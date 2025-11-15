@@ -175,10 +175,41 @@ class CropBoxState:
         self.clamp()
 
     def clamp(self) -> None:
-        """Ensure crop state remains within valid bounds."""
+        """Ensure crop state remains within valid bounds.
+        
+        Applies robust boundary constraints to prevent floating-point precision
+        issues from allowing the crop rectangle to extend beyond [0, 1] bounds,
+        which would result in black borders appearing outside the image area.
+        """
+        # Use a small epsilon to account for floating-point precision errors
+        epsilon = 1e-10
+        
+        # Clamp width and height to valid range
         self.width = max(self.min_width, min(1.0, self.width))
         self.height = max(self.min_height, min(1.0, self.height))
+        
+        # Calculate half dimensions for center constraints
         half_w = self.width * 0.5
         half_h = self.height * 0.5
-        self.cx = max(half_w, min(1.0 - half_w, self.cx))
-        self.cy = max(half_h, min(1.0 - half_h, self.cy))
+        
+        # Clamp center position to ensure the entire crop rect stays within [0, 1]
+        # With epsilon tolerance to prevent edge-case floating-point errors
+        self.cx = max(half_w + epsilon, min(1.0 - half_w - epsilon, self.cx))
+        self.cy = max(half_h + epsilon, min(1.0 - half_h - epsilon, self.cy))
+        
+        # Final validation: ensure computed bounds are strictly within [0, 1]
+        # This catches any residual floating-point precision issues
+        left = self.cx - half_w
+        right = self.cx + half_w
+        top = self.cy - half_h
+        bottom = self.cy + half_h
+        
+        # If bounds exceed valid range, adjust center to bring them back
+        if left < 0.0:
+            self.cx = half_w
+        if right > 1.0:
+            self.cx = 1.0 - half_w
+        if top < 0.0:
+            self.cy = half_h
+        if bottom > 1.0:
+            self.cy = 1.0 - half_h

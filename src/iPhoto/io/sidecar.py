@@ -43,6 +43,9 @@ _ATTR_CX = "cx"
 _ATTR_CY = "cy"
 _ATTR_WIDTH = "w"
 _ATTR_HEIGHT = "h"
+_ATTR_SCALE = "scale"
+_ATTR_OX = "ox"
+_ATTR_OY = "oy"
 _VERSION_ATTR = "version"
 _CURRENT_VERSION = "1.0"
 
@@ -145,6 +148,9 @@ def load_adjustments(asset_path: Path) -> Dict[str, float | bool]:
         cy = crop_node.get(_ATTR_CY)
         width = crop_node.get(_ATTR_WIDTH)
         height = crop_node.get(_ATTR_HEIGHT)
+        scale = crop_node.get(_ATTR_SCALE)
+        ox = crop_node.get(_ATTR_OX)
+        oy = crop_node.get(_ATTR_OY)
         try:
             result["Crop_CX"] = _clamp01(float(cx)) if cx is not None else 0.5
         except (TypeError, ValueError):
@@ -161,6 +167,19 @@ def load_adjustments(asset_path: Path) -> Dict[str, float | bool]:
             result["Crop_H"] = _clamp01(float(height)) if height is not None else 1.0
         except (TypeError, ValueError):
             result["Crop_H"] = 1.0
+
+        try:
+            result["Crop_Scale"] = float(scale) if scale is not None else 1.0
+        except (TypeError, ValueError):
+            result["Crop_Scale"] = 1.0
+        try:
+            result["Crop_OX"] = float(ox) if ox is not None else 0.0
+        except (TypeError, ValueError):
+            result["Crop_OX"] = 0.0
+        try:
+            result["Crop_OY"] = float(oy) if oy is not None else 0.0
+        except (TypeError, ValueError):
+            result["Crop_OY"] = 0.0
 
     return result
 
@@ -214,6 +233,9 @@ def save_adjustments(asset_path: Path, adjustments: Mapping[str, float | bool]) 
     crop.set(_ATTR_CY, f"{_clamp01(adjustments.get('Crop_CY', 0.5)):.6f}")
     crop.set(_ATTR_WIDTH, f"{_clamp01(adjustments.get('Crop_W', 1.0)):.6f}")
     crop.set(_ATTR_HEIGHT, f"{_clamp01(adjustments.get('Crop_H', 1.0)):.6f}")
+    crop.set(_ATTR_SCALE, f"{adjustments.get('Crop_Scale', 1.0):.6f}")
+    crop.set(_ATTR_OX, f"{adjustments.get('Crop_OX', 0.0):.6f}")
+    crop.set(_ATTR_OY, f"{adjustments.get('Crop_OY', 0.0):.6f}")
 
     tmp_path = sidecar_path.with_suffix(sidecar_path.suffix + ".tmp")
     tree = ET.ElementTree(root)

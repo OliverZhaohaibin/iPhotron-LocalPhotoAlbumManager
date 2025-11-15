@@ -88,6 +88,14 @@ class EditSession(QObject):
         self._values["Crop_H"] = 1.0
         self._ranges["Crop_H"] = (0.0, 1.0)
 
+        # Crop mode image scale and offset (model transform)
+        self._values["Crop_Scale"] = 1.0
+        self._ranges["Crop_Scale"] = (0.02, 40.0)  # Range from gl_crop_controller
+        self._values["Crop_OX"] = 0.0
+        self._ranges["Crop_OX"] = (-1e6, 1e6)  # Essentially unlimited
+        self._values["Crop_OY"] = 0.0
+        self._ranges["Crop_OY"] = (-1e6, 1e6)  # Essentially unlimited
+
     # ------------------------------------------------------------------
     # Accessors
     def value(self, key: str) -> float | bool:
@@ -174,6 +182,9 @@ class EditSession(QObject):
                 "Crop_CY": 0.5,
                 "Crop_W": 1.0,
                 "Crop_H": 1.0,
+                "Crop_Scale": 1.0,
+                "Crop_OX": 0.0,
+                "Crop_OY": 0.0,
             }
         )
         self.set_values(defaults, emit_individual=True)

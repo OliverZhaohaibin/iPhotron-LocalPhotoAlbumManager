@@ -101,7 +101,11 @@ class CropInteractionController:
 
     def get_crop_values(self) -> dict[str, float]:
         """Return the current crop state as a mapping."""
-        return self._crop_state.as_mapping()
+        values = self._crop_state.as_mapping()
+        values["Crop_Scale"] = self._crop_img_scale
+        values["Crop_OX"] = self._crop_img_offset.x()
+        values["Crop_OY"] = self._crop_img_offset.y()
+        return values
 
     def get_crop_state(self) -> CropBoxState:
         """Return the current crop state object."""
@@ -136,6 +140,12 @@ class CropInteractionController:
         if enabled == self._active:
             if enabled and values is not None:
                 self._apply_crop_values(values)
+                # Ensure that model transform is also updated when mode is already active
+                self._crop_img_scale = float(values.get("Crop_Scale", 1.0))
+                self._crop_img_offset = QPointF(
+                    float(values.get("Crop_OX", 0.0)),
+                    float(values.get("Crop_OY", 0.0)),
+                )
             return
 
         self._active = bool(enabled)
@@ -150,9 +160,17 @@ class CropInteractionController:
             self._on_request_update()
             return
 
-        # Reset the image model transform when entering crop mode
-        self._reset_crop_model_transform()
-        self._apply_crop_values(values)
+        # Load model transform from values if available, otherwise reset
+        if values:
+            self._apply_crop_values(values)
+            self._crop_img_scale = float(values.get("Crop_Scale", 1.0))
+            self._crop_img_offset = QPointF(
+                float(values.get("Crop_OX", 0.0)),
+                float(values.get("Crop_OY", 0.0)),
+            )
+        else:
+            self._reset_crop_model_transform()
+            self._apply_crop_values(None)
         self._crop_faded_out = False
         self._crop_drag_handle = CropHandle.NONE
         self._crop_dragging = False

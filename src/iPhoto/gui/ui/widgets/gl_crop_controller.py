@@ -251,27 +251,26 @@ class CropInteractionController:
                 -float(delta_view.y()) * dpr / view_scale,
             )
 
-            # Compute the scaled image bounds in world space. The crop model keeps
-            # its own translation/scale separate from the camera, so we must clamp
-            # against these transformed bounds rather than the raw texture size.
-            scale_model = self._crop_img_scale
-            offset_x = self._crop_img_offset.x()
-            offset_y = self._crop_img_offset.y()
-            half_width_scaled = (tex_w * scale_model) * 0.5
-            half_height_scaled = (tex_h * scale_model) * 0.5
+            # -----------------------------------------------------------------
+            # Crop box definition (System A) must be constrained by the original
+            # texture bounds (scale=1, offset=0), not by the view transform state
+            # (System B: self._crop_img_scale, self._crop_img_offset).
+            # This ensures the saved crop data remains consistent regardless of
+            # temporary pan/zoom operations in the crop interface.
+            # -----------------------------------------------------------------
+            half_width_orig = tex_w * 0.5
+            half_height_orig = tex_h * 0.5
             img_bounds_world = {
-                "left": offset_x - half_width_scaled,
-                "right": offset_x + half_width_scaled,
-                "bottom": offset_y - half_height_scaled,
-                "top": offset_y + half_height_scaled,
+                "left": -half_width_orig,
+                "right": half_width_orig,
+                "bottom": -half_height_orig,
+                "top": half_height_orig,
             }
 
             # Convert the current crop rectangle into world coordinates so we can
             # manipulate each edge directly and perform clamping in the same space
             # as the image bounds computed above.
             crop_rect_px = self._crop_state.to_pixel_rect(tex_w, tex_h)
-            half_width_orig = tex_w * 0.5
-            half_height_orig = tex_h * 0.5
             crop_world = {
                 "left": crop_rect_px["left"] - half_width_orig,
                 "right": crop_rect_px["right"] - half_width_orig,

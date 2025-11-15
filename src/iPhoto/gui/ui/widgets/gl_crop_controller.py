@@ -245,10 +245,17 @@ class CropInteractionController:
             if view_scale <= 1e-6:
                 return
 
+            # The effective scale for converting screen deltas to world coordinates
+            # must account for both the view transform scale and the crop model scale,
+            # since both affect how the image appears on screen during crop editing.
+            effective_scale = view_scale * self._crop_img_scale
+            if effective_scale <= 1e-6:
+                return
+
             dpr = self._transform_controller._get_dpr()
             delta_world = QPointF(
-                float(delta_view.x()) * dpr / view_scale,
-                -float(delta_view.y()) * dpr / view_scale,
+                float(delta_view.x()) * dpr / effective_scale,
+                -float(delta_view.y()) * dpr / effective_scale,
             )
 
             # -----------------------------------------------------------------

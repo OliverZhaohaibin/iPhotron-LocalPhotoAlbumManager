@@ -182,7 +182,7 @@ class EditFullscreenManager(QObject):
             image_source=source,
             reset_view=True,
         )
-        self._ui.edit_image_viewer.reset_zoom()
+        self._ui.edit_image_viewer.reset_zoom_to_crop(adjustments)
 
         return True
 
@@ -282,7 +282,7 @@ class EditFullscreenManager(QObject):
             image_source=source,
             reset_view=True,
         )
-        self._ui.edit_image_viewer.reset_zoom()
+        self._ui.edit_image_viewer.reset_zoom_to_crop(adjustments)
 
         return True
 

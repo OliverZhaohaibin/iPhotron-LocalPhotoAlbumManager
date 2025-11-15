@@ -167,7 +167,7 @@ class GLImageViewer(QOpenGLWidget):
             # uniforms need to be refreshed in this scenario.
             self.set_adjustments(adjustments)
             if reset_view:
-                self.reset_zoom()
+                self.reset_zoom_to_crop(self._adjustments)
             return
 
         self._current_image_source = image_source
@@ -197,7 +197,7 @@ class GLImageViewer(QOpenGLWidget):
             # same fit-to-window baseline that the QWidget-based viewer
             # exposes.  ``reset_view`` lets callers preserve the zoom when the
             # user toggles between detail and edit modes.
-            self.reset_zoom()
+            self.reset_zoom_to_crop(self._adjustments)
     def set_placeholder(self, pixmap) -> None:
         """Display *pixmap* without changing the tracked image source."""
 
@@ -296,6 +296,16 @@ class GLImageViewer(QOpenGLWidget):
 
     def reset_zoom(self) -> None:
         self._transform_controller.reset_zoom()
+
+    def reset_zoom_to_crop(self, adjustments: Mapping[str, float] | None) -> None:
+        """Fit the view to the crop described by *adjustments* when available.
+
+        Passing ``None`` or a mapping without ``Crop_*`` entries gracefully falls back to the
+        standard :meth:`reset_zoom` behaviour, ensuring callers do not have to special-case assets
+        without non-destructive crops.
+        """
+
+        self._transform_controller.reset_zoom_to_rect(dict(adjustments or {}))
 
     def zoom_in(self) -> None:
         current = self._transform_controller.get_zoom_factor()
@@ -414,7 +424,11 @@ class GLImageViewer(QOpenGLWidget):
             return
 
         texture_size = self._renderer.texture_size()
-        base_scale = compute_fit_to_view_scale(texture_size, float(vw), float(vh))
+        base_scale = self._transform_controller.base_scale_for_view(
+            texture_size,
+            float(vw),
+            float(vh),
+        )
         zoom_factor = self._transform_controller.get_zoom_factor()
         effective_scale = max(base_scale * zoom_factor, 1e-6)
 

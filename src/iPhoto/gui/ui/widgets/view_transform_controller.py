@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from typing import Callable, Optional
+from typing import Callable, Mapping, Optional
 
 from PySide6.QtCore import QPointF, Qt
 from PySide6.QtGui import QMouseEvent, QWheelEvent
@@ -53,6 +53,11 @@ class ViewTransformController:
         self._is_panning: bool = False
         self._pan_start_pos: QPointF = QPointF()
         self._wheel_action: str = "zoom"
+        # ``_crop_override`` stores the normalised crop rectangle requested by callers of
+        # :meth:`reset_zoom_to_rect`.  When present, the base "fit to view" scale is computed
+        # against the cropped bounds instead of the full texture so previously saved
+        # non-destructive crops can be displayed directly.
+        self._crop_override: dict[str, float] | None = None
 
     # ------------------------------------------------------------------
     # Helper methods for getting viewport info
@@ -147,7 +152,7 @@ class ViewTransformController:
             dpr = self._viewer.devicePixelRatioF()
             view_width = float(self._viewer.width()) * dpr
             view_height = float(self._viewer.height()) * dpr
-            base_scale = compute_fit_to_view_scale((tex_w, tex_h), view_width, view_height)
+            base_scale = self._effective_base_scale((tex_w, tex_h), view_width, view_height)
             old_scale = base_scale * self._zoom_factor
             new_scale = base_scale * clamped
             if old_scale > 1e-6 and new_scale > 0.0:
@@ -172,7 +177,123 @@ class ViewTransformController:
         changed = abs(self._zoom_factor - 1.0) > 1e-6 or abs(self._pan_px.x()) > 1e-6 or abs(self._pan_px.y()) > 1e-6
         self._zoom_factor = 1.0
         self._pan_px = QPointF(0.0, 0.0)
+        self._crop_override = None
         self._viewer.update()
+        self._on_zoom_changed(self._zoom_factor)
+        return changed
+
+    def _normalise_crop_parameters(
+        self, crop_params: Mapping[str, float] | None
+    ) -> dict[str, float] | None:
+        """Validate and clamp crop parameters to the ``[0.0, 1.0]`` domain.
+
+        The helper returns ``None`` when the mapping does not describe an actual crop (width and
+        height both expand to the entire image) so callers can gracefully fall back to the standard
+        reset behaviour.  The results include the centre coordinates and the extent expressed as
+        fractions of the texture dimensions, mirroring how adjustment values are persisted.
+        """
+
+        if not crop_params:
+            return None
+
+        try:
+            cx = float(crop_params.get("Crop_CX", 0.5))
+            cy = float(crop_params.get("Crop_CY", 0.5))
+            width = float(crop_params.get("Crop_W", 1.0))
+            height = float(crop_params.get("Crop_H", 1.0))
+        except (TypeError, ValueError):
+            return None
+
+        cx = max(0.0, min(1.0, cx))
+        cy = max(0.0, min(1.0, cy))
+        width = max(0.0, min(1.0, width))
+        height = max(0.0, min(1.0, height))
+
+        if width >= 0.999 and height >= 0.999:
+            return None
+
+        if width <= 0.0 or height <= 0.0:
+            return None
+
+        return {"cx": cx, "cy": cy, "width": width, "height": height}
+
+    def _effective_base_scale(
+        self,
+        texture_size: tuple[int, int],
+        view_width: float,
+        view_height: float,
+        override: dict[str, float] | None = None,
+    ) -> float:
+        """Return the baseline scale honouring any active crop override."""
+
+        base_scale = compute_fit_to_view_scale(texture_size, view_width, view_height)
+        active_override = override if override is not None else self._crop_override
+        if active_override is None:
+            return base_scale
+
+        tex_w, tex_h = texture_size
+        if tex_w <= 0 or tex_h <= 0:
+            return base_scale
+        if view_width <= 0.0 or view_height <= 0.0:
+            return base_scale
+
+        crop_pixel_w = float(tex_w) * max(active_override["width"], 1e-6)
+        crop_pixel_h = float(tex_h) * max(active_override["height"], 1e-6)
+        if crop_pixel_w <= 0.0 or crop_pixel_h <= 0.0:
+            return base_scale
+
+        crop_scale = min(view_width / crop_pixel_w, view_height / crop_pixel_h)
+        return base_scale if crop_scale <= 0.0 else crop_scale
+
+    def base_scale_for_view(
+        self, texture_size: tuple[int, int], view_width: float, view_height: float
+    ) -> float:
+        """Expose the effective base scale so the renderer can honour crop overrides."""
+
+        return self._effective_base_scale(texture_size, view_width, view_height)
+
+    def reset_zoom_to_rect(self, crop_params: Mapping[str, float] | None) -> bool:
+        """Fit the view to the non-destructive crop described by *crop_params*.
+
+        When the mapping does not reference a reduced crop (``Crop_W`` and ``Crop_H`` both expand to
+        ``1.0``) this method falls back to :meth:`reset_zoom`.  The viewer keeps the zoom slider in
+        the default ``1.0`` position while internally increasing the base scale so the cropped
+        region fills the viewport.
+        """
+
+        normalised = self._normalise_crop_parameters(crop_params)
+        if normalised is None:
+            self._crop_override = None
+            return self.reset_zoom()
+
+        texture_size = self._texture_size_provider()
+        tex_w, tex_h = texture_size
+        if tex_w <= 0 or tex_h <= 0:
+            self._crop_override = None
+            return self.reset_zoom()
+
+        view_width, view_height = self._get_view_dimensions_device_px()
+        base_scale = self._effective_base_scale(texture_size, view_width, view_height, normalised)
+        if base_scale <= 0.0:
+            self._crop_override = None
+            return self.reset_zoom()
+
+        self._crop_override = normalised
+
+        crop_cx = float(tex_w) * normalised["cx"]
+        crop_cy = float(tex_h) * normalised["cy"]
+        previous_zoom = self._zoom_factor
+        previous_pan = QPointF(self._pan_px)
+
+        self._zoom_factor = 1.0
+        effective_scale = max(base_scale * self._zoom_factor, 1e-6)
+        self.set_image_center_pixels(QPointF(crop_cx, crop_cy), texture_size, effective_scale)
+
+        changed = (
+            abs(self._zoom_factor - previous_zoom) > 1e-6
+            or abs(self._pan_px.x() - previous_pan.x()) > 1e-6
+            or abs(self._pan_px.y() - previous_pan.y()) > 1e-6
+        )
         self._on_zoom_changed(self._zoom_factor)
         return changed
 
@@ -259,7 +380,7 @@ class ViewTransformController:
         self, texture_size: tuple[int, int], view_width: float, view_height: float
     ) -> float:
         """Calculate the effective rendering scale (base scale × zoom factor)."""
-        base_scale = compute_fit_to_view_scale(texture_size, view_width, view_height)
+        base_scale = self._effective_base_scale(texture_size, view_width, view_height)
         return max(base_scale * self._zoom_factor, 1e-6)
 
     def image_center_pixels(

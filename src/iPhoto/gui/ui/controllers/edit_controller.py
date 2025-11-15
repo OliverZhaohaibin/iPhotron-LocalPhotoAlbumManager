@@ -230,11 +230,14 @@ class EditController(QObject):
         except (TypeError, RuntimeError):
             pass
         viewer.cropChanged.connect(self._handle_crop_changed)
-        viewer.setCropMode(False, session.values())
+        # Cache the adjustment snapshot so crop mode and zoom reset reuse the same mapping
+        # without asking the session to emit additional change notifications.
+        session_values = session.values()
+        viewer.setCropMode(False, session_values)
         current_source = viewer.current_image_source()
         self._skip_next_preview_frame = current_source == source
         if not self._skip_next_preview_frame:
-            viewer.reset_zoom()
+            viewer.reset_zoom_to_crop(session_values)
 
         # Clear any stale preview content before attaching the fresh session.  The sidebar reuses
         # its last preview image until it receives an explicit replacement, so resetting it ahead

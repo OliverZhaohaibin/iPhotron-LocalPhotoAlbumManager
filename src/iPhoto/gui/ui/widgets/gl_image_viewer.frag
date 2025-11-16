@@ -1,9 +1,10 @@
 #version 330 core
-in vec2 vUV;
+in vec2 vScreenUV;
 out vec4 FragColor;
 
 uniform sampler2D uTex;
 
+uniform vec2  uContentSize;
 uniform float uBrilliance;
 uniform float uExposure;
 uniform float uHighlights;
@@ -24,10 +25,10 @@ uniform float uScale;
 uniform vec2  uPan;
 uniform float uImgScale;
 uniform vec2  uImgOffset;
-uniform float uCropCX;
-uniform float uCropCY;
-uniform float uCropW;
-uniform float uCropH;
+uniform bool  uIsCropping;
+uniform bool  uApplyCropTransform;
+uniform vec4  uCropRect;
+uniform float uCropDimmingStrength;
 
 float clamp01(float x) { return clamp(x, 0.0, 1.0); }
 
@@ -151,32 +152,27 @@ void main() {
 
     float safeImgScale = max(uImgScale, 1e-6);
 
-    vec2 fragPx = vec2(gl_FragCoord.x - 0.5, gl_FragCoord.y - 0.5);
+    vec2 fragPx = vec2(vScreenUV.x * uViewSize.x, vScreenUV.y * uViewSize.y) - vec2(0.5);
     vec2 viewCentre = uViewSize * 0.5;
     vec2 viewVector = fragPx - viewCentre;
     vec2 screenVector = viewVector - uPan;
     vec2 texVector = (screenVector / uScale - uImgOffset) / safeImgScale;
-    vec2 texPx = texVector + (uTexSize * 0.5);
-    vec2 uv = texPx / uTexSize;
+    vec2 texPxContent = texVector + (uContentSize * 0.5);
+    vec2 uv = texPxContent / uContentSize;
+
+    if (uApplyCropTransform) {
+        uv = vec2(
+            uCropRect.x + uv.x * uCropRect.z,
+            uCropRect.y + uv.y * uCropRect.w
+        );
+    }
 
     if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) {
         discard;
     }
 
+    vec2 logicalUV = uv;
     uv.y = 1.0 - uv.y;
-
-    // Apply crop in texture coordinate space
-    // Calculate normalized crop boundaries
-    float crop_min_x = uCropCX - uCropW * 0.5;
-    float crop_max_x = uCropCX + uCropW * 0.5;
-    float crop_min_y = uCropCY - uCropH * 0.5;
-    float crop_max_y = uCropCY + uCropH * 0.5;
-    
-    // Check if current fragment's texture coordinate is outside the crop box
-    if (uv.x < crop_min_x || uv.x > crop_max_x ||
-        uv.y < crop_min_y || uv.y > crop_max_y) {
-        discard; // Discard fragments outside the crop region
-    }
 
     vec4 texel = texture(uTex, uv);
     vec3 c = texel.rgb;
@@ -198,5 +194,18 @@ void main() {
     if (uBWEnabled) {
         c = apply_bw(c, uv);
     }
+
+    if (uIsCropping && uCropDimmingStrength > 1e-4) {
+        float xMin = uCropRect.x;
+        float xMax = uCropRect.x + uCropRect.z;
+        float yMin = uCropRect.y;
+        float yMax = uCropRect.y + uCropRect.w;
+        bool outside = logicalUV.x < xMin || logicalUV.x > xMax ||
+                       logicalUV.y < yMin || logicalUV.y > yMax;
+        if (outside) {
+            c *= (1.0 - uCropDimmingStrength);
+        }
+    }
+
     FragColor = vec4(clamp(c, 0.0, 1.0), 1.0);
 }

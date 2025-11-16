@@ -99,6 +99,20 @@ class CropBoxState:
             self.cy + half_h,
         )
 
+    def to_normalized_rect(self) -> tuple[float, float, float, float]:
+        """Return ``(x, y, w, h)`` describing the top-left anchored crop.
+
+        The crop interaction logic stores the rectangle using a centre/extent
+        representation, whereas the persisted XML/sidecar data uses a
+        top-left/size tuple.  This helper bridges those conventions so all
+        callers have a single, well-documented conversion path.
+        """
+
+        left, top, right, bottom = self.bounds_normalised()
+        width = max(0.0, right - left)
+        height = max(0.0, bottom - top)
+        return (float(left), float(top), float(width), float(height))
+
     def to_pixel_rect(self, image_width: int, image_height: int) -> dict[str, float]:
         """Convert normalised crop to pixel coordinates."""
         left_n, top_n, right_n, bottom_n = self.bounds_normalised()

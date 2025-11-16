@@ -45,3 +45,14 @@ def test_translate_pixels_moves_state():
 
     assert state.cx == pytest.approx(0.6)
     assert state.cy == pytest.approx(0.7)
+
+
+def test_to_normalized_rect_matches_bounds():
+    state = CropBoxState()
+    state.cx = 0.6
+    state.cy = 0.4
+    state.width = 0.25
+    state.height = 0.5
+
+    rect = state.to_normalized_rect()
+    assert rect == pytest.approx((0.475, 0.15, 0.25, 0.5))

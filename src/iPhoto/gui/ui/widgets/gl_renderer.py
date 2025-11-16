@@ -120,6 +120,7 @@ class GLRenderer:
         try:
             for name in (
                 "uTex",
+                "uContentSize",
                 "uBrilliance",
                 "uExposure",
                 "uHighlights",
@@ -140,10 +141,10 @@ class GLRenderer:
                 "uPan",
                 "uImgScale",
                 "uImgOffset",
-                "uCropCX",
-                "uCropCY",
-                "uCropW",
-                "uCropH",
+                "uIsCropping",
+                "uApplyCropTransform",
+                "uCropRect",
+                "uCropDimmingStrength",
             ):
                 self._uniform_locations[name] = program.uniformLocation(name)
         finally:
@@ -281,6 +282,11 @@ class GLRenderer:
         time_value: float | None = None,
         img_scale: float = 1.0,
         img_offset: Optional[QPointF] = None,
+        content_dimensions: tuple[int, int] | None = None,
+        is_cropping: bool = False,
+        crop_rect_normalized: tuple[float, float, float, float] | None = None,
+        crop_dimming_strength: float = 0.0,
+        apply_crop_transform: bool = False,
     ) -> None:
         """Draw the textured triangle covering the current viewport."""
 
@@ -301,6 +307,11 @@ class GLRenderer:
                 self._dummy_vao.bind()
 
             offset_value = img_offset or QPointF(0.0, 0.0)
+            content_w, content_h = content_dimensions or (self._texture_width, self._texture_height)
+            content_w = max(1, int(content_w))
+            content_h = max(1, int(content_h))
+            crop_rect = crop_rect_normalized or (0.0, 0.0, 1.0, 1.0)
+            dim_strength = max(0.0, min(1.0, float(crop_dimming_strength)))
 
             gf.glActiveTexture(gl.GL_TEXTURE0)
             gf.glBindTexture(gl.GL_TEXTURE_2D, int(self._texture_id))
@@ -349,6 +360,7 @@ class GLRenderer:
                 float(max(1, self._texture_width)),
                 float(max(1, self._texture_height)),
             )
+            self._set_uniform2f("uContentSize", float(content_w), float(content_h))
             self._set_uniform2f("uPan", float(pan.x()), float(pan.y()))
             self._set_uniform1f("uImgScale", safe_img_scale)
             self._set_uniform2f(
@@ -356,12 +368,10 @@ class GLRenderer:
                 float(offset_value.x()),
                 float(offset_value.y()),
             )
-
-            # Pass crop parameters to shader
-            self._set_uniform1f("uCropCX", adjustment_value("Crop_CX", 0.5))
-            self._set_uniform1f("uCropCY", adjustment_value("Crop_CY", 0.5))
-            self._set_uniform1f("uCropW", adjustment_value("Crop_W", 1.0))
-            self._set_uniform1f("uCropH", adjustment_value("Crop_H", 1.0))
+            self._set_uniform1i("uIsCropping", 1 if is_cropping else 0)
+            self._set_uniform1i("uApplyCropTransform", 1 if apply_crop_transform else 0)
+            self._set_uniform4f("uCropRect", *crop_rect)
+            self._set_uniform1f("uCropDimmingStrength", dim_strength)
 
             gf.glDrawArrays(gl.GL_TRIANGLES, 0, 3)
         finally:
@@ -402,8 +412,9 @@ class GLRenderer:
         vao = self._overlay_vao
         gf = self._gl_funcs
 
-        alpha = 1.0 if faded else 0.55
-        overlay_colour = (0.0, 0.0, 0.0, alpha)
+        if faded:
+            return
+
         border_colour = (1.0, 0.85, 0.2, 1.0)
 
         def _to_clip(points: list[tuple[float, float]]) -> np.ndarray:
@@ -432,44 +443,33 @@ class GLRenderer:
 
         try:
             vao.bind()
-            quads = [
-                [(0.0, 0.0), (vw, 0.0), (vw, top), (0.0, top)],
-                [(0.0, bottom), (vw, bottom), (vw, vh), (0.0, vh)],
-                [(0.0, top), (left, top), (left, bottom), (0.0, bottom)],
-                [(right, top), (vw, top), (vw, bottom), (right, bottom)],
-            ]
-            for quad in quads:
-                vertices = _to_clip(quad)
-                _draw(vertices, gl.GL_TRIANGLE_FAN, overlay_colour)
-
-            if not faded:
-                border_points = _to_clip(
-                    [
-                        (left, bottom),
-                        (right, bottom),
-                        (right, top),
-                        (left, top),
-                        (left, bottom),
-                    ]
-                )
-                _draw(border_points, gl.GL_LINE_STRIP, border_colour)
-
-                handle_size = 7.0
-                corners = [
-                    (left, top),
-                    (right, top),
+            border_points = _to_clip(
+                [
+                    (left, bottom),
                     (right, bottom),
+                    (right, top),
+                    (left, top),
                     (left, bottom),
                 ]
-                for cx, cy in corners:
-                    square = [
-                        (cx - handle_size, cy - handle_size),
-                        (cx + handle_size, cy - handle_size),
-                        (cx + handle_size, cy + handle_size),
-                        (cx - handle_size, cy + handle_size),
-                    ]
-                    vertices = _to_clip(square)
-                    _draw(vertices, gl.GL_TRIANGLE_FAN, border_colour)
+            )
+            _draw(border_points, gl.GL_LINE_STRIP, border_colour)
+
+            handle_size = 7.0
+            corners = [
+                (left, top),
+                (right, top),
+                (right, bottom),
+                (left, bottom),
+            ]
+            for cx, cy in corners:
+                square = [
+                    (cx - handle_size, cy - handle_size),
+                    (cx + handle_size, cy - handle_size),
+                    (cx + handle_size, cy + handle_size),
+                    (cx - handle_size, cy + handle_size),
+                ]
+                vertices = _to_clip(square)
+                _draw(vertices, gl.GL_TRIANGLE_FAN, border_colour)
         finally:
             vao.release()
             program.release()
@@ -593,6 +593,7 @@ class GLRenderer:
                 pan=QPointF(0.0, 0.0),
                 adjustments=dict(adjustments),
                 time_value=time_value,
+                content_dimensions=(self._texture_width, self._texture_height),
             )
 
             return fbo.toImage().convertToFormat(QImage.Format.Format_ARGB32)

@@ -101,6 +101,11 @@ class CropInteractionController:
         """Return the current crop state object."""
         return self._crop_state
 
+    def get_normalized_rect(self) -> tuple[float, float, float, float]:
+        """Return the crop rectangle in ``(x, y, w, h)`` normalised form."""
+
+        return self._crop_state.to_normalized_rect()
+
     def is_faded_out(self) -> bool:
         """Return True if the crop overlay is currently faded out."""
         return self._crop_faded_out
@@ -303,6 +308,7 @@ class CropInteractionController:
                     self._crop_state.height = new_height / tex_h
                     self._crop_state.clamp()
 
+            self._check_and_apply_auto_zoom()
             self._emit_crop_changed()
 
         self._restart_crop_idle()
@@ -568,3 +574,52 @@ class CropInteractionController:
 
         current = self._snapshot_crop_state()
         return any(abs(a - b) > 1e-6 for a, b in zip(snapshot, current))
+
+    def _check_and_apply_auto_zoom(self) -> None:
+        """Zoom out when a handle drag reaches the viewport boundary.
+
+        The Photos reference implementation smoothly zooms out whenever the
+        user drags a crop handle beyond the comfortable viewing area.  The
+        helper reproduces that behaviour by monitoring the current cursor
+        position and nudging the :class:`ViewTransformController` towards the
+        scale that keeps the entire crop inside the viewport with a modest
+        padding.
+        """
+
+        if not self._active:
+            return
+
+        view_w, view_h = self._transform_controller._get_view_dimensions_logical()
+        if view_w <= 0.0 or view_h <= 0.0:
+            return
+
+        padding = 20.0
+        pos = self._crop_last_pos
+        if (
+            padding <= pos.x() <= (view_w - padding)
+            and padding <= pos.y() <= (view_h - padding)
+        ):
+            return
+
+        tex_w, tex_h = self._texture_size_provider()
+        if tex_w <= 0 or tex_h <= 0:
+            return
+
+        target_scale = self._target_scale_for_crop()
+        vw, vh = self._transform_controller._get_view_dimensions_device_px()
+        base_scale = compute_fit_to_view_scale((tex_w, tex_h), vw, vh)
+        if base_scale <= 1e-6:
+            return
+
+        target_zoom = target_scale / base_scale
+        min_zoom = self._transform_controller.minimum_zoom()
+        max_zoom = self._transform_controller.maximum_zoom()
+        target_zoom = max(min_zoom, min(max_zoom, target_zoom))
+        current_zoom = self._transform_controller.get_zoom_factor()
+        if target_zoom >= current_zoom - 1e-4:
+            return
+
+        self._stop_crop_animation()
+        anchor = self._crop_center_viewport_point()
+        if self._transform_controller.set_zoom(target_zoom, anchor=anchor):
+            self._on_request_update()

@@ -101,7 +101,7 @@ class GLImageViewer(QOpenGLWidget):
         self._loading_overlay.hide()
         self._transform_controller = ViewTransformController(
             self,
-            texture_size_provider=self._texture_dimensions,
+            texture_size_provider=self._content_dimensions,
             on_zoom_changed=self.zoomChanged.emit,
             on_next_item=self.nextItemRequested.emit,
             on_prev_item=self.prevItemRequested.emit,
@@ -172,6 +172,7 @@ class GLImageViewer(QOpenGLWidget):
 
         self._current_image_source = image_source
         self._image = image
+        previous_adjustments = dict(self._adjustments)
         self._adjustments = dict(adjustments or {})
         self._loading_overlay.hide()
         self._time_base = time.monotonic()
@@ -192,12 +193,11 @@ class GLImageViewer(QOpenGLWidget):
                     finally:
                         self.doneCurrent()
 
-        if reset_view:
-            # Reset the interactive transform so every new asset begins in the
-            # same fit-to-window baseline that the QWidget-based viewer
-            # exposes.  ``reset_view`` lets callers preserve the zoom when the
-            # user toggles between detail and edit modes.
-            self.reset_zoom()
+        self._handle_adjustment_change(
+            previous_adjustments,
+            self._adjustments,
+            force_reset=reset_view,
+        )
     def set_placeholder(self, pixmap) -> None:
         """Display *pixmap* without changing the tracked image source."""
 
@@ -237,9 +237,10 @@ class GLImageViewer(QOpenGLWidget):
     def set_adjustments(self, adjustments: Mapping[str, float] | None = None) -> None:
         """Update the active adjustment uniforms without replacing the texture."""
 
+        previous_adjustments = dict(self._adjustments)
         mapped_adjustments = dict(adjustments or {})
         self._adjustments = mapped_adjustments
-        self.update()
+        self._handle_adjustment_change(previous_adjustments, mapped_adjustments)
 
     def current_image_source(self) -> object | None:
         """Return the identifier describing the currently displayed image."""
@@ -414,13 +415,30 @@ class GLImageViewer(QOpenGLWidget):
             return
 
         texture_size = self._renderer.texture_size()
-        base_scale = compute_fit_to_view_scale(texture_size, float(vw), float(vh))
+        content_size = self._content_dimensions()
+        base_scale = compute_fit_to_view_scale(content_size, float(vw), float(vh))
         zoom_factor = self._transform_controller.get_zoom_factor()
         effective_scale = max(base_scale * zoom_factor, 1e-6)
 
         time_value = time.monotonic() - self._time_base
-        
+
         view_pan = self._transform_controller.get_pan_pixels()
+
+        crop_rect_adjustment = self._extract_adjustment_crop_rect(self._adjustments)
+        is_cropping = self._crop_controller.is_active()
+        crop_rect = (
+            self._crop_controller.get_normalized_rect()
+            if is_cropping
+            else (crop_rect_adjustment or (0.0, 0.0, 1.0, 1.0))
+        )
+        apply_crop_transform = (
+            not is_cropping
+            and crop_rect_adjustment is not None
+            and (crop_rect_adjustment[2] < 0.999 or crop_rect_adjustment[3] < 0.999)
+        )
+        dimming_strength = 0.0
+        if is_cropping and not self._crop_controller.is_faded_out():
+            dimming_strength = 0.5
 
         self._renderer.render(
             view_width=float(vw),
@@ -429,6 +447,11 @@ class GLImageViewer(QOpenGLWidget):
             pan=view_pan,
             adjustments=self._adjustments,
             time_value=time_value,
+            content_dimensions=content_size,
+            is_cropping=is_cropping,
+            crop_rect_normalized=crop_rect,
+            crop_dimming_strength=dimming_strength,
+            apply_crop_transform=apply_crop_transform,
         )
 
         if self._crop_controller.is_active():
@@ -611,6 +634,24 @@ class GLImageViewer(QOpenGLWidget):
             return (0, 0)
         return self._renderer.texture_size()
 
+    def _content_dimensions(self) -> tuple[int, int]:
+        """Return the conceptual content size used for fit-to-view math."""
+
+        tex_w, tex_h = self._texture_dimensions()
+        if tex_w <= 0 or tex_h <= 0:
+            return tex_w, tex_h
+
+        if self._crop_controller.is_active():
+            return tex_w, tex_h
+
+        crop_rect = self._extract_adjustment_crop_rect(self._adjustments)
+        if crop_rect is None:
+            return tex_w, tex_h
+
+        crop_w = max(1, int(round(tex_w * crop_rect[2])))
+        crop_h = max(1, int(round(tex_h * crop_rect[3])))
+        return crop_w, crop_h
+
     def _fit_to_view_scale(self, view_width: float, view_height: float) -> float:
         """Return the baseline scale that fits the texture within the viewport."""
 
@@ -633,3 +674,61 @@ class GLImageViewer(QOpenGLWidget):
         self.setStyleSheet(f"background-color: {target.name()}; border: none;")
         self._backdrop_color = QColor(target)
         self.update()
+
+    def _extract_adjustment_crop_rect(
+        self, adjustments: Mapping[str, float] | None
+    ) -> tuple[float, float, float, float] | None:
+        """Return the persisted crop rectangle in ``(x, y, w, h)`` form.
+
+        The adjustments dictionary always stores the Photos crop data as
+        centre/extent fields (``Crop_CX`` et al.).  Downstream consumers,
+        including the shaders and the XML writer, expect a top-left anchored
+        rectangle.  A single helper keeps that conversion consistent.
+        """
+
+        if not adjustments:
+            return None
+
+        width = float(adjustments.get("Crop_W", 1.0))
+        height = float(adjustments.get("Crop_H", 1.0))
+        cx = float(adjustments.get("Crop_CX", 0.5))
+        cy = float(adjustments.get("Crop_CY", 0.5))
+
+        width = max(0.0, min(1.0, width))
+        height = max(0.0, min(1.0, height))
+        half_w = width * 0.5
+        half_h = height * 0.5
+        x = max(0.0, cx - half_w)
+        y = max(0.0, cy - half_h)
+
+        return (x, y, width, height)
+
+    def _handle_adjustment_change(
+        self,
+        previous: Mapping[str, float] | None,
+        current: Mapping[str, float],
+        *,
+        force_reset: bool = False,
+    ) -> None:
+        """Reset the view when crop metadata changes.
+
+        ``reset_zoom`` is surprisingly expensive (and visually jarring) when
+        triggered unnecessarily, so we only invoke it when the caller either
+        explicitly requested a reset or when the persisted crop rectangle
+        changed while the viewer is in a non-cropping mode.
+        """
+
+        if force_reset:
+            self.reset_zoom()
+            return
+
+        if self._crop_controller.is_active():
+            self.update()
+            return
+
+        prev_rect = self._extract_adjustment_crop_rect(previous)
+        curr_rect = self._extract_adjustment_crop_rect(current)
+        if prev_rect != curr_rect:
+            self.reset_zoom()
+        else:
+            self.update()

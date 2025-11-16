@@ -169,8 +169,9 @@ class ViewTransformController:
     def reset_zoom(self, adjustments: dict | None = None) -> bool:
         """Restore the baseline zoom and recenter the texture.
         
-        If adjustments are provided and contain crop information, center
-        and zoom to fit the crop region instead of the full image.
+        The adjustments parameter is kept for signature compatibility but
+        is not used. The crop transform is applied in the rendering pipeline
+        (paintGL), not in the view transform.
         """
         tex_w, tex_h = self._texture_size_provider()
         if tex_w <= 0 or tex_h <= 0:
@@ -190,47 +191,8 @@ class ViewTransformController:
             self._on_zoom_changed(self._zoom_factor)
             return changed
         
-        # Check if we should zoom to crop region
-        if adjustments:
-            crop_cx = adjustments.get("Crop_CX", 0.5)
-            crop_cy = adjustments.get("Crop_CY", 0.5)
-            crop_w = adjustments.get("Crop_W", 1.0)
-            crop_h = adjustments.get("Crop_H", 1.0)
-            
-            # Only zoom to crop if there's a significant crop (< 99% of image)
-            if crop_w < 0.99 or crop_h < 0.99:
-                # Calculate crop center in pixel coordinates
-                center_x = float(crop_cx) * tex_w
-                center_y = float(crop_cy) * tex_h
-                
-                # Calculate crop dimensions in pixels
-                crop_width_px = float(crop_w) * tex_w
-                crop_height_px = float(crop_h) * tex_h
-                
-                # Calculate scale to fit crop region (similar to fit-to-view but for crop region)
-                scale_x = vw / crop_width_px if crop_width_px > 0 else 1.0
-                scale_y = vh / crop_height_px if crop_height_px > 0 else 1.0
-                target_scale = min(scale_x, scale_y)
-                
-                # Calculate base scale for the full image
-                tex_size = (float(tex_w), float(tex_h))
-                base_scale = compute_fit_to_view_scale(tex_size, vw, vh)
-                
-                # Calculate zoom factor relative to base scale
-                if base_scale > 0:
-                    zoom_factor = target_scale / base_scale
-                    # Clamp to zoom limits
-                    zoom_factor = max(self._min_zoom, min(self._max_zoom, zoom_factor))
-                    
-                    # Apply zoom and center
-                    changed = abs(self._zoom_factor - zoom_factor) > 1e-6
-                    self._zoom_factor = zoom_factor
-                    center_pt = QPointF(center_x, center_y)
-                    self.set_image_center_pixels(center_pt, (tex_w, tex_h), target_scale)
-                    self._on_zoom_changed(self._zoom_factor)
-                    return changed
-        
-        # Default behavior: fit full image to view
+        # Always reset to default view (fit full image to view)
+        # The crop transform is applied separately in paintGL via img_scale/img_offset
         changed = abs(self._zoom_factor - 1.0) > 1e-6 or abs(self._pan_px.x()) > 1e-6 or abs(self._pan_px.y()) > 1e-6
         self._zoom_factor = 1.0
         self._pan_px = QPointF(0.0, 0.0)

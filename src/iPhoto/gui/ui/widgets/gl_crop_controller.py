@@ -23,6 +23,16 @@ from .gl_crop_utils import (
     ease_out_cubic,
 )
 from .view_transform_controller import compute_fit_to_view_scale
+from .perspective_math import (
+    NormalisedRect,
+    build_perspective_matrix,
+    calculate_min_zoom_to_fit,
+    compute_projected_quad,
+    point_in_convex_polygon,
+    quad_centroid,
+    rect_inside_quad,
+    unit_quad,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -91,6 +101,9 @@ class CropInteractionController:
         self._crop_anim_start_center = QPointF()
         self._crop_anim_target_center = QPointF()
         self._crop_faded_out: bool = False
+        self._perspective_vertical: float = 0.0
+        self._perspective_horizontal: float = 0.0
+        self._perspective_quad: list[tuple[float, float]] = unit_quad()
 
     # ------------------------------------------------------------------
     # Public API
@@ -110,6 +123,31 @@ class CropInteractionController:
     def is_faded_out(self) -> bool:
         """Return True if the crop overlay is currently faded out."""
         return self._crop_faded_out
+
+    def update_perspective(self, vertical: float, horizontal: float) -> None:
+        """Refresh the cached perspective quad and enforce crop constraints."""
+
+        new_vertical = float(vertical)
+        new_horizontal = float(horizontal)
+        if (
+            abs(new_vertical - self._perspective_vertical) <= 1e-6
+            and abs(new_horizontal - self._perspective_horizontal) <= 1e-6
+        ):
+            return
+
+        self._perspective_vertical = new_vertical
+        self._perspective_horizontal = new_horizontal
+        matrix = build_perspective_matrix(new_vertical, new_horizontal)
+        self._perspective_quad = compute_projected_quad(matrix)
+
+        changed = self._ensure_crop_center_inside_quad()
+        if not self._is_crop_inside_perspective_quad():
+            changed = self._auto_scale_crop_to_quad() or changed
+
+        if changed:
+            self._crop_state.clamp()
+            self._emit_crop_changed()
+            self._on_request_update()
 
     def current_crop_rect_pixels(self) -> dict[str, float] | None:
         """Return the crop rectangle in viewport device pixels."""
@@ -215,6 +253,8 @@ class CropInteractionController:
 
             snapshot = self._snapshot_crop_state()
             self._crop_state.translate_pixels(delta_image, (tex_w, tex_h))
+            if not self._ensure_crop_valid_or_revert(snapshot, allow_shrink=False):
+                return
             if self._has_crop_state_changed(snapshot):
                 self._emit_crop_changed()
         else:
@@ -225,6 +265,7 @@ class CropInteractionController:
             if view_scale <= 1e-6:
                 return
 
+            snapshot = self._snapshot_crop_state()
             dpr = self._transform_controller._get_dpr()
             delta_world = QPointF(
                 float(delta_view.x()) * dpr / view_scale,
@@ -309,6 +350,8 @@ class CropInteractionController:
                     self._crop_state.height = new_height / tex_h
                     self._crop_state.clamp()
 
+            if not self._ensure_crop_valid_or_revert(snapshot, allow_shrink=False):
+                return
             self._emit_crop_changed()
             self._apply_edge_push_auto_zoom(delta_view)
 
@@ -352,6 +395,11 @@ class CropInteractionController:
 
         snapshot = self._snapshot_crop_state()
         self._crop_state.zoom_about_point(anchor_norm_x, anchor_norm_y, factor)
+        if not self._ensure_crop_valid_or_revert(snapshot, allow_shrink=False):
+            self._on_request_update()
+            self._restart_crop_idle()
+            event.accept()
+            return
         if self._has_crop_state_changed(snapshot):
             self._emit_crop_changed()
         self._on_request_update()
@@ -368,6 +416,10 @@ class CropInteractionController:
         else:
             self._crop_state.set_full()
 
+        changed = self._ensure_crop_center_inside_quad()
+        if not self._is_crop_inside_perspective_quad():
+            changed = self._auto_scale_crop_to_quad() or changed
+
         tex_w, tex_h = self._texture_size_provider()
         if tex_w <= 0 or tex_h <= 0:
             return
@@ -376,6 +428,8 @@ class CropInteractionController:
         scale = self._transform_controller.get_effective_scale()
         clamped_center = self._clamp_image_center_to_crop(center, scale)
         self._transform_controller.apply_image_center_pixels(clamped_center, scale)
+        if changed:
+            self._emit_crop_changed()
 
     def _crop_center_viewport_point(self) -> QPointF:
         """Return the crop center in viewport coordinates."""
@@ -575,6 +629,61 @@ class CropInteractionController:
 
         current = self._snapshot_crop_state()
         return any(abs(a - b) > 1e-6 for a, b in zip(snapshot, current))
+
+    def _restore_crop_snapshot(self, snapshot: tuple[float, float, float, float]) -> None:
+        """Restore the crop rectangle from *snapshot*."""
+
+        self._crop_state.cx, self._crop_state.cy, self._crop_state.width, self._crop_state.height = snapshot
+        self._crop_state.clamp()
+
+    def _current_normalised_rect(self) -> NormalisedRect:
+        left, top, right, bottom = self._crop_state.bounds_normalised()
+        return NormalisedRect(left, top, right, bottom)
+
+    def _is_crop_inside_perspective_quad(self) -> bool:
+        quad = self._perspective_quad or unit_quad()
+        return rect_inside_quad(self._current_normalised_rect(), quad)
+
+    def _ensure_crop_center_inside_quad(self) -> bool:
+        """Reposition the crop centre when perspective squeezes the valid quad."""
+
+        quad = self._perspective_quad or unit_quad()
+        center = (float(self._crop_state.cx), float(self._crop_state.cy))
+        if point_in_convex_polygon(center, quad):
+            return False
+        centroid = quad_centroid(quad)
+        self._crop_state.cx = max(0.0, min(1.0, centroid[0]))
+        self._crop_state.cy = max(0.0, min(1.0, centroid[1]))
+        self._crop_state.clamp()
+        return True
+
+    def _auto_scale_crop_to_quad(self) -> bool:
+        """Shrink the crop uniformly so it sits entirely inside the quad."""
+
+        quad = self._perspective_quad or unit_quad()
+        rect = self._current_normalised_rect()
+        scale = calculate_min_zoom_to_fit(rect, quad)
+        if not math.isfinite(scale) or scale <= 1.0 + 1e-4:
+            return False
+        self._crop_state.width = max(self._crop_state.min_width, self._crop_state.width / scale)
+        self._crop_state.height = max(self._crop_state.min_height, self._crop_state.height / scale)
+        self._crop_state.clamp()
+        return True
+
+    def _ensure_crop_valid_or_revert(
+        self,
+        snapshot: tuple[float, float, float, float],
+        *,
+        allow_shrink: bool,
+    ) -> bool:
+        """Keep the crop within the perspective quad or restore *snapshot*."""
+
+        if self._is_crop_inside_perspective_quad():
+            return True
+        if allow_shrink and self._auto_scale_crop_to_quad():
+            return True
+        self._restore_crop_snapshot(snapshot)
+        return False
 
     # ------------------------------------------------------------------
     # Edge-push auto zoom helpers

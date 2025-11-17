@@ -88,6 +88,15 @@ class EditSession(QObject):
         self._values["Crop_H"] = 1.0
         self._ranges["Crop_H"] = (0.0, 1.0)
 
+        # Perspective correction sliders operate in a symmetric range so they
+        # can skew in both directions.  The shader interprets the normalised
+        # ``[-1.0, 1.0]`` inputs as ±20° rotations around the horizontal and
+        # vertical axes.
+        self._values["Perspective_Vertical"] = 0.0
+        self._ranges["Perspective_Vertical"] = (-1.0, 1.0)
+        self._values["Perspective_Horizontal"] = 0.0
+        self._ranges["Perspective_Horizontal"] = (-1.0, 1.0)
+
     # ------------------------------------------------------------------
     # Accessors
     def value(self, key: str) -> float | bool:
@@ -174,6 +183,8 @@ class EditSession(QObject):
                 "Crop_CY": 0.5,
                 "Crop_W": 1.0,
                 "Crop_H": 1.0,
+                "Perspective_Vertical": 0.0,
+                "Perspective_Horizontal": 0.0,
             }
         )
         self.set_values(defaults, emit_individual=True)

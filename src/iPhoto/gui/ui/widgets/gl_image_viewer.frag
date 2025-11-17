@@ -28,6 +28,7 @@ uniform float uCropCX;
 uniform float uCropCY;
 uniform float uCropW;
 uniform float uCropH;
+uniform mat3  uPerspectiveMatrix;
 
 float clamp01(float x) { return clamp(x, 0.0, 1.0); }
 
@@ -112,6 +113,17 @@ float grain_noise(vec2 uv, float grain_amount) {
     return (noise - 0.5) * 0.2 * grain_amount;
 }
 
+vec2 apply_inverse_perspective(vec2 uv) {
+    vec2 centered = uv * 2.0 - 1.0;
+    vec3 warped = uPerspectiveMatrix * vec3(centered, 1.0);
+    float denom = warped.z;
+    if (abs(denom) < 1e-5) {
+        denom = (denom >= 0.0) ? 1e-5 : -1e-5;
+    }
+    vec2 restored = warped.xy / denom;
+    return restored * 0.5 + 0.5;
+}
+
 vec3 apply_bw(vec3 color, vec2 uv) {
     float intensity = clamp(uBWParams.x, -1.0, 1.0);
     float neutrals = clamp(uBWParams.y, -1.0, 1.0);
@@ -164,6 +176,7 @@ void main() {
     }
 
     uv.y = 1.0 - uv.y;
+    vec2 uv_corrected = uv;
 
     // Apply crop in texture coordinate space
     // Calculate normalized crop boundaries
@@ -171,14 +184,20 @@ void main() {
     float crop_max_x = uCropCX + uCropW * 0.5;
     float crop_min_y = uCropCY - uCropH * 0.5;
     float crop_max_y = uCropCY + uCropH * 0.5;
-    
+
     // Check if current fragment's texture coordinate is outside the crop box
-    if (uv.x < crop_min_x || uv.x > crop_max_x ||
-        uv.y < crop_min_y || uv.y > crop_max_y) {
+    if (uv_corrected.x < crop_min_x || uv_corrected.x > crop_max_x ||
+        uv_corrected.y < crop_min_y || uv_corrected.y > crop_max_y) {
         discard; // Discard fragments outside the crop region
     }
 
-    vec4 texel = texture(uTex, uv);
+    vec2 uv_original = apply_inverse_perspective(uv_corrected);
+    if (uv_original.x < 0.0 || uv_original.x > 1.0 ||
+        uv_original.y < 0.0 || uv_original.y > 1.0) {
+        discard;
+    }
+
+    vec4 texel = texture(uTex, uv_original);
     vec3 c = texel.rgb;
 
     float exposure_term    = uExposure   * 1.5;
@@ -196,7 +215,7 @@ void main() {
     c = apply_color_transform(c, uSaturation, uVibrance, uColorCast, uGain);
 
     if (uBWEnabled) {
-        c = apply_bw(c, uv);
+        c = apply_bw(c, uv_original);
     }
     FragColor = vec4(clamp(c, 0.0, 1.0), 1.0);
 }

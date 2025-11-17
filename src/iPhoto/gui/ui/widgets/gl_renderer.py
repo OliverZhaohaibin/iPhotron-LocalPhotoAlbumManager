@@ -28,6 +28,8 @@ from PySide6.QtOpenGL import (
 from OpenGL import GL as gl
 from shiboken6.Shiboken import VoidPtr
 
+from .perspective_math import build_perspective_matrix
+
 _LOGGER = logging.getLogger(__name__)
 
 
@@ -144,6 +146,7 @@ class GLRenderer:
                 "uCropCY",
                 "uCropW",
                 "uCropH",
+                "uPerspectiveMatrix",
             ):
                 self._uniform_locations[name] = program.uniformLocation(name)
         finally:
@@ -362,6 +365,11 @@ class GLRenderer:
             self._set_uniform1f("uCropCY", adjustment_value("Crop_CY", 0.5))
             self._set_uniform1f("uCropW", adjustment_value("Crop_W", 1.0))
             self._set_uniform1f("uCropH", adjustment_value("Crop_H", 1.0))
+            perspective_matrix = build_perspective_matrix(
+                adjustment_value("Perspective_Vertical", 0.0),
+                adjustment_value("Perspective_Horizontal", 0.0),
+            )
+            self._set_uniform_matrix3("uPerspectiveMatrix", perspective_matrix)
 
             gf.glDrawArrays(gl.GL_TRIANGLES, 0, 3)
         finally:
@@ -561,6 +569,18 @@ class GLRenderer:
         location = self._uniform_locations.get(name, -1)
         if location != -1:
             self._gl_funcs.glUniform4f(location, float(x), float(y), float(z), float(w))
+
+    def _set_uniform_matrix3(self, name: str, matrix: np.ndarray) -> None:
+        location = self._uniform_locations.get(name, -1)
+        if location == -1:
+            return
+        matrix = np.asarray(matrix, dtype=np.float32).ravel()
+        self._gl_funcs.glUniformMatrix3fv(
+            location,
+            1,
+            gl.GL_TRUE,
+            np.asarray(matrix, dtype=np.float32),
+        )
 
     def render_offscreen_image(
         self,

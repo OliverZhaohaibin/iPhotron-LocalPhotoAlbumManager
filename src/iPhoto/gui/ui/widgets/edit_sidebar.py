@@ -23,6 +23,7 @@ from ..models.edit_session import EditSession
 from .edit_light_section import EditLightSection
 from .edit_color_section import EditColorSection
 from .edit_bw_section import EditBWSection
+from .edit_perspective_controls import PerspectiveControls
 from .collapsible_section import CollapsibleSection
 from ..palette import SIDEBAR_BACKGROUND_COLOR, Edit_SIDEBAR_FONT
 from ..icon import load_icon
@@ -184,12 +185,6 @@ class EditSidebar(QWidget):
         self._stack.addWidget(adjust_container)
 
         # Crop page -----------------------------------------------------
-        crop_placeholder = QLabel(
-            "Cropping tools will arrive in a future update.",
-            self,
-        )
-        crop_placeholder.setWordWrap(True)
-        crop_placeholder.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignHCenter)
         crop_container = QWidget(self)
         crop_palette = crop_container.palette()
         crop_palette.setColor(QPalette.ColorRole.Window, SIDEBAR_BACKGROUND_COLOR)
@@ -198,7 +193,8 @@ class EditSidebar(QWidget):
         crop_container.setAutoFillBackground(True)
         crop_layout = QVBoxLayout(crop_container)
         crop_layout.setContentsMargins(24, 24, 24, 24)
-        crop_layout.addWidget(crop_placeholder)
+        self._perspective_controls = PerspectiveControls(crop_container)
+        crop_layout.addWidget(self._perspective_controls)
         crop_layout.addStretch(1)
         crop_container.setLayout(crop_layout)
         self._stack.addWidget(crop_container)
@@ -258,6 +254,7 @@ class EditSidebar(QWidget):
         self._light_section.bind_session(session)
         self._color_section.bind_session(session)
         self._bw_section.bind_session(session)
+        self._perspective_controls.bind_session(session)
         if session is not None:
             self.light_reset_button.clicked.connect(self._on_light_reset)
             self.light_toggle_button.toggled.connect(self._on_light_toggled)
@@ -306,6 +303,7 @@ class EditSidebar(QWidget):
         self._light_section.refresh_from_session()
         self._color_section.refresh_from_session()
         self._bw_section.refresh_from_session()
+        self._perspective_controls.refresh_from_session()
         self._sync_light_toggle_state()
         self._sync_color_toggle_state()
         self._sync_bw_toggle_state()

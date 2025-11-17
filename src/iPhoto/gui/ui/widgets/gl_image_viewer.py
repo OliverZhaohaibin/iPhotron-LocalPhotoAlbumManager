@@ -119,6 +119,7 @@ class GLImageViewer(QOpenGLWidget):
             timer_parent=self,
         )
         self._auto_crop_view_locked: bool = False
+        self._update_crop_perspective_state()
 
     # --------------------------- Public API ---------------------------
 
@@ -174,6 +175,7 @@ class GLImageViewer(QOpenGLWidget):
         self._current_image_source = image_source
         self._image = image
         self._adjustments = dict(adjustments or {})
+        self._update_crop_perspective_state()
         self._loading_overlay.hide()
         self._time_base = time.monotonic()
 
@@ -241,6 +243,7 @@ class GLImageViewer(QOpenGLWidget):
 
         mapped_adjustments = dict(adjustments or {})
         self._adjustments = mapped_adjustments
+        self._update_crop_perspective_state()
         if self._auto_crop_view_locked and not self._crop_controller.is_active():
             self._reapply_locked_crop_view()
         self.update()
@@ -483,6 +486,15 @@ class GLImageViewer(QOpenGLWidget):
 
     def crop_values(self) -> dict[str, float]:
         return self._crop_controller.get_crop_values()
+
+    def _update_crop_perspective_state(self) -> None:
+        """Forward the latest perspective sliders to the crop controller."""
+
+        if not hasattr(self, "_crop_controller") or self._crop_controller is None:
+            return
+        vertical = float(self._adjustments.get("Perspective_Vertical", 0.0))
+        horizontal = float(self._adjustments.get("Perspective_Horizontal", 0.0))
+        self._crop_controller.update_perspective(vertical, horizontal)
 
     # --------------------------- Coordinate transformations ---------------------------
 

@@ -111,8 +111,12 @@ class CropInteractionController:
         if tex_w <= 0 or tex_h <= 0:
             return None
         rect = self._crop_state.to_pixel_rect(tex_w, tex_h)
-        top_left = self._transform_controller.convert_image_to_viewport(rect["left"], rect["top"])
-        bottom_right = self._transform_controller.convert_image_to_viewport(rect["right"], rect["bottom"])
+        top_left = self._transform_controller.convert_image_to_viewport(
+            rect["left"], rect["top"]
+        )
+        bottom_right = self._transform_controller.convert_image_to_viewport(
+            rect["right"], rect["bottom"]
+        )
         dpr = self._transform_controller._get_dpr()
         return {
             "left": top_left.x() * dpr,
@@ -303,6 +307,9 @@ class CropInteractionController:
                     self._crop_state.height = new_height / tex_h
                     self._crop_state.clamp()
 
+            # Apply auto zoom-out when pushing edges near viewport boundaries
+            self._auto_shrink_on_drag(delta_view)
+
             self._emit_crop_changed()
 
         self._restart_crop_idle()
@@ -403,10 +410,18 @@ class CropInteractionController:
             return CropHandle.NONE
 
         rect = self._crop_state.to_pixel_rect(tex_w, tex_h)
-        top_left = self._transform_controller.convert_image_to_viewport(rect["left"], rect["top"])
-        top_right = self._transform_controller.convert_image_to_viewport(rect["right"], rect["top"])
-        bottom_right = self._transform_controller.convert_image_to_viewport(rect["right"], rect["bottom"])
-        bottom_left = self._transform_controller.convert_image_to_viewport(rect["left"], rect["bottom"])
+        top_left = self._transform_controller.convert_image_to_viewport(
+            rect["left"], rect["top"]
+        )
+        top_right = self._transform_controller.convert_image_to_viewport(
+            rect["right"], rect["top"]
+        )
+        bottom_right = self._transform_controller.convert_image_to_viewport(
+            rect["right"], rect["bottom"]
+        )
+        bottom_left = self._transform_controller.convert_image_to_viewport(
+            rect["left"], rect["bottom"]
+        )
 
         # Check corners first
         corners = [
@@ -549,6 +564,195 @@ class CropInteractionController:
         min_scale = base_scale * self._transform_controller.minimum_zoom()
         max_scale = base_scale * self._transform_controller.maximum_zoom()
         return max(min_scale, min(max_scale, target_scale))
+
+    def _get_crop_edges_viewport(self) -> tuple[float, float, float, float]:
+        """Return crop edges in viewport coordinates.
+        
+        Returns (left, right, top, bottom) in logical pixels.
+        """
+        tex_w, tex_h = self._texture_size_provider()
+        if tex_w <= 0 or tex_h <= 0:
+            return (0.0, 0.0, 0.0, 0.0)
+        
+        crop_rect_px = self._crop_state.to_pixel_rect(tex_w, tex_h)
+        top_left = self._transform_controller.convert_image_to_viewport(
+            crop_rect_px["left"], crop_rect_px["top"]
+        )
+        bottom_right = self._transform_controller.convert_image_to_viewport(
+            crop_rect_px["right"], crop_rect_px["bottom"]
+        )
+        return (top_left.x(), bottom_right.x(), top_left.y(), bottom_right.y())
+
+    def _dynamic_min_scale_to_cover_crop(self) -> float:
+        """Calculate minimum scale needed to cover the crop box without black bars."""
+        tex_w, tex_h = self._texture_size_provider()
+        if tex_w <= 0 or tex_h <= 0:
+            return 1.0
+        
+        crop_rect_px = self._crop_state.to_pixel_rect(tex_w, tex_h)
+        crop_width = max(1.0, crop_rect_px["right"] - crop_rect_px["left"])
+        crop_height = max(1.0, crop_rect_px["bottom"] - crop_rect_px["top"])
+        
+        # Calculate the minimum scale that allows the texture to cover the crop box
+        return max(crop_width / tex_w, crop_height / tex_h)
+
+    def _clamp_image_center_to_cover_crop(self, center: QPointF, scale: float) -> QPointF:
+        """Clamp image center to ensure the image covers the crop box (no black bars)."""
+        tex_w, tex_h = self._texture_size_provider()
+        if tex_w <= 0 or tex_h <= 0 or scale <= 1e-6:
+            return center
+        
+        crop_rect_px = self._crop_state.to_pixel_rect(tex_w, tex_h)
+        
+        # Calculate half-dimensions of the scaled image
+        half_width_scaled = (tex_w * scale) * 0.5
+        half_height_scaled = (tex_h * scale) * 0.5
+        
+        # The image center must be positioned such that the image extends far enough
+        # to cover the crop box on all sides
+        min_cx = crop_rect_px["right"] - half_width_scaled
+        max_cx = crop_rect_px["left"] + half_width_scaled
+        min_cy = crop_rect_px["bottom"] - half_height_scaled
+        max_cy = crop_rect_px["top"] + half_height_scaled
+        
+        clamped_x = max(min_cx, min(max_cx, center.x()))
+        clamped_y = max(min_cy, min(max_cy, center.y()))
+        
+        return QPointF(clamped_x, clamped_y)
+
+    def _auto_shrink_on_drag(self, delta_view: QPointF) -> None:
+        """Auto zoom-out and reverse-pan when dragging crop edges near viewport boundaries.
+        
+        This implements the edge-push behavior from the demo: when a crop edge is dragged
+        towards a viewport boundary, the image automatically zooms out and pans in the
+        opposite direction, allowing continuous crop adjustment without manual zoom.
+        """
+        tex_w, tex_h = self._texture_size_provider()
+        if tex_w <= 0 or tex_h <= 0:
+            return
+        
+        # Get crop edges in viewport coordinates (logical pixels)
+        left_vp, right_vp, top_vp, bottom_vp = self._get_crop_edges_viewport()
+        vw, vh = self._transform_controller.get_view_dimensions_logical()
+        threshold = self._crop_edge_threshold
+        
+        pressure = 0.0
+        pan_delta = QPointF(0.0, 0.0)
+        
+        # Get the current view scale for world-space calculations
+        view_scale = self._transform_controller.get_effective_scale()
+        if view_scale <= 1e-6:
+            return
+        
+        dpr = self._transform_controller._get_dpr()
+        
+        # Convert delta_view to world-space delta (similar to demo's screen_vec_to_world_vec)
+        delta_world_x = float(delta_view.x()) * dpr / view_scale
+        delta_world_y = -float(delta_view.y()) * dpr / view_scale  # Y-flip for world space
+        
+        # Left edge pushed outward (delta_view.x < 0): pan right (+x)
+        if self._crop_drag_handle in (CropHandle.LEFT, CropHandle.TOP_LEFT, CropHandle.BOTTOM_LEFT):
+            if delta_view.x() < 0:
+                margin = left_vp
+                if margin < threshold:
+                    p = (threshold - margin) / threshold
+                    pressure = max(pressure, p)
+                    pan_delta.setX(max(pan_delta.x(), -delta_world_x * p))
+        
+        # Right edge pushed outward (delta_view.x > 0): pan left (-x)
+        handle = self._crop_drag_handle
+        if handle in (CropHandle.RIGHT, CropHandle.TOP_RIGHT, CropHandle.BOTTOM_RIGHT):
+            if delta_view.x() > 0:
+                margin = vw - right_vp
+                if margin < threshold:
+                    p = (threshold - margin) / threshold
+                    pressure = max(pressure, p)
+                    pan_delta.setX(min(pan_delta.x(), -delta_world_x * p))
+        
+        # Top edge pushed outward (delta_view.y < 0): pan down (-y in world space)
+        if self._crop_drag_handle in (CropHandle.TOP, CropHandle.TOP_LEFT, CropHandle.TOP_RIGHT):
+            if delta_view.y() < 0:
+                margin = top_vp
+                if margin < threshold:
+                    p = (threshold - margin) / threshold
+                    pressure = max(pressure, p)
+                    pan_delta.setY(min(pan_delta.y(), -delta_world_y * p))
+        
+        # Bottom edge pushed outward (delta_view.y > 0): pan up (+y in world space)
+        if handle in (CropHandle.BOTTOM, CropHandle.BOTTOM_LEFT, CropHandle.BOTTOM_RIGHT):
+            if delta_view.y() > 0:
+                margin = vh - bottom_vp
+                if margin < threshold:
+                    p = (threshold - margin) / threshold
+                    pressure = max(pressure, p)
+                    pan_delta.setY(max(pan_delta.y(), -delta_world_y * p))
+        
+        if pressure <= 0.0:
+            return
+        
+        # Apply eased pressure for smooth zoom-out
+        from .gl_crop_utils import ease_in_quad
+        eased_pressure = ease_in_quad(min(1.0, pressure))
+        
+        # Calculate zoom-out factor
+        vw_device, vh_device = self._transform_controller.get_view_dimensions_device_px()
+        base_scale = compute_fit_to_view_scale((tex_w, tex_h), vw_device, vh_device)
+        min_zoom = self._transform_controller.minimum_zoom()
+        max_zoom = self._transform_controller.maximum_zoom()
+        
+        # Get dynamic minimum scale to ensure no black bars
+        dyn_min_scale = self._dynamic_min_scale_to_cover_crop()
+        min_allowed_scale = max(base_scale * min_zoom, dyn_min_scale)
+        max_allowed_scale = base_scale * max_zoom
+        
+        # Apply zoom-out with maximum 5% reduction per event
+        k_max = 0.05
+        zoom_factor = 1.0 - k_max * eased_pressure
+        current_scale = view_scale
+        new_scale_raw = current_scale * zoom_factor
+        new_scale = max(min_allowed_scale, min(max_allowed_scale, new_scale_raw))
+        
+        if abs(new_scale - current_scale) < 1e-6:
+            return
+        
+        # Calculate the new zoom factor to apply
+        new_zoom_factor = new_scale / max(base_scale, 1e-6)
+        
+        # Get current image center in pixels
+        current_center = self._transform_controller.get_image_center_pixels()
+        
+        # The crop center should remain the anchor point for zooming
+        crop_center = self._crop_state.center_pixels(tex_w, tex_h)
+        
+        # Calculate zoom about crop center
+        scale_ratio = new_scale / max(current_scale, 1e-12)
+        new_center = QPointF(
+            crop_center.x() + (current_center.x() - crop_center.x()) * scale_ratio,
+            crop_center.y() + (current_center.y() - crop_center.y()) * scale_ratio
+        )
+        
+        # Apply reverse-direction pan with gain based on pressure
+        pan_gain = 0.75 + 0.25 * eased_pressure
+        final_pan_delta = QPointF(pan_delta.x() * pan_gain, pan_delta.y() * pan_gain)
+        
+        # Translate the image center by the pan delta (in image pixel coordinates)
+        new_center = QPointF(
+            new_center.x() + final_pan_delta.x(),
+            new_center.y() + final_pan_delta.y()
+        )
+        
+        # Synchronize crop box position: translate it by the same pan delta
+        # so it maintains visual stability in viewport space
+        self._crop_state.cx += final_pan_delta.x() / tex_w
+        self._crop_state.cy += final_pan_delta.y() / tex_h
+        self._crop_state.clamp()
+        
+        # Clamp the image center to ensure no black bars
+        clamped_center = self._clamp_image_center_to_cover_crop(new_center, new_scale)
+        
+        # Apply the new zoom and center
+        self._transform_controller.set_zoom_factor_direct(new_zoom_factor)
+        self._transform_controller.apply_image_center_pixels(clamped_center, new_scale)
 
     def _emit_crop_changed(self) -> None:
         """Emit the crop changed signal."""

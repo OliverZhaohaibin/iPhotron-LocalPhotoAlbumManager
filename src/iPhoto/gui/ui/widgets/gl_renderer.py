@@ -150,9 +150,15 @@ class GLRenderer:
             program.release()
 
         overlay_prog = QOpenGLShaderProgram(self._parent)
-        if not overlay_prog.addShaderFromSourceCode(QOpenGLShader.Vertex, _OVERLAY_VERTEX_SHADER):
+        vert_ok = overlay_prog.addShaderFromSourceCode(
+            QOpenGLShader.Vertex, _OVERLAY_VERTEX_SHADER
+        )
+        if not vert_ok:
             raise RuntimeError("Unable to compile overlay vertex shader")
-        if not overlay_prog.addShaderFromSourceCode(QOpenGLShader.Fragment, _OVERLAY_FRAGMENT_SHADER):
+        frag_ok = overlay_prog.addShaderFromSourceCode(
+            QOpenGLShader.Fragment, _OVERLAY_FRAGMENT_SHADER
+        )
+        if not frag_ok:
             raise RuntimeError("Unable to compile overlay fragment shader")
         if not overlay_prog.link():
             raise RuntimeError("Unable to link overlay shader program")
@@ -414,8 +420,14 @@ class GLRenderer:
                 coords.extend((x_ndc, y_ndc))
             return np.array(coords, dtype=np.float32)
 
-        def _draw(vertices: np.ndarray, mode: int, colour: tuple[float, float, float, float]) -> None:
-            program.setUniformValue("uColor", *colour)
+        def _draw(
+            vertices: np.ndarray, mode: int, colour: tuple[float, float, float, float]
+        ) -> None:
+            # Use glUniform4f directly to match the demo implementation for
+            # reliable uniform transmission
+            color_loc = gl.glGetUniformLocation(program.programId(), "uColor")
+            if color_loc != -1:
+                gl.glUniform4f(color_loc, colour[0], colour[1], colour[2], colour[3])
             gl.glBindBuffer(gl.GL_ARRAY_BUFFER, int(self._overlay_vbo))
             gl.glBufferData(gl.GL_ARRAY_BUFFER, vertices.nbytes, vertices, gl.GL_DYNAMIC_DRAW)
             gf.glEnableVertexAttribArray(0)

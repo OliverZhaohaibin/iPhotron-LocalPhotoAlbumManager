@@ -15,7 +15,13 @@ from collections.abc import Callable, Mapping
 from PySide6.QtCore import QPointF, Qt, QTimer, QObject
 from PySide6.QtGui import QMouseEvent, QWheelEvent
 
-from .gl_crop_utils import CropBoxState, CropHandle, cursor_for_handle, ease_out_cubic
+from .gl_crop_utils import (
+    CropBoxState,
+    CropHandle,
+    cursor_for_handle,
+    ease_in_quad,
+    ease_out_cubic,
+)
 from .view_transform_controller import compute_fit_to_view_scale
 
 _LOGGER = logging.getLogger(__name__)
@@ -304,6 +310,7 @@ class CropInteractionController:
                     self._crop_state.clamp()
 
             self._emit_crop_changed()
+            self._apply_edge_push_auto_zoom(delta_view)
 
         self._restart_crop_idle()
         self._on_request_update()
@@ -568,3 +575,123 @@ class CropInteractionController:
 
         current = self._snapshot_crop_state()
         return any(abs(a - b) > 1e-6 for a, b in zip(snapshot, current))
+
+    # ------------------------------------------------------------------
+    # Edge-push auto zoom helpers
+    # ------------------------------------------------------------------
+    def _apply_edge_push_auto_zoom(self, delta_view: QPointF) -> None:
+        """Shrink and pan automatically when a handle pushes against the viewport.
+
+        The behaviour mirrors the reference demo: when the user drags an edge or
+        corner towards the viewport boundary we gradually zoom out and pan in the
+        opposite direction so new image content flows into view without forcing
+        the gesture to pause.  All calculations are performed in device pixels to
+        avoid precision loss on high-DPI screens, after which the resulting
+        offsets are converted back into image-space pixels for the transform
+        controller.
+        """
+
+        if self._crop_drag_handle in (CropHandle.NONE, CropHandle.INSIDE):
+            return
+
+        tex_w, tex_h = self._texture_size_provider()
+        if tex_w <= 0 or tex_h <= 0:
+            return
+
+        crop_rect = self.current_crop_rect_pixels()
+        if not crop_rect:
+            return
+
+        vw, vh = self._transform_controller._get_view_dimensions_device_px()
+        if vw <= 0.0 or vh <= 0.0:
+            return
+
+        dpr = self._transform_controller._get_dpr()
+        threshold = max(1.0, self._crop_edge_threshold * dpr)
+        view_scale = self._transform_controller.get_effective_scale()
+        if view_scale <= 1e-6:
+            return
+
+        delta_device = QPointF(float(delta_view.x()) * dpr, float(delta_view.y()) * dpr)
+        if abs(delta_device.x()) < 1e-6 and abs(delta_device.y()) < 1e-6:
+            return
+
+        # ``delta_image`` lives in the conventional image pixel space (top-left
+        # origin) so we can reuse it directly when nudging the image centre.
+        delta_image = QPointF(
+            float(delta_device.x()) / view_scale,
+            float(delta_device.y()) / view_scale,
+        )
+
+        pressure = 0.0
+        offset_x = 0.0
+        offset_y = 0.0
+        handle = self._crop_drag_handle
+
+        left_margin = float(crop_rect["left"])
+        right_margin = max(0.0, vw - float(crop_rect["right"]))
+        top_margin = float(crop_rect["top"])
+        bottom_margin = max(0.0, vh - float(crop_rect["bottom"]))
+
+        if handle in (CropHandle.LEFT, CropHandle.TOP_LEFT, CropHandle.BOTTOM_LEFT):
+            if delta_device.x() < 0.0 and left_margin < threshold:
+                p = (threshold - left_margin) / threshold
+                pressure = max(pressure, p)
+                offset_x = max(offset_x, -float(delta_image.x()) * p)
+
+        if handle in (CropHandle.RIGHT, CropHandle.TOP_RIGHT, CropHandle.BOTTOM_RIGHT):
+            if delta_device.x() > 0.0 and right_margin < threshold:
+                p = (threshold - right_margin) / threshold
+                pressure = max(pressure, p)
+                offset_x = min(offset_x, -float(delta_image.x()) * p)
+
+        if handle in (CropHandle.TOP, CropHandle.TOP_LEFT, CropHandle.TOP_RIGHT):
+            if delta_device.y() < 0.0 and top_margin < threshold:
+                p = (threshold - top_margin) / threshold
+                pressure = max(pressure, p)
+                offset_y = max(offset_y, -float(delta_image.y()) * p)
+
+        if handle in (CropHandle.BOTTOM, CropHandle.BOTTOM_LEFT, CropHandle.BOTTOM_RIGHT):
+            if delta_device.y() > 0.0 and bottom_margin < threshold:
+                p = (threshold - bottom_margin) / threshold
+                pressure = max(pressure, p)
+                offset_y = min(offset_y, -float(delta_image.y()) * p)
+
+        if pressure <= 0.0:
+            return
+
+        eased_pressure = ease_in_quad(min(1.0, pressure))
+
+        texture_size = (tex_w, tex_h)
+        base_scale = compute_fit_to_view_scale(texture_size, vw, vh)
+        min_scale = max(base_scale, 1e-6)
+        max_scale = base_scale * self._transform_controller.maximum_zoom()
+
+        shrink_strength = 0.05
+        new_scale_raw = view_scale * (1.0 - shrink_strength * eased_pressure)
+        new_scale = max(min_scale, min(max_scale, new_scale_raw))
+
+        crop_center = self._crop_state.center_pixels(tex_w, tex_h)
+        crop_center_view = self._transform_controller.convert_image_to_viewport(
+            crop_center.x(), crop_center.y()
+        )
+        base_scale_safe = max(base_scale, 1e-6)
+        target_zoom = new_scale / base_scale_safe
+        self._transform_controller.set_zoom(target_zoom, anchor=crop_center_view)
+
+        # Translate opposite to the drag direction.  ``pan_gain`` amplifies the
+        # offset slightly when the pressure approaches 1.0 to mimic the demo's
+        # "push against the wall" feel.
+        pan_gain = 0.75 + 0.25 * eased_pressure
+        offset_delta = QPointF(offset_x * pan_gain, offset_y * pan_gain)
+        if abs(offset_delta.x()) < 1e-6 and abs(offset_delta.y()) < 1e-6:
+            return
+
+        current_center = self._transform_controller.get_image_center_pixels()
+        target_center = QPointF(
+            current_center.x() + offset_delta.x(),
+            current_center.y() + offset_delta.y(),
+        )
+        effective_scale = self._transform_controller.get_effective_scale()
+        clamped_center = self._clamp_image_center_to_crop(target_center, effective_scale)
+        self._transform_controller.apply_image_center_pixels(clamped_center, effective_scale)

@@ -406,7 +406,18 @@ class GLRenderer:
         overlay_colour = (0.0, 0.0, 0.0, alpha)
         border_colour = (1.0, 0.85, 0.2, 1.0)
 
-        def _to_clip(points: list[tuple[float, float]]) -> np.ndarray:
+        def _viewport_rect_to_clip(
+            rect: tuple[float, float, float, float]
+        ) -> np.ndarray:
+            """Convert a viewport-space rectangle into interleaved clip coordinates."""
+
+            left_px, top_px, right_px, bottom_px = rect
+            points = [
+                (left_px, top_px),
+                (right_px, top_px),
+                (right_px, bottom_px),
+                (left_px, bottom_px),
+            ]
             coords: list[float] = []
             for px, py in points:
                 x_ndc = (2.0 * px / vw) - 1.0
@@ -414,7 +425,11 @@ class GLRenderer:
                 coords.extend((x_ndc, y_ndc))
             return np.array(coords, dtype=np.float32)
 
-        def _draw(vertices: np.ndarray, mode: int, colour: tuple[float, float, float, float]) -> None:
+        def _draw(
+            vertices: np.ndarray, mode: int, colour: tuple[float, float, float, float]
+        ) -> None:
+            """Upload *vertices* and issue a draw call with the provided colour."""
+
             program.setUniformValue("uColor", *colour)
             gl.glBindBuffer(gl.GL_ARRAY_BUFFER, int(self._overlay_vbo))
             gl.glBufferData(gl.GL_ARRAY_BUFFER, vertices.nbytes, vertices, gl.GL_DYNAMIC_DRAW)
@@ -432,43 +447,74 @@ class GLRenderer:
 
         try:
             vao.bind()
+
+            # 1) Mask everything outside the crop rectangle using four quads that
+            # stitch together seamlessly.  This approach mirrors the reference
+            # demo and avoids precision issues around the crop borders.
             quads = [
-                [(0.0, 0.0), (vw, 0.0), (vw, top), (0.0, top)],
-                [(0.0, bottom), (vw, bottom), (vw, vh), (0.0, vh)],
-                [(0.0, top), (left, top), (left, bottom), (0.0, bottom)],
-                [(right, top), (vw, top), (vw, bottom), (right, bottom)],
+                (0.0, 0.0, vw, top),  # top band
+                (0.0, bottom, vw, vh),  # bottom band
+                (0.0, top, left, bottom),  # left band
+                (right, top, vw, bottom),  # right band
             ]
             for quad in quads:
-                vertices = _to_clip(quad)
+                vertices = _viewport_rect_to_clip(quad)
                 _draw(vertices, gl.GL_TRIANGLE_FAN, overlay_colour)
 
             if not faded:
-                border_points = _to_clip(
-                    [
-                        (left, bottom),
-                        (right, bottom),
-                        (right, top),
-                        (left, top),
-                        (left, bottom),
-                    ]
-                )
-                _draw(border_points, gl.GL_LINE_STRIP, border_colour)
+                # 2) Highlight the crop perimeter.
+                border_vertices = _viewport_rect_to_clip((left, top, right, bottom))
+                # ``GL_LINE_LOOP`` implicitly closes the strip, preventing gaps
+                # when the widget is resized rapidly.
+                _draw(border_vertices, gl.GL_LINE_LOOP, border_colour)
 
+                # 3) Render corner and edge handles so the user can clearly see
+                # where drags will latch.  Corners use small squares while edge
+                # handles use elongated rectangles centred on each edge.
                 handle_size = 7.0
-                corners = [
+                corner_positions = [
                     (left, top),
                     (right, top),
                     (right, bottom),
                     (left, bottom),
                 ]
-                for cx, cy in corners:
-                    square = [
-                        (cx - handle_size, cy - handle_size),
-                        (cx + handle_size, cy - handle_size),
-                        (cx + handle_size, cy + handle_size),
-                        (cx - handle_size, cy + handle_size),
-                    ]
-                    vertices = _to_clip(square)
+                for cx, cy in corner_positions:
+                    square = (
+                        cx - handle_size,
+                        cy - handle_size,
+                        cx + handle_size,
+                        cy + handle_size,
+                    )
+                    vertices = _viewport_rect_to_clip(square)
+                    _draw(vertices, gl.GL_TRIANGLE_FAN, border_colour)
+
+                edge_half_length = 16.0
+                edge_half_thickness = 3.0
+                horizontal_edges = [
+                    ((left + right) * 0.5, top),
+                    ((left + right) * 0.5, bottom),
+                ]
+                vertical_edges = [
+                    (left, (top + bottom) * 0.5),
+                    (right, (top + bottom) * 0.5),
+                ]
+                for cx, cy in horizontal_edges:
+                    rect = (
+                        cx - edge_half_length,
+                        cy - edge_half_thickness,
+                        cx + edge_half_length,
+                        cy + edge_half_thickness,
+                    )
+                    vertices = _viewport_rect_to_clip(rect)
+                    _draw(vertices, gl.GL_TRIANGLE_FAN, border_colour)
+                for cx, cy in vertical_edges:
+                    rect = (
+                        cx - edge_half_thickness,
+                        cy - edge_half_length,
+                        cx + edge_half_thickness,
+                        cy + edge_half_length,
+                    )
+                    vertices = _viewport_rect_to_clip(rect)
                     _draw(vertices, gl.GL_TRIANGLE_FAN, border_colour)
         finally:
             vao.release()

@@ -31,7 +31,7 @@ class _PerspectiveSliderRow(QWidget):
         self._slider = BWSlider(label, self, minimum=-1.0, maximum=1.0, initial=0.0)
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(12)
+        layout.setSpacing(0)
 
         icon_label = QLabel(self)
         icon_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -71,7 +71,7 @@ class PerspectiveControls(QWidget):
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(0)
+        layout.setSpacing(3)
 
         self._vertical_row = _PerspectiveSliderRow(
             "Vertical",

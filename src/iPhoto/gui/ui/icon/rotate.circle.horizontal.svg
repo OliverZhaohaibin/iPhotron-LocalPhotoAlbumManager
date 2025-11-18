@@ -1,0 +1,20 @@
+<svg viewBox="0 0 200 200" xmlns="http://www.w3.org/2000/svg">
+
+    <!-- Mask：挖掉圆与横线的重叠区域 -->
+    <mask id="cut">
+        <!-- 基底全部填白，使元素正常显示 -->
+        <rect width="200" height="200" fill="white"/>
+
+        <!-- 黑色区域表示透明（从最终图形中挖掉） -->
+        <rect x="40" y="95" width="120" height="10" fill="black"/>
+    </mask>
+
+    <!-- 正圆（不会被压扁） -->
+    <circle cx="100" cy="100" r="60" fill="#aaa" mask="url(#cut)" />
+
+    <!-- 横线（中间被挖空透明） -->
+    <g mask="url(#cut)">
+        <rect x="20" y="95" width="160" height="10" rx="5" fill="#ddd" />
+    </g>
+
+</svg>

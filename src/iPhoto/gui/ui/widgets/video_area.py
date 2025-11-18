@@ -229,6 +229,11 @@ class VideoArea(QWidget):
             return
         super().mouseDoubleClickEvent(event)
 
+    def showEvent(self, event) -> None:  # pragma: no cover - GUI behaviour
+        """Force position update when widget becomes visible."""
+        super().showEvent(event)
+        self._update_bar_geometry()
+
     def hideEvent(self, event) -> None:  # pragma: no cover - GUI behaviour
         super().hideEvent(event)
         self.hide_controls(animate=False)

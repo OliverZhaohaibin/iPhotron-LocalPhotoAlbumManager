@@ -152,6 +152,7 @@ class Ui_MainWindow(object):
         self.edit_compare_button = self.detail_page.edit_compare_button
         self.edit_reset_button = self.detail_page.edit_reset_button
         self.edit_done_button = self.detail_page.edit_done_button
+        self.edit_rotate_left_button = self.detail_page.edit_rotate_left_button
         self.edit_image_viewer = self.image_viewer
         self.edit_sidebar = self.detail_page.edit_sidebar
         self.edit_mode_control = self.detail_page.edit_mode_control

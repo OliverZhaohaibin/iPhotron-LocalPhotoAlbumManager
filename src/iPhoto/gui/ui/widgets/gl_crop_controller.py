@@ -725,9 +725,13 @@ class CropInteractionController:
         2. No black edges appear within the crop box
         3. The scale change is minimal (closest to current scale)
         
-        This implements the bidirectional auto-scaling requirement: the view can
-        both zoom in (when content is too large) or zoom out (when content is too small)
-        to maintain the optimal fill.
+        The logic works as follows:
+        - The perspective transformation warps the image, creating a perspective quad
+        - The crop box defines the viewport we want to fill
+        - We calculate the minimum scale needed so the crop box fits inside the quad
+        - If scale > 1, crop is too big, so we zoom OUT
+        - If scale < 1, crop could be bigger, but we keep stable to avoid oscillation
+        - We use smooth interpolation to avoid jarring transitions
         """
         tex_w, tex_h = self._texture_size_provider()
         if tex_w <= 0 or tex_h <= 0:
@@ -741,35 +745,28 @@ class CropInteractionController:
         crop_rect = self._current_normalised_rect()
         quad = self._perspective_quad or unit_quad()
         
+        # Check if crop is already inside the quad
+        if rect_inside_quad(crop_rect, quad):
+            # Crop fits perfectly, no adjustment needed
+            return
+        
         # Calculate the minimum scale needed to ensure the crop box fits inside
         # the perspective-transformed quad without black edges
         min_scale_factor = calculate_min_zoom_to_fit(crop_rect, quad)
         
-        if not math.isfinite(min_scale_factor) or min_scale_factor <= 1e-6:
+        if not math.isfinite(min_scale_factor) or min_scale_factor <= 1.0 + 1e-4:
+            # No scaling needed or invalid result
             return
         
-        # Convert crop box to pixel dimensions
-        crop_width_px = self._crop_state.width * tex_w
-        crop_height_px = self._crop_state.height * tex_h
+        # min_scale_factor > 1.0 means the crop box is too large relative to the
+        # available content after perspective transformation. We need to zoom OUT
+        # the view to compensate.
         
-        if crop_width_px <= 1e-6 or crop_height_px <= 1e-6:
-            return
-        
-        # The min_scale_factor tells us how much we need to scale the crop box
-        # to fit inside the quad. We need to invert this logic to calculate
-        # how much to scale the VIEW to compensate.
-        # 
-        # If min_scale_factor > 1.0, the crop box needs to shrink to fit,
-        # which means we need to zoom OUT the view.
-        # If min_scale_factor < 1.0, we could zoom IN.
-        
-        # Calculate target scale that would make the (scaled) crop fill the viewport optimally
-        # while respecting the perspective transformation
         current_scale = self._transform_controller.get_effective_scale()
         base_scale = compute_fit_to_view_scale((tex_w, tex_h), vw, vh)
         
-        # Target scale adjustment: if crop needs to shrink by factor X to fit quad,
-        # then we should zoom out by approximately factor X
+        # Calculate target scale: zoom out by the reciprocal of min_scale_factor
+        # This ensures the effectively-scaled crop box will fit inside the quad
         target_scale = current_scale / min_scale_factor
         
         # Apply zoom limits

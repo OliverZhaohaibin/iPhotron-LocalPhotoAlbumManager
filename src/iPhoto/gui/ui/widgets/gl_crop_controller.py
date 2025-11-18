@@ -691,6 +691,12 @@ class CropInteractionController:
         quad = self._perspective_quad or unit_quad()
         rect = self._current_normalised_rect()
         scale = calculate_min_zoom_to_fit(rect, quad)
+        
+        # Add 1% safety margin to prevent floating-point precision errors
+        # from causing the crop box to fall just outside the quad boundary,
+        # which would result in black edges at large perspective angles
+        scale *= 1.01
+        
         if not math.isfinite(scale) or scale <= 1.0 + 1e-4:
             return False
         self._crop_state.width = max(self._crop_state.min_width, self._crop_state.width / scale)
@@ -730,6 +736,11 @@ class CropInteractionController:
         
         if not math.isfinite(scale):
             scale = 1.0
+        
+        # Add 1% safety margin to prevent black edges during interaction
+        # This ensures the crop box stays strictly inside the quad even with
+        # floating-point precision errors at large perspective angles
+        scale *= 1.01
         
         # Apply the scale factor to get the final size
         final_width = base_width / scale

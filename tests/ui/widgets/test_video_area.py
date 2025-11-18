@@ -8,7 +8,6 @@ pytest.importorskip("PySide6", reason="PySide6 is required for GUI tests")
 
 from PySide6.QtCore import QEvent
 from PySide6.QtWidgets import QApplication
-from unittest.mock import MagicMock, patch
 
 from iPhotos.src.iPhoto.gui.ui.widgets.video_area import VideoArea
 

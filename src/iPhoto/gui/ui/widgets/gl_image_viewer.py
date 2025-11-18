@@ -106,6 +106,7 @@ class GLImageViewer(QOpenGLWidget):
             on_zoom_changed=self.zoomChanged.emit,
             on_next_item=self.nextItemRequested.emit,
             on_prev_item=self.prevItemRequested.emit,
+            display_texture_size_provider=self._display_texture_dimensions,
         )
         self._transform_controller.reset_zoom()
 
@@ -536,7 +537,8 @@ class GLImageViewer(QOpenGLWidget):
             self._transform_controller.set_image_cover_scale(1.0)
             return
         view_width, view_height = self._view_dimensions_device_px()
-        base_scale = compute_fit_to_view_scale((tex_w, tex_h), float(view_width), float(view_height))
+        display_w, display_h = self._display_texture_dimensions()
+        base_scale = compute_fit_to_view_scale((display_w, display_h), float(view_width), float(view_height))
         cover_scale = compute_rotation_cover_scale(
             (tex_w, tex_h),
             base_scale,
@@ -714,6 +716,23 @@ class GLImageViewer(QOpenGLWidget):
         if self._image is not None and not self._image.isNull():
             return (self._image.width(), self._image.height())
         return (0, 0)
+
+    def _display_texture_dimensions(self) -> tuple[int, int]:
+        """Return the logical texture dimensions used for fit-to-view math."""
+
+        tex_w, tex_h = self._texture_dimensions()
+        if tex_w <= 0 or tex_h <= 0:
+            return (tex_w, tex_h)
+        rotate_steps = int(float(self._adjustments.get("Crop_Rotate90", 0.0)))
+        if rotate_steps % 2:
+            # When the user rotates the photo by 90° or 270° the shader renders a
+            # portrait-aligned frame even though the underlying texture upload
+            # remains landscape.  Swapping the logical dimensions keeps the
+            # transform controller's fit-to-view baseline consistent with the
+            # rendered orientation so we no longer squish the frame into the
+            # previous aspect ratio.
+            return (tex_h, tex_w)
+        return (tex_w, tex_h)
 
     def _frame_crop_if_available(self) -> bool:
         """Frame the active crop rectangle if the adjustments define one."""

@@ -75,9 +75,18 @@ class ViewTransformController:
         on_zoom_changed: Callable[[float], None],
         on_next_item: Optional[Callable[[], None]] = None,
         on_prev_item: Optional[Callable[[], None]] = None,
+        display_texture_size_provider: Callable[[], tuple[int, int]] | None = None,
     ) -> None:
         self._viewer = viewer
         self._texture_size_provider = texture_size_provider
+        # ``_display_texture_size_provider`` mirrors ``texture_size_provider`` but allows
+        # callers to describe the logical texture dimensions that should drive
+        # fit-to-view computations.  When the image is rotated by 90° steps the
+        # visible width and height swap even though the uploaded texture keeps its
+        # original orientation.  Feeding the rotated dimensions keeps the baseline
+        # zoom (and therefore the shader output) perfectly aligned with the on-screen
+        # frame, eliminating the stretched look reported in the demo comparison.
+        self._display_texture_size_provider = display_texture_size_provider
         self._on_zoom_changed = on_zoom_changed
         self._on_next_item = on_next_item
         self._on_prev_item = on_prev_item
@@ -108,6 +117,21 @@ class ViewTransformController:
     def _get_view_dimensions_logical(self) -> tuple[float, float]:
         """Get viewport dimensions in logical pixels."""
         return float(self._viewer.width()), float(self._viewer.height())
+
+    def _get_fit_texture_size(self) -> tuple[float, float]:
+        """Return the texture dimensions that should drive fit-to-view math."""
+
+        if self._display_texture_size_provider is not None:
+            try:
+                size = self._display_texture_size_provider()
+            except Exception:
+                size = (0, 0)
+            else:
+                width, height = size
+                if width > 0 and height > 0:
+                    return float(width), float(height)
+        tex_w, tex_h = self._texture_size_provider()
+        return float(tex_w), float(tex_h)
 
     # ------------------------------------------------------------------
     # Public wrappers for viewport info
@@ -184,7 +208,8 @@ class ViewTransformController:
             dpr = self._viewer.devicePixelRatioF()
             view_width = float(self._viewer.width()) * dpr
             view_height = float(self._viewer.height()) * dpr
-            base_scale = compute_fit_to_view_scale((tex_w, tex_h), view_width, view_height)
+            fit_w, fit_h = self._get_fit_texture_size()
+            base_scale = compute_fit_to_view_scale((fit_w, fit_h), view_width, view_height)
             cover_scale = self._image_cover_scale
             old_scale = base_scale * cover_scale * self._zoom_factor
             new_scale = base_scale * cover_scale * clamped
@@ -297,7 +322,9 @@ class ViewTransformController:
         self, texture_size: tuple[int, int], view_width: float, view_height: float
     ) -> float:
         """Calculate the effective rendering scale (base scale × zoom factor)."""
-        base_scale = compute_fit_to_view_scale(texture_size, view_width, view_height)
+        del texture_size  # The fit-to-view dimensions may differ during rotation.
+        fit_w, fit_h = self._get_fit_texture_size()
+        base_scale = compute_fit_to_view_scale((fit_w, fit_h), view_width, view_height)
         return max(base_scale * self._image_cover_scale * self._zoom_factor, 1e-6)
 
     def image_center_pixels(
@@ -391,7 +418,8 @@ class ViewTransformController:
         if view_width <= 0.0 or view_height <= 0.0:
             return False
 
-        base_scale = compute_fit_to_view_scale((tex_w, tex_h), view_width, view_height)
+        fit_w, fit_h = self._get_fit_texture_size()
+        base_scale = compute_fit_to_view_scale((fit_w, fit_h), view_width, view_height)
         if base_scale <= 0.0:
             return False
 

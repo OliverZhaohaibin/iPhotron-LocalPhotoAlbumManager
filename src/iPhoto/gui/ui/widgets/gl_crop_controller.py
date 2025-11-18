@@ -722,7 +722,7 @@ class CropInteractionController:
         # This guarantees that all crop corners will map to valid UV coordinates
         # with appropriate safety padding based on actual texture resolution
         constrained_rect = constrain_rect_to_uv_bounds(
-            rect, self._perspective_matrix, (tex_w, tex_h), padding_pixels=3
+            rect, self._perspective_matrix, (tex_w, tex_h), padding_pixels=3, max_iterations=20
         )
         
         # Check if the rectangle actually changed
@@ -772,7 +772,8 @@ class CropInteractionController:
         # Use UV-space constraint solver to ensure valid crop bounds
         # This replaces the old scale calculation with texture-resolution-based validation
         constrained_rect = constrain_rect_to_uv_bounds(
-            candidate_rect, self._perspective_matrix, (tex_w, tex_h), padding_pixels=3
+            candidate_rect, self._perspective_matrix, (tex_w, tex_h), 
+            padding_pixels=3, max_iterations=20
         )
         
         # Ensure we respect minimum dimensions

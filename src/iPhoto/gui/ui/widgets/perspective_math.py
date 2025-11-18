@@ -366,7 +366,7 @@ def constrain_rect_to_uv_bounds(
     matrix: np.ndarray,
     texture_size: tuple[int, int],
     padding_pixels: int = 3,
-    max_iterations: int = 10,
+    max_iterations: int = 20,
 ) -> NormalisedRect:
     """Iteratively constrain a crop rectangle to stay within UV texture bounds.
     
@@ -385,7 +385,7 @@ def constrain_rect_to_uv_bounds(
     padding_pixels:
         Number of pixels to pad (default: 3 pixels).
     max_iterations:
-        Maximum number of shrinking iterations (default: 10).
+        Maximum number of shrinking iterations (default: 20).
         
     Returns
     -------
@@ -395,16 +395,36 @@ def constrain_rect_to_uv_bounds(
     current_rect = rect
     
     for _ in range(max_iterations):
-        is_valid, _ = validate_crop_corners_in_uv_space(
+        is_valid, uv_corners = validate_crop_corners_in_uv_space(
             current_rect, matrix, texture_size, padding_pixels
         )
         
         if is_valid:
             return current_rect
         
-        # Shrink uniformly by 2% per iteration
-        # This is more conservative than trying to find the exact boundary
-        shrink_factor = 0.98
+        # Calculate how far out of bounds we are
+        epsilon_u, epsilon_v = calculate_texture_safety_padding(
+            texture_size[0], texture_size[1], padding_pixels
+        )
+        
+        max_violation = 0.0
+        for u, v in uv_corners:
+            if u < epsilon_u:
+                max_violation = max(max_violation, epsilon_u - u)
+            elif u > (1.0 - epsilon_u):
+                max_violation = max(max_violation, u - (1.0 - epsilon_u))
+            if v < epsilon_v:
+                max_violation = max(max_violation, epsilon_v - v)
+            elif v > (1.0 - epsilon_v):
+                max_violation = max(max_violation, v - (1.0 - epsilon_v))
+        
+        # Shrink more aggressively if we're far out of bounds
+        if max_violation > 0.1:
+            shrink_factor = 0.90  # 10% shrink for large violations
+        elif max_violation > 0.05:
+            shrink_factor = 0.95  # 5% shrink for medium violations
+        else:
+            shrink_factor = 0.98  # 2% shrink for small violations
         
         cx, cy = current_rect.center
         new_width = current_rect.width * shrink_factor

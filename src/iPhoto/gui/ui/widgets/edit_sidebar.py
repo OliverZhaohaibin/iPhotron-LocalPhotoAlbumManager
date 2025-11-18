@@ -2,13 +2,10 @@
 
 from __future__ import annotations
 
-from typing import Optional
-
-from PySide6.QtCore import Qt, Slot, Signal
-from PySide6.QtGui import QPalette, QColor
+from PySide6.QtCore import Signal, Slot
+from PySide6.QtGui import QColor, QPalette
 from PySide6.QtWidgets import (
     QFrame,
-    QLabel,
     QScrollArea,
     QStackedWidget,
     QToolButton,
@@ -16,17 +13,17 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from ....core.light_resolver import LIGHT_KEYS
-from ....core.color_resolver import COLOR_KEYS, ColorStats
 from ....core.bw_resolver import BWParams
-from ..models.edit_session import EditSession
-from .edit_light_section import EditLightSection
-from .edit_color_section import EditColorSection
-from .edit_bw_section import EditBWSection
-from .edit_perspective_controls import PerspectiveControls
-from .collapsible_section import CollapsibleSection
-from ..palette import SIDEBAR_BACKGROUND_COLOR, Edit_SIDEBAR_FONT
+from ....core.color_resolver import COLOR_KEYS, ColorStats
+from ....core.light_resolver import LIGHT_KEYS
 from ..icon import load_icon
+from ..models.edit_session import EditSession
+from ..palette import SIDEBAR_BACKGROUND_COLOR, Edit_SIDEBAR_FONT
+from .collapsible_section import CollapsibleSection
+from .edit_bw_section import EditBWSection
+from .edit_color_section import EditColorSection
+from .edit_light_section import EditLightSection
+from .edit_perspective_controls import PerspectiveControls
 
 
 class EditSidebar(QWidget):
@@ -38,9 +35,9 @@ class EditSidebar(QWidget):
     bwParamsCommitted = Signal(BWParams)
     """Emitted when Black & White adjustments should be written to the session."""
 
-    def __init__(self, parent: Optional[QWidget] = None) -> None:
+    def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self._session: Optional[EditSession] = None
+        self._session: EditSession | None = None
         self._light_preview_image = None
         self._color_stats: ColorStats | None = None
         self._control_icon_tint: QColor | None = None
@@ -202,7 +199,7 @@ class EditSidebar(QWidget):
         self.set_mode("adjust")
 
     # ------------------------------------------------------------------
-    def set_session(self, session: Optional[EditSession]) -> None:
+    def set_session(self, session: EditSession | None) -> None:
         """Attach *session* to every tool section."""
 
         if self._light_controls_connected:
@@ -287,7 +284,7 @@ class EditSidebar(QWidget):
             self.bw_toggle_button.setChecked(False)
             self._update_bw_toggle_icon(False)
 
-    def session(self) -> Optional[EditSession]:
+    def session(self) -> EditSession | None:
         return self._session
 
     # ------------------------------------------------------------------
@@ -347,7 +344,7 @@ class EditSidebar(QWidget):
     def _on_light_reset(self) -> None:
         if self._session is None:
             return
-        updates = {key: 0.0 for key in LIGHT_KEYS}
+        updates = dict.fromkeys(LIGHT_KEYS, 0.0)
         updates["Light_Master"] = 0.0
         updates["Light_Enabled"] = True
         self._session.set_values(updates)
@@ -363,7 +360,7 @@ class EditSidebar(QWidget):
     def _on_color_reset(self) -> None:
         if self._session is None:
             return
-        updates = {key: 0.0 for key in COLOR_KEYS}
+        updates = dict.fromkeys(COLOR_KEYS, 0.0)
         updates["Color_Master"] = 0.0
         updates["Color_Enabled"] = True
         self._session.set_values(updates)

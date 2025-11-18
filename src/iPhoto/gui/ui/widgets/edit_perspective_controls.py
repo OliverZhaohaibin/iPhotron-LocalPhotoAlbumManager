@@ -1,10 +1,10 @@
 from __future__ import annotations
+
 """Perspective correction controls for the crop sidebar page."""
 """Widgets that implement the crop sidebar perspective slider group."""
 
 
 
-from typing import Optional
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import QHBoxLayout, QLabel, QVBoxLayout, QWidget
@@ -12,7 +12,6 @@ from PySide6.QtWidgets import QHBoxLayout, QLabel, QVBoxLayout, QWidget
 from ..icon import load_icon
 from ..models.edit_session import EditSession
 from .edit_strip import BWSlider
-
 
 _PERSPECTIVE_VERTICAL_KEY = "Perspective_Vertical"
 _PERSPECTIVE_HORIZONTAL_KEY = "Perspective_Horizontal"
@@ -67,7 +66,7 @@ class PerspectiveControls(QWidget):
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self._session: Optional[EditSession] = None
+        self._session: EditSession | None = None
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -101,7 +100,7 @@ class PerspectiveControls(QWidget):
         self._horizontal_row.sliderReleased.connect(self.interactionEnded)
 
     # ------------------------------------------------------------------
-    def bind_session(self, session: Optional[EditSession]) -> None:
+    def bind_session(self, session: EditSession | None) -> None:
         """Attach the sliders to *session* so they stay in sync with edits."""
 
         if self._session is session:

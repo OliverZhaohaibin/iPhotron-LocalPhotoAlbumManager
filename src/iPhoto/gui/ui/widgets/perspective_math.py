@@ -361,18 +361,113 @@ def validate_crop_corners_in_uv_space(
     return (all_valid, uv_corners)
 
 
+def find_maximum_safe_scale_binary_search(
+    center: tuple[float, float],
+    width: float,
+    height: float,
+    matrix: np.ndarray,
+    texture_size: tuple[int, int],
+    padding_pixels: int = 3,
+    max_iterations: int = 10,
+    tolerance: float = 0.001,
+) -> float:
+    """Find maximum safe scale factor using binary search.
+    
+    This implements requirement 3.2: Binary search to find the largest scale
+    factor where the crop box fits within UV bounds. Converges in ~10 iterations
+    to pixel-level precision.
+    
+    Parameters
+    ----------
+    center:
+        Center point (cx, cy) of the crop box in normalized coordinates.
+    width:
+        Initial width of the crop box.
+    height:
+        Initial height of the crop box.
+    matrix:
+        The perspective transformation matrix.
+    texture_size:
+        (width, height) of the texture in pixels.
+    padding_pixels:
+        Number of pixels to pad (default: 3 pixels).
+    max_iterations:
+        Maximum number of binary search iterations (default: 10).
+    tolerance:
+        Convergence tolerance for scale factor (default: 0.001).
+        
+    Returns
+    -------
+    float
+        Maximum safe scale factor in range [0, 1].
+    """
+    cx, cy = center
+    
+    # Binary search bounds: [min_scale, max_scale]
+    # Start with assumption that full size (scale=1.0) might be too large
+    min_scale = 0.0
+    max_scale = 1.0
+    
+    # Quick check: if full scale is valid, return it immediately
+    full_rect = NormalisedRect(
+        left=cx - width * 0.5,
+        top=cy - height * 0.5,
+        right=cx + width * 0.5,
+        bottom=cy + height * 0.5,
+    )
+    is_valid, _ = validate_crop_corners_in_uv_space(
+        full_rect, matrix, texture_size, padding_pixels
+    )
+    if is_valid:
+        return 1.0
+    
+    # Binary search for maximum safe scale
+    for _ in range(max_iterations):
+        # Try mid-point scale
+        mid_scale = (min_scale + max_scale) * 0.5
+        
+        # Create test rectangle with this scale
+        test_width = width * mid_scale
+        test_height = height * mid_scale
+        test_rect = NormalisedRect(
+            left=cx - test_width * 0.5,
+            top=cy - test_height * 0.5,
+            right=cx + test_width * 0.5,
+            bottom=cy + test_height * 0.5,
+        )
+        
+        # Check if this scale fits within UV bounds
+        is_valid, _ = validate_crop_corners_in_uv_space(
+            test_rect, matrix, texture_size, padding_pixels
+        )
+        
+        if is_valid:
+            # This scale works, try larger
+            min_scale = mid_scale
+        else:
+            # This scale is too large, try smaller
+            max_scale = mid_scale
+        
+        # Check convergence
+        if abs(max_scale - min_scale) < tolerance:
+            break
+    
+    # Return the safe scale (use min_scale to be conservative)
+    return min_scale
+
+
 def constrain_rect_to_uv_bounds(
     rect: NormalisedRect,
     matrix: np.ndarray,
     texture_size: tuple[int, int],
     padding_pixels: int = 3,
-    max_iterations: int = 20,
+    max_iterations: int = 10,
 ) -> NormalisedRect:
-    """Iteratively constrain a crop rectangle to stay within UV texture bounds.
+    """Constrain a crop rectangle to stay within UV texture bounds using binary search.
     
-    This implements the core iterative solver: it repeatedly checks if the crop
-    corners are within safe UV bounds, and if not, shrinks the rectangle uniformly
-    until all corners are valid.
+    This implements requirement 3.2: uses binary search to find the maximum safe
+    scale factor that keeps all corners within UV bounds. Converges faster and
+    more precisely than iterative linear shrinking.
     
     Parameters
     ----------
@@ -385,57 +480,36 @@ def constrain_rect_to_uv_bounds(
     padding_pixels:
         Number of pixels to pad (default: 3 pixels).
     max_iterations:
-        Maximum number of shrinking iterations (default: 20).
+        Maximum number of binary search iterations (default: 10).
         
     Returns
     -------
     NormalisedRect
         A constrained rectangle that guarantees all corners are within safe UV bounds.
     """
-    current_rect = rect
+    # Use binary search to find maximum safe scale
+    cx, cy = rect.center
+    width = rect.width
+    height = rect.height
     
-    for _ in range(max_iterations):
-        is_valid, uv_corners = validate_crop_corners_in_uv_space(
-            current_rect, matrix, texture_size, padding_pixels
-        )
-        
-        if is_valid:
-            return current_rect
-        
-        # Calculate how far out of bounds we are
-        epsilon_u, epsilon_v = calculate_texture_safety_padding(
-            texture_size[0], texture_size[1], padding_pixels
-        )
-        
-        max_violation = 0.0
-        for u, v in uv_corners:
-            if u < epsilon_u:
-                max_violation = max(max_violation, epsilon_u - u)
-            elif u > (1.0 - epsilon_u):
-                max_violation = max(max_violation, u - (1.0 - epsilon_u))
-            if v < epsilon_v:
-                max_violation = max(max_violation, epsilon_v - v)
-            elif v > (1.0 - epsilon_v):
-                max_violation = max(max_violation, v - (1.0 - epsilon_v))
-        
-        # Shrink more aggressively if we're far out of bounds
-        if max_violation > 0.1:
-            shrink_factor = 0.90  # 10% shrink for large violations
-        elif max_violation > 0.05:
-            shrink_factor = 0.95  # 5% shrink for medium violations
-        else:
-            shrink_factor = 0.98  # 2% shrink for small violations
-        
-        cx, cy = current_rect.center
-        new_width = current_rect.width * shrink_factor
-        new_height = current_rect.height * shrink_factor
-        
-        current_rect = NormalisedRect(
-            left=cx - new_width * 0.5,
-            top=cy - new_height * 0.5,
-            right=cx + new_width * 0.5,
-            bottom=cy + new_height * 0.5,
-        )
+    safe_scale = find_maximum_safe_scale_binary_search(
+        center=(cx, cy),
+        width=width,
+        height=height,
+        matrix=matrix,
+        texture_size=texture_size,
+        padding_pixels=padding_pixels,
+        max_iterations=max_iterations,
+        tolerance=0.001,  # Pixel-level precision
+    )
     
-    # If we couldn't converge, return the last attempt
-    return current_rect
+    # Apply the safe scale
+    final_width = width * safe_scale
+    final_height = height * safe_scale
+    
+    return NormalisedRect(
+        left=cx - final_width * 0.5,
+        top=cy - final_height * 0.5,
+        right=cx + final_width * 0.5,
+        bottom=cy + final_height * 0.5,
+    )

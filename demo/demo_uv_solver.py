@@ -68,64 +68,64 @@ def validate_rect(
     return True
 
 
+def find_maximum_safe_scale_binary(
+    cx: float, cy: float, width: float, height: float,
+    matrix: np.ndarray, tex_w: int, tex_h: int, padding: int = 3
+) -> float:
+    """Find maximum safe scale using binary search."""
+    # Quick check if full scale works
+    if validate_rect(cx - width * 0.5, cy - height * 0.5,
+                     cx + width * 0.5, cy + height * 0.5,
+                     matrix, tex_w, tex_h, padding):
+        return 1.0
+    
+    # Binary search for maximum safe scale
+    min_scale = 0.0
+    max_scale = 1.0
+    
+    for _ in range(10):  # 10 iterations for pixel-level precision
+        mid_scale = (min_scale + max_scale) * 0.5
+        test_width = width * mid_scale
+        test_height = height * mid_scale
+        
+        if validate_rect(cx - test_width * 0.5, cy - test_height * 0.5,
+                        cx + test_width * 0.5, cy + test_height * 0.5,
+                        matrix, tex_w, tex_h, padding):
+            min_scale = mid_scale
+        else:
+            max_scale = mid_scale
+        
+        if abs(max_scale - min_scale) < 0.001:
+            break
+    
+    return min_scale
+
+
 def constrain_rect(
     left: float, top: float, right: float, bottom: float,
     matrix: np.ndarray, tex_w: int, tex_h: int, padding: int = 3
 ) -> tuple[float, float, float, float]:
-    """Iteratively shrink rectangle until all corners are within UV bounds."""
+    """Use binary search to find maximum safe scale for rectangle."""
     cx = (left + right) * 0.5
     cy = (top + bottom) * 0.5
     width = right - left
     height = bottom - top
     
-    epsilon_u, epsilon_v = calculate_safety_padding(tex_w, tex_h, padding)
+    # Use binary search to find maximum safe scale
+    safe_scale = find_maximum_safe_scale_binary(cx, cy, width, height, matrix, tex_w, tex_h, padding)
     
-    for iteration in range(20):  # Increased max iterations
-        if validate_rect(
-            cx - width * 0.5, cy - height * 0.5,
-            cx + width * 0.5, cy + height * 0.5,
-            matrix, tex_w, tex_h, padding
-        ):
-            break
-        
-        # Calculate violation amount
-        corners = [
-            (cx - width * 0.5, cy - height * 0.5),
-            (cx + width * 0.5, cy - height * 0.5),
-            (cx + width * 0.5, cy + height * 0.5),
-            (cx - width * 0.5, cy + height * 0.5),
-        ]
-        
-        max_violation = 0.0
-        for corner_x, corner_y in corners:
-            u, v = inverse_project_point((corner_x, corner_y), matrix)
-            if u < epsilon_u:
-                max_violation = max(max_violation, epsilon_u - u)
-            elif u > (1.0 - epsilon_u):
-                max_violation = max(max_violation, u - (1.0 - epsilon_u))
-            if v < epsilon_v:
-                max_violation = max(max_violation, epsilon_v - v)
-            elif v > (1.0 - epsilon_v):
-                max_violation = max(max_violation, v - (1.0 - epsilon_v))
-        
-        # Adaptive shrinking
-        if max_violation > 0.1:
-            shrink_factor = 0.90
-        elif max_violation > 0.05:
-            shrink_factor = 0.95
-        else:
-            shrink_factor = 0.98
-        
-        width *= shrink_factor
-        height *= shrink_factor
+    # Apply the safe scale
+    final_width = width * safe_scale
+    final_height = height * safe_scale
     
-    return (cx - width * 0.5, cy - height * 0.5, cx + width * 0.5, cy + height * 0.5)
+    return (cx - final_width * 0.5, cy - final_height * 0.5,
+            cx + final_width * 0.5, cy + final_height * 0.5)
 
 
 def main():
     """Run demonstration."""
     print("╔" + "═" * 78 + "╗")
-    print("║" + " UV-SPACE CONSTRAINT SOLVER DEMONSTRATION ".center(78) + "║")
+    print("║" + " UV-SPACE BINARY SEARCH CONSTRAINT SOLVER ".center(78) + "║")
     print("╚" + "═" * 78 + "╝")
     
     texture_size = (2000, 2000)

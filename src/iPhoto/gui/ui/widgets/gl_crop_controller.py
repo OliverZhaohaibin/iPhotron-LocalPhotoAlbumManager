@@ -718,11 +718,12 @@ class CropInteractionController:
 
         rect = self._current_normalised_rect()
         
-        # Use the iterative UV-space constraint solver
+        # Use the binary search UV-space constraint solver (requirement 3.2)
         # This guarantees that all crop corners will map to valid UV coordinates
         # with appropriate safety padding based on actual texture resolution
+        # Binary search converges in ~10 iterations to pixel-level precision
         constrained_rect = constrain_rect_to_uv_bounds(
-            rect, self._perspective_matrix, (tex_w, tex_h), padding_pixels=3, max_iterations=20
+            rect, self._perspective_matrix, (tex_w, tex_h), padding_pixels=3, max_iterations=10
         )
         
         # Check if the rectangle actually changed
@@ -769,11 +770,12 @@ class CropInteractionController:
             bottom=centroid[1] + base_height * 0.5,
         )
         
-        # Use UV-space constraint solver to ensure valid crop bounds
+        # Use binary search UV-space constraint solver to ensure valid crop bounds
         # This replaces the old scale calculation with texture-resolution-based validation
+        # Binary search converges faster with pixel-level precision (requirement 3.2)
         constrained_rect = constrain_rect_to_uv_bounds(
             candidate_rect, self._perspective_matrix, (tex_w, tex_h), 
-            padding_pixels=3, max_iterations=20
+            padding_pixels=3, max_iterations=10
         )
         
         # Ensure we respect minimum dimensions

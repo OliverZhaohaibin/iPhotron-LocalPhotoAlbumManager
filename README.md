@@ -167,6 +167,42 @@ This modular separation ensures:
 - ✅ **GUI architecture** follows MVC principles (Controllers coordinate Models and Widgets).  
 - ✅ **Background tasks** are handled asynchronously for smooth user interaction.
 
+---
+
+### 4️⃣ Crop & Perspective: Coordinate Systems Definition
+
+When working with the crop tool and perspective transformation, **three distinct coordinate systems** are used. Understanding these is critical to avoid ambiguity and ensure correct black-border prevention logic.
+
+#### A. Original Texture Space (原始纹理坐标系)
+
+* **Definition:** The raw pixel space of the source image file.
+* **Range:** `[0, 0]` to `[W_src, H_src]` where `W_src` and `H_src` are the image dimensions in pixels.
+* **Purpose:** This is the **input source** for the perspective transformation.
+* **Example:** A 1920×1080 image has texture coordinates from `(0, 0)` at the top-left to `(1920, 1080)` at the bottom-right.
+
+#### B. Projected/Distorted Space (投影空间坐标系) — **Core Calculation Space**
+
+* **Definition:** The 2D space **after applying the perspective transformation matrix**.
+* **Shape:** The original rectangular image boundary becomes an **arbitrary convex quadrilateral** in this space, denoted as `Q_valid`.
+* **Crop Box State:** The user's crop box **remains an axis-aligned bounding box (AABB)** in this space, denoted as `R_crop`.
+* **Critical Validation:** All **black-border prevention logic** must be performed in this space.  
+  Specifically, we must verify that the crop rectangle `R_crop` is **fully contained** within the quadrilateral `Q_valid`.
+* **Coordinate Range:** Typically normalized to `[0, 1]` for both dimensions.
+* **Why It's Core:** This is where geometric containment checks (`rect_inside_quad`, `point_in_convex_polygon`) happen to ensure no black pixels appear in the final crop.
+
+#### C. Viewport/Screen Space (视口/屏幕坐标系)
+
+* **Definition:** The final pixel coordinates rendered on the screen widget.
+* **Purpose:** Used **only** for handling user interaction events (mouse clicks, drags, wheel scrolls).
+* **Transformation Required:** Before performing any logic calculations, screen coordinates **must be inverse-transformed** back to space **B (Projected Space)**.
+* **Example:** A mouse click at `(500, 300)` on screen needs to be converted to normalized projected coordinates to determine which crop handle was clicked.
+
+---
+
+**Key Takeaway:**  
+Always operate crop logic in **Projected Space (B)**. Screen coordinates are for input only, and texture coordinates are for rendering only. Mixing these spaces leads to incorrect cropping and visual artifacts.
+
+---
 
 ## 🧱 Module Dependency Hierarchy
 

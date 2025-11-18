@@ -2,26 +2,27 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable, Optional
 
-from PySide6.QtCore import QPoint, QUrl, Qt
+from PySide6.QtCore import QPoint, Qt, QUrl
 from PySide6.QtGui import QDesktopServices, QPalette
 from PySide6.QtWidgets import (
     QInputDialog,
     QMenu,
     QMessageBox,
-    QWidget,
     QTreeView,
+    QWidget,
 )
 
 from ....errors import LibraryError
 from ....library.manager import LibraryManager
 from ....library.tree import AlbumNode
-from ..models.album_tree_model import AlbumTreeItem, NodeType, AlbumTreeModel
+from ..models.album_tree_model import AlbumTreeItem, AlbumTreeModel, NodeType
+from ..palette import SIDEBAR_BACKGROUND_COLOR, SIDEBAR_TEXT_COLOR
 
 
-def _apply_main_window_menu_style(menu: QMenu, anchor: Optional[QWidget]) -> None:
+def _apply_main_window_menu_style(menu: QMenu, anchor: QWidget | None) -> None:
     """Apply the main window's rounded menu styling to ``menu``."""
 
     # Keep ``WA_TranslucentBackground`` enabled so the stylesheet-defined border radius can take
@@ -44,7 +45,7 @@ def _apply_main_window_menu_style(menu: QMenu, anchor: Optional[QWidget]) -> Non
         menu.setBackgroundRole(QPalette.ColorRole.Base)
 
         accessor = getattr(main_window, "get_qmenu_stylesheet", None)
-        stylesheet: Optional[str]
+        stylesheet: str | None
         if callable(accessor):
             stylesheet = accessor()
         else:
@@ -56,6 +57,69 @@ def _apply_main_window_menu_style(menu: QMenu, anchor: Optional[QWidget]) -> Non
     # Clear any inherited graphics effect so previous UI state cannot interfere with the rounded
     # outline or introduce unexpected blending artefacts on the popup surface.
     menu.setGraphicsEffect(None)
+
+
+def _create_styled_input_dialog(
+    parent: QWidget, title: str, label: str, text: str = ""
+) -> tuple[str, bool]:
+    """Create an input dialog styled to match the sidebar's light theme.
+    
+    This helper ensures that input dialogs for album operations (new album, rename)
+    use the consistent light background and dark text defined in palette.py, instead
+    of inheriting potentially incorrect system defaults.
+    
+    Args:
+        parent: Parent widget for the dialog
+        title: Dialog window title
+        label: Prompt label text
+        text: Default input text value
+        
+    Returns:
+        Tuple of (user_input_text, accepted_bool)
+    """
+    dialog = QInputDialog(parent)
+    dialog.setWindowTitle(title)
+    dialog.setLabelText(label)
+    dialog.setTextValue(text)
+    
+    # Apply stylesheet using colors from palette.py to ensure consistent light theme
+    # Background uses SIDEBAR_BACKGROUND_COLOR (#eef3f6), text uses SIDEBAR_TEXT_COLOR (#2b2b2b)
+    background_color = SIDEBAR_BACKGROUND_COLOR.name()
+    text_color = SIDEBAR_TEXT_COLOR.name()
+    
+    stylesheet = f"""
+        QInputDialog {{
+            background-color: {background_color};
+            color: {text_color};
+        }}
+        QLabel {{
+            color: {text_color};
+        }}
+        QLineEdit {{
+            background-color: white;
+            color: {text_color};
+            border: 1px solid #c0c0c0;
+            padding: 4px;
+        }}
+        QPushButton {{
+            background-color: white;
+            color: {text_color};
+            border: 1px solid #c0c0c0;
+            padding: 6px 16px;
+            min-width: 60px;
+        }}
+        QPushButton:hover {{
+            background-color: #f0f0f0;
+        }}
+        QPushButton:pressed {{
+            background-color: #e0e0e0;
+        }}
+    """
+    dialog.setStyleSheet(stylesheet)
+    
+    # Execute dialog and return result
+    accepted = dialog.exec()
+    return (dialog.textValue(), accepted == QInputDialog.DialogCode.Accepted)
 
 
 class AlbumSidebarContextMenu(QMenu):
@@ -113,7 +177,7 @@ class AlbumSidebarContextMenu(QMenu):
         if self._item.node_type == NodeType.ACTION:
             self.addAction("Set Basic Library…", self._on_bind_library)
 
-    def _prompt_new_album(self, parent_item: Optional[AlbumTreeItem] = None) -> None:
+    def _prompt_new_album(self, parent_item: AlbumTreeItem | None = None) -> None:
         base_item = parent_item
         if base_item is None:
             index = self._tree.currentIndex()
@@ -122,7 +186,7 @@ class AlbumSidebarContextMenu(QMenu):
         if base_item is None:
             return
 
-        name, ok = QInputDialog.getText(self.parentWidget(), "New Album", "Album name:")
+        name, ok = _create_styled_input_dialog(self.parentWidget(), "New Album", "Album name:")
         if not ok:
             return
         target_name = name.strip()
@@ -143,7 +207,7 @@ class AlbumSidebarContextMenu(QMenu):
         if item.album is None:
             return
         current_title = item.album.title
-        name, ok = QInputDialog.getText(
+        name, ok = _create_styled_input_dialog(
             self.parentWidget(),
             "Rename Album",
             "New album name:",
@@ -163,7 +227,7 @@ class AlbumSidebarContextMenu(QMenu):
         self._set_pending_selection(item.album.path.parent / target_name)
 
     @staticmethod
-    def _reveal_path(album: Optional[AlbumNode]) -> None:
+    def _reveal_path(album: AlbumNode | None) -> None:
         if album is None:
             return
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(album.path)))

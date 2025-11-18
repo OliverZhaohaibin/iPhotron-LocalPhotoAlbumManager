@@ -36,8 +36,8 @@ class _PerspectiveSliderRow(QWidget):
         icon_label = QLabel(self)
         icon_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         icon = load_icon(icon_name)
-        icon_label.setPixmap(icon.pixmap(24, 24))
-        icon_label.setFixedSize(28, 28)
+        icon_label.setPixmap(icon.pixmap(28, 28))
+        icon_label.setFixedSize(32, 32)
         layout.addWidget(icon_label)
 
         layout.addWidget(self._slider, 1)
@@ -71,12 +71,7 @@ class PerspectiveControls(QWidget):
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(16)
-
-        header = QLabel("Perspective", self)
-        header.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
-        header.setStyleSheet("font-weight: 600; color: palette(window-text);")
-        layout.addWidget(header)
+        layout.setSpacing(0)
 
         self._vertical_row = _PerspectiveSliderRow(
             "Vertical",

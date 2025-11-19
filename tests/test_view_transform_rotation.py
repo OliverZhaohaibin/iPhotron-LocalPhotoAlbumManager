@@ -1,20 +1,22 @@
 """Tests for ViewTransformController rotation coordinate mapping."""
 
-import sys
 import os
-import pytest
+import sys
 from unittest.mock import Mock
 
-# Add src to path to import directly
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
+import pytest
 
-from PySide6.QtCore import QPointF
+# Add src to path to import directly
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 # Import directly from the module file to avoid importing the entire GUI package
 import importlib.util
+
+from PySide6.QtCore import QPointF
+
 spec = importlib.util.spec_from_file_location(
     "view_transform_controller",
-    os.path.join(os.path.dirname(__file__), '..', 'src', 'iPhoto', 'gui', 'ui', 'widgets', 'view_transform_controller.py')
+    os.path.join(os.path.dirname(__file__), "..", "src", "iPhoto", "gui", "ui", "widgets", "view_transform_controller.py")
 )
 view_transform_module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(view_transform_module)

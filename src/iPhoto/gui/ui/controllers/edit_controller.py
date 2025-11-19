@@ -550,36 +550,23 @@ class EditController(QObject):
         self._session.set_values(updates, emit_individual=False)
 
     def _handle_rotate_left_clicked(self) -> None:
+        """Rotate the image counter-clockwise by 90°.
+        
+        Rotation is handled as a pure view transformation via the perspective
+        matrix. The crop coordinates remain in the original image space and are
+        rotated by the shader alongside the image.
+        """
         if self._session is None:
             return
         current = int(float(self._session.value("Crop_Rotate90")))
         new_value = (current - 1) % 4
         self._session.set_value("Crop_Rotate90", new_value)
-        self._rotate_crop_box_ccw()
         # Reset the zoom stack so the newly rotated orientation is re-framed
         # using the Photos-compatible fit-to-view baseline instead of stretching
         # the previously cached transform.
         self._ui.edit_image_viewer.reset_zoom()
 
-    def _rotate_crop_box_ccw(self) -> None:
-        """Rotate the stored crop rectangle 90° counter-clockwise in-place."""
 
-        if self._session is None:
-            return
-        cx = float(self._session.value("Crop_CX"))
-        cy = float(self._session.value("Crop_CY"))
-        width = float(self._session.value("Crop_W"))
-        height = float(self._session.value("Crop_H"))
-        # Rotating around the image centre in a top-left origin coordinate space
-        # maps ``(x, y)`` to ``(y, 1 - x)``.  Swapping width/height preserves the
-        # axis-aligned crop box shape so the overlay matches the rotated photo.
-        updates = {
-            "Crop_CX": max(0.0, min(1.0, cy)),
-            "Crop_CY": max(0.0, min(1.0, 1.0 - cx)),
-            "Crop_W": max(0.0, min(1.0, height)),
-            "Crop_H": max(0.0, min(1.0, width)),
-        }
-        self._session.set_values(updates, emit_individual=False)
 
     def _apply_session_adjustments_to_viewer(self) -> None:
         """Forward the latest session values to the GL viewer."""

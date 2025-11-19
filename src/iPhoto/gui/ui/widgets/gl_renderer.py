@@ -10,6 +10,7 @@ API tailored to the viewer.
 from __future__ import annotations
 
 import logging
+import math
 import time
 from pathlib import Path
 from typing import Mapping, Optional
@@ -388,16 +389,18 @@ class GLRenderer:
             straighten_value = adjustment_value("Crop_Straighten", 0.0)
             rotate_steps = int(float(adjustments.get("Crop_Rotate90", 0.0)))
             flip_enabled = bool(adjustments.get("Crop_FlipH", False))
-            # The perspective matrix must use the SAME aspect ratio as ``uTexSize``.
-            #
-            # ``uTexSize`` already accounts for 90°/270° rotations by swapping the logical
-            # dimensions so the fragment shader's UV normalisation matches what the UI draws
-            # on screen.  Feeding a different ratio into ``build_perspective_matrix`` causes
-            # the Z-rotation to operate in a mismatched basis (physical pixels vs rotated
-            # logical frame), which manifests as visible stretching when the image is turned
-            # by a quarter turn.  Using the logical ratio keeps the model-space rotation and
-            # UV normalisation aligned, mirroring ``demo/rotate.py``.
-            aspect_ratio = safe_logical_w / safe_logical_h
+            # Derive the perspective matrix from the physical upload dimensions so the rotation
+            # (applied inside ``build_perspective_matrix``) operates in true pixel proportions.
+            # Using the logical dimensions here double-applies the 90° swap already encoded by
+            # the rotation steps and leads to the alternating stretch the user reported.  UV
+            # normalisation still relies on ``uTexSize`` above so pan/zoom math stays in the
+            # rotation-aware logical frame while the perspective correction uses the invariant
+            # texture aspect.
+            physical_w = float(max(1.0, self._texture_width))
+            physical_h = float(max(1.0, self._texture_height))
+            aspect_ratio = physical_w / physical_h
+            if not math.isfinite(aspect_ratio) or aspect_ratio <= 1e-6:
+                aspect_ratio = safe_logical_w / safe_logical_h
             perspective_matrix = build_perspective_matrix(
                 adjustment_value("Perspective_Vertical", 0.0),
                 adjustment_value("Perspective_Horizontal", 0.0),

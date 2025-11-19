@@ -284,6 +284,7 @@ class GLRenderer:
         time_value: float | None = None,
         img_scale: float = 1.0,
         img_offset: Optional[QPointF] = None,
+        logical_tex_size: tuple[float, float] | None = None,
     ) -> None:
         """Draw the textured triangle covering the current viewport."""
 
@@ -347,11 +348,30 @@ class GLRenderer:
             safe_img_scale = max(img_scale, 1e-6)
             self._set_uniform1f("uScale", safe_scale)
             self._set_uniform2f("uViewSize", max(view_width, 1.0), max(view_height, 1.0))
-            self._set_uniform2f(
-                "uTexSize",
-                float(max(1, self._texture_width)),
-                float(max(1, self._texture_height)),
-            )
+            # ``logical_tex_size`` allows callers to provide rotation-aware dimensions that
+            # mirror the shader's visual orientation. This keeps UV normalisation aligned
+            # with the logical coordinate system used by the interaction controllers.
+            logical_w: float
+            logical_h: float
+            if logical_tex_size is None:
+                # Fall back to the physical texture upload but still honour the current 90° rotation
+                # when normalising UVs and computing the perspective matrix.  Callers such as tests
+                # or diagnostic tooling sometimes omit ``logical_tex_size``; without this guard the
+                # shader would keep using the unrotated aspect ratio, producing the exact stretching
+                # artefact reported when rotating a portrait image into landscape or vice versa.
+                rotate_steps = int(float(adjustments.get("Crop_Rotate90", 0.0))) % 4
+                if rotate_steps % 2 == 1:
+                    logical_w = float(self._texture_height)
+                    logical_h = float(self._texture_width)
+                else:
+                    logical_w = float(self._texture_width)
+                    logical_h = float(self._texture_height)
+            else:
+                logical_w, logical_h = logical_tex_size
+            safe_logical_w = float(max(1.0, logical_w))
+            safe_logical_h = float(max(1.0, logical_h))
+
+            self._set_uniform2f("uTexSize", safe_logical_w, safe_logical_h)
             self._set_uniform2f("uPan", float(pan.x()), float(pan.y()))
             self._set_uniform1f("uImgScale", safe_img_scale)
             self._set_uniform2f(
@@ -368,9 +388,16 @@ class GLRenderer:
             straighten_value = adjustment_value("Crop_Straighten", 0.0)
             rotate_steps = int(float(adjustments.get("Crop_Rotate90", 0.0)))
             flip_enabled = bool(adjustments.get("Crop_FlipH", False))
-            tex_w = max(1, self._texture_width)
-            tex_h = max(1, self._texture_height)
-            aspect_ratio = float(tex_w) / float(tex_h)
+            tex_w = float(max(1.0, self._texture_width))
+            tex_h = float(max(1.0, self._texture_height))
+            # ``build_perspective_matrix`` expects the *physical* aspect ratio of the uploaded
+            # texture so that its Z-rotation happens in the correct pixel space.  Passing the
+            # rotation-aware logical dimensions (which swap on 90° turns) causes the matrix to
+            # rotate inside an already-rotated frame, producing the horizontal stretching visible
+            # after quarter-turn rotations.  Using the original upload dimensions keeps the model
+            # transform anchored to the true image proportions while the logical dimensions still
+            # drive UV normalisation via ``uTexSize``.
+            aspect_ratio = tex_w / tex_h
             perspective_matrix = build_perspective_matrix(
                 adjustment_value("Perspective_Vertical", 0.0),
                 adjustment_value("Perspective_Horizontal", 0.0),
@@ -658,7 +685,14 @@ class GLRenderer:
             from .view_transform_controller import compute_fit_to_view_scale
 
             texture_size = self.texture_size()
-            base_scale = compute_fit_to_view_scale(texture_size, float(width), float(height))
+            tex_w, tex_h = texture_size
+            rotate_steps = int(float(adjustments.get("Crop_Rotate90", 0.0)))
+            if rotate_steps % 2 and tex_w > 0 and tex_h > 0:
+                logical_tex_size = (tex_h, tex_w)
+            else:
+                logical_tex_size = texture_size
+
+            base_scale = compute_fit_to_view_scale(logical_tex_size, float(width), float(height))
             effective_scale = max(base_scale, 1e-6)
             time_value = time.monotonic() - time_base
 
@@ -669,6 +703,7 @@ class GLRenderer:
                 pan=QPointF(0.0, 0.0),
                 adjustments=dict(adjustments),
                 time_value=time_value,
+                logical_tex_size=(float(logical_tex_size[0]), float(logical_tex_size[1])),
             )
 
             return fbo.toImage().convertToFormat(QImage.Format.Format_ARGB32)

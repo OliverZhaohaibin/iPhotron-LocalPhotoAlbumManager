@@ -139,9 +139,17 @@ class PerspectiveControls(QWidget):
                 self._session.valueChanged.disconnect(self._on_session_value_changed)
             except (TypeError, RuntimeError):
                 pass
+            try:
+                self._session.valuesChanged.disconnect(self._on_session_values_changed)
+            except (TypeError, RuntimeError):
+                pass
         self._session = session
         if session is not None:
             session.valueChanged.connect(self._on_session_value_changed)
+            # Listen for batched updates (for example, a 90° rotation that remaps
+            # the perspective axes) so the sliders mirror the latest geometry even
+            # when individual valueChanged signals are intentionally suppressed.
+            session.valuesChanged.connect(self._on_session_values_changed)
             self._sync_from_session()
         else:
             self._straighten_row.set_value(0.0)
@@ -189,6 +197,15 @@ class PerspectiveControls(QWidget):
             self._straighten_row.set_value(float(value))
         elif key == _FLIP_KEY:
             self._flip_row.set_checked(bool(value))
+
+    def _on_session_values_changed(self, _values: dict) -> None:
+        """Refresh every control after a batch update such as a rotation."""
+
+        # ``valuesChanged`` delivers the full mapping, so simply reload from the
+        # authoritative session state without attempting to diff the payload.  The
+        # slider helpers avoid emitting signals when the value is unchanged,
+        # preventing feedback loops during continuous drags.
+        self._sync_from_session()
 
     def _sync_from_session(self) -> None:
         if self._session is None:

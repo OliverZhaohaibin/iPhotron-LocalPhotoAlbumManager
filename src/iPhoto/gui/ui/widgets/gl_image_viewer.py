@@ -963,9 +963,11 @@ class GLImageViewer(QOpenGLWidget):
         if rotate_steps == 0:
             return (tcx, tcy, tw, th)
         if rotate_steps == 1:
+            # Step 1: 90° CW (270° CCW) - texture TOP becomes visual RIGHT
+            # Transformation: (x', y') = (1-y, x)
             return (
-                self._clamp_unit(tcy),
-                self._clamp_unit(1.0 - tcx),
+                self._clamp_unit(1.0 - tcy),
+                self._clamp_unit(tcx),
                 self._clamp_unit(th),
                 self._clamp_unit(tw),
             )
@@ -976,9 +978,11 @@ class GLImageViewer(QOpenGLWidget):
                 self._clamp_unit(tw),
                 self._clamp_unit(th),
             )
+        # Step 3: 90° CCW (270° CW) - texture TOP becomes visual LEFT  
+        # Transformation: (x', y') = (y, 1-x)
         return (
-            self._clamp_unit(1.0 - tcy),
-            self._clamp_unit(tcx),
+            self._clamp_unit(tcy),
+            self._clamp_unit(1.0 - tcx),
             self._clamp_unit(th),
             self._clamp_unit(tw),
         )
@@ -1004,9 +1008,11 @@ class GLImageViewer(QOpenGLWidget):
                 self._clamp_unit(lh),
             )
         if rotate_steps == 1:
+            # Step 1 inverse: (x, y) = (y', 1-x') 
+            # (reverse of the forward 90° CW transformation)
             return (
-                self._clamp_unit(1.0 - lcy),
-                self._clamp_unit(lcx),
+                self._clamp_unit(lcy),
+                self._clamp_unit(1.0 - lcx),
                 self._clamp_unit(lh),
                 self._clamp_unit(lw),
             )
@@ -1017,9 +1023,11 @@ class GLImageViewer(QOpenGLWidget):
                 self._clamp_unit(lw),
                 self._clamp_unit(lh),
             )
+        # Step 3 inverse: (x, y) = (1-y', x')
+        # (reverse of the forward 90° CCW transformation)
         return (
-            self._clamp_unit(lcy),
-            self._clamp_unit(1.0 - lcx),
+            self._clamp_unit(1.0 - lcy),
+            self._clamp_unit(lcx),
             self._clamp_unit(lh),
             self._clamp_unit(lw),
         )

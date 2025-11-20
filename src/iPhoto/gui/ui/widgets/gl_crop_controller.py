@@ -391,13 +391,14 @@ class CropInteractionController:
             min_width_px = max(1.0, self._crop_state.min_width * tex_w)
             min_height_px = max(1.0, self._crop_state.min_height * tex_h)
 
-            # Rotate the handle from logical space (what user sees) to texture space
-            # (where crop data is stored). At 90° rotation, dragging the visual "right"
-            # edge should modify the texture "bottom" edge.
-            handle = self._crop_drag_handle
-            texture_handle = self._rotate_handle_to_texture_space(handle, self._rotate_steps)
-            delta_x = delta_world.x()
-            delta_y = delta_world.y()
+            # _crop_hit_test returns TEXTURE-SPACE handles, so we use them directly  
+            # without additional rotation transformation.
+            texture_handle = self._crop_drag_handle
+            
+            # Convert delta to texture space (currently no-op, see method docs)
+            delta_x, delta_y = self._rotate_delta_to_texture_space(
+                delta_world.x(), delta_world.y(), self._rotate_steps
+            )
 
 
             if texture_handle in (CropHandle.LEFT, CropHandle.TOP_LEFT, CropHandle.BOTTOM_LEFT):
@@ -542,6 +543,10 @@ class CropInteractionController:
         texture coordinate system. This method transforms the handle from logical
         space back to texture space so the correct texture edges are modified.
         
+        IMPORTANT: This is the INVERSE mapping of the rotation. If the image is
+        rotated 90° CCW (step=1), then logical LEFT corresponds to texture TOP,
+        because texture TOP rotated 90° CCW ends up at the left side visually.
+        
         Parameters
         ----------
         handle:
@@ -561,8 +566,24 @@ class CropInteractionController:
         steps = int(rotate_steps) % 4
         if steps == 0:
             return handle
-            
-        # Map single edges: LEFT->TOP->RIGHT->BOTTOM->LEFT (90° CCW rotation)
+        
+        # CRITICAL: In this application, step DECREASES as rotation INCREASES.
+        # The actual CCW rotation amount is (4 - step):
+        # - step=3: one click → 90° CCW → actual_steps=1
+        #   Visual LEFT = Texture TOP (because TOP rotated 90° CCW lands at LEFT)
+        #   Mapping: LEFT → (1 CCW step) → TOP ✓
+        # - step=2: two clicks → 180° → actual_steps=2
+        #   Visual LEFT = Texture RIGHT
+        #   Mapping: LEFT → (2 CCW steps) → TOP → RIGHT ✓
+        # - step=1: three clicks → 270° CCW → actual_steps=3
+        #   Visual LEFT = Texture BOTTOM
+        #   Mapping: LEFT → (3 CCW steps) → TOP → RIGHT → BOTTOM ✓
+        
+        actual_steps = (4 - steps) % 4
+        if actual_steps == 0:
+            return handle
+        
+        # Map single edges using CCW rotation: LEFT→TOP→RIGHT→BOTTOM→LEFT
         edge_map_90ccw = {
             CropHandle.LEFT: CropHandle.TOP,
             CropHandle.TOP: CropHandle.RIGHT,
@@ -577,9 +598,9 @@ class CropInteractionController:
             CropHandle.BOTTOM_LEFT: CropHandle.TOP_LEFT,
         }
         
-        # Apply rotation mapping 'steps' times
+        # Apply CCW rotation 'actual_steps' times
         current = handle
-        for _ in range(steps):
+        for _ in range(actual_steps):
             if current in edge_map_90ccw:
                 current = edge_map_90ccw[current]
             elif current in corner_map_90ccw:
@@ -589,52 +610,34 @@ class CropInteractionController:
 
     @staticmethod
     def _rotate_delta_to_texture_space(delta_x: float, delta_y: float, rotate_steps: int) -> tuple[float, float]:
-        """Rotate a delta vector from logical space to texture space.
+        """Convert delta vector from world space to texture space.
         
-        When the image is rotated, mouse movements in screen space need to be
-        transformed to the correct texture-space deltas. For example, at 90° CCW
-        rotation, a rightward drag (positive delta_x in logical space) should
-        apply a downward change (positive delta_y) in texture space.
+        IMPORTANT: Delta vectors do NOT need rotation transformation because:
+        1. The delta is already in world coordinate space (Y-up)
+        2. The world coordinate system is shared between texture and viewport
+        3. The viewport transformation (_convert_image_to_viewport) already
+           handles the rotation when mapping positions
+        4. For edge dragging, we work directly with world-space crop_world dict
+           which uses the same coordinate system as delta
+        
+        Therefore, we simply return the delta as-is. Any rotation would
+        cause the drag direction to be mapped incorrectly.
         
         Parameters
         ----------
         delta_x:
-            Horizontal delta in logical/world space.
+            Horizontal delta in world space.
         delta_y:
-            Vertical delta in logical/world space (positive = up in world coords).
+            Vertical delta in world space (positive = up).
         rotate_steps:
-            Number of 90° CCW rotations (0-3).
+            Number of rotation steps (0-3), unused but kept for API consistency.
             
         Returns
         -------
         tuple[float, float]:
-            (texture_delta_x, texture_delta_y) in texture space.
-            
-        Examples
-        --------
-        At 0° rotation:
-            (dx, dy) → (dx, dy)
-            
-        At 90° CCW rotation:
-            Logical right (dx>0) → Texture down (dy>0)
-            Logical up (dy>0) → Texture right (dx>0)
-            Result: (dy, -dx)
-            
-        At 180° rotation:
-            Result: (-dx, -dy)
-            
-        At 270° CCW rotation:
-            Result: (-dy, dx)
+            (delta_x, delta_y) unchanged.
         """
-        steps = int(rotate_steps) % 4
-        if steps == 0:
-            return (delta_x, delta_y)
-        elif steps == 1:  # 90° CCW
-            return (delta_y, -delta_x)
-        elif steps == 2:  # 180°
-            return (-delta_x, -delta_y)
-        else:  # 270° CCW (or 90° CW)
-            return (-delta_y, delta_x)
+        return (delta_x, delta_y)
 
     @staticmethod
     def _distance_to_segment(point: QPointF, start: QPointF, end: QPointF) -> float:
@@ -653,7 +656,12 @@ class CropInteractionController:
         return math.hypot(px - qx, py - qy)
 
     def _crop_hit_test(self, point: QPointF) -> CropHandle:
-        """Determine which crop handle (if any) is under the cursor."""
+        """Determine which crop handle (if any) is under the cursor.
+        
+        IMPORTANT: This returns TEXTURE-SPACE handles, not logical handles.
+        The handle names (TOP, LEFT, etc.) refer to the texture coordinate system,
+        not the visual/rotated display.
+        """
         tex_w, tex_h = self._texture_size_provider()
         if tex_w <= 0 or tex_h <= 0:
             return CropHandle.NONE
@@ -664,7 +672,7 @@ class CropInteractionController:
         bottom_right = self._transform_controller.convert_image_to_viewport(rect["right"], rect["bottom"])
         bottom_left = self._transform_controller.convert_image_to_viewport(rect["left"], rect["bottom"])
 
-        # Check corners first
+        # Check corners first - these are TEXTURE-SPACE handles
         corners = [
             (CropHandle.TOP_LEFT, top_left),
             (CropHandle.TOP_RIGHT, top_right),
@@ -675,7 +683,7 @@ class CropInteractionController:
             if math.hypot(point.x() - corner.x(), point.y() - corner.y()) <= self._crop_hit_padding:
                 return handle
 
-        # Check edges
+        # Check edges - these are TEXTURE-SPACE handles  
         edges = [
             (CropHandle.TOP, top_left, top_right),
             (CropHandle.RIGHT, top_right, bottom_right),

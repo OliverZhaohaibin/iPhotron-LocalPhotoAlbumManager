@@ -189,12 +189,18 @@ class CropInteractionController:
         self._straighten_degrees = new_straighten
         self._rotate_steps = new_rotate
         self._flip_horizontal = new_flip
+        # GLImageViewer already swaps texture dimensions for 90°/270° rotations,
+        # so the aspect_ratio here reflects the rotated display space. Passing a
+        # non-zero rotate_steps would rotate the perspective quad a second time
+        # and incorrectly shrink the crop box; therefore we force zero rotation
+        # when building the matrix while still caching _rotate_steps for drag
+        # handle mapping.
         matrix = build_perspective_matrix(
             new_vertical,
             new_horizontal,
             image_aspect_ratio=aspect_ratio,
             straighten_degrees=new_straighten,
-            rotate_steps=new_rotate,
+            rotate_steps=0,
             flip_horizontal=new_flip,
         )
         self._perspective_quad = compute_projected_quad(matrix)

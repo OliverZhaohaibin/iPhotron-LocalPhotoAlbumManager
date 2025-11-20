@@ -29,6 +29,7 @@ uniform float uCropCY;
 uniform float uCropW;
 uniform float uCropH;
 uniform mat3  uPerspectiveMatrix;
+uniform int   uRotate90;  // 0, 1, 2, 3 for 0°, 90°, 180°, 270° CCW rotation
 
 float clamp01(float x) { return clamp(x, 0.0, 1.0); }
 
@@ -124,6 +125,24 @@ vec2 apply_inverse_perspective(vec2 uv) {
     return restored * 0.5 + 0.5;
 }
 
+vec2 apply_rotation_90(vec2 uv, int rotate_steps) {
+    // Apply discrete 90-degree rotations
+    // Note: These are CW rotations to match the logical coordinate swap direction
+    int steps = rotate_steps % 4;
+    if (steps == 1) {
+        // 90° CW: (x,y) -> (y, 1-x)
+        return vec2(uv.y, 1.0 - uv.x);
+    } else if (steps == 2) {
+        // 180°: (x,y) -> (1-x, 1-y)
+        return vec2(1.0 - uv.x, 1.0 - uv.y);
+    } else if (steps == 3) {
+        // 270° CW (or 90° CCW): (x,y) -> (1-y, x)
+        return vec2(1.0 - uv.y, uv.x);
+    }
+    // steps == 0: no rotation
+    return uv;
+}
+
 vec3 apply_bw(vec3 color, vec2 uv) {
     float intensity = clamp(uBWParams.x, -1.0, 1.0);
     float neutrals = clamp(uBWParams.y, -1.0, 1.0);
@@ -196,6 +215,9 @@ void main() {
         uv_original.y < 0.0 || uv_original.y > 1.0) {
         discard;
     }
+    
+    // Apply 90-degree rotation AFTER perspective correction
+    uv_original = apply_rotation_90(uv_original, uRotate90);
 
     vec4 texel = texture(uTex, uv_original);
     vec3 c = texel.rgb;

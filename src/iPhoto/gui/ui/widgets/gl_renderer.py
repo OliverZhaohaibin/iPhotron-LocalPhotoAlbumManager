@@ -148,6 +148,7 @@ class GLRenderer:
                 "uCropW",
                 "uCropH",
                 "uPerspectiveMatrix",
+                "uRotate90",
             ):
                 self._uniform_locations[name] = program.uniformLocation(name)
         finally:
@@ -349,19 +350,16 @@ class GLRenderer:
             safe_img_scale = max(img_scale, 1e-6)
             self._set_uniform1f("uScale", safe_scale)
             self._set_uniform2f("uViewSize", max(view_width, 1.0), max(view_height, 1.0))
-            # ``logical_tex_size`` allows callers to provide rotation-aware dimensions that
-            # mirror the shader's visual orientation. This keeps UV normalisation aligned
-            # with the logical coordinate system used by the interaction controllers.
+            
+            # CRITICAL: uTexSize must match ViewTransformController's coordinate space.
+            # ViewTransformController calculates scale using logical (rotation-aware) dimensions,
+            # so uTexSize must also use logical dimensions for correct viewport→texture mapping.
+            # The shader's apply_rotation_90() then rotates UVs to sample from physical texture.
             logical_w: float
             logical_h: float
             if logical_tex_size is None:
-                # Fall back to the physical texture upload but still honour the current 90° rotation
-                # when normalising UVs and computing the perspective matrix.  Callers such as tests
-                # or diagnostic tooling sometimes omit ``logical_tex_size``; without this guard the
-                # shader would keep using the unrotated aspect ratio, producing the exact stretching
-                # artefact reported when rotating a portrait image into landscape or vice versa.
-                rotate_steps = int(float(adjustments.get("Crop_Rotate90", 0.0))) % 4
-                if rotate_steps % 2 == 1:
+                rotate_steps_val = int(float(adjustments.get("Crop_Rotate90", 0.0))) % 4
+                if rotate_steps_val % 2 == 1:
                     logical_w = float(self._texture_height)
                     logical_h = float(self._texture_width)
                 else:
@@ -369,10 +367,11 @@ class GLRenderer:
                     logical_h = float(self._texture_height)
             else:
                 logical_w, logical_h = logical_tex_size
+            
             safe_logical_w = float(max(1.0, logical_w))
             safe_logical_h = float(max(1.0, logical_h))
-
             self._set_uniform2f("uTexSize", safe_logical_w, safe_logical_h)
+            
             self._set_uniform2f("uPan", float(pan.x()), float(pan.y()))
             self._set_uniform1f("uImgScale", safe_img_scale)
             self._set_uniform2f(
@@ -389,24 +388,26 @@ class GLRenderer:
             straighten_value = adjustment_value("Crop_Straighten", 0.0)
             rotate_steps = int(float(adjustments.get("Crop_Rotate90", 0.0)))
             flip_enabled = bool(adjustments.get("Crop_FlipH", False))
-            # Derive the perspective matrix from the physical upload dimensions so the rotation
-            # (applied inside ``build_perspective_matrix``) operates in true pixel proportions.
-            # Using the logical dimensions here double-applies the 90° swap already encoded by
-            # the rotation steps and leads to the alternating stretch the user reported.  UV
-            # normalisation still relies on ``uTexSize`` above so pan/zoom math stays in the
-            # rotation-aware logical frame while the perspective correction uses the invariant
-            # texture aspect.
+            
+            # Pass rotation to shader as uniform
+            self._set_uniform1i("uRotate90", rotate_steps % 4)
+            
+            # Get physical dimensions for perspective matrix aspect ratio
             physical_w = float(max(1.0, self._texture_width))
             physical_h = float(max(1.0, self._texture_height))
+            
+            # Perspective matrix uses physical aspect ratio but rotate_steps=0
+            # because rotation is now handled in the shader
             aspect_ratio = physical_w / physical_h
             if not math.isfinite(aspect_ratio) or aspect_ratio <= 1e-6:
-                aspect_ratio = safe_logical_w / safe_logical_h
+                aspect_ratio = 1.0
+                
             perspective_matrix = build_perspective_matrix(
                 adjustment_value("Perspective_Vertical", 0.0),
                 adjustment_value("Perspective_Horizontal", 0.0),
-                image_aspect_ratio=aspect_ratio,
+                image_aspect_ratio=aspect_ratio,  # Physical aspect ratio
                 straighten_degrees=straighten_value,
-                rotate_steps=rotate_steps,
+                rotate_steps=0,  # Rotation handled in shader via uRotate90
                 flip_horizontal=flip_enabled,
             )
             self._set_uniform_matrix3("uPerspectiveMatrix", perspective_matrix)

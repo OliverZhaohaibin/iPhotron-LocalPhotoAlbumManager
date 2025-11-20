@@ -367,29 +367,34 @@ class CropInteractionController:
             min_width_px = max(1.0, self._crop_state.min_width * tex_w)
             min_height_px = max(1.0, self._crop_state.min_height * tex_h)
 
+            # Rotate the handle from logical space (what user sees) to texture space
+            # (where crop data is stored). At 90° rotation, dragging the visual "right"
+            # edge should modify the texture "bottom" edge.
             handle = self._crop_drag_handle
+            texture_handle = self._rotate_handle_to_texture_space(handle, self._rotate_steps)
             delta_x = delta_world.x()
             delta_y = delta_world.y()
 
-            if handle in (CropHandle.LEFT, CropHandle.TOP_LEFT, CropHandle.BOTTOM_LEFT):
+
+            if texture_handle in (CropHandle.LEFT, CropHandle.TOP_LEFT, CropHandle.BOTTOM_LEFT):
                 new_left = crop_world["left"] + delta_x
                 new_left = min(new_left, crop_world["right"] - min_width_px)
                 new_left = max(new_left, img_bounds_world["left"])
                 crop_world["left"] = new_left
 
-            if handle in (CropHandle.RIGHT, CropHandle.TOP_RIGHT, CropHandle.BOTTOM_RIGHT):
+            if texture_handle in (CropHandle.RIGHT, CropHandle.TOP_RIGHT, CropHandle.BOTTOM_RIGHT):
                 new_right = crop_world["right"] + delta_x
                 new_right = max(new_right, crop_world["left"] + min_width_px)
                 new_right = min(new_right, img_bounds_world["right"])
                 crop_world["right"] = new_right
 
-            if handle in (CropHandle.BOTTOM, CropHandle.BOTTOM_LEFT, CropHandle.BOTTOM_RIGHT):
+            if texture_handle in (CropHandle.BOTTOM, CropHandle.BOTTOM_LEFT, CropHandle.BOTTOM_RIGHT):
                 new_bottom = crop_world["bottom"] + delta_y
                 new_bottom = min(new_bottom, crop_world["top"] - min_height_px)
                 new_bottom = max(new_bottom, img_bounds_world["bottom"])
                 crop_world["bottom"] = new_bottom
 
-            if handle in (CropHandle.TOP, CropHandle.TOP_LEFT, CropHandle.TOP_RIGHT):
+            if texture_handle in (CropHandle.TOP, CropHandle.TOP_LEFT, CropHandle.TOP_RIGHT):
                 new_top = crop_world["top"] + delta_y
                 new_top = max(new_top, crop_world["bottom"] + min_height_px)
                 new_top = min(new_top, img_bounds_world["top"])
@@ -503,6 +508,109 @@ class CropInteractionController:
             return QPointF(view_width / 2, view_height / 2)
         center = self._crop_state.center_pixels(tex_w, tex_h)
         return self._transform_controller.convert_image_to_viewport(center.x(), center.y())
+
+    @staticmethod
+    def _rotate_handle_to_texture_space(handle: CropHandle, rotate_steps: int) -> CropHandle:
+        """Map a logical-space crop handle to its texture-space equivalent.
+        
+        When the image is rotated, the user drags edges/corners in the rotated
+        (logical) coordinate system, but the crop state is stored in the original
+        texture coordinate system. This method transforms the handle from logical
+        space back to texture space so the correct texture edges are modified.
+        
+        Parameters
+        ----------
+        handle:
+            The handle in logical/display space (what the user sees).
+        rotate_steps:
+            Number of 90° CCW rotations (0-3).
+            
+        Returns
+        -------
+        CropHandle:
+            The equivalent handle in texture space.
+        """
+        if handle in (CropHandle.NONE, CropHandle.INSIDE):
+            return handle
+            
+        # Normalize to 0-3 range
+        steps = int(rotate_steps) % 4
+        if steps == 0:
+            return handle
+            
+        # Map single edges: LEFT->TOP->RIGHT->BOTTOM->LEFT (90° CCW rotation)
+        edge_map_90ccw = {
+            CropHandle.LEFT: CropHandle.TOP,
+            CropHandle.TOP: CropHandle.RIGHT,
+            CropHandle.RIGHT: CropHandle.BOTTOM,
+            CropHandle.BOTTOM: CropHandle.LEFT,
+        }
+        
+        corner_map_90ccw = {
+            CropHandle.TOP_LEFT: CropHandle.TOP_RIGHT,
+            CropHandle.TOP_RIGHT: CropHandle.BOTTOM_RIGHT,
+            CropHandle.BOTTOM_RIGHT: CropHandle.BOTTOM_LEFT,
+            CropHandle.BOTTOM_LEFT: CropHandle.TOP_LEFT,
+        }
+        
+        # Apply rotation mapping 'steps' times
+        current = handle
+        for _ in range(steps):
+            if current in edge_map_90ccw:
+                current = edge_map_90ccw[current]
+            elif current in corner_map_90ccw:
+                current = corner_map_90ccw[current]
+                
+        return current
+
+    @staticmethod
+    def _rotate_delta_to_texture_space(delta_x: float, delta_y: float, rotate_steps: int) -> tuple[float, float]:
+        """Rotate a delta vector from logical space to texture space.
+        
+        When the image is rotated, mouse movements in screen space need to be
+        transformed to the correct texture-space deltas. For example, at 90° CCW
+        rotation, a rightward drag (positive delta_x in logical space) should
+        apply a downward change (positive delta_y) in texture space.
+        
+        Parameters
+        ----------
+        delta_x:
+            Horizontal delta in logical/world space.
+        delta_y:
+            Vertical delta in logical/world space (positive = up in world coords).
+        rotate_steps:
+            Number of 90° CCW rotations (0-3).
+            
+        Returns
+        -------
+        tuple[float, float]:
+            (texture_delta_x, texture_delta_y) in texture space.
+            
+        Examples
+        --------
+        At 0° rotation:
+            (dx, dy) → (dx, dy)
+            
+        At 90° CCW rotation:
+            Logical right (dx>0) → Texture down (dy>0)
+            Logical up (dy>0) → Texture right (dx>0)
+            Result: (dy, -dx)
+            
+        At 180° rotation:
+            Result: (-dx, -dy)
+            
+        At 270° CCW rotation:
+            Result: (-dy, dx)
+        """
+        steps = int(rotate_steps) % 4
+        if steps == 0:
+            return (delta_x, delta_y)
+        elif steps == 1:  # 90° CCW
+            return (delta_y, -delta_x)
+        elif steps == 2:  # 180°
+            return (-delta_x, -delta_y)
+        else:  # 270° CCW (or 90° CW)
+            return (-delta_y, delta_x)
 
     @staticmethod
     def _distance_to_segment(point: QPointF, start: QPointF, end: QPointF) -> float:
@@ -642,7 +750,13 @@ class CropInteractionController:
             return
 
         vw, vh = self._transform_controller._get_view_dimensions_device_px()
-        tex_size = (tex_w, tex_h)
+        
+        # CRITICAL: Must use logical (rotation-aware) dimensions for base_scale calculation
+        # to match ViewTransformController.effective_scale behavior. Using physical dimensions
+        # causes zoom factor mismatch at 90°/270° rotations.
+        fit_w, fit_h = self._transform_controller._get_fit_texture_size()
+        tex_size = (int(fit_w), int(fit_h))
+            
         base_scale = compute_fit_to_view_scale(tex_size, vw, vh)
         min_zoom = self._transform_controller.minimum_zoom()
         max_zoom = self._transform_controller.maximum_zoom()

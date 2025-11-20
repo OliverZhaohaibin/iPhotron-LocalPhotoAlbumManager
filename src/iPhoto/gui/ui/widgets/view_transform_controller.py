@@ -34,18 +34,39 @@ def compute_rotation_cover_scale(
     base_scale: float,
     straighten_degrees: float,
     rotate_steps: int,
+    physical_texture_size: tuple[int, int] | None = None,
 ) -> float:
-    """Return the scale multiplier that keeps rotated images free of black corners."""
+    """Return the scale multiplier that keeps rotated images free of black corners.
+    
+    Args:
+        texture_size: Logical (rotation-aware) dimensions used for frame calculation
+        base_scale: Scale factor calculated from logical dimensions
+        straighten_degrees: Straighten angle in degrees
+        rotate_steps: Number of 90° rotations
+        physical_texture_size: Physical (original) dimensions for bounds checking.
+                              If None, uses texture_size (for backward compatibility).
+                              When provided, texture_size is assumed to be logical (already rotated),
+                              so only straighten_degrees is applied, not the 90° rotation steps.
+    """
 
     tex_w, tex_h = texture_size
     if tex_w <= 0 or tex_h <= 0 or base_scale <= 0.0:
         return 1.0
-    total_degrees = float(straighten_degrees) + float(int(rotate_steps)) * -90.0
+    
+    # When physical_texture_size is provided, texture_size (logical) already accounts
+    # for the 90° rotation, so we only apply straighten_degrees
+    if physical_texture_size is not None:
+        total_degrees = float(straighten_degrees)  # Only straighten, no 90° rotation
+    else:
+        total_degrees = float(straighten_degrees) + float(int(rotate_steps)) * -90.0
+        
     if abs(total_degrees) <= 1e-5:
         return 1.0
     theta = math.radians(total_degrees)
     cos_t = math.cos(theta)
     sin_t = math.sin(theta)
+    
+    # Frame corners calculated in logical space (rotation-aware dimensions)
     half_frame_w = tex_w * base_scale * 0.5
     half_frame_h = tex_h * base_scale * 0.5
     corners = [
@@ -54,11 +75,18 @@ def compute_rotation_cover_scale(
         (half_frame_w, half_frame_h),
         (-half_frame_w, half_frame_h),
     ]
+    
+    # Use physical dimensions for bounds checking (corners are rotated back to texture space)
+    if physical_texture_size is not None:
+        phys_w, phys_h = physical_texture_size
+    else:
+        phys_w, phys_h = tex_w, tex_h
+    
     scale = 1.0
     for xf, yf in corners:
         x_prime = xf * cos_t + yf * sin_t
         y_prime = -xf * sin_t + yf * cos_t
-        s_corner = max((2.0 * abs(x_prime)) / tex_w, (2.0 * abs(y_prime)) / tex_h)
+        s_corner = max((2.0 * abs(x_prime)) / phys_w, (2.0 * abs(y_prime)) / phys_h)
         if s_corner > scale:
             scale = s_corner
     return max(scale, 1.0)

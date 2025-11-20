@@ -561,24 +561,41 @@ class GLImageViewer(QOpenGLWidget):
         if not self._renderer or not self._renderer.has_texture():
             self._transform_controller.set_image_cover_scale(1.0)
             return
-        # Use the rotation-aware logical dimensions when computing the baseline cover scale so the
-        # rotated frame matches the on-screen aspect ratio. Relying on the raw upload dimensions
-        # would leave the 90°/270° cases scaled against the wrong axis and trigger visible
-        # stretching during rotation transitions.
-        tex_w, tex_h = self._display_texture_dimensions()
+        
+        # When rotation is handled in the shader (current implementation), cover_scale
+        # only needs to account for straighten angle, not the 90° discrete rotations.
+        # Since logical dimensions are already used in ViewTransformController, and
+        # shader rotation maps logical→physical, we can simplify:
+        if abs(straighten_deg) <= 1e-5:
+            # No straighten angle: no cover scale needed
+            self._transform_controller.set_image_cover_scale(1.0)
+            return
+            
+        # If there's a straighten angle, we still need cover scale calculation
+        tex_w, tex_h = self._texture_dimensions()
         if tex_w <= 0 or tex_h <= 0:
             self._transform_controller.set_image_cover_scale(1.0)
             return
-        view_width, view_height = self._view_dimensions_device_px()
+            
         display_w, display_h = self._display_texture_dimensions()
+        view_width, view_height = self._view_dimensions_device_px()
+        
         base_scale = compute_fit_to_view_scale((display_w, display_h), float(view_width), float(view_height))
+        
+        # For straighten, use logical dims with physical bounds checking
         cover_scale = compute_rotation_cover_scale(
-            (tex_w, tex_h),
+            (display_w, display_h),
             base_scale,
             straighten_deg,
             rotate_steps,
+            physical_texture_size=(tex_w, tex_h),
         )
+        
         self._transform_controller.set_image_cover_scale(cover_scale)
+
+
+
+
 
     # --------------------------- Coordinate transformations ---------------------------
 

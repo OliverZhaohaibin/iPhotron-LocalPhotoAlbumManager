@@ -189,6 +189,24 @@ class CropInteractionController:
         self._straighten_degrees = new_straighten
         self._rotate_steps = new_rotate
         self._flip_horizontal = new_flip
+
+        # When the viewer swaps texture width/height for 90°/270° rotations we
+        # keep rotate_steps=0 while building the matrix to avoid a secondary
+        # rotation in the shader. This coordinate system swap implicitly flips
+        # the sign of rotation and perspective controls, so we need to adjust
+        # the values up front to preserve a consistent, view-based experience.
+        calc_straighten = new_straighten
+        calc_vertical = new_vertical
+        calc_horizontal = new_horizontal
+        if new_rotate % 2 != 0:
+            # Odd rotate steps mean the logical axes are swapped; negate values
+            # so that the Straighten slider still performs a pure rotation (no
+            # unintended shear) and vertical/horizontal perspective sliders
+            # continue to lean in the same visual direction as the unrotated
+            # view.
+            calc_straighten = -new_straighten
+            calc_vertical = -new_vertical
+            calc_horizontal = -new_horizontal
         # GLImageViewer already swaps texture dimensions for 90°/270° rotations,
         # so the aspect_ratio here reflects the rotated display space. Passing a
         # non-zero rotate_steps would rotate the perspective quad a second time
@@ -196,10 +214,10 @@ class CropInteractionController:
         # when building the matrix while still caching _rotate_steps for drag
         # handle mapping.
         matrix = build_perspective_matrix(
-            new_vertical,
-            new_horizontal,
+            calc_vertical,
+            calc_horizontal,
             image_aspect_ratio=aspect_ratio,
-            straighten_degrees=new_straighten,
+            straighten_degrees=calc_straighten,
             rotate_steps=0,
             flip_horizontal=new_flip,
         )

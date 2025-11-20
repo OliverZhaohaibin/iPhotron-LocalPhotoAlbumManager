@@ -393,21 +393,26 @@ class GLRenderer:
             self._set_uniform1i("uRotate90", rotate_steps % 4)
             
             # Get physical dimensions for perspective matrix aspect ratio
-            physical_w = float(max(1.0, self._texture_width))
-            physical_h = float(max(1.0, self._texture_height))
-            
-            # Perspective matrix uses physical aspect ratio but rotate_steps=0
-            # because rotation is now handled in the shader
-            aspect_ratio = physical_w / physical_h
-            if not math.isfinite(aspect_ratio) or aspect_ratio <= 1e-6:
-                aspect_ratio = 1.0
-                
+            # Perspective matrix must operate in the logical orientation so that the
+            # "vertical" and "horizontal" sliders always align with on-screen axes even
+            # after the user rotates the image by 90° steps.  Using the logical aspect
+            # ratio (width/height after the quarter-turn swap) keeps the warp and
+            # straighten rotation in a matching aspect space and avoids the shear-like
+            # artefacts seen when mixing rotation and perspective.
+            logical_aspect_ratio = logical_w / logical_h
+            if not math.isfinite(logical_aspect_ratio) or logical_aspect_ratio <= 1e-6:
+                logical_aspect_ratio = 1.0
+
             perspective_matrix = build_perspective_matrix(
                 adjustment_value("Perspective_Vertical", 0.0),
                 adjustment_value("Perspective_Horizontal", 0.0),
-                image_aspect_ratio=aspect_ratio,  # Physical aspect ratio
+                image_aspect_ratio=logical_aspect_ratio,
                 straighten_degrees=straighten_value,
-                rotate_steps=0,  # Rotation handled in shader via uRotate90
+                # Rotation is handled in the shader via uRotate90; keeping rotate_steps
+                # at zero ensures straighten is applied as a rigid rotation around the
+                # logical view centre instead of compounding rotations in physical
+                # texture space.
+                rotate_steps=0,
                 flip_horizontal=flip_enabled,
             )
             self._set_uniform_matrix3("uPerspectiveMatrix", perspective_matrix)

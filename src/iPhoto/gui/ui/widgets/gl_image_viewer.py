@@ -312,7 +312,28 @@ class GLImageViewer(QOpenGLWidget):
         """
 
         rotated_steps = (self._current_rotate_steps() - 1) % 4
-        updates: dict[str, float] = {"Crop_Rotate90": float(rotated_steps)}
+
+        # Remap perspective sliders into the rotated coordinate frame so that the visual
+        # effect stays consistent with what the user saw pre-rotation.  Perspective
+        # values are expressed as a 2D vector aligned to the on-screen axes; rotating the
+        # image 90° counter-clockwise corresponds to rotating this vector 90° clockwise
+        # (swap axes and invert the previous vertical component).  If the image is
+        # horizontally flipped, the horizontal axis is mirrored, so we also invert the
+        # remapped horizontal component to preserve the perceived direction.
+        old_v = float(self._adjustments.get("Perspective_Vertical", 0.0))
+        old_h = float(self._adjustments.get("Perspective_Horizontal", 0.0))
+        old_flip = bool(self._adjustments.get("Crop_FlipH", False))
+
+        new_v = old_h
+        new_h = -old_v
+        if old_flip:
+            new_h = -new_h
+
+        updates: dict[str, float] = {
+            "Crop_Rotate90": float(rotated_steps),
+            "Perspective_Vertical": new_v,
+            "Perspective_Horizontal": new_h,
+        }
 
         # Apply the rotation locally so the viewer updates immediately even before the
         # session broadcasts the new adjustment mapping.

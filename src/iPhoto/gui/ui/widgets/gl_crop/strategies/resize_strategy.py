@@ -130,15 +130,14 @@ class ResizeStrategy(InteractionStrategy):
         new_px_top = half_height_orig - crop_world["top"]
         new_px_bottom = half_height_orig - crop_world["bottom"]
 
-        if tex_w > 0 and tex_h > 0:
-            new_width = new_px_right - new_px_left
-            new_height = new_px_bottom - new_px_top
-            if new_width > 0.0 and new_height > 0.0:
-                crop_state.cx = (new_px_left + new_px_right) * 0.5 / tex_w
-                crop_state.cy = (new_px_top + new_px_bottom) * 0.5 / tex_h
-                crop_state.width = new_width / tex_w
-                crop_state.height = new_height / tex_h
-                crop_state.clamp()
+        new_width = new_px_right - new_px_left
+        new_height = new_px_bottom - new_px_top
+        if new_width > 0.0 and new_height > 0.0:
+            crop_state.cx = (new_px_left + new_px_right) * 0.5 / tex_w
+            crop_state.cy = (new_px_top + new_px_bottom) * 0.5 / tex_h
+            crop_state.width = new_width / tex_w
+            crop_state.height = new_height / tex_h
+            crop_state.clamp()
 
         if not self._model.ensure_valid_or_revert(snapshot, allow_shrink=False):
             return

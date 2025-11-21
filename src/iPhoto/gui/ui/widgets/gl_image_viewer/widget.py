@@ -37,6 +37,8 @@ from ..view_transform_controller import (
 
 from . import crop_logic
 from . import geometry
+from .input_handler import InputEventHandler
+from .resources import TextureResourceManager
 from .utils import normalise_colour
 
 _LOGGER = logging.getLogger(__name__)
@@ -77,8 +79,14 @@ class GLImageViewer(QOpenGLWidget):
         # 状态
         self._image: QImage | None = None
         self._adjustments: dict[str, float] = {}
-        self._current_image_source: object | None = None
-        self._live_replay_enabled: bool = False
+        
+        # Texture resource manager
+        self._texture_manager = TextureResourceManager(
+            renderer_provider=lambda: self._renderer,
+            context_provider=lambda: self.context(),
+            make_current=self.makeCurrent,
+            done_current=self.doneCurrent,
+        )
 
         # Track the viewer surface colour so immersive mode can temporarily
         # switch to a pure black canvas.  ``viewer_surface_color`` returns a
@@ -126,6 +134,16 @@ class GLImageViewer(QOpenGLWidget):
         )
         self._auto_crop_view_locked: bool = False
         self._update_crop_perspective_state()
+        
+        # Input event handler
+        self._input_handler = InputEventHandler(
+            crop_controller=self._crop_controller,
+            transform_controller=self._transform_controller,
+            on_replay_requested=self.replayRequested.emit,
+            on_fullscreen_exit=self.fullscreenExitRequested.emit,
+            on_fullscreen_toggle=self.fullscreenToggleRequested.emit,
+            on_cancel_auto_crop_lock=self._cancel_auto_crop_lock,
+        )
 
     # --------------------------- Public API ---------------------------
 
@@ -165,21 +183,17 @@ class GLImageViewer(QOpenGLWidget):
             mode can reuse the detail view framing without a visible jump.
         """
 
-        reuse_existing_texture = (
-            image_source is not None
-            and image_source == getattr(self, "_current_image_source", None)
-        )
+        # Check if we can reuse the existing texture
+        if self._texture_manager.should_reuse_texture(image_source):
+            if image is not None and not image.isNull():
+                # Skip texture re-upload, only update adjustments
+                self.set_adjustments(adjustments)
+                if reset_view:
+                    self.reset_zoom()
+                return
 
-        if reuse_existing_texture and image is not None and not image.isNull():
-            # Skip the heavy texture re-upload when the caller explicitly
-            # reports that the source asset is unchanged.  Only the adjustment
-            # uniforms need to be refreshed in this scenario.
-            self.set_adjustments(adjustments)
-            if reset_view:
-                self.reset_zoom()
-            return
-
-        self._current_image_source = image_source
+        # Update texture resource tracking
+        self._texture_manager.set_image(image, image_source)
         self._image = image
         self._adjustments = dict(adjustments or {})
         self._update_crop_perspective_state()
@@ -187,22 +201,10 @@ class GLImageViewer(QOpenGLWidget):
         self._time_base = time.monotonic()
 
         if image is None or image.isNull():
-            self._current_image_source = None
+            # Clear resources and reset state
+            self._texture_manager.clear_image()
             self._auto_crop_view_locked = False
             self._transform_controller.set_image_cover_scale(1.0)
-            renderer = self._renderer
-            if renderer is not None:
-                gl_context = self.context()
-                if gl_context is not None:
-                    # ``set_image(None)`` is frequently triggered while the widget is
-                    # still hidden, meaning the GL context (and therefore the
-                    # renderer) may not have been created yet.  Guard the cleanup so
-                    # we only touch GPU state when a live context is bound.
-                    self.makeCurrent()
-                    try:
-                        renderer.delete_texture()
-                    finally:
-                        self.doneCurrent()
 
         if reset_view:
             # Reset the interactive transform so every new asset begins in the
@@ -264,7 +266,7 @@ class GLImageViewer(QOpenGLWidget):
     def current_image_source(self) -> object | None:
         """Return the identifier describing the currently displayed image."""
 
-        return getattr(self, "_current_image_source", None)
+        return self._texture_manager.get_current_image_source()
 
     def pixmap(self) -> QPixmap | None:
         """Return a defensive copy of the currently displayed frame."""
@@ -289,7 +291,7 @@ class GLImageViewer(QOpenGLWidget):
         return self
 
     def set_live_replay_enabled(self, enabled: bool) -> None:
-        self._live_replay_enabled = bool(enabled)
+        self._input_handler.set_live_replay_enabled(enabled)
 
     def set_wheel_action(self, action: str) -> None:
         self._transform_controller.set_wheel_action(action)
@@ -724,51 +726,29 @@ class GLImageViewer(QOpenGLWidget):
     # --------------------------- Viewport helpers ---------------------------
 
     def mousePressEvent(self, event: QMouseEvent) -> None:
-        if self._crop_controller.is_active() and event.button() == Qt.LeftButton:
-            self._crop_controller.handle_mouse_press(event)
-            return
-        if event.button() == Qt.LeftButton:
-            if self._live_replay_enabled:
-                self.replayRequested.emit()
-            else:
-                self._cancel_auto_crop_lock()
-                self._transform_controller.handle_mouse_press(event)
-        super().mousePressEvent(event)
+        handled = self._input_handler.handle_mouse_press(event)
+        if not handled:
+            super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event: QMouseEvent) -> None:
-        if self._crop_controller.is_active():
-            self._crop_controller.handle_mouse_move(event)
-            return
-        if not self._live_replay_enabled:
-            self._transform_controller.handle_mouse_move(event)
-        super().mouseMoveEvent(event)
+        handled = self._input_handler.handle_mouse_move(event)
+        if not handled:
+            super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event: QMouseEvent) -> None:
-        if self._crop_controller.is_active() and event.button() == Qt.LeftButton:
-            self._crop_controller.handle_mouse_release(event)
-            return
-        if not self._live_replay_enabled:
-            self._transform_controller.handle_mouse_release(event)
-        super().mouseReleaseEvent(event)
+        handled = self._input_handler.handle_mouse_release(event)
+        if not handled:
+            super().mouseReleaseEvent(event)
 
     def mouseDoubleClickEvent(self, event: QMouseEvent) -> None:
-        if event.button() == Qt.LeftButton:
-            top_level = self.window()
-            # Toggle immersive mode depending on the top-level window state.
-            if top_level is not None and top_level.isFullScreen():
-                self.fullscreenExitRequested.emit()
-            else:
-                self.fullscreenToggleRequested.emit()
+        handled = self._input_handler.handle_double_click_with_window(event, self.window())
+        if handled:
             event.accept()
             return
         super().mouseDoubleClickEvent(event)
 
     def wheelEvent(self, event: QWheelEvent) -> None:
-        if self._crop_controller.is_active():
-            self._crop_controller.handle_wheel(event)
-            return
-        self._cancel_auto_crop_lock()
-        self._transform_controller.handle_wheel(event)
+        self._input_handler.handle_wheel(event)
 
     def resizeGL(self, w: int, h: int) -> None:
         gf = self._gl_funcs

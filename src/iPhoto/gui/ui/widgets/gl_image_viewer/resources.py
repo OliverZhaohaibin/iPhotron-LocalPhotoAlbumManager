@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING
 from PySide6.QtGui import QImage
 
 if TYPE_CHECKING:
-    from ..gl_renderer import GLRenderer
+    pass
 
 _LOGGER = logging.getLogger(__name__)
 

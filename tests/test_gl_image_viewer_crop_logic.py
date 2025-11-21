@@ -9,7 +9,6 @@ This allows testing with only the minimal PySide6 imports required.
 """
 
 import sys
-from pathlib import Path
 
 import pytest
 

@@ -10,23 +10,16 @@ from unittest.mock import MagicMock, Mock
 
 
 # Direct module import to avoid Qt dependencies in test environment
-input_handler_path = (
-    Path(__file__).parent.parent
-    / "src"
-    / "iPhoto"
-    / "gui"
-    / "ui"
-    / "widgets"
-    / "gl_image_viewer"
-)
-sys.path.insert(0, str(input_handler_path))
+# Add project root (parent of 'src') to sys.path for package imports
+project_root = Path(__file__).parent.parent
+sys.path.insert(0, str(project_root))
 
 # Mock Qt modules before importing
 sys.modules['PySide6'] = MagicMock()
 sys.modules['PySide6.QtCore'] = MagicMock()
 sys.modules['PySide6.QtGui'] = MagicMock()
 
-import input_handler  # noqa: E402
+from iPhoto.gui.ui.widgets.gl_image_viewer import input_handler  # noqa: E402
 
 InputEventHandler = input_handler.InputEventHandler
 

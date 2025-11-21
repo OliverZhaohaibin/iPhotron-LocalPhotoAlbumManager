@@ -93,4 +93,3 @@ class OffscreenRenderer:
         finally:
             done_current()
         
-        return QImage()

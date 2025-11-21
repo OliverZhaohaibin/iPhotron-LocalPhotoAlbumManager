@@ -121,7 +121,6 @@ class CropSessionModel:
             and abs(new_straighten - self._straighten_degrees) <= 1e-6
             and new_rotate == self._rotate_steps
             and new_flip is self._flip_horizontal
-            and self._baseline_crop_state is None
         ):
             return False
 

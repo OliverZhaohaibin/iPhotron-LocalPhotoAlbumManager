@@ -25,7 +25,6 @@ from PySide6.QtOpenGL import (
     QOpenGLFunctions_3_3_Core,
 )
 from PySide6.QtOpenGLWidgets import QOpenGLWidget
-from PySide6.QtWidgets import QLabel
 
 from ..gl_crop_controller import CropInteractionController
 from ..gl_renderer import GLRenderer
@@ -37,9 +36,12 @@ from ..view_transform_controller import (
 
 from . import crop_logic
 from . import geometry
+from .components import LoadingOverlay
 from .input_handler import InputEventHandler
+from .offscreen import OffscreenRenderer
 from .resources import TextureResourceManager
 from .utils import normalise_colour
+from .view_helpers import clamp_center_to_texture_bounds
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -102,16 +104,8 @@ class GLImageViewer(QOpenGLWidget):
         # sessions.
         self._time_base = time.monotonic()
 
-        self._loading_overlay = QLabel("Loading…", self)
-        self._loading_overlay.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._loading_overlay.setAttribute(
-            Qt.WidgetAttribute.WA_TransparentForMouseEvents,
-            True,
-        )
-        self._loading_overlay.setStyleSheet(
-            "background-color: rgba(0, 0, 0, 128); color: white; font-size: 18px;"
-        )
-        self._loading_overlay.hide()
+        # Loading overlay component
+        self._loading_overlay = LoadingOverlay(self)
         self._transform_controller = ViewTransformController(
             self,
             texture_size_provider=self._display_texture_dimensions,
@@ -125,7 +119,7 @@ class GLImageViewer(QOpenGLWidget):
         # Crop interaction controller
         self._crop_controller = CropInteractionController(
             texture_size_provider=self._display_texture_dimensions,
-            clamp_image_center_to_crop=self._clamp_image_center_to_crop,
+            clamp_image_center_to_crop=self._create_clamp_function(),
             transform_controller=self._transform_controller,
             on_crop_changed=self._handle_crop_interaction_changed,
             on_cursor_change=self._handle_cursor_change,
@@ -279,9 +273,8 @@ class GLImageViewer(QOpenGLWidget):
         """Toggle the translucent loading overlay."""
 
         if loading:
-            self._loading_overlay.setVisible(True)
-            self._loading_overlay.raise_()
-            self._loading_overlay.resize(self.size())
+            self._loading_overlay.show()
+            self._loading_overlay.update_geometry(self.size())
         else:
             self._loading_overlay.hide()
 
@@ -405,34 +398,16 @@ class GLImageViewer(QOpenGLWidget):
         The width and height of the rendered image are clamped to at least one pixel
         to avoid driver errors. The returned image is always in Format_ARGB32 format.
         """
-        if target_size.isEmpty():
-            _LOGGER.warning("render_offscreen_image: target size was empty")
-            return QImage()
-
-        if self.context() is None:
-            _LOGGER.warning("render_offscreen_image: no OpenGL context available")
-            return QImage()
-
-        if self._image is None or self._image.isNull():
-            _LOGGER.warning("render_offscreen_image: no source image bound to the viewer")
-            return QImage()
-
-        if self._renderer is None:
-            _LOGGER.warning("render_offscreen_image: renderer not initialized")
-            return QImage()
-
-        self.makeCurrent()
-        try:
-            return self._renderer.render_offscreen_image(
-                self._image,
-                adjustments or self._adjustments,
-                target_size,
-                time_base=self._time_base,
-            )
-        finally:
-            self.doneCurrent()
-
-        return QImage()
+        return OffscreenRenderer.render(
+            renderer=self._renderer,
+            context=self.context(),
+            make_current=self.makeCurrent,
+            done_current=self.doneCurrent,
+            image=self._image,
+            adjustments=adjustments or self._adjustments,
+            target_size=target_size,
+            time_base=self._time_base,
+        )
 
     # --------------------------- GL lifecycle ---------------------------
 
@@ -670,58 +645,17 @@ class GLImageViewer(QOpenGLWidget):
             return QPointF()
         return self._transform_controller.convert_viewport_to_image(point)
 
-    def _clamp_image_center_to_crop(self, center: QPointF, scale: float) -> QPointF:
-        """Return *center* limited so the viewport never exposes empty pixels.
-
-        The demo reference keeps the camera free to roam while the crop-specific
-        model transform guarantees that the crop rectangle only samples valid
-        pixels.  To mirror that behaviour we clamp the *viewport* centre purely
-        against the texture bounds.  As soon as the viewport half extents exceed
-        the texture half extents we collapse the permissible interval to the
-        image midpoint, matching the demo's behaviour once the frame is larger
-        than the source.
-        """
-
-        if (
-            not self._renderer
-            or not self._renderer.has_texture()
-            or scale <= 1e-9
-        ):
-            return center
-
-        # Use the rotation-aware logical dimensions so the clamp aligns with the visible frame
-        # after 90°/270° rotations. Physical texture sizes ignore the width/height swap and would
-        # produce asymmetric bounds (e.g. allowing black bars on one axis and over-clamping on the
-        # other).
-        tex_w, tex_h = self._display_texture_dimensions()
-        vw, vh = self._view_dimensions_device_px()
-
-        half_view_w = (float(vw) / float(scale)) * 0.5
-        half_view_h = (float(vh) / float(scale)) * 0.5
-
-        tex_half_w = float(tex_w) * 0.5
-        tex_half_h = float(tex_h) * 0.5
-
-        min_center_x = half_view_w
-        max_center_x = float(tex_w) - half_view_w
-
-        if min_center_x > max_center_x:
-            min_center_x = tex_half_w
-            max_center_x = tex_half_w
-
-        min_center_y = half_view_h
-        max_center_y = float(tex_h) - half_view_h
-
-        if min_center_y > max_center_y:
-            min_center_y = tex_half_h
-            max_center_y = tex_half_h
-
-        clamped_x = max(min_center_x, min(max_center_x, float(center.x())))
-        clamped_y = max(min_center_y, min(max_center_y, float(center.y())))
-
-        clamped_x = max(0.0, min(float(tex_w), clamped_x))
-        clamped_y = max(0.0, min(float(tex_h), clamped_y))
-        return QPointF(clamped_x, clamped_y)
+    def _create_clamp_function(self):
+        """Create a clamp function with access to viewer state."""
+        def clamp_fn(center: QPointF, scale: float) -> QPointF:
+            return clamp_center_to_texture_bounds(
+                center=center,
+                scale=scale,
+                texture_dimensions=self._display_texture_dimensions(),
+                view_dimensions=self._view_dimensions_device_px(),
+                has_texture=bool(self._renderer and self._renderer.has_texture()),
+            )
+        return clamp_fn
 
     # --------------------------- Viewport helpers ---------------------------
 
@@ -759,8 +693,7 @@ class GLImageViewer(QOpenGLWidget):
 
     def resizeEvent(self, event) -> None:  # type: ignore[override]
         super().resizeEvent(event)
-        if self._loading_overlay is not None:
-            self._loading_overlay.resize(self.size())
+        self._loading_overlay.update_geometry(self.size())
         if self._auto_crop_view_locked and not self._crop_controller.is_active():
             self._reapply_locked_crop_view()
         straighten, rotate_steps, _ = self._rotation_parameters()

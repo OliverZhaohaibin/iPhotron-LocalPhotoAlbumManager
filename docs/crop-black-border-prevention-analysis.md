@@ -40,7 +40,7 @@
 
 ```python
 def point_in_convex_polygon(point: tuple[float, float], polygon: Sequence[tuple[float, float]]) -> bool:
-    """判断点是否在凸多边形内部"""
+    """Return ``True`` if *point* lies inside the convex *polygon*."""
     if len(polygon) < 3:
         return False
     last_sign = 0.0

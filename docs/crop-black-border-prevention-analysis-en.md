@@ -40,7 +40,7 @@ The key to preventing black borders lies in understanding and correctly using th
 
 ```python
 def point_in_convex_polygon(point: tuple[float, float], polygon: Sequence[tuple[float, float]]) -> bool:
-    """Return True if point lies inside the convex polygon."""
+    """Return ``True`` if *point* lies inside the convex *polygon*."""
     if len(polygon) < 3:
         return False
     last_sign = 0.0
@@ -69,7 +69,7 @@ def point_in_convex_polygon(point: tuple[float, float], polygon: Sequence[tuple[
 
 ```python
 def rect_inside_quad(rect: NormalisedRect, quad: Sequence[tuple[float, float]]) -> bool:
-    """Return True when rect is fully contained inside quad."""
+    """Return ``True`` when *rect* is fully contained inside *quad*."""
     corners = [
         (rect.left, rect.top),
         (rect.right, rect.top),
@@ -90,7 +90,7 @@ def rect_inside_quad(rect: NormalisedRect, quad: Sequence[tuple[float, float]]) 
 
 ```python
 def calculate_min_zoom_to_fit(rect: NormalisedRect, quad: Sequence[tuple[float, float]]) -> float:
-    """Return the minimum uniform zoom needed so rect fits inside quad."""
+    """Return the minimum uniform zoom needed so *rect* fits inside *quad*."""
     cx, cy = rect.center
     corners = [
         (rect.left, rect.top),

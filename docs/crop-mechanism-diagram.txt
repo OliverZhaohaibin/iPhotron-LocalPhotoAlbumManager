@@ -1,0 +1,228 @@
+═══════════════════════════════════════════════════════════════════════════════
+  iPhotos Crop Black Border Prevention Mechanism - Visual Diagram
+═══════════════════════════════════════════════════════════════════════════════
+
+1. THREE COORDINATE SYSTEMS
+═══════════════════════════════════════════════════════════════════════════════
+
+   A. Texture Space              B. Projected Space           C. Viewport Space
+      (Original Image)              (After Perspective)          (Screen Display)
+   
+   ┌───────────────┐             ┌─────────────────┐          ┌───────────────┐
+   │ (0,0)         │             │  /─────────\    │          │               │
+   │               │   Matrix    │ /           \   │  View    │   Mouse       │
+   │     Image     │   ──────>   │ │  Q_valid  │  │  ──────> │   Interaction │
+   │     Pixels    │   Transform │ \           /   │  Scale   │   Only        │
+   │               │             │  \_________/    │          │               │
+   │         (W,H) │             │                 │          │               │
+   └───────────────┘             │   [R_crop]      │          └───────────────┘
+                                 │   (AABB Rect)   │
+                                 └─────────────────┘
+                                 
+   Used for:                     Used for:                    Used for:
+   • GPU rendering               • ALL logic validation       • User clicks
+   • Input source                • Black border checks        • Drag events
+                                 • Geometric calculations      • Wheel scrolls
+
+
+2. KEY VALIDATION: rect_inside_quad()
+═══════════════════════════════════════════════════════════════════════════════
+
+   Valid State (✓)                          Invalid State (✗)
+   ━━━━━━━━━━━━━━━                          ━━━━━━━━━━━━━━━━━
+   
+        Perspective Quad                         Perspective Quad
+      ┌─────────────────┐                      ┌─────────────────┐
+     ╱                   ╲                    ╱                   ╲
+    ╱   ┌──────────┐     ╲                  ╱         ┌──────────┼──┐
+   │    │          │      │                 │         │          │░░│
+   │    │  R_crop  │      │                 │         │  R_crop  │░░│<- Black!
+   │    │ (inside) │      │                 │         │          │░░│
+   │    └──────────┘      │                 │         └──────────┼──┘
+    ╲                    ╱                   ╲                   ╱
+     ╲__________________╱                     ╲_________________╱
+   
+   All 4 corners inside quad              Corner outside → Black border
+   Action: ACCEPT ✓                        Action: REJECT ✗ or AUTO-FIT
+
+
+3. AUTO-FIT ALGORITHM: calculate_min_zoom_to_fit()
+═══════════════════════════════════════════════════════════════════════════════
+
+   Step 1: Cast rays from center to corners
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+   
+        Perspective Quad
+      ┌─────────────────┐
+     ╱         *         ╲          * = Center
+    ╱        ╱ │ ╲        ╲
+   │       ╱   │   ╲       │       Rays cast from center
+   │     ╱     │     ╲     │       to each corner
+   │   *───────┼───────*   │
+   │     ╲     │     ╱     │       Find intersection with
+   │       ╲   │   ╱       │       quad boundary
+    ╲        ╲ │ ╱        ╱
+     ╲         *         ╱
+      └─────────────────┘
+   
+   Step 2: Calculate scale needed
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+   
+   For each corner:
+     hit_distance = distance to quad boundary
+     corner_distance = distance to corner
+     
+     if hit_distance < corner_distance:
+       scale_needed = corner_distance / hit_distance
+   
+   return max(all scale_needed)
+
+
+4. INTERACTION FLOW: Edge Drag Example
+═══════════════════════════════════════════════════════════════════════════════
+
+   Time 0: User starts drag
+   ━━━━━━━━━━━━━━━━━━━━━━━
+         Quad                              Snapshot Created
+      ┌────────┐                           ────────────────
+     ╱  ┌───┐  ╲                           cx = 0.5
+    │   │   │   │  <- Mouse down           cy = 0.5
+    │   └───┘   │     here                 w  = 0.6
+     ╲         ╱                            h  = 0.4
+      └────────┘
+
+   Time 1: User drags right
+   ━━━━━━━━━━━━━━━━━━━━━━━━━
+         Quad
+      ┌────────┐
+     ╱  ┌─────┐ ╲  <- New position
+    │   │     │  │     attempted
+    │   └─────┘  │
+     ╲          ╱
+      └────────┘
+      
+      Validation:
+      1. Check img_bounds ✓
+      2. Check rect_inside_quad() ✓
+      → ACCEPT, update UI
+
+   Time 2: User drags too far
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━
+         Quad
+      ┌────────┐
+     ╱  ┌───────┼──┐  <- Would create
+    │   │       │░░│     black border!
+    │   └───────┼──┘
+     ╲          ╱
+      └────────┘
+      
+      Validation:
+      1. Check rect_inside_quad() ✗
+      2. restore_snapshot()
+      → REJECT, maintain old state
+
+
+5. PERSPECTIVE ADJUSTMENT FLOW
+═══════════════════════════════════════════════════════════════════════════════
+
+   Before: No perspective (vertical = 0, horizontal = 0)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+   
+      Quad = Unit Square         Crop Box
+      ┌───────────────┐         ┌────────┐
+      │               │         │        │
+      │               │         │  CROP  │
+      │               │         │        │
+      │               │         └────────┘
+      └───────────────┘
+      
+      Baseline Saved: (cx=0.5, cy=0.5, w=0.6, h=0.4)
+
+   After: Vertical perspective applied (vertical = 0.5)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+   
+      New Quad (Trapezoid)
+        ┌─────────┐              Old crop would
+       ╱           ╲             have black edges!
+      ╱   ┌─────┐  ╲            
+     │    │     │   │            Auto-fit triggered:
+     │    └─────┘   │            1. Check center in quad
+      ╲            ╱             2. Calculate scale
+       ╲__________╱              3. Shrink crop box
+                                 4. New size prevents
+      Adjusted Crop                 black borders ✓
+      
+
+6. DEFENSE LAYERS
+═══════════════════════════════════════════════════════════════════════════════
+
+   Layer 1: Boundary Constraints
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+   • Crop cannot exceed [0, 1] normalized range
+   • Minimum size enforced (min_width, min_height)
+   • CropBoxState.clamp() ensures validity
+   
+   Layer 2: Geometric Validation
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+   • rect_inside_quad() checks all corners
+   • point_in_convex_polygon() uses cross products
+   • Works in normalized projected space
+   
+   Layer 3: Auto-Correction
+   ━━━━━━━━━━━━━━━━━━━━━━━
+   • calculate_min_zoom_to_fit() computes scale
+   • auto_scale_crop_to_quad() applies shrinking
+   • Preserves aspect ratio and center when possible
+   
+   Layer 4: Rollback Protection
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━
+   • Snapshot created before risky operations
+   • ensure_valid_or_revert() handles failures
+   • User never sees invalid intermediate states
+
+
+7. ALGORITHM COMPLEXITY
+═══════════════════════════════════════════════════════════════════════════════
+
+   Function                          Time Complexity    Space Complexity
+   ─────────────────────────────────────────────────────────────────────
+   point_in_convex_polygon()         O(n)              O(1)
+   rect_inside_quad()                O(n)              O(1)  (n=4 fixed)
+   calculate_min_zoom_to_fit()       O(n²)             O(1)  (4 corners × n edges)
+   ensure_valid_or_revert()          O(n)              O(1)
+   
+   Where n = number of quadrilateral vertices (typically 4)
+   
+   → Very fast, suitable for real-time interaction
+
+
+8. CODE FLOW SUMMARY
+═══════════════════════════════════════════════════════════════════════════════
+
+   User Action                 System Response                   Result
+   ─────────────────────────────────────────────────────────────────────
+   Mouse down on edge    →     Create snapshot                 State saved
+                         →     Identify handle (LEFT/RIGHT/etc)
+   
+   Mouse drag            →     Convert screen → projected space
+                         →     Calculate new crop bounds
+                         →     Apply img_bounds constraints
+                         →     Validate rect_inside_quad()
+                               ├─ Valid?   → Update UI ✓
+                               └─ Invalid? → Restore snapshot ✗
+   
+   Mouse up              →     Finalize or discard changes
+   
+   Adjust perspective    →     Recompute projection matrix
+                         →     Calculate new Q_valid quad
+                         →     Apply baseline fit
+                               ├─ Center inside? → Keep position
+                               └─ Center outside? → Move to centroid
+                         →     Calculate scale to fit
+                         →     Shrink if necessary
+                         →     Update UI with animation ✓
+
+
+═══════════════════════════════════════════════════════════════════════════════
+  Legend: ✓ = Valid/Accepted  ✗ = Invalid/Rejected  ░ = Black border region
+═══════════════════════════════════════════════════════════════════════════════

@@ -255,13 +255,14 @@ def _apply_edge_push_auto_zoom(self, delta_view: QPointF) -> None:
     offset_y = 0.0
     
     # 3. 根据拖动方向和距离计算压力
-    if handle in (CropHandle.LEFT, ...) and delta_device.x() < 0.0:
-        if left_margin < threshold:
+    # 左边向外推（delta < 0）且距离边界 < threshold
+    if handle in (CropHandle.LEFT, CropHandle.TOP_LEFT, CropHandle.BOTTOM_LEFT):
+        if delta_device.x() < 0.0 and left_margin < threshold:
             p = (threshold - left_margin) / threshold
             pressure = max(pressure, p)
             offset_x = max(offset_x, -float(delta_image.x()) * p)
     
-    # 右边、上边、下边同理...
+    # 右边、上边、下边使用相同的逻辑...
 ```
 
 **压力计算公式：**

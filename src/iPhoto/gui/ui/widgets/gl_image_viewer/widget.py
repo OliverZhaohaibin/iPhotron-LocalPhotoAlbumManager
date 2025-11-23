@@ -532,7 +532,37 @@ class GLImageViewer(QOpenGLWidget):
             self.reset_zoom()
 
     def crop_values(self) -> dict[str, float]:
-        return self._crop_controller.get_crop_values()
+        """Return crop values in texture space for persistence.
+        
+        The crop controller works in logical space (what the user sees after rotation),
+        but we need to save coordinates in texture space (invariant to rotation).
+        This method converts from logical space back to texture space before returning.
+        """
+        # Get the current crop values in logical space
+        logical_values = self._crop_controller.get_crop_values()
+        
+        # Extract logical coordinates
+        logical_cx = float(logical_values.get("Crop_CX", 0.5))
+        logical_cy = float(logical_values.get("Crop_CY", 0.5))
+        logical_w = float(logical_values.get("Crop_W", 1.0))
+        logical_h = float(logical_values.get("Crop_H", 1.0))
+        
+        # Get the current rotation state
+        rotate_steps = geometry.get_rotate_steps(self._adjustments)
+        
+        # Convert from logical space back to texture space
+        tex_cx, tex_cy, tex_w, tex_h = geometry.logical_crop_to_texture(
+            (logical_cx, logical_cy, logical_w, logical_h),
+            rotate_steps,
+        )
+        
+        # Return texture space coordinates
+        return {
+            "Crop_CX": tex_cx,
+            "Crop_CY": tex_cy,
+            "Crop_W": tex_w,
+            "Crop_H": tex_h,
+        }
 
     def start_perspective_interaction(self) -> None:
         """Snapshot the crop before a perspective slider drag begins."""

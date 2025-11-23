@@ -160,33 +160,40 @@ class TestCropValuesCoordinateConversion:
         viewer._crop_controller.get_crop_values = Mock(return_value=crop_values)
         viewer._adjustments = {"Crop_Rotate90": float(rotation_steps)}
         
+        # Mock _rotation_parameters to return the rotation steps
+        viewer._rotation_parameters = Mock(return_value=(0.0, rotation_steps, False))
+        
         # Implement the fixed crop_values method inline for testing
         def crop_values_impl():
-            """Return crop values in texture space for persistence."""
-            # Get the current crop values in logical space
+            """Return the current crop rect transformed back to texture space."""
+            # 1. Get the current logical coordinates
             logical_values = viewer._crop_controller.get_crop_values()
             
-            # Extract logical coordinates
-            logical_cx = float(logical_values.get("Crop_CX", 0.5))
-            logical_cy = float(logical_values.get("Crop_CY", 0.5))
-            logical_w = float(logical_values.get("Crop_W", 1.0))
-            logical_h = float(logical_values.get("Crop_H", 1.0))
+            # 2. Get the current rotation steps
+            _, rotate_steps, _ = viewer._rotation_parameters()
             
-            # Get the current rotation state
-            rotate_steps = geometry.get_rotate_steps(viewer._adjustments)
+            # If no rotation, logical equals texture space - return directly
+            if rotate_steps == 0:
+                return logical_values
             
-            # Convert from logical space back to texture space
-            tex_cx, tex_cy, tex_w, tex_h = geometry.logical_crop_to_texture(
-                (logical_cx, logical_cy, logical_w, logical_h),
+            # 3. Extract components for conversion
+            l_cx = float(logical_values.get("Crop_CX", 0.5))
+            l_cy = float(logical_values.get("Crop_CY", 0.5))
+            l_w = float(logical_values.get("Crop_W", 1.0))
+            l_h = float(logical_values.get("Crop_H", 1.0))
+            
+            # 4. Execute inverse transform: Logical -> Texture
+            t_cx, t_cy, t_w, t_h = geometry.logical_crop_to_texture(
+                (l_cx, l_cy, l_w, l_h),
                 rotate_steps,
             )
             
-            # Return texture space coordinates
+            # 5. Return corrected texture space coordinates
             return {
-                "Crop_CX": tex_cx,
-                "Crop_CY": tex_cy,
-                "Crop_W": tex_w,
-                "Crop_H": tex_h,
+                "Crop_CX": t_cx,
+                "Crop_CY": t_cy,
+                "Crop_W": t_w,
+                "Crop_H": t_h,
             }
         
         viewer.crop_values = crop_values_impl

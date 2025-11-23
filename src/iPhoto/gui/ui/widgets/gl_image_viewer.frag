@@ -1,4 +1,25 @@
 #version 330 core
+//
+// GL Image Viewer Fragment Shader
+//
+// COORDINATE SYSTEM ARCHITECTURE:
+//
+// This shader implements a dual coordinate system to simplify crop interactions:
+//
+// 1. TEXTURE SPACE: The canonical storage format. Coordinates remain fixed
+//    regardless of rotation. Used for texture sampling and persistence.
+//
+// 2. LOGICAL SPACE: The user's visual coordinate system after rotation.
+//    This is what the user sees on screen and interacts with.
+//
+// CROP PARAMETER CONVENTION:
+// - uCropCX, uCropCY, uCropW, uCropH are passed in LOGICAL SPACE
+// - Python converts texture coordinates to logical before passing to shader
+// - Shader converts logical coordinates back to texture space for sampling
+//
+// This design allows Python UI controllers to work entirely in logical space,
+// eliminating rotation-dependent coordinate transformation branches.
+//
 in vec2 vUV;
 out vec4 FragColor;
 
@@ -24,10 +45,10 @@ uniform float uScale;
 uniform vec2  uPan;
 uniform float uImgScale;
 uniform vec2  uImgOffset;
-uniform float uCropCX;
-uniform float uCropCY;
-uniform float uCropW;
-uniform float uCropH;
+uniform float uCropCX;      // Crop center X in LOGICAL space
+uniform float uCropCY;      // Crop center Y in LOGICAL space
+uniform float uCropW;       // Crop width in LOGICAL space
+uniform float uCropH;       // Crop height in LOGICAL space
 uniform mat3  uPerspectiveMatrix;
 uniform int   uRotate90;  // 0, 1, 2, 3 for 0°, 90°, 180°, 270° CCW rotation
 

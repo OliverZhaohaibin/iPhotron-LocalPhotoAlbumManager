@@ -197,31 +197,33 @@ void main() {
     uv.y = 1.0 - uv.y;
     vec2 uv_corrected = uv;
 
-    // Apply crop test in screen/view space BEFORE any transforms
-    // This is the coordinate space that matches the visual display
-    // Calculate normalized crop boundaries
+    // Apply perspective correction first
+    vec2 uv_perspective = apply_inverse_perspective(uv_corrected);
+    if (uv_perspective.x < 0.0 || uv_perspective.x > 1.0 ||
+        uv_perspective.y < 0.0 || uv_perspective.y > 1.0) {
+        discard;
+    }
+    
+    // Apply rotation to get texture-space coordinates
+    // After this transformation, uv_tex represents coordinates in the canonical
+    // texture space (0,0 = top-left, 1,1 = bottom-right), regardless of rotation
+    vec2 uv_tex = apply_rotation_90(uv_perspective, uRotate90);
+    
+    // Perform crop test in texture space (unified logic for all rotation angles)
+    // The crop parameters (uCropCX, uCropCY, uCropW, uCropH) are in texture space,
+    // so this test works identically whether the image is rotated 0°, 90°, 180°, or 270°
     float crop_min_x = uCropCX - uCropW * 0.5;
     float crop_max_x = uCropCX + uCropW * 0.5;
     float crop_min_y = uCropCY - uCropH * 0.5;
     float crop_max_y = uCropCY + uCropH * 0.5;
 
-    // Check if current fragment's screen coordinate is outside the crop box
-    if (uv_corrected.x < crop_min_x || uv_corrected.x > crop_max_x ||
-        uv_corrected.y < crop_min_y || uv_corrected.y > crop_max_y) {
+    if (uv_tex.x < crop_min_x || uv_tex.x > crop_max_x ||
+        uv_tex.y < crop_min_y || uv_tex.y > crop_max_y) {
         discard; // Discard fragments outside the crop region
     }
 
-    // Apply perspective correction
-    vec2 uv_original = apply_inverse_perspective(uv_corrected);
-    if (uv_original.x < 0.0 || uv_original.x > 1.0 ||
-        uv_original.y < 0.0 || uv_original.y > 1.0) {
-        discard;
-    }
-    
-    // Apply 90-degree rotation to get final texture sampling coordinates
-    // This rotation transforms the perspective-corrected UVs to display the image
-    // at the user's selected orientation (0°, 90°, 180°, or 270°)
-    uv_original = apply_rotation_90(uv_original, uRotate90);
+    // Sample the texture at the computed texture-space coordinates
+    vec2 uv_original = uv_tex;
 
     vec4 texel = texture(uTex, uv_original);
     vec3 c = texel.rgb;

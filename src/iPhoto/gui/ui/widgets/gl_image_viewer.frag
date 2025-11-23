@@ -206,22 +206,22 @@ void main() {
         discard;
     }
     
-    // Perform crop test BEFORE rotation
-    // Crop parameters are defined in texture space (original unrotated texture).
-    // We test against uv_perspective (before rotation) because that represents
-    // the texture-space coordinates before the rotation transform.
+    // Apply rotation to get final texture sampling coordinates
+    // This converts from logical space (uv_perspective) to texture space (uv_tex)
+    vec2 uv_tex = apply_rotation_90(uv_perspective, uRotate90);
+    
+    // Perform crop test AFTER rotation using texture-space coordinates
+    // Crop parameters (uCropCX, uCropW, etc.) are in texture space,
+    // so we must compare them against uv_tex (also texture space) for correct alignment.
     float crop_min_x = uCropCX - uCropW * 0.5;
     float crop_max_x = uCropCX + uCropW * 0.5;
     float crop_min_y = uCropCY - uCropH * 0.5;
     float crop_max_y = uCropCY + uCropH * 0.5;
 
-    if (uv_perspective.x < crop_min_x || uv_perspective.x > crop_max_x ||
-        uv_perspective.y < crop_min_y || uv_perspective.y > crop_max_y) {
+    if (uv_tex.x < crop_min_x || uv_tex.x > crop_max_x ||
+        uv_tex.y < crop_min_y || uv_tex.y > crop_max_y) {
         discard;
     }
-    
-    // Apply rotation to get final texture sampling coordinates
-    vec2 uv_tex = apply_rotation_90(uv_perspective, uRotate90);
 
     // Sample the texture at the computed texture-space coordinates
     vec4 texel = texture(uTex, uv_tex);

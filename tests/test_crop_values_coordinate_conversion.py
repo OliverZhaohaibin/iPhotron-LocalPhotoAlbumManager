@@ -160,8 +160,7 @@ class TestCropValuesCoordinateConversion:
         viewer._crop_controller.get_crop_values = Mock(return_value=crop_values)
         viewer._adjustments = {"Crop_Rotate90": float(rotation_steps)}
         
-        # Import and bind the actual crop_values method
-        # We'll implement it inline to match the fixed version
+        # Implement the fixed crop_values method inline for testing
         def crop_values_impl():
             """Return crop values in texture space for persistence."""
             # Get the current crop values in logical space

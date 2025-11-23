@@ -264,7 +264,7 @@ uv.y = 1.0 - uv.y;
 * **关键作用**: **黑边检测的核心空间**
   * 透视变换（perspective/straighten）应用后形成的有效区域四边形
   * 裁剪框必须完全包含在此四边形内才不会出现黑边
-  * **重要**: 四边形计算时 `rotate_steps=0`（`src/iPhoto/gui/ui/widgets/gl_crop/model.py` 第 149 行）
+  * **重要**: 四边形计算时 `rotate_steps=0`（`src/iPhoto/gui/ui/widgets/gl_crop/model.py` 第 147 行）
 * **实现逻辑**: 
   ```python
   # model.py 第 142-149 行
@@ -330,7 +330,7 @@ vec4 texel = texture(uTex, uv_tex);
 
 **核心原则**: 黑边判定在**投影空间**（透视变换后，旋转前）进行。
 
-1. **步骤0策略** (`model.py` 第 149 行):
+1. **步骤0策略** (`model.py` 第 147 行):
    * 计算有效四边形时强制 `rotate_steps=0`
    * 原因: 旋转是纯粹的坐标重映射，不影响有效像素区域
    * 结果: 四边形 `Q_valid` 代表真实的有效像素边界
@@ -381,13 +381,13 @@ vec4 texel = texture(uTex, uv_tex);
    ```
 
 3. **黑边检查位置**  
-   * Python 层：使用 `rect_inside_quad()` 在投影空间检查（`model.py` 第 158-166 行）
+   * Python 层：使用 `rect_inside_quad()` 在投影空间检查（`model.py` 第 158-165 行）
    * Shader 层：裁剪测试在旋转前进行（`gl_image_viewer.frag` 第 210-221 行）
 
 4. **实现文件参考**  
    * `src/iPhoto/gui/ui/widgets/gl_image_viewer.frag` — Shader 坐标变换管线
    * `src/iPhoto/gui/ui/widgets/gl_image_viewer/geometry.py` — 纹理/逻辑空间转换
-   * `src/iPhoto/gui/ui/widgets/gl_crop/model.py` — 黑边检测逻辑（第 149 行关键）
+   * `src/iPhoto/gui/ui/widgets/gl_crop/model.py` — 黑边检测逻辑（第 147 行关键）
    * `src/iPhoto/gui/ui/widgets/perspective_math.py` — 几何算法（包含性检查）
 
 ---

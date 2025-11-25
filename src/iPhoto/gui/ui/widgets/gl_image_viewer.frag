@@ -30,6 +30,10 @@ uniform float uCropW;
 uniform float uCropH;
 uniform mat3  uPerspectiveMatrix;
 uniform int   uRotate90;  // 0, 1, 2, 3 for 0°, 90°, 180°, 270° CCW rotation
+uniform float uStraightenDegrees;  // Straighten angle for unified black border detection
+uniform float uVertical;           // Vertical perspective parameter
+uniform float uHorizontal;         // Horizontal perspective parameter
+uniform bool  uFlipHorizontal;     // Horizontal flip flag
 
 float clamp01(float x) { return clamp(x, 0.0, 1.0); }
 
@@ -175,6 +179,30 @@ vec3 apply_bw(vec3 color, vec2 uv) {
     return vec3(gray);
 }
 
+// Unified black border detection function
+// Checks if UV coordinate is within valid bounds after all transformations
+bool is_within_valid_bounds(vec2 uv) {
+    // 1. Apply inverse perspective transformation
+    vec2 uv_perspective = apply_inverse_perspective(uv);
+    
+    // Check if perspective transformation caused out-of-bounds
+    if (uv_perspective.x < 0.0 || uv_perspective.x > 1.0 ||
+        uv_perspective.y < 0.0 || uv_perspective.y > 1.0) {
+        return false;
+    }
+    
+    // 2. Apply 90-degree rotation
+    vec2 uv_rotated = apply_rotation_90(uv_perspective, uRotate90);
+    
+    // Final check: ensure we're within physical texture bounds
+    if (uv_rotated.x < 0.0 || uv_rotated.x > 1.0 ||
+        uv_rotated.y < 0.0 || uv_rotated.y > 1.0) {
+        return false;
+    }
+    
+    return true;
+}
+
 void main() {
     if (uScale <= 0.0) {
         discard;
@@ -210,11 +238,13 @@ void main() {
         discard; // Discard fragments outside the crop region
     }
 
-    vec2 uv_original = apply_inverse_perspective(uv_corrected);
-    if (uv_original.x < 0.0 || uv_original.x > 1.0 ||
-        uv_original.y < 0.0 || uv_original.y > 1.0) {
+    // Unified black border detection - check bounds after all transformations
+    if (!is_within_valid_bounds(uv_corrected)) {
         discard;
     }
+    
+    // Apply transformations for texture sampling
+    vec2 uv_original = apply_inverse_perspective(uv_corrected);
     
     // Apply 90-degree rotation AFTER perspective correction
     uv_original = apply_rotation_90(uv_original, uRotate90);

@@ -130,21 +130,15 @@ class CropSessionModel:
         self._rotate_steps = new_rotate
         self._flip_horizontal = new_flip
 
-        # Apply coordinate system adjustments for rotations
-        calc_straighten = new_straighten
-        calc_vertical = new_vertical
-        calc_horizontal = new_horizontal
-        if new_rotate % 2 != 0:
-            calc_straighten = -new_straighten
-            calc_vertical = -new_vertical
-            calc_horizontal = -new_horizontal
-
+        # Pass original parameters directly to the perspective matrix builder.
+        # The shader now handles black border detection uniformly across all rotation
+        # steps, so we no longer need to reverse parameters for odd rotations.
         matrix = build_perspective_matrix(
-            calc_vertical,
-            calc_horizontal,
+            new_vertical,
+            new_horizontal,
             image_aspect_ratio=aspect_ratio,
-            straighten_degrees=calc_straighten,
-            rotate_steps=0,
+            straighten_degrees=new_straighten,
+            rotate_steps=0,  # Always 0; rotation is handled by shader's uRotate90
             flip_horizontal=new_flip,
         )
         self._perspective_quad = compute_projected_quad(matrix)

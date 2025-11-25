@@ -149,6 +149,10 @@ class GLRenderer:
                 "uCropH",
                 "uPerspectiveMatrix",
                 "uRotate90",
+                "uStraightenDegrees",
+                "uVertical",
+                "uHorizontal",
+                "uFlipHorizontal",
             ):
                 self._uniform_locations[name] = program.uniformLocation(name)
         finally:
@@ -391,6 +395,12 @@ class GLRenderer:
             
             # Pass rotation to shader as uniform
             self._set_uniform1i("uRotate90", rotate_steps % 4)
+            
+            # Pass transformation parameters for unified black border detection
+            self._set_uniform1f("uStraightenDegrees", straighten_value)
+            self._set_uniform1f("uVertical", adjustment_value("Perspective_Vertical", 0.0))
+            self._set_uniform1f("uHorizontal", adjustment_value("Perspective_Horizontal", 0.0))
+            self._set_uniform1i("uFlipHorizontal", 1 if flip_enabled else 0)
             
             # Get physical dimensions for perspective matrix aspect ratio
             # Perspective matrix must operate in the logical orientation so that the

@@ -755,3 +755,57 @@ Step 3 (270° CW): (x, y) = (1-y', x')
 
 - [黑边检测参数差异分析](./black_border_detection_parameters.md)
 - [统一黑边检测逻辑需求](./requirements_unified_black_border_detection.md)
+
+---
+
+## 11. 实现状态 (Implementation Status)
+
+**状态**: ✅ 已实现核心修复
+
+### 已实施的修改
+
+| 步骤 | 文件 | 改动 | 状态 |
+|------|------|------|------|
+| 1 | `gl_crop/model.py` | 添加 `_transform_quad_to_texture_space()` 方法 | ✅ 完成 |
+| 2 | `gl_crop/model.py` | 修改 `update_perspective()` 使用新方法 | ✅ 完成 |
+| 3 | `gl_image_viewer.frag` | 增强 `is_within_valid_bounds()` 函数（添加epsilon容差） | ✅ 完成 |
+| 4 | `gui/main.py` | 修复错误的导入路径 | ✅ 完成 |
+| 5 | `tests/test_gl_crop_model.py` | 添加旋转坐标转换测试 | ✅ 完成 |
+
+### 核心修复说明
+
+问题的根本原因是**坐标空间不一致**：
+- 裁剪框坐标存储在**纹理空间**（未旋转）
+- 透视四边形计算在**逻辑空间**（已旋转）
+
+修复方案：在 `CropSessionModel.update_perspective()` 中添加 `_transform_quad_to_texture_space()` 方法，将逻辑空间的透视四边形转换到纹理空间，确保裁剪验证使用一致的坐标系。
+
+**关键代码变更**:
+
+```python
+# gl_crop/model.py - update_perspective() 方法
+def update_perspective(self, ...):
+    # ... 构建透视矩阵 ...
+    matrix = build_perspective_matrix(...)
+    
+    # 计算逻辑空间的透视四边形
+    logical_quad = compute_projected_quad(matrix)
+    
+    # 转换到纹理空间进行裁剪验证
+    self._perspective_quad = self._transform_quad_to_texture_space(
+        logical_quad, 
+        rotate_steps,
+    )
+```
+
+### 未实施的可选优化
+
+以下是文档中提到但尚未实施的可选优化（优先级较低）：
+
+| 步骤 | 文件 | 改动 | 状态 | 原因 |
+|------|------|------|------|------|
+| 4 | `view_transform_controller.py` | 简化 `compute_rotation_cover_scale()` | ⏳ 未实施 | 现有逻辑工作正常 |
+| 5 | `gl_image_viewer/widget.py` | 简化 `_update_cover_scale()` | ⏳ 未实施 | 现有逻辑工作正常 |
+| 6 | `perspective_math.py` | 添加废弃注释 | ⏳ 未实施 | 向后兼容性考虑 |
+
+这些优化是代码简化，对功能正确性没有影响，可在后续迭代中考虑实施。

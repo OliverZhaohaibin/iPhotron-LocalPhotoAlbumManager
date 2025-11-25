@@ -103,6 +103,9 @@ def _transform_quad_to_texture_space(
 
 ```python
 # perspective_math.py 第92行
+# 计算总旋转角度：straighten角度 + 90°旋转步数
+# 注意：rotate_steps * -90.0 表示顺时针旋转（负值表示顺时针方向）
+# 例如：rotate_steps=1 产生 -90°，即顺时针旋转90°
 total_degrees = float(straighten_degrees) + float(int(rotate_steps)) * -90.0
 ```
 
@@ -173,6 +176,25 @@ def sample_valid_bounds_from_shader(
     
     通过在逻辑空间的网格上查询每个点是否有效，
     构建准确的透视四边形边界。
+    
+    Parameters
+    ----------
+    renderer:
+        GLRenderer实例，需要支持query_point_valid方法（需要新增实现）
+    adjustments:
+        包含所有变换参数的字典
+    grid_resolution:
+        采样网格分辨率（默认32x32）
+        
+    Returns
+    -------
+    list[tuple[float, float]]:
+        有效区域的凸包顶点列表，按顺时针或逆时针排序
+        
+    Notes
+    -----
+    - renderer.query_point_valid() 是需要新增实现的方法
+    - compute_convex_hull() 需要使用 scipy.spatial.ConvexHull 或类似实现
     """
     valid_points = []
     
@@ -182,10 +204,16 @@ def sample_valid_bounds_from_shader(
             y = j / grid_resolution
             
             # 通过shader查询该点是否有效
-            # 这需要renderer支持单点查询模式
+            # 注意：这需要在GLRenderer中新增query_point_valid方法
+            # 该方法应模拟Shader的is_within_valid_bounds()逻辑
             if renderer.query_point_valid(x, y, adjustments):
                 valid_points.append((x, y))
     
+    # 使用凸包算法提取边界
+    # 可以使用 scipy.spatial.ConvexHull 或自定义实现
+    # from scipy.spatial import ConvexHull
+    # hull = ConvexHull(valid_points)
+    # return [valid_points[i] for i in hull.vertices]
     return compute_convex_hull(valid_points)
 ```
 

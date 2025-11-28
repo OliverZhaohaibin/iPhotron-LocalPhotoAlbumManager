@@ -21,6 +21,13 @@ from ..perspective_math import (
 )
 from .utils import CropBoxState
 
+try:
+    from ..gl_image_viewer.geometry import logical_crop_to_texture
+except ImportError:
+    # Fallback if geometry module not available
+    def logical_crop_to_texture(crop, rotate_steps):
+        return crop
+
 
 class CropSessionModel:
     """Manages crop session data and validation logic."""
@@ -130,21 +137,14 @@ class CropSessionModel:
         self._rotate_steps = new_rotate
         self._flip_horizontal = new_flip
 
-        # Apply coordinate system adjustments for rotations
-        calc_straighten = new_straighten
-        calc_vertical = new_vertical
-        calc_horizontal = new_horizontal
-        if new_rotate % 2 != 0:
-            calc_straighten = -new_straighten
-            calc_vertical = -new_vertical
-            calc_horizontal = -new_horizontal
-
+        # Calculate quad WITHOUT rotation, matching step=0's successful logic
+        # The quad represents valid region after perspective/straighten only
         matrix = build_perspective_matrix(
-            calc_vertical,
-            calc_horizontal,
+            new_vertical,
+            new_horizontal,
             image_aspect_ratio=aspect_ratio,
-            straighten_degrees=calc_straighten,
-            rotate_steps=0,
+            straighten_degrees=new_straighten,
+            rotate_steps=0,  # Match step=0 behavior
             flip_horizontal=new_flip,
         )
         self._perspective_quad = compute_projected_quad(matrix)
@@ -156,7 +156,11 @@ class CropSessionModel:
         return NormalisedRect(left, top, right, bottom)
 
     def is_crop_inside_quad(self) -> bool:
-        """Check if the crop rectangle is entirely inside the perspective quad."""
+        """Check if the crop rectangle is entirely inside the perspective quad.
+        
+        Quad is in logical space (after perspective/straighten, before rotation).
+        Crop is also in logical space. Direct comparison works.
+        """
         quad = self._perspective_quad or unit_quad()
         return rect_inside_quad(self._current_normalised_rect(), quad)
 

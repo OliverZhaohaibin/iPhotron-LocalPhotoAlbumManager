@@ -197,29 +197,34 @@ void main() {
     uv.y = 1.0 - uv.y;
     vec2 uv_corrected = uv;
 
-    // Apply crop in texture coordinate space
-    // Calculate normalized crop boundaries
+    // Apply perspective correction first
+    vec2 uv_perspective = apply_inverse_perspective(uv_corrected);
+    
+    // Check perspective bounds
+    if (uv_perspective.x < 0.0 || uv_perspective.x > 1.0 ||
+        uv_perspective.y < 0.0 || uv_perspective.y > 1.0) {
+        discard;
+    }
+    
+    // Perform crop test BEFORE rotation
+    // Crop parameters are defined in texture space (original unrotated texture).
+    // We test against uv_perspective (before rotation) because that represents
+    // the texture-space coordinates before the rotation transform.
     float crop_min_x = uCropCX - uCropW * 0.5;
     float crop_max_x = uCropCX + uCropW * 0.5;
     float crop_min_y = uCropCY - uCropH * 0.5;
     float crop_max_y = uCropCY + uCropH * 0.5;
 
-    // Check if current fragment's texture coordinate is outside the crop box
-    if (uv_corrected.x < crop_min_x || uv_corrected.x > crop_max_x ||
-        uv_corrected.y < crop_min_y || uv_corrected.y > crop_max_y) {
-        discard; // Discard fragments outside the crop region
-    }
-
-    vec2 uv_original = apply_inverse_perspective(uv_corrected);
-    if (uv_original.x < 0.0 || uv_original.x > 1.0 ||
-        uv_original.y < 0.0 || uv_original.y > 1.0) {
+    if (uv_perspective.x < crop_min_x || uv_perspective.x > crop_max_x ||
+        uv_perspective.y < crop_min_y || uv_perspective.y > crop_max_y) {
         discard;
     }
     
-    // Apply 90-degree rotation AFTER perspective correction
-    uv_original = apply_rotation_90(uv_original, uRotate90);
+    // Apply rotation to get final texture sampling coordinates
+    vec2 uv_tex = apply_rotation_90(uv_perspective, uRotate90);
 
-    vec4 texel = texture(uTex, uv_original);
+    // Sample the texture at the computed texture-space coordinates
+    vec4 texel = texture(uTex, uv_tex);
     vec3 c = texel.rgb;
 
     float exposure_term    = uExposure   * 1.5;
@@ -237,7 +242,7 @@ void main() {
     c = apply_color_transform(c, uSaturation, uVibrance, uColorCast, uGain);
 
     if (uBWEnabled) {
-        c = apply_bw(c, uv_original);
+        c = apply_bw(c, uv_tex);
     }
     FragColor = vec4(clamp(c, 0.0, 1.0), 1.0);
 }

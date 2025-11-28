@@ -3,6 +3,35 @@ Coordinate transformation utilities for GL image viewer.
 
 This module provides pure mathematical functions for converting between texture-space
 and logical-space coordinates, handling rotation transformations for image display.
+
+## Coordinate System Refactoring
+
+After the coordinate system refactoring, the usage of these functions has changed:
+
+**Texture Space**: The canonical storage format where coordinates remain fixed regardless
+of rotation. Used for persistence (saving/loading from .ipo sidecar files).
+
+**Logical Space**: The user's visual coordinate system after rotation. This is what the
+user sees on screen and interacts with.
+
+### New Usage Pattern:
+
+1. **Shader-side**: The fragment shader now performs coordinate transformations internally.
+   It receives crop parameters in logical space and converts them to texture space for
+   sampling. This eliminates the need for Python to perform complex transformations during
+   rendering.
+
+2. **Python UI Layer**: Crop interaction controllers work entirely in logical space. The
+   boundary checks and user interactions are simplified because they always operate in the
+   coordinate system the user sees.
+
+3. **I/O Persistence**: The transformation functions (texture_crop_to_logical,
+   logical_crop_to_texture) are now primarily used for:
+   - Converting texture coordinates from disk (sidecar files) to logical coordinates for UI
+   - Converting logical coordinates back to texture coordinates when saving
+
+This design keeps the stored data immutable with respect to rotation and prevents
+floating-point error accumulation across repeated rotations.
 """
 
 from __future__ import annotations

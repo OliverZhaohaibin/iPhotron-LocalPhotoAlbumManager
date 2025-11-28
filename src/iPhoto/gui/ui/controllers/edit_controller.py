@@ -824,6 +824,8 @@ class EditController(QObject):
                     "Crop_CY": float(self._session.value("Crop_CY")),
                     "Crop_W": float(self._session.value("Crop_W")),
                     "Crop_H": float(self._session.value("Crop_H")),
+                    "Crop_Rotate90": float(self._session.value("Crop_Rotate90")),
+                    "Crop_FlipH": float(self._session.value("Crop_FlipH")),
                 }
             self._ui.edit_image_viewer.setCropMode(True, crop_values)
         index = 0 if mode == "adjust" else 1

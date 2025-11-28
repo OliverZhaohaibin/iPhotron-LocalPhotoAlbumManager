@@ -532,7 +532,19 @@ class GLImageViewer(QOpenGLWidget):
             self.reset_zoom()
 
     def crop_values(self) -> dict[str, float]:
-        return self._crop_controller.get_crop_values()
+        logical_map = self._crop_controller.get_crop_values()
+        logical_tuple = geometry.normalised_crop_from_mapping(logical_map)
+        rotate_steps = geometry.get_rotate_steps(self._adjustments)
+
+        tex_cx, tex_cy, tex_w, tex_h = geometry.logical_crop_to_texture(
+            logical_tuple, rotate_steps
+        )
+        return {
+            "Crop_CX": tex_cx,
+            "Crop_CY": tex_cy,
+            "Crop_W": tex_w,
+            "Crop_H": tex_h,
+        }
 
     def start_perspective_interaction(self) -> None:
         """Snapshot the crop before a perspective slider drag begins."""
@@ -552,12 +564,14 @@ class GLImageViewer(QOpenGLWidget):
         vertical = float(self._adjustments.get("Perspective_Vertical", 0.0))
         horizontal = float(self._adjustments.get("Perspective_Horizontal", 0.0))
         straighten, rotate_steps, flip = self._rotation_parameters()
+        logical_values = geometry.logical_crop_mapping_from_texture(self._adjustments)
         self._crop_controller.update_perspective(
             vertical,
             horizontal,
             straighten,
             rotate_steps,
             flip,
+            new_crop_values=logical_values,
         )
         self._update_cover_scale(straighten, rotate_steps)
 

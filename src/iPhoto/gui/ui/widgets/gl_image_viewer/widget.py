@@ -552,12 +552,14 @@ class GLImageViewer(QOpenGLWidget):
         vertical = float(self._adjustments.get("Perspective_Vertical", 0.0))
         horizontal = float(self._adjustments.get("Perspective_Horizontal", 0.0))
         straighten, rotate_steps, flip = self._rotation_parameters()
+        logical_values = geometry.logical_crop_mapping_from_texture(self._adjustments)
         self._crop_controller.update_perspective(
             vertical,
             horizontal,
             straighten,
             rotate_steps,
             flip,
+            new_crop_values=logical_values,
         )
         self._update_cover_scale(straighten, rotate_steps)
 

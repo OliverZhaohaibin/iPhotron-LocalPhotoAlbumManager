@@ -18,7 +18,9 @@ from PySide6.QtCore import (
     Qt,
     Signal,
 )
-from PySide6.QtGui import QImage, QPainter, QPixmap
+from PySide6.QtGui import QImage, QPainter, QPixmap, QTransform
+
+import numpy as np
 
 from ....config import THUMBNAIL_SEEK_GUARD_SEC, WORK_DIR_NAME
 from ....utils.pathutils import ensure_work_dir
@@ -27,6 +29,7 @@ from ....core.image_filters import apply_adjustments
 from ....core.color_resolver import compute_color_statistics
 from ....io import sidecar
 from .video_frame_grabber import grab_video_frame
+from . import geo_utils
 
 
 class ThumbnailJob(QRunnable):
@@ -94,7 +97,7 @@ class ThumbnailJob(QRunnable):
         
         # Apply crop before other adjustments and scaling
         if adjustments:
-            image = self._apply_crop(image, adjustments)
+            image = self._apply_geometry_and_crop(image, adjustments)
             if image is None:
                 return None
             image = apply_adjustments(image, adjustments, color_stats=stats)
@@ -109,58 +112,162 @@ class ThumbnailJob(QRunnable):
         )
         if image is None:
             return None
+
+        # Video thumbnails should also respect edits
+        raw_adjustments = sidecar.load_adjustments(self._abs_path)
+        stats = compute_color_statistics(image) if raw_adjustments else None
+        adjustments = sidecar.resolve_render_adjustments(
+            raw_adjustments,
+            color_stats=stats,
+        )
+
+        if adjustments:
+            image = self._apply_geometry_and_crop(image, adjustments)
+            if image is None:
+                return None
+            image = apply_adjustments(image, adjustments, color_stats=stats)
+
         return self._composite_canvas(image)
 
-    def _apply_crop(self, image: QImage, adjustments: Dict[str, float]) -> Optional[QImage]:
-        """Apply crop from adjustments to the image.
+    def _apply_geometry_and_crop(self, image: QImage, adjustments: Dict[str, float]) -> Optional[QImage]:
+        """Apply geometric transformations (rotation, perspective, straighten) and crop.
         
-        Extracts the crop parameters (Crop_CX, Crop_CY, Crop_W, Crop_H) from
-        adjustments and uses QImage.copy to extract the cropped region.
-        
-        Args:
-            image: Source image to crop
-            adjustments: Dictionary containing crop parameters
-            
-        Returns:
-            Cropped QImage or original image if no valid crop data exists
+        This method replicates the visual result of the OpenGL viewer on the CPU.
         """
-        from PySide6.QtCore import QRect
+        rotate_steps = int(adjustments.get("Crop_Rotate90", 0))
+        flip_h = bool(adjustments.get("Crop_FlipH", False))
+        straighten = float(adjustments.get("Crop_Straighten", 0.0))
+        p_vert = float(adjustments.get("Perspective_Vertical", 0.0))
+        p_horz = float(adjustments.get("Perspective_Horizontal", 0.0))
+
+        tex_crop = (
+            float(adjustments.get("Crop_CX", 0.5)),
+            float(adjustments.get("Crop_CY", 0.5)),
+            float(adjustments.get("Crop_W", 1.0)),
+            float(adjustments.get("Crop_H", 1.0))
+        )
         
-        # Get crop parameters with defaults (no crop)
-        crop_cx = adjustments.get("Crop_CX", 0.5)
-        crop_cy = adjustments.get("Crop_CY", 0.5)
-        crop_w = adjustments.get("Crop_W", 1.0)
-        crop_h = adjustments.get("Crop_H", 1.0)
+        # Convert texture space crop to logical space (accounting for 90-degree rotations)
+        log_cx, log_cy, log_w, log_h = geo_utils.texture_crop_to_logical(tex_crop, rotate_steps)
         
-        # Only apply crop if there's actual cropping (width or height < 1.0)
-        if crop_w >= 1.0 and crop_h >= 1.0:
+        w, h = image.width(), image.height()
+
+        # If no significant geometry changes and full crop, return original
+        if (rotate_steps == 0 and not flip_h and abs(straighten) < 1e-5 and
+            abs(p_vert) < 1e-5 and abs(p_horz) < 1e-5 and
+            log_w >= 0.999 and log_h >= 0.999):
             return image
+
+        # Calculate logical aspect ratio for perspective matrix
+        if rotate_steps % 2 == 1:
+            logical_aspect = float(h) / float(w) if w > 0 else 1.0
+        else:
+            logical_aspect = float(w) / float(h) if h > 0 else 1.0
+
+        # Build perspective matrix (Inverse: Projected -> Texture)
+        matrix_inv = geo_utils.build_perspective_matrix(
+            vertical=p_vert,
+            horizontal=p_horz,
+            image_aspect_ratio=logical_aspect,
+            straighten_degrees=straighten,
+            rotate_steps=0, # Rotation handled separately via QTransform
+            flip_horizontal=flip_h
+        )
+
+        # We need the Forward matrix (Texture -> Projected)
+        try:
+            matrix = np.linalg.inv(matrix_inv)
+        except np.linalg.LinAlgError:
+            matrix = np.identity(3)
+
+        # Convert to QTransform
+        # QTransform expects elements in a specific order that corresponds to
+        # the transpose of the standard matrix math convention used by numpy.
+        # h11=m00, h12=m10, h13=m20
+        # h21=m01, h22=m11, h23=m21
+        # h31=m02, h32=m12, h33=m22
+        qt_perspective = QTransform(
+            matrix[0, 0], matrix[1, 0], matrix[2, 0],
+            matrix[0, 1], matrix[1, 1], matrix[2, 1],
+            matrix[0, 2], matrix[1, 2], matrix[2, 2]
+        )
         
-        # Convert normalized coordinates to pixel coordinates
-        img_width = image.width()
-        img_height = image.height()
+        # Construct transformation chain
+        # 1. Normalize Pixels -> [0, 1]
+        t_to_norm = QTransform().scale(1.0 / w, 1.0 / h)
         
-        # Calculate crop rectangle in pixels
-        # Center coordinates are normalized (0-1)
-        # Width and height are normalized (0-1) representing the fraction of the image
-        crop_width_px = int(crop_w * img_width)
-        crop_height_px = int(crop_h * img_height)
+        # 2. Apply 90-degree Rotation Steps around center (0.5, 0.5)
+        # QTransform methods pre-multiply (apply to left), so we build in reverse order of application.
+        # Desired: T(-0.5) * R * T(0.5) (applied to point p: p * T(-0.5) * R * T(0.5))
+        # Construction: T(0.5).rotate().translate(-0.5)
+        t_rot = QTransform()
+        t_rot.translate(0.5, 0.5)
+        t_rot.rotate(rotate_steps * 90)
+        t_rot.translate(-0.5, -0.5)
         
-        # Calculate top-left corner from center position
-        crop_left_px = int((crop_cx * img_width) - (crop_width_px / 2))
-        crop_top_px = int((crop_cy * img_height) - (crop_height_px / 2))
+        # 3. Normalize to [-1, 1] for Perspective Matrix
+        # Desired: p * S(2) * T(-1) = 2p - 1.
+        # QTransform builder applies operations in reverse (First().Second() -> Second * First).
+        # We want S * T matrix. So T().S().
+        t_to_ndc = QTransform().scale(2.0, 2.0).translate(-1.0, -1.0)
         
-        # Clamp to image bounds
-        crop_left_px = max(0, min(crop_left_px, img_width - 1))
-        crop_top_px = max(0, min(crop_top_px, img_height - 1))
-        crop_width_px = max(1, min(crop_width_px, img_width - crop_left_px))
-        crop_height_px = max(1, min(crop_height_px, img_height - crop_top_px))
+        # 4. Denormalize from [-1, 1] to [0, 1]
+        # Desired: p * S(0.5) * T(0.5) = 0.5p + 0.5.
+        # Call Order: T(0.5).S(0.5).
+        t_from_ndc = QTransform().scale(0.5, 0.5).translate(0.5, 0.5)
         
-        # Create crop rectangle and extract the region
-        crop_rect = QRect(crop_left_px, crop_top_px, crop_width_px, crop_height_px)
-        cropped_image = image.copy(crop_rect)
+        # 5. Scale to Logical Pixels
+        log_w_px = h if rotate_steps % 2 else w
+        log_h_px = w if rotate_steps % 2 else h
+        t_to_pixels = QTransform().scale(log_w_px, log_h_px)
+
+        # Compose full transform:
+        # Texture -> Norm -> Rotated -> NDC -> Perspective -> NDC -> Norm -> Pixels
+        #
+        # --- Example: Coordinate Flow ---
+        # Suppose input pixel = (100, 200), image size = (w, h) = (400, 300)
+        # Assume no rotation, no perspective, crop is centered, log_w = log_h = 1, log_cx = log_cy = 0.5
+        # 1. Normalize: (100, 200) / (400, 300) = (0.25, 0.6667)
+        # 2. Rotate: (no-op if rotate_steps == 0)
+        # 3. To NDC: (0.25, 0.6667) * 2 - 1 = (-0.5, 0.3333)
+        # 4. Perspective: (no-op if qt_perspective is identity)
+        # 5. From NDC: ((-0.5, 0.3333) * 0.5) + 0.5 = (0.25, 0.6667)
+        # 6. To Pixels: (0.25, 0.6667) * (400, 300) = (100, 200)
+        # 7. Crop: If crop is centered and full size, crop_x_px = crop_y_px = 0, so no shift.
+        # Final output: (100, 200)
+        #
+        # This example shows that for identity transforms and centered, full-size crop,
+        # the chain maps (100, 200) input pixel to the same output pixel.
+        #
+        transform = t_to_norm * t_rot * t_to_ndc * qt_perspective * t_from_ndc * t_to_pixels
+
+        # Calculate crop rectangle in Logical Pixels
+        crop_x_px = log_cx * log_w_px - (log_w * log_w_px * 0.5)
+        crop_y_px = log_cy * log_h_px - (log_h * log_h_px * 0.5)
+        crop_w_px = log_w * log_w_px
+        crop_h_px = log_h * log_h_px
+
+        # Shift so crop top-left is at (0, 0)
+        t_final = QTransform().translate(-crop_x_px, -crop_y_px) * transform
+
+        # Determine output size
+        out_w = max(1, int(round(crop_w_px)))
+        out_h = max(1, int(round(crop_h_px)))
+
+        # Render
+        result_img = QImage(out_w, out_h, QImage.Format.Format_ARGB32_Premultiplied)
+        result_img.fill(Qt.transparent)
+
+        painter = QPainter(result_img)
+        # Use high quality rendering
+        painter.setRenderHint(QPainter.Antialiasing)
+        painter.setRenderHint(QPainter.SmoothPixmapTransform)
+
+        painter.setTransform(t_final)
+        painter.drawImage(0, 0, image)
+        painter.end()
         
-        return cropped_image if not cropped_image.isNull() else image
+        return result_img
 
     def _seek_targets(self) -> list[Optional[float]]:
         """Return seek offsets for video thumbnails with guard rails."""

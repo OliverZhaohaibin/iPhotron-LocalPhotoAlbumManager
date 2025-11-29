@@ -7,16 +7,110 @@ import sys
 from pathlib import Path
 from typing import Optional
 
-from PySide6.QtCore import QObject, QMimeData, QUrl
-from PySide6.QtGui import QAction, QGuiApplication
+from PySide6.QtCore import QObject, QMimeData, QUrl, QThreadPool, QRunnable, Signal
+from PySide6.QtGui import QAction, QGuiApplication, QImage, QTransform
 from PySide6.QtWidgets import QPushButton
 from PySide6.QtGui import QActionGroup
 
+from ....io import sidecar
+from ....core.filters.facade import apply_adjustments
+from ...utils import image_loader
 from ..media import PlaylistController
 from ..models.asset_model import AssetModel, Roles
 from ..widgets.notification_toast import NotificationToast
 
 from .status_bar_controller import StatusBarController
+
+
+class RenderClipboardSignals(QObject):
+    """Signals emitted by :class:`RenderClipboardWorker`."""
+
+    success = Signal(QImage)
+    """Emitted with the fully rendered image."""
+
+    failed = Signal(str)
+    """Emitted when rendering fails."""
+
+
+class RenderClipboardWorker(QRunnable):
+    """Render the current asset with adjustments for clipboard copy."""
+
+    def __init__(self, path: Path) -> None:
+        super().__init__()
+        self._path = path
+        self.signals = RenderClipboardSignals()
+
+    def run(self) -> None:
+        try:
+            self._do_work()
+        except Exception as exc:
+            self.signals.failed.emit(str(exc))
+
+    def _do_work(self) -> None:
+        # 1. Load adjustments
+        raw_adjustments = sidecar.load_adjustments(self._path)
+        if not raw_adjustments:
+            self.signals.failed.emit("No adjustments found")
+            return
+
+        # 2. Load original image
+        image = image_loader.load_qimage(self._path)
+        if image is None or image.isNull():
+            self.signals.failed.emit("Failed to load image")
+            return
+
+        # 3. Apply Filters (Tone/Color)
+        # We must use resolve_render_adjustments to combine master sliders with
+        # individual deltas into the final shader-friendly values expected by the facade.
+        resolved_adjustments = sidecar.resolve_render_adjustments(raw_adjustments)
+
+        filtered_image = apply_adjustments(image, resolved_adjustments)
+
+        # 4. Apply Geometry (Crop -> Flip -> Rotate)
+        # Crop logic mirrors sidecar._normalised_crop_components
+        cx = self._clamp(float(raw_adjustments.get("Crop_CX", 0.5)))
+        cy = self._clamp(float(raw_adjustments.get("Crop_CY", 0.5)))
+        w = self._clamp(float(raw_adjustments.get("Crop_W", 1.0)))
+        h = self._clamp(float(raw_adjustments.get("Crop_H", 1.0)))
+
+        # Constrain crop to image bounds
+        half_w = w * 0.5
+        half_h = h * 0.5
+        cx = max(half_w, min(1.0 - half_w, cx))
+        cy = max(half_h, min(1.0 - half_h, cy))
+
+        # Calculate pixel rect
+        img_w = filtered_image.width()
+        img_h = filtered_image.height()
+
+        rect_w = int(round(w * img_w))
+        rect_h = int(round(h * img_h))
+        rect_left = int(round((cx - half_w) * img_w))
+        rect_top = int(round((cy - half_h) * img_h))
+
+        # Clamp pixels
+        rect_left = max(0, rect_left)
+        rect_top = max(0, rect_top)
+        rect_w = min(rect_w, img_w - rect_left)
+        rect_h = min(rect_h, img_h - rect_top)
+
+        if rect_w > 0 and rect_h > 0:
+            filtered_image = filtered_image.copy(rect_left, rect_top, rect_w, rect_h)
+
+        # Flip Horizontal
+        if bool(raw_adjustments.get("Crop_FlipH", False)):
+            filtered_image = filtered_image.mirrored(True, False)
+
+        # Rotate 90
+        rotate_steps = int(float(raw_adjustments.get("Crop_Rotate90", 0.0))) % 4
+        if rotate_steps > 0:
+            transform = QTransform().rotate(rotate_steps * 90)
+            filtered_image = filtered_image.transformed(transform)
+
+        self.signals.success.emit(filtered_image)
+
+    def _clamp(self, val: float) -> float:
+        return max(0.0, min(1.0, val))
 
 
 class ShareController(QObject):
@@ -110,9 +204,33 @@ class ShareController(QObject):
             self._status_bar.show_message(f"File not found: {path.name}", 3000)
             return
 
+        # Check for sidecar adjustments
+        sidecar_path = sidecar.sidecar_path_for_asset(path)
+        if sidecar_path.exists():
+            self._copy_rendered_image_to_clipboard(path)
+            return
+
         mime_data = self._build_file_mime_data(path)
         QGuiApplication.clipboard().setMimeData(mime_data)
         self._toast.show_toast("Copied to Clipboard")
+
+    def _copy_rendered_image_to_clipboard(self, path: Path) -> None:
+        self._toast.show_toast("Preparing image...")
+        worker = RenderClipboardWorker(path)
+
+        def _on_success(image: QImage):
+            QGuiApplication.clipboard().setImage(image)
+            self._toast.show_toast("Copied to Clipboard")
+
+        def _on_failure(message: str):
+            # Fallback to file copy if rendering fails
+            mime_data = self._build_file_mime_data(path)
+            QGuiApplication.clipboard().setMimeData(mime_data)
+            self._toast.show_toast("Copied Original File")
+
+        worker.signals.success.connect(_on_success)
+        worker.signals.failed.connect(_on_failure)
+        QThreadPool.globalInstance().start(worker)
 
     def _copy_path_to_clipboard(self, path: Path) -> None:
         QGuiApplication.clipboard().setText(str(path))

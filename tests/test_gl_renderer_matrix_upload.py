@@ -97,9 +97,7 @@ def test_render_upload_matrix_transpose_flag(renderer, mock_gl_funcs):
     for call in calls:
         args, kwargs = call
         location = args[0]
-        # count = args[1]
         transpose = args[2]
-        # value = args[3]
 
         if location == 1:
             found = True

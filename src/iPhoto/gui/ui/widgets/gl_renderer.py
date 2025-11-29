@@ -645,7 +645,7 @@ class GLRenderer:
         self._gl_funcs.glUniformMatrix3fv(
             location,
             1,  # count = 1 matrix
-            0,  # transpose = False
+            1,  # transpose = True (OpenGL expects column-major, numpy is row-major)
             matrix_list  # Python list of floats
         )
 

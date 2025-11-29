@@ -44,6 +44,7 @@ class CropSessionModel:
         self._straighten_degrees: float = 0.0
         self._rotate_steps: int = 0
         self._flip_horizontal: bool = False
+        self._aspect_ratio: float = 0.0
 
     def get_crop_state(self) -> CropBoxState:
         """Return the current crop state object."""
@@ -128,6 +129,7 @@ class CropSessionModel:
             and abs(new_straighten - self._straighten_degrees) <= 1e-6
             and new_rotate == self._rotate_steps
             and new_flip is self._flip_horizontal
+            and abs(aspect_ratio - self._aspect_ratio) <= 1e-6
         ):
             return False
 
@@ -136,6 +138,7 @@ class CropSessionModel:
         self._straighten_degrees = new_straighten
         self._rotate_steps = new_rotate
         self._flip_horizontal = new_flip
+        self._aspect_ratio = aspect_ratio
 
         # Calculate quad WITHOUT rotation, matching step=0's successful logic
         # The quad represents valid region after perspective/straighten only

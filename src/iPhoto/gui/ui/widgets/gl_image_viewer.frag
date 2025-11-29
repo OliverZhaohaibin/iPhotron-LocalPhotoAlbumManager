@@ -197,26 +197,26 @@ void main() {
     uv.y = 1.0 - uv.y;
     vec2 uv_corrected = uv;
 
-    // Apply perspective correction first
-    vec2 uv_perspective = apply_inverse_perspective(uv_corrected);
-    
-    // Check perspective bounds
-    if (uv_perspective.x < 0.0 || uv_perspective.x > 1.0 ||
-        uv_perspective.y < 0.0 || uv_perspective.y > 1.0) {
-        discard;
-    }
-    
-    // Perform crop test BEFORE rotation
-    // Crop parameters are defined in texture space (original unrotated texture).
-    // We test against uv_perspective (before rotation) because that represents
-    // the texture-space coordinates before the rotation transform.
+    // Perform crop test in Logical/Screen space.
+    // The crop box is defined by the user on the screen (post-perspective/straighten),
+    // so we must mask pixels based on their screen position (uv_corrected).
     float crop_min_x = uCropCX - uCropW * 0.5;
     float crop_max_x = uCropCX + uCropW * 0.5;
     float crop_min_y = uCropCY - uCropH * 0.5;
     float crop_max_y = uCropCY + uCropH * 0.5;
 
-    if (uv_perspective.x < crop_min_x || uv_perspective.x > crop_max_x ||
-        uv_perspective.y < crop_min_y || uv_perspective.y > crop_max_y) {
+    if (uv_corrected.x < crop_min_x || uv_corrected.x > crop_max_x ||
+        uv_corrected.y < crop_min_y || uv_corrected.y > crop_max_y) {
+        discard;
+    }
+
+    // Apply perspective correction
+    vec2 uv_perspective = apply_inverse_perspective(uv_corrected);
+
+    // Check perspective bounds (Valid Image Area)
+    // This clips any invalid texture regions (black borders) created by the perspective transform.
+    if (uv_perspective.x < 0.0 || uv_perspective.x > 1.0 ||
+        uv_perspective.y < 0.0 || uv_perspective.y > 1.0) {
         discard;
     }
     

@@ -123,6 +123,7 @@ class CropInteractionController:
         straighten: float = 0.0,
         rotate_steps: int = 0,
         flip_horizontal: bool = False,
+        new_crop_values: Mapping[str, float] | None = None,
     ) -> None:
         """Refresh the cached perspective quad and enforce crop constraints."""
         tex_w, tex_h = self._texture_size_provider()
@@ -130,10 +131,26 @@ class CropInteractionController:
         if tex_w > 0 and tex_h > 0:
             aspect_ratio = float(tex_w) / float(tex_h)
 
+        # Detect rotation changes to coordinate crop updates
+        old_rotate_steps = self._model._rotate_steps
+        rotation_changed = old_rotate_steps != rotate_steps
+
         # Track perspective quad changes separately from crop changes
         quad_changed = self._model.update_perspective(
             vertical, horizontal, straighten, rotate_steps, flip_horizontal, aspect_ratio
         )
+
+        # If rotation changed, we must update the crop to the new logical coordinates
+        # BEFORE validation. This prevents the validation logic from checking the old
+        # (invalid) crop coordinates against the new (rotated) perspective quad.
+        # We also sync when inactive to ensure the model doesn't drift from external state
+        # (e.g. during undo/redo or session updates while not dragging).
+        should_sync = rotation_changed or (not self.is_active())
+        if should_sync and new_crop_values is not None:
+            self._apply_crop_values(new_crop_values)
+            self._on_request_update()
+            return
+
         if not quad_changed:
             return
 

@@ -142,11 +142,19 @@ class MainWindow(QMainWindow):
         self.controller.open_album_from_path(path)
 
     def current_selection(self) -> list[Path]:
-        """Return absolute paths for every asset selected in the filmstrip."""
+        """Return absolute paths for every asset selected in the active view."""
 
-        if self.ui.filmstrip_view.selectionModel() is None:
-            return []
+        # Priority 1: Grid View (Gallery)
+        if self.ui.grid_view.selectionModel() is not None:
+            grid_indexes = self.ui.grid_view.selectionModel().selectedIndexes()
+            if grid_indexes:
+                return self.controller.paths_from_indexes(grid_indexes)
 
-        indexes = self.ui.filmstrip_view.selectionModel().selectedIndexes()
-        return self.controller.paths_from_indexes(indexes)
+        # Priority 2: Filmstrip View
+        if self.ui.filmstrip_view.selectionModel() is not None:
+            indexes = self.ui.filmstrip_view.selectionModel().selectedIndexes()
+            if indexes:
+                return self.controller.paths_from_indexes(indexes)
+
+        return []
 

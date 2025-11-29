@@ -11,6 +11,7 @@ from PySide6.QtCore import QFileSystemWatcher, QObject, QTimer, Signal
 
 from ..config import (
     ALBUM_MANIFEST_NAMES,
+    EXPORT_DIR_NAME,
     RECENTLY_DELETED_DIR_NAME,
     WORK_DIR_NAME,
 )
@@ -400,6 +401,8 @@ class LibraryManager(QObject):
                 # The trash folder should stay hidden from the regular album list
                 # so that it only appears through the dedicated "Recently Deleted"
                 # entry in the sidebar.
+                continue
+            if entry.name == EXPORT_DIR_NAME:
                 continue
             yield entry
 

@@ -9,7 +9,7 @@ from typing import Mapping, Optional
 from PySide6.QtCore import QObject
 from PySide6.QtWidgets import QWidget
 
-from ...utils import image_loader
+from ....utils import image_loader
 from ..ui_main_window import Ui_MainWindow
 from .edit_preview_manager import EditPreviewManager
 

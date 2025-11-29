@@ -11,7 +11,7 @@ from PySide6.QtGui import QImage
 from ....config import THUMBNAIL_SEEK_GUARD_SEC
 from ....errors import ExternalToolError
 from ....utils.ffmpeg import extract_video_frame
-from ...utils import image_loader
+from ....utils import image_loader
 
 
 def grab_video_frame(

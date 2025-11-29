@@ -9,6 +9,7 @@ from PySide6.QtCore import QObject
 from ..widgets import NotificationToast
 from .context_menu_controller import ContextMenuController
 from .drag_drop_controller import DragDropController
+from .export_controller import ExportController
 from .playback_controller import PlaybackController
 from .playback_state_manager import PlaybackStateManager
 from .preference_controller import PreferenceController
@@ -109,6 +110,21 @@ class InteractionManager(QObject):
         )
         self._share.restore_preference()
 
+        self._export = ExportController(
+            settings=context.settings,
+            library=context.library,
+            status_bar=status_bar,
+            toast=self._notification_toast,
+            export_all_action=ui.main_header.export_all_edited_action,
+            export_selected_action=ui.main_header.export_selected_action,
+            destination_group=ui.main_header.export_destination_group,
+            destination_library=ui.main_header.export_destination_library,
+            destination_ask=ui.main_header.export_destination_ask,
+            main_window=window,
+            selection_callback=window.current_selection,
+            parent=window,
+        )
+
         self._context_menu = ContextMenuController(
             grid_view=ui.grid_view,
             asset_model=data_manager.asset_model(),
@@ -154,6 +170,9 @@ class InteractionManager(QObject):
 
     def share(self) -> ShareController:
         return self._share
+
+    def export_controller(self) -> ExportController:
+        return self._export
 
     def context_menu(self) -> ContextMenuController:
         return self._context_menu

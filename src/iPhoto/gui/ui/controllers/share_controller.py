@@ -14,7 +14,7 @@ from PySide6.QtGui import QActionGroup
 
 from ....io import sidecar
 from ....core.filters.facade import apply_adjustments
-from ...utils import image_loader
+from ....utils import image_loader
 from ..media import PlaylistController
 from ..models.asset_model import AssetModel, Roles
 from ..widgets.notification_toast import NotificationToast

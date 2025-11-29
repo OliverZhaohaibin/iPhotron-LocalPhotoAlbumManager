@@ -7,7 +7,7 @@ from pathlib import Path
 from PySide6.QtCore import QObject, QRunnable, Signal
 from PySide6.QtGui import QImage
 
-from ...utils import image_loader
+from ....utils import image_loader
 
 
 class ImageLoadWorkerSignals(QObject):

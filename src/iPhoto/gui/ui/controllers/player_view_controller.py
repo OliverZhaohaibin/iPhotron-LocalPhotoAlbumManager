@@ -9,7 +9,7 @@ from PySide6.QtCore import QObject, QRunnable, QThreadPool, Signal
 from PySide6.QtGui import QImage, QPixmap
 from PySide6.QtWidgets import QStackedWidget, QWidget
 
-from ...utils import image_loader
+from ....utils import image_loader
 from ....core.color_resolver import compute_color_statistics
 from ....io import sidecar
 from ..widgets.gl_image_viewer import GLImageViewer

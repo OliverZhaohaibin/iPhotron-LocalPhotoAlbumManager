@@ -10,7 +10,7 @@ import logging
 from PySide6.QtCore import QSize, Qt
 from PySide6.QtGui import QImage, QImageReader, QPixmap
 
-from ...utils.deps import load_pillow
+from .deps import load_pillow
 
 _PILLOW = load_pillow()
 if _PILLOW is not None:  # pragma: no branch - import guard

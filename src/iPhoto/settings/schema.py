@@ -30,6 +30,10 @@ SETTINGS_SCHEMA: dict[str, Any] = {
                     "type": "string",
                     "enum": ["copy_file", "copy_path", "reveal_file"],
                 },
+                "export_destination": {
+                    "type": "string",
+                    "enum": ["library", "ask"],
+                },
                 "show_filmstrip": {"type": "boolean"},
                 "wheel_action": {
                     "type": "string",
@@ -55,6 +59,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         "volume": 75,
         "is_muted": False,
         "share_action": "reveal_file",
+        "export_destination": "library",
         "show_filmstrip": True,
         "wheel_action": "navigate",
     },

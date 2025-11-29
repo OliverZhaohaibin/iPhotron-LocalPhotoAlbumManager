@@ -143,7 +143,7 @@ def test_copy_file_with_sidecar_success(controller_factory, mocker, tmp_path, qa
 
     # Instead of patching class, let's patch _do_work or dependencies to make it succeed.
     mocker.patch("iPhotos.src.iPhoto.io.sidecar.load_adjustments", return_value={"Crop_W": 1.0})
-    mocker.patch("iPhotos.src.iPhoto.gui.utils.image_loader.load_qimage", return_value=QImage(100, 100, QImage.Format_ARGB32))
+    mocker.patch("iPhotos.src.iPhoto.utils.image_loader.load_qimage", return_value=QImage(100, 100, QImage.Format_ARGB32))
     mocker.patch("iPhotos.src.iPhoto.io.sidecar.resolve_render_adjustments", return_value={})
     mocker.patch("iPhotos.src.iPhoto.gui.ui.controllers.share_controller.apply_adjustments", return_value=QImage(100, 100, QImage.Format_ARGB32))
 
@@ -199,7 +199,7 @@ def test_worker_logic(mocker, tmp_path):
     original_image = QImage(100, 100, QImage.Format.Format_ARGB32)
     original_image.fill(0xFF000000) # Black
 
-    mocker.patch("iPhotos.src.iPhoto.gui.utils.image_loader.load_qimage", return_value=original_image)
+    mocker.patch("iPhotos.src.iPhoto.utils.image_loader.load_qimage", return_value=original_image)
     mocker.patch("iPhotos.src.iPhoto.io.sidecar.resolve_render_adjustments", return_value={})
     mocker.patch("iPhotos.src.iPhoto.gui.ui.controllers.share_controller.apply_adjustments", side_effect=lambda img, adj: img)
 

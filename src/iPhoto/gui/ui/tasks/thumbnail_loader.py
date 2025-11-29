@@ -24,7 +24,7 @@ import numpy as np
 
 from ....config import THUMBNAIL_SEEK_GUARD_SEC, WORK_DIR_NAME
 from ....utils.pathutils import ensure_work_dir
-from ...utils import image_loader
+from ....utils import image_loader
 from ....core.image_filters import apply_adjustments
 from ....core.color_resolver import compute_color_statistics
 from ....io import sidecar

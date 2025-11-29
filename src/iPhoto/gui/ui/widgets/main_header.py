@@ -113,6 +113,16 @@ class MainHeaderWidget(QWidget):
         self.wheel_action_group.addAction(self.wheel_action_zoom)
         self.wheel_action_navigate.setChecked(True)
 
+        self.export_all_edited_action = QAction("Export All Edited", main_window)
+        self.export_selected_action = QAction("Export Selected", main_window)
+
+        self.export_destination_group = QActionGroup(main_window)
+        self.export_destination_library = QAction("Basic Library", main_window, checkable=True)
+        self.export_destination_ask = QAction("Ask Every Time", main_window, checkable=True)
+        self.export_destination_group.addAction(self.export_destination_library)
+        self.export_destination_group.addAction(self.export_destination_ask)
+        self.export_destination_library.setChecked(True)
+
     def _populate_menus(self) -> None:
         """Populate the menu bar and wire shared actions to widgets."""
 
@@ -121,6 +131,9 @@ class MainHeaderWidget(QWidget):
             self.open_album_action,
             None,
             self.bind_library_action,
+            None,
+            self.export_all_edited_action,
+            self.export_selected_action,
             None,
             self.rebuild_links_action,
         ):
@@ -136,6 +149,10 @@ class MainHeaderWidget(QWidget):
         settings_menu.addSeparator()
         settings_menu.addAction(self.toggle_filmstrip_action)
         settings_menu.addSeparator()
+
+        export_menu = settings_menu.addMenu("Export Destination")
+        export_menu.addAction(self.export_destination_library)
+        export_menu.addAction(self.export_destination_ask)
 
         wheel_menu = settings_menu.addMenu("Wheel Action")
         wheel_menu.addAction(self.wheel_action_navigate)

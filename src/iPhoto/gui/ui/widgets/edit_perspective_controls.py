@@ -249,7 +249,7 @@ class _FlipToggleRow(QWidget):
         self._label_button.setDown(checked)
 
     def _toggle(self) -> None:
-        # 切换按钮状态并发射信号，与图标按钮保持一致
+        # Toggle button state and emit signal to stay consistent with icon button
         new_state = not self._button.isChecked()
         self._button.setChecked(new_state)
         self.interactionStarted.emit()

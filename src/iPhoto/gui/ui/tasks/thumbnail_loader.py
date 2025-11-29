@@ -214,7 +214,7 @@ class ThumbnailJob(QRunnable):
         # 4. Denormalize from [-1, 1] to [0, 1]
         # Desired: p * S(0.5) * T(0.5) = 0.5p + 0.5.
         # Call Order: T(0.5).S(0.5).
-        t_from_ndc = QTransform().translate(0.5, 0.5).scale(0.5, 0.5)
+        t_from_ndc = QTransform().scale(0.5, 0.5).translate(0.5, 0.5)
         
         # 5. Scale to Logical Pixels
         log_w_px = h if rotate_steps % 2 else w

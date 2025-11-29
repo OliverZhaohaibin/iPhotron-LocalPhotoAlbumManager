@@ -629,6 +629,74 @@ class FramelessWindowManager(QObject):
             "}"
         )
 
+        scrollbar_track_color = QColor(text_color)
+        scrollbar_track_color.setAlpha(50)
+        scrollbar_handle_color = QColor(text_color)
+        scrollbar_handle_color.setAlpha(160)
+        scrollbar_handle_hover_color = QColor(text_color)
+        scrollbar_handle_hover_color.setAlpha(200)
+
+        scrollbar_track_hex = scrollbar_track_color.name(QColor.NameFormat.HexArgb)
+        scrollbar_handle_hex = scrollbar_handle_color.name(QColor.NameFormat.HexArgb)
+        scrollbar_handle_hover_hex = scrollbar_handle_hover_color.name(
+            QColor.NameFormat.HexArgb
+        )
+
+        scrollbar_style = (
+            f"QScrollBar:vertical {{\n"
+            f"    background-color: {scrollbar_track_hex};\n"
+            "    width: 14px;\n"
+            "    margin: 0px;\n"
+            "    border: none;\n"
+            "    border-radius: 4px;\n"
+            "}\n"
+            f"QScrollBar::handle:vertical {{\n"
+            f"    background-color: {scrollbar_handle_hex};\n"
+            "    min-height: 20px;\n"
+            "    border-radius: 4px;\n"
+            "    margin: 3px;\n"
+            "}\n"
+            f"QScrollBar::handle:vertical:hover {{\n"
+            f"    background-color: {scrollbar_handle_hover_hex};\n"
+            "}\n"
+            "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {\n"
+            "    height: 0px;\n"
+            "    subcontrol-position: bottom;\n"
+            "    subcontrol-origin: margin;\n"
+            "}\n"
+            "QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {\n"
+            "    background: none;\n"
+            "    border: none;\n"
+            "}\n"
+            f"QScrollBar:horizontal {{\n"
+            f"    background-color: {scrollbar_track_hex};\n"
+            "    height: 14px;\n"
+            "    margin: 0px;\n"
+            "    border: none;\n"
+            "    border-radius: 4px;\n"
+            "}\n"
+            f"QScrollBar::handle:horizontal {{\n"
+            f"    background-color: {scrollbar_handle_hex};\n"
+            "    min-width: 20px;\n"
+            "    border-radius: 4px;\n"
+            "    margin: 3px;\n"
+            "}\n"
+            f"QScrollBar::handle:horizontal:hover {{\n"
+            f"    background-color: {scrollbar_handle_hover_hex};\n"
+            "}\n"
+            "QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {\n"
+            "    width: 0px;\n"
+            "    subcontrol-position: right;\n"
+            "    subcontrol-origin: margin;\n"
+            "}\n"
+            "QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {\n"
+            "    background: none;\n"
+            "    border: none;\n"
+            "}"
+        )
+
+        qmenu_style = qmenu_style + "\n" + scrollbar_style
+
         menubar_style = (
             "QMenuBar {\n"
             f"    background-color: {window_color_name};\n"

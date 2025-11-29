@@ -10,7 +10,7 @@ def scan_test_dir(tmp_path):
     files = [
         "image.heif",
         "IMAGE.HEIF",
-        "image.heic", # Should already work if uppercase HEIC is in DEFAULT_INCLUDE (on case-insensitive FS) or if lowercase is added
+        "image.heic",
         "IMAGE.HEIC",
         "image.jpg",
         "IMAGE.JPG",

@@ -25,6 +25,8 @@ from ..delegates.album_sidebar_delegate import (
 from ..menus.album_sidebar_menu import show_context_menu
 from ..palette import (
     SIDEBAR_BACKGROUND_COLOR,
+    SIDEBAR_SELECTED_BACKGROUND,
+    SIDEBAR_ICON_COLOR,
     SIDEBAR_ICON_SIZE,
     SIDEBAR_INDENT_PER_LEVEL,
     SIDEBAR_INDICATOR_HOTZONE_MARGIN,
@@ -219,8 +221,9 @@ class AlbumSidebar(QWidget):
         tree_palette = self._tree.palette()
         tree_palette.setColor(QPalette.ColorRole.Base, SIDEBAR_BACKGROUND_COLOR)
         tree_palette.setColor(QPalette.ColorRole.Window, SIDEBAR_BACKGROUND_COLOR)
-        tree_palette.setColor(QPalette.ColorRole.Highlight, Qt.GlobalColor.transparent)
+        tree_palette.setColor(QPalette.ColorRole.Highlight, SIDEBAR_SELECTED_BACKGROUND)
         tree_palette.setColor(QPalette.ColorRole.HighlightedText, SIDEBAR_TEXT_COLOR)
+        tree_palette.setColor(QPalette.ColorRole.Link, SIDEBAR_ICON_COLOR)
         self._tree.setPalette(tree_palette)
         self._tree.setAutoFillBackground(True)
         self._tree.setStyleSheet(SIDEBAR_TREE_STYLESHEET)

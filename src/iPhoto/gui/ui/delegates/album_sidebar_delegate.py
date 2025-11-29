@@ -319,6 +319,8 @@ class AlbumSidebarDelegate(QStyledItemDelegate):
             highlight = highlight.lighter(115)
 
         if state.is_selected:
+            if highlight.alpha() < 255:
+                return highlight
             colour = self._soften_colour(highlight, base_colour, 0.8)
             minimum_alpha = int(0.65 * 255)
             alpha = colour.alpha() if colour.alpha() > 0 else minimum_alpha
@@ -326,6 +328,10 @@ class AlbumSidebarDelegate(QStyledItemDelegate):
             return colour
 
         if state.is_hover and state.is_enabled:
+            if highlight.alpha() < 255:
+                hover_colour = QColor(highlight)
+                hover_colour.setAlpha(int(highlight.alpha() * 0.5))
+                return hover_colour
             colour = self._soften_colour(highlight, base_colour, 0.6)
             minimum_alpha = int(0.35 * 255)
             base_alpha = colour.alpha() if colour.alpha() > 0 else minimum_alpha

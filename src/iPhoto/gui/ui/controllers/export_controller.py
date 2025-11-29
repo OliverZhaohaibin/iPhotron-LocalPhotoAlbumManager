@@ -210,7 +210,7 @@ class ExportController(QObject):
         worker = LibraryExportWorker(self._library, export_root)
         self._start_worker(worker)
 
-    def _start_worker(self, worker: QRunnable | LibraryExportWorker | ExportWorker) -> None:
+    def _start_worker(self, worker: QRunnable) -> None:
         worker.signals.progress.connect(self._on_progress)
         worker.signals.finished.connect(self._on_finished)
         worker.signals.message.connect(self._status_bar.show_message)

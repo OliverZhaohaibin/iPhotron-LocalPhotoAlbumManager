@@ -11,8 +11,8 @@ def modern_scrollbar_style(
     track_alpha: int = 30,
     handle_alpha: int = 40,
     handle_hover_alpha: int = 100,
-    radius: int = 7,
-    handle_radius: int = 5,
+    radius: int = 4,
+    handle_radius: int = 3,
     extra_selectors: str = "",
 ) -> str:
     """Generate a CSS string for a modern, transparent scrollbar.
@@ -85,8 +85,9 @@ def modern_scrollbar_style(
 
     handle_css = (
         f"    background-color: {handle_hex};\n"
+        "    border: none;\n"
         f"    border-radius: {handle_radius}px;\n"
-        "    margin: 2px;\n"
+        "    margin: 1px;\n"
     )
 
     handle_hover_css = (
@@ -116,10 +117,10 @@ def modern_scrollbar_style(
         f"{base_css}"
         "}\n"
         f"QScrollBar:vertical {extra_selectors} {{\n"
-        "    width: 14px;\n"
+        "    width: 7px;\n"
         "}\n"
         f"QScrollBar:horizontal {extra_selectors} {{\n"
-        "    height: 14px;\n"
+        "    height: 7px;\n"
         "}\n"
         f"QScrollBar::handle:vertical, QScrollBar::handle:horizontal {{\n"
         f"{handle_css}"

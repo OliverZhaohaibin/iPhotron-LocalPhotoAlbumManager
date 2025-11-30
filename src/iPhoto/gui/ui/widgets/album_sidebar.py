@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import QModelIndex, QPoint, QRect, QSize, Qt, Signal
+from PySide6.QtCore import QEvent, QModelIndex, QPoint, QRect, QSize, Qt, Signal
 from PySide6.QtGui import QCursor, QDragEnterEvent, QDragMoveEvent, QDropEvent, QFont, QPalette
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -23,6 +23,7 @@ from ..delegates.album_sidebar_delegate import (
     BranchIndicatorController,
 )
 from ..menus.album_sidebar_menu import show_context_menu
+from ..styles import modern_scrollbar_style
 from ..palette import (
     SIDEBAR_BACKGROUND_COLOR,
     SIDEBAR_SELECTED_BACKGROUND,
@@ -155,6 +156,7 @@ class AlbumSidebar(QWidget):
 
     def __init__(self, library: LibraryManager, parent: QWidget | None = None) -> None:
         super().__init__(parent)
+        self._updating_style = False
         self._library = library
         self._model = AlbumTreeModel(library, self)
         self._pending_selection: Path | None = None
@@ -226,7 +228,8 @@ class AlbumSidebar(QWidget):
         tree_palette.setColor(QPalette.ColorRole.Link, SIDEBAR_ICON_COLOR)
         self._tree.setPalette(tree_palette)
         self._tree.setAutoFillBackground(True)
-        self._tree.setStyleSheet(SIDEBAR_TREE_STYLESHEET)
+
+        self._apply_scrollbar_style()
 
         # Track the minimum width that should apply when the user resizes the splitter manually.
         # The sidebar should never collapse completely in that situation, so we keep a computed
@@ -253,6 +256,31 @@ class AlbumSidebar(QWidget):
         self._tree.filesDropped.connect(self._on_files_dropped)
         self._expand_defaults()
         self._update_title()
+
+    def changeEvent(self, event: QEvent) -> None:
+        if event.type() == QEvent.Type.PaletteChange:
+            if not self._updating_style:
+                self._apply_scrollbar_style()
+        super().changeEvent(event)
+
+    def _apply_scrollbar_style(self) -> None:
+        if not hasattr(self, "_tree"):
+            return
+
+        # Explicitly use the sidebar's dark text color to ensure contrast against the
+        # fixed light background, regardless of the active application theme.
+        scrollbar_style = modern_scrollbar_style(SIDEBAR_TEXT_COLOR)
+
+        full_style = SIDEBAR_TREE_STYLESHEET + "\n" + scrollbar_style
+
+        if self._tree.styleSheet() == full_style:
+            return
+
+        self._updating_style = True
+        try:
+            self._tree.setStyleSheet(full_style)
+        finally:
+            self._updating_style = False
 
     # ------------------------------------------------------------------
     # Animation helpers

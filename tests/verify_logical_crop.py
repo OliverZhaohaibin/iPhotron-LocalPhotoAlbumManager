@@ -1,7 +1,7 @@
 
 import pytest
 
-# Simulation of Shader Functions (Same as before)
+# Simulation of Shader Functions
 def check_crop(uv, crop_cx, crop_cy, crop_w, crop_h):
     min_x = crop_cx - crop_w * 0.5
     max_x = crop_cx + crop_w * 0.5

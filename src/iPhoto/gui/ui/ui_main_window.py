@@ -121,6 +121,7 @@ class Ui_MainWindow(object):
         self.info_button = self.detail_page.info_button
         self.share_button = self.detail_page.share_button
         self.favorite_button = self.detail_page.favorite_button
+        self.rotate_left_button = self.detail_page.rotate_left_button
         self.edit_button = self.detail_page.edit_button
         self.zoom_widget = self.detail_page.zoom_widget
         self.zoom_slider = self.detail_page.zoom_slider

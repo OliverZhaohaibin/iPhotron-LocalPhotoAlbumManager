@@ -19,7 +19,7 @@ from PySide6.QtWidgets import (
 )
 
 from ..icon import load_icon
-from ..palette import viewer_surface_color
+from ..palette import SIDEBAR_TEXT_COLOR, viewer_surface_color
 from .edit_sidebar import EditSidebar
 from .edit_topbar import SegmentedTopBar
 from .filmstrip_view import FilmstripView
@@ -82,7 +82,8 @@ class DetailPageWidget(QWidget):
         self.share_button = QToolButton(self)
         self.favorite_button = QToolButton(self)
         self.favorite_button.setEnabled(False)
-        self.edit_button = QToolButton(self)
+        self.rotate_left_button = QToolButton(self)
+        self.edit_button = QPushButton("Edit", self)
         self.edit_button.setEnabled(False)
 
         self.zoom_widget = QWidget(self)
@@ -208,10 +209,47 @@ class DetailPageWidget(QWidget):
             (self.info_button, "info.circle.svg", "Info"),
             (self.share_button, "square.and.arrow.up.svg", "Share"),
             (self.favorite_button, "suit.heart.svg", "Add to Favorites"),
-            (self.edit_button, "slider.horizontal.3.svg", "Edit"),
         ):
             self._configure_header_button(button, icon_name, tooltip)
             actions_layout.addWidget(button)
+
+        self.rotate_left_button.setIcon(load_icon("rotate.left.svg", color=(0, 0, 0)))
+        self.rotate_left_button.setIconSize(HEADER_ICON_GLYPH_SIZE)
+        self.rotate_left_button.setFixedSize(HEADER_BUTTON_SIZE)
+        self.rotate_left_button.setAutoRaise(True)
+        self.rotate_left_button.setToolTip("Rotate Left")
+        actions_layout.addWidget(self.rotate_left_button)
+
+        self.edit_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.edit_button.setFixedHeight(30)
+
+        bg_hex = viewer_surface_color(self)
+        border_c = QColor(SIDEBAR_TEXT_COLOR)
+        border_c.setAlpha(30)
+        border_hex = border_c.name(QColor.NameFormat.HexArgb)
+        text_hex = "#000000"
+
+        # Calculate hover/pressed states based on background
+        bg_color = QColor(bg_hex)
+        hover_hex = bg_color.darker(105).name(QColor.NameFormat.HexArgb)
+        pressed_hex = bg_color.darker(110).name(QColor.NameFormat.HexArgb)
+        disabled_text = QColor(0, 0, 0, 90).name(QColor.NameFormat.HexArgb) # Approximate disabled text
+
+        self.edit_button.setStyleSheet(
+            "QPushButton {"
+            f"  background-color: {bg_hex};"
+            f"  border: 1px solid {border_hex};"
+            "  border-radius: 8px;"
+            f"  color: {text_hex};"
+            "  font-weight: 600;"
+            "  padding-left: 20px;"
+            "  padding-right: 20px;"
+            "}"
+            f"QPushButton:hover {{ background-color: {hover_hex}; }}"
+            f"QPushButton:pressed {{ background-color: {pressed_hex}; }}"
+            f"QPushButton:disabled {{ color: {disabled_text}; border-color: {border_hex}; }}"
+        )
+        actions_layout.addWidget(self.edit_button)
 
         self.detail_actions_layout = actions_layout
         self.detail_info_button_index = actions_layout.indexOf(self.info_button)

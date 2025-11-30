@@ -61,6 +61,7 @@ class ViewControllerManager(QObject):
             self._view_controller,
             self._header,
             ui.favorite_button,
+            ui.rotate_left_button,
             ui.edit_button,
             ui.info_button,
             self._info_panel,
@@ -69,6 +70,7 @@ class ViewControllerManager(QObject):
             ui.zoom_in_button,
             ui.zoom_out_button,
             ui.status_bar,
+            navigation,
             window,
         )
         self._edit_controller = EditController(

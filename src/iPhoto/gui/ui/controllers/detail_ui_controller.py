@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Optional
+from typing import Optional, TYPE_CHECKING
 
 from PySide6.QtCore import (
     QModelIndex,
@@ -14,7 +14,7 @@ from PySide6.QtCore import (
     Slot,
 )
 from PySide6.QtGui import QColor, QIcon
-from PySide6.QtWidgets import QSlider, QToolButton, QWidget
+from PySide6.QtWidgets import QPushButton, QSlider, QToolButton, QWidget
 
 ZOOM_SLIDER_DEFAULT = 100
 """Default percentage value used when the zoom slider is reset."""
@@ -29,8 +29,12 @@ from ..widgets.gl_image_viewer import GLImageViewer
 from .header_controller import HeaderController
 from .player_view_controller import PlayerViewController
 from .view_controller import ViewController
+from ....io import sidecar
 from ....io.metadata import read_image_meta
 from ....utils.logging import get_logger
+
+if TYPE_CHECKING:
+    from .navigation_controller import NavigationController
 
 
 _LOGGER = get_logger()
@@ -55,7 +59,8 @@ class DetailUIController(QObject):
         view_controller: ViewController,
         header: HeaderController,
         favorite_button: QToolButton,
-        edit_button: QToolButton,
+        rotate_left_button: QToolButton,
+        edit_button: QPushButton,
         info_button: QToolButton,
         info_panel: InfoPanel,
         zoom_widget: QWidget,
@@ -63,6 +68,7 @@ class DetailUIController(QObject):
         zoom_in_button: QToolButton,
         zoom_out_button: QToolButton,
         status_bar: ChromeStatusBar,
+        navigation_controller: NavigationController | None = None,
         parent: QObject | None = None,
     ) -> None:
         """Store widget references and apply the initial UI baseline."""
@@ -75,6 +81,7 @@ class DetailUIController(QObject):
         self._view_controller = view_controller
         self._header = header
         self._favorite_button = favorite_button
+        self._rotate_left_button = rotate_left_button
         self._edit_button = edit_button
         self._info_button = info_button
         self._info_panel = info_panel
@@ -83,6 +90,7 @@ class DetailUIController(QObject):
         self._zoom_in_button = zoom_in_button
         self._zoom_out_button = zoom_out_button
         self._status_bar = status_bar
+        self._navigation: NavigationController | None = navigation_controller
         self._current_row: int = -1
         self._cached_info: Optional[dict[str, object]] = None
         self._toolbar_icon_tint: str | None = None
@@ -90,6 +98,7 @@ class DetailUIController(QObject):
         self._initialize_static_state()
         self._wire_player_bar_events()
         self.connect_zoom_controls()
+        self._rotate_left_button.clicked.connect(self._handle_rotate_left_clicked)
         self._info_button.clicked.connect(self._handle_info_button_clicked)
         self._view_controller.galleryViewShown.connect(self._handle_gallery_view_shown)
 
@@ -203,15 +212,18 @@ class DetailUIController(QObject):
 
         if row < 0:
             self._edit_button.setEnabled(False)
+            self._rotate_left_button.setEnabled(False)
             return
 
         index = self._model.index(row, 0)
         if not index.isValid():
             self._edit_button.setEnabled(False)
+            self._rotate_left_button.setEnabled(False)
             return
 
         is_image = bool(index.data(Roles.IS_IMAGE))
         self._edit_button.setEnabled(is_image)
+        self._rotate_left_button.setEnabled(is_image)
 
     def set_toolbar_icon_tint(self, color: QColor | str | None) -> None:
         """Tint the info and favorite toolbar icons using *color* when provided.
@@ -431,8 +443,8 @@ class DetailUIController(QObject):
         self._favorite_button.setIcon(self._load_toolbar_icon("suit.heart.svg"))
         self._favorite_button.setToolTip("Add to Favorites")
         self._edit_button.setEnabled(False)
-        self._edit_button.setIcon(load_icon("slider.horizontal.3.svg"))
         self._edit_button.setToolTip("Edit adjustments")
+        self._rotate_left_button.setEnabled(False)
         self._info_button.setEnabled(False)
         self._info_button.setIcon(self._load_toolbar_icon("info.circle.svg"))
         self.hide_zoom_controls()
@@ -502,6 +514,43 @@ class DetailUIController(QObject):
         self._cached_info = payload
         if self._info_panel.isVisible():
             self._info_panel.set_asset_metadata(self._cached_info)
+
+    def _handle_rotate_left_clicked(self) -> None:
+        """Rotate the current photo 90 degrees counter-clockwise."""
+
+        if self._current_row < 0:
+            return
+        index = self._model.index(self._current_row, 0)
+        if not index.isValid():
+            return
+
+        abs_path = index.data(Roles.ABS)
+        if not isinstance(abs_path, str) or not abs_path:
+            return
+        source = Path(abs_path)
+
+        updates = self._player_view.image_viewer.rotate_image_ccw()
+        try:
+            current_adjustments = sidecar.load_adjustments(source)
+            current_adjustments.update(updates)
+
+            if self._navigation is not None:
+                self._navigation.suppress_tree_refresh_for_edit()
+
+            sidecar.save_adjustments(source, current_adjustments)
+
+            rel = index.data(Roles.REL)
+            if isinstance(rel, str) and rel:
+                source_model = self._model.source_model()
+                if hasattr(source_model, "invalidate_thumbnail"):
+                    # Defer invalidation to avoid jarring visual updates while the
+                    # user is focused on the detail surface.
+                    QTimer.singleShot(
+                        0, lambda: source_model.invalidate_thumbnail(rel)
+                    )
+                self._model.thumbnail_loader().invalidate(rel)
+        except Exception:
+            _LOGGER.exception("Failed to persist rotation for %s", source)
 
     def _handle_info_button_clicked(self) -> None:
         """Show or hide the info panel for the current playlist row."""

@@ -35,7 +35,7 @@ class AssetGridDelegate(QStyledItemDelegate):
         # ``_pano_icon`` is rendered in the lower-right corner when the asset is a panorama.
         self._pano_icon: QIcon = load_icon("pano.svg", color="white")
         self._filmstrip_mode = filmstrip_mode
-        self._base_size = 192
+        self._base_size = 512
         self._filmstrip_height = 120
         self._filmstrip_border_width = 2
         self._selection_mode_active = False

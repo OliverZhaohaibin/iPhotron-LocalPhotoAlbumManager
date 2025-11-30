@@ -48,7 +48,7 @@ def test_thumbnail_loader_cache_naming(tmp_path: Path, qapp: QApplication) -> No
     loader.reset_for_album(tmp_path)
 
     spy = QSignalSpy(loader.ready)
-    pixmap = loader.request("IMG_0001.JPG", image_path, QSize(192, 192), is_image=True)
+    pixmap = loader.request("IMG_0001.JPG", image_path, QSize(512, 512), is_image=True)
     assert pixmap is None
     deadline = time.monotonic() + 4.0
     while time.monotonic() < deadline and spy.count() < 1:
@@ -62,13 +62,13 @@ def test_thumbnail_loader_cache_naming(tmp_path: Path, qapp: QApplication) -> No
     filename = files[0].name
     digest = hashlib.sha1("IMG_0001.JPG".encode("utf-8")).hexdigest()
     assert filename.startswith(f"{digest}_")
-    assert filename.endswith("_192x192.png")
+    assert filename.endswith("_512x512.png")
 
     # Changing the modification time should produce a new cache entry and
     # remove the stale one.
     os.utime(image_path, None)
     spy = QSignalSpy(loader.ready)
-    loader.request("IMG_0001.JPG", image_path, QSize(192, 192), is_image=True)
+    loader.request("IMG_0001.JPG", image_path, QSize(512, 512), is_image=True)
     deadline = time.monotonic() + 4.0
     while time.monotonic() < deadline and spy.count() < 1:
         qapp.processEvents()

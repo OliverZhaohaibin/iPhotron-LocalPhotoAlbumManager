@@ -46,7 +46,7 @@ class AssetListModel(QAbstractListModel):
         super().__init__(parent)
         self._facade = facade
         self._album_root: Optional[Path] = None
-        self._thumb_size = QSize(192, 192)
+        self._thumb_size = QSize(512, 512)
         self._cache_manager = AssetCacheManager(self._thumb_size, self)
         self._cache_manager.thumbnailReady.connect(self._on_thumb_ready)
         self._data_loader = AssetDataLoader(self)

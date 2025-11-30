@@ -15,12 +15,12 @@ class GalleryGridView(AssetGrid):
 
     def __init__(self, parent=None) -> None:  # type: ignore[override]
         super().__init__(parent)
-        icon_size = QSize(192, 192)
+        icon_size = QSize(512, 512)
         self._selection_mode_enabled = False
         self.setSelectionMode(QListView.SelectionMode.SingleSelection)
         self.setViewMode(QListView.ViewMode.IconMode)
         self.setIconSize(icon_size)
-        self.setGridSize(QSize(194, 194))
+        self.setGridSize(QSize(514, 514))
         self.setSpacing(6)
         self.setUniformItemSizes(True)
         self.setResizeMode(QListView.ResizeMode.Adjust)

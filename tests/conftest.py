@@ -17,99 +17,89 @@ if "iPhotos" not in sys.modules:
     pkg.__path__ = [str(ROOT)]  # type: ignore[attr-defined]
     sys.modules["iPhotos"] = pkg
 
-# Mock QtMultimedia to avoid libpulse dependency in headless tests
-if "PySide6.QtMultimedia" not in sys.modules:
-    mock_mm = MagicMock()
-    mock_mm.__spec__ = MagicMock()
-    sys.modules["PySide6.QtMultimedia"] = mock_mm
+# Helper to conditionally mock modules
+def ensure_module(name: str, mock_obj: object = None) -> None:
+    try:
+        __import__(name)
+    except ImportError:
+        if name not in sys.modules:
+            if mock_obj is None:
+                mock_obj = MagicMock()
+                mock_obj.__spec__ = MagicMock()
+            sys.modules[name] = mock_obj
 
-if "PySide6.QtMultimediaWidgets" not in sys.modules:
-    mock_mmw = MagicMock()
-    mock_mmw.__spec__ = MagicMock()
-    sys.modules["PySide6.QtMultimediaWidgets"] = mock_mmw
+# Mock QtMultimedia to avoid libpulse dependency in headless tests
+ensure_module("PySide6.QtMultimedia")
+ensure_module("PySide6.QtMultimediaWidgets")
 
 # Mock QtOpenGLWidgets to avoid display dependency in headless tests
-if "PySide6.QtOpenGLWidgets" not in sys.modules:
-    mock_glw = MagicMock()
-    mock_glw.__spec__ = MagicMock()
-    sys.modules["PySide6.QtOpenGLWidgets"] = mock_glw
+ensure_module("PySide6.QtOpenGLWidgets")
+ensure_module("PySide6.QtOpenGL")
 
-if "PySide6.QtOpenGL" not in sys.modules:
-    mock_qgl = MagicMock()
-    mock_qgl.__spec__ = MagicMock()
-    sys.modules["PySide6.QtOpenGL"] = mock_qgl
+# Core Qt modules - try to import, mock if missing
+ensure_module("PySide6.QtWidgets")
 
-if "PySide6.QtWidgets" not in sys.modules:
-    mock_qt = MagicMock()
-    mock_qt.__spec__ = MagicMock()
-    sys.modules["PySide6.QtWidgets"] = mock_qt
+# PySide6.QtGui needs special handling for mocks if it is missing
+try:
+    import PySide6.QtGui
+except ImportError:
+    if "PySide6.QtGui" not in sys.modules:
+        mock_gui = MagicMock()
+        mock_gui.__spec__ = MagicMock()
 
-if "PySide6.QtGui" not in sys.modules:
-    mock_gui = MagicMock()
-    mock_gui.__spec__ = MagicMock()
+        # Define dummy classes for types used in type hints or Slots
+        class MockQtClass:
+            def __init__(self, *args, **kwargs): pass
+            def __getattr__(self, name): return MagicMock()
 
-    # Define dummy classes for types used in type hints or Slots
-    class MockQtClass:
-        def __init__(self, *args, **kwargs): pass
-        def __getattr__(self, name): return MagicMock()
+        class MockQImage(MockQtClass): pass
+        class MockQColor(MockQtClass): pass
+        class MockQPixmap(MockQtClass): pass
+        class MockQIcon(MockQtClass): pass
+        class MockQPainter(MockQtClass): pass
+        class MockQPen(MockQtClass): pass
+        class MockQBrush(MockQtClass): pass
+        class MockQMouseEvent(MockQtClass): pass
+        class MockQResizeEvent(MockQtClass): pass
+        class MockQPaintEvent(MockQtClass): pass
+        class MockQPalette(MockQtClass):
+            class ColorRole:
+                Window = 1
+                WindowText = 2
+                Base = 3
+                AlternateBase = 4
+                ToolTipBase = 5
+                ToolTipText = 6
+                Text = 7
+                Button = 8
+                ButtonText = 9
+                BrightText = 10
+                Link = 11
+                Highlight = 12
+                HighlightedText = 13
+                Mid = 14
+                Midlight = 15
+                Shadow = 16
+                Dark = 17
 
-    class MockQImage(MockQtClass): pass
-    class MockQColor(MockQtClass): pass
-    class MockQPixmap(MockQtClass): pass
-    class MockQIcon(MockQtClass): pass
-    class MockQPainter(MockQtClass): pass
-    class MockQPen(MockQtClass): pass
-    class MockQBrush(MockQtClass): pass
-    class MockQMouseEvent(MockQtClass): pass
-    class MockQResizeEvent(MockQtClass): pass
-    class MockQPaintEvent(MockQtClass): pass
-    class MockQPalette(MockQtClass):
-        class ColorRole:
-            Window = 1
-            WindowText = 2
-            Base = 3
-            AlternateBase = 4
-            ToolTipBase = 5
-            ToolTipText = 6
-            Text = 7
-            Button = 8
-            ButtonText = 9
-            BrightText = 10
-            Link = 11
-            Highlight = 12
-            HighlightedText = 13
-            Mid = 14
-            Midlight = 15
-            Shadow = 16
-            Dark = 17
+        mock_gui.QImage = MockQImage
+        mock_gui.QColor = MockQColor
+        mock_gui.QPixmap = MockQPixmap
+        mock_gui.QIcon = MockQIcon
+        mock_gui.QPainter = MockQPainter
+        mock_gui.QPen = MockQPen
+        mock_gui.QBrush = MockQBrush
+        mock_gui.QMouseEvent = MockQMouseEvent
+        mock_gui.QResizeEvent = MockQResizeEvent
+        mock_gui.QPaintEvent = MockQPaintEvent
+        mock_gui.QPalette = MockQPalette
 
-    mock_gui.QImage = MockQImage
-    mock_gui.QColor = MockQColor
-    mock_gui.QPixmap = MockQPixmap
-    mock_gui.QIcon = MockQIcon
-    mock_gui.QPainter = MockQPainter
-    mock_gui.QPen = MockQPen
-    mock_gui.QBrush = MockQBrush
-    mock_gui.QMouseEvent = MockQMouseEvent
-    mock_gui.QResizeEvent = MockQResizeEvent
-    mock_gui.QPaintEvent = MockQPaintEvent
-    mock_gui.QPalette = MockQPalette
+        sys.modules["PySide6.QtGui"] = mock_gui
 
-    sys.modules["PySide6.QtGui"] = mock_gui
-
-if "PySide6.QtSvg" not in sys.modules:
-    mock_svg = MagicMock()
-    mock_svg.__spec__ = MagicMock()
-    sys.modules["PySide6.QtSvg"] = mock_svg
-
-if "PySide6.QtTest" not in sys.modules:
-    mock_qttest = MagicMock()
-    mock_qttest.__spec__ = MagicMock()
-    sys.modules["PySide6.QtTest"] = mock_qttest
+ensure_module("PySide6.QtSvg")
+ensure_module("PySide6.QtTest")
 
 # Mock OpenGL to avoid display dependency
-if "OpenGL" not in sys.modules:
-    mock_gl = MagicMock()
-    mock_gl.__spec__ = MagicMock()
-    sys.modules["OpenGL"] = mock_gl
-    sys.modules["OpenGL.GL"] = MagicMock()
+ensure_module("OpenGL")
+if "OpenGL" in sys.modules and isinstance(sys.modules["OpenGL"], MagicMock):
+     sys.modules["OpenGL.GL"] = MagicMock()

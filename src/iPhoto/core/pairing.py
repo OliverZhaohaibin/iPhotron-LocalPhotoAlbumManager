@@ -83,7 +83,8 @@ def pair_live(index_rows: List[Dict[str, object]]) -> List[LiveGroup]:
         cid = photo.get("content_id")
         if not cid or cid not in video_by_cid:
             continue
-        chosen = _select_best_video(video_by_cid[cid])
+        candidates = [v for v in video_by_cid[cid] if v["rel"] not in used_videos]
+        chosen = _select_best_video(candidates)
         if chosen:
             matched[photo["rel"]] = LiveGroup(
                 id=f"live_{hash((photo['rel'], chosen['rel'])) & 0xFFFFFF:x}",
@@ -160,7 +161,10 @@ def _select_best_video(candidates: Iterable[Dict[str, object]]) -> Dict[str, obj
             elif current_score < best_score:
                 continue
         if still_time is not None and best.get("still_image_time") is not None:
-            if still_time < best["still_image_time"]:
+            # Prefer valid non-negative still_image_time,
+            # then prefer smaller values.
+            best_time = best["still_image_time"]
+            if still_time >= 0 and (best_time < 0 or still_time < best_time):
                 best = candidate
     return best
 

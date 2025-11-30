@@ -26,12 +26,10 @@ def test_bw_render_adjustments_range() -> None:
     resolved = resolve_render_adjustments(raw, color_stats=ColorStats())
 
     # BWIntensity: 0.5 -> 0.0
-    # Current BUG: Returns 0.5
     assert resolved["BWIntensity"] == pytest.approx(0.0, abs=1e-6), \
         f"BWIntensity 0.5 should map to 0.0, got {resolved['BWIntensity']}"
 
     # BWNeutrals: -0.5 -> -0.5
-    # Current BUG: Returns 0.25 (normalized)
     assert resolved["BWNeutrals"] == pytest.approx(-0.5, abs=1e-6), \
         f"BWNeutrals -0.5 should remain -0.5, got {resolved['BWNeutrals']}"
 

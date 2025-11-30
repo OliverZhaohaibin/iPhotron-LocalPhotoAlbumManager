@@ -59,7 +59,7 @@ class _SaveRotationWorker(QRunnable):
         self._adjustments = adjustments
         self._signals = signals
 
-    def run(self):
+    def run(self):  # type: ignore[override]
         try:
             sidecar.save_adjustments(self._source, self._adjustments)
             self._signals.finished.emit()

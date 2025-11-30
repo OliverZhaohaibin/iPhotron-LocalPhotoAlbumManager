@@ -80,8 +80,8 @@ class EditBWSection(QWidget):
 
         specs = [
             _SliderSpec("Intensity", "BW_Intensity", 0.0, 1.0, 0.5),
-            _SliderSpec("Neutrals", "BW_Neutrals", 0.0, 1.0, 0.0),
-            _SliderSpec("Tone", "BW_Tone", 0.0, 1.0, 0.0),
+            _SliderSpec("Neutrals", "BW_Neutrals", -1.0, 1.0, 0.0),
+            _SliderSpec("Tone", "BW_Tone", -1.0, 1.0, 0.0),
             _SliderSpec("Grain", "BW_Grain", 0.0, 1.0, 0.0),
         ]
         for spec in specs:

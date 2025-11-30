@@ -367,7 +367,16 @@ def save_adjustments(asset_path: Path, adjustments: Mapping[str, float | bool]) 
     bw_enabled.text = "true" if bw_enabled_value else "false"
 
     for key in BW_KEYS:
-        value = _normalise_bw_value(key, float(adjustments.get(key, BW_DEFAULTS.get(key, 0.0))))
+        # Only normalize Master and Intensity to [0, 1]. Neutrals and Tone use [-1, 1].
+        # Grain uses [0, 1] but doesn't need legacy normalization.
+        raw = float(adjustments.get(key, BW_DEFAULTS.get(key, 0.0)))
+        if key in ("BW_Master", "BW_Intensity"):
+            value = _normalise_bw_value(key, raw)
+        elif key == "BW_Grain":
+            value = max(0.0, min(1.0, raw))
+        else:
+            # Neutrals and Tone: clamp to [-1, 1] for safety but don't normalize to [0, 1]
+            value = max(-1.0, min(1.0, raw))
         child = ET.SubElement(light, key)
         child.text = f"{value:.2f}"
 
@@ -455,12 +464,22 @@ def resolve_render_adjustments(
 
     bw_enabled = bool(adjustments.get("BW_Enabled", False))
     if bw_enabled:
-        resolved["BWIntensity"] = _normalise_bw_value("BW_Intensity", float(adjustments.get("BW_Intensity", 0.5)))
-        resolved["BWNeutrals"] = _normalise_bw_value("BW_Neutrals", float(adjustments.get("BW_Neutrals", 0.0)))
-        resolved["BWTone"] = _normalise_bw_value("BW_Tone", float(adjustments.get("BW_Tone", 0.0)))
-        resolved["BWGrain"] = _normalise_bw_value("BW_Grain", float(adjustments.get("BW_Grain", 0.0)))
+        # BWIntensity is stored as [0, 1] (0.5 Neutral) but Shader expects [-1, 1] (0.0 Neutral).
+        norm_intensity = _normalise_bw_value("BW_Intensity", float(adjustments.get("BW_Intensity", 0.5)))
+        resolved["BWIntensity"] = norm_intensity * 2.0 - 1.0
+
+        # BWNeutrals/Tone are stored as [-1, 1]. Shader expects [-1, 1].
+        resolved["BWNeutrals"] = float(adjustments.get("BW_Neutrals", 0.0))
+        resolved["BWTone"] = float(adjustments.get("BW_Tone", 0.0))
+
+        # BWGrain is stored as [0, 1]. Shader expects [0, 1].
+        resolved["BWGrain"] = max(0.0, min(1.0, float(adjustments.get("BW_Grain", 0.0))))
     else:
-        resolved["BWIntensity"] = 0.5
+        # Defaults mapped to shader range:
+        # Intensity 0.5 (Neutral) -> 0.0
+        # Neutrals 0.0 (Neutral) -> 0.0
+        # Tone 0.0 (Neutral) -> 0.0
+        resolved["BWIntensity"] = 0.0
         resolved["BWNeutrals"] = 0.0
         resolved["BWTone"] = 0.0
         resolved["BWGrain"] = 0.0

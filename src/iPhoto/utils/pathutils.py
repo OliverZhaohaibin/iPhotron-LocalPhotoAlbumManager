@@ -9,7 +9,7 @@ from typing import Iterable, Iterator
 
 
 def _expand(pattern: str) -> Iterator[str]:
-    match = re.search(r"\{([^}]+)\}", pattern)
+    match = re.search(r"\{([^{}]*,[^{}]*)\}", pattern)
     if not match:
         yield pattern
         return

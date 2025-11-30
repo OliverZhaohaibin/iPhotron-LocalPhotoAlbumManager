@@ -1,5 +1,5 @@
 
-from iPhotos.src.iPhoto.core.pairing import pair_live
+from iPhoto.core.pairing import pair_live
 
 def test_duplicates_pair_one_to_one():
     """
@@ -64,4 +64,37 @@ def test_still_image_time_preference():
     assert len(groups) == 1
     # Before fix, -1 < 0.5, so invalid.mov might be picked (depending on order)
     # We want valid.mov
+    assert groups[0].motion == "valid.mov", f"Expected valid.mov, got {groups[0].motion}"
+
+
+def test_still_image_time_preference_valid_vs_missing():
+    """
+    Verify that a video with a valid still_image_time is preferred
+    over one with missing (None) still_image_time.
+    """
+    cid = "uuid-still-time-missing-test"
+
+    photo = {"rel": "photo.heic", "mime": "image/heic", "content_id": cid}
+
+    v_missing = {
+        "rel": "missing.mov",
+        "mime": "video/quicktime",
+        "content_id": cid,
+        "dur": 3.0,
+        "still_image_time": None
+    }
+
+    v_valid = {
+        "rel": "valid.mov",
+        "mime": "video/quicktime",
+        "content_id": cid,
+        "dur": 3.0,
+        "still_image_time": 0.5
+    }
+
+    index_rows = [photo, v_missing, v_valid]
+
+    groups = pair_live(index_rows)
+
+    assert len(groups) == 1
     assert groups[0].motion == "valid.mov", f"Expected valid.mov, got {groups[0].motion}"

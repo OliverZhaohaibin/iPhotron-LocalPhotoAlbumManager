@@ -160,10 +160,17 @@ def _select_best_video(candidates: Iterable[Dict[str, object]]) -> Dict[str, obj
                 continue
             elif current_score < best_score:
                 continue
-        if still_time is not None and best.get("still_image_time") is not None:
+        # If durations are comparable (handled above), prefer video with valid still_image_time
+        best_time = best.get("still_image_time")
+        if still_time is not None and best_time is None:
+            best = candidate
+            continue
+        elif still_time is None and best_time is not None:
+            continue
+
+        if still_time is not None and best_time is not None:
             # Prefer valid non-negative still_image_time,
             # then prefer smaller values.
-            best_time = best["still_image_time"]
             if still_time >= 0 and (best_time < 0 or still_time < best_time):
                 best = candidate
     return best

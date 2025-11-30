@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, Iterator, List, Optional, Tuple
 
-from ..config import WORK_DIR_NAME
+from ..config import EXPORT_DIR_NAME, WORK_DIR_NAME
 from ..errors import ExternalToolError, IPhotoError
 from ..utils.exiftool import get_metadata_batch
 from ..utils.hashutils import file_xxh3
@@ -38,6 +38,8 @@ def gather_media_paths(
         if not candidate.is_file():
             continue
         if WORK_DIR_NAME in candidate.parts:
+            continue
+        if EXPORT_DIR_NAME in candidate.parts:
             continue
         if is_excluded(candidate, exclude_globs, root=root):
             continue

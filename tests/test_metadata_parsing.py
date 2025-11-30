@@ -8,7 +8,7 @@ def test_coerce_fractional_duplicate_sum():
     value = "1/125s (0.008)"
 
     # Expected: 0.008 (1/125)
-    # Actual (bug): 0.008 + 0.008 = 0.016
+    # Before fix (bug): 0.008 + 0.008 = 0.016
 
     result = _coerce_fractional(value)
     assert result == pytest.approx(0.008, rel=1e-3)

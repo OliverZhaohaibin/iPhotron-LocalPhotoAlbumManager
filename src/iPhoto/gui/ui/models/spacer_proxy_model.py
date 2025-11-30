@@ -62,6 +62,7 @@ class SpacerProxyModel(QAbstractProxyModel):
                 previous.modelReset.disconnect(self._handle_source_reset)
                 previous.rowsInserted.disconnect(self._handle_source_reset)
                 previous.rowsRemoved.disconnect(self._handle_source_reset)
+                previous.dataChanged.disconnect(self._handle_source_data_changed)
             except (RuntimeError, TypeError):  # pragma: no cover - Qt disconnect noise
                 pass
 
@@ -71,6 +72,7 @@ class SpacerProxyModel(QAbstractProxyModel):
             source_model.modelReset.connect(self._handle_source_reset)
             source_model.rowsInserted.connect(self._handle_source_reset)
             source_model.rowsRemoved.connect(self._handle_source_reset)
+            source_model.dataChanged.connect(self._handle_source_data_changed)
 
     def rowCount(self, parent: QModelIndex = QModelIndex()) -> int:  # noqa: N802
         if parent.isValid():
@@ -151,3 +153,25 @@ class SpacerProxyModel(QAbstractProxyModel):
     def _handle_source_reset(self, *args, **_kwargs) -> None:  # pragma: no cover - Qt signal glue
         self.beginResetModel()
         self.endResetModel()
+
+    def _handle_source_data_changed(
+        self,
+        top_left: QModelIndex,
+        bottom_right: QModelIndex,
+        roles: list[int] | None = None,
+    ) -> None:
+        """Forward data changes from the source model to the proxy."""
+
+        if not top_left.isValid() or not bottom_right.isValid():
+            return
+
+        proxy_top_left = self.mapFromSource(top_left)
+        proxy_bottom_right = self.mapFromSource(bottom_right)
+
+        if not proxy_top_left.isValid() or not proxy_bottom_right.isValid():
+            return
+
+        # ``dataChanged`` signal signature requires roles to be a list or empty.
+        # Passing None directly can cause issues with some Qt bindings/versions.
+        safe_roles = roles if roles is not None else []
+        self.dataChanged.emit(proxy_top_left, proxy_bottom_right, safe_roles)

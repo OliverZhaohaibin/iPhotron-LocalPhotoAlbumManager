@@ -59,6 +59,7 @@ class MainController(QObject):
         # edit workflow free to coordinate sidebar suppression before it writes
         # sidecar files on disk.
         self._view_manager.edit_controller().set_navigation_controller(self._navigation)
+        self._view_manager.detail_ui().set_navigation_controller(self._navigation)
         self._interaction = InteractionManager(
             window=window,
             context=context,

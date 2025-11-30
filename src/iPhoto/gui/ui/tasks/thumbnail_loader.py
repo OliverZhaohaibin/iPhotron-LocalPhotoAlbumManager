@@ -567,6 +567,21 @@ class ThumbnailLoader(QObject):
             if queue is not None:
                 queue.pop(key, None)
 
+        if self._album_root is not None:
+            # Aggressively clean up disk cache for this relative path.
+            # This ensures that even if the source file timestamp hasn't changed
+            # (e.g. only the sidecar was edited), we force a regeneration.
+            try:
+                digest = hashlib.sha1(rel.encode("utf-8")).hexdigest()
+                thumbs_dir = self._album_root / WORK_DIR_NAME / "thumbs"
+                if thumbs_dir.exists():
+                    # Filename format: {digest}_{stamp}_{w}x{h}.png
+                    for file_path in thumbs_dir.glob(f"{digest}_*.png"):
+                        self._safe_unlink(file_path)
+            except Exception:
+                # Don't let disk errors crash the UI during invalidation
+                pass
+
     def _queue_video_job(
         self,
         key: Tuple[str, str, int, int, int],

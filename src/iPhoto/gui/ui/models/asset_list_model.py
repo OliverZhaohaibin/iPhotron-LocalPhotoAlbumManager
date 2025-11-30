@@ -304,20 +304,25 @@ class AssetListModel(QAbstractListModel):
     def thumbnail_loader(self) -> ThumbnailLoader:
         return self._cache_manager.thumbnail_loader()
 
-    def invalidate_thumbnail(self, rel: str) -> None:
-        """Remove cached thumbnails and notify views for *rel*."""
+    def invalidate_thumbnail(self, rel: str) -> Optional[QModelIndex]:
+        """Remove cached thumbnails and notify views for *rel*.
+
+        Returns the :class:`QModelIndex` of the invalidated row if it exists
+        in the current model snapshot.
+        """
 
         if not rel:
-            return
+            return None
         self._cache_manager.remove_thumbnail(rel)
         loader = self._cache_manager.thumbnail_loader()
         loader.invalidate(rel)
         row_index = self._state_manager.row_lookup.get(rel)
         rows = self._state_manager.rows
         if row_index is None or not (0 <= row_index < len(rows)):
-            return
+            return None
         model_index = self.index(row_index, 0)
         self.dataChanged.emit(model_index, model_index, [Qt.DecorationRole])
+        return model_index
 
     # ------------------------------------------------------------------
     # Facade callbacks

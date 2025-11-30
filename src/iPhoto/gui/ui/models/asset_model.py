@@ -37,6 +37,22 @@ class AssetModel(AssetFilterProxyModel):
     def thumbnail_loader(self) -> ThumbnailLoader:
         return self._list_model.thumbnail_loader()
 
+    def invalidate_thumbnail(self, rel: str) -> None:
+        """Invalidate the thumbnail for *rel* and force a proxy update."""
+
+        source_index = self._list_model.invalidate_thumbnail(rel)
+        if source_index is not None and source_index.isValid():
+            proxy_index = self.mapFromSource(source_index)
+            if proxy_index.isValid():
+                # Explicitly emit dataChanged on the proxy to ensure views
+                # (especially those like the filmstrip using secondary proxies)
+                # definitely receive the update signal.
+                self.dataChanged.emit(
+                    proxy_index,
+                    proxy_index,
+                    [Qt.DecorationRole],
+                )
+
     # ------------------------------------------------------------------
     # Sorting helpers
     # ------------------------------------------------------------------

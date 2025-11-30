@@ -1,6 +1,5 @@
 """Tests for pathutils."""
 
-import pytest
 from pathlib import Path
 from iPhotos.src.iPhoto.utils.pathutils import _expand, is_excluded
 

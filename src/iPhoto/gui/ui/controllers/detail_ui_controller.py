@@ -536,6 +536,12 @@ class DetailUIController(QObject):
 
             if self._navigation is not None:
                 self._navigation.suspend_library_watcher()
+                self._navigation.suppress_tree_refresh_for_edit()
+                # Ensure the suppression flag is cleared even if the file system
+                # watcher does not trigger a sidebar refresh.
+                QTimer.singleShot(
+                    3000, self._navigation.release_tree_refresh_suppression_if_edit
+                )
 
             sidecar.save_adjustments(source, current_adjustments)
 

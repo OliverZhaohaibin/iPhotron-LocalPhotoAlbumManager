@@ -53,21 +53,23 @@ def texture_crop_to_logical(crop_params, rotate_steps):
 def shader_logic(uv_corrected, logical_crop_params, rotate_steps):
     """
     Simulates the Restored shader logic.
-    1. Checks crop against uv_corrected (Logical Space).
-    2. Applies Inverse Perspective.
-    3. Applies Rotation.
+    1. Applies Inverse Perspective.
+    2. Applies Rotation.
+    3. Checks crop against uv_tex (Texture Space).
     """
     cx, cy, w, h = logical_crop_params
 
-    # 1. Crop Test (Logical Space)
-    if not check_crop(uv_corrected, cx, cy, w, h):
-        return "DISCARD"
-
-    # 2. Inverse Perspective
+    # 1. Inverse Perspective
     uv_perspective = apply_inverse_perspective(uv_corrected)
 
-    # 3. Rotation
+    # 2. Rotation
     uv_tex = apply_rotation_90(uv_perspective, rotate_steps)
+
+    # 3. Crop Test (Texture Space)
+    # Convert logical crop params to texture space for crop test
+    crop_tex_params = texture_crop_to_logical((cx, cy, w, h), (4 - rotate_steps) % 4)
+    if not check_crop(uv_tex, *crop_tex_params):
+        return "DISCARD"
     return uv_tex
 
 def test_texture_space_crop():

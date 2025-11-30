@@ -535,7 +535,7 @@ class DetailUIController(QObject):
             current_adjustments.update(updates)
 
             if self._navigation is not None:
-                self._navigation.suspend_library_watcher()
+                self._navigation.suppress_tree_refresh_for_edit()
 
             sidecar.save_adjustments(source, current_adjustments)
 

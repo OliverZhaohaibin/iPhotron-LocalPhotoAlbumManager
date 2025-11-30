@@ -19,6 +19,7 @@ class GalleryPageWidget(QWidget):
         layout.setSpacing(0)
 
         self.grid_view = GalleryGridView()
+        self.grid_view.setObjectName("galleryGridView")
         layout.addWidget(self.grid_view)
 
 

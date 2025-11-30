@@ -267,8 +267,15 @@ class AlbumSidebar(QWidget):
         if not hasattr(self, "_tree"):
             return
 
-        text_color = self.palette().color(QPalette.ColorRole.WindowText)
-        scrollbar_style = modern_scrollbar_style(text_color)
+        # Explicitly use the sidebar's dark text color to ensure contrast against the
+        # fixed light background, regardless of the active application theme.
+        #
+        # NOTE: track_alpha is increased to 60 to ensure visibility against the light background.
+        # handle_radius is reduced to 2px to ensure the rounded corners render correctly within
+        # the narrow 7px width (5px content area after margins).
+        scrollbar_style = modern_scrollbar_style(
+            SIDEBAR_TEXT_COLOR, track_alpha=60, handle_radius=2
+        )
 
         full_style = SIDEBAR_TREE_STYLESHEET + "\n" + scrollbar_style
 

@@ -85,6 +85,7 @@ def modern_scrollbar_style(
 
     handle_css = (
         f"    background-color: {handle_hex};\n"
+        "    border: none;\n"
         f"    border-radius: {handle_radius}px;\n"
         "    margin: 1px;\n"
     )

@@ -9,6 +9,8 @@ from PySide6.QtCore import (
     QModelIndex,
     QItemSelectionModel,
     QObject,
+    QRunnable,
+    QThreadPool,
     QTimer,
     Signal,
     Slot,
@@ -39,6 +41,31 @@ if TYPE_CHECKING:
 
 _LOGGER = get_logger()
 """Module level logger used for debug and fallback metadata warnings."""
+
+
+class _SaveRotationSignals(QObject):
+    """Signals for the background rotation worker."""
+
+    finished = Signal()
+    error = Signal(str)
+
+
+class _SaveRotationWorker(QRunnable):
+    """Background worker to save rotation adjustments to the sidecar."""
+
+    def __init__(self, source: Path, adjustments: dict, signals: _SaveRotationSignals):
+        super().__init__()
+        self._source = source
+        self._adjustments = adjustments
+        self._signals = signals
+
+    def run(self):
+        try:
+            sidecar.save_adjustments(self._source, self._adjustments)
+            self._signals.finished.emit()
+        except Exception as e:
+            _LOGGER.exception("Failed to persist rotation for %s", self._source)
+            self._signals.error.emit(str(e))
 
 
 class DetailUIController(QObject):
@@ -94,6 +121,7 @@ class DetailUIController(QObject):
         self._current_row: int = -1
         self._cached_info: Optional[dict[str, object]] = None
         self._toolbar_icon_tint: str | None = None
+        self._active_workers = set()
 
         self._initialize_static_state()
         self._wire_player_bar_events()
@@ -411,6 +439,11 @@ class DetailUIController(QObject):
 
         return self._favorite_button
 
+    def set_navigation_controller(self, navigation: NavigationController) -> None:
+        """Inject the navigation controller dependency."""
+
+        self._navigation = navigation
+
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
@@ -536,21 +569,51 @@ class DetailUIController(QObject):
 
             if self._navigation is not None:
                 self._navigation.suspend_library_watcher()
+                self._navigation.suppress_tree_refresh_for_edit()
 
-            sidecar.save_adjustments(source, current_adjustments)
+            # Prepare signals for the worker.  Parenting the signals object to
+            # the controller ensures its lifecycle is managed safely, although
+            # we also delete it explicitly when the worker finishes.
+            signals = _SaveRotationSignals()
 
+            # Capture the relative path and model dependencies for the completion callback.
             rel = index.data(Roles.REL)
-            if isinstance(rel, str) and rel:
-                source_model = self._model.source_model()
-                if hasattr(source_model, "invalidate_thumbnail"):
-                    # Defer invalidation to avoid jarring visual updates while the
-                    # user is focused on the detail surface.
-                    QTimer.singleShot(
-                        0, lambda: source_model.invalidate_thumbnail(rel)
-                    )
-                self._model.thumbnail_loader().invalidate(rel)
+
+            def _on_save_finished() -> None:
+                # Always clear the suppression flag, matching the original logic
+                # that used a 3-second timer.  Here we do it immediately after
+                # the write completes, which is more precise.
+                if self._navigation is not None:
+                    self._navigation.release_tree_refresh_suppression_if_edit()
+
+                # Clean up the signal object
+                signals.deleteLater()
+
+                if isinstance(rel, str) and rel:
+                    # Invalidate the thumbnail only after the write is confirmed.
+                    # This avoids the race condition where the loader might read
+                    # stale data if triggered too early.
+                    source_model = self._model.source_model()
+                    if hasattr(source_model, "invalidate_thumbnail"):
+                        source_model.invalidate_thumbnail(rel)
+                    self._model.thumbnail_loader().invalidate(rel)
+
+            def _on_save_error(msg: str) -> None:
+                if self._navigation is not None:
+                    self._navigation.release_tree_refresh_suppression_if_edit()
+                signals.deleteLater()
+                _LOGGER.error("Background rotation save failed: %s", msg)
+
+            signals.finished.connect(_on_save_finished)
+            signals.error.connect(_on_save_error)
+
+            worker = _SaveRotationWorker(source, current_adjustments, signals)
+            # Use global thread pool but don't track the worker strictly since it's
+            # a fire-and-forget save operation.
+            QThreadPool.globalInstance().start(worker)
+
         except Exception:
-            _LOGGER.exception("Failed to persist rotation for %s", source)
+            _LOGGER.exception("Failed to prepare rotation for %s", source)
 
     def _handle_info_button_clicked(self) -> None:
         """Show or hide the info panel for the current playlist row."""

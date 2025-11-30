@@ -221,6 +221,15 @@ class NavigationController:
             self._dialog.bind_library_dialog()
             return
 
+        is_refresh = bool(
+            self._static_selection
+            and self._static_selection.casefold() == "recently deleted"
+        )
+        self._last_open_was_refresh = is_refresh
+
+        if is_refresh:
+            return
+
         try:
             deleted_root = self._context.library.ensure_deleted_directory()
         except AlbumOperationError as exc:
@@ -228,7 +237,6 @@ class NavigationController:
             return
 
         self._reset_playback_for_gallery_navigation()
-        self._last_open_was_refresh = False
         self._view_controller.restore_default_gallery()
         self._view_controller.show_gallery_view()
         self._asset_model.set_filter_mode(None)
@@ -253,12 +261,24 @@ class NavigationController:
         if root is None:
             self._dialog.bind_library_dialog()
             return
+
+        current_static = self._static_selection
+        is_refresh = bool(current_static and current_static.casefold() == title.casefold())
+        self._last_open_was_refresh = is_refresh
+
+        if is_refresh:
+            return
+
         # ``open_static_collection`` is always a user-driven navigation request
         # (e.g. clicking "All Photos" or "Favorites"), so explicitly mark the
         # transition as a fresh navigation instead of a passive refresh.  This
         # prevents the caller that triggered the static switch from assuming
         # the previous album remained visible.
-        self._last_open_was_refresh = False
+        #
+        # Note: The ``is_refresh`` check above now guards against sidebar
+        # reloads triggered by background workers, which maintains the previous
+        # view state (e.g. keeping the detail pane active) when the user did
+        # not initiate the navigation.
 
         # Reset the detail pane whenever a static collection (All Photos,
         # Favorites, etc.) is opened so the UI consistently shows the grid as

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 from collections import OrderedDict
-from unittest.mock import Mock, MagicMock, patch
+from unittest.mock import Mock, patch
 
 import pytest
 

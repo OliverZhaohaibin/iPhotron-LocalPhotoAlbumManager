@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import QModelIndex, QSize, Qt, Signal
-from PySide6.QtGui import QResizeEvent, QWheelEvent
+from PySide6.QtCore import QEvent, QModelIndex, QSize, Qt, Signal
+from PySide6.QtGui import QPalette, QResizeEvent, QWheelEvent
 from PySide6.QtWidgets import QListView, QSizePolicy, QStyleOptionViewItem
 
 from .asset_grid import AssetGrid
 from ..models.asset_model import Roles
+from ..styles import modern_scrollbar_style
 
 
 class FilmstripView(AssetGrid):
@@ -15,6 +16,11 @@ class FilmstripView(AssetGrid):
 
     nextItemRequested = Signal()
     prevItemRequested = Signal()
+
+    BASE_STYLESHEET = (
+        "QListView { border: none; background-color: transparent; }"
+        "QListView::item { border: none; padding: 0px; margin: 0px; }"
+    )
 
     def __init__(self, parent=None) -> None:  # type: ignore[override]
         super().__init__(parent)
@@ -35,14 +41,35 @@ class FilmstripView(AssetGrid):
         self.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.setWordWrap(False)
-        self.setStyleSheet(
-            "QListView { border: none; background-color: transparent; }"
-            "QListView::item { border: none; padding: 0px; margin: 0px; }"
-        )
+
         strip_height = self._base_height + 12
         self.setMinimumHeight(strip_height)
         self.setMaximumHeight(strip_height)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+
+        self._updating_style = False
+        self._apply_scrollbar_style()
+
+    def changeEvent(self, event: QEvent) -> None:
+        if event.type() == QEvent.Type.PaletteChange:
+            if not self._updating_style:
+                self._apply_scrollbar_style()
+        super().changeEvent(event)
+
+    def _apply_scrollbar_style(self) -> None:
+        text_color = self.palette().color(QPalette.ColorRole.WindowText)
+        style = modern_scrollbar_style(text_color, track_alpha=30)
+
+        full_style = self.BASE_STYLESHEET + style
+
+        if self.styleSheet() == full_style:
+            return
+
+        self._updating_style = True
+        try:
+            self.setStyleSheet(full_style)
+        finally:
+            self._updating_style = False
 
     def setModel(self, model) -> None:  # type: ignore[override]
         super().setModel(model)

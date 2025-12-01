@@ -495,7 +495,12 @@ class GLRenderer:
 
         gf.glEnable(gl.GL_BLEND)
         gf.glBlendFunc(gl.GL_SRC_ALPHA, gl.GL_ONE_MINUS_SRC_ALPHA)
+        # Disable alpha write to prevent the overlay from reducing the framebuffer's alpha,
+        # which can cause the window to become transparent in some compositing managers.
+        gf.glColorMask(True, True, True, False)
+
         if not program.bind():
+            gf.glColorMask(True, True, True, True)
             gf.glDisable(gl.GL_BLEND)
             return
 
@@ -573,6 +578,7 @@ class GLRenderer:
         finally:
             vao.release()
             program.release()
+            gf.glColorMask(True, True, True, True)
             gf.glDisable(gl.GL_BLEND)
 
     # ------------------------------------------------------------------

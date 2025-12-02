@@ -298,7 +298,7 @@ class DashboardThumbnailLoader(QObject):
     """Simplified thumbnail loader for dashboard cards."""
 
     thumbnailReady = Signal(Path, QPixmap)  # album_root, pixmap
-    _delivered = Signal(object, object, str)  # key, image, rel
+    _delivered = Signal(str, QImage, str)  # key, image, rel
 
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)

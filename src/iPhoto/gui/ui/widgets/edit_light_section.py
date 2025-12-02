@@ -307,7 +307,6 @@ class _SliderRow(QFrame):
                 not self.slider.isEnabled()
                 and self.slider.geometry().contains(event.position().toPoint())
             ):
-                
                 self.clickedWhenDisabled.emit()
 
                 slider_event = QMouseEvent(

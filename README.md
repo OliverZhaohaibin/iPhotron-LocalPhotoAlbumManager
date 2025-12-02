@@ -55,7 +55,7 @@ A comprehensive editing suite with **Adjust** and **Crop** modes:
 #### Crop Mode
 - **Perspective Correction:** Vertical and horizontal keystoning adjustments
 - **Straighten Tool:** ±45° rotation with sub-degree precision
-- **Flip & Mirror:** Horizontal flip support
+- **Flip (Horizontal):** Horizontal flip support
 - **Interactive Crop Box:** Drag handles, edge snapping, and aspect ratio constraints
 - **Black Border Prevention:** Automatic validation ensures no black edges appear after perspective transforms
 

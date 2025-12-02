@@ -36,7 +36,7 @@ def _run_command(command: Sequence[str]) -> subprocess.CompletedProcess[bytes]:
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             startupinfo=startupinfo,
-            creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0,
+            creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0) if os.name == 'nt' else 0,
         )
     except FileNotFoundError as exc:  # pragma: no cover - depends on environment
         raise ExternalToolError("ffmpeg executable not found on PATH") from exc

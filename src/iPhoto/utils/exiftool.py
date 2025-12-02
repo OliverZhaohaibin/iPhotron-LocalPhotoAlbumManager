@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -53,6 +54,13 @@ def get_metadata_batch(paths: List[Path]) -> List[Dict[str, Any]]:
     ]
 
     try:
+        # Define startupinfo to hide the window on Windows
+        startupinfo = None
+        if os.name == 'nt':
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            startupinfo.wShowWindow = subprocess.SW_HIDE
+
         # ``encoding`` forces Python to decode the JSON using UTF-8 even on
         # locales that default to a more restrictive codec such as ``cp1252``.
         # ``errors='replace'`` keeps the scan moving if unexpected byte
@@ -63,6 +71,8 @@ def get_metadata_batch(paths: List[Path]) -> List[Dict[str, Any]]:
             check=True,
             encoding="utf-8",
             errors="replace",
+            startupinfo=startupinfo,
+            creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0,
         )
     except FileNotFoundError as exc:
         raise ExternalToolError(

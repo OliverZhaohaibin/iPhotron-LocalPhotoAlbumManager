@@ -22,12 +22,21 @@ _FFMPEG_LOG_LEVEL = "error"
 def _run_command(command: Sequence[str]) -> subprocess.CompletedProcess[bytes]:
     """Execute *command* and return the completed process."""
 
+    # Define startupinfo to hide the window on Windows
+    startupinfo = None
+    if os.name == 'nt':
+        startupinfo = subprocess.STARTUPINFO()
+        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        startupinfo.wShowWindow = subprocess.SW_HIDE
+
     try:
         process = subprocess.run(
             list(command),
             check=False,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
+            startupinfo=startupinfo,
+            creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0,
         )
     except FileNotFoundError as exc:  # pragma: no cover - depends on environment
         raise ExternalToolError("ffmpeg executable not found on PATH") from exc

@@ -85,7 +85,7 @@ class ViewController(QObject):
         if self._view_stack.currentWidget() is not self._albums_dashboard_page:
             self._view_stack.setCurrentWidget(self._albums_dashboard_page)
         self._edit_mode_active = False
-
+        self.galleryViewShown.emit()
     def restore_default_gallery(self) -> None:
         """Reset the gallery view back to the standard grid."""
 

@@ -143,7 +143,11 @@ This section is pure Python logic and **does not depend** on any GUI framework (
 | **`cli.py`** | Typer-based command-line entry point that parses user commands and invokes methods from `app.py`. |
 | **`models/`** | Defines the main data structures such as `Album` (manifest read/write) and `LiveGroup`. |
 | **`io/`** | Handles filesystem interaction, mainly `scanner.py` (file scanning) and `metadata.py` (metadata reading). |
-| **`core/`** | Core algorithmic logic such as `pairing.py` (Live Photo pairing algorithm). |
+| **`core/`** | Core algorithmic logic including `pairing.py` (Live Photo pairing) and image adjustment resolvers. |
+| ├─ **`light_resolver.py`** | Resolves Light master slider to 7 fine-tuning parameters (Brilliance, Exposure, etc.). |
+| ├─ **`color_resolver.py`** | Resolves Color master slider to Saturation/Vibrance/Cast with image statistics. |
+| ├─ **`bw_resolver.py`** | Resolves B&W master slider using 3-anchor Gaussian interpolation. |
+| └─ **`filters/`** | High-performance image processing (NumPy vectorized → Numba JIT → QColor fallback). |
 | **`cache/`** | Manages disposable cache files, including `index_store.py` (read/write `index.jsonl`) and `lock.py` (file-level locking). |
 | **`utils/`** | General utilities, especially wrappers for external tools (`exiftool.py`, `ffmpeg.py`). |
 | **`schemas/`** | JSON Schema definitions, e.g., `album.schema.json`. |
@@ -164,10 +168,29 @@ This is the PySide6-based desktop application layer, which depends on the backen
 | **`ui/`** | Contains all UI components: windows, controllers, models, and custom widgets. |
 | ├─ **`main_window.py`** |— Implementation of the main `QMainWindow`. |
 | ├─ **`ui_main_window.py`** |— Auto-generated from Qt Designer (`pyside6-uic`), defining all widgets. |
-| ├─ **`controllers/`** |— The “brain” of the GUI (MVC pattern). `main_controller.py` orchestrates all subcontrollers (e.g., `NavigationController`, `PlaybackController`) and connects all signals and slots. |
-| ├─ **`models/`** |— Qt **Model-View** data models such as `AssetListModel` and `AlbumTreeModel`. |
-| ├─ **`widgets/`** |— Reusable custom QWidget components such as `AlbumSidebar`, `PhotoMapView`, and `PlayerBar`. |
+| ├─ **`controllers/`** |— The “brain” of the GUI (MVC pattern). `main_controller.py` orchestrates all subcontrollers (e.g., `NavigationController`, `PlaybackController`, `EditController`) and connects all signals and slots. |
+| ├─ **`models/`** |— Qt **Model-View** data models such as `AssetListModel`, `AlbumTreeModel`, and `EditSession`. |
+| ├─ **`widgets/`** |— Reusable custom QWidget components such as `AlbumSidebar`, `PhotoMapView`, `PlayerBar`, and edit-related widgets (see below). |
 | └─ **`tasks/`**| — `QRunnable` implementations for background tasks, e.g., `ThumbnailLoader` and `ScannerWorker`. |
+
+#### Edit Widgets (`src/iPhoto/gui/ui/widgets/`)
+
+The edit system is composed of modular widgets for non-destructive photo adjustments:
+
+| File / Module | Description |
+|----------------|-------------|
+| **`edit_sidebar.py`** | Container widget hosting Adjust/Crop mode pages with stacked layout. |
+| **`edit_light_section.py`** | Light adjustment panel (Brilliance, Exposure, Highlights, Shadows, Brightness, Contrast, Black Point). |
+| **`edit_color_section.py`** | Color adjustment panel (Saturation, Vibrance, Cast) with image statistics analysis. |
+| **`edit_bw_section.py`** | Black & White panel (Intensity, Neutrals, Tone, Grain) with artistic presets. |
+| **`edit_perspective_controls.py`** | Perspective correction sliders (Vertical, Horizontal, Straighten). |
+| **`edit_topbar.py`** | Edit mode toolbar with Adjust/Crop toggle and action buttons. |
+| **`edit_strip.py`** | Custom slider widgets (`BWSlider`) used throughout the edit panels. |
+| **`thumbnail_strip_slider.py`** | Slider with real-time thumbnail preview strip. |
+| **`gl_image_viewer/`** | OpenGL-based image viewer module for real-time preview rendering. |
+| **`gl_crop/`** | Crop interaction module (model, controller, hit-tester, animator, strategies). |
+| **`gl_renderer.py`** | Core OpenGL renderer handling texture upload and shader uniforms. |
+| **`perspective_math.py`** | Geometric utilities for perspective matrix calculation and black-border validation. |
 
 ---
 ### 3️⃣ Map Component (`maps/`)

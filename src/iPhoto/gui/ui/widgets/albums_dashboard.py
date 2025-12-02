@@ -16,6 +16,7 @@ from PySide6.QtCore import (
     Signal,
 )
 from PySide6.QtGui import (
+    QBrush,
     QColor,
     QFont,
     QFontMetrics,
@@ -23,6 +24,7 @@ from PySide6.QtGui import (
     QPainter,
     QPainterPath,
     QPixmap,
+    QRadialGradient,
 )
 from PySide6.QtWidgets import (
     QFrame,
@@ -109,12 +111,24 @@ class RoundedImageView(QWidget):
 class AlbumCard(QFrame):
     """Card widget representing a single album."""
 
-    def __init__(self, title: str, count: int, parent: QWidget | None = None) -> None:
+    clicked = Signal(Path)
+
+    def __init__(
+        self,
+        path: Path,
+        title: str,
+        count: int,
+        parent: QWidget | None = None,
+    ) -> None:
         super().__init__(parent)
+        self.path = path
+        self.setMouseTracking(True)
+        self._cursor_pos: QPoint | None = None
 
         # 1. Container dimensions
         self.setFixedSize(260, 80)
         self.setObjectName("AlbumCard")
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
 
         # 2. Layout
         self.layout = QHBoxLayout(self)  # type: ignore[assignment]
@@ -132,6 +146,7 @@ class AlbumCard(QFrame):
         # 4. Right side: Metadata
         self.text_container = QWidget()
         self.text_container.setObjectName("TextPart")
+        self.text_container.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
 
         self.text_layout = QVBoxLayout(self.text_container)
         self.text_layout.setContentsMargins(15, 0, 10, 0)
@@ -158,10 +173,10 @@ class AlbumCard(QFrame):
         self.layout.addWidget(self.text_container)
 
         # 5. Stylesheet
+        # Note: Background color is handled in paintEvent for the light source effect
         self.setStyleSheet("""
-            /* Parent container: white background and rounded corners */
+            /* Parent container: rounded corners handled in paintEvent */
             #AlbumCard {
-                background-color: #FFFFFF;
                 border-radius: 12px;
             }
 
@@ -173,6 +188,39 @@ class AlbumCard(QFrame):
 
         # 6. Shadow
         self.add_shadow()
+
+    def mouseMoveEvent(self, event) -> None:
+        self._cursor_pos = event.position().toPoint()
+        self.update()
+        super().mouseMoveEvent(event)
+
+    def leaveEvent(self, event) -> None:
+        self._cursor_pos = None
+        self.update()
+        super().leaveEvent(event)
+
+    def mousePressEvent(self, event) -> None:
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.clicked.emit(self.path)
+        super().mousePressEvent(event)
+
+    def paintEvent(self, event) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        path = QPainterPath()
+        path.addRoundedRect(self.rect(), 12, 12)
+
+        if self._cursor_pos:
+            # Highlight effect: Radial gradient from cursor
+            # Center: White (#FFFFFF), Outer: #F5F5F7
+            gradient = QRadialGradient(self._cursor_pos, 200)
+            gradient.setColorAt(0.0, QColor("#FFFFFF"))
+            gradient.setColorAt(1.0, QColor("#F5F5F7"))
+            painter.fillPath(path, QBrush(gradient))
+        else:
+            # Default state
+            painter.fillPath(path, QColor("#F5F5F7"))
 
     def add_shadow(self) -> None:
         shadow = QGraphicsDropShadowEffect(self)
@@ -332,6 +380,8 @@ class DashboardThumbnailLoader(QObject):
 class AlbumsDashboard(QWidget):
     """Main view for browsing all user albums."""
 
+    albumSelected = Signal(Path)
+
     def __init__(self, library: LibraryManager, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._library = library
@@ -405,7 +455,8 @@ class AlbumsDashboard(QWidget):
 
         for album in albums:
             # Create card with "0" count first
-            card = AlbumCard(album.title, 0, self.scroll_content)
+            card = AlbumCard(album.path, album.title, 0, self.scroll_content)
+            card.clicked.connect(self.albumSelected)
             self.flow_layout.addWidget(card)
             self._cards[album.path] = card
 

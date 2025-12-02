@@ -294,6 +294,50 @@ def test_open_static_collection_refresh_skips_gallery(
     assert len(facade.open_requests) == 1
 
 
+def test_open_album_from_dashboard_force_navigation(
+    tmp_path: Path, qapp: QApplication
+) -> None:
+    """Navigating to the current album from the dashboard must switch views."""
+
+    facade = _StubFacade()
+    context = _StubContext(tmp_path)
+    context.facade = facade
+    asset_model = _StubAssetModel()
+    sidebar = _StubSidebar()
+    status_bar = QStatusBar()
+    dialog = _StubDialog()
+    view_controller = _SpyViewController()
+
+    controller = NavigationController(
+        context,
+        facade,
+        asset_model,
+        sidebar,
+        status_bar,
+        dialog,  # type: ignore[arg-type]
+        view_controller,
+    )
+
+    album_path = tmp_path / "album"
+    album_path.mkdir()
+
+    # 1. Open album first
+    controller.open_album(album_path)
+    assert view_controller.gallery_calls == 1
+
+    # 2. Go to Dashboard
+    controller.open_albums_dashboard()
+    assert controller.static_selection() == "Albums"
+
+    # 3. Open same album again (simulate card click)
+    controller.open_album(album_path)
+
+    # Expectation: It should NOT be treated as refresh, and Gallery should be shown again.
+    assert view_controller.gallery_calls == 2
+    assert controller.consume_last_open_refresh() is False
+    assert controller.static_selection() is None
+
+
 def test_open_recently_deleted_refresh_skips_gallery(
     tmp_path: Path, qapp: QApplication
 ) -> None:

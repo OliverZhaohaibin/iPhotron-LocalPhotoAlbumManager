@@ -118,6 +118,7 @@ class MainController(QObject):
 
         # Sidebar navigation
         ui.sidebar.albumSelected.connect(self.open_album_from_path)
+        ui.albums_dashboard_page.albumSelected.connect(self.open_album_from_path)
         ui.sidebar.allPhotosSelected.connect(self._handle_all_photos_selected)
         ui.sidebar.staticNodeSelected.connect(self._handle_static_node_selected)
         ui.sidebar.bindLibraryRequested.connect(self._dialog.bind_library_dialog)

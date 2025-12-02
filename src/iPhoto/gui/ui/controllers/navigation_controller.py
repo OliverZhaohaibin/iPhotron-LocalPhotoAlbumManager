@@ -118,6 +118,17 @@ class NavigationController:
         # wipe the model and produce placeholder tiles while the asynchronous
         # reload repopulates the data.
         is_refresh = bool(is_same_album)
+
+        # If the user is currently on the Albums Dashboard, clicking an album card
+        # should always navigate to the album view, even if it is technically
+        # the currently "open" album in the facade.
+        if (
+            is_refresh
+            and self._static_selection
+            and self._static_selection.casefold() == "albums"
+        ):
+            is_refresh = False
+
         self._last_open_was_refresh = is_refresh
 
         if is_refresh:

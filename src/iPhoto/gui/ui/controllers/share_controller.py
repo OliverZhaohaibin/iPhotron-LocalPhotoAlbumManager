@@ -61,7 +61,7 @@ class RenderClipboardWorker(QRunnable):
 
         # 3. Apply Filters (Tone/Color)
         # We must use resolve_render_adjustments to combine master sliders with
-        # individual deltas into the final shader-friendly values expected by the facade.
+        # individual deltas into the final shader-friendly values expected by the filters.facade API (apply_adjustments).
         resolved_adjustments = sidecar.resolve_render_adjustments(raw_adjustments)
 
         filtered_image = apply_adjustments(image, resolved_adjustments)

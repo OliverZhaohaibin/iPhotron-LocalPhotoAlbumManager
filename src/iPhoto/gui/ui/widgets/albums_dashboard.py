@@ -332,7 +332,7 @@ class DashboardThumbnailLoader(QObject):
         except ValueError:
             real_rel = image_path.name
 
-        digest = hashlib.sha1(real_rel.encode("utf-8")).hexdigest()
+        digest = hashlib.sha256(real_rel.encode("utf-8")).hexdigest()
         filename = f"{digest}_{stamp}_{size.width()}x{size.height()}.png"
         cache_path = thumbs_dir / filename
 

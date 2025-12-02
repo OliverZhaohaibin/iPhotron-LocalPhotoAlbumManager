@@ -222,7 +222,7 @@ class AlbumCard(QFrame):
         else:
             # Default state
             painter.fillPath(path, QColor("#F5F5F7"))
-
+        super().paintEvent(event)
     def add_shadow(self) -> None:
         shadow = QGraphicsDropShadowEffect(self)
         shadow.setBlurRadius(18)

@@ -480,7 +480,6 @@ class AlbumsDashboard(QWidget):
         # Ignore results from outdated refresh operations
         if generation != self._current_generation:
             return
-            
         card = self._cards.get(root)
         if not card:
             return

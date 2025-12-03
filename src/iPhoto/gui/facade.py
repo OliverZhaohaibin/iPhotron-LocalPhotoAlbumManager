@@ -28,6 +28,7 @@ class AppFacade(QObject):
     """Expose high-level album operations to the GUI layer."""
 
     albumOpened = Signal(Path)
+    assetUpdated = Signal(Path)
     indexUpdated = Signal(Path)
     linksUpdated = Signal(Path)
     errorRaised = Signal(str)

@@ -66,6 +66,7 @@ class AssetListModel(QAbstractListModel):
         self._deferred_incremental_refresh: Optional[Path] = None
 
         self._facade.linksUpdated.connect(self.handle_links_updated)
+        self._facade.assetUpdated.connect(self.handle_asset_updated)
 
     def album_root(self) -> Optional[Path]:
         """Return the path of the currently open album, if any."""
@@ -526,6 +527,20 @@ class AssetListModel(QAbstractListModel):
             return
         model_index = self.index(index, 0)
         self.dataChanged.emit(model_index, model_index, [Qt.DecorationRole])
+
+    @Slot(Path)
+    def handle_asset_updated(self, path: Path) -> None:
+        """Refresh the thumbnail and view when an asset is modified."""
+
+        metadata = self.metadata_for_absolute_path(path)
+        if metadata is None:
+            return
+
+        rel = metadata.get("rel")
+        if not rel:
+            return
+
+        self.invalidate_thumbnail(str(rel))
 
     @Slot(Path)
     def handle_links_updated(self, root: Path) -> None:

@@ -193,6 +193,8 @@ class MainController(QObject):
 
         ui.back_button.clicked.connect(self._handle_back_button_clicked)
         ui.edit_button.clicked.connect(self._edit_controller.begin_edit)
+        self._edit_controller.editingFinished.connect(self._facade.assetUpdated)
+
     # -----------------------------------------------------------------
     # Slots
     def _handle_open_album_dialog(self) -> None:

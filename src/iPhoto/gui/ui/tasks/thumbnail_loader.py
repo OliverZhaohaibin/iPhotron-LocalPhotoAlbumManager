@@ -446,6 +446,20 @@ class ThumbnailLoader(QObject):
         stamp_ns = getattr(stat_result, "st_mtime_ns", None)
         if stamp_ns is None:
             stamp_ns = int(stat_result.st_mtime * 1_000_000_000)
+
+        # Ensure that edits stored in sidecar files trigger a cache refresh by
+        # mixing the sidecar timestamp into the cache key.
+        sidecar_path = sidecar.sidecar_path_for_asset(path)
+        if sidecar_path.exists():
+            try:
+                sidecar_stat = sidecar_path.stat()
+                sidecar_ns = getattr(sidecar_stat, "st_mtime_ns", None)
+                if sidecar_ns is None:
+                    sidecar_ns = int(sidecar_stat.st_mtime * 1_000_000_000)
+                stamp_ns = max(stamp_ns, sidecar_ns)
+            except OSError:
+                pass
+
         stamp = int(stamp_ns)
         key = self._make_key(rel, size, stamp)
         cached = self._memory.get(key)

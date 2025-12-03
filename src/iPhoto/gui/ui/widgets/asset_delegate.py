@@ -41,6 +41,10 @@ class AssetGridDelegate(QStyledItemDelegate):
         self._selection_mode_active = False
         self._selection_icon: QIcon = load_icon("checkmark.circle.svg")
 
+    def set_base_size(self, size: int) -> None:
+        """Update the target rendering size for standard grid tiles."""
+        self._base_size = size
+
     # ------------------------------------------------------------------
     # Painting
     # ------------------------------------------------------------------

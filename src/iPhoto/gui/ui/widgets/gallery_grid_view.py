@@ -20,8 +20,8 @@ class GalleryGridView(AssetGrid):
         self.setSelectionMode(QListView.SelectionMode.SingleSelection)
         self.setViewMode(QListView.ViewMode.IconMode)
         self.setIconSize(icon_size)
-        self.setGridSize(QSize(194, 194))
-        self.setSpacing(6)
+        self.setGridSize(QSize(196, 196))
+        self.setSpacing(0)
         self.setUniformItemSizes(True)
         self.setResizeMode(QListView.ResizeMode.Adjust)
         self.setMovement(QListView.Movement.Static)
@@ -36,6 +36,34 @@ class GalleryGridView(AssetGrid):
 
         self._updating_style = False
         self._apply_scrollbar_style()
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        viewport_width = self.viewport().width()
+        if viewport_width <= 0:
+            return
+
+        min_item_width = 192
+        gap = 4
+
+        # Determine how many columns can fit with the minimum size constraint.
+        # We model the grid cell as (item_width + gap), which provides 2px padding
+        # on each side of the item, resulting in a visual 4px gutter between items.
+        num_cols = max(1, int(viewport_width / (min_item_width + gap)))
+
+        # Calculate the expanded cell size that will fill the available width.
+        cell_size = int(viewport_width / num_cols)
+        new_item_width = cell_size - gap
+
+        current_size = self.iconSize().width()
+        if current_size != new_item_width:
+            new_size = QSize(new_item_width, new_item_width)
+            self.setIconSize(new_size)
+            self.setGridSize(QSize(cell_size, cell_size))
+
+            delegate = self.itemDelegate()
+            if hasattr(delegate, "set_base_size"):
+                delegate.set_base_size(new_item_width)
 
     def changeEvent(self, event: QEvent) -> None:
         if event.type() == QEvent.Type.PaletteChange:

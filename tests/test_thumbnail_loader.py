@@ -78,6 +78,7 @@ def test_thumbnail_loader_cache_naming(tmp_path: Path, qapp: QApplication) -> No
     files = list(thumbs_dir.iterdir())
     assert len(files) == 1
     assert files[0].name != filename
+
 def test_thumbnail_loader_sidecar_invalidation(tmp_path: Path, qapp: QApplication) -> None:
     image_path = tmp_path / "IMG_SIDE.JPG"
     _create_image(image_path)
@@ -99,8 +100,10 @@ def test_thumbnail_loader_sidecar_invalidation(tmp_path: Path, qapp: QApplicatio
     original_cache_file = files[0].name
 
     # Create sidecar with edits - ensure mtime is newer
-    time.sleep(1.1)
     save_adjustments(image_path, {"Light_Master": 0.5})
+    sidecar_path = image_path.with_suffix(".ipo")
+    image_mtime = image_path.stat().st_mtime
+    os.utime(sidecar_path, (image_mtime + 5, image_mtime + 5))
 
     # Request again - should trigger new generation because sidecar is newer
     spy = QSignalSpy(loader.ready)

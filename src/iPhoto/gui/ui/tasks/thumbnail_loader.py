@@ -458,7 +458,6 @@ class ThumbnailLoader(QObject):
                     sidecar_ns = int(sidecar_stat.st_mtime * 1_000_000_000)
                 stamp_ns = max(stamp_ns, sidecar_ns)
             except OSError:
-                # Ignore OSError: sidecar file may have been deleted or become inaccessible between existence check and stat.
                 pass
 
         stamp = int(stamp_ns)

@@ -48,7 +48,7 @@ def test_gallery_responsive_layout(qapp_instance, monkeypatch):
     # Helper to calculate expectation
     def get_expectations(viewport_w):
         min_w = 192
-        gap = 2
+        gap = GalleryGridView.ITEM_GAP
         # Use the safety margin from the implementation
         safety = GalleryGridView.SAFETY_MARGIN
         # Code uses raw viewport width for column count

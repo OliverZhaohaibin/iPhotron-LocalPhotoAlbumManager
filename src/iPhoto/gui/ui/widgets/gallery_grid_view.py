@@ -2,12 +2,34 @@
 
 from __future__ import annotations
 
+import math
+
 from PySide6.QtCore import QEvent, QSize, Qt
-from PySide6.QtGui import QPalette
-from PySide6.QtWidgets import QAbstractItemView, QListView
+from PySide6.QtGui import QIcon, QPalette
+from PySide6.QtWidgets import QAbstractItemView, QListView, QStyledItemDelegate
 
 from ..styles import modern_scrollbar_style
 from .asset_grid import AssetGrid
+
+
+class ScalingDelegate(QStyledItemDelegate):
+    """Delegate that forces icons to scale up to the view's icon size."""
+
+    def initStyleOption(self, option, index) -> None:
+        super().initStyleOption(option, index)
+        target_size = option.decorationSize
+        if not option.icon.isNull() and target_size.isValid():
+            # Get the best available pixmap from the icon
+            pix = option.icon.pixmap(target_size)
+            # If the pixmap is smaller than the target size, force upscale
+            if pix.width() < target_size.width() or pix.height() < target_size.height():
+                # Scale smoothly to fill the target size
+                scaled_pix = pix.scaled(
+                    target_size,
+                    Qt.AspectRatioMode.KeepAspectRatio,
+                    Qt.TransformationMode.SmoothTransformation,
+                )
+                option.icon = QIcon(scaled_pix)
 
 
 class GalleryGridView(AssetGrid):
@@ -20,8 +42,11 @@ class GalleryGridView(AssetGrid):
         self.setSelectionMode(QListView.SelectionMode.SingleSelection)
         self.setViewMode(QListView.ViewMode.IconMode)
         self.setIconSize(icon_size)
-        self.setGridSize(QSize(194, 194))
-        self.setSpacing(6)
+        self.setItemDelegate(ScalingDelegate(self))
+        # We handle layout dynamically in resizeEvent.
+        # Explicitly set spacing to 0 to rely solely on setGridSize for layout stride.
+        # This prevents platform-specific double-spacing issues.
+        self.setSpacing(0)
         self.setUniformItemSizes(True)
         self.setResizeMode(QListView.ResizeMode.Adjust)
         self.setMovement(QListView.Movement.Static)
@@ -36,6 +61,41 @@ class GalleryGridView(AssetGrid):
 
         self._updating_style = False
         self._apply_scrollbar_style()
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+
+        viewport_width = self.viewport().width()
+        min_item_width = 192
+        gap = 4
+
+        if viewport_width <= 0:
+            return
+
+        available_width = viewport_width - gap
+        item_footprint = min_item_width + gap
+
+        # Calculate target column count
+        # Formula: N = floor((ViewportWidth - Gap) / (MinItemWidth + Gap))
+        n_columns = math.floor(available_width / item_footprint)
+        if n_columns <= 0:
+            n_columns = 1
+
+        # Calculate new item width
+        # Formula: W = (ViewportWidth - (N + 1) * Gap) / N
+        remaining_space = viewport_width - (n_columns + 1) * gap
+        new_width = remaining_space / n_columns
+
+        # Ensure we have an integer size. Using floor prevents overflow.
+        new_width_int = int(new_width)
+
+        # Apply new size if it changed
+        current_size = self.iconSize()
+        if current_size.width() != new_width_int:
+            self.setIconSize(QSize(new_width_int, new_width_int))
+            # QListView uses gridSize as the cell stride. To ensure 4px spacing between
+            # items (centered in the cell), we add the gap to the grid size.
+            self.setGridSize(QSize(new_width_int + gap, new_width_int + gap))
 
     def changeEvent(self, event: QEvent) -> None:
         if event.type() == QEvent.Type.PaletteChange:

@@ -14,7 +14,7 @@ def patch_delegate_icons(monkeypatch):
         return QIcon()
 
     # Patch where it is used. AssetGridDelegate imports it as `from ..icons import load_icon`
-    monkeypatch.setattr("iPhoto.gui.ui.widgets.asset_delegate.load_icon", mock_load_icon)
+    monkeypatch.setattr("iPhotos.src.iPhoto.gui.ui.widgets.asset_delegate.load_icon", mock_load_icon)
 
 @pytest.fixture(scope="module")
 def qapp_instance():

@@ -54,12 +54,11 @@ class GalleryGridView(AssetGrid):
         if viewport_width <= 0:
             return
 
-        min_item_width = self.MIN_ITEM_WIDTH
 
         # Determine how many columns can fit with the minimum size constraint.
         # We model the grid cell as (item_width + gap), which provides 1px padding
         # on each side of the item, resulting in a visual 2px gutter between items.
-        num_cols = max(1, int(viewport_width / (min_item_width + self.ITEM_GAP)))
+        num_cols = max(1, int(viewport_width / (self.MIN_ITEM_WIDTH + self.ITEM_GAP)))
 
         # Calculate the expanded cell size that will fill the available width.
         # We subtract SAFETY_MARGIN from the viewport width to prevent the layout

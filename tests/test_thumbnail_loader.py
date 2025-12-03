@@ -78,7 +78,6 @@ def test_thumbnail_loader_cache_naming(tmp_path: Path, qapp: QApplication) -> No
     files = list(thumbs_dir.iterdir())
     assert len(files) == 1
     assert files[0].name != filename
-
 def test_thumbnail_loader_sidecar_invalidation(tmp_path: Path, qapp: QApplication) -> None:
     image_path = tmp_path / "IMG_SIDE.JPG"
     _create_image(image_path)

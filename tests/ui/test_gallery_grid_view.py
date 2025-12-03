@@ -1,7 +1,7 @@
 import pytest
 from PySide6.QtCore import QSize, Qt
 from PySide6.QtGui import QStandardItem, QStandardItemModel, QPixmap
-from PySide6.QtWidgets import QApplication, QListView
+from PySide6.QtWidgets import QApplication
 
 from iPhotos.src.iPhoto.gui.ui.widgets.gallery_grid_view import GalleryGridView
 from iPhotos.src.iPhoto.gui.ui.widgets.asset_delegate import AssetGridDelegate

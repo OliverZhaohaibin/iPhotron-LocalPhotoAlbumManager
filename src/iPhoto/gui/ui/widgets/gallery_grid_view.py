@@ -13,6 +13,9 @@ from .asset_grid import AssetGrid
 class GalleryGridView(AssetGrid):
     """Dense icon-mode grid tuned for album browsing."""
 
+    # Minimum width (and height) for grid items in pixels
+    MIN_ITEM_WIDTH = 192
+
     # Gap between grid items (provides 1px padding on each side)
     ITEM_GAP = 2
 
@@ -23,12 +26,12 @@ class GalleryGridView(AssetGrid):
 
     def __init__(self, parent=None) -> None:  # type: ignore[override]
         super().__init__(parent)
-        icon_size = QSize(192, 192)
+        icon_size = QSize(self.MIN_ITEM_WIDTH, self.MIN_ITEM_WIDTH)
         self._selection_mode_enabled = False
         self.setSelectionMode(QListView.SelectionMode.SingleSelection)
         self.setViewMode(QListView.ViewMode.IconMode)
         self.setIconSize(icon_size)
-        self.setGridSize(QSize(192 + self.ITEM_GAP, 192 + self.ITEM_GAP))
+        self.setGridSize(QSize(self.MIN_ITEM_WIDTH + self.ITEM_GAP, self.MIN_ITEM_WIDTH + self.ITEM_GAP))
         self.setSpacing(0)
         self.setUniformItemSizes(True)
         self.setResizeMode(QListView.ResizeMode.Adjust)
@@ -51,7 +54,7 @@ class GalleryGridView(AssetGrid):
         if viewport_width <= 0:
             return
 
-        min_item_width = 192
+        min_item_width = self.MIN_ITEM_WIDTH
 
         # Determine how many columns can fit with the minimum size constraint.
         # We model the grid cell as (item_width + gap), which provides 1px padding

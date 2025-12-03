@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import math
+
 from PySide6.QtCore import QEvent, QSize, Qt
 from PySide6.QtGui import QPalette
 from PySide6.QtWidgets import QAbstractItemView, QListView
@@ -20,8 +22,9 @@ class GalleryGridView(AssetGrid):
         self.setSelectionMode(QListView.SelectionMode.SingleSelection)
         self.setViewMode(QListView.ViewMode.IconMode)
         self.setIconSize(icon_size)
-        self.setGridSize(QSize(194, 194))
-        self.setSpacing(6)
+        # We handle layout dynamically in resizeEvent, so we remove the fixed grid size
+        # and set the spacing strictly to 4px as requested.
+        self.setSpacing(4)
         self.setUniformItemSizes(True)
         self.setResizeMode(QListView.ResizeMode.Adjust)
         self.setMovement(QListView.Movement.Static)
@@ -36,6 +39,41 @@ class GalleryGridView(AssetGrid):
 
         self._updating_style = False
         self._apply_scrollbar_style()
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+
+        viewport_width = self.viewport().width()
+        min_item_width = 192
+        gap = 4
+
+        if viewport_width <= 0:
+            return
+
+        available_width = viewport_width - gap
+        item_footprint = min_item_width + gap
+
+        # Calculate target column count
+        # Formula: N = floor((ViewportWidth - Gap) / (MinItemWidth + Gap))
+        n_columns = math.floor(available_width / item_footprint)
+        if n_columns <= 0:
+            n_columns = 1
+
+        # Calculate new item width
+        # Formula: W = (ViewportWidth - (N + 1) * Gap) / N
+        remaining_space = viewport_width - (n_columns + 1) * gap
+        new_width = remaining_space / n_columns
+
+        # Ensure we have an integer size. Using floor prevents overflow.
+        new_width_int = int(new_width)
+
+        # Apply new size if it changed
+        current_size = self.iconSize()
+        if current_size.width() != new_width_int:
+            self.setIconSize(QSize(new_width_int, new_width_int))
+            # QListView uses gridSize as the cell stride. To ensure 4px spacing between
+            # items (centered in the cell), we add the gap to the grid size.
+            self.setGridSize(QSize(new_width_int + gap, new_width_int + gap))
 
     def changeEvent(self, event: QEvent) -> None:
         if event.type() == QEvent.Type.PaletteChange:

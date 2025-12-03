@@ -30,11 +30,13 @@ dependencies = [
 [project.optional-dependencies]
 test = [
     "pytest",
-    "pytest-mock"
+    "pytest-mock",
+    "pytest-qt"
 ]
 dev = [
     "pytest",
     "pytest-mock",
+    "pytest-qt",
     "ruff",
     "black",
     "mypy",

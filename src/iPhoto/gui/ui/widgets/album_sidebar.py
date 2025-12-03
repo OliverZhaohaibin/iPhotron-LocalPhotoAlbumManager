@@ -381,6 +381,10 @@ class AlbumSidebar(QWidget):
         if node_type == NodeType.ACTION:
             self.bindLibraryRequested.emit()
             return
+        if node_type == NodeType.HEADER:
+            if item.title == "Albums":
+                self.staticNodeSelected.emit("Albums")
+            return
         if node_type == NodeType.STATIC:
             if self._library.root() is None:
                 self.bindLibraryRequested.emit()

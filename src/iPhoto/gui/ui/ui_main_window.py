@@ -27,6 +27,7 @@ from .widgets import (
     PhotoMapView,
     PreviewWindow,
 )
+from .widgets.albums_dashboard import AlbumsDashboard
 from .widgets.gl_image_viewer import GLImageViewer
 
 
@@ -184,6 +185,10 @@ class Ui_MainWindow(object):
         self.view_stack.addWidget(self.gallery_page)
         self.view_stack.addWidget(self.map_page)
         self.view_stack.addWidget(self.detail_page)
+
+        self.albums_dashboard_page = AlbumsDashboard(library, MainWindow)
+        self.view_stack.addWidget(self.albums_dashboard_page)
+
         self.view_stack.setCurrentWidget(self.gallery_page)
         right_layout.addWidget(self.view_stack)
 

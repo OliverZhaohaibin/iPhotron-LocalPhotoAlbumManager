@@ -118,6 +118,17 @@ class NavigationController:
         # wipe the model and produce placeholder tiles while the asynchronous
         # reload repopulates the data.
         is_refresh = bool(is_same_album)
+
+        # If the user is currently on the Albums Dashboard, clicking an album card
+        # should always navigate to the album view, even if it is technically
+        # the currently "open" album in the facade.
+        if (
+            is_refresh
+            and self._static_selection
+            and self._static_selection.casefold() == "albums"
+        ):
+            is_refresh = False
+
         self._last_open_was_refresh = is_refresh
 
         if is_refresh:
@@ -194,6 +205,15 @@ class NavigationController:
     # ------------------------------------------------------------------
     # Static collections
     # ------------------------------------------------------------------
+    def open_albums_dashboard(self) -> None:
+        """Open the 'All Albums' dashboard view."""
+
+        self._reset_playback_for_gallery_navigation()
+        self._view_controller.show_albums_dashboard()
+        self._static_selection = "Albums"
+        self._asset_model.set_filter_mode(None)
+        self._status.showMessage("Albums")
+
     def open_all_photos(self) -> None:
         self._view_controller.restore_default_gallery()
         self.open_static_collection(AlbumSidebar.ALL_PHOTOS_TITLE, None)
@@ -427,6 +447,7 @@ class NavigationController:
             "videos",
             "live photos",
             "favorites",
+            "albums",
         }
         return normalized_title in virtual_views
 

@@ -52,12 +52,14 @@ A comprehensive editing suite with **Adjust** and **Crop** modes:
 - **Master Sliders:** Each section features an intelligent master slider that distributes values across multiple fine-tuning controls
 - **Live Thumbnails:** Real-time preview strips showing the effect range for each adjustment
 <img width="1925" height="1086" alt="image" src="https://github.com/user-attachments/assets/9ac3095a-4be4-48fa-84cc-db0a3d58fe16" />
+
 #### Crop Mode
 - **Perspective Correction:** Vertical and horizontal keystoning adjustments
 - **Straighten Tool:** ±45° rotation with sub-degree precision
 - **Flip (Horizontal):** Horizontal flip support
 - **Interactive Crop Box:** Drag handles, edge snapping, and aspect ratio constraints
 - **Black Border Prevention:** Automatic validation ensures no black edges appear after perspective transforms
+  
 <img width="1925" height="1086" alt="image" src="https://github.com/user-attachments/assets/6a5e927d-3403-4c22-9512-7564a0f24702" />
 All edits are stored in `.ipo` sidecar files, preserving original photos untouched.
 

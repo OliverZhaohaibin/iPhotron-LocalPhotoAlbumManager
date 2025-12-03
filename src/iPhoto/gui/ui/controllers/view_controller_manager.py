@@ -41,6 +41,7 @@ class ViewControllerManager(QObject):
             ui.gallery_page,
             ui.detail_page,
             map_page=ui.map_page,
+            albums_dashboard_page=ui.albums_dashboard_page,
             parent=window,
         )
         self._player_view = PlayerViewController(

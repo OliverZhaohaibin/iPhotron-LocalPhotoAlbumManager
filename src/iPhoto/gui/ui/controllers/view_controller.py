@@ -24,6 +24,7 @@ class ViewController(QObject):
         gallery_page: QWidget | None,
         detail_page: QWidget | None,
         map_page: QWidget | None = None,
+        albums_dashboard_page: QWidget | None = None,
         parent: QObject | None = None,
     ) -> None:
         """Initialise the controller with the stacked widget and its pages."""
@@ -33,6 +34,7 @@ class ViewController(QObject):
         self._gallery_page = gallery_page
         self._detail_page = detail_page
         self._map_page = map_page
+        self._albums_dashboard_page = albums_dashboard_page
         self._active_gallery_page = gallery_page
         self._edit_mode_active = False
 
@@ -75,6 +77,15 @@ class ViewController(QObject):
         self._edit_mode_active = False
         self.galleryViewShown.emit()
 
+    def show_albums_dashboard(self) -> None:
+        """Switch to the albums dashboard view."""
+
+        if self._albums_dashboard_page is None:
+            return
+        if self._view_stack.currentWidget() is not self._albums_dashboard_page:
+            self._view_stack.setCurrentWidget(self._albums_dashboard_page)
+        self._edit_mode_active = False
+        self.galleryViewShown.emit()
     def restore_default_gallery(self) -> None:
         """Reset the gallery view back to the standard grid."""
 

@@ -105,6 +105,10 @@ class Ui_MainWindow(object):
         self.wheel_action_group = self.main_header.wheel_action_group
         self.wheel_action_navigate = self.main_header.wheel_action_navigate
         self.wheel_action_zoom = self.main_header.wheel_action_zoom
+        self.theme_group = self.main_header.theme_group
+        self.theme_system = self.main_header.theme_system
+        self.theme_light = self.main_header.theme_light
+        self.theme_dark = self.main_header.theme_dark
 
         self.window_shell_layout.addWidget(self.window_chrome)
         self.window_shell_layout.addWidget(self.menu_bar_container)

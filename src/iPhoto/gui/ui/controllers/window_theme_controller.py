@@ -14,6 +14,7 @@ from ..ui_main_window import Ui_MainWindow
 from ..widgets.collapsible_section import CollapsibleSection
 from ..window_manager import RoundedWindowShell
 from ..theme_manager import ThemeManager, ThemeColors, DARK_THEME
+from ..palette import SIDEBAR_SELECTED_BACKGROUND, SIDEBAR_ICON_COLOR
 
 if TYPE_CHECKING:
     from .detail_ui_controller import DetailUIController
@@ -106,17 +107,25 @@ class WindowThemeController(QObject):
         self._ui.window_title_label.setStyleSheet(f"color: {fg_color};")
 
         # Sidebar (Navigation)
-        # Note: sidebar background is handled by the shell, but maybe we want explicit?
-        # The existing code set it to transparent.
+        # Apply theme-aware background to ensure visual hierarchy (Light Blue in Light Mode, Gray in Dark Mode).
+        sidebar_bg = colors.sidebar_background.name()
+
+        # Match the window's rounded corners at the bottom-left
+        radius = 0
+        if self._rounded_window_shell:
+            radius = self._rounded_window_shell.corner_radius()
+
         self._ui.sidebar.setStyleSheet(
-            f"QWidget#albumSidebar {{ background-color: transparent; color: {fg_color}; }}\n"
+            f"QWidget#albumSidebar {{ background-color: {sidebar_bg}; color: {fg_color}; border-bottom-left-radius: {radius}px; }}\n"
             f"QWidget#albumSidebar QLabel {{ color: {fg_color}; }}\n"
-            f"QWidget#albumSidebar QTreeView {{ background-color: transparent; color: {fg_color}; }}"
+            f"QWidget#albumSidebar QTreeView {{ background-color: transparent; color: {fg_color}; }}\n"
+            f"QWidget#albumSidebar QTreeView::item:selected {{ color: {colors.sidebar_text.name()}; }}"
         )
         # Apply specific palette for sidebar selection visualization
         sidebar_palette = self._ui.sidebar.palette()
-        sidebar_palette.setColor(QPalette.ColorRole.Highlight, colors.sidebar_selected)
+        sidebar_palette.setColor(QPalette.ColorRole.Highlight, SIDEBAR_SELECTED_BACKGROUND)
         sidebar_palette.setColor(QPalette.ColorRole.HighlightedText, colors.sidebar_text)
+        sidebar_palette.setColor(QPalette.ColorRole.Link, SIDEBAR_ICON_COLOR)
         self._ui.sidebar.setPalette(sidebar_palette)
 
         # Status Bar

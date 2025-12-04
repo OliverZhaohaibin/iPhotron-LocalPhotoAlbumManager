@@ -495,8 +495,6 @@ class AlbumSidebarDelegate(QStyledItemDelegate):
             return palette.color(QPalette.ColorRole.Link)
         if not state.is_enabled:
             return palette.color(QPalette.ColorGroup.Disabled, QPalette.ColorRole.Text)
-        if state.is_selected and state.node_type == NodeType.HEADER:
-            return palette.color(QPalette.ColorRole.HighlightedText)
         return palette.color(QPalette.ColorRole.Text)
 
     def _draw_separator(self, painter: QPainter, rect: QRect) -> None:

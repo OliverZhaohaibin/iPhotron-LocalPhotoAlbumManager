@@ -85,6 +85,7 @@ class ViewControllerManager(QObject):
             navigation=navigation,
             detail_ui_controller=self._detail_ui,
             settings=context.settings,
+            theme_manager=context.theme,
         )
         self._map_controller = LocationMapController(
             context.library,

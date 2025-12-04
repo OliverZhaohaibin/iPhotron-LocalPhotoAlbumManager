@@ -52,6 +52,11 @@ class MainWindow(QMainWindow):
         # active.
         self.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
 
+    def boot(self) -> None:
+        """Trigger deferred initialization of heavy controller logic."""
+
+        self.controller.boot_services()
+
     # ------------------------------------------------------------------
     # QWidget overrides
     def closeEvent(self, event: QCloseEvent) -> None:  # type: ignore[override]

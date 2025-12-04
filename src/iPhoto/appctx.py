@@ -53,6 +53,21 @@ class AppContext:
         # factories before ``__post_init__`` runs.
         self.facade.bind_library(self.library)
 
+        stored = self.settings.get("last_open_albums", []) or []
+        resolved: list[Path] = []
+        for entry in stored:
+            try:
+                resolved.append(Path(entry))
+            except TypeError:
+                continue
+        if resolved:
+            self.recent_albums = resolved[:10]
+
+    def initialize_library(self) -> None:
+        """Load the library path from settings and bind it if valid."""
+
+        from .errors import LibraryError
+
         basic_path = self.settings.get("basic_library_path")
         if isinstance(basic_path, str) and basic_path:
             candidate = Path(basic_path).expanduser()
@@ -65,15 +80,28 @@ class AppContext:
                 self.library.errorRaised.emit(
                     f"Basic Library path is unavailable: {candidate}"
                 )
-        stored = self.settings.get("last_open_albums", []) or []
-        resolved: list[Path] = []
-        for entry in stored:
-            try:
-                resolved.append(Path(entry))
-            except TypeError:
-                continue
-        if resolved:
-            self.recent_albums = resolved[:10]
+
+    def validate_recent_albums(self) -> None:
+        """Filter out recent albums that no longer exist on disk.
+
+        This check is deferred to avoid blocking application startup with
+        slow file system operations.
+        """
+
+        validated: list[Path] = []
+        changed = False
+        for path in self.recent_albums:
+            if path.exists():
+                validated.append(path)
+            else:
+                changed = True
+
+        if changed:
+            self.recent_albums = validated
+            self.settings.set(
+                "last_open_albums",
+                [str(p) for p in self.recent_albums],
+            )
 
     def remember_album(self, root: Path) -> None:
         """Track *root* in the recent albums list, keeping the most recent first."""

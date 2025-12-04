@@ -31,26 +31,53 @@ class MainController(QObject):
         self._context = context
         self._facade: AppFacade = context.facade
 
+        self._data = None
+        self._dialog = None
+        self._status_bar = None
+        self._view_manager = None
+        self._navigation = None
+        self._interaction = None
+        self._playlist = None
+        self._asset_model = None
+        self._filmstrip_model = None
+        self._view_controller = None
+        self._detail_ui = None
+        self._map_controller = None
+        self._playback = None
+        self._state_manager = None
+        self._selection_controller = None
+        self._edit_controller = None
+
+    def boot_services(self) -> None:
+        """Defer heavy initialization until the main window is visible."""
+
+        # Initialize the library now that we are off the critical startup path
+        self._context.initialize_library()
+
         # Data layer ----------------------------------------------------
-        self._data = DataManager(window, self._facade)
-        self._data.configure_views(window.ui)
+        self._data = DataManager(self._window, self._facade)
+        self._data.configure_views(self._window.ui)
 
         # Controllers ---------------------------------------------------
-        self._dialog = DialogController(window, context, window.ui.status_bar)
+        self._dialog = DialogController(
+            self._window, self._context, self._window.ui.status_bar
+        )
         self._facade.register_restore_prompt(self._dialog.prompt_restore_to_root)
         self._status_bar = StatusBarController(
-            window.ui.status_bar,
-            window.ui.progress_bar,
-            window.ui.rescan_action,
-            context,
+            self._window.ui.status_bar,
+            self._window.ui.progress_bar,
+            self._window.ui.rescan_action,
+            self._context,
         )
-        self._view_manager = ViewControllerManager(window, context, self._data)
+        self._view_manager = ViewControllerManager(
+            self._window, self._context, self._data
+        )
         self._navigation = NavigationController(
-            context,
+            self._context,
             self._facade,
             self._data.asset_model(),
-            window.ui.sidebar,
-            window.ui.status_bar,
+            self._window.ui.sidebar,
+            self._window.ui.status_bar,
             self._dialog,
             self._view_manager.view_controller(),
         )
@@ -61,15 +88,15 @@ class MainController(QObject):
         self._view_manager.edit_controller().set_navigation_controller(self._navigation)
         self._view_manager.detail_ui().set_navigation_controller(self._navigation)
         self._interaction = InteractionManager(
-            window=window,
-            context=context,
+            window=self._window,
+            context=self._context,
             facade=self._facade,
             data_manager=self._data,
             view_manager=self._view_manager,
             navigation=self._navigation,
             dialog=self._dialog,
             status_bar=self._status_bar,
-            window_manager=window.window_manager,
+            window_manager=self._window.window_manager,
             main_controller=self,
         )
 
@@ -93,9 +120,12 @@ class MainController(QObject):
     def shutdown(self) -> None:
         """Stop worker threads and background jobs before the app exits."""
 
-        self._interaction.shutdown()
-        self._map_controller.shutdown()
-        self._asset_model.thumbnail_loader().shutdown()
+        if self._interaction:
+            self._interaction.shutdown()
+        if self._map_controller:
+            self._map_controller.shutdown()
+        if self._asset_model:
+            self._asset_model.thumbnail_loader().shutdown()
         QThreadPool.globalInstance().waitForDone()
 
     # -----------------------------------------------------------------
@@ -338,7 +368,7 @@ class MainController(QObject):
     def current_player_state(self):
         return self._state_manager.state
 
-    def edit_controller(self) -> "EditController":
+    def edit_controller(self) -> "EditController" | None:
         """Expose the edit controller so other components can coordinate."""
 
         return self._edit_controller
@@ -346,6 +376,8 @@ class MainController(QObject):
     def is_edit_view_active(self) -> bool:
         """Return ``True`` when the edit UI is currently visible."""
 
+        if self._view_controller is None:
+            return False
         return self._view_controller.is_edit_view_active()
 
     def is_media_muted(self) -> bool:
@@ -422,12 +454,12 @@ class MainController(QObject):
         self._detail_ui.show_placeholder()
 
     def suspend_playback_for_transition(self) -> bool:
-        if not self._data.media().is_playing():
+        if self._data is None or not self._data.media().is_playing():
             return False
         self._data.media().pause()
         return True
 
     def resume_playback_after_transition(self) -> None:
-        if self._data.media().is_paused():
+        if self._data and self._data.media().is_paused():
             self._data.media().play()
 

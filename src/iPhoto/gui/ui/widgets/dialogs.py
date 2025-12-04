@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Optional
 
-from PySide6.QtWidgets import QFileDialog, QMessageBox, QWidget
+from PySide6.QtWidgets import QApplication, QFileDialog, QMessageBox, QWidget
 
 
 def select_directory(parent: QWidget, caption: str, start: Optional[Path] = None) -> Optional[Path]:
@@ -21,10 +21,14 @@ def select_directory(parent: QWidget, caption: str, start: Optional[Path] = None
 def show_error(parent: QWidget, message: str, *, title: str = "iPhoto") -> None:
     """Display a blocking error message."""
 
-    QMessageBox.critical(parent, title, message)
+    box = QMessageBox(QMessageBox.Icon.Critical, title, message, QMessageBox.StandardButton.Ok, parent)
+    box.setPalette(QApplication.palette())
+    box.exec()
 
 
 def show_information(parent: QWidget, message: str, *, title: str = "iPhoto") -> None:
     """Display an informational message box."""
 
-    QMessageBox.information(parent, title, message)
+    box = QMessageBox(QMessageBox.Icon.Information, title, message, QMessageBox.StandardButton.Ok, parent)
+    box.setPalette(QApplication.palette())
+    box.exec()

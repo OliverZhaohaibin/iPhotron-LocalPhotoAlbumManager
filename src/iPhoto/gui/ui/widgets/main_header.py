@@ -123,6 +123,15 @@ class MainHeaderWidget(QWidget):
         self.export_destination_group.addAction(self.export_destination_ask)
         self.export_destination_library.setChecked(True)
 
+        self.theme_group = QActionGroup(main_window)
+        self.theme_system = QAction("System Default", main_window, checkable=True)
+        self.theme_light = QAction("Light Mode", main_window, checkable=True)
+        self.theme_dark = QAction("Dark Mode", main_window, checkable=True)
+        self.theme_group.addAction(self.theme_system)
+        self.theme_group.addAction(self.theme_light)
+        self.theme_group.addAction(self.theme_dark)
+        self.theme_system.setChecked(True)
+
     def _populate_menus(self) -> None:
         """Populate the menu bar and wire shared actions to widgets."""
 
@@ -149,6 +158,11 @@ class MainHeaderWidget(QWidget):
         settings_menu.addSeparator()
         settings_menu.addAction(self.toggle_filmstrip_action)
         settings_menu.addSeparator()
+
+        appearance_menu = settings_menu.addMenu("Appearance")
+        appearance_menu.addAction(self.theme_system)
+        appearance_menu.addAction(self.theme_light)
+        appearance_menu.addAction(self.theme_dark)
 
         export_menu = settings_menu.addMenu("Export Destination")
         export_menu.addAction(self.export_destination_library)

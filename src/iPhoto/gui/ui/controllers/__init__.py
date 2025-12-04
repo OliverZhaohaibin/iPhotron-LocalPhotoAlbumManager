@@ -8,7 +8,7 @@ from .drag_drop_controller import DragDropController
 from .header_controller import HeaderController
 from .interaction_manager import InteractionManager
 from .main_controller import MainController
-from .edit_theme_manager import EditThemeManager
+from .window_theme_controller import WindowThemeController
 from .navigation_controller import NavigationController
 from .playback_controller import PlaybackController
 from .playback_state_manager import PlaybackStateManager
@@ -33,7 +33,7 @@ __all__ = [
     "HeaderController",
     "InteractionManager",
     "MainController",
-    "EditThemeManager",
+    "WindowThemeController",
     "NavigationController",
     "PlaybackController",
     "PlaybackStateManager",

@@ -292,7 +292,12 @@ class AlbumTreeModel(QAbstractItemModel):
         self._path_map[album.path.resolve()] = item
         return item
 
-    def _icon_for_item(self, item: AlbumTreeItem, stroke_width: float | None = None) -> QIcon:
+    def _icon_for_item(
+        self,
+        item: AlbumTreeItem,
+        stroke_width: float | None = None,
+        color: str | None = None,
+    ) -> QIcon:
         """Return the icon representing *item*, optionally adjusting stroke width."""
 
         if item.icon_name:
@@ -300,9 +305,9 @@ class AlbumTreeModel(QAbstractItemModel):
             # is used by the promoted headers so they can reference bespoke SVG
             # assets (for example, the folder icon requested for the Albums
             # section) without overloading the generic header styling below.
-            return load_icon(item.icon_name, stroke_width=stroke_width)
+            return load_icon(item.icon_name, stroke_width=stroke_width, color=color)
         if item.node_type == NodeType.ACTION:
-            return load_icon("plus.circle", stroke_width=stroke_width)
+            return load_icon("plus.circle", stroke_width=stroke_width, color=color)
         if item.node_type == NodeType.STATIC:
             icon_name = self._STATIC_ICON_MAP.get(item.title.casefold())
             if icon_name:
@@ -316,9 +321,13 @@ class AlbumTreeModel(QAbstractItemModel):
                     stroke_width=stroke_width,
                 )
         if item.node_type in {NodeType.ALBUM, NodeType.SUBALBUM}:
-            return load_icon("rectangle.stack", stroke_width=stroke_width)
+            return load_icon("rectangle.stack", stroke_width=stroke_width, color=color)
         if item.node_type == NodeType.HEADER:
-            return load_icon("photo.on.rectangle", stroke_width=stroke_width)
+            return load_icon(
+                "photo.on.rectangle",
+                stroke_width=stroke_width,
+                color=color,
+            )
         return QIcon()
 
 

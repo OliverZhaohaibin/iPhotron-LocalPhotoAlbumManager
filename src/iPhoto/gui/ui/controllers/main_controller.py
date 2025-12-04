@@ -111,6 +111,19 @@ class MainController(QObject):
         ui.rebuild_links_action.triggered.connect(lambda: self._facade.pair_live_current())
         ui.bind_library_action.triggered.connect(self._dialog.bind_library_dialog)
 
+        # Appearance settings
+        ui.theme_system.triggered.connect(lambda: self._context.settings.set("ui.theme", "system"))
+        ui.theme_light.triggered.connect(lambda: self._context.settings.set("ui.theme", "light"))
+        ui.theme_dark.triggered.connect(lambda: self._context.settings.set("ui.theme", "dark"))
+
+        current_theme = self._context.settings.get("ui.theme", "system")
+        if current_theme == "light":
+            ui.theme_light.setChecked(True)
+        elif current_theme == "dark":
+            ui.theme_dark.setChecked(True)
+        else:
+            ui.theme_system.setChecked(True)
+
         # Global error reporting
         self._facade.errorRaised.connect(self._dialog.show_error)
         self._context.library.errorRaised.connect(self._dialog.show_error)

@@ -42,9 +42,14 @@ class AppContext:
     library: "LibraryManager" = field(default_factory=_create_library_manager)
     facade: "AppFacade" = field(default_factory=_create_facade)
     recent_albums: List[Path] = field(default_factory=list)
+    theme: "ThemeManager" = field(init=False)
 
     def __post_init__(self) -> None:
         from .errors import LibraryError
+        from .gui.ui.theme_manager import ThemeManager
+
+        self.theme = ThemeManager(self.settings)
+        self.theme.apply_theme()
 
         # ``AppFacade`` needs to observe the shared library manager so that
         # manifest writes performed while browsing nested albums can keep the

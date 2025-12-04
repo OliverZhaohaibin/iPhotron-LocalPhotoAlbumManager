@@ -15,7 +15,7 @@ from PySide6.QtCore import (
 from PySide6.QtWidgets import QGraphicsOpacityEffect
 
 from ..ui_main_window import Ui_MainWindow
-from .edit_theme_manager import EditThemeManager
+from .window_theme_controller import WindowThemeController
 
 if TYPE_CHECKING:  # pragma: no cover - import for typing only
     from .detail_ui_controller import DetailUIController
@@ -33,13 +33,13 @@ class EditViewTransitionManager(QObject):
         window: QObject | None,
         parent: Optional[QObject] = None,
         *,
-        theme_manager: EditThemeManager | None = None,
+        theme_controller: WindowThemeController | None = None,
     ) -> None:
         """Initialise animations and capture the theme manager dependency."""
 
         super().__init__(parent)
         self._ui = ui
-        self._theme_manager = theme_manager or EditThemeManager(ui, window)
+        self._theme_controller = theme_controller
 
         preferred_width = ui.edit_sidebar.property("defaultPreferredWidth")
         minimum_width = ui.edit_sidebar.property("defaultMinimumWidth")
@@ -79,8 +79,8 @@ class EditViewTransitionManager(QObject):
         self, controller: "DetailUIController" | None
     ) -> None:
         """Record *controller* so icon tinting tracks the active theme."""
-
-        self._theme_manager.set_detail_ui_controller(controller)
+        # Managed by EditController/WindowThemeController directly now.
+        pass
 
     def is_transition_active(self) -> bool:
         """Return ``True`` if an enter/exit animation is running."""
@@ -103,7 +103,6 @@ class EditViewTransitionManager(QObject):
         self._splitter_sizes_before_edit = list(splitter_sizes)
         self._prepare_navigation_sidebar_for_entry()
         self._prepare_edit_sidebar_for_entry()
-        self._theme_manager.apply_dark_theme()
         self._start_transition_animation(
             entering=True,
             splitter_start_sizes=splitter_sizes,
@@ -129,7 +128,6 @@ class EditViewTransitionManager(QObject):
 
         self._prepare_navigation_sidebar_for_exit()
         self._prepare_edit_sidebar_for_exit()
-        self._theme_manager.restore_light_theme()
 
         self._ui.detail_chrome_container.show()
         self._ui.edit_header_container.show()
@@ -219,9 +217,11 @@ class EditViewTransitionManager(QObject):
         sidebar_start = int(sidebar_start)
         sidebar_end = int(sidebar_end)
 
-        shell, shell_start_color, shell_end_color = self._theme_manager.get_shell_animation_colors(
-            entering
-        )
+        shell, shell_start_color, shell_end_color = None, None, None
+        if self._theme_controller:
+            shell, shell_start_color, shell_end_color = self._theme_controller.get_shell_animation_colors(
+                entering
+            )
 
         if shell is not None and shell_start_color is not None:
             shell.set_override_color(shell_start_color)

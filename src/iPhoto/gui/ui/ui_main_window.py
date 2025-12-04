@@ -166,11 +166,6 @@ class Ui_MainWindow(object):
         right_panel = QWidget()
         right_panel.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         right_panel.setAutoFillBackground(True)
-        light_content_palette = right_panel.palette()
-        content_bg_color = QColor(Qt.GlobalColor.white)
-        light_content_palette.setColor(QPalette.ColorRole.Window, content_bg_color)
-        light_content_palette.setColor(QPalette.ColorRole.Base, content_bg_color)
-        right_panel.setPalette(light_content_palette)
         right_layout = QVBoxLayout(right_panel)
         right_layout.setContentsMargins(8, 8, 8, 8)
 

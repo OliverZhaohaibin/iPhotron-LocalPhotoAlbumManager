@@ -36,7 +36,6 @@ from ..palette import (
     SIDEBAR_LAYOUT_MARGIN,
     SIDEBAR_LAYOUT_SPACING,
     SIDEBAR_TEXT_COLOR,
-    SIDEBAR_TITLE_COLOR_HEX,
     SIDEBAR_TREE_MIN_WIDTH,
     SIDEBAR_TREE_STYLESHEET,
 )
@@ -182,7 +181,6 @@ class AlbumSidebar(QWidget):
         title_font.setPointSizeF(title_font.pointSizeF() + 0.5)
         title_font.setBold(True)
         self._title.setFont(title_font)
-        self._title.setStyleSheet(f"color: {SIDEBAR_TITLE_COLOR_HEX};")
 
         self._tree = _DropAwareTree(self)
         self._tree.setObjectName("albumSidebarTree")

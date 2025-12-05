@@ -217,7 +217,7 @@ class MonotoneCubicSpline:
         # Handle h=0 (degenerate intervals) or out of bounds (though clip handles it)
         # Just return yi for safety where mask is false
         if np.any(~mask):
-             result[~mask] = yi[~mask]
+            result[~mask] = yi[~mask]
 
         if scalar:
             return result[0]

@@ -314,7 +314,7 @@ class InputLevelSliders(QWidget):
         self.update()
 
     def setWhitePoint(self, val):
-        self._white_val = max(0.0, min(val, 1.0))
+        self._white_val = max(self._black_val + 0.01, min(val, 1.0))
         self.update()
 
     def paintEvent(self, event):

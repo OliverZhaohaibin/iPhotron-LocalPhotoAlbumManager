@@ -23,7 +23,6 @@ ZOOM_SLIDER_DEFAULT = 100
 
 from ..icons import load_icon
 from ..models.asset_model import AssetModel, Roles
-from ..ui_main_window import ChromeStatusBar
 from ..widgets.asset_grid import AssetGrid
 from ..widgets.info_panel import InfoPanel
 from ..widgets.player_bar import PlayerBar
@@ -36,6 +35,7 @@ from ....io.metadata import read_image_meta
 from ....utils.logging import get_logger
 
 if TYPE_CHECKING:
+    from ..widgets.chrome_status_bar import ChromeStatusBar
     from .navigation_controller import NavigationController
 
 

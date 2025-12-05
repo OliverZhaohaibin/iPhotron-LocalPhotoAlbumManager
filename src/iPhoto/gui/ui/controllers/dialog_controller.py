@@ -12,9 +12,12 @@ try:  # pragma: no cover - depends on runtime packaging
     from ...appctx import AppContext
 except ImportError:  # pragma: no cover - fallback for script execution
     from iPhotos.src.iPhoto.appctx import AppContext
+from typing import TYPE_CHECKING
 from ....errors import LibraryError
 from ..widgets import dialogs
-from ..ui_main_window import ChromeStatusBar
+
+if TYPE_CHECKING:
+    from ..widgets.chrome_status_bar import ChromeStatusBar
 
 
 class DialogController:

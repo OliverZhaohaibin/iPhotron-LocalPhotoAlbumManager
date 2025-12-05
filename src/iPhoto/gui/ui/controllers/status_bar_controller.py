@@ -5,13 +5,16 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Optional
 
+from typing import TYPE_CHECKING
 from PySide6.QtCore import QObject
 from PySide6.QtGui import QAction
 from PySide6.QtWidgets import QProgressBar
 
-from ..ui_main_window import ChromeStatusBar
 from ....appctx import AppContext
 from ....config import RECENTLY_DELETED_DIR_NAME
+
+if TYPE_CHECKING:
+    from ..widgets.chrome_status_bar import ChromeStatusBar
 
 class StatusBarController(QObject):
     """Manage progress feedback and transient messages in the status bar."""

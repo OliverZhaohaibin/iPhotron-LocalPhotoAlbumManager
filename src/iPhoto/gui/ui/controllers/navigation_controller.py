@@ -17,11 +17,11 @@ from ...facade import AppFacade
 from ....errors import AlbumOperationError
 from ..models.asset_model import AssetModel
 from ..widgets.album_sidebar import AlbumSidebar
-from ..ui_main_window import ChromeStatusBar
 from .dialog_controller import DialogController
 from .view_controller import ViewController
 
 if TYPE_CHECKING:  # pragma: no cover - runtime import cycle guard
+    from ..widgets.chrome_status_bar import ChromeStatusBar
     from .playback_controller import PlaybackController
 
 

@@ -7,6 +7,12 @@
 ![License](https://img.shields.io/badge/license-MIT-green)
 [![GitHub Repo](https://img.shields.io/badge/github-iPhotos-181717?logo=github)](https://github.com/OliverZhaohaibin/iPhotos-LocalPhotoAlbumManager)
 
+## 📥 Download
+
+[![Download iPhoto](https://img.shields.io/badge/⬇️%20Download-iPhoto%20Latest%20Release-blue?style=for-the-badge&logo=windows)](https://github.com/OliverZhaohaibin/iPhotos-LocalPhotoAlbumManager/releases/latest/download/iPhoto-v2.11.exe)
+
+**💡 Quick Install:** Click the button above to download the latest Windows installer (.exe) directly.
+
 ---
 
 ## 🌟 Overview

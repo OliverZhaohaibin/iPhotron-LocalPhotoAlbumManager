@@ -285,6 +285,12 @@ class GLImageViewer(QOpenGLWidget):
 # UI Classes
 # ==========================================
 class InputLevelSliders(QWidget):
+    """
+    An interactive slider widget for setting black and white input level points.
+    These points control the clamping range of a curve, typically used for image
+    processing to adjust the input range. The widget emits signals when the black
+    or white points are changed.
+    """
     blackPointChanged = Signal(float)
     whitePointChanged = Signal(float)
 

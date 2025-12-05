@@ -323,6 +323,7 @@ class StyledComboBox(QComboBox):
 
 class CurveGraph(QWidget):
     lutChanged = Signal(object)
+    HIT_DETECTION_RADIUS = 15  # pixels
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -452,7 +453,7 @@ class CurveGraph(QWidget):
         w, h = self.width(), self.height()
 
         # Hit detection radius
-        hit_radius_sq = 15 * 15
+        hit_radius_sq = self.HIT_DETECTION_RADIUS ** 2
 
         click_idx = -1
         min_dist_sq = float('inf')

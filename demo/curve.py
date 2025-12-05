@@ -298,8 +298,8 @@ class InputLevelSliders(QWidget):
         self._dragging = None  # 'black', 'white', or None
 
         # Style constants
-        self.handle_width = 14
-        self.handle_height = 18
+        self.handle_width = 10
+        self.handle_height = 12
         self.hit_radius = 15
 
     def setBlackPoint(self, val):
@@ -323,26 +323,42 @@ class InputLevelSliders(QWidget):
         self._draw_handle(painter, self._white_val * w, is_black=False)
 
     def _draw_handle(self, painter, x_pos, is_black):
-        y_bottom = self.height() - 2
-        y_top = y_bottom - self.handle_height
+        # Align flush with X-axis (Top of widget)
+        y_top = 0
+        y_bottom = self.handle_height
         hw = self.handle_width / 2.0
 
-        # Upward pointing teardrop / pin shape
-        # Top point at (x_pos, y_top)
-        # Bottom rounded
+        # Improved Teardrop Shape
+        # Tip at (x_pos, 0)
+        # Rounded bottom: Circle at (x_pos, y_bottom - radius)
+
+        radius = hw  # 5.0
+        cy = y_bottom - radius
 
         path = QPainterPath()
         path.moveTo(x_pos, y_top)
 
-        # Curve out to bottom-right
-        # Control points to make it look like a teardrop
-        path.cubicTo(x_pos + hw, y_top + self.handle_height * 0.5,
-                     x_pos + hw, y_bottom - hw,
-                     x_pos, y_bottom)
+        # Right side curve
+        # Curve from top to right tangent of circle
+        # Control point 1: (x_pos + radius/2, y_top + height/3)
+        # Control point 2: (x_pos + radius, cy - radius/2)
 
-        # Curve up to top from bottom-left
-        path.cubicTo(x_pos - hw, y_bottom - hw,
-                     x_pos - hw, y_top + self.handle_height * 0.5,
+        # Simple approach: Line to circle tangent? No, teardrop has concave sides usually.
+        # Or convex? "Upward pointing teardrop" usually implies convex.
+        # Let's use quadratic curves or cubic to blend to the circle.
+
+        path.cubicTo(x_pos + hw * 0.5, y_top + self.handle_height * 0.4,
+                     x_pos + hw, cy - radius * 0.5,
+                     x_pos + hw, cy)
+
+        # Bottom arc
+        # Arc from 0 degrees (right) to 180 degrees (left) via bottom
+        # Rect for arc: (x_pos - radius, cy - radius, 2*radius, 2*radius)
+        path.arcTo(x_pos - radius, cy - radius, 2*radius, 2*radius, 0, -180)
+
+        # Left side curve (back to top)
+        path.cubicTo(x_pos - hw, cy - radius * 0.5,
+                     x_pos - hw * 0.5, y_top + self.handle_height * 0.4,
                      x_pos, y_top)
 
         # Fill - Light Gray
@@ -351,12 +367,12 @@ class InputLevelSliders(QWidget):
         painter.drawPath(path)
 
         # Inner Circle
-        circle_radius = 2.5
-        center_y = y_bottom - 5
+        circle_radius = 1.5
+        center_y_circle = cy # Centered in the bulb part
 
         inner_color = QColor("black") if is_black else QColor("white")
         painter.setBrush(inner_color)
-        painter.drawEllipse(QPointF(x_pos, center_y), circle_radius, circle_radius)
+        painter.drawEllipse(QPointF(x_pos, center_y_circle), circle_radius, circle_radius)
 
     def mousePressEvent(self, event):
         pos = event.position()
@@ -369,8 +385,8 @@ class InputLevelSliders(QWidget):
         dist_b = abs(pos.x() - bx)
         dist_w = abs(pos.x() - wx)
 
-        # Check Y range too roughly
-        if pos.y() > self.height() - self.handle_height - 5:
+        # Check Y range: Click must be within the handle height approx
+        if pos.y() <= self.handle_height + 5:
             # Prioritize closer one
             if dist_b < self.hit_radius and dist_b <= dist_w:
                 self._dragging = 'black'

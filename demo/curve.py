@@ -351,15 +351,7 @@ class InputLevelSliders(QWidget):
         path = QPainterPath()
         path.moveTo(x_pos, y_top)
 
-        # Right side curve
-        # Curve from top to right tangent of circle
-        # Control point 1: (x_pos + radius/2, y_top + height/3)
-        # Control point 2: (x_pos + radius, cy - radius/2)
-
-        # Simple approach: Line to circle tangent? No, teardrop has concave sides usually.
-        # Or convex? "Upward pointing teardrop" usually implies convex.
-        # Let's use quadratic curves or cubic to blend to the circle.
-
+        # Draw teardrop shape: use cubic Bezier curves for the sides, blending smoothly into a semicircular bottom.
         path.cubicTo(x_pos + hw * self.bezier_ctrl_x_factor, y_top + self.handle_height * self.bezier_ctrl_y_factor,
                      x_pos + hw, cy - radius * self.bezier_ctrl_x_factor,
                      x_pos + hw, cy)

@@ -844,7 +844,7 @@ class CurveGraph(QWidget):
                 end_pt = pts[-1]
 
                 # Evaluate spline
-                vals = s.evaluate(inputs)
+                vals = s.evaluate(inputs).copy()
 
                 # Clamp based on X range of the curve definition
                 # inputs < start_pt.x => start_pt.y

@@ -131,8 +131,8 @@ void main() {
 
     // LUT lookup
     float r = texture(curveLUT, col.r).r;
-    float g = texture(curveLUT, col.g).r;
-    float b = texture(curveLUT, col.b).r;
+    float g = texture(curveLUT, col.g).g;
+    float b = texture(curveLUT, col.b).b;
 
     FragColor = vec4(r, g, b, col.a);
 }
@@ -203,12 +203,23 @@ class GLImageViewer(QOpenGLWidget):
         if self._pending_lut is not None:
              self.upload_lut(self._pending_lut)
         else:
-             self.upload_lut(np.linspace(0, 1, 256, dtype=np.float32))
+             # Default LUT: linear RGB
+             lut = np.linspace(0, 1, 256, dtype=np.float32)
+             lut = np.stack([lut, lut, lut], axis=1) # (256, 3)
+             self.upload_lut(lut)
 
     def upload_lut(self, lut_data):
         if not self.isValid():
             self._pending_lut = lut_data
             return
+
+        # Ensure data is contiguous and float32
+        lut_data = np.ascontiguousarray(lut_data, dtype=np.float32)
+
+        # Reshape if necessary, we expect (256, 3)
+        if lut_data.ndim == 1 and len(lut_data) == 256:
+             # If passed 1D array, treat as grayscale/all-channels
+             lut_data = np.stack([lut_data]*3, axis=1)
 
         self.makeCurrent()
         if self.lut_texture is None:
@@ -219,7 +230,7 @@ class GLImageViewer(QOpenGLWidget):
         gl.glTexParameteri(gl.GL_TEXTURE_1D, gl.GL_TEXTURE_MIN_FILTER, gl.GL_LINEAR)
         gl.glTexParameteri(gl.GL_TEXTURE_1D, gl.GL_TEXTURE_MAG_FILTER, gl.GL_LINEAR)
 
-        gl.glTexImage1D(gl.GL_TEXTURE_1D, 0, gl.GL_RED, 256, 0, gl.GL_RED, gl.GL_FLOAT, lut_data)
+        gl.glTexImage1D(gl.GL_TEXTURE_1D, 0, gl.GL_RGB, 256, 0, gl.GL_RGB, gl.GL_FLOAT, lut_data)
         gl.glBindTexture(gl.GL_TEXTURE_1D, 0)
         self.doneCurrent()
         self.update()
@@ -331,25 +342,43 @@ class CurveGraph(QWidget):
         self.setMinimumSize(300, 300)
         self.setStyleSheet("background-color: #2b2b2b;")
 
-        # 2.1 Initialization State: Linear identity (0,0)->(1,1)
-        self.points = [QPointF(0.0, 0.0), QPointF(1.0, 1.0)]
+        # 2.1 Independent Data Models
+        self.active_channel = "RGB"
+        self.channels = {
+            "RGB": [QPointF(0.0, 0.0), QPointF(1.0, 1.0)],
+            "Red": [QPointF(0.0, 0.0), QPointF(1.0, 1.0)],
+            "Green": [QPointF(0.0, 0.0), QPointF(1.0, 1.0)],
+            "Blue": [QPointF(0.0, 0.0), QPointF(1.0, 1.0)]
+        }
+        self.splines = {}
+
         self.selected_index = -1
         self.dragging = False
         self.histogram_data = None
-        self.spline = None
-        self._recalculate_spline()
+
+        # Initial calculation
+        self._recalculate_splines_all()
+
+    def set_channel(self, channel_name):
+        if channel_name in self.channels and channel_name != self.active_channel:
+            self.active_channel = channel_name
+            self.selected_index = -1
+            self.update()
 
     def set_histogram(self, hist_data):
         self.histogram_data = hist_data
         self.update()
 
-    def _recalculate_spline(self):
-        # Sort points by x just in case, though logic should maintain order
-        self.points.sort(key=lambda p: p.x())
+    def _recalculate_splines_all(self):
+        for name in self.channels:
+            self._recalculate_spline(name)
 
-        x = [p.x() for p in self.points]
-        y = [p.y() for p in self.points]
-        self.spline = MonotoneCubicSpline(x, y)
+    def _recalculate_spline(self, channel_name):
+        points = self.channels[channel_name]
+        points.sort(key=lambda p: p.x())
+        x = [p.x() for p in points]
+        y = [p.y() for p in points]
+        self.splines[channel_name] = MonotoneCubicSpline(x, y)
 
     def paintEvent(self, event):
         painter = QPainter(self)
@@ -372,21 +401,36 @@ class CurveGraph(QWidget):
         self.draw_curve(painter, w, h)
 
         point_radius = 5
-        for i, p in enumerate(self.points):
+        current_points = self.channels[self.active_channel]
+
+        # Determine point color based on channel
+        if self.active_channel == "Red":
+             pt_color = QColor("#FF4444")
+        elif self.active_channel == "Green":
+             pt_color = QColor("#44FF44")
+        elif self.active_channel == "Blue":
+             pt_color = QColor("#4444FF")
+        else:
+             pt_color = QColor("white")
+
+        for i, p in enumerate(current_points):
             sx = p.x() * w
             sy = h - (p.y() * h)
 
             # Visual Feedback: Hollow for selected
             if i == self.selected_index:
                 painter.setBrush(Qt.NoBrush)
-                painter.setPen(QPen(QColor("white"), 2))
+                painter.setPen(QPen(pt_color, 2))
                 painter.drawEllipse(QPointF(sx, sy), point_radius + 2, point_radius + 2)
 
-            painter.setBrush(QColor("#ffffff"))
+            painter.setBrush(pt_color)
             painter.setPen(QPen(QColor("#000000"), 1))
             painter.drawEllipse(QPointF(sx, sy), point_radius, point_radius)
 
     def draw_fake_histogram(self, painter, w, h):
+        # Fallback noise for design time
+        if self.active_channel != "RGB": return # Simplify fake view for individual channels?
+
         path = QPainterPath()
         path.moveTo(0, h)
         import math
@@ -403,12 +447,28 @@ class CurveGraph(QWidget):
         painter.drawPath(path)
 
     def draw_real_histogram(self, painter, w, h):
-        if len(self.histogram_data.shape) == 1:
+        # 2.2 Dynamic Histogram Visualization
+        # Assuming histogram_data is (3, 256) float array normalized to 0..1
+        if self.histogram_data is None: return
+
+        # If shape is 1D, it's grayscale.
+        is_gray = (len(self.histogram_data.shape) == 1)
+
+        if is_gray:
             self._draw_hist_channel(painter, self.histogram_data, QColor(120, 120, 120, 128), w, h)
-        elif self.histogram_data.shape[0] == 3:
+            return
+
+        if self.active_channel == "RGB":
+            # Draw all combined
             self._draw_hist_channel(painter, self.histogram_data[0], QColor(255, 0, 0, 100), w, h)
             self._draw_hist_channel(painter, self.histogram_data[1], QColor(0, 255, 0, 100), w, h)
             self._draw_hist_channel(painter, self.histogram_data[2], QColor(0, 0, 255, 100), w, h)
+        elif self.active_channel == "Red":
+            self._draw_hist_channel(painter, self.histogram_data[0], QColor(255, 0, 0, 150), w, h)
+        elif self.active_channel == "Green":
+            self._draw_hist_channel(painter, self.histogram_data[1], QColor(0, 255, 0, 150), w, h)
+        elif self.active_channel == "Blue":
+            self._draw_hist_channel(painter, self.histogram_data[2], QColor(0, 0, 255, 150), w, h)
 
     def _draw_hist_channel(self, painter, data, color, w, h):
         path = QPainterPath()
@@ -426,16 +486,24 @@ class CurveGraph(QWidget):
         painter.drawPath(path)
 
     def draw_curve(self, painter, w, h):
-        if self.spline is None:
+        spline = self.splines.get(self.active_channel)
+        if spline is None:
             return
 
-        # 3.1 Data Separation & Rendering: Sample spline for polyline
-        # Using ~1 sample per pixel or every 2 pixels
+        # 2.3 Visual Feedback (Curve Color)
+        color_map = {
+            "RGB": QColor("#FFFFFF"),
+            "Red": QColor("#FF4444"),
+            "Green": QColor("#44FF44"),
+            "Blue": QColor("#4444FF")
+        }
+        pen_color = color_map.get(self.active_channel, QColor("white"))
+
         steps = w // 2
         if steps < 100: steps = 100
 
         xs = np.linspace(0, 1, steps)
-        ys = self.spline.evaluate(xs)
+        ys = spline.evaluate(xs)
 
         path = QPainterPath()
         path.moveTo(xs[0] * w, h - ys[0] * h)
@@ -445,7 +513,7 @@ class CurveGraph(QWidget):
             cy = h - ys[i] * h
             path.lineTo(cx, cy)
 
-        painter.setPen(QPen(QColor("#ffffff"), 2))
+        painter.setPen(QPen(pen_color, 2))
         painter.setBrush(Qt.NoBrush)
         painter.drawPath(path)
 
@@ -453,14 +521,14 @@ class CurveGraph(QWidget):
         pos = event.position()
         w, h = self.width(), self.height()
 
-        # Hit detection radius
-        hit_radius_sq = self.HIT_DETECTION_RADIUS ** 2
+        # Operates on active channel points
+        points = self.channels[self.active_channel]
 
+        hit_radius_sq = self.HIT_DETECTION_RADIUS ** 2
         click_idx = -1
         min_dist_sq = float('inf')
 
-        # Find closest point
-        for i, p in enumerate(self.points):
+        for i, p in enumerate(points):
             sx, sy = p.x() * w, h - p.y() * h
             dist_sq = (pos.x() - sx) ** 2 + (pos.y() - sy) ** 2
             if dist_sq < hit_radius_sq:
@@ -470,43 +538,26 @@ class CurveGraph(QWidget):
 
         if click_idx != -1:
             self.selected_index = click_idx
-            # Delete point on right click if not endpoint
-            if event.button() == Qt.RightButton and 0 < click_idx < len(self.points) - 1:
-                self.points.pop(click_idx)
+            if event.button() == Qt.RightButton and 0 < click_idx < len(points) - 1:
+                points.pop(click_idx)
                 self.selected_index = -1
                 self.update_spline_and_lut()
         else:
-            # If not clicking a point, maybe adding one?
-            # Requirement says "Add Point" button logic is specific.
-            # But standard curve editors also allow click-to-add on the line.
-            # Preserving existing click-to-add logic but using spline evaluation?
-            # Or just doing nothing as per "Add Point Button Logic" focus?
-            # The original code added a point. I will keep it for better UX,
-            # but strictly constrain it.
-
-            # Map screen to 0..1
+            # Add point logic
             nx = max(0.0, min(1.0, pos.x() / w))
-            # Find where to insert
-            insert_i = len(self.points)
-            for i, p in enumerate(self.points):
+            insert_i = len(points)
+            for i, p in enumerate(points):
                 if p.x() > nx:
                     insert_i = i
                     break
 
-            # Use spline to get exact Y at this X if we were snapping to curve,
-            # but user clicked a specific Y.
-            # Requirement 2.4 is about "Add Point Button".
-            # Requirement 2.3 says "Add Point: Users must be able to add points".
-
             ny = max(0.0, min(1.0, (h - pos.y()) / h))
 
-            # Enforce constraints relative to neighbors
-            prev_x = self.points[insert_i-1].x() if insert_i > 0 else 0
-            next_x = self.points[insert_i].x() if insert_i < len(self.points) else 1
+            prev_x = points[insert_i-1].x() if insert_i > 0 else 0
+            next_x = points[insert_i].x() if insert_i < len(points) else 1
 
-            # Minimal separation
             if nx > prev_x + self.MIN_DISTANCE_THRESHOLD and nx < next_x - self.MIN_DISTANCE_THRESHOLD:
-                self.points.insert(insert_i, QPointF(nx, ny))
+                points.insert(insert_i, QPointF(nx, ny))
                 self.selected_index = insert_i
                 self.update_spline_and_lut()
 
@@ -514,32 +565,27 @@ class CurveGraph(QWidget):
 
     def mouseMoveEvent(self, event):
         if self.dragging and self.selected_index != -1:
+            points = self.channels[self.active_channel]
             pos = event.position()
             w, h = self.width(), self.height()
 
             nx = max(0.0, min(1.0, pos.x() / w))
             ny = max(0.0, min(1.0, (h - pos.y()) / h))
 
-            # 2.3 Drag Constraints:
-            # Endpoints clamped to x=0 and x=1
             if self.selected_index == 0:
                 nx = 0.0
-            elif self.selected_index == len(self.points) - 1:
+            elif self.selected_index == len(points) - 1:
                 nx = 1.0
             else:
-                # Neighbors constraint: x_{i-1} < x_i < x_{i+1}
-                prev_p = self.points[self.selected_index - 1]
-                next_p = self.points[self.selected_index + 1]
-
+                prev_p = points[self.selected_index - 1]
+                next_p = points[self.selected_index + 1]
                 min_x = prev_p.x() + self.MIN_DISTANCE_THRESHOLD
                 max_x = next_p.x() - self.MIN_DISTANCE_THRESHOLD
 
                 if nx < min_x: nx = min_x
                 if nx > max_x: nx = max_x
 
-            self.points[self.selected_index] = QPointF(nx, ny)
-
-            # 3.2 Performance: Recalculate real-time
+            points[self.selected_index] = QPointF(nx, ny)
             self.update_spline_and_lut()
 
     def mouseReleaseEvent(self, event):
@@ -549,64 +595,79 @@ class CurveGraph(QWidget):
         """
         2.4 "Add Point" Button Logic
         """
-        if len(self.points) < 2: return
+        points = self.channels[self.active_channel]
+        if len(points) < 2: return
 
-        # 1. Identify gap with max horizontal distance
         max_gap = -1.0
         max_gap_idx = -1
 
-        for i in range(len(self.points) - 1):
-            gap = self.points[i+1].x() - self.points[i].x()
+        for i in range(len(points) - 1):
+            gap = points[i+1].x() - points[i].x()
             if gap > max_gap:
                 max_gap = gap
                 max_gap_idx = i
 
         if max_gap_idx != -1:
-            # 2. Insert at geometric midpoint
-            p0 = self.points[max_gap_idx]
-            p1 = self.points[max_gap_idx + 1]
+            p0 = points[max_gap_idx]
+            p1 = points[max_gap_idx + 1]
             mid_x = p0.x() + (p1.x() - p0.x()) * 0.5
 
-            # 3. Y value based on CURRENT curve value
-            # Since shape shouldn't change, we evaluate existing spline
-            if self.spline:
-                mid_y = self.spline.evaluate(mid_x)
+            spline = self.splines.get(self.active_channel)
+            if spline:
+                mid_y = spline.evaluate(mid_x)
             else:
-                # Fallback linear if no spline (shouldn't happen)
                 mid_y = p0.y() + (p1.y() - p0.y()) * 0.5
-
-            # Clamp Y
             mid_y = max(0.0, min(1.0, mid_y))
 
             new_point = QPointF(mid_x, mid_y)
             insert_at = max_gap_idx + 1
-            self.points.insert(insert_at, new_point)
+            points.insert(insert_at, new_point)
 
             self.selected_index = insert_at
             self.update_spline_and_lut()
 
-    # Alias for backward compatibility if needed, or update connection
     def add_point_center(self):
         self.add_point_smart()
 
     def update_spline_and_lut(self):
-        self._recalculate_spline()
+        self._recalculate_spline(self.active_channel)
         self.update_lut()
         self.update()
 
     def update_lut(self):
-        if not self.spline:
-            return
+        # 3.1 Composite Logic: Output = Master(Channel(Input))
 
-        # 3.1 Data (LUT): Sample exact same function
-        # Resolution: 256
+        # Base input: 0..1
         xs = np.linspace(0, 1, 256)
-        lut = self.spline.evaluate(xs)
 
-        # Clip to valid range 0..1
-        lut = np.clip(lut, 0.0, 1.0)
+        # Helper to get eval from spline or identity if missing
+        def eval_spline(name, inputs):
+            s = self.splines.get(name)
+            if s:
+                return np.clip(s.evaluate(inputs), 0.0, 1.0)
+            return inputs # Identity
 
-        self.lutChanged.emit(lut.astype(np.float32))
+        # 1. Apply individual channel curves
+        r_curve = eval_spline("Red", xs)
+        g_curve = eval_spline("Green", xs)
+        b_curve = eval_spline("Blue", xs)
+
+        # 2. Apply master curve to the result of individual curves
+        master_spline = self.splines.get("RGB")
+        if master_spline:
+            # We must map the previous output through the master spline
+            r_final = np.clip(master_spline.evaluate(r_curve), 0.0, 1.0)
+            g_final = np.clip(master_spline.evaluate(g_curve), 0.0, 1.0)
+            b_final = np.clip(master_spline.evaluate(b_curve), 0.0, 1.0)
+        else:
+            r_final = r_curve
+            g_final = g_curve
+            b_final = b_curve
+
+        # Stack: (256, 3)
+        lut = np.stack([r_final, g_final, b_final], axis=1).astype(np.float32)
+
+        self.lutChanged.emit(lut)
 
 
 class IconButton(QPushButton):
@@ -692,6 +753,7 @@ class CurvesDemo(QWidget):
 
         combo = StyledComboBox()
         combo.addItems(["RGB", "Red", "Green", "Blue"])
+        combo.currentTextChanged.connect(lambda text: self.curve.set_channel(text))
         controls_layout.addWidget(combo)
 
         tools_layout = QHBoxLayout()

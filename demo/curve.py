@@ -1039,8 +1039,8 @@ class CurvesDemo(QWidget):
         if not points: return
 
         # Update point
-        pEnd = points[-1]
-        points[-1] = QPointF(val, pEnd.y())
+        p_end = points[-1]
+        points[-1] = QPointF(val, p_end.y())
 
         # Trigger update in curve
         self.curve.update_spline_and_lut()

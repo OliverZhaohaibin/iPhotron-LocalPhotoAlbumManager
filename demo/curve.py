@@ -470,9 +470,9 @@ class CurveGraph(QWidget):
             self.selected_index = click_idx
             # Delete point on right click if not endpoint
             if event.button() == Qt.RightButton and 0 < click_idx < len(self.points) - 1:
-                 self.points.pop(click_idx)
-                 self.selected_index = -1
-                 self.update_spline_and_lut()
+                self.points.pop(click_idx)
+                self.selected_index = -1
+                self.update_spline_and_lut()
         else:
             # If not clicking a point, maybe adding one?
             # Requirement says "Add Point" button logic is specific.

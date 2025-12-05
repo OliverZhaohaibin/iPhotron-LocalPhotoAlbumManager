@@ -19,7 +19,6 @@ from ....errors import LibraryError
 from ....library.manager import LibraryManager
 from ....library.tree import AlbumNode
 from ..models.album_tree_model import AlbumTreeItem, AlbumTreeModel, NodeType
-from ..palette import SIDEBAR_BACKGROUND_COLOR, SIDEBAR_TEXT_COLOR
 from ..widgets import dialogs
 
 

@@ -324,6 +324,7 @@ class StyledComboBox(QComboBox):
 class CurveGraph(QWidget):
     lutChanged = Signal(object)
     HIT_DETECTION_RADIUS = 15  # pixels
+    MIN_DISTANCE_THRESHOLD = 0.01
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -504,7 +505,7 @@ class CurveGraph(QWidget):
             next_x = self.points[insert_i].x() if insert_i < len(self.points) else 1
 
             # Minimal separation
-            if nx > prev_x + 0.01 and nx < next_x - 0.01:
+            if nx > prev_x + self.MIN_DISTANCE_THRESHOLD and nx < next_x - self.MIN_DISTANCE_THRESHOLD:
                 self.points.insert(insert_i, QPointF(nx, ny))
                 self.selected_index = insert_i
                 self.update_spline_and_lut()
@@ -531,8 +532,8 @@ class CurveGraph(QWidget):
                 prev_p = self.points[self.selected_index - 1]
                 next_p = self.points[self.selected_index + 1]
 
-                min_x = prev_p.x() + 0.01
-                max_x = next_p.x() - 0.01
+                min_x = prev_p.x() + self.MIN_DISTANCE_THRESHOLD
+                max_x = next_p.x() - self.MIN_DISTANCE_THRESHOLD
 
                 if nx < min_x: nx = min_x
                 if nx > max_x: nx = max_x

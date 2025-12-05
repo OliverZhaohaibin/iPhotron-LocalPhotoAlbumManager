@@ -14,6 +14,14 @@ except ImportError:
             return func
         return decorator
 
+try:
+    from demo.spline import MonotoneCubicSpline
+except ImportError:
+    # Try local import if running as script from root
+    sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    from demo.spline import MonotoneCubicSpline
+
+
 from PySide6.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout,
                                QComboBox, QPushButton, QLabel, QFrame, QSizePolicy, QFileDialog)
 from PySide6.QtCore import Qt, QPointF, QSize, Signal
@@ -320,14 +328,26 @@ class CurveGraph(QWidget):
         super().__init__(parent)
         self.setMinimumSize(300, 300)
         self.setStyleSheet("background-color: #2b2b2b;")
+
+        # 2.1 Initialization State: Linear identity (0,0)->(1,1)
         self.points = [QPointF(0.0, 0.0), QPointF(1.0, 1.0)]
         self.selected_index = -1
         self.dragging = False
         self.histogram_data = None
+        self.spline = None
+        self._recalculate_spline()
 
     def set_histogram(self, hist_data):
         self.histogram_data = hist_data
         self.update()
+
+    def _recalculate_spline(self):
+        # Sort points by x just in case, though logic should maintain order
+        self.points.sort(key=lambda p: p.x())
+
+        x = [p.x() for p in self.points]
+        y = [p.y() for p in self.points]
+        self.spline = MonotoneCubicSpline(x, y)
 
     def paintEvent(self, event):
         painter = QPainter(self)
@@ -335,6 +355,8 @@ class CurveGraph(QWidget):
         w, h = self.width(), self.height()
 
         painter.fillRect(self.rect(), QColor("#222222"))
+
+        # Grid
         painter.setPen(QPen(QColor("#444444"), 1))
         for i in range(1, 4):
             painter.drawLine(i * w / 4, 0, i * w / 4, h)
@@ -351,10 +373,13 @@ class CurveGraph(QWidget):
         for i, p in enumerate(self.points):
             sx = p.x() * w
             sy = h - (p.y() * h)
+
+            # Visual Feedback: Hollow for selected
             if i == self.selected_index:
                 painter.setBrush(Qt.NoBrush)
                 painter.setPen(QPen(QColor("white"), 2))
                 painter.drawEllipse(QPointF(sx, sy), point_radius + 2, point_radius + 2)
+
             painter.setBrush(QColor("#ffffff"))
             painter.setPen(QPen(QColor("#000000"), 1))
             painter.drawEllipse(QPointF(sx, sy), point_radius, point_radius)
@@ -399,14 +424,25 @@ class CurveGraph(QWidget):
         painter.drawPath(path)
 
     def draw_curve(self, painter, w, h):
-        if len(self.points) < 2: return
-        screen_pts = [QPointF(p.x() * w, h - p.y() * h) for p in self.points]
+        if self.spline is None:
+            return
+
+        # 3.1 Data Separation & Rendering: Sample spline for polyline
+        # Using ~1 sample per pixel or every 2 pixels
+        steps = w // 2
+        if steps < 100: steps = 100
+
+        xs = np.linspace(0, 1, steps)
+        ys = self.spline.evaluate(xs)
+
         path = QPainterPath()
-        path.moveTo(screen_pts[0])
-        for i in range(len(screen_pts) - 1):
-            p0, p1 = screen_pts[i], screen_pts[i + 1]
-            dx = p1.x() - p0.x()
-            path.cubicTo(QPointF(p0.x() + dx * 0.5, p0.y()), QPointF(p1.x() - dx * 0.5, p1.y()), p1)
+        path.moveTo(xs[0] * w, h - ys[0] * h)
+
+        for i in range(1, len(xs)):
+            cx = xs[i] * w
+            cy = h - ys[i] * h
+            path.lineTo(cx, cy)
+
         painter.setPen(QPen(QColor("#ffffff"), 2))
         painter.setBrush(Qt.NoBrush)
         painter.drawPath(path)
@@ -414,163 +450,162 @@ class CurveGraph(QWidget):
     def mousePressEvent(self, event):
         pos = event.position()
         w, h = self.width(), self.height()
+
+        # Hit detection radius
+        hit_radius_sq = 15 * 15
+
         click_idx = -1
+        min_dist_sq = float('inf')
+
+        # Find closest point
         for i, p in enumerate(self.points):
             sx, sy = p.x() * w, h - p.y() * h
-            if (pos.x() - sx) ** 2 + (pos.y() - sy) ** 2 < 225:
-                click_idx = i
-                break
+            dist_sq = (pos.x() - sx) ** 2 + (pos.y() - sy) ** 2
+            if dist_sq < hit_radius_sq:
+                if dist_sq < min_dist_sq:
+                    min_dist_sq = dist_sq
+                    click_idx = i
+
         if click_idx != -1:
             self.selected_index = click_idx
+            # Delete point on right click if not endpoint
+            if event.button() == Qt.RightButton and 0 < click_idx < len(self.points) - 1:
+                 self.points.pop(click_idx)
+                 self.selected_index = -1
+                 self.update_spline_and_lut()
         else:
+            # If not clicking a point, maybe adding one?
+            # Requirement says "Add Point" button logic is specific.
+            # But standard curve editors also allow click-to-add on the line.
+            # Preserving existing click-to-add logic but using spline evaluation?
+            # Or just doing nothing as per "Add Point Button Logic" focus?
+            # The original code added a point. I will keep it for better UX,
+            # but strictly constrain it.
+
+            # Map screen to 0..1
             nx = max(0.0, min(1.0, pos.x() / w))
-            ny = max(0.0, min(1.0, (h - pos.y()) / h))
+            # Find where to insert
             insert_i = len(self.points)
             for i, p in enumerate(self.points):
                 if p.x() > nx:
                     insert_i = i
                     break
-            self.points.insert(insert_i, QPointF(nx, ny))
-            self.selected_index = insert_i
-            self.constrain_point(insert_i)
+
+            # Use spline to get exact Y at this X if we were snapping to curve,
+            # but user clicked a specific Y.
+            # Requirement 2.4 is about "Add Point Button".
+            # Requirement 2.3 says "Add Point: Users must be able to add points".
+
+            ny = max(0.0, min(1.0, (h - pos.y()) / h))
+
+            # Enforce constraints relative to neighbors
+            prev_x = self.points[insert_i-1].x() if insert_i > 0 else 0
+            next_x = self.points[insert_i].x() if insert_i < len(self.points) else 1
+
+            # Minimal separation
+            if nx > prev_x + 0.01 and nx < next_x - 0.01:
+                self.points.insert(insert_i, QPointF(nx, ny))
+                self.selected_index = insert_i
+                self.update_spline_and_lut()
+
         self.dragging = True
-        self.update_lut()
         self.update()
 
     def mouseMoveEvent(self, event):
         if self.dragging and self.selected_index != -1:
             pos = event.position()
             w, h = self.width(), self.height()
+
             nx = max(0.0, min(1.0, pos.x() / w))
             ny = max(0.0, min(1.0, (h - pos.y()) / h))
+
+            # 2.3 Drag Constraints:
+            # Endpoints clamped to x=0 and x=1
             if self.selected_index == 0:
                 nx = 0.0
             elif self.selected_index == len(self.points) - 1:
                 nx = 1.0
+            else:
+                # Neighbors constraint: x_{i-1} < x_i < x_{i+1}
+                prev_p = self.points[self.selected_index - 1]
+                next_p = self.points[self.selected_index + 1]
+
+                min_x = prev_p.x() + 0.01
+                max_x = next_p.x() - 0.01
+
+                if nx < min_x: nx = min_x
+                if nx > max_x: nx = max_x
+
             self.points[self.selected_index] = QPointF(nx, ny)
-            self.constrain_point(self.selected_index)
-            self.update_lut()
-            self.update()
+
+            # 3.2 Performance: Recalculate real-time
+            self.update_spline_and_lut()
 
     def mouseReleaseEvent(self, event):
         self.dragging = False
 
+    def add_point_smart(self):
+        """
+        2.4 "Add Point" Button Logic
+        """
+        if len(self.points) < 2: return
+
+        # 1. Identify gap with max horizontal distance
+        max_gap = -1.0
+        max_gap_idx = -1
+
+        for i in range(len(self.points) - 1):
+            gap = self.points[i+1].x() - self.points[i].x()
+            if gap > max_gap:
+                max_gap = gap
+                max_gap_idx = i
+
+        if max_gap_idx != -1:
+            # 2. Insert at geometric midpoint
+            p0 = self.points[max_gap_idx]
+            p1 = self.points[max_gap_idx + 1]
+            mid_x = p0.x() + (p1.x() - p0.x()) * 0.5
+
+            # 3. Y value based on CURRENT curve value
+            # Since shape shouldn't change, we evaluate existing spline
+            if self.spline:
+                mid_y = self.spline.evaluate(mid_x)
+            else:
+                # Fallback linear if no spline (shouldn't happen)
+                mid_y = p0.y() + (p1.y() - p0.y()) * 0.5
+
+            # Clamp Y
+            mid_y = max(0.0, min(1.0, mid_y))
+
+            new_point = QPointF(mid_x, mid_y)
+            insert_at = max_gap_idx + 1
+            self.points.insert(insert_at, new_point)
+
+            self.selected_index = insert_at
+            self.update_spline_and_lut()
+
+    # Alias for backward compatibility if needed, or update connection
     def add_point_center(self):
-        mx, my = 0.5, 0.5
-        for p in self.points:
-            if abs(p.x() - mx) < 0.05:
-                return
-        insert_i = 0
-        for i, p in enumerate(self.points):
-            if p.x() > mx:
-                insert_i = i
-                break
-        self.points.insert(insert_i, QPointF(mx, my))
+        self.add_point_smart()
+
+    def update_spline_and_lut(self):
+        self._recalculate_spline()
         self.update_lut()
         self.update()
 
-    def constrain_point(self, idx):
-        cx, cy = self.points[idx].x(), self.points[idx].y()
-        if idx > 0:
-            prev = self.points[idx - 1]
-            if cx <= prev.x() + 0.01: cx = prev.x() + 0.01
-        if idx < len(self.points) - 1:
-            next_p = self.points[idx + 1]
-            if cx >= next_p.x() - 0.01: cx = next_p.x() - 0.01
-        self.points[idx] = QPointF(cx, cy)
-
     def update_lut(self):
-        # Generate LUT from points
-        # Using simple interpolation for now: Monotone Cubic Spline would be ideal.
-        # Here we implement a Catmull-Rom or similar, or just sample the bezier if possible.
-        # Since we don't have a math library for bezier solving easily at hand,
-        # and QPainterPath is for drawing...
-        #
-        # Let's implement Monotone Cubic Interpolation (Steffen's method)
-        # to ensure the curve behaves well.
-        #
-        # Input: self.points (sorted by x)
+        if not self.spline:
+             return
 
-        x_in = [p.x() for p in self.points]
-        y_in = [p.y() for p in self.points]
+        # 3.1 Data (LUT): Sample exact same function
+        # Resolution: 256
+        xs = np.linspace(0, 1, 256)
+        lut = self.spline.evaluate(xs)
 
-        lut = self._generate_monotonic_lut(x_in, y_in)
+        # Clip to valid range 0..1
+        lut = np.clip(lut, 0.0, 1.0)
+
         self.lutChanged.emit(lut.astype(np.float32))
-
-    def _generate_monotonic_lut(self, x, y):
-        # Simple linear interpolation fallback or custom spline
-        # Let's do simple linear for robustness first, then upgrade if time permits.
-        # Linear is safe and fast.
-        # If we want smooth, we need a spline.
-        # Let's try to implement a basic Pchip interpolator equivalent.
-
-        n = len(x)
-        if n < 2:
-            return np.linspace(0, 1, 256)
-
-        # Compute slopes
-        m = np.zeros(n-1)
-        for i in range(n-1):
-            dx = x[i+1] - x[i]
-            dy = y[i+1] - y[i]
-            if dx == 0:
-                m[i] = 0
-            else:
-                m[i] = dy/dx
-
-        # Compute tangents at points (simple method)
-        # This is a basic smooth interpolation logic
-        # But let's just use linear for now to guarantee no overshoots,
-        # or actually, just use np.interp which is linear.
-        # The visual curve is Bezier (smooth), so linear LUT will look different from line.
-        #
-        # To match Bezier visual:
-        # We can recursively subdivide the Bezier segments to find points.
-        # Segment i: p0=pts[i], p3=pts[i+1].
-        # Control points: p1 = (p0.x + dx*0.5, p0.y), p2 = (p3.x - dx*0.5, p3.y)
-        # We can evaluate this cubic bezier for t in 0..1
-        # B(t) = (1-t)^3 p0 + 3(1-t)^2 t p1 + 3(1-t)t^2 p2 + t^3 p3
-
-        lut = np.zeros(256)
-
-        # We need to map X (0..255) -> Y
-        # Since X is monotonic, we can find which segment we are in.
-
-        # Pre-calculate many points along the curve
-        sample_pts = []
-
-        for i in range(n-1):
-            p0 = self.points[i]
-            p3 = self.points[i+1]
-            dx = p3.x() - p0.x()
-            p1 = QPointF(p0.x() + dx * 0.5, p0.y())
-            p2 = QPointF(p3.x() - dx * 0.5, p3.y())
-
-            # Subdivide this segment
-            steps = 50 # enough samples
-            for t in np.linspace(0, 1, steps):
-                inv_t = 1 - t
-
-                # Cubic Bezier formula
-                bx = (inv_t**3)*p0.x() + 3*(inv_t**2)*t*p1.x() + 3*inv_t*(t**2)*p2.x() + (t**3)*p3.x()
-                by = (inv_t**3)*p0.y() + 3*(inv_t**2)*t*p1.y() + 3*inv_t*(t**2)*p2.y() + (t**3)*p3.y()
-
-                sample_pts.append((bx, by))
-
-        sample_pts.append((self.points[-1].x(), self.points[-1].y()))
-
-        # Sort just in case, though it should be sorted
-        sample_pts.sort(key=lambda p: p[0])
-
-        # Unzip
-        sx = [p[0] for p in sample_pts]
-        sy = [p[1] for p in sample_pts]
-
-        # Interpolate to 256 integers
-        target_x = np.linspace(0, 1, 256)
-        lut = np.interp(target_x, sx, sy)
-
-        return lut
 
 
 class IconButton(QPushButton):

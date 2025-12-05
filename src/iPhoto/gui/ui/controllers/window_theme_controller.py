@@ -7,7 +7,6 @@ from typing import TYPE_CHECKING
 
 from PySide6.QtCore import QObject
 from PySide6.QtGui import QColor, QPalette
-from PySide6.QtWidgets import QWidget
 
 from ..icon import load_icon
 from ..ui_main_window import Ui_MainWindow

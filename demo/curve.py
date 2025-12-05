@@ -302,6 +302,13 @@ class InputLevelSliders(QWidget):
         self.handle_height = 12
         self.hit_radius = 15
 
+        # Magic numbers replacement
+        self.limit_gap = 0.01
+        self.inner_circle_radius = 1.5
+        self.hit_padding_y = 5
+        self.bezier_ctrl_y_factor = 0.4
+        self.bezier_ctrl_x_factor = 0.5
+
     def setBlackPoint(self, val):
         self._black_val = max(0.0, min(val, 1.0))
         self.update()
@@ -347,8 +354,8 @@ class InputLevelSliders(QWidget):
         # Or convex? "Upward pointing teardrop" usually implies convex.
         # Let's use quadratic curves or cubic to blend to the circle.
 
-        path.cubicTo(x_pos + hw * 0.5, y_top + self.handle_height * 0.4,
-                     x_pos + hw, cy - radius * 0.5,
+        path.cubicTo(x_pos + hw * self.bezier_ctrl_x_factor, y_top + self.handle_height * self.bezier_ctrl_y_factor,
+                     x_pos + hw, cy - radius * self.bezier_ctrl_x_factor,
                      x_pos + hw, cy)
 
         # Bottom arc
@@ -357,8 +364,8 @@ class InputLevelSliders(QWidget):
         path.arcTo(x_pos - radius, cy - radius, 2*radius, 2*radius, 0, -180)
 
         # Left side curve (back to top)
-        path.cubicTo(x_pos - hw, cy - radius * 0.5,
-                     x_pos - hw * 0.5, y_top + self.handle_height * 0.4,
+        path.cubicTo(x_pos - hw, cy - radius * self.bezier_ctrl_x_factor,
+                     x_pos - hw * self.bezier_ctrl_x_factor, y_top + self.handle_height * self.bezier_ctrl_y_factor,
                      x_pos, y_top)
 
         # Fill - Light Gray
@@ -367,12 +374,11 @@ class InputLevelSliders(QWidget):
         painter.drawPath(path)
 
         # Inner Circle
-        circle_radius = 1.5
         center_y_circle = cy # Centered in the bulb part
 
         inner_color = QColor("black") if is_black else QColor("white")
         painter.setBrush(inner_color)
-        painter.drawEllipse(QPointF(x_pos, center_y_circle), circle_radius, circle_radius)
+        painter.drawEllipse(QPointF(x_pos, center_y_circle), self.inner_circle_radius, self.inner_circle_radius)
 
     def mousePressEvent(self, event):
         pos = event.position()
@@ -386,7 +392,7 @@ class InputLevelSliders(QWidget):
         dist_w = abs(pos.x() - wx)
 
         # Check Y range: Click must be within the handle height approx
-        if pos.y() <= self.handle_height + 5:
+        if pos.y() <= self.handle_height + self.hit_padding_y:
             # Prioritize closer one
             if dist_b < self.hit_radius and dist_b <= dist_w:
                 self._dragging = 'black'
@@ -405,13 +411,13 @@ class InputLevelSliders(QWidget):
 
         if self._dragging == 'black':
             # Constraint: cannot cross white point (minus small gap)
-            limit = self._white_val - 0.01
+            limit = self._white_val - self.limit_gap
             if val > limit: val = limit
             self._black_val = val
             self.blackPointChanged.emit(val)
 
         elif self._dragging == 'white':
-            limit = self._black_val + 0.01
+            limit = self._black_val + self.limit_gap
             if val < limit: val = limit
             self._white_val = val
             self.whitePointChanged.emit(val)

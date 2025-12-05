@@ -98,11 +98,11 @@ class MonotoneCubicSpline:
         Returns:
             float: The computed tangent (first derivative) at the endpoint, constrained to preserve monotonicity.
         """
-        h0 = self.x[1] - self.x[0] if k == 0 else self.x[-1] - self.x[-2]
-        d0 = self.d[0] if k == 0 else self.d[-1]
+
 
         # If n=2, linear interpolation
         if self.n == 2:
+            d0 = self.d[0] if k == 0 else self.d[-1]
             return d0
 
         # Use 3-point formula if n > 2

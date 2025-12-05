@@ -180,7 +180,6 @@ class WindowThemeController(QObject):
         # We construct the stylesheet based on `colors`.
 
         bg = colors.window_background.name()
-        sec_bg = colors.border_color.name() # Using border/secondary for header bg
         # EditThemeManager used #2C2C2E for header, which is lighter than #1C1C1E.
         # Our DARK_THEME.border_color is #323236 which is close.
         # Let's define some specific derived colors if needed, or rely on ThemeColors.

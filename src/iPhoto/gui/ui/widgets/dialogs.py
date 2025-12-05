@@ -83,4 +83,5 @@ def confirm_action(
     _apply_theme(box, parent)
     box.exec()
 
-    return box.clickedButton() == yes_btn
+    clicked = box.clickedButton()
+    return clicked == yes_btn if clicked is not None else False

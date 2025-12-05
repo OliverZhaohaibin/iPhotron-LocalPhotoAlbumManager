@@ -663,8 +663,8 @@ class CurveGraph(QWidget):
         # Clamping is explicitly applied in the loop below: for x < start_pt.x(), y is set to start_pt.y();
         # for x > end_pt.x(), y is set to end_pt.y(). This overrides any extrapolation or edge-value behavior
         # from spline.evaluate, ensuring the flat lines are drawn correctly for the "clamped" regions.
-        # We assume xs covers 0 to 1 sufficiently to show the flat clamped regions.
-
+        # Note: This visualization clamping is needed separately from the LUT clamping in update_lut().
+        # It ensures the visual curve display matches the actual behavior applied in the LUT, providing consistent user feedback.
         path = QPainterPath()
 
         first_pt = True

@@ -1028,6 +1028,9 @@ class CurvesDemo(QWidget):
         points = self.curve.channels[self.curve.active_channel]
         if not points: return
 
+        # Clamp val so it doesn't get too close to the next control point
+        if len(points) > 1:
+            val = min(val, points[1].x() - self.curve.MIN_DISTANCE_THRESHOLD)
         # Update point
         p0 = points[0]
         points[0] = QPointF(val, p0.y())

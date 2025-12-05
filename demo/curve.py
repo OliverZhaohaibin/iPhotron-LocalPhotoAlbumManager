@@ -316,11 +316,11 @@ class InputLevelSliders(QWidget):
         self.bezier_ctrl_x_factor = 0.5
 
     def setBlackPoint(self, val):
-        self._black_val = max(0.0, min(val, self._white_val - 0.01))
+        self._black_val = max(0.0, min(val, self._white_val - self.limit_gap))
         self.update()
 
     def setWhitePoint(self, val):
-        self._white_val = max(self._black_val + 0.01, min(val, 1.0))
+        self._white_val = max(self._black_val + self.limit_gap, min(val, 1.0))
         self.update()
 
     def paintEvent(self, event):

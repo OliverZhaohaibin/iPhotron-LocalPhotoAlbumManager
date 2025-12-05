@@ -105,6 +105,10 @@ class Ui_MainWindow(object):
         self.wheel_action_group = self.main_header.wheel_action_group
         self.wheel_action_navigate = self.main_header.wheel_action_navigate
         self.wheel_action_zoom = self.main_header.wheel_action_zoom
+        self.theme_group = self.main_header.theme_group
+        self.theme_system = self.main_header.theme_system
+        self.theme_light = self.main_header.theme_light
+        self.theme_dark = self.main_header.theme_dark
 
         self.window_shell_layout.addWidget(self.window_chrome)
         self.window_shell_layout.addWidget(self.menu_bar_container)
@@ -166,11 +170,6 @@ class Ui_MainWindow(object):
         right_panel = QWidget()
         right_panel.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         right_panel.setAutoFillBackground(True)
-        light_content_palette = right_panel.palette()
-        content_bg_color = QColor(Qt.GlobalColor.white)
-        light_content_palette.setColor(QPalette.ColorRole.Window, content_bg_color)
-        light_content_palette.setColor(QPalette.ColorRole.Base, content_bg_color)
-        right_panel.setPalette(light_content_palette)
         right_layout = QVBoxLayout(right_panel)
         right_layout.setContentsMargins(8, 8, 8, 8)
 

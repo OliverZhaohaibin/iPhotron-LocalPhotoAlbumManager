@@ -2,7 +2,7 @@
 
 import pytest
 
-from src.iPhoto.gui.ui.widgets.gl_crop.model import CropSessionModel
+from iPhotos.src.iPhoto.gui.ui.widgets.gl_crop.model import CropSessionModel
 
 
 @pytest.fixture

@@ -1,7 +1,7 @@
 
 import pytest
 from unittest.mock import MagicMock
-from src.iPhoto.gui.ui.widgets.gl_crop.controller import CropInteractionController
+from iPhotos.src.iPhoto.gui.ui.widgets.gl_crop.controller import CropInteractionController
 
 def create_controller():
     texture_provider = MagicMock(return_value=(300, 200))

@@ -5,7 +5,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from PySide6.QtCore import QPoint, QModelIndex
 
-from iPhoto.gui.ui.controllers.context_menu_controller import ContextMenuController
+from iPhotos.src.iPhoto.gui.ui.controllers.context_menu_controller import ContextMenuController
 
 
 @pytest.fixture

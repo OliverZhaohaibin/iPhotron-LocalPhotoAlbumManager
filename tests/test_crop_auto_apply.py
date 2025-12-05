@@ -5,7 +5,7 @@ import pytest
 
 def test_sidecar_crop_keys_preserved():
     """Test that resolve_render_adjustments preserves crop keys."""
-    from iPhoto.io.sidecar import resolve_render_adjustments
+    from iPhotos.src.iPhoto.io.sidecar import resolve_render_adjustments
     
     # Create adjustments with crop data
     adjustments = {

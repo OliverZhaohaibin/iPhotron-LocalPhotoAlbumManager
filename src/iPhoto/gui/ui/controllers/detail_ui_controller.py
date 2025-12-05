@@ -87,6 +87,7 @@ class DetailUIController(QObject):
         header: HeaderController,
         favorite_button: QToolButton,
         rotate_left_button: QToolButton,
+        share_button: QToolButton,
         edit_button: QPushButton,
         info_button: QToolButton,
         info_panel: InfoPanel,
@@ -109,6 +110,7 @@ class DetailUIController(QObject):
         self._header = header
         self._favorite_button = favorite_button
         self._rotate_left_button = rotate_left_button
+        self._share_button = share_button
         self._edit_button = edit_button
         self._info_button = info_button
         self._info_panel = info_panel
@@ -282,6 +284,8 @@ class DetailUIController(QObject):
 
         # The info button keeps a fixed glyph, so update it directly.
         self._info_button.setIcon(self._load_toolbar_icon("info.circle.svg"))
+        self._share_button.setIcon(self._load_toolbar_icon("square.and.arrow.up.svg"))
+        self._rotate_left_button.setIcon(self._load_toolbar_icon("rotate.left.svg"))
         # The favourite button icon depends on the active row; reusing the public
         # helper ensures we respect both the tint and the featured state.
         self.update_favorite_button(self._current_row)

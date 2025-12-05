@@ -3,8 +3,8 @@
 import pytest
 from PySide6.QtCore import QPointF
 
-from src.iPhoto.gui.ui.widgets.gl_crop.hit_tester import HitTester
-from src.iPhoto.gui.ui.widgets.gl_crop.utils import CropHandle
+from iPhotos.src.iPhoto.gui.ui.widgets.gl_crop.hit_tester import HitTester
+from iPhotos.src.iPhoto.gui.ui.widgets.gl_crop.utils import CropHandle
 
 
 @pytest.fixture

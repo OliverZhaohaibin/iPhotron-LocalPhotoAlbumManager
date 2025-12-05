@@ -18,7 +18,10 @@ SETTINGS_SCHEMA: dict[str, Any] = {
         "ui": {
             "type": "object",
             "properties": {
-                "theme": {"type": "string"},
+                "theme": {
+                    "type": "string",
+                    "enum": ["system", "light", "dark"],
+                },
                 "sidebar_width": {"type": "number", "minimum": 120},
                 "volume": {
                     "type": "number",
@@ -54,7 +57,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "schema": "iPhoto/settings@1",
     "basic_library_path": None,
     "ui": {
-        "theme": "light",
+        "theme": "system",
         "sidebar_width": 280,
         "volume": 75,
         "is_muted": False,

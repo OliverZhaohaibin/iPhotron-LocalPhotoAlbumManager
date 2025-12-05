@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Optional
 
-from PySide6.QtWidgets import QMessageBox, QWidget
+from PySide6.QtWidgets import QWidget
 
 # Allow both ``iPhoto.gui`` and legacy ``iPhotos.src.iPhoto.gui`` import paths.
 try:  # pragma: no cover - depends on runtime packaging
@@ -65,11 +65,10 @@ class DialogController:
             "location could not be determined. Do you want to restore this file "
             "to the main 'Basic Library' folder instead?"
         ).format(name=filename)
-        choice = QMessageBox.question(
+        return dialogs.confirm_action(
             self._parent,
-            "Restore Failed",
             message,
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.Yes,
+            title="Restore Failed",
+            yes_label="Yes",
+            no_label="No",
         )
-        return choice == QMessageBox.StandardButton.Yes

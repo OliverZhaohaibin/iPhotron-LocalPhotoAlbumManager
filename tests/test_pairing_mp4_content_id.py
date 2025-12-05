@@ -1,6 +1,6 @@
 from __future__ import annotations
 from datetime import datetime, timezone
-from iPhoto.core.pairing import pair_live
+from iPhotos.src.iPhoto.core.pairing import pair_live
 
 def iso(ts: datetime) -> str:
     return ts.replace(tzinfo=timezone.utc).isoformat().replace("+00:00", "Z")

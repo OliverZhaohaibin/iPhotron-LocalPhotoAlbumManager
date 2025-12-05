@@ -1,7 +1,7 @@
 import pytest
 from PySide6.QtCore import QPointF
 
-from src.iPhoto.gui.ui.widgets.gl_crop_utils import CropBoxState
+from iPhotos.src.iPhoto.gui.ui.widgets.gl_crop_utils import CropBoxState
 
 
 def test_zoom_about_point_shrinks_towards_anchor():

@@ -63,6 +63,7 @@ class ViewControllerManager(QObject):
             self._header,
             ui.favorite_button,
             ui.rotate_left_button,
+            ui.share_button,
             ui.edit_button,
             ui.info_button,
             self._info_panel,
@@ -84,6 +85,7 @@ class ViewControllerManager(QObject):
             navigation=navigation,
             detail_ui_controller=self._detail_ui,
             settings=context.settings,
+            theme_manager=context.theme,
         )
         self._map_controller = LocationMapController(
             context.library,

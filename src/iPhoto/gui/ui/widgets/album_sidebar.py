@@ -36,7 +36,6 @@ from ..palette import (
     SIDEBAR_LAYOUT_MARGIN,
     SIDEBAR_LAYOUT_SPACING,
     SIDEBAR_TEXT_COLOR,
-    SIDEBAR_TITLE_COLOR_HEX,
     SIDEBAR_TREE_MIN_WIDTH,
     SIDEBAR_TREE_STYLESHEET,
 )
@@ -163,25 +162,12 @@ class AlbumSidebar(QWidget):
         self._current_selection: Path | None = None
         self._current_static_selection: str | None = None
 
-        palette = self.palette()
-        palette.setColor(QPalette.ColorRole.Window, SIDEBAR_BACKGROUND_COLOR)
-        palette.setColor(QPalette.ColorRole.Base, SIDEBAR_BACKGROUND_COLOR)
-        self.setPalette(palette)
-        self.setAutoFillBackground(True)
-
         # Give the widget a stable object name so the stylesheet targets only the
         # sidebar shell and does not bleed into child controls such as the tree view.
         self.setObjectName("albumSidebar")
         # ``WA_StyledBackground`` tells Qt to honour our palette/stylesheet even when the
         # parent widgets are translucent (required for the rounded window shell).
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
-        # Apply the light blue background with a stylesheet to override the
-        # transparent background inherited from the frameless window chrome.
-        self.setStyleSheet(
-            "QWidget#albumSidebar {\n"
-            f"    background-color: {SIDEBAR_BACKGROUND_COLOR.name()};\n"
-            "}"
-        )
 
         self._title = QLabel("Basic Library")
         self._title.setObjectName("albumSidebarTitle")
@@ -195,7 +181,6 @@ class AlbumSidebar(QWidget):
         title_font.setPointSizeF(title_font.pointSizeF() + 0.5)
         title_font.setBold(True)
         self._title.setFont(title_font)
-        self._title.setStyleSheet(f"color: {SIDEBAR_TITLE_COLOR_HEX};")
 
         self._tree = _DropAwareTree(self)
         self._tree.setObjectName("albumSidebarTree")
@@ -221,10 +206,7 @@ class AlbumSidebar(QWidget):
         self._tree.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self._tree.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         tree_palette = self._tree.palette()
-        tree_palette.setColor(QPalette.ColorRole.Base, SIDEBAR_BACKGROUND_COLOR)
-        tree_palette.setColor(QPalette.ColorRole.Window, SIDEBAR_BACKGROUND_COLOR)
         tree_palette.setColor(QPalette.ColorRole.Highlight, SIDEBAR_SELECTED_BACKGROUND)
-        tree_palette.setColor(QPalette.ColorRole.HighlightedText, SIDEBAR_TEXT_COLOR)
         tree_palette.setColor(QPalette.ColorRole.Link, SIDEBAR_ICON_COLOR)
         self._tree.setPalette(tree_palette)
         self._tree.setAutoFillBackground(True)

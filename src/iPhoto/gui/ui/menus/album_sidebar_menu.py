@@ -8,18 +8,18 @@ from pathlib import Path
 from PySide6.QtCore import QPoint, Qt, QUrl
 from PySide6.QtGui import QDesktopServices, QPalette
 from PySide6.QtWidgets import (
+    QApplication,
     QInputDialog,
     QMenu,
-    QMessageBox,
     QTreeView,
     QWidget,
 )
 
+from ..widgets import dialogs
 from ....errors import LibraryError
 from ....library.manager import LibraryManager
 from ....library.tree import AlbumNode
 from ..models.album_tree_model import AlbumTreeItem, AlbumTreeModel, NodeType
-from ..palette import SIDEBAR_BACKGROUND_COLOR, SIDEBAR_TEXT_COLOR
 
 
 def _apply_main_window_menu_style(menu: QMenu, anchor: QWidget | None) -> None:
@@ -62,18 +62,17 @@ def _apply_main_window_menu_style(menu: QMenu, anchor: QWidget | None) -> None:
 def _create_styled_input_dialog(
     parent: QWidget, title: str, label: str, text: str = ""
 ) -> tuple[str, bool]:
-    """Create an input dialog styled to match the sidebar's light theme.
-    
-    This helper ensures that input dialogs for album operations (new album, rename)
-    use the consistent light background and dark text defined in palette.py, instead
-    of inheriting potentially incorrect system defaults.
-    
+    """Create an input dialog for album operations.
+
+    This helper used to enforce a light theme but now inherits the application-wide
+    theme settings to support both Light and Dark modes.
+
     Args:
         parent: Parent widget for the dialog
         title: Dialog window title
         label: Prompt label text
         text: Default input text value
-        
+
     Returns:
         Tuple of (user_input_text, accepted_bool)
     """
@@ -81,42 +80,45 @@ def _create_styled_input_dialog(
     dialog.setWindowTitle(title)
     dialog.setLabelText(label)
     dialog.setTextValue(text)
-    
-    # Apply stylesheet using colors from palette.py to ensure consistent light theme
-    # Background uses SIDEBAR_BACKGROUND_COLOR (#eef3f6), text uses SIDEBAR_TEXT_COLOR (#2b2b2b)
-    background_color = SIDEBAR_BACKGROUND_COLOR.name()
-    text_color = SIDEBAR_TEXT_COLOR.name()
-    
+
+    # Retrieve the application-wide palette to ensure the dialog respects the active theme.
+    # While inheritance usually handles this, we explicitly query the global state to
+    # guarantee the correct colors are applied regardless of the parent widget's styling.
+    palette = QApplication.palette()
+    bg = palette.color(QPalette.ColorRole.Window).name()
+    text_col = palette.color(QPalette.ColorRole.WindowText).name()
+    base = palette.color(QPalette.ColorRole.Base).name()
+    text_input = palette.color(QPalette.ColorRole.Text).name()
+    button = palette.color(QPalette.ColorRole.Button).name()
+    button_text = palette.color(QPalette.ColorRole.ButtonText).name()
+
     stylesheet = f"""
         QInputDialog {{
-            background-color: {background_color};
-            color: {text_color};
+            background-color: {bg};
+            color: {text_col};
         }}
         QLabel {{
-            color: {text_color};
+            color: {text_col};
         }}
         QLineEdit {{
-            background-color: white;
-            color: {text_color};
-            border: 1px solid #c0c0c0;
+            background-color: {base};
+            color: {text_input};
+            border: 1px solid {text_col};
             padding: 4px;
         }}
         QPushButton {{
-            background-color: white;
-            color: {text_color};
-            border: 1px solid #c0c0c0;
+            background-color: {button};
+            color: {button_text};
+            border: 1px solid {text_col};
             padding: 6px 16px;
             min-width: 60px;
         }}
         QPushButton:hover {{
-            background-color: #f0f0f0;
-        }}
-        QPushButton:pressed {{
-            background-color: #e0e0e0;
+            background-color: {base};
         }}
     """
     dialog.setStyleSheet(stylesheet)
-    
+
     # Execute dialog and return result
     accepted = dialog.exec()
     return (dialog.textValue(), accepted == QInputDialog.DialogCode.Accepted)
@@ -191,7 +193,7 @@ class AlbumSidebarContextMenu(QMenu):
             return
         target_name = name.strip()
         if not target_name:
-            QMessageBox.warning(self.parentWidget(), "iPhoto", "Album name cannot be empty.")
+            dialogs.show_warning(self.parentWidget(), "Album name cannot be empty.")
             return
         try:
             if base_item.node_type == NodeType.ALBUM and base_item.album is not None:
@@ -199,7 +201,7 @@ class AlbumSidebarContextMenu(QMenu):
             else:
                 node = self._library.create_album(target_name)
         except LibraryError as exc:  # pragma: no cover - GUI feedback
-            QMessageBox.warning(self.parentWidget(), "iPhoto", str(exc))
+            dialogs.show_warning(self.parentWidget(), str(exc))
             return
         self._set_pending_selection(node.path)
 
@@ -217,12 +219,12 @@ class AlbumSidebarContextMenu(QMenu):
             return
         target_name = name.strip()
         if not target_name:
-            QMessageBox.warning(self.parentWidget(), "iPhoto", "Album name cannot be empty.")
+            dialogs.show_warning(self.parentWidget(), "Album name cannot be empty.")
             return
         try:
             self._library.rename_album(item.album, target_name)
         except LibraryError as exc:  # pragma: no cover - GUI feedback
-            QMessageBox.warning(self.parentWidget(), "iPhoto", str(exc))
+            dialogs.show_warning(self.parentWidget(), str(exc))
             return
         self._set_pending_selection(item.album.path.parent / target_name)
 

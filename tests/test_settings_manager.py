@@ -47,4 +47,4 @@ def test_settings_manager_nested_updates_preserve_defaults(tmp_path: Path) -> No
     manager.load()
     manager.set("ui.sidebar_width", 320)
     assert manager.get("ui.sidebar_width") == 320
-    assert manager.get("ui.theme") == "light"
+    assert manager.get("ui.theme") == "system"

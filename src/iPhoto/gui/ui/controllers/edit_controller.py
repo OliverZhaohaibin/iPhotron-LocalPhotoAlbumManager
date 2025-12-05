@@ -21,11 +21,13 @@ from ..tasks.edit_sidebar_preview_worker import (
     EditSidebarPreviewWorker,
 )
 from ..ui_main_window import Ui_MainWindow
+from ..theme_manager import ThemeManager
 from .edit_fullscreen_manager import EditFullscreenManager
 from .edit_preview_manager import EditPreviewManager, resolve_adjustment_mapping
 from .edit_view_transition import EditViewTransitionManager
 from .player_view_controller import PlayerViewController
 from .view_controller import ViewController
+from .window_theme_controller import WindowThemeController
 
 if TYPE_CHECKING:  # pragma: no cover - import for typing only
     from .detail_ui_controller import DetailUIController
@@ -56,6 +58,7 @@ class EditController(QObject):
         navigation: "NavigationController" | None = None,
         detail_ui_controller: "DetailUIController" | None = None,
         settings: SettingsManager | None = None,
+        theme_manager: ThemeManager | None = None,
     ) -> None:
         super().__init__(parent)
         # ``parent`` is the main window hosting the edit UI.  Retaining a weak reference to the
@@ -79,6 +82,11 @@ class EditController(QObject):
         # respect user preferences such as whether the filmstrip should appear
         # after leaving the editor.
         self._settings: SettingsManager | None = settings
+        # ``_theme_controller`` manages window chrome styling.
+        self._theme_controller: WindowThemeController | None = None
+        if theme_manager and parent:
+            self._theme_controller = WindowThemeController(ui, parent, theme_manager)
+
         # Track whether the shared zoom controls are currently routed to the edit viewer so we can
         # disconnect them without relying on Qt to silently drop redundant requests.  Qt logs a
         # warning when asked to disconnect a link that was never created, so this boolean keeps the
@@ -109,9 +117,16 @@ class EditController(QObject):
             self._ui.edit_image_viewer.end_perspective_interaction
         )
 
-        self._transition_manager = EditViewTransitionManager(self._ui, self._window, self)
+        self._transition_manager = EditViewTransitionManager(
+            self._ui,
+            self._window,
+            self,
+            theme_controller=self._theme_controller,
+        )
         self._transition_manager.transition_finished.connect(self._on_transition_finished)
         self._transition_manager.set_detail_ui_controller(self._detail_ui_controller)
+        if self._theme_controller:
+            self._theme_controller.set_detail_ui_controller(self._detail_ui_controller)
 
         self._fullscreen_manager = EditFullscreenManager(
             self._ui,
@@ -219,6 +234,9 @@ class EditController(QObject):
     # ------------------------------------------------------------------
     def begin_edit(self) -> None:
         """Enter the edit view for the playlist's current asset."""
+
+        if self._theme_controller:
+            self._theme_controller.apply_edit_theme()
 
         if self._view_controller.is_edit_view_active():
             return
@@ -484,6 +502,9 @@ class EditController(QObject):
 
     def leave_edit_mode(self, animate: bool = True) -> None:
         """Return to the standard detail view, optionally animating the transition."""
+
+        if self._theme_controller:
+            self._theme_controller.restore_global_theme()
 
         self._preview_manager.cancel_pending_updates()
         if self._is_loading_edit_image:

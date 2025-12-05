@@ -17,7 +17,7 @@ pytest.importorskip(
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication
 
-from iPhoto.gui.ui.widgets.albums_dashboard import AlbumCard, AlbumsDashboard
+from iPhotos.src.iPhoto.gui.ui.widgets.albums_dashboard import AlbumCard, AlbumsDashboard
 
 @pytest.fixture
 def qapp():

@@ -1,6 +1,6 @@
 from PySide6.QtGui import QPalette, QColor
 from PySide6.QtWidgets import QApplication
-from src.iPhoto.gui.ui.widgets.filmstrip_view import FilmstripView
+from iPhotos.src.iPhoto.gui.ui.widgets.filmstrip_view import FilmstripView
 import pytest
 
 @pytest.fixture(scope="session")

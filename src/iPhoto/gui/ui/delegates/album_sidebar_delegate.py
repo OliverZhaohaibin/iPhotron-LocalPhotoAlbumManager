@@ -201,7 +201,14 @@ class AlbumSidebarDelegate(QStyledItemDelegate):
         icon = QIcon()
         if isinstance(model, AlbumTreeModel) and isinstance(item, AlbumTreeItem):
             # Re-fetch the icon so we can enforce a consistent stroke width override.
-            icon = model._icon_for_item(item, stroke_width=SIDEBAR_ICON_STROKE_WIDTH)
+            palette = self._palette_for_state(state)
+            text_color = palette.color(QPalette.ColorRole.Text)
+            icon_color = text_color.name(QColor.NameFormat.HexArgb)
+            icon = model._icon_for_item(
+                item,
+                stroke_width=SIDEBAR_ICON_STROKE_WIDTH,
+                color=icon_color,
+            )
         else:
             # Fallback to whatever the model exposed if the expected types differ.
             data = index.data(Qt.ItemDataRole.DecorationRole)
@@ -488,8 +495,6 @@ class AlbumSidebarDelegate(QStyledItemDelegate):
             return palette.color(QPalette.ColorRole.Link)
         if not state.is_enabled:
             return palette.color(QPalette.ColorGroup.Disabled, QPalette.ColorRole.Text)
-        if state.is_selected and state.node_type == NodeType.HEADER:
-            return palette.color(QPalette.ColorRole.HighlightedText)
         return palette.color(QPalette.ColorRole.Text)
 
     def _draw_separator(self, painter: QPainter, rect: QRect) -> None:

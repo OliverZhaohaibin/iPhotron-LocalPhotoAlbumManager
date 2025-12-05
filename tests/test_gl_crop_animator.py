@@ -27,13 +27,13 @@ def mock_callbacks():
 
 def test_animator_imports():
     """Test that CropAnimator can be imported."""
-    from src.iPhoto.gui.ui.widgets.gl_crop.animator import CropAnimator
+    from iPhotos.src.iPhoto.gui.ui.widgets.gl_crop.animator import CropAnimator
     assert CropAnimator is not None
 
 
 def test_animator_initialization(mock_callbacks):
     """Test animator initialization."""
-    from src.iPhoto.gui.ui.widgets.gl_crop.animator import CropAnimator
+    from iPhotos.src.iPhoto.gui.ui.widgets.gl_crop.animator import CropAnimator
 
     animator = CropAnimator(
         on_idle_timeout=mock_callbacks.on_idle,
@@ -45,7 +45,7 @@ def test_animator_initialization(mock_callbacks):
 
 def test_animator_idle_timer(mock_callbacks):
     """Test idle timer functionality."""
-    from src.iPhoto.gui.ui.widgets.gl_crop.animator import CropAnimator
+    from iPhotos.src.iPhoto.gui.ui.widgets.gl_crop.animator import CropAnimator
 
     animator = CropAnimator(
         on_idle_timeout=mock_callbacks.on_idle,
@@ -62,7 +62,7 @@ def test_animator_idle_timer(mock_callbacks):
 
 def test_animator_start_stop_animation(mock_callbacks):
     """Test starting and stopping animation."""
-    from src.iPhoto.gui.ui.widgets.gl_crop.animator import CropAnimator
+    from iPhotos.src.iPhoto.gui.ui.widgets.gl_crop.animator import CropAnimator
 
     animator = CropAnimator(
         on_idle_timeout=mock_callbacks.on_idle,
@@ -87,7 +87,7 @@ def test_animator_start_stop_animation(mock_callbacks):
 
 def test_animator_animation_duration(mock_callbacks):
     """Test that animation duration is respected."""
-    from src.iPhoto.gui.ui.widgets.gl_crop.animator import CropAnimator
+    from iPhotos.src.iPhoto.gui.ui.widgets.gl_crop.animator import CropAnimator
 
     animator = CropAnimator(
         on_idle_timeout=mock_callbacks.on_idle,

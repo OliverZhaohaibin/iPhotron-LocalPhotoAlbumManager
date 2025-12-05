@@ -12,7 +12,7 @@ This allows testing with only the minimal PySide6 imports required.
 import pytest
 
 # Import crop_logic using package structure. If Qt dependencies are problematic, mock them in test setup.
-from src.iPhoto.gui.ui.widgets.gl_image_viewer import crop_logic
+from iPhotos.src.iPhoto.gui.ui.widgets.gl_image_viewer import crop_logic
 has_valid_crop = crop_logic.has_valid_crop
 compute_crop_rect_pixels = crop_logic.compute_crop_rect_pixels
 

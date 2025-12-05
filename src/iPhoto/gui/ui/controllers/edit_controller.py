@@ -20,7 +20,6 @@ from ..tasks.edit_sidebar_preview_worker import (
     EditSidebarPreviewResult,
     EditSidebarPreviewWorker,
 )
-from ..ui_main_window import Ui_MainWindow
 from ..theme_manager import ThemeManager
 from .edit_fullscreen_manager import EditFullscreenManager
 from .edit_preview_manager import EditPreviewManager, resolve_adjustment_mapping
@@ -30,6 +29,7 @@ from .view_controller import ViewController
 from .window_theme_controller import WindowThemeController
 
 if TYPE_CHECKING:  # pragma: no cover - import for typing only
+    from ..ui_main_window import Ui_MainWindow
     from .detail_ui_controller import DetailUIController
     from .navigation_controller import NavigationController
 

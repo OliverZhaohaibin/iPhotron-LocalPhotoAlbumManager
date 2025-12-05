@@ -9,9 +9,12 @@ from typing import Mapping, Optional
 from PySide6.QtCore import QObject
 from PySide6.QtWidgets import QWidget
 
+from typing import TYPE_CHECKING
 from ....utils import image_loader
-from ..ui_main_window import Ui_MainWindow
 from .edit_preview_manager import EditPreviewManager
+
+if TYPE_CHECKING:
+    from ..ui_main_window import Ui_MainWindow
 
 _LOGGER = logging.getLogger(__name__)
 

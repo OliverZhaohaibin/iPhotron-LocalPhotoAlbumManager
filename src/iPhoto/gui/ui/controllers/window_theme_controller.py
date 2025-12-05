@@ -8,13 +8,13 @@ from PySide6.QtCore import QObject
 from PySide6.QtGui import QColor, QPalette
 
 from ..icon import load_icon
-from ..ui_main_window import Ui_MainWindow
 from ..widgets.collapsible_section import CollapsibleSection
 from ..window_manager import RoundedWindowShell
 from ..theme_manager import ThemeManager, ThemeColors, DARK_THEME
 from ..palette import SIDEBAR_SELECTED_BACKGROUND, SIDEBAR_ICON_COLOR
 
 if TYPE_CHECKING:
+    from ..ui_main_window import Ui_MainWindow
     from .detail_ui_controller import DetailUIController
 
 

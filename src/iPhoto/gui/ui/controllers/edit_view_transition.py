@@ -14,10 +14,10 @@ from PySide6.QtCore import (
 )
 from PySide6.QtWidgets import QGraphicsOpacityEffect
 
-from ..ui_main_window import Ui_MainWindow
 from .window_theme_controller import WindowThemeController
 
 if TYPE_CHECKING:  # pragma: no cover - import for typing only
+    from ..ui_main_window import Ui_MainWindow
     from .detail_ui_controller import DetailUIController
 
 

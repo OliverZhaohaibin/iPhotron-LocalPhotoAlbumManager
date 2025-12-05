@@ -112,8 +112,6 @@ class MonotoneCubicSpline:
 
         idx_0, idx_1, idx_2 = (0, 1, 2) if k == 0 else (self.n-1, self.n-2, self.n-3)
 
-        h0 = self.x[idx_1] - self.x[idx_0]
-        h1 = self.x[idx_2] - self.x[idx_1] # This is directed distance
         # Actually distances are always positive if sorted.
         h0 = abs(self.x[idx_1] - self.x[idx_0])
         h1 = abs(self.x[idx_2] - self.x[idx_1])

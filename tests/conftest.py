@@ -32,14 +32,34 @@ def ensure_module(name: str, mock_obj: object = None) -> None:
 ensure_module("PySide6.QtMultimedia")
 ensure_module("PySide6.QtMultimediaWidgets")
 
+# Core Qt modules - try to import, mock if missing
+ensure_module("PySide6.QtWidgets")
+
+# Import QWidget safely to use as a base class for MockQOpenGLWidget
+try:
+    from PySide6.QtWidgets import QWidget
+except ImportError:
+    # If imports fail despite ensure_module (unlikely unless mocked), fallback to MagicMock
+    QWidget = MagicMock()
+
 # Force-mock QtOpenGLWidgets and QtOpenGL to avoid segmentation faults in headless environment.
 # Even if these modules are importable, using them (e.g. creating QOpenGLWidget subclasses)
 # can cause crashes without a proper display server.
-sys.modules["PySide6.QtOpenGLWidgets"] = MagicMock()
-sys.modules["PySide6.QtOpenGL"] = MagicMock()
+# Instead of a raw MagicMock, we provide a safe QWidget-based mock for QOpenGLWidget
+# so that subclasses (like GLImageViewer) remain valid QObjects and don't crash Signals.
+class MockQOpenGLWidget(QWidget):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
 
-# Core Qt modules - try to import, mock if missing
-ensure_module("PySide6.QtWidgets")
+    def makeCurrent(self): pass
+    def doneCurrent(self): pass
+    def context(self): return MagicMock()
+
+mock_gl_widgets = MagicMock()
+mock_gl_widgets.QOpenGLWidget = MockQOpenGLWidget
+sys.modules["PySide6.QtOpenGLWidgets"] = mock_gl_widgets
+
+sys.modules["PySide6.QtOpenGL"] = MagicMock()
 
 # PySide6.QtGui needs special handling for mocks if it is missing
 try:

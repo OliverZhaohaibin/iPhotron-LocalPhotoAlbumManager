@@ -123,7 +123,7 @@ def test_apply_theme_signal(theme_manager, mock_settings):
         theme_manager.apply_theme()
 
         assert theme_manager.current_colors() == LIGHT_THEME
-        mock_signal.emit.assert_called_with(False) # False for light
+        mock_signal.emit.assert_called_with(False)  # False for light
 
 
 def test_set_force_dark(theme_manager, mock_settings):

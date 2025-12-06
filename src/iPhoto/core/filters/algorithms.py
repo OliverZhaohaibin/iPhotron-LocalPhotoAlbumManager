@@ -10,7 +10,18 @@ from __future__ import annotations
 
 import math
 
-from numba import jit
+try:
+    from numba import jit
+except ImportError:
+    # Fallback if Numba is not present (e.g. running in stripped AOT mode).
+    # This allows the module to be imported without error, although these
+    # functions shouldn't be called directly in AOT mode (the compiled
+    # extension should be used instead).
+    def jit(*args, **kwargs):
+        def decorator(func):
+            return func
+
+        return decorator
 
 
 @jit(nopython=True, inline="always")

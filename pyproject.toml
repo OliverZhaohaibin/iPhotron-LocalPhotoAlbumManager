@@ -4,10 +4,10 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "iPhoto"
-version = "0.1.0"
+version = "2.3.0"
 description = "Folder-native photo manager with Live Photo support"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.12"
 authors = [{name = "iPhoto Team"}]
 dependencies = [
   "typer>=0.12",

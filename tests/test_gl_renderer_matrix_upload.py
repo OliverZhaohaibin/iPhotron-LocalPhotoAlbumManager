@@ -37,12 +37,22 @@ def load_module_from_file(module_name, file_path):
 
 setup_dummy_packages()
 
-base_path = os.getcwd()
-perspective_math_path = os.path.join(base_path, 'src/iPhoto/gui/ui/widgets/perspective_math.py')
-gl_renderer_path = os.path.join(base_path, 'src/iPhoto/gui/ui/widgets/gl_renderer.py')
+this_dir = os.path.dirname(os.path.abspath(__file__))
+project_root = os.path.dirname(this_dir)
 
-# Load perspective_math
+perspective_math_path = os.path.join(
+    project_root, 'src', 'iPhoto', 'gui', 'ui', 'widgets', 'perspective_math.py'
+)
+perspective_math_path = os.path.abspath(perspective_math_path)
+
+gl_renderer_path = os.path.join(
+    project_root, 'src', 'iPhoto', 'gui', 'ui', 'widgets', 'gl_renderer.py'
+)
+gl_renderer_path = os.path.abspath(gl_renderer_path)
+
+# Load perspective_math first as it is imported by gl_renderer
 load_module_from_file('iPhoto.gui.ui.widgets.perspective_math', perspective_math_path)
+
 # Load gl_renderer
 gl_renderer_mod = load_module_from_file('iPhoto.gui.ui.widgets.gl_renderer', gl_renderer_path)
 

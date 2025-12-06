@@ -46,7 +46,11 @@ class AdjustModeState(EditModeState):
         self._ui.edit_crop_action.setChecked(False)
         self._ui.edit_sidebar.set_mode("adjust")
         self._ui.edit_image_viewer.setCropMode(False)
+
+        # Block signals to prevent recursion if the control emits signal on same index
+        was_blocked = self._ui.edit_mode_control.blockSignals(True)
         self._ui.edit_mode_control.setCurrentIndex(0)
+        self._ui.edit_mode_control.blockSignals(was_blocked)
 
 
 class CropModeState(EditModeState):
@@ -73,4 +77,8 @@ class CropModeState(EditModeState):
                 "Crop_FlipH": float(session.value("Crop_FlipH")),
             }
         self._ui.edit_image_viewer.setCropMode(True, crop_values)
+
+        # Block signals to prevent recursion if the control emits signal on same index
+        was_blocked = self._ui.edit_mode_control.blockSignals(True)
         self._ui.edit_mode_control.setCurrentIndex(1)
+        self._ui.edit_mode_control.blockSignals(was_blocked)

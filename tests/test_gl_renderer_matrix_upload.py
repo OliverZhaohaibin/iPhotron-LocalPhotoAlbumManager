@@ -37,12 +37,22 @@ def load_module_from_file(module_name, file_path):
 
 setup_dummy_packages()
 
-base_path = os.getcwd()
-perspective_math_path = os.path.join(base_path, 'src/iPhoto/gui/ui/widgets/perspective_math.py')
-gl_renderer_path = os.path.join(base_path, 'src/iPhoto/gui/ui/widgets/gl_renderer.py')
+this_dir = os.path.dirname(os.path.abspath(__file__))
+project_root = os.path.dirname(this_dir)
 
-# Load perspective_math
+perspective_math_path = os.path.join(
+    project_root, 'src', 'iPhoto', 'gui', 'ui', 'widgets', 'perspective_math.py'
+)
+perspective_math_path = os.path.abspath(perspective_math_path)
+
+gl_renderer_path = os.path.join(
+    project_root, 'src', 'iPhoto', 'gui', 'ui', 'widgets', 'gl_renderer.py'
+)
+gl_renderer_path = os.path.abspath(gl_renderer_path)
+
+# Load perspective_math first as it is imported by gl_renderer
 load_module_from_file('iPhoto.gui.ui.widgets.perspective_math', perspective_math_path)
+
 # Load gl_renderer
 gl_renderer_mod = load_module_from_file('iPhoto.gui.ui.widgets.gl_renderer', gl_renderer_path)
 
@@ -58,6 +68,7 @@ def renderer(mock_gl_funcs):
     # Patch QOpenGLShaderProgram to avoid needing a real GL context
     with patch('iPhoto.gui.ui.widgets.gl_renderer.QOpenGLShaderProgram') as MockProgram, \
          patch('iPhoto.gui.ui.widgets.gl_renderer.QOpenGLVertexArrayObject') as MockVAO, \
+         patch('iPhoto.gui.ui.widgets.gl_renderer.gl') as MockGL, \
          patch('iPhoto.gui.ui.widgets.gl_renderer._load_shader_source', return_value="void main() {}"):
 
         MockProgram.return_value.addShaderFromSourceCode.return_value = True
@@ -65,6 +76,9 @@ def renderer(mock_gl_funcs):
         MockProgram.return_value.uniformLocation.return_value = 1
 
         MockVAO.return_value.isCreated.return_value = True
+
+        # Ensure glGenBuffers returns a value compatible with int()
+        MockGL.glGenBuffers.return_value = 1
 
         renderer = GLRenderer(mock_gl_funcs)
         renderer.initialize_resources()

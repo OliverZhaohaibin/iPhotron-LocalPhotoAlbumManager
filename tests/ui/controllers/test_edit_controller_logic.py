@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 from PySide6.QtWidgets import QApplication
-from PySide6.QtGui import QImage, QPalette
+from PySide6.QtGui import QImage
 from PySide6.QtCore import QObject, Signal
 
 from src.iPhoto.gui.ui.controllers.edit_controller import EditController

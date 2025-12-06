@@ -88,7 +88,7 @@ def test_prepare_sidebar_preview_starts_worker(MockWorker, pipeline_loader):
     # Case where scaling is NOT needed
     image_small = QImage(50, 50, QImage.Format.Format_RGB32)
     target_height_large = 100
-    # 50 > 150 is False
+    # 50 > 100 * 1.5 (=150) is False
 
     MockWorker.reset_mock()
     pipeline_loader.prepare_sidebar_preview(image_small, target_height_large)

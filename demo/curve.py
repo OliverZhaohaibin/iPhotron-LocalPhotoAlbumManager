@@ -25,7 +25,7 @@ except ImportError:
 from PySide6.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout,
                                QComboBox, QPushButton, QLabel, QFrame, QSizePolicy, QFileDialog)
 from PySide6.QtCore import Qt, QPointF, QSize, Signal
-from PySide6.QtGui import (QPainter, QColor, QPen, QPainterPath, QIcon, QSurfaceFormat)
+from PySide6.QtGui import (QPainter, QColor, QPen, QPainterPath, QIcon, QSurfaceFormat, QCursor)
 from PySide6.QtOpenGLWidgets import QOpenGLWidget
 from OpenGL import GL as gl
 
@@ -143,6 +143,8 @@ void main() {
 # GL Image Viewer
 # ==========================================
 class GLImageViewer(QOpenGLWidget):
+    pixelClicked = Signal(float, float, float)  # r, g, b (0..1)
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.image_texture = None
@@ -152,6 +154,16 @@ class GLImageViewer(QOpenGLWidget):
         self.vbo = None
         self.has_image = False
         self._pending_lut = None
+
+        self.image_data = None  # CPU-side image data (H, W, 3) float32
+        self.sampling_mode = False
+
+    def set_sampling_mode(self, active: bool):
+        self.sampling_mode = active
+        if active:
+            self.setCursor(Qt.CrossCursor)
+        else:
+            self.setCursor(Qt.ArrowCursor)
 
     def initializeGL(self):
         gl.glClearColor(0.15, 0.15, 0.15, 1.0)
@@ -236,6 +248,10 @@ class GLImageViewer(QOpenGLWidget):
         self.update()
 
     def set_image(self, img_pil):
+        # Store CPU data for sampling (normalized float 0..1)
+        rgb_img = img_pil.convert("RGB")
+        self.image_data = np.array(rgb_img, dtype=np.float32) / 255.0
+
         self.makeCurrent()
         img = img_pil.convert("RGBA")
         data = np.array(img)
@@ -256,6 +272,30 @@ class GLImageViewer(QOpenGLWidget):
         self.has_image = True
         self.doneCurrent()
         self.update()
+
+    def mousePressEvent(self, event):
+        if self.sampling_mode and self.has_image and self.image_data is not None:
+            pos = event.position()
+            x = int(pos.x())
+            y = int(pos.y())
+            w = self.width()
+            h = self.height()
+
+            # Map widget coordinates to image coordinates
+            # Assuming the image fills the widget (stretched) as per vertex shader
+            img_h, img_w = self.image_data.shape[:2]
+
+            # Avoid div by zero
+            if w > 0 and h > 0:
+                ix = int((x / w) * img_w)
+                iy = int((y / h) * img_h)
+
+                # Clamp
+                ix = max(0, min(ix, img_w - 1))
+                iy = max(0, min(iy, img_h - 1))
+
+                pixel = self.image_data[iy, ix] # RGB
+                self.pixelClicked.emit(float(pixel[0]), float(pixel[1]), float(pixel[2]))
 
     def paintGL(self):
         gl.glClear(gl.GL_COLOR_BUFFER_BIT)
@@ -822,6 +862,38 @@ class CurveGraph(QWidget):
     def add_point_center(self):
         self.add_point_smart()
 
+    def add_or_update_point(self, channel_name, x, y):
+        points = self.channels.get(channel_name)
+        if points is None: return
+
+        # Ensure x is within current Black/White range (inner)
+        start_x = points[0].x()
+        end_x = points[-1].x()
+
+        # If x is outside range, clamp it inside?
+        # For a gray point, it must be visible.
+        if x <= start_x: x = start_x + 0.01
+        if x >= end_x: x = end_x - 0.01
+
+        if x <= start_x or x >= end_x:
+            # If still out of bounds (range too small), abort
+            return
+
+        # Check existing internal points
+        hit_idx = -1
+        for i in range(1, len(points) - 1):
+            if abs(points[i].x() - x) < self.MIN_DISTANCE_THRESHOLD:
+                hit_idx = i
+                break
+
+        if hit_idx != -1:
+            points[hit_idx] = QPointF(x, y)
+        else:
+            points.append(QPointF(x, y))
+            points.sort(key=lambda p: p.x())
+
+        self.update_spline_and_lut()
+
     def update_spline_and_lut(self):
         self._recalculate_spline(self.active_channel)
         self.update_lut()
@@ -877,6 +949,12 @@ class CurveGraph(QWidget):
         self.lutChanged.emit(lut)
 
 
+class ToolMode:
+    NONE = 0
+    BLACK = 1
+    GRAY = 2
+    WHITE = 3
+
 class IconButton(QPushButton):
     def __init__(self, icon_path, tooltip, parent=None):
         super().__init__(parent)
@@ -907,6 +985,7 @@ class IconButton(QPushButton):
 class CurvesDemo(QWidget):
     def __init__(self):
         super().__init__()
+        self.current_tool = ToolMode.NONE
         self.setWindowTitle("Curves Demo")
         self.setStyleSheet("background-color: #1e1e1e; font-family: 'Segoe UI', sans-serif;")
         self.setFixedSize(1000, 600)
@@ -970,16 +1049,22 @@ class CurvesDemo(QWidget):
         tf_layout.setContentsMargins(0, 0, 0, 0)
         tf_layout.setSpacing(0)
 
-        btn_black = IconButton(ICON_PATH_BLACK, "Set Black Point")
-        btn_gray = IconButton(ICON_PATH_GRAY, "Set Gray Point")
-        btn_white = IconButton(ICON_PATH_WHITE, "Set White Point")
-        border_style = "border-right: 1px solid #555;"
-        btn_black.setStyleSheet(btn_black.styleSheet() + border_style)
-        btn_gray.setStyleSheet(btn_gray.styleSheet() + border_style)
+        self.btn_black = IconButton(ICON_PATH_BLACK, "Set Black Point")
+        self.btn_black.clicked.connect(lambda: self.set_tool(ToolMode.BLACK))
 
-        tf_layout.addWidget(btn_black)
-        tf_layout.addWidget(btn_gray)
-        tf_layout.addWidget(btn_white)
+        self.btn_gray = IconButton(ICON_PATH_GRAY, "Set Gray Point")
+        self.btn_gray.clicked.connect(lambda: self.set_tool(ToolMode.GRAY))
+
+        self.btn_white = IconButton(ICON_PATH_WHITE, "Set White Point")
+        self.btn_white.clicked.connect(lambda: self.set_tool(ToolMode.WHITE))
+
+        border_style = "border-right: 1px solid #555;"
+        self.btn_black.setStyleSheet(self.btn_black.styleSheet() + border_style)
+        self.btn_gray.setStyleSheet(self.btn_gray.styleSheet() + border_style)
+
+        tf_layout.addWidget(self.btn_black)
+        tf_layout.addWidget(self.btn_gray)
+        tf_layout.addWidget(self.btn_white)
         tools_layout.addWidget(tools_frame)
 
         self.btn_add_point = IconButton(ICON_PATH_ADD, "Add Point to Curve")
@@ -1002,6 +1087,7 @@ class CurvesDemo(QWidget):
 
         self.curve = CurveGraph()
         self.curve.lutChanged.connect(self.image_viewer.upload_lut)
+        self.image_viewer.pixelClicked.connect(self.on_pixel_sampled)
         graph_sliders_layout.addWidget(self.curve)
 
         # 2.2 Replace Gradient Bar with Interactive Sliders
@@ -1073,6 +1159,87 @@ class CurvesDemo(QWidget):
                 self.curve.update_lut()
             except Exception as e:
                 print(f"Error loading image: {e}")
+
+    def set_tool(self, mode):
+        if self.current_tool == mode:
+            # Toggle off
+            mode = ToolMode.NONE
+
+        self.current_tool = mode
+        self.image_viewer.set_sampling_mode(mode != ToolMode.NONE)
+
+        # Update UI state (optional highlight)
+        # Reset styles
+        base_style = """
+            QPushButton {
+                background-color: transparent;
+                border: none;
+                border-radius: 0px;
+            }
+            QPushButton:hover {
+                background-color: #444;
+            }
+            QPushButton:pressed {
+                background-color: #222;
+            }
+        """
+        active_style = """
+            QPushButton {
+                background-color: #555;
+                border: none;
+                border-radius: 0px;
+            }
+        """
+        border_style = "border-right: 1px solid #555;"
+
+        # Helper to apply style
+        def set_btn_style(btn, active, has_border=False):
+            s = active_style if active else base_style
+            if has_border: s += border_style
+            btn.setStyleSheet(s)
+
+        set_btn_style(self.btn_black, mode == ToolMode.BLACK, True)
+        set_btn_style(self.btn_gray, mode == ToolMode.GRAY, True)
+        set_btn_style(self.btn_white, mode == ToolMode.WHITE, False)
+
+    def on_pixel_sampled(self, r, g, b):
+        if self.current_tool == ToolMode.NONE: return
+
+        active_channel = self.curve.active_channel
+
+        # Calculate Luminance for RGB Master logic (Rec. 709 coefficients)
+        lum = 0.2126 * r + 0.7152 * g + 0.0722 * b
+
+        if self.current_tool == ToolMode.BLACK:
+            if active_channel == "RGB":
+                self.input_sliders.setBlackPoint(lum)
+            else:
+                val = {"Red": r, "Green": g, "Blue": b}.get(active_channel, 0)
+                self.input_sliders.setBlackPoint(val)
+
+        elif self.current_tool == ToolMode.WHITE:
+            if active_channel == "RGB":
+                self.input_sliders.setWhitePoint(lum)
+            else:
+                 val = {"Red": r, "Green": g, "Blue": b}.get(active_channel, 1)
+                 self.input_sliders.setWhitePoint(val)
+
+        elif self.current_tool == ToolMode.GRAY:
+             # Always acts on R, G, B individually
+             # Target: Input Channel Val -> 0.5 Output
+
+             # We add/update points on the respective channels
+             self.curve.add_or_update_point("Red", r, 0.5)
+             self.curve.add_or_update_point("Green", g, 0.5)
+             self.curve.add_or_update_point("Blue", b, 0.5)
+
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key_Escape:
+            if self.current_tool != ToolMode.NONE:
+                self.set_tool(ToolMode.NONE)
+                event.accept()
+                return
+        super().keyPressEvent(event)
 
 
 if __name__ == "__main__":

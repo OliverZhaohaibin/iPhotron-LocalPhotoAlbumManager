@@ -22,7 +22,7 @@ Please note that this project is released with a [Code of Conduct](CODE_OF_CONDU
 
 1.  **Clone the repository**:
     ```bash
-    git clone https://github.com/OliverZhaohaibin/git
+    git clone https://github.com/OliverZhaohaibin/iPhotos.git
     cd iPhotos
     ```
 

@@ -7,6 +7,7 @@ import pytest
 pytest.importorskip("PySide6", reason="PySide6 is required for GUI tests")
 
 from PySide6.QtCore import QEvent
+from PySide6.QtGui import QShowEvent
 from PySide6.QtWidgets import QApplication
 
 from src.iPhoto.gui.ui.widgets.video_area import VideoArea
@@ -30,7 +31,7 @@ def test_video_area_show_event_calls_update_bar_geometry(qapp, mocker):
     mock_update = mocker.patch.object(video_area, '_update_bar_geometry')
     
     # Create a show event
-    show_event = QEvent(QEvent.Type.Show)
+    show_event = QShowEvent()
     
     # Call showEvent
     video_area.showEvent(show_event)
@@ -48,7 +49,7 @@ def test_video_area_show_event_calls_super(qapp, mocker):
     mock_super_show = mocker.patch('PySide6.QtWidgets.QWidget.showEvent')
     
     # Create a show event
-    show_event = QEvent(QEvent.Type.Show)
+    show_event = QShowEvent()
     
     # Call showEvent
     video_area.showEvent(show_event)

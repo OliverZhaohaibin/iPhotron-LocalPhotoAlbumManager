@@ -1,10 +1,9 @@
 
 from unittest.mock import MagicMock
-import pytest
 from PySide6.QtWidgets import QStackedWidget, QWidget
 
-from iPhoto.gui.ui.controllers.view_controller import ViewController
-from iPhoto.gui.ui.widgets.albums_dashboard import AlbumsDashboard
+from src.iPhoto.gui.ui.controllers.view_controller import ViewController
+from src.iPhoto.gui.ui.widgets.albums_dashboard import AlbumsDashboard
 
 def test_show_albums_dashboard_triggers_refresh(qtbot):
     """

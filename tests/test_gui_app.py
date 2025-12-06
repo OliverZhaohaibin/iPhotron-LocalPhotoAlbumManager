@@ -35,28 +35,8 @@ from PySide6.QtWidgets import (
 from src.iPhoto.gui.facade import AppFacade
 from src.iPhoto.library.manager import LibraryManager
 from src.iPhoto.models.album import Album
-from src.iPhoto.gui.ui.controllers.detail_ui_controller import DetailUIController
-from src.iPhoto.gui.ui.controllers.header_controller import HeaderController
-from src.iPhoto.gui.ui.controllers.player_view_controller import (
-    PlayerViewController,
-)
-from src.iPhoto.gui.ui.controllers.playback_controller import PlaybackController
-from src.iPhoto.gui.ui.controllers.playback_state_manager import (
-    PlaybackStateManager,
-)
-from src.iPhoto.gui.ui.controllers.preview_controller import PreviewController
-from src.iPhoto.gui.ui.controllers.view_controller import ViewController
 from src.iPhoto.gui.ui.models.asset_model import AssetModel, Roles
-from src.iPhoto.gui.ui.media.playlist_controller import PlaylistController
-from src.iPhoto.gui.ui.models.spacer_proxy_model import SpacerProxyModel
 from src.iPhoto.gui.ui.tasks.thumbnail_loader import ThumbnailJob
-from src.iPhoto.gui.ui.widgets.gallery_grid_view import GalleryGridView
-from src.iPhoto.gui.ui.widgets.filmstrip_view import FilmstripView
-from src.iPhoto.gui.ui.widgets.gl_image_viewer import GLImageViewer
-from src.iPhoto.gui.ui.widgets.info_panel import InfoPanel
-from src.iPhoto.gui.ui.widgets.live_badge import LiveBadge
-from src.iPhoto.gui.ui.widgets.player_bar import PlayerBar
-from src.iPhoto.gui.ui.widgets.video_area import VideoArea
 from src.iPhoto.config import WORK_DIR_NAME
 
 

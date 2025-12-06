@@ -8,9 +8,6 @@ from PySide6.QtCore import QObject
 
 if TYPE_CHECKING:
     from ..ui_main_window import Ui_MainWindow
-    from ..models.edit_session import EditSession
-
-
 class EditModeState(QObject):
     """Abstract base state for edit modes."""
 

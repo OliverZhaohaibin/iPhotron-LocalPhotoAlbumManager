@@ -39,7 +39,7 @@ def test_adjust_mode_enter(qapp):
     ui.edit_crop_action.setChecked.assert_called_with(False)
     ui.edit_sidebar.set_mode.assert_called_with("adjust")
     ui.edit_image_viewer.setCropMode.assert_called_with(False)
-    ui.edit_mode_control.setCurrentIndex.assert_called_with(0)
+    ui.edit_mode_control.setCurrentIndex.assert_called_with(0, animate=True)
 
 def test_crop_mode_enter_with_session(qapp):
     ui = MockUi()

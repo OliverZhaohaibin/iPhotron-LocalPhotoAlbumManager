@@ -1,11 +1,10 @@
-"""Unit tests for edit history (undo/redo) logic in EditController."""
+"""Unit tests for edit history (undo/redo) logic in EditController and EditHistoryManager."""
 
 from __future__ import annotations
 
 import os
-
-from typing import Optional
 from unittest.mock import Mock, patch
+
 import pytest
 
 pytest.importorskip(
@@ -171,16 +170,19 @@ def edit_controller(qapp):
         # Manually initialize session for testing
         session = EditSession()
         controller._session = session
+        controller._history_manager.set_session(session)
 
         return controller
 
 
 def test_undo_stack_initialization(edit_controller):
     """Verify undo stacks are initialized empty."""
-    assert hasattr(edit_controller, "_undo_stack")
-    assert edit_controller._undo_stack == []
-    assert hasattr(edit_controller, "_redo_stack")
-    assert edit_controller._redo_stack == []
+    # Now accessed via _history_manager
+    manager = edit_controller._history_manager
+    assert hasattr(manager, "_undo_stack")
+    assert manager._undo_stack == []
+    assert hasattr(manager, "_redo_stack")
+    assert manager._redo_stack == []
 
 
 def test_push_undo_state(edit_controller):
@@ -191,8 +193,9 @@ def test_push_undo_state(edit_controller):
     # Simulate action start
     edit_controller.push_undo_state()
 
-    assert len(edit_controller._undo_stack) == 1
-    saved_state = edit_controller._undo_stack[0]
+    manager = edit_controller._history_manager
+    assert len(manager._undo_stack) == 1
+    saved_state = manager._undo_stack[0]
     assert saved_state["Light_Master"] == 0.5
 
     # Change value
@@ -201,8 +204,8 @@ def test_push_undo_state(edit_controller):
     # Undo
     edit_controller.undo()
     assert session.value("Light_Master") == 0.5
-    assert len(edit_controller._undo_stack) == 0
-    assert len(edit_controller._redo_stack) == 1
+    assert len(manager._undo_stack) == 0
+    assert len(manager._redo_stack) == 1
 
 
 def test_redo_logic(edit_controller):
@@ -228,6 +231,7 @@ def test_history_limit(edit_controller):
     """Verify history stack respects the limit."""
     limit = 50
     session = edit_controller._session
+    manager = edit_controller._history_manager
 
     for i in range(limit + 10):
         # Use values within [-1.0, 1.0] range to avoid clamping
@@ -235,10 +239,10 @@ def test_history_limit(edit_controller):
         session.set_value("Light_Master", val)
         edit_controller.push_undo_state()
 
-    assert len(edit_controller._undo_stack) == limit
+    assert len(manager._undo_stack) == limit
     # The oldest states (0..9) should have been dropped.
     # The stack should contain 10..59 (values 0.10 .. 0.59)
-    assert abs(edit_controller._undo_stack[0]["Light_Master"] - 0.10) < 1e-6
+    assert abs(manager._undo_stack[0]["Light_Master"] - 0.10) < 1e-6
 
 
 def test_signal_connections(edit_controller, qapp):

@@ -14,12 +14,14 @@ from ....core.bw_resolver import BWParams
 from ....settings import SettingsManager
 from ..models.asset_model import AssetModel
 from ..models.edit_session import EditSession
-from ..tasks.image_load_worker import ImageLoadWorker
+from .edit_history_manager import EditHistoryManager
+from .edit_pipeline_loader import EditPipelineLoader
+from .thumbnail_cache_service import ThumbnailCacheService
+from .edit_zoom_handler import EditZoomHandler
+from .edit_modes import AdjustModeState, CropModeState
+from .header_layout_manager import HeaderLayoutManager
 from ..tasks.thumbnail_loader import ThumbnailLoader
-from ..tasks.edit_sidebar_preview_worker import (
-    EditSidebarPreviewResult,
-    EditSidebarPreviewWorker,
-)
+from ..tasks.edit_sidebar_preview_worker import EditSidebarPreviewResult
 from ..theme_manager import ThemeManager
 from .edit_fullscreen_manager import EditFullscreenManager
 from .edit_preview_manager import EditPreviewManager, resolve_adjustment_mapping
@@ -87,24 +89,31 @@ class EditController(QObject):
         if theme_manager and parent:
             self._theme_controller = WindowThemeController(ui, parent, theme_manager)
 
-        # Track whether the shared zoom controls are currently routed to the edit viewer so we can
-        # disconnect them without relying on Qt to silently drop redundant requests.  Qt logs a
-        # warning when asked to disconnect a link that was never created, so this boolean keeps the
-        # console clean while still allowing repeated hand-overs between the detail and edit views.
-        self._edit_zoom_controls_connected = False
-        self._thumbnail_loader: ThumbnailLoader = asset_model.thumbnail_loader()
-        # ``_pending_thumbnail_refreshes`` tracks relative asset identifiers with
-        # a refresh queued via :meth:`_schedule_thumbnail_refresh`.  Deferring
-        # the cache invalidation keeps the detail pane visible when edits are
-        # saved, preventing the grid view from temporarily reclaiming focus just
-        # so it can reload its thumbnails.
-        self._pending_thumbnail_refreshes: set[str] = set()
+        self._zoom_handler = EditZoomHandler(
+            viewer=self._ui.edit_image_viewer,
+            zoom_in_button=self._ui.zoom_in_button,
+            zoom_out_button=self._ui.zoom_out_button,
+            zoom_slider=self._ui.zoom_slider,
+            parent=self,
+        )
+        self._thumbnail_cache_service = ThumbnailCacheService(asset_model, parent=self)
+
+        # State pattern for modes
+        self._adjust_mode = AdjustModeState(ui, lambda: self._session, parent=self)
+        self._crop_mode = CropModeState(ui, lambda: self._session, parent=self)
+        self._current_mode = self._adjust_mode
+
+        self._header_layout_manager = HeaderLayoutManager(ui, parent=self)
 
         # Track the background image loader so we can avoid queueing multiple
         # decode jobs for the same asset if the user re-enters the edit view
         # quickly.  The worker owns the heavy file I/O, leaving the GUI thread
         # free to animate the transition into the edit chrome.
-        self._active_image_worker: ImageLoadWorker | None = None
+        self._pipeline_loader = EditPipelineLoader(self)
+        self._pipeline_loader.imageLoaded.connect(self._on_edit_image_loaded)
+        self._pipeline_loader.imageLoadFailed.connect(self._on_edit_image_load_failed)
+        self._pipeline_loader.sidebarPreviewReady.connect(self._handle_sidebar_preview_ready)
+
         self._is_loading_edit_image = False
 
         self._preview_manager = EditPreviewManager(self._ui.edit_image_viewer, self)
@@ -161,75 +170,11 @@ class EditController(QObject):
 
         ui.edit_header_container.hide()
 
-        # The sidebar preview worker runs after the full-resolution image is decoded to avoid
-        # blocking the transition animation.  Tracking the generation number keeps stale results
-        # from briefly replacing the preview when the user switches assets rapidly.
-        self._sidebar_preview_generation = 0
-        self._sidebar_preview_worker: EditSidebarPreviewWorker | None = None
-        self._sidebar_preview_worker_generation: int | None = None
-
-        self._undo_stack: list[dict[str, float | bool]] = []
-        self._redo_stack: list[dict[str, float | bool]] = []
-        self._history_limit = 50
+        self._history_manager = EditHistoryManager(parent=self)
 
         # Wire up undo triggers from the UI widgets.
         self._ui.edit_sidebar.interactionStarted.connect(self.push_undo_state)
         self._ui.edit_image_viewer.cropInteractionStarted.connect(self.push_undo_state)
-
-    # ------------------------------------------------------------------
-    # Zoom toolbar management
-    # ------------------------------------------------------------------
-    def _connect_edit_zoom_controls(self) -> None:
-        """Connect the shared zoom toolbar to the edit image viewer."""
-
-        if self._edit_zoom_controls_connected:
-            return
-
-        viewer = self._ui.edit_image_viewer
-        self._ui.zoom_in_button.clicked.connect(viewer.zoom_in)
-        self._ui.zoom_out_button.clicked.connect(viewer.zoom_out)
-        self._ui.zoom_slider.valueChanged.connect(self._handle_edit_zoom_slider_changed)
-        viewer.zoomChanged.connect(self._handle_edit_viewer_zoom_changed)
-        self._edit_zoom_controls_connected = True
-
-    def _disconnect_edit_zoom_controls(self) -> None:
-        """Detach the shared zoom toolbar from the edit image viewer."""
-
-        if not self._edit_zoom_controls_connected:
-            return
-
-        viewer = self._ui.edit_image_viewer
-        try:
-            self._ui.zoom_in_button.clicked.disconnect(viewer.zoom_in)
-            self._ui.zoom_out_button.clicked.disconnect(viewer.zoom_out)
-            self._ui.zoom_slider.valueChanged.disconnect(self._handle_edit_zoom_slider_changed)
-            viewer.zoomChanged.disconnect(self._handle_edit_viewer_zoom_changed)
-        finally:
-            # Ensure the state flag is cleared even if Qt reports that some of the links had already
-            # been severed.  The warning-prone duplicate disconnect attempts should now be guarded by
-            # the boolean check above, but resetting the flag keeps the controller resilient in case
-            # future refactors bypass the helper inadvertently.
-            self._edit_zoom_controls_connected = False
-
-    def _handle_edit_zoom_slider_changed(self, value: int) -> None:
-        """Translate slider *value* percentages into edit viewer zoom factors."""
-
-        slider = self._ui.zoom_slider
-        clamped = max(slider.minimum(), min(slider.maximum(), value))
-        factor = float(clamped) / 100.0
-        viewer = self._ui.edit_image_viewer
-        viewer.set_zoom(factor, anchor=viewer.viewport_center())
-
-    def _handle_edit_viewer_zoom_changed(self, factor: float) -> None:
-        """Synchronise the slider position when the edit viewer reports a new zoom *factor*."""
-
-        slider = self._ui.zoom_slider
-        slider_value = max(slider.minimum(), min(slider.maximum(), int(round(factor * 100.0))))
-        if slider_value == slider.value():
-            return
-        slider.blockSignals(True)
-        slider.setValue(slider_value)
-        slider.blockSignals(False)
 
     # ------------------------------------------------------------------
     def begin_edit(self) -> None:
@@ -251,6 +196,7 @@ class EditController(QObject):
         session.set_values(adjustments, emit_individual=False)
         session.valuesChanged.connect(self._handle_session_changed)
         self._session = session
+        self._history_manager.set_session(session)
         self._apply_session_adjustments_to_viewer()
 
         # Detect whether the detail view already uploaded the same image so the
@@ -289,10 +235,10 @@ class EditController(QObject):
         self._compare_active = False
         self._set_mode("adjust")
 
-        self._move_header_widgets_for_edit()
+        self._header_layout_manager.switch_to_edit_mode()
         if self._detail_ui_controller is not None:
             self._detail_ui_controller.disconnect_zoom_controls()
-        self._connect_edit_zoom_controls()
+        self._zoom_handler.connect_controls()
         self._view_controller.show_edit_view()
         self._transition_manager.enter_edit_mode(animate=True)
 
@@ -307,11 +253,7 @@ class EditController(QObject):
 
         if self._session is None:
             return
-        # Reset any previous worker reference so a stale ``ImageLoadWorker`` finishing late does
-        # not try to update widgets for an unrelated asset.  The session check above already guards
-        # against most late deliveries, but clearing the pointer avoids keeping unnecessary objects
-        # alive.
-        self._active_image_worker = None
+
         self._is_loading_edit_image = True
         if self._skip_next_preview_frame:
             # The detail surface already uploaded the texture for this asset.  Suppressing the
@@ -321,68 +263,11 @@ class EditController(QObject):
         else:
             self._ui.edit_image_viewer.set_loading(True)
 
-        worker = ImageLoadWorker(source)
-        worker.signals.imageLoaded.connect(self._on_edit_image_loaded)
-        worker.signals.loadFailed.connect(self._on_edit_image_load_failed)
-        self._active_image_worker = worker
-        QThreadPool.globalInstance().start(worker)
-
-    def _start_sidebar_preview_preparation(
-        self,
-        image: QImage,
-        *,
-        full_res_image_for_fallback: QImage | None = None,
-    ) -> None:
-        """Prepare a sidebar preview from *image*, optionally falling back to CPU scaling.
-
-        Parameters
-        ----------
-        image:
-            The pre-scaled image generated by the GPU.  When the GPU path
-            fails, callers may pass the full-resolution source and supply the
-            original image via *full_res_image_for_fallback* so the worker can
-            fall back to its legacy scaling routine.
-        full_res_image_for_fallback:
-            Optional copy of the source image used when ``image`` turns out to
-            be unscaled.  Providing the original frame allows the worker to
-            reuse its existing CPU scaling logic while still benefiting from
-            colour statistics computed on the reduced preview in the success
-            case.
-        """
-
-        if image.isNull():
-            return
-
-        self._sidebar_preview_generation += 1
-        generation = self._sidebar_preview_generation
-
-        track_height = max(1, self._ui.edit_sidebar.preview_thumbnail_height())
-        target_height = max(track_height * 6, 320)
-
-        # Determine whether the worker should perform an additional scaling pass.
-        if image.height() > int(target_height * 1.5):
-            worker_image = full_res_image_for_fallback if full_res_image_for_fallback else image
-            worker_target_height = target_height
-        else:
-            worker_image = image
-            worker_target_height = -1
-
-        worker = EditSidebarPreviewWorker(
-            worker_image,
-            generation=generation,
-            target_height=worker_target_height,
-        )
-        worker.signals.ready.connect(self._handle_sidebar_preview_ready)
-        worker.signals.error.connect(self._handle_sidebar_preview_error)
-        worker.signals.finished.connect(self._handle_sidebar_preview_finished)
-        self._sidebar_preview_worker = worker
-        self._sidebar_preview_worker_generation = generation
-        QThreadPool.globalInstance().start(worker)
+        self._pipeline_loader.load_image(source)
 
     def _on_edit_image_loaded(self, path: Path, image: QImage) -> None:
         """Handle a successfully decoded edit image."""
 
-        self._active_image_worker = None
         if self._session is None or self._current_source != path:
             return
         if not self._view_controller.is_edit_view_active():
@@ -451,8 +336,9 @@ class EditController(QObject):
             _LOGGER.error("GPU scaled preview image was null; falling back to CPU scaling")
             scaled_preview_image = image
 
-        self._start_sidebar_preview_preparation(
+        self._pipeline_loader.prepare_sidebar_preview(
             scaled_preview_image,
+            target_height=target_height,
             full_res_image_for_fallback=image,
         )
 
@@ -460,7 +346,6 @@ class EditController(QObject):
         """Abort the edit flow when the source image fails to load."""
 
         del path  # The controller already stores the active source path separately.
-        self._active_image_worker = None
         if not self._is_loading_edit_image:
             return
         self._is_loading_edit_image = False
@@ -472,12 +357,9 @@ class EditController(QObject):
     def _handle_sidebar_preview_ready(
         self,
         result: EditSidebarPreviewResult,
-        generation: int,
     ) -> None:
         """Apply the asynchronously prepared sidebar preview when it matches the active asset."""
 
-        if generation != self._sidebar_preview_generation:
-            return
         if self._session is None or not self._view_controller.is_edit_view_active():
             return
         self._ui.edit_sidebar.set_light_preview_image(
@@ -485,20 +367,6 @@ class EditController(QObject):
             color_stats=result.stats,
         )
         self._ui.edit_sidebar.refresh()
-
-    def _handle_sidebar_preview_error(self, generation: int, message: str) -> None:
-        """Log errors from the preview worker without interrupting the edit flow."""
-
-        if generation != self._sidebar_preview_generation:
-            return
-        _LOGGER.error("Edit sidebar preview preparation failed: %s", message)
-
-    def _handle_sidebar_preview_finished(self, generation: int) -> None:
-        """Release the sidebar worker reference once its signals have been delivered."""
-
-        if generation == self._sidebar_preview_worker_generation:
-            self._sidebar_preview_worker = None
-            self._sidebar_preview_worker_generation = None
 
     def leave_edit_mode(self, animate: bool = True) -> None:
         """Return to the standard detail view, optionally animating the transition."""
@@ -523,10 +391,10 @@ class EditController(QObject):
         self._handle_compare_released()
         self._ui.edit_image_viewer.setCropMode(False)
 
-        self._disconnect_edit_zoom_controls()
+        self._zoom_handler.disconnect_controls()
         if self._detail_ui_controller is not None:
             self._detail_ui_controller.connect_zoom_controls()
-        self._restore_header_widgets_after_edit()
+        self._header_layout_manager.restore_detail_mode()
         if self._edit_viewer_fullscreen_connected:
             try:
                 self._ui.edit_image_viewer.fullscreenExitRequested.disconnect(
@@ -569,41 +437,15 @@ class EditController(QObject):
 
     def push_undo_state(self) -> None:
         """Capture the current session state onto the undo stack."""
-        if self._session is None:
-            return
-
-        current_state = self._session.values()
-        self._undo_stack.append(current_state)
-        if len(self._undo_stack) > self._history_limit:
-            self._undo_stack.pop(0)
-
-        # New action clears the redo history.
-        self._redo_stack.clear()
+        self._history_manager.push_undo_state()
 
     def undo(self) -> None:
         """Revert the last edit action."""
-        if self._session is None or not self._undo_stack:
-            return
-
-        current_state = self._session.values()
-        self._redo_stack.append(current_state)
-
-        previous_state = self._undo_stack.pop()
-        # Updating the session triggers the UI refresh automatically via signals.
-        self._session.set_values(previous_state)
+        self._history_manager.undo()
 
     def redo(self) -> None:
         """Restore the previously undone edit action."""
-        if self._session is None or not self._redo_stack:
-            return
-
-        current_state = self._session.values()
-        self._undo_stack.append(current_state)
-        if len(self._undo_stack) > self._history_limit:
-            self._undo_stack.pop(0)
-
-        next_state = self._redo_stack.pop()
-        self._session.set_values(next_state)
+        self._history_manager.redo()
 
     def _handle_crop_changed(self, cx: float, cy: float, width: float, height: float) -> None:
         if self._session is None:
@@ -719,8 +561,7 @@ class EditController(QObject):
             self._compare_active = False
             self._active_adjustments = {}
             self._skip_next_preview_frame = False
-            self._undo_stack.clear()
-            self._redo_stack.clear()
+            self._history_manager.clear()
 
     # ------------------------------------------------------------------
     # Dedicated edit full screen workflow
@@ -810,59 +651,13 @@ class EditController(QObject):
         # Defer cache invalidation until after the detail surface has been
         # restored so the gallery does not briefly become the active view while
         # its thumbnails refresh in the background.
-        self._schedule_thumbnail_refresh(source)
+        self._thumbnail_cache_service.schedule_refresh(source)
         self.leave_edit_mode(animate=True)
         # ``display_image`` schedules an asynchronous reload; logging the
         # boolean result would not improve the UX, so simply trigger it and
         # fall back to the playlist selection handlers if scheduling fails.
         self._player_view.display_image(source, placeholder=preview_pixmap)
         self.editingFinished.emit(source)
-
-    def _refresh_thumbnail_cache(self, source: Path) -> None:
-        metadata = self._asset_model.source_model().metadata_for_absolute_path(source)
-        if metadata is None:
-            return
-        rel_value = metadata.get("rel")
-        if not rel_value:
-            return
-        self._refresh_thumbnail_cache_for_rel(str(rel_value))
-
-    def _refresh_thumbnail_cache_for_rel(self, rel: str) -> None:
-        """Invalidate cached thumbnails identified by *rel*."""
-
-        if not rel:
-            return
-        source_model = self._asset_model.source_model()
-        if hasattr(source_model, "invalidate_thumbnail"):
-            source_model.invalidate_thumbnail(rel)
-        self._thumbnail_loader.invalidate(rel)
-
-    def _schedule_thumbnail_refresh(self, source: Path) -> None:
-        """Refresh thumbnails for *source* on the next event loop turn.
-
-        The deferment avoids jarring view changes that occur when the gallery
-        reacts to cache invalidation while the user is still focused on the
-        detail surface.
-        """
-
-        metadata = self._asset_model.source_model().metadata_for_absolute_path(source)
-        if metadata is None:
-            return
-        rel_value = metadata.get("rel")
-        if not rel_value:
-            return
-        rel = str(rel_value)
-        if rel in self._pending_thumbnail_refreshes:
-            return
-
-        def _run_refresh(rel_key: str) -> None:
-            try:
-                self._refresh_thumbnail_cache_for_rel(rel_key)
-            finally:
-                self._pending_thumbnail_refreshes.discard(rel_key)
-
-        self._pending_thumbnail_refreshes.add(rel)
-        QTimer.singleShot(0, lambda rel_key=rel: _run_refresh(rel_key))
 
     def _handle_mode_change(self, mode: str, checked: bool) -> None:
         if not checked:
@@ -871,58 +666,23 @@ class EditController(QObject):
 
     def _handle_top_bar_index_changed(self, index: int) -> None:
         """Synchronise action state when the segmented bar changes selection."""
-
         mode = "adjust" if index == 0 else "crop"
-        target_action = self._ui.edit_adjust_action if mode == "adjust" else self._ui.edit_crop_action
-        if not target_action.isChecked():
-            target_action.setChecked(True)
-        self._set_mode(mode, from_top_bar=True)
+        self._set_mode(mode)
 
-    def _set_mode(self, mode: str, *, from_top_bar: bool = False) -> None:
+    def _set_mode(self, mode: str) -> None:
         if mode == "adjust":
-            self._ui.edit_adjust_action.setChecked(True)
-            self._ui.edit_crop_action.setChecked(False)
-            self._ui.edit_sidebar.set_mode("adjust")
-            self._ui.edit_image_viewer.setCropMode(False)
+            new_state = self._adjust_mode
         else:
-            self._ui.edit_adjust_action.setChecked(False)
-            self._ui.edit_crop_action.setChecked(True)
-            self._ui.edit_sidebar.set_mode("crop")
-            crop_values: Mapping[str, float] | None = None
-            if self._session is not None:
-                crop_values = {
-                    "Crop_CX": float(self._session.value("Crop_CX")),
-                    "Crop_CY": float(self._session.value("Crop_CY")),
-                    "Crop_W": float(self._session.value("Crop_W")),
-                    "Crop_H": float(self._session.value("Crop_H")),
-                    "Crop_Rotate90": float(self._session.value("Crop_Rotate90")),
-                    "Crop_FlipH": float(self._session.value("Crop_FlipH")),
-                }
-            self._ui.edit_image_viewer.setCropMode(True, crop_values)
-        index = 0 if mode == "adjust" else 1
-        self._ui.edit_mode_control.setCurrentIndex(index, animate=not from_top_bar)
+            new_state = self._crop_mode
 
-    def _move_header_widgets_for_edit(self) -> None:
-        """Reparent shared toolbar widgets into the edit header."""
+        if self._current_mode == new_state:
+            return
 
-        ui = self._ui
-        if ui.edit_zoom_host_layout.indexOf(ui.zoom_widget) == -1:
-            ui.edit_zoom_host_layout.addWidget(ui.zoom_widget)
-        ui.zoom_widget.show()
+        if self._current_mode:
+            self._current_mode.exit()
 
-        right_layout = ui.edit_right_controls_layout
-        if right_layout.indexOf(ui.info_button) == -1:
-            right_layout.insertWidget(0, ui.info_button)
-        if right_layout.indexOf(ui.favorite_button) == -1:
-            right_layout.insertWidget(1, ui.favorite_button)
-
-    def _restore_header_widgets_after_edit(self) -> None:
-        """Return shared toolbar widgets to the detail header layout."""
-
-        ui = self._ui
-        ui.detail_actions_layout.insertWidget(ui.detail_info_button_index, ui.info_button)
-        ui.detail_actions_layout.insertWidget(ui.detail_favorite_button_index, ui.favorite_button)
-        ui.detail_header_layout.insertWidget(ui.detail_zoom_widget_index, ui.zoom_widget)
+        self._current_mode = new_state
+        self._current_mode.enter()
 
     def _handle_playlist_change(self) -> None:
         if self._view_controller.is_edit_view_active():

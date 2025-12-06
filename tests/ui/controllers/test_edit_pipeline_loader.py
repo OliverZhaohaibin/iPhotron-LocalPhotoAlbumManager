@@ -6,7 +6,6 @@ from unittest.mock import Mock, patch
 from pathlib import Path
 
 import pytest
-from PySide6.QtCore import QThreadPool
 from PySide6.QtGui import QImage
 
 from src.iPhoto.gui.ui.controllers.edit_pipeline_loader import EditPipelineLoader

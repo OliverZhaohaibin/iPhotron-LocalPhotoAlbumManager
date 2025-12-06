@@ -6,7 +6,6 @@ from unittest.mock import Mock
 from pathlib import Path
 
 import pytest
-from PySide6.QtCore import QCoreApplication
 
 from src.iPhoto.gui.ui.controllers.thumbnail_cache_service import ThumbnailCacheService
 

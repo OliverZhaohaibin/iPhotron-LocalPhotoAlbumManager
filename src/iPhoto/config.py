@@ -11,9 +11,12 @@ from typing import Final
 # collection, mirroring the behaviour users expect from other photo managers.
 RECENTLY_DELETED_DIR_NAME: Final[str] = ".Trash"
 
-DEFAULT_INCLUDE: Final[list[str]] = [
-    "**/*.{HEIC,heic,HEIF,heif,HEIFS,heifs,HEICF,heicf,JPG,jpg,JPEG,jpeg,PNG,png,MOV,mov,MP4,mp4,M4V,m4v,QT,qt}"
-]
+# The scanner has its own hard-coded list of supported extensions (see
+# ``src.iPhoto.io.scanner``).  We default to including everything so that
+# the scanner can filter based on its internal rules.  This avoids duplicate
+# configuration and subtle bugs where case-sensitivity differences in globs
+# cause files to be skipped on some platforms (e.g. Windows).
+DEFAULT_INCLUDE: Final[list[str]] = ["**/*"]
 DEFAULT_EXCLUDE: Final[list[str]] = [
     "**/.iPhoto/**",
     "**/.DS_Store",

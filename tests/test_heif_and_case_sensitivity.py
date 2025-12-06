@@ -5,17 +5,21 @@ from src.iPhoto.config import DEFAULT_INCLUDE, DEFAULT_EXCLUDE
 
 @pytest.fixture
 def scan_test_dir(tmp_path):
-    """Creates a temporary directory with various file extensions."""
+    """Creates a temporary directory with various file extensions.
+
+    We use different base names for uppercase and lowercase variants to ensure
+    they exist as distinct files even on case-insensitive filesystems (Windows/macOS).
+    """
     # Create files
     files = [
-        "image.heif",
-        "IMAGE.HEIF",
-        "image.heic",
-        "IMAGE.HEIC",
-        "image.jpg",
-        "IMAGE.JPG",
-        "video.mov",
-        "VIDEO.MOV",
+        "image_lower.heif",
+        "image_upper.HEIF",
+        "image_lower.heic",
+        "image_upper.HEIC",
+        "image_lower.jpg",
+        "image_upper.JPG",
+        "video_lower.mov",
+        "video_upper.MOV",
         "image.heifs",
         "image.heicf"
     ]

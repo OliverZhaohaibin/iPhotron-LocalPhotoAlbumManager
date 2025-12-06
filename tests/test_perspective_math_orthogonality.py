@@ -29,9 +29,13 @@ def load_module_from_file(module_name, file_path):
     spec.loader.exec_module(module)
     return module
 
-setup_dummy_packages()
-base_path = os.getcwd()
-perspective_math_path = os.path.join(base_path, 'src/iPhoto/gui/ui/widgets/perspective_math.py')
+this_dir = os.path.dirname(os.path.abspath(__file__))
+project_root = os.path.dirname(this_dir)
+
+perspective_math_path = os.path.join(
+    project_root, 'src', 'iPhoto', 'gui', 'ui', 'widgets', 'perspective_math.py'
+)
+perspective_math_path = os.path.abspath(perspective_math_path)
 pm = load_module_from_file('iPhoto.gui.ui.widgets.perspective_math', perspective_math_path)
 build_perspective_matrix = pm.build_perspective_matrix
 

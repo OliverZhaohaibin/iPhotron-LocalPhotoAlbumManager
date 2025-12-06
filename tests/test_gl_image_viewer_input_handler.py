@@ -6,23 +6,16 @@ Tests the input event routing logic without requiring Qt GUI infrastructure.
 
 import sys
 from pathlib import Path
-from unittest.mock import MagicMock, Mock
+from unittest.mock import Mock
 
+from PySide6.QtCore import Qt
 
-# Direct module import to avoid Qt dependencies in test environment
-# Add project root (parent of 'src') to sys.path for package imports
+# Ensure src is in path (handled by conftest usually, but adding for safety if run standalone)
 project_root = Path(__file__).parent.parent
-sys.path.insert(0, str(project_root))
+if str(project_root) not in sys.path:
+    sys.path.insert(0, str(project_root))
 
-# Mock Qt modules before importing
-sys.modules['PySide6'] = MagicMock()
-sys.modules['PySide6.QtCore'] = MagicMock()
-sys.modules['PySide6.QtGui'] = MagicMock()
-sys.modules['PySide6.QtWidgets'] = MagicMock()
-
-from src.iPhoto.gui.ui.widgets.gl_image_viewer import input_handler  # noqa: E402
-
-InputEventHandler = input_handler.InputEventHandler
+from src.iPhoto.gui.ui.widgets.gl_image_viewer.input_handler import InputEventHandler
 
 
 class TestInputEventHandler:
@@ -36,7 +29,7 @@ class TestInputEventHandler:
         self.on_fullscreen_exit = Mock()
         self.on_fullscreen_toggle = Mock()
         self.on_cancel_crop_lock = Mock()
-        
+
         self.handler = InputEventHandler(
             crop_controller=self.crop_controller,
             transform_controller=self.transform_controller,
@@ -51,7 +44,7 @@ class TestInputEventHandler:
         self.crop_controller.is_active.return_value = True
         
         event = Mock()
-        event.button.return_value = 1  # Qt.LeftButton
+        event.button.return_value = Qt.LeftButton
         
         result = self.handler.handle_mouse_press(event)
         
@@ -64,7 +57,7 @@ class TestInputEventHandler:
         self.crop_controller.is_active.return_value = False
         
         event = Mock()
-        event.button.return_value = 1  # Qt.LeftButton
+        event.button.return_value = Qt.LeftButton
         
         result = self.handler.handle_mouse_press(event)
         
@@ -78,7 +71,7 @@ class TestInputEventHandler:
         self.handler.set_live_replay_enabled(True)
         
         event = Mock()
-        event.button.return_value = 1  # Qt.LeftButton
+        event.button.return_value = Qt.LeftButton
         
         self.handler.handle_mouse_press(event)
         
@@ -129,7 +122,7 @@ class TestInputEventHandler:
     def test_double_click_with_fullscreen_window(self):
         """Double-click should exit fullscreen when window is fullscreen."""
         event = Mock()
-        event.button.return_value = 1
+        event.button.return_value = Qt.LeftButton
         
         window = Mock()
         window.isFullScreen.return_value = True
@@ -142,7 +135,7 @@ class TestInputEventHandler:
     def test_double_click_with_normal_window(self):
         """Double-click should toggle fullscreen when window is normal."""
         event = Mock()
-        event.button.return_value = 1
+        event.button.return_value = Qt.LeftButton
         
         window = Mock()
         window.isFullScreen.return_value = False

@@ -63,11 +63,21 @@ class ThumbnailJob(QRunnable):
 
     def run(self) -> None:  # pragma: no cover - executed in worker thread
         image = self._render_media()
+        success = False
         if image is not None:
-            self._write_cache(image)
+            success = self._write_cache(image)
         loader = getattr(self, "_loader", None)
         if loader is None:
             return
+
+        if success:
+            try:
+                loader.cache_written.emit(self._cache_path)
+            except AttributeError:  # pragma: no cover - dummy loader in tests
+                pass
+            except RuntimeError:  # pragma: no cover - race with QObject deletion
+                pass
+
         try:
             loader._delivered.emit(
                 loader._make_key(self._rel, self._size, self._stamp),
@@ -315,7 +325,7 @@ class ThumbnailJob(QRunnable):
         painter.end()
         return canvas
 
-    def _write_cache(self, canvas: QImage) -> None:  # pragma: no cover - worker helper
+    def _write_cache(self, canvas: QImage) -> bool:  # pragma: no cover - worker helper
         try:
             self._cache_path.parent.mkdir(parents=True, exist_ok=True)
             tmp_path = self._cache_path.with_suffix(self._cache_path.suffix + ".tmp")
@@ -323,12 +333,14 @@ class ThumbnailJob(QRunnable):
                 ThumbnailLoader._safe_unlink(self._cache_path)
                 try:
                     tmp_path.replace(self._cache_path)
+                    return True
                 except OSError:
                     tmp_path.unlink(missing_ok=True)
             else:  # pragma: no cover - Qt returns False on IO errors
                 tmp_path.unlink(missing_ok=True)
         except Exception:
             pass
+        return False
 
 
 class ThumbnailLoader(QObject):
@@ -339,6 +351,7 @@ class ThumbnailLoader(QObject):
     # rest of the GUI layer and prevents Nuitka from flagging the connection as
     # type-unsafe during compilation.
     ready = Signal(Path, str, QPixmap)
+    cache_written = Signal(Path)
     _delivered = Signal(object, object, str)
 
     class Priority(IntEnum):

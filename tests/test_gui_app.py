@@ -355,10 +355,14 @@ def test_asset_model_populates_rows(tmp_path: Path, qapp: QApplication) -> None:
     assert not decoration.isNull()
     placeholder_key = decoration.cacheKey()
 
-    # Thumbnail generation is asynchronous.  Poll the decoration role while
-    # allowing the event loop to drain until the pixmap changes from the
-    # placeholder returned above.  This avoids relying on arbitrary sleep
-    # intervals that may intermittently fail on slower CI workers.
+    # Thumbnail generation is asynchronous.  Listen for the signal that confirms
+    # the file has been written to disk to avoid race conditions between the
+    # in-memory update and the file system flush.
+    loader = model.thumbnail_loader()
+    cache_spy = QSignalSpy(loader.cache_written)
+
+    # Poll the decoration role while allowing the event loop to drain until the
+    # pixmap changes from the placeholder returned above.
     refreshed: QPixmap | None = None
     deadline = time.monotonic() + 10.0
     while time.monotonic() < deadline:
@@ -375,12 +379,14 @@ def test_asset_model_populates_rows(tmp_path: Path, qapp: QApplication) -> None:
 
     assert isinstance(refreshed, QPixmap)
     assert not refreshed.isNull()
+
+    # Ensure we caught the disk sync signal.  If the UI updated, the signal
+    # should have been emitted (or be pending in the event queue).
+    if cache_spy.count() == 0:
+        cache_spy.wait(1000)
+
+    assert cache_spy.count() > 0, "Thumbnail file write signal was not received"
     thumbs_dir = tmp_path / WORK_DIR_NAME / "thumbs"
-    for _ in range(20):
-        qapp.processEvents()
-        if thumbs_dir.exists() and any(thumbs_dir.iterdir()):
-            break
-        time.sleep(0.05)
     assert thumbs_dir.exists()
     assert any(thumbs_dir.iterdir())
 

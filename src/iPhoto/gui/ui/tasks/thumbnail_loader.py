@@ -344,7 +344,7 @@ class ThumbnailJob(QRunnable):
 
 
 class ThumbnailLoader(QObject):
-    """Asynchronous thumbnail rendering helpers."""
+    """Asynchronous thumbnail renderer with disk and memory caching."""
 
     # ``Path`` is used for the album root argument to keep the public signal in
     # sync with slots that expect :class:`Path` instances.  This mirrors the

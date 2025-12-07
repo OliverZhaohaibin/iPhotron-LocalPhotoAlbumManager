@@ -128,6 +128,10 @@ def _np_gamma_neutral_signed(gray: np.ndarray, neutral_adjust: float) -> np.ndar
     return np.clip(clamped, 0.0, 1.0)
 
 def _np_contrast_tone_signed(gray: np.ndarray, tone_adjust: float) -> np.ndarray:
+    """Apply a signed contrast tone curve adjustment to a grayscale array.
+
+    Positive values increase contrast (steepen the curve), negative values decrease contrast (flatten the curve).
+    """
     tone_value = float(max(-1.0, min(1.0, tone_adjust)))
     if tone_value >= 0.0:
         k = 1.0 + (2.2 - 1.0) * tone_value

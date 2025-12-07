@@ -376,7 +376,7 @@ def apply_adjustments_buffer(
         gray = _np_contrast_tone_signed(gray, tone_s)
 
         if abs(grain_amt) > 1e-6:
-             noise = _generate_grain_field(width, height)
+            noise = _generate_grain_field(width, height)
             gray += (noise - 0.5) * 0.2 * grain_amt
 
         gray = np.clip(gray, 0.0, 1.0)

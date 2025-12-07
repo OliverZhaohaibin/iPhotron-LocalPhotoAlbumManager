@@ -159,7 +159,7 @@ class AppFacade(QObject):
         """Open *root* and trigger background work as needed."""
 
         try:
-            album = backend.open_album(root)
+            album = backend.open_album(root, autoscan=False)
         except IPhotoError as exc:
             self.errorRaised.emit(str(exc))
             return None
@@ -168,6 +168,21 @@ class AppFacade(QObject):
         album_root = album.root
         self._asset_list_model.prepare_for_album(album_root)
         self.albumOpened.emit(album_root)
+
+        # Check if the index is empty (likely because it's a new or cleaned album)
+        # and trigger a background scan if necessary.
+        has_assets = False
+        try:
+            store = backend.IndexStore(album_root)
+            # Peek at the first item to see if there is any data.
+            # read_all returns an iterator, so next() is sufficient.
+            next(store.read_all())
+            has_assets = True
+        except (StopIteration, IPhotoError):
+            pass
+
+        if not has_assets:
+            self.rescan_current_async()
 
         force_reload = self._library_update_service.consume_forced_reload(album_root)
         self._restart_asset_load(

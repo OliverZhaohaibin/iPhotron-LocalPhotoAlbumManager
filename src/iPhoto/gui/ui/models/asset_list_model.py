@@ -48,6 +48,10 @@ class AssetListModel(QAbstractListModel):
     loadProgress = Signal(Path, int, int)
     loadFinished = Signal(Path, bool)
 
+    # Accumulate chunks for 250ms to prevent the UI from stuttering during rapid
+    # updates.  This strikes a balance between responsiveness and smoothness.
+    FLUSH_INTERVAL_MS = 250
+
     def __init__(self, facade: "AppFacade", parent=None) -> None:  # type: ignore[override]
         super().__init__(parent)
         self._facade = facade
@@ -73,7 +77,7 @@ class AssetListModel(QAbstractListModel):
 
         self._incoming_buffer: List[Dict[str, object]] = []
         self._flush_timer = QTimer(self)
-        self._flush_timer.setInterval(250)
+        self._flush_timer.setInterval(self.FLUSH_INTERVAL_MS)
         self._flush_timer.setSingleShot(True)
         self._flush_timer.timeout.connect(self._flush_buffer)
 

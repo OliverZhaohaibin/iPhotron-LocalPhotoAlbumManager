@@ -719,18 +719,42 @@ class AssetListModel(QAbstractListModel):
             key=lambda item: item[0],
         )
 
-        for insert_index, row_data, rel_key in insertion_payload:
-            position = max(0, min(insert_index, len(current_rows)))
-            self.beginInsertRows(QModelIndex(), position, position)
-            current_rows.insert(position, row_data)
-            self.endInsertRows()
-            self._state_manager.on_external_row_inserted(position)
-            if rel_key:
-                self._cache_manager.remove_thumbnail(rel_key)
-                self._cache_manager.remove_placeholder(rel_key)
-            abs_value = row_data.get("abs")
-            if abs_value:
-                self._cache_manager.remove_recently_removed(str(abs_value))
+        # Group contiguous insertions to minimise signal emission and layout churn.
+        if insertion_payload:
+            groups = []
+            current_group = [insertion_payload[0]]
+            for i in range(1, len(insertion_payload)):
+                curr_item = insertion_payload[i]
+                prev_item = insertion_payload[i - 1]
+                if curr_item[0] == prev_item[0] + 1:
+                    current_group.append(curr_item)
+                else:
+                    groups.append(current_group)
+                    current_group = [curr_item]
+            groups.append(current_group)
+
+            for group in groups:
+                start_index = group[0][0]
+                rows_to_insert = [item[1] for item in group]
+                count = len(rows_to_insert)
+
+                # Ensure we don't insert out of bounds, though start_index should align
+                # with the target state if we process in ascending order.
+                position = max(0, min(start_index, len(current_rows)))
+
+                self.beginInsertRows(QModelIndex(), position, position + count - 1)
+                current_rows[position:position] = rows_to_insert
+                self.endInsertRows()
+
+                for offset, (idx, row_data, rel_key) in enumerate(group):
+                    real_pos = position + offset
+                    self._state_manager.on_external_row_inserted(real_pos)
+                    if rel_key:
+                        self._cache_manager.remove_thumbnail(rel_key)
+                        self._cache_manager.remove_placeholder(rel_key)
+                    abs_value = row_data.get("abs")
+                    if abs_value:
+                        self._cache_manager.remove_recently_removed(str(abs_value))
 
         # Rebuild a mapping that reflects the post-update order so updates can
         # reuse the final positions without guessing offsets introduced by

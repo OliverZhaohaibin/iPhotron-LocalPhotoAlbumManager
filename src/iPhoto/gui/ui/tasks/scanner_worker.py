@@ -125,6 +125,9 @@ class ScannerWorker(QRunnable):
                 self._signals.error.emit(self._root, str(exc))
         finally:
             if not self._is_cancelled and not self._had_error:
+                # Consumers should use `chunkReady` for progressive UI updates.
+                # The `finished` signal provides the complete dataset for
+                # authoritative operations (e.g. writing the index file).
                 self._signals.finished.emit(self._root, rows)
             else:
                 self._signals.finished.emit(self._root, [])

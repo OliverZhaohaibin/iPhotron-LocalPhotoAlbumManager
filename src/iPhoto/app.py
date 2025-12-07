@@ -208,6 +208,47 @@ def rescan(root: Path) -> List[dict]:
     return rows
 
 
+def scan_specific_files(root: Path, files: List[Path]) -> None:
+    """Generate index rows for specific files and merge them into the index.
+
+    This helper avoids a full directory scan, enabling efficient incremental
+    updates during batch import operations.
+    """
+    from .io.scanner import process_media_paths, gather_media_paths
+
+    # We need to separate images and videos for process_media_paths, but
+    # since we already have the specific file list, we can just split them manually
+    # based on extensions or just pass them all to get_metadata_batch which handles mixed types.
+    # However, process_media_paths expects separate lists.
+    # Let's reuse gather_media_paths logic but applied to our specific list.
+
+    # Reuse scanner constants if possible, or just rely on extension check.
+    # Since we can't easily import private constants from scanner, we'll try to use
+    # public API or logic similar to gather_media_paths but for a fixed list.
+    # Actually, process_media_paths takes image_paths and video_paths.
+
+    # We will just categorize them here.
+    image_paths: List[Path] = []
+    video_paths: List[Path] = []
+
+    # Minimal set of extensions matching scanner.py
+    _IMAGE_EXTENSIONS = {".heic", ".heif", ".heifs", ".heicf", ".jpg", ".jpeg", ".png"}
+    _VIDEO_EXTENSIONS = {".mov", ".mp4", ".m4v", ".qt"}
+
+    for f in files:
+        if f.suffix.lower() in _IMAGE_EXTENSIONS:
+            image_paths.append(f)
+        elif f.suffix.lower() in _VIDEO_EXTENSIONS:
+            video_paths.append(f)
+
+    rows = list(process_media_paths(root, image_paths, video_paths))
+
+    store = IndexStore(root)
+    # We use append_rows which handles merging/updating based on 'rel' key
+    # It also handles locking safely.
+    store.append_rows(rows)
+
+
 def pair(root: Path) -> List[LiveGroup]:
     """Rebuild live photo pairings from the current index."""
 

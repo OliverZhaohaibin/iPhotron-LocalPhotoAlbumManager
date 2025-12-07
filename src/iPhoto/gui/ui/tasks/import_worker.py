@@ -4,11 +4,17 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Callable, Iterable, List
+import time
 
 from PySide6.QtCore import QObject, QRunnable, Signal
 
 from .... import app as backend
 from ....errors import IPhotoError
+
+# Max updates per second for progress signal
+MAX_UPDATES_PER_SEC = 10
+# Number of files to process before triggering an incremental index update
+CHUNK_SIZE = 20
 
 
 class ImportSignals(QObject):
@@ -59,6 +65,10 @@ class ImportWorker(QRunnable):
             return
 
         imported: List[Path] = []
+        pending_batch: List[Path] = []
+        last_emit_time = 0.0
+        min_interval = 1.0 / MAX_UPDATES_PER_SEC
+
         for index, source in enumerate(self._sources, start=1):
             if self._is_cancelled:
                 break
@@ -71,13 +81,31 @@ class ImportWorker(QRunnable):
                 self._signals.error.emit(str(exc))
             else:
                 imported.append(copied)
+                pending_batch.append(copied)
             finally:
-                # Report progress even when a file fails so the UI stays responsive.
-                self._signals.progress.emit(self._destination, index, total)
+                # Throttled progress emission
+                now = time.monotonic()
+                if now - last_emit_time >= min_interval or index == total:
+                    self._signals.progress.emit(self._destination, index, total)
+                    last_emit_time = now
 
+            # Process chunk if ready
+            if len(pending_batch) >= CHUNK_SIZE:
+                self._process_chunk(pending_batch)
+                pending_batch.clear()
+
+        # Process any remaining files in the final chunk
+        if pending_batch:
+            self._process_chunk(pending_batch)
+            pending_batch.clear()
+
+        # Final full rescan/link check if not cancelled
         rescan_success = False
         if imported and not self._is_cancelled:
             try:
+                # We still do a full rescan/pair at the end to ensure consistency (like Live Photo pairing)
+                # that might span across chunks, and to catch any edge cases.
+                # However, since we've been incrementally updating, the UI should already show most items.
                 backend.rescan(self._destination)
             except IPhotoError as exc:
                 self._signals.error.emit(str(exc))
@@ -87,3 +115,13 @@ class ImportWorker(QRunnable):
                 rescan_success = True
 
         self._signals.finished.emit(self._destination, imported, rescan_success)
+
+    def _process_chunk(self, batch: List[Path]) -> None:
+        """Update the index for a batch of imported files."""
+        if not batch or self._is_cancelled:
+            return
+        try:
+            backend.scan_specific_files(self._destination, batch)
+        except Exception as exc:
+            # Log error but don't fail the whole import; final rescan might fix it
+            self._signals.error.emit(f"Incremental scan failed: {exc}")

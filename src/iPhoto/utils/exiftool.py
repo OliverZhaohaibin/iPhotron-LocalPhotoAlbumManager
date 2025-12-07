@@ -48,7 +48,11 @@ def get_metadata_batch(paths: List[Path]) -> List[Dict[str, Any]]:
     # then manually delete it.
     with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", delete=False) as tmp_arg_file:
         for path in paths:
-            tmp_arg_file.write(str(path) + "\n")
+            # Always use POSIX paths (forward slashes) for ExifTool argument files.
+            # This avoids issues with backslashes on Windows, which ExifTool might
+            # misinterpret as escape sequences or wildcards when combined with
+            # certain non-ASCII characters.
+            tmp_arg_file.write(path.as_posix() + "\n")
         tmp_arg_path = tmp_arg_file.name
 
     try:

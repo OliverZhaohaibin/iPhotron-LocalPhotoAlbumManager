@@ -92,7 +92,7 @@ class AssetListStateManager:
         self._row_lookup = refreshed
 
     @staticmethod
-    def _normalise_key(value: Optional[str]) -> Optional[str]:
+    def normalise_key(value: Optional[str]) -> Optional[str]:
         """Return a POSIX-formatted representation of ``value`` when possible."""
 
         if not value:
@@ -103,7 +103,7 @@ class AssetListStateManager:
         """Adjust pending move bookkeeping after a row was removed externally."""
 
         if self._pending_virtual_moves:
-            normalised_rel = self._normalise_key(rel_key)
+            normalised_rel = self.normalise_key(rel_key)
             updated: Dict[str, Tuple[int, str, bool]] = {}
             for original_rel, (row_index, guessed_rel, was_removed) in (
                 list(self._pending_virtual_moves.items())
@@ -111,8 +111,8 @@ class AssetListStateManager:
                 if row_index == position:
                     continue
                 if normalised_rel is not None:
-                    original_key = self._normalise_key(original_rel)
-                    guessed_key = self._normalise_key(guessed_rel)
+                    original_key = self.normalise_key(original_rel)
+                    guessed_key = self.normalise_key(guessed_rel)
                     if normalised_rel in {original_key, guessed_key}:
                         continue
                 adjusted_index = row_index - 1 if row_index > position else row_index

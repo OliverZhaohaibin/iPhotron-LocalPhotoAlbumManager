@@ -227,7 +227,7 @@ if not _AOT_AVAILABLE:
         # 3. Fallback: NumPy Vectorization
         # Used when AOT is missing AND (Numba is missing OR we are in Nuitka)
         logger.warning(
-            "AOT module missing and runtime JIT unavailable (Compiled=%s, Numba=%s). "
+            "AOT module missing and runtime JIT unavailable (IsCompiledBuild=%s, NumbaAvailable=%s). "
             "Falling back to slower NumPy implementation.",
             _IS_COMPILED, _JIT_AVAILABLE
         )

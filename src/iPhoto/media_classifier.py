@@ -54,16 +54,17 @@ def classify_media(row: Mapping[str, object]) -> Tuple[bool, bool]:
     """
 
     mime = _normalise_mime(row.get("mime"))
-    if mime.startswith("image/"):
-        return True, False
-    if mime.startswith("video/"):
-        return False, True
 
     # If the MIME type implies an image but the extension is unambiguously video
     # (e.g. .mov), trust the extension. This protects against system registries
     # that misreport QuickTime container files as images.
     suffix = _suffix_from_row(row)
     if mime.startswith("image/") and suffix in VIDEO_EXTENSIONS:
+        return False, True
+
+    if mime.startswith("image/"):
+        return True, False
+    if mime.startswith("video/"):
         return False, True
 
     legacy_kind = row.get("type")

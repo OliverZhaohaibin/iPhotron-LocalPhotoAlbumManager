@@ -117,6 +117,7 @@ def _np_apply_color_transform(
 
 
 def _bw_unsigned_to_signed(value: float) -> float:
+    """Remap a value from [0, 1] to [-1, 1] range."""
     return float(max(-1.0, min(1.0, float(value) * 2.0 - 1.0)))
 
 def _np_gamma_neutral_signed(gray: np.ndarray, neutral_adjust: float) -> np.ndarray:

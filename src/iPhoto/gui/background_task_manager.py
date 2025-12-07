@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from typing import Callable, Dict, List, Optional
 
@@ -36,6 +37,14 @@ class BackgroundTaskManager(QObject):
     ) -> None:
         super().__init__(parent)
         self._thread_pool = QThreadPool.globalInstance()
+        self._io_thread_pool = QThreadPool()
+
+        # Limit I/O threads to logical CPU count to prevent disk thrashing
+        cpu_count = os.cpu_count()
+        if cpu_count is None:
+            cpu_count = 1
+        self._io_thread_pool.setMaxThreadCount(cpu_count)
+
         self._pause_callback = pause_watcher
         self._resume_callback = resume_watcher
         self._resume_delay_ms = max(0, int(resume_delay_ms))
@@ -71,6 +80,7 @@ class BackgroundTaskManager(QObject):
         on_finished: Callable[..., None],
         on_error: Optional[Callable[[str], None]] = None,
         result_payload: Optional[Callable[..., object]] = None,
+        is_io_intensive: bool = False,
     ) -> None:
         """Submit *worker* to the pool and propagate lifecycle events."""
 
@@ -113,7 +123,8 @@ class BackgroundTaskManager(QObject):
         finished.connect(finish_handler)
         connections.append((finished, finish_handler))
 
-        self._thread_pool.start(worker)
+        pool = self._io_thread_pool if is_io_intensive else self._thread_pool
+        pool.start(worker)
 
     # ------------------------------------------------------------------
     # Signal wrappers

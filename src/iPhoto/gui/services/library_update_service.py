@@ -92,6 +92,7 @@ class LibraryUpdateService(QObject):
             on_finished=lambda root, rows: self._on_scan_finished(worker, root, rows),
             on_error=lambda root, message: self._on_scan_error(worker, root, message),
             result_payload=lambda root, rows: rows,
+            is_io_intensive=True,
         )
 
     def pair_live(self, album: "Album") -> List[dict]:
@@ -502,6 +503,7 @@ class LibraryUpdateService(QObject):
             on_finished=_on_finished,
             on_error=_on_error,
             result_payload=lambda path, succeeded: (path, succeeded),
+            is_io_intensive=True,
         )
 
     def _build_restore_rescan_task_id(self, album_root: Path) -> str:

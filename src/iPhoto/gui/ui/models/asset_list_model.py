@@ -19,6 +19,12 @@ from PySide6.QtCore import (
 from PySide6.QtGui import QPixmap
 
 from ..tasks.thumbnail_loader import ThumbnailLoader
+from ..tasks.asset_loader_worker import (
+    build_asset_entry,
+    resolve_live_map,
+    motion_paths_to_hide,
+    normalize_featured,
+)
 from .asset_cache_manager import AssetCacheManager
 from .asset_data_loader import AssetDataLoader
 from .asset_state_manager import AssetListStateManager
@@ -421,9 +427,35 @@ class AssetListModel(QAbstractListModel):
         if not self._album_root or root != self._album_root or not chunk:
             return
 
-        # If a background scan provides updates while we are already viewing the
-        # target album, merge them immediately so the user sees progress.
-        self._merge_chunk(chunk)
+        # Scanner rows are raw metadata dictionaries.  We must transform them
+        # into full asset entries (including derived fields like `is_live`)
+        # so the model behaves consistently regardless of the data source.
+        manifest = self._facade.current_album.manifest if self._facade.current_album else {}
+        featured = manifest.get("featured", []) or []
+        featured_set = normalize_featured(featured)
+
+        live_map_snapshot = self._cache_manager.live_map_snapshot()
+        # Note: During a fresh scan, `chunk` contains new items that might form
+        # Live Photo pairs.  However, `live_map_snapshot` is based on the
+        # *existing* `links.json`.  We can't easily update the live map incrementally
+        # here without reimplementing the full pairing logic.  Accept that
+        # progressively scanned items might appear unpaired until the scan completes
+        # and `linksUpdated` fires.
+        #
+        # Use the existing map to at least resolve known pairs.
+        resolved_map = resolve_live_map(chunk, live_map_snapshot)
+        paths_to_hide = motion_paths_to_hide(resolved_map)
+
+        entries: List[Dict[str, object]] = []
+        for row in chunk:
+            entry = build_asset_entry(
+                root, row, featured_set, resolved_map, paths_to_hide
+            )
+            if entry is not None:
+                entries.append(entry)
+
+        if entries:
+            self._merge_chunk(entries)
 
     def _merge_chunk(self, chunk: List[Dict[str, object]]) -> None:
         """Append or update rows in the model efficiently."""

@@ -28,6 +28,7 @@ When building with Nuitka, you should exclude the `numba` package to reduce bina
 
 Example Nuitka command (adjust as needed for your specific platform/requirements):
 
+> **Note:** The entry point `src/iPhoto/gui/main.py` is used as an example. Please verify and adjust this path to match your project's actual entry point if it differs.
 ```bash
 nuitka --standalone --nofollow-import-to=numba --include-package=iPhoto --output-dir=dist src/iPhoto/gui/main.py
 ```

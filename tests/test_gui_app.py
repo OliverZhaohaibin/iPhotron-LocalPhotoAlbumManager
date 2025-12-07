@@ -182,9 +182,16 @@ def test_facade_open_album_emits_signals(tmp_path: Path, qapp: QApplication) -> 
     facade.indexUpdated.connect(lambda _: received.append("index"))
     facade.linksUpdated.connect(lambda _: received.append("links"))
     album = facade.open_album(tmp_path)
-    qapp.processEvents()
+
+    # The scanner runs in a background thread.  Pump the event loop until the
+    # index file is created or we time out, to avoid race conditions.
+    deadline = time.monotonic() + 5.0
+    index_path = tmp_path / ".iPhoto" / "index.jsonl"
+    while not index_path.exists() and time.monotonic() < deadline:
+        qapp.processEvents()
+
     assert album is not None
-    assert (tmp_path / ".iPhoto" / "index.jsonl").exists()
+    assert index_path.exists()
     assert "opened" in received and "index" in received
 
 

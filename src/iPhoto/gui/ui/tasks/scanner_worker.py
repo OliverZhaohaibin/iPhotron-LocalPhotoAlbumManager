@@ -16,6 +16,7 @@ class ScannerSignals(QObject):
     """Signals emitted by :class:`ScannerWorker` while scanning."""
 
     progressUpdated = Signal(Path, int, int)
+    chunkReady = Signal(Path, list)
     finished = Signal(Path, list)
     error = Signal(Path, str)
 
@@ -89,20 +90,35 @@ class ScannerWorker(QRunnable):
 
             processed_count = 0
             last_reported = 0
+            chunk: List[dict] = []
+            chunk_size = 10
+
             for row in process_media_paths(self._root, image_paths, video_paths):
                 if self._is_cancelled:
                     return
                 rows.append(row)
+                chunk.append(row)
                 processed_count += 1
+
+                should_report = (
+                    processed_count == total_files or processed_count - last_reported >= 25
+                )
+
+                if len(chunk) >= chunk_size:
+                    self._signals.chunkReady.emit(self._root, chunk)
+                    chunk = []
 
                 # To avoid overwhelming the UI thread we only emit progress
                 # every 25 items (and always on completion).  This matches the
                 # cadence of the original worker implementation.
-                if processed_count == total_files or processed_count - last_reported >= 25:
+                if should_report:
                     self._signals.progressUpdated.emit(
                         self._root, processed_count, total_files
                     )
                     last_reported = processed_count
+
+            if chunk:
+                self._signals.chunkReady.emit(self._root, chunk)
         except Exception as exc:  # pragma: no cover - best-effort error propagation
             if not self._is_cancelled:
                 self._had_error = True

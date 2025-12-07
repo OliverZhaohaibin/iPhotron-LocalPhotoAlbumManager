@@ -24,6 +24,7 @@ class LibraryUpdateService(QObject):
     """Coordinate rescans, Live Photo pairing, and move aftermath bookkeeping."""
 
     scanProgress = Signal(Path, int, int)
+    scanChunkReady = Signal(Path, list)
     scanFinished = Signal(Path, bool)
     indexUpdated = Signal(Path)
     linksUpdated = Signal(Path)
@@ -77,6 +78,7 @@ class LibraryUpdateService(QObject):
 
         signals = ScannerSignals()
         signals.progressUpdated.connect(self._relay_scan_progress)
+        signals.chunkReady.connect(self._relay_scan_chunk_ready)
 
         worker = ScannerWorker(album.root, include, exclude, signals)
         self._scanner_worker = worker
@@ -260,6 +262,11 @@ class LibraryUpdateService(QObject):
         """Forward worker progress updates to keep Qt's type system satisfied."""
 
         self.scanProgress.emit(root, current, total)
+
+    def _relay_scan_chunk_ready(self, root: Path, chunk: List[dict]) -> None:
+        """Forward worker chunks to listeners."""
+
+        self.scanChunkReady.emit(root, chunk)
 
     def _on_scan_finished(
         self,

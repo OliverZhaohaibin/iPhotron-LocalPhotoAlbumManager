@@ -33,6 +33,7 @@ class AppFacade(QObject):
     linksUpdated = Signal(Path)
     errorRaised = Signal(str)
     scanProgress = Signal(Path, int, int)
+    scanChunkReady = Signal(Path, list)
     scanFinished = Signal(Path, bool)
     loadStarted = Signal(Path)
     loadProgress = Signal(Path, int, int)
@@ -87,6 +88,7 @@ class AppFacade(QObject):
             parent=self,
         )
         self._library_update_service.scanProgress.connect(self._relay_scan_progress)
+        self._library_update_service.scanChunkReady.connect(self._relay_scan_chunk_ready)
         self._library_update_service.scanFinished.connect(self._relay_scan_finished)
         self._library_update_service.indexUpdated.connect(self._relay_index_updated)
         self._library_update_service.linksUpdated.connect(self._relay_links_updated)
@@ -692,6 +694,12 @@ class AppFacade(QObject):
         """Forward scan progress updates emitted by :class:`LibraryUpdateService`."""
 
         self.scanProgress.emit(root, current, total)
+
+    @Slot(Path, list)
+    def _relay_scan_chunk_ready(self, root: Path, chunk: List[dict]) -> None:
+        """Forward scan chunks emitted by :class:`LibraryUpdateService`."""
+
+        self.scanChunkReady.emit(root, chunk)
 
     @Slot(Path, bool)
     def _relay_scan_finished(self, root: Path, success: bool) -> None:

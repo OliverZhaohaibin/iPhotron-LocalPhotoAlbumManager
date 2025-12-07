@@ -67,6 +67,7 @@ class AssetListModel(QAbstractListModel):
 
         self._facade.linksUpdated.connect(self.handle_links_updated)
         self._facade.assetUpdated.connect(self.handle_asset_updated)
+        self._facade.scanChunkReady.connect(self._on_scan_chunk_ready)
 
     def album_root(self) -> Optional[Path]:
         """Return the path of the currently open album, if any."""
@@ -376,22 +377,28 @@ class AssetListModel(QAbstractListModel):
             self._state_manager.mark_reload_pending()
             return
 
+        # Clear the model before starting a fresh load so progressive updates
+        # build the view from scratch.  This replaces the old behaviour where we
+        # waited for the full payload and then did a single ``beginResetModel``.
+        self.beginResetModel()
+        self._state_manager.clear_rows()
+        self.endResetModel()
+        self._cache_manager.clear_recently_removed()
+
         manifest = self._facade.current_album.manifest if self._facade.current_album else {}
         featured = manifest.get("featured", []) or []
 
         live_map = load_live_map(self._album_root)
         self._cache_manager.set_live_map(live_map)
 
-        # Remember which album root is being populated so chunk handlers can
-        # accumulate results while the worker traverses the filesystem.
-        self._pending_rows = []
+        # Remember which album root is being populated so chunk handlers know
+        # the incoming data belongs to the active view.
         self._pending_loader_root = self._album_root
 
         try:
             self._data_loader.start(self._album_root, featured, live_map)
         except RuntimeError:
             self._state_manager.mark_reload_pending()
-            self._pending_rows = []
             self._pending_loader_root = None
             return
 
@@ -406,10 +413,75 @@ class AssetListModel(QAbstractListModel):
         ):
             return
 
-        # Buffer worker rows so the view can be refreshed exactly once when the
-        # load completes instead of growing incrementally and triggering a full
-        # resort after every sub-album traversal.
-        self._pending_rows.extend(chunk)
+        self._merge_chunk(chunk)
+
+    def _on_scan_chunk_ready(self, root: Path, chunk: List[Dict[str, object]]) -> None:
+        """Integrate fresh rows from the scanner into the live view."""
+
+        if not self._album_root or root != self._album_root or not chunk:
+            return
+
+        # If a background scan provides updates while we are already viewing the
+        # target album, merge them immediately so the user sees progress.
+        self._merge_chunk(chunk)
+
+    def _merge_chunk(self, chunk: List[Dict[str, object]]) -> None:
+        """Append or update rows in the model efficiently."""
+
+        # Separate new items from updates to minimize signal emission overhead.
+        # We append new items to the end and update existing ones in place.
+        new_items: List[Dict[str, object]] = []
+        updates: List[int] = []
+
+        for row in chunk:
+            rel = row.get("rel")
+            if not rel:
+                continue
+
+            # The row lookup keys are normalized relative paths.
+            rel_key = self._state_manager._normalise_key(str(rel))
+            if not rel_key:
+                continue
+
+            existing_index = self._state_manager.row_lookup.get(rel_key)
+            if existing_index is not None:
+                # Update the existing row data in place.
+                if 0 <= existing_index < len(self._state_manager.rows):
+                    self._state_manager.rows[existing_index] = row
+                    updates.append(existing_index)
+            else:
+                new_items.append(row)
+
+        # Batch inserts for better performance.
+        if new_items:
+            start_row = self._state_manager.row_count()
+            end_row = start_row + len(new_items) - 1
+            self.beginInsertRows(QModelIndex(), start_row, end_row)
+            self._state_manager.append_chunk(new_items)
+            self.endInsertRows()
+            self._state_manager.on_external_row_inserted(start_row)
+
+        # Emit updates for modified rows.
+        if updates:
+            # Determine the range of roles that might have changed.  Since we
+            # replaced the entire row dict, basically everything is fair game.
+            affected_roles = [
+                Roles.REL,
+                Roles.ABS,
+                Roles.SIZE,
+                Roles.DT,
+                Roles.IS_IMAGE,
+                Roles.IS_VIDEO,
+                Roles.IS_LIVE,
+                Qt.DecorationRole,  # Thumbnail might need refresh
+            ]
+            for row_index in updates:
+                index = self.index(row_index, 0)
+                self.dataChanged.emit(index, index, affected_roles)
+                # Invalidate cache for updated rows to ensure fresh thumbnails
+                rel = self._state_manager.rows[row_index].get("rel")
+                if rel:
+                    self._cache_manager.remove_thumbnail(str(rel))
 
     def _on_loader_progress(self, root: Path, current: int, total: int) -> None:
         if not self._album_root or root != self._album_root:
@@ -423,17 +495,8 @@ class AssetListModel(QAbstractListModel):
                 QTimer.singleShot(0, self.start_load)
             return
 
-        if success and self._pending_loader_root == self._album_root:
-            rows = list(self._pending_rows)
-            self.beginResetModel()
-            self._state_manager.set_rows(rows)
-            self.endResetModel()
-            self._cache_manager.reset_caches_for_new_rows(rows)
-            self._cache_manager.clear_recently_removed()
-
         self.loadFinished.emit(root, success)
 
-        self._pending_rows = []
         self._pending_loader_root = None
 
         if (

@@ -11,6 +11,8 @@ from ....config import WORK_DIR_NAME
 from ....io.scanner import gather_media_paths, process_media_paths
 from ....utils.pathutils import ensure_work_dir
 
+DEFAULT_BATCH_SIZE = 10
+
 
 class ScannerSignals(QObject):
     """Signals emitted by :class:`ScannerWorker` while scanning."""
@@ -30,6 +32,7 @@ class ScannerWorker(QRunnable):
         include: Iterable[str],
         exclude: Iterable[str],
         signals: ScannerSignals,
+        batch_size: int = DEFAULT_BATCH_SIZE,
     ) -> None:
         super().__init__()
         self.setAutoDelete(False)
@@ -37,6 +40,7 @@ class ScannerWorker(QRunnable):
         self._include = list(include)
         self._exclude = list(exclude)
         self._signals = signals
+        self._batch_size = batch_size
         self._is_cancelled = False
         self._had_error = False
 
@@ -91,10 +95,9 @@ class ScannerWorker(QRunnable):
             processed_count = 0
             last_reported = 0
             current_batch: List[dict] = []
-            batch_size = 10
 
             for row in process_media_paths(
-                self._root, image_paths, video_paths, batch_size=batch_size
+                self._root, image_paths, video_paths, batch_size=self._batch_size
             ):
                 if self._is_cancelled:
                     return
@@ -102,8 +105,8 @@ class ScannerWorker(QRunnable):
                 current_batch.append(row)
                 processed_count += 1
 
-                if len(current_batch) >= batch_size:
-                    self._signals.batchProcessed.emit(self._root, list(current_batch))
+                if len(current_batch) >= self._batch_size:
+                    self._signals.batchProcessed.emit(self._root, current_batch)
                     current_batch.clear()
 
                 # To avoid overwhelming the UI thread we only emit progress

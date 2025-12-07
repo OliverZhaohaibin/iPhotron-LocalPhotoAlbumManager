@@ -11,9 +11,12 @@ from PySide6.QtCore import QObject, QTimer, Signal, Slot
 from ... import app as backend
 from ...config import RECENTLY_DELETED_DIR_NAME, WORK_DIR_NAME
 from ...errors import IPhotoError
+from ...utils.logging import get_logger
 from ..background_task_manager import BackgroundTaskManager
 from ..ui.tasks.rescan_worker import RescanSignals, RescanWorker
 from ..ui.tasks.scanner_worker import ScannerSignals, ScannerWorker
+
+LOGGER = get_logger()
 
 if TYPE_CHECKING:
     from ...library.manager import LibraryManager

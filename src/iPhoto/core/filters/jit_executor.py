@@ -353,7 +353,12 @@ def apply_color_adjustments_inplace_qimage(
         raise BufferError("QImage pixel buffer is smaller than expected")
 
     if _apply_color_adjustments_inplace is None:
-        logger.error("No color adjustment kernel available.")
+        logger.error(
+            "No color adjustment kernel available. "
+            "This may be due to missing dependencies (e.g., Numba), "
+            "the AOT module not being compiled, or an unsupported environment. "
+            "Please ensure all dependencies are installed and the AOT module is built if required."
+        )
         return
 
     _apply_color_adjustments_inplace(

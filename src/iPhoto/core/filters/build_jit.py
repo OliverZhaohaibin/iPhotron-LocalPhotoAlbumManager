@@ -14,12 +14,12 @@ src_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../"))
 sys.path.insert(0, src_path)
 
 try:
-    from iPhoto.core.filters.jit_executor import (
+    from iPhoto.core.filters.jit_kernels import (
         _apply_adjustments_fast,
         _apply_color_adjustments_inplace,
     )
 except ImportError as e:
-    print(f"Error importing jit_executor: {e}")
+    print(f"Error importing jit_kernels: {e}")
     sys.exit(1)
 
 # Validate that the imported functions have the .py_func attribute (Numba JIT-compiled)

@@ -124,7 +124,7 @@ class AssetListStateManager:
         if self._pending_row_removals:
             self._pending_row_removals.clear()
 
-    def on_external_row_inserted(self, position: int) -> None:
+    def on_external_row_inserted(self, position: int, count: int = 1) -> None:
         """Shift pending move bookkeeping after a row was inserted externally."""
 
         if self._pending_virtual_moves:
@@ -133,7 +133,7 @@ class AssetListStateManager:
                 list(self._pending_virtual_moves.items())
             ):
                 if row_index >= position:
-                    adjusted_index = row_index + 1
+                    adjusted_index = row_index + count
                 else:
                     adjusted_index = row_index
                 adjusted[original_rel] = (adjusted_index, guessed_rel, was_removed)

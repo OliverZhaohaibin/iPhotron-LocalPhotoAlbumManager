@@ -134,7 +134,13 @@ def _np_gamma_neutral_signed(gray: np.ndarray, neutral_adjust: float) -> np.ndar
     return np.clip(clamped, 0.0, 1.0)
 
 def _np_contrast_tone_signed(gray: np.ndarray, tone_adjust: float) -> np.ndarray:
-    """Apply a signed contrast tone curve adjustment to a grayscale array.
+    """
+    Apply a signed contrast adjustment via a tone curve to a grayscale array.
+    The `tone_adjust` parameter (in [-1.0, 1.0]) controls the steepness of the tone curve:
+    - Positive values steepen the curve, increasing contrast.
+    - Negative values flatten the curve, decreasing contrast.
+    In this context, "tone" refers to the shape of the curve mapping input luminance to output luminance,
+    affecting overall image contrast.
 
     Positive values increase contrast (steepen the curve), negative values decrease contrast (flatten the curve).
     """

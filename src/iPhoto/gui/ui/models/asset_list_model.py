@@ -527,7 +527,7 @@ class AssetListModel(QAbstractListModel):
             self.beginInsertRows(QModelIndex(), start_row, end_row)
             self._state_manager.append_chunk(new_items)
             self.endInsertRows()
-            self._state_manager.on_external_row_inserted(start_row)
+            self._state_manager.on_external_row_inserted(start_row, len(new_items))
 
         # Emit updates for modified rows.
         if updates:

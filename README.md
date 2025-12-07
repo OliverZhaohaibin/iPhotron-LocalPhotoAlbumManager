@@ -7,6 +7,10 @@
 ![License](https://img.shields.io/badge/license-MIT-green)
 [![GitHub Repo](https://img.shields.io/badge/github-iPhotos-181717?logo=github)](https://github.com/OliverZhaohaibin/iPhotos-LocalPhotoAlbumManager)
 
+## ☕ Support
+
+[![Buy Me a Coffee](https://img.shields.io/badge/Buy%20Me%20a%20Coffee-Support%20Development-yellow?style=for-the-badge&logo=buy-me-a-coffee&logoColor=white)](https://buymeacoffee.com/oliverzhao)
+
 ## 📥 Download
 
 [![Download iPhoto](https://img.shields.io/badge/⬇️%20Download-iPhoto%20Latest%20Release-blue?style=for-the-badge&logo=windows)](https://github.com/OliverZhaohaibin/iPhotos-LocalPhotoAlbumManager/releases/download/v2.3.1/iPhoto-v2.31.exe)

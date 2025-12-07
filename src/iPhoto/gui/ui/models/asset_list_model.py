@@ -511,7 +511,7 @@ class AssetListModel(QAbstractListModel):
             if existing_index is not None:
                 # Update the existing row data in place.
                 if 0 <= existing_index < len(self._state_manager.rows):
-                    self._state_manager.rows[existing_index] = row
+                    self._state_manager.update_row_at_index(existing_index, row)
                     updates.append(existing_index)
             else:
                 # Ensure the new row has a normalized rel key before appending

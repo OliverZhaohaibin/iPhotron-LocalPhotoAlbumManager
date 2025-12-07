@@ -102,7 +102,7 @@ def resolve_live_map(
     return mapping
 
 
-def motion_paths_to_hide(live_map: Dict[str, Dict[str, object]]) -> Set[str]:
+def get_motion_paths_to_hide(live_map: Dict[str, Dict[str, object]]) -> Set[str]:
     motion_paths: Set[str] = set()
     for info in live_map.values():
         if not isinstance(info, dict):
@@ -120,10 +120,10 @@ def build_asset_entry(
     row: Dict[str, object],
     featured: Set[str],
     live_map: Dict[str, Dict[str, object]],
-    motion_paths_to_hide: Set[str],
+    hidden_motion_paths: Set[str],
 ) -> Optional[Dict[str, object]]:
     rel = str(row.get("rel"))
-    if not rel or rel in motion_paths_to_hide:
+    if not rel or rel in hidden_motion_paths:
         return None
 
     live_info = live_map.get(rel)
@@ -203,7 +203,7 @@ def compute_asset_rows(
     ensure_work_dir(root, WORK_DIR_NAME)
     index_rows = list(IndexStore(root).read_all())
     resolved_map = resolve_live_map(index_rows, live_map)
-    motion_paths = motion_paths_to_hide(resolved_map)
+    motion_paths = get_motion_paths_to_hide(resolved_map)
     featured_set = normalize_featured(featured)
 
     entries: List[Dict[str, object]] = []
@@ -283,7 +283,7 @@ class AssetLoaderWorker(QRunnable):
         ensure_work_dir(self._root, WORK_DIR_NAME)
         index_rows = list(IndexStore(self._root).read_all())
         live_map = resolve_live_map(index_rows, self._live_map)
-        motion_paths_to_hide = motion_paths_to_hide(live_map)
+        hidden_motion_paths = get_motion_paths_to_hide(live_map)
 
         total = len(index_rows)
         if total == 0:
@@ -302,7 +302,7 @@ class AssetLoaderWorker(QRunnable):
                 row,
                 self._featured,
                 live_map,
-                motion_paths_to_hide,
+                hidden_motion_paths,
             )
             if entry is not None:
                 chunk.append(entry)

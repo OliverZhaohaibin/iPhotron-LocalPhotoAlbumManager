@@ -22,7 +22,7 @@ from ..tasks.thumbnail_loader import ThumbnailLoader
 from ..tasks.asset_loader_worker import (
     build_asset_entry,
     resolve_live_map,
-    motion_paths_to_hide,
+    get_motion_paths_to_hide,
     normalize_featured,
 )
 from .asset_cache_manager import AssetCacheManager
@@ -444,7 +444,7 @@ class AssetListModel(QAbstractListModel):
         #
         # Use the existing map to at least resolve known pairs.
         resolved_map = resolve_live_map(chunk, live_map_snapshot)
-        paths_to_hide = motion_paths_to_hide(resolved_map)
+        paths_to_hide = get_motion_paths_to_hide(resolved_map)
 
         entries: List[Dict[str, object]] = []
         for row in chunk:

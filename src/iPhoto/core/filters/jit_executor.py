@@ -51,7 +51,12 @@ if not _IN_BUILD_MODE:
 if not _AOT_AVAILABLE:
     # Check if we are running in a Nuitka-compiled environment.
     # Numba JIT requires raw Python bytecode. Nuitka strips this, so JIT will crash.
-    _IS_COMPILED = "__compiled__" in globals() or hasattr(sys, "frozen") # simple heuristics
+    # Use robust check for compiled environments (Nuitka, PyInstaller, etc.)
+    _IS_COMPILED = (
+        "__compiled__" in globals() or
+        hasattr(sys, "frozen") or
+        hasattr(sys, "_MEIPASS")
+    )
 
     if not _IS_COMPILED:
         try:

@@ -204,7 +204,7 @@ def apply_bw_vectorized(
     buffer = np.frombuffer(view, dtype=np.uint8, count=expected_size)
 
 
-    # ... Restoring old implementation body ...
+    # Using the previous implementation for Black & White effect to ensure stability and avoid regressions.
     try:
         surface = buffer.reshape((height, bytes_per_line))
     except ValueError:

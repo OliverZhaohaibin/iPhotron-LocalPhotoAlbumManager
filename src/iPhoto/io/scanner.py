@@ -66,7 +66,7 @@ def process_media_paths(
     all_paths = image_paths + video_paths
     total_files = len(all_paths)
 
-    if not batch_size or batch_size <= 0:
+    if batch_size is None or batch_size <= 0:
         chunk_size = total_files
     else:
         chunk_size = batch_size

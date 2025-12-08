@@ -107,11 +107,11 @@ def test_proxy_sort_order(qapp):
     # The key part is that the source model must return data for DT_SORT
 
     rows = [
-        {"rel": "a.jpg", "dt_sort": 100.0},
-        {"rel": "b.jpg", "dt_sort": 200.0},
-        {"rel": "c.jpg", "dt_sort": float("-inf")}, # No date
-        {"rel": "d.jpg", "dt_sort": 50.0},
-        {"rel": "e.jpg", "dt_sort": 0.0},  # Unix epoch
+        {"rel": "a.jpg", "dt_sort": 100.0, "ts": 100000000},
+        {"rel": "b.jpg", "dt_sort": 200.0, "ts": 200000000},
+        {"rel": "c.jpg", "dt_sort": float("-inf"), "ts": -1}, # No date
+        {"rel": "d.jpg", "dt_sort": 50.0, "ts": 50000000},
+        {"rel": "e.jpg", "dt_sort": 0.0, "ts": 0},  # Unix epoch
     ]
     source_model._state_manager.set_rows(rows)
 

@@ -118,21 +118,24 @@ class AssetFilterProxyModel(QSortFilterProxyModel):
     # QSortFilterProxyModel API
     # ------------------------------------------------------------------
     def filterAcceptsRow(self, row: int, parent) -> bool:  # type: ignore[override]
+        if self._filter_mode is None and not self._search_text:
+            return True
+
         if self._fast_source is not None:
             # Bypass Qt index creation and role lookups for raw performance.
             row_data = self._fast_source.get_internal_row(row)  # type: ignore
             if row_data is None:
                 return False
-            if self._filter_mode == "videos" and not row_data.get("is_video"):
+            if self._filter_mode == "videos" and not row_data["is_video"]:
                 return False
-            if self._filter_mode == "live" and not row_data.get("is_live"):
+            if self._filter_mode == "live" and not row_data["is_live"]:
                 return False
-            if self._filter_mode == "favorites" and not row_data.get("featured"):
+            if self._filter_mode == "favorites" and not row_data["featured"]:
                 return False
             if self._search_text:
-                rel = row_data.get("rel")
+                rel = row_data["rel"]
                 name = str(rel).casefold() if rel is not None else ""
-                asset_id = row_data.get("id")
+                asset_id = row_data["id"]
                 identifier = str(asset_id).casefold() if asset_id is not None else ""
                 if self._search_text not in name and self._search_text not in identifier:
                     return False
@@ -171,22 +174,16 @@ class AssetFilterProxyModel(QSortFilterProxyModel):
                 # We retrieve the pre-calculated microsecond timestamp (`ts`)
                 # directly from the backing store to avoid parsing overhead.
                 left_ts = -1
-                left_rel = ""
                 if left_row is not None:
-                    # Use .get() with a default to safely handle legacy/incomplete rows.
-                    # We avoid `or -1` because 0 is a valid timestamp (Unix epoch).
-                    raw_ts = left_row.get("ts")
-                    left_ts = int(raw_ts) if raw_ts is not None else -1
-                    left_rel = str(left_row.get("rel") or "")
+                    left_ts = left_row["ts"]
 
                 right_ts = -1
-                right_rel = ""
                 if right_row is not None:
-                    raw_ts = right_row.get("ts")
-                    right_ts = int(raw_ts) if raw_ts is not None else -1
-                    right_rel = str(right_row.get("rel") or "")
+                    right_ts = right_row["ts"]
 
                 if left_ts == right_ts:
+                    left_rel = str(left_row["rel"]) if left_row is not None else ""
+                    right_rel = str(right_row["rel"]) if right_row is not None else ""
                     return left_rel < right_rel
                 return left_ts < right_ts
 

@@ -11,7 +11,6 @@ from PySide6.QtGui import QColor, QFont, QFontMetrics, QPainter, QPixmap
 
 from ..tasks.thumbnail_loader import ThumbnailLoader
 from .live_map import load_live_map
-from ..badge_renderer import BadgeRenderer
 
 
 class AssetCacheManager(QObject):
@@ -34,7 +33,6 @@ class AssetCacheManager(QObject):
         self._recently_removed_limit = 256
         self._album_root: Optional[Path] = None
         self._live_map: Dict[str, Dict[str, object]] = {}
-        self._badge_renderer = BadgeRenderer()
 
     def thumbnail_loader(self) -> ThumbnailLoader:
         """Expose the :class:`ThumbnailLoader` used for rendering previews."""
@@ -311,7 +309,7 @@ class AssetCacheManager(QObject):
         return self._live_map
 
     def _create_composite_thumbnail(self, rel: str, source: QPixmap, row: Dict[str, object]) -> QPixmap:
-        """Generate and cache a badge-burned composite thumbnail."""
+        """Generate and cache a resized/cropped thumbnail (without badges)."""
 
         # 1. Create a square target pixmap
         target_size = self._thumb_size
@@ -345,33 +343,8 @@ class AssetCacheManager(QObject):
             painter.setRenderHint(QPainter.SmoothPixmapTransform, True)
             painter.drawPixmap(QRect(0, 0, view_w, view_h), source, source_rect)
 
-            # 3. Draw Badges
-            rect = QRect(0, 0, view_w, view_h)
-
-            if bool(row.get("is_live")):
-                self._badge_renderer.draw_live_badge(painter, rect)
-
-            if bool(row.get("is_pano")):
-                self._badge_renderer.draw_pano_badge(painter, rect)
-
-            if bool(row.get("is_video")):
-                duration = 0.0
-                raw_dur = row.get("dur")
-                if isinstance(raw_dur, (int, float)):
-                    duration = max(0, float(raw_dur))
-                if duration > 0:
-                    # We use a default font here, or we could cache a standard one.
-                    # QFont() constructs a default application font.
-                    self._badge_renderer.draw_duration_badge(painter, rect, duration, QFont())
-
-            if bool(row.get("featured")):
-                self._badge_renderer.draw_favorite_badge(painter, rect)
-
         finally:
             painter.end()
-
-        # Mark as composite so Delegate knows to skip badge drawing
-        setattr(composite, "has_badges", True)
 
         self._composite_cache[rel] = composite
         return composite

@@ -156,28 +156,24 @@ class AssetGridDelegate(QStyledItemDelegate):
             radius = max(0.0, corner_radius - 1)
             painter.drawRoundedRect(QRectF(adjusted), radius, radius)
 
-        # Check if badges are already composed into the pixmap
-        pixmap_has_badges = getattr(pixmap, "has_badges", False)
+        if index.data(Roles.IS_LIVE):
+            self._badge_renderer.draw_live_badge(painter, thumb_rect)
 
-        if not pixmap_has_badges:
-            if index.data(Roles.IS_LIVE):
-                self._badge_renderer.draw_live_badge(painter, thumb_rect)
+        if index.data(Roles.IS_PANO):
+            self._badge_renderer.draw_pano_badge(painter, thumb_rect)
 
-            if index.data(Roles.IS_PANO):
-                self._badge_renderer.draw_pano_badge(painter, thumb_rect)
+        if index.data(Roles.IS_VIDEO):
+            size_info = index.data(Roles.SIZE)
+            duration = 0.0
+            if isinstance(size_info, dict):
+                raw = size_info.get("duration")  # type: ignore[arg-type]
+                if isinstance(raw, (int, float)):
+                    duration = max(0, float(raw))
+            if duration > 0:
+                self._badge_renderer.draw_duration_badge(painter, thumb_rect, duration, option.font)
 
-            if index.data(Roles.IS_VIDEO):
-                size_info = index.data(Roles.SIZE)
-                duration = 0.0
-                if isinstance(size_info, dict):
-                    raw = size_info.get("duration")  # type: ignore[arg-type]
-                    if isinstance(raw, (int, float)):
-                        duration = max(0, float(raw))
-                if duration > 0:
-                    self._badge_renderer.draw_duration_badge(painter, thumb_rect, duration, option.font)
-
-            if bool(index.data(Roles.FEATURED)):
-                self._badge_renderer.draw_favorite_badge(painter, thumb_rect)
+        if bool(index.data(Roles.FEATURED)):
+            self._badge_renderer.draw_favorite_badge(painter, thumb_rect)
 
         if (
             self._selection_mode_active

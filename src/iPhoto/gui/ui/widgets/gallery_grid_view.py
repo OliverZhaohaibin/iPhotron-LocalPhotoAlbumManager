@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 from PySide6.QtCore import QEvent, QSize, Qt
-from PySide6.QtGui import QPainter, QPalette, QSurfaceFormat
+from OpenGL import GL as gl
+from PySide6.QtGui import QPalette, QSurfaceFormat
 from PySide6.QtOpenGLWidgets import QOpenGLWidget
 from PySide6.QtWidgets import QAbstractItemView, QListView
 
@@ -12,16 +13,31 @@ from .asset_grid import AssetGrid
 
 
 class GalleryViewport(QOpenGLWidget):
-    """Custom OpenGL viewport that explicitly fills its background."""
+    """Custom OpenGL viewport that explicitly fills its background using OpenGL commands."""
+
+    def paintGL(self) -> None:
+        """
+        Enforce opaque background painting using hardware clear.
+
+        QOpenGLWidget in a translucent window context (common with frameless windows)
+        can default to transparent or fail to clear the alpha channel correctly
+        when using QPainter. We explicitly clear the background using standard
+        OpenGL commands to ensure the Alpha channel is set to 1.0 (Opaque).
+        """
+        # Retrieve the Window color from the palette
+        bg_color = self.palette().color(QPalette.ColorRole.Window)
+
+        # Set the clear color to the window color with Alpha = 1.0 (Fully Opaque)
+        gl.glClearColor(bg_color.redF(), bg_color.greenF(), bg_color.blueF(), 1.0)
+
+        # Clear the color buffer, filling it with the opaque color immediately
+        gl.glClear(gl.GL_COLOR_BUFFER_BIT)
 
     def paintEvent(self, event) -> None:
-        """Enforce opaque background painting."""
-        # QOpenGLWidget in a translucent window context (common with frameless windows)
-        # can default to transparent or fail to clear correctly. We explicitly fill
-        # the background with the Window color from the palette to ensure opacity.
-        with QPainter(self) as painter:
-            painter.fillRect(event.rect(), self.palette().color(QPalette.ColorRole.Window))
-
+        # Standard behavior:
+        # 1. QOpenGLWidget calls paintGL() (defined above) to clear the background.
+        # 2. super().paintEvent() lets QListView draw the items (thumbnails)
+        #    on top of the now opaque background.
         super().paintEvent(event)
 
 

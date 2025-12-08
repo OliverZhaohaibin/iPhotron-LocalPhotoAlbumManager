@@ -312,7 +312,7 @@ class AssetCacheManager(QObject):
         return self._live_map
 
     def _create_composite_thumbnail(self, rel: str, source: QPixmap, row: Dict[str, object]) -> QPixmap:
-        """Generate and cache a resized/cropped thumbnail (without badges)."""
+        """Generate and cache a resized/cropped thumbnail at the target display size."""
 
         # 1. Create a square target pixmap
         target_size = self._thumb_size

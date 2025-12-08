@@ -6,11 +6,20 @@ from PySide6.QtCore import QRectF, QSize
 
 
 def calculate_center_crop(img_size: QSize, view_size: QSize) -> QRectF:
-    """Calculate the source rectangle for an Aspect Fill (Center Crop) operation.
+    """
+    Calculate the source rectangle for an Aspect Fill (Center Crop) operation.
 
     Given an image size and a target view size, this function returns the
     rectangle within the source image that should be drawn to fill the view
     while preserving the aspect ratio and centering the content.
+
+    Args:
+        img_size (QSize): The size of the source image, in pixels.
+        view_size (QSize): The size of the target view area, in pixels.
+
+    Returns:
+        QRectF: A rectangle in image coordinates representing the region to be drawn
+            to fill the view with the correct aspect ratio, centered within the image.
     """
     img_w, img_h = img_size.width(), img_size.height()
     view_w, view_h = view_size.width(), view_size.height()

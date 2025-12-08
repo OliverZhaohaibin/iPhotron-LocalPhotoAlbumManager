@@ -116,13 +116,7 @@ def test_sort_lazy_evaluation(qapp):
     proxy.sort(0, Qt.SortOrder.DescendingOrder)
 
     # Expected: c.jpg (200), b.jpg (100), a.jpg (100)
-    # Timestamps equal, but Qt sort handling usually reverses the order of the strict weak ordering?
-    # Actually QSortFilterProxyModel uses lessThan.
-    # If lessThan(a, b) is True (a < b), then a comes first in Ascending.
-    # In Descending, b comes first.
-    # a.jpg < b.jpg is True.
-    # So Ascending: a, b
-    # Descending: b, a
+    # In descending order, items with equal timestamps maintain reverse alphabetical order
 
     assert proxy.data(proxy.index(0, 0), Roles.REL) == "c.jpg"
     assert proxy.data(proxy.index(1, 0), Roles.REL) == "b.jpg"

@@ -20,6 +20,7 @@ from PySide6.QtGui import (
 from PySide6.QtWidgets import QStyle, QStyleOptionViewItem, QStyledItemDelegate
 
 from ..badge_renderer import BadgeRenderer
+from ..geometry_utils import calculate_center_crop
 from ..models.asset_model import Roles
 
 
@@ -108,24 +109,8 @@ class AssetGridDelegate(QStyledItemDelegate):
                     source.adjust(0, top, 0, -bottom)
                 painter.drawPixmap(thumb_rect, scaled, source)
             else:
-                img_size = pixmap.size()
-                view_size = thumb_rect.size()
-                img_w, img_h = img_size.width(), img_size.height()
-                view_w, view_h = view_size.width(), view_size.height()
-
-                if img_w > 0 and img_h > 0 and view_w > 0 and view_h > 0:
-                    img_ratio = img_w / img_h
-                    view_ratio = view_w / view_h
-
-                    if img_ratio > view_ratio:
-                        new_w = img_h * view_ratio
-                        offset_x = (img_w - new_w) / 2.0
-                        source_rect = QRectF(offset_x, 0.0, new_w, float(img_h))
-                    else:
-                        new_h = img_w / view_ratio
-                        offset_y = (img_h - new_h) / 2.0
-                        source_rect = QRectF(0.0, offset_y, float(img_w), new_h)
-
+                source_rect = calculate_center_crop(pixmap.size(), thumb_rect.size())
+                if not source_rect.isEmpty():
                     painter.drawPixmap(QRectF(thumb_rect), pixmap, source_rect)
                 else:
                     painter.fillRect(thumb_rect, QColor("#1b1b1b"))

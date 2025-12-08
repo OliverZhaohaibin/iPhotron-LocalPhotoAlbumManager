@@ -11,6 +11,7 @@ from PySide6.QtGui import QColor, QFont, QFontMetrics, QPainter, QPixmap
 
 from ..tasks.thumbnail_loader import ThumbnailLoader
 from .live_map import load_live_map
+from ..geometry_utils import calculate_center_crop
 
 
 class AssetCacheManager(QObject):
@@ -319,29 +320,14 @@ class AssetCacheManager(QObject):
         painter = QPainter(composite)
         try:
             # 2. Draw Source (Aspect Fill / Center Crop)
-            img_size = source.size()
-            img_w, img_h = img_size.width(), img_size.height()
             view_w, view_h = target_size.width(), target_size.height()
 
-            source_rect = QRectF(0.0, 0.0, float(img_w), float(img_h))
+            source_rect = calculate_center_crop(source.size(), target_size)
 
-            if img_w > 0 and img_h > 0:
-                img_ratio = img_w / img_h
-                view_ratio = view_w / view_h
-
-                # Center Crop Logic
-                if img_ratio > view_ratio:
-                    new_w = img_h * view_ratio
-                    offset_x = (img_w - new_w) / 2.0
-                    source_rect = QRectF(offset_x, 0.0, new_w, float(img_h))
-                else:
-                    new_h = img_w / view_ratio
-                    offset_y = (img_h - new_h) / 2.0
-                    source_rect = QRectF(0.0, offset_y, float(img_w), new_h)
-
-            painter.setRenderHint(QPainter.Antialiasing, True)
-            painter.setRenderHint(QPainter.SmoothPixmapTransform, True)
-            painter.drawPixmap(QRectF(0.0, 0.0, float(view_w), float(view_h)), source, source_rect)
+            if not source_rect.isEmpty():
+                painter.setRenderHint(QPainter.Antialiasing, True)
+                painter.setRenderHint(QPainter.SmoothPixmapTransform, True)
+                painter.drawPixmap(QRectF(0.0, 0.0, float(view_w), float(view_h)), source, source_rect)
 
         finally:
             painter.end()

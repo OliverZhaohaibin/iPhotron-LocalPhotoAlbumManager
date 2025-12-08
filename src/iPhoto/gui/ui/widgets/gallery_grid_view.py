@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from OpenGL import GL as gl
 from PySide6.QtCore import QEvent, QSize, Qt
 from PySide6.QtGui import QPalette, QSurfaceFormat
 from PySide6.QtOpenGLWidgets import QOpenGLWidget
@@ -9,6 +10,25 @@ from PySide6.QtWidgets import QAbstractItemView, QListView
 
 from ..styles import modern_scrollbar_style
 from .asset_grid import AssetGrid
+
+
+class GalleryViewport(QOpenGLWidget):
+    """OpenGL viewport that ensures an opaque background."""
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+
+        # Disable the alpha buffer to prevent transparency issues with the DWM
+        # when using a frameless window configuration.
+        gl_format = QSurfaceFormat()
+        gl_format.setAlphaBufferSize(0)
+        self.setFormat(gl_format)
+
+    def paintGL(self) -> None:
+        """Clear the background to the theme's base color with full opacity."""
+        base_color = self.palette().color(QPalette.ColorRole.Base)
+        gl.glClearColor(base_color.redF(), base_color.greenF(), base_color.blueF(), 1.0)
+        gl.glClear(gl.GL_COLOR_BUFFER_BIT)
 
 
 class GalleryGridView(AssetGrid):
@@ -46,16 +66,8 @@ class GalleryGridView(AssetGrid):
         self.setSelectionRectVisible(False)
 
         # Enable hardware acceleration for the viewport to improve scrolling performance
-        gl_viewport = QOpenGLWidget()
-
-        # Disable the alpha buffer to prevent transparency issues with the DWM
-        # when using a frameless window configuration.
-        gl_format = QSurfaceFormat()
-        gl_format.setAlphaBufferSize(0)
-        gl_viewport.setFormat(gl_format)
-
+        gl_viewport = GalleryViewport()
         self.setViewport(gl_viewport)
-        self.viewport().setAutoFillBackground(True)
 
         self._updating_style = False
         self._apply_scrollbar_style()

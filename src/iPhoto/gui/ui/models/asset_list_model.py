@@ -19,6 +19,12 @@ from PySide6.QtCore import (
 from PySide6.QtGui import QPixmap
 
 from ..tasks.thumbnail_loader import ThumbnailLoader
+from ..tasks.asset_loader_worker import (
+    build_asset_entry,
+    resolve_live_map,
+    get_motion_paths_to_hide,
+    normalize_featured,
+)
 from .asset_cache_manager import AssetCacheManager
 from .asset_data_loader import AssetDataLoader
 from .asset_state_manager import AssetListStateManager
@@ -41,6 +47,10 @@ class AssetListModel(QAbstractListModel):
     # implementation and results in runtime errors during packaging.
     loadProgress = Signal(Path, int, int)
     loadFinished = Signal(Path, bool)
+
+    # Accumulate chunks for 250ms to prevent the UI from stuttering during rapid
+    # updates.  This strikes a balance between responsiveness and smoothness.
+    FLUSH_INTERVAL_MS = 250
 
     def __init__(self, facade: "AppFacade", parent=None) -> None:  # type: ignore[override]
         super().__init__(parent)
@@ -65,8 +75,15 @@ class AssetListModel(QAbstractListModel):
         self._pending_loader_root: Optional[Path] = None
         self._deferred_incremental_refresh: Optional[Path] = None
 
+        self._incoming_buffer: List[Dict[str, object]] = []
+        self._flush_timer = QTimer(self)
+        self._flush_timer.setInterval(self.FLUSH_INTERVAL_MS)
+        self._flush_timer.setSingleShot(True)
+        self._flush_timer.timeout.connect(self._flush_buffer)
+
         self._facade.linksUpdated.connect(self.handle_links_updated)
         self._facade.assetUpdated.connect(self.handle_asset_updated)
+        self._facade.scanChunkReady.connect(self._on_scan_chunk_ready)
 
     def album_root(self) -> Optional[Path]:
         """Return the path of the currently open album, if any."""
@@ -337,6 +354,8 @@ class AssetListModel(QAbstractListModel):
         self._album_root = root
         self._cache_manager.reset_for_album(root)
         self._set_deferred_incremental_refresh(None)
+        self._flush_timer.stop()
+        self._incoming_buffer.clear()
         self.beginResetModel()
         self._state_manager.clear_rows()
         self.endResetModel()
@@ -376,22 +395,30 @@ class AssetListModel(QAbstractListModel):
             self._state_manager.mark_reload_pending()
             return
 
+        # Clear the model before starting a fresh load so progressive updates
+        # build the view from scratch.  This replaces the old behaviour where we
+        # waited for the full payload and then did a single ``beginResetModel``.
+        self._flush_timer.stop()
+        self._incoming_buffer.clear()
+        self.beginResetModel()
+        self._state_manager.clear_rows()
+        self.endResetModel()
+        self._cache_manager.clear_recently_removed()
+
         manifest = self._facade.current_album.manifest if self._facade.current_album else {}
         featured = manifest.get("featured", []) or []
 
         live_map = load_live_map(self._album_root)
         self._cache_manager.set_live_map(live_map)
 
-        # Remember which album root is being populated so chunk handlers can
-        # accumulate results while the worker traverses the filesystem.
-        self._pending_rows = []
+        # Remember which album root is being populated so chunk handlers know
+        # the incoming data belongs to the active view.
         self._pending_loader_root = self._album_root
 
         try:
             self._data_loader.start(self._album_root, featured, live_map)
         except RuntimeError:
             self._state_manager.mark_reload_pending()
-            self._pending_rows = []
             self._pending_loader_root = None
             return
 
@@ -406,10 +433,122 @@ class AssetListModel(QAbstractListModel):
         ):
             return
 
-        # Buffer worker rows so the view can be refreshed exactly once when the
-        # load completes instead of growing incrementally and triggering a full
-        # resort after every sub-album traversal.
-        self._pending_rows.extend(chunk)
+        self._incoming_buffer.extend(chunk)
+        if not self._flush_timer.isActive():
+            self._flush_timer.start()
+
+    def _on_scan_chunk_ready(self, root: Path, chunk: List[Dict[str, object]]) -> None:
+        """Integrate fresh rows from the scanner into the live view."""
+
+        if not self._album_root or root != self._album_root or not chunk:
+            return
+
+        # Scanner rows are raw metadata dictionaries.  We must transform them
+        # into full asset entries (including derived fields like `is_live`)
+        # so the model behaves consistently regardless of the data source.
+        manifest = self._facade.current_album.manifest if self._facade.current_album else {}
+        featured = manifest.get("featured", []) or []
+        featured_set = normalize_featured(featured)
+
+        live_map_snapshot = self._cache_manager.live_map_snapshot()
+        # Note: During a fresh scan, `chunk` contains new items that might form
+        # Live Photo pairs.  However, `live_map_snapshot` is based on the
+        # *existing* `links.json`.  We can't easily update the live map incrementally
+        # here without reimplementing the full pairing logic.
+        # User experience: Items that could form Live Photo pairs may temporarily
+        # appear unpaired in the UI during the scan. Once the scan completes and
+        # `linksUpdated` fires, the model will update and correctly pair these items.
+        # This is an acceptable trade-off to avoid complex incremental pairing logic.
+        # Use the existing map to at least resolve known pairs.
+        resolved_map = resolve_live_map(chunk, live_map_snapshot)
+        paths_to_hide = get_motion_paths_to_hide(resolved_map)
+
+        entries: List[Dict[str, object]] = []
+        for row in chunk:
+            entry = build_asset_entry(
+                root, row, featured_set, resolved_map, paths_to_hide
+            )
+            if entry is not None:
+                entries.append(entry)
+
+        if entries:
+            self._incoming_buffer.extend(entries)
+            if not self._flush_timer.isActive():
+                self._flush_timer.start()
+
+    def _flush_buffer(self) -> None:
+        """Commit accumulated rows to the model."""
+
+        if not self._incoming_buffer:
+            return
+
+        # Move items out of the buffer so the list remains consistent if new
+        # chunks arrive while we are merging.
+        payload = list(self._incoming_buffer)
+        self._incoming_buffer.clear()
+        self._merge_chunk(payload)
+
+    def _merge_chunk(self, chunk: List[Dict[str, object]]) -> None:
+        """Append or update rows in the model efficiently."""
+
+        # Separate new items from updates to minimize signal emission overhead.
+        # We append new items to the end and update existing ones in place.
+        new_items: List[Dict[str, object]] = []
+        updates: List[int] = []
+
+        for row in chunk:
+            rel = row.get("rel")
+            if not rel:
+                continue
+
+            # The row lookup keys are normalized relative paths.
+            rel_key = self._state_manager.normalise_key(str(rel))
+            if not rel_key:
+                continue
+
+            existing_index = self._state_manager.row_lookup.get(rel_key)
+            if existing_index is not None:
+                # Update the existing row data in place.
+                if 0 <= existing_index < len(self._state_manager.rows):
+                    self._state_manager.update_row_at_index(existing_index, row)
+                    updates.append(existing_index)
+            else:
+                # Ensure the new row has a normalized rel key before appending
+                # so the lookup table populated by append_chunk is consistent
+                # with the normalized keys we use for searching.
+                row["rel"] = rel_key
+                new_items.append(row)
+
+        # Batch inserts for better performance.
+        if new_items:
+            start_row = self._state_manager.row_count()
+            end_row = start_row + len(new_items) - 1
+            self.beginInsertRows(QModelIndex(), start_row, end_row)
+            self._state_manager.append_chunk(new_items)
+            self.endInsertRows()
+            self._state_manager.on_external_row_inserted(start_row, len(new_items))
+
+        # Emit updates for modified rows.
+        if updates:
+            # Determine the range of roles that might have changed.  Since we
+            # replaced the entire row dict, basically everything is fair game.
+            affected_roles = [
+                Roles.REL,
+                Roles.ABS,
+                Roles.SIZE,
+                Roles.DT,
+                Roles.IS_IMAGE,
+                Roles.IS_VIDEO,
+                Roles.IS_LIVE,
+                Qt.DecorationRole,  # Thumbnail might need refresh
+            ]
+            for row_index in updates:
+                index = self.index(row_index, 0)
+                self.dataChanged.emit(index, index, affected_roles)
+                # Invalidate cache for updated rows to ensure fresh thumbnails
+                rel = self._state_manager.rows[row_index].get("rel")
+                if rel:
+                    self._cache_manager.remove_thumbnail(str(rel))
 
     def _on_loader_progress(self, root: Path, current: int, total: int) -> None:
         if not self._album_root or root != self._album_root:
@@ -423,17 +562,13 @@ class AssetListModel(QAbstractListModel):
                 QTimer.singleShot(0, self.start_load)
             return
 
-        if success and self._pending_loader_root == self._album_root:
-            rows = list(self._pending_rows)
-            self.beginResetModel()
-            self._state_manager.set_rows(rows)
-            self.endResetModel()
-            self._cache_manager.reset_caches_for_new_rows(rows)
-            self._cache_manager.clear_recently_removed()
+        # Ensure any remaining items are committed before announcing completion.
+        if self._flush_timer.isActive():
+            self._flush_timer.stop()
+        self._flush_buffer()
 
         self.loadFinished.emit(root, success)
 
-        self._pending_rows = []
         self._pending_loader_root = None
 
         if (

@@ -92,7 +92,7 @@ class AssetListStateManager:
         self._row_lookup = refreshed
 
     @staticmethod
-    def _normalise_key(value: Optional[str]) -> Optional[str]:
+    def normalise_key(value: Optional[str]) -> Optional[str]:
         """Return a POSIX-formatted representation of ``value`` when possible."""
 
         if not value:
@@ -103,7 +103,7 @@ class AssetListStateManager:
         """Adjust pending move bookkeeping after a row was removed externally."""
 
         if self._pending_virtual_moves:
-            normalised_rel = self._normalise_key(rel_key)
+            normalised_rel = self.normalise_key(rel_key)
             updated: Dict[str, Tuple[int, str, bool]] = {}
             for original_rel, (row_index, guessed_rel, was_removed) in (
                 list(self._pending_virtual_moves.items())
@@ -111,8 +111,8 @@ class AssetListStateManager:
                 if row_index == position:
                     continue
                 if normalised_rel is not None:
-                    original_key = self._normalise_key(original_rel)
-                    guessed_key = self._normalise_key(guessed_rel)
+                    original_key = self.normalise_key(original_rel)
+                    guessed_key = self.normalise_key(guessed_rel)
                     if normalised_rel in {original_key, guessed_key}:
                         continue
                 adjusted_index = row_index - 1 if row_index > position else row_index
@@ -124,7 +124,7 @@ class AssetListStateManager:
         if self._pending_row_removals:
             self._pending_row_removals.clear()
 
-    def on_external_row_inserted(self, position: int) -> None:
+    def on_external_row_inserted(self, position: int, count: int = 1) -> None:
         """Shift pending move bookkeeping after a row was inserted externally."""
 
         if self._pending_virtual_moves:
@@ -133,7 +133,7 @@ class AssetListStateManager:
                 list(self._pending_virtual_moves.items())
             ):
                 if row_index >= position:
-                    adjusted_index = row_index + 1
+                    adjusted_index = row_index + count
                 else:
                     adjusted_index = row_index
                 adjusted[original_rel] = (adjusted_index, guessed_rel, was_removed)
@@ -150,6 +150,12 @@ class AssetListStateManager:
         for offset, row_data in enumerate(chunk):
             self._row_lookup[row_data["rel"]] = start_row + offset
         return start_row, start_row + len(chunk) - 1
+
+    def update_row_at_index(self, index: int, row_data: Dict[str, object]) -> None:
+        """Update the row data at the specified index."""
+
+        if 0 <= index < len(self._rows):
+            self._rows[index] = row_data
 
     def active_rel_keys(self) -> Set[str]:
         """Return the current set of ``rel`` keys."""

@@ -33,6 +33,7 @@ class AppFacade(QObject):
     linksUpdated = Signal(Path)
     errorRaised = Signal(str)
     scanProgress = Signal(Path, int, int)
+    scanChunkReady = Signal(Path, list)
     scanFinished = Signal(Path, bool)
     loadStarted = Signal(Path)
     loadProgress = Signal(Path, int, int)
@@ -87,6 +88,7 @@ class AppFacade(QObject):
             parent=self,
         )
         self._library_update_service.scanProgress.connect(self._relay_scan_progress)
+        self._library_update_service.scanChunkReady.connect(self._relay_scan_chunk_ready)
         self._library_update_service.scanFinished.connect(self._relay_scan_finished)
         self._library_update_service.indexUpdated.connect(self._relay_index_updated)
         self._library_update_service.linksUpdated.connect(self._relay_links_updated)
@@ -159,7 +161,7 @@ class AppFacade(QObject):
         """Open *root* and trigger background work as needed."""
 
         try:
-            album = backend.open_album(root)
+            album = backend.open_album(root, autoscan=False)
         except IPhotoError as exc:
             self.errorRaised.emit(str(exc))
             return None
@@ -168,6 +170,21 @@ class AppFacade(QObject):
         album_root = album.root
         self._asset_list_model.prepare_for_album(album_root)
         self.albumOpened.emit(album_root)
+
+        # Check if the index is empty (likely because it's a new or cleaned album)
+        # and trigger a background scan if necessary.
+        has_assets = False
+        try:
+            store = backend.IndexStore(album_root)
+            # Peek at the first item to see if there is any data.
+            # read_all returns an iterator, so next() is sufficient.
+            next(store.read_all())
+            has_assets = True
+        except (StopIteration, IPhotoError):
+            pass
+
+        if not has_assets:
+            self.rescan_current_async()
 
         force_reload = self._library_update_service.consume_forced_reload(album_root)
         self._restart_asset_load(
@@ -677,6 +694,12 @@ class AppFacade(QObject):
         """Forward scan progress updates emitted by :class:`LibraryUpdateService`."""
 
         self.scanProgress.emit(root, current, total)
+
+    @Slot(Path, list)
+    def _relay_scan_chunk_ready(self, root: Path, chunk: List[dict]) -> None:
+        """Forward scan chunks emitted by :class:`LibraryUpdateService`."""
+
+        self.scanChunkReady.emit(root, chunk)
 
     @Slot(Path, bool)
     def _relay_scan_finished(self, root: Path, success: bool) -> None:

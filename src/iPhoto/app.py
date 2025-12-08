@@ -24,13 +24,13 @@ from .utils.logging import get_logger
 LOGGER = get_logger()
 
 
-def open_album(root: Path) -> Album:
+def open_album(root: Path, autoscan: bool = True) -> Album:
     """Open an album directory, scanning and pairing as required."""
 
     album = Album.open(root)
     store = IndexStore(root)
     rows = list(store.read_all())
-    if not rows:
+    if not rows and autoscan:
         include = album.manifest.get("filters", {}).get("include", DEFAULT_INCLUDE)
         exclude = album.manifest.get("filters", {}).get("exclude", DEFAULT_EXCLUDE)
         from .io.scanner import scan_album

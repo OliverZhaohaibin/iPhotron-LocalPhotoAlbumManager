@@ -15,7 +15,7 @@ from ....utils.geocoding import resolve_location_name
 from ....utils.pathutils import ensure_work_dir
 
 
-def _normalize_featured(featured: Iterable[str]) -> Set[str]:
+def normalize_featured(featured: Iterable[str]) -> Set[str]:
     return {str(entry) for entry in featured}
 
 
@@ -60,7 +60,7 @@ def _is_featured(rel: str, featured: Set[str]) -> bool:
     return live_ref in featured
 
 
-def _resolve_live_map(
+def resolve_live_map(
     index_rows: List[Dict[str, object]],
     base_map: Dict[str, Dict[str, object]],
 ) -> Dict[str, Dict[str, object]]:
@@ -102,7 +102,7 @@ def _resolve_live_map(
     return mapping
 
 
-def _motion_paths_to_hide(live_map: Dict[str, Dict[str, object]]) -> Set[str]:
+def get_motion_paths_to_hide(live_map: Dict[str, Dict[str, object]]) -> Set[str]:
     motion_paths: Set[str] = set()
     for info in live_map.values():
         if not isinstance(info, dict):
@@ -115,15 +115,15 @@ def _motion_paths_to_hide(live_map: Dict[str, Dict[str, object]]) -> Set[str]:
     return motion_paths
 
 
-def _build_entry(
+def build_asset_entry(
     root: Path,
     row: Dict[str, object],
     featured: Set[str],
     live_map: Dict[str, Dict[str, object]],
-    motion_paths_to_hide: Set[str],
+    hidden_motion_paths: Set[str],
 ) -> Optional[Dict[str, object]]:
     rel = str(row.get("rel"))
-    if not rel or rel in motion_paths_to_hide:
+    if not rel or rel in hidden_motion_paths:
         return None
 
     live_info = live_map.get(rel)
@@ -202,13 +202,13 @@ def compute_asset_rows(
 ) -> Tuple[List[Dict[str, object]], int]:
     ensure_work_dir(root, WORK_DIR_NAME)
     index_rows = list(IndexStore(root).read_all())
-    resolved_map = _resolve_live_map(index_rows, live_map)
-    motion_paths = _motion_paths_to_hide(resolved_map)
-    featured_set = _normalize_featured(featured)
+    resolved_map = resolve_live_map(index_rows, live_map)
+    motion_paths = get_motion_paths_to_hide(resolved_map)
+    featured_set = normalize_featured(featured)
 
     entries: List[Dict[str, object]] = []
     for row in index_rows:
-        entry = _build_entry(root, row, featured_set, resolved_map, motion_paths)
+        entry = build_asset_entry(root, row, featured_set, resolved_map, motion_paths)
         if entry is not None:
             entries.append(entry)
     return entries, len(index_rows)
@@ -239,7 +239,7 @@ class AssetLoaderWorker(QRunnable):
         super().__init__()
         self.setAutoDelete(False)
         self._root = root
-        self._featured: Set[str] = _normalize_featured(featured)
+        self._featured: Set[str] = normalize_featured(featured)
         self._signals = signals
         self._live_map = live_map
         self._is_cancelled = False
@@ -282,8 +282,8 @@ class AssetLoaderWorker(QRunnable):
     def _build_payload_chunks(self) -> Iterable[List[Dict[str, object]]]:
         ensure_work_dir(self._root, WORK_DIR_NAME)
         index_rows = list(IndexStore(self._root).read_all())
-        live_map = _resolve_live_map(index_rows, self._live_map)
-        motion_paths_to_hide = _motion_paths_to_hide(live_map)
+        live_map = resolve_live_map(index_rows, self._live_map)
+        hidden_motion_paths = get_motion_paths_to_hide(live_map)
 
         total = len(index_rows)
         if total == 0:
@@ -297,12 +297,12 @@ class AssetLoaderWorker(QRunnable):
             if self._is_cancelled:
                 return
             should_emit = position == total or position - last_reported >= 50
-            entry = _build_entry(
+            entry = build_asset_entry(
                 self._root,
                 row,
                 self._featured,
                 live_map,
-                motion_paths_to_hide,
+                hidden_motion_paths,
             )
             if entry is not None:
                 chunk.append(entry)

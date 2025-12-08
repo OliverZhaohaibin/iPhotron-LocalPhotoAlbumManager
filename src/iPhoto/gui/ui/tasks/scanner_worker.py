@@ -16,12 +16,18 @@ class ScannerSignals(QObject):
     """Signals emitted by :class:`ScannerWorker` while scanning."""
 
     progressUpdated = Signal(Path, int, int)
+    chunkReady = Signal(Path, list)
     finished = Signal(Path, list)
     error = Signal(Path, str)
 
 
 class ScannerWorker(QRunnable):
     """Scan album files in a worker thread and emit progress updates."""
+
+    # Number of items to process before emitting a progressive update signal.
+    # A smaller chunk size makes the UI feel more responsive during the initial
+    # load, while a larger one reduces the overhead of signal emission.
+    SCAN_CHUNK_SIZE = 10
 
     def __init__(
         self,
@@ -89,26 +95,43 @@ class ScannerWorker(QRunnable):
 
             processed_count = 0
             last_reported = 0
+            chunk: List[dict] = []
+
             for row in process_media_paths(self._root, image_paths, video_paths):
                 if self._is_cancelled:
                     return
                 rows.append(row)
+                chunk.append(row)
                 processed_count += 1
+
+                should_report = (
+                    processed_count == total_files or processed_count - last_reported >= 25
+                )
+
+                if len(chunk) >= self.SCAN_CHUNK_SIZE:
+                    self._signals.chunkReady.emit(self._root, chunk)
+                    chunk = []
 
                 # To avoid overwhelming the UI thread we only emit progress
                 # every 25 items (and always on completion).  This matches the
                 # cadence of the original worker implementation.
-                if processed_count == total_files or processed_count - last_reported >= 25:
+                if should_report:
                     self._signals.progressUpdated.emit(
                         self._root, processed_count, total_files
                     )
                     last_reported = processed_count
+
+            if chunk:
+                self._signals.chunkReady.emit(self._root, chunk)
         except Exception as exc:  # pragma: no cover - best-effort error propagation
             if not self._is_cancelled:
                 self._had_error = True
                 self._signals.error.emit(self._root, str(exc))
         finally:
             if not self._is_cancelled and not self._had_error:
+                # Consumers should use `chunkReady` for progressive UI updates.
+                # The `finished` signal provides the complete dataset for
+                # authoritative operations (e.g. writing the index file).
                 self._signals.finished.emit(self._root, rows)
             else:
                 self._signals.finished.emit(self._root, [])

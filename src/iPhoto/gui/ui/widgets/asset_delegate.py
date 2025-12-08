@@ -89,18 +89,11 @@ class AssetGridDelegate(QStyledItemDelegate):
             painter.setRenderHint(QPainter.Antialiasing, True)
             painter.setRenderHint(QPainter.SmoothPixmapTransform, True)
 
-            if self._filmstrip_mode:
-                source_rect = calculate_center_crop(pixmap.size(), thumb_rect.size())
-                if not source_rect.isEmpty():
-                    painter.drawPixmap(QRectF(thumb_rect), pixmap, source_rect)
-                else:
-                    painter.fillRect(thumb_rect, QColor("#1b1b1b"))
+            source_rect = calculate_center_crop(pixmap.size(), thumb_rect.size())
+            if not source_rect.isEmpty():
+                painter.drawPixmap(QRectF(thumb_rect), pixmap, source_rect)
             else:
-                source_rect = calculate_center_crop(pixmap.size(), thumb_rect.size())
-                if not source_rect.isEmpty():
-                    painter.drawPixmap(QRectF(thumb_rect), pixmap, source_rect)
-                else:
-                    painter.fillRect(thumb_rect, QColor("#1b1b1b"))
+                painter.fillRect(thumb_rect, QColor("#1b1b1b"))
         else:
             painter.fillRect(thumb_rect, QColor("#1b1b1b"))
 

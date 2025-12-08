@@ -188,8 +188,8 @@ class AssetFilterProxyModel(QSortFilterProxyModel):
                 return left_ts < right_ts
 
             # Fallback for standard models (rarely used in the main grid).
-            left_value = float(left.data(Roles.DT_SORT) if left.data(Roles.DT_SORT) is not None else float("-inf"))
-            right_value = float(right.data(Roles.DT_SORT) if right.data(Roles.DT_SORT) is not None else float("-inf"))
+            left_value = float(left.data(Roles.DT_SORT) if left.data(Roles.DT_SORT) is not None and left.data(Roles.DT_SORT) != float("-inf") else -1 / 1_000_000)
+            right_value = float(right.data(Roles.DT_SORT) if right.data(Roles.DT_SORT) is not None and right.data(Roles.DT_SORT) != float("-inf") else -1 / 1_000_000)
             if left_value == right_value:
                 left_rel = str(left.data(Roles.REL) or "")
                 right_rel = str(right.data(Roles.REL) or "")

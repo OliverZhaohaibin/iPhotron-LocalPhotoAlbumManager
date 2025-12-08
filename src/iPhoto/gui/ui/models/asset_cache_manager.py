@@ -124,6 +124,8 @@ class AssetCacheManager(QObject):
         """Store *pixmap* under the cache key *rel*."""
 
         self._thumb_cache[rel] = pixmap
+        # Invalidate the composite cache entry for this key, since the composite
+        # must be regenerated from the new thumbnail data.
         self._composite_cache.pop(rel, None)
 
     def remove_thumbnail(self, rel: str) -> None:

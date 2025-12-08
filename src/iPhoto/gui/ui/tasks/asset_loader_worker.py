@@ -184,6 +184,17 @@ def build_asset_entry(
     gps_raw = row.get("gps") if isinstance(row, dict) else None
     location_name = resolve_location_name(gps_raw if isinstance(gps_raw, dict) else None)
 
+    # Resolve timestamp with legacy fallback safety
+    ts_value = -1
+    if "ts" in row:
+        ts_value = int(row["ts"])
+    else:
+        # Fallback for legacy rows: parse 'dt' on the fly.
+        # Must check for -inf to avoid OverflowError when casting to int.
+        dt_parsed = _parse_timestamp(row.get("dt"))
+        if dt_parsed != float("-inf"):
+            ts_value = int(dt_parsed * 1_000_000)
+
     entry: Dict[str, object] = {
         "rel": rel,
         "abs": abs_path,
@@ -200,6 +211,7 @@ def build_asset_entry(
         "size": _determine_size(row, is_image),
         "dt": row.get("dt"),
         "dt_sort": _parse_timestamp(row.get("dt")),
+        "ts": ts_value,
         "featured": _is_featured(rel, featured),
         "still_image_time": row.get("still_image_time"),
         "dur": row.get("dur"),

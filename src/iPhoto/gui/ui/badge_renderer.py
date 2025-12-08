@@ -12,6 +12,7 @@ from PySide6.QtGui import (
     QIcon,
     QPainter,
     QStaticText,
+    QTransform,
 )
 
 from .icons import load_icon
@@ -57,7 +58,8 @@ class BadgeRenderer:
         # Cache QStaticText
         if text not in self._duration_text_cache:
             static_text = QStaticText(text)
-            static_text.prepare(painter.transform(), target_font)
+            # Use default transform to be view-agnostic
+            static_text.prepare(QTransform(), target_font)
             self._duration_text_cache[text] = static_text
 
         static_text = self._duration_text_cache[text]

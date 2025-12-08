@@ -350,7 +350,10 @@ class LibraryUpdateService(QObject):
             self.linksUpdated.emit(root)
             # Ensure the view reloads if this scan was triggered for the current album
             # (e.g. initial auto-scan on startup).
-            self.assetReloadRequested.emit(root, False, False)
+            # Only emit assetReloadRequested if the model is not already loading due to this scan
+            if not self._model_loading_due_to_scan:
+                self.assetReloadRequested.emit(root, False, False)
+            self._model_loading_due_to_scan = False
             self.scanFinished.emit(root, True)
 
         should_restart = self._scan_pending

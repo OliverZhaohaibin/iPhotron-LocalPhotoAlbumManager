@@ -90,23 +90,11 @@ class AssetGridDelegate(QStyledItemDelegate):
             painter.setRenderHint(QPainter.SmoothPixmapTransform, True)
 
             if self._filmstrip_mode:
-                scaled = pixmap.scaled(
-                    thumb_rect.size(),
-                    Qt.KeepAspectRatioByExpanding,
-                    Qt.SmoothTransformation,
-                )
-                source = scaled.rect()
-                if source.width() > thumb_rect.width():
-                    diff = source.width() - thumb_rect.width()
-                    left = diff // 2
-                    right = diff - left
-                    source.adjust(left, 0, -right, 0)
-                if source.height() > thumb_rect.height():
-                    diff = source.height() - thumb_rect.height()
-                    top = diff // 2
-                    bottom = diff - top
-                    source.adjust(0, top, 0, -bottom)
-                painter.drawPixmap(thumb_rect, scaled, source)
+                source_rect = calculate_center_crop(pixmap.size(), thumb_rect.size())
+                if not source_rect.isEmpty():
+                    painter.drawPixmap(QRectF(thumb_rect), pixmap, source_rect)
+                else:
+                    painter.fillRect(thumb_rect, QColor("#1b1b1b"))
             else:
                 source_rect = calculate_center_crop(pixmap.size(), thumb_rect.size())
                 if not source_rect.isEmpty():

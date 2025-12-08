@@ -3,12 +3,26 @@
 from __future__ import annotations
 
 from PySide6.QtCore import QEvent, QSize, Qt
-from PySide6.QtGui import QPalette, QSurfaceFormat
+from PySide6.QtGui import QPainter, QPalette, QSurfaceFormat
 from PySide6.QtOpenGLWidgets import QOpenGLWidget
 from PySide6.QtWidgets import QAbstractItemView, QListView
 
 from ..styles import modern_scrollbar_style
 from .asset_grid import AssetGrid
+
+
+class GalleryViewport(QOpenGLWidget):
+    """Custom OpenGL viewport that explicitly fills its background."""
+
+    def paintEvent(self, event) -> None:
+        """Enforce opaque background painting."""
+        # QOpenGLWidget in a translucent window context (common with frameless windows)
+        # can default to transparent or fail to clear correctly. We explicitly fill
+        # the background with the Window color from the palette to ensure opacity.
+        with QPainter(self) as painter:
+            painter.fillRect(event.rect(), self.palette().color(QPalette.ColorRole.Window))
+
+        super().paintEvent(event)
 
 
 class GalleryGridView(AssetGrid):
@@ -46,7 +60,7 @@ class GalleryGridView(AssetGrid):
         self.setSelectionRectVisible(False)
 
         # Enable hardware acceleration for the viewport to improve scrolling performance
-        gl_viewport = QOpenGLWidget()
+        gl_viewport = GalleryViewport()
 
         # Disable the alpha buffer to prevent transparency issues with the DWM
         # when using a frameless window configuration.

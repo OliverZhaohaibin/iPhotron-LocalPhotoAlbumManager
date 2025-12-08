@@ -6,11 +6,12 @@ from collections import OrderedDict
 from pathlib import Path
 from typing import Dict, List, Optional
 
-from PySide6.QtCore import QObject, QSize, Signal
+from PySide6.QtCore import QObject, QSize, Signal, Qt, QRectF
 from PySide6.QtGui import QColor, QFont, QFontMetrics, QPainter, QPixmap
 
 from ..tasks.thumbnail_loader import ThumbnailLoader
 from .live_map import load_live_map
+from ..geometry_utils import calculate_center_crop
 
 
 class AssetCacheManager(QObject):
@@ -26,6 +27,7 @@ class AssetCacheManager(QObject):
         self._thumb_loader = ThumbnailLoader(self)
         self._thumb_loader.ready.connect(self._on_thumb_ready)
         self._thumb_cache: Dict[str, QPixmap] = {}
+        self._composite_cache: Dict[str, QPixmap] = {}
         self._placeholder_cache: Dict[str, QPixmap] = {}
         self._placeholder_templates: Dict[str, QPixmap] = {}
         self._recently_removed_rows: "OrderedDict[str, Dict[str, object]]" = OrderedDict()
@@ -44,6 +46,7 @@ class AssetCacheManager(QObject):
         self._album_root = root
         self._thumb_loader.reset_for_album(root)
         self._thumb_cache.clear()
+        self._composite_cache.clear()
         self._placeholder_cache.clear()
         self._placeholder_templates.clear()
         self._recently_removed_rows.clear()
@@ -81,6 +84,7 @@ class AssetCacheManager(QObject):
             return
 
         self.clear_thumbnails_not_in(active_rel_keys)
+        self._composite_cache = {rel: pix for rel, pix in self._composite_cache.items() if rel in active_rel_keys}
         # Placeholders are light-weight so we rebuild them lazily, but removing
         # stale entries keeps the cache keyed to the active dataset and avoids
         # accidentally returning templates for rows that no longer exist.
@@ -120,11 +124,15 @@ class AssetCacheManager(QObject):
         """Store *pixmap* under the cache key *rel*."""
 
         self._thumb_cache[rel] = pixmap
+        # Invalidate the composite cache entry for this key, since the composite
+        # must be regenerated from the new thumbnail data.
+        self._composite_cache.pop(rel, None)
 
     def remove_thumbnail(self, rel: str) -> None:
         """Remove the cached thumbnail for *rel* when it exists."""
 
         self._thumb_cache.pop(rel, None)
+        self._composite_cache.pop(rel, None)
 
     def move_thumbnail(self, old_rel: str, new_rel: str) -> None:
         """Move the cached thumbnail from *old_rel* to *new_rel*."""
@@ -132,6 +140,10 @@ class AssetCacheManager(QObject):
         pixmap = self._thumb_cache.pop(old_rel, None)
         if pixmap is not None:
             self._thumb_cache[new_rel] = pixmap
+
+        comp_pixmap = self._composite_cache.pop(old_rel, None)
+        if comp_pixmap is not None:
+            self._composite_cache[new_rel] = comp_pixmap
 
     def clear_thumbnails_not_in(self, active: set[str]) -> None:
         """Discard cached thumbnails whose keys are not present in *active*."""
@@ -142,6 +154,7 @@ class AssetCacheManager(QObject):
         """Remove every cached thumbnail."""
 
         self._thumb_cache.clear()
+        self._composite_cache.clear()
 
     def move_placeholder(self, old_rel: str, new_rel: str) -> None:
         """Move the cached placeholder entry from *old_rel* to *new_rel*."""
@@ -168,9 +181,16 @@ class AssetCacheManager(QObject):
         """Return a thumbnail for *row*, requesting it asynchronously if needed."""
 
         rel = str(row["rel"])
+
+        # Check for pre-composed thumbnail first
+        composite = self._composite_cache.get(rel)
+        if composite is not None:
+            return composite
+
         cached = self._thumb_cache.get(rel)
         if cached is not None:
-            return cached
+            # Generate composite from cached raw thumbnail
+            return self._create_composite_thumbnail(rel, cached, row)
 
         placeholder = self._placeholder_for(rel, bool(row.get("is_video")))
         if not self._album_root:
@@ -189,7 +209,7 @@ class AssetCacheManager(QObject):
             )
             if pixmap is not None:
                 self._thumb_cache[rel] = pixmap
-                return pixmap
+                return self._create_composite_thumbnail(rel, pixmap, row)
 
         if bool(row.get("is_video")):
             still_time = row.get("still_image_time")
@@ -212,7 +232,7 @@ class AssetCacheManager(QObject):
             )
             if pixmap is not None:
                 self._thumb_cache[rel] = pixmap
-                return pixmap
+                return self._create_composite_thumbnail(rel, pixmap, row)
 
         return placeholder
 
@@ -291,12 +311,42 @@ class AssetCacheManager(QObject):
 
         return self._live_map
 
+    def _create_composite_thumbnail(self, rel: str, source: QPixmap, row: Dict[str, object]) -> QPixmap:
+        """Generate and cache a resized/cropped thumbnail at the target display size."""
+
+        # 1. Create a square target pixmap
+        target_size = self._thumb_size
+        composite = QPixmap(target_size)
+        composite.fill(Qt.transparent)
+
+        painter = QPainter(composite)
+        try:
+            # 2. Draw Source (Aspect Fill / Center Crop)
+            view_w, view_h = target_size.width(), target_size.height()
+
+            source_rect = calculate_center_crop(source.size(), target_size)
+
+            if not source_rect.isEmpty():
+                painter.setRenderHint(QPainter.Antialiasing, True)
+                painter.setRenderHint(QPainter.SmoothPixmapTransform, True)
+                painter.drawPixmap(QRectF(0.0, 0.0, float(view_w), float(view_h)), source, source_rect)
+
+        finally:
+            painter.end()
+
+        self._composite_cache[rel] = composite
+        return composite
+
     def _on_thumb_ready(self, root: Path, rel: str, pixmap: QPixmap) -> None:
         """Store thumbnails produced by :class:`ThumbnailLoader` and relay them."""
 
         if self._album_root and root != self._album_root:
             return
         self._thumb_cache[rel] = pixmap
+        # Clear old composite if any
+        self._composite_cache.pop(rel, None)
+        # Note: We emit the raw pixmap here. The composite thumbnail for this `rel` will be generated
+        # lazily the next time `resolve_thumbnail` is called for this `rel`, ensuring deferred composition.
         self.thumbnailReady.emit(root, rel, pixmap)
 
     def _placeholder_for(self, rel: str, is_video: bool) -> QPixmap:

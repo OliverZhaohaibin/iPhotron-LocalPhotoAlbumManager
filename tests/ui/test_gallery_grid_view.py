@@ -9,12 +9,17 @@ from src.iPhoto.gui.ui.models.roles import Roles
 
 # Attempt to patch load_icon in asset_delegate if it exists
 def patch_delegate_icons(monkeypatch):
-    from PySide6.QtGui import QIcon
-    def mock_load_icon(*args, **kwargs):
-        return QIcon()
+    # AssetGridDelegate doesn't use load_icon anymore, so this patch is likely obsolete.
+    # We'll wrap it in try-except to avoid breaking tests if the import path is invalid.
+    try:
+        from PySide6.QtGui import QIcon
+        def mock_load_icon(*args, **kwargs):
+            return QIcon()
 
-    # Patch where it is used. AssetGridDelegate imports it as `from ..icons import load_icon`
-    monkeypatch.setattr("src.iPhoto.gui.ui.widgets.asset_delegate.load_icon", mock_load_icon)
+        # Patch where it is used. AssetGridDelegate imports it as `from ..icons import load_icon`
+        monkeypatch.setattr("src.iPhoto.gui.ui.widgets.asset_delegate.load_icon", mock_load_icon)
+    except (ImportError, AttributeError) as e:
+        print(f"patch_delegate_icons: Could not patch load_icon: {e}")
 
 @pytest.fixture(scope="module")
 def qapp_instance():

@@ -151,6 +151,12 @@ class AssetListStateManager:
             self._row_lookup[row_data["rel"]] = start_row + offset
         return start_row, start_row + len(chunk) - 1
 
+    def update_row_at_index(self, index: int, row_data: Dict[str, object]) -> None:
+        """Update the row data at the specified index."""
+
+        if 0 <= index < len(self._rows):
+            self._rows[index] = row_data
+
     def active_rel_keys(self) -> Set[str]:
         """Return the current set of ``rel`` keys."""
 

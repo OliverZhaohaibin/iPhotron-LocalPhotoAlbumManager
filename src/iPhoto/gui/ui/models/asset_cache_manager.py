@@ -6,7 +6,7 @@ from collections import OrderedDict
 from pathlib import Path
 from typing import Dict, List, Optional
 
-from PySide6.QtCore import QObject, QSize, Signal, Qt, QRect
+from PySide6.QtCore import QObject, QSize, Signal, Qt, QRect, QRectF
 from PySide6.QtGui import QColor, QFont, QFontMetrics, QPainter, QPixmap
 
 from ..tasks.thumbnail_loader import ThumbnailLoader
@@ -323,7 +323,7 @@ class AssetCacheManager(QObject):
             img_w, img_h = img_size.width(), img_size.height()
             view_w, view_h = target_size.width(), target_size.height()
 
-            source_rect = QRect(0, 0, img_w, img_h)
+            source_rect = QRectF(0.0, 0.0, float(img_w), float(img_h))
 
             if img_w > 0 and img_h > 0:
                 img_ratio = img_w / img_h
@@ -333,15 +333,15 @@ class AssetCacheManager(QObject):
                 if img_ratio > view_ratio:
                     new_w = img_h * view_ratio
                     offset_x = (img_w - new_w) / 2.0
-                    source_rect = QRect(int(offset_x), 0, int(new_w), int(img_h))
+                    source_rect = QRectF(offset_x, 0.0, new_w, float(img_h))
                 else:
                     new_h = img_w / view_ratio
                     offset_y = (img_h - new_h) / 2.0
-                    source_rect = QRect(0, int(offset_y), int(img_w), int(new_h))
+                    source_rect = QRectF(0.0, offset_y, float(img_w), new_h)
 
             painter.setRenderHint(QPainter.Antialiasing, True)
             painter.setRenderHint(QPainter.SmoothPixmapTransform, True)
-            painter.drawPixmap(QRect(0, 0, view_w, view_h), source, source_rect)
+            painter.drawPixmap(QRectF(0.0, 0.0, float(view_w), float(view_h)), source, source_rect)
 
         finally:
             painter.end()

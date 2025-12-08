@@ -6,7 +6,7 @@ from unittest.mock import MagicMock
 
 # Skip if PySide6 not available
 try:
-    from PySide6.QtCore import Qt, QModelIndex, QSortFilterProxyModel
+    from PySide6.QtCore import Qt
     from PySide6.QtWidgets import QApplication
 except ImportError:
     pytest.skip("PySide6 not installed", allow_module_level=True)
@@ -36,6 +36,15 @@ def test_parse_timestamp():
     # Float/Int
     assert _parse_timestamp(1698393600.0) == 1698393600.0
     assert _parse_timestamp(1698393600) == 1698393600.0
+
+    # datetime object with timezone
+    dt_obj = datetime(2023, 10, 27, 10, 0, 0, tzinfo=timezone.utc)
+    assert _parse_timestamp(dt_obj) == dt_obj.timestamp()
+
+    # datetime object without timezone (should get UTC assigned)
+    dt_no_tz = datetime(2023, 10, 27, 10, 0, 0)
+    expected_ts = dt_no_tz.replace(tzinfo=timezone.utc).timestamp()
+    assert _parse_timestamp(dt_no_tz) == expected_ts
 
     # Invalid/Empty
     assert _parse_timestamp("") == float("-inf")
@@ -102,6 +111,7 @@ def test_proxy_sort_order(qapp):
         {"rel": "b.jpg", "dt_sort": 200.0},
         {"rel": "c.jpg", "dt_sort": float("-inf")}, # No date
         {"rel": "d.jpg", "dt_sort": 50.0},
+        {"rel": "e.jpg", "dt_sort": 0.0},  # Unix epoch
     ]
     source_model._state_manager.set_rows(rows)
 
@@ -112,17 +122,19 @@ def test_proxy_sort_order(qapp):
     # Test Ascending
     proxy.sort(0, Qt.SortOrder.AscendingOrder)
 
-    # Expected order: c (-inf), d (50), a (100), b (200)
+    # Expected order: c (-inf), e (0.0), d (50), a (100), b (200)
     assert proxy.data(proxy.index(0, 0), Roles.REL) == "c.jpg"
-    assert proxy.data(proxy.index(1, 0), Roles.REL) == "d.jpg"
-    assert proxy.data(proxy.index(2, 0), Roles.REL) == "a.jpg"
-    assert proxy.data(proxy.index(3, 0), Roles.REL) == "b.jpg"
+    assert proxy.data(proxy.index(1, 0), Roles.REL) == "e.jpg"
+    assert proxy.data(proxy.index(2, 0), Roles.REL) == "d.jpg"
+    assert proxy.data(proxy.index(3, 0), Roles.REL) == "a.jpg"
+    assert proxy.data(proxy.index(4, 0), Roles.REL) == "b.jpg"
 
     # Test Descending
     proxy.sort(0, Qt.SortOrder.DescendingOrder)
 
-    # Expected order: b (200), a (100), d (50), c (-inf)
+    # Expected order: b (200), a (100), d (50), e (0.0), c (-inf)
     assert proxy.data(proxy.index(0, 0), Roles.REL) == "b.jpg"
     assert proxy.data(proxy.index(1, 0), Roles.REL) == "a.jpg"
     assert proxy.data(proxy.index(2, 0), Roles.REL) == "d.jpg"
-    assert proxy.data(proxy.index(3, 0), Roles.REL) == "c.jpg"
+    assert proxy.data(proxy.index(3, 0), Roles.REL) == "e.jpg"
+    assert proxy.data(proxy.index(4, 0), Roles.REL) == "c.jpg"

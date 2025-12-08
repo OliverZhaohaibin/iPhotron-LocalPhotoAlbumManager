@@ -184,8 +184,8 @@ class AssetFilterProxyModel(QSortFilterProxyModel):
                 return left_value < right_value
 
             # Access the pre-calculated timestamp float directly.
-            left_value = float(left.data(Roles.DT_SORT) or float("-inf"))
-            right_value = float(right.data(Roles.DT_SORT) or float("-inf"))
+            left_value = float(left.data(Roles.DT_SORT) if left.data(Roles.DT_SORT) is not None else float("-inf"))
+            right_value = float(right.data(Roles.DT_SORT) if right.data(Roles.DT_SORT) is not None else float("-inf"))
             if left_value == right_value:
                 # Use the relative path as a deterministic tiebreaker so the
                 # proxy order stays stable even when multiple assets share the

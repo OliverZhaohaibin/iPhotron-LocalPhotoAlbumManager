@@ -118,6 +118,11 @@ class AssetFilterProxyModel(QSortFilterProxyModel):
     # QSortFilterProxyModel API
     # ------------------------------------------------------------------
     def filterAcceptsRow(self, row: int, parent) -> bool:  # type: ignore[override]
+        # Fast path: if no filters are active, everything is accepted.
+        # This avoids retrieving the row data entirely.
+        if self._filter_mode is None and not self._search_text:
+            return True
+
         if self._fast_source is not None:
             # Bypass Qt index creation and role lookups for raw performance.
             row_data = self._fast_source.get_internal_row(row)  # type: ignore
@@ -167,23 +172,17 @@ class AssetFilterProxyModel(QSortFilterProxyModel):
                 left_row = self._fast_source.get_internal_row(left.row())  # type: ignore
                 right_row = self._fast_source.get_internal_row(right.row())  # type: ignore
 
-                left_value = float("-inf")
-                left_rel = ""
-                if left_row is not None:
-                    dt_sort = left_row.get("dt_sort")
-                    left_value = float(dt_sort if dt_sort is not None else float("-inf"))
-                    left_rel = str(left_row.get("rel") or "")
+                # Optimized comparison: Check timestamps first.
+                left_value = float(left_row["dt_sort"]) if left_row is not None else float("-inf")
+                right_value = float(right_row["dt_sort"]) if right_row is not None else float("-inf")
 
-                right_value = float("-inf")
-                right_rel = ""
-                if right_row is not None:
-                    dt_sort = right_row.get("dt_sort")
-                    right_value = float(dt_sort if dt_sort is not None else float("-inf"))
-                    right_rel = str(right_row.get("rel") or "")
+                if left_value != right_value:
+                    return left_value < right_value
 
-                if left_value == right_value:
-                    return left_rel < right_rel
-                return left_value < right_value
+                # Tie-breaker: Fetch and compare relative paths only if timestamps match.
+                left_rel = str(left_row["rel"]) if left_row is not None else ""
+                right_rel = str(right_row["rel"]) if right_row is not None else ""
+                return left_rel < right_rel
 
             # Access the pre-calculated timestamp float directly.
             left_value = float(left.data(Roles.DT_SORT) if left.data(Roles.DT_SORT) is not None else float("-inf"))

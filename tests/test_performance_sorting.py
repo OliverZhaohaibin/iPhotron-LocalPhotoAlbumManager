@@ -138,3 +138,74 @@ def test_proxy_sort_order(qapp):
     assert proxy.data(proxy.index(2, 0), Roles.REL) == "d.jpg"
     assert proxy.data(proxy.index(3, 0), Roles.REL) == "e.jpg"
     assert proxy.data(proxy.index(4, 0), Roles.REL) == "c.jpg"
+
+def test_proxy_filter_accepts_row_fast_path(qapp):
+    """Verify that filterAcceptsRow returns True without querying the source when no filters are active."""
+    # Setup source model
+    facade = MagicMock()
+    source_model = AssetListModel(facade)
+
+    # Mock get_internal_row to track calls
+    # We use a spy or mock side_effect
+    source_model.get_internal_row = MagicMock(return_value={"rel": "a.jpg", "dt_sort": 100.0})
+
+    proxy = AssetFilterProxyModel()
+    proxy.setSourceModel(source_model)
+
+    # Ensure no filters
+    proxy.set_filter_mode(None)
+    proxy.set_search_text("")
+
+    # Call filterAcceptsRow
+    # Note: Since we are calling it directly, we can pass a dummy row index
+    result = proxy.filterAcceptsRow(0, None)
+
+    assert result is True
+    # The optimization goal: get_internal_row should NOT be called
+    # However, BEFORE the optimization is applied, this assertion would fail if we asserted count was 0.
+    # So we write the test to EXPECT the optimization.
+    # source_model.get_internal_row.assert_not_called()
+    # For now, since I haven't applied the fix, I will comment this out or invert it to verify behavior change?
+    # Actually, standard practice is to write the test that fails (or passes if I want TDD).
+    # But since I am modifying an existing file and will run it before changes, I should probably assert what happens NOW
+    # or just add the test and let it fail.
+    # The instruction said "Run tests to establish a baseline". If I add a failing test, the baseline will be "failed".
+    # That's fine. I will assert assert_not_called() and expect it to fail in step 2.
+
+    source_model.get_internal_row.assert_not_called()
+
+
+def test_proxy_sort_tie_breaking(qapp):
+    """Verify that sorting uses relative path as tie breaker for equal timestamps."""
+    facade = MagicMock()
+    source_model = AssetListModel(facade)
+
+    rows = [
+        {"rel": "z.jpg", "dt_sort": 100.0},
+        {"rel": "a.jpg", "dt_sort": 100.0},
+    ]
+    source_model._state_manager.set_rows(rows)
+
+    proxy = AssetFilterProxyModel()
+    proxy.setSourceModel(source_model)
+    proxy.setSortRole(Roles.DT)
+
+    # Ascending: a.jpg (100) then z.jpg (100) because "a" < "z"
+    proxy.sort(0, Qt.SortOrder.AscendingOrder)
+    assert proxy.data(proxy.index(0, 0), Roles.REL) == "a.jpg"
+    assert proxy.data(proxy.index(1, 0), Roles.REL) == "z.jpg"
+
+    # Descending: z.jpg (100) then a.jpg (100) because "z" > "a" ... Wait.
+    # Qt's sortStable? Or how does standard sort work?
+    # Usually sort uses lessThan(a, b).
+    # If Ascending: if a < b, a comes first.
+    # For a.jpg and z.jpg:
+    # lessThan(a, z): timestamp equal. "a" < "z" is True. So 'a' comes first. Correct.
+
+    # If Descending:
+    # It essentially reverses the order.
+    # If logic is consistent, it should be z then a.
+
+    proxy.sort(0, Qt.SortOrder.DescendingOrder)
+    assert proxy.data(proxy.index(0, 0), Roles.REL) == "z.jpg"
+    assert proxy.data(proxy.index(1, 0), Roles.REL) == "a.jpg"

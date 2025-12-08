@@ -167,31 +167,30 @@ class AssetFilterProxyModel(QSortFilterProxyModel):
                 left_row = self._fast_source.get_internal_row(left.row())  # type: ignore
                 right_row = self._fast_source.get_internal_row(right.row())  # type: ignore
 
-                left_value = float("-inf")
+                # Optimization: direct integer comparison for O(1) sorting speed.
+                # We retrieve the pre-calculated microsecond timestamp (`ts`)
+                # directly from the backing store to avoid parsing overhead.
+                left_ts = -1
                 left_rel = ""
                 if left_row is not None:
-                    dt_sort = left_row.get("dt_sort")
-                    left_value = float(dt_sort if dt_sort is not None else float("-inf"))
+                    # Use .get() with a default to safely handle legacy/incomplete rows
+                    left_ts = int(left_row.get("ts") or -1)
                     left_rel = str(left_row.get("rel") or "")
 
-                right_value = float("-inf")
+                right_ts = -1
                 right_rel = ""
                 if right_row is not None:
-                    dt_sort = right_row.get("dt_sort")
-                    right_value = float(dt_sort if dt_sort is not None else float("-inf"))
+                    right_ts = int(right_row.get("ts") or -1)
                     right_rel = str(right_row.get("rel") or "")
 
-                if left_value == right_value:
+                if left_ts == right_ts:
                     return left_rel < right_rel
-                return left_value < right_value
+                return left_ts < right_ts
 
-            # Access the pre-calculated timestamp float directly.
+            # Fallback for standard models (rarely used in the main grid).
             left_value = float(left.data(Roles.DT_SORT) if left.data(Roles.DT_SORT) is not None else float("-inf"))
             right_value = float(right.data(Roles.DT_SORT) if right.data(Roles.DT_SORT) is not None else float("-inf"))
             if left_value == right_value:
-                # Use the relative path as a deterministic tiebreaker so the
-                # proxy order stays stable even when multiple assets share the
-                # same timestamp.
                 left_rel = str(left.data(Roles.REL) or "")
                 right_rel = str(right.data(Roles.REL) or "")
                 return left_rel < right_rel

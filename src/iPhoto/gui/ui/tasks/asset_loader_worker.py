@@ -200,6 +200,7 @@ def build_asset_entry(
         "size": _determine_size(row, is_image),
         "dt": row.get("dt"),
         "dt_sort": _parse_timestamp(row.get("dt")),
+        "ts": int(row["ts"]) if "ts" in row else int(_parse_timestamp(row.get("dt")) * 1_000_000),
         "featured": _is_featured(rel, featured),
         "still_image_time": row.get("still_image_time"),
         "dur": row.get("dur"),

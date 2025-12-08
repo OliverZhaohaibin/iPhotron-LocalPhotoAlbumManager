@@ -128,6 +128,7 @@ def _build_base_row(root: Path, file_path: Path, stat: Any) -> Dict[str, Any]:
         "dt": datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat().replace(
             "+00:00", "Z"
         ),
+        "ts": int(stat.st_mtime * 1_000_000),
         "id": f"as_{file_xxh3(file_path)}",
         "mime": mimetypes.guess_type(file_path.name)[0],
     }
@@ -157,5 +158,21 @@ def _build_row(
         if value is None and key in base_row:
             continue
         base_row[key] = value
+
+    # If the metadata yielded a valid creation date, strictly prefer it over the
+    # filesystem timestamp to ensure sorting stability even if the file is
+    # touched later.
+    if "dt" in metadata and isinstance(metadata["dt"], str):
+        try:
+            # Parse the ISO 8601 string back to a timestamp.  The metadata
+            # reader guarantees 'Z' suffix for UTC, which we must adapt for
+            # `fromisoformat` compatibility in older Python versions.
+            dt_str = metadata["dt"].replace("Z", "+00:00")
+            dt_obj = datetime.fromisoformat(dt_str)
+            base_row["ts"] = int(dt_obj.timestamp() * 1_000_000)
+        except (ValueError, TypeError):
+            # If parsing fails, fall back to the filesystem timestamp already
+            # populated in `_build_base_row`.
+            pass
 
     return base_row

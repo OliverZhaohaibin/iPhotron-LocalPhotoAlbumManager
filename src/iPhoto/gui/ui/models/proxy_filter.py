@@ -170,13 +170,15 @@ class AssetFilterProxyModel(QSortFilterProxyModel):
                 left_value = float("-inf")
                 left_rel = ""
                 if left_row is not None:
-                    left_value = float(left_row.get("dt_sort") or float("-inf"))
+                    dt_sort = left_row.get("dt_sort")
+                    left_value = float(dt_sort if dt_sort is not None else float("-inf"))
                     left_rel = str(left_row.get("rel") or "")
 
                 right_value = float("-inf")
                 right_rel = ""
                 if right_row is not None:
-                    right_value = float(right_row.get("dt_sort") or float("-inf"))
+                    dt_sort = right_row.get("dt_sort")
+                    right_value = float(dt_sort if dt_sort is not None else float("-inf"))
                     right_rel = str(right_row.get("rel") or "")
 
                 if left_value == right_value:

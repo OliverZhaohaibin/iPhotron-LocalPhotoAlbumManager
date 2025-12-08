@@ -19,6 +19,7 @@ class AssetFilterProxyModel(QSortFilterProxyModel):
         self._default_sort_role: int = int(Roles.DT)
         self._default_sort_order: Qt.SortOrder = Qt.SortOrder.DescendingOrder
         self._monitored_source: Optional[QAbstractItemModel] = None
+        self._fast_source: Optional[object] = None
         self.setDynamicSortFilter(True)
         self.setFilterCaseSensitivity(Qt.CaseInsensitive)
         # ``configure_default_sort`` applies the sort role and ensures the proxy
@@ -103,6 +104,9 @@ class AssetFilterProxyModel(QSortFilterProxyModel):
                 )
             except (TypeError, RuntimeError):  # pragma: no cover - Qt disconnect quirk
                 pass
+        self._fast_source = (
+            sourceModel if sourceModel is not None and hasattr(sourceModel, "get_internal_row") else None
+        )
         super().setSourceModel(sourceModel)
         self._monitored_source = sourceModel
         if sourceModel is not None:
@@ -114,6 +118,26 @@ class AssetFilterProxyModel(QSortFilterProxyModel):
     # QSortFilterProxyModel API
     # ------------------------------------------------------------------
     def filterAcceptsRow(self, row: int, parent) -> bool:  # type: ignore[override]
+        if self._fast_source is not None:
+            # Bypass Qt index creation and role lookups for raw performance.
+            row_data = self._fast_source.get_internal_row(row)  # type: ignore
+            if row_data is None:
+                return False
+            if self._filter_mode == "videos" and not row_data.get("is_video"):
+                return False
+            if self._filter_mode == "live" and not row_data.get("is_live"):
+                return False
+            if self._filter_mode == "favorites" and not row_data.get("featured"):
+                return False
+            if self._search_text:
+                rel = row_data.get("rel")
+                name = str(rel).casefold() if rel is not None else ""
+                asset_id = row_data.get("id")
+                identifier = str(asset_id).casefold() if asset_id is not None else ""
+                if self._search_text not in name and self._search_text not in identifier:
+                    return False
+            return True
+
         source = self.sourceModel()
         if source is None:
             return False
@@ -139,6 +163,26 @@ class AssetFilterProxyModel(QSortFilterProxyModel):
         """Apply a timestamp-aware comparison when sorting by :data:`Roles.DT`."""
 
         if self.sortRole() == int(Roles.DT):
+            if self._fast_source is not None:
+                left_row = self._fast_source.get_internal_row(left.row())  # type: ignore
+                right_row = self._fast_source.get_internal_row(right.row())  # type: ignore
+
+                left_value = float("-inf")
+                left_rel = ""
+                if left_row is not None:
+                    left_value = float(left_row.get("dt_sort") or float("-inf"))
+                    left_rel = str(left_row.get("rel") or "")
+
+                right_value = float("-inf")
+                right_rel = ""
+                if right_row is not None:
+                    right_value = float(right_row.get("dt_sort") or float("-inf"))
+                    right_rel = str(right_row.get("rel") or "")
+
+                if left_value == right_value:
+                    return left_rel < right_rel
+                return left_value < right_value
+
             # Access the pre-calculated timestamp float directly.
             left_value = float(left.data(Roles.DT_SORT) or float("-inf"))
             right_value = float(right.data(Roles.DT_SORT) or float("-inf"))

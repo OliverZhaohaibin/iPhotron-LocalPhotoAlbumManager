@@ -2,7 +2,7 @@
 
 from unittest.mock import MagicMock
 import pytest
-from PySide6.QtCore import QAbstractListModel, QModelIndex, Qt
+from PySide6.QtCore import Qt
 from pathlib import Path
 
 # Need to make sure facade is importable.

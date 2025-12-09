@@ -88,7 +88,8 @@ class IndexStore:
             # 'dt' is used for sorting.
             conn.execute("CREATE INDEX IF NOT EXISTS idx_dt ON assets (dt)")
             # Add specific index for descending sort on dt to optimize streaming query
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_assets_dt_desc ON assets (dt DESC)")
+            # We use a composite index on dt and id to match the ORDER BY clause for optimal streaming.
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_assets_dt_id_desc ON assets (dt DESC, id DESC)")
             # 'gps' index might help if we have huge datasets, but IS NOT NULL scan is usually fast enough
             # unless we add partial index. For now, full table scan with filtering is better than loading all to Python.
 
@@ -229,9 +230,11 @@ class IndexStore:
                 query += " WHERE " + " AND ".join(where_clauses)
 
             if sort_by_date:
-                # Ensure NULL dates appear last when sorting descending
-                # Deterministic sort order for stable streaming
-                query += " ORDER BY dt IS NULL, dt DESC, id DESC"
+                # Optimized sort for streaming:
+                # 1. 'dt DESC' puts newest items first. NULLs are naturally last in DESC order in SQLite.
+                # 2. 'id DESC' ensures deterministic order for items with same timestamp.
+                # Removing 'dt IS NULL' allows the query optimizer to use the composite index (dt DESC, id DESC).
+                query += " ORDER BY dt DESC, id DESC"
 
             # Set the row factory on the connection before creating the cursor
             conn.row_factory = sqlite3.Row

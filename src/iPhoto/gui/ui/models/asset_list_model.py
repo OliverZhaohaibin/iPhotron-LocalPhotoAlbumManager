@@ -212,8 +212,7 @@ class AssetListModel(QAbstractListModel):
     def populate_from_cache(self) -> bool:
         """Synchronously load cached index data when the file is small.
 
-        Deprecated: This method is disabled to enforce streaming behavior
-        and prevent main thread blocking on large albums.
+        Disabled to enforce streaming behavior and prevent main thread blocking on large albums.
         """
         return False
 

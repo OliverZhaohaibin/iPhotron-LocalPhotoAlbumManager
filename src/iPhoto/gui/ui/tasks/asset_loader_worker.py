@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import xxhash
 from datetime import datetime, timezone
 from pathlib import Path
@@ -14,6 +15,9 @@ from ....config import WORK_DIR_NAME
 from ....media_classifier import classify_media
 from ....utils.geocoding import resolve_location_name
 from ....utils.pathutils import ensure_work_dir
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 def normalize_featured(featured: Iterable[str]) -> Set[str]:
@@ -317,8 +321,9 @@ class AssetLoaderWorker(QRunnable):
                     try:
                         total = store.count(filter_hidden=True)
                         total_calculated = True
-                    except Exception:
-                        total = 0 # fallback
+                    except Exception as exc:
+                        LOGGER.warning("Failed to count assets in database: %s", exc, exc_info=True)
+                        total = 0  # fallback
 
             # Update progress periodically
             # Use >= total to robustly handle concurrent additions where position might exceed original total

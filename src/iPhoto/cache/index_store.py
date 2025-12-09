@@ -233,7 +233,7 @@ class IndexStore:
                 # Optimized sort for streaming:
                 # 1. 'dt DESC' puts newest items first.
                 # 2. 'NULLS LAST' explicitly ensures items without dates appear at the end.
-                #    (Note: SQLite's default for DESC is already NULLS LAST, but being explicit avoids ambiguity)
+                #    (Note: SQLite's default for DESC is NULLS FIRST, so 'NULLS LAST' is necessary to achieve the desired order.)
                 # 3. 'id DESC' ensures deterministic order for items with same timestamp.
                 query += " ORDER BY dt DESC NULLS LAST, id DESC"
 

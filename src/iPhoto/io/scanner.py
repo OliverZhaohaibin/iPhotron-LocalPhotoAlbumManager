@@ -270,7 +270,6 @@ def scan_album(
                         # Continue consuming if there might be more?
                         # No, if thread is dead and we got one item, we should
                         # loop back to consume the rest. But get_nowait only gets one.
-                        # The logic "while True" handles subsequent iterations.
                         continue
                     except queue.Empty:
                         # Discovery died without sending None?

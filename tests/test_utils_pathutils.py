@@ -1,6 +1,5 @@
 """Tests for pathutils."""
 
-import os
 import pytest
 from pathlib import Path
 from src.iPhoto.utils.pathutils import (

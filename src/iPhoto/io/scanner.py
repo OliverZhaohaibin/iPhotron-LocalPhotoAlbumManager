@@ -275,8 +275,21 @@ def scan_album(
                 if discoverer.is_alive():
                     continue
                 else:
-                    # Discovery died without sending None?
-                    return
+                    # Thread died. One final check to see if it put something
+                    # before dying but after our last get().
+                    try:
+                        path = path_queue.get_nowait()
+                        if path is None:
+                            return
+                        yield path
+                        # Continue consuming if there might be more?
+                        # No, if thread is dead and we got one item, we should
+                        # loop back to consume the rest. But get_nowait only gets one.
+                        # The logic "while True" handles subsequent iterations.
+                        continue
+                    except queue.Empty:
+                        # Discovery died without sending None?
+                        return
 
             if path is None:
                 return

@@ -149,7 +149,7 @@ def test_incremental_update_existing_row(model):
     ]
 
     model.dataChanged = MagicMock()
-    model.invalidate_thumbnail = MagicMock() # Mock it to verifying calling, but real method exists now
+    model.invalidate_thumbnail = MagicMock() # Mock it to verify calling; the real method exists now
 
     # Ensure real method exists (sanity check for regression fix)
     assert hasattr(model, "invalidate_thumbnail")

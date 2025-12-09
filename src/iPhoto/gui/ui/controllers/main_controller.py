@@ -53,6 +53,7 @@ class MainController(QObject):
             window.ui.status_bar,
             self._dialog,
             self._view_manager.view_controller(),
+            window,
         )
         # The navigation controller is created after the edit controller, so
         # provide the reference now that the instance exists.  This keeps the

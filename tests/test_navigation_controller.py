@@ -20,7 +20,7 @@ pytest.importorskip(
     exc_type=ImportError,
 )
 
-from PySide6.QtWidgets import QApplication, QStackedWidget, QStatusBar, QWidget
+from PySide6.QtWidgets import QApplication, QStackedWidget, QStatusBar, QWidget, QMainWindow
 
 from src.iPhoto.gui.ui.controllers.navigation_controller import NavigationController
 from src.iPhoto.gui.ui.controllers.view_controller import ViewController
@@ -154,6 +154,7 @@ def test_open_album_skips_gallery_on_refresh(tmp_path: Path, qapp: QApplication)
         status_bar,
         dialog,  # type: ignore[arg-type]
         view_controller,
+        QMainWindow(),
     )
 
     album_path = tmp_path / "album"
@@ -203,6 +204,7 @@ def test_open_album_refresh_detected_without_sidebar_sync(
         status_bar,
         dialog,  # type: ignore[arg-type]
         view_controller,
+        QMainWindow(),
     )
 
     album_path = tmp_path / "album"
@@ -246,6 +248,7 @@ def test_open_all_photos_applies_chronological_sort(
         status_bar,
         dialog,  # type: ignore[arg-type]
         view_controller,
+        QMainWindow(),
     )
 
     tmp_path.mkdir(exist_ok=True)
@@ -277,6 +280,7 @@ def test_open_static_collection_refresh_skips_gallery(
         status_bar,
         dialog,  # type: ignore[arg-type]
         view_controller,
+        QMainWindow(),
     )
 
     tmp_path.mkdir(exist_ok=True)
@@ -316,6 +320,7 @@ def test_open_album_from_dashboard_force_navigation(
         status_bar,
         dialog,  # type: ignore[arg-type]
         view_controller,
+        QMainWindow(),
     )
 
     album_path = tmp_path / "album"
@@ -366,6 +371,7 @@ def test_open_recently_deleted_refresh_skips_gallery(
         status_bar,
         dialog,  # type: ignore[arg-type]
         view_controller,
+        QMainWindow(),
     )
 
     tmp_path.mkdir(exist_ok=True)

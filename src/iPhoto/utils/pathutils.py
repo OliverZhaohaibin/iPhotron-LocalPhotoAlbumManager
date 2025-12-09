@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import fnmatch
+import os
 import re
 from pathlib import Path
-from typing import Iterable, Iterator
+from typing import Iterable, Iterator, Optional
 
 
 def _expand(pattern: str) -> Iterator[str]:
@@ -57,3 +58,48 @@ def ensure_work_dir(root: Path, name: str = ".iPhoto") -> Path:
     work_dir = root / name
     work_dir.mkdir(parents=True, exist_ok=True)
     return work_dir
+
+
+def normalise_for_compare(path: Path) -> Path:
+    """Return a normalised ``Path`` suitable for cross-platform comparisons.
+
+    ``Path.resolve`` is insufficient on its own because it preserves the
+    original casing on case-insensitive filesystems.  Combining
+    :func:`os.path.realpath` with :func:`os.path.normcase` yields a canonical
+    representation that collapses symbolic links and performs the necessary
+    case folding so that two references to the same directory compare equal
+    regardless of how they were produced.
+    """
+
+    try:
+        resolved = os.path.realpath(path)
+    except OSError:
+        resolved = str(path)
+    return Path(os.path.normcase(resolved))
+
+
+def is_descendant_path(path: Path, candidate_root: Path) -> bool:
+    """Return ``True`` when *path* is located under *candidate_root*.
+
+    The helper treats equality as a positive match so callers can avoid
+    special casing.  ``Path.parents`` yields every ancestor of *path*, making
+    it a convenient way to check the relationship without manual string
+    operations that could break across platforms.
+    """
+
+    if path == candidate_root:
+        return True
+
+    return candidate_root in path.parents
+
+
+def normalise_rel_value(value: object) -> Optional[str]:
+    """Return a POSIX-formatted relative path for *value* when possible."""
+
+    if isinstance(value, str) and value:
+        return Path(value).as_posix()
+    if isinstance(value, Path):
+        return value.as_posix()
+    if value:
+        return Path(str(value)).as_posix()
+    return None

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional, TYPE_CHECKING, Tuple
 
@@ -28,8 +27,16 @@ from ..tasks.asset_loader_worker import (
 from .asset_cache_manager import AssetCacheManager
 from .asset_data_loader import AssetDataLoader
 from .asset_state_manager import AssetListStateManager
+from .asset_data_accumulator import AssetDataAccumulator
+from .asset_row_adapter import AssetRowAdapter
+from .list_diff_calculator import ListDiffCalculator
 from .live_map import load_live_map
 from .roles import Roles, role_names
+from ....utils.pathutils import (
+    normalise_for_compare,
+    is_descendant_path,
+    normalise_rel_value,
+)
 
 if TYPE_CHECKING:  # pragma: no cover - import only for type checking
     from ...facade import AppFacade
@@ -48,10 +55,6 @@ class AssetListModel(QAbstractListModel):
     loadProgress = Signal(Path, int, int)
     loadFinished = Signal(Path, bool)
 
-    # Accumulate chunks for 250ms to prevent the UI from stuttering during rapid
-    # updates.  This strikes a balance between responsiveness and smoothness.
-    FLUSH_INTERVAL_MS = 250
-
     def __init__(self, facade: "AppFacade", parent=None) -> None:  # type: ignore[override]
         super().__init__(parent)
         self._facade = facade
@@ -66,6 +69,10 @@ class AssetListModel(QAbstractListModel):
         self._data_loader.error.connect(self._on_loader_error)
         self._state_manager = AssetListStateManager(self, self._cache_manager)
         self._cache_manager.set_recently_removed_limit(256)
+
+        self._accumulator = AssetDataAccumulator(self, self._state_manager, self)
+        self._row_adapter = AssetRowAdapter(self._thumb_size, self._cache_manager)
+
         # ``_pending_rows`` accumulates worker results while a background load is
         # in flight.  Once :meth:`_on_loader_finished` fires we swap the buffered
         # snapshot into the model in a single reset so aggregate views only see
@@ -74,12 +81,6 @@ class AssetListModel(QAbstractListModel):
         self._pending_rows: List[Dict[str, object]] = []
         self._pending_loader_root: Optional[Path] = None
         self._deferred_incremental_refresh: Optional[Path] = None
-
-        self._incoming_buffer: List[Dict[str, object]] = []
-        self._flush_timer = QTimer(self)
-        self._flush_timer.setInterval(self.FLUSH_INTERVAL_MS)
-        self._flush_timer.setSingleShot(True)
-        self._flush_timer.timeout.connect(self._flush_buffer)
 
         self._facade.linksUpdated.connect(self.handle_links_updated)
         self._facade.assetUpdated.connect(self.handle_asset_updated)
@@ -258,48 +259,7 @@ class AssetListModel(QAbstractListModel):
         rows = self._state_manager.rows
         if not index.isValid() or not (0 <= index.row() < len(rows)):
             return None
-        row = rows[index.row()]
-        if role == Qt.DisplayRole:
-            return ""
-        if role == Qt.DecorationRole:
-            return self._cache_manager.resolve_thumbnail(row, ThumbnailLoader.Priority.NORMAL)
-        if role == Qt.SizeHintRole:
-            return QSize(self._thumb_size.width(), self._thumb_size.height())
-        if role == Roles.REL:
-            return row["rel"]
-        if role == Roles.ABS:
-            return row["abs"]
-        if role == Roles.ASSET_ID:
-            return row["id"]
-        if role == Roles.IS_IMAGE:
-            return row["is_image"]
-        if role == Roles.IS_VIDEO:
-            return row["is_video"]
-        if role == Roles.IS_LIVE:
-            return row["is_live"]
-        if role == Roles.IS_PANO:
-            return row.get("is_pano", False)
-        if role == Roles.LIVE_GROUP_ID:
-            return row["live_group_id"]
-        if role == Roles.LIVE_MOTION_REL:
-            return row["live_motion"]
-        if role == Roles.LIVE_MOTION_ABS:
-            return row["live_motion_abs"]
-        if role == Roles.SIZE:
-            return row["size"]
-        if role == Roles.DT:
-            return row["dt"]
-        if role == Roles.DT_SORT:
-            return row.get("dt_sort", float("-inf"))
-        if role == Roles.LOCATION:
-            return row.get("location")
-        if role == Roles.FEATURED:
-            return row["featured"]
-        if role == Roles.IS_CURRENT:
-            return bool(row.get("is_current", False))
-        if role == Roles.INFO:
-            return dict(row)
-        return None
+        return self._row_adapter.data(rows[index.row()], role)
 
     def roleNames(self) -> Dict[int, bytes]:  # type: ignore[override]
         return role_names(super().roleNames())
@@ -364,8 +324,7 @@ class AssetListModel(QAbstractListModel):
         self._album_root = root
         self._cache_manager.reset_for_album(root)
         self._set_deferred_incremental_refresh(None)
-        self._flush_timer.stop()
-        self._incoming_buffer.clear()
+        self._accumulator.clear()
         self.beginResetModel()
         self._state_manager.clear_rows()
         self.endResetModel()
@@ -408,8 +367,7 @@ class AssetListModel(QAbstractListModel):
         # Clear the model before starting a fresh load so progressive updates
         # build the view from scratch.  This replaces the old behaviour where we
         # waited for the full payload and then did a single ``beginResetModel``.
-        self._flush_timer.stop()
-        self._incoming_buffer.clear()
+        self._accumulator.clear()
         self.beginResetModel()
         self._state_manager.clear_rows()
         self.endResetModel()
@@ -443,9 +401,7 @@ class AssetListModel(QAbstractListModel):
         ):
             return
 
-        self._incoming_buffer.extend(chunk)
-        if not self._flush_timer.isActive():
-            self._flush_timer.start()
+        self._accumulator.add_chunk(chunk)
 
     def _on_scan_chunk_ready(self, root: Path, chunk: List[Dict[str, object]]) -> None:
         """Integrate fresh rows from the scanner into the live view."""
@@ -482,83 +438,7 @@ class AssetListModel(QAbstractListModel):
                 entries.append(entry)
 
         if entries:
-            self._incoming_buffer.extend(entries)
-            if not self._flush_timer.isActive():
-                self._flush_timer.start()
-
-    def _flush_buffer(self) -> None:
-        """Commit accumulated rows to the model."""
-
-        if not self._incoming_buffer:
-            return
-
-        # Move items out of the buffer so the list remains consistent if new
-        # chunks arrive while we are merging.
-        payload = list(self._incoming_buffer)
-        self._incoming_buffer.clear()
-        self._merge_chunk(payload)
-
-    def _merge_chunk(self, chunk: List[Dict[str, object]]) -> None:
-        """Append or update rows in the model efficiently."""
-
-        # Separate new items from updates to minimize signal emission overhead.
-        # We append new items to the end and update existing ones in place.
-        new_items: List[Dict[str, object]] = []
-        updates: List[int] = []
-
-        for row in chunk:
-            rel = row.get("rel")
-            if not rel:
-                continue
-
-            # The row lookup keys are normalized relative paths.
-            rel_key = self._state_manager.normalise_key(str(rel))
-            if not rel_key:
-                continue
-
-            existing_index = self._state_manager.row_lookup.get(rel_key)
-            if existing_index is not None:
-                # Update the existing row data in place.
-                if 0 <= existing_index < len(self._state_manager.rows):
-                    self._state_manager.update_row_at_index(existing_index, row)
-                    updates.append(existing_index)
-            else:
-                # Ensure the new row has a normalized rel key before appending
-                # so the lookup table populated by append_chunk is consistent
-                # with the normalized keys we use for searching.
-                row["rel"] = rel_key
-                new_items.append(row)
-
-        # Batch inserts for better performance.
-        if new_items:
-            start_row = self._state_manager.row_count()
-            end_row = start_row + len(new_items) - 1
-            self.beginInsertRows(QModelIndex(), start_row, end_row)
-            self._state_manager.append_chunk(new_items)
-            self.endInsertRows()
-            self._state_manager.on_external_row_inserted(start_row, len(new_items))
-
-        # Emit updates for modified rows.
-        if updates:
-            # Determine the range of roles that might have changed.  Since we
-            # replaced the entire row dict, basically everything is fair game.
-            affected_roles = [
-                Roles.REL,
-                Roles.ABS,
-                Roles.SIZE,
-                Roles.DT,
-                Roles.IS_IMAGE,
-                Roles.IS_VIDEO,
-                Roles.IS_LIVE,
-                Qt.DecorationRole,  # Thumbnail might need refresh
-            ]
-            for row_index in updates:
-                index = self.index(row_index, 0)
-                self.dataChanged.emit(index, index, affected_roles)
-                # Invalidate cache for updated rows to ensure fresh thumbnails
-                rel = self._state_manager.rows[row_index].get("rel")
-                if rel:
-                    self._cache_manager.remove_thumbnail(str(rel))
+            self._accumulator.add_chunk(entries)
 
     def _on_loader_progress(self, root: Path, current: int, total: int) -> None:
         if not self._album_root or root != self._album_root:
@@ -573,9 +453,7 @@ class AssetListModel(QAbstractListModel):
             return
 
         # Ensure any remaining items are committed before announcing completion.
-        if self._flush_timer.isActive():
-            self._flush_timer.stop()
-        self._flush_buffer()
+        self._accumulator.flush()
 
         self.loadFinished.emit(root, success)
 
@@ -585,7 +463,7 @@ class AssetListModel(QAbstractListModel):
             success
             and self._album_root
             and self._deferred_incremental_refresh
-            and self._normalise_for_compare(self._album_root)
+            and normalise_for_compare(self._album_root)
             == self._deferred_incremental_refresh
         ):
             logger.debug(
@@ -697,8 +575,8 @@ class AssetListModel(QAbstractListModel):
             )
             return
 
-        album_root = self._normalise_for_compare(self._album_root)
-        updated_root = self._normalise_for_compare(Path(root))
+        album_root = normalise_for_compare(self._album_root)
+        updated_root = normalise_for_compare(Path(root))
 
         if not self._links_update_targets_current_view(album_root, updated_root):
             logger.debug(
@@ -785,62 +663,29 @@ class AssetListModel(QAbstractListModel):
             )
 
     def _apply_incremental_rows(self, new_rows: List[Dict[str, object]]) -> bool:
-        """Merge *new_rows* into the model without clearing the entire view.
-
-        The method follows three steps:
-
-        #. Identify rows that disappeared or appeared and emit the appropriate
-           Qt signals so the view can update without a full reset.
-        #. Update metadata for rows that persisted but changed, ensuring
-           thumbnails and cached role data stay in sync.
-        #. Rebuild the lookup table once the dust settles so subsequent
-           selections or hover states continue to resolve correctly.
-        """
+        """Merge *new_rows* into the model without clearing the entire view."""
 
         current_rows = self._state_manager.rows
-        fresh_rows = [dict(row) for row in new_rows]
 
-        if not current_rows:
-            if not fresh_rows:
-                return False
+        diff = ListDiffCalculator.calculate_diff(current_rows, new_rows)
+
+        if diff.is_reset:
             self.beginResetModel()
-            self._state_manager.set_rows(fresh_rows)
+            self._state_manager.set_rows(new_rows)
             self.endResetModel()
-            self._cache_manager.reset_caches_for_new_rows(fresh_rows)
+            self._cache_manager.reset_caches_for_new_rows(new_rows)
             self._state_manager.clear_visible_rows()
             return True
 
-        # Map the existing dataset by ``rel`` so we can detect which rows need
-        # to be removed or updated.
-        old_lookup: Dict[str, int] = {}
-        for index, row in enumerate(current_rows):
-            rel_key = self._normalise_rel_value(row.get("rel"))
-            if rel_key is None:
-                continue
-            old_lookup[rel_key] = index
+        if diff.is_empty_to_empty:
+            return False
 
-        # Build the same mapping for the freshly loaded rows to locate
-        # insertions and replacements in the target snapshot.
-        new_lookup: Dict[str, int] = {}
-        for index, row in enumerate(fresh_rows):
-            rel_key = self._normalise_rel_value(row.get("rel"))
-            if rel_key is None:
-                continue
-            new_lookup[rel_key] = index
-
-        removed_keys = set(old_lookup.keys()) - set(new_lookup.keys())
-        inserted_keys = set(new_lookup.keys()) - set(old_lookup.keys())
-        common_keys = set(old_lookup.keys()) & set(new_lookup.keys())
-
-        # Removing rows first keeps indices stable for the insertion phase.
-        removed_indices = sorted((old_lookup[key] for key in removed_keys), reverse=True)
-        structure_changed = bool(removed_indices or inserted_keys)
-
-        for index in removed_indices:
+        # Apply removals
+        for index in diff.removed_indices:
             if not (0 <= index < len(current_rows)):
                 continue
             row_snapshot = current_rows[index]
-            rel_key = self._normalise_rel_value(row_snapshot.get("rel"))
+            rel_key = normalise_rel_value(row_snapshot.get("rel"))
             abs_key = row_snapshot.get("abs")
             self.beginRemoveRows(QModelIndex(), index, index)
             current_rows.pop(index)
@@ -852,19 +697,8 @@ class AssetListModel(QAbstractListModel):
             if abs_key:
                 self._cache_manager.remove_recently_removed(str(abs_key))
 
-        # Insert new rows at the positions reported by the freshly scanned
-        # snapshot.  Sorting the payload ensures indices remain valid as the
-        # list grows.
-        insertion_payload = sorted(
-            (
-                (new_lookup[key], fresh_rows[new_lookup[key]], key)
-                for key in inserted_keys
-                if key in new_lookup
-            ),
-            key=lambda item: item[0],
-        )
-
-        for insert_index, row_data, rel_key in insertion_payload:
+        # Apply insertions
+        for insert_index, row_data, rel_key in diff.inserted_items:
             position = max(0, min(insert_index, len(current_rows)))
             self.beginInsertRows(QModelIndex(), position, position)
             current_rows.insert(position, row_data)
@@ -877,58 +711,41 @@ class AssetListModel(QAbstractListModel):
             if abs_value:
                 self._cache_manager.remove_recently_removed(str(abs_value))
 
-        # Rebuild a mapping that reflects the post-update order so updates can
-        # reuse the final positions without guessing offsets introduced by
-        # insertions or deletions.
-        final_lookup: Dict[str, int] = {}
-        for index, row in enumerate(current_rows):
-            rel_key = self._normalise_rel_value(row.get("rel"))
-            if rel_key is None:
-                continue
-            final_lookup[rel_key] = index
+        # Apply updates
+        if diff.structure_changed:
+            self._state_manager.clear_visible_rows()
 
-        changed_rows: List[int] = []
-        for rel_key in common_keys:
-            new_index = new_lookup.get(rel_key)
-            current_index = final_lookup.get(rel_key)
-            if new_index is None or current_index is None:
+        if not current_rows and not diff.is_reset:
+             # If we ended up empty after removals
+            self._cache_manager.reset_caches_for_new_rows([])
+
+        self._state_manager.rebuild_lookup()
+
+        # Update data for changed rows
+        for replacement in diff.changed_items:
+            rel_key = normalise_rel_value(replacement.get("rel"))
+            if not rel_key:
                 continue
-            replacement = fresh_rows[new_index]
-            if current_rows[current_index] == replacement:
+
+            # Look up the current index of the item using its rel key.
+            # We use the rebuilt lookup table which reflects the structure
+            # after insertions and removals.
+            row_index = self._state_manager.row_lookup.get(rel_key)
+            if row_index is None or not (0 <= row_index < len(current_rows)):
                 continue
-            current_rows[current_index] = replacement
-            changed_rows.append(current_index)
+
+            current_rows[row_index] = replacement
+
+            model_index = self.index(row_index, 0)
+            self.dataChanged.emit(model_index, model_index, [])
+
             self._cache_manager.remove_thumbnail(rel_key)
             self._cache_manager.remove_placeholder(rel_key)
             abs_value = replacement.get("abs")
             if abs_value:
                 self._cache_manager.remove_recently_removed(str(abs_value))
 
-        if structure_changed:
-            self._state_manager.clear_visible_rows()
-
-        if not current_rows:
-            self._cache_manager.reset_caches_for_new_rows([])
-
-        self._state_manager.rebuild_lookup()
-
-        for row_index in sorted(set(changed_rows)):
-            model_index = self.index(row_index, 0)
-            self.dataChanged.emit(model_index, model_index, [])
-
-        return structure_changed or bool(changed_rows)
-
-    @staticmethod
-    def _normalise_rel_value(value: object) -> Optional[str]:
-        """Return a POSIX-formatted relative path for *value* when possible."""
-
-        if isinstance(value, str) and value:
-            return Path(value).as_posix()
-        if isinstance(value, Path):
-            return value.as_posix()
-        if value:
-            return Path(str(value)).as_posix()
-        return None
+        return diff.structure_changed or bool(diff.changed_items)
 
     def _set_deferred_incremental_refresh(self, root: Optional[Path]) -> None:
         """Remember that an incremental refresh should run once loading settles."""
@@ -936,7 +753,7 @@ class AssetListModel(QAbstractListModel):
         if root is None:
             self._deferred_incremental_refresh = None
             return
-        self._deferred_incremental_refresh = self._normalise_for_compare(root)
+        self._deferred_incremental_refresh = normalise_for_compare(root)
 
     def _links_update_targets_current_view(
         self, album_root: Path, updated_root: Path
@@ -962,40 +779,7 @@ class AssetListModel(QAbstractListModel):
         if album_root == updated_root:
             return True
 
-        return self._is_descendant_path(updated_root, album_root)
-
-    @staticmethod
-    def _is_descendant_path(path: Path, candidate_root: Path) -> bool:
-        """Return ``True`` when *path* is located under *candidate_root*.
-
-        The helper treats equality as a positive match so callers can avoid
-        special casing.  ``Path.parents`` yields every ancestor of *path*, making
-        it a convenient way to check the relationship without manual string
-        operations that could break across platforms.
-        """
-
-        if path == candidate_root:
-            return True
-
-        return candidate_root in path.parents
-
-    @staticmethod
-    def _normalise_for_compare(path: Path) -> Path:
-        """Return a normalised ``Path`` suitable for cross-platform comparisons.
-
-        ``Path.resolve`` is insufficient on its own because it preserves the
-        original casing on case-insensitive filesystems.  Combining
-        :func:`os.path.realpath` with :func:`os.path.normcase` yields a canonical
-        representation that collapses symbolic links and performs the necessary
-        case folding so that two references to the same directory compare equal
-        regardless of how they were produced.
-        """
-
-        try:
-            resolved = os.path.realpath(path)
-        except OSError:
-            resolved = str(path)
-        return Path(os.path.normcase(resolved))
+        return is_descendant_path(updated_root, album_root)
 
     def _reload_live_metadata(self) -> None:
         """Re-read ``links.json`` and update cached Live Photo roles."""

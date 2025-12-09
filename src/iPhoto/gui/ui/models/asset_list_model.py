@@ -27,7 +27,6 @@ from .asset_data_loader import AssetDataLoader
 from .asset_state_manager import AssetListStateManager
 from .asset_row_adapter import AssetRowAdapter
 from .list_diff_calculator import ListDiffCalculator
-from .live_map import load_live_map
 from .roles import Roles, role_names
 from ....utils.pathutils import (
     normalise_for_compare,
@@ -220,8 +219,6 @@ class AssetListModel(QAbstractListModel):
         root = self._album_root
         manifest = self._facade.current_album.manifest if self._facade.current_album else {}
         featured = manifest.get("featured", []) or []
-        live_map = load_live_map(root)
-        self._cache_manager.set_live_map(live_map)
 
         # ``AssetDataLoader.populate_from_cache`` computes the rows immediately yet
         # defers all signal emission to the next event-loop iteration.  This mirrors
@@ -231,7 +228,6 @@ class AssetListModel(QAbstractListModel):
         result = self._data_loader.populate_from_cache(
             root,
             featured,
-            self._cache_manager.live_map_snapshot(),
         )
         if result is None:
             return False
@@ -374,26 +370,17 @@ class AssetListModel(QAbstractListModel):
         self._flush_timer.stop()
         self._is_first_chunk = True
 
-        # We DON'T reset the model here anymore to allow seamless reloading
-        # But for switching albums, prepare_for_album handles reset.
-        # For simple reload, we might want to clear?
-        # The requirement says: "If it is the first chunk... Call beginResetModel... to clear old data".
-        # So we defer clearing until the first chunk arrives to minimize blank screen time.
-
         self._cache_manager.clear_recently_removed()
 
         manifest = self._facade.current_album.manifest if self._facade.current_album else {}
         featured = manifest.get("featured", []) or []
-
-        live_map = load_live_map(self._album_root)
-        self._cache_manager.set_live_map(live_map)
 
         # Remember which album root is being populated so chunk handlers know
         # the incoming data belongs to the active view.
         self._pending_loader_root = self._album_root
 
         try:
-            self._data_loader.start(self._album_root, featured, live_map)
+            self._data_loader.start(self._album_root, featured)
         except RuntimeError:
             self._state_manager.mark_reload_pending()
             self._pending_loader_root = None
@@ -637,10 +624,11 @@ class AssetListModel(QAbstractListModel):
             logger.debug(
                 "AssetListModel: finishing temporary suppression for %s after non-aggregate move.",
                 updated_root,
-                )
+            )
             self._state_manager.set_virtual_reload_suppressed(False)
             if self._state_manager.rows:
-                self._reload_live_metadata()
+                # With the schema update, we must trigger an incremental refresh from DB.
+                self._refresh_rows_from_index(self._album_root)
             return
 
         logger.debug(
@@ -650,7 +638,9 @@ class AssetListModel(QAbstractListModel):
         )
 
         if self._state_manager.rows:
-            self._reload_live_metadata()
+            # We used to call _reload_live_metadata here, but it relied on reading links.json synchronously.
+            # Now we use the DB as the source of truth, so we refresh rows from the index.
+            self._refresh_rows_from_index(self._album_root)
 
         if not self._state_manager.rows or self._pending_loader_root:
             logger.debug(
@@ -683,11 +673,8 @@ class AssetListModel(QAbstractListModel):
         manifest = self._facade.current_album.manifest if self._facade.current_album else {}
         featured = manifest.get("featured", []) or []
 
-        live_map = load_live_map(root)
-        self._cache_manager.set_live_map(live_map)
-
         try:
-            fresh_rows, _ = self._data_loader.compute_rows(root, featured, live_map)
+            fresh_rows, _ = self._data_loader.compute_rows(root, featured)
         except Exception as exc:  # pragma: no cover - surfaced via GUI
             logger.error(
                 "AssetListModel: incremental refresh for %s failed: %s", root, exc
@@ -826,29 +813,3 @@ class AssetListModel(QAbstractListModel):
             return True
 
         return is_descendant_path(updated_root, album_root)
-
-    def _reload_live_metadata(self) -> None:
-        """Re-read ``links.json`` and update cached Live Photo roles.
-
-        Note: With the schema update, structural changes (hide/show) require
-        a full refresh via _refresh_rows_from_index. This method now serves
-        primarily to update metadata for items that remain visible.
-        """
-
-        rows = self._state_manager.rows
-        if not self._album_root or not rows:
-            return
-
-        updated_rows = self._cache_manager.reload_live_metadata(rows)
-        if not updated_rows:
-            return
-
-        roles_to_refresh = [
-            Roles.IS_LIVE,
-            Roles.LIVE_GROUP_ID,
-            Roles.LIVE_MOTION_REL,
-            Roles.LIVE_MOTION_ABS,
-        ]
-        for row_index in updated_rows:
-            model_index = self.index(row_index, 0)
-            self.dataChanged.emit(model_index, model_index, roles_to_refresh)

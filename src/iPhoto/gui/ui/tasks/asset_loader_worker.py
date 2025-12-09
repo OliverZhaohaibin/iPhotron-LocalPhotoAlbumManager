@@ -178,7 +178,6 @@ def build_asset_entry(
 def compute_asset_rows(
     root: Path,
     featured: Iterable[str],
-    live_map: Dict[str, Dict[str, object]], # Kept for compatibility but unused for pairing
 ) -> Tuple[List[Dict[str, object]], int]:
     ensure_work_dir(root, WORK_DIR_NAME)
 
@@ -214,14 +213,12 @@ class AssetLoaderWorker(QRunnable):
         root: Path,
         featured: Iterable[str],
         signals: AssetLoaderSignals,
-        live_map: Dict[str, Dict[str, object]],
     ) -> None:
         super().__init__()
         self.setAutoDelete(False)
         self._root = root
         self._featured: Set[str] = normalize_featured(featured)
         self._signals = signals
-        self._live_map = live_map
         self._is_cancelled = False
 
     @property

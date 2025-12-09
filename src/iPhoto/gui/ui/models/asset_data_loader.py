@@ -45,7 +45,6 @@ class AssetDataLoader(QObject):
         self,
         root: Path,
         featured: List[Dict[str, object]],
-        live_map: Dict[str, Dict[str, object]],
     ) -> Optional[Tuple[List[Dict[str, object]], int]]:
         """Return cached rows for *root* when the index file remains lightweight.
 
@@ -67,7 +66,7 @@ class AssetDataLoader(QObject):
             return None
 
         try:
-            rows, total = self.compute_rows(root, featured, live_map)
+            rows, total = self.compute_rows(root, featured)
         except Exception as exc:  # pragma: no cover - surfaced via GUI
             message = str(exc)
 
@@ -109,7 +108,6 @@ class AssetDataLoader(QObject):
         self,
         root: Path,
         featured: List[Dict[str, object]],
-        live_map: Dict[str, Dict[str, object]],
     ) -> None:
         """Launch a background worker for *root*."""
         if self._worker is not None:
@@ -119,7 +117,7 @@ class AssetDataLoader(QObject):
         signals.finished.connect(self._handle_finished)
         signals.progressUpdated.connect(self._handle_progress)
         signals.error.connect(self._handle_error)
-        worker = AssetLoaderWorker(root, featured, signals, live_map)
+        worker = AssetLoaderWorker(root, featured, signals)
         self._worker = worker
         self._signals = signals
         self._pool.start(worker)
@@ -134,7 +132,6 @@ class AssetDataLoader(QObject):
         self,
         root: Path,
         featured: List[Dict[str, object]],
-        live_map: Dict[str, Dict[str, object]],
     ) -> Tuple[List[Dict[str, object]], int]:
         """Synchronously compute asset rows for *root*.
 
@@ -143,7 +140,7 @@ class AssetDataLoader(QObject):
         what :class:`AssetLoaderWorker` performs in the background.
         """
 
-        return compute_asset_rows(root, featured, live_map)
+        return compute_asset_rows(root, featured)
 
     def _handle_chunk_ready(self, root: Path, chunk: List[Dict[str, object]]) -> None:
         """Relay chunk notifications from the worker."""

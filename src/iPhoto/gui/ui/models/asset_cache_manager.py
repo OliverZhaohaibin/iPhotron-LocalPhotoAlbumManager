@@ -10,12 +10,11 @@ from PySide6.QtCore import QObject, QSize, Signal, Qt, QRectF
 from PySide6.QtGui import QColor, QFont, QFontMetrics, QPainter, QPixmap
 
 from ..tasks.thumbnail_loader import ThumbnailLoader
-from .live_map import load_live_map
 from ..geometry_utils import calculate_center_crop
 
 
 class AssetCacheManager(QObject):
-    """Manage thumbnail, placeholder and Live Photo caches."""
+    """Manage thumbnail and placeholder caches."""
 
     thumbnailReady = Signal(Path, str, QPixmap)
 
@@ -33,7 +32,6 @@ class AssetCacheManager(QObject):
         self._recently_removed_rows: "OrderedDict[str, Dict[str, object]]" = OrderedDict()
         self._recently_removed_limit = 256
         self._album_root: Optional[Path] = None
-        self._live_map: Dict[str, Dict[str, object]] = {}
 
     def thumbnail_loader(self) -> ThumbnailLoader:
         """Expose the :class:`ThumbnailLoader` used for rendering previews."""
@@ -50,7 +48,6 @@ class AssetCacheManager(QObject):
         self._placeholder_cache.clear()
         self._placeholder_templates.clear()
         self._recently_removed_rows.clear()
-        self._live_map = {}
 
     def clear_recently_removed(self) -> None:
         """Drop all cached metadata for recently removed rows."""
@@ -235,81 +232,6 @@ class AssetCacheManager(QObject):
                 return self._create_composite_thumbnail(rel, pixmap, row)
 
         return placeholder
-
-    def reload_live_metadata(self, rows: List[Dict[str, object]]) -> List[int]:
-        """Refresh cached Live Photo metadata and update *rows* in place."""
-
-        if not self._album_root or not rows:
-            return []
-
-        live_map = load_live_map(self._album_root)
-        self._live_map = dict(live_map)
-        updated_rows: List[int] = []
-        album_root = self._normalise_path(self._album_root)
-
-        for row_index, row in enumerate(rows):
-            rel = str(row.get("rel", ""))
-            if not rel:
-                continue
-
-            info = self._live_map.get(rel)
-            new_is_live = False
-            new_motion_rel: Optional[str] = None
-            new_motion_abs: Optional[str] = None
-            new_group_id: Optional[str] = None
-
-            if isinstance(info, dict):
-                group_id = info.get("id")
-                if isinstance(group_id, str):
-                    new_group_id = group_id
-                elif group_id is not None:
-                    new_group_id = str(group_id)
-
-                if info.get("role") == "still":
-                    motion_rel = info.get("motion")
-                    if isinstance(motion_rel, str) and motion_rel:
-                        new_motion_rel = motion_rel
-                        try:
-                            new_motion_abs = str((album_root / motion_rel).resolve())
-                        except OSError:
-                            new_motion_abs = str(album_root / motion_rel)
-                        new_is_live = True
-
-            previous_is_live = bool(row.get("is_live", False))
-            previous_motion_rel = row.get("live_motion")
-            previous_motion_abs = row.get("live_motion_abs")
-            previous_group_id = row.get("live_group_id")
-
-            if (
-                previous_is_live == new_is_live
-                and (previous_motion_rel or None) == new_motion_rel
-                and (previous_motion_abs or None) == new_motion_abs
-                and (previous_group_id or None) == new_group_id
-            ):
-                continue
-
-            row["is_live"] = new_is_live
-            row["live_motion"] = new_motion_rel
-            row["live_motion_abs"] = new_motion_abs
-            row["live_group_id"] = new_group_id
-            updated_rows.append(row_index)
-
-        return updated_rows
-
-    def set_live_map(self, mapping: Dict[str, Dict[str, object]]) -> None:
-        """Replace the cached Live Photo mapping."""
-
-        self._live_map = dict(mapping)
-
-    def live_map_snapshot(self) -> Dict[str, Dict[str, object]]:
-        """Return a shallow copy of the cached Live Photo information."""
-
-        return dict(self._live_map)
-
-    def live_map(self) -> Dict[str, Dict[str, object]]:
-        """Return the cached Live Photo mapping."""
-
-        return self._live_map
 
     def _create_composite_thumbnail(self, rel: str, source: QPixmap, row: Dict[str, object]) -> QPixmap:
         """Generate and cache a resized/cropped thumbnail at the target display size."""

@@ -308,8 +308,11 @@ def scan_album(
                 break
 
         discoverer.join(timeout=1.0)
-
-
+        if discoverer.is_alive():
+            LOGGER.warning(
+                "FileDiscoverer thread did not terminate within 1.0s timeout and is still alive. "
+                "This may indicate a resource leak or blocking operation."
+            )
 def _build_base_row(root: Path, file_path: Path, stat: Any) -> Dict[str, Any]:
     """Create the common metadata fields shared by images and videos."""
 

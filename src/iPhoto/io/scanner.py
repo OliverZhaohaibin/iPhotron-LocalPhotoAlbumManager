@@ -93,6 +93,8 @@ class FileDiscoverer(threading.Thread):
             # Signal end of discovery
             try:
                 self._queue.put(None, timeout=0.5)
+            # If the queue is full, we are likely stopping and the consumer may have stopped listening,
+            # so it's acceptable to ignore this exception.
             except queue.Full:
                 LOGGER.warning("Could not signal end of discovery: queue is full. Consumer may hang waiting for sentinel.")
 

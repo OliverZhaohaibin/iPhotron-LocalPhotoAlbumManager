@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Iterable, List
+from typing import Iterable, Iterator, List, Optional
 
 from PySide6.QtCore import QObject, QRunnable, Signal
 
 from ....config import WORK_DIR_NAME
-from ....io.scanner import gather_media_paths, process_media_paths
+from ....io.scanner import scan_album
 from ....utils.pathutils import ensure_work_dir
 
 
@@ -73,61 +73,52 @@ class ScannerWorker(QRunnable):
         """Perform the scan and emit progress as files are processed."""
 
         rows: List[dict] = []
+        scanner: Optional[Iterator[dict]] = None
+
         try:
             ensure_work_dir(self._root, WORK_DIR_NAME)
 
-            # Emit an initial indeterminate update so the UI can show a busy
-            # indicator while we enumerate the filesystem.  This mirrors the
-            # behaviour of the legacy implementation to keep the UX familiar.
+            # Emit an initial indeterminate update
             self._signals.progressUpdated.emit(self._root, 0, -1)
 
-            image_paths, video_paths = gather_media_paths(
-                self._root, self._include, self._exclude
-            )
-            if self._is_cancelled:
-                return
+            def progress_callback(processed: int, total: int) -> None:
+                if not self._is_cancelled:
+                    self._signals.progressUpdated.emit(self._root, processed, total)
 
-            total_files = len(image_paths) + len(video_paths)
-            self._signals.progressUpdated.emit(self._root, 0, total_files)
-            if total_files == 0:
-                self._signals.finished.emit(self._root, [])
-                return
-
-            processed_count = 0
-            last_reported = 0
             chunk: List[dict] = []
 
-            for row in process_media_paths(self._root, image_paths, video_paths):
+            # The new scan_album implementation handles parallel discovery and processing.
+            # We initialize the generator but execution (and thread starting) happens on iteration.
+            scanner = scan_album(
+                self._root,
+                self._include,
+                self._exclude,
+                progress_callback=progress_callback
+            )
+
+            for row in scanner:
                 if self._is_cancelled:
-                    return
+                    break
+
                 rows.append(row)
                 chunk.append(row)
-                processed_count += 1
-
-                should_report = (
-                    processed_count == total_files or processed_count - last_reported >= 25
-                )
 
                 if len(chunk) >= self.SCAN_CHUNK_SIZE:
                     self._signals.chunkReady.emit(self._root, chunk)
                     chunk = []
 
-                # To avoid overwhelming the UI thread we only emit progress
-                # every 25 items (and always on completion).  This matches the
-                # cadence of the original worker implementation.
-                if should_report:
-                    self._signals.progressUpdated.emit(
-                        self._root, processed_count, total_files
-                    )
-                    last_reported = processed_count
-
-            if chunk:
+            if chunk and not self._is_cancelled:
                 self._signals.chunkReady.emit(self._root, chunk)
+
         except Exception as exc:  # pragma: no cover - best-effort error propagation
             if not self._is_cancelled:
                 self._had_error = True
                 self._signals.error.emit(self._root, str(exc))
         finally:
+            # Ensure the scanner generator is closed to trigger its cleanup logic (stopping threads)
+            if scanner is not None:
+                scanner.close()
+
             if not self._is_cancelled and not self._had_error:
                 # Consumers should use `chunkReady` for progressive UI updates.
                 # The `finished` signal provides the complete dataset for

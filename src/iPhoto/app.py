@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import asdict
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Callable, Dict, List, Optional
 
 from .cache.index_store import IndexStore
 from .cache.lock import FileLock
@@ -153,7 +153,7 @@ def _update_index_snapshot(root: Path, materialised_rows: List[dict]) -> None:
             store.write_rows(materialised_snapshot)
 
 
-def rescan(root: Path) -> List[dict]:
+def rescan(root: Path, progress_callback: Optional[Callable[[int, int], None]] = None) -> List[dict]:
     """Rescan the album and return the fresh index rows."""
 
     store = IndexStore(root)
@@ -189,7 +189,7 @@ def rescan(root: Path) -> List[dict]:
     exclude = album.manifest.get("filters", {}).get("exclude", DEFAULT_EXCLUDE)
     from .io.scanner import scan_album
 
-    rows = list(scan_album(root, include, exclude))
+    rows = list(scan_album(root, include, exclude, progress_callback=progress_callback))
     if is_recently_deleted and preserved_restore_rows:
         for new_row in rows:
             rel_value = new_row.get("rel")
@@ -214,7 +214,7 @@ def scan_specific_files(root: Path, files: List[Path]) -> None:
     This helper avoids a full directory scan, enabling efficient incremental
     updates during batch import operations.
     """
-    from .io.scanner import process_media_paths, gather_media_paths
+    from .io.scanner import process_media_paths
 
     # We need to separate images and videos for process_media_paths, but
     # since we already have the specific file list, we can just split them manually

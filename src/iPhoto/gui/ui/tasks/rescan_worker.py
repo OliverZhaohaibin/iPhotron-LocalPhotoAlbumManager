@@ -13,6 +13,7 @@ from ....errors import IPhotoError
 class RescanSignals(QObject):
     """Signal bundle emitted by :class:`RescanWorker` while executing."""
 
+    progressUpdated = Signal(Path, int, int)
     finished = Signal(Path, bool)
     error = Signal(Path, str)
 
@@ -43,7 +44,10 @@ class RescanWorker(QRunnable):
 
         success = False
         try:
-            backend.rescan(self._root)
+            def progress_callback(processed: int, total: int) -> None:
+                self._signals.progressUpdated.emit(self._root, processed, total)
+
+            backend.rescan(self._root, progress_callback=progress_callback)
         except IPhotoError as exc:
             # Surface domain-specific failures with the album path attached so the
             # facade can relay meaningful diagnostics to the user.
@@ -59,4 +63,3 @@ class RescanWorker(QRunnable):
 
 
 __all__ = ["RescanSignals", "RescanWorker"]
-

@@ -46,11 +46,11 @@ class ListDiffCalculator:
             return result
 
         if not fresh_rows_copy:
-             # Full clear needed (handled as removals or reset)
-             # If we want detailed removals:
-             result.removed_indices = list(range(len(current_rows) - 1, -1, -1))
-             result.structure_changed = True
-             return result
+            # Full clear needed (handled as removals or reset)
+            # If we want detailed removals:
+            result.removed_indices = list(range(len(current_rows) - 1, -1, -1))
+            result.structure_changed = True
+            return result
 
         # Map the existing dataset by ``rel`` so we can detect which rows need
         # to be removed or updated.

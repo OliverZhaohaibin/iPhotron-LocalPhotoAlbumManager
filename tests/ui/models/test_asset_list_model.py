@@ -1,6 +1,5 @@
 """Integration tests for AssetListModel refactoring."""
 
-import sys
 from unittest.mock import MagicMock
 import pytest
 from PySide6.QtCore import QAbstractListModel, QModelIndex, Qt

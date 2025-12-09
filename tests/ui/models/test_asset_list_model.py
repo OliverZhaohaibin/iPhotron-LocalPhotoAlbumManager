@@ -170,22 +170,7 @@ def test_incremental_update_existing_row(model):
     args = model.dataChanged.emit.call_args[0]
     assert args[0].row() == 1
 
-    # Verify invalidate_thumbnail called (via the logic in _apply_incremental_rows which calls cache manager removal directly
-    # OR calls invalidate_thumbnail?
-    # Wait, my implementation of _apply_incremental_rows does NOT call invalidate_thumbnail directly.
-    # It calls:
-    # self._cache_manager.remove_thumbnail(rel_key)
-    # self._cache_manager.remove_placeholder(rel_key)
-    #
-    # The crash in feedback was about `AssetDataAccumulator` calling `invalidate_thumbnail`.
-    # Let's verify `AssetDataAccumulator` uses `invalidate_thumbnail`.
-
-    # But this test is about `_apply_incremental_rows` (Diff Logic).
-    # The diff logic in Model calls cache manager directly (I see it in code).
-
-    # However, `AssetDataAccumulator` calls `model.invalidate_thumbnail`.
-    # I should add a test case for `AssetDataAccumulator` update too.
-
+    # Verify that the model's data is updated and the appropriate signals are emitted when an existing row is updated.
 def test_accumulator_update_existing_row(model):
     """Regression test: Accumulator merging an update should call invalidate_thumbnail without crash."""
 

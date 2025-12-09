@@ -185,15 +185,15 @@ def _process_path_stream(
                 resolved = path.resolve()
                 metadata = metadata_lookup.get(resolved) or metadata_lookup.get(path)
                 yield _build_row(root, path, metadata)
+                processed_count += 1
             except (IPhotoError, OSError) as exc:
                 LOGGER.warning("Could not process file %s: %s", path, exc)
                 try:
                     stat = path.stat()
                     yield _build_base_row(root, path, stat)
+                    processed_count += 1
                 except OSError:
                     continue
-
-            processed_count += 1
             # Throttle updates to every 25 items to avoid flooding the UI event loop
             if progress_callback and total_provider:
                 if processed_count - last_reported_count >= 25:

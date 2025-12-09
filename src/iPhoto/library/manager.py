@@ -94,6 +94,12 @@ class LibraryManager(QObject):
     # Binding and scanning
     # ------------------------------------------------------------------
     def bind_path(self, root: Path) -> None:
+        # Clear existing watches to ensure initialization operations (like creating
+        # the deleted items folder) do not trigger "directoryChanged" signals
+        # from an active watcher, which would cause a double-refresh.
+        if existing := self._watcher.directories():
+            self._watcher.removePaths(existing)
+
         normalized = root.expanduser().resolve()
         if not normalized.exists() or not normalized.is_dir():
             raise LibraryUnavailableError(f"Library path does not exist: {root}")

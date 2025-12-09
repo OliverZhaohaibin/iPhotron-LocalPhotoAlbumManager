@@ -18,10 +18,10 @@ def qapp() -> QApplication:
         app = QApplication([])
     yield app
 
-def test_watcher_active_during_init_deleted_dir(tmp_path, qapp):
+def test_watcher_inactive_during_rebind(tmp_path, qapp):
     """
-    Verify that the file system watcher is active during _initialize_deleted_dir
-    when re-binding a library, which causes the double-scan issue.
+    Verify that the file system watcher is NOT active during _initialize_deleted_dir
+    when re-binding a library, which fixes the double-scan issue.
     """
     root = tmp_path / "Library"
     root.mkdir()

@@ -1,6 +1,5 @@
 """Tests for ListDiffCalculator."""
 
-import pytest
 from src.iPhoto.gui.ui.models.list_diff_calculator import ListDiffCalculator
 
 def test_diff_empty_to_empty():

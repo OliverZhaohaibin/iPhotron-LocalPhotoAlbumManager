@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Dict, Any, Optional
+from typing import Dict, Any
 
 from PySide6.QtCore import Qt, QSize
 

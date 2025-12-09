@@ -2,8 +2,6 @@ from __future__ import annotations
 
 import sqlite3
 from pathlib import Path
-from typing import Any, Dict
-
 import pytest
 from src.iPhoto.cache.index_store import IndexStore
 from src.iPhoto.config import WORK_DIR_NAME

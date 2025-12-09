@@ -13,7 +13,7 @@ class ListDiffResult:
     def __init__(self) -> None:
         self.removed_indices: List[int] = []
         self.inserted_items: List[Any] = []  # List of (index, item, rel_key)
-        self.changed_items: List[Dict[str, object]] = [] # List of fresh row data for items that changed
+        self.changed_items: List[Dict[str, object]] = []  # List of fresh row data for items that changed
         self.structure_changed: bool = False
         self.is_empty_to_empty: bool = False
         self.is_reset: bool = False

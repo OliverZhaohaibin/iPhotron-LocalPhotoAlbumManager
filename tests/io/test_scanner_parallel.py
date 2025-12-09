@@ -1,7 +1,6 @@
 """Tests for parallel file discovery and scanning."""
 
 import queue
-import threading
 import time
 from pathlib import Path
 from unittest.mock import patch

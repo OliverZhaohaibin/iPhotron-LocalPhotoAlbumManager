@@ -211,13 +211,10 @@ def _process_path_stream(
                     processed_count += 1
                 except OSError:
                     continue
-            # Throttle updates to every 25 items to avoid flooding the UI event loop
-            if progress_callback and total_provider:
-                if processed_count - last_reported_count >= 25:
-                    progress_callback(processed_count, total_provider())
-                    last_reported_count = processed_count
+            # Progress callback is now called once per batch, after processing all items.
 
-        # Ensure we send a final update for the batch if there were leftovers
+
+        # Report progress once per batch after processing all items in the batch
         if progress_callback and total_provider and processed_count != last_reported_count:
             progress_callback(processed_count, total_provider())
             last_reported_count = processed_count

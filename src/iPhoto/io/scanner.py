@@ -7,7 +7,7 @@ import queue
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional, Tuple, Union
+from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional, Tuple
 
 from ..config import EXPORT_DIR_NAME, WORK_DIR_NAME
 from ..errors import ExternalToolError, IPhotoError

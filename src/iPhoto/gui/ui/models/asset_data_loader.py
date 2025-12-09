@@ -8,6 +8,7 @@ from typing import Dict, List, Optional, Tuple
 from PySide6.QtCore import QObject, QThreadPool, Signal, QTimer
 
 from ..tasks.asset_loader_worker import AssetLoaderSignals, AssetLoaderWorker, compute_asset_rows
+from ....cache.index_store import IndexStore
 from ....config import WORK_DIR_NAME
 
 
@@ -18,6 +19,12 @@ class AssetDataLoader(QObject):
     loadFinished = Signal(Path, bool)
     loadProgress = Signal(Path, int, int)
     error = Signal(Path, str)
+
+    # Threshold for synchronous loading (number of rows).
+    # If the index has fewer assets than this, we load synchronously
+    # on the UI thread to make small albums appear instantly.
+    # 20,000 rows is roughly instantaneous on modern SSDs with SQLite.
+    SYNC_LOAD_THRESHOLD: int = 20000
 
     def __init__(self, parent: QObject | None = None) -> None:
         """Initialise the loader wrapper."""
@@ -52,13 +59,14 @@ class AssetDataLoader(QObject):
         notification window when they connect right after ``open_album`` returns.
         """
 
-        index_path = root / WORK_DIR_NAME / "index.jsonl"
         try:
-            size = index_path.stat().st_size
-        except OSError:
-            size = 0
+            # We use row count from SQLite instead of file size.
+            # max_index_bytes is ignored in favor of SYNC_LOAD_THRESHOLD.
+            count = IndexStore(root).count()
+        except Exception:
+            count = 0
 
-        if size > max_index_bytes:
+        if count > self.SYNC_LOAD_THRESHOLD:
             return None
 
         try:

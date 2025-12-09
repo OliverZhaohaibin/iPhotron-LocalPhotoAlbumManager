@@ -249,7 +249,8 @@ def compute_asset_rows(
     live_map: Dict[str, Dict[str, object]],
 ) -> Tuple[List[Dict[str, object]], int]:
     ensure_work_dir(root, WORK_DIR_NAME)
-    index_rows = list(IndexStore(root).read_all())
+    # Use sort_by_date=True to leverage SQLite's sorting
+    index_rows = list(IndexStore(root).read_all(sort_by_date=True))
     resolved_map = resolve_live_map(index_rows, live_map)
     motion_paths = get_motion_paths_to_hide(resolved_map)
     featured_set = normalize_featured(featured)
@@ -329,12 +330,10 @@ class AssetLoaderWorker(QRunnable):
     # ------------------------------------------------------------------
     def _build_payload_chunks(self) -> Iterable[List[Dict[str, object]]]:
         ensure_work_dir(self._root, WORK_DIR_NAME)
-        index_rows = list(IndexStore(self._root).read_all())
-
-        # Pre-sort rows by date (descending) to match the UI order.
-        # This ensures "newest" items are sent in the first chunk, preventing
-        # the "append-then-jump" visual glitch.
-        index_rows.sort(key=lambda row: row.get("dt") or "", reverse=True)
+        # Use sort_by_date=True to leverage SQLite's sorting capability.
+        # This replaces the client-side sorting:
+        # index_rows.sort(key=lambda row: row.get("dt") or "", reverse=True)
+        index_rows = list(IndexStore(self._root).read_all(sort_by_date=True))
 
         live_map = resolve_live_map(index_rows, self._live_map)
         hidden_motion_paths = get_motion_paths_to_hide(live_map)

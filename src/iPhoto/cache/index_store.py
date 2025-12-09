@@ -1,165 +1,256 @@
-"""Persistent storage for album index rows."""
+"""Persistent storage for album index rows using SQLite."""
 
 from __future__ import annotations
 
 import json
-from pathlib import Path
+import sqlite3
 from contextlib import contextmanager
-from typing import Dict, Iterable, Iterator, List, Optional
+from pathlib import Path
+from typing import Dict, Iterable, Iterator, Optional, Any, List
 
 from ..config import WORK_DIR_NAME
-from .lock import FileLock
-from ..errors import IndexCorruptedError
-from ..utils.jsonio import atomic_write_text
 
 
 class IndexStore:
-    """Read/write helper for ``index.jsonl`` files."""
+    """Read/write helper for ``index.db`` SQLite database."""
 
     def __init__(self, album_root: Path):
         self.album_root = album_root
-        self.path = album_root / WORK_DIR_NAME / "index.jsonl"
+        self.path = album_root / WORK_DIR_NAME / "index.db"
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self._pending_transaction = False
-        self._batch_cache: Optional[Dict[str, Dict[str, object]]] = None
+        self._conn: Optional[sqlite3.Connection] = None
+        self._init_db()
+
+    def _init_db(self) -> None:
+        """Initialize the database schema."""
+        # Check if DB exists to avoid overhead? No, CREATE TABLE IF NOT EXISTS is fast.
+        # Use a transient connection for initialization
+        with sqlite3.connect(self.path) as conn:
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS assets (
+                    rel TEXT PRIMARY KEY,
+                    id TEXT,
+                    dt TEXT,
+                    ts INTEGER,
+                    bytes INTEGER,
+                    mime TEXT,
+                    make TEXT,
+                    model TEXT,
+                    lens TEXT,
+                    iso INTEGER,
+                    f_number REAL,
+                    exposure_time REAL,
+                    exposure_compensation REAL,
+                    focal_length REAL,
+                    w INTEGER,
+                    h INTEGER,
+                    gps TEXT,
+                    content_id TEXT,
+                    frame_rate REAL,
+                    codec TEXT,
+                    still_image_time REAL,
+                    dur REAL,
+                    original_rel_path TEXT,
+                    original_album_id TEXT,
+                    original_album_subpath TEXT
+                )
+            """)
+            # Create indices for common sort/filter operations if needed.
+            # 'dt' is used for sorting.
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_dt ON assets (dt)")
+
+    def _get_conn(self) -> sqlite3.Connection:
+        """Return the active connection or create a new one."""
+        if self._conn:
+            return self._conn
+        return sqlite3.connect(self.path)
 
     @contextmanager
     def transaction(self) -> Iterator[None]:
-        """Batch multiple updates into a single disk write."""
-        if self._pending_transaction:
-            # Nested transactions are not supported, just yield
+        """Batch multiple updates into a single transaction."""
+        if self._conn:
+            # Nested transaction (conceptually), just yield.
             yield
             return
 
-        with FileLock(self.album_root, "index"):
-            self._pending_transaction = True
-            try:
-                # Pre-load data
-                self._batch_cache = {
-                    Path(str(r["rel"])).as_posix(): r for r in self.read_all()
-                }
+        self._conn = sqlite3.connect(self.path)
+        try:
+            with self._conn:
                 yield
-                # Commit: Write all data from _batch_cache to disk
-                if self._batch_cache is not None:
-                    self.write_rows(self._batch_cache.values(), locked=True)
-            finally:
-                self._pending_transaction = False
-                self._batch_cache = None
+        finally:
+            self._conn.close()
+            self._conn = None
 
-    def write_rows(self, rows: Iterable[Dict[str, object]], *, locked: bool = False) -> None:
+    def write_rows(self, rows: Iterable[Dict[str, Any]], *, locked: bool = False) -> None:
         """Rewrite the entire index with *rows*."""
+        conn = self._get_conn()
+        is_nested = (conn == self._conn)
 
-        payload = "\n".join(json.dumps(row, ensure_ascii=False, sort_keys=True) for row in rows)
-        if payload:
-            payload += "\n"
+        try:
+            if is_nested:
+                # We are in a transaction, do not use `with conn:` as it would commit early.
+                conn.execute("DELETE FROM assets")
+                self._insert_rows(conn, rows)
+            else:
+                with conn:
+                    conn.execute("DELETE FROM assets")
+                    self._insert_rows(conn, rows)
+        finally:
+            if not is_nested:
+                conn.close()
 
-        if locked:
-            atomic_write_text(self.path, payload)
-        else:
-            with FileLock(self.album_root, "index"):
-                atomic_write_text(self.path, payload)
+    def _insert_rows(self, conn: sqlite3.Connection, rows: Iterable[Dict[str, Any]]) -> None:
+        """Helper to bulk insert rows."""
+        # Prepare data
+        data_list = []
+        for row in rows:
+            data = self._row_to_db_params(row)
+            data_list.append(data)
 
-    def read_all(self) -> Iterator[Dict[str, object]]:
-        """Yield all rows from the index."""
+        if not data_list:
+            return
 
-        if not self.path.exists():
-            return iter(())
+        columns = [
+            "rel", "id", "dt", "ts", "bytes", "mime", "make", "model", "lens",
+            "iso", "f_number", "exposure_time", "exposure_compensation", "focal_length",
+            "w", "h", "gps", "content_id", "frame_rate", "codec",
+            "still_image_time", "dur", "original_rel_path",
+            "original_album_id", "original_album_subpath"
+        ]
+        placeholders = ", ".join(["?"] * len(columns))
+        query = f"INSERT OR REPLACE INTO assets ({', '.join(columns)}) VALUES ({placeholders})"
 
-        def _iterator() -> Iterator[Dict[str, object]]:
+        conn.executemany(query, data_list)
+
+    def _row_to_db_params(self, row: Dict[str, Any]) -> List[Any]:
+        """Map a dictionary row to a list of values for the DB."""
+        gps_val = row.get("gps")
+        gps_str = json.dumps(gps_val) if gps_val is not None else None
+
+        return [
+            row.get("rel"),
+            row.get("id"),
+            row.get("dt"),
+            row.get("ts"),
+            row.get("bytes"),
+            row.get("mime"),
+            row.get("make"),
+            row.get("model"),
+            row.get("lens"),
+            row.get("iso"),
+            row.get("f_number"),
+            row.get("exposure_time"),
+            row.get("exposure_compensation"),
+            row.get("focal_length"),
+            row.get("w"),
+            row.get("h"),
+            gps_str,
+            row.get("content_id"),
+            row.get("frame_rate"),
+            row.get("codec"),
+            row.get("still_image_time"),
+            row.get("dur"),
+            row.get("original_rel_path"),
+            row.get("original_album_id"),
+            row.get("original_album_subpath"),
+        ]
+
+    def _db_row_to_dict(self, db_row: sqlite3.Row) -> Dict[str, Any]:
+        """Map a DB row back to a dictionary."""
+        d = dict(db_row)
+        if d["gps"] is not None:
             try:
-                with self.path.open("r", encoding="utf-8") as handle:
-                    for line in handle:
-                        line = line.strip()
-                        if not line:
-                            continue
-                        yield json.loads(line)
-            except json.JSONDecodeError as exc:
-                raise IndexCorruptedError(f"Corrupted index file: {self.path}") from exc
+                d["gps"] = json.loads(d["gps"])
+            except json.JSONDecodeError:
+                d["gps"] = None
+        return d
 
-        return _iterator()
+    def read_all(self, sort_by_date: bool = False) -> Iterator[Dict[str, Any]]:
+        """Yield all rows from the index.
 
-    def upsert_row(self, rel: str, row: Dict[str, object]) -> None:
+        :param sort_by_date: If True, order results by 'dt' descending (newest first).
+        """
+        conn = self._get_conn()
+        should_close = (conn != self._conn)
+        conn.row_factory = sqlite3.Row
+
+        try:
+            query = "SELECT * FROM assets"
+            if sort_by_date:
+                query += " ORDER BY dt DESC"
+
+            cursor = conn.execute(query)
+            for row in cursor:
+                yield self._db_row_to_dict(row)
+        finally:
+            if should_close:
+                conn.close()
+
+    def upsert_row(self, rel: str, row: Dict[str, Any]) -> None:
         """Insert or update a single row identified by *rel*."""
+        conn = self._get_conn()
+        is_nested = (conn == self._conn)
 
-        if self._pending_transaction and self._batch_cache is not None:
-            rel_key = Path(str(rel)).as_posix()
-            self._batch_cache[rel_key] = row
-        else:
-            data = {existing["rel"]: existing for existing in self.read_all()}
-            data[rel] = row
-            self.write_rows(data.values())
+        try:
+            # Ensure rel is in the row data
+            row_data = row.copy()
+            row_data["rel"] = rel
+
+            if is_nested:
+                self._insert_rows(conn, [row_data])
+            else:
+                with conn:
+                    self._insert_rows(conn, [row_data])
+        finally:
+            if not is_nested:
+                conn.close()
 
     def remove_rows(self, rels: Iterable[str]) -> None:
-        """Drop any index rows whose ``rel`` key matches *rels*.
-
-        The helper loads the existing payload once, filters out the requested
-        entries, and rewrites the file atomically.  This mirrors the behaviour
-        of :meth:`write_rows` so concurrent processes never observe a partially
-        written ``index.jsonl`` file.
-        """
-
-        removable = {Path(rel).as_posix() for rel in rels}
+        """Drop any index rows whose ``rel`` key matches *rels*."""
+        removable = list(rels)
         if not removable:
             return
 
-        if self._pending_transaction and self._batch_cache is not None:
-            for rel_key in removable:
-                self._batch_cache.pop(rel_key, None)
-        else:
-            remaining: List[Dict[str, object]] = []
-            removed_any = False
-            for row in self.read_all():
-                rel_key = Path(str(row.get("rel", ""))).as_posix()
-                if rel_key in removable:
-                    removed_any = True
-                    continue
-                remaining.append(row)
+        conn = self._get_conn()
+        is_nested = (conn == self._conn)
 
-            # Rewrite the file only when something actually changed.  Skipping the
-            # write keeps the lock duration short if the target rows were absent.
-            if not removed_any:
-                return
+        try:
+            placeholders = ", ".join(["?"] * len(removable))
+            query = f"DELETE FROM assets WHERE rel IN ({placeholders})"
 
-            self.write_rows(remaining)
+            if is_nested:
+                conn.execute(query, removable)
+            else:
+                with conn:
+                    conn.execute(query, removable)
+        finally:
+            if not is_nested:
+                conn.close()
 
-    def append_rows(self, rows: Iterable[Dict[str, object]]) -> None:
-        """Merge *rows* into the index, replacing duplicates by ``rel`` key.
+    def append_rows(self, rows: Iterable[Dict[str, Any]]) -> None:
+        """Merge *rows* into the index, replacing duplicates by ``rel`` key."""
+        conn = self._get_conn()
+        is_nested = (conn == self._conn)
 
-        Appending new entries requires keeping existing rows intact.  The
-        implementation reads the current snapshot once, merges the incoming
-        payload, and relies on :meth:`write_rows` to persist the result using an
-        atomic rename so interrupted writes cannot corrupt the cache.
-        """
+        try:
+            if is_nested:
+                self._insert_rows(conn, rows)
+            else:
+                with conn:
+                    self._insert_rows(conn, rows)
+        finally:
+            if not is_nested:
+                conn.close()
 
-        additions = list(rows)
-        if not additions:
-            return
+    def count(self) -> int:
+        """Return the total number of assets in the index."""
+        conn = self._get_conn()
+        should_close = (conn != self._conn)
 
-        if self._pending_transaction and self._batch_cache is not None:
-            for row in additions:
-                rel_value = row.get("rel")
-                if rel_value is None:
-                    continue
-                rel_key = Path(str(rel_value)).as_posix()
-                self._batch_cache[rel_key] = row
-        else:
-            merged: Dict[str, Dict[str, object]] = {}
-            for row in self.read_all():
-                rel_key = Path(str(row.get("rel", ""))).as_posix()
-                merged[rel_key] = row
-
-            changed = False
-            for row in additions:
-                rel_value = row.get("rel")
-                if rel_value is None:
-                    continue
-                rel_key = Path(str(rel_value)).as_posix()
-                existing = merged.get(rel_key)
-                if existing != row:
-                    changed = True
-                merged[rel_key] = row
-
-            if not changed:
-                return
-
-            self.write_rows(merged.values())
+        try:
+            cursor = conn.execute("SELECT COUNT(*) FROM assets")
+            result = cursor.fetchone()
+            return result[0] if result else 0
+        finally:
+            if should_close:
+                conn.close()

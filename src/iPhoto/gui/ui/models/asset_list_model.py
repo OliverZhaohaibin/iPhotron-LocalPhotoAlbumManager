@@ -495,6 +495,7 @@ class AssetListModel(QAbstractListModel):
         self.loadFinished.emit(root, False)
 
         self._pending_chunks_buffer = []
+        self._flush_timer.stop()
         self._pending_loader_root = None
 
         should_restart = self._state_manager.consume_pending_reload(self._album_root, root)

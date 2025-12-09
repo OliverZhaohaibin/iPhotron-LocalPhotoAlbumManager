@@ -103,7 +103,10 @@ def build_asset_entry(
     if not rel:
         return None
 
+    # Performance optimization: use string concatenation instead of path.resolve()
+    # to avoid disk I/O. We assume root is absolute.
     abs_path = str(root / rel)
+
     is_image, is_video = classify_media(row)
     is_pano = _is_panorama_candidate(row, is_image)
 
@@ -275,6 +278,7 @@ class AssetLoaderWorker(QRunnable):
 
         total = 0
         total_calculated = False
+        first_batch_emitted = False
 
         for position, row in enumerate(generator, start=1):
             if self._is_cancelled:
@@ -290,12 +294,12 @@ class AssetLoaderWorker(QRunnable):
                 chunk.append(entry)
 
             # Determine emission
-            is_first_batch = position <= first_chunk_size
             should_flush = False
 
-            if is_first_batch:
+            if not first_batch_emitted:
                 if len(chunk) >= first_chunk_size:
                     should_flush = True
+                    first_batch_emitted = True
             elif len(chunk) >= normal_chunk_size:
                 should_flush = True
 

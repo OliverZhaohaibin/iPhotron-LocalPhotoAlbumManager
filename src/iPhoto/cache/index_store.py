@@ -38,9 +38,12 @@ class IndexStore:
     def _init_db(self) -> None:
         """Initialize the database schema."""
         # Use a transient connection for initialization
-        with sqlite3.connect(self.path) as conn:
+        with sqlite3.connect(self.path, timeout=10.0) as conn:
             # Enable Write-Ahead Logging for concurrency and performance
-            conn.execute("PRAGMA journal_mode=WAL;")
+            try:
+                conn.execute("PRAGMA journal_mode=WAL;")
+            except sqlite3.OperationalError:
+                pass
             conn.execute("PRAGMA synchronous=NORMAL;")
 
             conn.execute("""

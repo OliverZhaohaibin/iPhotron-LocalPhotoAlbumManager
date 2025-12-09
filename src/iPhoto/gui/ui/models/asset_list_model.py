@@ -80,6 +80,7 @@ class AssetListModel(QAbstractListModel):
         self._flush_timer.setSingleShot(True)
         self._flush_timer.timeout.connect(self._flush_pending_chunks)
         self._is_first_chunk = True
+        self._is_flushing = False
 
         self._pending_loader_root: Optional[Path] = None
         self._deferred_incremental_refresh: Optional[Path] = None
@@ -296,6 +297,7 @@ class AssetListModel(QAbstractListModel):
 
         self._pending_chunks_buffer = []
         self._flush_timer.stop()
+        self._is_flushing = False
 
         self.beginResetModel()
         self._state_manager.clear_rows()
@@ -338,6 +340,7 @@ class AssetListModel(QAbstractListModel):
         self._pending_chunks_buffer = []
         self._flush_timer.stop()
         self._is_first_chunk = True
+        self._is_flushing = False
 
         self._cache_manager.clear_recently_removed()
 
@@ -390,21 +393,27 @@ class AssetListModel(QAbstractListModel):
 
     def _flush_pending_chunks(self) -> None:
         """Commit buffered chunks to the model."""
+        if self._is_flushing:
+            return
         if not self._pending_chunks_buffer:
             return
 
-        payload = self._pending_chunks_buffer
-        self._pending_chunks_buffer = []
-        self._flush_timer.stop()
+        self._is_flushing = True
+        try:
+            payload = self._pending_chunks_buffer
+            self._pending_chunks_buffer = []
+            self._flush_timer.stop()
 
-        start_row = self._state_manager.row_count()
-        end_row = start_row + len(payload) - 1
+            start_row = self._state_manager.row_count()
+            end_row = start_row + len(payload) - 1
 
-        self.beginInsertRows(QModelIndex(), start_row, end_row)
-        self._state_manager.append_chunk(payload)
-        self.endInsertRows()
+            self.beginInsertRows(QModelIndex(), start_row, end_row)
+            self._state_manager.append_chunk(payload)
+            self.endInsertRows()
 
-        self._state_manager.on_external_row_inserted(start_row, len(payload))
+            self._state_manager.on_external_row_inserted(start_row, len(payload))
+        finally:
+            self._is_flushing = False
 
     def _on_scan_chunk_ready(self, root: Path, chunk: List[Dict[str, object]]) -> None:
         """Integrate fresh rows from the scanner into the live view."""

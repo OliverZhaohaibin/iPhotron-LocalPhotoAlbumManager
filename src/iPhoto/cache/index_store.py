@@ -225,9 +225,9 @@ class IndexStore:
             # We filter for gps IS NOT NULL at the database level
             query = "SELECT * FROM assets WHERE gps IS NOT NULL"
 
-            # Use a cursor with a specific row factory
+            # Set the row factory on the connection before creating the cursor
+            conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
-            cursor.row_factory = sqlite3.Row
             cursor.execute(query)
             for row in cursor:
                 yield self._db_row_to_dict(row)

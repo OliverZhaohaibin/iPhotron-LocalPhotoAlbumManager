@@ -46,10 +46,10 @@ def _ensure_links(root: Path, rows: List[dict]) -> None:
     links_path = work_dir / "links.json"
     groups, payload = _compute_links_payload(rows)
 
-    # Even if payload matches, we must ensure the DB is synced with the live roles
-    # derived from the link structure.
-    # However, if the file exists and payload matches, it's highly likely DB is also synced
-    # unless this is a migration scenario. To be safe, we perform the sync.
+    # Always sync the DB with the live roles derived from the link structure,
+    # even if the payload matches. This ensures that in migration scenarios
+    # (where links.json exists but new DB columns for live roles have been added),
+    # the DB is updated for consistency.
 
     if links_path.exists():
         try:

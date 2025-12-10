@@ -2,6 +2,7 @@ import hashlib
 import os
 import time
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -16,7 +17,7 @@ from PySide6.QtTest import QSignalSpy
 from PySide6.QtWidgets import QApplication
 
 from src.iPhoto.config import WORK_DIR_NAME
-from src.iPhoto.gui.ui.tasks.thumbnail_loader import ThumbnailLoader, generate_cache_path
+from src.iPhoto.gui.ui.tasks.thumbnail_loader import ThumbnailLoader, generate_cache_path, safe_unlink
 from src.iPhoto.io.sidecar import save_adjustments
 
 try:
@@ -222,3 +223,115 @@ def test_thumbnail_loader_sidecar_invalidation(tmp_path: Path, qapp: QApplicatio
     new_cache_file = files[0].name
 
     assert new_cache_file != original_cache_file
+
+
+def test_thumbnail_loader_cache_validation(tmp_path: Path, qapp: QApplication) -> None:
+    """Test that _report_valid is called when cached thumbnail is still current."""
+    image_path = tmp_path / "IMG_VALID.JPG"
+    _create_image(image_path)
+    loader = ThumbnailLoader()
+    loader.reset_for_album(tmp_path)
+
+    # Initial request - generates thumbnail and caches it
+    ready_spy = QSignalSpy(loader.ready)
+    cache_written_spy = QSignalSpy(loader.cache_written)
+    validation_spy = QSignalSpy(loader._validation_success)
+
+    loader.request("IMG_VALID.JPG", image_path, QSize(512, 512), is_image=True)
+    deadline = time.monotonic() + 4.0
+    while time.monotonic() < deadline and ready_spy.count() < 1:
+        qapp.processEvents()
+        time.sleep(0.05)
+
+    assert ready_spy.count() >= 1
+    assert cache_written_spy.count() >= 1
+
+    # Second request - file hasn't changed, cache should be valid
+    # Should emit _validation_success and NOT emit cache_written
+    cache_written_spy = QSignalSpy(loader.cache_written)
+    validation_spy = QSignalSpy(loader._validation_success)
+
+    # Request should return cached pixmap immediately
+    cached_pixmap = loader.request("IMG_VALID.JPG", image_path, QSize(512, 512), is_image=True)
+    assert cached_pixmap is not None, "Cached pixmap should be returned immediately"
+
+    # Wait for validation signal to be emitted from background job
+    deadline = time.monotonic() + 4.0
+    while time.monotonic() < deadline and validation_spy.count() < 1:
+        qapp.processEvents()
+        time.sleep(0.05)
+
+    # Validation success should be emitted when cache is still valid
+    assert validation_spy.count() >= 1
+    # Cache should NOT be written again since it's still valid
+    assert cache_written_spy.count() == 0
+def test_safe_unlink_successful_deletion(tmp_path: Path) -> None:
+    """Test that safe_unlink successfully deletes a file when it exists."""
+    test_file = tmp_path / "test_file.txt"
+    test_file.write_text("test content")
+    assert test_file.exists()
+    
+    safe_unlink(test_file)
+    
+    assert not test_file.exists()
+
+
+def test_safe_unlink_missing_file(tmp_path: Path) -> None:
+    """Test that safe_unlink handles missing files gracefully."""
+    test_file = tmp_path / "nonexistent_file.txt"
+    assert not test_file.exists()
+    
+    # Should not raise an exception
+    safe_unlink(test_file)
+    
+    assert not test_file.exists()
+
+
+def test_safe_unlink_permission_error(tmp_path: Path) -> None:
+    """Test that safe_unlink renames file with .stale suffix on PermissionError."""
+    test_file = tmp_path / "locked_file.txt"
+    test_file.write_text("test content")
+    assert test_file.exists()
+    
+    # Mock unlink to raise PermissionError
+    with patch.object(Path, "unlink", side_effect=PermissionError("Permission denied")):
+        safe_unlink(test_file)
+    
+    # Original file should not exist (renamed to .stale)
+    assert not test_file.exists()
+    # A file with .stale suffix should exist
+    stale_file = test_file.with_suffix(test_file.suffix + ".stale")
+    assert stale_file.exists()
+    # Verify the content was preserved
+    assert stale_file.read_text() == "test content"
+
+
+def test_safe_unlink_permission_error_rename_fails(tmp_path: Path) -> None:
+    """Test that safe_unlink handles OSError during rename gracefully."""
+    test_file = tmp_path / "locked_file2.txt"
+    test_file.write_text("test content")
+    assert test_file.exists()
+    
+    # Mock unlink to raise PermissionError and rename to raise OSError
+    with patch.object(Path, "unlink", side_effect=PermissionError("Permission denied")):
+        with patch.object(Path, "rename", side_effect=OSError("Cannot rename")):
+            # Should not raise an exception
+            safe_unlink(test_file)
+    
+    # File should still exist (because we mocked both operations to fail)
+    assert test_file.exists()
+
+
+def test_safe_unlink_oserror_during_unlink(tmp_path: Path) -> None:
+    """Test that safe_unlink handles OSError during unlink gracefully."""
+    test_file = tmp_path / "error_file.txt"
+    test_file.write_text("test content")
+    assert test_file.exists()
+    
+    # Mock unlink to raise a generic OSError (not PermissionError)
+    with patch.object(Path, "unlink", side_effect=OSError("Generic OS error")):
+        # Should not raise an exception
+        safe_unlink(test_file)
+    
+    # File should still exist (because we mocked unlink to fail)
+    assert test_file.exists()

@@ -661,11 +661,6 @@ class ThumbnailLoader(QObject):
         self._failures = {k for k in self._failures if k[1] != rel}
         self._missing = {k for k in self._missing if k[1] != rel}
         # Remove jobs for the invalidated rel from the pending deque to avoid zombie entries
-        if hasattr(self, "_pending_deque"):
-            self._pending_deque = deque(
-                job for job in self._pending_deque
-                if not hasattr(job, "rel") or job.rel != rel
-            )
         self._pending_deque = deque(
             (key, job) for key, job in self._pending_deque
             if key[1] != rel

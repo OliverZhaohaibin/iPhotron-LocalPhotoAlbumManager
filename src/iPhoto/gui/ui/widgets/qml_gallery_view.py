@@ -18,7 +18,7 @@ from PySide6.QtCore import (
 )
 from PySide6.QtQuickWidgets import QQuickWidget
 from PySide6.QtQuick import QQuickItem
-from PySide6.QtWidgets import QWidget, QAbstractItemView
+from PySide6.QtWidgets import QWidget, QAbstractItemView, QSizePolicy
 from PySide6.QtGui import QDragEnterEvent, QDragMoveEvent, QDropEvent
 
 from ..models.asset_list_model import AssetListModel
@@ -43,8 +43,8 @@ class QmlGalleryWidget(QQuickWidget):
         self.setResizeMode(QQuickWidget.ResizeMode.SizeRootObjectToView)
 
         self.setSizePolicy(
-            QWidget.QSizePolicy.Policy.Expanding,
-            QWidget.QSizePolicy.Policy.Expanding
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Expanding
         )
 
         self._model: Optional[QObject] = None

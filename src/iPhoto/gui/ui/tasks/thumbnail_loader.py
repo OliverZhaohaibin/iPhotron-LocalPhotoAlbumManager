@@ -142,7 +142,7 @@ class ThumbnailJob(QRunnable):
         cache_exists = False
         try:
             cache_exists = cache_path.exists()
-        except (OSError, PermissionError):
+        except OSError:
             cache_exists = False
         if cache_exists:
             image = QImage(str(cache_path))
@@ -623,11 +623,10 @@ class ThumbnailLoader(QObject):
         self._failures = {k for k in self._failures if k[1] != rel}
         self._missing = {k for k in self._missing if k[1] != rel}
         # Remove jobs for the invalidated rel from the pending deque to avoid zombie entries
-        if hasattr(self, "_pending_deque"):
-            self._pending_deque = deque(
-                (key, job) for key, job in self._pending_deque
-                if key[1] != rel
-            )
+        self._pending_deque = deque(
+            (key, job) for key, job in self._pending_deque
+            if key[1] != rel
+        )
 
         if self._album_root is not None:
             try:

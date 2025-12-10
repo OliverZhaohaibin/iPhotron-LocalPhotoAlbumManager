@@ -6,7 +6,7 @@ import sys
 import os
 from unittest.mock import MagicMock
 
-from PySide6.QtCore import QAbstractListModel, Qt, QModelIndex, QSortFilterProxyModel
+from PySide6.QtCore import QAbstractListModel, Qt, QModelIndex
 from PySide6.QtWidgets import QApplication
 
 # Ensure src is in path

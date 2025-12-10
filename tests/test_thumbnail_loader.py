@@ -142,7 +142,6 @@ def test_thumbnail_loader_cache_validation(tmp_path: Path, qapp: QApplication) -
     
     assert ready_spy.count() >= 1
     assert cache_written_spy.count() >= 1
-    initial_validation_count = validation_spy.count()
 
     # Second request - file hasn't changed, cache should be valid
     # Should emit _validation_success and NOT emit cache_written

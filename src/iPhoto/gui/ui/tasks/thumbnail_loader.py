@@ -39,6 +39,16 @@ from . import geo_utils
 
 
 def safe_unlink(path: Path) -> None:
+    """
+    Safely delete a file, handling permission errors gracefully.
+
+    Attempts to delete the file at the given path. If a PermissionError occurs,
+    the file is renamed with a ".stale" suffix instead. Other OSError exceptions
+    (such as the file not existing or being inaccessible) are ignored.
+
+    Parameters:
+        path (Path): The path to the file to be deleted.
+    """
     try:
         path.unlink(missing_ok=True)
     except PermissionError:

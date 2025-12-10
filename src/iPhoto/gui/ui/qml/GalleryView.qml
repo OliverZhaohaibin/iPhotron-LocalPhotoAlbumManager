@@ -16,6 +16,7 @@ Rectangle {
         console.log("GalleryView Loaded. AssetModel:", assetModel)
         console.log("SelectionModel:", selectionModel)
         console.log("IconPath:", iconPath)
+        console.log("GridView Count:", gridView.count)
     }
 
     signal itemClicked(var index, var modifiers)
@@ -110,7 +111,16 @@ Rectangle {
             Rectangle {
                 anchors.fill: parent
                 anchors.margins: root.cellGap / 2
-                color: "#1b1b1b"
+                color: "#333333" // Lighter placeholder for visibility
+
+                // Debug Text
+                Text {
+                    anchors.centerIn: parent
+                    text: index
+                    color: "white"
+                    font.pixelSize: 20
+                    visible: thumbImage.status !== Image.Ready
+                }
 
                 Image {
                     id: thumbImage
@@ -122,13 +132,7 @@ Rectangle {
                     smooth: true
                     mipmap: true
 
-                    opacity: 0
-                    NumberAnimation on opacity {
-                        from: 0
-                        to: 1
-                        duration: 200
-                        running: thumbImage.status === Image.Ready
-                    }
+                    // Removed opacity animation for debugging
                 }
 
                 // Selection Overlay (Active Focus Single Selection)

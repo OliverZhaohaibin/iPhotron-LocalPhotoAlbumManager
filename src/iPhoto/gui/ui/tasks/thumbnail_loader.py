@@ -629,7 +629,6 @@ class ThumbnailLoader(QObject):
                 job for job in self._pending_deque
                 if not hasattr(job, "rel") or job.rel != rel
             )
-        # Remove jobs for the invalidated rel from the pending deque to avoid zombie entries
         self._pending_deque = deque(
             (key, job) for key, job in self._pending_deque
             if key[1] != rel

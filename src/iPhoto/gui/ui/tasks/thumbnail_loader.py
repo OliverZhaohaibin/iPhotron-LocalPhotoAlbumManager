@@ -100,7 +100,7 @@ class ThumbnailJob(QRunnable):
         if loader is None:
             return
 
-        if success:
+        if success and not loaded_from_cache:
             try:
                 loader.cache_written.emit(self._cache_path)
             except AttributeError:  # pragma: no cover - dummy loader in tests

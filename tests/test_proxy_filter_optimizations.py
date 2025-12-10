@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import sys
 import os
-from unittest.mock import MagicMock
 
 from PySide6.QtCore import QAbstractListModel, Qt, QModelIndex
 from PySide6.QtWidgets import QApplication

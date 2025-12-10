@@ -30,6 +30,7 @@ class Roles(IntEnum):
     IS_PANO = Qt.UserRole + 17
     COMPOSITE = Qt.UserRole + 18
     DT_SORT = Qt.UserRole + 19
+    THUMB_URL = Qt.UserRole + 20
 
 
 def role_names(base: Dict[int, bytes] | None = None) -> Dict[int, bytes]:
@@ -57,6 +58,7 @@ def role_names(base: Dict[int, bytes] | None = None) -> Dict[int, bytes]:
             Roles.IS_PANO: b"isPano",
             Roles.COMPOSITE: b"composite",
             Roles.DT_SORT: b"dtSort",
+            Roles.THUMB_URL: b"thumbUrl",
         }
     )
     return mapping

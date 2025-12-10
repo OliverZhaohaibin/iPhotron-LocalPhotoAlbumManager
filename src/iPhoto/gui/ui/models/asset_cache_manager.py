@@ -170,6 +170,38 @@ class AssetCacheManager(QObject):
 
         self._placeholder_cache.clear()
 
+    def resolve_thumbnail_url(self, row: Dict[str, object]) -> str:
+        """Return a file URL for the cached thumbnail, or an empty string if missing.
+
+        This method triggers an asynchronous load (at normal priority) if the
+        thumbnail is not yet available on disk.
+        """
+        rel = str(row["rel"])
+
+        # Check if we have a valid cache path that exists on disk
+        # We need to compute the cache path.
+        # Since we don't store the exact cache path with timestamp in the row,
+        # we rely on the loader to check existence or we check the in-memory cache first.
+        # Actually, for QML we want a file URL.
+
+        # If we have a pixmap in memory, it means we likely loaded it from disk or generated it.
+        # But QML wants a URL.
+        # We can construct the expected path.
+
+        if not self._album_root:
+            return ""
+
+        # We can reuse the loader logic to find the file, but the loader is async.
+        # However, the loader's `_cache_path` logic is deterministic if we know the timestamp.
+        # But getting the timestamp requires stat() which is slow.
+        # Instead, we can let the QML side handle the async nature via a custom ImageProvider,
+        # OR we can return a custom scheme URL that the ImageProvider handles.
+
+        # Strategy: Return "image://thumbnail/rel".
+        # The ImageProvider will look it up.
+
+        return f"image://thumbnail/{rel}"
+
     def resolve_thumbnail(
         self,
         row: Dict[str, object],

@@ -60,4 +60,6 @@ class AssetRowAdapter:
             return bool(row.get("is_current", False))
         if role == Roles.INFO:
             return dict(row)
+        if role == Roles.THUMB_URL:
+            return self._cache_manager.resolve_thumbnail_url(row)
         return None

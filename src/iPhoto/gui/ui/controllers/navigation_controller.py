@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Literal, Optional, TYPE_CHECKING
 
 from PySide6.QtCore import QTimer
+from PySide6.QtWidgets import QMainWindow
 
 # Support both package-style and legacy ``src`` imports during GUI
 # bootstrap.
@@ -37,6 +38,7 @@ class NavigationController:
         status_bar: ChromeStatusBar,
         dialog: DialogController,
         view_controller: ViewController,
+        main_window: QMainWindow,
         playback_controller: "PlaybackController" | None = None,
     ) -> None:
         self._context = context
@@ -46,6 +48,7 @@ class NavigationController:
         self._status = status_bar
         self._dialog = dialog
         self._view_controller = view_controller
+        self._main_window = main_window
         # ``PlaybackController`` is injected lazily so the main controller can
         # finish instantiating the playback stack before wiring the navigation
         # callbacks.  When ``None`` the helper simply skips the playback reset.
@@ -277,13 +280,26 @@ class NavigationController:
         show_gallery: bool = True,
     ) -> None:
         self._reset_playback_for_gallery_navigation()
-        root = self._context.library.root()
-        if root is None:
+        target_root = self._context.library.root()
+        if target_root is None:
             self._dialog.bind_library_dialog()
             return
 
+        # Determine if we are navigating within the currently loaded physical library.
+        current_root = (
+            self._facade.current_album.root
+            if self._facade.current_album
+            else None
+        )
+        is_same_root = (
+            current_root is not None
+            and current_root.resolve() == target_root.resolve()
+        )
+
         current_static = self._static_selection
-        is_refresh = bool(current_static and current_static.casefold() == title.casefold())
+        is_refresh = bool(
+            current_static and current_static.casefold() == title.casefold()
+        )
         self._last_open_was_refresh = is_refresh
 
         if is_refresh:
@@ -306,19 +322,45 @@ class NavigationController:
         if show_gallery:
             self._view_controller.restore_default_gallery()
             self._view_controller.show_gallery_view()
-        self._asset_model.set_filter_mode(filter_mode)
-        # Aggregated collections should always present assets chronologically so
-        # that freshly captured media surfaces immediately after move/restore
-        # operations rebuild the index.  Reapplying the sort each time keeps the
-        # proxy aligned even if other workflows temporarily changed it.
-        self._asset_model.ensure_chronological_order()
+
         self._static_selection = title
-        album = self._facade.open_album(root)
-        if album is None:
-            self._static_selection = None
-            self._asset_model.set_filter_mode(None)
-            return
-        album.manifest = {**album.manifest, "title": title}
+
+        if is_same_root:
+            # --- OPTIMIZED PATH (In-Memory) ---
+            # We are staying in the same library.
+            # 1. Skip open_album() to prevent model destruction and reloading.
+            # 2. Apply the filter directly. This is the only cost incurred.
+            self._asset_model.set_filter_mode(filter_mode)
+            self._asset_model.ensure_chronological_order()
+
+            # Manually update UI state since open_album() was skipped
+            if self._facade.current_album:
+                self._facade.current_album.manifest["title"] = title
+            self._main_window.setWindowTitle(title)
+            self._sidebar.select_static_node(title)
+        else:
+            # --- STANDARD PATH (Context Switch) ---
+            # We are switching from a different physical album root or loading the library for the first time.
+            # 1. Destroy the old model FIRST.
+            # This prevents wasting CPU cycles filtering the old dataset.
+            album = self._facade.open_album(target_root)
+            if album is None:
+                self._static_selection = None
+                self._asset_model.set_filter_mode(None)
+                return
+
+            # 2. Configure the new empty model
+            self._asset_model.set_filter_mode(filter_mode)
+            # Aggregated collections should always present assets chronologically so
+            # that freshly captured media surfaces immediately after move/restore
+            # operations rebuild the index.  Reapplying the sort each time keeps the
+            # proxy aligned even if other workflows temporarily changed it.
+            self._asset_model.ensure_chronological_order()
+
+            album.manifest = {**album.manifest, "title": title}
+            self._main_window.setWindowTitle(title)
+
+        self.update_status()
 
     def consume_last_open_refresh(self) -> bool:
         """Return ``True`` if the previous :meth:`open_album` was a refresh."""

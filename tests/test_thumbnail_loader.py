@@ -151,7 +151,7 @@ def test_thumbnail_loader_cache_validation(tmp_path: Path, qapp: QApplication) -
 
     loader.request("IMG_VALID.JPG", image_path, QSize(512, 512), is_image=True)
     deadline = time.monotonic() + 4.0
-    # Wait for validation signal, but we might not get a ready signal since cache is valid
+    # Wait for validation signal; ready signal will NOT be emitted since cache is valid
     while time.monotonic() < deadline and validation_spy.count() < 1:
         qapp.processEvents()
         time.sleep(0.05)
@@ -160,5 +160,4 @@ def test_thumbnail_loader_cache_validation(tmp_path: Path, qapp: QApplication) -
     assert validation_spy.count() >= 1
     # Cache should NOT be written again since it's still valid
     assert cache_written_spy.count() == 0
-    # Ready signal may or may not be emitted depending on implementation
-    # but the key is that validation succeeded without re-rendering
+    # Ready signal is NOT emitted when job returns early via _report_valid

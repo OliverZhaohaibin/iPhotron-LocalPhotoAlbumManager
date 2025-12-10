@@ -586,6 +586,7 @@ class ThumbnailLoader(QObject):
         if pixmap.isNull():
             self._failures.add(base_key)
             self._missing.add(base_key)
+            self._missing.add(base_key)
             self._drain_queue()
             return
 

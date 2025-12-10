@@ -12,6 +12,12 @@ Rectangle {
     property int safetyMargin: 10
     property bool selectionModeActive: false
 
+    Component.onCompleted: {
+        console.log("GalleryView Loaded. AssetModel:", assetModel)
+        console.log("SelectionModel:", selectionModel)
+        console.log("IconPath:", iconPath)
+    }
+
     signal itemClicked(var index, var modifiers)
     signal itemDoubleClicked(var index)
     signal requestPreview(var index)

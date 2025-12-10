@@ -83,20 +83,36 @@ class QmlGalleryWidget(QQuickWidget):
         root_ctx.setContextProperty("iconPath", str(icon_path.resolve()).replace("\\", "/"))
 
         # Load Source
+        self.statusChanged.connect(self._on_status_changed)
         qml_path = Path(__file__).parent.parent / "qml" / "GalleryView.qml"
         self.setSource(QUrl.fromLocalFile(str(qml_path.resolve())))
 
         # Connect Signals from Root Object
+        self._connect_root_signals()
+
+    def _on_status_changed(self, status: QQuickWidget.Status) -> None:
+        if status == QQuickWidget.Status.Error:
+            for error in self.errors():
+                logger.error("QML Error: %s", error.toString())
+
+    def _connect_root_signals(self) -> None:
         root_obj = self.rootObject()
         if root_obj:
-            root_obj.itemClicked.connect(self._on_qml_item_clicked)
-            root_obj.requestPreview.connect(self._on_qml_request_preview)
-            root_obj.previewReleased.connect(self.previewReleased)
-            root_obj.previewCancelled.connect(self.previewCancelled)
-            root_obj.visibleRowsChanged.connect(self.visibleRowsChanged)
+            try:
+                root_obj.itemClicked.connect(self._on_qml_item_clicked)
+                root_obj.requestPreview.connect(self._on_qml_request_preview)
+                root_obj.previewReleased.connect(self.previewReleased)
+                root_obj.previewCancelled.connect(self.previewCancelled)
+                root_obj.visibleRowsChanged.connect(self.visibleRowsChanged)
 
-            # Sync selection mode state
-            root_obj.setSelectionMode(False) # Default
+                # Sync selection mode state
+                # Check if property exists before calling
+                if root_obj.metaObject().indexOfMethod("setSelectionMode(bool)") != -1:
+                    root_obj.setSelectionMode(False)
+            except Exception as e:
+                logger.error("Failed to connect QML signals: %s", e)
+        else:
+            logger.warning("QML Root Object is None. Status: %s", self.status())
 
     def selectionModel(self) -> QItemSelectionModel:
         """Return the selection model for controller compatibility."""

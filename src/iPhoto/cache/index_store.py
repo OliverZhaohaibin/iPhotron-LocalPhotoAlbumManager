@@ -109,8 +109,6 @@ class IndexStore:
             conn.execute("CREATE INDEX IF NOT EXISTS idx_year_month ON assets(year, month)")
             # Index for media type filtering (Photos/Videos)
             conn.execute("CREATE INDEX IF NOT EXISTS idx_media_type ON assets(media_type)")
-            # Index for optimized timeline sorting
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_timeline_optimization ON assets (year DESC, month DESC, dt DESC)")
             # 'gps' index might help if we have huge datasets, but IS NOT NULL scan is usually fast enough
             # unless we add partial index. For now, full table scan with filtering is better than loading all to Python.
 
@@ -361,7 +359,7 @@ class IndexStore:
                 query += " WHERE " + " AND ".join(where_clauses)
 
             if sort_by_date:
-                query += " ORDER BY year DESC, month DESC, dt DESC NULLS LAST, id DESC"
+                query += " ORDER BY dt DESC NULLS LAST, id DESC"
 
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()

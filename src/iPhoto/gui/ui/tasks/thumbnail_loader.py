@@ -673,7 +673,7 @@ class ThumbnailLoader(QObject):
 
         if self._album_root is not None:
             try:
-                digest = hashlib.sha1(rel.encode("utf-8")).hexdigest()
+                digest = hashlib.blake2b(rel.encode("utf-8"), digest_size=20).hexdigest()
                 thumbs_dir = self._album_root / WORK_DIR_NAME / "thumbs"
                 if thumbs_dir.exists():
                     for file_path in thumbs_dir.glob(f"{digest}_*.png"):

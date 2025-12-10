@@ -75,7 +75,7 @@ def test_proxy_optimization_flag():
 def test_set_filter_mode_optimization():
     """Verify set_filter_mode triggers the optimization flag sequence."""
 
-    app = QApplication.instance() or QApplication()
+    QApplication.instance() or QApplication()
 
     proxy = AssetFilterProxyModel()
     source = MockSourceModel(100)

@@ -133,13 +133,13 @@ def test_thumbnail_loader_cache_validation(tmp_path: Path, qapp: QApplication) -
     ready_spy = QSignalSpy(loader.ready)
     cache_written_spy = QSignalSpy(loader.cache_written)
     validation_spy = QSignalSpy(loader._validation_success)
-    
+
     loader.request("IMG_VALID.JPG", image_path, QSize(512, 512), is_image=True)
     deadline = time.monotonic() + 4.0
     while time.monotonic() < deadline and ready_spy.count() < 1:
         qapp.processEvents()
         time.sleep(0.05)
-    
+
     assert ready_spy.count() >= 1
     assert cache_written_spy.count() >= 1
 
@@ -148,7 +148,7 @@ def test_thumbnail_loader_cache_validation(tmp_path: Path, qapp: QApplication) -
     ready_spy = QSignalSpy(loader.ready)
     cache_written_spy = QSignalSpy(loader.cache_written)
     validation_spy = QSignalSpy(loader._validation_success)
-    
+
     loader.request("IMG_VALID.JPG", image_path, QSize(512, 512), is_image=True)
     deadline = time.monotonic() + 4.0
     # Wait for validation signal, but we might not get a ready signal since cache is valid

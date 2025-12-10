@@ -191,7 +191,7 @@ class ThumbnailJob(QRunnable):
                 # Use 0 as stamp for missing files, though the loader will just use the base key
                 key = loader._make_key(self._rel, self._size, 0)
                 loader._delivered.emit(key, None, self._rel)
-            except RuntimeError:
+            except RuntimeError:  # pragma: no cover - race with QObject deletion
                 # pragma: no cover - race with QObject deletion
                 pass
 

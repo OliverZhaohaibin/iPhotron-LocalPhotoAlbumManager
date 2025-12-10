@@ -188,11 +188,15 @@ def build_asset_entry(
 def compute_asset_rows(
     root: Path,
     featured: Iterable[str],
+    filter_params: Optional[Dict[str, object]] = None,
 ) -> Tuple[List[Dict[str, object]], int]:
     ensure_work_dir(root, WORK_DIR_NAME)
 
     store = IndexStore(root)
-    index_rows = list(store.read_all(sort_by_date=True, filter_hidden=True))
+    index_rows = list(store.read_geometry_only(
+        filter_params=filter_params,
+        sort_by_date=True
+    ))
     featured_set = normalize_featured(featured)
 
     entries: List[Dict[str, object]] = []

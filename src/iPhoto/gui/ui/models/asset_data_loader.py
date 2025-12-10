@@ -45,6 +45,7 @@ class AssetDataLoader(QObject):
         self,
         root: Path,
         featured: List[Dict[str, object]],
+        filter_params: Optional[Dict[str, object]] = None,
     ) -> Optional[Tuple[List[Dict[str, object]], int]]:
         """Return cached rows for *root* when the index file remains lightweight.
 
@@ -58,7 +59,7 @@ class AssetDataLoader(QObject):
 
         try:
             # We use row count from SQLite instead of file size.
-            count = IndexStore(root).count(filter_hidden=True)
+            count = IndexStore(root).count(filter_hidden=True, filter_params=filter_params)
         except Exception:
             count = 0
 
@@ -66,7 +67,7 @@ class AssetDataLoader(QObject):
             return None
 
         try:
-            rows, total = self.compute_rows(root, featured)
+            rows, total = self.compute_rows(root, featured, filter_params=filter_params)
         except Exception as exc:  # pragma: no cover - surfaced via GUI
             message = str(exc)
 
@@ -133,6 +134,7 @@ class AssetDataLoader(QObject):
         self,
         root: Path,
         featured: List[Dict[str, object]],
+        filter_params: Optional[Dict[str, object]] = None,
     ) -> Tuple[List[Dict[str, object]], int]:
         """Synchronously compute asset rows for *root*.
 
@@ -141,7 +143,7 @@ class AssetDataLoader(QObject):
         what :class:`AssetLoaderWorker` performs in the background.
         """
 
-        return compute_asset_rows(root, featured)
+        return compute_asset_rows(root, featured, filter_params=filter_params)
 
     def _handle_chunk_ready(self, root: Path, chunk: List[Dict[str, object]]) -> None:
         """Relay chunk notifications from the worker."""

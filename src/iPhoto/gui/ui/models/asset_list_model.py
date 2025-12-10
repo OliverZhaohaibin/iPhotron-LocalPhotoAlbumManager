@@ -671,8 +671,12 @@ class AssetListModel(QAbstractListModel):
         manifest = self._facade.current_album.manifest if self._facade.current_album else {}
         featured = manifest.get("featured", []) or []
 
+        filter_params = {}
+        if self._active_filter:
+            filter_params["filter_mode"] = self._active_filter
+
         try:
-            fresh_rows, _ = self._data_loader.compute_rows(root, featured)
+            fresh_rows, _ = self._data_loader.compute_rows(root, featured, filter_params=filter_params)
         except Exception as exc:  # pragma: no cover - surfaced via GUI
             logger.error(
                 "AssetListModel: incremental refresh for %s failed: %s", root, exc

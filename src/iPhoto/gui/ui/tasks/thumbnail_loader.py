@@ -45,8 +45,10 @@ def safe_unlink(path: Path) -> None:
         try:
             path.rename(path.with_suffix(path.suffix + ".stale"))
         except OSError:
+            # Ignore errors when renaming; file may be locked or already deleted.
             pass
     except OSError:
+        # Ignore errors when unlinking; file may not exist or be inaccessible.
         pass
 
 
@@ -95,7 +97,7 @@ class ThumbnailJob(QRunnable):
         # 1. Stat the file to get actual timestamp
         try:
             stat_result = self._abs_path.stat()
-        except FileNotFoundError:
+        except OSError:
             self._handle_missing()
             return
 
@@ -105,15 +107,18 @@ class ThumbnailJob(QRunnable):
 
         # Check sidecar
         sidecar_path = sidecar.sidecar_path_for_asset(self._abs_path)
-        if sidecar_path.exists():
-            try:
-                sidecar_stat = sidecar_path.stat()
-                sidecar_ns = getattr(sidecar_stat, "st_mtime_ns", None)
-                if sidecar_ns is None:
-                    sidecar_ns = int(sidecar_stat.st_mtime * 1_000_000_000)
-                stamp_ns = max(stamp_ns, sidecar_ns)
-            except OSError:
-                pass
+        try:
+            if sidecar_path.exists():
+                try:
+                    sidecar_stat = sidecar_path.stat()
+                    sidecar_ns = getattr(sidecar_stat, "st_mtime_ns", None)
+                    if sidecar_ns is None:
+                        sidecar_ns = int(sidecar_stat.st_mtime * 1_000_000_000)
+                    stamp_ns = max(stamp_ns, sidecar_ns)
+                except OSError:
+                    pass
+        except OSError:
+            pass
 
         actual_stamp = int(stamp_ns)
 
@@ -134,7 +139,11 @@ class ThumbnailJob(QRunnable):
         image: Optional[QImage] = None
         loaded_from_cache = False
 
-        if cache_path.exists():
+        try:
+            cache_exists = cache_path.exists()
+        except OSError:
+            cache_exists = False
+        if cache_exists:
             image = QImage(str(cache_path))
             if not image.isNull():
                 loaded_from_cache = True
@@ -162,7 +171,8 @@ class ThumbnailJob(QRunnable):
                 loader.cache_written.emit(cache_path)
             except AttributeError:  # pragma: no cover - dummy loader in tests
                 pass
-            except RuntimeError:  # pragma: no cover - race with QObject deletion
+            except RuntimeError:
+                # pragma: no cover - race with QObject deletion
                 pass
 
         try:
@@ -182,6 +192,7 @@ class ThumbnailJob(QRunnable):
                 key = loader._make_key(self._rel, self._size, 0)
                 loader._delivered.emit(key, None, self._rel)
             except RuntimeError:
+                # pragma: no cover - race with QObject deletion
                 pass
 
     def _report_valid(self, stamp: int) -> None:
@@ -191,8 +202,10 @@ class ThumbnailJob(QRunnable):
             try:
                 loader._validation_success.emit(loader._make_key(self._rel, self._size, stamp))
             except RuntimeError:
+                # pragma: no cover - race with QObject deletion
                 pass
             except AttributeError:
+                # The loader may have been deleted or not fully initialized; safe to ignore.
                 pass
 
     def _render_media(self) -> Optional[QImage]:  # pragma: no cover - worker helper
@@ -503,7 +516,7 @@ class ThumbnailLoader(QObject):
             return retval
 
         if base_key in self._failures:
-            return retval
+            return None
 
         job = ThumbnailJob(
             self,
@@ -530,7 +543,7 @@ class ThumbnailLoader(QObject):
         while self._active_jobs_count < self._max_active_jobs and self._pending_deque:
             key, job = self._pending_deque.pop() # LIFO
             if key not in self._pending_keys:
-                 continue
+                continue
 
             self._start_job(job, key)
 
@@ -571,6 +584,7 @@ class ThumbnailLoader(QObject):
         pixmap = QPixmap.fromImage(image)
         if pixmap.isNull():
             self._failures.add(base_key)
+            self._missing.add(base_key)
             self._drain_queue()
             return
 
@@ -587,9 +601,7 @@ class ThumbnailLoader(QObject):
         self._pending_keys.discard(base_key)
         self._drain_queue()
 
-    @staticmethod
-    def _safe_unlink(path: Path) -> None:
-        safe_unlink(path)
+
 
     def invalidate(self, rel: str) -> None:
         if self._album_root is None:
@@ -603,13 +615,17 @@ class ThumbnailLoader(QObject):
                 stamp, pixmap = entry
                 del pixmap
                 _, _, width, height = k
-                size = QSize(width, height)
-                path = generate_cache_path(self._album_root, rel, size, stamp)
+                path = generate_cache_path(self._album_root, rel, QSize(width, height), stamp)
                 safe_unlink(path)
 
         self._pending_keys = {k for k in self._pending_keys if k[1] != rel}
         self._failures = {k for k in self._failures if k[1] != rel}
         self._missing = {k for k in self._missing if k[1] != rel}
+        # Remove jobs for the invalidated rel from the pending deque to avoid zombie entries
+        self._pending_deque = deque(
+            (key, job) for key, job in self._pending_deque
+            if key[1] != rel
+        )
 
         if self._album_root is not None:
             try:

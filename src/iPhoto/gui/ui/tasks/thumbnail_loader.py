@@ -38,6 +38,18 @@ from .video_frame_grabber import grab_video_frame
 from . import geo_utils
 
 
+def safe_unlink(path: Path) -> None:
+    try:
+        path.unlink(missing_ok=True)
+    except PermissionError:
+        try:
+            path.rename(path.with_suffix(path.suffix + ".stale"))
+        except OSError:
+            pass
+    except OSError:
+        pass
+
+
 class ThumbnailJob(QRunnable):
     """Background task that renders a thumbnail ``QImage``."""
 
@@ -47,8 +59,8 @@ class ThumbnailJob(QRunnable):
         rel: str,
         abs_path: Path,
         size: QSize,
-        stamp: int,
-        cache_path: Path,
+        known_stamp: Optional[int],
+        album_root: Path,
         *,
         is_image: bool,
         is_video: bool,
@@ -60,8 +72,8 @@ class ThumbnailJob(QRunnable):
         self._rel = rel
         self._abs_path = abs_path
         self._size = size
-        self._stamp = stamp
-        self._cache_path = cache_path
+        self._known_stamp = known_stamp
+        self._album_root = album_root
         self._is_image = is_image
         self._is_video = is_video
         self._still_image_time = still_image_time
@@ -74,15 +86,54 @@ class ThumbnailJob(QRunnable):
             if mem.percent > 80.0:
                  time.sleep(0.5)
 
+        # 1. Stat the file to get actual timestamp
+        try:
+            stat_result = self._abs_path.stat()
+        except FileNotFoundError:
+            self._handle_missing()
+            return
+
+        stamp_ns = getattr(stat_result, "st_mtime_ns", None)
+        if stamp_ns is None:
+            stamp_ns = int(stat_result.st_mtime * 1_000_000_000)
+
+        # Check sidecar
+        sidecar_path = sidecar.sidecar_path_for_asset(self._abs_path)
+        if sidecar_path.exists():
+            try:
+                sidecar_stat = sidecar_path.stat()
+                sidecar_ns = getattr(sidecar_stat, "st_mtime_ns", None)
+                if sidecar_ns is None:
+                    sidecar_ns = int(sidecar_stat.st_mtime * 1_000_000_000)
+                stamp_ns = max(stamp_ns, sidecar_ns)
+            except OSError:
+                pass
+
+        actual_stamp = int(stamp_ns)
+
+        # 2. Validation
+        if self._known_stamp is not None:
+            if self._known_stamp == actual_stamp:
+                # Cache is valid, remove from pending jobs and exit
+                self._report_valid(actual_stamp)
+                return
+            else:
+                # Stale cache detected. Remove old file.
+                old_path = self._generate_cache_path(self._known_stamp)
+                safe_unlink(old_path)
+
+        # 3. Calculate Cache Path
+        cache_path = self._generate_cache_path(actual_stamp)
+
         image: Optional[QImage] = None
         loaded_from_cache = False
 
-        if self._cache_path.exists():
-            image = QImage(str(self._cache_path))
+        if cache_path.exists():
+            image = QImage(str(cache_path))
             if not image.isNull():
                 loaded_from_cache = True
             else:
-                ThumbnailLoader._safe_unlink(self._cache_path)
+                safe_unlink(cache_path)
                 image = None
 
         if image is None:
@@ -91,7 +142,7 @@ class ThumbnailJob(QRunnable):
         success = False
         if image is not None:
             if not loaded_from_cache:
-                success = self._write_cache(image)
+                success = self._write_cache(image, cache_path)
             else:
                 # Cache hit, so it's already written.
                 success = True
@@ -102,7 +153,7 @@ class ThumbnailJob(QRunnable):
 
         if success and not loaded_from_cache:
             try:
-                loader.cache_written.emit(self._cache_path)
+                loader.cache_written.emit(cache_path)
             except AttributeError:  # pragma: no cover - dummy loader in tests
                 pass
             except RuntimeError:  # pragma: no cover - race with QObject deletion
@@ -110,12 +161,38 @@ class ThumbnailJob(QRunnable):
 
         try:
             loader._delivered.emit(
-                loader._make_key(self._rel, self._size, self._stamp),
+                loader._make_key(self._rel, self._size, actual_stamp),
                 image,
                 self._rel,
             )
         except RuntimeError:  # pragma: no cover - race with QObject deletion
             pass
+
+    def _handle_missing(self) -> None:
+        loader = getattr(self, "_loader", None)
+        if loader:
+            try:
+                # Use 0 as stamp for missing files, though the loader will just use the base key
+                key = loader._make_key(self._rel, self._size, 0)
+                loader._delivered.emit(key, None, self._rel)
+            except RuntimeError:
+                pass
+
+    def _report_valid(self, stamp: int) -> None:
+        """Inform the loader that the existing cache is still valid."""
+        loader = getattr(self, "_loader", None)
+        if loader:
+            try:
+                loader._validation_success.emit(loader._make_key(self._rel, self._size, stamp))
+            except RuntimeError:
+                pass
+            except AttributeError:
+                pass
+
+    def _generate_cache_path(self, stamp: int) -> Path:
+        digest = hashlib.sha1(self._rel.encode("utf-8")).hexdigest()
+        filename = f"{digest}_{stamp}_{self._size.width()}x{self._size.height()}.png"
+        return self._album_root / WORK_DIR_NAME / "thumbs" / filename
 
     def _render_media(self) -> Optional[QImage]:  # pragma: no cover - worker helper
         if self._is_video:
@@ -135,7 +212,6 @@ class ThumbnailJob(QRunnable):
             color_stats=stats,
         )
         
-        # Apply crop before other adjustments and scaling
         if adjustments:
             image = self._apply_geometry_and_crop(image, adjustments)
             if image is None:
@@ -153,7 +229,6 @@ class ThumbnailJob(QRunnable):
         if image is None:
             return None
 
-        # Video thumbnails should also respect edits
         raw_adjustments = sidecar.load_adjustments(self._abs_path)
         stats = compute_color_statistics(image) if raw_adjustments else None
         adjustments = sidecar.resolve_render_adjustments(
@@ -170,10 +245,6 @@ class ThumbnailJob(QRunnable):
         return self._composite_canvas(image)
 
     def _apply_geometry_and_crop(self, image: QImage, adjustments: Dict[str, float]) -> Optional[QImage]:
-        """Apply geometric transformations (rotation, perspective, straighten) and crop.
-        
-        This method replicates the visual result of the OpenGL viewer on the CPU.
-        """
         rotate_steps = int(adjustments.get("Crop_Rotate90", 0))
         flip_h = bool(adjustments.get("Crop_FlipH", False))
         straighten = float(adjustments.get("Crop_Straighten", 0.0))
@@ -187,103 +258,70 @@ class ThumbnailJob(QRunnable):
             float(adjustments.get("Crop_H", 1.0))
         )
         
-        # Convert texture space crop to logical space (accounting for 90-degree rotations)
         log_cx, log_cy, log_w, log_h = geo_utils.texture_crop_to_logical(tex_crop, rotate_steps)
         
         w, h = image.width(), image.height()
 
-        # If no significant geometry changes and full crop, return original
         if (rotate_steps == 0 and not flip_h and abs(straighten) < 1e-5 and
             abs(p_vert) < 1e-5 and abs(p_horz) < 1e-5 and
             log_w >= 0.999 and log_h >= 0.999):
             return image
 
-        # Calculate logical aspect ratio for perspective matrix
         if rotate_steps % 2 == 1:
             logical_aspect = float(h) / float(w) if w > 0 else 1.0
         else:
             logical_aspect = float(w) / float(h) if h > 0 else 1.0
 
-        # Build perspective matrix (Inverse: Projected -> Texture)
         matrix_inv = geo_utils.build_perspective_matrix(
             vertical=p_vert,
             horizontal=p_horz,
             image_aspect_ratio=logical_aspect,
             straighten_degrees=straighten,
-            rotate_steps=0, # Rotation handled separately via QTransform
+            rotate_steps=0,
             flip_horizontal=flip_h
         )
 
-        # We need the Forward matrix (Texture -> Projected)
         try:
             matrix = np.linalg.inv(matrix_inv)
         except np.linalg.LinAlgError:
             matrix = np.identity(3)
 
-        # Convert to QTransform
-        # QTransform expects elements in a specific order that corresponds to
-        # the transpose of the standard matrix math convention used by numpy.
-        # h11=m00, h12=m10, h13=m20
-        # h21=m01, h22=m11, h23=m21
-        # h31=m02, h32=m12, h33=m22
         qt_perspective = QTransform(
             matrix[0, 0], matrix[1, 0], matrix[2, 0],
             matrix[0, 1], matrix[1, 1], matrix[2, 1],
             matrix[0, 2], matrix[1, 2], matrix[2, 2]
         )
         
-        # Construct transformation chain
-        # 1. Normalize Pixels -> [0, 1]
         t_to_norm = QTransform().scale(1.0 / w, 1.0 / h)
         
-        # 2. Apply 90-degree Rotation Steps around center (0.5, 0.5)
-        # QTransform methods pre-multiply (apply to left), so we build in reverse order of application.
-        # Desired: T(-0.5) * R * T(0.5) (applied to point p: p * T(-0.5) * R * T(0.5))
-        # Construction: T(0.5).rotate().translate(-0.5)
         t_rot = QTransform()
         t_rot.translate(0.5, 0.5)
         t_rot.rotate(rotate_steps * 90)
         t_rot.translate(-0.5, -0.5)
         
-        # 3. Normalize to [-1, 1] for Perspective Matrix
-        # Desired: p * S(2) * T(-1) = 2p - 1.
-        # QTransform builder applies operations in reverse (First().Second() -> Second * First).
-        # We want S * T matrix. So T().S().
         t_to_ndc = QTransform().translate(-1.0, -1.0).scale(2.0, 2.0)
-        
-        # 4. Denormalize from [-1, 1] to [0, 1]
-        # Desired: p * S(0.5) * T(0.5) = 0.5p + 0.5.
-        # Call Order: T(0.5).S(0.5).
         t_from_ndc = QTransform().translate(0.5, 0.5).scale(0.5, 0.5)
         
-        # 5. Scale to Logical Pixels
         log_w_px = h if rotate_steps % 2 else w
         log_h_px = w if rotate_steps % 2 else h
         t_to_pixels = QTransform().scale(log_w_px, log_h_px)
 
-        # Compose full transform:
-        # Texture -> Norm -> Rotated -> NDC -> Perspective -> NDC -> Norm -> Pixels
         transform = t_to_norm * t_rot * t_to_ndc * qt_perspective * t_from_ndc * t_to_pixels
 
-        # Calculate crop rectangle in Logical Pixels
         crop_x_px = log_cx * log_w_px - (log_w * log_w_px * 0.5)
         crop_y_px = log_cy * log_h_px - (log_h * log_h_px * 0.5)
         crop_w_px = log_w * log_w_px
         crop_h_px = log_h * log_h_px
 
-        # Shift so crop top-left is at (0, 0)
         t_final = transform * QTransform().translate(-crop_x_px, -crop_y_px)
 
-        # Determine output size
         out_w = max(1, int(round(crop_w_px)))
         out_h = max(1, int(round(crop_h_px)))
 
-        # Render
         result_img = QImage(out_w, out_h, QImage.Format.Format_ARGB32_Premultiplied)
         result_img.fill(Qt.transparent)
 
         painter = QPainter(result_img)
-        # Use high quality rendering
         painter.setRenderHint(QPainter.Antialiasing)
         painter.setRenderHint(QPainter.SmoothPixmapTransform)
 
@@ -294,8 +332,6 @@ class ThumbnailJob(QRunnable):
         return result_img
 
     def _seek_targets(self) -> list[Optional[float]]:
-        """Return seek offsets for video thumbnails with guard rails."""
-
         if not self._is_video:
             return [None]
 
@@ -355,14 +391,14 @@ class ThumbnailJob(QRunnable):
         painter.end()
         return canvas
 
-    def _write_cache(self, canvas: QImage) -> bool:  # pragma: no cover - worker helper
+    def _write_cache(self, canvas: QImage, path: Path) -> bool:  # pragma: no cover - worker helper
         try:
-            self._cache_path.parent.mkdir(parents=True, exist_ok=True)
-            tmp_path = self._cache_path.with_suffix(self._cache_path.suffix + ".tmp")
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp_path = path.with_suffix(path.suffix + ".tmp")
             if canvas.save(str(tmp_path), "PNG"):
-                ThumbnailLoader._safe_unlink(self._cache_path)
+                safe_unlink(path)
                 try:
-                    tmp_path.replace(self._cache_path)
+                    tmp_path.replace(path)
                     return True
                 except OSError:
                     tmp_path.unlink(missing_ok=True)
@@ -376,17 +412,12 @@ class ThumbnailJob(QRunnable):
 class ThumbnailLoader(QObject):
     """Asynchronous thumbnail renderer with disk and memory caching."""
 
-    # ``Path`` is used for the album root argument to keep the public signal in
-    # sync with slots that expect :class:`Path` instances.  This mirrors the
-    # rest of the GUI layer and prevents Nuitka from flagging the connection as
-    # type-unsafe during compilation.
     ready = Signal(Path, str, QPixmap)
     cache_written = Signal(Path)
     _delivered = Signal(object, object, str)
+    _validation_success = Signal(object)
 
     class Priority(IntEnum):
-        """Simple priority values recognised by the loader."""
-
         LOW = -1
         NORMAL = 0
         VISIBLE = 1
@@ -396,30 +427,28 @@ class ThumbnailLoader(QObject):
             parent = QCoreApplication.instance()
         super().__init__(parent)
         self._pool = QThreadPool.globalInstance()
-        # We still use pool logic but we manage submission ourselves for LIFO
         global_max = self._pool.maxThreadCount()
         if global_max <= 0:
             global_max = os.cpu_count() or 4
 
-        # Max concurrent jobs allowed
         self._max_active_jobs = max(1, global_max - 1)
         self._active_jobs_count = 0
 
         self._album_root: Optional[Path] = None
         self._album_root_str: Optional[str] = None
-        self._memory: Dict[Tuple[str, str, int, int, int], QPixmap] = {}
 
-        # LIFO Queue: append new jobs to right, pop from right
-        self._pending_deque: deque[Tuple[Tuple[str, str, int, int, int], ThumbnailJob]] = deque()
-        self._pending_keys: Set[Tuple[str, str, int, int, int]] = set()
+        self._memory: Dict[Tuple[str, str, int, int], Tuple[int, QPixmap]] = {}
 
-        self._failures: Set[Tuple[str, str, int, int, int]] = set()
+        self._pending_deque: deque[Tuple[Tuple[str, str, int, int], ThumbnailJob]] = deque()
+        self._pending_keys: Set[Tuple[str, str, int, int]] = set()
+
+        self._failures: Set[Tuple[str, str, int, int]] = set()
         self._missing: Set[Tuple[str, str, int, int]] = set()
 
         self._delivered.connect(self._handle_result)
+        self._validation_success.connect(self._handle_validation_success)
 
     def shutdown(self) -> None:
-        """Stop background workers so the interpreter can exit cleanly."""
         self._pending_deque.clear()
         self._pending_keys.clear()
         self._pool.waitForDone()
@@ -454,90 +483,52 @@ class ThumbnailLoader(QObject):
     ) -> Optional[QPixmap]:
         if self._album_root is None or self._album_root_str is None:
             return None
+
         base_key = self._base_key(rel, size)
+
         if base_key in self._missing:
             return None
         if not is_image and not is_video:
             return None
-        try:
-            stat_result = path.stat()
-        except FileNotFoundError:
-            self._missing.add(base_key)
-            return None
-        stamp_ns = getattr(stat_result, "st_mtime_ns", None)
-        if stamp_ns is None:
-            stamp_ns = int(stat_result.st_mtime * 1_000_000_000)
 
-        # Ensure that edits stored in sidecar files trigger a cache refresh by
-        # mixing the sidecar timestamp into the cache key.
-        sidecar_path = sidecar.sidecar_path_for_asset(path)
-        if sidecar_path.exists():
-            try:
-                sidecar_stat = sidecar_path.stat()
-                sidecar_ns = getattr(sidecar_stat, "st_mtime_ns", None)
-                if sidecar_ns is None:
-                    sidecar_ns = int(sidecar_stat.st_mtime * 1_000_000_000)
-                stamp_ns = max(stamp_ns, sidecar_ns)
-            except OSError:
-                pass
+        cached_entry = self._memory.get(base_key)
+        known_stamp: Optional[int] = None
+        retval: Optional[QPixmap] = None
 
-        stamp = int(stamp_ns)
-        key = self._make_key(rel, size, stamp)
-        cached = self._memory.get(key)
-        if cached is not None:
-            return cached
-        if key in self._failures:
-            return None
-        cache_path = self._cache_path(rel, size, stamp)
+        if cached_entry:
+            known_stamp, retval = cached_entry
 
-        if key in self._pending_keys:
-            # Already pending. Since we use LIFO and want to prioritize this request,
-            # we could move it to the end of the deque.
-            # For simplicity, we just leave it where it is, or we could optimize later.
-            # To be strictly LIFO for re-requests, we should move it.
-            self._promote_pending_job(key)
-            return None
+        if base_key in self._pending_keys:
+            return retval
+
+        if base_key in self._failures:
+            return retval
 
         job = ThumbnailJob(
             self,
             rel,
             path,
             size,
-            stamp,
-            cache_path,
+            known_stamp,
+            self._album_root,
             is_image=is_image,
             is_video=is_video,
             still_image_time=still_image_time,
             duration=duration,
         )
 
-        self._schedule_job(key, job)
-        return None
+        self._schedule_job(base_key, job)
+        return retval
 
-    def _schedule_job(self, key: Tuple[str, str, int, int, int], job: ThumbnailJob) -> None:
+    def _schedule_job(self, key: Tuple[str, str, int, int], job: ThumbnailJob) -> None:
         self._pending_deque.append((key, job))
         self._pending_keys.add(key)
         self._drain_queue()
 
-    def _promote_pending_job(self, key: Tuple[str, str, int, int, int]) -> None:
-        # Move job to right end of deque
-        try:
-            # Locate and remove
-            # This is O(N), but queue shouldn't be massive in typical usage or we rely on scroll speed
-            # Optimization: could use a dict to map key -> deque index, but deque doesn't support random access well
-            # or remove.
-            # Simple approach: rebuild deque? No, too slow.
-            # Given Python deque rotate/remove is O(N), we might just skip this for now
-            # or do a lazy delete marker.
-            pass
-        except ValueError:
-            pass
-
     def _drain_queue(self) -> None:
         while self._active_jobs_count < self._max_active_jobs and self._pending_deque:
-            key, job = self._pending_deque.pop() # LIFO: pop from right
+            key, job = self._pending_deque.pop() # LIFO
             if key not in self._pending_keys:
-                 # Was cancelled or handled
                  continue
 
             self._start_job(job, key)
@@ -545,15 +536,10 @@ class ThumbnailLoader(QObject):
     def _start_job(
         self,
         job: ThumbnailJob,
-        key: Tuple[str, str, int, int, int],
+        key: Tuple[str, str, int, int],
     ) -> None:
         self._active_jobs_count += 1
-        # _pending_keys includes running jobs in original code?
-        # In original code _pending set included running.
-        # Here _pending_keys tracks jobs we know about (queued or running).
-        # We keep it in _pending_keys until finished.
         self._pool.start(job)
-
 
     def _base_key(self, rel: str, size: QSize) -> Tuple[str, str, int, int]:
         assert self._album_root_str is not None
@@ -563,102 +549,75 @@ class ThumbnailLoader(QObject):
         base = self._base_key(rel, size)
         return (*base, stamp)
 
-    def _cache_path(self, rel: str, size: QSize, stamp: int) -> Path:
-        assert self._album_root is not None
-        digest = hashlib.sha1(rel.encode("utf-8")).hexdigest()
-        filename = f"{digest}_{stamp}_{size.width()}x{size.height()}.png"
-        return self._album_root / WORK_DIR_NAME / "thumbs" / filename
-
     def _handle_result(
         self,
-        key: Tuple[str, str, int, int, int],
+        full_key: Tuple[str, str, int, int, int],
         image: Optional[QImage],
         rel: str,
     ) -> None:
+        base_key = full_key[:-1]
+        stamp = full_key[-1]
+
         self._active_jobs_count = max(0, self._active_jobs_count - 1)
-        self._pending_keys.discard(key)
+        self._pending_keys.discard(base_key)
 
         if image is None:
-            self._failures.add(key)
+            self._failures.add(base_key)
+            self._missing.add(base_key)
             self._drain_queue()
             return
+
         pixmap = QPixmap.fromImage(image)
         if pixmap.isNull():
-            self._failures.add(key)
+            self._failures.add(base_key)
             self._drain_queue()
             return
-        base = key[:-1]
-        obsolete = [existing for existing in self._memory if existing[:-1] == base and existing != key]
-        for existing in obsolete:
-            self._memory.pop(existing, None)
-            if self._album_root is not None:
-                _, _, width, height, stale_stamp = existing
-                stale_size = QSize(width, height)
-                stale_path = self._cache_path(rel, stale_size, stale_stamp)
-                self._safe_unlink(stale_path)
-        self._memory[key] = pixmap
+
+        self._memory[base_key] = (stamp, pixmap)
+
         if self._album_root is not None:
             self.ready.emit(self._album_root, rel, pixmap)
+
+        self._drain_queue()
+
+    def _handle_validation_success(self, full_key: Tuple[str, str, int, int, int]) -> None:
+        base_key = full_key[:-1]
+        self._active_jobs_count = max(0, self._active_jobs_count - 1)
+        self._pending_keys.discard(base_key)
         self._drain_queue()
 
     @staticmethod
     def _safe_unlink(path: Path) -> None:
-        try:
-            path.unlink(missing_ok=True)
-        except PermissionError:
-            try:
-                path.rename(path.with_suffix(path.suffix + ".stale"))
-            except OSError:
-                pass
-        except OSError:
-            pass
+        safe_unlink(path)
 
-    # ------------------------------------------------------------------
     def invalidate(self, rel: str) -> None:
-        """Remove cached thumbnails associated with *rel*."""
-
         if self._album_root is None:
             return
-        to_remove = [key for key in self._memory if key[1] == rel]
-        for key in to_remove:
-            pixmap = self._memory.pop(key, None)
-            if pixmap is not None:
+
+        to_remove = [k for k in self._memory if k[1] == rel]
+
+        for k in to_remove:
+            entry = self._memory.pop(k, None)
+            if entry:
+                stamp, pixmap = entry
                 del pixmap
-            _, _, width, height, stamp = key
-            size = QSize(width, height)
-            cache_path = self._cache_path(rel, size, stamp)
-            self._safe_unlink(cache_path)
+                _, _, width, height = k
+                size = QSize(width, height)
+                digest = hashlib.sha1(rel.encode("utf-8")).hexdigest()
+                filename = f"{digest}_{stamp}_{width}x{height}.png"
+                path = self._album_root / WORK_DIR_NAME / "thumbs" / filename
+                safe_unlink(path)
 
-        # Cancel pending jobs for this rel
-        # We iterate safely by copying since we might modify
-        self._pending_keys = {key for key in self._pending_keys if key[1] != rel}
-        self._failures = {key for key in self._failures if key[1] != rel}
-        self._missing = {key for key in self._missing if key[1] != rel}
-
-        # Mark pending jobs as cancelled without removing from deque (expensive)
-        # The _drain_queue loop will filter them out by checking _pending_keys
-        # But we also need to cancel running jobs?
-        # Running jobs are not easily accessible unless we track them.
-        # But ThumbnailJob now checks _is_cancelled.
-        # We rely on invalidation being rare or not critical to stop running jobs instantly.
-        # If we really need to stop running jobs, we would need a map of key->job.
-
-        # NOTE: Original implementation had complex video queue cleanup.
-        # Our single deque makes this simpler: we just cleared the keys.
-        # _drain_queue checks keys.
+        self._pending_keys = {k for k in self._pending_keys if k[1] != rel}
+        self._failures = {k for k in self._failures if k[1] != rel}
+        self._missing = {k for k in self._missing if k[1] != rel}
 
         if self._album_root is not None:
-            # Aggressively clean up disk cache for this relative path.
-            # This ensures that even if the source file timestamp hasn't changed
-            # (e.g. only the sidecar was edited), we force a regeneration.
             try:
                 digest = hashlib.sha1(rel.encode("utf-8")).hexdigest()
                 thumbs_dir = self._album_root / WORK_DIR_NAME / "thumbs"
                 if thumbs_dir.exists():
-                    # Filename format: {digest}_{stamp}_{w}x{h}.png
                     for file_path in thumbs_dir.glob(f"{digest}_*.png"):
-                        self._safe_unlink(file_path)
+                        safe_unlink(file_path)
             except Exception:
-                # Don't let disk errors crash the UI during invalidation
                 pass
-

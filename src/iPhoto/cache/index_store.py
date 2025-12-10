@@ -288,10 +288,21 @@ class IndexStore:
                     where_clauses.append("media_type = 1")
                 elif mode == "live":
                     where_clauses.append("live_partner_rel IS NOT NULL")
-                # 'favorites' filter is handled in Python post-processing (AssetLoaderWorker)
-                # because 'featured' status is not currently indexed in the DB.
+                elif mode == "favorites":
+                    # Assumes temp_favorites table has been populated
+                    where_clauses.append("rel IN (SELECT rel FROM temp_favorites)")
 
         return where_clauses, params
+
+    def _ensure_temp_favorites(self, conn: sqlite3.Connection, featured_rels: Iterable[str]) -> None:
+        """Populate a temporary table with featured asset relationships."""
+        conn.execute("CREATE TEMP TABLE IF NOT EXISTS temp_favorites (rel TEXT PRIMARY KEY)")
+        conn.execute("DELETE FROM temp_favorites")
+        if featured_rels:
+            # Chunk inserts to avoid potential parameter limits, though bulk insert is usually safe
+            # in modern sqlite for moderate sizes.
+            data = [(r,) for r in featured_rels]
+            conn.executemany("INSERT OR IGNORE INTO temp_favorites (rel) VALUES (?)", data)
 
     def read_geometry_only(
         self,
@@ -339,6 +350,9 @@ class IndexStore:
 
             # Always filter hidden assets (live photo components) in grid view
             base_where = ["live_role = 0"]
+
+            if filter_params and filter_params.get("filter_mode") == "favorites":
+                self._ensure_temp_favorites(conn, filter_params.get("featured_rels", []))
 
             filter_where, params = self._build_filter_clauses(filter_params)
             where_clauses = base_where + filter_where
@@ -446,6 +460,9 @@ class IndexStore:
             base_where = []
             if filter_hidden:
                 base_where.append("live_role = 0")
+
+            if filter_params and filter_params.get("filter_mode") == "favorites":
+                self._ensure_temp_favorites(conn, filter_params.get("featured_rels", []))
 
             filter_where, params = self._build_filter_clauses(filter_params)
             where_clauses = base_where + filter_where

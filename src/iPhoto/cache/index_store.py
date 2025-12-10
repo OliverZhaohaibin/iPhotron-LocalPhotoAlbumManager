@@ -363,6 +363,40 @@ class IndexStore:
             if should_close:
                 conn.close()
 
+    def get_timeline_distribution(self, filter_hidden: bool = True) -> List[Dict[str, Any]]:
+        """Return the count of assets grouped by year and month.
+
+        The result is ordered by year DESC, month DESC.
+        Assets without dates appear at the end.
+        """
+        conn = self._get_conn()
+        should_close = (conn != self._conn)
+
+        try:
+            query = """
+                SELECT year, month, COUNT(*) as count
+                FROM assets
+            """
+
+            where_clauses = []
+            if filter_hidden:
+                where_clauses.append("live_role = 0")
+
+            if where_clauses:
+                query += " WHERE " + " AND ".join(where_clauses)
+
+            query += """
+                GROUP BY year, month
+                ORDER BY year DESC NULLS LAST, month DESC NULLS LAST
+            """
+
+            conn.row_factory = sqlite3.Row
+            cursor = conn.execute(query)
+            return [dict(row) for row in cursor]
+        finally:
+            if should_close:
+                conn.close()
+
     def apply_live_role_updates(self, updates: List[Tuple[str, int, Optional[str]]]) -> None:
         """Update live_role and live_partner_rel for a batch of assets.
 

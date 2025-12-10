@@ -150,13 +150,39 @@ class AssetFilterProxyModel(QSortFilterProxyModel):
         if self._filter_mode is None and not self._search_text:
             return True
 
+        source = self.sourceModel()
+        if source is None:
+            return False
+
+        # Handle virtual header rows
+        # If headers are implemented as rows, we generally want to accept them
+        # or implement logic to hide empty headers (which is expensive).
+        # For instant filtering, we accept headers.
+        # We must use index-based lookup for Roles.IS_HEADER because it's a calculated role,
+        # not stored in the fast_source dict usually (unless we update get_internal_row to handle it).
+        index = source.index(row, 0, parent)
+        if index.isValid() and bool(index.data(Roles.IS_HEADER)):
+            return True
+
         if self._fast_source is not None:
             # Bypass Qt index creation and role lookups for raw performance.
             row_data = self._fast_source.get_internal_row(row)  # type: ignore
             if row_data is None:
                 return False
-            if self._filter_mode == "videos" and not row_data["is_video"]:
-                return False
+
+            # --- OPTIMIZATION START ---
+            # Use integer comparison for media type filtering
+            if self._filter_mode == "videos":
+                # 1 = Video, 0 = Image
+                # We prioritize the integer check, but fallback to boolean if key is missing (legacy safety)
+                media_type = row_data.get("media_type")
+                if media_type is not None:
+                     if media_type != 1:
+                         return False
+                elif not row_data.get("is_video"):
+                    return False
+            # --- OPTIMIZATION END ---
+
             if self._filter_mode == "live" and not row_data["is_live"]:
                 return False
             if self._filter_mode == "favorites" and not row_data["featured"]:
@@ -170,14 +196,17 @@ class AssetFilterProxyModel(QSortFilterProxyModel):
                     return False
             return True
 
-        source = self.sourceModel()
-        if source is None:
-            return False
-        index = source.index(row, 0, parent)
+        # Fallback for standard models
         if not index.isValid():
             return False
-        if self._filter_mode == "videos" and not bool(index.data(Roles.IS_VIDEO)):
-            return False
+
+        if self._filter_mode == "videos":
+             # Try integer role if available (needs custom role mapping or direct data access)
+             # But here we are using standard Qt API.
+             # We stick to the IS_VIDEO role which should be populated correctly.
+             if not bool(index.data(Roles.IS_VIDEO)):
+                 return False
+
         if self._filter_mode == "live" and not bool(index.data(Roles.IS_LIVE)):
             return False
         if self._filter_mode == "favorites" and not bool(index.data(Roles.FEATURED)):

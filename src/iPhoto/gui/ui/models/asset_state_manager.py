@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
 
@@ -10,6 +11,14 @@ from PySide6.QtCore import QModelIndex
 if False:  # pragma: no cover - circular import guard
     from .asset_list_model import AssetListModel
     from .asset_cache_manager import AssetCacheManager
+
+
+@dataclass
+class TimelineSection:
+    year: Optional[int]
+    month: Optional[int]
+    count: int
+    start_index: int  # Virtual row index where the header sits
 
 
 class AssetListStateManager:
@@ -21,6 +30,8 @@ class AssetListStateManager:
         self._model = model
         self._cache = cache_manager
         self._rows: List[Dict[str, object]] = []
+        self._sections: List[TimelineSection] = []
+        self._virtual_row_count: int = 0
         self._row_lookup: Dict[str, int] = {}
         self._visible_rows: Set[int] = set()
         self._pending_virtual_moves: Dict[str, Tuple[int, str, bool]] = {}
@@ -57,20 +68,42 @@ class AssetListStateManager:
 
         self._visible_rows.clear()
 
-    def row_count(self) -> int:
-        """Return the number of cached rows."""
+    @property
+    def sections(self) -> List[TimelineSection]:
+        return self._sections
 
+    def row_count(self) -> int:
+        """Return the number of virtual rows (headers + assets)."""
+        if self._sections:
+            return self._virtual_row_count
         return len(self._rows)
+
+    def set_sections(self, sections: List[TimelineSection]) -> None:
+        """Initialize the model with virtual timeline sections."""
+        self._sections = sections
+        total = 0
+        for section in sections:
+            # Header row + asset rows
+            section.start_index = total
+            total += 1 + section.count
+        self._virtual_row_count = total
+        # Clear specific rows as we are entering virtual mode
+        self._rows = []
+        self._row_lookup = {}
 
     def set_rows(self, rows: List[Dict[str, object]]) -> None:
         """Replace the internal dataset with *rows* and rebuild lookups."""
 
+        self._sections = []
+        self._virtual_row_count = 0
         self._rows = rows
         self._row_lookup = {row["rel"]: index for index, row in enumerate(rows)}
 
     def clear_rows(self) -> None:
         """Remove all cached rows and transient move metadata."""
 
+        self._sections = []
+        self._virtual_row_count = 0
         self._rows = []
         self._row_lookup = {}
         self._visible_rows.clear()

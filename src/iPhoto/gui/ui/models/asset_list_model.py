@@ -24,7 +24,7 @@ from ..tasks.asset_loader_worker import (
 )
 from .asset_cache_manager import AssetCacheManager
 from .asset_data_loader import AssetDataLoader
-from .asset_state_manager import AssetListStateManager
+from .asset_state_manager import AssetListStateManager, TimelineSection
 from .asset_row_adapter import AssetRowAdapter
 from .list_diff_calculator import ListDiffCalculator
 from .roles import Roles, role_names
@@ -33,6 +33,7 @@ from ....utils.pathutils import (
     is_descendant_path,
     normalise_rel_value,
 )
+from ....cache.index_store import IndexStore
 
 if TYPE_CHECKING:  # pragma: no cover - import only for type checking
     from ...facade import AppFacade
@@ -225,10 +226,69 @@ class AssetListModel(QAbstractListModel):
         return self._state_manager.row_count()
 
     def data(self, index: QModelIndex, role: int = Qt.DisplayRole):  # type: ignore[override]
-        rows = self._state_manager.rows
-        if not index.isValid() or not (0 <= index.row() < len(rows)):
+        if not index.isValid():
             return None
-        return self._row_adapter.data(rows[index.row()], role)
+
+        row_idx = index.row()
+
+        # Virtual Timeline Mode
+        sections = self._state_manager.sections
+        if sections:
+            # Binary search or iteration to find the section
+            # Since section count is small (months * years), iteration is fine for now
+            # Optimization: Cache last accessed section
+            target_section = None
+            for section in sections:
+                if row_idx >= section.start_index and row_idx < (section.start_index + 1 + section.count):
+                    target_section = section
+                    break
+
+            if target_section:
+                local_offset = row_idx - target_section.start_index
+
+                # Header Row
+                if local_offset == 0:
+                    if role == Roles.IS_HEADER:
+                        return True
+                    if role == Roles.HEADER_TITLE:
+                        import calendar
+                        month_name = calendar.month_name[target_section.month] if target_section.month else "Unknown Date"
+                        year_str = str(target_section.year) if target_section.year else ""
+                        if target_section.month and target_section.year:
+                            return f"{month_name} {year_str}"
+                        return "Unknown Date"
+                    return None
+
+                # Asset Row (Virtual)
+                # Map virtual index to physical index in the loaded rows buffer
+                # However, the loaded rows buffer (_rows) is currently a flat list of *loaded* items.
+                # If we are in virtual mode, `_rows` might be empty or partially filled.
+                # The current `AssetLoaderWorker` loads everything sequentially.
+                # We need to map the virtual position to the physical position in the loaded buffer.
+
+                # Calculate absolute asset index (ignoring headers)
+                # This is tricky because `_rows` doesn't contain headers.
+                asset_global_index = 0
+                for section in sections:
+                    if section == target_section:
+                        asset_global_index += (local_offset - 1)
+                        break
+                    asset_global_index += section.count
+
+                rows = self._state_manager.rows
+                if 0 <= asset_global_index < len(rows):
+                    return self._row_adapter.data(rows[asset_global_index], role)
+                else:
+                    # Placeholder
+                    if role == Roles.IS_HEADER:
+                        return False
+                    return None
+
+        # Fallback to standard flat mode
+        rows = self._state_manager.rows
+        if not (0 <= row_idx < len(rows)):
+            return None
+        return self._row_adapter.data(rows[row_idx], role)
 
     def roleNames(self) -> Dict[int, bytes]:  # type: ignore[override]
         return role_names(super().roleNames())
@@ -255,6 +315,35 @@ class AssetListModel(QAbstractListModel):
 
     def get_internal_row(self, row_index: int) -> Optional[Dict[str, object]]:
         """Return the raw dictionary for *row_index* to bypass the Qt role API."""
+
+        # Handle Virtual Mode
+        sections = self._state_manager.sections
+        if sections:
+            # Locate section
+            target_section = None
+            for section in sections:
+                if row_index >= section.start_index and row_index < (section.start_index + 1 + section.count):
+                    target_section = section
+                    break
+
+            if target_section:
+                local_offset = row_index - target_section.start_index
+                if local_offset == 0:
+                    # Header row - no dict representation
+                    return None
+
+                # Map to global asset index
+                asset_global_index = 0
+                for section in sections:
+                    if section == target_section:
+                        asset_global_index += (local_offset - 1)
+                        break
+                    asset_global_index += section.count
+
+                rows = self._state_manager.rows
+                if 0 <= asset_global_index < len(rows):
+                    return rows[asset_global_index]
+                return None
 
         rows = self._state_manager.rows
         if not (0 <= row_index < len(rows)):
@@ -343,6 +432,13 @@ class AssetListModel(QAbstractListModel):
 
         self._cache_manager.clear_recently_removed()
 
+        # --- OPTIMIZATION START ---
+        # Initialize virtual sections instantly from the index database.
+        # This allows the UI to render headers and scrollbars immediately
+        # while actual assets load in the background.
+        self._populate_virtual_structure_from_index()
+        # --- OPTIMIZATION END ---
+
         manifest = self._facade.current_album.manifest if self._facade.current_album else {}
         featured = manifest.get("featured", []) or []
 
@@ -358,6 +454,33 @@ class AssetListModel(QAbstractListModel):
             return
 
         self._state_manager.clear_reload_pending()
+
+    def _populate_virtual_structure_from_index(self) -> None:
+        """Fetch timeline structure from DB and initialize virtual sections."""
+        if not self._album_root:
+            return
+
+        try:
+            store = IndexStore(self._album_root)
+            # Fetch minimal structure: year, month, count
+            distribution = store.get_timeline_distribution(filter_hidden=True)
+
+            from .asset_state_manager import TimelineSection
+            sections = []
+            for item in distribution:
+                sections.append(TimelineSection(
+                    year=item["year"],
+                    month=item["month"],
+                    count=item["count"],
+                    start_index=0 # Will be calculated by set_sections
+                ))
+
+            if sections:
+                self.beginResetModel()
+                self._state_manager.set_sections(sections)
+                self.endResetModel()
+        except Exception as e:
+            logger.error("Failed to populate virtual timeline: %s", e)
 
     def _on_loader_chunk_ready(self, root: Path, chunk: List[Dict[str, object]]) -> None:
         if (

@@ -69,7 +69,10 @@ class GalleryGridView(AssetGrid):
         # Defer initial size calculation to resizeEvent to avoid rendering the
         # default 192px layout before the viewport dimensions are known.
         self.setSpacing(0)
-        self.setUniformItemSizes(True)
+        # --- OPTIMIZATION START ---
+        # Disable uniform item sizes to allow variable widths based on aspect ratio
+        self.setUniformItemSizes(False)
+        # --- OPTIMIZATION END ---
         self.setResizeMode(QListView.ResizeMode.Adjust)
         self.setMovement(QListView.Movement.Static)
         self.setFlow(QListView.Flow.LeftToRight)
@@ -122,13 +125,33 @@ class GalleryGridView(AssetGrid):
 
         current_size = self.iconSize().width()
         if current_size != new_item_width:
+            # For variable aspect ratio support, we set the IconSize to a square
+            # base. The Delegate will then scale the width using sizeHint().
+            # However, `setGridSize` enforces a strict grid cell size, which we
+            # do not want for variable width items (justified-like layout).
+
+            # --- OPTIMIZATION START ---
             new_size = QSize(new_item_width, new_item_width)
             self.setIconSize(new_size)
-            self.setGridSize(QSize(cell_size, cell_size))
+
+            # We do NOT call setGridSize here anymore, because that enforces
+            # uniform cell dimensions which conflicts with variable aspect ratios.
+            # self.setGridSize(QSize(cell_size, cell_size))
+
+            # We must explicitly clear the grid size if it was set previously
+            self.setGridSize(QSize())
+            # --- OPTIMIZATION END ---
 
             delegate = self.itemDelegate()
             if hasattr(delegate, "set_base_size"):
                 delegate.set_base_size(new_item_width)
+
+            # Since we are not using setGridSize, we need to ensure the delegate
+            # knows the "row height" or base dimension to calculate aspect-based width.
+            if hasattr(delegate, "set_row_height"):
+                 # Use cell_size (which includes gap) or item_width?
+                 # Usually row height is the constraint.
+                 delegate.set_row_height(new_item_width)
 
     def changeEvent(self, event: QEvent) -> None:
         if event.type() == QEvent.Type.PaletteChange:

@@ -181,6 +181,8 @@ def build_asset_entry(
         "original_rel_path": row.get("original_rel_path"),
         "original_album_id": row.get("original_album_id"),
         "original_album_subpath": row.get("original_album_subpath"),
+        "aspect_ratio": row.get("aspect_ratio"),
+        "media_type": row.get("media_type"),
     }
     return entry
 

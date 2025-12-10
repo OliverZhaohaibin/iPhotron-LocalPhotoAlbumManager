@@ -2,13 +2,9 @@ import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
 
-Item {
+Rectangle {
     id: root
-
-    // Exposed from Python context
-    property var assetModel: null
-    property var selectionModel: null
-    property var iconPath: ""
+    color: "#2b2b2b"
 
     // Configuration
     property int minCellWidth: 192
@@ -36,7 +32,7 @@ Item {
         anchors.margins: 0
         clip: true
 
-        model: root.assetModel
+        model: assetModel
         cellWidth: 200
         cellHeight: 200
 

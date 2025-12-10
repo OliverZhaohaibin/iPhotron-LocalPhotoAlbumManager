@@ -323,6 +323,8 @@ class NavigationController:
             self._view_controller.restore_default_gallery()
             self._view_controller.show_gallery_view()
 
+        self._static_selection = title
+
         if is_same_root:
             # --- OPTIMIZED PATH (In-Memory) ---
             # We are staying in the same library.
@@ -358,7 +360,6 @@ class NavigationController:
             album.manifest = {**album.manifest, "title": title}
             self._main_window.setWindowTitle(title)
 
-        self._static_selection = title
         self.update_status()
 
     def consume_last_open_refresh(self) -> bool:

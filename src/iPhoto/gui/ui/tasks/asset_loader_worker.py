@@ -226,7 +226,8 @@ def compute_asset_rows(
         sort_by_date=True
     ))
     entries: List[Dict[str, object]] = []
-    # filter_mode is handled at DB level
+    # Filtering for videos, live photos, and favorites is now performed at the database query level
+    # via filter_params in store.read_geometry_only, so no post-processing is needed here.
     for row in index_rows:
         entry = build_asset_entry(root, row, featured_set)
         if entry is not None:

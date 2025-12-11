@@ -2,7 +2,7 @@ from __future__ import annotations
 from pathlib import Path
 from unittest.mock import patch
 
-from PySide6.QtCore import QObject, Signal, QSize
+from PySide6.QtCore import QObject, Signal
 from src.iPhoto.gui.ui.models.asset_list_model import AssetListModel
 
 class MockFacade(QObject):

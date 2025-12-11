@@ -456,6 +456,10 @@ class AssetListModel(QAbstractListModel):
 
         entries: List[Dict[str, object]] = []
         for row in chunk:
+            rel = row.get("rel")
+            if rel and normalise_rel_value(rel) in self._state_manager.row_lookup:
+                continue
+
             entry = build_asset_entry(
                 root, row, featured_set
             )

@@ -195,9 +195,6 @@ def compute_asset_rows(
     params = filter_params.copy() if filter_params else {}
     featured_set = normalize_featured(featured)
 
-    if params.get("filter_mode") == "favorites":
-        params["featured_rels"] = {str(f).split("#")[0] for f in featured_set}
-
     store = IndexStore(root)
     index_rows = list(store.read_geometry_only(
         filter_params=params,
@@ -286,8 +283,6 @@ class AssetLoaderWorker(QRunnable):
 
         # Prepare filter params with featured list if needed
         params = self._filter_params.copy() if self._filter_params else {}
-        if params.get("filter_mode") == "favorites":
-            params["featured_rels"] = {str(f).split("#")[0] for f in self._featured}
 
         # 2. Stream rows using lightweight geometry-first query
         # We use a transaction context to keep the connection open, allowing the

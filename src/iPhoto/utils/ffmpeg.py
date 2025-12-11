@@ -92,7 +92,7 @@ def extract_frame_with_pyav(
             for frame in container.decode(stream):
                 # We seeked to the nearest keyframe, so we may need to decode
                 # forward to reach the exact target time.
-                if frame.pts < target_pts:
+                if frame.pts is None or frame.pts < target_pts:
                     continue
 
                 # Once we reach or pass the target, use this frame

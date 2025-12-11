@@ -35,6 +35,9 @@ class IndexStore:
         self._conn: Optional[sqlite3.Connection] = None
         self._init_db()
 
+    # Whitelist of allowed filter modes to prevent injection and logic errors
+    _VALID_FILTER_MODES = frozenset({"videos", "live", "favorites"})
+
     def _init_db(self) -> None:
         """Initialize the database schema."""
         # Use a transient connection for initialization
@@ -78,7 +81,8 @@ class IndexStore:
                     aspect_ratio REAL,
                     year INTEGER,
                     month INTEGER,
-                    media_type INTEGER
+                    media_type INTEGER,
+                    is_favorite INTEGER DEFAULT 0
                 )
             """)
 
@@ -98,15 +102,21 @@ class IndexStore:
                 conn.execute("ALTER TABLE assets ADD COLUMN month INTEGER")
             if "media_type" not in columns:
                 conn.execute("ALTER TABLE assets ADD COLUMN media_type INTEGER")
+            if "is_favorite" not in columns:
+                conn.execute("ALTER TABLE assets ADD COLUMN is_favorite INTEGER DEFAULT 0")
 
             # Create indices for common sort/filter operations if needed.
             # 'dt' is used for sorting.
             conn.execute("CREATE INDEX IF NOT EXISTS idx_dt ON assets (dt)")
+            # Index for optimized favorites retrieval
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_assets_favorite_dt ON assets (is_favorite, dt DESC)")
             # Add specific index for descending sort on dt to optimize streaming query
             # We use a composite index on dt and id to match the ORDER BY clause for optimal streaming.
             conn.execute("CREATE INDEX IF NOT EXISTS idx_assets_dt_id_desc ON assets (dt DESC, id DESC)")
             # Index for timeline grouping (Year/Month headers)
             conn.execute("CREATE INDEX IF NOT EXISTS idx_year_month ON assets(year, month)")
+            # Index for timeline optimization (year DESC, month DESC, dt DESC)
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_timeline_optimization ON assets(year DESC, month DESC, dt DESC)")
             # Index for media type filtering (Photos/Videos)
             conn.execute("CREATE INDEX IF NOT EXISTS idx_media_type ON assets(media_type)")
             # 'gps' index might help if we have huge datasets, but IS NOT NULL scan is usually fast enough
@@ -178,7 +188,7 @@ class IndexStore:
             "still_image_time", "dur", "original_rel_path",
             "original_album_id", "original_album_subpath",
             "live_role", "live_partner_rel",
-            "aspect_ratio", "year", "month", "media_type"
+            "aspect_ratio", "year", "month", "media_type", "is_favorite"
         ]
         placeholders = ", ".join(["?"] * len(columns))
         query = f"INSERT OR REPLACE INTO assets ({', '.join(columns)}) VALUES ({placeholders})"
@@ -222,6 +232,7 @@ class IndexStore:
             row.get("year"),
             row.get("month"),
             row.get("media_type"),
+            row.get("is_favorite", 0),
         ]
 
     def _db_row_to_dict(self, db_row: sqlite3.Row) -> Dict[str, Any]:
@@ -267,6 +278,155 @@ class IndexStore:
             cursor.execute(query)
             for row in cursor:
                 yield self._db_row_to_dict(row)
+        finally:
+            if should_close:
+                conn.close()
+
+    def _build_filter_clauses(self, filter_params: Optional[Dict[str, Any]]) -> Tuple[List[str], List[Any]]:
+        """Helper to build WHERE clauses and parameters from filter params."""
+        where_clauses: List[str] = []
+        params: List[Any] = []
+
+        if filter_params:
+            if "media_type" in filter_params:
+                media_type = filter_params["media_type"]
+                if not isinstance(media_type, int):
+                    raise ValueError(f"Invalid media_type: {media_type} (expected int)")
+                where_clauses.append("media_type = ?")
+                params.append(media_type)
+
+            if "filter_mode" in filter_params:
+                mode = filter_params["filter_mode"]
+                # Strict whitelist check for filter mode
+                if mode in self._VALID_FILTER_MODES:
+                    if mode == "videos":
+                        where_clauses.append("media_type = 1")
+                    elif mode == "live":
+                        where_clauses.append("live_partner_rel IS NOT NULL")
+                    elif mode == "favorites":
+                        where_clauses.append("is_favorite = 1")
+                else:
+                    raise ValueError(f"Invalid filter_mode: {mode}")
+
+        return where_clauses, params
+
+    def set_favorite_status(self, rel: str, is_favorite: bool) -> None:
+        """Toggle the favorite status for a single asset efficiently."""
+        val = 1 if is_favorite else 0
+        conn = self._get_conn()
+        is_nested = (conn == self._conn)
+        try:
+            if is_nested:
+                conn.execute("UPDATE assets SET is_favorite = ? WHERE rel = ?", (val, rel))
+            else:
+                with conn:
+                    conn.execute("UPDATE assets SET is_favorite = ? WHERE rel = ?", (val, rel))
+        finally:
+            if not is_nested:
+                conn.close()
+
+    def sync_favorites(self, featured_rels: Iterable[str]) -> None:
+        """Synchronise the DB 'is_favorite' column with the provided list of featured paths."""
+        # Convert to list to ensure we can iterate multiple times if needed
+        featured_list = list(featured_rels)
+
+        conn = self._get_conn()
+        is_nested = (conn == self._conn)
+
+        def _perform_sync(c: sqlite3.Connection) -> None:
+            # Optimization: Use a temp table to avoid full-table updates.
+            # 1. Populate temp table
+            c.execute("CREATE TEMP TABLE IF NOT EXISTS temp_sync_favs (rel TEXT PRIMARY KEY)")
+            c.execute("DELETE FROM temp_sync_favs")
+            if featured_list:
+                c.executemany("INSERT OR IGNORE INTO temp_sync_favs (rel) VALUES (?)", [(r,) for r in featured_list])
+
+            # 2. Clear old favorites (only touch rows that are currently favorite)
+            # We only clear favorites that are NOT in the new list to minimize writes
+            c.execute("UPDATE assets SET is_favorite = 0 WHERE is_favorite != 0 AND rel NOT IN (SELECT rel FROM temp_sync_favs)")
+
+            # 3. Set new favorites (only touch rows that need to be favorite and aren't already)
+            # This naturally handles invalid paths (they won't match any asset rel)
+            c.execute("UPDATE assets SET is_favorite = 1 WHERE is_favorite != 1 AND rel IN (SELECT rel FROM temp_sync_favs)")
+
+            c.execute("DROP TABLE temp_sync_favs")
+
+        try:
+            if is_nested:
+                _perform_sync(conn)
+            else:
+                with conn:
+                    _perform_sync(conn)
+        finally:
+            if not is_nested:
+                conn.close()
+
+    def read_geometry_only(
+        self,
+        filter_params: Optional[Dict[str, Any]] = None,
+        sort_by_date: bool = True
+    ) -> Iterator[Dict[str, Any]]:
+        """Yield lightweight asset rows (geometry & core metadata) for fast grid layout.
+
+        Fetches only the columns strictly required for:
+        1. Calculating the grid layout (id, aspect_ratio).
+        2. Drawing section headers (year, month).
+        3. Identifying media type & badges (media_type, live_partner_rel, dur).
+        4. Sorting (dt, ts).
+
+        :param filter_params: Optional dictionary of SQL filter criteria.
+                              Supported keys:
+                                - 'media_type' (int): Filter by media type.
+                                - 'filter_mode' (str): Filter mode, accepts "videos", "live", or "favorites".
+        :param sort_by_date: If True, sort results by date descending.
+        """
+        conn = self._get_conn()
+        should_close = (conn != self._conn)
+
+        try:
+            # Columns needed for the lightweight "viewport-first" loading strategy
+            columns = [
+                "id",
+                "rel",
+                "aspect_ratio",
+                "media_type",
+                "live_partner_rel",
+                "dur",
+                "year",
+                "month",
+                "dt",
+                "ts",
+                "content_id",  # needed for live photo pairing logic if needed
+                "bytes",  # needed for panorama detection logic
+                "mime",  # needed for classifier
+                "w",  # needed for panorama detection logic
+                "h",  # needed for panorama detection logic
+                "original_rel_path",  # needed for trash restore logic
+                "original_album_id",
+                "original_album_subpath",
+                "is_favorite"
+            ]
+            query = f"SELECT {', '.join(columns)} FROM assets"
+
+            # Always filter hidden assets (live photo components) in grid view
+            base_where = ["live_role = 0"]
+
+            filter_where, params = self._build_filter_clauses(filter_params)
+            where_clauses = base_where + filter_where
+
+            if where_clauses:
+                query += " WHERE " + " AND ".join(where_clauses)
+
+            if sort_by_date:
+                query += " ORDER BY dt DESC NULLS LAST, id DESC"
+
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            cursor.execute(query, params)
+            for row in cursor:
+                # We return a dict, but one that is much lighter than the full row
+                d = dict(row)
+                yield d
         finally:
             if should_close:
                 conn.close()
@@ -346,17 +506,43 @@ class IndexStore:
             if not is_nested:
                 conn.close()
 
-    def count(self, filter_hidden: bool = False) -> int:
-        """Return the total number of assets in the index."""
+    def count(self, filter_hidden: bool = False, filter_params: Optional[Dict[str, Any]] = None) -> int:
+        """
+        Return the total number of assets in the index, optionally filtered by criteria.
+
+        Parameters
+        ----------
+        filter_hidden : bool, optional
+            If True, exclude assets with ``live_role != 0`` (i.e., hidden assets).
+        filter_params : dict, optional
+            Dictionary of filter criteria to apply. Supported keys include:
+                - 'filter_mode': Filter by asset mode (e.g., 'photo', 'video').
+                - 'media_type': Filter by media type (e.g., 'image', 'movie').
+                - Additional keys may be supported as defined in `_build_filter_clauses`.
+            These filters restrict the count to assets matching the specified criteria.
+
+        Returns
+        -------
+        int
+            The number of assets in the index matching the given filters.
+        """
         conn = self._get_conn()
         should_close = (conn != self._conn)
 
         try:
             query = "SELECT COUNT(*) FROM assets"
-            if filter_hidden:
-                query += " WHERE live_role = 0"
 
-            cursor = conn.execute(query)
+            base_where = []
+            if filter_hidden:
+                base_where.append("live_role = 0")
+
+            filter_where, params = self._build_filter_clauses(filter_params)
+            where_clauses = base_where + filter_where
+
+            if where_clauses:
+                query += " WHERE " + " AND ".join(where_clauses)
+
+            cursor = conn.execute(query, params)
             result = cursor.fetchone()
             return result[0] if result else 0
         finally:

@@ -38,6 +38,7 @@ def open_album(root: Path, autoscan: bool = True) -> Album:
         rows = list(scan_album(root, include, exclude))
         store.write_rows(rows)
     _ensure_links(root, rows)
+    store.sync_favorites(album.manifest.get("featured", []))
     return album
 
 
@@ -232,6 +233,7 @@ def rescan(root: Path, progress_callback: Optional[Callable[[int, int], None]] =
 
     _update_index_snapshot(root, rows)
     _ensure_links(root, rows)
+    store.sync_favorites(album.manifest.get("featured", []))
     return rows
 
 

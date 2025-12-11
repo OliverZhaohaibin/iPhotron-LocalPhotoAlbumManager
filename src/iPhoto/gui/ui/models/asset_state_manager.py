@@ -180,7 +180,7 @@ class AssetListStateManager:
     def consume_pending_reload(self, album_root: Optional[Path], root: Path) -> bool:
         """Consume the pending reload flag and report whether ``root`` matches."""
 
-        should_restart = bool(self._pending_reload and album_root and root == album_root)
+        should_restart = bool(self._pending_reload and album_root)
         self._pending_reload = False
         return should_restart
 

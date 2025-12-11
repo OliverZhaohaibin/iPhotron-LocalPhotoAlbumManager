@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import xxhash
 from datetime import datetime, timezone
+import copy
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Set, Tuple
 
@@ -188,19 +189,50 @@ def build_asset_entry(
 def compute_asset_rows(
     root: Path,
     featured: Iterable[str],
+    filter_params: Optional[Dict[str, object]] = None,
 ) -> Tuple[List[Dict[str, object]], int]:
+    """
+    Assemble asset entries for grid views, applying optional filtering.
+
+    Parameters
+    ----------
+    root : Path
+        The root directory containing the asset index and media files.
+    featured : Iterable[str]
+        An iterable of asset relative paths to be marked as featured.
+    filter_params : Optional[Dict[str, object]], optional
+        Dictionary of filter parameters to restrict the returned assets.
+        Valid keys include:
+            - 'filter_mode': str, one of 'all', 'images', 'videos', 'featured'.
+              Determines which asset types are included.
+            - Additional keys may be supported by the index store for filtering.
+        If None or empty, no filtering is applied.
+
+    Returns
+    -------
+    entries : List[Dict[str, object]]
+        List of asset entry dictionaries suitable for grid display.
+    count : int
+        The number of entries returned.
+    """
     ensure_work_dir(root, WORK_DIR_NAME)
 
-    store = IndexStore(root)
-    index_rows = list(store.read_all(sort_by_date=True, filter_hidden=True))
+    params = copy.deepcopy(filter_params) if filter_params else {}
     featured_set = normalize_featured(featured)
 
+    store = IndexStore(root)
+    index_rows = list(store.read_geometry_only(
+        filter_params=params,
+        sort_by_date=True
+    ))
     entries: List[Dict[str, object]] = []
+    # Filtering for videos, live photos, and favorites is now performed at the database query level
+    # via filter_params in store.read_geometry_only, so no post-processing is needed here.
     for row in index_rows:
         entry = build_asset_entry(root, row, featured_set)
         if entry is not None:
             entries.append(entry)
-    return entries, len(index_rows)
+    return entries, len(entries)
 
 
 class AssetLoaderSignals(QObject):
@@ -223,13 +255,15 @@ class AssetLoaderWorker(QRunnable):
         root: Path,
         featured: Iterable[str],
         signals: AssetLoaderSignals,
+        filter_params: Optional[Dict[str, object]] = None,
     ) -> None:
         super().__init__()
-        self.setAutoDelete(False)
+        self.setAutoDelete(True)
         self._root = root
         self._featured: Set[str] = normalize_featured(featured)
         self._signals = signals
         self._is_cancelled = False
+        self._filter_params = filter_params
 
     @property
     def root(self) -> Path:
@@ -273,69 +307,77 @@ class AssetLoaderWorker(QRunnable):
         # Emit indeterminate progress initially
         self._signals.progressUpdated.emit(self._root, 0, 0)
 
-        # 2. Stream rows
-        generator = store.read_all(sort_by_date=True, filter_hidden=True)
+        # Prepare filter params with featured list if needed
+        params = copy.deepcopy(self._filter_params) if self._filter_params else {}
 
-        chunk: List[Dict[str, object]] = []
-        last_reported = 0
-
-        # Priority: Emit first 20 items quickly
-        first_chunk_size = 20
-        normal_chunk_size = 200
-
-        total = 0
-        total_calculated = False
-        first_batch_emitted = False
-        yielded_count = 0
-
-        for position, row in enumerate(generator, start=1):
-            if self._is_cancelled:
-                return
-
-            entry = build_asset_entry(
-                self._root,
-                row,
-                self._featured,
+        # 2. Stream rows using lightweight geometry-first query
+        # Use a transaction context to keep the connection open for both the read and count queries.
+        with store.transaction():
+            generator = store.read_geometry_only(
+                filter_params=params,
+                sort_by_date=True
             )
 
-            if entry is not None:
-                chunk.append(entry)
+            chunk: List[Dict[str, object]] = []
+            last_reported = 0
 
-            # Determine emission
-            should_flush = False
+            # Priority: Emit first 20 items quickly
+            first_chunk_size = 20
+            normal_chunk_size = 200
 
-            if not first_batch_emitted:
-                if len(chunk) >= first_chunk_size:
+            total = 0
+            total_calculated = False
+            first_batch_emitted = False
+            yielded_count = 0
+
+            for position, row in enumerate(generator, start=1):
+                if self._is_cancelled:
+                    return
+
+                entry = build_asset_entry(
+                    self._root,
+                    row,
+                    self._featured,
+                )
+
+                if entry is not None:
+                    chunk.append(entry)
+
+                # Determine emission
+                should_flush = False
+
+                if not first_batch_emitted:
+                    if len(chunk) >= first_chunk_size:
+                        should_flush = True
+                        first_batch_emitted = True
+                elif len(chunk) >= normal_chunk_size:
                     should_flush = True
-                    first_batch_emitted = True
-            elif len(chunk) >= normal_chunk_size:
-                should_flush = True
 
-            if should_flush:
+                if should_flush:
+                    yielded_count += len(chunk)
+                    yield chunk
+                    chunk = []
+
+                    # Perform count after yielding first chunk
+                    if not total_calculated:
+                        try:
+                            total = store.count(filter_hidden=True, filter_params=params)
+                            total_calculated = True
+                        except Exception as exc:
+                            LOGGER.warning("Failed to count assets in database: %s", exc, exc_info=True)
+                            total = 0  # fallback
+
+                # Update progress periodically
+                # Use >= total to robustly handle concurrent additions where position might exceed original total
+                if total_calculated and (position >= total or position - last_reported >= 50):
+                    last_reported = position
+                    self._signals.progressUpdated.emit(self._root, position, total)
+
+            if chunk:
                 yielded_count += len(chunk)
                 yield chunk
-                chunk = []
 
-                # Perform count after yielding first chunk
-                if not total_calculated:
-                    try:
-                        total = store.count(filter_hidden=True)
-                        total_calculated = True
-                    except Exception as exc:
-                        LOGGER.warning("Failed to count assets in database: %s", exc, exc_info=True)
-                        total = 0  # fallback
-
-            # Update progress periodically
-            # Use >= total to robustly handle concurrent additions where position might exceed original total
-            if total_calculated and (position >= total or position - last_reported >= 50):
-                last_reported = position
-                self._signals.progressUpdated.emit(self._root, position, total)
-
-        if chunk:
-            yielded_count += len(chunk)
-            yield chunk
-
-        # Final progress update
-        if not total_calculated:  # If we never flushed (e.g. small album)
-             total = yielded_count
-        self._signals.progressUpdated.emit(self._root, total, total)
+            # Final progress update
+            if not total_calculated:  # If we never flushed (e.g. small album)
+                total = yielded_count
+            self._signals.progressUpdated.emit(self._root, total, total)

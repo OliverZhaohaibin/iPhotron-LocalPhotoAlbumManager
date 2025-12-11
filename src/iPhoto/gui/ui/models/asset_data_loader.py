@@ -45,6 +45,7 @@ class AssetDataLoader(QObject):
         self,
         root: Path,
         featured: List[Dict[str, object]],
+        filter_params: Optional[Dict[str, object]] = None,
     ) -> Optional[Tuple[List[Dict[str, object]], int]]:
         """Return cached rows for *root* when the index file remains lightweight.
 
@@ -54,11 +55,32 @@ class AssetDataLoader(QObject):
         through :func:`QTimer.singleShot`.  Emitting asynchronously prevents
         listeners—especially :class:`PySide6.QtTest.QSignalSpy`—from missing the
         notification window when they connect right after ``open_album`` returns.
+
+        Parameters
+        ----------
+        root : Path
+            The album root directory to load assets from.
+        featured : List[Dict[str, object]]
+            List of featured asset metadata dictionaries.
+        filter_params : Optional[Dict[str, object]]
+            Optional dictionary of filter parameters to restrict the assets loaded.
+            Supported keys may include:
+                - "rating": int or list of int, filter by asset rating
+                - "tags": list of str, filter by asset tags
+                - "date_range": tuple of (start_date, end_date), filter by date
+                - "search": str, full-text search query
+            The exact supported keys depend on the implementation of AssetLoaderWorker.
+
+        Returns
+        -------
+        Optional[Tuple[List[Dict[str, object]], int]]
+            A tuple of (rows, total_count) if the index is small enough to load
+            synchronously, or None if it should be loaded asynchronously instead.
         """
 
         try:
             # We use row count from SQLite instead of file size.
-            count = IndexStore(root).count(filter_hidden=True)
+            count = IndexStore(root).count(filter_hidden=True, filter_params=filter_params)
         except Exception:
             count = 0
 
@@ -66,7 +88,7 @@ class AssetDataLoader(QObject):
             return None
 
         try:
-            rows, total = self.compute_rows(root, featured)
+            rows, total = self.compute_rows(root, featured, filter_params=filter_params)
         except Exception as exc:  # pragma: no cover - surfaced via GUI
             message = str(exc)
 
@@ -108,8 +130,26 @@ class AssetDataLoader(QObject):
         self,
         root: Path,
         featured: List[Dict[str, object]],
+        filter_params: Optional[Dict[str, object]] = None,
     ) -> None:
-        """Launch a background worker for *root*."""
+        """
+        Launch a background worker for *root*.
+
+        Parameters
+        ----------
+        root : Path
+            The album root directory to load assets from.
+        featured : List[Dict[str, object]]
+            List of featured asset metadata dictionaries.
+        filter_params : Optional[Dict[str, object]]
+            Optional dictionary of filter parameters to restrict the assets loaded.
+            Supported keys may include:
+                - "rating": int or list of int, filter by asset rating
+                - "tags": list of str, filter by asset tags
+                - "date_range": tuple of (start_date, end_date), filter by date
+                - "search": str, full-text search query
+            The exact supported keys depend on the implementation of AssetLoaderWorker.
+        """
         if self._worker is not None:
             raise RuntimeError("Loader already running")
         signals = AssetLoaderSignals()
@@ -117,7 +157,7 @@ class AssetDataLoader(QObject):
         signals.finished.connect(self._handle_finished)
         signals.progressUpdated.connect(self._handle_progress)
         signals.error.connect(self._handle_error)
-        worker = AssetLoaderWorker(root, featured, signals)
+        worker = AssetLoaderWorker(root, featured, signals, filter_params=filter_params)
         self._worker = worker
         self._signals = signals
         self._pool.start(worker)
@@ -132,15 +172,37 @@ class AssetDataLoader(QObject):
         self,
         root: Path,
         featured: List[Dict[str, object]],
+        filter_params: Optional[Dict[str, object]] = None,
     ) -> Tuple[List[Dict[str, object]], int]:
         """Synchronously compute asset rows for *root*.
 
         This is primarily used when the index file is small enough to load on the
         GUI thread without noticeably blocking the interface.  The logic mirrors
         what :class:`AssetLoaderWorker` performs in the background.
+
+        Parameters
+        ----------
+        root : Path
+            The album root directory to load assets from.
+        featured : List[Dict[str, object]]
+            List of featured asset metadata dictionaries.
+        filter_params : Optional[Dict[str, object]]
+            Optional dictionary of filter parameters to restrict the assets loaded.
+            Supported keys may include:
+                - "rating": int or list of int, filter by asset rating
+                - "tags": list of str, filter by asset tags
+                - "date_range": tuple of (start_date, end_date), filter by date
+                - "search": str, full-text search query
+            The exact supported keys depend on the implementation of AssetLoaderWorker.
+
+        Returns
+        -------
+        Tuple[List[Dict[str, object]], int]
+            A tuple of (rows, total_count) where rows is the list of asset metadata
+            dictionaries and total_count is the total number of assets in the album.
         """
 
-        return compute_asset_rows(root, featured)
+        return compute_asset_rows(root, featured, filter_params=filter_params)
 
     def _handle_chunk_ready(self, root: Path, chunk: List[Dict[str, object]]) -> None:
         """Relay chunk notifications from the worker."""

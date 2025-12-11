@@ -33,27 +33,21 @@ class AssetFilterProxyModel(QSortFilterProxyModel):
     # Public API
     # ------------------------------------------------------------------
     def set_filter_mode(self, mode: Optional[str]) -> None:
+        """Apply the filter mode by delegating to the source model for DB-level filtering."""
         normalized = mode.casefold() if isinstance(mode, str) and mode else None
         if normalized == self._filter_mode:
             return
 
-        # --- OPTIMIZATION START ---
-        # Temporarily disable dynamic sorting and bypass the expensive comparisons.
-        # The source model is likely already sorted by date. Disabling this prevents
-        # the expensive O(N log N) sort and Python `lessThan` overhead during the
-        # filtering phase.
-        was_dynamic = self.dynamicSortFilter()
-        if was_dynamic:
-            self.setDynamicSortFilter(False)
-        self._bypass_sort_optimization = True
-        # --- OPTIMIZATION END ---
-
         self._filter_mode = normalized
-        self.invalidateFilter()
 
-        # Restore state.
-        self._bypass_sort_optimization = False
-        # if was_dynamic:
+        # Delegate to the source model to reload with SQL filtering
+        source = self.sourceModel()
+        if hasattr(source, "set_filter_mode"):
+            source.set_filter_mode(normalized)
+
+        # We invalidate the proxy filter just in case, but rely on the source model
+        # to provide only the matching rows.
+        self.invalidateFilter()
 
     def filter_mode(self) -> Optional[str]:
         return self._filter_mode
@@ -147,19 +141,24 @@ class AssetFilterProxyModel(QSortFilterProxyModel):
     # QSortFilterProxyModel API
     # ------------------------------------------------------------------
     def filterAcceptsRow(self, row: int, parent) -> bool:  # type: ignore[override]
-        if self._filter_mode is None and not self._search_text:
+        # When using DB-side filtering, the source model only contains matching rows.
+        # However, we still support text search on top of the DB results.
+        # If _filter_mode is active, we assume the source model has already
+        # filtered by type, so we only check text search here.
+
+        if not self._search_text and self._filter_mode is None:
+            return True
+
+        # If we have a filter mode but no search text, we can trust the source model (DB)
+        # and just accept everything. Note: This assumes set_filter_mode successfully
+        # triggered a DB reload.
+        if self._filter_mode is not None and not self._search_text:
             return True
 
         if self._fast_source is not None:
             # Bypass Qt index creation and role lookups for raw performance.
             row_data = self._fast_source.get_internal_row(row)  # type: ignore
             if row_data is None:
-                return False
-            if self._filter_mode == "videos" and not row_data["is_video"]:
-                return False
-            if self._filter_mode == "live" and not row_data["is_live"]:
-                return False
-            if self._filter_mode == "favorites" and not row_data["featured"]:
                 return False
             if self._search_text:
                 rel = row_data["rel"]

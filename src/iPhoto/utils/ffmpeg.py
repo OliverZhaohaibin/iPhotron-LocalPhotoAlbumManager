@@ -6,9 +6,17 @@ import json
 import os
 import subprocess
 from pathlib import Path
-from typing import Any, Dict, Optional, Sequence
+from typing import Any, Dict, Optional, Sequence, TYPE_CHECKING
 
 from ..errors import ExternalToolError
+
+if TYPE_CHECKING:
+    from PIL import Image
+
+try:  # pragma: no cover - optional dependency detection
+    import av  # type: ignore
+except Exception:  # pragma: no cover - PyAV not available or broken
+    av = None  # type: ignore[assignment]
 
 try:  # pragma: no cover - optional dependency detection
     import cv2  # type: ignore
@@ -40,6 +48,83 @@ def _run_command(command: Sequence[str]) -> subprocess.CompletedProcess[bytes]:
     except FileNotFoundError as exc:  # pragma: no cover - depends on environment
         raise ExternalToolError("ffmpeg executable not found on PATH") from exc
     return process
+
+
+def extract_frame_with_pyav(
+    source: Path,
+    *,
+    at: Optional[float] = None,
+    scale: Optional[tuple[int, int]] = None,
+) -> Optional["Image.Image"]:
+    """Return a still frame extracted from *source* using PyAV.
+
+    This method decodes directly to memory, avoiding process overhead.
+    Returns a PIL Image on success, or ``None`` if PyAV is unavailable or
+    decoding fails.
+
+    Parameters
+    ----------
+    at : Optional[float], optional
+        Timestamp in seconds at which to extract the frame. If not specified,
+        the first frame is used.
+    scale : Optional[tuple[int, int]], optional
+        Optional tuple of (max_width, max_height) specifying the maximum
+        dimensions for the output image. The aspect ratio is preserved and
+        the image is resized to fit within the given box if necessary.
+    """
+    if av is None:
+        return None
+
+    try:
+        with av.open(str(source)) as container:
+            if not container.streams.video:
+                return None
+            stream = container.streams.video[0]
+            stream.thread_type = 'AUTO'  # Use multi-threading if available
+
+            target_pts = 0
+            if at is not None and at > 0:
+                # Seek to the keyframe before the timestamp
+                # time_base is usually 1/timescale
+                target_pts = int(at / stream.time_base)
+                container.seek(target_pts, stream=stream)
+
+            for frame in container.decode(stream):
+                # We seeked to the nearest keyframe, so we may need to decode
+                # forward to reach the exact target time.
+                if frame.pts is None or frame.pts < target_pts:
+                    continue
+
+                # Once we reach or pass the target, use this frame
+                image = frame.to_image()
+
+                # Handle scaling if requested
+                if (
+                    scale is not None
+                    and scale[0] > 0
+                    and scale[1] > 0
+                ):
+                    max_width, max_height = scale
+                    # Calculate new size preserving aspect ratio, ensuring it fits in box
+                    # This logic mirrors the ffmpeg 'force_original_aspect_ratio=decrease'
+                    w, h = image.size
+                    ratio = min(max_width / w, max_height / h)
+
+                    if ratio < 1.0:
+                        # Calculate new size preserving aspect ratio, ensuring it fits in box
+                        # Use max(2, trunc(x/2)*2) to match ffmpeg's behavior and ensure even dimensions
+                        new_width = max(2, int((w * ratio) / 2) * 2)
+                        new_height = max(2, int((h * ratio) / 2) * 2)
+
+                        image = image.resize((new_width, new_height), resample=3) # LANCZOS = 3 (usually)
+
+                return image
+
+            return None
+
+    except (av.FFmpegError, ValueError, IndexError, Exception):
+        # Fallback to other methods if PyAV fails for any reason
+        return None
 
 
 def extract_video_frame(
@@ -113,8 +198,11 @@ def _extract_with_ffmpeg(
     if scale is not None:
         width, height = scale
         if width > 0 and height > 0:
+            # Note: ffmpeg syntax for force_original_aspect_ratio requires specific handling
+            # In complex filtergraphs, we just construct the scale filter carefully.
+            # Using 'decrease' ensures the output fits within the bounding box.
             filters.append(
-                "scale=min({w},iw):min({h},ih):force_original_aspect_ratio=decrease".format(
+                "scale='min({w},iw)':'min({h},ih)':force_original_aspect_ratio=decrease".format(
                     w=width,
                     h=height,
                 )
@@ -122,7 +210,8 @@ def _extract_with_ffmpeg(
     if format == "jpeg":
         if not filters:
             filters.append("scale=iw:ih")
-        filters.append("scale=max(2,trunc(iw/2)*2):max(2,trunc(ih/2)*2)")
+        # Ensure dimensions are even for MJPEG
+        filters.append("scale='max(2,trunc(iw/2)*2)':'max(2,trunc(ih/2)*2)'")
     if format == "png":
         filters.append("format=rgba")
     else:

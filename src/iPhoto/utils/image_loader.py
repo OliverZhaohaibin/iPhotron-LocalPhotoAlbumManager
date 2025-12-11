@@ -22,6 +22,11 @@ else:  # pragma: no cover - executed when Pillow is unavailable
     _ImageOps = None  # type: ignore[assignment]
     _ImageQt = None  # type: ignore[assignment]
 
+# Type checking import
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    from PIL import Image
+
 _LOGGER = logging.getLogger(__name__)
 
 
@@ -112,6 +117,18 @@ def qimage_from_bytes(data: bytes) -> Optional[QImage]:
         _LOGGER.exception("Pillow failed to decode image bytes in qimage_from_bytes")
         return None
     return QImage(qt_image)
+
+
+def qimage_from_pil(image: "Image.Image") -> Optional[QImage]:
+    """Return a :class:`QImage` from a PIL Image."""
+    if _ImageQt is None:
+        return None
+    try:
+        qt_image = _ImageQt(image.convert("RGBA"))
+        return QImage(qt_image)
+    except Exception:
+        _LOGGER.exception("Failed to convert PIL image to QImage")
+        return None
 
 
 def _load_with_pillow(source: Path, target: QSize | None = None) -> Optional[QImage]:

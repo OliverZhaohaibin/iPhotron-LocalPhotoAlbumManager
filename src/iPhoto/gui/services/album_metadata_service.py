@@ -94,6 +94,9 @@ class AlbumMetadataService(QObject):
             root_saved = self._save_manifest(root_album, reload_view=False)
 
         if current_saved and root_saved:
+            # Update DB index after successful manifest save.
+            # Any transient inconsistency (e.g. DB update failure) is self-corrected
+            # by sync_favorites() on the next album load.
             IndexStore(album.root).set_favorite_status(ref, desired_state)
             self._asset_list_model.update_featured_status(ref, desired_state)
             return desired_state

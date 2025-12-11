@@ -101,14 +101,10 @@ def extract_frame_with_pyav(
                     ratio = min(max_width / w, max_height / h)
 
                     if ratio < 1.0:
-                        new_width = max(int(w * ratio), 1)
-                        new_height = max(int(h * ratio), 1)
-                        # Ensure even dimensions for compatibility if we were to re-encode
-                        # but for PIL it doesn't strictly matter, though good practice
-                        if new_width % 2 == 1 and new_width > 1:
-                            new_width -= 1
-                        if new_height % 2 == 1 and new_height > 1:
-                            new_height -= 1
+                        # Calculate new size preserving aspect ratio, ensuring it fits in box
+                        # Use max(2, trunc(x/2)*2) to match ffmpeg's behavior and ensure even dimensions
+                        new_width = max(2, int((w * ratio) / 2) * 2)
+                        new_height = max(2, int((h * ratio) / 2) * 2)
 
                         image = image.resize((new_width, new_height), resample=3) # LANCZOS = 3 (usually)
 

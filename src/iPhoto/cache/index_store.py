@@ -302,6 +302,8 @@ class IndexStore:
                         where_clauses.append("live_partner_rel IS NOT NULL")
                     elif mode == "favorites":
                         where_clauses.append("is_favorite = 1")
+                else:
+                    raise ValueError(f"Invalid filter_mode: {mode}")
 
         return where_clauses, params
 

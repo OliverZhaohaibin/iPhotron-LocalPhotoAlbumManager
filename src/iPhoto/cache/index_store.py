@@ -82,7 +82,8 @@ class IndexStore:
                     aspect_ratio REAL,
                     year INTEGER,
                     month INTEGER,
-                    media_type INTEGER
+                    media_type INTEGER,
+                    is_favorite INTEGER DEFAULT 0
                 )
             """)
 
@@ -102,10 +103,14 @@ class IndexStore:
                 conn.execute("ALTER TABLE assets ADD COLUMN month INTEGER")
             if "media_type" not in columns:
                 conn.execute("ALTER TABLE assets ADD COLUMN media_type INTEGER")
+            if "is_favorite" not in columns:
+                conn.execute("ALTER TABLE assets ADD COLUMN is_favorite INTEGER DEFAULT 0")
 
             # Create indices for common sort/filter operations if needed.
             # 'dt' is used for sorting.
             conn.execute("CREATE INDEX IF NOT EXISTS idx_dt ON assets (dt)")
+            # Index for optimized favorites retrieval
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_assets_favorite_dt ON assets (is_favorite, dt DESC)")
             # Add specific index for descending sort on dt to optimize streaming query
             # We use a composite index on dt and id to match the ORDER BY clause for optimal streaming.
             conn.execute("CREATE INDEX IF NOT EXISTS idx_assets_dt_id_desc ON assets (dt DESC, id DESC)")
@@ -294,30 +299,67 @@ class IndexStore:
                     elif mode == "live":
                         where_clauses.append("live_partner_rel IS NOT NULL")
                     elif mode == "favorites":
-                        # Assumes temp_favorites table has been populated
-                        where_clauses.append("rel IN (SELECT rel FROM temp_favorites)")
+                        where_clauses.append("is_favorite = 1")
 
         return where_clauses, params
 
-    def _ensure_temp_favorites(self, conn: sqlite3.Connection, featured_rels: Iterable[str]) -> None:
-        """Populate a temporary table with featured asset relationships."""
+    def set_favorite_status(self, rel: str, is_favorite: bool) -> None:
+        """Toggle the favorite status for a single asset efficiently."""
+        val = 1 if is_favorite else 0
+        conn = self._get_conn()
+        is_nested = (conn == self._conn)
+        try:
+            if is_nested:
+                conn.execute("UPDATE assets SET is_favorite = ? WHERE rel = ?", (val, rel))
+            else:
+                with conn:
+                    conn.execute("UPDATE assets SET is_favorite = ? WHERE rel = ?", (val, rel))
+        finally:
+            if not is_nested:
+                conn.close()
 
-        # Optimization: If we are in a persistent transaction (self._conn == conn) and the data hasn't changed,
-        # we can skip the recreation.
-        current_hash = hash(tuple(sorted(list(featured_rels)))) if featured_rels else 0
-        if self._conn and self._conn == conn and self._featured_hash == current_hash:
-            return
+    def sync_favorites(self, featured_rels: Iterable[str]) -> None:
+        """Synchronise the DB 'is_favorite' column with the provided list of featured paths."""
+        conn = self._get_conn()
+        is_nested = (conn == self._conn)
+        try:
+            # We must normalize the list to handle any potential mismatches
+            # Note: featured_rels typically contains raw strings from manifest.
+            # We assume they match DB 'rel' keys.
 
-        conn.execute("CREATE TEMP TABLE IF NOT EXISTS temp_favorites (rel TEXT PRIMARY KEY)")
-        conn.execute("DELETE FROM temp_favorites")
-        if featured_rels:
-            # Chunk inserts to avoid potential parameter limits, though bulk insert is usually safe
-            # in modern sqlite for moderate sizes.
-            data = [(r,) for r in featured_rels]
-            conn.executemany("INSERT OR IGNORE INTO temp_favorites (rel) VALUES (?)", data)
+            # Prepare bulk update
+            # 1. Reset all to 0
+            # 2. Set specific to 1
 
-        if self._conn and self._conn == conn:
-            self._featured_hash = current_hash
+            # Since we can't easily do "UPDATE ... WHERE rel IN big_list" without limits,
+            # we can use a temp table logic JUST for this sync operation, or executemany.
+            # Given we are replacing the temp table logic for *reading*, using it for *writing/syncing* is fine.
+            # Or simpler:
+            # UPDATE assets SET is_favorite = CASE WHEN rel IN (...) THEN 1 ELSE 0 END
+            # limits apply.
+
+            # Safe approach:
+            # 1. Update all to 0.
+            # 2. Update set to 1 using executemany.
+
+            if is_nested:
+                conn.execute("UPDATE assets SET is_favorite = 0")
+                if featured_rels:
+                    conn.executemany(
+                        "UPDATE assets SET is_favorite = 1 WHERE rel = ?",
+                        [(r,) for r in featured_rels]
+                    )
+            else:
+                with conn:
+                    conn.execute("UPDATE assets SET is_favorite = 0")
+                    if featured_rels:
+                        conn.executemany(
+                            "UPDATE assets SET is_favorite = 1 WHERE rel = ?",
+                            [(r,) for r in featured_rels]
+                        )
+        finally:
+            if not is_nested:
+                conn.close()
 
     def read_geometry_only(
         self,
@@ -365,9 +407,6 @@ class IndexStore:
 
             # Always filter hidden assets (live photo components) in grid view
             base_where = ["live_role = 0"]
-
-            if filter_params and filter_params.get("filter_mode") == "favorites":
-                self._ensure_temp_favorites(conn, filter_params.get("featured_rels", []))
 
             filter_where, params = self._build_filter_clauses(filter_params)
             where_clauses = base_where + filter_where
@@ -475,9 +514,6 @@ class IndexStore:
             base_where = []
             if filter_hidden:
                 base_where.append("live_role = 0")
-
-            if filter_params and filter_params.get("filter_mode") == "favorites":
-                self._ensure_temp_favorites(conn, filter_params.get("featured_rels", []))
 
             filter_where, params = self._build_filter_clauses(filter_params)
             where_clauses = base_where + filter_where

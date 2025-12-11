@@ -322,31 +322,38 @@ class IndexStore:
 
     def sync_favorites(self, featured_rels: Iterable[str]) -> None:
         """Synchronise the DB 'is_favorite' column with the provided list of featured paths."""
-        # Convert to list to ensure we can iterate multiple times if needed (e.g. len check + loop)
+        # Convert to list to ensure we can iterate multiple times if needed
         featured_list = list(featured_rels)
 
         conn = self._get_conn()
         is_nested = (conn == self._conn)
-        try:
-            # Safe approach:
-            # 1. Update all to 0.
-            # 2. Update set to 1 using executemany.
 
+        def _perform_sync(c: sqlite3.Connection) -> None:
+            # Optimization: Use a temp table to avoid full-table updates.
+            # 1. Populate temp table
+            c.execute("CREATE TEMP TABLE IF NOT EXISTS temp_sync_favs (rel TEXT PRIMARY KEY)")
+            c.execute("DELETE FROM temp_sync_favs")
+            if featured_list:
+                c.executemany("INSERT OR IGNORE INTO temp_sync_favs (rel) VALUES (?)", [(r,) for r in featured_list])
+
+            # 2. Clear old favorites (only touch rows that are currently favorite)
+            # Note: We clear ALL favorites that are NOT in the new list?
+            # Or just clear all favorites and re-set?
+            # Clearing all favorites (WHERE is_favorite != 0) is fast if index exists.
+            c.execute("UPDATE assets SET is_favorite = 0 WHERE is_favorite != 0")
+
+            # 3. Set new favorites (only touch rows that need to be favorite)
+            # This naturally handles invalid paths (they won't match any asset rel)
+            c.execute("UPDATE assets SET is_favorite = 1 WHERE rel IN (SELECT rel FROM temp_sync_favs)")
+
+            c.execute("DROP TABLE temp_sync_favs")
+
+        try:
             if is_nested:
-                conn.execute("UPDATE assets SET is_favorite = 0")
-                if featured_list:
-                    conn.executemany(
-                        "UPDATE assets SET is_favorite = 1 WHERE rel = ?",
-                        [(r,) for r in featured_list]
-                    )
+                _perform_sync(conn)
             else:
                 with conn:
-                    conn.execute("UPDATE assets SET is_favorite = 0")
-                    if featured_list:
-                        conn.executemany(
-                            "UPDATE assets SET is_favorite = 1 WHERE rel = ?",
-                            [(r,) for r in featured_list]
-                        )
+                    _perform_sync(conn)
         finally:
             if not is_nested:
                 conn.close()

@@ -7,6 +7,7 @@ from typing import Callable, Optional, Sequence, TYPE_CHECKING
 
 from PySide6.QtCore import QObject, QTimer, Signal
 
+from ...cache.index_store import IndexStore
 from ...errors import IPhotoError
 from ...models.album import Album
 
@@ -93,6 +94,7 @@ class AlbumMetadataService(QObject):
             root_saved = self._save_manifest(root_album, reload_view=False)
 
         if current_saved and root_saved:
+            IndexStore(album.root).set_favorite_status(ref, desired_state)
             self._asset_list_model.update_featured_status(ref, desired_state)
             return desired_state
 

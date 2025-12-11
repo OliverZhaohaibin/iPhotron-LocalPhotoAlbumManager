@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 from unittest.mock import MagicMock
-import pytest
-
 from PySide6.QtCore import QAbstractItemModel, QModelIndex, Qt
 
 # Stub for QAbstractItemModel since we just need the type compatibility

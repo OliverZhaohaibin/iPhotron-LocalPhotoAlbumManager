@@ -191,6 +191,30 @@ def compute_asset_rows(
     featured: Iterable[str],
     filter_params: Optional[Dict[str, object]] = None,
 ) -> Tuple[List[Dict[str, object]], int]:
+    """
+    Assemble asset entries for grid views, applying optional filtering.
+
+    Parameters
+    ----------
+    root : Path
+        The root directory containing the asset index and media files.
+    featured : Iterable[str]
+        An iterable of asset relative paths to be marked as featured.
+    filter_params : Optional[Dict[str, object]], optional
+        Dictionary of filter parameters to restrict the returned assets.
+        Valid keys include:
+            - 'filter_mode': str, one of 'all', 'images', 'videos', 'featured'.
+              Determines which asset types are included.
+            - Additional keys may be supported by the index store for filtering.
+        If None or empty, no filtering is applied.
+
+    Returns
+    -------
+    entries : List[Dict[str, object]]
+        List of asset entry dictionaries suitable for grid display.
+    count : int
+        The number of entries returned.
+    """
     ensure_work_dir(root, WORK_DIR_NAME)
 
     params = copy.deepcopy(filter_params) if filter_params else {}

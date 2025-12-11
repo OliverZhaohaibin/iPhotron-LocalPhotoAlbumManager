@@ -160,11 +160,6 @@ class AssetFilterProxyModel(QSortFilterProxyModel):
             row_data = self._fast_source.get_internal_row(row)  # type: ignore
             if row_data is None:
                 return False
-            # If we rely on DB filtering, we skip these checks unless we suspect mixed mode.
-            # But for safety, we can keep them if we want to support non-DB sources.
-            # Assuming AssetListModel is the source and it handles set_filter_mode:
-            # if self._filter_mode == "videos" and not row_data["is_video"]: return False
-
             if self._search_text:
                 rel = row_data["rel"]
                 name = str(rel).casefold() if rel is not None else ""

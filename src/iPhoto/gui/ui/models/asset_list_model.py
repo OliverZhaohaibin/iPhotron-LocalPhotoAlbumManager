@@ -464,6 +464,14 @@ class AssetListModel(QAbstractListModel):
                 root, row, featured_set
             )
             if entry is not None:
+                # Apply active filter constraints to prevent pollution during rescans
+                if self._active_filter == "videos" and not entry.get("is_video"):
+                    continue
+                if self._active_filter == "live" and not entry.get("is_live"):
+                    continue
+                if self._active_filter == "favorites" and not entry.get("featured"):
+                    continue
+
                 entries.append(entry)
 
         if entries:

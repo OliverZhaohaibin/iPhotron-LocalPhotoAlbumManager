@@ -116,6 +116,20 @@ class AssetFilterProxyModel(QSortFilterProxyModel):
     def setSourceModel(self, sourceModel: QAbstractItemModel | None) -> None:  # type: ignore[override]
         """Attach *sourceModel* while keeping default sort hooks in sync."""
 
+        if sourceModel is self:
+            raise ValueError(
+                "Circular reference detected: AssetFilterProxyModel cannot be its own source."
+            )
+
+        candidate = sourceModel
+        while hasattr(candidate, "sourceModel"):
+            candidate = candidate.sourceModel()
+            if candidate is self:
+                raise ValueError(
+                    "Circular reference detected: "
+                    "AssetFilterProxyModel source chain leads back to self."
+                )
+
         if self._monitored_source is not None:
             try:
                 self._monitored_source.modelReset.disconnect(self._on_source_model_reset)

@@ -33,7 +33,6 @@ class IndexStore:
         self.path = album_root / WORK_DIR_NAME / "index.db"
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._conn: Optional[sqlite3.Connection] = None
-        self._featured_hash: Optional[int] = None
         self._init_db()
 
     # Whitelist of allowed filter modes to prevent injection and logic errors

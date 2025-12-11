@@ -376,7 +376,9 @@ class IndexStore:
         4. Sorting (dt, ts).
 
         :param filter_params: Optional dictionary of SQL filter criteria.
-                              Supported keys: 'media_type' (int).
+                              Supported keys:
+                                - 'media_type' (int): Filter by media type.
+                                - 'filter_mode' (str): Filter mode, accepts "videos", "live", or "favorites".
         :param sort_by_date: If True, sort results by date descending.
         """
         conn = self._get_conn()

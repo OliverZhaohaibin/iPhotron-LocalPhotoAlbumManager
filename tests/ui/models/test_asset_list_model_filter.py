@@ -1,6 +1,6 @@
 from __future__ import annotations
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 from PySide6.QtCore import QObject, Signal, QSize
 from src.iPhoto.gui.ui.models.asset_list_model import AssetListModel

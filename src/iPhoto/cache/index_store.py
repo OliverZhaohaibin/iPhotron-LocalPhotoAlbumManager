@@ -36,6 +36,9 @@ class IndexStore:
         self._featured_hash: Optional[int] = None
         self._init_db()
 
+    # Whitelist of allowed filter modes to prevent injection and logic errors
+    _VALID_FILTER_MODES = frozenset({"videos", "live", "favorites"})
+
     def _init_db(self) -> None:
         """Initialize the database schema."""
         # Use a transient connection for initialization
@@ -281,15 +284,18 @@ class IndexStore:
             if "media_type" in filter_params:
                 where_clauses.append("media_type = ?")
                 params.append(filter_params["media_type"])
+
             if "filter_mode" in filter_params:
                 mode = filter_params["filter_mode"]
-                if mode == "videos":
-                    where_clauses.append("media_type = 1")
-                elif mode == "live":
-                    where_clauses.append("live_partner_rel IS NOT NULL")
-                elif mode == "favorites":
-                    # Assumes temp_favorites table has been populated
-                    where_clauses.append("rel IN (SELECT rel FROM temp_favorites)")
+                # Strict whitelist check for filter mode
+                if mode in self._VALID_FILTER_MODES:
+                    if mode == "videos":
+                        where_clauses.append("media_type = 1")
+                    elif mode == "live":
+                        where_clauses.append("live_partner_rel IS NOT NULL")
+                    elif mode == "favorites":
+                        # Assumes temp_favorites table has been populated
+                        where_clauses.append("rel IN (SELECT rel FROM temp_favorites)")
 
         return where_clauses, params
 

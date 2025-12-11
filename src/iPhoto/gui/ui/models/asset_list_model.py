@@ -330,7 +330,14 @@ class AssetListModel(QAbstractListModel):
     # Filtering
     # ------------------------------------------------------------------
     def set_filter_mode(self, mode: Optional[str]) -> None:
-        """Apply a new filter mode and trigger a reload if necessary."""
+        """
+        Apply a new filter mode and trigger a reload if necessary.
+
+        Changing the filter mode will cause the model to perform a full reload of the dataset
+        from the database by calling `start_load()`. This operation will clear the current view
+        and repopulate the model with the filtered data. Be aware that this may have performance
+        implications, especially for large datasets, as the entire model is reset and reloaded.
+        """
         normalized = mode.casefold() if isinstance(mode, str) and mode else None
         if normalized == self._active_filter:
             return

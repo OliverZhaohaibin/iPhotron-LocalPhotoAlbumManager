@@ -108,6 +108,13 @@ class SpacerProxyModel(QAbstractProxyModel):
         source = self.sourceModel()
         if source is None or not proxy_index.isValid():
             return QModelIndex()
+
+        # Runtime safety: if source somehow became self (or a wrapper leading to self),
+        # prevent infinite recursion and crash. This can happen if the model graph
+        # is mutated dynamically in ways `setSourceModel` couldn't catch initially.
+        if source is self:
+            return QModelIndex()
+
         row = proxy_index.row()
         count = source.rowCount()
         if not (1 <= row <= count):

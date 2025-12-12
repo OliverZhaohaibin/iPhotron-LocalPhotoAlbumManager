@@ -495,3 +495,34 @@ class AlbumsDashboard(QWidget):
         card = self._cards.get(album_root)
         if card:
             card.set_cover_image(pixmap)
+
+    def on_scan_finished(self, root: Path, success: bool) -> None:
+        """Reload data for the specified album when a scan completes."""
+        if not success:
+            return
+
+        # If the scan matches the library root (e.g. "All Photos" scan),
+        # we refresh the entire dashboard to ensure consistency.
+        library_root = self._library.root()
+        if library_root and root == library_root:
+            self.refresh()
+            return
+
+        # Otherwise, update the specific album card if it exists.
+        card = self._cards.get(root)
+        if not card:
+            return
+
+        node: AlbumNode | None = None
+        # Locate the node without relying on private API if possible
+        for candidate in self._library.list_albums():
+            if candidate.path == root:
+                node = candidate
+                break
+
+        if node is None:
+            return
+
+        pool = QThreadPool.globalInstance()
+        worker = AlbumDataWorker(node, self._loader_signals, self._current_generation)
+        pool.start(worker)

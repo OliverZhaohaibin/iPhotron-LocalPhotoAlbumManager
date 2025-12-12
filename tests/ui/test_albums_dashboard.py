@@ -17,7 +17,7 @@ pytest.importorskip(
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication
 
-from src.iPhoto.gui.ui.widgets.albums_dashboard import AlbumCard, AlbumsDashboard
+from src.iPhoto.gui.ui.widgets.albums_dashboard import AlbumCard, AlbumsDashboard, AlbumDataWorker
 
 @pytest.fixture
 def qapp():
@@ -119,3 +119,71 @@ def test_albums_dashboard_relays_signal(qtbot, mock_library):
             card.clicked.emit(album.path)
 
         assert blocker.args == [album.path]
+
+def test_scan_finished_triggers_refresh(qtbot, mock_library):
+    """Test that on_scan_finished triggers a data refresh for the specific album."""
+    album_path = Path("/path/to/album")
+    album = MagicMock()
+    album.title = "Test Album"
+    album.path = album_path
+
+    # Setup library to return this album
+    mock_library.list_albums.return_value = [album]
+    mock_library.root.return_value = Path("/library/root")
+
+    # Patch QThreadPool to verify worker submission
+    with patch("PySide6.QtCore.QThreadPool.globalInstance") as mock_pool_provider:
+        mock_pool = MagicMock()
+        mock_pool_provider.return_value = mock_pool
+
+        # Initialize dashboard
+        dashboard = AlbumsDashboard(mock_library)
+        qtbot.addWidget(dashboard)
+
+        # Initial refresh should have started a worker
+        assert mock_pool.start.call_count == 1
+        # Capture the first worker
+        first_worker = mock_pool.start.call_args[0][0]
+        assert isinstance(first_worker, AlbumDataWorker)
+        assert first_worker.node.path == album_path
+
+        # Reset mock to track new calls
+        mock_pool.start.reset_mock()
+
+        # Call the slot
+        dashboard.on_scan_finished(album_path, success=True)
+
+        # Verify a NEW worker was started
+        assert mock_pool.start.call_count == 1
+        second_worker = mock_pool.start.call_args[0][0]
+        assert isinstance(second_worker, AlbumDataWorker)
+        assert second_worker.node.path == album_path
+
+def test_scan_finished_triggers_full_refresh_for_root(qtbot, mock_library):
+    """Test that on_scan_finished triggers a full refresh if root matches library root."""
+    root_path = Path("/library/root")
+    mock_library.root.return_value = root_path
+
+    album = MagicMock()
+    album.title = "Test Album"
+    album.path = Path("/path/to/album")
+    mock_library.list_albums.return_value = [album]
+
+    with patch("PySide6.QtCore.QThreadPool.globalInstance") as mock_pool_provider:
+        mock_pool = MagicMock()
+        mock_pool_provider.return_value = mock_pool
+
+        dashboard = AlbumsDashboard(mock_library)
+        qtbot.addWidget(dashboard)
+
+        # Reset mock
+        mock_pool.start.reset_mock()
+
+        # Call with library root
+        dashboard.on_scan_finished(root_path, success=True)
+
+        # Should trigger refresh -> start worker for album
+        assert mock_pool.start.call_count == 1
+        worker = mock_pool.start.call_args[0][0]
+        assert isinstance(worker, AlbumDataWorker)
+        assert worker.node.path == album.path

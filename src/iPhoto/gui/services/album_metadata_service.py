@@ -108,8 +108,8 @@ class AlbumMetadataService(QObject):
                         # Skip synchronization.
                         target_album = None
 
-                except (OSError, ValueError):
-                    pass
+                except (OSError, ValueError) as exc:
+                    self.errorRaised.emit(str(exc))
 
         if desired_state:
             album.add_featured(ref)

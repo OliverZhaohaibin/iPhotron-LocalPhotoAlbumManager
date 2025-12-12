@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import unicodedata
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Dict, Iterable, Iterator, Optional, Any, List, Tuple
@@ -327,29 +328,51 @@ class IndexStore:
 
     def sync_favorites(self, featured_rels: Iterable[str]) -> None:
         """Synchronise the DB 'is_favorite' column with the provided list of featured paths."""
-        # Convert to list to ensure we can iterate multiple times if needed
-        featured_list = list(featured_rels)
+        # Convert to list to avoid consuming iterator multiple times
+        featured_rels_list = list(featured_rels)
+        
+        # Normalize input paths to ensure consistent comparison (NFC)
+        # Build mapping from normalized to original input strings
+        input_normalized_map = {unicodedata.normalize("NFC", r): r for r in featured_rels_list}
+        featured_normalized_set = set(input_normalized_map.keys())
 
         conn = self._get_conn()
         is_nested = (conn == self._conn)
 
         def _perform_sync(c: sqlite3.Connection) -> None:
-            # Optimization: Use a temp table to avoid full-table updates.
-            # 1. Populate temp table
-            c.execute("CREATE TEMP TABLE IF NOT EXISTS temp_sync_favs (rel TEXT PRIMARY KEY)")
-            c.execute("DELETE FROM temp_sync_favs")
-            if featured_list:
-                c.executemany("INSERT OR IGNORE INTO temp_sync_favs (rel) VALUES (?)", [(r,) for r in featured_list])
+            # 1. Fetch all rels from the DB to build a normalized-to-original mapping.
+            #    This ensures we always update the exact key present in the database,
+            #    even if the database contains paths with different Unicode normalization.
+            cursor = c.execute("SELECT rel FROM assets")
+            all_rels_map = {unicodedata.normalize("NFC", row[0]): row[0] for row in cursor}
 
-            # 2. Clear old favorites (only touch rows that are currently favorite)
-            # We only clear favorites that are NOT in the new list to minimize writes
-            c.execute("UPDATE assets SET is_favorite = 0 WHERE is_favorite != 0 AND rel NOT IN (SELECT rel FROM temp_sync_favs)")
+            # 2. Fetch currently marked favorites from the DB to calculate the diff.
+            current_favs_normalized = {
+                unicodedata.normalize("NFC", row[0])
+                for row in c.execute("SELECT rel FROM assets WHERE is_favorite != 0")
+            }
 
-            # 3. Set new favorites (only touch rows that need to be favorite and aren't already)
-            # This naturally handles invalid paths (they won't match any asset rel)
-            c.execute("UPDATE assets SET is_favorite = 1 WHERE is_favorite != 1 AND rel IN (SELECT rel FROM temp_sync_favs)")
+            # 3. Determine which rows actually need updates
+            # Items in DB (normalized) but not in input list -> Remove
+            to_remove_normalized = current_favs_normalized - featured_normalized_set
 
-            c.execute("DROP TABLE temp_sync_favs")
+            # Items in input list but not in DB (normalized) -> Add
+            to_add_normalized = featured_normalized_set - current_favs_normalized
+
+            # 4. Apply updates only where necessary
+            if to_remove_normalized:
+                # Use the ORIGINAL keys from the DB to ensure the UPDATE succeeds
+                to_remove_original = [all_rels_map[n] for n in to_remove_normalized if n in all_rels_map]
+                c.executemany("UPDATE assets SET is_favorite = 0 WHERE rel = ?", [(r,) for r in to_remove_original])
+
+            if to_add_normalized:
+                # Use the ORIGINAL keys from the DB to ensure the UPDATE succeeds
+                # Fall back to input keys if the normalized key is not found in DB
+                to_add_original = [
+                    all_rels_map.get(n, input_normalized_map[n]) 
+                    for n in to_add_normalized
+                ]
+                c.executemany("UPDATE assets SET is_favorite = 1 WHERE rel = ?", [(r,) for r in to_add_original])
 
         try:
             if is_nested:

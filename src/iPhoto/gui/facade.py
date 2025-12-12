@@ -71,7 +71,10 @@ class AppFacade(QObject):
 
         self._library_list_model = AssetListModel(self)
         self._album_list_model = AssetListModel(self)
-        self._active_model: AssetListModel = self._album_list_model
+        # Initialize active model to the library model. This ensures consumers
+        # encountering the app in a "Library" state (e.g. at startup) receive
+        # the correct persistent model context rather than a transient album one.
+        self._active_model: AssetListModel = self._library_list_model
 
         for model in (self._library_list_model, self._album_list_model):
             model.loadProgress.connect(self._on_model_load_progress)

@@ -25,7 +25,15 @@ class AssetModel(AssetFilterProxyModel):
         self.setSourceModel(self._list_model)
 
     def setSourceModel(self, source_model: AssetListModel) -> None:  # type: ignore[override]
-        """Update the source model reference when switching contexts."""
+        """
+        Update the source model reference when switching contexts.
+
+        This override intentionally narrows the accepted type from the parent's
+        generic QAbstractItemModel to specifically AssetListModel. This constraint
+        ensures that only compatible models are used with AssetModel, and is
+        required for correct operation of methods that depend on AssetListModel's
+        interface. See type: ignore[override] for rationale.
+        """
         super().setSourceModel(source_model)
         self._list_model = source_model
         # Re-apply the default sort to ensure consistency across model switches

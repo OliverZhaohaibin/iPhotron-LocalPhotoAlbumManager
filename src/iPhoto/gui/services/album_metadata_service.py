@@ -13,10 +13,14 @@ from ...config import ALBUM_MANIFEST_NAMES
 from ...errors import IPhotoError
 from ...models.album import Album
 from ...utils.pathutils import is_descendant_path
+from ...utils.logging import get_logger
 
 if TYPE_CHECKING:
     from ...library.manager import LibraryManager
     from ..ui.models.asset_list_model import AssetListModel
+
+
+LOGGER = get_logger()
 
 
 class AlbumMetadataService(QObject):
@@ -106,9 +110,14 @@ class AlbumMetadataService(QObject):
                     else:
                         # No physical album found (e.g., file is directly in Library Root or is an orphan).
                         # Skip synchronization.
+                        LOGGER.debug(
+                            "Skipping favorites sync for %s: no physical album found above it.",
+                            absolute_asset,
+                        )
                         target_album = None
 
                 except (OSError, ValueError) as exc:
+                    LOGGER.debug("Failed to calculate paths for favorites sync: %s", exc)
                     self.errorRaised.emit(str(exc))
 
         if desired_state:

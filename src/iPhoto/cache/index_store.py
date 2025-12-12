@@ -19,6 +19,9 @@ from pathlib import Path
 from typing import Dict, Iterable, Iterator, Optional, Any, List, Tuple
 
 from ..config import WORK_DIR_NAME
+from ..utils.logging import get_logger
+
+LOGGER = get_logger()
 
 
 class IndexStore:
@@ -42,7 +45,8 @@ class IndexStore:
     def _init_db(self) -> None:
         """Initialize the database schema."""
         # Use a transient connection for initialization
-        with sqlite3.connect(self.path, timeout=10.0) as conn:
+        # Ensure path is cast to string for cross-platform sqlite3 compatibility
+        with sqlite3.connect(str(self.path), timeout=10.0) as conn:
             # Enable Write-Ahead Logging for concurrency and performance
             try:
                 conn.execute("PRAGMA journal_mode=WAL;")
@@ -127,7 +131,7 @@ class IndexStore:
         """Return the active connection or create a new one."""
         if self._conn:
             return self._conn
-        return sqlite3.connect(self.path)
+        return sqlite3.connect(str(self.path))
 
     @contextmanager
     def transaction(self) -> Iterator[None]:
@@ -145,7 +149,7 @@ class IndexStore:
             yield
             return
 
-        self._conn = sqlite3.connect(self.path)
+        self._conn = sqlite3.connect(str(self.path))
         try:
             with self._conn:
                 yield
@@ -363,7 +367,8 @@ class IndexStore:
             if to_remove_normalized:
                 # Use the ORIGINAL keys from the DB to ensure the UPDATE succeeds
                 to_remove_original = [all_rels_map[n] for n in to_remove_normalized if n in all_rels_map]
-                c.executemany("UPDATE assets SET is_favorite = 0 WHERE rel = ?", [(r,) for r in to_remove_original])
+                count = c.executemany("UPDATE assets SET is_favorite = 0 WHERE rel = ?", [(r,) for r in to_remove_original])
+                LOGGER.debug("Removed favorites from %d rows (normalized diff)", count.rowcount if count else 0)
 
             if to_add_normalized:
                 # Use the ORIGINAL keys from the DB to ensure the UPDATE succeeds
@@ -372,7 +377,8 @@ class IndexStore:
                     all_rels_map.get(n, input_normalized_map[n]) 
                     for n in to_add_normalized
                 ]
-                c.executemany("UPDATE assets SET is_favorite = 1 WHERE rel = ?", [(r,) for r in to_add_original])
+                count = c.executemany("UPDATE assets SET is_favorite = 1 WHERE rel = ?", [(r,) for r in to_add_original])
+                LOGGER.debug("Added favorites to %d rows (normalized diff)", count.rowcount if count else 0)
 
         try:
             if is_nested:

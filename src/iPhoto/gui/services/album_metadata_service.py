@@ -65,41 +65,77 @@ class AlbumMetadataService(QObject):
         if manager is not None:
             library_root = manager.root()
 
-        if library_root is not None and library_root != album.root:
-            try:
-                absolute_asset = (album.root / ref).resolve()
-                root_relative = absolute_asset.relative_to(library_root.resolve())
-            except (OSError, ValueError):
-                root_ref = None
-            else:
-                root_ref = root_relative.as_posix()
+        target_album: Optional[Album] = None
+        target_ref: Optional[str] = None
+
+        if library_root is not None:
+            if library_root != album.root:
+                # Case 1: Toggling in a sub-album. Need to update the Library Root as well.
                 try:
-                    root_album = Album.open(library_root)
-                except IPhotoError as exc:
-                    self.errorRaised.emit(str(exc))
-                    root_album = None
+                    absolute_asset = (album.root / ref).resolve()
+                    root_relative = absolute_asset.relative_to(library_root.resolve())
+                except (OSError, ValueError):
+                    pass
+                else:
+                    target_ref = root_relative.as_posix()
+                    try:
+                        target_album = Album.open(library_root)
+                    except IPhotoError as exc:
+                        self.errorRaised.emit(str(exc))
+                        target_album = None
+            else:
+                # Case 2: Toggling in the Library Root. Need to update the physical sub-album.
+                try:
+                    absolute_asset = (album.root / ref).resolve()
+                    # Identify the physical album by checking the parent directory.
+                    # We walk up until we find a directory that is NOT the library root
+                    # but is a direct child of it, or simply use the parent if it's a sub-album.
+                    parent = absolute_asset.parent
+                    if parent != library_root and parent.is_relative_to(library_root):
+                        # Simple assumption: The parent folder is the album.
+                        # This covers the 90% case where albums are direct subfolders.
+                        # For deeply nested structures, this updates the immediate container.
+                        physical_root = parent
+                        physical_ref = absolute_asset.name
+
+                        target_ref = physical_ref
+                        try:
+                            target_album = Album.open(physical_root)
+                        except IPhotoError:
+                            # If it's not a valid album (no manifest yet), we might be
+                            # implicitly creating one, or we should skip.
+                            # Album.open creates a default manifest if missing, which is acceptable behavior here.
+                            target_album = None
+                            # Try to open it only if it exists
+                            if physical_root.exists() and physical_root.is_dir():
+                                try:
+                                    target_album = Album.open(physical_root)
+                                except IPhotoError as exc:
+                                    self.errorRaised.emit(str(exc))
+                except (OSError, ValueError):
+                    pass
 
         if desired_state:
             album.add_featured(ref)
-            if root_album is not None and root_ref is not None:
-                root_album.add_featured(root_ref)
+            if target_album is not None and target_ref is not None:
+                target_album.add_featured(target_ref)
         else:
             album.remove_featured(ref)
-            if root_album is not None and root_ref is not None:
-                root_album.remove_featured(root_ref)
+            if target_album is not None and target_ref is not None:
+                target_album.remove_featured(target_ref)
 
         current_saved = self._save_manifest(album, reload_view=False)
-        root_saved = True
-        if root_album is not None and root_ref is not None:
-            root_saved = self._save_manifest(root_album, reload_view=False)
+        target_saved = True
+        if target_album is not None and target_ref is not None:
+            target_saved = self._save_manifest(target_album, reload_view=False)
 
-        if current_saved and root_saved:
+        if current_saved and target_saved:
             # Update DB index after successful manifest save.
             # Any transient inconsistency (e.g. DB update failure) is self-corrected
             # by sync_favorites() on the next album load.
             IndexStore(album.root).set_favorite_status(ref, desired_state)
-            if root_album is not None and root_ref is not None:
-                IndexStore(root_album.root).set_favorite_status(root_ref, desired_state)
+            if target_album is not None and target_ref is not None:
+                IndexStore(target_album.root).set_favorite_status(target_ref, desired_state)
             self._asset_list_model_provider().update_featured_status(ref, desired_state)
             return desired_state
 
@@ -107,12 +143,12 @@ class AlbumMetadataService(QObject):
         # in-memory representation stays consistent with the on-disk version.
         if desired_state:
             album.remove_featured(ref)
-            if root_album is not None and root_ref is not None:
-                root_album.remove_featured(root_ref)
+            if target_album is not None and target_ref is not None:
+                target_album.remove_featured(target_ref)
         else:
             album.add_featured(ref)
-            if root_album is not None and root_ref is not None:
-                root_album.add_featured(root_ref)
+            if target_album is not None and target_ref is not None:
+                target_album.add_featured(target_ref)
         return was_featured
 
     def ensure_featured_entries(

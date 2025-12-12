@@ -813,10 +813,12 @@ class AppFacade(QObject):
         if self._current_album and self._paths_equal(root, self._current_album.root):
             target_models.add(self._active_model)
 
-        for model in target_models:
+        if target_models:
             if announce_index:
                 self._pending_index_announcements.add(root)
             self.loadStarted.emit(root)
+
+        for model in target_models:
             if not force_reload and model.populate_from_cache():
                 continue
             model.start_load()

@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-from typing import Callable, Optional
-
 import os
+from collections.abc import Callable
+from pathlib import Path
+
 import pytest
 
 pytest.importorskip(
@@ -42,7 +42,7 @@ class DummyAlbum:
     def __init__(self, root: Path) -> None:
         self.root = root
         self.manifest: dict[str, list[str]] = {"featured": []}
-        self.cover: Optional[str] = None
+        self.cover: str | None = None
         self.saved = 0
 
     def set_cover(self, rel: str) -> None:
@@ -71,8 +71,8 @@ class DummyAlbum:
 def _build_service(
     *,
     asset_model,
-    current_album: Callable[[], Optional[DummyAlbum]],
-    library_manager_getter: Callable[[], Optional[object]],
+    current_album: Callable[[], DummyAlbum | None],
+    library_manager_getter: Callable[[], object | None],
     refresh,
 ) -> AlbumMetadataService:
     """Create a service instance with timer scheduling patched for tests."""
@@ -109,6 +109,13 @@ def test_toggle_featured_updates_current_and_library_album(
     monkeypatch.setattr(
         "src.iPhoto.gui.services.album_metadata_service.QTimer.singleShot",
         lambda _delay, callback: callback(),
+    )
+    
+    # Mock IndexStore to avoid DB operations in tests
+    index_store_mock = mocker.MagicMock()
+    monkeypatch.setattr(
+        "src.iPhoto.gui.services.album_metadata_service.IndexStore",
+        lambda root: index_store_mock,
     )
 
     manager = mocker.MagicMock()
@@ -182,6 +189,153 @@ def test_toggle_featured_rolls_back_on_failure(
     refresh.assert_not_called()
 
 
+def test_toggle_featured_from_library_root_updates_sub_album(
+    monkeypatch: pytest.MonkeyPatch,
+    mocker,
+    tmp_path: Path,
+    qapp: QApplication,
+) -> None:
+    """Toggling from Library Root should propagate to the physical sub-album."""
+
+    library_root = tmp_path / "Library"
+    album_root = library_root / "Trip"
+    album_root.mkdir(parents=True)
+    
+    # Create a dummy physical file to make path resolution work
+    photo_path = album_root / "photo.jpg"
+    photo_path.touch()
+    
+    root_album = DummyAlbum(library_root)
+    sub_album = DummyAlbum(album_root)
+
+    # Patch ``Album.open`` to return the appropriate album based on path
+    def album_opener(path):
+        path = Path(path)
+        if path == library_root:
+            return root_album
+        elif path == album_root:
+            return sub_album
+        return None
+
+    monkeypatch.setattr(
+        "src.iPhoto.gui.services.album_metadata_service.Album.open",
+        album_opener,
+    )
+    monkeypatch.setattr(
+        "src.iPhoto.gui.services.album_metadata_service.QTimer.singleShot",
+        lambda _delay, callback: callback(),
+    )
+    
+    # Mock IndexStore to avoid DB operations in tests
+    index_store_mock = mocker.MagicMock()
+    monkeypatch.setattr(
+        "src.iPhoto.gui.services.album_metadata_service.IndexStore",
+        lambda root: index_store_mock,
+    )
+
+    manager = mocker.MagicMock()
+    manager.root.return_value = library_root
+    asset_model = mocker.MagicMock()
+    refresh = mocker.MagicMock()
+
+    service = _build_service(
+        asset_model=asset_model,
+        current_album=lambda: root_album,
+        library_manager_getter=lambda: manager,
+        refresh=refresh,
+    )
+
+    # Toggle favorite from the Library Root perspective
+    result = service.toggle_featured(root_album, "Trip/photo.jpg")
+
+    # The library root should mark the asset as featured
+    assert result is True
+    assert root_album.manifest["featured"] == ["Trip/photo.jpg"]
+    assert root_album.saved == 1
+
+    # The physical sub-album should also be updated
+    assert sub_album.manifest["featured"] == ["photo.jpg"]
+    assert sub_album.saved == 1
+    
+    # IndexStore should be called twice (once for root, once for sub-album)
+    assert index_store_mock.set_favorite_status.call_count == 2
+    
+    asset_model.update_featured_status.assert_called_once_with("Trip/photo.jpg", True)
+    refresh.assert_not_called()
+
+
+def test_toggle_featured_from_library_root_for_root_asset(
+    monkeypatch: pytest.MonkeyPatch,
+    mocker,
+    tmp_path: Path,
+    qapp: QApplication,
+) -> None:
+    """Toggling an asset directly in Library Root (not in sub-album) should update root only."""
+
+    library_root = tmp_path / "Library"
+    library_root.mkdir(parents=True)
+    
+    # Create a file directly in library root
+    photo_path = library_root / "photo.jpg"
+    photo_path.touch()
+    
+    root_album = DummyAlbum(library_root)
+
+    open_count = 0
+    def album_opener(path):
+        nonlocal open_count
+        open_count += 1
+        if Path(path) == library_root:
+            return root_album
+        return None
+
+    monkeypatch.setattr(
+        "src.iPhoto.gui.services.album_metadata_service.Album.open",
+        album_opener,
+    )
+    monkeypatch.setattr(
+        "src.iPhoto.gui.services.album_metadata_service.QTimer.singleShot",
+        lambda _delay, callback: callback(),
+    )
+    
+    # Mock IndexStore to avoid DB operations in tests
+    index_store_mock = mocker.MagicMock()
+    monkeypatch.setattr(
+        "src.iPhoto.gui.services.album_metadata_service.IndexStore",
+        lambda root: index_store_mock,
+    )
+
+    manager = mocker.MagicMock()
+    manager.root.return_value = library_root
+    asset_model = mocker.MagicMock()
+    refresh = mocker.MagicMock()
+
+    service = _build_service(
+        asset_model=asset_model,
+        current_album=lambda: root_album,
+        library_manager_getter=lambda: manager,
+        refresh=refresh,
+    )
+
+    # Toggle favorite for an asset directly in the library root
+    result = service.toggle_featured(root_album, "photo.jpg")
+
+    # The library root should be updated
+    assert result is True
+    assert root_album.manifest["featured"] == ["photo.jpg"]
+    # Root album should be saved twice: once as primary album, once as target
+    assert root_album.saved == 2
+    
+    # Album.open should be called exactly twice (once for target identification)
+    assert open_count == 2
+    
+    # IndexStore should be called twice (once for root as primary, once for root as target)
+    assert index_store_mock.set_favorite_status.call_count == 2
+    
+    asset_model.update_featured_status.assert_called_once_with("photo.jpg", True)
+    refresh.assert_not_called()
+
+
 def test_ensure_featured_entries_updates_album(
     monkeypatch: pytest.MonkeyPatch,
     mocker,
@@ -195,7 +349,7 @@ def test_ensure_featured_entries_updates_album(
     album_root.mkdir(parents=True)
     imported = [album_root / "a.jpg", album_root / "b.jpg", library_root / "skip.txt"]
 
-    current_album: Optional[DummyAlbum] = None
+    current_album: DummyAlbum | None = None
     dummy_album = DummyAlbum(album_root)
 
     monkeypatch.setattr(

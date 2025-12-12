@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable, Sequence
 from pathlib import Path
-from typing import Callable, Optional, Sequence, TYPE_CHECKING
+from typing import TYPE_CHECKING
 
 from PySide6.QtCore import QObject, QTimer, Signal
 
@@ -24,11 +25,11 @@ class AlbumMetadataService(QObject):
     def __init__(
         self,
         *,
-        asset_list_model_provider: Callable[[], "AssetListModel"],
-        current_album_getter: Callable[[], Optional[Album]],
-        library_manager_getter: Callable[[], Optional["LibraryManager"]],
+        asset_list_model_provider: Callable[[], AssetListModel],
+        current_album_getter: Callable[[], Album | None],
+        library_manager_getter: Callable[[], LibraryManager | None],
         refresh_view: Callable[[Path], None],
-        parent: Optional[QObject] = None,
+        parent: QObject | None = None,
     ) -> None:
         super().__init__(parent)
         self._asset_list_model_provider = asset_list_model_provider
@@ -57,16 +58,14 @@ class AlbumMetadataService(QObject):
         was_featured = ref in featured
         desired_state = not was_featured
 
-        library_root: Optional[Path] = None
-        root_album: Optional[Album] = None
-        root_ref: Optional[str] = None
+        library_root: Path | None = None
 
         manager = self._library_manager_getter()
         if manager is not None:
             library_root = manager.root()
 
-        target_album: Optional[Album] = None
-        target_ref: Optional[str] = None
+        target_album: Album | None = None
+        target_ref: str | None = None
 
         if library_root is not None:
             if library_root != album.root:
@@ -92,26 +91,29 @@ class AlbumMetadataService(QObject):
                     # but is a direct child of it, or simply use the parent if it's a sub-album.
                     parent = absolute_asset.parent
                     if parent != library_root and parent.is_relative_to(library_root):
-                        # Simple assumption: The parent folder is the album.
-                        # This covers the 90% case where albums are direct subfolders.
-                        # For deeply nested structures, this updates the immediate container.
+                        # This handles the common case where albums are immediate child
+                        # directories of the library root. For nested album structures,
+                        # this updates the most immediate containing album directory.
                         physical_root = parent
                         physical_ref = absolute_asset.name
 
                         target_ref = physical_ref
                         try:
                             target_album = Album.open(physical_root)
-                        except IPhotoError:
-                            # If it's not a valid album (no manifest yet), we might be
-                            # implicitly creating one, or we should skip.
-                            # Album.open creates a default manifest if missing, which is acceptable behavior here.
+                        except IPhotoError as exc:
+                            # Album.open creates a default manifest if missing,
+                            # which is acceptable behavior here.
+                            # If opening still fails, emit the error and skip.
+                            self.errorRaised.emit(str(exc))
                             target_album = None
-                            # Try to open it only if it exists
-                            if physical_root.exists() and physical_root.is_dir():
-                                try:
-                                    target_album = Album.open(physical_root)
-                                except IPhotoError as exc:
-                                    self.errorRaised.emit(str(exc))
+                    elif parent == library_root:
+                        # Asset is directly in the library root; propagate to the root album itself.
+                        target_ref = absolute_asset.name
+                        try:
+                            target_album = Album.open(library_root)
+                        except IPhotoError as exc:
+                            self.errorRaised.emit(str(exc))
+                            target_album = None
                 except (OSError, ValueError):
                     pass
 
@@ -182,7 +184,7 @@ class AlbumMetadataService(QObject):
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
-    def _resolve_album_for_root(self, root: Path) -> Optional[Album]:
+    def _resolve_album_for_root(self, root: Path) -> Album | None:
         """Return an :class:`Album` instance representing *root*."""
 
         current = self._current_album_getter()

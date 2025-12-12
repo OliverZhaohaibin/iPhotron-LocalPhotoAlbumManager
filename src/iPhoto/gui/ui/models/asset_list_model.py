@@ -343,6 +343,13 @@ class AssetListModel(QAbstractListModel):
             return
 
         self._active_filter = normalized
+
+        # Clear data immediately to avoid "ghosting" (showing stale data while the
+        # new filter is being processed asynchronously).
+        self.beginResetModel()
+        self._state_manager.clear_rows()
+        self.endResetModel()
+
         self.start_load()
 
     def active_filter_mode(self) -> Optional[str]:

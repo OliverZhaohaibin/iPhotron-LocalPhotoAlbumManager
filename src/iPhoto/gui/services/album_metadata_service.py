@@ -90,7 +90,13 @@ class AlbumMetadataService(QObject):
                     # We walk up until we find a directory that is NOT the library root
                     # but is a direct child of it, or simply use the parent if it's a sub-album.
                     parent = absolute_asset.parent
-                    if parent != library_root and parent.is_relative_to(library_root):
+                    try:
+                        is_subpath = parent.relative_to(library_root)
+                    except ValueError:
+                        is_subpath = False
+                    else:
+                        is_subpath = True
+                    if parent != library_root and is_subpath:
                         # This handles the common case where albums are immediate child
                         # directories of the library root. For nested album structures,
                         # this updates the most immediate containing album directory.

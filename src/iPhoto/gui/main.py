@@ -70,7 +70,7 @@ def main(argv: list[str] | None = None) -> int:
     if len(arguments) > 1:
         window.open_album_from_path(Path(arguments[1]))
     else:
-        window.ui.sidebar.select_all_photos()
+        window.ui.sidebar.select_all_photos(emit_signal=True)
     return app.exec()
 
 

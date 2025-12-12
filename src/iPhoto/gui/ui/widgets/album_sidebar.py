@@ -478,12 +478,12 @@ class AlbumSidebar(QWidget):
 
         self._tree.scrollTo(index)
 
-    def select_all_photos(self) -> None:
+    def select_all_photos(self, emit_signal: bool = False) -> None:
         """Select the "All Photos" static node if it is available."""
 
-        self.select_static_node(self.ALL_PHOTOS_TITLE)
+        self.select_static_node(self.ALL_PHOTOS_TITLE, emit_signal=emit_signal)
 
-    def select_static_node(self, title: str) -> None:
+    def select_static_node(self, title: str, emit_signal: bool = False) -> None:
         """Select the static node matching *title* when present."""
 
         index = self._find_static_index(title)
@@ -496,12 +496,13 @@ class AlbumSidebar(QWidget):
         # Block signals for static nodes as well to prevent similar feedback loops
         # when programmatically restoring state (e.g. at startup or after resets).
         selection_model = self._tree.selectionModel()
-        if selection_model is not None:
+        should_block = selection_model is not None and not emit_signal
+        if should_block and selection_model:
             selection_model.blockSignals(True)
         try:
             self._tree.setCurrentIndex(index)
         finally:
-            if selection_model is not None:
+            if should_block and selection_model:
                 selection_model.blockSignals(False)
 
         self._tree.scrollTo(index)

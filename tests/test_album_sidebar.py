@@ -64,3 +64,23 @@ def test_programmatic_selection_suppresses_signals(tmp_path: Path, qapp: QApplic
     sidebar.select_path(album_dir)
     qapp.processEvents()
     assert not triggered_album, "Programmatic album selection must suppress signal"
+
+
+def test_programmatic_selection_can_emit_signals(tmp_path: Path, qapp: QApplication) -> None:
+    """Verify that programmatic selection can optionally emit signals."""
+    root = tmp_path / "Library"
+    root.mkdir()
+    manager = LibraryManager()
+    manager.bind_path(root)
+    qapp.processEvents()
+
+    sidebar = AlbumSidebar(manager)
+    qapp.processEvents()
+
+    triggered_all: list[bool] = []
+    sidebar.allPhotosSelected.connect(lambda: triggered_all.append(True))
+
+    # Test: Selecting "All Photos" programmatically with signals enabled
+    sidebar.select_all_photos(emit_signal=True)
+    qapp.processEvents()
+    assert triggered_all, "Programmatic All Photos selection should emit signal when requested"

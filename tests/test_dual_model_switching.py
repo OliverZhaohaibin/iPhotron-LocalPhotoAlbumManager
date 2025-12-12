@@ -43,12 +43,14 @@ def test_dual_model_switching(tmp_path: Path, qapp: QApplication) -> None:
 
     # 1. Open Library Root (All Photos)
     facade.open_album(root)
+    qapp.processEvents()
     library_model = facade.asset_list_model
     assert library_model is not None
     assert facade._active_model == facade._library_list_model
 
     # 2. Open Sub-Album
     facade.open_album(album_dir)
+    qapp.processEvents()
     album_model = facade.asset_list_model
     assert album_model is not None
     assert album_model != library_model
@@ -56,6 +58,7 @@ def test_dual_model_switching(tmp_path: Path, qapp: QApplication) -> None:
 
     # 3. Switch back to Library Root
     facade.open_album(root)
+    qapp.processEvents()
     current_model = facade.asset_list_model
     assert current_model == library_model
     assert facade._active_model == facade._library_list_model
@@ -66,26 +69,33 @@ def test_dual_model_switching(tmp_path: Path, qapp: QApplication) -> None:
 
     # Switch to Album
     facade.open_album(album_dir)
+    qapp.processEvents()
     assert len(signaled_models) == 1
     assert signaled_models[0] == album_model
 
     # Re-open same album (should NOT emit signal)
     facade.open_album(album_dir)
+    qapp.processEvents()
     assert len(signaled_models) == 1
 
     # Switch to Library
     facade.open_album(root)
+    qapp.processEvents()
     assert len(signaled_models) == 2
     assert signaled_models[1] == library_model
 
     # Re-open Library (should NOT emit signal)
     facade.open_album(root)
+    qapp.processEvents()
     assert len(signaled_models) == 2
 
     # Rapid switching simulation
     facade.open_album(album_dir)
+    qapp.processEvents()
     facade.open_album(root)
+    qapp.processEvents()
     facade.open_album(album_dir)
+    qapp.processEvents()
     # Should emit 3 more times
     assert len(signaled_models) == 5
     assert signaled_models[-1] == album_model
@@ -101,18 +111,6 @@ def test_dual_model_no_library(tmp_path: Path, qapp: QApplication) -> None:
     # No bind_library called
 
     facade.open_album(root)
-    # When no library is bound, it should default to album model (or library model if it's default active)
-    # Logic: if library_root is None, it uses _album_list_model for target.
-    # But _active_model is initialized to _library_list_model.
-    # So it should switch to _album_list_model?
-
-    # Check what open_album logic does:
-    # target_model = self._album_list_model
-    # if library_root and ... : target = library
-    # So target is album model.
-    # if target != active: switch.
-
-    # Initial active is library model.
-    # So it should switch to album model.
+    qapp.processEvents()
 
     assert facade.asset_list_model == facade._album_list_model

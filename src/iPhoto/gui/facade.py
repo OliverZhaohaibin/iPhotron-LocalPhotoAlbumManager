@@ -365,7 +365,7 @@ class AppFacade(QObject):
         if not normalized:
             return
 
-        model = self._asset_list_model
+        model = self.asset_list_model
         for still_path in list(normalized):
             metadata = model.metadata_for_absolute_path(still_path)
             if not metadata or not metadata.get("is_live"):
@@ -437,7 +437,7 @@ class AppFacade(QObject):
         if not normalized:
             return False
 
-        model = self._asset_list_model
+        model = self.asset_list_model
         for still_path in list(normalized):
             metadata = model.metadata_for_absolute_path(still_path)
             if not metadata or not metadata.get("is_live"):

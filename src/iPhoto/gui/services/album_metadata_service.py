@@ -9,8 +9,10 @@ from typing import TYPE_CHECKING
 from PySide6.QtCore import QObject, QTimer, Signal
 
 from ...cache.index_store import IndexStore
+from ...config import ALBUM_MANIFEST_NAMES
 from ...errors import IPhotoError
 from ...models.album import Album
+from ...utils.pathutils import is_descendant_path
 
 if TYPE_CHECKING:
     from ...library.manager import LibraryManager
@@ -86,40 +88,26 @@ class AlbumMetadataService(QObject):
                 # Case 2: Toggling in the Library Root. Need to update the physical sub-album.
                 try:
                     absolute_asset = (album.root / ref).resolve()
-                    # Identify the physical album by checking the parent directory.
-                    # We walk up until we find a directory that is NOT the library root
-                    # but is a direct child of it, or simply use the parent if it's a sub-album.
-                    parent = absolute_asset.parent
-                    try:
-                        is_subpath = parent.relative_to(library_root)
-                    except ValueError:
-                        is_subpath = False
-                    else:
-                        is_subpath = True
-                    if parent != library_root and is_subpath:
-                        # This handles the common case where albums are immediate child
-                        # directories of the library root. For nested album structures,
-                        # this updates the most immediate containing album directory.
-                        physical_root = parent
-                        physical_ref = absolute_asset.name
+                    # Instead of assuming the immediate parent is the album, search for the real root.
+                    physical_root = self._find_containing_physical_album(
+                        library_root, absolute_asset
+                    )
 
-                        target_ref = physical_ref
+                    if physical_root:
+                        # Calculate the correct relative path from the actual physical root
+                        # e.g., converts absolute path to "SubFolder/Photo.jpg"
+                        target_ref = absolute_asset.relative_to(physical_root).as_posix()
+
                         try:
                             target_album = Album.open(physical_root)
                         except IPhotoError as exc:
-                            # Album.open creates a default manifest if missing,
-                            # which is acceptable behavior here.
-                            # If opening still fails, emit the error and skip.
                             self.errorRaised.emit(str(exc))
                             target_album = None
-                    elif parent == library_root:
-                        # Asset is directly in the library root; propagate to the root album itself.
-                        target_ref = absolute_asset.name
-                        try:
-                            target_album = Album.open(library_root)
-                        except IPhotoError as exc:
-                            self.errorRaised.emit(str(exc))
-                            target_album = None
+                    else:
+                        # No physical album found (e.g., file is directly in Library Root or is an orphan).
+                        # Skip synchronization.
+                        target_album = None
+
                 except (OSError, ValueError):
                     pass
 
@@ -158,6 +146,26 @@ class AlbumMetadataService(QObject):
             if target_album is not None and target_ref is not None:
                 target_album.add_featured(target_ref)
         return was_featured
+
+    def _find_containing_physical_album(self, library_root: Path, asset_path: Path) -> Path | None:
+        """Traverse upwards from the asset path to find the nearest physical album root."""
+        candidate = asset_path.parent
+
+        # Safety check: Ensure we stay strictly within the library root
+        while candidate != library_root and is_descendant_path(candidate, library_root):
+            # Check if any known manifest file exists in the current candidate directory
+            for name in ALBUM_MANIFEST_NAMES:
+                if (candidate / name).exists():
+                    return candidate
+
+            # Stop if we hit the filesystem root to prevent infinite loops
+            if candidate.parent == candidate:
+                break
+
+            # Move up one level
+            candidate = candidate.parent
+
+        return None
 
     def ensure_featured_entries(
         self,

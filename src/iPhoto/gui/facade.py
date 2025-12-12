@@ -781,19 +781,23 @@ class AppFacade(QObject):
         # But _restart_asset_load currently uses _active_model.
         # To support background updates properly, we should check which model covers the root.
 
-        target_model = None
-        if self._library_manager and self._paths_equal(root, self._library_manager.root()):
-            target_model = self._library_list_model
-        elif self._current_album and self._paths_equal(root, self._current_album.root):
-            target_model = self._active_model # Likely the album model
+        # Gather all models that are managing this root.
+        # This handles the case where the library root is also the currently open active album.
+        target_models: Set[AssetListModel] = set()
 
-        if target_model:
-             if announce_index:
-                 self._pending_index_announcements.add(root)
-             self.loadStarted.emit(root)
-             if not force_reload and target_model.populate_from_cache():
-                 return
-             target_model.start_load()
+        if self._library_manager and self._paths_equal(root, self._library_manager.root()):
+            target_models.add(self._library_list_model)
+
+        if self._current_album and self._paths_equal(root, self._current_album.root):
+            target_models.add(self._active_model)
+
+        for model in target_models:
+            if announce_index:
+                self._pending_index_announcements.add(root)
+            self.loadStarted.emit(root)
+            if not force_reload and model.populate_from_cache():
+                continue
+            model.start_load()
 
 
 __all__ = ["AppFacade"]

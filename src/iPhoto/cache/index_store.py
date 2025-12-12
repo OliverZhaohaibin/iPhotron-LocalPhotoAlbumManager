@@ -328,46 +328,50 @@ class IndexStore:
 
     def sync_favorites(self, featured_rels: Iterable[str]) -> None:
         """Synchronise the DB 'is_favorite' column with the provided list of featured paths."""
+        # Convert to list to avoid consuming iterator multiple times
+        featured_rels_list = list(featured_rels)
+        
         # Normalize input paths to ensure consistent comparison (NFC)
-        # We assume the DB uses consistent normalization or we rely on normalization for matching.
-        featured_set = {unicodedata.normalize("NFC", r) for r in featured_rels}
+        # Build mapping from normalized to original input strings
+        input_normalized_map = {unicodedata.normalize("NFC", r): r for r in featured_rels_list}
+        featured_normalized_set = set(input_normalized_map.keys())
 
         conn = self._get_conn()
         is_nested = (conn == self._conn)
 
         def _perform_sync(c: sqlite3.Connection) -> None:
-            # 1. Fetch currently marked favorites from the DB to calculate the diff.
-            #    We store a map of normalized_rel -> original_rel to ensure we update
-            #    the exact key present in the database even if casing/normalization differs slightly.
-            cursor = c.execute("SELECT rel FROM assets WHERE is_favorite != 0")
-            current_favs_map = {unicodedata.normalize("NFC", row[0]): row[0] for row in cursor}
-            current_favs_normalized = set(current_favs_map.keys())
+            # 1. Fetch all rels from the DB to build a normalized-to-original mapping.
+            #    This ensures we always update the exact key present in the database,
+            #    even if the database contains paths with different Unicode normalization.
+            cursor = c.execute("SELECT rel FROM assets")
+            all_rels_map = {unicodedata.normalize("NFC", row[0]): row[0] for row in cursor}
 
-            # 2. Determine which rows actually need updates
+            # 2. Fetch currently marked favorites from the DB to calculate the diff.
+            current_favs_normalized = {
+                unicodedata.normalize("NFC", row[0])
+                for row in c.execute("SELECT rel FROM assets WHERE is_favorite != 0")
+            }
+
+            # 3. Determine which rows actually need updates
             # Items in DB (normalized) but not in input list -> Remove
-            to_remove_normalized = current_favs_normalized - featured_set
+            to_remove_normalized = current_favs_normalized - featured_normalized_set
 
             # Items in input list but not in DB (normalized) -> Add
-            # Note: For adding, we have to use the keys from the input list (or try to find them).
-            # Since we don't have a map for non-favorites, we use the raw input strings.
-            # This works best if the input list matches the filesystem/DB convention.
-            to_add_normalized = featured_set - current_favs_normalized
+            to_add_normalized = featured_normalized_set - current_favs_normalized
 
-            # 3. Apply updates only where necessary
+            # 4. Apply updates only where necessary
             if to_remove_normalized:
                 # Use the ORIGINAL keys from the DB to ensure the UPDATE succeeds
-                to_remove_original = [current_favs_map[n] for n in to_remove_normalized]
+                to_remove_original = [all_rels_map[n] for n in to_remove_normalized if n in all_rels_map]
                 c.executemany("UPDATE assets SET is_favorite = 0 WHERE rel = ?", [(r,) for r in to_remove_original])
 
             if to_add_normalized:
-                # We can only guess the key here based on the input.
-                # If we wanted to be 100% robust we would need to fetch ALL keys from DB, but that's too slow.
-                # Instead, we just use the input keys that matched the normalized set difference.
-                # To do this correctly, we need the original input strings that produced the normalized keys.
-                # Let's rebuild that map.
-                input_map = {unicodedata.normalize("NFC", r): r for r in featured_rels}
-                to_add_original = [input_map[n] for n in to_add_normalized]
-
+                # Use the ORIGINAL keys from the DB to ensure the UPDATE succeeds
+                # Fall back to input keys if the normalized key is not found in DB
+                to_add_original = [
+                    all_rels_map.get(n, input_normalized_map[n]) 
+                    for n in to_add_normalized
+                ]
                 c.executemany("UPDATE assets SET is_favorite = 1 WHERE rel = ?", [(r,) for r in to_add_original])
 
         try:

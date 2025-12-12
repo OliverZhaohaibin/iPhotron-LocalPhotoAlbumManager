@@ -116,3 +116,72 @@ def test_read_geometry_only_sorting(store: IndexStore) -> None:
     results = list(store.read_geometry_only(sort_by_date=True))
     rels = [r["rel"] for r in results]
     assert rels == ["b.jpg", "a.jpg", "c.jpg"]
+
+def test_sync_favorites_non_ascii(store: IndexStore) -> None:
+    """Test synchronizing favorites with non-ASCII filenames."""
+    rows = [
+        {"rel": "café.jpg", "is_favorite": 0},
+        {"rel": "文件.jpg", "is_favorite": 0},
+        {"rel": "фото.jpg", "is_favorite": 1},
+    ]
+    store.write_rows(rows)
+
+    # Sync: café=Fav, 文件=Fav, фото=NotFav
+    store.sync_favorites(["café.jpg", "文件.jpg"])
+
+    data = {r["rel"]: r["is_favorite"] for r in store.read_all()}
+    assert data["café.jpg"] == 1
+    assert data["文件.jpg"] == 1
+    assert data["фото.jpg"] == 0
+
+def test_sync_favorites_unicode_normalization(store: IndexStore) -> None:
+    """Test synchronizing favorites with different Unicode normalization forms."""
+    import unicodedata
+    
+    # Use NFD form (decomposed) in the database
+    cafe_nfd = unicodedata.normalize("NFD", "café")  # e + combining acute accent
+    rows = [
+        {"rel": cafe_nfd, "is_favorite": 0},
+        {"rel": "normal.jpg", "is_favorite": 0},
+    ]
+    store.write_rows(rows)
+
+    # Use NFC form (composed) in the input
+    cafe_nfc = unicodedata.normalize("NFC", "café")  # é as single character
+    
+    # These should match even though they're different byte sequences
+    assert cafe_nfc != cafe_nfd
+    assert unicodedata.normalize("NFC", cafe_nfc) == unicodedata.normalize("NFC", cafe_nfd)
+    
+    store.sync_favorites([cafe_nfc])
+
+    # The database should have updated the row with the NFD key
+    data = {r["rel"]: r["is_favorite"] for r in store.read_all()}
+    assert data[cafe_nfd] == 1
+    assert data["normal.jpg"] == 0
+
+def test_sync_favorites_mixed_unicode_forms(store: IndexStore) -> None:
+    """Test syncing when database and input use different Unicode forms."""
+    import unicodedata
+    
+    # Store paths in different normalization forms
+    rows = [
+        {"rel": unicodedata.normalize("NFC", "café.jpg"), "is_favorite": 0},
+        {"rel": unicodedata.normalize("NFD", "naïve.jpg"), "is_favorite": 1},
+        {"rel": "regular.jpg", "is_favorite": 0},
+    ]
+    store.write_rows(rows)
+    
+    # Input uses opposite normalization forms
+    input_list = [
+        unicodedata.normalize("NFD", "café.jpg"),  # NFD form
+        unicodedata.normalize("NFC", "naïve.jpg"),  # NFC form
+    ]
+    
+    store.sync_favorites(input_list)
+    
+    # Both should be marked as favorites despite different normalization
+    data = {r["rel"]: r["is_favorite"] for r in store.read_all()}
+    assert data[unicodedata.normalize("NFC", "café.jpg")] == 1
+    assert data[unicodedata.normalize("NFD", "naïve.jpg")] == 1
+    assert data["regular.jpg"] == 0

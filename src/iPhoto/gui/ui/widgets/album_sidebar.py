@@ -4,8 +4,23 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import QEvent, QModelIndex, QPoint, QRect, QSize, Qt, Signal
-from PySide6.QtGui import QCursor, QDragEnterEvent, QDragMoveEvent, QDropEvent, QFont, QPalette
+from PySide6.QtCore import (
+    QEvent,
+    QModelIndex,
+    QPoint,
+    QRect,
+    QSize,
+    Qt,
+    Signal,
+)
+from PySide6.QtGui import (
+    QCursor,
+    QDragEnterEvent,
+    QDragMoveEvent,
+    QDropEvent,
+    QFont,
+    QPalette,
+)
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QFrame,
@@ -437,8 +452,28 @@ class AlbumSidebar(QWidget):
         index = self._model.index_for_path(path)
         if not index.isValid():
             return
+
         self._current_static_selection = None
-        self._tree.setCurrentIndex(index)
+        self._current_selection = path
+
+        # When programmatically selecting an album in response to an external event (like
+        # 'albumOpened'), we must suppress the sidebar's selection signals.
+        # Failing to block signals creates a feedback loop:
+        # 1. NavigationController opens Album A -> calls sidebar.select_path(A)
+        # 2. sidebar.select_path(A) -> emits albumSelected(A)
+        # 3. albumSelected(A) -> triggers NavigationController.open_album(A)
+        #
+        # While NavigationController has checks for redundant opens, race conditions in
+        # rapid switching can bypass them, leading to infinite loops or crashes.
+        # Blocking signals ensures this method only updates the visual state without
+        # triggering further navigation logic.
+        selection_model = self._tree.selectionModel()
+        selection_model.blockSignals(True)
+        try:
+            self._tree.setCurrentIndex(index)
+        finally:
+            selection_model.blockSignals(False)
+
         self._tree.scrollTo(index)
 
     def select_all_photos(self) -> None:
@@ -452,9 +487,19 @@ class AlbumSidebar(QWidget):
         index = self._find_static_index(title)
         if not index.isValid():
             return
+
         self._current_selection = None
         self._current_static_selection = title
-        self._tree.setCurrentIndex(index)
+
+        # Block signals for static nodes as well to prevent similar feedback loops
+        # when programmatically restoring state (e.g. at startup or after resets).
+        selection_model = self._tree.selectionModel()
+        selection_model.blockSignals(True)
+        try:
+            self._tree.setCurrentIndex(index)
+        finally:
+            selection_model.blockSignals(False)
+
         self._tree.scrollTo(index)
 
     def _show_context_menu(self, point: QPoint) -> None:

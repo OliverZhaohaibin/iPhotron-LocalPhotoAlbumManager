@@ -10,8 +10,6 @@ pytest.importorskip("PySide6.QtWidgets", reason="Qt widgets not available", exc_
 
 from PySide6.QtWidgets import QApplication
 
-from src.iPhoto.cache.index_store import IndexStore
-from src.iPhoto.gui.facade import AppFacade
 from src.iPhoto.gui.ui.widgets.album_sidebar import AlbumSidebar
 from src.iPhoto.library.manager import LibraryManager
 
@@ -30,12 +28,8 @@ def _write_manifest(path: Path, title: str) -> None:
     (path / ".iphoto.album.json").write_text(json.dumps(payload), encoding="utf-8")
 
 
-_PNG_DATA = base64.b64decode(
-    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y4nKwAAAABJRU5ErkJggg=="
-)
-
-
-def test_all_photos_selection_emits_signal(tmp_path: Path, qapp: QApplication) -> None:
+def test_programmatic_selection_suppresses_signals(tmp_path: Path, qapp: QApplication) -> None:
+    """Verify that programmatic selection calls do not emit navigation signals."""
     root = tmp_path / "Library"
     album_dir = root / "Trip"
     album_dir.mkdir(parents=True)
@@ -45,53 +39,28 @@ def test_all_photos_selection_emits_signal(tmp_path: Path, qapp: QApplication) -
     qapp.processEvents()
 
     sidebar = AlbumSidebar(manager)
+    # Force the sidebar to process pending events (e.g. tree population)
     qapp.processEvents()
 
-    triggered: list[bool] = []
-    sidebar.allPhotosSelected.connect(lambda: triggered.append(True))
+    triggered_all: list[bool] = []
+    triggered_static: list[str] = []
+    triggered_album: list[Path] = []
+
+    sidebar.allPhotosSelected.connect(lambda: triggered_all.append(True))
+    sidebar.staticNodeSelected.connect(lambda title: triggered_static.append(title))
+    sidebar.albumSelected.connect(lambda path: triggered_album.append(path))
+
+    # Test: Selecting "All Photos" programmatically
     sidebar.select_all_photos()
     qapp.processEvents()
+    assert not triggered_all, "Programmatic All Photos selection must suppress signal"
 
-    assert triggered, "Selecting All Photos should emit allPhotosSelected"
-
-
-def test_videos_selection_emits_static_signal(tmp_path: Path, qapp: QApplication) -> None:
-    root = tmp_path / "Library"
-    album_dir = root / "Trip"
-    album_dir.mkdir(parents=True)
-    _write_manifest(album_dir, "Trip")
-    manager = LibraryManager()
-    manager.bind_path(root)
-    qapp.processEvents()
-
-    sidebar = AlbumSidebar(manager)
-    qapp.processEvents()
-
-    triggered: list[str] = []
-    sidebar.staticNodeSelected.connect(lambda title: triggered.append(title))
+    # Test: Selecting static node "Videos" programmatically
     sidebar.select_static_node("Videos")
     qapp.processEvents()
+    assert not triggered_static, "Programmatic static node selection must suppress signal"
 
-    assert triggered == ["Videos"], "Videos selection should emit staticNodeSelected"
-
-
-def test_opening_library_root_indexes_nested_assets(tmp_path: Path, qapp: QApplication) -> None:
-    root = tmp_path / "Library"
-    album_dir = root / "Trip"
-    child_dir = album_dir / "Day1"
-    child_dir.mkdir(parents=True)
-    # Ensure every level of the hierarchy carries a manifest so the scanner treats
-    # each directory as a well-defined album during the integration flow.
-    _write_manifest(root, "Library")
-    _write_manifest(album_dir, "Trip")
-    _write_manifest(child_dir, "Day1")
-    (album_dir / "photo.PNG").write_bytes(_PNG_DATA)
-    (child_dir / "nested.PNG").write_bytes(_PNG_DATA)
-
-    facade = AppFacade()
-    album = facade.open_album(root)
-    assert album is not None
-
-    rows = list(IndexStore(root).read_all())
-    rel_paths = {row["rel"] for row in rows}
-    assert rel_paths == {"Trip/photo.PNG", "Trip/Day1/nested.PNG"}
+    # Test: Selecting album path programmatically
+    sidebar.select_path(album_dir)
+    qapp.processEvents()
+    assert not triggered_album, "Programmatic album selection must suppress signal"

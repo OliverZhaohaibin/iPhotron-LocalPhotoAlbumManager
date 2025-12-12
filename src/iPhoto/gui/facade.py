@@ -74,6 +74,9 @@ class AppFacade(QObject):
         # Initialize active model to the library model. This ensures consumers
         # encountering the app in a "Library" state (e.g. at startup) receive
         # the correct persistent model context rather than a transient album one.
+        # Although the app might launch without a bound library, defaulting to
+        # the library context avoids exposing an arbitrary transient model and
+        # aligns with the "All Photos" default view.
         self._active_model: AssetListModel = self._library_list_model
 
         for model in (self._library_list_model, self._album_list_model):

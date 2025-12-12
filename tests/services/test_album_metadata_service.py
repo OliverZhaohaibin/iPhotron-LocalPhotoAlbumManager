@@ -78,7 +78,7 @@ def _build_service(
     """Create a service instance with timer scheduling patched for tests."""
 
     service = AlbumMetadataService(
-        asset_list_model=asset_model,
+        asset_list_model_provider=lambda: asset_model,
         current_album_getter=current_album,
         library_manager_getter=library_manager_getter,
         refresh_view=refresh,

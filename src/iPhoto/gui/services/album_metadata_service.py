@@ -98,6 +98,8 @@ class AlbumMetadataService(QObject):
             # Any transient inconsistency (e.g. DB update failure) is self-corrected
             # by sync_favorites() on the next album load.
             IndexStore(album.root).set_favorite_status(ref, desired_state)
+            if root_album is not None and root_ref is not None:
+                IndexStore(root_album.root).set_favorite_status(root_ref, desired_state)
             self._asset_list_model_provider().update_featured_status(ref, desired_state)
             return desired_state
 

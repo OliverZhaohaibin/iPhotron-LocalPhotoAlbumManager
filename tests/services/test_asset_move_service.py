@@ -50,7 +50,7 @@ def _create_service(
 
     return AssetMoveService(
         task_manager=task_manager,
-        asset_list_model=asset_list_model,
+        asset_list_model_provider=lambda: asset_list_model,
         current_album_getter=current_album,
         library_manager_getter=(lambda: library_manager),
     )
@@ -286,8 +286,10 @@ def test_move_from_library_root_updates_source_album_index(
     assert album_a_rows == []
 
     library_rows = list(IndexStore(library_root).read_all())
-    assert library_rows == [{"rel": f"AlbumB/{asset.name}"}]
+    assert len(library_rows) == 1
+    assert library_rows[0]["rel"] == f"AlbumB/{asset.name}"
 
     album_b_rows = list(IndexStore(album_b).read_all())
-    assert album_b_rows == [{"rel": asset.name}]
+    assert len(album_b_rows) == 1
+    assert album_b_rows[0]["rel"] == asset.name
 

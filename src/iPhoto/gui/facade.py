@@ -181,11 +181,6 @@ class AppFacade(QObject):
         if library_root and self._paths_equal(root, library_root):
             target_model = self._library_list_model
 
-        # If switching models, notify listeners (e.g. DataManager to update the proxy).
-        if target_model is not self._active_model:
-            self._active_model = target_model
-            self.activeModelChanged.emit(target_model)
-
         self._current_album = album
         album_root = album.root
 
@@ -206,6 +201,13 @@ class AppFacade(QObject):
 
         if should_prepare:
             target_model.prepare_for_album(album_root)
+
+        # If switching models, notify listeners (e.g. DataManager to update the proxy).
+        # We emit this AFTER preparing the target model so that the proxy receives
+        # a model that is already reset (or ready), avoiding a brief flash of stale data.
+        if target_model is not self._active_model:
+            self._active_model = target_model
+            self.activeModelChanged.emit(target_model)
 
         self.albumOpened.emit(album_root)
 

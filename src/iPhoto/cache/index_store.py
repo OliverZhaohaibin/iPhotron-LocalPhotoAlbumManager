@@ -337,7 +337,7 @@ class IndexStore:
             # 1. Fetch currently marked favorites from the DB to calculate the diff.
             #    This avoids using a TEMP TABLE, preventing potential crashes related
             #    to temporary file handling with non-ASCII paths on Windows.
-            cursor = c.execute("SELECT rel FROM assets WHERE is_favorite = 1")
+            cursor = c.execute("SELECT rel FROM assets WHERE is_favorite != 0")
             current_favs = {row[0] for row in cursor}
 
             # 2. Determine which rows actually need updates

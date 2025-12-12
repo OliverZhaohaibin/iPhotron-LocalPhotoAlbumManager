@@ -187,3 +187,33 @@ def test_scan_finished_triggers_full_refresh_for_root(qtbot, mock_library):
         worker = mock_pool.start.call_args[0][0]
         assert isinstance(worker, AlbumDataWorker)
         assert worker.node.path == album.path
+
+def test_index_updated_triggers_refresh(qtbot, mock_library):
+    """Test that on_index_updated triggers a data refresh for the specific album."""
+    album_path = Path("/path/to/album")
+    album = MagicMock()
+    album.title = "Test Album"
+    album.path = album_path
+
+    # Setup library to return this album
+    mock_library.list_albums.return_value = [album]
+    mock_library.root.return_value = Path("/library/root")
+
+    with patch("PySide6.QtCore.QThreadPool.globalInstance") as mock_pool_provider:
+        mock_pool = MagicMock()
+        mock_pool_provider.return_value = mock_pool
+
+        dashboard = AlbumsDashboard(mock_library)
+        qtbot.addWidget(dashboard)
+
+        # Reset mock
+        mock_pool.start.reset_mock()
+
+        # Call with album path
+        dashboard.on_index_updated(album_path)
+
+        # Should trigger refresh -> start worker for album
+        assert mock_pool.start.call_count == 1
+        worker = mock_pool.start.call_args[0][0]
+        assert isinstance(worker, AlbumDataWorker)
+        assert worker.node.path == album.path

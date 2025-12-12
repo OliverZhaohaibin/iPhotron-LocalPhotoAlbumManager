@@ -500,8 +500,11 @@ class AlbumsDashboard(QWidget):
         """Reload data for the specified album when a scan completes."""
         if not success:
             return
+        self.on_index_updated(root)
 
-        # If the scan matches the library root (e.g. "All Photos" scan),
+    def on_index_updated(self, root: Path) -> None:
+        """Reload data for the specified album when its index changes."""
+        # If the update matches the library root (e.g. "All Photos" scan/update),
         # we refresh the entire dashboard to ensure consistency.
         library_root = self._library.root()
         if library_root and root == library_root:

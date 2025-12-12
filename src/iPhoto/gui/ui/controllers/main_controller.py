@@ -144,6 +144,7 @@ class MainController(QObject):
         updates.scanFinished.connect(self._status_bar.handle_scan_finished)
         updates.scanFinished.connect(ui.albums_dashboard_page.on_scan_finished)
         updates.indexUpdated.connect(self._map_controller.handle_index_update)
+        updates.indexUpdated.connect(ui.albums_dashboard_page.on_index_updated)
         self._facade.loadStarted.connect(self._status_bar.handle_load_started)
         self._facade.loadProgress.connect(self._status_bar.handle_load_progress)
         self._facade.loadFinished.connect(self._status_bar.handle_load_finished)

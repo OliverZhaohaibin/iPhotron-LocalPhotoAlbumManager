@@ -140,8 +140,11 @@ def build_asset_entry(
                 try:
                     store.update_location(rel, location_name)
                 except Exception:
-                    # Silently ignore write failures during read operations to prevent crashes
-                    pass
+                    # Log write failures during read operations to aid debugging, but do not crash
+                    LOGGER.warning(
+                        "Failed to update location cache for asset '%s': %s",
+                        rel, location_name, exc_info=True
+                    )
     else:
         # If location is present, we might still want gps for other purposes if needed,
         # but the original logic extracted it mainly for resolution.

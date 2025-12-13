@@ -722,7 +722,7 @@ class AssetListModel(QAbstractListModel):
                     child_album = Album.open(descendant_root)
                     child_featured = child_album.manifest.get("featured", [])
                 except Exception as exc:
-                    logger.warning(
+                    logger.error(
                         "AssetListModel: failed to load manifest for %s: %s",
                         descendant_root,
                         exc,

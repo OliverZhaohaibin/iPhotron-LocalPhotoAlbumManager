@@ -21,7 +21,7 @@ from PySide6.QtCore import (
 )
 from PySide6.QtGui import QColor, QDragEnterEvent, QDragMoveEvent, QDropEvent, QSurfaceFormat
 from PySide6.QtQuickWidgets import QQuickWidget
-from PySide6.QtWidgets import QWidget
+from PySide6.QtWidgets import QWidget, QLabel, QVBoxLayout
 
 from ..models.roles import Roles
 from ..qml.thumbnail_provider import ThumbnailProvider
@@ -240,6 +240,12 @@ class GalleryQuickWidget(QQuickWidget):
 
         if not qml_path.exists():
             logger.error(f"GalleryQuickWidget: QML file not found at {qml_path}")
+            # Show visible error state
+            layout = QVBoxLayout(self)
+            label = QLabel(f"Critical Error: Gallery QML not found at\n{qml_path}", self)
+            label.setStyleSheet("color: #ff5555; background: #222; font-size: 14px; padding: 20px;")
+            label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            layout.addWidget(label)
             return
 
         logger.info(f"GalleryQuickWidget: Loading QML from {qml_path}")

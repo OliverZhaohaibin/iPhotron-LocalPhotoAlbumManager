@@ -42,6 +42,23 @@ class SelectionModelShim(QObject):
     def __init__(self, model, parent=None):
         super().__init__(parent)
         self._model = model
+        self._selection_cache: Optional[List[QModelIndex]] = None
+
+        # Connect signals to invalidate cache
+        self._model.dataChanged.connect(self._on_data_changed)
+        self._model.rowsInserted.connect(self._invalidate_cache)
+        self._model.rowsRemoved.connect(self._invalidate_cache)
+        self._model.modelReset.connect(self._invalidate_cache)
+        self._model.layoutChanged.connect(self._invalidate_cache)
+
+    @Slot()
+    def _invalidate_cache(self) -> None:
+        self._selection_cache = None
+
+    @Slot(QModelIndex, QModelIndex, list)
+    def _on_data_changed(self, top: QModelIndex, bottom: QModelIndex, roles: List[int] = []) -> None:
+        if not roles or Roles.IS_SELECTED in roles:
+            self._selection_cache = None
 
     def isSelected(self, index: QModelIndex) -> bool:
         if not index.isValid():
@@ -140,13 +157,18 @@ class SelectionModelShim(QObject):
 
     def selectedIndexes(self) -> List[QModelIndex]:
         """Return a list of all selected indexes."""
+        if self._selection_cache is not None:
+            return list(self._selection_cache)
+
         selected = []
         row_count = self._model.rowCount()
         for i in range(row_count):
             index = self._model.index(i, 0)
             if self._model.data(index, Roles.IS_SELECTED):
                 selected.append(index)
-        return selected
+
+        self._selection_cache = selected
+        return list(selected)
 
     def currentIndex(self) -> QModelIndex:
         row_count = self._model.rowCount()

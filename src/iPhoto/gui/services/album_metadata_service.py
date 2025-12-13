@@ -78,26 +78,19 @@ class AlbumMetadataService(QObject):
             return False
 
         if library_root:
-            # Check Physical Album (Child)
-            physical_root = self._find_containing_physical_album(
+            # Iterate through all containing albums (Physical Child, Parent, Library Root)
+            containing_roots = self._find_all_containing_albums(
                 library_root, absolute_asset
             )
-            if physical_root and physical_root != album.root:
-                try:
-                    phys_album = Album.open(physical_root)
-                    phys_ref = absolute_asset.relative_to(physical_root).as_posix()
-                    targets.append((phys_album, phys_ref))
-                except (OSError, ValueError, IPhotoError) as exc:
-                    self.errorRaised.emit(str(exc))
-
-            # Check Library Root
-            if library_root != album.root:
-                try:
-                    lib_album = Album.open(library_root)
-                    lib_ref = absolute_asset.relative_to(library_root).as_posix()
-                    targets.append((lib_album, lib_ref))
-                except (OSError, ValueError, IPhotoError):
-                    pass
+            for root in containing_roots:
+                if root != album.root:  # Deduplication handled later but good optimization
+                    try:
+                        alb = Album.open(root)
+                        rel = absolute_asset.relative_to(root).as_posix()
+                        targets.append((alb, rel))
+                    except (OSError, ValueError, IPhotoError) as exc:
+                        # Log but continue to update others
+                        self.errorRaised.emit(str(exc))
 
         # Deduplicate targets by album root
         unique_targets: dict[Path, tuple[Album, str]] = {}
@@ -134,25 +127,39 @@ class AlbumMetadataService(QObject):
 
         return was_featured
 
-    def _find_containing_physical_album(self, library_root: Path, asset_path: Path) -> Path | None:
-        """Traverse upwards from the asset path to find the nearest physical album root."""
+    def _find_all_containing_albums(
+        self, library_root: Path, asset_path: Path
+    ) -> list[Path]:
+        """Traverse upwards to find all physical albums containing the asset."""
+        found: list[Path] = []
         candidate = asset_path.parent
 
-        # Safety check: Ensure we stay strictly within the library root
-        while candidate != library_root and is_descendant_path(candidate, library_root):
-            # Check if any known manifest file exists in the current candidate directory
-            for name in ALBUM_MANIFEST_NAMES:
-                if (candidate / name).exists():
-                    return candidate
-
-            # Stop if we hit the filesystem root to prevent infinite loops
-            if candidate.parent == candidate:
+        while True:
+            # Check if candidate is strictly under or equal to library_root
+            if candidate != library_root and not is_descendant_path(
+                candidate, library_root
+            ):
                 break
 
-            # Move up one level
-            candidate = candidate.parent
+            # Check if any known manifest file exists
+            is_album = False
+            for name in ALBUM_MANIFEST_NAMES:
+                if (candidate / name).exists():
+                    is_album = True
+                    break
 
-        return None
+            if is_album:
+                found.append(candidate)
+
+            if candidate == library_root:
+                break
+
+            parent = candidate.parent
+            if parent == candidate:  # File system root
+                break
+            candidate = parent
+
+        return found
 
     def ensure_featured_entries(
         self,

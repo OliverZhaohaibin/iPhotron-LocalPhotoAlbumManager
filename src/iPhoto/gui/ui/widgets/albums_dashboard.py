@@ -39,6 +39,7 @@ from PySide6.QtWidgets import (
 from ....utils.pathutils import ensure_work_dir
 from ....cache.index_store import IndexStore
 from ....config import WORK_DIR_NAME
+from ....media_classifier import IMAGE_EXTENSIONS
 from ....models.album import Album
 from ..tasks.thumbnail_loader import ThumbnailJob
 from .flow_layout import FlowLayout
@@ -291,6 +292,22 @@ class AlbumDataWorker(QRunnable):
             candidate = self.node.path / first_rel
             if candidate.exists():
                 cover_path = candidate
+
+        # NEW FALLBACK LOGIC
+        if cover_path is None:
+            # Extended extensions including those requested in requirements
+            valid_extensions = IMAGE_EXTENSIONS | {'.webp', '.bmp', '.tiff'}
+            try:
+                # Iterate directory to find the first valid image
+                # Using scan to allow quick break
+                for item in self.node.path.iterdir():
+                    if item.is_file() and item.suffix.lower() in valid_extensions:
+                        cover_path = item
+                        if count == 0:
+                            count = 1
+                        break
+            except OSError:
+                pass  # Handle permission errors or missing directory
 
         self.signals.albumReady.emit(self.node, count, cover_path, self.node.path, self.generation)
 

@@ -101,7 +101,10 @@ class AlbumMetadataService(QObject):
             else:
                 # Case 2: Toggling in the Library Root. Need to update the physical sub-album.
                 try:
-                    absolute_asset = (album.root / ref).resolve()
+                    # Use absolute() instead of resolve() to preserve logical path hierarchy
+                    # in case of symlinks/junctions that point outside the library root.
+                    absolute_asset = (album.root / ref).absolute()
+
                     # Instead of assuming the immediate parent is the album, search for the real root.
                     physical_root = self._find_containing_physical_album(
                         library_root, absolute_asset

@@ -736,10 +736,6 @@ class AssetListModel(QAbstractListModel):
                 descendant_root=descendant_root
             )
 
-            # We need to keep a reference to signals/worker to prevent GC before it finishes?
-            # QRunnable auto-deletes, but signals are QObjects.
-            # We store them in self._incremental_signals/worker.
-
             QThreadPool.globalInstance().start(self._incremental_worker)
 
     def _on_incremental_error(self, root: Path, message: str) -> None:

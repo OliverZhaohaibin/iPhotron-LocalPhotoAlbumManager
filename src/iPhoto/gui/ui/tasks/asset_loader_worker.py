@@ -135,7 +135,7 @@ def build_asset_entry(
     if not location_name:
         gps_raw = row.get("gps") if isinstance(row, dict) else None
         if gps_raw:
-            location_name = resolve_location_name(gps_raw if isinstance(gps_raw, dict) else None)
+            location_name = resolve_location_name(gps_raw)
             if location_name and store:
                 try:
                     store.update_location(rel, location_name)

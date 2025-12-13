@@ -754,8 +754,12 @@ class AssetListModel(QAbstractListModel):
     def _cleanup_incremental_worker(self) -> None:
         with QMutexLocker(self._refresh_lock):
             if self._incremental_signals:
-                self._incremental_signals.resultsReady.disconnect(self._apply_incremental_results)
-                self._incremental_signals.error.disconnect(self._on_incremental_error)
+                try:
+                    self._incremental_signals.resultsReady.disconnect(self._apply_incremental_results)
+                    self._incremental_signals.error.disconnect(self._on_incremental_error)
+                except RuntimeError:
+                    # Ignore errors if signals were already disconnected
+                    pass
                 self._incremental_signals.deleteLater()
                 self._incremental_signals = None
             # Reset worker inside lock to prevent race

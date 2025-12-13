@@ -708,13 +708,7 @@ class AssetListModel(QAbstractListModel):
         thread to load the data and calculate the diff, avoiding UI blocking on
         the main thread.
         """
-        # If a worker is already running for this root, we might want to cancel it or queue.
-        # For simplicity, if one is running, we assume it will cover the latest state or
-        # another update will trigger later. But ideally we should ensure the latest update runs.
-        # Since this is an incremental refresh, we can just start a new one, but we must
-        # be careful about race conditions if multiple finish out of order.
-        # However, Python's GIL and the fact that we process results on the main thread via signals
-        # simplifies things.
+        # Spawn a background worker to refresh data incrementally without blocking the UI.
 
         with QMutexLocker(self._refresh_lock):
             if self._incremental_worker is not None:

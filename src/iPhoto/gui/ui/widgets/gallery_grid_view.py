@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from OpenGL import GL as gl
 from PySide6.QtCore import QEvent, QSize, Qt
-from PySide6.QtGui import QPaintEvent, QPalette, QSurfaceFormat, QColor
+from PySide6.QtGui import QPaintEvent, QPalette, QSurfaceFormat, QColor, QGuiApplication
 from PySide6.QtOpenGLWidgets import QOpenGLWidget
 from PySide6.QtWidgets import QAbstractItemView, QListView
 
@@ -137,8 +137,13 @@ class GalleryGridView(AssetGrid):
         super().changeEvent(event)
 
     def _apply_scrollbar_style(self) -> None:
-        text_color = self.palette().color(QPalette.ColorRole.WindowText)
-        base_color = self.palette().color(QPalette.ColorRole.Base)
+        # Fetch the global application palette to ensure we get the fresh theme colors,
+        # ignoring any local stylesheet overrides that self.palette() might reflect.
+        app = QGuiApplication.instance()
+        palette = app.palette() if app else self.palette()
+
+        text_color = palette.color(QPalette.ColorRole.WindowText)
+        base_color = palette.color(QPalette.ColorRole.Base)
 
         # Propagate background color to the viewport
         viewport = self.viewport()

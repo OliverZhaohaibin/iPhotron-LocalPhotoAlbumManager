@@ -129,18 +129,26 @@ def build_asset_entry(
         combined_key = f"{rel}|{live_partner_rel}".encode("utf-8")
         live_group_id = f"live_{xxhash.xxh64(combined_key).hexdigest()}"
 
-    gps_raw = row.get("gps") if isinstance(row, dict) else None
-
     # Use cached location if available, otherwise resolve and optionally cache it
     location_name = row.get("location")
-    if not location_name and gps_raw:
-        location_name = resolve_location_name(gps_raw if isinstance(gps_raw, dict) else None)
-        if location_name and store:
-            try:
-                store.update_location(rel, location_name)
-            except Exception:
-                # Silently ignore write failures during read operations to prevent crashes
-                pass
+    gps_raw = None
+    if not location_name:
+        gps_raw = row.get("gps") if isinstance(row, dict) else None
+        if gps_raw:
+            location_name = resolve_location_name(gps_raw if isinstance(gps_raw, dict) else None)
+            if location_name and store:
+                try:
+                    store.update_location(rel, location_name)
+                except Exception:
+                    # Silently ignore write failures during read operations to prevent crashes
+                    pass
+    else:
+        # If location is present, we might still want gps for other purposes if needed,
+        # but the original logic extracted it mainly for resolution.
+        # If we need gps for the entry dict anyway, we should extract it.
+        # Looking below: "gps": gps_raw is in the entry.
+        # So we must extract gps_raw regardless of location presence if we want it in the model.
+        gps_raw = row.get("gps") if isinstance(row, dict) else None
 
     # Resolve timestamp with legacy fallback safety
     ts_value = -1

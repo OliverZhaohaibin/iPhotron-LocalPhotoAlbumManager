@@ -75,11 +75,13 @@ class SelectionModelShim(QObject):
         # If ClearAndSelect, first clear everything
         if command & QItemSelectionModel.SelectionFlag.ClearAndSelect:
             # We need to find what will be deselected
+            # Use row numbers for robust comparison
+            rows_to_keep = {ix.row() for ix in indexes if ix.isValid()}
             row_count = self._model.rowCount()
             for i in range(row_count):
                 idx = self._model.index(i, 0)
                 if self._model.data(idx, Roles.IS_SELECTED):
-                    if idx not in indexes: # Unless we are re-selecting it later
+                    if idx.row() not in rows_to_keep: # Unless we are re-selecting it later
                         self._model.setData(idx, False, Roles.IS_SELECTED)
                         deselected_indexes.append(idx)
             is_select = True

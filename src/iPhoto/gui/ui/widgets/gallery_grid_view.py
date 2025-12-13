@@ -131,7 +131,8 @@ class GalleryQuickWidget(QQuickWidget):
     """
 
     # Signals compatible with AssetGrid
-    itemClicked = Signal(QModelIndex)
+    clicked = Signal(QModelIndex)
+    doubleClicked = Signal(QModelIndex)
     visibleRowsChanged = Signal(int, int)
     customContextMenuRequested = Signal(QPoint)
     requestPreview = Signal(QModelIndex)
@@ -153,7 +154,11 @@ class GalleryQuickWidget(QQuickWidget):
         self.setResizeMode(QQuickWidget.ResizeMode.SizeRootObjectToView)
         self.setAttribute(Qt.WidgetAttribute.WA_AlwaysStackOnTop, False)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, False)
-        self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent)
+        # Removed WA_OpaquePaintEvent to allow parent widget to paint background if GL context fails or is transparent
+        # self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent)
+
+        self.statusChanged.connect(self._on_status_changed)
+        self.sceneGraphError.connect(self._on_scene_graph_error)
 
         # Internal state
         self._model = None
@@ -227,23 +232,46 @@ class GalleryQuickWidget(QQuickWidget):
             return self._last_context_menu_index
         return QModelIndex()
 
+    def currentIndex(self) -> QModelIndex:
+        """Return the current index."""
+        if self._selection_shim:
+            return self._selection_shim.currentIndex()
+        return QModelIndex()
+
+    def setCurrentIndex(self, index: QModelIndex) -> None:
+        """Set the current index."""
+        if not index.isValid() or not self._model:
+            return
+
+        self._model.setData(index, True, Roles.IS_CURRENT)
+
     # ------------------------------------------------------------------
     # QML Signal Handlers
     # ------------------------------------------------------------------
+    @Slot(str)
+    def _on_status_changed(self, status):
+        if status == QQuickWidget.Status.Error:
+            for error in self.errors():
+                logger.error(f"QML Error: {error.toString()}")
+
+    @Slot(str, str)
+    def _on_scene_graph_error(self, error, message):
+        logger.error(f"SceneGraph Error: {error} - {message}")
+
     @Slot(int, int)
     def _on_item_clicked(self, row: int, modifiers: int) -> None:
         index = self._model.index(row, 0)
         if index.isValid():
-            self.itemClicked.emit(index)
-            # Handle modification flags if needed, but SelectionController checks modifiers via QGuiApplication or passed arg?
-            # SelectionController connects to itemClicked(QModelIndex).
-            # It checks modifiers itself or expects standard behavior?
-            # SelectionController code:
-            #   _handle_grid_item_clicked(index) -> uses self._active state.
-            #   It doesn't take modifiers.
-            #   Wait, plan said "def handle_click(self, index: int, modifiers: int)".
-            #   But I am creating a Shim.
-            #   So emitting itemClicked(index) is enough for existing controller.
+            # Update current index in model
+            self.setCurrentIndex(index)
+            self.clicked.emit(index)
+
+    @Slot(int)
+    def _on_item_double_clicked(self, row: int) -> None:
+        index = self._model.index(row, 0)
+        if index.isValid():
+            self.setCurrentIndex(index)
+            self.doubleClicked.emit(index)
 
     @Slot(int, int)
     def _on_visible_rows_changed(self, first: int, last: int) -> None:

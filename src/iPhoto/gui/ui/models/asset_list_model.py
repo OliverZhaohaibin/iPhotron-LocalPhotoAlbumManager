@@ -740,6 +740,7 @@ class AssetListModel(QAbstractListModel):
                     }
 
                     rel_prefix = descendant_root.relative_to(root)
+                    prefix_str = rel_prefix.as_posix()
 
                     for child_row in child_rows:
                         child_rel = child_row.get("rel")
@@ -747,8 +748,10 @@ class AssetListModel(QAbstractListModel):
                             continue
 
                         # Adjust child rel to be relative to the parent root
-                        # Use forward slashes for internal consistency
-                        adjusted_rel = (rel_prefix / str(child_rel)).as_posix()
+                        # Use string concatenation for performance instead of Path objects
+                        # Ensure forward slashes for consistency
+                        child_rel_str = str(child_rel).replace("\\", "/")
+                        adjusted_rel = f"{prefix_str}/{child_rel_str}"
                         normalized_key = normalise_rel_value(adjusted_rel)
 
                         if normalized_key in fresh_lookup:

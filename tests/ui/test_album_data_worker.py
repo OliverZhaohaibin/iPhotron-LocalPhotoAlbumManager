@@ -92,16 +92,6 @@ def test_worker_fallback_with_image(tmp_path, mock_node, mock_signals):
     mock_signals.albumReady.emit.assert_called_once()
     args = mock_signals.albumReady.emit.call_args[0]
 
-    # Check count is updated to 1 (per requirement: update count if 0 and fallback found)
-    # CURRENTLY failing requirement as not implemented
-    # We expect this to FAIL until implementation
-    # But for TDD, I assert the EXPECTED behavior
-
-    # Wait, the current code DOES NOT implement this.
-    # So this test should pass assertions about *current* behavior if I wrote it for current code
-    # But I want to reproduce the "failure" (missing feature).
-    # So I will assert the DESIRED behavior.
-
     # cover_path should be the fallback image
     assert args[2] == album_path / "fallback.jpg"
 

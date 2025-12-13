@@ -293,10 +293,17 @@ class AlbumDataWorker(QRunnable):
             if candidate.exists():
                 cover_path = candidate
 
+        # Extended extensions including those requested in requirements
+        valid_extensions = IMAGE_EXTENSIONS | {'.webp', '.bmp', '.tiff'}
+
+        # Verify that current cover_path is actually an image (e.g. not a video)
+        # If the index returned a video as first_rel, we should invalidate it
+        # so we can fall back to searching for an image.
+        if cover_path and cover_path.suffix.lower() not in valid_extensions:
+            cover_path = None
+
         # NEW FALLBACK LOGIC
         if cover_path is None:
-            # Extended extensions including those requested in requirements
-            valid_extensions = IMAGE_EXTENSIONS | {'.webp', '.bmp', '.tiff'}
             try:
                 # Iterate directory to find the first valid image
                 # Using scan to allow quick break

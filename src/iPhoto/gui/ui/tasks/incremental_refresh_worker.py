@@ -49,8 +49,7 @@ class IncrementalRefreshWorker(QRunnable):
                 self._root, self._featured, filter_params=self._filter_params
             )
 
-            # 2. If a descendant root is involved, merge its fresh data
-            # This logic mimics what was previously in AssetListModel._refresh_rows_from_index
+            # 2. If a descendant root is involved, merge its fresh data into the current set of rows
             if self._descendant_root and self._descendant_root != self._root:
                 self._merge_descendant_rows(fresh_rows)
 

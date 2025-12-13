@@ -29,6 +29,7 @@ from .asset_row_adapter import AssetRowAdapter
 from .list_diff_calculator import ListDiffCalculator
 from .roles import Roles, role_names
 from ....models.album import Album
+from ....errors import IPhotoError
 from ....utils.pathutils import (
     normalise_for_compare,
     is_descendant_path,
@@ -721,7 +722,7 @@ class AssetListModel(QAbstractListModel):
                 try:
                     child_album = Album.open(descendant_root)
                     child_featured = child_album.manifest.get("featured", [])
-                except Exception as exc:
+                except (IPhotoError, OSError, ValueError) as exc:
                     logger.error(
                         "AssetListModel: failed to load manifest for %s: %s",
                         descendant_root,

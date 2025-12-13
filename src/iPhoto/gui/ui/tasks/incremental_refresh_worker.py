@@ -44,7 +44,7 @@ class IncrementalRefreshWorker(QRunnable):
 
     def run(self) -> None:
         try:
-            # 1. Load fresh rows from DB (now handles location resolution internally)
+            # 1. Load fresh rows from DB (location resolution occurs in build_asset_entry, called during row processing)
             fresh_rows, _ = compute_asset_rows(
                 self._root, self._featured, filter_params=self._filter_params
             )

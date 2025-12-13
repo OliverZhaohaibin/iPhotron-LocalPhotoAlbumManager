@@ -704,8 +704,9 @@ class AssetListModel(QAbstractListModel):
     ) -> None:
         """Synchronise the model with the latest index snapshot for *root*.
 
-        This method spawns a background worker to load the data and calculate
-        the diff, avoiding UI blocking on the main thread.
+        This method spawns an :class:`IncrementalRefreshWorker` on a background
+        thread to load the data and calculate the diff, avoiding UI blocking on
+        the main thread.
         """
         # If a worker is already running for this root, we might want to cancel it or queue.
         # For simplicity, if one is running, we assume it will cover the latest state or

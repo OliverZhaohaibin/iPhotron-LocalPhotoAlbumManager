@@ -222,6 +222,13 @@ class AssetListModel(QAbstractListModel):
     # ------------------------------------------------------------------
     # Qt model implementation
     # ------------------------------------------------------------------
+    def flags(self, index: QModelIndex) -> Qt.ItemFlag:  # type: ignore[override]
+        """Expose items as editable to allow QML updates."""
+        default_flags = super().flags(index)
+        if index.isValid():
+            return default_flags | Qt.ItemFlag.ItemIsEditable
+        return default_flags
+
     def rowCount(self, parent: QModelIndex | None = None) -> int:  # type: ignore[override]
         if parent is not None and parent.isValid():  # pragma: no cover - tree fallback
             return 0
@@ -242,16 +249,26 @@ class AssetListModel(QAbstractListModel):
         rows = self._state_manager.rows
         if not index.isValid() or not (0 <= index.row() < len(rows)):
             return False
-        if role != Roles.IS_CURRENT:
-            return super().setData(index, value, role)
 
-        normalized = bool(value)
-        row = rows[index.row()]
-        if bool(row.get("is_current", False)) == normalized:
+        if role == Roles.IS_CURRENT:
+            normalized = bool(value)
+            row = rows[index.row()]
+            if bool(row.get("is_current", False)) == normalized:
+                return True
+            row["is_current"] = normalized
+            self.dataChanged.emit(index, index, [Roles.IS_CURRENT])
             return True
-        row["is_current"] = normalized
-        self.dataChanged.emit(index, index, [Roles.IS_CURRENT])
-        return True
+
+        if role == Roles.IS_SELECTED:
+            normalized = bool(value)
+            row = rows[index.row()]
+            if bool(row.get("is_selected", False)) == normalized:
+                return True
+            row["is_selected"] = normalized
+            self.dataChanged.emit(index, index, [Roles.IS_SELECTED])
+            return True
+
+        return super().setData(index, value, role)
 
     def thumbnail_loader(self) -> ThumbnailLoader:
         return self._cache_manager.thumbnail_loader()
@@ -280,8 +297,14 @@ class AssetListModel(QAbstractListModel):
         rows = self._state_manager.rows
         if row_index is None or not (0 <= row_index < len(rows)):
             return None
+
+        # Force a revision bump so QML reload logic detects the change
+        rows[row_index]["thumbnail_rev"] = rows[row_index].get("thumbnail_rev", 0) + 1
+
         model_index = self.index(row_index, 0)
-        self.dataChanged.emit(model_index, model_index, [Qt.DecorationRole])
+        self.dataChanged.emit(
+            model_index, model_index, [Qt.DecorationRole, Roles.THUMBNAIL_REV]
+        )
         return model_index
 
     # ------------------------------------------------------------------

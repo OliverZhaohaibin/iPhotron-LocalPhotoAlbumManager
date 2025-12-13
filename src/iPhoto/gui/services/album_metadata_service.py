@@ -79,8 +79,9 @@ class AlbumMetadataService(QObject):
 
         if library_root:
             # Iterate through all containing albums (Physical Child, Parent, Library Root)
+            known_roots = {library_root, album.root}
             containing_roots = self._find_all_containing_albums(
-                library_root, absolute_asset
+                library_root, absolute_asset, known_roots
             )
             for root in containing_roots:
                 if root != album.root:  # Deduplication handled later but good optimization
@@ -129,11 +130,15 @@ class AlbumMetadataService(QObject):
         return was_featured
 
     def _find_all_containing_albums(
-        self, library_root: Path, asset_path: Path
+        self,
+        library_root: Path,
+        asset_path: Path,
+        known_roots: set[Path] | None = None,
     ) -> list[Path]:
         """Traverse upwards to find all physical albums containing the asset."""
         found: list[Path] = []
         candidate = asset_path.parent
+        known = known_roots or set()
 
         while True:
             # Check if candidate is strictly under or equal to library_root
@@ -142,12 +147,16 @@ class AlbumMetadataService(QObject):
             ):
                 break
 
-            # Check if any known manifest file exists
             is_album = False
-            for name in ALBUM_MANIFEST_NAMES:
-                if (candidate / name).exists():
-                    is_album = True
-                    break
+            # Optimization: Skip I/O if we know this path is an album
+            if candidate in known:
+                is_album = True
+            else:
+                # Check if any known manifest file exists
+                for name in ALBUM_MANIFEST_NAMES:
+                    if (candidate / name).exists():
+                        is_album = True
+                        break
 
             if is_album:
                 found.append(candidate)

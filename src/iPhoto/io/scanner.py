@@ -151,6 +151,7 @@ def process_media_paths(
 def _process_path_stream(
     root: Path,
     path_iterator: Iterator[Path],
+    existing_index: Optional[Dict[str, Dict[str, Any]]] = None,
     progress_callback: Optional[Callable[[int, int], None]] = None,
     total_provider: Optional[Callable[[], int]] = None,
     batch_size: int = 50,
@@ -161,6 +162,8 @@ def _process_path_stream(
     Args:
         root (Path): The root directory for scanning, used for context.
         path_iterator (Iterator[Path]): An iterator yielding Path objects to process.
+        existing_index (Optional[Dict[str, Dict[str, Any]]]): Optional map of existing index rows
+            keyed by relative path. Used for incremental scanning (cache hits).
         progress_callback (Optional[Callable[[int, int], None]]): Optional callback function
             that is called with the number of processed items and the total number of items.
             Useful for reporting progress. If None, no progress is reported.
@@ -213,13 +216,41 @@ def _process_path_stream(
                     continue
             # Progress callback is now called once per batch, after processing all items.
 
-
         # Report progress once per batch after processing all items in the batch
         if progress_callback and total_provider and processed_count != last_reported_count:
             progress_callback(processed_count, total_provider())
             last_reported_count = processed_count
 
     for path in path_iterator:
+        try:
+            # Check for cache hit
+            if existing_index:
+                rel = path.relative_to(root).as_posix()
+                existing_record = existing_index.get(rel)
+                if existing_record:
+                    stat = path.stat()
+                    cached_ts = existing_record.get("ts")
+                    cached_bytes = existing_record.get("bytes")
+                    # Tolerance of 1 second (1,000,000 microseconds)
+                    current_ts = int(stat.st_mtime * 1_000_000)
+
+                    if (
+                        cached_bytes == stat.st_size
+                        and cached_ts is not None
+                        and abs(cached_ts - current_ts) <= 1_000_000
+                    ):
+                        # Verify we have essential fields
+                        if "id" in existing_record:
+                            yield existing_record
+                            processed_count += 1
+                            if progress_callback and total_provider and processed_count != last_reported_count:
+                                progress_callback(processed_count, total_provider())
+                                last_reported_count = processed_count
+                            continue
+        except (ValueError, OSError) as e:
+            # It is possible for files to be deleted or become inaccessible between directory listing and stat calls.
+            LOGGER.debug(f"Skipping file {path} due to exception during cache check: {e}")
+
         batch.append(path)
         if len(batch) >= batch_size:
             yield from _flush_batch()
@@ -232,6 +263,7 @@ def scan_album(
     root: Path,
     include_globs: Iterable[str],
     exclude_globs: Iterable[str],
+    existing_index: Optional[Dict[str, Dict[str, Any]]] = None,
     progress_callback: Optional[Callable[[int, int], None]] = None,
 ) -> Iterator[Dict[str, Any]]:
     """Yield index rows for all matching assets in *root*, scanning in parallel.
@@ -287,6 +319,7 @@ def scan_album(
         yield from _process_path_stream(
             root,
             _queue_iterator(),
+            existing_index=existing_index,
             progress_callback=progress_callback,
             total_provider=lambda: discoverer.total_found
         )

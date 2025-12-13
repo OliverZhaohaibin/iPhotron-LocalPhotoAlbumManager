@@ -284,15 +284,22 @@ class GalleryQuickWidget(QQuickWidget):
         self.setSource(QUrl.fromLocalFile(str(qml_path)))
 
         # Connect signals from QML root object
+        if self.status() == QQuickWidget.Status.Error:
+            logger.error("GalleryQuickWidget: QML Engine reported errors.")
+            for error in self.errors():
+                logger.error(f"QML Error: {error.toString()}")
+            return
+
         root = self.rootObject()
-        if root:
-            root.itemClicked.connect(self._on_item_clicked)
-            root.currentIndexChanged.connect(self._on_current_index_changed)
-            root.visibleRowsChanged.connect(self._on_visible_rows_changed)
-            root.showContextMenu.connect(self._on_show_context_menu)
-            root.filesDropped.connect(self._on_files_dropped)
-        else:
+        if root is None:
             logger.error("GalleryQuickWidget: Failed to load root object from QML")
+            return
+
+        root.itemClicked.connect(self._on_item_clicked)
+        root.currentIndexChanged.connect(self._on_current_index_changed)
+        root.visibleRowsChanged.connect(self._on_visible_rows_changed)
+        root.showContextMenu.connect(self._on_show_context_menu)
+        root.filesDropped.connect(self._on_files_dropped)
 
     def model(self):
         return self._model

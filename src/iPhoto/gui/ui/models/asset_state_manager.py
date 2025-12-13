@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
 
 from PySide6.QtCore import QModelIndex
+
+logger = logging.getLogger(__name__)
 
 if False:  # pragma: no cover - circular import guard
     from .asset_list_model import AssetListModel
@@ -101,6 +104,11 @@ class AssetListStateManager:
                 key = str(abs_value)
                 if key not in refreshed_abs:
                     refreshed_abs[key] = index
+                else:
+                    logger.warning(
+                        "Duplicate absolute path detected in rebuild_lookup: %s (indices %s, %s)",
+                        key, refreshed_abs[key], index
+                    )
 
         self._row_lookup = refreshed_rel
         self._abs_lookup = refreshed_abs
@@ -173,6 +181,11 @@ class AssetListStateManager:
                 key = str(abs_val)
                 if key not in self._abs_lookup:
                     self._abs_lookup[key] = idx
+                else:
+                    logger.warning(
+                        "Duplicate absolute path detected in append_chunk: %s (existing index %s, new index %s)",
+                        key, self._abs_lookup[key], idx
+                    )
         return start_row, start_row + len(chunk) - 1
 
     def update_row_at_index(self, index: int, row_data: Dict[str, object]) -> None:

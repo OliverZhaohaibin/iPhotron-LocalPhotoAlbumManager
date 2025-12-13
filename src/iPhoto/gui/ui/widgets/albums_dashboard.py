@@ -39,6 +39,7 @@ from PySide6.QtWidgets import (
 from ....utils.pathutils import ensure_work_dir
 from ....cache.index_store import IndexStore
 from ....config import WORK_DIR_NAME
+from ....media_classifier import get_media_type, MediaType
 from ....models.album import Album
 from ..tasks.thumbnail_loader import ThumbnailJob, generate_cache_path
 from .flow_layout import FlowLayout
@@ -346,6 +347,9 @@ class DashboardThumbnailLoader(QObject):
         key_str = self._make_key_str(unique_rel, size, stamp)
         self._key_to_root[key_str] = album_root
 
+        media_type = get_media_type(image_path)
+        is_video = media_type == MediaType.VIDEO
+
         job = ThumbnailJob(
             self,  # type: ignore
             unique_rel,  # Pass absolute path string as rel to ensure uniqueness
@@ -353,8 +357,8 @@ class DashboardThumbnailLoader(QObject):
             size,
             None,  # Pass None as known_stamp to force regeneration if missing
             album_root,
-            is_image=True,
-            is_video=False,
+            is_image=True,  # Is image (can be viewed as still)
+            is_video=is_video,
             still_image_time=None,
             duration=None,
             cache_rel=real_rel,

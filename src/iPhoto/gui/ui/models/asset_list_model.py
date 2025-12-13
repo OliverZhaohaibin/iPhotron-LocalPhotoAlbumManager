@@ -712,10 +712,10 @@ class AssetListModel(QAbstractListModel):
 
         with QMutexLocker(self._refresh_lock):
             if self._incremental_worker is not None:
-                 # Already refreshing, skip this request or queue it?
-                 # For now, let's just log and skip, relying on subsequent updates or the current one being enough.
-                 logger.debug("AssetListModel: incremental refresh already in progress, skipping request.")
-                 return
+                # Already refreshing, skip this request or queue it?
+                # For now, let's just log and skip, relying on subsequent updates or the current one being enough.
+                logger.debug("AssetListModel: incremental refresh already in progress, skipping request.")
+                return
 
             manifest = self._facade.current_album.manifest if self._facade.current_album else {}
             featured = manifest.get("featured", []) or []

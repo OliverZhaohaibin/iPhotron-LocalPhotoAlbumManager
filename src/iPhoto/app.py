@@ -24,13 +24,13 @@ from .utils.logging import get_logger
 LOGGER = get_logger()
 
 
-def open_album(root: Path, autoscan: bool = True, pair: bool = True) -> Album:
+def open_album(root: Path, autoscan: bool = True, pair: bool = False) -> Album:
     """Open an album directory, scanning and pairing as required.
 
     :param root: The root directory of the album.
     :param autoscan: If True, automatically scan for assets if the index is empty.
-    :param pair: If True, perform Live Photo pairing synchronously.
-                 Set to False to defer pairing to a background task (recommended for GUI).
+    :param pair: If True, perform Live Photo pairing and Favorites syncing synchronously.
+                 Set to False to defer these operations to a background task (default for GUI).
     """
 
     album = Album.open(root)
@@ -48,12 +48,13 @@ def open_album(root: Path, autoscan: bool = True, pair: bool = True) -> Album:
         store.write_rows(rows)
         # If we just scanned, we must pair immediately to ensure consistency
         _ensure_links(root, rows)
+        store.sync_favorites(album.manifest.get("featured", []))
     elif pair:
         # Legacy/CLI mode: Load all rows and pair synchronously
         rows = list(store.read_all())
         _ensure_links(root, rows)
+        store.sync_favorites(album.manifest.get("featured", []))
 
-    store.sync_favorites(album.manifest.get("featured", []))
     return album
 
 
@@ -332,3 +333,20 @@ def pair(root: Path) -> List[LiveGroup]:
     _sync_live_roles_to_db(root, groups)
 
     return groups
+
+
+def sync_metadata(root: Path) -> None:
+    """Perform background metadata synchronisation (pairing + favorites)."""
+
+    # 1. Pair Live Photos
+    pair(root)
+
+    # 2. Sync Favorites
+    # We must reload the manifest to get the latest 'featured' list
+    try:
+        album = Album.open(root)
+        featured = album.manifest.get("featured", [])
+    except Exception:
+        featured = []
+
+    IndexStore(root).sync_favorites(featured)

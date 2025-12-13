@@ -56,6 +56,7 @@ class AssetListModel(QAbstractListModel):
     # Tuning constants for streaming updates
     _STREAM_FLUSH_INTERVAL_MS = 100
     _STREAM_FLUSH_THRESHOLD = 500
+    _UI_BATCH_SIZE = 200  # Number of items to process in one event loop slice
 
     def __init__(self, facade: "AppFacade", parent=None) -> None:  # type: ignore[override]
         super().__init__(parent)
@@ -427,7 +428,7 @@ class AssetListModel(QAbstractListModel):
             self._flush_timer.start()
 
     def _flush_pending_chunks(self) -> None:
-        """Commit buffered chunks to the model."""
+        """Commit buffered chunks to the model using time-sliced batching."""
         if self._is_flushing:
             return
         if not self._pending_chunks_buffer:
@@ -435,9 +436,16 @@ class AssetListModel(QAbstractListModel):
 
         self._is_flushing = True
         try:
-            payload = self._pending_chunks_buffer
-            self._pending_chunks_buffer = []
-            self._flush_timer.stop()
+            # Take a slice of the pending buffer
+            total_pending = len(self._pending_chunks_buffer)
+            batch_size = min(total_pending, self._UI_BATCH_SIZE)
+
+            payload = self._pending_chunks_buffer[:batch_size]
+            # Keep the rest in the buffer
+            self._pending_chunks_buffer = self._pending_chunks_buffer[batch_size:]
+
+            if not self._pending_chunks_buffer:
+                self._flush_timer.stop()
 
             start_row = self._state_manager.row_count()
             end_row = start_row + len(payload) - 1
@@ -447,6 +455,12 @@ class AssetListModel(QAbstractListModel):
             self.endInsertRows()
 
             self._state_manager.on_external_row_inserted(start_row, len(payload))
+
+            # If we still have pending items, schedule next flush immediately
+            # to yield to event loop but continue processing
+            if self._pending_chunks_buffer:
+                QTimer.singleShot(0, self._flush_pending_chunks)
+
         finally:
             self._is_flushing = False
 

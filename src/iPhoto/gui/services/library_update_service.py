@@ -36,7 +36,7 @@ class PairingWorker(QRunnable):
 
     def run(self) -> None:
         try:
-            backend.pair(self._root)
+            backend.sync_metadata(self._root)
             self._signals.finished.emit(self._root, True)
         except Exception as exc:
             self._signals.error.emit(self._root, str(exc))

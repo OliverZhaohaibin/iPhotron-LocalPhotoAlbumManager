@@ -661,10 +661,12 @@ class AssetListModel(QAbstractListModel):
             album_root,
         )
 
+        descendant_root = updated_root if updated_root != album_root else None
+
         if self._state_manager.rows:
             # We used to call _reload_live_metadata here, but it relied on reading links.json synchronously.
             # Now we use the DB as the source of truth, so we refresh rows from the index.
-            self._refresh_rows_from_index(self._album_root)
+            self._refresh_rows_from_index(self._album_root, descendant_root=descendant_root)
 
         if not self._state_manager.rows or self._pending_loader_root:
             logger.debug(
@@ -683,9 +685,11 @@ class AssetListModel(QAbstractListModel):
             return
 
         self._set_deferred_incremental_refresh(None)
-        self._refresh_rows_from_index(self._album_root)
+        self._refresh_rows_from_index(self._album_root, descendant_root=descendant_root)
 
-    def _refresh_rows_from_index(self, root: Path) -> None:
+    def _refresh_rows_from_index(
+        self, root: Path, descendant_root: Optional[Path] = None
+    ) -> None:
         """Synchronise the model with the latest index snapshot for *root*.
 
         The helper performs a synchronous load of ``index.jsonl`` so the model
@@ -702,7 +706,47 @@ class AssetListModel(QAbstractListModel):
             filter_params["filter_mode"] = self._active_filter
 
         try:
-            fresh_rows, _ = self._data_loader.compute_rows(root, featured, filter_params=filter_params)
+            fresh_rows, _ = self._data_loader.compute_rows(
+                root, featured, filter_params=filter_params
+            )
+
+            # If the update came from a descendant sub-album, the parent's DB might not yet
+            # reflect the changes (e.g., favorite status). We explicitly fetch the rows
+            # from the descendant's DB and merge them into the parent's row set.
+            if descendant_root and descendant_root != root:
+                # Note: 'featured' set here is from parent manifest, which is stale.
+                # But our fix in compute_asset_rows now respects the child DB's 'is_favorite',
+                # so 'child_rows' will have the correct featured status.
+                child_rows, _ = self._data_loader.compute_rows(
+                    descendant_root, featured, filter_params=filter_params
+                )
+                if child_rows:
+                    # Map fresh rows by rel for O(1) update
+                    fresh_lookup = {
+                        normalise_rel_value(row.get("rel")): i
+                        for i, row in enumerate(fresh_rows)
+                    }
+
+                    rel_prefix = descendant_root.relative_to(root)
+
+                    for child_row in child_rows:
+                        child_rel = child_row.get("rel")
+                        if not child_rel:
+                            continue
+
+                        # Adjust child rel to be relative to the parent root
+                        # Use forward slashes for internal consistency
+                        adjusted_rel = (rel_prefix / str(child_rel)).as_posix()
+                        normalized_key = normalise_rel_value(adjusted_rel)
+
+                        if normalized_key in fresh_lookup:
+                            # Update the child row with adjusted rel
+                            child_row["rel"] = adjusted_rel
+                            # Since ID might be different or same depending on implementation,
+                            # we trust the match by rel/abs path.
+                            # We replace the stale row in fresh_rows with the fresh child_row.
+                            fresh_rows[fresh_lookup[normalized_key]] = child_row
+
         except Exception as exc:  # pragma: no cover - surfaced via GUI
             logger.error(
                 "AssetListModel: incremental refresh for %s failed: %s", root, exc

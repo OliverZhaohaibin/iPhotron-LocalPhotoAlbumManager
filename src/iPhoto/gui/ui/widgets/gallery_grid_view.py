@@ -160,13 +160,20 @@ class SelectionModelShim(QObject):
         if index == old_current:
             return
 
+        if index.isValid() and index.model() != self._model:
+            logger.warning("SelectionModelShim: Attempted to set current index from a different model.")
+            return
+
         # Unset old current
         if old_current.isValid():
             self._model.setData(old_current, False, Roles.IS_CURRENT)
 
         # Set new current
         if index.isValid():
-            self._model.setData(index, True, Roles.IS_CURRENT)
+            if not self._model.setData(index, True, Roles.IS_CURRENT):
+                logger.warning(f"SelectionModelShim: Failed to set current index for row {index.row()}")
+        else:
+            logger.debug("SelectionModelShim: Clearing current index (invalid index passed).")
 
         self.currentChanged.emit(index, old_current)
 

@@ -28,6 +28,7 @@ from .asset_state_manager import AssetListStateManager
 from .asset_row_adapter import AssetRowAdapter
 from .list_diff_calculator import ListDiffCalculator
 from .roles import Roles, role_names
+from ....models.album import Album
 from ....utils.pathutils import (
     normalise_for_compare,
     is_descendant_path,
@@ -714,11 +715,22 @@ class AssetListModel(QAbstractListModel):
             # reflect the changes (e.g., favorite status). We explicitly fetch the rows
             # from the descendant's DB and merge them into the parent's row set.
             if descendant_root and descendant_root != root:
-                # Note: 'featured' set here is from parent manifest, which is stale.
-                # But our fix in compute_asset_rows now respects the child DB's 'is_favorite',
-                # so 'child_rows' will have the correct featured status.
+                # Load the descendant's manifest to get the fresh 'featured' list.
+                # This ensures that even if the DB is stale (is_favorite=0), the manifest
+                # will provide the correct status.
+                try:
+                    child_album = Album.open(descendant_root)
+                    child_featured = child_album.manifest.get("featured", [])
+                except Exception as exc:
+                    logger.warning(
+                        "AssetListModel: failed to load manifest for %s: %s",
+                        descendant_root,
+                        exc,
+                    )
+                    child_featured = []
+
                 child_rows, _ = self._data_loader.compute_rows(
-                    descendant_root, featured, filter_params=filter_params
+                    descendant_root, child_featured, filter_params=filter_params
                 )
                 if child_rows:
                     # Map fresh rows by rel for O(1) update

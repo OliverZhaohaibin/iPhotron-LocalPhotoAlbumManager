@@ -15,7 +15,7 @@ from PySide6.QtCore import (
     Slot,
     QTimer,
     QMutex,
-    QMutexLocker,
+    QMutexLocker, QThreadPool,
 )
 from PySide6.QtGui import QPixmap
 

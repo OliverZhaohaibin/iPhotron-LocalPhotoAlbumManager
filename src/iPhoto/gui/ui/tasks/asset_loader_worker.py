@@ -159,7 +159,7 @@ def build_asset_entry(
         "dt": row.get("dt"),
         "dt_sort": _parse_timestamp(row.get("dt")),
         "ts": ts_value,
-        "featured": _is_featured(rel, featured),
+        "featured": bool(row.get("is_favorite")) or _is_featured(rel, featured),
         "still_image_time": row.get("still_image_time"),
         "dur": row.get("dur"),
         "location": location_name,

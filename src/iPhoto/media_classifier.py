@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from enum import IntEnum
 from pathlib import Path
 from typing import Mapping, Tuple
 
@@ -82,13 +83,13 @@ def classify_media(row: Mapping[str, object]) -> Tuple[bool, bool]:
     return False, False
 
 
-class MediaType:
+class MediaType(IntEnum):
     IMAGE = 1
     VIDEO = 2
     UNKNOWN = 0
 
 
-def get_media_type(path: Path) -> int:
+def get_media_type(path: Path) -> MediaType:
     suffix = path.suffix.lower()
     if suffix in IMAGE_EXTENSIONS:
         return MediaType.IMAGE

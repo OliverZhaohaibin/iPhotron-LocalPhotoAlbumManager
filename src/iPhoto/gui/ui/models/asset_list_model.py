@@ -760,8 +760,8 @@ class AssetListModel(QAbstractListModel):
         """Apply the fetched rows to the model via diffing."""
 
         if not self._album_root or root != self._album_root:
-             self._cleanup_incremental_worker()
-             return
+            self._cleanup_incremental_worker()
+            return
 
         self._cleanup_incremental_worker()
 

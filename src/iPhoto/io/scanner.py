@@ -247,8 +247,9 @@ def _process_path_stream(
                                 progress_callback(processed_count, total_provider())
                                 last_reported_count = processed_count
                             continue
-        except (ValueError, OSError):
-            pass
+        except (ValueError, OSError) as e:
+            # It is possible for files to be deleted or become inaccessible between directory listing and stat calls.
+            LOGGER.debug(f"Skipping file {path} due to exception during cache check: {e}")
 
         batch.append(path)
         if len(batch) >= batch_size:

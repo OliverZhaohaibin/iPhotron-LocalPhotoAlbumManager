@@ -38,8 +38,53 @@ def open_album(root: Path, autoscan: bool = True) -> Album:
         rows = list(scan_album(root, include, exclude))
         store.write_rows(rows)
     _ensure_links(root, rows)
-    store.sync_favorites(album.manifest.get("featured", []))
+    _sync_manifest_favorites_to_db(store, album.manifest.get("featured", []))
     return album
+
+
+def _sync_manifest_favorites_to_db(store: IndexStore, featured_paths: List[str]) -> None:
+    """Resolve manifest paths to IDs and sync DB favorite status."""
+    if not featured_paths:
+        store.sync_favorites([])
+        return
+
+    # Resolve paths to IDs robustly using NFC normalization
+    from .utils.pathutils import normalise_for_compare
+    import unicodedata
+
+    # 1. Fetch all (rel, id) pairs from DB
+    #    We need to scan the DB to map current DB paths to IDs
+    #    Optimization: In a huge DB, fetching all might be slow.
+    #    But we usually need to map arbitrary paths.
+    #    Alternatively, we could query specific paths, but due to Unicode mismatch,
+    #    we can't rely on exact lookup. We need to normalize DB values.
+    #    So reading all rels is the safest way to ensure matching.
+
+    # We use read_geometry_only or a custom query to get just rel and id
+    featured_ids = set()
+
+    # Build a normalized set of featured paths for O(1) lookup
+    norm_featured = {normalise_for_compare(Path(p)).as_posix() for p in featured_paths}
+
+    # Iterate DB to find matches
+    # We can use a raw cursor for speed
+    with store.transaction(): # Just to get a connection context if needed, or use read_all
+        # We need a custom query to get rel and id
+        conn = store._get_conn()
+        cursor = conn.execute("SELECT rel, id FROM assets")
+        for row in cursor:
+            rel, content_id = row[0], row[1]
+            if not rel or not content_id:
+                continue
+
+            # Normalize DB rel
+            # Note: normalise_for_compare takes Path, handles case and NFC
+            norm_rel = normalise_for_compare(Path(rel)).as_posix()
+
+            if norm_rel in norm_featured:
+                featured_ids.add(content_id)
+
+    store.sync_favorites(featured_ids)
 
 
 def _ensure_links(root: Path, rows: List[dict]) -> None:
@@ -233,7 +278,7 @@ def rescan(root: Path, progress_callback: Optional[Callable[[int, int], None]] =
 
     _update_index_snapshot(root, rows)
     _ensure_links(root, rows)
-    store.sync_favorites(album.manifest.get("featured", []))
+    _sync_manifest_favorites_to_db(store, album.manifest.get("featured", []))
     return rows
 
 

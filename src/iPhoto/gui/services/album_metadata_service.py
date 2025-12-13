@@ -151,9 +151,9 @@ class AlbumMetadataService(QObject):
             # Update DB index after successful manifest save.
             # Any transient inconsistency (e.g. DB update failure) is self-corrected
             # by sync_favorites() on the next album load.
-            IndexStore(album.root).set_favorite_status(ref, desired_state)
+            self._update_db_favorite_status(album.root, ref, desired_state)
             if target_album is not None and target_ref is not None:
-                IndexStore(target_album.root).set_favorite_status(target_ref, desired_state)
+                self._update_db_favorite_status(target_album.root, target_ref, desired_state)
             self._asset_list_model_provider().update_featured_status(ref, desired_state)
             return desired_state
 
@@ -227,6 +227,38 @@ class AlbumMetadataService(QObject):
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+    def _update_db_favorite_status(self, root: Path, rel: str, is_favorite: bool) -> None:
+        """Helper to resolve ID from path and update DB status."""
+        store = IndexStore(root)
+
+        # We need to find the ID for this rel.
+        # Since we might have Unicode mismatches, we use a robust lookup similar to sync logic.
+        content_id = None
+
+        # Optimize: try exact match first
+        with store.transaction():
+            # Try to get ID by exact rel
+            # Note: We can't easily SELECT by rel if normalization differs,
+            # so we iterate if exact match fails.
+
+            # 1. Try exact match (fastest)
+            cursor = store._get_conn().execute("SELECT id FROM assets WHERE rel = ?", (rel,))
+            row = cursor.fetchone()
+            if row:
+                content_id = row[0]
+            else:
+                # 2. Try robust match (slower but necessary for this bug)
+                norm_rel = normalise_for_compare(Path(rel)).as_posix()
+                cursor = store._get_conn().execute("SELECT rel, id FROM assets")
+                for r in cursor:
+                    db_rel, db_id = r[0], r[1]
+                    if normalise_for_compare(Path(db_rel)).as_posix() == norm_rel:
+                        content_id = db_id
+                        break
+
+        if content_id:
+            store.set_favorite_status(content_id, is_favorite)
+
     def _resolve_album_for_root(self, root: Path) -> Album | None:
         """Return an :class:`Album` instance representing *root*."""
 

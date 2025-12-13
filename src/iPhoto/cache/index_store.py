@@ -111,6 +111,8 @@ class IndexStore:
             conn.execute("CREATE INDEX IF NOT EXISTS idx_dt ON assets (dt)")
             # Index for optimized favorites retrieval
             conn.execute("CREATE INDEX IF NOT EXISTS idx_assets_favorite_dt ON assets (is_favorite, dt DESC)")
+            # Index for ID-based lookups and sync
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_assets_id ON assets (id)")
             # Add specific index for descending sort on dt to optimize streaming query
             # We use a composite index on dt and id to match the ORDER BY clause for optimal streaming.
             conn.execute("CREATE INDEX IF NOT EXISTS idx_assets_dt_id_desc ON assets (dt DESC, id DESC)")
@@ -311,68 +313,50 @@ class IndexStore:
 
         return where_clauses, params
 
-    def set_favorite_status(self, rel: str, is_favorite: bool) -> None:
-        """Toggle the favorite status for a single asset efficiently."""
+    def set_favorite_status(self, content_id: str, is_favorite: bool) -> None:
+        """Toggle the favorite status for assets with the given content ID."""
         val = 1 if is_favorite else 0
         conn = self._get_conn()
         is_nested = (conn == self._conn)
         try:
             if is_nested:
-                conn.execute("UPDATE assets SET is_favorite = ? WHERE rel = ?", (val, rel))
+                conn.execute("UPDATE assets SET is_favorite = ? WHERE id = ?", (val, content_id))
             else:
                 with conn:
-                    conn.execute("UPDATE assets SET is_favorite = ? WHERE rel = ?", (val, rel))
+                    conn.execute("UPDATE assets SET is_favorite = ? WHERE id = ?", (val, content_id))
         finally:
             if not is_nested:
                 conn.close()
 
-    def sync_favorites(self, featured_rels: Iterable[str]) -> None:
-        """Synchronise the DB 'is_favorite' column with the provided list of featured paths."""
-        # Convert to list to avoid consuming iterator multiple times
-        featured_rels_list = list(featured_rels)
-        
-        # Normalize input paths to ensure consistent comparison (NFC)
-        # Build mapping from normalized to original input strings
-        input_normalized_map = {unicodedata.normalize("NFC", r): r for r in featured_rels_list}
-        featured_normalized_set = set(input_normalized_map.keys())
+    def sync_favorites(self, featured_ids: Iterable[str]) -> None:
+        """Synchronise the DB 'is_favorite' column with the provided list of content IDs."""
+        featured_ids_set = set(featured_ids)
 
         conn = self._get_conn()
         is_nested = (conn == self._conn)
 
         def _perform_sync(c: sqlite3.Connection) -> None:
-            # 1. Fetch all rels from the DB to build a normalized-to-original mapping.
-            #    This ensures we always update the exact key present in the database,
-            #    even if the database contains paths with different Unicode normalization.
-            cursor = c.execute("SELECT rel FROM assets")
-            all_rels_map = {unicodedata.normalize("NFC", row[0]): row[0] for row in cursor}
+            # 1. Reset all favorites first
+            #    (Optimization: We could calculate diffs, but doing a bulk reset
+            #     and then setting new favorites is often faster/simpler for IDs
+            #     unless the dataset is huge, but here we stick to the diff approach
+            #     to minimize WAL growth and lock contention if possible)
 
-            # 2. Fetch currently marked favorites from the DB to calculate the diff.
-            current_favs_normalized = {
-                unicodedata.normalize("NFC", row[0])
-                for row in c.execute("SELECT rel FROM assets WHERE is_favorite != 0")
+            # Let's use the diff approach for consistency and performance
+
+            # Fetch currently marked favorites (IDs)
+            current_favs = {
+                row[0] for row in c.execute("SELECT id FROM assets WHERE is_favorite != 0")
             }
 
-            # 3. Determine which rows actually need updates
-            # Items in DB (normalized) but not in input list -> Remove
-            to_remove_normalized = current_favs_normalized - featured_normalized_set
+            to_remove = current_favs - featured_ids_set
+            to_add = featured_ids_set - current_favs
 
-            # Items in input list but not in DB (normalized) -> Add
-            to_add_normalized = featured_normalized_set - current_favs_normalized
+            if to_remove:
+                c.executemany("UPDATE assets SET is_favorite = 0 WHERE id = ?", [(i,) for i in to_remove])
 
-            # 4. Apply updates only where necessary
-            if to_remove_normalized:
-                # Use the ORIGINAL keys from the DB to ensure the UPDATE succeeds
-                to_remove_original = [all_rels_map[n] for n in to_remove_normalized if n in all_rels_map]
-                c.executemany("UPDATE assets SET is_favorite = 0 WHERE rel = ?", [(r,) for r in to_remove_original])
-
-            if to_add_normalized:
-                # Use the ORIGINAL keys from the DB to ensure the UPDATE succeeds
-                # Fall back to input keys if the normalized key is not found in DB
-                to_add_original = [
-                    all_rels_map.get(n, input_normalized_map[n]) 
-                    for n in to_add_normalized
-                ]
-                c.executemany("UPDATE assets SET is_favorite = 1 WHERE rel = ?", [(r,) for r in to_add_original])
+            if to_add:
+                c.executemany("UPDATE assets SET is_favorite = 1 WHERE id = ?", [(i,) for i in to_add])
 
         try:
             if is_nested:

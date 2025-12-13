@@ -19,7 +19,7 @@ from PySide6.QtCore import (
     QItemSelectionModel,
     QEvent,
 )
-from PySide6.QtGui import QDragEnterEvent, QDragMoveEvent, QDropEvent, QSurfaceFormat
+from PySide6.QtGui import QColor, QDragEnterEvent, QDragMoveEvent, QDropEvent, QSurfaceFormat
 from PySide6.QtQuickWidgets import QQuickWidget
 from PySide6.QtWidgets import QWidget
 
@@ -149,6 +149,7 @@ class GalleryQuickWidget(QQuickWidget):
         gl_format.setAlphaBufferSize(0)
         self.setFormat(gl_format)
 
+        self.setClearColor(QColor("#2b2b2b"))
         self.setResizeMode(QQuickWidget.ResizeMode.SizeRootObjectToView)
         self.setAttribute(Qt.WidgetAttribute.WA_AlwaysStackOnTop, False)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, False)

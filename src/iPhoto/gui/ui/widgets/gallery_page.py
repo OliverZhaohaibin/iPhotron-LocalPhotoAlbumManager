@@ -18,6 +18,8 @@ class GalleryPageWidget(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
 
+        self.setStyleSheet("background-color: #2b2b2b;")
+
         self.grid_view = GalleryQuickWidget()
         self.grid_view.setObjectName("galleryGridView")
         layout.addWidget(self.grid_view)

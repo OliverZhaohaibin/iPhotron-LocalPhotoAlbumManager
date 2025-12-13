@@ -114,7 +114,7 @@ class AlbumMetadataService(QObject):
                 IndexStore(alb.root).set_favorite_status(r, desired_state)
 
                 # Check if this was the primary album
-                if alb is album:
+                if alb.root == album.root:
                     primary_success = True
             else:
                 # Failure: Rollback in-memory state to match disk

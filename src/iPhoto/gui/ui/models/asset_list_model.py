@@ -749,6 +749,8 @@ class AssetListModel(QAbstractListModel):
 
     def _cleanup_incremental_worker(self) -> None:
         if self._incremental_signals:
+            self._incremental_signals.resultsReady.disconnect(self._apply_incremental_results)
+            self._incremental_signals.error.disconnect(self._on_incremental_error)
             self._incremental_signals.deleteLater()
             self._incremental_signals = None
         self._incremental_worker = None

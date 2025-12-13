@@ -752,12 +752,14 @@ class AssetListModel(QAbstractListModel):
                         normalized_key = normalise_rel_value(adjusted_rel)
 
                         if normalized_key in fresh_lookup:
+                            # Create a copy to avoid mutating data potentially shared or cached
+                            merged_row = child_row.copy()
                             # Update the child row with adjusted rel
-                            child_row["rel"] = adjusted_rel
+                            merged_row["rel"] = adjusted_rel
                             # Since ID might be different or same depending on implementation,
                             # we trust the match by rel/abs path.
                             # We replace the stale row in fresh_rows with the fresh child_row.
-                            fresh_rows[fresh_lookup[normalized_key]] = child_row
+                            fresh_rows[fresh_lookup[normalized_key]] = merged_row
 
         except Exception as exc:  # pragma: no cover - surfaced via GUI
             logger.error(

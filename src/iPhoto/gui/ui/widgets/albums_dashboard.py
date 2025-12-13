@@ -39,7 +39,7 @@ from PySide6.QtWidgets import (
 from ....utils.pathutils import ensure_work_dir
 from ....cache.index_store import IndexStore
 from ....config import WORK_DIR_NAME
-from ....media_classifier import IMAGE_EXTENSIONS
+from ....media_classifier import IMAGE_EXTENSIONS, classify_media
 from ....models.album import Album
 from ..tasks.thumbnail_loader import ThumbnailJob
 from .flow_layout import FlowLayout
@@ -269,10 +269,12 @@ class AlbumDataWorker(QRunnable):
         try:
             store = IndexStore(self.node.path)
             # Efficiently count rows and find first rel
-            for i, row in enumerate(store.read_all()):
+            for row in store.read_all():
                 count += 1
-                if i == 0 and isinstance(row, dict):
-                    first_rel = str(row.get("rel", ""))
+                if first_rel is None and isinstance(row, dict):
+                    is_image, _ = classify_media(row)
+                    if is_image:
+                        first_rel = str(row.get("rel", ""))
         except Exception:
             pass
 
@@ -297,8 +299,6 @@ class AlbumDataWorker(QRunnable):
         valid_extensions = IMAGE_EXTENSIONS | {'.webp', '.bmp', '.tiff'}
 
         # Verify that current cover_path is actually an image (e.g. not a video)
-        # If the index returned a video as first_rel, we should invalidate it
-        # so we can fall back to searching for an image.
         if cover_path and cover_path.suffix.lower() not in valid_extensions:
             cover_path = None
 

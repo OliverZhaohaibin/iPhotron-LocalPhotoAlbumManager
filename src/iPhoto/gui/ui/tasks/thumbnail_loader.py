@@ -96,6 +96,7 @@ class ThumbnailJob(QRunnable):
         is_video: bool,
         still_image_time: Optional[float],
         duration: Optional[float],
+        cache_rel: Optional[str] = None,
     ) -> None:
         super().__init__()
         self._loader = loader
@@ -108,6 +109,7 @@ class ThumbnailJob(QRunnable):
         self._is_video = is_video
         self._still_image_time = still_image_time
         self._duration = duration
+        self._cache_rel = cache_rel
 
     def run(self) -> None:  # pragma: no cover - executed in worker thread
         # Memory Guard
@@ -146,6 +148,8 @@ class ThumbnailJob(QRunnable):
 
         actual_stamp = int(stamp_ns)
 
+        rel_for_path = self._cache_rel if self._cache_rel is not None else self._rel
+
         # 2. Validation
         if self._known_stamp is not None:
             if self._known_stamp == actual_stamp:
@@ -154,11 +158,11 @@ class ThumbnailJob(QRunnable):
                 return
             else:
                 # Stale cache detected. Remove old file.
-                old_path = generate_cache_path(self._album_root, self._rel, self._size, self._known_stamp)
+                old_path = generate_cache_path(self._album_root, rel_for_path, self._size, self._known_stamp)
                 safe_unlink(old_path)
 
         # 3. Calculate Cache Path
-        cache_path = generate_cache_path(self._album_root, self._rel, self._size, actual_stamp)
+        cache_path = generate_cache_path(self._album_root, rel_for_path, self._size, actual_stamp)
 
         image: Optional[QImage] = None
         loaded_from_cache = False

@@ -39,8 +39,9 @@ from PySide6.QtWidgets import (
 from ....utils.pathutils import ensure_work_dir
 from ....cache.index_store import IndexStore
 from ....config import WORK_DIR_NAME
+from ....media_classifier import get_media_type, MediaType
 from ....models.album import Album
-from ..tasks.thumbnail_loader import ThumbnailJob
+from ..tasks.thumbnail_loader import ThumbnailJob, generate_cache_path
 from .flow_layout import FlowLayout
 from ..icon import load_icon
 
@@ -313,9 +314,6 @@ class DashboardThumbnailLoader(QObject):
         # passed to ThumbnailJob. This ensures the key emitted back is unique.
         unique_rel = str(image_path)
 
-        # However, we must ensure the cache path is calculated correctly.
-        # ThumbnailJob uses the passed cache_path.
-
         try:
             work_dir = ensure_work_dir(album_root, WORK_DIR_NAME)
             thumbs_dir = work_dir / "thumbs"
@@ -336,9 +334,8 @@ class DashboardThumbnailLoader(QObject):
         except ValueError:
             real_rel = image_path.name
 
-        digest = hashlib.sha256(real_rel.encode("utf-8")).hexdigest()
-        filename = f"{digest}_{stamp}_{size.width()}x{size.height()}.png"
-        cache_path = thumbs_dir / filename
+        # Check existing using standardized generator
+        cache_path = generate_cache_path(album_root, real_rel, size, stamp)
 
         if cache_path.exists():
             pixmap = QPixmap(str(cache_path))
@@ -350,17 +347,22 @@ class DashboardThumbnailLoader(QObject):
         key_str = self._make_key_str(unique_rel, size, stamp)
         self._key_to_root[key_str] = album_root
 
+        media_type = get_media_type(image_path)
+        is_image = media_type == MediaType.IMAGE
+        is_video = media_type == MediaType.VIDEO
+
         job = ThumbnailJob(
             self,  # type: ignore
             unique_rel,  # Pass absolute path string as rel to ensure uniqueness
             image_path,
             size,
-            stamp,
-            cache_path,
-            is_image=True,
-            is_video=False,
+            None,  # Pass None as known_stamp to force regeneration if missing
+            album_root,
+            is_image=is_image,
+            is_video=is_video,
             still_image_time=None,
             duration=None,
+            cache_rel=real_rel,
         )
         self._pool.start(job)
 

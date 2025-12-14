@@ -70,13 +70,15 @@ def generate_cache_path(album_root: Path, rel: str, size: QSize, stamp: int) -> 
         album_root (Path): The root directory of the album.
         rel (str): The relative path of the media file within the album.
         size (QSize): The desired size of the thumbnail.
-        stamp (int): A timestamp or version identifier for cache invalidation.
+        stamp (int): A timestamp or version identifier. Ignored in this version
+                     as we use a Trust-on-First-Use strategy with invalidation.
 
     Returns:
         Path: The path to the cache file for the thumbnail image.
     """
     digest = hashlib.blake2b(rel.encode("utf-8"), digest_size=20).hexdigest()
-    filename = f"{digest}_{stamp}_{size.width()}x{size.height()}.png"
+    # stamp is ignored in the filename generation to support Trust-on-First-Use
+    filename = f"{digest}_{size.width()}x{size.height()}.png"
     return album_root / WORK_DIR_NAME / "thumbs" / filename
 
 
@@ -112,84 +114,61 @@ class ThumbnailJob(QRunnable):
         self._cache_rel = cache_rel
 
     def run(self) -> None:  # pragma: no cover - executed in worker thread
-        # Memory Guard
+        # 1. Memory Guard
         if psutil:
             mem = psutil.virtual_memory()
             if mem.percent > 80.0:
                  time.sleep(0.5)
 
-        # 1. Stat the file to get actual timestamp
-        try:
-            stat_result = self._abs_path.stat()
-        except OSError:
-            self._handle_missing()
-            return
-
-        stamp_ns = getattr(stat_result, "st_mtime_ns", None)
-        if stamp_ns is None:
-            stamp_ns = int(stat_result.st_mtime * 1_000_000_000)
-
-        # Check sidecar
-        sidecar_path = sidecar.sidecar_path_for_asset(self._abs_path)
-        try:
-            if sidecar_path.exists():
-                try:
-                    sidecar_stat = sidecar_path.stat()
-                    sidecar_ns = getattr(sidecar_stat, "st_mtime_ns", None)
-                    if sidecar_ns is None:
-                        sidecar_ns = int(sidecar_stat.st_mtime * 1_000_000_000)
-                    stamp_ns = max(stamp_ns, sidecar_ns)
-                except OSError:
-                    # Ignore errors reading sidecar file; treat as if sidecar is missing or inaccessible.
-                    pass
-        except OSError:
-            # Ignore errors when checking for sidecar existence or stat; sidecar may not exist or be inaccessible.
-            pass
-
-        actual_stamp = int(stamp_ns)
-
+        # Prepare path arguments
         rel_for_path = self._cache_rel if self._cache_rel is not None else self._rel
 
-        # 2. Validation
-        if self._known_stamp is not None:
-            if self._known_stamp == actual_stamp:
-                # Cache is valid, remove from pending jobs and exit
-                self._report_valid(actual_stamp)
-                return
-            else:
-                # Stale cache detected. Remove old file.
-                old_path = generate_cache_path(self._album_root, rel_for_path, self._size, self._known_stamp)
-                safe_unlink(old_path)
-
-        # 3. Calculate Cache Path
-        cache_path = generate_cache_path(self._album_root, rel_for_path, self._size, actual_stamp)
+        # 2. Check cache existence directly
+        # Pass stamp=0, as generate_cache_path ignores stamp.
+        # This allows us to skip stat operations on the original file, significantly reducing IO.
+        cache_path = generate_cache_path(self._album_root, rel_for_path, self._size, 0)
 
         image: Optional[QImage] = None
         loaded_from_cache = False
 
-        try:
-            cache_exists = cache_path.exists()
-        except OSError:
-            cache_exists = False
-        if cache_exists:
+        # Attempt to load from cache directly
+        if cache_path.exists():
             image = QImage(str(cache_path))
             if not image.isNull():
                 loaded_from_cache = True
             else:
+                # If image is corrupted, delete it and prepare to re-render
                 safe_unlink(cache_path)
                 image = None
 
-        if image is None:
+        # 3. Only read original file info and render if cache is missing or corrupted (Cache Miss)
+        actual_stamp = 0
+        if not loaded_from_cache:
+            # Only here do we need to stat the original file to get the timestamp for memory cache
+            # (though it's not used for verification anymore)
+            try:
+                stat_result = self._abs_path.stat()
+                stamp_ns = getattr(stat_result, "st_mtime_ns", None)
+                if stamp_ns is None:
+                    stamp_ns = int(stat_result.st_mtime * 1_000_000_000)
+                actual_stamp = int(stamp_ns)
+            except OSError:
+                self._handle_missing()
+                return
+
+            # Perform rendering
             image = self._render_media()
 
+        # 4. Write process
         success = False
         if image is not None:
             if not loaded_from_cache:
+                # Write to cache (no need to sync timestamp anymore)
                 success = self._write_cache(image, cache_path)
             else:
-                # Cache hit, so it's already written.
                 success = True
 
+        # 5. Deliver results
         loader = getattr(self, "_loader", None)
         if loader is None:
             return
@@ -197,19 +176,20 @@ class ThumbnailJob(QRunnable):
         if success and not loaded_from_cache:
             try:
                 loader.cache_written.emit(cache_path)
-            except AttributeError:  # pragma: no cover - dummy loader in tests
-                pass
             except RuntimeError:
-                # pragma: no cover - race with QObject deletion
                 pass
 
         try:
+            # actual_stamp can be 0 if read from cache, which is fine
+            # because Memory Cache relies on invalidate to clean up
+            report_stamp = actual_stamp if actual_stamp > 0 else 0
+
             loader._delivered.emit(
-                loader._make_key(self._rel, self._size, actual_stamp),
+                loader._make_key(self._rel, self._size, report_stamp),
                 image,
                 self._rel,
             )
-        except RuntimeError:  # pragma: no cover - race with QObject deletion
+        except RuntimeError:
             pass
 
     def _handle_missing(self) -> None:
@@ -452,10 +432,13 @@ class ThumbnailJob(QRunnable):
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
             tmp_path = path.with_suffix(path.suffix + ".tmp")
-            if canvas.save(str(tmp_path), "PNG"):
+
+            # quality=0 is fastest
+            if canvas.save(str(tmp_path), "PNG", quality=0):
                 safe_unlink(path)
                 try:
                     tmp_path.replace(path)
+                    # Removed os.utime call as we are now in "Blind Cache" mode
                     return True
                 except OSError:
                     tmp_path.unlink(missing_ok=True)

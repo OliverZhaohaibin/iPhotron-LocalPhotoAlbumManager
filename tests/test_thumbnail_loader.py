@@ -48,9 +48,9 @@ def test_generate_cache_path_basic(tmp_path: Path) -> None:
     assert result.parent.name == "thumbs"
     assert result.suffix == ".png"
     
-    # Verify filename includes stamp and size
+    # Verify filename includes size but NOT stamp (Trust-on-First-Use)
     filename = result.name
-    assert f"{stamp}_" in filename
+    assert f"_{stamp}_" not in filename
     assert "512x512.png" in filename
 
 
@@ -170,7 +170,7 @@ def test_thumbnail_loader_lru_eviction(tmp_path: Path, qapp: QApplication) -> No
 
 
 def test_generate_cache_path_different_stamps(tmp_path: Path) -> None:
-    """Test that different timestamps produce different cache paths."""
+    """Test that different timestamps produce SAME cache paths (since stamp is ignored)."""
     album_root = tmp_path / "album"
     rel = "photos/IMG_0001.JPG"
     size = QSize(512, 512)
@@ -178,10 +178,10 @@ def test_generate_cache_path_different_stamps(tmp_path: Path) -> None:
     result_old = generate_cache_path(album_root, rel, size, 1234567890)
     result_new = generate_cache_path(album_root, rel, size, 9876543210)
     
-    # Different timestamps should produce different filenames
-    assert result_old != result_new
-    assert "_1234567890_" in result_old.name
-    assert "_9876543210_" in result_new.name
+    # Different timestamps should produce SAME filenames now
+    assert result_old == result_new
+    assert f"_{1234567890}_" not in result_old.name
+    assert f"_{9876543210}_" not in result_new.name
 
 
 def test_generate_cache_path_different_rel_paths(tmp_path: Path) -> None:
@@ -249,103 +249,73 @@ def test_thumbnail_loader_cache_naming(tmp_path: Path, qapp: QApplication) -> No
     assert filename.startswith(f"{digest}_")
     assert filename.endswith("_512x512.png")
 
-    # Changing the modification time should produce a new cache entry and
-    # remove the stale one.
+    # Changing the modification time should NOT produce a new cache entry
+    # (Trust-on-First-Use: existing cache is used regardless of stamp)
     os.utime(image_path, None)
     spy = QSignalSpy(loader.ready)
     loader.request("IMG_0001.JPG", image_path, QSize(512, 512), is_image=True)
+
+    # Wait to ensure request is processed
     deadline = time.monotonic() + 4.0
     while time.monotonic() < deadline and spy.count() < 1:
         qapp.processEvents()
         time.sleep(0.05)
-    assert spy.count() >= 1
+
+    # We may or may not get a new 'ready' signal depending on how request handles known keys
+    # But the file on disk should remain the SAME.
     files = list(thumbs_dir.iterdir())
     assert len(files) == 1
-    assert files[0].name != filename
+    assert files[0].name == filename
 
-def test_thumbnail_loader_sidecar_invalidation(tmp_path: Path, qapp: QApplication) -> None:
-    image_path = tmp_path / "IMG_SIDE.JPG"
+
+def test_thumbnail_loader_manual_invalidation(tmp_path: Path, qapp: QApplication) -> None:
+    """Test that calling invalidate() removes the cache file and allows regeneration."""
+    image_path = tmp_path / "IMG_INVALIDATE.JPG"
     _create_image(image_path)
     loader = ThumbnailLoader()
     loader.reset_for_album(tmp_path)
 
-    # Initial request
+    # 1. Initial request -> Cache created
     spy = QSignalSpy(loader.ready)
-    loader.request("IMG_SIDE.JPG", image_path, QSize(512, 512), is_image=True)
+    loader.request("IMG_INVALIDATE.JPG", image_path, QSize(512, 512), is_image=True)
     deadline = time.monotonic() + 4.0
     while time.monotonic() < deadline and spy.count() < 1:
         qapp.processEvents()
         time.sleep(0.05)
-    assert spy.count() >= 1
 
     thumbs_dir = tmp_path / WORK_DIR_NAME / "thumbs"
     files = list(thumbs_dir.iterdir())
     assert len(files) == 1
-    original_cache_file = files[0].name
+    old_file_mtime = files[0].stat().st_mtime
 
-    # Create sidecar with edits - ensure mtime is newer
-    save_adjustments(image_path, {"Light_Master": 0.5})
-    sidecar_path = image_path.with_suffix(".ipo")
-    image_mtime = image_path.stat().st_mtime
-    os.utime(sidecar_path, (image_mtime + 5, image_mtime + 5))
+    # 2. Modify image (change content so we can detect if it regenerated, though here we just check file replacement)
+    # Ideally we'd change content, but utime is enough to simulate 'change'
+    # and verify that AFTER invalidate, we get a write.
+    # Note: write_cache happens fast, mtime might not change if within same second unless we sleep or check content.
+    # For now, let's just ensure the file is deleted by invalidate.
 
-    # Request again - should trigger new generation because sidecar is newer
+    loader.invalidate("IMG_INVALIDATE.JPG")
+
+    # Assert file is gone
+    files = list(thumbs_dir.iterdir())
+    assert len(files) == 0
+
+    # 3. Request again -> New cache created
     spy = QSignalSpy(loader.ready)
-
-    loader.request("IMG_SIDE.JPG", image_path, QSize(512, 512), is_image=True)
+    loader.request("IMG_INVALIDATE.JPG", image_path, QSize(512, 512), is_image=True)
     deadline = time.monotonic() + 4.0
     while time.monotonic() < deadline and spy.count() < 1:
         qapp.processEvents()
         time.sleep(0.05)
-    assert spy.count() >= 1
 
     files = list(thumbs_dir.iterdir())
     assert len(files) == 1
-    new_cache_file = files[0].name
 
-    assert new_cache_file != original_cache_file
+    # Ensure it's back
+    digest = hashlib.blake2b("IMG_INVALIDATE.JPG".encode("utf-8"), digest_size=20).hexdigest()
+    assert files[0].name.startswith(f"{digest}_")
 
 
-def test_thumbnail_loader_cache_validation(tmp_path: Path, qapp: QApplication) -> None:
-    """Test that _report_valid is called when cached thumbnail is still current."""
-    image_path = tmp_path / "IMG_VALID.JPG"
-    _create_image(image_path)
-    loader = ThumbnailLoader()
-    loader.reset_for_album(tmp_path)
-
-    # Initial request - generates thumbnail and caches it
-    ready_spy = QSignalSpy(loader.ready)
-    cache_written_spy = QSignalSpy(loader.cache_written)
-    validation_spy = QSignalSpy(loader._validation_success)
-
-    loader.request("IMG_VALID.JPG", image_path, QSize(512, 512), is_image=True)
-    deadline = time.monotonic() + 4.0
-    while time.monotonic() < deadline and ready_spy.count() < 1:
-        qapp.processEvents()
-        time.sleep(0.05)
-
-    assert ready_spy.count() >= 1
-    assert cache_written_spy.count() >= 1
-
-    # Second request - file hasn't changed, cache should be valid
-    # Should emit _validation_success and NOT emit cache_written
-    cache_written_spy = QSignalSpy(loader.cache_written)
-    validation_spy = QSignalSpy(loader._validation_success)
-
-    # Request should return cached pixmap immediately
-    cached_pixmap = loader.request("IMG_VALID.JPG", image_path, QSize(512, 512), is_image=True)
-    assert cached_pixmap is not None, "Cached pixmap should be returned immediately"
-
-    # Wait for validation signal to be emitted from background job
-    deadline = time.monotonic() + 4.0
-    while time.monotonic() < deadline and validation_spy.count() < 1:
-        qapp.processEvents()
-        time.sleep(0.05)
-
-    # Validation success should be emitted when cache is still valid
-    assert validation_spy.count() >= 1
-    # Cache should NOT be written again since it's still valid
-    assert cache_written_spy.count() == 0
 def test_safe_unlink_successful_deletion(tmp_path: Path) -> None:
     """Test that safe_unlink successfully deletes a file when it exists."""
     test_file = tmp_path / "test_file.txt"

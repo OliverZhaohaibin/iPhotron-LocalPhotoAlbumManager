@@ -302,20 +302,24 @@ class DashboardThumbnailLoader(QObject):
     thumbnailReady = Signal(Path, QPixmap)  # album_root, pixmap
     _delivered = Signal(str, QImage, str)  # key, image, rel
 
-    def __init__(self, parent: QObject | None = None) -> None:
+    def __init__(self, parent: QObject | None = None, library_root: Optional[Path] = None) -> None:
         super().__init__(parent)
         self._pool = QThreadPool.globalInstance()
         self._delivered.connect(self._handle_result)
         # Map unique keys to album roots
         self._key_to_root: dict[str, Path] = {}
+        self._library_root = library_root
 
     def request_with_absolute_key(self, album_root: Path, image_path: Path, size: QSize) -> None:
         # To avoid rel collision across albums, we use the absolute path string as the 'rel' identifier
         # passed to ThumbnailJob. This ensures the key emitted back is unique.
         unique_rel = str(image_path)
 
+        # Use library root if available, otherwise fallback to album root
+        effective_library_root = self._library_root if self._library_root else album_root
+
         try:
-            work_dir = ensure_work_dir(album_root, WORK_DIR_NAME)
+            work_dir = ensure_work_dir(effective_library_root, WORK_DIR_NAME)
             thumbs_dir = work_dir / "thumbs"
             thumbs_dir.mkdir(parents=True, exist_ok=True)
         except OSError:
@@ -327,15 +331,8 @@ class DashboardThumbnailLoader(QObject):
             return
         stamp = int(stat.st_mtime * 1_000_000_000)
 
-        # For the cache file name, we want it to be based on the album-relative path so it's stable
-        # if the library moves (if we used real rel).
-        try:
-            real_rel = str(image_path.relative_to(album_root))
-        except ValueError:
-            real_rel = image_path.name
-
-        # Check existing using standardized generator
-        cache_path = generate_cache_path(album_root, real_rel, size, stamp)
+        # Use standardized generator with absolute path
+        cache_path = generate_cache_path(effective_library_root, image_path, size, stamp)
 
         if cache_path.exists():
             pixmap = QPixmap(str(cache_path))
@@ -351,6 +348,10 @@ class DashboardThumbnailLoader(QObject):
         is_image = media_type == MediaType.IMAGE
         is_video = media_type == MediaType.VIDEO
 
+        # Determine cache_rel based on library root if possible to match main loader behavior,
+        # but DashboardThumbnailLoader logic uses unique_rel as the key.
+        # We pass effective_library_root as library_root to ThumbnailJob.
+
         job = ThumbnailJob(
             self,  # type: ignore
             unique_rel,  # Pass absolute path string as rel to ensure uniqueness
@@ -358,11 +359,20 @@ class DashboardThumbnailLoader(QObject):
             size,
             None,  # Pass None as known_stamp to force regeneration if missing
             album_root,
+            effective_library_root,
             is_image=is_image,
             is_video=is_video,
             still_image_time=None,
             duration=None,
-            cache_rel=real_rel,
+            cache_rel=None, # Not used when hashing absolute path in new logic?
+            # Wait, ThumbnailJob still uses _cache_rel if provided?
+            # In new logic: rel_for_path = self._cache_rel if self._cache_rel is not None else self._rel
+            # Then: generate_cache_path(self._library_root, self._abs_path, ...)
+            # generate_cache_path IGNORES rel/cache_rel now! It uses abs_path.
+            # So cache_rel is irrelevant for path generation, but might be used for logging?
+            # The job passes it. Let's pass None or keep it consistent?
+            # The old code calculated real_rel.
+            # Let's pass None as it's not needed for the path generation anymore.
         )
         self._pool.start(job)
 
@@ -400,7 +410,7 @@ class AlbumsDashboard(QWidget):
         self._loader_signals = DashboardLoaderSignals()
         self._loader_signals.albumReady.connect(self._on_album_data_ready)
 
-        self._thumb_loader = DashboardThumbnailLoader(self)
+        self._thumb_loader = DashboardThumbnailLoader(self, library_root=self._library.root())
         self._thumb_loader.thumbnailReady.connect(self._on_thumbnail_ready)
 
         self._init_ui()

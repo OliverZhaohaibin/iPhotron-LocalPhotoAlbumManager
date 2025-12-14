@@ -233,7 +233,7 @@ class LibraryManager(QObject):
             prefix = scan_root_res.relative_to(rel_root_res).as_posix()
             for item in self._live_scan_buffer:
                 item_rel = item.get("rel")
-                if not item_rel:
+                if not isinstance(item_rel, str) or not item_rel:
                     continue
                 new_item = item.copy()
                 new_item["rel"] = f"{prefix}/{item_rel}"

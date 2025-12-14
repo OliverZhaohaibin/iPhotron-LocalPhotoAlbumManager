@@ -193,11 +193,6 @@ class AssetCacheManager(QObject):
             # Generate composite from cached raw thumbnail
             return self._create_composite_thumbnail(rel, cached, row)
 
-        # Check for micro thumbnail before falling back to generic placeholder
-        micro_thumb = row.get("micro_thumbnail_image")
-        if isinstance(micro_thumb, QImage) and not micro_thumb.isNull():
-            return QPixmap.fromImage(micro_thumb)
-
         placeholder = self._placeholder_for(rel, bool(row.get("is_video")))
         if not self._album_root:
             return placeholder
@@ -205,6 +200,7 @@ class AssetCacheManager(QObject):
         abs_value = row.get("abs", "")
         abs_path = Path(str(abs_value)) if abs_value else self._album_root / rel
 
+        # Trigger async load even if we return a micro thumbnail
         if bool(row.get("is_image")):
             pixmap = self._thumb_loader.request(
                 rel,
@@ -239,6 +235,11 @@ class AssetCacheManager(QObject):
             if pixmap is not None:
                 self._thumb_cache[rel] = pixmap
                 return self._create_composite_thumbnail(rel, pixmap, row)
+
+        # Check for micro thumbnail before falling back to generic placeholder
+        micro_thumb = row.get("micro_thumbnail_image")
+        if isinstance(micro_thumb, QImage) and not micro_thumb.isNull():
+            return QPixmap.fromImage(micro_thumb)
 
         return placeholder
 

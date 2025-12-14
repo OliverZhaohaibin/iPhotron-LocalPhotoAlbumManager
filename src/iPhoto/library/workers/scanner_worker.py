@@ -7,10 +7,10 @@ from typing import Iterable, Iterator, List, Optional
 
 from PySide6.QtCore import QObject, QRunnable, Signal
 
-from ....app import load_incremental_index_cache
-from ....config import WORK_DIR_NAME
-from ....io.scanner import scan_album
-from ....utils.pathutils import ensure_work_dir
+from ...app import load_incremental_index_cache
+from ...config import WORK_DIR_NAME
+from ...io.scanner import scan_album
+from ...utils.pathutils import ensure_work_dir
 
 
 class ScannerSignals(QObject):

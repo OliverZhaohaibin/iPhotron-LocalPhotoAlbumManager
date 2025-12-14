@@ -12,8 +12,9 @@ from ... import app as backend
 from ...config import RECENTLY_DELETED_DIR_NAME, WORK_DIR_NAME
 from ...errors import IPhotoError
 from ..background_task_manager import BackgroundTaskManager
-from ..ui.tasks.rescan_worker import RescanSignals, RescanWorker
-from ..ui.tasks.scanner_worker import ScannerSignals, ScannerWorker
+# Updated imports to new location
+from ...library.workers.rescan_worker import RescanSignals, RescanWorker
+from ...library.workers.scanner_worker import ScannerSignals, ScannerWorker
 
 if TYPE_CHECKING:
     from ...library.manager import LibraryManager
@@ -553,4 +554,3 @@ class LibraryUpdateService(QObject):
 
 
 __all__ = ["LibraryUpdateService"]
-

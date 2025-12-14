@@ -153,6 +153,7 @@ class NavigationController:
         self._view_controller.restore_default_gallery()
         self._view_controller.show_gallery_view()
 
+        # Scanning persistence is now handled by LibraryManager.
         album = self._facade.open_album(path)
         if album is not None:
             self._context.remember_album(album.root)
@@ -341,8 +342,8 @@ class NavigationController:
         else:
             # --- STANDARD PATH (Context Switch) ---
             # We are switching from a different physical album root or loading the library for the first time.
-            # 1. Destroy the old model FIRST.
-            # This prevents wasting CPU cycles filtering the old dataset.
+            # Scanning persistence is handled by LibraryManager and survives navigation.
+
             album = self._facade.open_album(target_root)
             if album is None:
                 self._static_selection = None

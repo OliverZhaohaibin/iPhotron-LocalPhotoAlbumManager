@@ -6,8 +6,8 @@ from pathlib import Path
 
 from PySide6.QtCore import QObject, QRunnable, Signal
 
-from .... import app as backend
-from ....errors import IPhotoError
+from ... import app as backend
+from ...errors import IPhotoError
 
 
 class RescanSignals(QObject):

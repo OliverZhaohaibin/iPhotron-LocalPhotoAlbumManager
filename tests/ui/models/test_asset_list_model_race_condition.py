@@ -42,6 +42,24 @@ class MockLoader(QObject):
     def is_running(self):
         return self._running
 
+class MockAssetCacheManager(QObject):
+    thumbnailReady = Signal(Path, str, object)
+
+    def __init__(self, *args, **kwargs):
+        super().__init__()
+        self.set_library_root = MagicMock()
+        self.reset_for_album = MagicMock()
+        self.clear_recently_removed = MagicMock()
+        self.set_recently_removed_limit = MagicMock()
+        self.reset_caches_for_new_rows = MagicMock()
+        self.remove_thumbnail = MagicMock()
+        self.remove_placeholder = MagicMock()
+        self.remove_recently_removed = MagicMock()
+        self.thumbnail_for = MagicMock(return_value=None)
+        self.resolve_thumbnail = MagicMock()
+        self.recently_removed = MagicMock(return_value=None)
+        self.thumbnail_loader = MagicMock()
+
 @pytest.fixture
 def model_setup(qapp):
     """Setup model with mocked dependencies."""
@@ -50,7 +68,7 @@ def model_setup(qapp):
     # Patch AssetDataLoader to use our MockLoader
     with patch('src.iPhoto.gui.ui.models.asset_list_model.AssetDataLoader', side_effect=MockLoader) as mock_loader_cls:
         # Also patch AssetCacheManager to avoid crashes in headless env
-        with patch('src.iPhoto.gui.ui.models.asset_list_model.AssetCacheManager') as mock_cache_cls:
+        with patch('src.iPhoto.gui.ui.models.asset_list_model.AssetCacheManager', side_effect=MockAssetCacheManager) as mock_cache_cls:
             model = AssetListModel(facade)
 
             # Access the instantiated mock loader

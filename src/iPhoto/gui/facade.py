@@ -168,6 +168,12 @@ class AppFacade(QObject):
 
         return self._library_update_service
 
+    @property
+    def library_manager(self) -> Optional["LibraryManager"]:
+        """Expose the underlying library manager."""
+
+        return self._library_manager
+
     def open_album(self, root: Path) -> Optional[Album]:
         """Open *root* and trigger background work as needed."""
 
@@ -294,6 +300,15 @@ class AppFacade(QObject):
 
         self._library_manager = library
         self._library_update_service.reset_cache()
+        self._library_manager.treeUpdated.connect(self._on_library_tree_updated)
+
+    def _on_library_tree_updated(self) -> None:
+        """Propagate library root updates to models for centralized thumbnail storage."""
+        if self._library_manager:
+            root = self._library_manager.root()
+            if root:
+                self._library_list_model.set_library_root(root)
+                self._album_list_model.set_library_root(root)
 
     def register_restore_prompt(
         self, handler: Optional[Callable[[str], bool]]

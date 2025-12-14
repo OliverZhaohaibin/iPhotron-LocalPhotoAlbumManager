@@ -65,7 +65,13 @@ class AssetListModel(QAbstractListModel):
         self._facade = facade
         self._album_root: Optional[Path] = None
         self._thumb_size = QSize(512, 512)
-        self._cache_manager = AssetCacheManager(self._thumb_size, self)
+
+        # Try to acquire library root early if available
+        library_root = None
+        if self._facade.library_manager:
+            library_root = self._facade.library_manager.root()
+
+        self._cache_manager = AssetCacheManager(self._thumb_size, self, library_root=library_root)
         self._cache_manager.thumbnailReady.connect(self._on_thumb_ready)
         self._data_loader = AssetDataLoader(self)
         self._data_loader.chunkReady.connect(self._on_loader_chunk_ready)
@@ -98,6 +104,10 @@ class AssetListModel(QAbstractListModel):
         self._facade.linksUpdated.connect(self.handle_links_updated)
         self._facade.assetUpdated.connect(self.handle_asset_updated)
         self._facade.scanChunkReady.connect(self._on_scan_chunk_ready)
+
+    def set_library_root(self, root: Path) -> None:
+        """Update the centralized library root for thumbnail generation."""
+        self._cache_manager.set_library_root(root)
 
     def album_root(self) -> Optional[Path]:
         """Return the path of the currently open album, if any."""

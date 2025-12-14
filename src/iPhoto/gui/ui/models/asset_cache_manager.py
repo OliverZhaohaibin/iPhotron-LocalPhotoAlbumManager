@@ -18,12 +18,12 @@ class AssetCacheManager(QObject):
 
     thumbnailReady = Signal(Path, str, QPixmap)
 
-    def __init__(self, thumb_size: QSize, parent: QObject | None = None) -> None:
+    def __init__(self, thumb_size: QSize, parent: QObject | None = None, library_root: Optional[Path] = None) -> None:
         """Create an empty cache for thumbnails and transient metadata."""
 
         super().__init__(parent)
         self._thumb_size = QSize(thumb_size)
-        self._thumb_loader = ThumbnailLoader(self)
+        self._thumb_loader = ThumbnailLoader(self, library_root=library_root)
         self._thumb_loader.ready.connect(self._on_thumb_ready)
         self._thumb_cache: Dict[str, QPixmap] = {}
         self._composite_cache: Dict[str, QPixmap] = {}
@@ -37,6 +37,10 @@ class AssetCacheManager(QObject):
         """Expose the :class:`ThumbnailLoader` used for rendering previews."""
 
         return self._thumb_loader
+
+    def set_library_root(self, root: Path) -> None:
+        """Update the shared library root for centralized thumbnail storage."""
+        self._thumb_loader.set_library_root(root)
 
     def reset_for_album(self, root: Optional[Path]) -> None:
         """Reset caches so a new album can be loaded."""

@@ -62,22 +62,24 @@ def safe_unlink(path: Path) -> None:
         pass
 
 
-def generate_cache_path(album_root: Path, rel: str, size: QSize, stamp: int) -> Path:
+def generate_cache_path(library_root: Path, abs_path: Path, size: QSize, stamp: int) -> Path:
     """
     Generate the file path for a cached thumbnail image.
 
     Args:
-        album_root (Path): The root directory of the album.
-        rel (str): The relative path of the media file within the album.
+        library_root (Path): The root directory of the Basic Library.
+        abs_path (Path): The absolute path of the media file.
         size (QSize): The desired size of the thumbnail.
         stamp (int): A timestamp or version identifier for cache invalidation.
 
     Returns:
         Path: The path to the cache file for the thumbnail image.
     """
-    digest = hashlib.blake2b(rel.encode("utf-8"), digest_size=20).hexdigest()
+    # Use absolute path for global uniqueness
+    path_str = str(abs_path.resolve())
+    digest = hashlib.blake2b(path_str.encode("utf-8"), digest_size=20).hexdigest()
     filename = f"{digest}_{stamp}_{size.width()}x{size.height()}.png"
-    return album_root / WORK_DIR_NAME / "thumbs" / filename
+    return library_root / WORK_DIR_NAME / "thumbs" / filename
 
 
 class ThumbnailJob(QRunnable):
@@ -91,6 +93,7 @@ class ThumbnailJob(QRunnable):
         size: QSize,
         known_stamp: Optional[int],
         album_root: Path,
+        library_root: Path,
         *,
         is_image: bool,
         is_video: bool,
@@ -105,6 +108,7 @@ class ThumbnailJob(QRunnable):
         self._size = size
         self._known_stamp = known_stamp
         self._album_root = album_root
+        self._library_root = library_root
         self._is_image = is_image
         self._is_video = is_video
         self._still_image_time = still_image_time
@@ -158,11 +162,11 @@ class ThumbnailJob(QRunnable):
                 return
             else:
                 # Stale cache detected. Remove old file.
-                old_path = generate_cache_path(self._album_root, rel_for_path, self._size, self._known_stamp)
+                old_path = generate_cache_path(self._library_root, self._abs_path, self._size, self._known_stamp)
                 safe_unlink(old_path)
 
         # 3. Calculate Cache Path
-        cache_path = generate_cache_path(self._album_root, rel_for_path, self._size, actual_stamp)
+        cache_path = generate_cache_path(self._library_root, self._abs_path, self._size, actual_stamp)
 
         image: Optional[QImage] = None
         loaded_from_cache = False
@@ -489,10 +493,11 @@ class ThumbnailLoader(QObject):
         NORMAL = 0
         VISIBLE = 1
 
-    def __init__(self, parent: Optional[QObject] = None) -> None:
+    def __init__(self, parent: Optional[QObject] = None, library_root: Optional[Path] = None) -> None:
         if parent is None:
             parent = QCoreApplication.instance()
         super().__init__(parent)
+        self._library_root: Optional[Path] = library_root
         self._pool = QThreadPool.globalInstance()
         global_max = self._pool.maxThreadCount()
         if global_max <= 0:
@@ -521,6 +526,15 @@ class ThumbnailLoader(QObject):
         self._pending_keys.clear()
         self._pool.waitForDone()
 
+    def set_library_root(self, root: Path) -> None:
+        self._library_root = root
+        if root:
+            try:
+                work_dir = ensure_work_dir(root, WORK_DIR_NAME)
+                (work_dir / "thumbs").mkdir(parents=True, exist_ok=True)
+            except OSError:
+                pass
+
     def reset_for_album(self, root: Path) -> None:
         if self._album_root and self._album_root == root:
             return
@@ -531,11 +545,21 @@ class ThumbnailLoader(QObject):
         self._pending_keys.clear()
         self._failures.clear()
         self._missing.clear()
-        try:
-            work_dir = ensure_work_dir(root, WORK_DIR_NAME)
-            (work_dir / "thumbs").mkdir(parents=True, exist_ok=True)
-        except OSError:
-            pass
+
+        # Ensure the thumbnail directory exists in the library root (if set)
+        if self._library_root:
+            try:
+                work_dir = ensure_work_dir(self._library_root, WORK_DIR_NAME)
+                (work_dir / "thumbs").mkdir(parents=True, exist_ok=True)
+            except OSError:
+                pass
+        else:
+             # Fallback: create in local album root if library not configured
+             try:
+                work_dir = ensure_work_dir(root, WORK_DIR_NAME)
+                (work_dir / "thumbs").mkdir(parents=True, exist_ok=True)
+             except OSError:
+                pass
 
     def request(
         self,
@@ -551,6 +575,9 @@ class ThumbnailLoader(QObject):
     ) -> Optional[QPixmap]:
         if self._album_root is None or self._album_root_str is None:
             return None
+
+        # Fallback to album_root if library_root is not set
+        lib_root = self._library_root if self._library_root else self._album_root
 
         fixed_size = QSize(512, 512)
         base_key = self._base_key(rel, fixed_size)
@@ -581,6 +608,7 @@ class ThumbnailLoader(QObject):
             fixed_size,
             known_stamp,
             self._album_root,
+            lib_root,
             is_image=is_image,
             is_video=is_video,
             still_image_time=still_image_time,

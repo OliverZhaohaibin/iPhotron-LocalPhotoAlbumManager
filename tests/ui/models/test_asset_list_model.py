@@ -199,8 +199,8 @@ def test_incremental_update_existing_row(model):
     args = model.dataChanged.emit.call_args[0]
     assert args[0].row() == 1
 
-def test_buffer_update_existing_row(model):
-    """Regression test: Buffer merging an update should update rows."""
+def test_buffer_add_new_row(model):
+    """Regression test: Buffer merging should add new rows."""
 
     root = Path("/tmp")
     model._album_root = root

@@ -390,7 +390,7 @@ class AssetListModel(QAbstractListModel):
         if self._data_loader.is_running():
             self._data_loader.cancel()
             self._ignore_incoming_chunks = True
-            # Clear buffer immediately to avoid commiting stale chunks if logic leaks
+            # Clear buffer immediately to avoid committing stale chunks if logic leaks
             self._pending_chunks_buffer = []
             self._flush_timer.stop()
             self._is_first_chunk = True

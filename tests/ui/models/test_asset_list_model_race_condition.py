@@ -1,7 +1,7 @@
 
 import pytest
 from unittest.mock import MagicMock, patch
-from PySide6.QtCore import QObject, Signal, QTimer
+from PySide6.QtCore import QObject, Signal
 from pathlib import Path
 from src.iPhoto.gui.ui.models.asset_list_model import AssetListModel
 

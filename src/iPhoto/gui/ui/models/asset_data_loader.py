@@ -32,6 +32,7 @@ class AssetDataLoader(QObject):
         self._pool = QThreadPool.globalInstance()
         self._worker: Optional[AssetLoaderWorker] = None
         self._signals: Optional[AssetLoaderSignals] = None
+        self._request_id: int = 0
 
     def is_running(self) -> bool:
         """Return ``True`` while a worker is active."""
@@ -152,11 +153,24 @@ class AssetDataLoader(QObject):
         """
         if self._worker is not None:
             raise RuntimeError("Loader already running")
+
+        self._request_id += 1
+        current_request_id = self._request_id
+
         signals = AssetLoaderSignals()
-        signals.chunkReady.connect(self._handle_chunk_ready)
-        signals.finished.connect(self._handle_finished)
-        signals.progressUpdated.connect(self._handle_progress)
-        signals.error.connect(self._handle_error)
+        signals.chunkReady.connect(
+            lambda r, c: self._handle_chunk_ready(r, c, current_request_id)
+        )
+        signals.finished.connect(
+            lambda r, s: self._handle_finished(r, s, current_request_id)
+        )
+        signals.progressUpdated.connect(
+            lambda r, curr, tot: self._handle_progress(r, curr, tot, current_request_id)
+        )
+        signals.error.connect(
+            lambda r, msg: self._handle_error(r, msg, current_request_id)
+        )
+
         worker = AssetLoaderWorker(root, featured, signals, filter_params=filter_params)
         self._worker = worker
         self._signals = signals
@@ -204,21 +218,33 @@ class AssetDataLoader(QObject):
 
         return compute_asset_rows(root, featured, filter_params=filter_params)
 
-    def _handle_chunk_ready(self, root: Path, chunk: List[Dict[str, object]]) -> None:
-        """Relay chunk notifications from the worker."""
+    def _handle_chunk_ready(
+        self, root: Path, chunk: List[Dict[str, object]], request_id: int
+    ) -> None:
+        """Relay chunk notifications from the worker if the request ID matches."""
+        if request_id != self._request_id:
+            return
         self.chunkReady.emit(root, chunk)
 
-    def _handle_progress(self, root: Path, current: int, total: int) -> None:
-        """Relay progress updates from the worker."""
+    def _handle_progress(
+        self, root: Path, current: int, total: int, request_id: int
+    ) -> None:
+        """Relay progress updates from the worker if the request ID matches."""
+        if request_id != self._request_id:
+            return
         self.loadProgress.emit(root, current, total)
 
-    def _handle_finished(self, root: Path, success: bool) -> None:
-        """Relay completion notifications and tear down the worker."""
+    def _handle_finished(self, root: Path, success: bool, request_id: int) -> None:
+        """Relay completion notifications and tear down the worker if the request ID matches."""
+        if request_id != self._request_id:
+            return
         self.loadFinished.emit(root, success)
         self._teardown()
 
-    def _handle_error(self, root: Path, message: str) -> None:
-        """Relay worker errors and tear down the worker."""
+    def _handle_error(self, root: Path, message: str, request_id: int) -> None:
+        """Relay worker errors and tear down the worker if the request ID matches."""
+        if request_id != self._request_id:
+            return
         self.error.emit(root, message)
         self._teardown()
 

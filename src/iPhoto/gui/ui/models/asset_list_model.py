@@ -844,6 +844,7 @@ class AssetListModel(QAbstractListModel):
             if row_index is None or not (0 <= row_index < len(current_rows)):
                 continue
 
+            original = current_rows[row_index]
             current_rows[row_index] = replacement
 
             model_index = self.index(row_index, 0)
@@ -859,9 +860,39 @@ class AssetListModel(QAbstractListModel):
             ]
             self.dataChanged.emit(model_index, model_index, affected_roles)
 
-            self.invalidate_thumbnail(rel_key)
+            # Check if the change requires invalidating the thumbnail cache.
+            # We skip invalidation if only metadata that doesn't affect the visual
+            # thumbnail (like favorite status or live photo role) has changed.
+            if self._should_invalidate_thumbnail(original, replacement):
+                self.invalidate_thumbnail(rel_key)
 
         return diff.structure_changed or bool(diff.changed_items)
+
+    def _should_invalidate_thumbnail(
+        self, old_row: Dict[str, object], new_row: Dict[str, object]
+    ) -> bool:
+        """Return True if the thumbnail must be regenerated based on row changes."""
+        # Visual fields that definitely affect the thumbnail
+        # 'ts' (timestamp) is the primary versioning key.
+        # 'bytes' (filesize) implies content change.
+        # 'abs' (absolute path) implies file location change.
+        # 'w'/'h' affect aspect ratio and cropping.
+        visual_keys = {
+            "ts",
+            "bytes",
+            "abs",
+            "w",
+            "h",
+            "still_image_time",
+        }
+
+        for key in visual_keys:
+            if old_row.get(key) != new_row.get(key):
+                return True
+
+        # If only keys like 'is_favorite', 'live_role', 'location', 'gps', 'year', 'month'
+        # changed, we can safely keep the existing thumbnail.
+        return False
 
     def _set_deferred_incremental_refresh(self, root: Optional[Path]) -> None:
         """Remember that an incremental refresh should run once loading settles."""

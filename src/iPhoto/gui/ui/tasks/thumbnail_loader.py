@@ -673,9 +673,11 @@ class ThumbnailLoader(QObject):
             if entry:
                 stamp, pixmap = entry
                 del pixmap
-                _, _, width, height = k
-                path = generate_cache_path(self._album_root, rel, QSize(width, height), stamp)
-                safe_unlink(path)
+                # We intentionally do not delete the disk cache here.
+                # Invalidation primarily means "clear from memory and force a check".
+                # If the disk file is stale, ThumbnailJob will detect the timestamp mismatch
+                # and clean it up. If the disk file is still valid (e.g. invalidation triggered
+                # by a false alarm or metadata update), we want to reuse it.
 
         self._pending_keys = {k for k in self._pending_keys if k[1] != rel}
         self._failures = {k for k in self._failures if k[1] != rel}
@@ -685,13 +687,3 @@ class ThumbnailLoader(QObject):
             (key, job) for key, job in self._pending_deque
             if key[1] != rel
         )
-
-        if self._album_root is not None:
-            try:
-                digest = hashlib.blake2b(rel.encode("utf-8"), digest_size=20).hexdigest()
-                thumbs_dir = self._album_root / WORK_DIR_NAME / "thumbs"
-                if thumbs_dir.exists():
-                    for file_path in thumbs_dir.glob(f"{digest}_*.png"):
-                        safe_unlink(file_path)
-            except Exception:
-                pass

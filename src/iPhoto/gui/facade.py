@@ -36,6 +36,7 @@ class AppFacade(QObject):
     scanProgress = Signal(Path, int, int)
     scanChunkReady = Signal(Path, list)
     scanFinished = Signal(Path, bool)
+    scanBatchFailed = Signal(Path, int)
     loadStarted = Signal(Path)
     loadProgress = Signal(Path, int, int)
     loadFinished = Signal(Path, bool)
@@ -354,6 +355,7 @@ class AppFacade(QObject):
         self._library_manager.scanProgress.connect(self._relay_scan_progress)
         self._library_manager.scanChunkReady.connect(self._relay_scan_chunk_ready)
         self._library_manager.scanFinished.connect(self._relay_scan_finished)
+        self._library_manager.scanBatchFailed.connect(self._relay_scan_batch_failed)
 
         if self._library_manager.root():
             self._on_library_tree_updated()
@@ -847,6 +849,11 @@ class AppFacade(QObject):
         """Forward scan completion events to existing facade listeners."""
 
         self.scanFinished.emit(root, success)
+
+    @Slot(Path, int)
+    def _relay_scan_batch_failed(self, root: Path, count: int) -> None:
+        """Forward partial scan failure events."""
+        self.scanBatchFailed.emit(root, count)
 
     @Slot(Path)
     def _relay_index_updated(self, root: Path) -> None:

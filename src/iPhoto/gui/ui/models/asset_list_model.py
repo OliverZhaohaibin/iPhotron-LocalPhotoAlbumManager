@@ -498,10 +498,10 @@ class AssetListModel(QAbstractListModel):
         # They might overlap if the scanner persisted data and the loader picked it up.
         unique_chunk = []
         for row in chunk:
-             rel = row.get("rel")
-             # Only add if not already present
-             if rel and normalise_rel_value(rel) not in self._state_manager.row_lookup:
-                 unique_chunk.append(row)
+            rel = row.get("rel")
+            # Only add if not already present
+            if rel and normalise_rel_value(rel) not in self._state_manager.row_lookup:
+                unique_chunk.append(row)
 
         if not unique_chunk:
              return

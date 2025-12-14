@@ -76,6 +76,12 @@ class ScannerWorker(QRunnable):
 
         return self._had_error
 
+    @property
+    def failed_count(self) -> int:
+        """Return the number of items that failed to persist during the scan."""
+
+        return self._failed_count
+
     def run(self) -> None:  # pragma: no cover - executed on worker thread
         """Perform the scan and emit progress as files are processed."""
 
@@ -135,8 +141,16 @@ class ScannerWorker(QRunnable):
                 self._signals.error.emit(self._root, str(exc))
         finally:
             # Ensure the scanner generator is closed to trigger its cleanup logic (stopping threads)
-            if scanner is not None and hasattr(scanner, "close"):
+            if scanner is not None:
                 scanner.close()
+
+            # Clean up the IndexStore if it has a persistent connection
+            if store is not None and store._conn is not None:
+                try:
+                    store._conn.close()
+                    store._conn = None
+                except Exception as e:
+                    LOGGER.warning(f"Failed to close IndexStore connection: {e}")
 
             if not self._is_cancelled and not self._had_error:
                 # Consumers should use `chunkReady` for progressive UI updates.
@@ -147,7 +161,17 @@ class ScannerWorker(QRunnable):
                 self._signals.finished.emit(self._root, [])
 
     def _process_chunk(self, store: IndexStore, chunk: List[dict]) -> None:
-        """Persist a chunk to the store and emit readiness signal."""
+        """
+        Attempt to persist a chunk of items to the store and emit readiness signals.
+
+        This method tries to append the given chunk to the provided IndexStore. If
+        persistence fails, it logs the error, increments the failed count, and emits
+        the `batchFailed` signal with the number of items in the failed chunk.
+
+        Regardless of whether persistence succeeds or fails, the `chunkReady` signal
+        is always emitted with the chunk. This ensures that downstream consumers are
+        notified of all processed chunks, even if some were not successfully stored.
+        """
         try:
             store.append_rows(chunk)
         except Exception as e:

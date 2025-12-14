@@ -532,6 +532,9 @@ class AssetListModel(QAbstractListModel):
     def _on_loader_finished(self, root: Path, success: bool) -> None:
         if self._ignore_incoming_chunks:
             should_restart = self._state_manager.consume_pending_reload(self._album_root, root)
+            self._ignore_incoming_chunks = False
+            self._pending_loader_root = None
+            self.loadFinished.emit(root, success)
             if should_restart:
                 QTimer.singleShot(0, self.start_load)
             return

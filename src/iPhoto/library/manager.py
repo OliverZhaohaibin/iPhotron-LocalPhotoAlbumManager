@@ -90,7 +90,9 @@ class LibraryManager(QObject):
         self._debounce.setSingleShot(True)
         self._debounce.setInterval(500)
         # ``_watch_suspend_depth`` tracks how many in-flight operations asked us to
-        # ignore file-system notifications.
+        # ignore file-system notifications. We use a counter instead of a boolean
+        # to correctly handle nested operations that may overlap (e.g., multiple
+        # concurrent file operations that each need to pause/resume the watcher).
         self._watch_suspend_depth = 0
         self._watcher.directoryChanged.connect(self._on_directory_changed)
         self._debounce.timeout.connect(self._refresh_tree)
@@ -140,15 +142,15 @@ class LibraryManager(QObject):
     # ------------------------------------------------------------------
     def start_scanning(self, root: Path, include: Iterable[str], exclude: Iterable[str]) -> None:
         """Start a background scan for the given root directory."""
-        if self._current_scanner_worker is not None:
-            # If we are already scanning the SAME root, do nothing.
-            if self._live_scan_root and self._paths_equal(self._live_scan_root, root):
-                return
-            # Otherwise, cancel the old one
-            self.stop_scanning()
-
-        self._live_scan_root = root
+        # Check if already scanning the same root (thread-safe)
         with self._scan_buffer_lock:
+            if self._current_scanner_worker is not None:
+                if self._live_scan_root and self._paths_equal(self._live_scan_root, root):
+                    return
+                # Cancel the old scan before starting new one
+                self.stop_scanning()
+
+            self._live_scan_root = root
             self._live_scan_buffer.clear()
 
         signals = ScannerSignals()
@@ -163,28 +165,30 @@ class LibraryManager(QObject):
 
     def stop_scanning(self) -> None:
         """Cancel the currently running scan, if any."""
-        if self._current_scanner_worker:
-            self._current_scanner_worker.cancel()
-            self._current_scanner_worker = None
+        with self._scan_buffer_lock:
+            if self._current_scanner_worker:
+                self._current_scanner_worker.cancel()
+                self._current_scanner_worker = None
 
-        # We don't clear the buffer immediately on stop, as the UI might still need it
-        # until a new scan starts or the app closes. But setting root to None invalidates it contextually.
-        self._live_scan_root = None
+            # We don't clear the buffer immediately on stop, as the UI might still need it
+            # until a new scan starts or the app closes. Setting root to None invalidates it contextually.
+            self._live_scan_root = None
 
     def is_scanning_path(self, path: Path) -> bool:
         """Return True if the given path is covered by the active scan."""
-        if not self._live_scan_root:
-            return False
+        with self._scan_buffer_lock:
+            if not self._live_scan_root:
+                return False
 
-        try:
-            target = path.resolve()
-            scan_root = self._live_scan_root.resolve()
-            if target == scan_root:
-                return True
-            # Check if target is a subdirectory of scan_root
-            return scan_root in target.parents
-        except (OSError, ValueError):
-            return False
+            try:
+                target = path.resolve()
+                scan_root = self._live_scan_root.resolve()
+                if target == scan_root:
+                    return True
+                # Check if target is a subdirectory of scan_root
+                return scan_root in target.parents
+            except (OSError, ValueError):
+                return False
 
     def get_live_scan_results(self, relative_to: Optional[Path] = None) -> List[Dict]:
         """Return a snapshot of valid items currently in the scan buffer.
@@ -217,7 +221,9 @@ class LibraryManager(QObject):
 
                     if full_path == rel_root or rel_root in full_path.parents:
                         filtered.append(item)
-            except (OSError, ValueError):
+            except (OSError, ValueError) as e:
+                # Ignore errors due to invalid or missing paths; these can occur if files are moved or deleted during scanning.
+                LOGGER.debug(f"Failed to resolve path while filtering scan results: {e}")
                 pass
 
             return filtered
@@ -232,15 +238,15 @@ class LibraryManager(QObject):
         with self._scan_buffer_lock:
             # Check buffer limit
             if len(self._live_scan_buffer) < self._MAX_LIVE_BUFFER_SIZE:
-                 self._live_scan_buffer.extend(chunk)
+                self._live_scan_buffer.extend(chunk)
             else:
-                 # If buffer is full, we rely on disk.
-                 # We can optionally rotate, but simply stopping accumulation is safer for memory.
-                 # The consuming models should have already pulled earlier data.
-                 LOGGER.warning(
-                     f"Live scan buffer for {root} reached its limit of {self._MAX_LIVE_BUFFER_SIZE} items. "
-                     f"{len(chunk)} new items were not added to the in-memory buffer; relying on disk persistence."
-                 )
+                # If buffer is full, we rely on disk.
+                # We can optionally rotate, but simply stopping accumulation is safer for memory.
+                # The consuming models should have already pulled earlier data.
+                LOGGER.warning(
+                    f"Live scan buffer for {root} reached its limit of {self._MAX_LIVE_BUFFER_SIZE} items. "
+                    f"{len(chunk)} new items were not added to the in-memory buffer; relying on disk persistence."
+                )
 
         # 2. Persist to Disk Incrementally
         # We use IndexStore to append rows. This is thread-safe via the class design (uses new connection).
@@ -251,27 +257,23 @@ class LibraryManager(QObject):
             # Note: We do NOT trigger a full UI reload here via signals,
             # because the scanner emits chunkReady which the UI (AssetListModel) listens to directly
             # to merge "live" data.
-        except Exception as e:
+        except (OSError, IOError, RuntimeError) as e:
             LOGGER.error(f"Failed to persist scan chunk for {root}: {e}")
+            raise
 
         # 3. Forward signal
         self.scanChunkReady.emit(root, chunk)
 
     def _on_scan_finished(self, root: Path, rows: List[dict]) -> None:
-        self._current_scanner_worker = None
-        # We perform one final flush/sync here if needed, but since we are appending incrementally,
-        # the DB should be mostly up to date.
-        # However, the ScannerWorker sends "all rows" in the finished signal (currently).
-        # We should ensure 'links.json' is updated.
-
-        # We delegate the "Finish" logic logic (links.json generation) to the listener (Facade/Service)
-        # or handle it here?
-        # Traditionally LibraryUpdateService handled this. We will emit the signal and let facade handle it.
-
+        # Emit scanFinished for downstream handling (e.g., updating links or finalizing scan).
         self.scanFinished.emit(root, True)
+        # Clear worker reference after emitting signal to prevent race conditions
+        with self._scan_buffer_lock:
+            self._current_scanner_worker = None
 
     def _on_scan_error(self, root: Path, message: str) -> None:
-        self._current_scanner_worker = None
+        with self._scan_buffer_lock:
+            self._current_scanner_worker = None
         self.errorRaised.emit(message)
         self.scanFinished.emit(root, False)
 

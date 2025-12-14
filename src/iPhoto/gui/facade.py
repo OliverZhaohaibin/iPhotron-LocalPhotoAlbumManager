@@ -99,8 +99,11 @@ class AppFacade(QObject):
             library_manager_getter=self._get_library_manager,
             parent=self,
         )
-        # Note: We now hook up signals from LibraryManager when binding library,
-        # but existing update service signals are still useful for non-scan events.
+        # Signal connections after refactoring:
+        #   - Scan-related signals (scanProgress, scanChunkReady, scanFinished) are connected
+        #     from LibraryManager when binding library (see bind_library() method).
+        #   - Other signals (indexUpdated, linksUpdated, assetReloadRequested) remain
+        #     sourced from LibraryUpdateService for backwards compatibility and non-scan events.
         self._library_update_service.scanProgress.connect(self._relay_scan_progress)
         self._library_update_service.scanChunkReady.connect(self._relay_scan_chunk_ready)
         self._library_update_service.scanFinished.connect(self._relay_scan_finished)
@@ -335,7 +338,12 @@ class AppFacade(QObject):
         self._library_update_service.reset_cache()
         self._library_manager.treeUpdated.connect(self._on_library_tree_updated)
 
-        # Hook up scanning signals from LibraryManager to Facade
+        # Hook up scanning signals from LibraryManager to Facade.
+        # Note: These signals are also connected from LibraryUpdateService in __init__.
+        # Both connections are intentional for backwards compatibility:
+        #   - LibraryUpdateService handles synchronous rescans
+        #   - LibraryManager handles asynchronous background scans
+        # The relay methods handle duplicate calls gracefully.
         self._library_manager.scanProgress.connect(self._relay_scan_progress)
         self._library_manager.scanChunkReady.connect(self._relay_scan_chunk_ready)
         self._library_manager.scanFinished.connect(self._relay_scan_finished)

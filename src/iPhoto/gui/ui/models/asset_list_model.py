@@ -452,26 +452,11 @@ class AssetListModel(QAbstractListModel):
             self._data_loader.start(self._album_root, featured, filter_params=filter_params)
             self._ignore_incoming_chunks = False
 
-            # --- NEW: Inject Live Buffer Data ---
-            # Immediately fetch any items that have been scanned but not yet persisted/loaded.
-            # We do this AFTER starting the loader so that the loader is "active".
-            # Actually, we can just process them as if they were a "chunk".
-
+            # Inject any live (recently scanned but not yet persisted) items after starting the loader,
+            # so that the view includes the most up-to-date assets. Deduplication is handled downstream.
             if self._facade.library_manager:
                 live_items = self._facade.library_manager.get_live_scan_results(relative_to=self._album_root)
                 if live_items:
-                    # We treat this as an "instant chunk".
-                    # Note: We must ensure we don't duplicate what the loader finds from DB.
-                    # The loader runs async. We have these items NOW.
-                    # Strategy:
-                    # 1. Add live items immediately.
-                    # 2. When loader brings items, we rely on deduplication in `AssetListModel` / `StateManager`.
-                    #    Currently `AssetListModel` handles chunks by appending. It does NOT dedupe automatically against existing rows
-                    #    in `_on_loader_chunk_ready` unless we add logic.
-                    #
-                    #    However, `_on_scan_chunk_ready` DOES check `row_lookup`.
-                    #
-                    #    Let's re-use `_on_scan_chunk_ready` logic for these live items!
                     self._on_scan_chunk_ready(self._album_root, live_items)
 
         except RuntimeError:
@@ -511,16 +496,7 @@ class AssetListModel(QAbstractListModel):
         if self._is_first_chunk:
             self._is_first_chunk = False
 
-            # First chunk: Reset model immediately
-            # Note: If we already added live items, we shouldn't reset them away!
-            # But usually `start_load` triggers a reset via `set_filter_mode` -> `reset`.
-            # Wait, `start_load` doesn't call `reset` itself.
-            # But `_on_loader_chunk_ready` DOES call `beginResetModel` for the first chunk.
-            # This wipes our live items if we added them in `start_load`.
-
-            # Fix: We should NOT wipe if we already have rows (from live buffer).
-            # If `self._state_manager.row_count() > 0`, we should treat this as an APPEND, not a reset.
-
+            # If we already have rows (from live buffer), treat this chunk as subsequent rather than resetting.
             if self._state_manager.row_count() > 0:
                 # We have data (live buffer). Treat this chunk as subsequent.
                 self._pending_chunks_buffer.extend(chunk)
@@ -572,47 +548,12 @@ class AssetListModel(QAbstractListModel):
     def _on_scan_chunk_ready(self, root: Path, chunk: List[Dict[str, object]]) -> None:
         """Integrate fresh rows from the scanner into the live view."""
 
-        # Note: We loosen the check here. Even if root != album_root, if the chunk belongs to a subfolder
-        # or we are in a "recursive" view, we might want it.
-        # But generally, `LibraryManager` will filter `get_live_scan_results` for us.
-        # For live updates from signal, we need to check if the chunk is relevant.
-
         if not self._album_root or not chunk:
             return
 
-        # If the scan root matches our album root, or if we are viewing the Library root and scan is happening there.
-        # We rely on `build_asset_entry` to potentially filter? No, that just formats.
-
-        # Simple check: Is the chunk relevant to current view?
-        # If chunk root == album root, yes.
-        # If chunk root is a parent of album root? No.
-        # If chunk root is a child? No, scanner emits root as the scan root, not the file parent.
-
-        # So `root` here is the `scan_root`.
-        # If `scan_root` == `album_root`, we accept.
-        # If `scan_root` is the Library Root, and we are viewing `Library/Folder`, we accept?
-        # Yes, `get_live_scan_results` handles this logic.
-        # But this slot receives raw signal.
-
-        # Logic:
-        # 1. If scan_root == album_root: Accept.
-        # 2. If scan_root contains album_root: Accept (files might be inside our folder).
-        # 3. If album_root contains scan_root: Accept (we are viewing parent, scan is inside).
-
-        # To be safe, we just check if the individual files in the chunk are relevant.
-        # But the chunk schema is dicts with 'rel' relative to 'scan_root'.
-        # This is tricky if scan_root != album_root.
-        # Converting 'rel' requires knowing both roots.
-
-        # Assumption for this PR: The "Library Scan" runs on the Library Root.
-        # The "Album View" might be a sub-folder.
-        # If `root` (scan source) != `self._album_root`, we need to adjust `rel` paths or filter.
-
-        # Actually, `AssetListModel` expects `rel` to be relative to `self._album_root`.
-        # If the scanner provides `rel` relative to `Library`, and we are in `Library/Sub`,
-        # we must adjust path.
-
-        # Implementing path re-basing:
+        # Ensure asset paths are correctly interpreted relative to the current album view.
+        # If the scan root and album root differ, re-base or filter asset paths so that
+        # they are relative to the album root as expected by AssetListModel.
         try:
             scan_root = root.resolve()
             view_root = self._album_root.resolve()
@@ -656,10 +597,9 @@ class AssetListModel(QAbstractListModel):
             if normalise_rel_value(view_rel) in self._state_manager.row_lookup:
                 continue
 
-            # We need to construct a row compatible with `build_asset_entry`.
-            # `build_asset_entry` takes `root` (view root) and `row`.
-            # `row` must have `rel` relative to `root`.
-
+            # Re-base the row's 'rel' path to be relative to the current view root.
+            # Note: This creates a shallow copy which modifies the row dict. If this chunk
+            # is shared elsewhere, consider whether this side effect is acceptable.
             adjusted_row = row.copy()
             adjusted_row['rel'] = view_rel
 

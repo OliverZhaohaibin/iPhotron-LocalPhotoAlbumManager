@@ -270,7 +270,10 @@ class AppFacade(QObject):
         if album is None:
             return []
 
-        # Synchronous rescans remain in LibraryUpdateService for backwards compatibility.
+        # We delegate synchronous rescan to backend but update the library manager state if needed
+        # Actually synchronous rescan is blocking, so maybe we shouldn't route via LibraryManager async
+        # unless we change the API.
+        # For now, we keep using LibraryUpdateService for synchronous legacy calls.
         return self._library_update_service.rescan_album(album)
 
     def rescan_current_async(self) -> None:

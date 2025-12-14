@@ -96,6 +96,7 @@ class AssetListModel(QAbstractListModel):
         self._pending_loader_root: Optional[Path] = None
         self._deferred_incremental_refresh: Optional[Path] = None
         self._active_filter: Optional[str] = None
+        self._ignore_incoming_chunks: bool = False
 
         self._incremental_worker: Optional[IncrementalRefreshWorker] = None
         self._incremental_signals: Optional[IncrementalRefreshSignals] = None
@@ -312,6 +313,8 @@ class AssetListModel(QAbstractListModel):
 
         if self._data_loader.is_running():
             self._data_loader.cancel()
+            self._ignore_incoming_chunks = True
+
         self._state_manager.clear_reload_pending()
         self._album_root = root
         self._cache_manager.reset_for_album(root)
@@ -385,6 +388,10 @@ class AssetListModel(QAbstractListModel):
             return
         if self._data_loader.is_running():
             self._data_loader.cancel()
+            self._ignore_incoming_chunks = True
+            # Clear buffer immediately to avoid commiting stale chunks if logic leaks
+            self._pending_chunks_buffer = []
+            self._flush_timer.stop()
             self._state_manager.mark_reload_pending()
             return
 
@@ -408,6 +415,7 @@ class AssetListModel(QAbstractListModel):
 
         try:
             self._data_loader.start(self._album_root, featured, filter_params=filter_params)
+            self._ignore_incoming_chunks = False
         except RuntimeError:
             self._state_manager.mark_reload_pending()
             self._pending_loader_root = None
@@ -416,6 +424,9 @@ class AssetListModel(QAbstractListModel):
         self._state_manager.clear_reload_pending()
 
     def _on_loader_chunk_ready(self, root: Path, chunk: List[Dict[str, object]]) -> None:
+        if self._ignore_incoming_chunks:
+            return
+
         if (
             not self._album_root
             or root != self._album_root
@@ -518,6 +529,12 @@ class AssetListModel(QAbstractListModel):
         self.loadProgress.emit(root, current, total)
 
     def _on_loader_finished(self, root: Path, success: bool) -> None:
+        if self._ignore_incoming_chunks:
+            should_restart = self._state_manager.consume_pending_reload(self._album_root, root)
+            if should_restart:
+                QTimer.singleShot(0, self.start_load)
+            return
+
         if not self._album_root or root != self._album_root:
             should_restart = self._state_manager.consume_pending_reload(self._album_root, root)
             if should_restart:

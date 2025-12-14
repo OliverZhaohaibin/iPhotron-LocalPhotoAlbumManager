@@ -1,8 +1,8 @@
 """Integration tests for AssetListModel refactoring."""
 
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 import pytest
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QObject, Signal
 from pathlib import Path
 
 # Need to make sure facade is importable.
@@ -23,44 +23,71 @@ class MockFacade(MagicMock):
         self.assetUpdated.connect = MagicMock()
         self.scanChunkReady.connect = MagicMock()
 
+class MockAssetCacheManager(QObject):
+    thumbnailReady = Signal(Path, str, object)
+
+    def __init__(self, *args, **kwargs):
+        super().__init__()
+        self.set_library_root = MagicMock()
+        self.reset_for_album = MagicMock()
+        self.clear_recently_removed = MagicMock()
+        self.set_recently_removed_limit = MagicMock()
+        self.reset_caches_for_new_rows = MagicMock()
+        self.remove_thumbnail = MagicMock()
+        self.remove_placeholder = MagicMock()
+        self.remove_recently_removed = MagicMock()
+        self.thumbnail_for = MagicMock(return_value=None)
+        self.resolve_thumbnail = MagicMock()
+        self.recently_removed = MagicMock(return_value=None)
+        self.thumbnail_loader = MagicMock()
+
 @pytest.fixture
 def model(tmp_path):
     facade = MockFacade()
-    model = AssetListModel(facade)
-    return model
+
+    with patch('src.iPhoto.gui.ui.models.asset_list_model.AssetCacheManager', side_effect=MockAssetCacheManager):
+        model = AssetListModel(facade)
+        yield model
 
 def test_model_initialization(model):
     """Test that model initializes with new components."""
-    assert hasattr(model, "_accumulator")
+    # AssetDataAccumulator was removed and replaced by direct buffering
+    assert hasattr(model, "_pending_chunks_buffer")
     assert hasattr(model, "_row_adapter")
     assert hasattr(model, "_state_manager")
 
 def test_chunk_accumulation(model):
-    """Test that incoming chunks are buffered by accumulator."""
+    """Test that incoming chunks are buffered by internal buffer."""
 
     # Simulate incoming chunk
     chunk = [{"rel": "a.jpg", "abs": "/tmp/a.jpg", "is_current": False}]
 
-    # We can inspect internal accumulator state
-    assert len(model._accumulator._incoming_buffer) == 0
-    assert not model._accumulator._flush_timer.isActive()
+    # We can inspect internal buffer state
+    assert len(model._pending_chunks_buffer) == 0
+    assert not model._flush_timer.isActive()
 
-    # This should call _accumulator.add_chunk
+    # This should return early because album root is not set
     model._on_loader_chunk_ready(Path("/tmp"), chunk)
-
-    # Check if buffered (assuming root matches, which it won't if model._album_root is None)
-    # AssetListModel checks: if not self._album_root ... return
+    assert len(model._pending_chunks_buffer) == 0
 
     # Set album root
     root = Path("/tmp")
     model._album_root = root
     model._pending_loader_root = root # needed for loader chunk ready check
 
+    # Simulate first chunk (is_first_chunk is True by default)
+    # First chunk is NOT buffered, it is applied immediately.
     model._on_loader_chunk_ready(root, chunk)
+    assert len(model._pending_chunks_buffer) == 0
+    assert model.rowCount() == 1
 
-    assert len(model._accumulator._incoming_buffer) == 1
+    # Simulate second chunk - should be buffered
+    chunk2 = [{"rel": "b.jpg", "abs": "/tmp/b.jpg", "is_current": False}]
+    model._on_loader_chunk_ready(root, chunk2)
+
+    assert len(model._pending_chunks_buffer) == 1
     # Timer start might fail in headless test env without event loop, so we skip checking isActive()
-    # The fact that buffer length increased confirms add_chunk was called.
+    # The fact that buffer length increased confirms append was called.
 
 def test_flush_buffer_updates_model(model):
     """Test that flushing the buffer updates the model via Qt signals."""
@@ -69,6 +96,9 @@ def test_flush_buffer_updates_model(model):
     model._album_root = root
     model._pending_loader_root = root
 
+    # Make sure we are past the first chunk
+    model._is_first_chunk = False
+
     chunk = [{"rel": "a.jpg", "abs": "/tmp/a.jpg", "is_current": False}]
 
     # Spy on beginInsertRows
@@ -76,9 +106,10 @@ def test_flush_buffer_updates_model(model):
     model.endInsertRows = MagicMock()
 
     model._on_loader_chunk_ready(root, chunk)
+    assert len(model._pending_chunks_buffer) == 1
 
     # Force flush
-    model._accumulator.flush()
+    model._flush_pending_chunks()
 
     model.beginInsertRows.assert_called_once()
     model.endInsertRows.assert_called_once()
@@ -168,32 +199,25 @@ def test_incremental_update_existing_row(model):
     args = model.dataChanged.emit.call_args[0]
     assert args[0].row() == 1
 
-def test_accumulator_update_existing_row(model):
-    """Regression test: Accumulator merging an update should call invalidate_thumbnail without crash."""
+def test_buffer_update_existing_row(model):
+    """Regression test: Buffer merging an update should update rows."""
+
+    root = Path("/tmp")
+    model._album_root = root
+    model._pending_loader_root = root
+    model._is_first_chunk = False # Buffer mode
 
     row_a = {"rel": "a.jpg", "val": 1}
     model._state_manager.set_rows([row_a])
     model._state_manager.rebuild_lookup()
 
-    # Chunk with update
-    chunk = [{"rel": "a.jpg", "val": 2}]
-
-    # Mock dataChanged to avoid Qt warnings
-    model.dataChanged = MagicMock()
-
-    # Spy on invalidate_thumbnail
-    # We need to wrap the real method if we want to check it was called,
-    # but we can also just check it doesn't raise.
-    # We will spy.
-    real_invalidate = model.invalidate_thumbnail
-    model.invalidate_thumbnail = MagicMock(side_effect=real_invalidate)
+    # Chunk with NEW item
+    chunk = [{"rel": "b.jpg", "val": 2}]
 
     # Flush directly
-    model._accumulator.add_chunk(chunk)
-    model._accumulator.flush()
+    model._on_loader_chunk_ready(root, chunk)
+    model._flush_pending_chunks()
 
-    # Verify row updated
-    assert model._state_manager.rows[0]["val"] == 2
-
-    # Verify invalidate_thumbnail called
-    model.invalidate_thumbnail.assert_called_with("a.jpg")
+    # Verify row added
+    assert model.rowCount() == 2
+    assert model._state_manager.rows[1]["val"] == 2

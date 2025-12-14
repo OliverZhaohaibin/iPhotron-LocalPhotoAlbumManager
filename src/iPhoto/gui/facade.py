@@ -302,6 +302,9 @@ class AppFacade(QObject):
         self._library_update_service.reset_cache()
         self._library_manager.treeUpdated.connect(self._on_library_tree_updated)
 
+        if self._library_manager.root():
+            self._on_library_tree_updated()
+
     def _on_library_tree_updated(self) -> None:
         """Propagate library root updates to models for centralized thumbnail storage."""
         if self._library_manager:

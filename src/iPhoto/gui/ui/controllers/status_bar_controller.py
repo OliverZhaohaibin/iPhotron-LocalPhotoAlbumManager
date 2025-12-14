@@ -98,6 +98,10 @@ class StatusBarController(QObject):
         message = "Scan complete." if success else "Scan failed."
         self.show_message(message, 5000)
 
+    def handle_scan_batch_failed(self, _root: Path, count: int) -> None:
+        """Report a partial failure without interrupting the active scan."""
+        self.show_message(f"Failed to save {count} items to database", 5000)
+
     def handle_load_started(self, root: Path) -> None:
         """Show an indeterminate progress indicator while assets load."""
 

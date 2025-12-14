@@ -74,6 +74,7 @@ class LibraryManager(QObject):
     scanProgress = Signal(Path, int, int)
     scanChunkReady = Signal(Path, list)
     scanFinished = Signal(Path, bool)
+    scanBatchFailed = Signal(Path, int)
 
     _MAX_LIVE_BUFFER_SIZE = 5000
 
@@ -147,6 +148,7 @@ class LibraryManager(QObject):
         signals.chunkReady.connect(self._on_scan_chunk)
         signals.finished.connect(self._on_scan_finished)
         signals.error.connect(self._on_scan_error)
+        signals.batchFailed.connect(self._on_scan_batch_failed)
 
         # Check if already scanning the same root (thread-safe)
         locker = QMutexLocker(self._scan_buffer_lock)
@@ -232,7 +234,7 @@ class LibraryManager(QObject):
         return filtered
 
     def _on_scan_chunk(self, root: Path, chunk: List[dict]) -> None:
-        """Handle incoming scan chunks: update buffer and persist to DB incrementally."""
+        """Handle incoming scan chunks: update buffer only."""
 
         if not chunk:
             return
@@ -251,25 +253,8 @@ class LibraryManager(QObject):
                 f"{len(chunk)} new items were not added to the in-memory buffer; relying on disk persistence."
             )
 
-        # 2. Persist to Disk Incrementally
-        # We use IndexStore to append rows. This is thread-safe via the class design (uses new connection).
-        try:
-            store = IndexStore(root)
-            store.append_rows(chunk)
-
-            # Note: We do NOT trigger a full UI reload here via signals,
-            # because the scanner emits chunkReady which the UI (AssetListModel) listens to directly
-            # to merge "live" data.
-        except (OSError, IOError) as e:
-            # File system errors (disk full, permission denied, etc.)
-            # Log error and continue to maintain scan resilience; do not crash the scan.
-            LOGGER.error(f"Failed to persist scan chunk for {root}: {e}")
-        except Exception as e:
-            # Catch any other unexpected errors (e.g., database errors) to prevent
-            # the scan from crashing, but log them for debugging
-            LOGGER.exception(f"Unexpected error persisting scan chunk for {root}: {e}")
-
-        # 3. Forward signal
+        # 2. Forward signal
+        # The persistence is now handled by the ScannerWorker in the background thread.
         self.scanChunkReady.emit(root, chunk)
 
     def _on_scan_finished(self, root: Path, rows: List[dict]) -> None:
@@ -284,6 +269,10 @@ class LibraryManager(QObject):
         self._current_scanner_worker = None
         self.errorRaised.emit(message)
         self.scanFinished.emit(root, False)
+
+    def _on_scan_batch_failed(self, root: Path, count: int) -> None:
+        """Propagate partial failure notifications to the UI."""
+        self.scanBatchFailed.emit(root, count)
 
     def _paths_equal(self, p1: Path, p2: Path) -> bool:
         try:

@@ -142,6 +142,7 @@ class MainController(QObject):
         updates = self._facade.library_updates
         updates.scanProgress.connect(self._status_bar.handle_scan_progress)
         updates.scanFinished.connect(self._status_bar.handle_scan_finished)
+        self._facade.scanBatchFailed.connect(self._status_bar.handle_scan_batch_failed)
         updates.indexUpdated.connect(self._map_controller.handle_index_update)
         self._facade.loadStarted.connect(self._status_bar.handle_load_started)
         self._facade.loadProgress.connect(self._status_bar.handle_load_progress)

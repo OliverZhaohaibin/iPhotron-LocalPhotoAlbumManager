@@ -455,9 +455,12 @@ class AssetListModel(QAbstractListModel):
             # Inject any live (recently scanned but not yet persisted) items after starting the loader,
             # so that the view includes the most up-to-date assets. Deduplication is handled downstream.
             if self._facade.library_manager:
-                live_items = self._facade.library_manager.get_live_scan_results(relative_to=self._album_root)
-                if live_items:
-                    self._on_scan_chunk_ready(self._album_root, live_items)
+                try:
+                    live_items = self._facade.library_manager.get_live_scan_results(relative_to=self._album_root)
+                    if live_items:
+                        self._on_scan_chunk_ready(self._album_root, live_items)
+                except Exception as e:
+                    logger.error("Failed to inject live scan results: %s", e, exc_info=True)
 
         except RuntimeError:
             self._state_manager.mark_reload_pending()
@@ -489,7 +492,7 @@ class AssetListModel(QAbstractListModel):
                 unique_chunk.append(row)
 
         if not unique_chunk:
-             return
+            return
 
         chunk = unique_chunk
 

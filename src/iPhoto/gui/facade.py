@@ -100,8 +100,9 @@ class AppFacade(QObject):
             parent=self,
         )
         # Signal connections after refactoring:
-        #   - Scan-related signals (scanProgress, scanChunkReady, scanFinished) are connected
-        #     from LibraryManager when binding library (see bind_library() method).
+        #   - Scan-related signals (scanProgress, scanChunkReady, scanFinished) are initially
+        #     connected from LibraryUpdateService here, but will be disconnected and replaced
+        #     with LibraryManager signals when bind_library() is called.
         #   - Other signals (indexUpdated, linksUpdated, assetReloadRequested) remain
         #     sourced from LibraryUpdateService for backwards compatibility and non-scan events.
         self._library_update_service.scanProgress.connect(self._relay_scan_progress)
@@ -338,12 +339,18 @@ class AppFacade(QObject):
         self._library_update_service.reset_cache()
         self._library_manager.treeUpdated.connect(self._on_library_tree_updated)
 
+        # Disconnect LibraryUpdateService scan signals to prevent duplicate emissions
+        # now that LibraryManager is the primary source for scan operations
+        try:
+            self._library_update_service.scanProgress.disconnect(self._relay_scan_progress)
+            self._library_update_service.scanChunkReady.disconnect(self._relay_scan_chunk_ready)
+            self._library_update_service.scanFinished.disconnect(self._relay_scan_finished)
+        except (RuntimeError, TypeError):
+            # Ignore errors if signals were not connected
+            pass
+
         # Hook up scanning signals from LibraryManager to Facade.
-        # Note: These signals are also connected from LibraryUpdateService in __init__.
-        # Both connections are intentional for backwards compatibility:
-        #   - LibraryUpdateService handles synchronous rescans
-        #   - LibraryManager handles asynchronous background scans
-        # The relay methods handle duplicate calls gracefully.
+        # LibraryManager is now the primary source for all scan operations.
         self._library_manager.scanProgress.connect(self._relay_scan_progress)
         self._library_manager.scanChunkReady.connect(self._relay_scan_chunk_ready)
         self._library_manager.scanFinished.connect(self._relay_scan_finished)

@@ -146,8 +146,10 @@ class LibraryManager(QObject):
         if self._current_scanner_worker is not None:
             if self._live_scan_root and self._paths_equal(self._live_scan_root, root):
                 return
-            # Cancel the old scan before starting new one
-            self.stop_scanning()
+            # Cancel the old scan before starting new one (inline to avoid deadlock)
+            self._current_scanner_worker.cancel()
+            self._current_scanner_worker = None
+            self._live_scan_root = None
 
         self._live_scan_root = root
         self._live_scan_buffer.clear()
@@ -160,7 +162,7 @@ class LibraryManager(QObject):
 
         worker = ScannerWorker(root, include, exclude, signals)
         self._current_scanner_worker = worker
-        
+
         self._scan_thread_pool.start(worker)
 
     def stop_scanning(self) -> None:

@@ -3,12 +3,11 @@
 from __future__ import annotations
 
 import shutil
-import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence
 
-from PySide6.QtCore import QFileSystemWatcher, QObject, QTimer, Signal, QThreadPool
+from PySide6.QtCore import QFileSystemWatcher, QObject, QTimer, Signal, QThreadPool, QMutex, QMutexLocker
 
 from ..config import (
     ALBUM_MANIFEST_NAMES,
@@ -102,7 +101,7 @@ class LibraryManager(QObject):
         self._scan_thread_pool = QThreadPool.globalInstance()
         self._live_scan_buffer: List[Dict] = []
         self._live_scan_root: Optional[Path] = None
-        self._scan_buffer_lock = threading.Lock()
+        self._scan_buffer_lock = QMutex()
 
     # ------------------------------------------------------------------
     # Basic properties
@@ -142,53 +141,58 @@ class LibraryManager(QObject):
     # ------------------------------------------------------------------
     def start_scanning(self, root: Path, include: Iterable[str], exclude: Iterable[str]) -> None:
         """Start a background scan for the given root directory."""
-        # Check if already scanning the same root (thread-safe)
-        with self._scan_buffer_lock:
-            if self._current_scanner_worker is not None:
-                if self._live_scan_root and self._paths_equal(self._live_scan_root, root):
-                    return
-                # Cancel the old scan before starting new one
-                self.stop_scanning()
-
-            self._live_scan_root = root
-            self._live_scan_buffer.clear()
-
+        # Prepare signals outside the lock
         signals = ScannerSignals()
         signals.progressUpdated.connect(self.scanProgress)
         signals.chunkReady.connect(self._on_scan_chunk)
         signals.finished.connect(self._on_scan_finished)
         signals.error.connect(self._on_scan_error)
 
+        # Check if already scanning the same root (thread-safe)
+        locker = QMutexLocker(self._scan_buffer_lock)
+        if self._current_scanner_worker is not None:
+            if self._live_scan_root and self._paths_equal(self._live_scan_root, root):
+                return
+            # Cancel the old scan before starting new one (inline to avoid deadlock)
+            self._current_scanner_worker.cancel()
+            self._current_scanner_worker = None
+            self._live_scan_root = None
+
+        self._live_scan_root = root
+        self._live_scan_buffer.clear()
+
         worker = ScannerWorker(root, include, exclude, signals)
         self._current_scanner_worker = worker
+        # Release lock before starting the worker
+        del locker
+
         self._scan_thread_pool.start(worker)
 
     def stop_scanning(self) -> None:
         """Cancel the currently running scan, if any."""
-        with self._scan_buffer_lock:
-            if self._current_scanner_worker:
-                self._current_scanner_worker.cancel()
-                self._current_scanner_worker = None
-
+        locker = QMutexLocker(self._scan_buffer_lock)
+        if self._current_scanner_worker:
+            self._current_scanner_worker.cancel()
+            self._current_scanner_worker = None
             # We don't clear the buffer immediately on stop, as the UI might still need it
             # until a new scan starts or the app closes. Setting root to None invalidates it contextually.
             self._live_scan_root = None
 
     def is_scanning_path(self, path: Path) -> bool:
         """Return True if the given path is covered by the active scan."""
-        with self._scan_buffer_lock:
-            if not self._live_scan_root:
-                return False
+        locker = QMutexLocker(self._scan_buffer_lock)
+        if not self._live_scan_root:
+            return False
 
-            try:
-                target = path.resolve()
-                scan_root = self._live_scan_root.resolve()
-                if target == scan_root:
-                    return True
-                # Check if target is a subdirectory of scan_root
-                return scan_root in target.parents
-            except (OSError, ValueError):
-                return False
+        try:
+            target = path.resolve()
+            scan_root = self._live_scan_root.resolve()
+            if target == scan_root:
+                return True
+            # Check if target is a subdirectory of scan_root
+            return scan_root in target.parents
+        except (OSError, ValueError):
+            return False
 
     def get_live_scan_results(self, relative_to: Optional[Path] = None) -> List[Dict]:
         """Return a snapshot of valid items currently in the scan buffer.
@@ -196,37 +200,36 @@ class LibraryManager(QObject):
         Args:
             relative_to: If provided, only returns items that are descendants of this path.
         """
-        with self._scan_buffer_lock:
-            if not self._live_scan_buffer:
-                return []
+        locker = QMutexLocker(self._scan_buffer_lock)
+        if not self._live_scan_buffer:
+            return []
 
-            if relative_to is None:
-                return list(self._live_scan_buffer)
+        if relative_to is None:
+            return list(self._live_scan_buffer)
 
-            # Capture root inside lock to prevent race with stop_scanning
-            scan_root = self._live_scan_root
-            if not scan_root:
-                return []
+        # Capture root inside lock to prevent race with stop_scanning
+        scan_root = self._live_scan_root
+        if not scan_root:
+            return []
 
-            filtered = []
-            try:
-                rel_root = relative_to.resolve()
-                for item in self._live_scan_buffer:
-                    # Item 'rel' is relative to the scan root
-                    item_rel = item.get("rel")
-                    if not item_rel:
-                        continue
+        filtered = []
+        try:
+            rel_root = relative_to.resolve()
+            for item in self._live_scan_buffer:
+                # Item 'rel' is relative to the scan root
+                item_rel = item.get("rel")
+                if not item_rel:
+                    continue
 
-                    full_path = (scan_root / item_rel).resolve()
+                full_path = (scan_root / item_rel).resolve()
 
-                    if full_path == rel_root or rel_root in full_path.parents:
-                        filtered.append(item)
-            except (OSError, ValueError) as e:
-                # Ignore errors due to invalid or missing paths; these can occur if files are moved or deleted during scanning.
-                LOGGER.debug(f"Failed to resolve path while filtering scan results: {e}")
-                pass
+                if full_path == rel_root or rel_root in full_path.parents:
+                    filtered.append(item)
+        except (OSError, ValueError) as e:
+            # Ignore errors due to invalid or missing paths; these can occur if files are moved or deleted during scanning.
+            LOGGER.debug(f"Failed to resolve path while filtering scan results: {e}")
 
-            return filtered
+        return filtered
 
     def _on_scan_chunk(self, root: Path, chunk: List[dict]) -> None:
         """Handle incoming scan chunks: update buffer and persist to DB incrementally."""
@@ -235,18 +238,18 @@ class LibraryManager(QObject):
             return
 
         # 1. Update In-Memory Buffer
-        with self._scan_buffer_lock:
-            # Check buffer limit
-            if len(self._live_scan_buffer) < self._MAX_LIVE_BUFFER_SIZE:
-                self._live_scan_buffer.extend(chunk)
-            else:
-                # If buffer is full, we rely on disk.
-                # We can optionally rotate, but simply stopping accumulation is safer for memory.
-                # The consuming models should have already pulled earlier data.
-                LOGGER.warning(
-                    f"Live scan buffer for {root} reached its limit of {self._MAX_LIVE_BUFFER_SIZE} items. "
-                    f"{len(chunk)} new items were not added to the in-memory buffer; relying on disk persistence."
-                )
+        locker = QMutexLocker(self._scan_buffer_lock)
+        # Check buffer limit
+        if len(self._live_scan_buffer) < self._MAX_LIVE_BUFFER_SIZE:
+            self._live_scan_buffer.extend(chunk)
+        else:
+            # If buffer is full, we rely on disk.
+            # We can optionally rotate, but simply stopping accumulation is safer for memory.
+            # The consuming models should have already pulled earlier data.
+            LOGGER.warning(
+                f"Live scan buffer for {root} reached its limit of {self._MAX_LIVE_BUFFER_SIZE} items. "
+                f"{len(chunk)} new items were not added to the in-memory buffer; relying on disk persistence."
+            )
 
         # 2. Persist to Disk Incrementally
         # We use IndexStore to append rows. This is thread-safe via the class design (uses new connection).
@@ -259,8 +262,8 @@ class LibraryManager(QObject):
             # to merge "live" data.
         except (OSError, IOError) as e:
             # File system errors (disk full, permission denied, etc.)
+            # Log error and continue to maintain scan resilience; do not crash the scan.
             LOGGER.error(f"Failed to persist scan chunk for {root}: {e}")
-            raise
         except Exception as e:
             # Catch any other unexpected errors (e.g., database errors) to prevent
             # the scan from crashing, but log them for debugging
@@ -273,12 +276,12 @@ class LibraryManager(QObject):
         # Emit scanFinished for downstream handling (e.g., updating links or finalizing scan).
         self.scanFinished.emit(root, True)
         # Clear worker reference after emitting signal to prevent race conditions
-        with self._scan_buffer_lock:
-            self._current_scanner_worker = None
+        locker = QMutexLocker(self._scan_buffer_lock)
+        self._current_scanner_worker = None
 
     def _on_scan_error(self, root: Path, message: str) -> None:
-        with self._scan_buffer_lock:
-            self._current_scanner_worker = None
+        locker = QMutexLocker(self._scan_buffer_lock)
+        self._current_scanner_worker = None
         self.errorRaised.emit(message)
         self.scanFinished.emit(root, False)
 

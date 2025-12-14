@@ -111,7 +111,7 @@ class AssetGridDelegate(QStyledItemDelegate):
                 # Since it's a tiny image, SmoothPixmapTransform (bilinear) is important.
                 painter.drawImage(QRectF(thumb_rect), micro_thumb, QRectF(source_rect))
             else:
-                 painter.fillRect(thumb_rect, QColor("#1b1b1b"))
+                painter.fillRect(thumb_rect, QColor("#1b1b1b"))
         else:
             painter.fillRect(thumb_rect, QColor("#1b1b1b"))
 

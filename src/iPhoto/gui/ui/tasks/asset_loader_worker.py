@@ -439,7 +439,7 @@ class LiveIngestWorker(QRunnable):
 
             for row in self._items:
                 if self._is_cancelled:
-                    return
+                    break
 
                 # Process the potentially expensive metadata build in the background
                 entry = build_asset_entry(self._root, row, self._featured)
@@ -460,7 +460,6 @@ class LiveIngestWorker(QRunnable):
 
         except Exception as exc:
             LOGGER.error("Error processing live items: %s", exc, exc_info=True)
-            self._signals.error.emit(self._root, str(exc))
             if not self._is_cancelled:
                 self._signals.error.emit(self._root, str(exc))
             self._signals.finished.emit(self._root, False)

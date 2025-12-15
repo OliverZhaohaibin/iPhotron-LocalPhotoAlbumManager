@@ -59,8 +59,9 @@ class AssetListModel(QAbstractListModel):
     loadFinished = Signal(Path, bool)
 
     # Tuning constants for streaming updates
-    _STREAM_FLUSH_INTERVAL_MS = 100
-    _STREAM_FLUSH_THRESHOLD = 500
+    _STREAM_FLUSH_INTERVAL_MS = 10
+    _STREAM_BATCH_SIZE = 20
+    _STREAM_FLUSH_THRESHOLD = 100
 
     def __init__(self, facade: "AppFacade", parent=None) -> None:  # type: ignore[override]
         super().__init__(parent)
@@ -549,7 +550,7 @@ class AssetListModel(QAbstractListModel):
             self._flush_timer.start()
 
     def _flush_pending_chunks(self) -> None:
-        """Commit buffered chunks to the model."""
+        """Commit buffered chunks to the model in small batches to keep UI responsive."""
         if self._is_flushing:
             return
         if not self._pending_chunks_buffer:
@@ -557,9 +558,22 @@ class AssetListModel(QAbstractListModel):
 
         self._is_flushing = True
         try:
-            payload = self._pending_chunks_buffer
-            self._pending_chunks_buffer = []
-            self._flush_timer.stop()
+            # 1. Slice: take only the first N items to avoid freezing the UI
+            batch_size = self._STREAM_BATCH_SIZE
+            payload = self._pending_chunks_buffer[:batch_size]
+
+            # 2. Leave the rest for the next Timer tick
+            remainder = self._pending_chunks_buffer[batch_size:]
+            self._pending_chunks_buffer = remainder
+
+            # If data remains, ensure the timer continues with a short interval
+            if self._pending_chunks_buffer:
+                self._flush_timer.start(self._STREAM_FLUSH_INTERVAL_MS)
+            else:
+                self._flush_timer.stop()
+
+            if not payload:
+                return
 
             start_row = self._state_manager.row_count()
             end_row = start_row + len(payload) - 1

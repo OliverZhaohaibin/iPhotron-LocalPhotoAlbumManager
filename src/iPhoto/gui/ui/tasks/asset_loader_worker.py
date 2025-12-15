@@ -102,6 +102,8 @@ def _parse_timestamp(value: object) -> float:
         return float("-inf")
 
 
+# Maximum entries to cache per directory when checking on-disk presence.
+# Avoid caching very large directories to prevent high memory usage.
 DIR_CACHE_THRESHOLD = 1000
 
 

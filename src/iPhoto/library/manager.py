@@ -214,22 +214,53 @@ class LibraryManager(QObject):
         if not scan_root:
             return []
 
-        filtered = []
+        # Optimization: Resolve paths once outside the loop to avoid I/O blocking per item.
         try:
-            rel_root = relative_to.resolve()
+            scan_root_res = scan_root.resolve()
+            rel_root_res = relative_to.resolve()
+        except OSError:
+            return []
+
+        # Determine the relationship between scan root and view root.
+        # Case A: Same path. No path adjustment needed.
+        if scan_root_res == rel_root_res:
+            return list(self._live_scan_buffer)
+
+        filtered = []
+        # Case B: Scanning a child, viewing a parent (e.g., scan Vacation, view Photos).
+        # We need to prepend the relative difference to the item paths.
+        if rel_root_res in scan_root_res.parents:
+            prefix = scan_root_res.relative_to(rel_root_res).as_posix()
             for item in self._live_scan_buffer:
-                # Item 'rel' is relative to the scan root
                 item_rel = item.get("rel")
-                if not item_rel:
+                if not isinstance(item_rel, str) or not item_rel:
                     continue
+                new_item = item.copy()
+                new_item["rel"] = f"{prefix}/{item_rel}"
+                filtered.append(new_item)
 
-                full_path = (scan_root / item_rel).resolve()
+        # Case C: Scanning a parent, viewing a child (e.g., scan Photos, view Vacation).
+        # We need to filter items that belong to the child and strip the prefix.
+        elif scan_root_res in rel_root_res.parents:
+            prefix = rel_root_res.relative_to(scan_root_res).as_posix()
+            # We add a slash to ensure we match directory boundaries (e.g. "Vacation/" vs "VacationTrip")
+            prefix_slash = f"{prefix}/"
+            for item in self._live_scan_buffer:
+                item_rel = item.get("rel")
+                if not isinstance(item_rel, str):
+                    continue
+                # Check if the item is inside the viewing directory
+                if item_rel == prefix or item_rel.startswith(prefix_slash):
+                    new_item = item.copy()
+                    # Strip the prefix to make it relative to the viewing directory
+                    # e.g. "Vacation/img.jpg" -> "img.jpg"
+                    new_item["rel"] = item_rel[len(prefix_slash):] if item_rel != prefix else ""
+                    if not new_item["rel"]:
+                        continue # Should not happen for files, but safeguard
+                    filtered.append(new_item)
 
-                if full_path == rel_root or rel_root in full_path.parents:
-                    filtered.append(item)
-        except (OSError, ValueError) as e:
-            # Ignore errors due to invalid or missing paths; these can occur if files are moved or deleted during scanning.
-            LOGGER.debug(f"Failed to resolve path while filtering scan results: {e}")
+        # Case D: Disjoint paths (e.g. scan Photos/A, view Photos/B).
+        # Return empty list.
 
         return filtered
 

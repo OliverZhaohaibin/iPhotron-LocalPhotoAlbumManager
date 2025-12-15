@@ -9,7 +9,7 @@ import copy
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Set, Tuple
 
-from PySide6.QtCore import QObject, QRunnable, Signal
+from PySide6.QtCore import QObject, QRunnable, Signal, QThread
 
 from ....cache.index_store import IndexStore
 from ....config import WORK_DIR_NAME
@@ -305,6 +305,11 @@ class AssetLoaderWorker(QRunnable):
 
     def run(self) -> None:  # pragma: no cover - executed on worker thread
         try:
+            QThread.currentThread().setPriority(QThread.LowPriority)
+        except Exception:
+            pass  # Environment may not support priority changes
+
+        try:
             self._is_cancelled = False
             for chunk in self._build_payload_chunks():
                 if self._is_cancelled:
@@ -357,6 +362,10 @@ class AssetLoaderWorker(QRunnable):
             yielded_count = 0
 
             for position, row in enumerate(generator, start=1):
+                # Yield CPU every 50 items to keep UI responsive
+                if position % 50 == 0:
+                    QThread.msleep(10)
+
                 if self._is_cancelled:
                     return
 
@@ -408,3 +417,67 @@ class AssetLoaderWorker(QRunnable):
             if not total_calculated:  # If we never flushed (e.g. small album)
                 total = yielded_count
             self._signals.progressUpdated.emit(self._root, total, total)
+
+class LiveIngestWorker(QRunnable):
+    """Process in-memory live scan results on a background thread."""
+
+    def __init__(
+        self,
+        root: Path,
+        items: List[Dict[str, object]],
+        featured: Iterable[str],
+        signals: AssetLoaderSignals,
+    ) -> None:
+        super().__init__()
+        self.setAutoDelete(True)
+        self._root = root
+        self._items = items
+        self._featured = normalize_featured(featured)
+        self._signals = signals
+        self._is_cancelled = False
+
+    def cancel(self) -> None:
+        """Cancel the current ingest operation."""
+        self._is_cancelled = True
+
+    def run(self) -> None:
+        try:
+            QThread.currentThread().setPriority(QThread.LowPriority)
+        except Exception:
+            pass  # Environment may not support priority changes
+
+        try:
+            chunk: List[Dict[str, object]] = []
+            # Batch size to ensure responsiveness and smooth streaming
+            batch_size = 50
+
+            for i, row in enumerate(self._items, 1):
+                # Yield CPU every batch to allow UI thread to process events
+                if i > 0 and i % batch_size == 0:
+                    QThread.msleep(10)
+
+                if self._is_cancelled:
+                    break
+
+                # Process the potentially expensive metadata build in the background
+                entry = build_asset_entry(self._root, row, self._featured)
+                if entry:
+                    chunk.append(entry)
+
+                if len(chunk) >= batch_size:
+                    self._signals.chunkReady.emit(self._root, list(chunk))
+                    chunk = []
+
+            if chunk and not self._is_cancelled:
+                self._signals.chunkReady.emit(self._root, chunk)
+
+            if not self._is_cancelled:
+                self._signals.finished.emit(self._root, True)
+            else:
+                self._signals.finished.emit(self._root, False)
+
+        except Exception as exc:
+            LOGGER.error("Error processing live items: %s", exc, exc_info=True)
+            if not self._is_cancelled:
+                self._signals.error.emit(self._root, str(exc))
+            self._signals.finished.emit(self._root, False)

@@ -8,6 +8,8 @@ from typing import Dict, List, Optional, Set, Tuple
 
 from PySide6.QtCore import QModelIndex
 
+from ....utils.pathutils import normalise_rel_value
+
 logger = logging.getLogger(__name__)
 
 if False:  # pragma: no cover - circular import guard
@@ -90,13 +92,9 @@ class AssetListStateManager:
 
         for index, row in enumerate(self._rows):
             # Update REL lookup
-            rel_value = row.get("rel")
-            if isinstance(rel_value, str) and rel_value:
-                refreshed_rel[Path(rel_value).as_posix()] = index
-            elif isinstance(rel_value, Path):
-                refreshed_rel[rel_value.as_posix()] = index
-            elif rel_value:
-                refreshed_rel[Path(str(rel_value)).as_posix()] = index
+            rel_key = normalise_rel_value(row.get("rel"))
+            if rel_key:
+                refreshed_rel[rel_key] = index
 
             # Update ABS lookup
             abs_value = row.get("abs")
@@ -187,7 +185,9 @@ class AssetListStateManager:
         self._rows.extend(chunk)
         for offset, row_data in enumerate(chunk):
             idx = start_row + offset
-            self._row_lookup[row_data["rel"]] = idx
+            rel_key = normalise_rel_value(row_data.get("rel"))
+            if rel_key:
+                self._row_lookup[rel_key] = idx
             abs_val = row_data.get("abs")
             if abs_val:
                 key = str(abs_val)

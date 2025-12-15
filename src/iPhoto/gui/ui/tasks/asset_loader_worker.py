@@ -9,7 +9,7 @@ import copy
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Set, Tuple
 
-from PySide6.QtCore import QObject, QRunnable, Signal
+from PySide6.QtCore import QObject, QRunnable, Signal, QThread
 
 from ....cache.index_store import IndexStore
 from ....config import WORK_DIR_NAME
@@ -305,6 +305,11 @@ class AssetLoaderWorker(QRunnable):
 
     def run(self) -> None:  # pragma: no cover - executed on worker thread
         try:
+            QThread.currentThread().setPriority(QThread.LowPriority)
+        except Exception:
+            pass  # Environment may not support priority changes
+
+        try:
             self._is_cancelled = False
             for chunk in self._build_payload_chunks():
                 if self._is_cancelled:
@@ -357,6 +362,10 @@ class AssetLoaderWorker(QRunnable):
             yielded_count = 0
 
             for position, row in enumerate(generator, start=1):
+                # Yield CPU every 50 items to keep UI responsive
+                if position % 50 == 0:
+                    QThread.msleep(10)
+
                 if self._is_cancelled:
                     return
 
@@ -433,11 +442,20 @@ class LiveIngestWorker(QRunnable):
 
     def run(self) -> None:
         try:
+            QThread.currentThread().setPriority(QThread.LowPriority)
+        except Exception:
+            pass  # Environment may not support priority changes
+
+        try:
             chunk: List[Dict[str, object]] = []
             # Batch size to ensure responsiveness and smooth streaming
             batch_size = 50
 
-            for row in self._items:
+            for i, row in enumerate(self._items, 1):
+                # Yield CPU every batch to allow UI thread to process events
+                if i > 0 and i % batch_size == 0:
+                    QThread.msleep(10)
+
                 if self._is_cancelled:
                     break
 

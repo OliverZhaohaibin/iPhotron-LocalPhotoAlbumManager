@@ -185,7 +185,7 @@ class AssetListStateManager:
         self._rows.extend(chunk)
         for offset, row_data in enumerate(chunk):
             idx = start_row + offset
-            rel_key = normalise_rel_value(row_data["rel"])
+            rel_key = normalise_rel_value(row_data.get("rel"))
             if rel_key:
                 self._row_lookup[rel_key] = idx
             abs_val = row_data.get("abs")

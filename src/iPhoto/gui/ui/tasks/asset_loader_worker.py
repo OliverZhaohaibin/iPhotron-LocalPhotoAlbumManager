@@ -451,7 +451,7 @@ class LiveIngestWorker(QRunnable):
             # Batch size to ensure responsiveness and smooth streaming
             batch_size = 50
 
-            for i, row in enumerate(self._items):
+            for i, row in enumerate(self._items, 1):
                 # Yield CPU every batch to allow UI thread to process events
                 if i > 0 and i % batch_size == 0:
                     QThread.msleep(10)

@@ -2,7 +2,7 @@
 
 from unittest.mock import MagicMock, patch, call
 import pytest
-from PySide6.QtCore import QThread, QModelIndex, QTimer
+from PySide6.QtCore import QThread
 
 from iPhoto.gui.ui.models.asset_list_model import AssetListModel
 from iPhoto.gui.ui.tasks.asset_loader_worker import AssetLoaderWorker, LiveIngestWorker, AssetLoaderSignals
@@ -28,6 +28,10 @@ class TestAssetListModelBackpressure:
         # Actually QTimer works in tests if using qtbot or app loop, but here we can inspect calls.
         # We will check if timer is started.
         model._flush_timer = MagicMock()
+        
+        # Initialize _pending_rels and _pending_abs sets to match runtime behavior
+        model._pending_rels = set()
+        model._pending_abs = set()
 
         return model
 
@@ -120,10 +124,9 @@ class TestWorkerYielding:
             mock_thread.setPriority.assert_called_with(QThread.LowPriority)
 
             # Check sleep calls.
-            # 120 items. Batch size 50.
-            # i=0: no sleep
-            # i=50: sleep
-            # i=100: sleep
+            # 120 items with enumerate starting at 1, so positions are 1..120
+            # Sleep condition: i > 0 and i % 50 == 0
+            # Sleeps occur at i=50 and i=100
             # Total 2 sleeps
             assert mock_msleep.call_count == 2
             mock_msleep.assert_has_calls([call(10), call(10)])

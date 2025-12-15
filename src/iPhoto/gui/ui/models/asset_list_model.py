@@ -90,6 +90,7 @@ class AssetListModel(QAbstractListModel):
         # Streaming buffer state
         self._pending_chunks_buffer: List[Dict[str, object]] = []
         self._pending_rels: set[str] = set()
+        self._pending_abs: set[str] = set()
         self._flush_timer = QTimer(self)
         self._flush_timer.setInterval(self._STREAM_FLUSH_INTERVAL_MS)
         self._flush_timer.setSingleShot(True)
@@ -330,6 +331,7 @@ class AssetListModel(QAbstractListModel):
 
         self._pending_chunks_buffer = []
         self._pending_rels.clear()
+        self._pending_abs.clear()
         self._flush_timer.stop()
         self._pending_finish_event = None
         self._is_flushing = False
@@ -440,7 +442,7 @@ class AssetListModel(QAbstractListModel):
 
         self._pending_chunks_buffer = []
         self._pending_rels.clear()
-        self._pending_rels.clear()
+        self._pending_abs.clear()
         self._flush_timer.stop()
         self._pending_finish_event = None
         self._is_first_chunk = True
@@ -522,13 +524,23 @@ class AssetListModel(QAbstractListModel):
             if not rel:
                 continue
             norm_rel = normalise_rel_value(rel)
+            abs_val = row.get("abs")
+            abs_key = str(abs_val) if abs_val else None
+            
             # Only add if not already present in MODEL or PENDING BUFFER
+            # Check both rel and abs to prevent duplicates
             if (
                 norm_rel not in self._state_manager.row_lookup
                 and norm_rel not in self._pending_rels
+                and (not abs_key or (
+                    self._state_manager.get_index_by_abs(abs_key) is None
+                    and abs_key not in self._pending_abs
+                ))
             ):
                 unique_chunk.append(row)
                 self._pending_rels.add(norm_rel)
+                if abs_key:
+                    self._pending_abs.add(abs_key)
 
         if not unique_chunk:
             return
@@ -552,11 +564,14 @@ class AssetListModel(QAbstractListModel):
                 self._state_manager.append_chunk(chunk)
                 self.endResetModel()
 
-                # Cleanup pending rels for items we just inserted immediately
+                # Cleanup pending rels and abs for items we just inserted immediately
                 for row in chunk:
                     rel = row.get("rel")
                     if rel:
                         self._pending_rels.discard(normalise_rel_value(rel))
+                    abs_val = row.get("abs")
+                    if abs_val:
+                        self._pending_abs.discard(str(abs_val))
 
                 self.prioritize_rows(0, len(chunk) - 1)
 
@@ -593,24 +608,21 @@ class AssetListModel(QAbstractListModel):
             else:
                 self._flush_timer.stop()
 
-            if not payload:
-                # If buffer is empty, check if we need to emit finished signal
-                if self._pending_finish_event and not self._pending_chunks_buffer:
-                    self._finalize_loading(*self._pending_finish_event)
-                return
-
-            # Cleanup pending set for committed items
-            for row in payload:
-                rel = row.get("rel")
-                if rel:
-                    self._pending_rels.discard(normalise_rel_value(rel))
-
             start_row = self._state_manager.row_count()
             end_row = start_row + len(payload) - 1
 
             self.beginInsertRows(QModelIndex(), start_row, end_row)
             self._state_manager.append_chunk(payload)
             self.endInsertRows()
+
+            # Cleanup pending sets for committed items after successful insertion
+            for row in payload:
+                rel = row.get("rel")
+                if rel:
+                    self._pending_rels.discard(normalise_rel_value(rel))
+                abs_val = row.get("abs")
+                if abs_val:
+                    self._pending_abs.discard(str(abs_val))
 
             self._state_manager.on_external_row_inserted(start_row, len(payload))
 
@@ -714,6 +726,7 @@ class AssetListModel(QAbstractListModel):
             # Defensive programming: clear any buffered chunks to prevent state leakage
             self._pending_chunks_buffer = []
             self._pending_rels.clear()
+            self._pending_abs.clear()
             self._flush_timer.stop()
             self._pending_finish_event = None
 
@@ -780,6 +793,7 @@ class AssetListModel(QAbstractListModel):
 
         self._pending_chunks_buffer = []
         self._pending_rels.clear()
+        self._pending_abs.clear()
         self._flush_timer.stop()
         self._pending_finish_event = None
         self._pending_loader_root = None

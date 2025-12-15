@@ -452,5 +452,14 @@ class LiveIngestWorker(QRunnable):
 
             if chunk and not self._is_cancelled:
                 self._signals.chunkReady.emit(self._root, chunk)
+
+            if not self._is_cancelled:
+                self._signals.finished.emit(self._root, True)
+            else:
+                self._signals.finished.emit(self._root, False)
+
         except Exception as exc:
             LOGGER.error("Error processing live items: %s", exc, exc_info=True)
+            if not self._is_cancelled:
+                self._signals.error.emit(self._root, str(exc))
+            self._signals.finished.emit(self._root, False)

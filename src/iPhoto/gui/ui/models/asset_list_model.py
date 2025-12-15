@@ -473,6 +473,7 @@ class AssetListModel(QAbstractListModel):
                         # but connect to the same slot (_on_loader_chunk_ready) which handles buffering/deduplication.
                         live_signals = AssetLoaderSignals(self)
                         live_signals.chunkReady.connect(self._on_loader_chunk_ready)
+                        live_signals.finished.connect(lambda _, __: live_signals.deleteLater())
 
                         worker = LiveIngestWorker(
                             self._album_root,

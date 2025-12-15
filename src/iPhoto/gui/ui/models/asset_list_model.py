@@ -59,8 +59,8 @@ class AssetListModel(QAbstractListModel):
     loadFinished = Signal(Path, bool)
 
     # Tuning constants for streaming updates
-    _STREAM_FLUSH_INTERVAL_MS = 30
-    _STREAM_BATCH_SIZE = 20
+    _STREAM_FLUSH_INTERVAL_MS = 100
+    _STREAM_BATCH_SIZE = 100
     _STREAM_FLUSH_THRESHOLD = 100
 
     def __init__(self, facade: "AppFacade", parent=None) -> None:  # type: ignore[override]
@@ -97,6 +97,7 @@ class AssetListModel(QAbstractListModel):
         self._is_first_chunk = True
         self._is_flushing = False
 
+        self._pending_finish_event: Optional[Tuple[Path, bool]] = None
         self._pending_loader_root: Optional[Path] = None
         self._deferred_incremental_refresh: Optional[Path] = None
         self._active_filter: Optional[str] = None
@@ -330,6 +331,7 @@ class AssetListModel(QAbstractListModel):
         self._pending_chunks_buffer = []
         self._pending_rels.clear()
         self._flush_timer.stop()
+        self._pending_finish_event = None
         self._is_flushing = False
 
         self.beginResetModel()
@@ -438,7 +440,9 @@ class AssetListModel(QAbstractListModel):
 
         self._pending_chunks_buffer = []
         self._pending_rels.clear()
+        self._pending_rels.clear()
         self._flush_timer.stop()
+        self._pending_finish_event = None
         self._is_first_chunk = True
         self._is_flushing = False
 
@@ -581,6 +585,9 @@ class AssetListModel(QAbstractListModel):
                 self._flush_timer.stop()
 
             if not payload:
+                # If buffer is empty, check if we need to emit finished signal
+                if self._pending_finish_event and not self._pending_chunks_buffer:
+                    self._finalize_loading(*self._pending_finish_event)
                 return
 
             # Cleanup pending set for committed items
@@ -597,6 +604,11 @@ class AssetListModel(QAbstractListModel):
             self.endInsertRows()
 
             self._state_manager.on_external_row_inserted(start_row, len(payload))
+
+            # After processing this batch, if buffer is empty and we have a pending finish, finalize it.
+            if self._pending_finish_event and not self._pending_chunks_buffer:
+                self._finalize_loading(*self._pending_finish_event)
+
         finally:
             self._is_flushing = False
 
@@ -694,6 +706,7 @@ class AssetListModel(QAbstractListModel):
             self._pending_chunks_buffer = []
             self._pending_rels.clear()
             self._flush_timer.stop()
+            self._pending_finish_event = None
 
             self.loadFinished.emit(root, success)
             if should_restart:
@@ -706,11 +719,24 @@ class AssetListModel(QAbstractListModel):
                 QTimer.singleShot(0, self.start_load)
             return
 
-        # Ensure any remaining items are committed before announcing completion.
-        self._flush_pending_chunks()
+        # If buffer is empty, finalize immediately.
+        # Otherwise, store state and let _flush_pending_chunks handle it.
+        if not self._pending_chunks_buffer:
+            self._finalize_loading(root, success)
+        else:
+            self._pending_finish_event = (root, success)
+            # Ensure timer is running to drain buffer
+            if not self._flush_timer.isActive():
+                self._flush_timer.start()
+
+    def _finalize_loading(self, root: Path, success: bool) -> None:
+        """Emit loadFinished and handle post-load tasks."""
+        self._pending_finish_event = None
+        self._flush_timer.stop()
 
         self.loadFinished.emit(root, success)
 
+        # Only clear pending_loader_root AFTER strictly everything is done
         self._pending_loader_root = None
 
         if (
@@ -746,6 +772,7 @@ class AssetListModel(QAbstractListModel):
         self._pending_chunks_buffer = []
         self._pending_rels.clear()
         self._flush_timer.stop()
+        self._pending_finish_event = None
         self._pending_loader_root = None
 
         should_restart = self._state_manager.consume_pending_reload(self._album_root, root)

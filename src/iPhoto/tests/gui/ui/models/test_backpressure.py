@@ -32,30 +32,29 @@ class TestAssetListModelBackpressure:
         return model
 
     def test_backpressure_batching(self, model):
-        """Test that chunks are buffered and processed in batches of 20."""
+        """Test that chunks are buffered and processed in batches."""
 
-        # Setup constants to match what we expect
-        assert model._STREAM_BATCH_SIZE == 20
+        # Verify tuned constants
+        assert model._STREAM_BATCH_SIZE == 100
         assert model._STREAM_FLUSH_THRESHOLD == 100
+        assert model._STREAM_FLUSH_INTERVAL_MS == 100
 
-        # Simulate receiving a large chunk (e.g., 100 items)
-        # Note: _on_loader_chunk_ready has logic to extend buffer.
-        # To test _flush_pending_chunks directly, we can manipulate buffer manually.
-
-        chunk = [{"rel": f"img{i}.jpg"} for i in range(100)]
+        # Simulate receiving a large chunk (e.g., 500 items)
+        chunk = [{"rel": f"img{i}.jpg"} for i in range(500)]
         model._pending_chunks_buffer = chunk
         model._is_flushing = False
 
         # Call flush
         model._flush_pending_chunks()
 
-        # 1. Should have consumed 20 items
-        assert len(model._pending_chunks_buffer) == 80
+        # 1. Should have consumed 100 items (Batch Size)
+        # Remaining: 400
+        assert len(model._pending_chunks_buffer) == 400
         model._state_manager.append_chunk.assert_called_once()
         args, _ = model._state_manager.append_chunk.call_args
-        assert len(args[0]) == 20
+        assert len(args[0]) == 100
         assert args[0][0]["rel"] == "img0.jpg"
-        assert args[0][19]["rel"] == "img19.jpg"
+        assert args[0][99]["rel"] == "img99.jpg"
 
         # 2. Should have started timer for next batch
         model._flush_timer.start.assert_called_once_with(model._STREAM_FLUSH_INTERVAL_MS)
@@ -67,12 +66,12 @@ class TestAssetListModelBackpressure:
         # Call flush again
         model._flush_pending_chunks()
 
-        # 3. Should have consumed next 20 items
-        assert len(model._pending_chunks_buffer) == 60
+        # 3. Should have consumed next 100 items
+        assert len(model._pending_chunks_buffer) == 300
         model._state_manager.append_chunk.assert_called_once()
         args, _ = model._state_manager.append_chunk.call_args
-        assert len(args[0]) == 20
-        assert args[0][0]["rel"] == "img20.jpg"
+        assert len(args[0]) == 100
+        assert args[0][0]["rel"] == "img100.jpg"
 
         # 4. Timer started again
         model._flush_timer.start.assert_called_once_with(model._STREAM_FLUSH_INTERVAL_MS)
@@ -80,8 +79,8 @@ class TestAssetListModelBackpressure:
     def test_buffer_exhaustion(self, model):
         """Test that timer stops when buffer is empty."""
 
-        # Case: 20 items in buffer (exactly one batch)
-        chunk = [{"rel": f"img{i}.jpg"} for i in range(20)]
+        # Case: 100 items in buffer (exactly one batch)
+        chunk = [{"rel": f"img{i}.jpg"} for i in range(100)]
         model._pending_chunks_buffer = chunk
 
         model._flush_pending_chunks()

@@ -26,10 +26,7 @@ def test_corrupted_file_rebuilt(tmp_path: Path) -> None:
     store.write_rows([{"rel": "a.jpg", "is_favorite": 1}])
 
     # Overwrite with corrupted bytes to simulate a malformed database file
-    for extra in ["", "-wal", "-shm"]:
-        p = store.path.with_suffix(store.path.suffix + extra)
-        if p.exists():
-            p.unlink()
+    store._force_reset_db()
     store.path.write_bytes(b"\x00\x01corrupted")
 
     recovered = IndexStore(tmp_path)

@@ -164,7 +164,7 @@ class IndexStore:
                     for row in cursor:
                         try:
                             salvaged_rows.append(self._db_row_to_dict(row))
-                        except Exception as row_exc:  # noqa: BLE001
+                        except sqlite3.DatabaseError as row_exc:
                             logger.warning("Skipping corrupted row during salvage: %s", row_exc)
                 except sqlite3.DatabaseError as scan_exc:
                     logger.warning("Encountered error while scanning for salvage: %s", scan_exc)

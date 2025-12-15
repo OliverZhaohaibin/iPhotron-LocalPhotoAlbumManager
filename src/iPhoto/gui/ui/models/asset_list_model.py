@@ -464,6 +464,13 @@ class AssetListModel(QAbstractListModel):
             except Exception as e:
                 logger.exception("Failed to fetch initial items from data source: %s", e)
 
+        # Concurrency notes:
+        # - Scan chunks may continue to arrive while start_load runs; live buffer
+        #   prefilling provides a snapshot, while later chunks are merged via signals.
+        # - If the scan finishes during reset, the live snapshot still seeds the model
+        #   and persisted rows will arrive through the data source.
+        # - Items persisted between the live snapshot and the initial fetch are
+        #   deduped on insertion to avoid duplicate rows.
         live_entries: List[Dict[str, object]] = []
         if self._facade.library_manager:
             try:
@@ -528,7 +535,7 @@ class AssetListModel(QAbstractListModel):
         rows: List[Dict[str, object]],
         featured_set: Set[str],
     ) -> List[Dict[str, object]]:
-        """Normalize scanner rows relative to the current view and apply filters."""
+        """Normalize scanner rows relative to the current view, apply filters, and dedupe."""
 
         if not self._album_root or not rows:
             return []
@@ -547,6 +554,10 @@ class AssetListModel(QAbstractListModel):
             return []
 
         entries: List[Dict[str, object]] = []
+        try:
+            store = IndexStore(view_root)
+        except Exception:
+            store = None
         for row in rows:
             raw_rel = row.get("rel")
             if not raw_rel:
@@ -565,16 +576,12 @@ class AssetListModel(QAbstractListModel):
                 )
                 continue
 
-            normalized_rel = normalise_rel_value(view_rel)
-            if normalized_rel and normalized_rel in self._state_manager.row_lookup:
-                continue
-
             adjusted_row = row.copy()
             adjusted_row["rel"] = view_rel
 
-            # Live buffer rows are transient; rely on defaults without passing a store.
+            # Live buffer rows are transient; location caching is still allowed through the store.
             entry = build_asset_entry(
-                view_root, adjusted_row, featured_set, store=None
+                view_root, adjusted_row, featured_set, store=store
             )
 
             if entry is None:
@@ -589,7 +596,7 @@ class AssetListModel(QAbstractListModel):
 
             entries.append(entry)
 
-        return entries
+        return self._dedupe_items(entries)
 
     def _trigger_fetch(self, limit: int) -> None:
         if self._is_fetching or not self._data_source or not self._data_source.has_more():

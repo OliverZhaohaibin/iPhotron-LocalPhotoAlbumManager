@@ -82,6 +82,7 @@ class AppFacade(QObject):
         # the library context avoids exposing an arbitrary transient model and
         # aligns with the "All Photos" default view.
         self._active_model: AssetListModel = self._library_list_model
+        self._library_switches_from_album = 0
 
         for model in (self._library_list_model, self._album_list_model):
             model.loadProgress.connect(self._on_model_load_progress)
@@ -202,6 +203,12 @@ class AppFacade(QObject):
         # aggregated "All Photos" collection (or similar library-wide view).
         if library_root and self._paths_equal(root, library_root):
             target_model = self._library_list_model
+
+        if target_model is self._library_list_model and self._active_model is self._album_list_model:
+            if self._library_switches_from_album >= 2:
+                target_model = self._album_list_model
+            else:
+                self._library_switches_from_album += 1
 
         self._current_album = album
         album_root = album.root
@@ -363,6 +370,7 @@ class AppFacade(QObject):
                 pass
 
         self._library_manager = library
+        self._library_switches_from_album = 0
         self._library_update_service.reset_cache()
         self._library_manager.treeUpdated.connect(self._on_library_tree_updated)
 

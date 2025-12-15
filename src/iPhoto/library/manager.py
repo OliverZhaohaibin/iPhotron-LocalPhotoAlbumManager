@@ -330,6 +330,8 @@ class LibraryManager(QObject):
         """Return True when *p1* and *p2* share the same parent directory."""
         parent1 = p1.parent
         parent2 = p2.parent
+        if parent1 == p1 or parent2 == p2:
+            return False
         if not (parent1 and parent2):
             return False
         if p1 in parent2.parents or p2 in parent1.parents:

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Any, Dict, List, Optional, TYPE_CHECKING, Tuple
+from typing import Any, Dict, List, Optional, Set, TYPE_CHECKING, Tuple
 
 from PySide6.QtCore import (
     QAbstractListModel,
@@ -414,6 +414,7 @@ class AssetListModel(QAbstractListModel):
 
         manifest = self._facade.current_album.manifest if self._facade.current_album else {}
         featured = manifest.get("featured", []) or []
+        # Recompute for each chunk in case the manifest changed while scanning.
         featured_set = normalize_featured(featured)
         filter_params: Dict[str, object] = {}
         if self._active_filter:
@@ -481,15 +482,20 @@ class AssetListModel(QAbstractListModel):
         self.beginResetModel()
         self._state_manager.clear_rows()
         self._data_source = data_source
-        if live_entries:
-            self._state_manager.append_chunk(live_entries)
         self.endResetModel()
 
+        if live_entries:
+            start_row = self._state_manager.row_count()
+            end_row = start_row + len(live_entries) - 1
+            self.beginInsertRows(QModelIndex(), start_row, end_row)
+            self._state_manager.append_chunk(live_entries)
+            self.endInsertRows()
+            self._state_manager.on_external_row_inserted(start_row, len(live_entries))
+            current_total = self._state_manager.row_count()
+            self.loadProgress.emit(self._album_root, current_total, current_total)
+
         if initial_items:
-            deduped_initial = [
-                item for item in initial_items
-                if normalise_rel_value(item.get("rel")) not in self._state_manager.row_lookup
-            ]
+            deduped_initial = self._dedupe_items(initial_items)
             if deduped_initial:
                 start_row = self._state_manager.row_count()
                 end_row = start_row + len(deduped_initial) - 1
@@ -499,9 +505,6 @@ class AssetListModel(QAbstractListModel):
                 self._state_manager.on_external_row_inserted(start_row, len(deduped_initial))
                 current_total = self._state_manager.row_count()
                 self.loadProgress.emit(self._album_root, current_total, current_total)
-        elif live_entries:
-            current_total = self._state_manager.row_count()
-            self.loadProgress.emit(self._album_root, current_total, current_total)
 
         self._has_more_rows = self._data_source.has_more() if self._data_source else False
         if self._has_more_rows:
@@ -509,11 +512,21 @@ class AssetListModel(QAbstractListModel):
         else:
             self.loadFinished.emit(self._album_root, True)
 
+    def _dedupe_items(self, items: List[Dict[str, object]]) -> List[Dict[str, object]]:
+        """Filter out rows that already exist in the model."""
+        deduped: List[Dict[str, object]] = []
+        for item in items:
+            normalized = normalise_rel_value(item.get("rel"))
+            if normalized and normalized in self._state_manager.row_lookup:
+                continue
+            deduped.append(item)
+        return deduped
+
     def _build_entries_from_scan_rows(
         self,
         scan_root: Path,
         rows: List[Dict[str, object]],
-        featured_set: set[str],
+        featured_set: Set[str],
     ) -> List[Dict[str, object]]:
         """Normalize scanner rows relative to the current view and apply filters."""
 
@@ -552,14 +565,16 @@ class AssetListModel(QAbstractListModel):
                 )
                 continue
 
-            if normalise_rel_value(view_rel) in self._state_manager.row_lookup:
+            normalized_rel = normalise_rel_value(view_rel)
+            if normalized_rel and normalized_rel in self._state_manager.row_lookup:
                 continue
 
             adjusted_row = row.copy()
             adjusted_row["rel"] = view_rel
 
+            # Live buffer rows are transient; rely on defaults without passing a store.
             entry = build_asset_entry(
-                view_root, adjusted_row, featured_set
+                view_root, adjusted_row, featured_set, store=None
             )
 
             if entry is None:
@@ -593,10 +608,7 @@ class AssetListModel(QAbstractListModel):
             self.loadFinished.emit(self._album_root, True)
             return
 
-        filtered_items = [
-            item for item in items
-            if normalise_rel_value(item.get("rel")) not in self._state_manager.row_lookup
-        ]
+        filtered_items = self._dedupe_items(items)
 
         if not filtered_items:
             self._has_more_rows = self._data_source.has_more() if self._data_source else False

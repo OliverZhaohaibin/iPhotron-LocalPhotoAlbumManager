@@ -167,7 +167,7 @@ class LibraryManager(QObject):
                 return
             if current_root in requested_root.parents:
                 return
-            if current_root.parent == requested_root.parent:
+            if self._paths_are_siblings(current_root, requested_root):
                 return
 
             # Cancel the old scan before starting new one (inline to avoid deadlock)
@@ -325,6 +325,16 @@ class LibraryManager(QObject):
             return p1.resolve() == p2.resolve()
         except OSError:
             return p1 == p2
+
+    def _paths_are_siblings(self, p1: Path, p2: Path) -> bool:
+        """Return True when *p1* and *p2* share the same parent directory."""
+        parent1 = p1.parent
+        parent2 = p2.parent
+        if not (parent1 and parent2):
+            return False
+        if p1 in parent2.parents or p2 in parent1.parents:
+            return False
+        return parent1 == parent2
 
     # ------------------------------------------------------------------
     # Asset helpers

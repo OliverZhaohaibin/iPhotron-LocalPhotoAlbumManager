@@ -1,116 +1,100 @@
-"""Tests for AssetListModel backpressure and worker yielding logic."""
+"""Tests for paged AssetListModel fetch behaviour and worker yielding logic."""
 
 from unittest.mock import MagicMock, patch, call
 import pytest
 from PySide6.QtCore import QThread
+from pathlib import Path
 
 from iPhoto.gui.ui.models.asset_list_model import AssetListModel
 from iPhoto.gui.ui.tasks.asset_loader_worker import AssetLoaderWorker, LiveIngestWorker, AssetLoaderSignals
 
-class TestAssetListModelBackpressure:
+
+class DummyStateManager:
+    def __init__(self) -> None:
+        self.rows = []
+        self.row_lookup = {}
+
+    def row_count(self) -> int:
+        return len(self.rows)
+
+    def append_chunk(self, items):
+        start = len(self.rows)
+        self.rows.extend(items)
+        for offset, item in enumerate(items):
+            rel = item.get("rel")
+            if rel:
+                self.row_lookup[str(rel)] = start + offset
+
+    def on_external_row_inserted(self, *_args, **_kwargs):
+        return None
+
+    def set_virtual_reload_suppressed(self, *_args, **_kwargs):
+        return None
+
+    def set_virtual_move_requires_revisit(self, *_args, **_kwargs):
+        return None
+
+    def clear_reload_pending(self):
+        return None
+
+
+class FakeSource:
+    def __init__(self, pages):
+        self.pages = list(pages)
+
+    def has_more(self):
+        return bool(self.pages)
+
+    def fetch_next(self, limit):
+        if not self.pages:
+            return []
+        page = self.pages.pop(0)
+        return page[:limit]
+
+    def reset(self):
+        return None
+
+
+class TestAssetListModelPaging:
     @pytest.fixture
     def facade(self):
         facade = MagicMock()
         facade.library_manager = MagicMock()
         facade.library_manager.root.return_value = None
+        facade.current_album = MagicMock()
+        facade.current_album.manifest = {}
         return facade
 
     @pytest.fixture
     def model(self, facade):
         model = AssetListModel(facade)
-        # Mock state manager to avoid complex internal logic during simple buffer tests
-        model._state_manager = MagicMock()
-        model._state_manager.row_count.return_value = 0
-        model._state_manager.append_chunk = MagicMock()
-        model._state_manager.on_external_row_inserted = MagicMock()
-
-        # Ensure timer is mocked or controllable?
-        # Actually QTimer works in tests if using qtbot or app loop, but here we can inspect calls.
-        # We will check if timer is started.
-        model._flush_timer = MagicMock()
-        
-        # Initialize _pending_rels and _pending_abs sets to match runtime behavior
-        model._pending_rels = set()
-        model._pending_abs = set()
-
+        model._state_manager = DummyStateManager()
+        model._album_root = Path("/tmp")
         return model
 
-    def test_backpressure_batching(self, model):
-        """Test that chunks are buffered and processed in batches."""
+    def test_fetch_more_uses_page_size(self, model):
+        model._data_source = FakeSource([[{"rel": "a"}]])
+        model._page_size = 10
+        called = {}
+        def fake_trigger(limit):
+            called["limit"] = limit
+        model._trigger_fetch = fake_trigger
+        model.fetchMore(None)
+        assert called["limit"] == 10
 
-        # Verify tuned constants
-        assert model._STREAM_BATCH_SIZE == 100
-        assert model._STREAM_FLUSH_THRESHOLD == 2000
-        assert model._STREAM_FLUSH_INTERVAL_MS == 100
+    def test_on_page_loaded_appends_and_signals(self, model):
+        model._data_source = FakeSource([[{"rel": "b"}]])
+        model._album_root = Path("/tmp/root")
+        finished = []
+        model.loadFinished.connect(lambda *_: finished.append(True))
 
-        # Simulate receiving a large chunk (e.g., 500 items)
-        chunk = [{"rel": f"img{i}.jpg"} for i in range(500)]
-        model._pending_chunks_buffer = chunk
-        model._is_flushing = False
+        # Simulate source already consuming its page
+        model._data_source.pages = []
+        model._on_page_loaded([{"rel": "b"}])
 
-        # Call flush
-        model._flush_pending_chunks()
+        assert model._state_manager.rows[0]["rel"] == "b"
+        assert finished  # should finish because source now empty
 
-        # 1. Should have consumed 100 items (Batch Size)
-        # Remaining: 400
-        assert len(model._pending_chunks_buffer) == 400
-        model._state_manager.append_chunk.assert_called_once()
-        args, _ = model._state_manager.append_chunk.call_args
-        assert len(args[0]) == 100
-        assert args[0][0]["rel"] == "img0.jpg"
-        assert args[0][99]["rel"] == "img99.jpg"
-
-        # 2. Should have started timer for next batch
-        model._flush_timer.start.assert_called_once_with(model._STREAM_FLUSH_INTERVAL_MS)
-
-        # Reset mocks
-        model._state_manager.append_chunk.reset_mock()
-        model._flush_timer.start.reset_mock()
-
-        # Call flush again
-        model._flush_pending_chunks()
-
-        # 3. Should have consumed next 100 items
-        assert len(model._pending_chunks_buffer) == 300
-        model._state_manager.append_chunk.assert_called_once()
-        args, _ = model._state_manager.append_chunk.call_args
-        assert len(args[0]) == 100
-        assert args[0][0]["rel"] == "img100.jpg"
-
-        # 4. Timer started again
-        model._flush_timer.start.assert_called_once_with(model._STREAM_FLUSH_INTERVAL_MS)
-
-    def test_buffer_exhaustion(self, model):
-        """Test that timer stops when buffer is empty."""
-
-        # Case: 100 items in buffer (exactly one batch)
-        chunk = [{"rel": f"img{i}.jpg"} for i in range(100)]
-        model._pending_chunks_buffer = chunk
-
-        model._flush_pending_chunks()
-
-        # Buffer empty
-        assert len(model._pending_chunks_buffer) == 0
-
-        # Insert happened
-        model._state_manager.append_chunk.assert_called_once()
-
-        # Timer should be stopped
-        model._flush_timer.stop.assert_called_once()
-        # Should NOT be started
-        model._flush_timer.start.assert_not_called()
-
-    def test_finish_pending_flushes_immediately(self, model):
-        """Buffered rows should drain without delay once load completion is pending."""
-
-        # Prepare a partially drained buffer and mark finish pending
-        model._pending_finish_event = ("root", True)
-        model._pending_chunks_buffer = [{"rel": f"img{i}.jpg"} for i in range(150)]
-
-        model._flush_pending_chunks()
-
-        # Remaining items should be scheduled with zero-delay timer
-        model._flush_timer.start.assert_called_once_with(0)
 
 class TestWorkerYielding:
     @patch("PySide6.QtCore.QThread.currentThread")

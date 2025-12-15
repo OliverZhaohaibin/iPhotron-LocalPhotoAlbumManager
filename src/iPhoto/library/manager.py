@@ -152,9 +152,24 @@ class LibraryManager(QObject):
 
         # Check if already scanning the same root (thread-safe)
         locker = QMutexLocker(self._scan_buffer_lock)
-        if self._current_scanner_worker is not None:
-            if self._live_scan_root and self._paths_equal(self._live_scan_root, root):
+        if self._current_scanner_worker is not None and self._live_scan_root:
+            try:
+                current_root = self._live_scan_root.resolve()
+                requested_root = root.resolve()
+            except OSError:
+                current_root = self._live_scan_root
+                requested_root = root
+
+            # Keep scanning when the request targets the same tree (ancestor, descendant or sibling).
+            if requested_root == current_root:
                 return
+            if requested_root in current_root.parents:
+                return
+            if current_root in requested_root.parents:
+                return
+            if current_root.parent == requested_root.parent:
+                return
+
             # Cancel the old scan before starting new one (inline to avoid deadlock)
             self._current_scanner_worker.cancel()
             self._current_scanner_worker = None

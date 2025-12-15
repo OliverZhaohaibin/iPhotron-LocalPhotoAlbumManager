@@ -147,3 +147,24 @@ def test_race_condition_stale_chunk_ignored(model_setup):
     # Check if start was called again (for the new filter)
     # loader.start should have been called twice in total: once for initial, once for retry.
     assert loader.start.call_count >= 2
+
+
+def test_incremental_removal_prunes_cache(model_setup):
+    model, _ = model_setup
+    library_root = Path("/library/root")
+    model.prepare_for_album(library_root)
+
+    initial_rows = [
+        {"rel": "keep.jpg", "abs": "/library/root/keep.jpg"},
+        {"rel": "drop.jpg", "abs": "/library/root/drop.jpg"},
+    ]
+
+    model._state_manager.set_rows([dict(row) for row in initial_rows])
+    model._state_manager.rebuild_lookup()
+
+    model._cache_manager.reset_caches_for_new_rows.reset_mock()
+
+    new_rows = [dict(initial_rows[0])]
+    model._apply_incremental_rows(new_rows)
+
+    model._cache_manager.reset_caches_for_new_rows.assert_called_once_with(model._state_manager.rows)

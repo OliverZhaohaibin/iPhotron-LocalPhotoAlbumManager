@@ -1069,11 +1069,13 @@ class AssetListModel(QAbstractListModel):
         if diff.structure_changed:
             self._state_manager.clear_visible_rows()
 
-        if not current_rows and not diff.is_reset:
-            # If we ended up empty after removals
-            self._cache_manager.reset_caches_for_new_rows([])
-
         self._state_manager.rebuild_lookup()
+
+        if diff.structure_changed:
+            # Individual removals clear per-item caches above; this pass reconciles
+            # the remaining cache entries with the final dataset to drop any
+            # lingering thumbnails from deleted assets.
+            self._cache_manager.reset_caches_for_new_rows(current_rows)
 
         # Update data for changed rows
         for replacement in diff.changed_items:

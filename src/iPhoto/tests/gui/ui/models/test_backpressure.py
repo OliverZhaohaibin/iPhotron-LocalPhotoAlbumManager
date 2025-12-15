@@ -29,8 +29,9 @@ class TestAssetListModelBackpressure:
         # We will check if timer is started.
         model._flush_timer = MagicMock()
         
-        # Initialize _pending_rels set to match runtime behavior
+        # Initialize _pending_rels and _pending_abs sets to match runtime behavior
         model._pending_rels = set()
+        model._pending_abs = set()
 
         return model
 

@@ -177,6 +177,7 @@ def _process_path_stream(
         Dict[str, Any]: Populated index rows for each processed media file.
     """
     batch: List[Path] = []
+    prepared_dirs: set[Path] = set()
     processed_count = 0
     last_reported_count = 0
 
@@ -259,6 +260,14 @@ def _process_path_stream(
         except (ValueError, OSError) as e:
             # It is possible for files to be deleted or become inaccessible between directory listing and stat calls.
             LOGGER.debug(f"Skipping file {path} due to exception during cache check: {e}")
+
+        parent_dir = path.parent
+        if parent_dir not in prepared_dirs:
+            try:
+                ensure_work_dir(parent_dir, WORK_DIR_NAME)
+            except Exception:
+                LOGGER.warning("Failed to prepare work dir for %s", parent_dir, exc_info=True)
+            prepared_dirs.add(parent_dir)
 
         batch.append(path)
         if len(batch) >= batch_size:

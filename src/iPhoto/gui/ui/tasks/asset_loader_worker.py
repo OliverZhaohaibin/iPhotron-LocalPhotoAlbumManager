@@ -113,7 +113,10 @@ def build_asset_entry(
 
     # Performance optimization: use string concatenation instead of path.resolve()
     # to avoid disk I/O. We assume root is absolute.
-    abs_path = str(root / rel)
+    abs_path_obj = root / rel
+    if not abs_path_obj.exists():
+        return None
+    abs_path = str(abs_path_obj)
 
     is_image, is_video = classify_media(row)
     is_pano = _is_panorama_candidate(row, is_image)

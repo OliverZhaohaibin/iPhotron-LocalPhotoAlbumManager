@@ -602,9 +602,11 @@ class AssetListModel(QAbstractListModel):
             remainder = self._pending_chunks_buffer[batch_size:]
             self._pending_chunks_buffer = remainder
 
-            # If data remains, ensure the timer continues with a short interval
+            # If data remains, ensure the timer continues with a short interval.
+            # When a finish event is pending, use an immediate timeout to avoid visible stalls.
             if self._pending_chunks_buffer:
-                self._flush_timer.start(self._STREAM_FLUSH_INTERVAL_MS)
+                interval = 0 if self._pending_finish_event else self._STREAM_FLUSH_INTERVAL_MS
+                self._flush_timer.start(interval)
             else:
                 self._flush_timer.stop()
 
@@ -747,9 +749,8 @@ class AssetListModel(QAbstractListModel):
             self._finalize_loading(root, success)
         else:
             self._pending_finish_event = (root, success)
-            # Ensure timer is running to drain buffer
-            if not self._flush_timer.isActive():
-                self._flush_timer.start()
+            # Drain any remaining buffered chunks immediately to avoid end-of-load stalls.
+            self._flush_pending_chunks()
 
     def _finalize_loading(self, root: Path, success: bool) -> None:
         """Emit loadFinished and handle post-load tasks."""

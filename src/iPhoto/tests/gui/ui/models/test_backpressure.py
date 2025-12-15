@@ -100,6 +100,18 @@ class TestAssetListModelBackpressure:
         # Should NOT be started
         model._flush_timer.start.assert_not_called()
 
+    def test_finish_pending_flushes_immediately(self, model):
+        """Buffered rows should drain without delay once load completion is pending."""
+
+        # Prepare a partially drained buffer and mark finish pending
+        model._pending_finish_event = ("root", True)
+        model._pending_chunks_buffer = [{"rel": f"img{i}.jpg"} for i in range(150)]
+
+        model._flush_pending_chunks()
+
+        # Remaining items should be scheduled with zero-delay timer
+        model._flush_timer.start.assert_called_once_with(0)
+
 class TestWorkerYielding:
     @patch("PySide6.QtCore.QThread.currentThread")
     @patch("PySide6.QtCore.QThread.msleep")

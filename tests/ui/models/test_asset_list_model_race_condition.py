@@ -167,4 +167,4 @@ def test_incremental_removal_prunes_cache(model_setup):
     new_rows = [dict(initial_rows[0])]
     model._apply_incremental_rows(new_rows)
 
-    model._cache_manager.reset_caches_for_new_rows.assert_called_once_with(new_rows)
+    model._cache_manager.reset_caches_for_new_rows.assert_called_once_with(model._state_manager.rows)

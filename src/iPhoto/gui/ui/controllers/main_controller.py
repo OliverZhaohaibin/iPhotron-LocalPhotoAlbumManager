@@ -94,6 +94,7 @@ class MainController(QObject):
     def shutdown(self) -> None:
         """Stop worker threads and background jobs before the app exits."""
 
+        self._facade.cancel_active_scans()
         self._interaction.shutdown()
         self._map_controller.shutdown()
         self._asset_model.thumbnail_loader().shutdown()
@@ -445,4 +446,3 @@ class MainController(QObject):
     def resume_playback_after_transition(self) -> None:
         if self._data.media().is_paused():
             self._data.media().play()
-

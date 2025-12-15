@@ -12,6 +12,7 @@ from .. import app as backend
 from ..config import DEFAULT_INCLUDE, DEFAULT_EXCLUDE
 from ..errors import AlbumOperationError, IPhotoError
 from ..models.album import Album
+from ..utils.logging import get_logger
 from .background_task_manager import BackgroundTaskManager
 from .services import (
     AlbumMetadataService,
@@ -44,6 +45,7 @@ class AppFacade(QObject):
 
     def __init__(self) -> None:
         super().__init__()
+        self._logger = get_logger()
         self._current_album: Optional[Album] = None
         self._pending_index_announcements: Set[Path] = set()
         self._library_manager: Optional["LibraryManager"] = None
@@ -298,6 +300,30 @@ class AppFacade(QObject):
         else:
             # Fallback if library manager isn't bound (unlikely in full app)
             self._library_update_service.rescan_album_async(album)
+
+    def _inject_scan_dependencies_for_tests(
+        self,
+        *,
+        library_manager: Optional["LibraryManager"] = None,
+        library_update_service: Optional[LibraryUpdateService] = None,
+    ) -> None:
+        """Override scan collaborators during testing."""
+
+        if library_manager is not None:
+            self._library_manager = library_manager
+        if library_update_service is not None:
+            self._library_update_service = library_update_service
+
+    def cancel_active_scans(self) -> None:
+        """Request cancellation of any in-flight scan operations."""
+
+        if self._library_manager is not None:
+            try:
+                self._library_manager.stop_scanning()
+            except RuntimeError:
+                self._logger.warning("Failed to stop active scan during shutdown", exc_info=True)
+
+        self._library_update_service.cancel_active_scan()
 
     def is_performing_background_operation(self) -> bool:
         """Return ``True`` while imports or moves are still running."""

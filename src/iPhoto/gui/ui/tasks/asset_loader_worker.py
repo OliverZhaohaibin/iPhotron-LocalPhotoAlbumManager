@@ -105,6 +105,11 @@ def _parse_timestamp(value: object) -> float:
 # Maximum entries to cache per directory when checking on-disk presence.
 # Avoid caching very large directories to prevent high memory usage.
 DIR_CACHE_THRESHOLD = 1000
+def _path_exists_direct(path: Path) -> bool:
+    try:
+        return path.exists()
+    except OSError:
+        return False
 
 
 def _cached_path_exists(path: Path, cache: Dict[Path, Optional[Set[str]]]) -> bool:
@@ -118,12 +123,12 @@ def _cached_path_exists(path: Path, cache: Dict[Path, Optional[Set[str]]]) -> bo
                 if idx > DIR_CACHE_THRESHOLD:
                     # Avoid holding huge directory listings; fall back to direct exists checks.
                     cache[parent] = None
-                    return path.exists()
+                    return _path_exists_direct(path)
         except OSError:
             names = set()
         cache[parent] = names
     if names is None:
-        return path.exists()
+        return _path_exists_direct(path)
     return path.name in names
 
 
@@ -142,7 +147,7 @@ def build_asset_entry(
     # work; we still perform an existence check (with directory-level caching) to
     # drop index rows pointing to files deleted externally.
     abs_path_obj = root / rel
-    exists_fn = path_exists or (lambda p: p.exists())
+    exists_fn = path_exists or _path_exists_direct
     if not exists_fn(abs_path_obj):
         return None
     abs_path = str(abs_path_obj)

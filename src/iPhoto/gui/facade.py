@@ -299,6 +299,18 @@ class AppFacade(QObject):
             # Fallback if library manager isn't bound (unlikely in full app)
             self._library_update_service.rescan_album_async(album)
 
+    def cancel_active_scans(self) -> None:
+        """Request cancellation of any in-flight scan operations."""
+
+        if self._library_manager is not None:
+            try:
+                self._library_manager.stop_scanning()
+            except Exception:
+                # Ignore shutdown-time errors to avoid blocking application exit
+                pass
+
+        self._library_update_service.cancel_active_scan()
+
     def is_performing_background_operation(self) -> bool:
         """Return ``True`` while imports or moves are still running."""
 

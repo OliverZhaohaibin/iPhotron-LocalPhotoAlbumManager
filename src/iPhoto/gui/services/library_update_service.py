@@ -98,6 +98,15 @@ class LibraryUpdateService(QObject):
             result_payload=lambda root, rows: rows,
         )
 
+    def cancel_active_scan(self) -> None:
+        """Request cancellation of the active scan without scheduling retries."""
+
+        if self._scanner_worker is None:
+            return
+
+        self._scan_pending = False
+        self._scanner_worker.cancel()
+
     def pair_live(self, album: "Album") -> List[dict]:
         """Rebuild Live Photo pairings for *album* and refresh related views."""
 

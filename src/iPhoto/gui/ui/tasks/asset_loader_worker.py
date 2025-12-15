@@ -460,6 +460,7 @@ class LiveIngestWorker(QRunnable):
 
         except Exception as exc:
             LOGGER.error("Error processing live items: %s", exc, exc_info=True)
+            self._signals.error.emit(self._root, str(exc))
             if not self._is_cancelled:
                 self._signals.error.emit(self._root, str(exc))
             self._signals.finished.emit(self._root, False)

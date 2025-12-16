@@ -449,7 +449,9 @@ class AssetListModel(QAbstractListModel):
                                 r["_album_root"] = _node_path
                             return rows, next_cursor
 
-                    sources.append(_TaggedCursor(IndexStore(node_path), filter_params=filter_params))
+                    sources.append(
+                        _TaggedCursor(IndexStore(node_path, lazy_init=True), filter_params=filter_params)
+                    )
                 return PhotoStreamMerger(sources)
 
             data_source: Optional[AssetDataSource] = MergedAlbumSource(
@@ -466,9 +468,11 @@ class AssetListModel(QAbstractListModel):
                 check_exists=False,  # skip fs existence checks for faster initial paint
             )
 
-        # Preload first batch before resetting UI to avoid visible empty state
+        # Preload first batch before resetting UI to avoid visible empty state.
+        # For library view (aggregated), defer all fetching to background workers
+        # to avoid blocking the UI with many IndexStore inits and heap priming.
         initial_items = []
-        if data_source:
+        if data_source and not is_library_view:
             try:
                 initial_items = data_source.fetch_next(self._initial_page_size)
             except Exception as e:

@@ -32,12 +32,15 @@ class IndexStore:
        its own instance to avoid race conditions on the shared transaction connection.
     """
 
-    def __init__(self, album_root: Path):
+    def __init__(self, album_root: Path, *, lazy_init: bool = False):
         self.album_root = album_root
         self.path = album_root / WORK_DIR_NAME / "index.db"
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._conn: Optional[sqlite3.Connection] = None
-        self._init_db()
+        self._lazy_init = lazy_init
+        self._initialized = False
+        if not self._lazy_init:
+            self._init_db()
 
     # Whitelist of allowed filter modes to prevent injection and logic errors
     _VALID_FILTER_MODES = frozenset({"videos", "live", "favorites"})
@@ -75,6 +78,7 @@ class IndexStore:
         except sqlite3.DatabaseError as exc:
             logger.warning("Detected index.db corruption at %s: %s", self.path, exc)
             self._recover_database()
+        self._initialized = True
 
     def _run_init_sql(self, conn: sqlite3.Connection) -> None:
         """Create or migrate the assets table and indices."""
@@ -243,6 +247,11 @@ class IndexStore:
 
     def _get_conn(self) -> sqlite3.Connection:
         """Return the active connection or create a new one."""
+        if not self._initialized and not self._lazy_init:
+            self._init_db()
+        elif not self._initialized and self._lazy_init:
+            # Mark as initialized so subsequent calls do not attempt migration work.
+            self._initialized = True
         if self._conn:
             return self._conn
         return sqlite3.connect(self.path)

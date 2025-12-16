@@ -111,8 +111,13 @@ class MergedAlbumSource(AssetDataSource):
         self._featured = normalize_featured(featured or [])
         self._store_cache: Dict[Path, IndexStore] = {}
         self._dir_cache: Dict[Path, Optional[Set[str]]] = {}
-        self._merger: PhotoStreamMerger = merger_factory()
+        self._merger: PhotoStreamMerger | None = None
         self._check_exists = check_exists
+
+    def _ensure_merger(self) -> PhotoStreamMerger:
+        if self._merger is None:
+            self._merger = self._merger_factory()
+        return self._merger
 
     def _path_exists(self, path: Path) -> bool:
         parent = path.parent
@@ -129,7 +134,11 @@ class MergedAlbumSource(AssetDataSource):
         if limit <= 0 or not self._merger.has_more():
             return []
 
-        rows = self._merger.fetch_next_batch(limit)
+        merger = self._ensure_merger()
+        if limit <= 0 or not merger.has_more():
+            return []
+
+        rows = merger.fetch_next_batch(limit)
         entries: List[Dict[str, object]] = []
         for row in rows:
             album_root = Path(row.pop("_album_root", self._root))
@@ -146,9 +155,12 @@ class MergedAlbumSource(AssetDataSource):
         return entries
 
     def has_more(self) -> bool:
+        if self._merger is None:
+            # Unknown until first fetch; assume more to kick off background load.
+            return True
         return self._merger.has_more()
 
     def reset(self) -> None:
         self._dir_cache.clear()
-        self._merger = self._merger_factory()
+        self._merger = None
         self._store_cache.clear()

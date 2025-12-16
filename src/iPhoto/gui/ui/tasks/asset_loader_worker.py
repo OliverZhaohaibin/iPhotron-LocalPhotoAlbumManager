@@ -457,6 +457,7 @@ class LiveIngestWorker(QRunnable):
         items: List[Dict[str, object]],
         featured: Iterable[str],
         signals: AssetLoaderSignals,
+        filter_mode: Optional[str] = None,
     ) -> None:
         super().__init__()
         self.setAutoDelete(True)
@@ -466,6 +467,7 @@ class LiveIngestWorker(QRunnable):
         self._signals = signals
         self._is_cancelled = False
         self._dir_cache: Dict[Path, Optional[Set[str]]] = {}
+        self._filter_mode = (filter_mode or "").casefold() or None
 
     def _path_exists(self, path: Path) -> bool:
         return _cached_path_exists(path, self._dir_cache)
@@ -495,7 +497,7 @@ class LiveIngestWorker(QRunnable):
 
                 # Process the potentially expensive metadata build in the background
                 entry = build_asset_entry(self._root, row, self._featured, path_exists=self._path_exists)
-                if entry:
+                if entry and self._allow_entry(entry):
                     chunk.append(entry)
 
                 if len(chunk) >= batch_size:
@@ -515,3 +517,18 @@ class LiveIngestWorker(QRunnable):
             if not self._is_cancelled:
                 self._signals.error.emit(self._root, str(exc))
             self._signals.finished.emit(self._root, False)
+
+    def _allow_entry(self, entry: Dict[str, object]) -> bool:
+        """Apply simple filter mode checks for live ingest paths."""
+
+        if not self._filter_mode:
+            return True
+
+        mode = self._filter_mode
+        if mode == "videos":
+            return bool(entry.get("is_video"))
+        if mode == "live":
+            return bool(entry.get("is_live"))
+        if mode == "favorites":
+            return bool(entry.get("featured"))
+        return True

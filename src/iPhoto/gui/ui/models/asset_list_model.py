@@ -504,7 +504,13 @@ class AssetListModel(QAbstractListModel):
                 self._live_ingest_signals = AssetLoaderSignals(self)
                 self._live_ingest_signals.chunkReady.connect(self._on_live_ingest_chunk)
                 self._live_ingest_signals.finished.connect(self._on_live_ingest_finished)
-                worker = LiveIngestWorker(self._album_root, live_buffer, featured_set, self._live_ingest_signals)
+                worker = LiveIngestWorker(
+                    self._album_root,
+                    live_buffer,
+                    featured_set,
+                    self._live_ingest_signals,
+                    filter_mode=self._active_filter,
+                )
                 QThreadPool.globalInstance().start(worker)
                 live_worker_started = True
 

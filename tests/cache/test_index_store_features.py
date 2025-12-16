@@ -185,3 +185,80 @@ def test_sync_favorites_mixed_unicode_forms(store: IndexStore) -> None:
     assert data[unicodedata.normalize("NFC", "café.jpg")] == 1
     assert data[unicodedata.normalize("NFD", "naïve.jpg")] == 1
     assert data["regular.jpg"] == 0
+
+
+def test_read_geometry_paginated(store: IndexStore) -> None:
+    """Test paginated fetching for cursor-based loading."""
+    rows = [
+        {"rel": "a.jpg", "media_type": 0, "dt": "2023-01-01"},
+        {"rel": "b.jpg", "media_type": 0, "dt": "2023-01-02"},
+        {"rel": "c.jpg", "media_type": 0, "dt": "2023-01-03"},
+        {"rel": "d.jpg", "media_type": 0, "dt": "2023-01-04"},
+        {"rel": "e.jpg", "media_type": 0, "dt": "2023-01-05"},
+    ]
+    store.write_rows(rows)
+
+    # Test first page
+    results, has_more = store.read_geometry_paginated(limit=2, offset=0, sort_by_date=True)
+    assert len(results) == 2
+    assert has_more is True
+    assert results[0]["rel"] == "e.jpg"  # Newest first
+    assert results[1]["rel"] == "d.jpg"
+
+    # Test second page
+    results, has_more = store.read_geometry_paginated(limit=2, offset=2, sort_by_date=True)
+    assert len(results) == 2
+    assert has_more is True
+    assert results[0]["rel"] == "c.jpg"
+    assert results[1]["rel"] == "b.jpg"
+
+    # Test last page (partial)
+    results, has_more = store.read_geometry_paginated(limit=2, offset=4, sort_by_date=True)
+    assert len(results) == 1
+    assert has_more is False
+    assert results[0]["rel"] == "a.jpg"
+
+    # Test empty page (beyond data)
+    results, has_more = store.read_geometry_paginated(limit=2, offset=10, sort_by_date=True)
+    assert len(results) == 0
+    assert has_more is False
+
+
+def test_read_geometry_paginated_with_filter(store: IndexStore) -> None:
+    """Test paginated fetching respects filter parameters."""
+    rows = [
+        {"rel": "video1.mov", "media_type": 1, "dt": "2023-01-01"},
+        {"rel": "photo1.jpg", "media_type": 0, "dt": "2023-01-02"},
+        {"rel": "video2.mov", "media_type": 1, "dt": "2023-01-03"},
+        {"rel": "photo2.jpg", "media_type": 0, "dt": "2023-01-04"},
+        {"rel": "video3.mov", "media_type": 1, "dt": "2023-01-05"},
+    ]
+    store.write_rows(rows)
+
+    # Filter for videos only
+    results, has_more = store.read_geometry_paginated(
+        limit=2, offset=0, filter_params={"filter_mode": "videos"}, sort_by_date=True
+    )
+    assert len(results) == 2
+    assert has_more is True
+    assert results[0]["rel"] == "video3.mov"
+    assert results[1]["rel"] == "video2.mov"
+
+    # Second page of videos
+    results, has_more = store.read_geometry_paginated(
+        limit=2, offset=2, filter_params={"filter_mode": "videos"}, sort_by_date=True
+    )
+    assert len(results) == 1
+    assert has_more is False
+    assert results[0]["rel"] == "video1.mov"
+
+
+def test_read_geometry_paginated_single_item(store: IndexStore) -> None:
+    """Test paginated fetching with single item in database."""
+    rows = [{"rel": "single.jpg", "media_type": 0, "dt": "2023-01-01"}]
+    store.write_rows(rows)
+
+    results, has_more = store.read_geometry_paginated(limit=10, offset=0, sort_by_date=True)
+    assert len(results) == 1
+    assert has_more is False
+    assert results[0]["rel"] == "single.jpg"

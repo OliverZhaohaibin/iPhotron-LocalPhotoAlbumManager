@@ -481,6 +481,32 @@ class IndexStore:
             if not is_nested:
                 conn.close()
 
+    # Standard columns needed for grid display
+    _GEOMETRY_COLUMNS = [
+        "id",
+        "rel",
+        "aspect_ratio",
+        "media_type",
+        "live_partner_rel",
+        "dur",
+        "year",
+        "month",
+        "dt",
+        "ts",
+        "content_id",  # needed for live photo pairing logic if needed
+        "bytes",  # needed for panorama detection logic
+        "mime",  # needed for classifier
+        "w",  # needed for panorama detection logic
+        "h",  # needed for panorama detection logic
+        "original_rel_path",  # needed for trash restore logic
+        "original_album_id",
+        "original_album_subpath",
+        "is_favorite",
+        "location",
+        "gps",
+        "micro_thumbnail"
+    ]
+
     def read_geometry_only(
         self,
         filter_params: Optional[Dict[str, Any]] = None,
@@ -505,32 +531,7 @@ class IndexStore:
         should_close = (conn != self._conn)
 
         try:
-            # Columns needed for the lightweight "viewport-first" loading strategy
-            columns = [
-                "id",
-                "rel",
-                "aspect_ratio",
-                "media_type",
-                "live_partner_rel",
-                "dur",
-                "year",
-                "month",
-                "dt",
-                "ts",
-                "content_id",  # needed for live photo pairing logic if needed
-                "bytes",  # needed for panorama detection logic
-                "mime",  # needed for classifier
-                "w",  # needed for panorama detection logic
-                "h",  # needed for panorama detection logic
-                "original_rel_path",  # needed for trash restore logic
-                "original_album_id",
-                "original_album_subpath",
-                "is_favorite",
-                "location",
-                "gps",
-                "micro_thumbnail"
-            ]
-            query = f"SELECT {', '.join(columns)} FROM assets"
+            query = f"SELECT {', '.join(self._GEOMETRY_COLUMNS)} FROM assets"
 
             # Always filter hidden assets (live photo components) in grid view
             base_where = ["live_role = 0"]
@@ -557,6 +558,72 @@ class IndexStore:
                     except (json.JSONDecodeError, TypeError):
                         d["gps"] = None
                 yield d
+        finally:
+            if should_close:
+                conn.close()
+
+    def read_geometry_paginated(
+        self,
+        limit: int,
+        offset: int = 0,
+        filter_params: Optional[Dict[str, Any]] = None,
+        sort_by_date: bool = True
+    ) -> Tuple[List[Dict[str, Any]], bool]:
+        """Read a paginated subset of asset rows for fast initial viewport loading.
+
+        This method supports cursor-based pagination to efficiently load only
+        the assets needed for the current viewport, significantly improving
+        initial load times for large libraries.
+
+        :param limit: Maximum number of rows to return.
+        :param offset: Number of rows to skip before returning results.
+        :param filter_params: Optional dictionary of SQL filter criteria.
+        :param sort_by_date: If True, sort results by date descending.
+        :return: Tuple of (rows, has_more) where has_more indicates if more data exists.
+        """
+        conn = self._get_conn()
+        should_close = (conn != self._conn)
+
+        try:
+            query = f"SELECT {', '.join(self._GEOMETRY_COLUMNS)} FROM assets"
+
+            # Always filter hidden assets (live photo components) in grid view
+            base_where = ["live_role = 0"]
+
+            filter_where, params = self._build_filter_clauses(filter_params)
+            where_clauses = base_where + filter_where
+
+            if where_clauses:
+                query += " WHERE " + " AND ".join(where_clauses)
+
+            if sort_by_date:
+                query += " ORDER BY dt DESC NULLS LAST, id DESC"
+
+            # Request one extra row to determine if more data exists
+            query += f" LIMIT ? OFFSET ?"
+            params.extend([limit + 1, offset])
+
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            cursor.execute(query, params)
+
+            rows: List[Dict[str, Any]] = []
+            for row in cursor:
+                d = dict(row)
+                # Parse GPS if present (stored as JSON string)
+                if d.get("gps"):
+                    try:
+                        d["gps"] = json.loads(d["gps"])
+                    except (json.JSONDecodeError, TypeError):
+                        d["gps"] = None
+                rows.append(d)
+
+            # Check if we got more than limit (indicating more data exists)
+            has_more = len(rows) > limit
+            if has_more:
+                rows = rows[:limit]
+
+            return rows, has_more
         finally:
             if should_close:
                 conn.close()

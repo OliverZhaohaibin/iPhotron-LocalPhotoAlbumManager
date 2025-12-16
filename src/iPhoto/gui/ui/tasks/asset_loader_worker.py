@@ -382,86 +382,90 @@ class AssetLoaderWorker(QRunnable):
         # Prepare filter params with featured list if needed
         params = copy.deepcopy(self._filter_params) if self._filter_params else {}
 
-        # 2. Stream rows using lightweight geometry-first query
-        # Use a transaction context to keep the connection open for both the read and count queries.
         dir_cache: Dict[Path, Optional[Set[str]]] = {}
 
         def _path_exists(path: Path) -> bool:
             return _cached_path_exists(path, dir_cache)
 
+        # Use paginated loading for better initial responsiveness
+        # This avoids loading ALL rows at once and instead fetches in batches
+
+        # First page: Small batch for instant UI response
+        first_page_size = 50
+        # Subsequent pages: Larger batches for efficiency
+        normal_page_size = 500
+
+        offset = 0
+        yielded_count = 0
+        total = 0
+        total_calculated = False
+        first_batch_emitted = False
+
         with store.transaction():
-            generator = store.read_geometry_only(
-                filter_params=params,
-                sort_by_date=True
-            )
-
-            chunk: List[Dict[str, object]] = []
-            last_reported = 0
-
-            # Priority: Emit first 20 items quickly
-            first_chunk_size = 20
-            normal_chunk_size = 200
-
-            total = 0
-            total_calculated = False
-            first_batch_emitted = False
-            yielded_count = 0
-
-            for position, row in enumerate(generator, start=1):
-                # Yield CPU every 50 items to keep UI responsive
-                if position % 50 == 0:
-                    QThread.msleep(10)
-
+            while True:
                 if self._is_cancelled:
                     return
 
-                entry = build_asset_entry(
-                    self._root,
-                    row,
-                    self._featured,
-                    store,
-                    path_exists=_path_exists,
+                # Determine page size based on whether we've emitted first batch
+                page_size = first_page_size if not first_batch_emitted else normal_page_size
+
+                # Fetch a page of rows using SQL LIMIT/OFFSET
+                rows, has_more = store.read_geometry_paginated(
+                    limit=page_size,
+                    offset=offset,
+                    filter_params=params,
+                    sort_by_date=True
                 )
 
-                if entry is not None:
-                    chunk.append(entry)
+                if not rows:
+                    break
 
-                # Determine emission
-                should_flush = False
+                # Calculate total count after first page for progress reporting
+                if not total_calculated:
+                    try:
+                        total = store.count(filter_hidden=True, filter_params=params)
+                        total_calculated = True
+                    except Exception as exc:
+                        LOGGER.warning("Failed to count assets in database: %s", exc, exc_info=True)
+                        total = 0
 
-                if not first_batch_emitted:
-                    if len(chunk) >= first_chunk_size:
-                        should_flush = True
-                        first_batch_emitted = True
-                elif len(chunk) >= normal_chunk_size:
-                    should_flush = True
+                # Process rows into asset entries
+                chunk: List[Dict[str, object]] = []
+                for row in rows:
+                    if self._is_cancelled:
+                        return
 
-                if should_flush:
+                    entry = build_asset_entry(
+                        self._root,
+                        row,
+                        self._featured,
+                        store,
+                        path_exists=_path_exists,
+                    )
+
+                    if entry is not None:
+                        chunk.append(entry)
+
+                if chunk:
                     yielded_count += len(chunk)
                     yield chunk
-                    chunk = []
+                    first_batch_emitted = True
 
-                    # Perform count after yielding first chunk
-                    if not total_calculated:
-                        try:
-                            total = store.count(filter_hidden=True, filter_params=params)
-                            total_calculated = True
-                        except Exception as exc:
-                            LOGGER.warning("Failed to count assets in database: %s", exc, exc_info=True)
-                            total = 0  # fallback
+                    # Update progress
+                    if total_calculated:
+                        self._signals.progressUpdated.emit(self._root, yielded_count, total)
 
-                # Update progress periodically
-                # Use >= total to robustly handle concurrent additions where position might exceed original total
-                if total_calculated and (position >= total or position - last_reported >= 50):
-                    last_reported = position
-                    self._signals.progressUpdated.emit(self._root, position, total)
+                # Move to next page
+                offset += len(rows)
 
-            if chunk:
-                yielded_count += len(chunk)
-                yield chunk
+                if not has_more:
+                    break
+
+                # Yield CPU briefly between pages to keep UI responsive
+                QThread.msleep(5)
 
             # Final progress update
-            if not total_calculated:  # If we never flushed (e.g. small album)
+            if not total_calculated:
                 total = yielded_count
             self._signals.progressUpdated.emit(self._root, total, total)
 

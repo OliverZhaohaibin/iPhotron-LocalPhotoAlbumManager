@@ -139,7 +139,32 @@ def build_asset_entry(
     featured: Set[str],
     store: Optional[IndexStore] = None,
     path_exists: Optional[Callable[[Path], bool]] = None,
+    *,
+    skip_existence_check: bool = False,
+    skip_location_resolve: bool = False,
+    skip_micro_thumbnail: bool = False,
 ) -> Optional[Dict[str, object]]:
+    """Build an asset entry dictionary from a database row.
+
+    Parameters
+    ----------
+    root : Path
+        The album root directory.
+    row : Dict[str, object]
+        The database row containing asset metadata.
+    featured : Set[str]
+        Set of featured asset relative paths.
+    store : Optional[IndexStore]
+        Optional index store for caching location updates.
+    path_exists : Optional[Callable[[Path], bool]]
+        Optional callable to check if a file exists.
+    skip_existence_check : bool
+        If True, skip the expensive file existence check. Use for fast initial loading.
+    skip_location_resolve : bool
+        If True, skip reverse geocoding for location resolution.
+    skip_micro_thumbnail : bool
+        If True, skip decoding micro thumbnail blobs to QImage.
+    """
     rel = str(row.get("rel"))
     if not rel:
         return None
@@ -148,9 +173,10 @@ def build_asset_entry(
     # work; we still perform an existence check (with directory-level caching) to
     # drop index rows pointing to files deleted externally.
     abs_path_obj = root / rel
-    exists_fn = path_exists or _path_exists_direct
-    if not exists_fn(abs_path_obj):
-        return None
+    if not skip_existence_check:
+        exists_fn = path_exists or _path_exists_direct
+        if not exists_fn(abs_path_obj):
+            return None
     abs_path = str(abs_path_obj)
 
     is_image, is_video = classify_media(row)
@@ -170,9 +196,8 @@ def build_asset_entry(
 
     # Use cached location if available, otherwise resolve and optionally cache it
     location_name = row.get("location")
-    gps_raw = None
-    if not location_name:
-        gps_raw = row.get("gps") if isinstance(row, dict) else None
+    gps_raw = row.get("gps") if isinstance(row, dict) else None
+    if not location_name and not skip_location_resolve:
         if gps_raw:
             location_name = resolve_location_name(gps_raw)
             if location_name and store:
@@ -184,9 +209,6 @@ def build_asset_entry(
                         "Failed to update location cache for asset '%s': %s",
                         rel, location_name, exc_info=True
                     )
-    else:
-        # Always extract gps_raw so it can be included in the entry dictionary.
-        gps_raw = row.get("gps") if isinstance(row, dict) else None
 
     # Resolve timestamp with legacy fallback safety
     ts_value = -1
@@ -199,11 +221,12 @@ def build_asset_entry(
         if dt_parsed != float("-inf"):
             ts_value = int(dt_parsed * 1_000_000)
 
-    # Eagerly decode micro thumbnail if present
+    # Decode micro thumbnail if present (can be skipped for faster initial load)
     micro_thumb_img = None
-    micro_thumb_blob = row.get("micro_thumbnail")
-    if isinstance(micro_thumb_blob, bytes):
-        micro_thumb_img = qimage_from_bytes(micro_thumb_blob)
+    if not skip_micro_thumbnail:
+        micro_thumb_blob = row.get("micro_thumbnail")
+        if isinstance(micro_thumb_blob, bytes):
+            micro_thumb_img = qimage_from_bytes(micro_thumb_blob)
 
     entry: Dict[str, object] = {
         "rel": rel,
@@ -319,8 +342,8 @@ class AssetLoaderWorker(QRunnable):
     """Load album assets on a background thread."""
 
     # Page sizes for cursor-based pagination
-    # First page is smaller to show content immediately
-    FIRST_PAGE_SIZE = 50
+    # First page uses fast path (no file checks) to show content immediately
+    FIRST_PAGE_SIZE = 200
     # Subsequent pages are larger for efficiency
     NORMAL_PAGE_SIZE = 500
 
@@ -425,7 +448,8 @@ class AssetLoaderWorker(QRunnable):
                     break
 
                 # Calculate total count after first page for progress reporting
-                if not total_calculated:
+                # Defer this until after the first chunk is emitted for faster initial display
+                if first_batch_emitted and not total_calculated:
                     try:
                         total = store.count(filter_hidden=True, filter_params=params)
                         total_calculated = True
@@ -434,7 +458,11 @@ class AssetLoaderWorker(QRunnable):
                         total = 0
 
                 # Process rows into asset entries
+                # For the first batch, use fast path: skip existence checks, location resolve,
+                # and micro thumbnail decoding to minimize time to first render
                 chunk: List[Dict[str, object]] = []
+                use_fast_path = not first_batch_emitted
+
                 for row in rows:
                     if self._is_cancelled:
                         return
@@ -445,6 +473,9 @@ class AssetLoaderWorker(QRunnable):
                         self._featured,
                         store,
                         path_exists=_path_exists,
+                        skip_existence_check=use_fast_path,
+                        skip_location_resolve=use_fast_path,
+                        skip_micro_thumbnail=use_fast_path,
                     )
 
                     if entry is not None:

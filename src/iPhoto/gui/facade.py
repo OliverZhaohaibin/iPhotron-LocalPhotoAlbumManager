@@ -205,10 +205,9 @@ class AppFacade(QObject):
             target_model = self._library_list_model
 
         if target_model is self._library_list_model and self._active_model is self._album_list_model:
-            if self._library_switches_from_album >= 2:
-                target_model = self._album_list_model
-            else:
-                self._library_switches_from_album += 1
+            # Always prefer the persistent library model when returning to the root
+            # so the switch stays O(1) and reuse remains predictable.
+            self._library_switches_from_album = 0
 
         self._current_album = album
         album_root = album.root

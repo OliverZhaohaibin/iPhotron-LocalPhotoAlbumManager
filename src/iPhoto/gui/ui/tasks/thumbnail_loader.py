@@ -524,7 +524,7 @@ class ThumbnailLoader(QObject):
         self._memory: OrderedDict[Tuple[str, str, int, int], Tuple[int, QPixmap]] = OrderedDict()
         self._max_memory_items = 500
 
-        self._pending_deque: deque[Tuple[Tuple[str, str, int, int], ThumbnailJob]] = deque()
+        self._pending_deque: deque[Tuple[Tuple[str, str, int, int], ThumbnailJob, int]] = deque()
         self._max_pending_jobs = 200  # Cap pending jobs to prevent queue explosion
         self._pending_keys: Set[Tuple[str, str, int, int]] = set()
 
@@ -631,34 +631,54 @@ class ThumbnailLoader(QObject):
             duration=duration,
         )
 
-        self._schedule_job(base_key, job)
+        job_priority = self._normalize_priority(priority)
+        self._schedule_job(base_key, job, job_priority)
         return retval
+    
+    @staticmethod
+    def _normalize_priority(priority: object) -> int:
+        """Convert various priority enum types to an int accepted by QThreadPool.start."""
+        if isinstance(priority, IntEnum):
+            return int(priority)
+        value = getattr(priority, "value", None)
+        if isinstance(value, int):
+            return value
+        if isinstance(priority, int):
+            return priority
+        return 0
 
-    def _schedule_job(self, key: Tuple[str, str, int, int], job: ThumbnailJob) -> None:
+    def _schedule_job(self, key: Tuple[str, str, int, int], job: ThumbnailJob, priority: int) -> None:
         # Enforce queue limit by removing the oldest pending jobs
         while len(self._pending_deque) >= self._max_pending_jobs:
-            old_key, _ = self._pending_deque.popleft()
+            old_key, _, _ = self._pending_deque.popleft()
             self._pending_keys.discard(old_key)
 
-        self._pending_deque.append((key, job))
+        self._pending_deque.append((key, job, priority))
         self._pending_keys.add(key)
         self._drain_queue()
 
     def _drain_queue(self) -> None:
         while self._active_jobs_count < self._max_active_jobs and self._pending_deque:
-            key, job = self._pending_deque.pop() # LIFO
+            key, job, priority = self._pending_deque.pop() # LIFO
             if key not in self._pending_keys:
                 continue
 
-            self._start_job(job, key)
+            self._start_job(job, key, priority)
 
     def _start_job(
         self,
         job: ThumbnailJob,
         key: Tuple[str, str, int, int],
+        priority: int,
     ) -> None:
         self._active_jobs_count += 1
-        self._pool.start(job, QThread.LowestPriority)
+        priority_value = self._normalize_priority(priority)
+        try:
+            self._pool.start(job, priority_value)
+        except Exception:
+            self._active_jobs_count = max(0, self._active_jobs_count - 1)
+            self._pending_keys.discard(key)
+            raise
 
     def _base_key(self, rel: str, size: QSize) -> Tuple[str, str, int, int]:
         assert self._album_root_str is not None
@@ -733,6 +753,6 @@ class ThumbnailLoader(QObject):
         self._missing = {k for k in self._missing if k[1] != rel}
         # Remove jobs for the invalidated rel from the pending deque to avoid zombie entries
         self._pending_deque = deque(
-            (key, job) for key, job in self._pending_deque
+            (key, job, priority) for key, job, priority in self._pending_deque
             if key[1] != rel
         )

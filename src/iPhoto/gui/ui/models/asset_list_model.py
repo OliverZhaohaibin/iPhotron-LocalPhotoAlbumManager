@@ -610,7 +610,12 @@ class AssetListModel(QAbstractListModel):
         worker = PageFetchWorker(self._data_source, limit)
         worker.signals.results_ready.connect(self._on_page_loaded)
         priority = QThread.HighestPriority.value if hasattr(QThread.HighestPriority, "value") else QThread.HighestPriority
-        QThreadPool.globalInstance().start(worker, priority)
+        try:
+            QThreadPool.globalInstance().start(worker, priority)
+        except Exception:
+            # Reset flag so future fetch attempts can proceed if the start failed.
+            self._is_fetching = False
+            raise
 
     def _on_page_loaded(self, items: List[Dict[str, object]]) -> None:
         self._is_fetching = False

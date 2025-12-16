@@ -522,7 +522,7 @@ class ThumbnailLoader(QObject):
         self._album_root_str: Optional[str] = None
 
         self._memory: OrderedDict[Tuple[str, str, int, int], Tuple[int, QPixmap]] = OrderedDict()
-        self._max_memory_items = 500
+        self._max_memory_items = 1000
 
         self._pending_deque: deque[Tuple[Tuple[str, str, int, int], ThumbnailJob, int]] = deque()
         self._max_pending_jobs = 200  # Cap pending jobs to prevent queue explosion

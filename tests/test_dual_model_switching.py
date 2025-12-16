@@ -1,7 +1,6 @@
 import json
 import os
 from pathlib import Path
-from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -11,7 +10,9 @@ pytest.importorskip("PySide6", reason="PySide6 is required", exc_type=ImportErro
 from PySide6.QtWidgets import QApplication
 
 from src.iPhoto.gui.facade import AppFacade
+from src.iPhoto.gui.ui.models.data_source import AssetDataSource
 from src.iPhoto.library.manager import LibraryManager
+from src.iPhoto.models.album import Album
 
 
 @pytest.fixture(scope="module")
@@ -108,13 +109,13 @@ def test_library_switch_reuses_cached_model(tmp_path: Path, qapp: QApplication) 
     library_root = tmp_path / "Library"
     library_root.mkdir()
 
-    dummy_album = SimpleNamespace(root=library_root, manifest={})
+    dummy_album = Album(root=library_root, manifest={})
 
     with patch("src.iPhoto.gui.facade.backend.open_album", return_value=dummy_album), patch(
         "src.iPhoto.gui.facade.backend.IndexStore"
-    ) as MockStore:
-        mock_store = MockStore.return_value
-        mock_store.read_all.return_value = iter([{"rel": "seed"}])
+    ) as mock_index_store_class:
+        mock_index_store = mock_index_store_class.return_value
+        mock_index_store.read_all.return_value = iter([{"rel": "seed"}])
 
         facade = AppFacade()
 
@@ -129,16 +130,18 @@ def test_library_switch_reuses_cached_model(tmp_path: Path, qapp: QApplication) 
 
         library_model = facade._library_list_model
         library_model._album_root = library_root
-        library_model._data_source = object()
+        library_model._data_source = MagicMock(spec=AssetDataSource)
         library_model._state_manager.set_rows([{"rel": "seed"}])
 
         facade._active_model = facade._album_list_model
 
-        with patch.object(library_model, "prepare_for_album") as prep, patch.object(
+        with patch.object(
+            library_model, "prepare_for_album"
+        ) as mock_prepare_for_album, patch.object(
             facade, "_restart_asset_load"
-        ) as restart:
+        ) as mock_restart_asset_load:
             facade.open_album(library_root)
 
-        prep.assert_not_called()
-        restart.assert_not_called()
+        mock_prepare_for_album.assert_not_called()
+        mock_restart_asset_load.assert_not_called()
         assert facade.asset_list_model is library_model

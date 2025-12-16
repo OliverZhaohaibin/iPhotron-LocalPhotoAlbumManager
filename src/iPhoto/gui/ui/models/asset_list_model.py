@@ -112,7 +112,6 @@ class AssetListModel(QAbstractListModel):
             self._album_root is not None
             and self._data_source is not None
             and not self._state_manager.has_pending_reload()
-            and self._state_manager.row_count() > 0
         )
 
     def metadata_for_absolute_path(self, path: Path) -> Optional[Dict[str, object]]:

@@ -649,7 +649,7 @@ class ThumbnailLoader(QObject):
             return int(priority)
         except (TypeError, ValueError):
             default_priority = getattr(QThread, "NormalPriority", 0)
-            fallback = getattr(default_priority, "value", default_priority)
+            fallback = default_priority.value if hasattr(default_priority, "value") else default_priority
             return fallback if isinstance(fallback, int) else 0
 
     def _schedule_job(self, key: Tuple[str, str, int, int], job: ThumbnailJob, priority: int) -> None:

@@ -117,10 +117,9 @@ class MergedAlbumSource(AssetDataSource):
         self._merger_lock = threading.Lock()
 
     def _ensure_merger(self) -> PhotoStreamMerger:
-        if self._merger is None:
-            with self._merger_lock:
-                if self._merger is None:
-                    self._merger = self._merger_factory()
+        with self._merger_lock:
+            if self._merger is None:
+                self._merger = self._merger_factory()
         return self._merger
 
     def _path_exists(self, path: Path) -> bool:

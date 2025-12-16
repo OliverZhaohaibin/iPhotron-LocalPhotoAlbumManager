@@ -249,10 +249,9 @@ class IndexStore:
 
     def _get_conn(self) -> sqlite3.Connection:
         """Return the active connection or create a new one."""
-        if not self._initialized:
-            with self._init_lock:
-                if not self._initialized:
-                    self._init_db()
+        with self._init_lock:
+            if not self._initialized:
+                self._init_db()
         if self._conn:
             return self._conn
         return sqlite3.connect(self.path)

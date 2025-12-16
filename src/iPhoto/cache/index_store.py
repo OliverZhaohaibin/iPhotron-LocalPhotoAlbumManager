@@ -17,6 +17,7 @@ import unicodedata
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Dict, Iterable, Iterator, Optional, Any, List, Tuple
+import threading
 
 from ..config import WORK_DIR_NAME
 from ..utils.logging import get_logger
@@ -39,6 +40,7 @@ class IndexStore:
         self._conn: Optional[sqlite3.Connection] = None
         self._lazy_init = lazy_init
         self._initialized = False
+        self._init_lock = threading.Lock()
         if not self._lazy_init:
             self._init_db()
 
@@ -248,7 +250,9 @@ class IndexStore:
     def _get_conn(self) -> sqlite3.Connection:
         """Return the active connection or create a new one."""
         if not self._initialized:
-            self._init_db()
+            with self._init_lock:
+                if not self._initialized:
+                    self._init_db()
         if self._conn:
             return self._conn
         return sqlite3.connect(self.path)

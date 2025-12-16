@@ -3,6 +3,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple, Set
+import threading
 
 from ....cache.index_store import IndexStore
 from ....core.merger import PhotoStreamMerger
@@ -113,10 +114,13 @@ class MergedAlbumSource(AssetDataSource):
         self._dir_cache: Dict[Path, Optional[Set[str]]] = {}
         self._merger: PhotoStreamMerger | None = None
         self._check_exists = check_exists
+        self._merger_lock = threading.Lock()
 
     def _ensure_merger(self) -> PhotoStreamMerger:
         if self._merger is None:
-            self._merger = self._merger_factory()
+            with self._merger_lock:
+                if self._merger is None:
+                    self._merger = self._merger_factory()
         return self._merger
 
     def _path_exists(self, path: Path) -> bool:

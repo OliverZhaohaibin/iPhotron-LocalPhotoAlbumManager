@@ -20,7 +20,6 @@ from PySide6.QtCore import (
     QObject,
     QRunnable,
     QSize,
-    QThread,
     QThreadPool,
     Qt,
     Signal,
@@ -525,7 +524,6 @@ class ThumbnailLoader(QObject):
         self._max_memory_items = 500
 
         self._pending_deque: deque[Tuple[Tuple[str, str, int, int], ThumbnailJob]] = deque()
-        self._max_pending_jobs = 200  # Cap pending jobs to prevent queue explosion
         self._pending_keys: Set[Tuple[str, str, int, int]] = set()
 
         self._failures: Set[Tuple[str, str, int, int]] = set()
@@ -635,11 +633,6 @@ class ThumbnailLoader(QObject):
         return retval
 
     def _schedule_job(self, key: Tuple[str, str, int, int], job: ThumbnailJob) -> None:
-        # Enforce queue limit by removing the oldest pending jobs
-        while len(self._pending_deque) >= self._max_pending_jobs:
-            old_key, _ = self._pending_deque.popleft()
-            self._pending_keys.discard(old_key)
-
         self._pending_deque.append((key, job))
         self._pending_keys.add(key)
         self._drain_queue()
@@ -658,7 +651,7 @@ class ThumbnailLoader(QObject):
         key: Tuple[str, str, int, int],
     ) -> None:
         self._active_jobs_count += 1
-        self._pool.start(job, QThread.LowestPriority)
+        self._pool.start(job)
 
     def _base_key(self, rel: str, size: QSize) -> Tuple[str, str, int, int]:
         assert self._album_root_str is not None

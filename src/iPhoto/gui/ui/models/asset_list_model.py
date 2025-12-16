@@ -15,7 +15,6 @@ from PySide6.QtCore import (
     Slot,
     QMutex,
     QMutexLocker,
-    QThread,
     QThreadPool,
 )
 from PySide6.QtGui import QPixmap
@@ -609,7 +608,7 @@ class AssetListModel(QAbstractListModel):
         self._is_fetching = True
         worker = PageFetchWorker(self._data_source, limit)
         worker.signals.results_ready.connect(self._on_page_loaded)
-        QThreadPool.globalInstance().start(worker, QThread.HighestPriority)
+        QThreadPool.globalInstance().start(worker)
 
     def _on_page_loaded(self, items: List[Dict[str, object]]) -> None:
         self._is_fetching = False

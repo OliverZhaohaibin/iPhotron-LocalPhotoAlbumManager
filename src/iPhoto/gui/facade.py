@@ -725,14 +725,14 @@ class AppFacade(QObject):
             ),
         )
 
-    def toggle_featured(self, ref: str) -> bool:
+    def toggle_featured(self, ref: str, *, abs_path: Optional[Path] = None) -> bool:
         """Toggle *ref* in the active album and mirror the change in the library."""
 
         album = self._require_album()
-        if album is None or not ref:
+        if album is None or (not ref and abs_path is None):
             return False
 
-        return self._metadata_service.toggle_featured(album, ref)
+        return self._metadata_service.toggle_featured(album, ref, abs_path=abs_path)
 
     # ------------------------------------------------------------------
     # Internal utilities

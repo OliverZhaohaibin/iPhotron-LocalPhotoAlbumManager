@@ -317,10 +317,11 @@ class PlaybackController:
             return
 
         rel = str(index.data(Roles.REL) or "")
-        if not rel:
+        abs_path = self._abs_path_from_index(index)
+        if not rel and abs_path is None:
             return
 
-        is_featured = self._facade.toggle_featured(rel)
+        is_featured = self._facade.toggle_featured(rel, abs_path=abs_path)
         self._detail_ui.update_favorite_button(current_row, is_featured=is_featured)
 
     # ------------------------------------------------------------------
@@ -390,3 +391,11 @@ class PlaybackController:
         """Ensure scrub-related state does not leak across transitions."""
 
         self._resume_playback_after_scrub = False
+
+    def _abs_path_from_index(self, index: QModelIndex) -> Path | None:
+        """Return absolute path from the given model index if available."""
+
+        abs_raw = index.data(Roles.ABS)
+        if isinstance(abs_raw, (str, Path)) and str(abs_raw):
+            return Path(abs_raw)
+        return None

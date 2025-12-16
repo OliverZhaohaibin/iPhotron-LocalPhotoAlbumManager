@@ -50,14 +50,37 @@ class AlbumMetadataService(QObject):
         album.set_cover(rel)
         return self._save_manifest(album)
 
-    def toggle_featured(self, album: Album, ref: str) -> bool:
+    def toggle_featured(self, album: Album, ref: str, *, abs_path: Path | None = None) -> bool:
         """Toggle *ref* inside *album* and mirror updates to other affected albums."""
 
-        if not ref:
+        if not ref and abs_path is None:
+            return False
+
+        ui_ref = str(ref) if ref else ""
+        if abs_path is not None:
+            absolute_asset = Path(abs_path)
+        elif ref:
+            absolute_asset = album.root / Path(ref)
+        else:
+            return False
+        try:
+            absolute_asset = absolute_asset.resolve()
+        except OSError:
+            # Resolution can fail for transient or recently moved paths; fallback to best-effort path.
+            pass
+
+        def _rel_for_album(alb: Album) -> str | None:
+            try:
+                return absolute_asset.relative_to(alb.root).as_posix()
+            except ValueError:
+                return None
+
+        primary_rel = _rel_for_album(album) or ui_ref
+        if not primary_rel:
             return False
 
         featured = album.manifest.setdefault("featured", [])
-        was_featured = ref in featured
+        was_featured = primary_rel in featured
         desired_state = not was_featured
 
         # Collect all albums that need to be updated:
@@ -65,17 +88,12 @@ class AlbumMetadataService(QObject):
         # 2. The physical album where the file actually resides (if different).
         # 3. The library root album (if different).
 
-        targets: list[tuple[Album, str]] = [(album, ref)]
+        targets: list[tuple[Album, str]] = [(album, primary_rel)]
 
         library_root: Path | None = None
         manager = self._library_manager_getter()
         if manager is not None:
             library_root = manager.root()
-
-        try:
-            absolute_asset = (album.root / ref).resolve()
-        except OSError:
-            return False
 
         if library_root:
             # Iterate through all containing albums (Physical Child, Parent, Library Root)
@@ -87,7 +105,9 @@ class AlbumMetadataService(QObject):
                 if root != album.root:  # Deduplication handled later but good optimization
                     try:
                         alb = Album.open(root)
-                        rel = absolute_asset.relative_to(root).as_posix()
+                        rel = _rel_for_album(alb)
+                        if rel is None:
+                            continue
                         targets.append((alb, rel))
                     except (OSError, ValueError, IPhotoError) as exc:
                         # Log but continue to update others
@@ -124,7 +144,11 @@ class AlbumMetadataService(QObject):
                     alb.add_featured(r)
 
         if primary_success:
-            self._asset_list_model_provider().update_featured_status(ref, desired_state)
+            asset_key_for_ui_update = ui_ref or primary_rel
+            if asset_key_for_ui_update:
+                self._asset_list_model_provider().update_featured_status(
+                    asset_key_for_ui_update, desired_state
+                )
             return desired_state
 
         return was_featured

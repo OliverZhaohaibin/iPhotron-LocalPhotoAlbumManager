@@ -342,6 +342,83 @@ def test_toggle_featured_from_library_root_for_root_asset(
     refresh.assert_not_called()
 
 
+def test_toggle_featured_uses_abs_path_for_library_view(
+    monkeypatch: pytest.MonkeyPatch,
+    mocker,
+    tmp_path: Path,
+    qapp: QApplication,
+) -> None:
+    """
+    Verifies that toggling a photo as featured via the library view with an absolute path
+    updates both the library root and the physical album manifests and sets the favorite
+    status in both IndexStores, even when the rel lacks subfolder context.
+    """
+
+    library_root = tmp_path / "Library"
+    album_root = library_root / "Trip"
+    album_root.mkdir(parents=True)
+    (album_root / ".iphoto.album.json").touch()
+
+    photo_path = album_root / "photo.jpg"
+    photo_path.touch()
+
+    root_album = DummyAlbum(library_root)
+    sub_album = DummyAlbum(album_root)
+
+    def album_opener(path):
+        path = Path(path)
+        if path == library_root:
+            return root_album
+        if path == album_root:
+            return sub_album
+        return None
+
+    monkeypatch.setattr(
+        "src.iPhoto.gui.services.album_metadata_service.Album.open",
+        album_opener,
+    )
+    monkeypatch.setattr(
+        "src.iPhoto.gui.services.album_metadata_service.QTimer.singleShot",
+        lambda _delay, callback: callback(),
+    )
+
+    store_map: dict[Path, object] = {}
+
+    def store_factory(root: Path):
+        store = mocker.MagicMock()
+        store_map[Path(root)] = store
+        return store
+
+    monkeypatch.setattr(
+        "src.iPhoto.gui.services.album_metadata_service.IndexStore",
+        store_factory,
+    )
+
+    manager = mocker.MagicMock()
+    manager.root.return_value = library_root
+    asset_model = mocker.MagicMock()
+    refresh = mocker.MagicMock()
+
+    service = _build_service(
+        asset_model=asset_model,
+        current_album=lambda: root_album,
+        library_manager_getter=lambda: manager,
+        refresh=refresh,
+    )
+
+    result = service.toggle_featured(root_album, "photo.jpg", abs_path=photo_path)
+
+    assert result is True
+    assert root_album.manifest["featured"] == ["Trip/photo.jpg"]
+    assert sub_album.manifest["featured"] == ["photo.jpg"]
+    asset_model.update_featured_status.assert_called_once_with("photo.jpg", True)
+
+    assert album_root in store_map
+    assert library_root in store_map
+    store_map[album_root].set_favorite_status.assert_called_once_with("photo.jpg", True)
+    store_map[library_root].set_favorite_status.assert_called_once_with("Trip/photo.jpg", True)
+
+
 def test_ensure_featured_entries_updates_album(
     monkeypatch: pytest.MonkeyPatch,
     mocker,

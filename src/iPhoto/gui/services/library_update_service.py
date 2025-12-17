@@ -156,6 +156,7 @@ class LibraryUpdateService(QObject):
             finished=signals.finished,
             error=signals.error,
             pause_watcher=False,
+            on_finished=lambda r: self._on_maintenance_finished(r),
             result_payload=lambda r: r,
         )
 

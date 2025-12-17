@@ -67,6 +67,37 @@ def compute_album_path(
         return root, None
 
 
+def adjust_rel_for_album(row: Dict[str, object], album_path: Optional[str]) -> Dict[str, object]:
+    """Adjust the rel path in a row to be relative to the album root.
+
+    When loading assets from the global index with album filtering, the rel paths
+    are library-relative (e.g., "Album1/photo.jpg"). This function strips the
+    album_path prefix to make them relative to the album root (e.g., "photo.jpg").
+
+    Args:
+        row: The asset row from the database.
+        album_path: The album path prefix to strip, or None if no adjustment needed.
+
+    Returns:
+        The original row if no adjustment needed, or a copy with adjusted rel path.
+    """
+    if not album_path:
+        return row
+
+    rel = row.get("rel")
+    if not rel:
+        return row
+
+    rel_str = str(rel)
+    prefix = album_path + "/"
+    if rel_str.startswith(prefix):
+        adjusted_row = dict(row)  # Don't modify original row
+        adjusted_row["rel"] = rel_str[len(prefix):]
+        return adjusted_row
+
+    return row
+
+
 def normalize_featured(featured: Iterable[str]) -> Set[str]:
     return {str(entry) for entry in featured}
 
@@ -350,7 +381,9 @@ def compute_asset_rows(
     # Filtering for videos, live photos, and favorites is now performed at the database query level
     # via filter_params in store.read_geometry_only, so no post-processing is needed here.
     for row in index_rows:
-        entry = build_asset_entry(root, row, featured_set, store, path_exists=_path_exists)
+        # Adjust rel path to be relative to the album root
+        adjusted_row = adjust_rel_for_album(row, album_path)
+        entry = build_asset_entry(root, adjusted_row, featured_set, store, path_exists=_path_exists)
         if entry is not None:
             entries.append(entry)
     return entries, len(entries)
@@ -477,9 +510,12 @@ class AssetLoaderWorker(QRunnable):
                 if self._is_cancelled:
                     return
 
+                # Adjust rel path to be relative to the album root
+                adjusted_row = adjust_rel_for_album(row, album_path)
+
                 entry = build_asset_entry(
                     self._root,
-                    row,
+                    adjusted_row,
                     self._featured,
                     store,
                     path_exists=_path_exists,

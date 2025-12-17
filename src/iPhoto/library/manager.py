@@ -264,6 +264,19 @@ class LibraryManager(QObject):
 
         return filtered
 
+    def get_live_scan_snapshot(self) -> Tuple[Optional[Path], List[Dict]]:
+        """Return the raw live scan buffer and its root path.
+
+        This method avoids any path resolution or filtering logic, making it safe
+        and fast to call from the main thread even when the buffer is large.
+        The caller is responsible for processing the data (e.g., in a background worker).
+        """
+        locker = QMutexLocker(self._scan_buffer_lock)
+        if not self._live_scan_buffer:
+            return None, []
+        # Return a shallow copy of the list to allow safe iteration outside the lock
+        return self._live_scan_root, list(self._live_scan_buffer)
+
     def _on_scan_chunk(self, root: Path, chunk: List[dict]) -> None:
         """Handle incoming scan chunks: update buffer only."""
 

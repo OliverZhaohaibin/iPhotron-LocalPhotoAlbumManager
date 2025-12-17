@@ -564,7 +564,12 @@ class AssetLoaderWorker(QRunnable):
             self._signals.progressUpdated.emit(self._root, total, total)
 
 class LiveIngestWorker(QRunnable):
-    """Process in-memory live scan results on a background thread."""
+    """Process in-memory live scan results on a background thread.
+
+    This worker handles path resolution, filtering, and asset building for items
+    that are currently in the scan buffer or just arrived from the scanner,
+    offloading these expensive IO/CPU operations from the main thread.
+    """
 
     def __init__(
         self,
@@ -573,7 +578,18 @@ class LiveIngestWorker(QRunnable):
         featured: Iterable[str],
         signals: AssetLoaderSignals,
         filter_params: Optional[Dict[str, object]] = None,
+        scan_root: Optional[Path] = None,
     ) -> None:
+        """
+        Args:
+            root: The album root where assets are being viewed (view_root).
+            items: List of raw asset rows (from scanner or buffer).
+            featured: Set of featured asset paths.
+            signals: Signals to emit results.
+            filter_params: Optional filters.
+            scan_root: The root of the scan operation that produced the items.
+                       If provided and different from `root`, paths will be adjusted.
+        """
         super().__init__()
         self.setAutoDelete(True)
         self._root = root
@@ -581,6 +597,7 @@ class LiveIngestWorker(QRunnable):
         self._featured = normalize_featured(featured)
         self._signals = signals
         self._filter_params = filter_params or {}
+        self._scan_root = scan_root
         self._is_cancelled = False
         self._dir_cache: Dict[Path, Optional[Set[str]]] = {}
 
@@ -592,10 +609,6 @@ class LiveIngestWorker(QRunnable):
 
         This applies the same filter semantics as IndexStore._build_filter_clauses
         but operates on in-memory row dictionaries instead of SQL.
-
-        Key differences from the database filter:
-        - For 'favorites': Also checks the featured set, since live scan items
-          may not yet have is_favorite persisted in the database.
         """
         filter_mode = self._filter_params.get("filter_mode")
         if not filter_mode:
@@ -626,6 +639,29 @@ class LiveIngestWorker(QRunnable):
             pass  # Environment may not support priority changes
 
         try:
+            # Pre-calculate path adjustment prefix/logic if needed
+            prefix_to_add: Optional[str] = None
+            prefix_to_strip: Optional[str] = None
+            path_mismatch = False
+
+            if self._scan_root:
+                try:
+                    scan_root_res = self._scan_root.resolve()
+                    view_root_res = self._root.resolve()
+
+                    if scan_root_res != view_root_res:
+                        path_mismatch = True
+                        if view_root_res in scan_root_res.parents:
+                            # Scanning child, viewing parent
+                            prefix_to_add = scan_root_res.relative_to(view_root_res).as_posix()
+                        elif scan_root_res in view_root_res.parents:
+                            # Scanning parent, viewing child
+                            prefix_to_strip = view_root_res.relative_to(scan_root_res).as_posix() + "/"
+                except (OSError, ValueError):
+                    # If paths cannot be resolved or related, treat as mismatch that filters everything out
+                    # unless we are liberal. For now, assume if resolution fails, we skip adjustment.
+                    pass
+
             chunk: List[Dict[str, object]] = []
             # Batch size to ensure responsiveness and smooth streaming
             batch_size = 50
@@ -638,12 +674,36 @@ class LiveIngestWorker(QRunnable):
                 if self._is_cancelled:
                     break
 
+                adjusted_row = row
+
+                # Perform path adjustment if scanning logic requires it
+                if path_mismatch:
+                    row_rel = row.get("rel")
+                    if not isinstance(row_rel, str) or not row_rel:
+                        continue
+
+                    if prefix_to_add:
+                        # Append prefix
+                        adjusted_row = row.copy()
+                        adjusted_row["rel"] = f"{prefix_to_add}/{row_rel}"
+                    elif prefix_to_strip:
+                        # Strip prefix if it matches
+                        if row_rel.startswith(prefix_to_strip):
+                            adjusted_row = row.copy()
+                            adjusted_row["rel"] = row_rel[len(prefix_to_strip):]
+                        else:
+                            # Item is outside the view root
+                            continue
+                    else:
+                        # Disjoint paths
+                        continue
+
                 # Apply filter before processing (skip non-matching items early)
-                if not self._should_include_row(row):
+                if not self._should_include_row(adjusted_row):
                     continue
 
                 # Process the potentially expensive metadata build in the background
-                entry = build_asset_entry(self._root, row, self._featured, path_exists=self._path_exists)
+                entry = build_asset_entry(self._root, adjusted_row, self._featured, path_exists=self._path_exists)
                 if entry:
                     chunk.append(entry)
 

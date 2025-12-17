@@ -477,7 +477,10 @@ class AssetListModel(QAbstractListModel):
                         self._current_live_worker.cancel()
                         self._current_live_worker = None
 
-                    live_items = self._facade.library_manager.get_live_scan_results(relative_to=self._album_root)
+                    # Use get_live_scan_snapshot (fast, no logic) instead of get_live_scan_results (slow logic).
+                    # The worker handles path adjustment.
+                    scan_root, live_items = self._facade.library_manager.get_live_scan_snapshot()
+
                     if live_items:
                         # Create dedicated signals for the live ingest worker.
                         # We use a dedicated signal object to avoid interfering with the main loader's state,
@@ -492,6 +495,7 @@ class AssetListModel(QAbstractListModel):
                             featured,
                             live_signals,
                             filter_params=filter_params,
+                            scan_root=scan_root,
                         )
                         self._current_live_worker = worker
                         QThreadPool.globalInstance().start(worker)
@@ -638,83 +642,36 @@ class AssetListModel(QAbstractListModel):
             self._is_flushing = False
 
     def _on_scan_chunk_ready(self, root: Path, chunk: List[Dict[str, object]]) -> None:
-        """Integrate fresh rows from the scanner into the live view."""
+        """Integrate fresh rows from the scanner into the live view via background worker."""
 
         if not self._album_root or not chunk:
             return
 
-        # Ensure asset paths are correctly interpreted relative to the current album view.
-        # If the scan root and album root differ, re-base or filter asset paths so that
-        # they are relative to the album root as expected by AssetListModel.
-        try:
-            scan_root = root.resolve()
-            view_root = self._album_root.resolve()
-        except OSError as exc:
-            logger.warning("Failed to resolve paths during scan chunk processing: %s", exc)
-            return
-
-        is_direct_match = (scan_root == view_root)
-        is_scan_parent_of_view = (scan_root in view_root.parents)
-
-        if not (is_direct_match or is_scan_parent_of_view):
-            return
-
+        # Offload all processing (path resolution, existence checks, filtering)
+        # to a background worker to avoid blocking the UI thread.
         manifest = self._facade.current_album.manifest if self._facade.current_album else {}
         featured = manifest.get("featured", []) or []
-        featured_set = normalize_featured(featured)
 
-        entries: List[Dict[str, object]] = []
-        for row in chunk:
-            # `row['rel']` is relative to `scan_root`
-            raw_rel = row.get("rel")
-            if not raw_rel:
-                continue
+        filter_params = {}
+        if self._active_filter:
+            filter_params["filter_mode"] = self._active_filter
 
-            full_path = scan_root / raw_rel
+        live_signals = AssetLoaderSignals(self)
+        live_signals.chunkReady.connect(self._on_loader_chunk_ready)
+        # Self-cleaning worker signal
+        live_signals.finished.connect(lambda _, __: live_signals.deleteLater())
 
-            # Check if file is inside view_root
-            try:
-                view_rel = full_path.relative_to(view_root).as_posix()
-            except ValueError:
-                # File not inside current view
-                continue
-            except OSError as e:
-                logger.error(
-                    "OSError while checking if %s is relative to %s: %s",
-                    full_path, view_root, e
-                )
-                continue
-
-            # Re-check uniqueness using the VIEW relative path
-            if normalise_rel_value(view_rel) in self._state_manager.row_lookup:
-                continue
-
-            # Re-base the row's 'rel' path to be relative to the current view root.
-            # Creates a shallow copy to avoid modifying the original row dict.
-            adjusted_row = row.copy()
-            adjusted_row['rel'] = view_rel
-
-            entry = build_asset_entry(
-                view_root, adjusted_row, featured_set
-            )
-
-            if entry is not None:
-                if self._active_filter == "videos" and not entry.get("is_video"):
-                    continue
-                if self._active_filter == "live" and not entry.get("is_live"):
-                    continue
-                if self._active_filter == "favorites" and not entry.get("featured"):
-                    continue
-
-                entries.append(entry)
-
-        if entries:
-            start_row = self._state_manager.row_count()
-            end_row = start_row + len(entries) - 1
-            self.beginInsertRows(QModelIndex(), start_row, end_row)
-            self._state_manager.append_chunk(entries)
-            self.endInsertRows()
-            self._state_manager.on_external_row_inserted(start_row, len(entries))
+        # Spawn a worker for this specific chunk.
+        # Note: root here is the SCAN root, while self._album_root is the VIEW root.
+        worker = LiveIngestWorker(
+            self._album_root,
+            chunk,
+            featured,
+            live_signals,
+            filter_params=filter_params,
+            scan_root=root,
+        )
+        QThreadPool.globalInstance().start(worker)
 
     def _on_loader_progress(self, root: Path, current: int, total: int) -> None:
         if not self._album_root or root != self._album_root:

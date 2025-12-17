@@ -917,10 +917,29 @@ class IndexStore:
             params: List[Any] = []
 
             # Cursor condition for seek pagination
-            if cursor_dt is not None and cursor_id is not None:
-                # Row value comparison for efficient seeking
-                where_clauses.append("(dt, id) < (?, ?)")
-                params.extend([cursor_dt, cursor_id])
+            if cursor_id is not None:
+                if cursor_dt is not None:
+                    # Row value comparison for efficient seeking.
+                    # Note: We must explicitly allow NULL dates because 'dt < ?' will fail for NULLs.
+                    # We want rows where:
+                    # 1. dt < cursor_dt (Valid date older than cursor)
+                    # 2. OR dt IS NULL (NULL dates are "older" / come after valid dates in DESC NULLS LAST)
+                    # 3. OR dt = cursor_dt AND id < cursor_id (Same date, smaller ID)
+                    #
+                    # Standard (dt, id) < (val, val) logic:
+                    #   (dt < val) OR (dt = val AND id < val)
+                    # If dt is NULL, (dt < val) is NULL (false).
+                    # So we miss the NULL items when transitioning from valid date to NULL.
+                    #
+                    # So we need to handle the transition explicitly.
+                    where_clauses.append("((dt < ?) OR (dt IS NULL) OR (dt = ? AND id < ?))")
+                    params.extend([cursor_dt, cursor_dt, cursor_id])
+                else:
+                    # Pagination within NULL dt region.
+                    # Since NULLs are last (NULLS LAST in DESC), if we are at a NULL dt,
+                    # we only need to compare ID for items that also have NULL dt.
+                    where_clauses.append("dt IS NULL AND id < ?")
+                    params.append(cursor_id)
 
             # Album path filtering
             if album_path is not None:

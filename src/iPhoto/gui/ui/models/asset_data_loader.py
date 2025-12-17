@@ -26,13 +26,18 @@ class AssetDataLoader(QObject):
     # 20,000 rows is roughly instantaneous on modern SSDs with SQLite.
     SYNC_LOAD_THRESHOLD: int = 20000
 
-    def __init__(self, parent: QObject | None = None) -> None:
+    def __init__(self, parent: QObject | None = None, library_root: Optional[Path] = None) -> None:
         """Initialise the loader wrapper."""
         super().__init__(parent)
         self._pool = QThreadPool.globalInstance()
         self._worker: Optional[AssetLoaderWorker] = None
         self._signals: Optional[AssetLoaderSignals] = None
         self._request_id: int = 0
+        self._library_root: Optional[Path] = library_root
+
+    def set_library_root(self, root: Path) -> None:
+        """Update the library root for global index access."""
+        self._library_root = root
 
     def is_running(self) -> bool:
         """Return ``True`` while a worker is active."""
@@ -79,9 +84,12 @@ class AssetDataLoader(QObject):
             synchronously, or None if it should be loaded asynchronously instead.
         """
 
+        # Use library_root for IndexStore if available
+        effective_index_root = self._library_root if self._library_root else root
+
         try:
             # We use row count from SQLite instead of file size.
-            count = IndexStore(root).count(filter_hidden=True, filter_params=filter_params)
+            count = IndexStore(effective_index_root).count(filter_hidden=True, filter_params=filter_params)
         except Exception:
             count = 0
 
@@ -171,7 +179,11 @@ class AssetDataLoader(QObject):
             lambda r, msg: self._handle_error(r, msg, current_request_id)
         )
 
-        worker = AssetLoaderWorker(root, featured, signals, filter_params=filter_params)
+        worker = AssetLoaderWorker(
+            root, featured, signals,
+            filter_params=filter_params,
+            library_root=self._library_root,
+        )
         self._worker = worker
         self._signals = signals
         self._pool.start(worker)
@@ -216,7 +228,11 @@ class AssetDataLoader(QObject):
             dictionaries and total_count is the total number of assets in the album.
         """
 
-        return compute_asset_rows(root, featured, filter_params=filter_params)
+        return compute_asset_rows(
+            root, featured,
+            filter_params=filter_params,
+            library_root=self._library_root,
+        )
 
     def _handle_chunk_ready(
         self, root: Path, chunk: List[Dict[str, object]], request_id: int

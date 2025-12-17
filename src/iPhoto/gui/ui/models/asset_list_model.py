@@ -114,8 +114,9 @@ class AssetListModel(QAbstractListModel):
         self._facade.scanChunkReady.connect(self._on_scan_chunk_ready)
 
     def set_library_root(self, root: Path) -> None:
-        """Update the centralized library root for thumbnail generation."""
+        """Update the centralized library root for thumbnail generation and index access."""
         self._cache_manager.set_library_root(root)
+        self._data_loader.set_library_root(root)
 
     def album_root(self) -> Optional[Path]:
         """Return the path of the currently open album, if any."""

@@ -45,6 +45,22 @@ def normalize_path(path_str: str) -> str:
     return Path(path_str).as_posix()
 
 
+def escape_like_pattern(path: str) -> str:
+    """Escape special characters in a path for use in SQL LIKE patterns.
+
+    SQLite's LIKE operator treats '%' and '_' as wildcards. This function
+    escapes those characters (and backslashes) so they match literally when
+    used with 'ESCAPE \\'.
+
+    Args:
+        path: The path string to escape.
+
+    Returns:
+        The escaped path suitable for use in a LIKE pattern.
+    """
+    return path.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
 class IndexStore:
     """Read/write helper for the global ``global_index.db`` SQLite database.
 
@@ -555,7 +571,9 @@ class IndexStore:
     def read_geometry_only(
         self,
         filter_params: Optional[Dict[str, Any]] = None,
-        sort_by_date: bool = True
+        sort_by_date: bool = True,
+        album_path: Optional[str] = None,
+        include_subalbums: bool = True,
     ) -> Iterator[Dict[str, Any]]:
         """Yield lightweight asset rows (geometry & core metadata) for fast grid layout.
 
@@ -571,6 +589,8 @@ class IndexStore:
                                 - 'media_type' (int): Filter by media type.
                                 - 'filter_mode' (str): Filter mode, accepts "videos", "live", or "favorites".
         :param sort_by_date: If True, sort results by date descending.
+        :param album_path: If provided, filter to assets in this album path.
+        :param include_subalbums: If True, include assets from sub-albums (default True).
         """
         conn = self._get_conn()
         should_close = (conn != self._conn)
@@ -605,8 +625,24 @@ class IndexStore:
 
             # Always filter hidden assets (live photo components) in grid view
             base_where = ["live_role = 0"]
+            params: List[Any] = []
 
-            filter_where, params = self._build_filter_clauses(filter_params)
+            # Album path filtering
+            if album_path is not None:
+                if include_subalbums:
+                    # Match exact album or any sub-album
+                    base_where.append(
+                        "(parent_album_path = ? OR parent_album_path LIKE ? ESCAPE '\\')"
+                    )
+                    params.append(album_path)
+                    escaped_path = escape_like_pattern(album_path)
+                    params.append(f"{escaped_path}/%")
+                else:
+                    base_where.append("parent_album_path = ?")
+                    params.append(album_path)
+
+            filter_where, filter_params_list = self._build_filter_clauses(filter_params)
+            params.extend(filter_params_list)
             where_clauses = base_where + filter_where
 
             if where_clauses:
@@ -868,8 +904,7 @@ class IndexStore:
                         "(parent_album_path = ? OR parent_album_path LIKE ? ESCAPE '\\')"
                     )
                     params.append(album_path)
-                    # Escape \ first, then % and _ for LIKE pattern
-                    escaped_path = album_path.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+                    escaped_path = escape_like_pattern(album_path)
                     params.append(f"{escaped_path}/%")
                 else:
                     where_clauses.append("parent_album_path = ?")
@@ -940,8 +975,7 @@ class IndexStore:
                     "(parent_album_path = ? OR parent_album_path LIKE ? ESCAPE '\\')"
                 )
                 params.append(album_path)
-                # Escape \ first, then % and _ for LIKE pattern
-                escaped_path = album_path.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+                escaped_path = escape_like_pattern(album_path)
                 params.append(f"{escaped_path}/%")
             else:
                 where_clauses.append("parent_album_path = ?")
@@ -1018,8 +1052,7 @@ class IndexStore:
                     "(parent_album_path = ? OR parent_album_path LIKE ? ESCAPE '\\')"
                 )
                 params.append(album_path)
-                # Escape \ first, then % and _ for LIKE pattern
-                escaped_path = album_path.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+                escaped_path = escape_like_pattern(album_path)
                 params.append(f"{escaped_path}/%")
             else:
                 where_clauses.append("parent_album_path = ?")

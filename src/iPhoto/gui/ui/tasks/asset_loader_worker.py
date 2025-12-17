@@ -257,6 +257,7 @@ def compute_asset_rows(
     root: Path,
     featured: Iterable[str],
     filter_params: Optional[Dict[str, object]] = None,
+    library_root: Optional[Path] = None,
 ) -> Tuple[List[Dict[str, object]], int]:
     """
     Assemble asset entries for grid views, applying optional filtering.
@@ -274,6 +275,9 @@ def compute_asset_rows(
               Determines which asset types are included.
             - Additional keys may be supported by the index store for filtering.
         If None or empty, no filtering is applied.
+    library_root : Optional[Path], optional
+        The root directory of the library. If provided, uses the global index at
+        library_root and filters by album path. If None, uses root for the index.
 
     Returns
     -------
@@ -287,14 +291,32 @@ def compute_asset_rows(
     params = copy.deepcopy(filter_params) if filter_params else {}
     featured_set = normalize_featured(featured)
 
-    store = IndexStore(root)
+    # Determine the effective index root and album filter
+    effective_index_root = library_root if library_root else root
+    album_path: Optional[str] = None
+
+    if library_root:
+        # Ensure work dir exists at library root
+        ensure_work_dir(library_root, WORK_DIR_NAME)
+        # Compute album path relative to library root for filtering
+        try:
+            if root.resolve() != library_root.resolve():
+                album_path = root.resolve().relative_to(library_root.resolve()).as_posix()
+        except (ValueError, OSError):
+            # If root is not under library_root, fall back to using root as index
+            effective_index_root = root
+
+    store = IndexStore(effective_index_root)
     dir_cache: Dict[Path, Optional[Set[str]]] = {}
 
     def _path_exists(path: Path) -> bool:
         return _cached_path_exists(path, dir_cache)
+
     index_rows = list(store.read_geometry_only(
         filter_params=params,
-        sort_by_date=True
+        sort_by_date=True,
+        album_path=album_path,
+        include_subalbums=True,
     ))
     entries: List[Dict[str, object]] = []
     # Filtering for videos, live photos, and favorites is now performed at the database query level
@@ -327,6 +349,7 @@ class AssetLoaderWorker(QRunnable):
         featured: Iterable[str],
         signals: AssetLoaderSignals,
         filter_params: Optional[Dict[str, object]] = None,
+        library_root: Optional[Path] = None,
     ) -> None:
         super().__init__()
         self.setAutoDelete(True)
@@ -335,6 +358,7 @@ class AssetLoaderWorker(QRunnable):
         self._signals = signals
         self._is_cancelled = False
         self._filter_params = filter_params
+        self._library_root = library_root
 
     @property
     def root(self) -> Path:
@@ -378,7 +402,23 @@ class AssetLoaderWorker(QRunnable):
     # ------------------------------------------------------------------
     def _build_payload_chunks(self) -> Iterable[List[Dict[str, object]]]:
         ensure_work_dir(self._root, WORK_DIR_NAME)
-        store = IndexStore(self._root)
+
+        # Determine the effective index root and album path for filtering
+        effective_index_root = self._library_root if self._library_root else self._root
+        album_path: Optional[str] = None
+
+        if self._library_root:
+            # Ensure work dir exists at library root
+            ensure_work_dir(self._library_root, WORK_DIR_NAME)
+            # Compute album path relative to library root for filtering
+            try:
+                if self._root.resolve() != self._library_root.resolve():
+                    album_path = self._root.resolve().relative_to(self._library_root.resolve()).as_posix()
+            except (ValueError, OSError):
+                # If root is not under library_root, fall back to using root as index
+                effective_index_root = self._root
+
+        store = IndexStore(effective_index_root)
 
         # Emit indeterminate progress initially
         self._signals.progressUpdated.emit(self._root, 0, 0)
@@ -396,7 +436,9 @@ class AssetLoaderWorker(QRunnable):
         with store.transaction():
             generator = store.read_geometry_only(
                 filter_params=params,
-                sort_by_date=True
+                sort_by_date=True,
+                album_path=album_path,
+                include_subalbums=True,
             )
 
             chunk: List[Dict[str, object]] = []

@@ -13,7 +13,7 @@ import unicodedata
 from ..config import EXPORT_DIR_NAME, WORK_DIR_NAME
 from ..errors import ExternalToolError, IPhotoError
 from ..utils.exiftool import get_metadata_batch
-from ..utils.hashutils import file_xxh3
+from ..utils.hashutils import file_xxh3, compute_file_id
 from ..utils.logging import get_logger
 from ..utils.pathutils import ensure_work_dir, is_excluded, should_include
 from .metadata import read_image_meta_with_exiftool, read_video_meta
@@ -391,7 +391,7 @@ def _build_base_row(root: Path, file_path: Path, stat: Any) -> Dict[str, Any]:
             "+00:00", "Z"
         ),
         "ts": int(stat.st_mtime * 1_000_000),
-        "id": f"as_{file_xxh3(file_path)}",
+        "id": f"as_{compute_file_id(file_path)}",
         "mime": mimetypes.guess_type(file_path.name)[0],
     }
 

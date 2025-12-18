@@ -99,4 +99,4 @@ def test_dual_model_switching(tmp_path: Path, qapp: QApplication) -> None:
 
 
     facade.open_album(root)
-    assert facade.asset_list_model == facade._album_list_model
+    assert facade.asset_list_model == facade._library_list_model

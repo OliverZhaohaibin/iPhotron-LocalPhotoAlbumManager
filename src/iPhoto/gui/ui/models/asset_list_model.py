@@ -244,9 +244,36 @@ class AssetListModel(QAbstractListModel):
     def populate_from_cache(self) -> bool:
         """Synchronously load cached index data when the file is small.
 
-        Disabled to enforce streaming behavior and prevent main thread blocking on large albums.
+        Enabled to support seamless transitions from the global index ("All Photos")
+        to individual albums without the visual "flash" of a model reset.
         """
-        return False
+        if not self._album_root:
+            return False
+
+        manifest = self._facade.current_album.manifest if self._facade.current_album else {}
+        featured = manifest.get("featured", []) or []
+
+        filter_params = {}
+        if self._active_filter:
+            filter_params["filter_mode"] = self._active_filter
+
+        result = self._data_loader.populate_from_cache(
+            self._album_root,
+            featured,
+            filter_params=filter_params,
+        )
+
+        if result is None:
+            return False
+
+        rows, _total = result
+        self.beginResetModel()
+        self._state_manager.set_rows(rows)
+        self.endResetModel()
+
+        # Prioritize visible rows immediately
+        self.prioritize_rows(0, min(len(rows), 20) - 1)
+        return True
 
     # ------------------------------------------------------------------
     # Qt model implementation

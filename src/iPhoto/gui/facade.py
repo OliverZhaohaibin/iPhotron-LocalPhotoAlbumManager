@@ -20,6 +20,7 @@ from .services import (
     AssetMoveService,
     LibraryUpdateService,
 )
+from .ui.tasks.asset_loader_worker import compute_album_path
 
 if TYPE_CHECKING:
     from ..library.manager import LibraryManager
@@ -242,12 +243,15 @@ class AppFacade(QObject):
         # and trigger a background scan if necessary.
         has_assets = False
         try:
-            store = backend.IndexStore(album_root)
-            # Peek at the first item to see if there is any data.
-            # read_all returns an iterator, so next() is sufficient.
-            next(store.read_all())
-            has_assets = True
-        except (StopIteration, IPhotoError):
+            effective_index_root, album_path = compute_album_path(album_root, library_root)
+            store = backend.IndexStore(effective_index_root)
+            # Use count() with filtering to correctly detect assets belonging to this album
+            # from the global index, instead of relying on next(read_all()) which might be empty
+            # for a subfolder if using the global store without correct path context.
+            count = store.count(album_path=album_path, include_subalbums=True)
+            if count > 0:
+                has_assets = True
+        except (StopIteration, IPhotoError, Exception):
             pass
 
         # We now check if the LibraryManager is ALREADY scanning this path.

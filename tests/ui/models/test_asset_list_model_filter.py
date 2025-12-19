@@ -14,6 +14,7 @@ class MockFacade(QObject):
     def __init__(self):
         super().__init__()
         self._current_album = None
+        self.library_manager = None
 
     @property
     def current_album(self):
@@ -44,8 +45,8 @@ class MockLoader(QObject):
         return [], 0
 
 def test_asset_list_model_set_filter_mode(tmp_path):
-    # Patch the loader creation inside AssetListModel
-    with patch('src.iPhoto.gui.ui.models.asset_list_model.AssetDataLoader') as MockLoaderClass:
+    # Patch the loader creation inside IngestionController
+    with patch('src.iPhoto.gui.ui.models.logic.ingestion_controller.AssetDataLoader') as MockLoaderClass:
         mock_loader_instance = MockLoader()
         MockLoaderClass.return_value = mock_loader_instance
 

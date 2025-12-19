@@ -1,23 +1,23 @@
-"""State helpers extracted from :class:`AssetListModel`."""
+"""Data repository for AssetListModel."""
 
 from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Dict, List, Optional, Set, Tuple, TYPE_CHECKING
 
 from PySide6.QtCore import QModelIndex
 
-from ....utils.pathutils import normalise_rel_value
+from .....utils.pathutils import normalise_rel_value
 
 logger = logging.getLogger(__name__)
 
-if False:  # pragma: no cover - circular import guard
-    from .asset_list_model import AssetListModel
-    from .asset_cache_manager import AssetCacheManager
+if TYPE_CHECKING:
+    from ..asset_list_model import AssetListModel
+    from ..asset_cache_manager import AssetCacheManager
 
 
-class AssetListStateManager:
+class AssetRepository:
     """Maintain row data and transient flags for the asset list model."""
 
     def __init__(self, model: "AssetListModel", cache_manager: "AssetCacheManager") -> None:
@@ -126,6 +126,12 @@ class AssetListStateManager:
             The row index corresponding to the given absolute path, or None if not found.
         """
         return self._abs_lookup.get(abs_path)
+
+    def get_by_index(self, index: int) -> Optional[Dict[str, object]]:
+        """Return the row at the specified index."""
+        if 0 <= index < len(self._rows):
+            return self._rows[index]
+        return None
 
     @staticmethod
     def normalise_key(value: Optional[str]) -> Optional[str]:
@@ -535,6 +541,44 @@ class AssetListStateManager:
         self._virtual_move_requires_revisit = False
 
         return restored_rows
+
+    def metadata_for_absolute_path(self, path: Path, album_root: Optional[Path]) -> Optional[Dict[str, object]]:
+        """Return the cached metadata row for *path* if it belongs to the model."""
+        rows = self._rows
+        if not rows:
+            return None
+
+        try:
+            normalized_path = path.resolve()
+        except OSError:
+            normalized_path = path
+
+        if album_root is not None:
+            try:
+                normalized_root = album_root.resolve()
+            except OSError:
+                normalized_root = album_root
+            try:
+                rel_key = normalized_path.relative_to(normalized_root).as_posix()
+            except ValueError:
+                rel_key = None
+            else:
+                row_index = self._row_lookup.get(rel_key)
+                if row_index is not None and 0 <= row_index < len(rows):
+                    return rows[row_index]
+
+        normalized_str = str(normalized_path)
+
+        # O(1) Lookup optimization
+        row_index = self.get_index_by_abs(normalized_str)
+        if row_index is not None and 0 <= row_index < len(rows):
+            return rows[row_index]
+
+        # Fall back to the recently removed cache
+        cached = self._cache.recently_removed(normalized_str)
+        if cached is not None:
+            return cached
+        return None
 
     @staticmethod
     def _safe_resolve(path: Path) -> Path:

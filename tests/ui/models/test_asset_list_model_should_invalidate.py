@@ -13,8 +13,9 @@ class TestAssetListModelShouldInvalidate:
             m.setattr("PySide6.QtCore.QTimer", MagicMock())
             m.setattr("PySide6.QtCore.QThreadPool", MagicMock())
             m.setattr("src.iPhoto.gui.ui.models.asset_list_model.AssetCacheManager", MagicMock())
-            m.setattr("src.iPhoto.gui.ui.models.asset_list_model.AssetDataLoader", MagicMock())
-            m.setattr("src.iPhoto.gui.ui.models.asset_list_model.AssetListStateManager", MagicMock())
+            m.setattr("src.iPhoto.gui.ui.models.asset_list_model.AssetRepository", MagicMock())
+            m.setattr("src.iPhoto.gui.ui.models.asset_list_model.AssetIngestionController", MagicMock())
+            m.setattr("src.iPhoto.gui.ui.models.asset_list_model.AssetLiveSyncManager", MagicMock())
             m.setattr("src.iPhoto.gui.ui.models.asset_list_model.AssetRowAdapter", MagicMock())
 
             model = AssetListModel(facade)

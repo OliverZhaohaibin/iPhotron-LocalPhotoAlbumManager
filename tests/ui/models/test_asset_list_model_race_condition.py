@@ -3,6 +3,7 @@ from unittest.mock import MagicMock, patch
 from PySide6.QtCore import QObject, Signal
 from pathlib import Path
 from src.iPhoto.gui.ui.models.asset_list_model import AssetListModel
+from src.iPhoto.gui.ui.models.list_diff_calculator import ListDiffResult
 
 # Mock classes to simulate the environment
 
@@ -58,21 +59,23 @@ class MockAssetCacheManager(QObject):
         self.resolve_thumbnail = MagicMock()
         self.recently_removed = MagicMock(return_value=None)
         self.thumbnail_loader = MagicMock()
+        self.clear_placeholders = MagicMock()
+        self.clear_all_thumbnails = MagicMock()
+        self.clear_visible_rows = MagicMock()
 
 @pytest.fixture
-def model_setup(qapp):
+def model_setup():
     """Setup model with mocked dependencies."""
     facade = MockFacade()
 
     # Patch AssetDataLoader to use our MockLoader
-    with patch('src.iPhoto.gui.ui.models.asset_list_model.AssetDataLoader', side_effect=MockLoader) as mock_loader_cls:
+    with patch('src.iPhoto.gui.ui.models.logic.ingestion_controller.AssetDataLoader', side_effect=MockLoader) as mock_loader_cls:
         # Also patch AssetCacheManager to avoid crashes in headless env
         with patch('src.iPhoto.gui.ui.models.asset_list_model.AssetCacheManager', side_effect=MockAssetCacheManager) as mock_cache_cls:
             model = AssetListModel(facade)
 
             # Access the instantiated mock loader
-            # AssetListModel instantiates AssetDataLoader in __init__
-            mock_loader_instance = model._data_loader
+            mock_loader_instance = model._ingestion._data_loader
 
             yield model, mock_loader_instance
 
@@ -100,10 +103,6 @@ def test_race_condition_stale_chunk_ignored(model_setup):
     # This will internally call start_load -> cancel existing loader
     model.set_filter_mode("videos")
 
-    # Ideally, model.set_filter_mode calls start_load immediately.
-    # start_load will call loader.cancel() and mark reload pending because loader is running.
-    # It won't call loader.start() yet because the previous one is "running".
-
     assert model._active_filter == "videos"
     # verify cancel was called
     assert loader.cancel.called
@@ -114,8 +113,6 @@ def test_race_condition_stale_chunk_ignored(model_setup):
     stale_chunk = [{"rel": "photo_A.jpg", "abs": "/library/root/photo_A.jpg", "ts": 100}]
 
     # We want to check if this chunk is added.
-    # Reset model first to be clean? set_filter_mode does beginResetModel/endResetModel clearing rows.
-    # So currently rowCount should be 0.
     assert model.rowCount() == 0
 
     # Emit chunk
@@ -124,29 +121,25 @@ def test_race_condition_stale_chunk_ignored(model_setup):
     # CHECK: With the BUG, this chunk is added to the buffer or model.
     # With the FIX, it should be ignored.
 
-    # Force flush buffer if any
-    if hasattr(model, "_flush_pending_chunks"):
-        model._flush_pending_chunks()
-
-    # Assertion: If bug exists, rowCount > 0. If fix works, rowCount == 0.
+    # Force flush buffer if any (on ingestion controller)
+    if hasattr(model._ingestion, "_flush_pending_chunks"):
+        model._ingestion._flush_pending_chunks()
 
     # Assert that the model does not accept a stale chunk (verifies the bug is fixed).
     if model.rowCount() > 0:
         pytest.fail("Race condition reproduced: Stale chunk was accepted!")
 
-    # 4. Simulate Load A Finished
-    # This usually triggers the pending restart.
-    loader.loadFinished.emit(library_root, True)
+    # Patch QTimer to execute immediately
+    with patch('src.iPhoto.gui.ui.models.logic.ingestion_controller.QTimer') as MockTimer:
+        MockTimer.singleShot.side_effect = lambda ms, func: func()
 
-    # Now the model should have restarted the load for "videos"
-    # This creates a QTimer.singleShot(0, self.start_load)
-    # We need to process events to let that happen.
-    from PySide6.QtWidgets import QApplication
-    QApplication.processEvents()
+        # 4. Simulate Load A Finished
+        # This usually triggers the pending restart.
+        loader.loadFinished.emit(library_root, True)
 
-    # Check if start was called again (for the new filter)
-    # loader.start should have been called twice in total: once for initial, once for retry.
-    assert loader.start.call_count >= 2
+        # Check if start was called again (for the new filter)
+        # loader.start should have been called twice in total: once for initial, once for retry.
+        assert loader.start.call_count >= 2
 
 
 def test_incremental_removal_prunes_cache(model_setup):
@@ -159,12 +152,21 @@ def test_incremental_removal_prunes_cache(model_setup):
         {"rel": "drop.jpg", "abs": "/library/root/drop.jpg"},
     ]
 
-    model._state_manager.set_rows([dict(row) for row in initial_rows])
-    model._state_manager.rebuild_lookup()
+    model._repo.set_rows([dict(row) for row in initial_rows])
+    model._repo.rebuild_lookup()
 
     model._cache_manager.reset_caches_for_new_rows.reset_mock()
 
-    new_rows = [dict(initial_rows[0])]
-    model._apply_incremental_rows(new_rows)
+    # Simulate removal via Diff
+    diff = ListDiffResult()
+    diff.removed_indices = [1]
+    diff.structure_changed = True
 
-    model._cache_manager.reset_caches_for_new_rows.assert_called_once_with(model._state_manager.rows)
+    model._on_diff_ready(diff, [])
+
+    # Verify reset_caches_for_new_rows was called with the remaining rows
+    # The model._repo.rows should now contain only keep.jpg
+    assert model.rowCount() == 1
+    assert model._repo.rows[0]["rel"] == "keep.jpg"
+
+    model._cache_manager.reset_caches_for_new_rows.assert_called_once()

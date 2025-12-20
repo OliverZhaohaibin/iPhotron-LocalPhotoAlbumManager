@@ -228,6 +228,11 @@ class AppFacade(QObject):
 
         if should_prepare:
             target_model.prepare_for_album(album_root)
+            # Ensure the model knows the centralized library root for thumbnail cache sharing.
+            # This covers cases where the library was bound after model creation or
+            # if the active model needs a refresh of the library context.
+            if library_root:
+                target_model.set_library_root(library_root)
 
         # If switching models, notify listeners (e.g. DataManager to update the proxy).
         # We emit this AFTER preparing the target model so that the proxy receives
@@ -756,6 +761,8 @@ class AppFacade(QObject):
 
         # Force a preparation of the target model since we are refreshing from a manifest change.
         target_model.prepare_for_album(refreshed_root)
+        if library_root:
+            target_model.set_library_root(library_root)
 
         # Switch context if the refreshed album requires a different model.
         if target_model is not self._active_model:

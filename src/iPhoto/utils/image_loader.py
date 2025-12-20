@@ -162,15 +162,17 @@ def generate_micro_thumbnail(source: Path) -> Optional[bytes]:
             # Handle orientation
             img = _ImageOps.exif_transpose(img)  # type: ignore[attr-defined]
 
-            # Convert to RGB to ensure JPEG compatibility (drop alpha if present)
-            if img.mode != "RGB":
-                img = img.convert("RGB")
-
             # Scale to 16px max dimension
             target_size = (16, 16)
             resample = getattr(_Image, "Resampling", _Image)
-            resample_filter = getattr(resample, "LANCZOS", _Image.BICUBIC)
+            # Use BICUBIC instead of LANCZOS for speed; quality difference is negligible at 16x16
+            resample_filter = getattr(resample, "BICUBIC", _Image.BICUBIC)
             img.thumbnail(target_size, resample_filter)
+
+            # Convert to RGB to ensure JPEG compatibility (drop alpha if present)
+            # We convert AFTER resizing to avoid expensive RGB conversion on full-res images (e.g. RGBA PNGs)
+            if img.mode != "RGB":
+                img = img.convert("RGB")
 
             # Save to bytes
             output = BytesIO()

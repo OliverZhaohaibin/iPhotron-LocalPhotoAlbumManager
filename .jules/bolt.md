@@ -1,0 +1,3 @@
+## 2024-05-24 - [Pillow Image Optimization]
+**Learning:** When downscaling images with Pillow, perform the resize operation *before* converting color modes (e.g., RGBA to RGB) if possible. Resizing the large original array is expensive, but converting the color mode of a huge image is also expensive. By resizing first, the color conversion happens on a tiny array, saving significant memory and CPU time. Additionally, for tiny thumbnails (e.g., 16x16), `BICUBIC` resampling is faster and visually indistinguishable from `LANCZOS`.
+**Action:** Check image processing pipelines for efficient ordering of operations.

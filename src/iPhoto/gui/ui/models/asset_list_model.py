@@ -659,11 +659,9 @@ class AssetListModel(QAbstractListModel):
         if not (is_direct_match or is_scan_parent_of_view):
             return
 
-        manifest = self._facade.current_album.manifest if self._facade.current_album else {}
-        featured = manifest.get("featured", []) or []
-        featured_set = normalize_featured(featured)
-
-        entries: List[Dict[str, object]] = []
+        # Pre-process filtering on main thread (fast)
+        # Deduplication against existing rows is done here to avoid unnecessary work
+        adjusted_rows: List[Dict[str, object]] = []
         for row in chunk:
             # `row['rel']` is relative to `scan_root`
             raw_rel = row.get("rel")
@@ -693,20 +691,38 @@ class AssetListModel(QAbstractListModel):
             # Creates a shallow copy to avoid modifying the original row dict.
             adjusted_row = row.copy()
             adjusted_row['rel'] = view_rel
+            adjusted_rows.append(adjusted_row)
 
-            entry = build_asset_entry(
-                view_root, adjusted_row, featured_set
-            )
+        if not adjusted_rows:
+            return
 
-            if entry is not None:
-                if self._active_filter == "videos" and not entry.get("is_video"):
-                    continue
-                if self._active_filter == "live" and not entry.get("is_live"):
-                    continue
-                if self._active_filter == "favorites" and not entry.get("featured"):
-                    continue
+        # Offload metadata building (heavy, e.g. reverse geocoding) to background worker
+        manifest = self._facade.current_album.manifest if self._facade.current_album else {}
+        featured = manifest.get("featured", []) or []
 
-                entries.append(entry)
+        filter_params = {}
+        if self._active_filter:
+            filter_params["filter_mode"] = self._active_filter
+
+        # Use AssetLoaderSignals to relay chunks back to main thread
+        signals = AssetLoaderSignals(self)
+        # Connect to a NEW slot that handles already-processed entries
+        signals.chunkReady.connect(self._on_processed_scan_chunk_ready)
+        signals.finished.connect(lambda _, __: signals.deleteLater())
+
+        worker = LiveIngestWorker(
+            self._album_root,
+            adjusted_rows,
+            featured,
+            signals,
+            filter_params=filter_params,
+        )
+        QThreadPool.globalInstance().start(worker)
+
+    def _on_processed_scan_chunk_ready(self, root: Path, entries: List[Dict[str, object]]) -> None:
+        """Handle fully processed asset entries from the background worker."""
+        if not self._album_root or root != self._album_root:
+            return
 
         if entries:
             start_row = self._state_manager.row_count()

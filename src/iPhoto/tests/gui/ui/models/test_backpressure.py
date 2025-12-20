@@ -128,7 +128,7 @@ class TestWorkerYielding:
 
         # We need to mock build_asset_entry to return something valid, otherwise it might skip
         with patch("iPhoto.gui.ui.tasks.asset_loader_worker.build_asset_entry") as mock_build:
-            mock_build.side_effect = lambda r, row, f: row # just pass through row
+            mock_build.side_effect = lambda r, row, f, **kwargs: row # just pass through row
 
             worker.run()
 

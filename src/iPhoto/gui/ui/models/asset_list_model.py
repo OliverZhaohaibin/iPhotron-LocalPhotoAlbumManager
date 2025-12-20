@@ -1011,6 +1011,25 @@ class AssetListModel(QAbstractListModel):
 
         self._cleanup_incremental_worker()
 
+        # Merge live scan results into fresh_rows to prevent them from being removed
+        # if the disk index is stale.
+        if self._facade.library_manager:
+            try:
+                live_items = self._facade.library_manager.get_live_scan_results(relative_to=self._album_root)
+                if live_items:
+                    # Create a set of existing rels in fresh_rows for O(1) lookup
+                    fresh_rels = {normalise_rel_value(row.get("rel")) for row in fresh_rows if row.get("rel")}
+
+                    for item in live_items:
+                        rel = item.get("rel")
+                        if rel:
+                            norm_rel = normalise_rel_value(rel)
+                            if norm_rel not in fresh_rels:
+                                fresh_rows.append(item)
+                                fresh_rels.add(norm_rel)
+            except Exception as e:
+                logger.error("Failed to merge live scan results during incremental refresh: %s", e, exc_info=True)
+
         if self._apply_incremental_rows(fresh_rows):
             logger.debug(
                 "AssetListModel: applied incremental refresh for %s (%d rows).",

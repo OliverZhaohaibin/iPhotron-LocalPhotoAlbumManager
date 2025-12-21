@@ -109,6 +109,10 @@ class AssetListModel(QAbstractListModel):
         self._refresh_lock = QMutex()
         self._current_live_worker: Optional[LiveIngestWorker] = None
 
+        # Serialized scan processing state
+        self._scan_backlog_items: List[Dict[str, object]] = []
+        self._is_processing_scan: bool = False
+
         self._facade.linksUpdated.connect(self.handle_links_updated)
         self._facade.assetUpdated.connect(self.handle_asset_updated)
         self._facade.scanChunkReady.connect(self._on_scan_chunk_ready)
@@ -344,6 +348,8 @@ class AssetListModel(QAbstractListModel):
         self._state_manager.set_virtual_reload_suppressed(False)
         self._state_manager.set_virtual_move_requires_revisit(False)
         self._pending_loader_root = None
+        self._scan_backlog_items = []
+        self._is_processing_scan = False
 
     def update_featured_status(self, rel: str, is_featured: bool) -> None:
         """Update the cached ``featured`` flag for the asset identified by *rel*."""
@@ -661,7 +667,6 @@ class AssetListModel(QAbstractListModel):
 
         # Pre-process filtering on main thread (fast)
         # Deduplication against existing rows is done here to avoid unnecessary work
-        adjusted_rows: List[Dict[str, object]] = []
         for row in chunk:
             # `row['rel']` is relative to `scan_root`
             raw_rel = row.get("rel")
@@ -691,12 +696,20 @@ class AssetListModel(QAbstractListModel):
             # Creates a shallow copy to avoid modifying the original row dict.
             adjusted_row = row.copy()
             adjusted_row['rel'] = view_rel
-            adjusted_rows.append(adjusted_row)
+            self._scan_backlog_items.append(adjusted_row)
 
-        if not adjusted_rows:
+        self._schedule_scan_processing()
+
+    def _schedule_scan_processing(self) -> None:
+        """Spawn a worker to process the next batch of scanned items, if idle."""
+        if self._is_processing_scan or not self._scan_backlog_items:
             return
 
-        # Offload metadata building (heavy, e.g. reverse geocoding) to background worker
+        # Take all currently pending items to process in one batch
+        items_to_process = self._scan_backlog_items
+        self._scan_backlog_items = []
+        self._is_processing_scan = True
+
         manifest = self._facade.current_album.manifest if self._facade.current_album else {}
         featured = manifest.get("featured", []) or []
 
@@ -708,16 +721,29 @@ class AssetListModel(QAbstractListModel):
         signals = AssetLoaderSignals(self)
         # Connect to a NEW slot that handles already-processed entries
         signals.chunkReady.connect(self._on_processed_scan_chunk_ready)
+        # Connect finished to the scheduling handler to process next batch
+        signals.finished.connect(self._on_scan_worker_finished)
+        # Ensure signals are cleaned up
         signals.finished.connect(lambda _, __: signals.deleteLater())
 
         worker = LiveIngestWorker(
             self._album_root,
-            adjusted_rows,
+            items_to_process,
             featured,
             signals,
             filter_params=filter_params,
         )
         QThreadPool.globalInstance().start(worker)
+
+    def _on_scan_worker_finished(self, root: Path, success: bool) -> None:
+        """Handle completion of a scan processing job."""
+        if not self._album_root or root != self._album_root:
+            self._is_processing_scan = False
+            return
+
+        self._is_processing_scan = False
+        # Process any items that accumulated while the worker was running
+        self._schedule_scan_processing()
 
     def _on_processed_scan_chunk_ready(self, root: Path, entries: List[Dict[str, object]]) -> None:
         """Handle fully processed asset entries from the background worker."""

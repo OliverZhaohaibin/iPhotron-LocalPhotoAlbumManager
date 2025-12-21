@@ -109,6 +109,9 @@ class AssetListModel(QAbstractListModel):
         self._refresh_lock = QMutex()
         self._current_live_worker: Optional[LiveIngestWorker] = None
 
+        # State tracking for inactive models
+        self._is_stale: bool = False
+
         # Serialized scan processing state
         self._scan_backlog_items: List[Dict[str, object]] = []
         self._is_processing_scan: bool = False
@@ -121,6 +124,11 @@ class AssetListModel(QAbstractListModel):
         """Update the centralized library root for thumbnail generation and index access."""
         self._cache_manager.set_library_root(root)
         self._data_loader.set_library_root(root)
+
+    @property
+    def is_stale(self) -> bool:
+        """Return ``True`` if the model missed updates while inactive."""
+        return self._is_stale
 
     def album_root(self) -> Optional[Path]:
         """Return the path of the currently open album, if any."""
@@ -350,6 +358,7 @@ class AssetListModel(QAbstractListModel):
         self._pending_loader_root = None
         self._scan_backlog_items = []
         self._is_processing_scan = False
+        self._is_stale = False
 
     def update_featured_status(self, rel: str, is_featured: bool) -> None:
         """Update the cached ``featured`` flag for the asset identified by *rel*."""
@@ -646,6 +655,13 @@ class AssetListModel(QAbstractListModel):
     def _on_scan_chunk_ready(self, root: Path, chunk: List[Dict[str, object]]) -> None:
         """Integrate fresh rows from the scanner into the live view."""
 
+        # If this model is not the active one (e.g. "All Photos" while viewing a subfolder),
+        # ignore live updates to prevent main-thread contention and UI freezes.
+        # The model will refresh from the DB when it becomes active again.
+        if self._facade.asset_list_model is not self:
+            self._is_stale = True
+            return
+
         if not self._album_root or not chunk:
             return
 
@@ -919,6 +935,10 @@ class AssetListModel(QAbstractListModel):
     def handle_asset_updated(self, path: Path) -> None:
         """Refresh the thumbnail and view when an asset is modified."""
 
+        if self._facade.asset_list_model is not self:
+            self._is_stale = True
+            return
+
         metadata = self.metadata_for_absolute_path(path)
         if metadata is None:
             return
@@ -932,6 +952,10 @@ class AssetListModel(QAbstractListModel):
     @Slot(Path)
     def handle_links_updated(self, root: Path) -> None:
         """React to :mod:`links.json` refreshes triggered by the backend."""
+
+        if self._facade.asset_list_model is not self:
+            self._is_stale = True
+            return
 
         if not self._album_root:
             logger.debug(

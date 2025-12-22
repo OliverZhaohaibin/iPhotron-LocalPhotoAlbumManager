@@ -98,6 +98,13 @@ class AssetListModel(QAbstractListModel):
         self._is_first_chunk = True
         self._is_flushing = False
 
+        # State for batched ingestion of existing items
+        self._ingest_queue: List[Dict[str, object]] = []
+        self._ingest_timer = QTimer(self)
+        self._ingest_timer.setInterval(0) # Process next batch ASAP but yield to event loop
+        self._ingest_timer.setSingleShot(True)
+        self._ingest_timer.timeout.connect(self._process_next_ingest_batch)
+
         self._pending_finish_event: Optional[Tuple[Path, bool]] = None
         self._pending_loader_root: Optional[Path] = None
         self._deferred_incremental_refresh: Optional[Path] = None
@@ -345,6 +352,8 @@ class AssetListModel(QAbstractListModel):
         self._pending_rels.clear()
         self._pending_abs.clear()
         self._flush_timer.stop()
+        self._ingest_timer.stop()
+        self._ingest_queue = []
         self._pending_finish_event = None
         self._is_flushing = False
 
@@ -651,64 +660,38 @@ class AssetListModel(QAbstractListModel):
             self._is_flushing = False
 
     def ingest_existing_items(self, items: List[Dict[str, object]]) -> None:
-        """Inject existing items (e.g. from Library index) directly into the model."""
+        """Inject existing items (e.g. from Library index) directly into the model.
+
+        This method batches the processing to avoid freezing the UI when injecting
+        thousands of items. Path adjustment (relativization) is assumed to be done
+        by the caller (e.g. Facade) or not required.
+        """
         if not items or not self._album_root:
             return
 
-        # Treat as a processed chunk (deduplication will happen in _on_loader_chunk_ready logic)
-        # But we need to bypass the chunk processing queue if we want instant result.
-        # Actually, _on_loader_chunk_ready handles buffering and thread safety.
-        # Let's use it.
-        # We need to simulate the chunk format.
+        # Stop any pending ingestion
+        self._ingest_timer.stop()
+        self._ingest_queue = list(items) # Copy list to avoid external mutation
 
-        # We assume items are already relative to the album root if they came from filter.
-        # But if they came from global index, 'rel' might be relative to Library Root.
-        # We need to re-base them.
+        # Start processing immediately
+        self._process_next_ingest_batch()
 
-        # Wait, the caller (Facade) should probably handle path relativization?
-        # Or we do it here.
-        # Let's do it here if we know the library root.
+    def _process_next_ingest_batch(self) -> None:
+        """Process a small batch of items from the ingest queue."""
+        if not self._ingest_queue or not self._album_root:
+            return
 
-        library_root = self._cache_manager.library_root
-        if not library_root:
-             # Fallback: assume items are compatible or caller handled it.
-             self._on_loader_chunk_ready(self._album_root, items)
-             return
+        batch_size = 500
+        chunk = self._ingest_queue[:batch_size]
+        self._ingest_queue = self._ingest_queue[batch_size:]
 
-        rebased_items = []
-        album_root = self._album_root
+        # Push chunk to standard loader logic (handles buffering, deduplication)
+        # Note: _on_loader_chunk_ready handles deduplication on main thread,
+        # so keeping batch size small is critical for responsiveness.
+        self._on_loader_chunk_ready(self._album_root, chunk)
 
-        for item in items:
-            # We need 'abs' or full path to re-base.
-            # If 'abs' is missing, construct from library_root + rel?
-            # Global index usually has 'rel' relative to Library Root.
-            # Local index needs 'rel' relative to Album Root.
-
-            rel = item.get("rel")
-            if not rel:
-                continue
-
-            # If item has 'abs', use it.
-            # If not, try to reconstruct.
-            if "abs" in item:
-                 abs_path = Path(item["abs"])
-            else:
-                 abs_path = library_root / rel
-
-            try:
-                new_rel = abs_path.relative_to(album_root).as_posix()
-                new_item = item.copy()
-                new_item["rel"] = new_rel
-                # Update 'abs' if it was missing
-                if "abs" not in new_item:
-                    new_item["abs"] = str(abs_path)
-                rebased_items.append(new_item)
-            except ValueError:
-                # Not inside this album
-                continue
-
-        if rebased_items:
-             self._on_loader_chunk_ready(self._album_root, rebased_items)
+        if self._ingest_queue:
+            self._ingest_timer.start()
 
 
     def _on_scan_chunk_ready(self, root: Path, chunk: List[Dict[str, object]]) -> None:

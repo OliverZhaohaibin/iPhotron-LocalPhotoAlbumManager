@@ -335,7 +335,9 @@ class AppFacade(QObject):
 
         # If we skipped preparation (cached library model), we also skip the load restart
         # unless a force reload was requested.
-        if should_prepare or force_reload:
+        # CRITICAL: If hybrid loading succeeded, we MUST skip _restart_asset_load because
+        # start_load() clears the model, which would wipe the data we just injected from RAM.
+        if (should_prepare or force_reload) and not hybrid_loaded:
             self._restart_asset_load(
                 album_root,
                 announce_index=True,

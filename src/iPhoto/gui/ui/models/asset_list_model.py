@@ -1190,6 +1190,18 @@ class AssetListModel(QAbstractListModel):
         if diff.is_empty_to_empty:
             return False
 
+        # Optimization: If the diff is massive (e.g. due to path reference system conflict
+        # or full rescan), applying thousands of incremental updates will freeze the UI.
+        # Fall back to a full reset in these cases.
+        change_threshold = 500
+        if (len(diff.removed_indices) + len(diff.inserted_items)) > change_threshold:
+            self.beginResetModel()
+            self._state_manager.set_rows(new_rows)
+            self.endResetModel()
+            self._cache_manager.reset_caches_for_new_rows(new_rows)
+            self._state_manager.clear_visible_rows()
+            return True
+
         # Apply removals
         for index in diff.removed_indices:
             if not (0 <= index < len(current_rows)):

@@ -464,7 +464,7 @@ class AssetListModel(QAbstractListModel):
             )
             self._state_manager.set_virtual_reload_suppressed(False)
             if self._state_manager.rows:
-                # Trigger explicit refresh via controller, but only if it targets our view
+                # Check if update targets our view and trigger refresh if applicable
                 handled = self._controller.handle_links_updated(root, self._album_root)
                 if not handled:
                     logger.debug(

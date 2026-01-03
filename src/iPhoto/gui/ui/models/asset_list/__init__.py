@@ -19,6 +19,7 @@ from .filter_engine import ModelFilterHandler
 from .orchestrator import AssetDataOrchestrator
 from .refresh_handler import IncrementalUpdateHandler
 from .resolver import AssetPathResolver
+from .model import AssetListModel
 
 __all__ = [
     "AssetStreamBuffer",
@@ -27,4 +28,5 @@ __all__ = [
     "AssetDataOrchestrator",
     "IncrementalUpdateHandler",
     "AssetPathResolver",
+    "AssetListModel",
 ]

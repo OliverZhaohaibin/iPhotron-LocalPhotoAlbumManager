@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from PySide6.QtCore import QObject, QThreadPool, Signal
 
-from ..tasks.asset_loader_worker import (
+from ...tasks.asset_loader_worker import (
     AssetLoaderSignals,
     LiveIngestWorker,
     build_asset_entry,
@@ -22,7 +22,8 @@ from .streaming import AssetStreamBuffer
 from .....utils.pathutils import normalise_rel_value
 
 if TYPE_CHECKING:
-    from ..tasks.asset_loader_worker import AssetDataLoader
+    from ...tasks.asset_loader_worker import AssetDataLoader
+    from ..asset_state_manager import AssetListStateManager
 
 logger = logging.getLogger(__name__)
 
@@ -269,3 +270,81 @@ class AssetDataOrchestrator(QObject):
         self._stream_buffer.reset()
         self._pending_loader_root = None
         self.loadError.emit(root, message)
+
+    # ------------------------------------------------------------------
+    # Live scan integration
+    # ------------------------------------------------------------------
+    @staticmethod
+    def process_scan_chunk(
+        root: Path,
+        chunk: List[Dict[str, object]],
+        album_root: Optional[Path],
+        state_manager: "AssetListStateManager",
+        *,
+        featured: Optional[List[str]] = None,
+        filter_mode: Optional[str] = None,
+    ) -> List[Dict[str, object]]:
+        """Prepare scanner rows for insertion into the live model view.
+
+        This method normalises scanner output relative to the active album root,
+        filters out duplicates, and applies the current filter mode before
+        returning rows ready for insertion.
+        """
+        if not album_root or not chunk:
+            return []
+
+        try:
+            scan_root = root.resolve()
+            view_root = album_root.resolve()
+        except OSError as exc:
+            logger.warning("Failed to resolve paths during scan chunk processing: %s", exc)
+            return []
+
+        is_direct_match = scan_root == view_root
+        is_scan_parent_of_view = scan_root in view_root.parents
+
+        if not (is_direct_match or is_scan_parent_of_view):
+            return []
+
+        featured_set = normalize_featured(featured or [])
+        entries: List[Dict[str, object]] = []
+
+        for row in chunk:
+            raw_rel = row.get("rel")
+            if not raw_rel:
+                continue
+
+            full_path = scan_root / raw_rel
+            try:
+                view_rel = full_path.relative_to(view_root).as_posix()
+            except ValueError:
+                continue
+            except OSError as exc:
+                logger.error(
+                    "OSError while checking if %s is relative to %s: %s",
+                    full_path,
+                    view_root,
+                    exc,
+                )
+                continue
+
+            if normalise_rel_value(view_rel) in state_manager.row_lookup:
+                continue
+
+            adjusted_row = row.copy()
+            adjusted_row["rel"] = view_rel
+
+            entry = build_asset_entry(view_root, adjusted_row, featured_set)
+            if entry is None:
+                continue
+
+            if filter_mode == "videos" and not entry.get("is_video"):
+                continue
+            if filter_mode == "live" and not entry.get("is_live"):
+                continue
+            if filter_mode == "favorites" and not entry.get("featured"):
+                continue
+
+            entries.append(entry)
+
+        return entries

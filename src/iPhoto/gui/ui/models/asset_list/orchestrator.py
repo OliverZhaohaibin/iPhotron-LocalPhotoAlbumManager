@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from PySide6.QtCore import QObject, QThreadPool, Signal
 
-from ..tasks.asset_loader_worker import (
+from ...tasks.asset_loader_worker import (
     AssetLoaderSignals,
     LiveIngestWorker,
     build_asset_entry,
@@ -22,7 +22,7 @@ from .streaming import AssetStreamBuffer
 from .....utils.pathutils import normalise_rel_value
 
 if TYPE_CHECKING:
-    from ..tasks.asset_loader_worker import AssetDataLoader
+    from ...tasks.asset_loader_worker import AssetDataLoader
 
 logger = logging.getLogger(__name__)
 

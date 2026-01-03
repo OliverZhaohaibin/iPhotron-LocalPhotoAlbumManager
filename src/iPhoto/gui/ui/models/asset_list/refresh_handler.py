@@ -11,11 +11,11 @@ from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional
 
 from PySide6.QtCore import QMutex, QMutexLocker, QObject, QThreadPool, Signal
 
-from ..tasks.incremental_refresh_worker import (
+from ...tasks.incremental_refresh_worker import (
     IncrementalRefreshSignals,
     IncrementalRefreshWorker,
 )
-from .list_diff_calculator import ListDiffCalculator
+from ..list_diff_calculator import ListDiffCalculator
 from .....utils.pathutils import normalise_rel_value
 
 if TYPE_CHECKING:

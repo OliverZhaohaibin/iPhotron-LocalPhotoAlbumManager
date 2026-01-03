@@ -2,7 +2,7 @@
 
 ## Overview
 
-This refactoring successfully modularized two major components of the iPhotos application:
+This refactoring successfully modularized two major components of the iPhoto application:
 1. **index_store.py** (Persistence Layer) - ~1100 lines
 2. **asset_list_model.py** (Qt Model Layer) - Components extracted
 

@@ -5,7 +5,7 @@ to keep the UI responsive during large data loads.
 """
 from __future__ import annotations
 
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
 from PySide6.QtCore import QTimer
 
@@ -194,5 +194,10 @@ class AssetStreamBuffer:
             self._is_flushing = False
 
     def is_empty(self) -> bool:
-        """Return True if the buffer is empty."""
+        """Return True if the pending chunks buffer is empty.
+
+        Note: This only reflects the state of ``_pending_chunks_buffer``.
+        There may still be pending rel/abs in the tracking sets or a pending
+        finish event.
+        """
         return len(self._pending_chunks_buffer) == 0

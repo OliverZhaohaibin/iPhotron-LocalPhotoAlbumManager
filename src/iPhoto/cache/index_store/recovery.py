@@ -62,7 +62,7 @@ class RecoveryService:
         if salvaged_rows:
             logger.info("Salvaged %d rows from corrupted database", len(salvaged_rows))
         else:
-            logger.info("No rows salvaged; rebuilding fresh database")
+            logger.info("No salvageable rows found; rebuilding fresh database")
 
         # Level 3: Force reset and restore salvaged rows
         self._force_reset()

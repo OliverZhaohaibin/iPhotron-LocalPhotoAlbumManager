@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 from typing import Any, Dict, List
-import pytest
 
 from src.iPhoto.gui.ui.models.asset_list.streaming import AssetStreamBuffer
 

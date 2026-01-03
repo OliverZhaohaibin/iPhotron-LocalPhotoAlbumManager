@@ -50,12 +50,18 @@ class DatabaseManager:
         This context manager batches multiple updates into a single transaction
         for better performance and atomicity.
         
-        Note:
-            Nested transactions are not supported via savepoints. If this context
-            manager is entered recursively (or while a connection is already active),
-            the inner block is effectively flattened into the outer transaction.
-            Operations in the inner block will only be committed when the outermost
-            transaction exits successfully.
+        Warning:
+            Nested transactions are NOT truly supported. When this context manager
+            is entered while a transaction is already active, it yields the existing
+            connection WITHOUT creating a savepoint. This means:
+            
+            - The nested block has NO separate transaction semantics
+            - Errors in the nested block do NOT trigger a partial rollback
+            - Only the outermost transaction controls commit/rollback behavior
+            - Use with caution when nesting transaction contexts
+            
+            If you need true nested transactions, consider implementing savepoint
+            support or restructure your code to avoid nesting.
         
         Yields:
             A database connection within a transaction context.
@@ -66,7 +72,8 @@ class DatabaseManager:
             ...     conn.execute("UPDATE assets ...")
         """
         if self._conn:
-            # Nested transaction (conceptually), just yield the existing connection
+            # WARNING: Nested transaction - no savepoint, just yields existing connection
+            # The nested block shares the outer transaction's fate
             yield self._conn
             return
 

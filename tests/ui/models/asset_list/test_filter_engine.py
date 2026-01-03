@@ -1,8 +1,6 @@
 """Unit tests for ModelFilterHandler."""
 from __future__ import annotations
 
-import pytest
-
 from src.iPhoto.gui.ui.models.asset_list.filter_engine import ModelFilterHandler
 
 

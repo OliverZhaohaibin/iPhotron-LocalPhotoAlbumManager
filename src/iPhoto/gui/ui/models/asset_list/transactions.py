@@ -6,10 +6,13 @@ is still in progress.
 """
 from __future__ import annotations
 
+import logging
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 
 from .....utils.pathutils import normalise_rel_value
+
+logger = logging.getLogger(__name__)
 
 
 class OptimisticTransactionManager:
@@ -85,8 +88,12 @@ class OptimisticTransactionManager:
                     new_rel = full_src_path.relative_to(destination_root)
                     row["rel"] = str(new_rel)
                     row["abs"] = str(full_src_path)
-                except (ValueError, OSError):
+                except (ValueError, OSError) as e:
                     # Path calculations failed, skip update
+                    logger.warning(
+                        "Failed to calculate new path for move operation: %s -> %s (error: %s)",
+                        rel, destination_root, e
+                    )
                     continue
             
             changed_rows.append(row_index)

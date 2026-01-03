@@ -144,23 +144,23 @@ class SchemaMigrator:
             "CREATE INDEX IF NOT EXISTS idx_year_month ON assets(year, month)",
             
             # Timeline optimization (year DESC, month DESC, dt DESC)
-            "CREATE INDEX IF NOT EXISTS idx_timeline_optimization "
-            "ON assets(year DESC, month DESC, dt DESC)",
+            ("CREATE INDEX IF NOT EXISTS idx_timeline_optimization "
+             "ON assets(year DESC, month DESC, dt DESC)"),
             
             # Media type filtering (Photos/Videos)
             "CREATE INDEX IF NOT EXISTS idx_media_type ON assets(media_type)",
             
             # Core index for album-scoped pagination
-            "CREATE INDEX IF NOT EXISTS idx_assets_pagination "
-            "ON assets (parent_album_path, dt DESC, id DESC)",
+            ("CREATE INDEX IF NOT EXISTS idx_assets_pagination "
+             "ON assets (parent_album_path, dt DESC, id DESC)"),
             
             # Global view index (all photos sorted by date)
-            "CREATE INDEX IF NOT EXISTS idx_assets_global_sort "
-            "ON assets (dt DESC, id DESC)",
+            ("CREATE INDEX IF NOT EXISTS idx_assets_global_sort "
+             "ON assets (dt DESC, id DESC)"),
             
             # Album prefix queries (for sub-album filtering with LIKE)
-            "CREATE INDEX IF NOT EXISTS idx_parent_album_path "
-            "ON assets (parent_album_path)",
+            ("CREATE INDEX IF NOT EXISTS idx_parent_album_path "
+             "ON assets (parent_album_path)"),
         ]
 
         for index_sql in indexes:

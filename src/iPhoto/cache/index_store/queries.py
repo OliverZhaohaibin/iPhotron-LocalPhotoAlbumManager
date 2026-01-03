@@ -85,7 +85,10 @@ class QueryBuilder:
                 elif mode == "favorites":
                     where_clauses.append("is_favorite = 1")
             else:
-                raise ValueError(f"Invalid filter_mode: {mode}")
+                valid_modes = ", ".join(sorted(QueryBuilder._VALID_FILTER_MODES))
+                raise ValueError(
+                    f"Invalid filter_mode: {mode!r}. Valid options are: {valid_modes}"
+                )
 
         return where_clauses, params
 

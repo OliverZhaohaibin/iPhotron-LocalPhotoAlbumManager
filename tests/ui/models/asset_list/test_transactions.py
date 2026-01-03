@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 from pathlib import Path
-import pytest
 
 from src.iPhoto.gui.ui.models.asset_list.transactions import OptimisticTransactionManager
 

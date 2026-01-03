@@ -28,7 +28,7 @@ of asset records in the SQLite database.
 from __future__ import annotations
 
 # Re-export the main class and utilities for backward compatibility
-from .index_store import IndexStore, GLOBAL_INDEX_DB_NAME
+from .index_store.repository import IndexStore, GLOBAL_INDEX_DB_NAME
 from .index_store.queries import normalize_path, escape_like_pattern
 
 __all__ = ["IndexStore", "GLOBAL_INDEX_DB_NAME", "normalize_path", "escape_like_pattern"]

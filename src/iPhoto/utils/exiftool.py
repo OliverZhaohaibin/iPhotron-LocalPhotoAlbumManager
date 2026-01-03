@@ -9,9 +9,11 @@ import subprocess
 import tempfile
 from pathlib import Path
 from typing import Any, Dict, List
+import logging
 
 from ..errors import ExternalToolError
 
+LOGGER = logging.getLogger(__name__)
 
 def get_metadata_batch(paths: List[Path]) -> List[Dict[str, Any]]:
     """Return metadata for *paths* by launching a single ``exiftool`` process.
@@ -48,11 +50,23 @@ def get_metadata_batch(paths: List[Path]) -> List[Dict[str, Any]]:
     # then manually delete it.
     with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", delete=False) as tmp_arg_file:
         for path in paths:
+            # Security: Ensure we work with absolute paths.
+            # 1. Avoids ExifTool treating a relative path starting with '-' as an option.
+            # 2. Ensures unambiguous file references.
+            safe_path = path.absolute()
+
+            # Security: Reject paths with newlines to prevent argument injection in the argfile.
+            # ExifTool argfiles use newlines as delimiters.
+            path_str = safe_path.as_posix()
+            if '\n' in path_str or '\r' in path_str:
+                LOGGER.warning("Skipping file with unsafe characters in path: %r", path_str)
+                continue
+
             # Always use POSIX paths (forward slashes) for ExifTool argument files.
             # This avoids issues with backslashes on Windows, which ExifTool might
             # misinterpret as escape sequences or wildcards when combined with
             # certain non-ASCII characters.
-            tmp_arg_file.write(path.as_posix() + "\n")
+            tmp_arg_file.write(path_str + "\n")
         tmp_arg_path = tmp_arg_file.name
 
     try:

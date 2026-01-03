@@ -4,7 +4,8 @@ from unittest.mock import MagicMock, patch, call
 import pytest
 from PySide6.QtCore import QThread
 
-from iPhoto.gui.ui.models.asset_list_model import AssetListModel
+from iPhoto.gui.ui.models.asset_list.model import AssetListModel
+from iPhoto.gui.ui.models.asset_list.controller import AssetListController
 from iPhoto.gui.ui.tasks.asset_loader_worker import AssetLoaderWorker, LiveIngestWorker, AssetLoaderSignals
 
 class TestAssetListModelBackpressure:
@@ -16,101 +17,100 @@ class TestAssetListModelBackpressure:
         return facade
 
     @pytest.fixture
-    def model(self, facade):
-        model = AssetListModel(facade)
-        # Mock state manager to avoid complex internal logic during simple buffer tests
-        model._state_manager = MagicMock()
-        model._state_manager.row_count.return_value = 0
-        model._state_manager.append_chunk = MagicMock()
-        model._state_manager.on_external_row_inserted = MagicMock()
+    def controller(self, facade):
+        checker = MagicMock(return_value=False)
+        controller = AssetListController(facade, checker)
 
-        # Ensure timer is mocked or controllable?
-        # Actually QTimer works in tests if using qtbot or app loop, but here we can inspect calls.
-        # We will check if timer is started.
-        model._flush_timer = MagicMock()
+        # Ensure timer is mocked or controllable
+        controller._flush_timer = MagicMock()
         
         # Initialize _pending_rels and _pending_abs sets to match runtime behavior
-        model._pending_rels = set()
-        model._pending_abs = set()
+        controller._pending_rels = set()
+        controller._pending_abs = set()
 
-        return model
+        # Connect signals so we can assert they are emitted
+        controller.batchReady = MagicMock()
 
-    def test_backpressure_batching(self, model):
+        return controller
+
+    def test_backpressure_batching(self, controller):
         """Test that chunks are buffered and processed in batches."""
 
         # Verify tuned constants
-        assert model._STREAM_BATCH_SIZE == 100
-        assert model._STREAM_FLUSH_THRESHOLD == 2000
-        assert model._STREAM_FLUSH_INTERVAL_MS == 100
+        assert controller._STREAM_BATCH_SIZE == 100
+        assert controller._STREAM_FLUSH_THRESHOLD == 2000
+        assert controller._STREAM_FLUSH_INTERVAL_MS == 100
 
         # Simulate receiving a large chunk (e.g., 500 items)
         chunk = [{"rel": f"img{i}.jpg"} for i in range(500)]
-        model._pending_chunks_buffer = chunk
-        model._is_flushing = False
+        controller._pending_chunks_buffer = chunk
+        controller._is_flushing = False
 
         # Call flush
-        model._flush_pending_chunks()
+        controller._flush_pending_chunks()
 
         # 1. Should have consumed 100 items (Batch Size)
         # Remaining: 400
-        assert len(model._pending_chunks_buffer) == 400
-        model._state_manager.append_chunk.assert_called_once()
-        args, _ = model._state_manager.append_chunk.call_args
+        assert len(controller._pending_chunks_buffer) == 400
+        controller.batchReady.emit.assert_called_once()
+        args, _ = controller.batchReady.emit.call_args
         assert len(args[0]) == 100
         assert args[0][0]["rel"] == "img0.jpg"
         assert args[0][99]["rel"] == "img99.jpg"
+        # Reset check
+        assert args[1] is False
 
         # 2. Should have started timer for next batch
-        model._flush_timer.start.assert_called_once_with(model._STREAM_FLUSH_INTERVAL_MS)
+        controller._flush_timer.start.assert_called_once_with(controller._STREAM_FLUSH_INTERVAL_MS)
 
         # Reset mocks
-        model._state_manager.append_chunk.reset_mock()
-        model._flush_timer.start.reset_mock()
+        controller.batchReady.emit.reset_mock()
+        controller._flush_timer.start.reset_mock()
 
         # Call flush again
-        model._flush_pending_chunks()
+        controller._flush_pending_chunks()
 
         # 3. Should have consumed next 100 items
-        assert len(model._pending_chunks_buffer) == 300
-        model._state_manager.append_chunk.assert_called_once()
-        args, _ = model._state_manager.append_chunk.call_args
+        assert len(controller._pending_chunks_buffer) == 300
+        controller.batchReady.emit.assert_called_once()
+        args, _ = controller.batchReady.emit.call_args
         assert len(args[0]) == 100
         assert args[0][0]["rel"] == "img100.jpg"
 
         # 4. Timer started again
-        model._flush_timer.start.assert_called_once_with(model._STREAM_FLUSH_INTERVAL_MS)
+        controller._flush_timer.start.assert_called_once_with(controller._STREAM_FLUSH_INTERVAL_MS)
 
-    def test_buffer_exhaustion(self, model):
+    def test_buffer_exhaustion(self, controller):
         """Test that timer stops when buffer is empty."""
 
         # Case: 100 items in buffer (exactly one batch)
         chunk = [{"rel": f"img{i}.jpg"} for i in range(100)]
-        model._pending_chunks_buffer = chunk
+        controller._pending_chunks_buffer = chunk
 
-        model._flush_pending_chunks()
+        controller._flush_pending_chunks()
 
         # Buffer empty
-        assert len(model._pending_chunks_buffer) == 0
+        assert len(controller._pending_chunks_buffer) == 0
 
         # Insert happened
-        model._state_manager.append_chunk.assert_called_once()
+        controller.batchReady.emit.assert_called_once()
 
         # Timer should be stopped
-        model._flush_timer.stop.assert_called_once()
+        controller._flush_timer.stop.assert_called_once()
         # Should NOT be started
-        model._flush_timer.start.assert_not_called()
+        controller._flush_timer.start.assert_not_called()
 
-    def test_finish_pending_flushes_immediately(self, model):
+    def test_finish_pending_flushes_immediately(self, controller):
         """Buffered rows should drain without delay once load completion is pending."""
 
         # Prepare a partially drained buffer and mark finish pending
-        model._pending_finish_event = ("root", True)
-        model._pending_chunks_buffer = [{"rel": f"img{i}.jpg"} for i in range(150)]
+        controller._pending_finish_event = ("root", True)
+        controller._pending_chunks_buffer = [{"rel": f"img{i}.jpg"} for i in range(150)]
 
-        model._flush_pending_chunks()
+        controller._flush_pending_chunks()
 
         # Remaining items should be scheduled with zero-delay timer
-        model._flush_timer.start.assert_called_once_with(0)
+        controller._flush_timer.start.assert_called_once_with(0)
 
 class TestWorkerYielding:
     @patch("PySide6.QtCore.QThread.currentThread")
@@ -128,7 +128,8 @@ class TestWorkerYielding:
 
         # We need to mock build_asset_entry to return something valid, otherwise it might skip
         with patch("iPhoto.gui.ui.tasks.asset_loader_worker.build_asset_entry") as mock_build:
-            mock_build.side_effect = lambda r, row, f: row # just pass through row
+            # Update lambda to accept path_exists
+            mock_build.side_effect = lambda r, row, f, path_exists=False: row
 
             worker.run()
 

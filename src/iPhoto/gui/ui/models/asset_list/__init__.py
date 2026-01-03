@@ -8,6 +8,7 @@ This package provides a clean separation of concerns for the AssetListModel:
 - `orchestrator`: Data loading orchestration and worker management
 - `refresh_handler`: Incremental update handling via diff & patch
 - `resolver`: Path and metadata resolution
+- `controller`: Data loading and buffering logic
 
 The main AssetListModel class can be found in the parent directory's
 asset_list_model.py file, which coordinates these components.
@@ -20,6 +21,7 @@ from .orchestrator import AssetDataOrchestrator
 from .refresh_handler import IncrementalUpdateHandler
 from .resolver import AssetPathResolver
 from .model import AssetListModel
+from .controller import AssetListController
 
 __all__ = [
     "AssetStreamBuffer",
@@ -29,4 +31,5 @@ __all__ = [
     "IncrementalUpdateHandler",
     "AssetPathResolver",
     "AssetListModel",
+    "AssetListController",
 ]

@@ -264,9 +264,11 @@ class AssetListModel(QAbstractListModel):
     # ------------------------------------------------------------------
     def prepare_for_album(self, root: Path) -> None:
         """Reset internal state so *root* becomes the active album."""
-        self._album_root = root
+        # Let the controller handle any pending reload state before we
+        # mutate our own album root and clear the state manager flags.
         self._controller.prepare_for_album(root)
 
+        self._album_root = root
         self._state_manager.clear_reload_pending()
         self._cache_manager.reset_for_album(root)
 
@@ -369,7 +371,6 @@ class AssetListModel(QAbstractListModel):
         # Controller calls loadFinished(root, False) internally.
         # So _on_controller_load_finished will be called.
         # We just handle the Facade notification here.
-        pass
 
     # ------------------------------------------------------------------
     # Thumbnail helpers
@@ -463,12 +464,20 @@ class AssetListModel(QAbstractListModel):
             )
             self._state_manager.set_virtual_reload_suppressed(False)
             if self._state_manager.rows:
-                # Trigger explicit refresh via controller
-                self._controller.refresh_rows_from_index(self._album_root)
+                # Trigger explicit refresh via controller, but only if it targets our view
+                handled = self._controller.handle_links_updated(root, self._album_root)
+                if not handled:
+                    logger.debug(
+                        "AssetListModel: suppression cleared but update doesn't target current view."
+                    )
             return
 
         # Delegate to controller
-        self._controller.handle_links_updated(root, self._album_root)
+        handled = self._controller.handle_links_updated(root, self._album_root)
+        if not handled:
+            logger.debug(
+                "AssetListModel: linksUpdated ignored because update doesn't target current view."
+            )
 
     def _apply_incremental_results(
         self, fresh_rows: List[Dict[str, object]], root: Path

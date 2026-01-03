@@ -10,7 +10,6 @@ from PySide6.QtCore import (
     QObject,
     QTimer,
     Signal,
-    Slot,
     QMutex,
     QMutexLocker,
     QThreadPool,
@@ -79,6 +78,7 @@ class AssetListController(QObject):
         self._data_loader.error.connect(self._on_loader_error)
 
         self._current_live_worker: Optional[LiveIngestWorker] = None
+        self._live_signals: Optional[AssetLoaderSignals] = None
         self._incremental_worker: Optional[IncrementalRefreshWorker] = None
         self._incremental_signals: Optional[IncrementalRefreshSignals] = None
         self._refresh_lock = QMutex()
@@ -115,6 +115,21 @@ class AssetListController(QObject):
         else:
             self._ignore_incoming_chunks = False
 
+        # Cancel and cleanup live worker if running
+        if self._current_live_worker:
+            self._current_live_worker.cancel()
+            self._current_live_worker = None
+        if self._live_signals:
+            try:
+                self._live_signals.chunkReady.disconnect(self._on_loader_chunk_ready)
+            except RuntimeError:
+                pass
+            self._live_signals.deleteLater()
+            self._live_signals = None
+
+        # Cleanup incremental refresh worker
+        self._cleanup_incremental_worker()
+
         # When preparing for a new album, we should drop any pending reloads for the old one.
         self._reload_pending = False
 
@@ -131,6 +146,7 @@ class AssetListController(QObject):
         self._flush_timer.stop()
         self._pending_finish_event = None
         self._is_flushing = False
+        self._is_first_chunk = True
 
     def set_filter_mode(self, mode: Optional[str]) -> None:
         """Update filter mode and trigger reload if changed."""
@@ -183,6 +199,13 @@ class AssetListController(QObject):
                     if self._current_live_worker:
                         self._current_live_worker.cancel()
                         self._current_live_worker = None
+                    if self._live_signals:
+                        try:
+                            self._live_signals.chunkReady.disconnect(self._on_loader_chunk_ready)
+                        except RuntimeError:
+                            pass
+                        self._live_signals.deleteLater()
+                        self._live_signals = None
 
                     live_items = self._facade.library_manager.get_live_scan_results(
                         relative_to=self._album_root
@@ -202,6 +225,7 @@ class AssetListController(QObject):
                             filter_params=filter_params,
                         )
                         self._current_live_worker = worker
+                        self._live_signals = live_signals
                         QThreadPool.globalInstance().start(worker)
                 except Exception as e:
                     logger.error(
@@ -361,7 +385,12 @@ class AssetListController(QObject):
             adjusted_row = row.copy()
             adjusted_row["rel"] = view_rel
 
-            entry = build_asset_entry(view_root, adjusted_row, featured_set)
+            entry = build_asset_entry(
+                view_root,
+                adjusted_row,
+                featured_set,
+                path_exists=Path.exists,
+            )
             if entry is None:
                 continue
 
@@ -532,7 +561,12 @@ class AssetListController(QObject):
                         self._on_incremental_error
                     )
                 except RuntimeError:
-                    pass
+                    # Signals may already be disconnected or the underlying QObject
+                    # may have been deleted; ignore disconnect errors during cleanup.
+                    logger.debug(
+                        "Failed to disconnect incremental refresh signals during cleanup",
+                        exc_info=True,
+                    )
                 self._incremental_signals.deleteLater()
                 self._incremental_signals = None
             self._incremental_worker = None

@@ -4,7 +4,6 @@ from unittest.mock import MagicMock, patch, call
 import pytest
 from PySide6.QtCore import QThread
 
-from iPhoto.gui.ui.models.asset_list.model import AssetListModel
 from iPhoto.gui.ui.models.asset_list.controller import AssetListController
 from iPhoto.gui.ui.tasks.asset_loader_worker import AssetLoaderWorker, LiveIngestWorker, AssetLoaderSignals
 

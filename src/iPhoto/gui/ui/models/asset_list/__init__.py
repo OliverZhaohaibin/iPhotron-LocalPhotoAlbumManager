@@ -10,8 +10,8 @@ This package provides a clean separation of concerns for the AssetListModel:
 - `resolver`: Path and metadata resolution
 - `controller`: Data loading and buffering logic
 
-The main AssetListModel class can be found in the parent directory's
-asset_list_model.py file, which coordinates these components.
+The main AssetListModel class can be found in this package's
+model.py module, which coordinates these components.
 """
 
 from .streaming import AssetStreamBuffer

@@ -199,25 +199,33 @@ class AppFacade(QObject):
         library_root = self._library_manager.root() if self._library_manager else None
         is_library_descendant = False
 
+        # Resolve paths once to avoid redundant operations
+        root_resolved = None
+        library_resolved = None
+        if library_root:
+            try:
+                root_resolved = root.resolve()
+                library_resolved = library_root.resolve()
+            except OSError:
+                pass
+
         # If the requested root matches the library root, assume we are viewing the
         # aggregated "All Photos" collection (or similar library-wide view).
         # Also check if root is a subfolder of library - use library model to avoid
         # duplicate indexing and model reset.
-        if library_root:
-            if self._paths_equal(root, library_root):
+        if library_root and root_resolved and library_resolved:
+            if root_resolved == library_resolved:
                 target_model = self._library_list_model
                 is_library_descendant = True
             else:
                 # Check if root is a descendant of library_root
                 try:
-                    root_resolved = root.resolve()
-                    library_resolved = library_root.resolve()
                     # Try to get relative path - if it succeeds, root is under library
                     root_resolved.relative_to(library_resolved)
                     # If we get here without ValueError, it's a descendant
                     target_model = self._library_list_model
                     is_library_descendant = True
-                except (ValueError, OSError):
+                except ValueError:
                     # Not a descendant, use separate album model
                     target_model = self._album_list_model
 
@@ -236,7 +244,6 @@ class AppFacade(QObject):
             # We are using the library model for a library path.
             # Check if the model already has library data loaded.
             existing_root = target_model.album_root()
-            library_resolved = library_root.resolve() if library_root else None
             
             # Use lightweight switching if:
             # - Model has rows (data is loaded)
@@ -257,7 +264,7 @@ class AppFacade(QObject):
                         # the view context for the new subfolder
                         use_lightweight_switch = True
                         should_prepare = False
-                except (ValueError, OSError):
+                except OSError:
                     pass
 
         if use_lightweight_switch:

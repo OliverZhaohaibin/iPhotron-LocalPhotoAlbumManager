@@ -1,7 +1,7 @@
 
 import pytest
 from unittest.mock import MagicMock
-from src.iPhoto.gui.ui.models.asset_list_model import AssetListModel
+from src.iPhoto.gui.ui.models.asset_list.model import AssetListModel
 
 class TestAssetListModelShouldInvalidate:
     @pytest.fixture

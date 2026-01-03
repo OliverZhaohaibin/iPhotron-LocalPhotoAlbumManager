@@ -544,7 +544,7 @@ def test_asset_model_pairs_live_when_links_missing(
     os.utime(still, (timestamp, timestamp))
     os.utime(video, (timestamp, timestamp))
 
-    from src.iPhoto.gui.ui.models import asset_list_model as alm
+    from src.iPhoto.gui.ui.models.asset_list import AssetListModel as alm
 
     monkeypatch.setattr(alm, "load_live_map", lambda _: {})
 

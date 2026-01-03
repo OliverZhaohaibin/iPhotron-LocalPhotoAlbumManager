@@ -9,7 +9,7 @@ from PySide6.QtCore import QObject, QTimer, QModelIndex, Qt
 from .roles import Roles
 
 if TYPE_CHECKING:
-    from .asset_list_model import AssetListModel
+    from .asset_list.model import AssetListModel
     from .asset_state_manager import AssetListStateManager
 
 

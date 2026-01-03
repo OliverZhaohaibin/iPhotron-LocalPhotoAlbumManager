@@ -9,7 +9,7 @@ from PySide6.QtCore import Qt
 if TYPE_CHECKING:  # pragma: no cover - import for type checking only
     from ...facade import AppFacade
 from ..tasks.thumbnail_loader import ThumbnailLoader
-from .asset_list_model import AssetListModel
+from .asset_list.model import AssetListModel
 from .proxy_filter import AssetFilterProxyModel
 from .roles import Roles
 

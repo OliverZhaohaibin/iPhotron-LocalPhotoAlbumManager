@@ -14,7 +14,7 @@ from ..ui.tasks.move_worker import MoveSignals, MoveWorker
 if TYPE_CHECKING:
     from ...library.manager import LibraryManager
     from ...models.album import Album
-    from ..ui.models.asset_list_model import AssetListModel
+    from ..ui.models.asset_list.model import AssetListModel
 
 
 class AssetMoveService(QObject):

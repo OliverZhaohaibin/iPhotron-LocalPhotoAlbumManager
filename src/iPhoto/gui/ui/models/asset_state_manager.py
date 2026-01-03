@@ -13,7 +13,7 @@ from ....utils.pathutils import normalise_rel_value
 logger = logging.getLogger(__name__)
 
 if False:  # pragma: no cover - circular import guard
-    from .asset_list_model import AssetListModel
+    from .asset_list.model import AssetListModel
     from .asset_cache_manager import AssetCacheManager
 
 

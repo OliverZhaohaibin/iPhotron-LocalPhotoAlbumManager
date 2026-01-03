@@ -8,7 +8,7 @@ from pathlib import Path
 # Need to make sure facade is importable.
 # The `conftest.py` adds ROOT and SRC to path.
 
-from src.iPhoto.gui.ui.models.asset_list_model import AssetListModel
+from src.iPhoto.gui.ui.models.asset_list.model import AssetListModel
 
 class MockFacade(MagicMock):
     def __init__(self, *args, **kwargs):

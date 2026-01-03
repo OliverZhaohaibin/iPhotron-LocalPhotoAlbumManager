@@ -23,7 +23,7 @@ from .services import (
 
 if TYPE_CHECKING:
     from ..library.manager import LibraryManager
-    from .ui.models.asset_list_model import AssetListModel
+    from .ui.models.asset_list.model import AssetListModel
 
 
 class AppFacade(QObject):
@@ -71,7 +71,7 @@ class AppFacade(QObject):
             parent=self,
         )
 
-        from .ui.models.asset_list_model import AssetListModel
+        from .ui.models.asset_list.model import AssetListModel
 
         self._library_list_model = AssetListModel(self)
         self._album_list_model = AssetListModel(self)

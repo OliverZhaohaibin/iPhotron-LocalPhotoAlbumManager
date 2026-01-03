@@ -3,7 +3,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from PySide6.QtCore import QObject, Signal
-from src.iPhoto.gui.ui.models.asset_list_model import AssetListModel
+from src.iPhoto.gui.ui.models.asset_list.model import AssetListModel
 
 class MockFacade(QObject):
     linksUpdated = Signal(Path)

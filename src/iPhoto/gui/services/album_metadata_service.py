@@ -16,7 +16,7 @@ from ...utils.pathutils import is_descendant_path
 
 if TYPE_CHECKING:
     from ...library.manager import LibraryManager
-    from ..ui.models.asset_list_model import AssetListModel
+    from ..ui.models.asset_list.model import AssetListModel
 
 
 class AlbumMetadataService(QObject):

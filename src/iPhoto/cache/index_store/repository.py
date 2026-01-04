@@ -325,10 +325,13 @@ class AssetRepository:
             "micro_thumbnail"
         ]
 
-        print(
-            f"[debug] IndexStore.read_geometry_only album_path={album_path} "
-            f"include_subalbums={include_subalbums} sort_by_date={sort_by_date} "
-            f"filter_params={filter_params}"
+        logger.debug(
+            "IndexStore.read_geometry_only album_path=%s include_subalbums=%s "
+            "sort_by_date=%s filter_params=%s",
+            album_path,
+            include_subalbums,
+            sort_by_date,
+            filter_params,
         )
 
         query, params = QueryBuilder.build_pagination_query(

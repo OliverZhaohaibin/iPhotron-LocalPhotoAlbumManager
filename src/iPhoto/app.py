@@ -185,7 +185,9 @@ def _update_index_snapshot(root: Path, materialised_rows: List[dict]) -> None:
         store.write_rows(materialised_snapshot)
 
 
-def rescan(root: Path, progress_callback: Optional[Callable[[int, int], None]] = None) -> List[dict]:
+def rescan(
+    root: Path, progress_callback: Optional[Callable[[int, int], None]] = None
+) -> List[dict]:
     """Rescan the album and return the fresh index rows."""
 
     store = IndexStore(root)

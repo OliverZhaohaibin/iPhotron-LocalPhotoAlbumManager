@@ -49,6 +49,7 @@ class AssetListModel(QAbstractListModel):
         self._facade = facade
         self._album_root: Optional[Path] = None
         self._thumb_size = QSize(512, 512)
+        self._is_valid = False
 
         # Try to acquire library root early if available
         library_root = None
@@ -96,6 +97,11 @@ class AssetListModel(QAbstractListModel):
     def album_root(self) -> Optional[Path]:
         """Return the path of the currently open album, if any."""
         return self._album_root
+
+    def is_valid(self) -> bool:
+        """Return ``True`` when the cached rows represent the active album."""
+
+        return bool(self._is_valid and self._album_root)
 
     def metadata_for_absolute_path(self, path: Path) -> Optional[Dict[str, object]]:
         """Return the cached metadata row for *path* if it belongs to the model."""
@@ -269,6 +275,7 @@ class AssetListModel(QAbstractListModel):
         self._controller.prepare_for_album(root)
 
         self._album_root = root
+        self._is_valid = False
         self._state_manager.clear_reload_pending()
         self._cache_manager.reset_for_album(root)
 
@@ -309,6 +316,7 @@ class AssetListModel(QAbstractListModel):
         if normalized == self._controller.active_filter_mode():
             return
 
+        self._is_valid = False
         self.beginResetModel()
         self._state_manager.clear_rows()
         self.endResetModel()
@@ -323,6 +331,7 @@ class AssetListModel(QAbstractListModel):
     # ------------------------------------------------------------------
     def start_load(self) -> None:
         """Start loading data."""
+        self._is_valid = False
         self._state_manager.clear_reload_pending()
         self._cache_manager.clear_recently_removed()
         self._controller.start_load()
@@ -357,6 +366,7 @@ class AssetListModel(QAbstractListModel):
             self._album_root, root
         )
 
+        self._is_valid = bool(success and self._album_root and root == self._album_root)
         self.loadFinished.emit(root, success)
 
         if should_restart:

@@ -1,6 +1,7 @@
 import json
 import os
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -100,3 +101,55 @@ def test_dual_model_switching(tmp_path: Path, qapp: QApplication) -> None:
 
     facade.open_album(root)
     assert facade.asset_list_model == facade._album_list_model
+
+
+def test_open_library_root_reuses_cached_model(monkeypatch, tmp_path: Path, qapp: QApplication) -> None:
+    root = tmp_path / "Library"
+    root.mkdir()
+
+    facade = AppFacade()
+    facade._library_manager = SimpleNamespace(
+        root=lambda: root,
+        is_scanning_path=lambda _path: False,
+        start_scanning=lambda *_args, **_kwargs: None,
+        stop_scanning=lambda: None,
+        pause_watcher=lambda: None,
+        resume_watcher=lambda: None,
+    )
+
+    facade._library_update_service.consume_forced_reload = lambda _path: False
+    facade._library_update_service.reset_cache = lambda: None
+    facade._library_update_service.cancel_active_scan = lambda: None
+
+    def _fake_open_album(path: Path, autoscan: bool = False, library_root: Path | None = None):
+        return SimpleNamespace(root=path, manifest={"title": path.name})
+
+    class _StubIndexStore:
+        def __init__(self, *_args, **_kwargs) -> None:
+            return
+
+        def read_all(self):
+            return iter([{"id": 1}])
+
+    restart_calls: list[Path] = []
+
+    def _record_restart(album_root, announce_index=True, force_reload=False):
+        restart_calls.append(album_root)
+
+    facade._restart_asset_load = _record_restart
+    monkeypatch.setattr("src.iPhoto.gui.facade.backend.open_album", _fake_open_album)
+    monkeypatch.setattr("src.iPhoto.gui.facade.backend.IndexStore", _StubIndexStore)
+
+    facade.open_album(root)
+
+    library_model = facade._library_list_model
+    library_model._album_root = root
+    library_model._state_manager.set_rows(
+        [{"rel": "a.jpg", "abs": str(root / "a.jpg"), "id": 1}]
+    )
+    library_model._is_valid = True
+
+    restart_calls.clear()
+    facade.open_album(root)
+
+    assert restart_calls == []

@@ -505,13 +505,6 @@ class AssetLoaderWorker(QRunnable):
             return _cached_path_exists(path, dir_cache)
 
         with store.transaction():
-            generator = store.read_geometry_only(
-                filter_params=params,
-                sort_by_date=True,
-                album_path=album_path,
-                include_subalbums=True,
-            )
-
             chunk: List[Dict[str, object]] = []
             last_reported = 0
 
@@ -523,60 +516,82 @@ class AssetLoaderWorker(QRunnable):
             total_calculated = False
             first_batch_emitted = False
             yielded_count = 0
+            cursor_dt: Optional[str] = None
+            cursor_id: Optional[str] = None
 
-            for position, row in enumerate(generator, start=1):
-                # Yield CPU every 50 items to keep UI responsive
-                if position % 50 == 0:
-                    QThread.msleep(10)
-
-                if self._is_cancelled:
-                    return
-
-                # Adjust rel path to be relative to the album root
-                adjusted_row = adjust_rel_for_album(row, album_path)
-
-                entry = build_asset_entry(
-                    self._root,
-                    adjusted_row,
-                    self._featured,
-                    store,
-                    path_exists=_path_exists,
+            processed = 0
+            while True:
+                page = store.get_assets_page(
+                    cursor_dt=cursor_dt,
+                    cursor_id=cursor_id,
+                    limit=normal_chunk_size,
+                    album_path=album_path,
+                    include_subalbums=True,
+                    filter_hidden=True,
+                    filter_params=params,
                 )
+                if not page:
+                    break
 
-                if entry is not None:
-                    chunk.append(entry)
+                for row in page:
+                    processed += 1
 
-                # Determine emission
-                should_flush = False
+                    # Yield CPU every 50 items to keep UI responsive
+                    if processed % 50 == 0:
+                        QThread.msleep(10)
 
-                if not first_batch_emitted:
-                    if len(chunk) >= first_chunk_size:
+                    if self._is_cancelled:
+                        return
+
+                    # Adjust rel path to be relative to the album root
+                    adjusted_row = adjust_rel_for_album(row, album_path)
+
+                    entry = build_asset_entry(
+                        self._root,
+                        adjusted_row,
+                        self._featured,
+                        store,
+                        path_exists=_path_exists,
+                    )
+
+                    if entry is not None:
+                        chunk.append(entry)
+
+                    # Determine emission
+                    should_flush = False
+
+                    if not first_batch_emitted:
+                        if len(chunk) >= first_chunk_size:
+                            should_flush = True
+                            first_batch_emitted = True
+                    elif len(chunk) >= normal_chunk_size:
                         should_flush = True
-                        first_batch_emitted = True
-                elif len(chunk) >= normal_chunk_size:
-                    should_flush = True
 
-                if should_flush:
-                    yielded_count += len(chunk)
-                    yield chunk
-                    chunk = []
+                    if should_flush:
+                        yielded_count += len(chunk)
+                        yield chunk
+                        chunk = []
 
-                    # Perform count after yielding first chunk
-                    if not total_calculated:
-                        try:
-                            total = store.count(filter_hidden=True, filter_params=params)
-                            total_calculated = True
-                        except Exception as exc:
-                            LOGGER.warning("Failed to count assets in database: %s", exc, exc_info=True)
-                            total = 0  # fallback
+                        # Perform count after yielding first chunk
+                        if not total_calculated:
+                            try:
+                                total = store.count(filter_hidden=True, filter_params=params)
+                                total_calculated = True
+                            except Exception as exc:
+                                LOGGER.warning("Failed to count assets in database: %s", exc, exc_info=True)
+                                total = 0  # fallback
 
-                # Update progress periodically
-                # Use >= total to robustly handle concurrent additions where position might exceed original total
-                if total_calculated and (position >= total or position - last_reported >= 50):
-                    last_reported = position
-                    self._signals.progressUpdated.emit(self._root, position, total)
+                    # Update progress periodically
+                    if total_calculated and (processed >= total or processed - last_reported >= 50):
+                        last_reported = processed
+                        self._signals.progressUpdated.emit(self._root, processed, total)
 
-            if chunk:
+                # Prepare cursor for next page
+                last_row = page[-1]
+                cursor_dt = last_row.get("dt")
+                cursor_id = last_row.get("id")
+
+            if chunk and not self._is_cancelled:
                 yielded_count += len(chunk)
                 yield chunk
 

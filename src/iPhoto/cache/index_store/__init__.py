@@ -8,6 +8,7 @@ This package provides a modular architecture for asset persistence using a
 - `migrations`: Schema initialization and updates
 - `recovery`: Database corruption recovery
 - `queries`: SQL query construction utilities
+- `kway_merge`: K-Way merge for efficient multi-source aggregation
 
 Architecture:
     The package enforces a unified write pipeline where all database operations
@@ -28,13 +29,42 @@ Usage:
         store = IndexStore(library_root)
     
     Both approaches use the same database file, ensuring data consistency.
+    
+    For cursor-based pagination (recommended for large datasets):
+        from iPhoto.cache.index_store import IndexStore, CursorPage, PaginationCursor
+        store = IndexStore(library_root)
+        page = store.fetch_by_cursor(limit=50)
+        while page.has_more:
+            process(page.items)
+            page = store.fetch_by_cursor(cursor=page.next_cursor, limit=50)
+    
+    For merging multiple album sources (e.g., "All Photos" view):
+        from iPhoto.cache.index_store import (
+            IndexStore, KWayMergeProvider, AssetIterator, create_all_photos_provider
+        )
+        store = IndexStore(library_root)
+        provider = create_all_photos_provider(store)
+        for asset in provider:
+            display(asset)
 """
-from .repository import GLOBAL_INDEX_DB_NAME, get_global_repository, reset_global_repository
+from .kway_merge import AssetIterator, KWayMergeProvider, create_all_photos_provider
+from .repository import (
+    GLOBAL_INDEX_DB_NAME,
+    CursorPage,
+    PaginationCursor,
+    get_global_repository,
+    reset_global_repository,
+)
 from .repository import AssetRepository as IndexStore
 
 __all__ = [
+    "AssetIterator",
+    "CursorPage",
     "GLOBAL_INDEX_DB_NAME",
     "IndexStore",
+    "KWayMergeProvider",
+    "PaginationCursor",
+    "create_all_photos_provider",
     "get_global_repository",
     "reset_global_repository",
 ]

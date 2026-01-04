@@ -15,10 +15,12 @@ Architecture:
 """
 from __future__ import annotations
 
+import base64
 import json
 import sqlite3
 import threading
 import unicodedata
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterable, Iterator, List, Optional, Tuple
 
@@ -33,6 +35,68 @@ logger = get_logger()
 
 # Database filename for the global index
 GLOBAL_INDEX_DB_NAME = "global_index.db"
+
+
+@dataclass(frozen=True, slots=True)
+class PaginationCursor:
+    """Represents a cursor for keyset pagination.
+    
+    This cursor encodes the position in a sorted result set using the last
+    item's sort keys (dt and id). It enables efficient O(1) seeking regardless
+    of how deep into the dataset the user has scrolled.
+    
+    Attributes:
+        dt: The timestamp (creationDate) of the last item.
+        id: The unique identifier of the last item.
+    """
+    dt: str
+    id: str
+    
+    def encode(self) -> str:
+        """Encode the cursor as a Base64 string for API transport.
+        
+        Returns:
+            A URL-safe Base64 encoded string representing this cursor.
+        """
+        payload = json.dumps({"dt": self.dt, "id": self.id}, separators=(",", ":"))
+        return base64.urlsafe_b64encode(payload.encode("utf-8")).decode("ascii")
+    
+    @classmethod
+    def decode(cls, cursor_str: str) -> "PaginationCursor":
+        """Decode a cursor from a Base64 encoded string.
+        
+        Args:
+            cursor_str: The Base64 encoded cursor string.
+            
+        Returns:
+            A PaginationCursor instance.
+            
+        Raises:
+            ValueError: If the cursor string is invalid or malformed.
+        """
+        try:
+            payload = base64.urlsafe_b64decode(cursor_str.encode("ascii")).decode("utf-8")
+            data = json.loads(payload)
+            if "dt" not in data or "id" not in data:
+                raise ValueError("Cursor missing required fields 'dt' and 'id'")
+            return cls(dt=data["dt"], id=data["id"])
+        except (json.JSONDecodeError, UnicodeDecodeError, KeyError) as exc:
+            raise ValueError(f"Invalid cursor format: {exc}") from exc
+
+
+@dataclass(frozen=True, slots=True)
+class CursorPage:
+    """Result of a cursor-based pagination query.
+    
+    Attributes:
+        items: List of asset dictionaries for the current page.
+        next_cursor: Encoded cursor string for fetching the next page,
+                     or None if this is the last page.
+        has_more: True if there are more items after this page.
+    """
+    items: List[Dict[str, Any]]
+    next_cursor: Optional[str]
+    has_more: bool
 
 # Global singleton instance and lock for thread-safe access
 _global_instance: Optional["AssetRepository"] = None
@@ -289,6 +353,83 @@ class AssetRepository:
         finally:
             if should_close:
                 conn.close()
+
+    def fetch_by_cursor(
+        self,
+        cursor: Optional[str] = None,
+        limit: int = 100,
+        album_path: Optional[str] = None,
+        include_subalbums: bool = False,
+        filter_hidden: bool = True,
+        filter_params: Optional[Dict[str, Any]] = None,
+    ) -> CursorPage:
+        """Fetch assets using cursor-based pagination with automatic cursor generation.
+        
+        This is the recommended API for efficient scrolling through large datasets.
+        It uses keyset pagination (Seek Method) which provides O(1) access time
+        regardless of how deep into the dataset the user has scrolled.
+        
+        Args:
+            cursor: Base64-encoded cursor from a previous fetch, or None for first page.
+            limit: Maximum number of items to return (default: 100).
+            album_path: If provided, filter to assets in this album path.
+            include_subalbums: If True, include assets from sub-albums.
+            filter_hidden: If True, exclude hidden assets.
+            filter_params: Additional filter parameters.
+        
+        Returns:
+            A CursorPage containing the items, next cursor, and has_more flag.
+        
+        Example:
+            >>> # First page
+            >>> page = repo.fetch_by_cursor(limit=50)
+            >>> for asset in page.items:
+            ...     display(asset)
+            >>> 
+            >>> # Next page
+            >>> if page.has_more:
+            ...     next_page = repo.fetch_by_cursor(cursor=page.next_cursor, limit=50)
+        """
+        # Decode cursor if provided
+        cursor_dt: Optional[str] = None
+        cursor_id: Optional[str] = None
+        if cursor:
+            try:
+                decoded = PaginationCursor.decode(cursor)
+                cursor_dt = decoded.dt
+                cursor_id = decoded.id
+            except ValueError:
+                # Invalid cursor - start from beginning
+                logger.warning("Invalid cursor provided, starting from beginning")
+        
+        # Fetch one extra item to determine if there are more pages
+        fetch_limit = limit + 1
+        
+        results = self.get_assets_page(
+            cursor_dt=cursor_dt,
+            cursor_id=cursor_id,
+            limit=fetch_limit,
+            album_path=album_path,
+            include_subalbums=include_subalbums,
+            filter_hidden=filter_hidden,
+            filter_params=filter_params,
+        )
+        
+        # Determine if there are more pages
+        has_more = len(results) > limit
+        if has_more:
+            results = results[:limit]  # Trim to requested limit
+        
+        # Generate next cursor from the last item
+        next_cursor: Optional[str] = None
+        if has_more and results:
+            last_item = results[-1]
+            last_dt = last_item.get("dt")
+            last_id = last_item.get("id")
+            if last_dt is not None and last_id is not None:
+                next_cursor = PaginationCursor(dt=str(last_dt), id=str(last_id)).encode()
+        
+        return CursorPage(items=results, next_cursor=next_cursor, has_more=has_more)
 
     def read_geometry_only(
         self,

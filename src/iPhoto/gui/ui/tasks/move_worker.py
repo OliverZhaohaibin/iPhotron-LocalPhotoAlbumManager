@@ -180,36 +180,38 @@ class MoveWorker(QRunnable):
         return Path(moved_path).resolve()
 
     def _update_source_index(self, moved: List[Tuple[Path, Path]]) -> None:
-        """Remove moved assets from the source album's index and links."""
+        """Remove moved assets from the global index and update links."""
 
-        store = IndexStore(self._source_root)
+        # Use library root for global database
+        index_root = self._library_root if self._library_root else self._source_root
+        store = IndexStore(index_root)
         rels: List[str] = []
         for original, _ in moved:
             try:
-                rel = original.resolve().relative_to(self._source_root).as_posix()
+                # Compute library-relative path for global database
+                if self._library_root:
+                    rel = original.resolve().relative_to(self._library_root).as_posix()
+                else:
+                    rel = original.resolve().relative_to(self._source_root).as_posix()
             except (OSError, ValueError):
                 continue
             rels.append(rel)
         if rels:
             store.remove_rows(rels)
-        backend.pair(self._source_root)
-
-        # When moves originate from the Basic Library view ``self._source_root`` is
-        # the virtual aggregate rather than the concrete album that owned the asset.
-        # We therefore need to trim the individual album indexes as well so that
-        # browsing those collections after the move does not reveal ghost entries.
-        additional_rels = self._group_album_relatives(moved)
-        for album_root, album_rels in additional_rels.items():
-            if not album_rels or album_root == self._source_root:
-                continue
-            album_store = IndexStore(album_root)
-            album_store.remove_rows(album_rels)
-            backend.pair(album_root)
+        
+        # Update pairing at the library root level
+        if self._library_root:
+            backend.pair(self._library_root, library_root=self._library_root)
+        else:
+            backend.pair(self._source_root)
 
     def _update_destination_index(self, moved: List[Tuple[Path, Path]]) -> None:
-        """Append moved assets to the destination album's index and links."""
+        """Append moved assets to the global index and links."""
 
-        store = IndexStore(self._destination_root)
+        # Use library root for global database
+        index_root = self._library_root if self._library_root else self._destination_root
+        store = IndexStore(index_root)
+        
         image_paths: List[Path] = []
         video_paths: List[Path] = []
         for _, target in moved:
@@ -220,8 +222,11 @@ class MoveWorker(QRunnable):
                 video_paths.append(target)
             else:
                 image_paths.append(target)
+        
+        # Process media relative to the library root for global database
+        process_root = self._library_root if self._library_root else self._destination_root
         new_rows = list(
-            process_media_paths(self._destination_root, image_paths, video_paths)
+            process_media_paths(process_root, image_paths, video_paths)
         )
         if self._is_trash_destination and not self._is_restore:
             if self._library_root is None:
@@ -296,9 +301,15 @@ class MoveWorker(QRunnable):
                 annotated_rows.append(enriched)
             new_rows = annotated_rows
         store.append_rows(new_rows)
-        backend.pair(self._destination_root)
+        
+        # Update pairing at the library root level
+        if self._library_root:
+            backend.pair(self._library_root, library_root=self._library_root)
+        else:
+            backend.pair(self._destination_root)
 
-        self._synchronise_library_index(moved, image_paths, video_paths)
+        # No longer need to sync separate library index since we use single global DB
+        # self._synchronise_library_index(moved, image_paths, video_paths)
 
     def _synchronise_library_index(
         self,
@@ -349,7 +360,7 @@ class MoveWorker(QRunnable):
         # Pairing the Basic Library after each update keeps library-wide Live Photo metadata
         # consistent with the concrete album indices, ensuring that aggregated views present
         # fresh still/motion relationships immediately after moves or restores complete.
-        backend.pair(library_root)
+        backend.pair(library_root, library_root=library_root)
 
     def _resolve_optional(self, path: Optional[Path]) -> Optional[Path]:
         """Resolve *path* defensively, returning ``None`` when unavailable."""

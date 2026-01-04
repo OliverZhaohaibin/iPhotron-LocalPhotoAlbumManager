@@ -33,6 +33,7 @@ class IncrementalRefreshWorker(QRunnable):
         signals: IncrementalRefreshSignals,
         filter_params: Optional[Dict[str, object]] = None,
         descendant_root: Optional[Path] = None,
+        library_root: Optional[Path] = None,
     ) -> None:
         super().__init__()
         self.setAutoDelete(True)
@@ -41,12 +42,14 @@ class IncrementalRefreshWorker(QRunnable):
         self._signals = signals
         self._filter_params = filter_params
         self._descendant_root = descendant_root
+        self._library_root = library_root
 
     def run(self) -> None:
         try:
             # 1. Load fresh rows from DB (location resolution occurs in build_asset_entry, called during row processing)
             fresh_rows, _ = compute_asset_rows(
-                self._root, self._featured, filter_params=self._filter_params
+                self._root, self._featured, filter_params=self._filter_params,
+                library_root=self._library_root,
             )
 
             # 2. If a descendant root is involved, merge its fresh data into the current set of rows
@@ -82,7 +85,8 @@ class IncrementalRefreshWorker(QRunnable):
                 child_featured = []
 
             child_rows, _ = compute_asset_rows(
-                self._descendant_root, child_featured, filter_params=self._filter_params
+                self._descendant_root, child_featured, filter_params=self._filter_params,
+                library_root=self._library_root,
             )
 
             if child_rows:

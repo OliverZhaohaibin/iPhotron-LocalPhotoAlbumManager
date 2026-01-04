@@ -21,17 +21,30 @@ class RescanSignals(QObject):
 class RescanWorker(QRunnable):
     """Execute a blocking ``backend.rescan`` call on a worker thread."""
 
-    def __init__(self, root: Path, signals: RescanSignals) -> None:
+    def __init__(
+        self,
+        root: Path,
+        signals: RescanSignals,
+        *,
+        library_root: Path | None = None,
+    ) -> None:
         super().__init__()
         self.setAutoDelete(False)
         self._root = Path(root)
         self._signals = signals
+        self._library_root = library_root
 
     @property
     def root(self) -> Path:
         """Return the album directory that will be refreshed."""
 
         return self._root
+
+    @property
+    def library_root(self) -> Path | None:
+        """Return the library root used for the rescan."""
+
+        return self._library_root
 
     @property
     def signals(self) -> RescanSignals:
@@ -47,7 +60,11 @@ class RescanWorker(QRunnable):
             def progress_callback(processed: int, total: int) -> None:
                 self._signals.progressUpdated.emit(self._root, processed, total)
 
-            backend.rescan(self._root, progress_callback=progress_callback)
+            backend.rescan(
+                self._root,
+                progress_callback=progress_callback,
+                library_root=self._library_root,
+            )
         except IPhotoError as exc:
             # Surface domain-specific failures with the album path attached so the
             # facade can relay meaningful diagnostics to the user.

@@ -28,7 +28,11 @@ class ScannerSignals(QObject):
 
 
 class ScannerWorker(QRunnable):
-    """Scan album files in a worker thread and emit progress updates."""
+    """Scan album files in a worker thread and emit progress updates.
+    
+    All scanned assets are written to a single global database at the library root.
+    When scanning a subfolder, the assets are stored with their library-relative paths.
+    """
 
     # Number of items to process before emitting a progressive update signal.
     # A smaller chunk size makes the UI feel more responsive during the initial
@@ -41,6 +45,7 @@ class ScannerWorker(QRunnable):
         include: Iterable[str],
         exclude: Iterable[str],
         signals: ScannerSignals,
+        library_root: Optional[Path] = None,
     ) -> None:
         super().__init__()
         self.setAutoDelete(False)
@@ -48,6 +53,8 @@ class ScannerWorker(QRunnable):
         self._include = list(include)
         self._exclude = list(exclude)
         self._signals = signals
+        # Use library_root for database if provided, otherwise use root
+        self._library_root = library_root if library_root else root
         self._is_cancelled = False
         self._had_error = False
         self._failed_count = 0
@@ -63,6 +70,12 @@ class ScannerWorker(QRunnable):
         """Signal container used by this worker."""
 
         return self._signals
+
+    @property
+    def library_root(self) -> Path:
+        """Return the database root used by this worker."""
+
+        return self._library_root
 
     @property
     def cancelled(self) -> bool:
@@ -95,11 +108,11 @@ class ScannerWorker(QRunnable):
             # Emit an initial indeterminate update
             self._signals.progressUpdated.emit(self._root, 0, -1)
 
-            # Initialize IndexStore once
+            # Initialize IndexStore at library root (single global database)
             try:
-                store = IndexStore(self._root)
+                store = IndexStore(self._library_root)
             except Exception as e:
-                LOGGER.error(f"Failed to initialize IndexStore for {self._root}: {e}")
+                LOGGER.error(f"Failed to initialize IndexStore for {self._library_root}: {e}")
                 raise
 
             def progress_callback(processed: int, total: int) -> None:
@@ -109,7 +122,7 @@ class ScannerWorker(QRunnable):
             chunk: List[dict] = []
 
             # Load existing index for incremental scanning
-            existing_index = load_incremental_index_cache(self._root)
+            existing_index = load_incremental_index_cache(self._library_root)
 
             # The new scan_album implementation handles parallel discovery and processing.
             # We initialize the generator but execution (and thread starting) happens on iteration.
@@ -121,9 +134,24 @@ class ScannerWorker(QRunnable):
                 progress_callback=progress_callback
             )
 
+            # Compute prefix for library-relative paths (once, before the loop)
+            scan_prefix = ""
+            scan_prefix_with_slash = ""
+            try:
+                if self._library_root.resolve() != self._root.resolve():
+                    scan_prefix = self._root.relative_to(self._library_root).as_posix()
+                    scan_prefix_with_slash = scan_prefix + "/"
+            except ValueError:
+                pass  # root is not under library_root, keep empty prefix
+
             for row in scanner:
                 if self._is_cancelled:
                     break
+
+                # Adjust rel path to be library-relative if scanning a subfolder
+                if scan_prefix and "rel" in row:
+                    # Use string concatenation for efficiency (avoiding Path object creation per row)
+                    row["rel"] = scan_prefix_with_slash + row["rel"]
 
                 rows.append(row)
                 chunk.append(row)

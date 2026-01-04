@@ -2,11 +2,22 @@
 
 This module provides the main API for CRUD operations on assets, delegating
 infrastructure concerns to specialized components.
+
+Architecture:
+    This module implements a **Single Global Database** pattern where all metadata
+    and asset information is stored in one centralized SQLite database at the
+    library root. Key architectural principles:
+    
+    - **Single Write Gateway**: All write operations go through this repository
+    - **Idempotent Writes**: Duplicate scans produce identical results (upsert)
+    - **Additive-Only Scans**: Scanning never deletes data from the database
+    - **Multiple Entry Points**: Scans can be triggered from any location
 """
 from __future__ import annotations
 
 import json
 import sqlite3
+import threading
 import unicodedata
 from pathlib import Path
 from typing import Any, Dict, Iterable, Iterator, List, Optional, Tuple
@@ -23,33 +34,85 @@ logger = get_logger()
 # Database filename for the global index
 GLOBAL_INDEX_DB_NAME = "global_index.db"
 
+# Global singleton instance and lock for thread-safe access
+_global_instance: Optional["AssetRepository"] = None
+_global_lock = threading.Lock()
+
+
+def get_global_repository(library_root: Path) -> "AssetRepository":
+    """Get or create the global AssetRepository singleton for a library.
+    
+    This function ensures there is only one database instance for the entire
+    application lifecycle, regardless of which entry point triggers a scan.
+    
+    Args:
+        library_root: The root directory of the library.
+        
+    Returns:
+        The singleton AssetRepository instance.
+    """
+    global _global_instance
+    
+    with _global_lock:
+        resolved_root = library_root.resolve()
+        
+        if _global_instance is not None:
+            # Verify the instance matches the requested root
+            if _global_instance.library_root.resolve() == resolved_root:
+                return _global_instance
+            # Different root requested - close old instance and create new one
+            logger.info(
+                "Switching global database from %s to %s",
+                _global_instance.library_root,
+                resolved_root,
+            )
+            _global_instance.close()
+        
+        _global_instance = AssetRepository(resolved_root)
+        return _global_instance
+
+
+def reset_global_repository() -> None:
+    """Reset the global repository singleton.
+    
+    This is primarily used for testing to ensure clean state between tests.
+    """
+    global _global_instance
+    
+    with _global_lock:
+        if _global_instance is not None:
+            _global_instance.close()
+            _global_instance = None
+
 
 class AssetRepository:
     """High-level API for asset CRUD operations.
     
-    This class focuses purely on domain logic (reading, writing, and querying
-    assets) while delegating infrastructure concerns like connection management,
-    schema migrations, and recovery to specialized components.
+    This class implements the Single Write Gateway for the global database.
+    All asset metadata operations (create, read, update, delete) must go
+    through this repository to ensure data consistency.
+    
+    The repository uses idempotent write operations:
+    - `append_rows`: Uses INSERT OR REPLACE (upsert) to avoid duplicates
+    - `upsert_row`: Single-row upsert operation
+    - Unique constraint on `rel` (file path) prevents duplicate entries
+    
+    Note: For the global database singleton, use `get_global_repository()`.
     """
 
-    def __init__(self, album_root: Path, use_global_index: bool = True):
+    def __init__(self, library_root: Path):
         """Initialize the asset repository.
         
         Args:
-            album_root: The root directory of the library or album.
-            use_global_index: If True, use the global `global_index.db` at the
-                root. If False, use a per-album `index.db` for backward
-                compatibility during migration.
+            library_root: The root directory of the library. The global database
+                will be created at `<library_root>/.iPhoto/global_index.db`.
         """
-        self.album_root = album_root
-        if use_global_index:
-            self.path = album_root / WORK_DIR_NAME / GLOBAL_INDEX_DB_NAME
-        else:
-            # Legacy per-album database path
-            self.path = album_root / WORK_DIR_NAME / "index.db"
+        self.library_root = library_root
+        self.path = library_root / WORK_DIR_NAME / GLOBAL_INDEX_DB_NAME
         self.path.parent.mkdir(parents=True, exist_ok=True)
         
         self._db_manager = DatabaseManager(self.path)
+        self._conn: Optional[sqlite3.Connection] = None
         self._init_db()
 
     def _init_db(self) -> None:
@@ -77,6 +140,22 @@ class AssetRepository:
             ...     repo.upsert_row("b.jpg", {...})
         """
         return self._db_manager.transaction()
+
+    def close(self) -> None:
+        """Close any active database connections.
+        
+        This method should be called when the repository is no longer needed,
+        particularly when resetting the global singleton.
+        """
+        self._db_manager.close()
+        if self._conn is not None:
+            try:
+                self._conn.close()
+            except Exception as exc:
+                # Best-effort close: do not propagate, but log for observability.
+                logger.warning("Error while closing database connection: %s", exc)
+            finally:
+                self._conn = None
 
     def write_rows(self, rows: Iterable[Dict[str, Any]]) -> None:
         """Rewrite the entire index with *rows*."""
@@ -237,6 +316,15 @@ class AssetRepository:
             "original_album_subpath", "is_favorite", "location", "gps",
             "micro_thumbnail"
         ]
+
+        logger.debug(
+            "IndexStore.read_geometry_only album_path=%s include_subalbums=%s "
+            "sort_by_date=%s filter_params=%s",
+            album_path,
+            include_subalbums,
+            sort_by_date,
+            filter_params,
+        )
 
         query, params = QueryBuilder.build_pagination_query(
             select_clause=f"SELECT {', '.join(columns)}",

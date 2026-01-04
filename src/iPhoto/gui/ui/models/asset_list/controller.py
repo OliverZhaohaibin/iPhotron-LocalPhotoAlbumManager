@@ -124,7 +124,10 @@ class AssetListController(QObject):
                 self._live_signals.chunkReady.disconnect(self._on_loader_chunk_ready)
             except RuntimeError:
                 pass
-            self._live_signals.deleteLater()
+            try:
+                self._live_signals.deleteLater()
+            except RuntimeError:
+                pass  # C++ object already deleted
             self._live_signals = None
 
         # Cleanup incremental refresh worker
@@ -187,6 +190,13 @@ class AssetListController(QObject):
         if self._active_filter:
             filter_params["filter_mode"] = self._active_filter
 
+        # Ensure library_root is set from facade if not already configured
+        # This provides a fallback in case set_library_root wasn't called yet
+        if not self._data_loader._library_root and self._facade.library_manager:
+            library_root = self._facade.library_manager.root()
+            if library_root:
+                self._data_loader.set_library_root(library_root)
+
         try:
             self._data_loader.start(
                 self._album_root, featured, filter_params=filter_params
@@ -204,7 +214,10 @@ class AssetListController(QObject):
                             self._live_signals.chunkReady.disconnect(self._on_loader_chunk_ready)
                         except RuntimeError:
                             pass
-                        self._live_signals.deleteLater()
+                        try:
+                            self._live_signals.deleteLater()
+                        except RuntimeError:
+                            pass  # C++ object already deleted
                         self._live_signals = None
 
                     live_items = self._facade.library_manager.get_live_scan_results(
@@ -530,6 +543,11 @@ class AssetListController(QObject):
             if self._active_filter:
                 filter_params["filter_mode"] = self._active_filter
 
+            # Get library root for global database filtering
+            library_root = None
+            if self._facade.library_manager:
+                library_root = self._facade.library_manager.root()
+
             self._incremental_signals = IncrementalRefreshSignals()
             self._incremental_signals.resultsReady.connect(
                 self._apply_incremental_results
@@ -542,6 +560,7 @@ class AssetListController(QObject):
                 self._incremental_signals,
                 filter_params=filter_params,
                 descendant_root=descendant_root,
+                library_root=library_root,
             )
 
             QThreadPool.globalInstance().start(self._incremental_worker)

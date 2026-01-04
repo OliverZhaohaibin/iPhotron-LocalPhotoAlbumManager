@@ -57,6 +57,7 @@ class IncrementalUpdateHandler(QObject):
         get_current_rows: Callable[[], List[Dict[str, Any]]],
         get_featured: Callable[[], List[str]],
         get_filter_params: Callable[[], Optional[Dict[str, Any]]],
+        get_library_root: Optional[Callable[[], Optional[Path]]] = None,
         parent: Optional[QObject] = None,
     ):
         """Initialize the update handler.
@@ -65,12 +66,14 @@ class IncrementalUpdateHandler(QObject):
             get_current_rows: Callback to get current model rows.
             get_featured: Callback to get featured assets list.
             get_filter_params: Callback to get current filter parameters.
+            get_library_root: Optional callback to get library root for global database filtering.
             parent: Parent QObject.
         """
         super().__init__(parent)
         self._get_current_rows = get_current_rows
         self._get_featured = get_featured
         self._get_filter_params = get_filter_params
+        self._get_library_root = get_library_root
         
         self._incremental_worker: Optional[IncrementalRefreshWorker] = None
         self._incremental_signals: Optional[IncrementalRefreshSignals] = None
@@ -97,6 +100,12 @@ class IncrementalUpdateHandler(QObject):
             featured = self._get_featured()
             filter_params = self._get_filter_params() or {}
             
+            # Optionally get library root for global database filtering
+            if self._get_library_root is not None:
+                library_root = self._get_library_root()
+            else:
+                library_root = None
+            
             self._incremental_signals = IncrementalRefreshSignals()
             self._incremental_signals.resultsReady.connect(self._apply_incremental_results)
             self._incremental_signals.error.connect(self._on_error)
@@ -107,6 +116,7 @@ class IncrementalUpdateHandler(QObject):
                 self._incremental_signals,
                 filter_params=filter_params,
                 descendant_root=descendant_root,
+                library_root=library_root,
             )
             
             QThreadPool.globalInstance().start(self._incremental_worker)

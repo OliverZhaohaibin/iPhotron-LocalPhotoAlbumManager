@@ -76,21 +76,22 @@ class LibraryExportWorker(QRunnable):
                 album_paths.add(child.path)
 
         to_export = []
-        for album_path in album_paths:
-            try:
-                rows = IndexStore(album_path).read_all()
-            except Exception:
-                continue
-
+        # Use single global database at library root
+        try:
+            rows = IndexStore(root).read_all()
             for row in rows:
                 if not isinstance(row, dict):
                     continue
                 rel = row.get("rel")
                 if not rel or not isinstance(rel, str):
                     continue
-                abs_path = (album_path / rel).resolve()
+                abs_path = (root / rel).resolve()
                 if sidecar.sidecar_path_for_asset(abs_path).exists():
                     to_export.append(abs_path)
+        except Exception:
+            # If we cannot read from the database (e.g. corrupted, missing, or
+            # permission issues), skip export silently.
+            pass
 
         total = len(to_export)
         if total == 0:

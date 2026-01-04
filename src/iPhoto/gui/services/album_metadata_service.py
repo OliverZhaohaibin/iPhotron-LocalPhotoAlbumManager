@@ -101,6 +101,11 @@ class AlbumMetadataService(QObject):
         primary_success = False
 
         # Process each album atomically: Update Memory -> Persist -> Update DB
+        library_root = None
+        lib_manager = self._library_manager_getter()
+        if lib_manager:
+            library_root = lib_manager.root()
+
         for alb, r in unique_targets.values():
             # Apply changes in memory
             if desired_state:
@@ -111,7 +116,17 @@ class AlbumMetadataService(QObject):
             # Persist changes
             if self._save_manifest(alb, reload_view=False):
                 # Success: Update DB immediately to minimize inconsistency window
-                IndexStore(alb.root).set_favorite_status(r, desired_state)
+                # Use library root for global database
+                index_root = library_root if library_root else alb.root
+                # For global DB, we need the library-relative path
+                if library_root:
+                    try:
+                        lib_rel = absolute_asset.relative_to(library_root).as_posix()
+                        IndexStore(index_root).set_favorite_status(lib_rel, desired_state)
+                    except (ValueError, OSError):
+                        IndexStore(alb.root).set_favorite_status(r, desired_state)
+                else:
+                    IndexStore(index_root).set_favorite_status(r, desired_state)
 
                 # Check if this was the primary album
                 if alb.root == album.root:

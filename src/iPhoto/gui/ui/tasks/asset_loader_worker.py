@@ -471,6 +471,11 @@ class AssetLoaderWorker(QRunnable):
 
         # Determine the effective index root and album path using helper
         effective_index_root, album_path = compute_album_path(self._root, self._library_root)
+        print(
+            f"[debug] AssetLoaderWorker._build_payload_chunks root={self._root} "
+            f"library_root={self._library_root} index_root={effective_index_root} "
+            f"album_path={album_path} filter_params={self._filter_params}"
+        )
 
         store = IndexStore(effective_index_root)
 
@@ -540,6 +545,10 @@ class AssetLoaderWorker(QRunnable):
                     should_flush = True
 
                 if should_flush:
+                    print(
+                        f"[debug] AssetLoaderWorker chunk size={len(chunk)} "
+                        f"yielded_before={yielded_count} album_path={album_path}"
+                    )
                     yielded_count += len(chunk)
                     yield chunk
                     chunk = []
@@ -560,6 +569,10 @@ class AssetLoaderWorker(QRunnable):
                     self._signals.progressUpdated.emit(self._root, position, total)
 
             if chunk:
+                print(
+                    f"[debug] AssetLoaderWorker final chunk size={len(chunk)} "
+                    f"yielded_before={yielded_count} album_path={album_path}"
+                )
                 yielded_count += len(chunk)
                 yield chunk
 

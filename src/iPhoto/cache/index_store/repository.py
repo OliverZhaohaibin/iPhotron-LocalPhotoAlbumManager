@@ -325,6 +325,12 @@ class AssetRepository:
             "micro_thumbnail"
         ]
 
+        print(
+            f"[debug] IndexStore.read_geometry_only album_path={album_path} "
+            f"include_subalbums={include_subalbums} sort_by_date={sort_by_date} "
+            f"filter_params={filter_params}"
+        )
+
         query, params = QueryBuilder.build_pagination_query(
             select_clause=f"SELECT {', '.join(columns)}",
             base_where=["live_role = 0"],

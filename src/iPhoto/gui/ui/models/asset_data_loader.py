@@ -195,10 +195,6 @@ class AssetDataLoader(QObject):
             filter_params=filter_params,
             library_root=self._library_root,
         )
-        print(
-            f"[debug] AssetDataLoader.start root={root} library_root={self._library_root} "
-            f"filter_params={filter_params} request_id={current_request_id}"
-        )
         self._worker = worker
         self._signals = signals
         self._pool.start(worker)

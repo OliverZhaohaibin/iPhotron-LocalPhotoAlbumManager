@@ -554,10 +554,6 @@ class AssetLoaderWorker(QRunnable):
                     should_flush = True
 
                 if should_flush:
-                    print(
-                        f"[debug] AssetLoaderWorker chunk size={len(chunk)} "
-                        f"yielded_before={yielded_count} album_path={album_path}"
-                    )
                     yielded_count += len(chunk)
                     yield chunk
                     chunk = []
@@ -578,10 +574,6 @@ class AssetLoaderWorker(QRunnable):
                     self._signals.progressUpdated.emit(self._root, position, total)
 
             if chunk:
-                print(
-                    f"[debug] AssetLoaderWorker final chunk size={len(chunk)} "
-                    f"yielded_before={yielded_count} album_path={album_path}"
-                )
                 yielded_count += len(chunk)
                 yield chunk
 

@@ -43,7 +43,6 @@ def _compute_album_path(root: Path, library_root: Optional[Path]) -> Optional[st
     if rel in (".", ""):
         return None
     # Debug trace to help diagnose album filtering issues
-    print(f"[debug] app._compute_album_path root={root} library_root={library_root} rel={rel}")
     return rel
 
 
@@ -69,9 +68,6 @@ def open_album(
     
     # If using global DB, we need to filter by album path
     album_path = _compute_album_path(root, library_root)
-    print(f"[debug] rescan db_root={db_root} album_path={album_path}")
-    print(f"[debug] pair db_root={db_root} album_path={album_path}")
-    print(f"[debug] open_album db_root={db_root} album_path={album_path}")
     
     # Read rows from the database, filtered by album if using global DB
     if album_path:
@@ -461,7 +457,6 @@ def scan_specific_files(
     
     # If using global DB, convert to library-relative paths
     album_path = _compute_album_path(root, library_root)
-    print(f"[debug] scan_specific_files db_root={db_root} album_path={album_path}")
     
     if album_path:
         for row in rows:

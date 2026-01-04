@@ -190,6 +190,13 @@ class AssetListController(QObject):
         if self._active_filter:
             filter_params["filter_mode"] = self._active_filter
 
+        # Ensure library_root is set from facade if not already configured
+        # This provides a fallback in case set_library_root wasn't called yet
+        if not self._data_loader._library_root and self._facade.library_manager:
+            library_root = self._facade.library_manager.root()
+            if library_root:
+                self._data_loader.set_library_root(library_root)
+
         try:
             self._data_loader.start(
                 self._album_root, featured, filter_params=filter_params

@@ -66,7 +66,7 @@ class IncrementalUpdateHandler(QObject):
             get_current_rows: Callback to get current model rows.
             get_featured: Callback to get featured assets list.
             get_filter_params: Callback to get current filter parameters.
-            get_library_root: Optional callback to get library root for global DB filtering.
+            get_library_root: Optional callback to get library root for global database filtering.
             parent: Parent QObject.
         """
         super().__init__(parent)

@@ -476,12 +476,15 @@ class AssetLoaderWorker(QRunnable):
 
         # Determine the effective index root and album path using helper
         effective_index_root, album_path = compute_album_path(self._root, self._library_root)
+        root_name = self._root.name
+        library_root_name = self._library_root.name if self._library_root else None
+        index_root_name = effective_index_root.name
         LOGGER.debug(
             "AssetLoaderWorker._build_payload_chunks root=%s library_root=%s index_root=%s "
             "album_path=%s filter_params=%s",
-            self._root,
-            self._library_root,
-            effective_index_root,
+            root_name,
+            library_root_name,
+            index_root_name,
             album_path,
             self._filter_params,
         )

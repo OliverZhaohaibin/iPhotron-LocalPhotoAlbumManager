@@ -275,6 +275,12 @@ class AssetRepository:
             limit=limit,
         )
 
+        print(
+            f"[debug] IndexStore.get_assets_page album_path={album_path} "
+            f"include_subalbums={include_subalbums} filter_hidden={filter_hidden} "
+            f"cursor_dt={cursor_dt} cursor_id={cursor_id} limit={limit}"
+        )
+
         conn = self._db_manager.get_connection()
         should_close = (conn != self._db_manager._conn)
 
@@ -286,6 +292,7 @@ class AssetRepository:
             results = []
             for row in cursor:
                 results.append(self._db_row_to_dict(row))
+            print(f"[debug] IndexStore.get_assets_page returned={len(results)} rows")
             return results
         finally:
             if should_close:

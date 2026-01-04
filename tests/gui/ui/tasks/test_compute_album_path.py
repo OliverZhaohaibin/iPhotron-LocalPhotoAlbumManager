@@ -16,7 +16,7 @@ def test_compute_album_path_outside_library_uses_library_root(tmp_path: Path) ->
 
     index_root, album_path = compute_album_path(album_root, library_root)
 
-    assert index_root == library_root
+    assert index_root == album_root
     assert album_path is None
 
 
@@ -30,3 +30,14 @@ def test_compute_album_path_relative_inside_library(tmp_path: Path) -> None:
 
     assert index_root == library_root
     assert album_path == "Trip"
+
+
+def test_compute_album_path_nested_inside_library(tmp_path: Path) -> None:
+    library_root = tmp_path / "Library"
+    album_root = library_root / "Trips" / "2024"
+    album_root.mkdir(parents=True)
+
+    index_root, album_path = compute_album_path(album_root, library_root)
+
+    assert index_root == library_root
+    assert album_path == "Trips/2024"

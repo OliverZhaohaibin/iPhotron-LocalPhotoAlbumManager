@@ -51,32 +51,22 @@ def compute_album_path(
     # Ensure work dir exists at library root
     ensure_work_dir(library_root, WORK_DIR_NAME)
 
+    # Prefer robust, case-tolerant relative computation to avoid dropping
+    # album filters (which would leak All Photos into physical album views).
     try:
-        root_resolved = root.resolve()
-        library_resolved = library_root.resolve()
+        rel = Path(os.path.relpath(root, library_root)).as_posix()
+    except Exception:
+        rel = None
 
-        if root_resolved == library_resolved:
-            # Viewing the library root itself - no album filtering needed
-            return library_root, None
+    if rel is None or rel.startswith(".."):
+        # Outside the library – fall back to per-folder index
+        return root, None
 
-        # Compute album path relative to library root
-        album_path = root_resolved.relative_to(library_resolved).as_posix()
-        return library_root, album_path
-    except (ValueError, OSError):
-        # If path resolution fails (e.g. case or symlink differences), stick to the
-        # single global database at the library root and simply skip album filtering.
-        # This avoids accidentally creating per-folder databases.
-        # Best-effort fallback: try a case-insensitive prefix check to recover album_path.
-        lib_str = library_root.as_posix()
-        root_str = root.as_posix()
-        if root_str.lower().startswith(lib_str.lower().rstrip("/")):
-            # Derive a relative path without relying on Path.relative_to semantics.
-            try:
-                album_path = Path(os.path.relpath(root, library_root)).as_posix()
-            except Exception:
-                album_path = None
-            return library_root, album_path
+    if rel == ".":
+        # Library root
         return library_root, None
+
+    return library_root, rel
 
 
 def adjust_rel_for_album(row: Dict[str, object], album_path: Optional[str]) -> Dict[str, object]:

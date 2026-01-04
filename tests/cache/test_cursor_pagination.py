@@ -163,6 +163,87 @@ class TestFetchByCursor:
         assert page.items[0]["rel"] == "a.jpg"
 
 
+class TestFetchFirstViewport:
+    """Tests for fetch_first_viewport API."""
+
+    def test_returns_items_count_and_cursor(self, store: IndexStore) -> None:
+        """Verify fetch_first_viewport returns correct tuple structure."""
+        rows = [
+            {"rel": "a.jpg", "id": "1", "dt": "2023-01-01T10:00:00Z"},
+            {"rel": "b.jpg", "id": "2", "dt": "2023-01-02T10:00:00Z"},
+            {"rel": "c.jpg", "id": "3", "dt": "2023-01-03T10:00:00Z"},
+        ]
+        store.write_rows(rows)
+        
+        items, total, cursor = store.fetch_first_viewport(limit=2)
+        
+        assert len(items) == 2
+        assert total == 3
+        assert cursor is not None
+
+    def test_returns_lightweight_columns(self, store: IndexStore) -> None:
+        """Verify fetch_first_viewport returns minimal columns for fast rendering."""
+        rows = [
+            {"rel": "a.jpg", "id": "1", "dt": "2023-01-01T10:00:00Z", "w": 1920, "h": 1080},
+        ]
+        store.write_rows(rows)
+        
+        items, _, _ = store.fetch_first_viewport(limit=10)
+        
+        assert len(items) == 1
+        item = items[0]
+        # Should include essential columns
+        assert "id" in item
+        assert "rel" in item
+        assert "dt" in item
+        assert "w" in item
+        assert "h" in item
+
+    def test_cursor_works_with_fetch_by_cursor(self, store: IndexStore) -> None:
+        """Verify cursor from fetch_first_viewport works with fetch_by_cursor."""
+        rows = [
+            {"rel": f"photo{i}.jpg", "id": str(i), "dt": f"2023-01-{i:02d}T10:00:00Z"}
+            for i in range(1, 6)
+        ]
+        store.write_rows(rows)
+        
+        # Get first viewport
+        items, total, cursor = store.fetch_first_viewport(limit=2)
+        assert len(items) == 2
+        assert cursor is not None
+        
+        # Use cursor to get next page
+        next_page = store.fetch_by_cursor(cursor=cursor, limit=10)
+        assert len(next_page.items) == 3  # Remaining items
+
+    def test_no_cursor_when_all_items_fit(self, store: IndexStore) -> None:
+        """Verify no cursor when all items fit in the viewport."""
+        rows = [
+            {"rel": "a.jpg", "id": "1", "dt": "2023-01-01T10:00:00Z"},
+        ]
+        store.write_rows(rows)
+        
+        items, total, cursor = store.fetch_first_viewport(limit=10)
+        
+        assert len(items) == 1
+        assert total == 1
+        assert cursor is None
+
+    def test_with_album_filter(self, store: IndexStore) -> None:
+        """Verify album filtering works with fetch_first_viewport."""
+        rows = [
+            {"rel": "Album1/a.jpg", "id": "1", "dt": "2023-01-01T10:00:00Z"},
+            {"rel": "Album1/b.jpg", "id": "2", "dt": "2023-01-02T10:00:00Z"},
+            {"rel": "Album2/c.jpg", "id": "3", "dt": "2023-01-03T10:00:00Z"},
+        ]
+        store.write_rows(rows)
+        
+        items, total, _ = store.fetch_first_viewport(album_path="Album1", limit=10)
+        
+        assert len(items) == 2
+        assert total == 2
+
+
 class TestAssetIterator:
     """Tests for AssetIterator lazy loading."""
 

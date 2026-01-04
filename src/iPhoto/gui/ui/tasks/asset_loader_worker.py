@@ -515,8 +515,9 @@ class AssetLoaderWorker(QRunnable):
             chunk: List[Dict[str, object]] = []
             last_reported = 0
 
-            # Priority: Emit first 20 items quickly
-            first_chunk_size = 20
+            # Priority: Emit first 50 items quickly for instant viewport rendering
+            # Increased from 20 to 50 for faster initial perceived performance
+            first_chunk_size = 50
             normal_chunk_size = 200
 
             total = 0
@@ -525,9 +526,10 @@ class AssetLoaderWorker(QRunnable):
             yielded_count = 0
 
             for position, row in enumerate(generator, start=1):
-                # Yield CPU every 50 items to keep UI responsive
-                if position % 50 == 0:
-                    QThread.msleep(10)
+                # Yield CPU every 100 items to keep UI responsive
+                # Increased from 50 to 100 to reduce context switching overhead
+                if position % 100 == 0:
+                    QThread.msleep(5)
 
                 if self._is_cancelled:
                     return

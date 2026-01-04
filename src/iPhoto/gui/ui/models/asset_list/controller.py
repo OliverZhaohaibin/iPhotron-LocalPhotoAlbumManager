@@ -53,10 +53,13 @@ class AssetListController(QObject):
     loadFinished = Signal(Path, bool)
     error = Signal(Path, str)
 
-    # Tuning constants for streaming updates
-    _STREAM_FLUSH_INTERVAL_MS = 100
-    _STREAM_BATCH_SIZE = 100
-    _STREAM_FLUSH_THRESHOLD = 2000
+    # Tuning constants for streaming updates - optimized for fast initial rendering
+    # Reduced flush interval for more responsive updates
+    _STREAM_FLUSH_INTERVAL_MS = 50
+    # Increased batch size to reduce UI update overhead
+    _STREAM_BATCH_SIZE = 200
+    # Increased threshold before immediate flush
+    _STREAM_FLUSH_THRESHOLD = 3000
 
     def __init__(
         self,

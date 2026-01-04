@@ -431,6 +431,110 @@ class AssetRepository:
         
         return CursorPage(items=results, next_cursor=next_cursor, has_more=has_more)
 
+    def fetch_first_viewport(
+        self,
+        limit: int = 50,
+        album_path: Optional[str] = None,
+        include_subalbums: bool = True,
+        filter_hidden: bool = True,
+        filter_params: Optional[Dict[str, Any]] = None,
+    ) -> Tuple[List[Dict[str, Any]], int, Optional[str]]:
+        """Fetch the first viewport of assets with minimal overhead for instant UI rendering.
+        
+        This is an optimized method for the initial view switch that:
+        1. Returns only the columns needed for the grid layout (lightweight query)
+        2. Returns an estimated total count (via a fast COUNT query)
+        3. Returns a cursor for loading subsequent pages
+        
+        This method is designed for the "All Photos" view and album switches where
+        the user expects immediate visual feedback.
+        
+        Args:
+            limit: Number of items for the first viewport (default: 50).
+            album_path: If provided, filter to assets in this album path.
+            include_subalbums: If True, include assets from sub-albums.
+            filter_hidden: If True, exclude hidden assets.
+            filter_params: Additional filter parameters.
+        
+        Returns:
+            A tuple of (items, total_count, next_cursor) where:
+            - items: List of lightweight asset dictionaries for immediate display
+            - total_count: Estimated total number of assets matching the query
+            - next_cursor: Encoded cursor for fetching the next page, or None if done
+        
+        Example:
+            >>> items, total, cursor = repo.fetch_first_viewport(limit=50)
+            >>> display_grid(items)  # Instant display
+            >>> if cursor:
+            ...     # Load more in background
+            ...     more = repo.fetch_by_cursor(cursor=cursor, limit=100)
+        """
+        # Columns optimized for fast grid rendering
+        columns = [
+            "id", "rel", "aspect_ratio", "media_type", "live_partner_rel",
+            "dur", "dt", "ts", "w", "h", "is_favorite", "micro_thumbnail"
+        ]
+        
+        # Build query with limit + 1 to detect if there are more pages
+        fetch_limit = limit + 1
+        query, params = QueryBuilder.build_pagination_query(
+            select_clause=f"SELECT {', '.join(columns)}",
+            base_where=["live_role = 0"] if filter_hidden else None,
+            album_path=album_path,
+            include_subalbums=include_subalbums,
+            filter_params=filter_params,
+            sort_by_date=True,
+            limit=fetch_limit,
+        )
+        
+        conn = self._db_manager.get_connection()
+        # Close the connection after use only if we created a new one
+        # (i.e., not reusing an existing transaction connection)
+        should_close = (conn != self._db_manager._conn)
+        
+        try:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            
+            # Execute the main query
+            cursor.execute(query, params)
+            results = [dict(row) for row in cursor]
+            
+            # Determine if there are more pages
+            has_more = len(results) > limit
+            if has_more:
+                results = results[:limit]
+            
+            # Generate next cursor from the last item
+            next_cursor: Optional[str] = None
+            if has_more and results:
+                last_item = results[-1]
+                last_dt = last_item.get("dt")
+                last_id = last_item.get("id")
+                if last_dt is not None and last_id is not None:
+                    next_cursor = PaginationCursor(dt=str(last_dt), id=str(last_id)).encode()
+            
+            # Get total count. We execute a separate COUNT query since SQLite's
+            # COUNT(*) OVER() window function can be significantly slower than
+            # a dedicated COUNT query on large datasets with indexes.
+            # The index on (dt DESC, id DESC) makes this count fast.
+            count_query, count_params = QueryBuilder.build_pagination_query(
+                select_clause="SELECT COUNT(*)",
+                base_where=["live_role = 0"] if filter_hidden else None,
+                album_path=album_path,
+                include_subalbums=include_subalbums,
+                filter_params=filter_params,
+                sort_by_date=False,
+            )
+            cursor.execute(count_query, count_params)
+            count_result = cursor.fetchone()
+            total_count = count_result[0] if count_result else len(results)
+            
+            return results, total_count, next_cursor
+        finally:
+            if should_close:
+                conn.close()
+
     def read_geometry_only(
         self,
         filter_params: Optional[Dict[str, Any]] = None,

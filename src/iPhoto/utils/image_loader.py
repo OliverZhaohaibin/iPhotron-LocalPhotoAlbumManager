@@ -159,6 +159,13 @@ def generate_micro_thumbnail(source: Path) -> Optional[bytes]:
 
     try:
         with _Image.open(source) as img:  # type: ignore[attr-defined]
+            # Use draft mode for JPEG to significantly speed up loading by reading
+            # a lower resolution version directly from the DCT coefficients.
+            # We request 64x64 to ensure we have enough data for a high quality
+            # downscale to 16x16, while avoiding full resolution decoding.
+            if img.format == "JPEG":
+                img.draft("RGB", (64, 64))
+
             # Handle orientation
             img = _ImageOps.exif_transpose(img)  # type: ignore[attr-defined]
 

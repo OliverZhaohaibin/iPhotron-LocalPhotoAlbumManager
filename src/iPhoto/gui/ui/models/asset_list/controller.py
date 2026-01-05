@@ -237,10 +237,16 @@ class AssetListController(QObject):
         return self._active_filter
 
     def start_load(self) -> None:
-        """Start loading assets for the current album root."""
+        """Start loading assets for the current album root using lazy pagination.
+        
+        This method initializes the K-Way merge stream and triggers the first
+        page fetch using cursor-based pagination. Live Scanner results are
+        integrated in the background via the merge stream.
+        """
         if not self._album_root:
             return
 
+        # Cancel any running legacy loader
         if self._data_loader.is_running():
             self._reload_pending = True
             self._data_loader.cancel()
@@ -249,9 +255,16 @@ class AssetListController(QObject):
             self._is_first_chunk = True
             return
 
+        # Cancel any running paginated worker
+        self._cleanup_paginated_worker()
+
         self._reload_pending = False
         self._reset_buffers()
+        self._reset_pagination_state()
         self._is_first_chunk = True
+
+        # Enable lazy loading mode (uses K-Way merge stream)
+        self._use_lazy_loading = True
 
         manifest = (
             self._facade.current_album.manifest if self._facade.current_album else {}
@@ -264,63 +277,60 @@ class AssetListController(QObject):
             filter_params["filter_mode"] = self._active_filter
 
         # Ensure library_root is set from facade if not already configured
-        # This provides a fallback in case set_library_root wasn't called yet
         if not self._data_loader._library_root and self._facade.library_manager:
             library_root = self._facade.library_manager.root()
             if library_root:
                 self._data_loader.set_library_root(library_root)
 
-        try:
-            self._data_loader.start(
-                self._album_root, featured, filter_params=filter_params
-            )
-            self._ignore_incoming_chunks = False
+        self._ignore_incoming_chunks = False
 
-            # Live Ingest
-            if self._facade.library_manager:
-                try:
-                    if self._current_live_worker:
-                        self._current_live_worker.cancel()
-                        self._current_live_worker = None
-                    if self._live_signals:
-                        try:
-                            self._live_signals.chunkReady.disconnect(self._on_loader_chunk_ready)
-                        except RuntimeError:
-                            pass
-                        try:
-                            self._live_signals.deleteLater()
-                        except RuntimeError:
-                            pass  # C++ object already deleted
-                        self._live_signals = None
+        # Start Live Scanner for background updates
+        # Live items will be merged with DB results via K-Way stream
+        if self._facade.library_manager:
+            try:
+                if self._current_live_worker:
+                    self._current_live_worker.cancel()
+                    self._current_live_worker = None
+                if self._live_signals:
+                    try:
+                        self._live_signals.chunkReady.disconnect(self._on_loader_chunk_ready)
+                    except RuntimeError:
+                        pass
+                    try:
+                        self._live_signals.deleteLater()
+                    except RuntimeError:
+                        pass  # C++ object already deleted
+                    self._live_signals = None
 
-                    live_items = self._facade.library_manager.get_live_scan_results(
-                        relative_to=self._album_root
-                    )
-                    if live_items:
-                        live_signals = AssetLoaderSignals(self)
-                        live_signals.chunkReady.connect(self._on_loader_chunk_ready)
-                        live_signals.finished.connect(
-                            lambda _, __: live_signals.deleteLater()
-                        )
-
-                        worker = LiveIngestWorker(
-                            self._album_root,
-                            live_items,
-                            featured,
-                            live_signals,
-                            filter_params=filter_params,
-                        )
-                        self._current_live_worker = worker
-                        self._live_signals = live_signals
-                        QThreadPool.globalInstance().start(worker)
-                except Exception as e:
-                    logger.error(
-                        "Failed to inject live scan results: %s", e, exc_info=True
+                live_items = self._facade.library_manager.get_live_scan_results(
+                    relative_to=self._album_root
+                )
+                if live_items:
+                    live_signals = AssetLoaderSignals(self)
+                    live_signals.chunkReady.connect(self._on_live_chunk_ready)
+                    live_signals.finished.connect(
+                        lambda _, __: live_signals.deleteLater()
                     )
 
-        except RuntimeError:
-            self._pending_loader_root = None
-            return
+                    worker = LiveIngestWorker(
+                        self._album_root,
+                        live_items,
+                        featured,
+                        live_signals,
+                        filter_params=filter_params,
+                    )
+                    self._current_live_worker = worker
+                    self._live_signals = live_signals
+                    QThreadPool.globalInstance().start(worker)
+            except Exception as e:
+                logger.error(
+                    "Failed to inject live scan results: %s", e, exc_info=True
+                )
+
+        # Trigger first page load using optimized pagination
+        # This replaces the legacy _data_loader.start() call
+        logger.debug("start_load: triggering initial page load via lazy pagination")
+        self.load_next_page()
 
     def _on_loader_chunk_ready(
         self, root: Path, chunk: List[Dict[str, object]]
@@ -416,6 +426,54 @@ class AssetListController(QObject):
 
         finally:
             self._is_flushing = False
+
+    def _on_live_chunk_ready(
+        self, root: Path, chunk: List[Dict[str, object]]
+    ) -> None:
+        """Handle chunks from the LiveIngestWorker by routing through K-Way stream.
+        
+        Live scanner results are pushed to the live_queue of the MergedAssetStream,
+        where they will be merged with DB results in chronological order.
+        """
+        if self._ignore_incoming_chunks:
+            return
+
+        if (
+            not self._album_root
+            or root != self._album_root
+            or not chunk
+        ):
+            return
+
+        # Deduplicate and push to K-Way merge stream
+        unique_entries = []
+        for row in chunk:
+            rel = row.get("rel")
+            if not rel:
+                continue
+            norm_rel = normalise_rel_value(rel)
+            abs_val = row.get("abs")
+            abs_key = str(abs_val) if abs_val else None
+
+            # Check if already in model
+            if self._duplication_checker(norm_rel, abs_key):
+                continue
+            # Check if already in K-Way stream
+            if self._k_way_stream.is_row_tracked(norm_rel, abs_key):
+                continue
+
+            unique_entries.append(row)
+
+        if unique_entries:
+            # Push to K-Way merge stream's live queue
+            added = self._k_way_stream.push_live_chunk(unique_entries)
+            logger.debug(
+                "Live chunk received: %d entries, %d unique added to stream",
+                len(chunk),
+                added,
+            )
+            # Live data is now in the K-Way stream and will be merged
+            # with DB data when the UI triggers fetchMore/load_next_page
 
     def _on_scan_chunk_ready(self, root: Path, chunk: List[Dict[str, object]]) -> None:
         """Process scan results by routing them through the K-Way merge stream.
@@ -787,7 +845,8 @@ class AssetListController(QObject):
                 return True
 
         # No data available and DB is exhausted
-        if not self.allDataLoaded:
+        if not self._all_data_loaded:
+            self._all_data_loaded = True
             self.allDataLoaded.emit()
         logger.debug("load_next_page: all data exhausted")
         return False

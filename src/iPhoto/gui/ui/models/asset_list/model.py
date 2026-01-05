@@ -260,6 +260,42 @@ class AssetListModel(QAbstractListModel):
         return model_index
 
     # ------------------------------------------------------------------
+    # Pagination support (Qt canFetchMore/fetchMore API)
+    # ------------------------------------------------------------------
+    def canFetchMore(self, parent: QModelIndex = QModelIndex()) -> bool:
+        """Return True if more data can be loaded via pagination.
+        
+        This method is part of the Qt model API and is called automatically
+        by views when they reach the end of the currently loaded data.
+        """
+        if parent.isValid():
+            return False
+        return self._controller.can_load_more()
+
+    def fetchMore(self, parent: QModelIndex = QModelIndex()) -> None:
+        """Load the next page of data using cursor-based pagination.
+        
+        This method is part of the Qt model API and is called automatically
+        by views when canFetchMore() returns True and the view needs more data.
+        """
+        if parent.isValid():
+            return
+        self._controller.load_next_page()
+
+    def load_next_page(self) -> bool:
+        """Explicitly request the next page of data.
+        
+        Returns True if a page load was started, False otherwise.
+        This method is intended for use by the view or controller when
+        the user scrolls near the end of the current data.
+        """
+        return self._controller.load_next_page()
+
+    def all_data_loaded(self) -> bool:
+        """Return True if all data has been loaded (no more pages)."""
+        return self._controller.all_data_loaded()
+
+    # ------------------------------------------------------------------
     # Facade callbacks
     # ------------------------------------------------------------------
     def prepare_for_album(self, root: Path) -> None:

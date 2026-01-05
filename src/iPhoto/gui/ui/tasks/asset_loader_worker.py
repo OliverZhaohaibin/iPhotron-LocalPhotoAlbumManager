@@ -686,3 +686,166 @@ class LiveIngestWorker(QRunnable):
             if not self._is_cancelled:
                 self._signals.error.emit(self._root, str(exc))
             self._signals.finished.emit(self._root, False)
+
+
+# Default batch size for paginated loading
+DEFAULT_PAGE_SIZE = 500
+
+
+class PaginatedLoaderSignals(QObject):
+    """Signal container for :class:`PaginatedLoaderWorker` events."""
+
+    pageReady = Signal(Path, list, str, str)  # (root, chunk, last_dt, last_id)
+    endOfData = Signal(Path)  # Signals no more data available
+    error = Signal(Path, str)
+
+    def __init__(self, parent: QObject | None = None) -> None:
+        super().__init__(parent)
+
+
+class PaginatedLoaderWorker(QRunnable):
+    """Load a single page of assets using cursor-based pagination.
+    
+    This worker fetches exactly one page of assets starting from the provided
+    cursor position. It is designed to be re-used for infinite scroll scenarios
+    where pages are loaded on demand.
+    """
+
+    def __init__(
+        self,
+        root: Path,
+        featured: Iterable[str],
+        signals: PaginatedLoaderSignals,
+        filter_params: Optional[Dict[str, object]] = None,
+        library_root: Optional[Path] = None,
+        cursor_dt: Optional[str] = None,
+        cursor_id: Optional[str] = None,
+        page_size: int = DEFAULT_PAGE_SIZE,
+    ) -> None:
+        super().__init__()
+        self.setAutoDelete(True)
+        self._root = root
+        self._featured: Set[str] = normalize_featured(featured)
+        self._signals = signals
+        self._filter_params = filter_params
+        self._library_root = library_root
+        self._cursor_dt = cursor_dt
+        self._cursor_id = cursor_id
+        self._page_size = page_size
+        self._is_cancelled = False
+
+    @property
+    def root(self) -> Path:
+        """Return the album root handled by this worker."""
+        return self._root
+
+    @property
+    def signals(self) -> PaginatedLoaderSignals:
+        """Expose the worker signals for connection management."""
+        return self._signals
+
+    def cancel(self) -> None:
+        """Request cancellation of the current load operation."""
+        self._is_cancelled = True
+
+    def run(self) -> None:
+        """Execute the paginated load on a background thread."""
+        try:
+            QThread.currentThread().setPriority(QThread.LowPriority)
+        except Exception:
+            pass  # Environment may not support priority changes
+
+        try:
+            self._is_cancelled = False
+            self._load_page()
+        except Exception as exc:
+            LOGGER.error("Error loading paginated assets: %s", exc, exc_info=True)
+            if not self._is_cancelled:
+                self._signals.error.emit(self._root, str(exc))
+
+    def _load_page(self) -> None:
+        """Load a single page of assets."""
+        if self._is_cancelled:
+            return
+
+        ensure_work_dir(self._root, WORK_DIR_NAME)
+
+        # Determine the effective index root and album path
+        effective_index_root, album_path = compute_album_path(
+            self._root, self._library_root
+        )
+
+        LOGGER.debug(
+            "PaginatedLoaderWorker._load_page root=%s library_root=%s "
+            "cursor_dt=%s cursor_id=%s page_size=%d",
+            self._root.name,
+            self._library_root.name if self._library_root else None,
+            self._cursor_dt,
+            self._cursor_id,
+            self._page_size,
+        )
+
+        store = IndexStore(effective_index_root)
+        params = copy.deepcopy(self._filter_params) if self._filter_params else {}
+
+        dir_cache: Dict[Path, Optional[Set[str]]] = {}
+
+        def _path_exists(path: Path) -> bool:
+            return _cached_path_exists(path, dir_cache)
+
+        # Fetch a page using cursor-based pagination
+        rows = list(store.read_geometry_only(
+            filter_params=params,
+            sort_by_date=True,
+            album_path=album_path,
+            include_subalbums=True,
+            limit=self._page_size,
+            cursor_dt=self._cursor_dt,
+            cursor_id=self._cursor_id,
+        ))
+
+        if self._is_cancelled:
+            return
+
+        # If fewer rows than page_size, we've reached the end of data
+        is_end_of_data = len(rows) < self._page_size
+
+        # Build asset entries
+        entries: List[Dict[str, object]] = []
+        last_dt: Optional[str] = None
+        last_id: Optional[str] = None
+
+        for row in rows:
+            if self._is_cancelled:
+                return
+
+            # Adjust rel path to be relative to the album root
+            adjusted_row = adjust_rel_for_album(row, album_path)
+            entry = build_asset_entry(
+                self._root,
+                adjusted_row,
+                self._featured,
+                store,
+                path_exists=_path_exists,
+            )
+            if entry is not None:
+                entries.append(entry)
+                # Track the last dt and id for cursor continuation
+                last_dt = row.get("dt")
+                last_id = row.get("id")
+
+        if self._is_cancelled:
+            return
+
+        # Emit the page results
+        if entries:
+            self._signals.pageReady.emit(
+                self._root,
+                entries,
+                last_dt or "",
+                last_id or "",
+            )
+
+        # Signal end of data if we received fewer rows than requested
+        if is_end_of_data:
+            self._signals.endOfData.emit(self._root)

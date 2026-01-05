@@ -18,6 +18,9 @@ from PySide6.QtCore import (
 from ...tasks.asset_loader_worker import (
     LiveIngestWorker,
     AssetLoaderSignals,
+    PaginatedLoaderSignals,
+    PaginatedLoaderWorker,
+    DEFAULT_PAGE_SIZE,
     build_asset_entry,
     normalize_featured,
 )
@@ -41,7 +44,8 @@ class AssetListController(QObject):
 
     Delegates specific loading tasks to `AssetDataLoader`, `LiveIngestWorker`,
     and `IncrementalRefreshWorker`. Handles buffering of incoming chunks to
-    prevent UI freezing.
+    prevent UI freezing. Also supports cursor-based pagination for efficient
+    loading of large datasets.
     """
 
     # Signals
@@ -52,6 +56,8 @@ class AssetListController(QObject):
     loadProgress = Signal(Path, int, int)
     loadFinished = Signal(Path, bool)
     error = Signal(Path, str)
+    # Pagination signals
+    allDataLoaded = Signal()  # Signals when all data has been loaded (end of cursor)
 
     # Tuning constants for streaming updates
     _STREAM_FLUSH_INTERVAL_MS = 100
@@ -82,6 +88,14 @@ class AssetListController(QObject):
         self._incremental_worker: Optional[IncrementalRefreshWorker] = None
         self._incremental_signals: Optional[IncrementalRefreshSignals] = None
         self._refresh_lock = QMutex()
+
+        # Pagination state
+        self._cursor_dt: Optional[str] = None
+        self._cursor_id: Optional[str] = None
+        self._is_loading_page: bool = False
+        self._all_data_loaded: bool = False
+        self._paginated_worker: Optional[PaginatedLoaderWorker] = None
+        self._paginated_signals: Optional[PaginatedLoaderSignals] = None
 
         # Streaming buffer state
         self._pending_chunks_buffer: List[Dict[str, object]] = []
@@ -133,12 +147,16 @@ class AssetListController(QObject):
         # Cleanup incremental refresh worker
         self._cleanup_incremental_worker()
 
+        # Cleanup pagination worker
+        self._cleanup_paginated_worker()
+
         # When preparing for a new album, we should drop any pending reloads for the old one.
         self._reload_pending = False
 
         self._album_root = root
         self._set_deferred_incremental_refresh(None)
         self._reset_buffers()
+        self._reset_pagination_state()
         self._pending_loader_root = None
 
     def _reset_buffers(self) -> None:
@@ -151,6 +169,32 @@ class AssetListController(QObject):
         self._is_flushing = False
         self._is_first_chunk = True
 
+    def _reset_pagination_state(self) -> None:
+        """Clear pagination state for a fresh load."""
+        self._cursor_dt = None
+        self._cursor_id = None
+        self._is_loading_page = False
+        self._all_data_loaded = False
+
+    def _cleanup_paginated_worker(self) -> None:
+        """Cancel and cleanup any running paginated worker."""
+        if self._paginated_worker:
+            self._paginated_worker.cancel()
+            self._paginated_worker = None
+        if self._paginated_signals:
+            try:
+                self._paginated_signals.pageReady.disconnect(self._on_paginated_page_ready)
+                self._paginated_signals.endOfData.disconnect(self._on_paginated_end_of_data)
+                self._paginated_signals.error.disconnect(self._on_paginated_error)
+            except RuntimeError:
+                pass
+            try:
+                self._paginated_signals.deleteLater()
+            except RuntimeError:
+                pass  # C++ object already deleted
+            self._paginated_signals = None
+        self._is_loading_page = False
+
     def set_filter_mode(self, mode: Optional[str]) -> None:
         """Update filter mode and trigger reload if changed."""
         normalized = mode.casefold() if isinstance(mode, str) and mode else None
@@ -158,6 +202,7 @@ class AssetListController(QObject):
             return
 
         self._active_filter = normalized
+        self._reset_pagination_state()
         self.start_load()
 
     def active_filter_mode(self) -> Optional[str]:
@@ -605,3 +650,168 @@ class AssetListController(QObject):
             self._deferred_incremental_refresh = None
             return
         self._deferred_incremental_refresh = normalise_for_compare(root)
+
+    # ------------------------------------------------------------------
+    # Cursor-Based Pagination Methods
+    # ------------------------------------------------------------------
+
+    def can_load_more(self) -> bool:
+        """Return True if more data can be loaded via pagination.
+        
+        Returns False if:
+        - All data has been loaded
+        - A page load is currently in progress
+        - No album root is set
+        """
+        return (
+            not self._all_data_loaded
+            and not self._is_loading_page
+            and self._album_root is not None
+        )
+
+    def is_loading_page(self) -> bool:
+        """Return True if a page load is currently in progress."""
+        return self._is_loading_page
+
+    def all_data_loaded(self) -> bool:
+        """Return True if all data has been loaded (no more pages)."""
+        return self._all_data_loaded
+
+    def load_next_page(self, page_size: int = DEFAULT_PAGE_SIZE) -> bool:
+        """Load the next page of assets using cursor-based pagination.
+        
+        This method starts a background worker to fetch the next page of assets
+        starting from the current cursor position. The results are emitted via
+        the batchReady signal.
+        
+        Args:
+            page_size: Number of assets to fetch (default: DEFAULT_PAGE_SIZE).
+        
+        Returns:
+            True if a page load was started, False if conditions weren't met.
+        """
+        if not self.can_load_more():
+            logger.debug(
+                "load_next_page: cannot load more (all_loaded=%s, is_loading=%s, root=%s)",
+                self._all_data_loaded,
+                self._is_loading_page,
+                self._album_root,
+            )
+            return False
+
+        # Cleanup any existing paginated worker
+        self._cleanup_paginated_worker()
+
+        manifest = (
+            self._facade.current_album.manifest if self._facade.current_album else {}
+        )
+        featured = manifest.get("featured", []) or []
+
+        filter_params = {}
+        if self._active_filter:
+            filter_params["filter_mode"] = self._active_filter
+
+        # Get library root for global database filtering
+        library_root = None
+        if self._facade.library_manager:
+            library_root = self._facade.library_manager.root()
+
+        # Create and connect signals
+        self._paginated_signals = PaginatedLoaderSignals(self)
+        self._paginated_signals.pageReady.connect(self._on_paginated_page_ready)
+        self._paginated_signals.endOfData.connect(self._on_paginated_end_of_data)
+        self._paginated_signals.error.connect(self._on_paginated_error)
+
+        # Create and start worker
+        self._paginated_worker = PaginatedLoaderWorker(
+            self._album_root,
+            featured,
+            self._paginated_signals,
+            filter_params=filter_params,
+            library_root=library_root,
+            cursor_dt=self._cursor_dt,
+            cursor_id=self._cursor_id,
+            page_size=page_size,
+        )
+
+        self._is_loading_page = True
+        QThreadPool.globalInstance().start(self._paginated_worker)
+
+        logger.debug(
+            "load_next_page: started page load cursor_dt=%s cursor_id=%s page_size=%d",
+            self._cursor_dt,
+            self._cursor_id,
+            page_size,
+        )
+        return True
+
+    def _on_paginated_page_ready(
+        self,
+        root: Path,
+        chunk: List[Dict[str, object]],
+        last_dt: str,
+        last_id: str,
+    ) -> None:
+        """Handle a page of results from the paginated worker."""
+        if not self._album_root or root != self._album_root:
+            logger.debug("Ignoring paginated page ready for stale album: %s", root)
+            return
+
+        # Update cursor for next page
+        if last_dt:
+            self._cursor_dt = last_dt
+        if last_id:
+            self._cursor_id = last_id
+
+        # Deduplicate and emit results
+        unique_chunk = []
+        for row in chunk:
+            rel = row.get("rel")
+            if not rel:
+                continue
+            norm_rel = normalise_rel_value(rel)
+            abs_val = row.get("abs")
+            abs_key = str(abs_val) if abs_val else None
+
+            is_duplicate_in_model = self._duplication_checker(norm_rel, abs_key)
+            is_duplicate_in_buffer = (
+                norm_rel in self._pending_rels
+                or (abs_key and abs_key in self._pending_abs)
+            )
+
+            if not is_duplicate_in_model and not is_duplicate_in_buffer:
+                unique_chunk.append(row)
+                self._pending_rels.add(norm_rel)
+                if abs_key:
+                    self._pending_abs.add(abs_key)
+
+        if unique_chunk:
+            # Emit as non-reset batch (append mode)
+            self.batchReady.emit(unique_chunk, False)
+
+            # Clean up pending sets
+            for row in unique_chunk:
+                rel = row.get("rel")
+                if rel:
+                    self._pending_rels.discard(normalise_rel_value(rel))
+                abs_val = row.get("abs")
+                if abs_val:
+                    self._pending_abs.discard(str(abs_val))
+
+        self._is_loading_page = False
+
+    def _on_paginated_end_of_data(self, root: Path) -> None:
+        """Handle end of data signal from paginated worker."""
+        if not self._album_root or root != self._album_root:
+            return
+
+        self._all_data_loaded = True
+        self._is_loading_page = False
+        self.allDataLoaded.emit()
+        logger.debug("Pagination: all data loaded for album %s", root)
+
+    def _on_paginated_error(self, root: Path, message: str) -> None:
+        """Handle error from paginated worker."""
+        self._is_loading_page = False
+        logger.error("Pagination error for %s: %s", root, message)
+        self.error.emit(root, message)

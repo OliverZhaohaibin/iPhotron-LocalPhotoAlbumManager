@@ -296,17 +296,24 @@ class AssetRepository:
         sort_by_date: bool = True,
         album_path: Optional[str] = None,
         include_subalbums: bool = True,
+        limit: Optional[int] = None,
+        cursor_dt: Optional[str] = None,
+        cursor_id: Optional[str] = None,
     ) -> Iterator[Dict[str, Any]]:
         """Yield lightweight asset rows for fast grid layout.
         
         Fetches only the columns strictly required for grid layout, badges,
-        and sorting.
+        and sorting. Supports cursor-based pagination for efficient loading
+        of large datasets.
         
         Args:
             filter_params: Optional dictionary of SQL filter criteria.
             sort_by_date: If True, sort results by date descending.
             album_path: If provided, filter to assets in this album path.
             include_subalbums: If True, include assets from sub-albums.
+            limit: Maximum number of rows to return (default: None for all).
+            cursor_dt: Timestamp cursor for pagination (continue after this dt).
+            cursor_id: ID cursor for pagination (continue after this id).
         """
         # Columns needed for the lightweight "viewport-first" loading strategy
         columns = [
@@ -333,6 +340,9 @@ class AssetRepository:
             include_subalbums=include_subalbums,
             filter_params=filter_params,
             sort_by_date=sort_by_date,
+            cursor_dt=cursor_dt,
+            cursor_id=cursor_id,
+            limit=limit,
         )
 
         conn = self._db_manager.get_connection()

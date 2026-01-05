@@ -97,6 +97,10 @@ class AssetListModel(QAbstractListModel):
         """Return the path of the currently open album, if any."""
         return self._album_root
 
+    def is_valid(self) -> bool:
+        """Return ``True`` if the model is populated and tied to a valid root."""
+        return self._album_root is not None
+
     def metadata_for_absolute_path(self, path: Path) -> Optional[Dict[str, object]]:
         """Return the cached metadata row for *path* if it belongs to the model."""
         rows = self._state_manager.rows

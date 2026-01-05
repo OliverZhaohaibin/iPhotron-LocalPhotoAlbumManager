@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import mimetypes
 from datetime import datetime, timezone
 from pathlib import Path
@@ -30,7 +31,6 @@ def gather_media_paths(
     progress indicators, because the total work is known before any metadata
     extraction begins.
     """
-    import os
 
     image_paths: List[Path] = []
     video_paths: List[Path] = []

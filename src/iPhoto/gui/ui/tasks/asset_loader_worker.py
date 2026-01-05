@@ -707,8 +707,8 @@ class PaginatedLoaderWorker(QRunnable):
     """Load a single page of assets using cursor-based pagination.
     
     This worker fetches exactly one page of assets starting from the provided
-    cursor position. It is designed to be re-used for infinite scroll scenarios
-    where pages are loaded on demand.
+    cursor position. A new worker instance is created for each page load,
+    allowing the controller to manage cursor state and cancel in-flight requests.
     """
 
     def __init__(

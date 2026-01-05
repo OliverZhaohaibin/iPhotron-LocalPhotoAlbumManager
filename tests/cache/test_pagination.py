@@ -24,7 +24,8 @@ class TestReadGeometryOnlyPagination:
         """Test that passing limit returns exactly that many rows."""
         repo = get_global_repository(tmp_path)
 
-        # Create test files
+        # Create test files on disk to satisfy the file existence check
+        # performed by read_geometry_only (via build_asset_entry).
         for i in range(20):
             (tmp_path / f"photo_{i:02d}.jpg").write_bytes(b"fake")
 

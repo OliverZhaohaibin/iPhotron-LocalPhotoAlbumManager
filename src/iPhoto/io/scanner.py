@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import mimetypes
 from datetime import datetime, timezone
 from pathlib import Path
@@ -34,23 +35,37 @@ def gather_media_paths(
     image_paths: List[Path] = []
     video_paths: List[Path] = []
 
-    for candidate in root.rglob("*"):
-        if not candidate.is_file():
-            continue
-        if WORK_DIR_NAME in candidate.parts:
-            continue
-        if EXPORT_DIR_NAME in candidate.parts:
-            continue
-        if is_excluded(candidate, exclude_globs, root=root):
-            continue
-        if not should_include(candidate, include_globs, exclude_globs, root=root):
-            continue
+    # If the root itself is inside an excluded directory, return early.
+    if WORK_DIR_NAME in root.parts or EXPORT_DIR_NAME in root.parts:
+        return image_paths, video_paths
 
-        suffix = candidate.suffix.lower()
-        if suffix in _IMAGE_EXTENSIONS:
-            image_paths.append(candidate)
-        elif suffix in _VIDEO_EXTENSIONS:
-            video_paths.append(candidate)
+    for dirpath, dirnames, filenames in os.walk(root):
+        # Prune internal directories to prevent recursion into heavy cache/export folders
+        if WORK_DIR_NAME in dirnames:
+            dirnames.remove(WORK_DIR_NAME)
+        if EXPORT_DIR_NAME in dirnames:
+            dirnames.remove(EXPORT_DIR_NAME)
+
+        current_dir = Path(dirpath)
+
+        for name in filenames:
+            candidate = current_dir / name
+
+            # We must check is_file() because filenames may contain broken symlinks
+            # or other non-directory entries that are not regular files.
+            if not candidate.is_file():
+                continue
+
+            if is_excluded(candidate, exclude_globs, root=root):
+                continue
+            if not should_include(candidate, include_globs, exclude_globs, root=root):
+                continue
+
+            suffix = candidate.suffix.lower()
+            if suffix in _IMAGE_EXTENSIONS:
+                image_paths.append(candidate)
+            elif suffix in _VIDEO_EXTENSIONS:
+                video_paths.append(candidate)
 
     return image_paths, video_paths
 

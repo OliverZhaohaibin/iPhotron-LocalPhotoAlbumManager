@@ -1,5 +1,4 @@
 
-from pathlib import Path
 from src.iPhoto.utils.pathutils import is_excluded, should_include, _expand_cached, _expand
 
 def test_expand_simple():

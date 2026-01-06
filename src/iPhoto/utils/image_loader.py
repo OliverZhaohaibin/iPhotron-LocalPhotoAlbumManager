@@ -159,6 +159,12 @@ def generate_micro_thumbnail(source: Path) -> Optional[bytes]:
 
     try:
         with _Image.open(source) as img:  # type: ignore[attr-defined]
+            # Optimization: Use draft mode for JPEG images to speed up loading
+            # We request 64x64 to have enough headroom for high-quality downscaling
+            # to the target 16x16 size while avoiding loading the full resolution image.
+            if img.format == "JPEG":
+                img.draft("RGB", (64, 64))
+
             # Handle orientation
             img = _ImageOps.exif_transpose(img)  # type: ignore[attr-defined]
 

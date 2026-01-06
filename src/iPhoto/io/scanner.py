@@ -72,8 +72,7 @@ class FileDiscoverer(threading.Thread):
 
                     candidate = Path(dirpath) / name
 
-                    if is_excluded(candidate, self._exclude_globs, root=self._root):
-                        continue
+                    # Note: should_include checks is_excluded internally, so we don't need to call it twice.
                     if not should_include(candidate, self._include_globs, self._exclude_globs, root=self._root):
                         continue
 

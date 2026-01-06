@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import fnmatch
+import functools
 import os
 import re
 from pathlib import Path
-from typing import Iterable, Iterator, Optional
+from typing import Iterable, Iterator, Optional, Tuple
 
 
 def _expand(pattern: str) -> Iterator[str]:
@@ -20,6 +21,16 @@ def _expand(pattern: str) -> Iterator[str]:
         yield from _expand(prefix + option + suffix)
 
 
+@functools.lru_cache(maxsize=128)
+def _expand_cached(pattern: str) -> Tuple[str, ...]:
+    """Return a tuple of expanded patterns from *pattern* with caching.
+
+    This wraps :func:`_expand` to allow caching of the expansion results,
+    which is beneficial when the same patterns are checked against many files.
+    """
+    return tuple(_expand(pattern))
+
+
 def is_excluded(path: Path, globs: Iterable[str], *, root: Path) -> bool:
     """Return ``True`` if *path* should be excluded based on *globs*.
 
@@ -29,7 +40,7 @@ def is_excluded(path: Path, globs: Iterable[str], *, root: Path) -> bool:
 
     rel = path.relative_to(root).as_posix()
     for pattern in globs:
-        for expanded in _expand(pattern):
+        for expanded in _expand_cached(pattern):
             if fnmatch.fnmatch(rel, expanded):
                 return True
             if expanded.startswith("**/") and fnmatch.fnmatch(rel, expanded[3:]):
@@ -44,7 +55,7 @@ def should_include(path: Path, include_globs: Iterable[str], exclude_globs: Iter
         return False
     rel = path.relative_to(root).as_posix()
     for pattern in include_globs:
-        for expanded in _expand(pattern):
+        for expanded in _expand_cached(pattern):
             if fnmatch.fnmatch(rel, expanded):
                 return True
             if expanded.startswith("**/") and fnmatch.fnmatch(rel, expanded[3:]):

@@ -296,6 +296,24 @@ class NavigationController:
             current_root is not None
             and current_root.resolve() == target_root.resolve()
         )
+        
+        # OPTIMIZATION: Check if we can use the fast filter-only path
+        # even when switching from a physical album to an aggregated view.
+        # If the library model is already loaded with data for the target root,
+        # we can skip the expensive open_album() call and just change the filter.
+        can_use_fast_path = is_same_root
+        if not can_use_fast_path and self._facade._library_manager:
+            library_root = self._facade._library_manager.root()
+            if library_root and library_root.resolve() == target_root.resolve():
+                # We're switching to the library root (aggregated view)
+                # Check if the library model is already populated
+                library_model = self._facade._library_list_model
+                if (library_model.rowCount() > 0 
+                    and library_model.album_root()
+                    and library_model.album_root().resolve() == target_root.resolve()
+                    and getattr(library_model, "is_valid", lambda: False)()):
+                    # Library model is already loaded! Use fast path.
+                    can_use_fast_path = True
 
         current_static = self._static_selection
         is_refresh = bool(
@@ -326,11 +344,21 @@ class NavigationController:
 
         self._static_selection = title
 
-        if is_same_root:
-            # --- OPTIMIZED PATH (In-Memory) ---
-            # We are staying in the same library.
+        if can_use_fast_path:
+            # --- OPTIMIZED PATH (In-Memory Filter Change) ---
+            # We are staying in the same library OR switching to an already-loaded
+            # library view from a physical album.
             # 1. Skip open_album() to prevent model destruction and reloading.
             # 2. Apply the filter directly. This is the only cost incurred.
+            
+            # If we're switching from physical album to library view, ensure
+            # the library model is active (without triggering expensive signals)
+            if self._facade._active_model is not self._facade._library_list_model:
+                self._facade._switch_active_model_optimized(
+                    self._facade._library_list_model, 
+                    skip_signal=False  # Signal needed to update proxy
+                )
+            
             self._asset_model.set_filter_mode(filter_mode)
             self._asset_model.ensure_chronological_order()
 

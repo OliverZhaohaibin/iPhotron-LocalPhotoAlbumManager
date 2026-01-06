@@ -262,12 +262,8 @@ class AppFacade(QObject):
         if target_model is self._library_list_model:
             target_model.clear_background_cache_state()
 
-        # If switching models, notify listeners (e.g. DataManager to update the proxy).
-        # We emit this AFTER preparing the target model so that the proxy receives
-        # a model that is already reset (or ready), avoiding a brief flash of stale data.
-        if target_model is not self._active_model:
-            self._active_model = target_model
-            self.activeModelChanged.emit(target_model)
+        # Use optimized model switching to reduce signal overhead
+        self._switch_active_model_optimized(target_model, skip_signal=False)
 
         self.albumOpened.emit(album_root)
 
@@ -813,10 +809,8 @@ class AppFacade(QObject):
         # Force a preparation of the target model since we are refreshing from a manifest change.
         target_model.prepare_for_album(refreshed_root)
 
-        # Switch context if the refreshed album requires a different model.
-        if target_model is not self._active_model:
-            self._active_model = target_model
-            self.activeModelChanged.emit(target_model)
+        # Use optimized model switching
+        self._switch_active_model_optimized(target_model, skip_signal=False)
 
         self.albumOpened.emit(refreshed_root)
         force_reload = self._library_update_service.consume_forced_reload(refreshed_root)

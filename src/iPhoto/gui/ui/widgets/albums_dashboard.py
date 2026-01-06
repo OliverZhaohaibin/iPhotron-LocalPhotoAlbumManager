@@ -1,6 +1,7 @@
 """Dashboard view displaying all user albums."""
 
 from __future__ import annotations
+from collections import deque
 from pathlib import Path
 from typing import Optional, TYPE_CHECKING
 
@@ -345,7 +346,8 @@ class DashboardThumbnailLoader(QObject):
         self._pool = QThreadPool.globalInstance()
         self._delivered.connect(self._handle_result)
         # Map base keys (album_root, rel, width, height) to pending album roots
-        self._key_to_root: dict[tuple[str, str, int, int], list[Path]] = {}
+        self._key_to_root: dict[tuple[str, str, int, int], deque[Path]] = {}
+        self._resolved_roots: dict[Path, str] = {}
         self._library_root = library_root
 
     def request_with_absolute_key(self, album_root: Path, image_path: Path, size: QSize) -> None:
@@ -381,9 +383,9 @@ class DashboardThumbnailLoader(QObject):
                 return
 
         # Store mapping
-        job_root_str = str(album_root.resolve())
+        job_root_str = self._album_root_str(album_root)
         base_key: tuple[str, str, int, int] = (job_root_str, unique_rel, size.width(), size.height())
-        self._key_to_root.setdefault(base_key, []).append(album_root)
+        self._key_to_root.setdefault(base_key, deque()).append(album_root)
 
         media_type = get_media_type(image_path)
         is_image = media_type == MediaType.IMAGE
@@ -426,7 +428,10 @@ class DashboardThumbnailLoader(QObject):
         roots = self._key_to_root.get(base_key)
         if not roots:
             return
-        album_root = roots.pop(0)
+        try:
+            album_root = roots.popleft()
+        except IndexError:
+            return
         if not roots:
             self._key_to_root.pop(base_key, None)
 
@@ -436,6 +441,18 @@ class DashboardThumbnailLoader(QObject):
         pixmap = QPixmap.fromImage(image)
         if not pixmap.isNull():
             self.thumbnailReady.emit(album_root, pixmap)
+
+    def _album_root_str(self, album_root: Path) -> str:
+        cached = self._resolved_roots.get(album_root)
+        if cached is not None:
+            return cached
+        try:
+            resolved_path = album_root.resolve()
+        except OSError:
+            resolved_path = album_root
+        resolved = str(resolved_path)
+        self._resolved_roots[album_root] = resolved
+        return resolved
 
 
 class AlbumsDashboard(QWidget):

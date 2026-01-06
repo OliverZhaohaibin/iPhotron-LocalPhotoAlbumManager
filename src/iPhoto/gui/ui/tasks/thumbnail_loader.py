@@ -5,10 +5,11 @@ from __future__ import annotations
 from collections import OrderedDict, deque
 from enum import IntEnum
 import hashlib
+import heapq
 import os
 import time
 from pathlib import Path
-from typing import Dict, Optional, Set, Tuple
+from typing import Dict, Optional, Set, Tuple, List
 
 try:
     import psutil
@@ -498,11 +499,11 @@ class ThumbnailLoader(QObject):
         - NORMAL: Standard requests for thumbnails.
         - VISIBLE: Requests for thumbnails that are currently visible in the UI and should be prioritized.
 
-        Note: The priority parameter is accepted in the request method, but is not currently used in the implementation.
+        Lower numeric values have higher priority in the queue.
         """
-        LOW = -1
-        NORMAL = 0
-        VISIBLE = 1
+        VISIBLE = 0  # Highest priority - currently visible
+        NORMAL = 1   # Normal priority - standard requests
+        LOW = 2      # Lowest priority - background/prefetch
 
     def __init__(self, parent: Optional[QObject] = None, library_root: Optional[Path] = None) -> None:
         if parent is None:
@@ -523,7 +524,10 @@ class ThumbnailLoader(QObject):
         self._memory: OrderedDict[Tuple[str, str, int, int], Tuple[int, QPixmap]] = OrderedDict()
         self._max_memory_items = 500
 
-        self._pending_deque: deque[Tuple[Tuple[str, str, int, int], ThumbnailJob]] = deque()
+        # Priority queue: heap of (priority, counter, key, job)
+        # Counter ensures FIFO order for jobs with the same priority
+        self._pending_heap: List[Tuple[int, int, Tuple[str, str, int, int], ThumbnailJob]] = []
+        self._pending_counter = 0  # Monotonic counter for stable ordering
         self._pending_keys: Set[Tuple[str, str, int, int]] = set()
 
         self._failures: Set[Tuple[str, str, int, int]] = set()
@@ -533,7 +537,7 @@ class ThumbnailLoader(QObject):
         self._validation_success.connect(self._handle_validation_success)
 
     def shutdown(self) -> None:
-        self._pending_deque.clear()
+        self._pending_heap.clear()
         self._pending_keys.clear()
         self._pool.waitForDone()
 
@@ -553,7 +557,8 @@ class ThumbnailLoader(QObject):
         self._album_root = root
         self._album_root_str = str(root.resolve())
         self._memory.clear()
-        self._pending_deque.clear()
+        self._pending_heap.clear()
+        self._pending_counter = 0
         self._pending_keys.clear()
         self._failures.clear()
         self._missing.clear()
@@ -629,17 +634,30 @@ class ThumbnailLoader(QObject):
             duration=duration,
         )
 
-        self._schedule_job(base_key, job)
+        self._schedule_job(base_key, job, priority)
         return retval
 
-    def _schedule_job(self, key: Tuple[str, str, int, int], job: ThumbnailJob) -> None:
-        self._pending_deque.append((key, job))
+    def _schedule_job(
+        self, 
+        key: Tuple[str, str, int, int], 
+        job: ThumbnailJob,
+        priority: "ThumbnailLoader.Priority" = Priority.NORMAL,
+    ) -> None:
+        """Schedule a job with the given priority.
+        
+        Jobs are processed in priority order (VISIBLE > NORMAL > LOW).
+        Within the same priority level, FIFO order is maintained.
+        """
+        # Use counter to maintain FIFO order within same priority
+        self._pending_counter += 1
+        heapq.heappush(self._pending_heap, (int(priority), self._pending_counter, key, job))
         self._pending_keys.add(key)
         self._drain_queue()
 
     def _drain_queue(self) -> None:
-        while self._active_jobs_count < self._max_active_jobs and self._pending_deque:
-            key, job = self._pending_deque.pop() # LIFO
+        while self._active_jobs_count < self._max_active_jobs and self._pending_heap:
+            # Pop highest priority job (lowest priority value)
+            _, _, key, job = heapq.heappop(self._pending_heap)
             if key not in self._pending_keys:
                 continue
 

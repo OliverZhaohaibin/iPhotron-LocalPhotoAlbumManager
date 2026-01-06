@@ -69,6 +69,9 @@ class GalleryGridView(AssetGrid):
     # When scroll position reaches this threshold, trigger fetchMore
     PREFETCH_THRESHOLD = 0.8  # 80% - trigger load when 80% scrolled
     
+    # Hysteresis to prevent rapid toggling when scrolling near threshold
+    PREFETCH_HYSTERESIS = 0.1
+    
     # Minimum delay between prefetch triggers to avoid flooding
     PREFETCH_DEBOUNCE_MS = 100
 
@@ -246,8 +249,8 @@ class GalleryGridView(AssetGrid):
             # Debounce the prefetch trigger to avoid multiple calls
             self._schedule_fetch_more()
         
-        # Reset the trigger when scrolling back up (below threshold)
-        if scroll_ratio < self.PREFETCH_THRESHOLD - 0.1:  # Hysteresis to avoid flapping
+        # Reset the trigger when scrolling back up (below threshold with hysteresis)
+        if scroll_ratio < self.PREFETCH_THRESHOLD - self.PREFETCH_HYSTERESIS:
             self._prefetch_triggered = False
         
         self._last_scroll_value = value

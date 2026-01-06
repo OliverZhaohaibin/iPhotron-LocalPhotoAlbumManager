@@ -134,6 +134,7 @@ class AssetListController(QObject):
         self._lazy_mode_enabled: bool = True  # Default to enabled for performance
         self._initial_page_loaded: bool = False  # Track if first screen has loaded
         self._prefetch_timer: Optional[QTimer] = None  # Timer for background prefetch
+        self._prefetch_remaining: int = 0  # Counter for remaining prefetch pages
 
         # Legacy streaming buffer state (for backward compatibility)
         self._pending_chunks_buffer: List[Dict[str, object]] = []
@@ -341,9 +342,7 @@ class AssetListController(QObject):
         featured = manifest.get("featured", []) or []
 
         self._pending_loader_root = self._album_root
-        filter_params = {}
-        if self._active_filter:
-            filter_params["filter_mode"] = self._active_filter
+        filter_params = self._get_filter_params()
 
         # Ensure library_root is set from facade if not already configured
         if not self._data_loader._library_root and self._facade.library_manager:
@@ -761,9 +760,7 @@ class AssetListController(QObject):
             )
             featured = manifest.get("featured", []) or []
 
-            filter_params = {}
-            if self._active_filter:
-                filter_params["filter_mode"] = self._active_filter
+            filter_params = self._get_filter_params()
 
             # Get library root for global database filtering
             library_root = None
@@ -934,9 +931,7 @@ class AssetListController(QObject):
         )
         featured = manifest.get("featured", []) or []
 
-        filter_params = {}
-        if self._active_filter:
-            filter_params["filter_mode"] = self._active_filter
+        filter_params = self._get_filter_params()
 
         # Get library root for global database filtering
         library_root = None
@@ -1132,7 +1127,7 @@ class AssetListController(QObject):
         if self._all_data_loaded or self._is_loading_page:
             return
         
-        if not hasattr(self, '_prefetch_remaining') or self._prefetch_remaining <= 0:
+        if self._prefetch_remaining <= 0:
             return
         
         self._prefetch_remaining -= 1

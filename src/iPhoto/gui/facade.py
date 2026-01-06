@@ -232,11 +232,11 @@ class AppFacade(QObject):
         if not self.library_model_has_cached_data():
             return False
 
-        # Open the album object for the library root (lightweight operation)
-        # Note: library_root is passed both as the album to open (first arg) and
-        # for database access (keyword arg) since we're opening the library itself.
+        # PERFORMANCE OPTIMIZATION: Use Album.open() directly instead of
+        # backend.open_album() since we have cached data and don't need to
+        # read from the database. Album.open() only reads the manifest file.
         try:
-            album = backend.open_album(library_root, autoscan=False, library_root=library_root)
+            album = Album.open(library_root)
         except IPhotoError as exc:
             self.errorRaised.emit(str(exc))
             return False

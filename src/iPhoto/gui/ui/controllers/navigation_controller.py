@@ -358,7 +358,11 @@ class NavigationController:
                         target_root, title, filter_mode
                     )
                     return
-                # Filter was already applied by the facade, just ensure sort order
+                # Sync the proxy's filter mode with what the facade just set.
+                # The source model already has the correct filter, so calling
+                # set_filter_mode on the proxy will just update its internal state
+                # and call invalidateFilter() (source won't reload since filter matches).
+                self._asset_model.set_filter_mode(filter_mode)
                 self._asset_model.ensure_chronological_order()
             else:
                 # Same root - apply filter directly (model already bound to View)

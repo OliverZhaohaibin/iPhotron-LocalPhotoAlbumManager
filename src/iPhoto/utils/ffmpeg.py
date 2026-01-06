@@ -185,9 +185,10 @@ def _extract_with_ffmpeg(
     ]
     if at is not None:
         command += ["-ss", f"{max(at, 0):.3f}"]
+    # Security: Ensure absolute path to prevent argument injection if filename starts with '-'
     command += [
         "-i",
-        str(source),
+        str(source.absolute()),
         "-an",
         "-frames:v",
         "1",
@@ -244,7 +245,8 @@ def _extract_with_opencv(
         return None
 
     try:
-        capture = cv2.VideoCapture(str(source))
+        # Security: Ensure absolute path to prevent argument injection if filename starts with '-'
+        capture = cv2.VideoCapture(str(source.absolute()))
     except Exception:
         return None
 
@@ -358,7 +360,7 @@ def probe_media(source: Path) -> Dict[str, Any]:
         "json",
         "-show_format",
         "-show_streams",
-        str(source),
+        str(source.absolute()),
     ]
 
     process = _run_command(command)

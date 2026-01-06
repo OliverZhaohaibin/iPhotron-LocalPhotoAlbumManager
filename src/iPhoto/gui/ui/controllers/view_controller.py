@@ -94,7 +94,7 @@ class ViewController(QObject):
     def show_album_view(self) -> None:
         """Switch to the dynamic album gallery page."""
 
-        target = self._album_page or self._gallery_page
+        target = self._album_page
         if target is None:
             return
         self._active_gallery_page = target
@@ -119,7 +119,7 @@ class ViewController(QObject):
     def restore_default_gallery(self) -> None:
         """Reset the gallery view back to the standard grid."""
 
-        self._active_gallery_page = self._album_page or self._gallery_page
+        self._active_gallery_page = self._album_page
 
     def is_detail_view_active(self) -> bool:
         """Return ``True`` when the stacked widget is currently showing the detail page."""

@@ -4,14 +4,15 @@ from __future__ import annotations
 
 from collections import defaultdict
 from pathlib import Path
-from typing import Callable, Dict, Iterable, List, Optional, Set, TYPE_CHECKING
+from typing import Callable, Dict, Iterable, List, Optional, Set, Tuple, TYPE_CHECKING
 
 from PySide6.QtCore import QObject, Signal, Slot
 
 from .. import app as backend
-from ..config import DEFAULT_INCLUDE, DEFAULT_EXCLUDE
+from ..config import DEFAULT_INCLUDE, DEFAULT_EXCLUDE, WORK_DIR_NAME
 from ..errors import AlbumOperationError, IPhotoError
 from ..models.album import Album
+from ..utils.jsonio import read_json
 from ..utils.logging import get_logger
 from .background_task_manager import BackgroundTaskManager
 from .services import (
@@ -184,6 +185,45 @@ class AppFacade(QObject):
 
         return self._library_manager
 
+    def _sync_live_roles_from_links(self, library_root: Path, store: "backend.IndexStore") -> None:
+        """Sync live photo roles from links.json to the database.
+        
+        This reads the live_groups from the links.json file and updates the
+        live_role and live_partner_rel columns in the database. This is needed
+        for the "live" filter to work correctly.
+        
+        Args:
+            library_root: The library root directory.
+            store: The IndexStore instance to update.
+        """
+        links_path = library_root / WORK_DIR_NAME / "links.json"
+        if not links_path.exists():
+            return
+            
+        try:
+            data = read_json(links_path)
+        except Exception:
+            return
+            
+        # Build updates list from live_groups
+        # Format: (rel, live_role, live_partner_rel)
+        # Role 0 = Primary (still image), Role 1 = Hidden (motion component)
+        updates: List[Tuple[str, int, Optional[str]]] = []
+        
+        for group in data.get("live_groups", []):
+            still = group.get("still")
+            motion = group.get("motion")
+            
+            # Both still and motion must be non-empty strings
+            if isinstance(still, str) and still and isinstance(motion, str) and motion:
+                # Still image: Role 0, partner = motion
+                updates.append((still, 0, motion))
+                # Motion component: Role 1, partner = still
+                updates.append((motion, 1, still))
+        
+        if updates:
+            store.apply_live_role_updates(updates)
+
     def library_model_has_cached_data(self) -> bool:
         """Return ``True`` when the library model has valid cached data.
 
@@ -244,16 +284,18 @@ class AppFacade(QObject):
         self._current_album = album
         album.manifest = {**album.manifest, "title": title}
 
-        # CRITICAL: Sync favorites from manifest to database before applying filters.
-        # Without this, the "favorites" filter would not find any items because
-        # is_favorite column in DB wouldn't be set. The full backend.open_album()
-        # does this, but Album.open() alone does not.
+        # CRITICAL: Sync favorites and live roles from manifest/links to database
+        # before applying filters. Without this, the "favorites" and "live" filters
+        # would not find any items because the corresponding DB columns wouldn't be
+        # set. The full backend.open_album() does this, but Album.open() alone does not.
         try:
             store = backend.IndexStore(library_root)
             store.sync_favorites(album.manifest.get("featured", []))
+            # Sync live roles from links.json to database
+            self._sync_live_roles_from_links(library_root, store)
         except Exception:
             # Log but don't fail - sync errors shouldn't break navigation.
-            # Favorites may not work correctly, but other views will still function.
+            # Favorites/Live Photos may not work correctly, but other views will function.
             pass
 
         # PERFORMANCE CRITICAL: Apply the filter to the library model BEFORE

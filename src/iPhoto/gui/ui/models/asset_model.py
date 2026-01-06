@@ -17,7 +17,13 @@ __all__ = ["AssetModel", "Roles"]
 
 
 class AssetModel(AssetFilterProxyModel):
-    """Main entry point for asset data used by the widget views."""
+    """Main entry point for asset data used by the widget views.
+    
+    In the Dual-Proxy Architecture, instances of this class are created once
+    and permanently attached to their respective source models (Library or Album).
+    The proxies persist their sorted state in memory, eliminating the need for
+    re-sorting during view switches.
+    """
 
     def __init__(self, facade: "AppFacade") -> None:
         super().__init__()
@@ -33,11 +39,22 @@ class AssetModel(AssetFilterProxyModel):
         ensures that only compatible models are used with AssetModel, and is
         required for correct operation of methods that depend on AssetListModel's
         interface. See type: ignore[override] for rationale.
+        
+        Performance Note: In Dual-Proxy Architecture, this method is called
+        once per proxy at startup. The DB query already returns data sorted
+        by date DESC, so we configure the sort role but rely on the source
+        order rather than triggering a full O(N log N) sort.
         """
         super().setSourceModel(source_model)
         self._list_model = source_model
-        # Re-apply the default sort to ensure consistency across model switches
+        
+        # Configure the default chronological sort (newest first)
         self.ensure_chronological_order()
+        
+        # OPTIMIZATION: Disable dynamic sort filter to prevent unnecessary 
+        # re-calculations when rows are inserted/removed. The DB maintains 
+        # sort order (ORDER BY dt DESC), so the proxy can trust the source order.
+        self.setDynamicSortFilter(False)
 
     # ------------------------------------------------------------------
     # Convenience accessors

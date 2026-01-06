@@ -4,11 +4,13 @@ This module tests the key components of the incremental loading solution:
 1. Library model cache preservation when switching to physical albums
 2. First screen fast loading via cursor-based pagination
 3. Scroll-triggered lazy loading
+4. Dual-proxy persistence architecture
 """
 
 import json
 import os
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -18,7 +20,9 @@ from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QApplication
 
 from src.iPhoto.gui.facade import AppFacade
+from src.iPhoto.gui.ui.controllers.data_manager import DataManager
 from src.iPhoto.gui.ui.models.asset_list.model import AssetListModel
+from src.iPhoto.gui.ui.models.asset_model import AssetModel
 from src.iPhoto.library.manager import LibraryManager
 
 
@@ -373,3 +377,109 @@ class TestPaginationState:
         controller._is_loading_page = True
         controller._album_root = library_root
         assert controller.can_load_more() is False
+
+
+class TestDualProxyArchitecture:
+    """Tests for Solution 1: Dual-Proxy Persistence Architecture."""
+
+    def test_data_manager_creates_separate_proxies(
+        self, tmp_path: Path, qapp: QApplication
+    ) -> None:
+        """Test that DataManager creates separate proxy instances for library and album."""
+        library_root = tmp_path / "Library"
+        library_root.mkdir(parents=True)
+        _write_manifest(library_root, "Library")
+
+        manager = LibraryManager()
+        manager.bind_path(library_root)
+
+        facade = AppFacade()
+        facade.bind_library(manager)
+        
+        # Create a mock window
+        mock_window = MagicMock()
+        
+        data_manager = DataManager(mock_window, facade)
+        
+        # Verify separate proxy instances exist
+        assert data_manager._library_proxy is not None
+        assert data_manager._album_proxy is not None
+        assert data_manager._library_proxy is not data_manager._album_proxy
+        
+        # Verify library proxy is attached to library model
+        assert data_manager._library_proxy.source_model() is facade._library_list_model
+        
+        # Verify album proxy is attached to album model
+        assert data_manager._album_proxy.source_model() is facade._album_list_model
+
+    def test_active_proxy_switches_on_context_change(
+        self, tmp_path: Path, qapp: QApplication
+    ) -> None:
+        """Test that active proxy switches when activeModelChanged is emitted."""
+        library_root = tmp_path / "Library"
+        physical_album = library_root / "Album1"
+        physical_album.mkdir(parents=True)
+        _write_manifest(library_root, "Library")
+        _write_manifest(physical_album, "Album1")
+
+        manager = LibraryManager()
+        manager.bind_path(library_root)
+
+        facade = AppFacade()
+        facade.bind_library(manager)
+        
+        mock_window = MagicMock()
+        data_manager = DataManager(mock_window, facade)
+        
+        # Initially should be library proxy
+        assert data_manager._active_proxy is data_manager._library_proxy
+        
+        # Simulate switching to album model
+        data_manager._on_active_model_changed(facade._album_list_model)
+        assert data_manager._active_proxy is data_manager._album_proxy
+        
+        # Simulate switching back to library model
+        data_manager._on_active_model_changed(facade._library_list_model)
+        assert data_manager._active_proxy is data_manager._library_proxy
+
+    def test_proxy_switch_is_no_op_for_same_context(
+        self, tmp_path: Path, qapp: QApplication
+    ) -> None:
+        """Test that switching to the same context is a no-op."""
+        library_root = tmp_path / "Library"
+        library_root.mkdir(parents=True)
+        _write_manifest(library_root, "Library")
+
+        manager = LibraryManager()
+        manager.bind_path(library_root)
+
+        facade = AppFacade()
+        facade.bind_library(manager)
+        
+        mock_window = MagicMock()
+        data_manager = DataManager(mock_window, facade)
+        
+        original_proxy = data_manager._active_proxy
+        
+        # Switching to same context should be no-op
+        data_manager._on_active_model_changed(facade._library_list_model)
+        assert data_manager._active_proxy is original_proxy
+
+    def test_asset_model_disables_dynamic_sort_filter(
+        self, tmp_path: Path, qapp: QApplication
+    ) -> None:
+        """Test that AssetModel disables dynamic sort filter for performance."""
+        library_root = tmp_path / "Library"
+        library_root.mkdir(parents=True)
+        _write_manifest(library_root, "Library")
+
+        manager = LibraryManager()
+        manager.bind_path(library_root)
+
+        facade = AppFacade()
+        facade.bind_library(manager)
+        
+        proxy = AssetModel(facade)
+        
+        # Dynamic sort filter should be disabled for performance
+        assert proxy.dynamicSortFilter() is False

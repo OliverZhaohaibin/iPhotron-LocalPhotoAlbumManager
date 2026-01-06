@@ -483,7 +483,6 @@ def test_physical_album_to_all_photos_uses_cached_data_optimization(
 
     album_path = tmp_path / "album"
     album_path.mkdir()
-    tmp_path.mkdir(exist_ok=True)
 
     # 1. Open a physical album
     controller.open_album(album_path)
@@ -535,7 +534,6 @@ def test_physical_album_to_all_photos_fallback_without_cached_data(
 
     album_path = tmp_path / "album"
     album_path.mkdir()
-    tmp_path.mkdir(exist_ok=True)
 
     # 1. Open a physical album
     controller.open_album(album_path)

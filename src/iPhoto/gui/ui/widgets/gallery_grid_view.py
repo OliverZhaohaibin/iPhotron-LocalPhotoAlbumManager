@@ -2,14 +2,18 @@
 
 from __future__ import annotations
 
+import logging
+
 from OpenGL import GL as gl
-from PySide6.QtCore import QEvent, QSize, Qt
+from PySide6.QtCore import QEvent, QModelIndex, QSize, Qt, QTimer
 from PySide6.QtGui import QPaintEvent, QPalette, QSurfaceFormat, QColor, QGuiApplication
 from PySide6.QtOpenGLWidgets import QOpenGLWidget
 from PySide6.QtWidgets import QAbstractItemView, QListView
 
 from ..styles import modern_scrollbar_style
 from .asset_grid import AssetGrid
+
+logger = logging.getLogger(__name__)
 
 
 class GalleryViewport(QOpenGLWidget):
@@ -60,6 +64,16 @@ class GalleryGridView(AssetGrid):
     # errors or strict boundary checks. This accounts for frame borders and
     # potential internal margins.
     SAFETY_MARGIN = 10
+    
+    # Scroll threshold for triggering prefetch (percentage of scrollbar)
+    # When scroll position reaches this threshold, trigger fetchMore
+    PREFETCH_THRESHOLD = 0.8  # 80% - trigger load when 80% scrolled
+    
+    # Hysteresis to prevent rapid toggling when scrolling near threshold
+    PREFETCH_HYSTERESIS = 0.1
+    
+    # Minimum delay between prefetch triggers to avoid flooding
+    PREFETCH_DEBOUNCE_MS = 100
 
     def __init__(self, parent=None) -> None:  # type: ignore[override]
         super().__init__(parent)
@@ -87,6 +101,16 @@ class GalleryGridView(AssetGrid):
 
         self._updating_style = False
         self._apply_scrollbar_style()
+        
+        # Scroll-triggered loading state
+        self._last_scroll_value = 0
+        self._prefetch_triggered = False
+        self._prefetch_timer: QTimer | None = None
+        
+        # Connect scroll signal for lazy loading
+        scrollbar = self.verticalScrollBar()
+        if scrollbar:
+            scrollbar.valueChanged.connect(self._on_scroll_changed)
 
     def paintEvent(self, event: QPaintEvent) -> None:  # type: ignore[override]
         """Override paintEvent to force a GL clear before items are drawn."""
@@ -192,3 +216,74 @@ class GalleryGridView(AssetGrid):
         # activation steals focus from the selection rubber band. Disabling the
         # preview gesture keeps the pointer interactions unambiguous.
         self.set_preview_enabled(not desired_state)
+
+    # ------------------------------------------------------------------
+    # Scroll-triggered lazy loading
+    # ------------------------------------------------------------------
+    def _on_scroll_changed(self, value: int) -> None:
+        """Handle scroll position changes to trigger lazy loading.
+        
+        When the scroll position reaches PREFETCH_THRESHOLD of the total
+        scroll range, trigger fetchMore() on the model to load the next page.
+        """
+        scrollbar = self.verticalScrollBar()
+        if not scrollbar:
+            return
+        
+        max_value = scrollbar.maximum()
+        if max_value <= 0:
+            # No scrollable content yet
+            return
+        
+        # Calculate current scroll position as percentage
+        scroll_ratio = value / max_value
+        
+        # Check if we've crossed the threshold (scrolling down)
+        if scroll_ratio >= self.PREFETCH_THRESHOLD and not self._prefetch_triggered:
+            self._prefetch_triggered = True
+            logger.debug(
+                "Scroll threshold reached (%.1f%%), scheduling fetchMore",
+                scroll_ratio * 100,
+            )
+            
+            # Debounce the prefetch trigger to avoid multiple calls
+            self._schedule_fetch_more()
+        
+        # Reset the trigger when scrolling back up (below threshold with hysteresis)
+        if scroll_ratio < self.PREFETCH_THRESHOLD - self.PREFETCH_HYSTERESIS:
+            self._prefetch_triggered = False
+        
+        self._last_scroll_value = value
+
+    def _schedule_fetch_more(self) -> None:
+        """Schedule a debounced fetchMore call.
+        
+        Reuses a single timer instance to avoid memory leaks from creating
+        new timers on every scroll event.
+        """
+        # Reuse existing timer if available
+        if self._prefetch_timer is not None and self._prefetch_timer.isActive():
+            return  # Already scheduled
+
+        if self._prefetch_timer is None:
+            self._prefetch_timer = QTimer(self)
+            self._prefetch_timer.setSingleShot(True)
+            self._prefetch_timer.timeout.connect(self._trigger_fetch_more)
+
+        self._prefetch_timer.start(self.PREFETCH_DEBOUNCE_MS)
+
+    def _trigger_fetch_more(self) -> None:
+        """Trigger Qt's fetchMore mechanism on the model."""
+        model = self.model()
+        if model is None:
+            return
+        
+        # Check if the model can fetch more data
+        if model.canFetchMore(QModelIndex()):
+            logger.debug("Triggering model.fetchMore() due to scroll")
+            model.fetchMore(QModelIndex())
+        else:
+            logger.debug("Model has no more data to fetch")
+        
+        # Reset trigger so we can fetch again on next scroll
+        self._prefetch_triggered = False

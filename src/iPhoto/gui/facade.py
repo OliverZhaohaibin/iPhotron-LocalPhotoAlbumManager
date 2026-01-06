@@ -211,6 +211,8 @@ class AppFacade(QObject):
         # Optimization: If using the persistent library model and it already has data,
         # skip the reset/prepare step to keep the switch instant.
         should_prepare = True
+        preserve_library_cache = False
+        
         if target_model is self._library_list_model:
             # We assume a non-zero row count means the model is populated.
             # Ideally we would check if it's populated for *this specific root*,
@@ -227,9 +229,36 @@ class AppFacade(QObject):
                 and getattr(target_model, "is_valid", lambda: False)()
             ):
                 should_prepare = False
+                self._logger.info(
+                    "Skipping library model preparation (cache hit): %d rows",
+                    target_model.rowCount(),
+                )
+        elif target_model is self._album_list_model:
+            # Physical album: always prepare the album model
+            should_prepare = True
+            # KEY OPTIMIZATION: Preserve the library model cache when switching
+            # to a physical album. This allows instant switch back to the aggregate
+            # view (All Photos, Videos, etc.) without reloading the index.
+            if self._library_list_model.rowCount() > 0:
+                preserve_library_cache = True
+                self._logger.info(
+                    "Preserving library model cache while switching to physical album: "
+                    "%d rows cached",
+                    self._library_list_model.rowCount(),
+                )
 
         if should_prepare:
             target_model.prepare_for_album(album_root)
+        
+        # Mark the library model as background cache when switching to physical album.
+        # This keeps the data warm without being actively displayed.
+        if preserve_library_cache:
+            self._library_list_model.mark_as_background_cache()
+        
+        # Clear the background cache state when the library model becomes active.
+        # This is the reverse of the above - when switching back to library view.
+        if target_model is self._library_list_model:
+            target_model.clear_background_cache_state()
 
         # If switching models, notify listeners (e.g. DataManager to update the proxy).
         # We emit this AFTER preparing the target model so that the proxy receives

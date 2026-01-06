@@ -49,6 +49,9 @@ class AssetListModel(QAbstractListModel):
         self._facade = facade
         self._album_root: Optional[Path] = None
         self._thumb_size = QSize(512, 512)
+        # Track whether this model is in background cache mode (not actively displayed
+        # but data is kept warm for instant switching).
+        self._is_background_cache: bool = False
 
         # Try to acquire library root early if available
         library_root = None
@@ -100,6 +103,34 @@ class AssetListModel(QAbstractListModel):
     def is_valid(self) -> bool:
         """Return ``True`` if the model is populated and tied to a valid root."""
         return self._album_root is not None
+
+    def mark_as_background_cache(self) -> None:
+        """Mark the model as being in background cache mode.
+        
+        When the model is marked as a background cache, its data is kept warm
+        in memory but it's not currently displayed. This allows instant
+        switching back to the model without reloading from the index.
+        """
+        self._is_background_cache = True
+        logger.debug(
+            "Model marked as background cache: %s (%d rows)",
+            self._album_root,
+            self.rowCount(),
+        )
+
+    def is_background_cache(self) -> bool:
+        """Return ``True`` if the model is currently in background cache mode."""
+        return self._is_background_cache
+
+    def clear_background_cache_state(self) -> None:
+        """Clear the background cache flag when the model becomes active."""
+        if self._is_background_cache:
+            self._is_background_cache = False
+            logger.debug(
+                "Model activated from background cache: %s (%d rows)",
+                self._album_root,
+                self.rowCount(),
+            )
 
     def metadata_for_absolute_path(self, path: Path) -> Optional[Dict[str, object]]:
         """Return the cached metadata row for *path* if it belongs to the model."""

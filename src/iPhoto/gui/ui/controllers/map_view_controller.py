@@ -56,7 +56,7 @@ class LocationMapController(QObject):
         if not self._is_visible:
             return
         self._is_visible = False
-        self._view_controller.restore_default_gallery()
+        self._view_controller.set_album_gallery_active()
 
     def refresh_assets(self) -> None:
         """Reload the list of geotagged assets from the library."""

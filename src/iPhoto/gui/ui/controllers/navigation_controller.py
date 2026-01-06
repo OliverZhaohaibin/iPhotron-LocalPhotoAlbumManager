@@ -150,7 +150,7 @@ class NavigationController:
         self._asset_model.set_filter_mode(None)
         # Returning to a real album should always restore the traditional grid
         # presentation before the model finishes loading.
-        self._view_controller.restore_default_gallery()
+        self._view_controller.set_album_gallery_active()
         self._view_controller.show_gallery_view()
 
         # Scanning persistence is now handled by LibraryManager.
@@ -262,7 +262,7 @@ class NavigationController:
             return
 
         self._reset_playback_for_gallery_navigation()
-        self._view_controller.restore_default_gallery()
+        self._view_controller.set_album_gallery_active()
         self._view_controller.show_gallery_view()
         self._asset_model.set_filter_mode(None)
         self._static_selection = "Recently Deleted"
@@ -309,7 +309,7 @@ class NavigationController:
             if gallery_target == "library":
                 self._view_controller.show_library_view()
             else:
-                self._view_controller.restore_default_gallery()
+                self._view_controller.set_album_gallery_active()
                 self._view_controller.show_gallery_view()
 
         if is_refresh:

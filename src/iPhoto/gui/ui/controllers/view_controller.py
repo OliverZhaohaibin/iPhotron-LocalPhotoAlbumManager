@@ -43,7 +43,7 @@ class ViewController(QObject):
     def show_gallery_view(self) -> None:
         """Switch to the gallery view and notify listeners."""
 
-        target = self._active_gallery_page or self._library_page or self._gallery_page
+        target = self._active_gallery_page or self._library_page or self._album_page
         if target is not None:
             if self._view_stack.currentWidget() is not target:
                 self._view_stack.setCurrentWidget(target)
@@ -115,8 +115,8 @@ class ViewController(QObject):
 
         self._edit_mode_active = False
         self.galleryViewShown.emit()
-    def restore_default_gallery(self) -> None:
-        """Reset the active gallery to the primary album grid."""
+    def set_album_gallery_active(self) -> None:
+        """Mark the album gallery as the active page without changing the stack."""
 
         self._active_gallery_page = self._album_page or self._library_page
 

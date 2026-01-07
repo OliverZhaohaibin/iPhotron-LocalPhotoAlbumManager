@@ -165,15 +165,22 @@ def generate_micro_thumbnail(source: Path) -> Optional[bytes]:
             if img.format == "JPEG":
                 img.draft("RGB", (64, 64))
 
-            # Handle orientation
-            img = _ImageOps.exif_transpose(img)  # type: ignore[attr-defined]
-
             # Scale to 16px max dimension
             target_size = (16, 16)
             resample = getattr(_Image, "Resampling", _Image)
             # Use BICUBIC instead of LANCZOS for speed; quality difference is negligible at 16x16
             resample_filter = getattr(resample, "BICUBIC", _Image.BICUBIC)
+            # Optimization: Call thumbnail() BEFORE exif_transpose().
+            # thumbnail() reduces the image dimensions in-place (often triggering the load).
+            # If we transpose first (which creates a copy), we might be allocating a full-res
+            # rotated copy of a large image (e.g. 20MP PNG), which is slow and memory-heavy.
+            # By thumbnailing first, we only transpose a tiny 16x16 image.
+            # This is safe because thumbnail() preserves EXIF info, and for a square target box (16x16),
+            # the operations effectively commute regarding final dimensions.
             img.thumbnail(target_size, resample_filter)
+
+            # Handle orientation
+            img = _ImageOps.exif_transpose(img)  # type: ignore[attr-defined]
 
             # Convert to RGB to ensure JPEG compatibility (drop alpha if present)
             # We convert AFTER resizing to avoid expensive RGB conversion on full-res images (e.g. RGBA PNGs)

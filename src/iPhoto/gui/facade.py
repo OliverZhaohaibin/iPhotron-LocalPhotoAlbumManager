@@ -126,6 +126,7 @@ class AppFacade(QObject):
             current_album_root=self._current_album_root,
             update_service=self._library_update_service,
             metadata_service=self._metadata_service,
+            library_manager_getter=self._get_library_manager,
             parent=self,
         )
         self._import_service.errorRaised.connect(self._on_service_error)
@@ -695,7 +696,23 @@ class AppFacade(QObject):
                     continue
                 normalized.append(motion_path)
 
-        index_rows = list(backend.IndexStore(trash_root).read_all())
+        try:
+            trash_resolved = trash_root.resolve()
+        except OSError:
+            trash_resolved = trash_root
+        try:
+            library_resolved = library_root.resolve()
+        except OSError:
+            library_resolved = library_root
+        try:
+            album_path = trash_resolved.relative_to(library_resolved).as_posix()
+        except ValueError:
+            album_path = None
+        store = backend.IndexStore(library_root)
+        if album_path:
+            index_rows = list(store.read_album_assets(album_path, include_subalbums=True))
+        else:
+            index_rows = list(store.read_all())
         row_lookup: Dict[str, dict] = {}
         for row in index_rows:
             if not isinstance(row, dict):
@@ -703,8 +720,8 @@ class AppFacade(QObject):
             rel_value = row.get("rel")
             if not isinstance(rel_value, str):
                 continue
-            abs_candidate = trash_root / rel_value
-            key = str(_normalize(abs_candidate))
+            candidate_path = library_root / rel_value
+            key = str(_normalize(candidate_path))
             row_lookup[key] = row
 
         grouped: Dict[Path, List[Path]] = defaultdict(list)

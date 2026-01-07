@@ -8,6 +8,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+ESCAPE_CLAUSE = "ESCAPE '\\\\'"
+
 
 def normalize_path(path_str: str) -> str:
     """Normalize a path string to use forward slashes (POSIX style).
@@ -89,6 +91,15 @@ class QueryBuilder:
                 raise ValueError(
                     f"Invalid filter_mode: {mode!r}. Valid options are: {valid_modes}"
                 )
+
+        prefix = filter_params.get("exclude_path_prefix") if filter_params else None
+        if isinstance(prefix, str) and prefix:
+            normalized = normalize_path(prefix)
+            escaped_prefix = escape_like_pattern(normalized)
+            where_clauses.append(
+                f"(parent_album_path IS NULL OR (parent_album_path != ? AND parent_album_path NOT LIKE ? {ESCAPE_CLAUSE}))"
+            )
+            params.extend([normalized, f"{escaped_prefix}/%"])
 
         return where_clauses, params
 

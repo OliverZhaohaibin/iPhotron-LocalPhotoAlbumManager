@@ -32,6 +32,7 @@ class AssetImportService(QObject):
         update_service: Optional[LibraryUpdateService] = None,
         refresh_callback: Optional[Callable[[Path], None]] = None,
         metadata_service: AlbumMetadataService,
+        library_manager_getter: Optional[Callable[[], "LibraryManager | None"]] = None,
         parent: Optional[QObject] = None,
     ) -> None:
         super().__init__(parent)
@@ -49,6 +50,7 @@ class AssetImportService(QObject):
         self._update_service = update_service
         self._refresh_callback = refresh_callback
         self._metadata_service = metadata_service
+        self._library_manager_getter = library_manager_getter
 
     # ------------------------------------------------------------------
     # Public API
@@ -77,7 +79,19 @@ class AssetImportService(QObject):
         signals.started.connect(self._on_import_started)
         signals.progress.connect(self._on_import_progress)
 
-        worker = ImportWorker(normalized, target_root, self._copy_into_album, signals)
+        library_root: Optional[Path] = None
+        if self._library_manager_getter is not None:
+            manager = self._library_manager_getter()
+            if manager is not None:
+                library_root = manager.root()
+
+        worker = ImportWorker(
+            normalized,
+            target_root,
+            self._copy_into_album,
+            signals,
+            library_root=library_root,
+        )
         unique_task_id = f"import:{target_root}:{uuid.uuid4().hex}"
         # The BackgroundTaskManager refuses duplicate task identifiers so we append a
         # UUID suffix to ensure that repeated imports into the same album can be queued

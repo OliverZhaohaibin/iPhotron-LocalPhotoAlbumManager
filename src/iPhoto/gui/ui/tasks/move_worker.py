@@ -466,7 +466,12 @@ class MoveWorker(QRunnable):
             try:
                 relative = original_path.relative_to(library_root)
             except ValueError:
-                return None
+                try:
+                    relative_str = os.path.relpath(original_path, library_root)
+                except Exception:
+                    return None
+                else:
+                    return Path(relative_str).as_posix()
         return relative.as_posix()
 
 

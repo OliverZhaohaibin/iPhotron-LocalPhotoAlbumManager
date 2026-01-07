@@ -501,16 +501,53 @@ class AssetListModel(QAbstractListModel):
     def _apply_incremental_rows(self, new_rows: List[Dict[str, object]]) -> bool:
         """Merge *new_rows* into the model without clearing the entire view."""
         current_rows = self._state_manager.rows
+        existing_lookup = self._state_manager.row_lookup.copy()
+
+        # Optimistic merge when incoming snapshot is a subset of existing rows
+        if current_rows and new_rows:
+            fresh_rels = {
+                normalise_rel_value(row.get("rel"))
+                for row in new_rows
+                if normalise_rel_value(row.get("rel"))
+            }
+            if fresh_rels and fresh_rels.issubset(set(existing_lookup.keys())):
+                changed = False
+                for replacement in new_rows:
+                    rel_key = normalise_rel_value(replacement.get("rel"))
+                    if not rel_key:
+                        continue
+                    row_index = existing_lookup.get(rel_key)
+                    if row_index is None or not (0 <= row_index < len(current_rows)):
+                        continue
+                    original = current_rows[row_index]
+                    if original == replacement:
+                        continue
+                    current_rows[row_index] = replacement
+                    model_index = self.index(row_index, 0)
+                    affected_roles = [
+                        Roles.REL,
+                        Roles.ABS,
+                        Roles.SIZE,
+                        Roles.DT,
+                        Roles.IS_IMAGE,
+                        Roles.IS_VIDEO,
+                        Roles.IS_LIVE,
+                        Qt.DecorationRole,
+                    ]
+                    self.dataChanged.emit(model_index, model_index, affected_roles)
+                    if self._should_invalidate_thumbnail(original, replacement):
+                        self.invalidate_thumbnail(rel_key)
+                    changed = True
+                return changed
 
         # Heuristic: incremental import chunks should only add/update rows, not drop existing ones.
         if current_rows and new_rows and len(new_rows) < len(current_rows):
-            current_lookup = self._state_manager.row_lookup
             changed = False
             for replacement in new_rows:
                 rel_key = normalise_rel_value(replacement.get("rel"))
                 if not rel_key:
                     continue
-                row_index = current_lookup.get(rel_key)
+                row_index = existing_lookup.get(rel_key)
                 if row_index is None:
                     position = len(current_rows)
                     self.beginInsertRows(QModelIndex(), position, position)

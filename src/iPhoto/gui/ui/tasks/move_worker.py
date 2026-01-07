@@ -248,7 +248,8 @@ class MoveWorker(QRunnable):
                 if not isinstance(rel_value, str):
                     annotated_rows.append(row)
                     continue
-                absolute_target = self._destination_root / rel_value
+                base_for_lookup: Path = process_root
+                absolute_target = base_for_lookup / rel_value
                 target_key = self._normalised_string(absolute_target)
                 original_path = source_lookup.get(target_key) if target_key else None
                 if original_path is None:

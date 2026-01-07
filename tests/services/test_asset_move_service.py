@@ -22,6 +22,7 @@ pytest.importorskip(
 from PySide6.QtWidgets import QApplication
 
 from src.iPhoto.cache.index_store import IndexStore
+from src.iPhoto.config import RECENTLY_DELETED_DIR_NAME
 from src.iPhoto.gui.services.asset_move_service import AssetMoveService
 from src.iPhoto.gui.ui.tasks import move_worker as move_worker_module
 from src.iPhoto.gui.ui.tasks.move_worker import MoveSignals, MoveWorker
@@ -215,7 +216,7 @@ def test_restore_repopulates_library_index(
         return rows
 
     monkeypatch.setattr(move_worker_module, "process_media_paths", _fake_process_media_paths)
-    monkeypatch.setattr(move_worker_module.backend, "pair", lambda _root: None)
+    monkeypatch.setattr(move_worker_module.backend, "pair", lambda *_, **__: None)
 
     restore_signals = MoveSignals()
     worker = MoveWorker(
@@ -241,6 +242,52 @@ def test_restore_repopulates_library_index(
     assert any(row.get("rel") == asset_name for row in album_rows)
 
 
+def test_delete_records_original_path_for_restore(
+    tmp_path: Path, qapp: QApplication, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Moving into trash should annotate rows with the original relative path."""
+
+    library_root = tmp_path / "Library"
+    album_root = library_root / "AlbumA"
+    library_root.mkdir()
+    album_root.mkdir(parents=True)
+
+    asset_name = "IMG_0002.JPG"
+    asset = album_root / asset_name
+    asset.write_bytes(b"stub")
+
+    library_manager = LibraryManager()
+    library_manager.bind_path(library_root)
+    trash_root = library_manager.ensure_deleted_directory()
+    assert trash_root is not None
+
+    def _fake_process_media_paths(root: Path, image_paths, video_paths):
+        rows = []
+        for candidate in list(image_paths) + list(video_paths):
+            rows.append({"rel": candidate.resolve().relative_to(root).as_posix()})
+        return rows
+
+    monkeypatch.setattr(move_worker_module, "process_media_paths", _fake_process_media_paths)
+    monkeypatch.setattr(move_worker_module.backend, "pair", lambda *_, **__: None)
+
+    delete_signals = MoveSignals()
+    worker = MoveWorker(
+        [asset],
+        album_root,
+        trash_root,
+        delete_signals,
+        library_root=library_root,
+        trash_root=trash_root,
+    )
+    worker.run()
+
+    rows = list(IndexStore(library_root).read_all())
+    trash_rel = (Path(RECENTLY_DELETED_DIR_NAME) / asset_name).as_posix()
+    matching = [row for row in rows if row.get("rel") == trash_rel]
+    assert len(matching) == 1, "Trashed asset row should be present in the index"
+    assert matching[0].get("original_rel_path") == asset.relative_to(library_root).as_posix()
+
+
 def test_move_from_library_root_updates_source_album_index(
     tmp_path: Path, qapp: QApplication, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -264,7 +311,7 @@ def test_move_from_library_root_updates_source_album_index(
         return rows
 
     monkeypatch.setattr(move_worker_module, "process_media_paths", _fake_process_media_paths)
-    monkeypatch.setattr(move_worker_module.backend, "pair", lambda _root: None)
+    monkeypatch.setattr(move_worker_module.backend, "pair", lambda *_, **__: None)
 
     IndexStore(library_root).write_rows(
         [{"rel": f"AlbumA/{asset.name}", "abs": str(asset.resolve())}]
@@ -292,4 +339,3 @@ def test_move_from_library_root_updates_source_album_index(
     album_b_rows = list(IndexStore(album_b).read_all())
     assert len(album_b_rows) == 1
     assert album_b_rows[0]["rel"] == asset.name
-

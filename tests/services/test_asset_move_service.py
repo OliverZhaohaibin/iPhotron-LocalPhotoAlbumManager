@@ -339,3 +339,72 @@ def test_move_from_library_root_updates_source_album_index(
     album_b_rows = list(IndexStore(album_b).read_all())
     assert len(album_b_rows) == 1
     assert album_b_rows[0]["rel"] == asset.name
+
+
+def test_delete_collision_assigns_unique_trash_paths(
+    tmp_path: Path, qapp: QApplication, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Deleting same-named files from different albums should keep unique trash rels."""
+
+    library_root = tmp_path / "Library"
+    album_a = library_root / "AlbumA"
+    album_b = library_root / "AlbumB"
+    library_root.mkdir()
+    album_a.mkdir(parents=True)
+    album_b.mkdir(parents=True)
+
+    asset_name = "IMG_1000.JPG"
+    asset_a = album_a / asset_name
+    asset_b = album_b / asset_name
+    asset_a.write_bytes(b"a")
+    asset_b.write_bytes(b"b")
+
+    library_manager = LibraryManager()
+    library_manager.bind_path(library_root)
+    trash_root = library_manager.ensure_deleted_directory()
+    assert trash_root is not None
+
+    def _fake_process_media_paths(root: Path, image_paths, video_paths):
+        rows = []
+        for candidate in list(image_paths) + list(video_paths):
+            rel = candidate.resolve().relative_to(root).as_posix()
+            rows.append({"rel": rel, "ts": 1})
+        return rows
+
+    monkeypatch.setattr(move_worker_module, "process_media_paths", _fake_process_media_paths)
+    monkeypatch.setattr(move_worker_module.backend, "pair", lambda *_, **__: None)
+
+    # First delete
+    signals = MoveSignals()
+    worker = MoveWorker(
+        [asset_a],
+        album_a,
+        trash_root,
+        signals,
+        library_root=library_root,
+        trash_root=trash_root,
+    )
+    worker.run()
+
+    # Second delete with same name from different album
+    signals2 = MoveSignals()
+    worker2 = MoveWorker(
+        [asset_b],
+        album_b,
+        trash_root,
+        signals2,
+        library_root=library_root,
+        trash_root=trash_root,
+    )
+    worker2.run()
+
+    rows = list(IndexStore(library_root).read_all())
+    trash_rows = [
+        row for row in rows if row.get("rel", "").startswith(f"{RECENTLY_DELETED_DIR_NAME}/")
+    ]
+    assert len(trash_rows) == 2
+    rel_values = {row.get("rel") for row in trash_rows}
+    assert len(rel_values) == 2
+    # Ensure filesystem paths exist for both rels
+    for rel in rel_values:
+        assert (library_root / rel).exists()

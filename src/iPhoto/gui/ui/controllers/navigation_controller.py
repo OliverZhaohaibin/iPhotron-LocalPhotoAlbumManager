@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 from pathlib import Path
 from typing import Literal, Optional, TYPE_CHECKING
 
@@ -28,8 +29,19 @@ if TYPE_CHECKING:  # pragma: no cover - runtime import cycle guard
     from .playback_controller import PlaybackController
 
 
+LOGGER = logging.getLogger(__name__)
+
 class NavigationController:
     """Handle opening albums and switching between static collections."""
+
+    # Delay kicking off trash cleanup so album loading can settle first. Tuned to
+    # keep initial navigation responsive; adjust if UI still stalls before the
+    # loader warms the model.
+    _TRASH_CLEANUP_DELAY_MS = 750
+    # Minimum spacing between cleanup runs to avoid repeated DB contention. Five
+    # minutes keeps bounce-in/bounce-out navigation snappy while still pruning
+    # stale rows within a session.
+    _TRASH_CLEANUP_THROTTLE_SEC = 300.0
 
     def __init__(
         self,
@@ -75,6 +87,7 @@ class NavigationController:
         # reselection once).  ``Literal`` keeps the intent self-documenting and
         # avoids mistyped sentinel strings.
         self._tree_refresh_suppression_reason: Optional[Literal["edit", "operation"]] = None
+        self._last_trash_cleanup_at: Optional[float] = None
 
     def bind_playback_controller(self, playback: "PlaybackController") -> None:
         """Provide the playback controller once it has been constructed.
@@ -273,12 +286,16 @@ class NavigationController:
             finally:
                 self._trash_cleanup_running = False
 
-        if not self._trash_cleanup_running:
+        if (
+            not self._trash_cleanup_running
+            and self._should_run_trash_cleanup()
+        ):
             self._trash_cleanup_running = True
+            self._last_trash_cleanup_at = time.monotonic()
             QTimer.singleShot(
-                0,
+                self._TRASH_CLEANUP_DELAY_MS,
                 lambda: threading.Thread(
-                    target=_cleanup_trash, daemon=True
+                    target=_cleanup_trash, daemon=True, name="trash-cleanup"
                 ).start(),
             )
 
@@ -294,6 +311,14 @@ class NavigationController:
             return
 
         album.manifest = {**album.manifest, "title": "Recently Deleted"}
+
+    def _should_run_trash_cleanup(self) -> bool:
+        """Throttle trash cleanup to avoid repeated DB churn during navigation."""
+
+        if self._last_trash_cleanup_at is None:
+            return True
+        elapsed = time.monotonic() - self._last_trash_cleanup_at
+        return elapsed >= self._TRASH_CLEANUP_THROTTLE_SEC
 
     def open_static_collection(
         self,

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 from pathlib import Path
 from typing import Literal, Optional, TYPE_CHECKING
 
@@ -260,10 +261,15 @@ class NavigationController:
             self._dialog.show_error(str(exc))
             return
 
-        try:
-            self._context.library.cleanup_deleted_index()
-        except Exception:  # pragma: no cover - defensive guard
-            pass
+        # Run cleanup asynchronously to avoid blocking the UI when switching
+        # immediately after a delete operation.
+        def _cleanup_trash() -> None:
+            try:
+                self._context.library.cleanup_deleted_index()
+            except Exception:  # pragma: no cover - defensive guard
+                pass
+
+        threading.Thread(target=_cleanup_trash, daemon=True).start()
 
         self._reset_playback_for_gallery_navigation()
         self._view_controller.restore_default_gallery()

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import shutil
+import sqlite3
 import os
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple
@@ -243,9 +244,9 @@ class MoveWorker(QRunnable):
                 ]
                 if missing_rels:
                     store.remove_rows(missing_rels)
-            except Exception:
+            except (IPhotoError, sqlite3.Error, OSError) as exc:
                 # Best-effort cleanup; continue with insertion even if pruning fails.
-                pass
+                LOGGER.debug("Trash cleanup during move skipped: %s", exc)
 
         new_rows = list(
             process_media_paths(process_root, image_paths, video_paths)
@@ -495,6 +496,12 @@ class MoveWorker(QRunnable):
                     return None
                 else:
                     if relative_str.startswith(".."):
+                        return None
+                    try:
+                        candidate = (library_root / relative_str).resolve()
+                        root_resolved = library_root.resolve()
+                        candidate.relative_to(root_resolved)
+                    except (OSError, ValueError):
                         return None
                     return Path(relative_str).as_posix()
         return relative.as_posix()

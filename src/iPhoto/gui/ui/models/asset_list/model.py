@@ -642,14 +642,15 @@ class AssetListModel(QAbstractListModel):
             if not ordered:
                 return []
             ranges: List[Tuple[int, int]] = []
-            range_start = range_end = ordered[0]
+            range_start = range_end = prev = ordered[0]
             for idx in ordered[1:]:
-                if idx == range_start - 1:
+                if idx == prev - 1:
                     range_start = idx
                 else:
-                    ranges.append((min(range_start, range_end), max(range_start, range_end)))
+                    ranges.append((range_start, range_end))
                     range_start = range_end = idx
-            ranges.append((min(range_start, range_end), max(range_start, range_end)))
+                prev = idx
+            ranges.append((range_start, range_end))
             return ranges
 
         # Apply removals in contiguous batches to reduce signal churn
@@ -692,14 +693,14 @@ class AssetListModel(QAbstractListModel):
             position = max(0, min(insert_index + cumulative_inserted, len(current_rows)))
             batch: List[Tuple[Dict[str, object], Optional[str]]] = [(row_data, rel_key)]
 
-            expected_position = position + 1
+            expected_insert_index = insert_index + 1
             insert_pos += 1
             while insert_pos < len(insert_items):
                 next_index, next_row, next_rel = insert_items[insert_pos]
-                if next_index + cumulative_inserted != expected_position:
+                if next_index != expected_insert_index:
                     break
                 batch.append((next_row, next_rel))
-                expected_position += 1
+                expected_insert_index += 1
                 insert_pos += 1
 
             start_position = position

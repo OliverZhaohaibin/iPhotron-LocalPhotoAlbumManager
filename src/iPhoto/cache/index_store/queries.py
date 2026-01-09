@@ -97,7 +97,7 @@ class QueryBuilder:
             normalized = normalize_path(prefix)
             escaped_prefix = escape_like_pattern(normalized)
             where_clauses.append(
-                f"(parent_album_path IS NULL OR (parent_album_path != ? AND parent_album_path NOT LIKE ? {ESCAPE_CLAUSE}))"
+                f"(parent_album_path IS NOT NULL AND parent_album_path != ? AND parent_album_path NOT LIKE ? {ESCAPE_CLAUSE})"
             )
             params.extend([normalized, f"{escaped_prefix}/%"])
 

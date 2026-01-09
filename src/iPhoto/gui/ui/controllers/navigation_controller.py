@@ -297,12 +297,9 @@ class NavigationController:
                 self._last_trash_cleanup_at = time.monotonic()
 
         if should_start:
-            QTimer.singleShot(
-                self._TRASH_CLEANUP_DELAY_MS,
-                lambda: threading.Thread(
-                    target=_cleanup_trash, daemon=True, name="trash-cleanup"
-                ).start(),
-            )
+            threading.Thread(
+                target=_cleanup_trash, daemon=True, name="trash-cleanup"
+            ).start()
 
         self._reset_playback_for_gallery_navigation()
         self._view_controller.restore_default_gallery()

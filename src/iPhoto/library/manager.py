@@ -490,37 +490,22 @@ class LibraryManager(QObject):
             has_files = False
 
         store = IndexStore(root)
-        if has_files:
-            try:
-                entry_count = store.count(
-                    album_path=album_path,
-                    include_subalbums=True,
-                    filter_hidden=False,
-                )
-            except (sqlite3.Error, IPhotoError) as exc:
-                LOGGER.warning(
-                    "Failed to count deleted items for album %s: %s",
-                    album_path,
-                    exc,
-                )
-                entry_count = 0
+        try:
+            entry_count = store.count(
+                album_path=album_path,
+                include_subalbums=True,
+                filter_hidden=False,
+            )
+        except (sqlite3.Error, IPhotoError) as exc:
+            LOGGER.warning(
+                "Failed to count deleted items for album %s during cleanup: %s",
+                album_path,
+                exc,
+            )
+            return 0
 
-            if entry_count == 0:
-                return 0
-        else:
-            try:
-                if store.count(
-                    album_path=album_path,
-                    include_subalbums=True,
-                    filter_hidden=False,
-                ) == 0:
-                    return 0
-            except (sqlite3.Error, IPhotoError) as exc:
-                LOGGER.warning(
-                    "Failed to count deleted items for album %s during cleanup: %s",
-                    album_path,
-                    exc,
-                )
+        if entry_count == 0:
+            return 0
 
         missing: list[str] = []
 

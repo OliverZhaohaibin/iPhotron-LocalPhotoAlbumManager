@@ -15,7 +15,7 @@ from ....errors import IPhotoError
 from ....cache.index_store import IndexStore
 from ....io.scanner import process_media_paths
 from ....media_classifier import IMAGE_EXTENSIONS, VIDEO_EXTENSIONS
-from ....config import WORK_DIR_NAME
+from ....config import WORK_DIR_NAME, RECENTLY_DELETED_DIR_NAME
 
 
 class MoveSignals(QObject):

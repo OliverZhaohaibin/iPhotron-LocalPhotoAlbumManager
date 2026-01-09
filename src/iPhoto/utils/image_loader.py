@@ -22,6 +22,11 @@ else:  # pragma: no cover - executed when Pillow is unavailable
     _ImageOps = None  # type: ignore[assignment]
     _ImageQt = None  # type: ignore[assignment]
 
+# Type checking import
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    from PIL import Image
+
 _LOGGER = logging.getLogger(__name__)
 
 
@@ -114,6 +119,18 @@ def qimage_from_bytes(data: bytes) -> Optional[QImage]:
     return QImage(qt_image)
 
 
+def qimage_from_pil(image: "Image.Image") -> Optional[QImage]:
+    """Return a :class:`QImage` from a PIL Image."""
+    if _ImageQt is None:
+        return None
+    try:
+        qt_image = _ImageQt(image.convert("RGBA"))
+        return QImage(qt_image)
+    except Exception:
+        _LOGGER.exception("Failed to convert PIL image to QImage")
+        return None
+
+
 def _load_with_pillow(source: Path, target: QSize | None = None) -> Optional[QImage]:
     if _Image is None or _ImageOps is None or _ImageQt is None:
         return None
@@ -129,3 +146,44 @@ def _load_with_pillow(source: Path, target: QSize | None = None) -> Optional[QIm
         _LOGGER.exception("Pillow failed to load image from %s", source)
         return None
     return QImage(qt_image)
+
+
+def generate_micro_thumbnail(source: Path) -> Optional[bytes]:
+    """Generate a 16x16 (max dimension) JPEG thumbnail bytes for the given image.
+
+    This function loads the image using Pillow, scales it down maintaining aspect ratio
+    such that the longest side is 16 pixels, and encodes it as a JPEG.
+    """
+    if _Image is None or _ImageOps is None:
+        return None
+
+    try:
+        with _Image.open(source) as img:  # type: ignore[attr-defined]
+            # Optimization: Use draft mode for JPEG images to speed up loading
+            # We request 64x64 to have enough headroom for high-quality downscaling
+            # to the target 16x16 size while avoiding loading the full resolution image.
+            if img.format == "JPEG":
+                img.draft("RGB", (64, 64))
+
+            # Handle orientation
+            img = _ImageOps.exif_transpose(img)  # type: ignore[attr-defined]
+
+            # Scale to 16px max dimension
+            target_size = (16, 16)
+            resample = getattr(_Image, "Resampling", _Image)
+            # Use BICUBIC instead of LANCZOS for speed; quality difference is negligible at 16x16
+            resample_filter = getattr(resample, "BICUBIC", _Image.BICUBIC)
+            img.thumbnail(target_size, resample_filter)
+
+            # Convert to RGB to ensure JPEG compatibility (drop alpha if present)
+            # We convert AFTER resizing to avoid expensive RGB conversion on full-res images (e.g. RGBA PNGs)
+            if img.mode != "RGB":
+                img = img.convert("RGB")
+
+            # Save to bytes
+            output = BytesIO()
+            img.save(output, format="JPEG", quality=75)
+            return output.getvalue()
+    except Exception:
+        _LOGGER.debug("Failed to generate micro thumbnail for %s", source, exc_info=True)
+        return None

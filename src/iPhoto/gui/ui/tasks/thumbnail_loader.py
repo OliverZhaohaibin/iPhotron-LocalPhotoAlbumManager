@@ -2,12 +2,18 @@
 
 from __future__ import annotations
 
-from collections import OrderedDict
+from collections import OrderedDict, deque
 from enum import IntEnum
 import hashlib
 import os
+import time
 from pathlib import Path
 from typing import Dict, Optional, Set, Tuple
+
+try:
+    import psutil
+except ImportError:
+    psutil = None
 
 from PySide6.QtCore import (
     QCoreApplication,
@@ -32,6 +38,57 @@ from .video_frame_grabber import grab_video_frame
 from . import geo_utils
 
 
+def safe_unlink(path: Path) -> None:
+    """
+    Safely delete a file, handling permission errors gracefully.
+
+    Attempts to delete the file at the given path. If a PermissionError occurs,
+    the file is renamed with a ".stale" suffix instead. Other OSError exceptions
+    (such as the file not existing or being inaccessible) are ignored.
+
+    Parameters:
+        path (Path): The path to the file to be deleted.
+    """
+    try:
+        path.unlink(missing_ok=True)
+    except PermissionError:
+        try:
+            path.rename(path.with_suffix(path.suffix + ".stale"))
+        except OSError:
+            # Ignore errors when renaming; file may be locked or already deleted.
+            pass
+    except OSError:
+        # Ignore errors when unlinking; file may not exist or be inaccessible.
+        pass
+
+
+def stat_mtime_ns(stat_result: os.stat_result) -> int:
+    stamp = getattr(stat_result, "st_mtime_ns", None)
+    if stamp is None:
+        stamp = int(stat_result.st_mtime * 1_000_000_000)
+    return int(stamp)
+
+
+def generate_cache_path(library_root: Path, abs_path: Path, size: QSize, stamp: int) -> Path:
+    """
+    Generate the file path for a cached thumbnail image.
+
+    Args:
+        library_root (Path): The root directory of the Basic Library.
+        abs_path (Path): The absolute path of the media file.
+        size (QSize): The desired size of the thumbnail.
+        stamp (int): A timestamp or version identifier for cache invalidation.
+
+    Returns:
+        Path: The path to the cache file for the thumbnail image.
+    """
+    # Use absolute path for global uniqueness
+    path_str = str(abs_path.resolve())
+    digest = hashlib.blake2b(path_str.encode("utf-8"), digest_size=20).hexdigest()
+    filename = f"{digest}_{stamp}_{size.width()}x{size.height()}.png"
+    return library_root / WORK_DIR_NAME / "thumbs" / filename
+
+
 class ThumbnailJob(QRunnable):
     """Background task that renders a thumbnail ``QImage``."""
 
@@ -41,51 +98,162 @@ class ThumbnailJob(QRunnable):
         rel: str,
         abs_path: Path,
         size: QSize,
-        stamp: int,
-        cache_path: Path,
+        known_stamp: Optional[int],
+        album_root: Path,
+        library_root: Path,
         *,
         is_image: bool,
         is_video: bool,
         still_image_time: Optional[float],
         duration: Optional[float],
+        cache_rel: Optional[str] = None,
     ) -> None:
         super().__init__()
         self._loader = loader
         self._rel = rel
         self._abs_path = abs_path
         self._size = size
-        self._stamp = stamp
-        self._cache_path = cache_path
+        self._known_stamp = known_stamp
+        self._album_root = album_root
+        self._library_root = library_root
         self._is_image = is_image
         self._is_video = is_video
         self._still_image_time = still_image_time
         self._duration = duration
+        self._cache_rel = cache_rel
+        self._job_root_str = str(album_root.resolve())
+
+    def _make_local_key(self, stamp: int) -> Tuple[str, str, int, int, int]:
+        """Generate a cache key using the fixed job root string."""
+        return (
+            self._job_root_str,
+            self._rel,
+            self._size.width(),
+            self._size.height(),
+            stamp,
+        )
 
     def run(self) -> None:  # pragma: no cover - executed in worker thread
-        image = self._render_media()
+        # Memory Guard
+        if psutil:
+            mem = psutil.virtual_memory()
+            if mem.percent > 80.0:
+                 time.sleep(0.5)
+
+        # 1. Stat the file to get actual timestamp
+        try:
+            stat_result = self._abs_path.stat()
+        except OSError:
+            self._handle_missing()
+            return
+
+        stamp_ns = stat_mtime_ns(stat_result)
+
+        # Check sidecar
+        sidecar_path = sidecar.sidecar_path_for_asset(self._abs_path)
+        try:
+            if sidecar_path.exists():
+                try:
+                    sidecar_stat = sidecar_path.stat()
+                    sidecar_ns = getattr(sidecar_stat, "st_mtime_ns", None)
+                    if sidecar_ns is None:
+                        sidecar_ns = int(sidecar_stat.st_mtime * 1_000_000_000)
+                    stamp_ns = max(stamp_ns, sidecar_ns)
+                except OSError:
+                    # Ignore errors reading sidecar file; treat as if sidecar is missing or inaccessible.
+                    pass
+        except OSError:
+            # Ignore errors when checking for sidecar existence or stat; sidecar may not exist or be inaccessible.
+            pass
+
+        actual_stamp = int(stamp_ns)
+
+        rel_for_path = self._cache_rel if self._cache_rel is not None else self._rel
+
+        # 2. Validation
+        if self._known_stamp is not None:
+            if self._known_stamp == actual_stamp:
+                # Cache is valid, remove from pending jobs and exit
+                self._report_valid(actual_stamp)
+                return
+            else:
+                # Stale cache detected. Remove old file.
+                old_path = generate_cache_path(self._library_root, self._abs_path, self._size, self._known_stamp)
+                safe_unlink(old_path)
+
+        # 3. Calculate Cache Path
+        cache_path = generate_cache_path(self._library_root, self._abs_path, self._size, actual_stamp)
+
+        image: Optional[QImage] = None
+        loaded_from_cache = False
+
+        try:
+            cache_exists = cache_path.exists()
+        except OSError:
+            cache_exists = False
+        if cache_exists:
+            image = QImage(str(cache_path))
+            if not image.isNull():
+                loaded_from_cache = True
+            else:
+                safe_unlink(cache_path)
+                image = None
+
+        if image is None:
+            image = self._render_media()
+
         success = False
         if image is not None:
-            success = self._write_cache(image)
+            if not loaded_from_cache:
+                success = self._write_cache(image, cache_path)
+            else:
+                # Cache hit, so it's already written.
+                success = True
+
         loader = getattr(self, "_loader", None)
         if loader is None:
             return
 
-        if success:
+        if success and not loaded_from_cache:
             try:
-                loader.cache_written.emit(self._cache_path)
+                loader.cache_written.emit(cache_path)
             except AttributeError:  # pragma: no cover - dummy loader in tests
                 pass
-            except RuntimeError:  # pragma: no cover - race with QObject deletion
+            except RuntimeError:
+                # pragma: no cover - race with QObject deletion
                 pass
 
         try:
             loader._delivered.emit(
-                loader._make_key(self._rel, self._size, self._stamp),
+                self._make_local_key(actual_stamp),
                 image,
                 self._rel,
             )
         except RuntimeError:  # pragma: no cover - race with QObject deletion
             pass
+
+    def _handle_missing(self) -> None:
+        loader = getattr(self, "_loader", None)
+        if loader:
+            try:
+                # Use 0 as stamp for missing files, though the loader will just use the base key
+                key = self._make_local_key(0)
+                loader._delivered.emit(key, None, self._rel)
+            except RuntimeError:  # pragma: no cover - race with QObject deletion
+                pass
+
+    def _report_valid(self, stamp: int) -> None:
+        """Inform the loader that the existing cache is still valid."""
+        loader = getattr(self, "_loader", None)
+        if loader:
+            try:
+                loader._validation_success.emit(self._make_local_key(stamp))
+            except RuntimeError:
+                # pragma: no cover - race with QObject deletion
+                pass
+            except AttributeError:
+                # The loader may have been deleted or not fully initialized; safe to ignore.
+                pass
 
     def _render_media(self) -> Optional[QImage]:  # pragma: no cover - worker helper
         if self._is_video:
@@ -105,7 +273,6 @@ class ThumbnailJob(QRunnable):
             color_stats=stats,
         )
         
-        # Apply crop before other adjustments and scaling
         if adjustments:
             image = self._apply_geometry_and_crop(image, adjustments)
             if image is None:
@@ -123,7 +290,6 @@ class ThumbnailJob(QRunnable):
         if image is None:
             return None
 
-        # Video thumbnails should also respect edits
         raw_adjustments = sidecar.load_adjustments(self._abs_path)
         stats = compute_color_statistics(image) if raw_adjustments else None
         adjustments = sidecar.resolve_render_adjustments(
@@ -140,9 +306,16 @@ class ThumbnailJob(QRunnable):
         return self._composite_canvas(image)
 
     def _apply_geometry_and_crop(self, image: QImage, adjustments: Dict[str, float]) -> Optional[QImage]:
-        """Apply geometric transformations (rotation, perspective, straighten) and crop.
-        
-        This method replicates the visual result of the OpenGL viewer on the CPU.
+        """
+        Apply geometric transformations (rotation, perspective, straighten) and crop to the image
+        to replicate the OpenGL viewer's visual result on the CPU.
+
+        Args:
+            image (QImage): The input image to transform.
+            adjustments (Dict[str, float]): Dictionary of geometric adjustment parameters.
+
+        Returns:
+            Optional[QImage]: The transformed and cropped image, or None if the operation fails.
         """
         rotate_steps = int(adjustments.get("Crop_Rotate90", 0))
         flip_h = bool(adjustments.get("Crop_FlipH", False))
@@ -157,103 +330,70 @@ class ThumbnailJob(QRunnable):
             float(adjustments.get("Crop_H", 1.0))
         )
         
-        # Convert texture space crop to logical space (accounting for 90-degree rotations)
         log_cx, log_cy, log_w, log_h = geo_utils.texture_crop_to_logical(tex_crop, rotate_steps)
         
         w, h = image.width(), image.height()
 
-        # If no significant geometry changes and full crop, return original
         if (rotate_steps == 0 and not flip_h and abs(straighten) < 1e-5 and
             abs(p_vert) < 1e-5 and abs(p_horz) < 1e-5 and
             log_w >= 0.999 and log_h >= 0.999):
             return image
 
-        # Calculate logical aspect ratio for perspective matrix
         if rotate_steps % 2 == 1:
             logical_aspect = float(h) / float(w) if w > 0 else 1.0
         else:
             logical_aspect = float(w) / float(h) if h > 0 else 1.0
 
-        # Build perspective matrix (Inverse: Projected -> Texture)
         matrix_inv = geo_utils.build_perspective_matrix(
             vertical=p_vert,
             horizontal=p_horz,
             image_aspect_ratio=logical_aspect,
             straighten_degrees=straighten,
-            rotate_steps=0, # Rotation handled separately via QTransform
+            rotate_steps=0,
             flip_horizontal=flip_h
         )
 
-        # We need the Forward matrix (Texture -> Projected)
         try:
             matrix = np.linalg.inv(matrix_inv)
         except np.linalg.LinAlgError:
             matrix = np.identity(3)
 
-        # Convert to QTransform
-        # QTransform expects elements in a specific order that corresponds to
-        # the transpose of the standard matrix math convention used by numpy.
-        # h11=m00, h12=m10, h13=m20
-        # h21=m01, h22=m11, h23=m21
-        # h31=m02, h32=m12, h33=m22
         qt_perspective = QTransform(
             matrix[0, 0], matrix[1, 0], matrix[2, 0],
             matrix[0, 1], matrix[1, 1], matrix[2, 1],
             matrix[0, 2], matrix[1, 2], matrix[2, 2]
         )
         
-        # Construct transformation chain
-        # 1. Normalize Pixels -> [0, 1]
         t_to_norm = QTransform().scale(1.0 / w, 1.0 / h)
         
-        # 2. Apply 90-degree Rotation Steps around center (0.5, 0.5)
-        # QTransform methods pre-multiply (apply to left), so we build in reverse order of application.
-        # Desired: T(-0.5) * R * T(0.5) (applied to point p: p * T(-0.5) * R * T(0.5))
-        # Construction: T(0.5).rotate().translate(-0.5)
         t_rot = QTransform()
         t_rot.translate(0.5, 0.5)
         t_rot.rotate(rotate_steps * 90)
         t_rot.translate(-0.5, -0.5)
         
-        # 3. Normalize to [-1, 1] for Perspective Matrix
-        # Desired: p * S(2) * T(-1) = 2p - 1.
-        # QTransform builder applies operations in reverse (First().Second() -> Second * First).
-        # We want S * T matrix. So T().S().
         t_to_ndc = QTransform().translate(-1.0, -1.0).scale(2.0, 2.0)
-        
-        # 4. Denormalize from [-1, 1] to [0, 1]
-        # Desired: p * S(0.5) * T(0.5) = 0.5p + 0.5.
-        # Call Order: T(0.5).S(0.5).
         t_from_ndc = QTransform().translate(0.5, 0.5).scale(0.5, 0.5)
         
-        # 5. Scale to Logical Pixels
         log_w_px = h if rotate_steps % 2 else w
         log_h_px = w if rotate_steps % 2 else h
         t_to_pixels = QTransform().scale(log_w_px, log_h_px)
 
-        # Compose full transform:
-        # Texture -> Norm -> Rotated -> NDC -> Perspective -> NDC -> Norm -> Pixels
         transform = t_to_norm * t_rot * t_to_ndc * qt_perspective * t_from_ndc * t_to_pixels
 
-        # Calculate crop rectangle in Logical Pixels
         crop_x_px = log_cx * log_w_px - (log_w * log_w_px * 0.5)
         crop_y_px = log_cy * log_h_px - (log_h * log_h_px * 0.5)
         crop_w_px = log_w * log_w_px
         crop_h_px = log_h * log_h_px
 
-        # Shift so crop top-left is at (0, 0)
         t_final = transform * QTransform().translate(-crop_x_px, -crop_y_px)
 
-        # Determine output size
         out_w = max(1, int(round(crop_w_px)))
         out_h = max(1, int(round(crop_h_px)))
 
-        # Render
         result_img = QImage(out_w, out_h, QImage.Format.Format_ARGB32_Premultiplied)
         result_img.fill(Qt.transparent)
 
         painter = QPainter(result_img)
-        # Use high quality rendering
         painter.setRenderHint(QPainter.Antialiasing)
         painter.setRenderHint(QPainter.SmoothPixmapTransform)
 
@@ -264,8 +404,11 @@ class ThumbnailJob(QRunnable):
         return result_img
 
     def _seek_targets(self) -> list[Optional[float]]:
-        """Return seek offsets for video thumbnails with guard rails."""
-
+        """
+        Return a list of seek offsets (in seconds) for video thumbnails, applying guard rails
+        to avoid seeking too close to the start or end of the video. For non-video files,
+        returns a list containing a single None value.
+        """
         if not self._is_video:
             return [None]
 
@@ -325,14 +468,14 @@ class ThumbnailJob(QRunnable):
         painter.end()
         return canvas
 
-    def _write_cache(self, canvas: QImage) -> bool:  # pragma: no cover - worker helper
+    def _write_cache(self, canvas: QImage, path: Path) -> bool:  # pragma: no cover - worker helper
         try:
-            self._cache_path.parent.mkdir(parents=True, exist_ok=True)
-            tmp_path = self._cache_path.with_suffix(self._cache_path.suffix + ".tmp")
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp_path = path.with_suffix(path.suffix + ".tmp")
             if canvas.save(str(tmp_path), "PNG"):
-                ThumbnailLoader._safe_unlink(self._cache_path)
+                safe_unlink(path)
                 try:
-                    tmp_path.replace(self._cache_path)
+                    tmp_path.replace(path)
                     return True
                 except OSError:
                     tmp_path.unlink(missing_ok=True)
@@ -346,73 +489,68 @@ class ThumbnailJob(QRunnable):
 class ThumbnailLoader(QObject):
     """Asynchronous thumbnail renderer with disk and memory caching."""
 
-    # ``Path`` is used for the album root argument to keep the public signal in
-    # sync with slots that expect :class:`Path` instances.  This mirrors the
-    # rest of the GUI layer and prevents Nuitka from flagging the connection as
-    # type-unsafe during compilation.
     ready = Signal(Path, str, QPixmap)
     cache_written = Signal(Path)
     _delivered = Signal(object, object, str)
+    _validation_success = Signal(object)
 
     class Priority(IntEnum):
-        """Simple priority values recognised by the loader."""
+        """
+        Priority levels for thumbnail loading jobs.
 
+        These values indicate the relative importance of a thumbnail request.
+        - LOW: Background or prefetch requests that are not immediately needed.
+        - NORMAL: Standard requests for thumbnails.
+        - VISIBLE: Requests for thumbnails that are currently visible in the UI and should be prioritized.
+
+        Note: The priority parameter is accepted in the request method, but is not currently used in the implementation.
+        """
         LOW = -1
         NORMAL = 0
         VISIBLE = 1
 
-    def __init__(self, parent: Optional[QObject] = None) -> None:
+    def __init__(self, parent: Optional[QObject] = None, library_root: Optional[Path] = None) -> None:
         if parent is None:
             parent = QCoreApplication.instance()
         super().__init__(parent)
+        self._library_root: Optional[Path] = library_root
         self._pool = QThreadPool.globalInstance()
-        self._video_pool = QThreadPool(self)
         global_max = self._pool.maxThreadCount()
         if global_max <= 0:
             global_max = os.cpu_count() or 4
-        video_threads = max(1, min(max(global_max // 2, 1), 4))
-        self._video_pool.setMaxThreadCount(video_threads)
+
+        self._max_active_jobs = max(1, global_max - 1)
+        self._active_jobs_count = 0
+
         self._album_root: Optional[Path] = None
         self._album_root_str: Optional[str] = None
-        self._memory: Dict[Tuple[str, str, int, int, int], QPixmap] = {}
-        self._pending: Set[Tuple[str, str, int, int, int]] = set()
-        self._failures: Set[Tuple[str, str, int, int, int]] = set()
+
+        self._memory: OrderedDict[Tuple[str, str, int, int], Tuple[int, QPixmap]] = OrderedDict()
+        self._max_memory_items = 500
+
+        self._pending_deque: deque[Tuple[Tuple[str, str, int, int], ThumbnailJob]] = deque()
+        self._pending_keys: Set[Tuple[str, str, int, int]] = set()
+
+        self._failures: Set[Tuple[str, str, int, int]] = set()
         self._missing: Set[Tuple[str, str, int, int]] = set()
-        self._video_queue: Dict[
-            int, OrderedDict[Tuple[str, str, int, int, int], ThumbnailJob]
-        ] = {
-            self.Priority.VISIBLE: OrderedDict(),
-            self.Priority.NORMAL: OrderedDict(),
-            self.Priority.LOW: OrderedDict(),
-        }
-        self._video_queue_lookup: Dict[
-            Tuple[str, str, int, int, int], int
-        ] = {}
+
         self._delivered.connect(self._handle_result)
+        self._validation_success.connect(self._handle_validation_success)
 
     def shutdown(self) -> None:
-        """Stop background workers so the interpreter can exit cleanly."""
-
-        # Drop any queued-but-not-yet-started video jobs to avoid launching new
-        # work while the application is shutting down.  We intentionally leave
-        # the in-memory caches untouched so that, if shutdown is cancelled, the
-        # loader can continue without recomputing every thumbnail.
-        for queue in self._video_queue.values():
-            queue.clear()
-        self._video_queue_lookup.clear()
-
-        # ``QThreadPool.clear()`` prevents additional ``QRunnable`` instances
-        # from starting, and ``waitForDone()`` blocks until active workers
-        # finish.  Calling both ensures the dedicated video pool no longer owns
-        # any threads by the time Qt begins tearing down application state.
-        self._video_pool.clear()
-        self._video_pool.waitForDone()
-
-        # ``ThumbnailLoader`` also submits still-image work to the global pool.
-        # Other subsystems might share that pool, so we avoid clearing the
-        # queue.  Waiting is still safe because Qt tracks active references and
-        # returns immediately when no thumbnail jobs are in flight.
+        self._pending_deque.clear()
+        self._pending_keys.clear()
         self._pool.waitForDone()
+
+    def set_library_root(self, root: Path) -> None:
+        self._library_root = root
+        if root:
+            try:
+                work_dir = ensure_work_dir(root, WORK_DIR_NAME)
+                (work_dir / "thumbs").mkdir(parents=True, exist_ok=True)
+            except OSError:
+                # Ignore errors if the thumbnail directory cannot be created; not fatal.
+                pass
 
     def reset_for_album(self, root: Path) -> None:
         if self._album_root and self._album_root == root:
@@ -420,17 +558,27 @@ class ThumbnailLoader(QObject):
         self._album_root = root
         self._album_root_str = str(root.resolve())
         self._memory.clear()
-        self._pending.clear()
+        self._pending_deque.clear()
+        self._pending_keys.clear()
         self._failures.clear()
         self._missing.clear()
-        for queue in self._video_queue.values():
-            queue.clear()
-        self._video_queue_lookup.clear()
-        try:
-            work_dir = ensure_work_dir(root, WORK_DIR_NAME)
-            (work_dir / "thumbs").mkdir(parents=True, exist_ok=True)
-        except OSError:
-            pass
+
+        # Ensure the thumbnail directory exists in the library root (if set)
+        if self._library_root:
+            try:
+                work_dir = ensure_work_dir(self._library_root, WORK_DIR_NAME)
+                (work_dir / "thumbs").mkdir(parents=True, exist_ok=True)
+            except OSError:
+                # Ignore errors when creating the thumbnail directory; it may already exist or be inaccessible,
+                # and the application can proceed without it.
+                pass
+        else:
+            # Fallback: create in local album root if library not configured
+            try:
+                work_dir = ensure_work_dir(root, WORK_DIR_NAME)
+                (work_dir / "thumbs").mkdir(parents=True, exist_ok=True)
+            except OSError:
+                pass
 
     def request(
         self,
@@ -446,70 +594,69 @@ class ThumbnailLoader(QObject):
     ) -> Optional[QPixmap]:
         if self._album_root is None or self._album_root_str is None:
             return None
-        base_key = self._base_key(rel, size)
+
+        # Fallback to album_root if library_root is not set
+        lib_root = self._library_root if self._library_root else self._album_root
+
+        fixed_size = QSize(512, 512)
+        base_key = self._base_key(rel, fixed_size)
+
         if base_key in self._missing:
             return None
         if not is_image and not is_video:
             return None
-        try:
-            stat_result = path.stat()
-        except FileNotFoundError:
-            self._missing.add(base_key)
-            return None
-        stamp_ns = getattr(stat_result, "st_mtime_ns", None)
-        if stamp_ns is None:
-            stamp_ns = int(stat_result.st_mtime * 1_000_000_000)
 
-        # Ensure that edits stored in sidecar files trigger a cache refresh by
-        # mixing the sidecar timestamp into the cache key.
-        sidecar_path = sidecar.sidecar_path_for_asset(path)
-        if sidecar_path.exists():
-            try:
-                sidecar_stat = sidecar_path.stat()
-                sidecar_ns = getattr(sidecar_stat, "st_mtime_ns", None)
-                if sidecar_ns is None:
-                    sidecar_ns = int(sidecar_stat.st_mtime * 1_000_000_000)
-                stamp_ns = max(stamp_ns, sidecar_ns)
-            except OSError:
-                pass
+        cached_entry = self._memory.get(base_key)
+        known_stamp: Optional[int] = None
+        retval: Optional[QPixmap] = None
 
-        stamp = int(stamp_ns)
-        key = self._make_key(rel, size, stamp)
-        cached = self._memory.get(key)
-        if cached is not None:
-            return cached
-        if key in self._failures:
+        if cached_entry:
+            self._memory.move_to_end(base_key)
+            known_stamp, retval = cached_entry
+
+        if base_key in self._pending_keys:
+            return retval
+
+        if base_key in self._failures:
             return None
-        cache_path = self._cache_path(rel, size, stamp)
-        if cache_path.exists():
-            pixmap = QPixmap(str(cache_path))
-            if not pixmap.isNull():
-                # Print the cached thumbnail path to help debugging the
-                # Location view while reusing disk-stored thumbnails.
-                print(f"[ThumbnailLoader] Cached thumbnail hit: {cache_path}")
-                self._memory[key] = pixmap
-                return pixmap
-            self._safe_unlink(cache_path)
-        if key in self._pending:
-            return None
+
         job = ThumbnailJob(
             self,
             rel,
             path,
-            size,
-            stamp,
-            cache_path,
+            fixed_size,
+            known_stamp,
+            self._album_root,
+            lib_root,
             is_image=is_image,
             is_video=is_video,
             still_image_time=still_image_time,
             duration=duration,
         )
-        if is_video:
-            self._queue_video_job(key, job, priority)
-            self._drain_video_queue()
-        else:
-            self._start_job(job, key, self._pool)
-        return None
+
+        self._schedule_job(base_key, job)
+        return retval
+
+    def _schedule_job(self, key: Tuple[str, str, int, int], job: ThumbnailJob) -> None:
+        self._pending_deque.append((key, job))
+        self._pending_keys.add(key)
+        self._drain_queue()
+
+    def _drain_queue(self) -> None:
+        while self._active_jobs_count < self._max_active_jobs and self._pending_deque:
+            key, job = self._pending_deque.pop() # LIFO
+            if key not in self._pending_keys:
+                continue
+
+            self._start_job(job, key)
+
+    def _start_job(
+        self,
+        job: ThumbnailJob,
+        key: Tuple[str, str, int, int],
+    ) -> None:
+        self._active_jobs_count += 1
+        self._pool.start(job)
 
     def _base_key(self, rel: str, size: QSize) -> Tuple[str, str, int, int]:
         assert self._album_root_str is not None
@@ -519,156 +666,71 @@ class ThumbnailLoader(QObject):
         base = self._base_key(rel, size)
         return (*base, stamp)
 
-    def _cache_path(self, rel: str, size: QSize, stamp: int) -> Path:
-        assert self._album_root is not None
-        digest = hashlib.sha1(rel.encode("utf-8")).hexdigest()
-        filename = f"{digest}_{stamp}_{size.width()}x{size.height()}.png"
-        return self._album_root / WORK_DIR_NAME / "thumbs" / filename
-
     def _handle_result(
         self,
-        key: Tuple[str, str, int, int, int],
+        full_key: Tuple[str, str, int, int, int],
         image: Optional[QImage],
         rel: str,
     ) -> None:
-        self._pending.discard(key)
+        base_key = full_key[:-1]
+        stamp = full_key[-1]
+
+        self._active_jobs_count = max(0, self._active_jobs_count - 1)
+        self._pending_keys.discard(base_key)
+
         if image is None:
-            self._failures.add(key)
-            self._drain_video_queue()
+            self._failures.add(base_key)
+            self._missing.add(base_key)
+            self._drain_queue()
             return
+
         pixmap = QPixmap.fromImage(image)
         if pixmap.isNull():
-            self._failures.add(key)
-            self._drain_video_queue()
+            self._failures.add(base_key)
+            self._missing.add(base_key)
+            self._drain_queue()
             return
-        base = key[:-1]
-        obsolete = [existing for existing in self._memory if existing[:-1] == base and existing != key]
-        for existing in obsolete:
-            self._memory.pop(existing, None)
-            if self._album_root is not None:
-                _, _, width, height, stale_stamp = existing
-                stale_size = QSize(width, height)
-                stale_path = self._cache_path(rel, stale_size, stale_stamp)
-                self._safe_unlink(stale_path)
-        self._memory[key] = pixmap
+
+        self._memory[base_key] = (stamp, pixmap)
+
+        while len(self._memory) > self._max_memory_items:
+            self._memory.popitem(last=False)
+
         if self._album_root is not None:
             self.ready.emit(self._album_root, rel, pixmap)
-        self._drain_video_queue()
 
-    @staticmethod
-    def _safe_unlink(path: Path) -> None:
-        try:
-            path.unlink(missing_ok=True)
-        except PermissionError:
-            try:
-                path.rename(path.with_suffix(path.suffix + ".stale"))
-            except OSError:
-                pass
-        except OSError:
-            pass
+        self._drain_queue()
 
-    # ------------------------------------------------------------------
+    def _handle_validation_success(self, full_key: Tuple[str, str, int, int, int]) -> None:
+        base_key = full_key[:-1]
+        self._active_jobs_count = max(0, self._active_jobs_count - 1)
+        self._pending_keys.discard(base_key)
+        self._drain_queue()
+
+
+
     def invalidate(self, rel: str) -> None:
-        """Remove cached thumbnails associated with *rel*."""
-
         if self._album_root is None:
             return
-        to_remove = [key for key in self._memory if key[1] == rel]
-        for key in to_remove:
-            pixmap = self._memory.pop(key, None)
-            if pixmap is not None:
+
+        to_remove = [k for k in self._memory if k[1] == rel]
+
+        for k in to_remove:
+            entry = self._memory.pop(k, None)
+            if entry:
+                stamp, pixmap = entry
                 del pixmap
-            _, _, width, height, stamp = key
-            size = QSize(width, height)
-            cache_path = self._cache_path(rel, size, stamp)
-            self._safe_unlink(cache_path)
-        self._pending = {key for key in self._pending if key[1] != rel}
-        self._failures = {key for key in self._failures if key[1] != rel}
-        self._missing = {key for key in self._missing if key[1] != rel}
-        obsolete_lookup = [key for key, queue in self._video_queue_lookup.items() if key[1] == rel]
-        for key in obsolete_lookup:
-            priority = self._video_queue_lookup.pop(key, None)
-            if priority is None:
-                continue
-            queue = self._video_queue.get(priority)
-            if queue is not None:
-                queue.pop(key, None)
+                # We intentionally do not delete the disk cache here.
+                # Invalidation primarily means "clear from memory and force a check".
+                # If the disk file is stale, ThumbnailJob will detect the timestamp mismatch
+                # and clean it up. If the disk file is still valid (e.g. invalidation triggered
+                # by a false alarm or metadata update), we want to reuse it.
 
-        if self._album_root is not None:
-            # Aggressively clean up disk cache for this relative path.
-            # This ensures that even if the source file timestamp hasn't changed
-            # (e.g. only the sidecar was edited), we force a regeneration.
-            try:
-                digest = hashlib.sha1(rel.encode("utf-8")).hexdigest()
-                thumbs_dir = self._album_root / WORK_DIR_NAME / "thumbs"
-                if thumbs_dir.exists():
-                    # Filename format: {digest}_{stamp}_{w}x{h}.png
-                    for file_path in thumbs_dir.glob(f"{digest}_*.png"):
-                        self._safe_unlink(file_path)
-            except Exception:
-                # Don't let disk errors crash the UI during invalidation
-                pass
-
-    def _queue_video_job(
-        self,
-        key: Tuple[str, str, int, int, int],
-        job: ThumbnailJob,
-        priority: "ThumbnailLoader.Priority",
-    ) -> None:
-        if key in self._pending:
-            return
-        existing_priority = self._video_queue_lookup.get(key)
-        if existing_priority is not None:
-            if priority > existing_priority:
-                queue = self._video_queue[existing_priority]
-                existing_job = queue.pop(key, None)
-                if existing_job is not None:
-                    self._enqueue_video_job(key, existing_job, priority)
-            return
-        self._enqueue_video_job(key, job, priority)
-
-    def _enqueue_video_job(
-        self,
-        key: Tuple[str, str, int, int, int],
-        job: ThumbnailJob,
-        priority: "ThumbnailLoader.Priority",
-    ) -> None:
-        queue = self._video_queue.get(priority)
-        if queue is None:
-            queue = OrderedDict()
-            self._video_queue[priority] = queue
-        queue[key] = job
-        self._video_queue_lookup[key] = priority
-
-    def _start_job(
-        self,
-        job: ThumbnailJob,
-        key: Tuple[str, str, int, int, int],
-        pool: QThreadPool,
-    ) -> None:
-        self._pending.add(key)
-        pool.start(job)
-
-    def _drain_video_queue(self) -> None:
-        if self._video_pool is None:
-            return
-        if self._video_pool.activeThreadCount() >= self._video_pool.maxThreadCount():
-            return
-        while self._video_pool.activeThreadCount() < self._video_pool.maxThreadCount():
-            next_job = self._take_next_video_job()
-            if next_job is None:
-                break
-            key, job = next_job
-            self._start_job(job, key, self._video_pool)
-
-    def _take_next_video_job(
-        self,
-        ) -> Optional[Tuple[Tuple[str, str, int, int, int], ThumbnailJob]]:
-        for priority in (self.Priority.VISIBLE, self.Priority.NORMAL, self.Priority.LOW):
-            queue = self._video_queue.get(priority)
-            if not queue:
-                continue
-            key, job = queue.popitem(last=False)
-            self._video_queue_lookup.pop(key, None)
-            return key, job
-        return None
+        self._pending_keys = {k for k in self._pending_keys if k[1] != rel}
+        self._failures = {k for k in self._failures if k[1] != rel}
+        self._missing = {k for k in self._missing if k[1] != rel}
+        # Remove jobs for the invalidated rel from the pending deque to avoid zombie entries
+        self._pending_deque = deque(
+            (key, job) for key, job in self._pending_deque
+            if key[1] != rel
+        )

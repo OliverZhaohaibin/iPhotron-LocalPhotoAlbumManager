@@ -11,8 +11,8 @@ from src.iPhoto.utils import ffmpeg
 from src.iPhoto.errors import ExternalToolError
 
 
-def _fake_completed_process(command: list[str]) -> subprocess.CompletedProcess[bytes]:
-    return subprocess.CompletedProcess(command, 0, stdout=b"", stderr=b"")
+def _fake_completed_process(command: list[str], stdout: bytes = b"") -> subprocess.CompletedProcess[bytes]:
+    return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr=b"")
 
 
 def test_extract_video_frame_uses_yuv_format_for_jpeg(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -24,8 +24,7 @@ def test_extract_video_frame_uses_yuv_format_for_jpeg(monkeypatch: pytest.Monkey
 
     def fake_run(command: list[str]) -> subprocess.CompletedProcess[bytes]:
         captured["cmd"] = command
-        Path(command[-1]).write_bytes(b"jpeg")
-        return _fake_completed_process(command)
+        return _fake_completed_process(command, stdout=b"jpeg")
 
     monkeypatch.setattr(ffmpeg, "_run_command", fake_run)
 
@@ -34,12 +33,20 @@ def test_extract_video_frame_uses_yuv_format_for_jpeg(monkeypatch: pytest.Monkey
     assert data == b"jpeg"
     assert "cmd" in captured
     command = captured["cmd"]
+
+    # Check for hardware acceleration
+    assert "-hwaccel" in command
+    assert "auto" in command
+
+    # Check for pipe output
+    assert "pipe:1" in command
+
     assert "-vf" in command
     vf_index = command.index("-vf")
     vf_expression = command[vf_index + 1]
     assert "format=yuv420p" in vf_expression
-    assert "scale=min(320,iw):min(240,ih):force_original_aspect_ratio=decrease" in vf_expression
-    assert "scale=max(2,trunc(iw/2)*2):max(2,trunc(ih/2)*2)" in vf_expression
+    assert "scale='min(320,iw)':'min(240,ih)':force_original_aspect_ratio=decrease" in vf_expression
+    assert "scale='max(2,trunc(iw/2)*2)':'max(2,trunc(ih/2)*2)'" in vf_expression
     assert "format=rgba" not in vf_expression
 
 
@@ -52,8 +59,7 @@ def test_extract_video_frame_uses_rgba_for_png(monkeypatch: pytest.MonkeyPatch, 
 
     def fake_run(command: list[str]) -> subprocess.CompletedProcess[bytes]:
         captured["cmd"] = command
-        Path(command[-1]).write_bytes(b"png")
-        return _fake_completed_process(command)
+        return _fake_completed_process(command, stdout=b"png")
 
     monkeypatch.setattr(ffmpeg, "_run_command", fake_run)
 
@@ -62,6 +68,14 @@ def test_extract_video_frame_uses_rgba_for_png(monkeypatch: pytest.MonkeyPatch, 
     assert data == b"png"
     assert "cmd" in captured
     command = captured["cmd"]
+
+    # Check for hardware acceleration
+    assert "-hwaccel" in command
+    assert "auto" in command
+
+    # Check for pipe output
+    assert "pipe:1" in command
+
     assert "-vf" in command
     vf_index = command.index("-vf")
     vf_expression = command[vf_index + 1]
@@ -79,8 +93,7 @@ def test_extract_video_frame_without_scale_enforces_even_dimensions(monkeypatch:
 
     def fake_run(command: list[str]) -> subprocess.CompletedProcess[bytes]:
         captured["cmd"] = command
-        Path(command[-1]).write_bytes(b"jpeg")
-        return _fake_completed_process(command)
+        return _fake_completed_process(command, stdout=b"jpeg")
 
     monkeypatch.setattr(ffmpeg, "_run_command", fake_run)
 
@@ -93,7 +106,7 @@ def test_extract_video_frame_without_scale_enforces_even_dimensions(monkeypatch:
     vf_index = command.index("-vf")
     vf_expression = command[vf_index + 1]
     assert "scale=iw:ih" in vf_expression
-    assert "scale=max(2,trunc(iw/2)*2):max(2,trunc(ih/2)*2)" in vf_expression
+    assert "scale='max(2,trunc(iw/2)*2)':'max(2,trunc(ih/2)*2)'" in vf_expression
 
 
 def test_extract_video_frame_falls_back_to_opencv(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

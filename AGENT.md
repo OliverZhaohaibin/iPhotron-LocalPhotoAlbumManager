@@ -21,15 +21,17 @@
 * **隐藏工作目录**（可删）：
 
   ```
-  /<Album>/.iphoto/
+  /<LibraryRoot>/.iphoto/
+    global_index.db    # 全局 SQLite 数据库（整个图库的元数据）
     manifest.json      # 可选 manifest 位置
-    index.jsonl        # 扫描索引
     links.json         # Live 配对与逻辑组
     featured.json      # 精选 UI 卡片
     thumbs/            # 缩略图缓存
     manifest.bak/      # 历史备份
     locks/             # 并发锁
   ```
+
+  **注意：** V3.00 起，`index.jsonl` 已被 `global_index.db` 取代。全局 SQLite 数据库存储所有相册的资产元数据。
 
 * **原始照片/视频**
 
@@ -41,9 +43,15 @@
 ## 3. 数据与 Schema
 
 * **Manifest (`album`)**：权威数据源，必须符合 `schemas/album.schema.json`。
-* **Index (`index.jsonl`)**：一行一个资产快照；删掉可重建。
+* **Global Index (`global_index.db`)**：全局 SQLite 数据库，存储所有资产元数据；删掉可重建，但需重新扫描。
 * **Links (`links.json`)**：Live Photo 配对缓存；删掉可重建。
 * **Featured (`featured.json`)**：精选照片 UI 布局（裁剪框、标题等），可选。
+
+**V3.00 架构变更：**
+- 从分散的 `index.jsonl` 文件迁移到单一的全局 SQLite 数据库
+- 数据库位于图库根目录的 `.iphoto/global_index.db`
+- 支持跨相册查询和高性能索引
+- WAL 模式确保并发安全和崩溃恢复
 
 ---
 
@@ -53,7 +61,12 @@
 * **数据类**：统一用 `dataclass` 定义（见 `models/types.py`）。
 * **错误处理**：必须抛出自定义错误（见 `errors.py`），禁止裸 `Exception`。
 * **写文件**：必须原子操作（`*.tmp` → `replace()`），manifest 必须在写前备份到 `.iPhoto/manifest.bak/`。
-* **锁**：写 `manifest/links/index` 前必须检查 `.iPhoto/locks/`，避免并发冲突。
+* **数据库操作**：
+  * 使用 `AssetRepository` 进行所有数据库 CRUD 操作
+  * 通过 `get_global_repository(library_root)` 获取单例实例
+  * 使用事务上下文管理器 `with repo.transaction():` 确保原子性
+  * 写操作使用幂等 upsert（INSERT OR REPLACE）
+* **锁**：写 `manifest/links` 前必须检查 `.iPhoto/locks/`，避免并发冲突。数据库已通过 WAL 模式处理并发。
 
 ---
 
@@ -66,20 +79,30 @@
 * **注释必须清楚**：写明输入、输出、边界条件。
 * **跨平台**：Windows/macOS/Linux 都能跑。
 * **外部依赖**：只能调用声明在 `pyproject.toml` 的依赖。涉及 ffmpeg/exiftool 时，必须用 wrapper（`utils/ffmpeg.py`、`utils/exiftool.py`）。
-* **缓存策略**：索引/缩略图/配对都要检测是否存在并增量更新，不可全量覆盖。
+* **缓存策略**：
+  * 全局数据库使用幂等 upsert 操作（INSERT OR REPLACE）
+  * 增量扫描：只处理新增/修改的文件
+  * 数据库自动处理去重和更新
+  * 缩略图和配对信息也支持增量更新
 
 ---
 
 ## 6. 模块职责
 
-* **models/**：数据类 + manifest/index/links 的加载与保存。
+* **models/**：数据类 + manifest/links 的加载与保存。
 * **io/**：扫描文件系统、读取元数据、生成缩略图、写旁车。
 * **core/**：算法逻辑（配对、排序、精选管理、图像调整）。
   * `light_resolver.py`：Light 调整参数解析（Brilliance/Exposure/Highlights/Shadows/Brightness/Contrast/BlackPoint）
   * `color_resolver.py`：Color 调整参数解析（Saturation/Vibrance/Cast）+ 图像统计分析
   * `bw_resolver.py`：Black & White 参数解析（Intensity/Neutrals/Tone/Grain）
   * `filters/`：高性能图像处理（NumPy 向量化 + Numba JIT + QColor 回退策略）
-* **cache/**：索引与锁的实现。
+* **cache/**：全局 SQLite 数据库管理和锁实现。
+  * `index_store/engine.py`：数据库连接和事务管理
+  * `index_store/migrations.py`：Schema 演进和版本管理
+  * `index_store/recovery.py`：数据库自动修复和抢救
+  * `index_store/queries.py`：参数化 SQL 查询构建
+  * `index_store/repository.py`：高级 CRUD API
+  * `lock.py`：文件级锁实现
 * **utils/**：通用工具（hash、json、logging、外部工具封装）。
 * **schemas/**：JSON Schema。
 * **cli.py**：Typer 命令行入口。

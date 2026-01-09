@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from enum import IntEnum
 from pathlib import Path
 from typing import Mapping, Tuple
 
@@ -54,6 +55,14 @@ def classify_media(row: Mapping[str, object]) -> Tuple[bool, bool]:
     """
 
     mime = _normalise_mime(row.get("mime"))
+
+    # If the MIME type implies an image but the extension is unambiguously video
+    # (e.g. .mov), trust the extension. This protects against system registries
+    # that misreport QuickTime container files as images.
+    suffix = _suffix_from_row(row)
+    if mime.startswith("image/") and suffix in VIDEO_EXTENSIONS:
+        return False, True
+
     if mime.startswith("image/"):
         return True, False
     if mime.startswith("video/"):
@@ -67,7 +76,6 @@ def classify_media(row: Mapping[str, object]) -> Tuple[bool, bool]:
         if kind == "video":
             return False, True
 
-    suffix = _suffix_from_row(row)
     if suffix in IMAGE_EXTENSIONS:
         return True, False
     if suffix in VIDEO_EXTENSIONS:
@@ -75,4 +83,19 @@ def classify_media(row: Mapping[str, object]) -> Tuple[bool, bool]:
     return False, False
 
 
-__all__ = ["classify_media", "IMAGE_EXTENSIONS", "VIDEO_EXTENSIONS"]
+class MediaType(IntEnum):
+    IMAGE = 1
+    VIDEO = 2
+    UNKNOWN = 0
+
+
+def get_media_type(path: Path) -> MediaType:
+    suffix = path.suffix.lower()
+    if suffix in IMAGE_EXTENSIONS:
+        return MediaType.IMAGE
+    if suffix in VIDEO_EXTENSIONS:
+        return MediaType.VIDEO
+    return MediaType.UNKNOWN
+
+
+__all__ = ["classify_media", "get_media_type", "MediaType", "IMAGE_EXTENSIONS", "VIDEO_EXTENSIONS"]

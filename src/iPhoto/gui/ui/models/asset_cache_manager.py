@@ -6,37 +6,41 @@ from collections import OrderedDict
 from pathlib import Path
 from typing import Dict, List, Optional
 
-from PySide6.QtCore import QObject, QSize, Signal
-from PySide6.QtGui import QColor, QFont, QFontMetrics, QPainter, QPixmap
+from PySide6.QtCore import QObject, QSize, Signal, Qt, QRectF
+from PySide6.QtGui import QColor, QFont, QFontMetrics, QPainter, QPixmap, QImage
 
 from ..tasks.thumbnail_loader import ThumbnailLoader
-from .live_map import load_live_map
+from ..geometry_utils import calculate_center_crop
 
 
 class AssetCacheManager(QObject):
-    """Manage thumbnail, placeholder and Live Photo caches."""
+    """Manage thumbnail and placeholder caches."""
 
     thumbnailReady = Signal(Path, str, QPixmap)
 
-    def __init__(self, thumb_size: QSize, parent: QObject | None = None) -> None:
+    def __init__(self, thumb_size: QSize, parent: QObject | None = None, library_root: Optional[Path] = None) -> None:
         """Create an empty cache for thumbnails and transient metadata."""
 
         super().__init__(parent)
         self._thumb_size = QSize(thumb_size)
-        self._thumb_loader = ThumbnailLoader(self)
+        self._thumb_loader = ThumbnailLoader(self, library_root=library_root)
         self._thumb_loader.ready.connect(self._on_thumb_ready)
         self._thumb_cache: Dict[str, QPixmap] = {}
+        self._composite_cache: Dict[str, QPixmap] = {}
         self._placeholder_cache: Dict[str, QPixmap] = {}
         self._placeholder_templates: Dict[str, QPixmap] = {}
         self._recently_removed_rows: "OrderedDict[str, Dict[str, object]]" = OrderedDict()
         self._recently_removed_limit = 256
         self._album_root: Optional[Path] = None
-        self._live_map: Dict[str, Dict[str, object]] = {}
 
     def thumbnail_loader(self) -> ThumbnailLoader:
         """Expose the :class:`ThumbnailLoader` used for rendering previews."""
 
         return self._thumb_loader
+
+    def set_library_root(self, root: Path) -> None:
+        """Update the shared library root for centralized thumbnail storage."""
+        self._thumb_loader.set_library_root(root)
 
     def reset_for_album(self, root: Optional[Path]) -> None:
         """Reset caches so a new album can be loaded."""
@@ -44,10 +48,10 @@ class AssetCacheManager(QObject):
         self._album_root = root
         self._thumb_loader.reset_for_album(root)
         self._thumb_cache.clear()
+        self._composite_cache.clear()
         self._placeholder_cache.clear()
         self._placeholder_templates.clear()
         self._recently_removed_rows.clear()
-        self._live_map = {}
 
     def clear_recently_removed(self) -> None:
         """Drop all cached metadata for recently removed rows."""
@@ -81,6 +85,7 @@ class AssetCacheManager(QObject):
             return
 
         self.clear_thumbnails_not_in(active_rel_keys)
+        self._composite_cache = {rel: pix for rel, pix in self._composite_cache.items() if rel in active_rel_keys}
         # Placeholders are light-weight so we rebuild them lazily, but removing
         # stale entries keeps the cache keyed to the active dataset and avoids
         # accidentally returning templates for rows that no longer exist.
@@ -120,11 +125,15 @@ class AssetCacheManager(QObject):
         """Store *pixmap* under the cache key *rel*."""
 
         self._thumb_cache[rel] = pixmap
+        # Invalidate the composite cache entry for this key, since the composite
+        # must be regenerated from the new thumbnail data.
+        self._composite_cache.pop(rel, None)
 
     def remove_thumbnail(self, rel: str) -> None:
         """Remove the cached thumbnail for *rel* when it exists."""
 
         self._thumb_cache.pop(rel, None)
+        self._composite_cache.pop(rel, None)
 
     def move_thumbnail(self, old_rel: str, new_rel: str) -> None:
         """Move the cached thumbnail from *old_rel* to *new_rel*."""
@@ -132,6 +141,10 @@ class AssetCacheManager(QObject):
         pixmap = self._thumb_cache.pop(old_rel, None)
         if pixmap is not None:
             self._thumb_cache[new_rel] = pixmap
+
+        comp_pixmap = self._composite_cache.pop(old_rel, None)
+        if comp_pixmap is not None:
+            self._composite_cache[new_rel] = comp_pixmap
 
     def clear_thumbnails_not_in(self, active: set[str]) -> None:
         """Discard cached thumbnails whose keys are not present in *active*."""
@@ -142,6 +155,7 @@ class AssetCacheManager(QObject):
         """Remove every cached thumbnail."""
 
         self._thumb_cache.clear()
+        self._composite_cache.clear()
 
     def move_placeholder(self, old_rel: str, new_rel: str) -> None:
         """Move the cached placeholder entry from *old_rel* to *new_rel*."""
@@ -168,9 +182,16 @@ class AssetCacheManager(QObject):
         """Return a thumbnail for *row*, requesting it asynchronously if needed."""
 
         rel = str(row["rel"])
+
+        # Check for pre-composed thumbnail first
+        composite = self._composite_cache.get(rel)
+        if composite is not None:
+            return composite
+
         cached = self._thumb_cache.get(rel)
         if cached is not None:
-            return cached
+            # Generate composite from cached raw thumbnail
+            return self._create_composite_thumbnail(rel, cached, row)
 
         placeholder = self._placeholder_for(rel, bool(row.get("is_video")))
         if not self._album_root:
@@ -179,6 +200,7 @@ class AssetCacheManager(QObject):
         abs_value = row.get("abs", "")
         abs_path = Path(str(abs_value)) if abs_value else self._album_root / rel
 
+        # Trigger async load even if we return a micro thumbnail
         if bool(row.get("is_image")):
             pixmap = self._thumb_loader.request(
                 rel,
@@ -189,7 +211,7 @@ class AssetCacheManager(QObject):
             )
             if pixmap is not None:
                 self._thumb_cache[rel] = pixmap
-                return pixmap
+                return self._create_composite_thumbnail(rel, pixmap, row)
 
         if bool(row.get("is_video")):
             still_time = row.get("still_image_time")
@@ -212,84 +234,40 @@ class AssetCacheManager(QObject):
             )
             if pixmap is not None:
                 self._thumb_cache[rel] = pixmap
-                return pixmap
+                return self._create_composite_thumbnail(rel, pixmap, row)
+
+        # Check for micro thumbnail before falling back to generic placeholder
+        micro_thumb = row.get("micro_thumbnail_image")
+        if isinstance(micro_thumb, QImage) and not micro_thumb.isNull():
+            return QPixmap.fromImage(micro_thumb)
 
         return placeholder
 
-    def reload_live_metadata(self, rows: List[Dict[str, object]]) -> List[int]:
-        """Refresh cached Live Photo metadata and update *rows* in place."""
+    def _create_composite_thumbnail(self, rel: str, source: QPixmap, row: Dict[str, object]) -> QPixmap:
+        """Generate and cache a resized/cropped thumbnail at the target display size."""
 
-        if not self._album_root or not rows:
-            return []
+        # 1. Create a square target pixmap
+        target_size = self._thumb_size
+        composite = QPixmap(target_size)
+        composite.fill(Qt.transparent)
 
-        live_map = load_live_map(self._album_root)
-        self._live_map = dict(live_map)
-        updated_rows: List[int] = []
-        album_root = self._normalise_path(self._album_root)
+        painter = QPainter(composite)
+        try:
+            # 2. Draw Source (Aspect Fill / Center Crop)
+            view_w, view_h = target_size.width(), target_size.height()
 
-        for row_index, row in enumerate(rows):
-            rel = str(row.get("rel", ""))
-            if not rel:
-                continue
+            source_rect = calculate_center_crop(source.size(), target_size)
 
-            info = self._live_map.get(rel)
-            new_is_live = False
-            new_motion_rel: Optional[str] = None
-            new_motion_abs: Optional[str] = None
-            new_group_id: Optional[str] = None
+            if not source_rect.isEmpty():
+                painter.setRenderHint(QPainter.Antialiasing, True)
+                painter.setRenderHint(QPainter.SmoothPixmapTransform, True)
+                painter.drawPixmap(QRectF(0.0, 0.0, float(view_w), float(view_h)), source, source_rect)
 
-            if isinstance(info, dict):
-                group_id = info.get("id")
-                if isinstance(group_id, str):
-                    new_group_id = group_id
-                elif group_id is not None:
-                    new_group_id = str(group_id)
+        finally:
+            painter.end()
 
-                if info.get("role") == "still":
-                    motion_rel = info.get("motion")
-                    if isinstance(motion_rel, str) and motion_rel:
-                        new_motion_rel = motion_rel
-                        try:
-                            new_motion_abs = str((album_root / motion_rel).resolve())
-                        except OSError:
-                            new_motion_abs = str(album_root / motion_rel)
-                        new_is_live = True
-
-            previous_is_live = bool(row.get("is_live", False))
-            previous_motion_rel = row.get("live_motion")
-            previous_motion_abs = row.get("live_motion_abs")
-            previous_group_id = row.get("live_group_id")
-
-            if (
-                previous_is_live == new_is_live
-                and (previous_motion_rel or None) == new_motion_rel
-                and (previous_motion_abs or None) == new_motion_abs
-                and (previous_group_id or None) == new_group_id
-            ):
-                continue
-
-            row["is_live"] = new_is_live
-            row["live_motion"] = new_motion_rel
-            row["live_motion_abs"] = new_motion_abs
-            row["live_group_id"] = new_group_id
-            updated_rows.append(row_index)
-
-        return updated_rows
-
-    def set_live_map(self, mapping: Dict[str, Dict[str, object]]) -> None:
-        """Replace the cached Live Photo mapping."""
-
-        self._live_map = dict(mapping)
-
-    def live_map_snapshot(self) -> Dict[str, Dict[str, object]]:
-        """Return a shallow copy of the cached Live Photo information."""
-
-        return dict(self._live_map)
-
-    def live_map(self) -> Dict[str, Dict[str, object]]:
-        """Return the cached Live Photo mapping."""
-
-        return self._live_map
+        self._composite_cache[rel] = composite
+        return composite
 
     def _on_thumb_ready(self, root: Path, rel: str, pixmap: QPixmap) -> None:
         """Store thumbnails produced by :class:`ThumbnailLoader` and relay them."""
@@ -297,6 +275,10 @@ class AssetCacheManager(QObject):
         if self._album_root and root != self._album_root:
             return
         self._thumb_cache[rel] = pixmap
+        # Clear old composite if any
+        self._composite_cache.pop(rel, None)
+        # Note: We emit the raw pixmap here. The composite thumbnail for this `rel` will be generated
+        # lazily the next time `resolve_thumbnail` is called for this `rel`, ensuring deferred composition.
         self.thumbnailReady.emit(root, rel, pixmap)
 
     def _placeholder_for(self, rel: str, is_video: bool) -> QPixmap:

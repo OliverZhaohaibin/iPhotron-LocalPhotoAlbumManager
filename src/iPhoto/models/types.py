@@ -19,6 +19,10 @@ class PhotoMeta:
     model: Optional[str]
     gps: Optional[Dict[str, float]]
     content_id: Optional[str]
+    aspect_ratio: Optional[float] = None
+    year: Optional[int] = None
+    month: Optional[int] = None
+    media_type: Optional[int] = None
 
 
 @dataclass(slots=True)
@@ -31,6 +35,10 @@ class VideoMeta:
     codec: Optional[str]
     content_id: Optional[str]
     still_image_time: Optional[float]
+    aspect_ratio: Optional[float] = None
+    year: Optional[int] = None
+    month: Optional[int] = None
+    media_type: Optional[int] = None
 
 
 @dataclass(slots=True)

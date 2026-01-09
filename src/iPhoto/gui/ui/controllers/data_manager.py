@@ -26,6 +26,8 @@ class DataManager(QObject):
         self._facade = facade
 
         self._asset_model = AssetModel(self._facade)
+        self._facade.activeModelChanged.connect(self._asset_model.setSourceModel)
+
         self._filmstrip_model = SpacerProxyModel(window)
         self._filmstrip_model.setSourceModel(self._asset_model)
 

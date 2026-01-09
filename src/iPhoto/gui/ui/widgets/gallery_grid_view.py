@@ -2,12 +2,49 @@
 
 from __future__ import annotations
 
+from OpenGL import GL as gl
 from PySide6.QtCore import QEvent, QSize, Qt
-from PySide6.QtGui import QPalette
+from PySide6.QtGui import QPaintEvent, QPalette, QSurfaceFormat, QColor, QGuiApplication
+from PySide6.QtOpenGLWidgets import QOpenGLWidget
 from PySide6.QtWidgets import QAbstractItemView, QListView
 
 from ..styles import modern_scrollbar_style
 from .asset_grid import AssetGrid
+
+
+class GalleryViewport(QOpenGLWidget):
+    """OpenGL viewport that ensures an opaque background."""
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self._bg_color: QColor | None = None
+
+        # Disable the alpha buffer to prevent transparency issues with the DWM
+        # when using a frameless window configuration.
+        gl_format = QSurfaceFormat()
+        gl_format.setAlphaBufferSize(0)
+        self.setFormat(gl_format)
+
+    def set_background_color(self, color: QColor) -> None:
+        """Set the background color for the viewport."""
+        self._bg_color = color
+        self.update()
+
+    def paintGL(self) -> None:
+        """Clear the background to the theme's base color with full opacity."""
+        self.clear_background()
+
+    def clear_background(self) -> None:
+        """Explicitly clear the viewport background."""
+        if self._bg_color:
+            base_color = self._bg_color
+        else:
+            base_color = self.palette().color(QPalette.ColorRole.Base)
+
+        # Ensure we have a context before issuing GL commands
+        self.makeCurrent()
+        gl.glClearColor(base_color.redF(), base_color.greenF(), base_color.blueF(), 1.0)
+        gl.glClear(gl.GL_COLOR_BUFFER_BIT)
 
 
 class GalleryGridView(AssetGrid):
@@ -44,8 +81,19 @@ class GalleryGridView(AssetGrid):
         self.setWordWrap(False)
         self.setSelectionRectVisible(False)
 
+        # Enable hardware acceleration for the viewport to improve scrolling performance
+        gl_viewport = GalleryViewport()
+        self.setViewport(gl_viewport)
+
         self._updating_style = False
         self._apply_scrollbar_style()
+
+    def paintEvent(self, event: QPaintEvent) -> None:  # type: ignore[override]
+        """Override paintEvent to force a GL clear before items are drawn."""
+        viewport = self.viewport()
+        if isinstance(viewport, GalleryViewport):
+            viewport.clear_background()
+        super().paintEvent(event)
 
     def resizeEvent(self, event) -> None:  # type: ignore[override]
         super().resizeEvent(event)
@@ -89,15 +137,33 @@ class GalleryGridView(AssetGrid):
         super().changeEvent(event)
 
     def _apply_scrollbar_style(self) -> None:
-        text_color = self.palette().color(QPalette.ColorRole.WindowText)
-        style = modern_scrollbar_style(text_color)
+        # Fetch the global application palette to ensure we get the fresh theme colors,
+        # ignoring any local stylesheet overrides that self.palette() might reflect.
+        app = QGuiApplication.instance()
+        palette = app.palette() if app else self.palette()
 
-        if self.styleSheet() == style:
+        text_color = palette.color(QPalette.ColorRole.WindowText)
+        base_color = palette.color(QPalette.ColorRole.Base)
+
+        # Propagate background color to the viewport
+        viewport = self.viewport()
+        if isinstance(viewport, GalleryViewport):
+            viewport.set_background_color(base_color)
+
+        # We need to enforce the background color on the GalleryGridView (and its viewport)
+        # because QOpenGLWidget in a translucent window context defaults to transparent.
+        # By adding a background-color rule to the stylesheet, we ensure it's painted opaque.
+        style = modern_scrollbar_style(text_color)
+        bg_style = f"QListView {{ background-color: {base_color.name()}; }}"
+
+        full_style = f"{style}\n{bg_style}"
+
+        if self.styleSheet() == full_style:
             return
 
         self._updating_style = True
         try:
-            self.setStyleSheet(style)
+            self.setStyleSheet(full_style)
         finally:
             self._updating_style = False
 

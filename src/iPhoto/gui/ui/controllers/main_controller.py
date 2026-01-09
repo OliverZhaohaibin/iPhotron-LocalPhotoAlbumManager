@@ -53,6 +53,7 @@ class MainController(QObject):
             window.ui.status_bar,
             self._dialog,
             self._view_manager.view_controller(),
+            window,
         )
         # The navigation controller is created after the edit controller, so
         # provide the reference now that the instance exists.  This keeps the
@@ -93,6 +94,7 @@ class MainController(QObject):
     def shutdown(self) -> None:
         """Stop worker threads and background jobs before the app exits."""
 
+        self._facade.cancel_active_scans()
         self._interaction.shutdown()
         self._map_controller.shutdown()
         self._asset_model.thumbnail_loader().shutdown()
@@ -141,6 +143,10 @@ class MainController(QObject):
         updates = self._facade.library_updates
         updates.scanProgress.connect(self._status_bar.handle_scan_progress)
         updates.scanFinished.connect(self._status_bar.handle_scan_finished)
+        self._facade.scanBatchFailed.connect(self._status_bar.handle_scan_batch_failed)
+        # Also connect facade's own scanProgress for LibraryManager scans (Basic Library)
+        self._facade.scanProgress.connect(self._status_bar.handle_scan_progress)
+        self._facade.scanFinished.connect(self._status_bar.handle_scan_finished)
         updates.indexUpdated.connect(self._map_controller.handle_index_update)
         self._facade.loadStarted.connect(self._status_bar.handle_load_started)
         self._facade.loadProgress.connect(self._status_bar.handle_load_progress)
@@ -443,4 +449,3 @@ class MainController(QObject):
     def resume_playback_after_transition(self) -> None:
         if self._data.media().is_paused():
             self._data.media().play()
-

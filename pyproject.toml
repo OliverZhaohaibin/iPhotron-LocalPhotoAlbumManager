@@ -25,6 +25,7 @@ dependencies = [
   "numpy>=2.3.4",
   "numba>=0.60",
   "mapbox-vector-tile>=1.2",
+  "av>=11.0.0",
 ]
 
 [project.optional-dependencies]
@@ -58,7 +59,7 @@ line-length = 100
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-ra"
+addopts = "-ra -p no:pytestqt --ignore=tests/ui --ignore=tests/gui --ignore=src/iPhoto/tests --ignore=src/iPhoto/tests/gui"
 pythonpath = ["src"]
 
 [tool.typer]

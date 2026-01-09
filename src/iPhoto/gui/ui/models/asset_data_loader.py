@@ -7,7 +7,13 @@ from typing import Dict, List, Optional, Tuple
 
 from PySide6.QtCore import QObject, QThreadPool, Signal, QTimer
 
-from ..tasks.asset_loader_worker import AssetLoaderSignals, AssetLoaderWorker, compute_asset_rows
+from ..tasks.asset_loader_worker import (
+    AssetLoaderSignals,
+    AssetLoaderWorker,
+    compute_album_path,
+    compute_asset_rows,
+)
+from ....cache.index_store import IndexStore
 from ....config import WORK_DIR_NAME
 
 
@@ -19,12 +25,24 @@ class AssetDataLoader(QObject):
     loadProgress = Signal(Path, int, int)
     error = Signal(Path, str)
 
-    def __init__(self, parent: QObject | None = None) -> None:
+    # Threshold for synchronous loading (number of rows).
+    # If the index has fewer assets than this, we load synchronously
+    # on the UI thread to make small albums appear instantly.
+    # 20,000 rows is roughly instantaneous on modern SSDs with SQLite.
+    SYNC_LOAD_THRESHOLD: int = 20000
+
+    def __init__(self, parent: QObject | None = None, library_root: Optional[Path] = None) -> None:
         """Initialise the loader wrapper."""
         super().__init__(parent)
         self._pool = QThreadPool.globalInstance()
         self._worker: Optional[AssetLoaderWorker] = None
         self._signals: Optional[AssetLoaderSignals] = None
+        self._request_id: int = 0
+        self._library_root: Optional[Path] = library_root
+
+    def set_library_root(self, root: Path) -> None:
+        """Update the library root for global index access."""
+        self._library_root = root
 
     def is_running(self) -> bool:
         """Return ``True`` while a worker is active."""
@@ -38,9 +56,7 @@ class AssetDataLoader(QObject):
         self,
         root: Path,
         featured: List[Dict[str, object]],
-        live_map: Dict[str, Dict[str, object]],
-        *,
-        max_index_bytes: int,
+        filter_params: Optional[Dict[str, object]] = None,
     ) -> Optional[Tuple[List[Dict[str, object]], int]]:
         """Return cached rows for *root* when the index file remains lightweight.
 
@@ -50,19 +66,49 @@ class AssetDataLoader(QObject):
         through :func:`QTimer.singleShot`.  Emitting asynchronously prevents
         listeners—especially :class:`PySide6.QtTest.QSignalSpy`—from missing the
         notification window when they connect right after ``open_album`` returns.
+
+        Parameters
+        ----------
+        root : Path
+            The album root directory to load assets from.
+        featured : List[Dict[str, object]]
+            List of featured asset metadata dictionaries.
+        filter_params : Optional[Dict[str, object]]
+            Optional dictionary of filter parameters to restrict the assets loaded.
+            Supported keys may include:
+                - "rating": int or list of int, filter by asset rating
+                - "tags": list of str, filter by asset tags
+                - "date_range": tuple of (start_date, end_date), filter by date
+                - "search": str, full-text search query
+            The exact supported keys depend on the implementation of AssetLoaderWorker.
+
+        Returns
+        -------
+        Optional[Tuple[List[Dict[str, object]], int]]
+            A tuple of (rows, total_count) if the index is small enough to load
+            synchronously, or None if it should be loaded asynchronously instead.
         """
 
-        index_path = root / WORK_DIR_NAME / "index.jsonl"
-        try:
-            size = index_path.stat().st_size
-        except OSError:
-            size = 0
+        # Use helper to compute effective index root and album path
+        effective_index_root, album_path = compute_album_path(root, self._library_root)
 
-        if size > max_index_bytes:
+        try:
+            # We use row count from SQLite instead of file size.
+            # Include album_path filtering to count only assets in the current album
+            count = IndexStore(effective_index_root).count(
+                filter_hidden=True,
+                filter_params=filter_params,
+                album_path=album_path,
+                include_subalbums=True,
+            )
+        except Exception:
+            count = 0
+
+        if count > self.SYNC_LOAD_THRESHOLD:
             return None
 
         try:
-            rows, total = self.compute_rows(root, featured, live_map)
+            rows, total = self.compute_rows(root, featured, filter_params=filter_params)
         except Exception as exc:  # pragma: no cover - surfaced via GUI
             message = str(exc)
 
@@ -104,17 +150,51 @@ class AssetDataLoader(QObject):
         self,
         root: Path,
         featured: List[Dict[str, object]],
-        live_map: Dict[str, Dict[str, object]],
+        filter_params: Optional[Dict[str, object]] = None,
     ) -> None:
-        """Launch a background worker for *root*."""
+        """
+        Launch a background worker for *root*.
+
+        Parameters
+        ----------
+        root : Path
+            The album root directory to load assets from.
+        featured : List[Dict[str, object]]
+            List of featured asset metadata dictionaries.
+        filter_params : Optional[Dict[str, object]]
+            Optional dictionary of filter parameters to restrict the assets loaded.
+            Supported keys may include:
+                - "rating": int or list of int, filter by asset rating
+                - "tags": list of str, filter by asset tags
+                - "date_range": tuple of (start_date, end_date), filter by date
+                - "search": str, full-text search query
+            The exact supported keys depend on the implementation of AssetLoaderWorker.
+        """
         if self._worker is not None:
             raise RuntimeError("Loader already running")
+
+        self._request_id += 1
+        current_request_id = self._request_id
+
         signals = AssetLoaderSignals()
-        signals.chunkReady.connect(self._handle_chunk_ready)
-        signals.finished.connect(self._handle_finished)
-        signals.progressUpdated.connect(self._handle_progress)
-        signals.error.connect(self._handle_error)
-        worker = AssetLoaderWorker(root, featured, signals, live_map)
+        signals.chunkReady.connect(
+            lambda r, c: self._handle_chunk_ready(r, c, current_request_id)
+        )
+        signals.finished.connect(
+            lambda r, s: self._handle_finished(r, s, current_request_id)
+        )
+        signals.progressUpdated.connect(
+            lambda r, curr, tot: self._handle_progress(r, curr, tot, current_request_id)
+        )
+        signals.error.connect(
+            lambda r, msg: self._handle_error(r, msg, current_request_id)
+        )
+
+        worker = AssetLoaderWorker(
+            root, featured, signals,
+            filter_params=filter_params,
+            library_root=self._library_root,
+        )
         self._worker = worker
         self._signals = signals
         self._pool.start(worker)
@@ -129,32 +209,69 @@ class AssetDataLoader(QObject):
         self,
         root: Path,
         featured: List[Dict[str, object]],
-        live_map: Dict[str, Dict[str, object]],
+        filter_params: Optional[Dict[str, object]] = None,
     ) -> Tuple[List[Dict[str, object]], int]:
         """Synchronously compute asset rows for *root*.
 
         This is primarily used when the index file is small enough to load on the
         GUI thread without noticeably blocking the interface.  The logic mirrors
         what :class:`AssetLoaderWorker` performs in the background.
+
+        Parameters
+        ----------
+        root : Path
+            The album root directory to load assets from.
+        featured : List[Dict[str, object]]
+            List of featured asset metadata dictionaries.
+        filter_params : Optional[Dict[str, object]]
+            Optional dictionary of filter parameters to restrict the assets loaded.
+            Supported keys may include:
+                - "rating": int or list of int, filter by asset rating
+                - "tags": list of str, filter by asset tags
+                - "date_range": tuple of (start_date, end_date), filter by date
+                - "search": str, full-text search query
+            The exact supported keys depend on the implementation of AssetLoaderWorker.
+
+        Returns
+        -------
+        Tuple[List[Dict[str, object]], int]
+            A tuple of (rows, total_count) where rows is the list of asset metadata
+            dictionaries and total_count is the total number of assets in the album.
         """
 
-        return compute_asset_rows(root, featured, live_map)
+        return compute_asset_rows(
+            root, featured,
+            filter_params=filter_params,
+            library_root=self._library_root,
+        )
 
-    def _handle_chunk_ready(self, root: Path, chunk: List[Dict[str, object]]) -> None:
-        """Relay chunk notifications from the worker."""
+    def _handle_chunk_ready(
+        self, root: Path, chunk: List[Dict[str, object]], request_id: int
+    ) -> None:
+        """Relay chunk notifications from the worker if the request ID matches."""
+        if request_id != self._request_id:
+            return
         self.chunkReady.emit(root, chunk)
 
-    def _handle_progress(self, root: Path, current: int, total: int) -> None:
-        """Relay progress updates from the worker."""
+    def _handle_progress(
+        self, root: Path, current: int, total: int, request_id: int
+    ) -> None:
+        """Relay progress updates from the worker if the request ID matches."""
+        if request_id != self._request_id:
+            return
         self.loadProgress.emit(root, current, total)
 
-    def _handle_finished(self, root: Path, success: bool) -> None:
-        """Relay completion notifications and tear down the worker."""
+    def _handle_finished(self, root: Path, success: bool, request_id: int) -> None:
+        """Relay completion notifications and tear down the worker if the request ID matches."""
+        if request_id != self._request_id:
+            return
         self.loadFinished.emit(root, success)
         self._teardown()
 
-    def _handle_error(self, root: Path, message: str) -> None:
-        """Relay worker errors and tear down the worker."""
+    def _handle_error(self, root: Path, message: str, request_id: int) -> None:
+        """Relay worker errors and tear down the worker if the request ID matches."""
+        if request_id != self._request_id:
+            return
         self.error.emit(root, message)
         self._teardown()
 

@@ -10,7 +10,7 @@ from PySide6.QtGui import QImage
 
 from ....config import THUMBNAIL_SEEK_GUARD_SEC
 from ....errors import ExternalToolError
-from ....utils.ffmpeg import extract_video_frame
+from ....utils.ffmpeg import extract_video_frame, extract_frame_with_pyav
 from ....utils import image_loader
 
 
@@ -23,23 +23,28 @@ def grab_video_frame(
 ) -> Optional[QImage]:
     """Return a decoded frame for *path* scaled to *size*."""
 
-    frame_data: Optional[bytes] = None
+    target_size = (max(size.width(), 1), max(size.height(), 1))
+
     for target in _seek_targets(still_image_time, duration):
+        # 1. Try PyAV first (direct memory access, faster)
+        pil_image = extract_frame_with_pyav(path, at=target, scale=target_size)
+        if pil_image:
+            return image_loader.qimage_from_pil(pil_image)
+
+        # 2. Fallback to ffmpeg subprocess if PyAV fails
         try:
             frame_data = extract_video_frame(
                 path,
                 at=target,
-                scale=(max(size.width(), 1), max(size.height(), 1)),
+                scale=target_size,
                 format="jpeg",
             )
+            if frame_data:
+                return image_loader.qimage_from_bytes(frame_data)
         except ExternalToolError:
-            frame_data = None
             continue
-        if frame_data:
-            break
-    if not frame_data:
-        return None
-    return image_loader.qimage_from_bytes(frame_data)
+
+    return None
 
 
 def _seek_targets(

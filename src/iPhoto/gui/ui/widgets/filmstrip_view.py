@@ -122,25 +122,18 @@ class FilmstripView(AssetGrid):
             and not bool(current_proxy_index.data(Roles.IS_SPACER))
         ):
             current_index = current_proxy_index
-        else:
-            # Prefer the role flag that the controller keeps in sync with playback
-            for row in range(model.rowCount()):
-                index = model.index(row, 0)
-                if not index.isValid():
-                    continue
-                if bool(index.data(Roles.IS_SPACER)):
-                    continue
-                if bool(index.data(Roles.IS_CURRENT)):
-                    current_index = index
-                    break
 
-        # Fallback to the view's selection if the role is not yet updated
+        # Optimization: Check the Selection Model directly.
+        # This avoids iterating through thousands of rows.
         if current_index is None:
             selection_model = self.selectionModel()
             if selection_model is not None:
                 candidate = selection_model.currentIndex()
                 if candidate.isValid() and not bool(candidate.data(Roles.IS_SPACER)):
                     current_index = candidate
+
+        # NOTE: The original 'for row in range(model.rowCount())' loop has been removed
+        # to prevent UI freezing on large datasets.
 
         if current_index is None or not current_index.isValid():
             return self._narrow_item_width()
@@ -165,15 +158,27 @@ class FilmstripView(AssetGrid):
 
         option = QStyleOptionViewItem()
         option.initFrom(self)
-        # Prefer any non-current item to approximate the narrow width
-        for row in range(model.rowCount()):
+
+        # Prefer any non-current item to approximate the narrow width.
+        # We limit the search to avoid linear scans on large datasets.
+        limit = min(model.rowCount(), 10)
+        for row in range(limit):
             index = model.index(row, 0)
             if not index.isValid():
                 continue
             if bool(index.data(Roles.IS_SPACER)):
                 continue
-            if bool(index.data(Roles.IS_CURRENT)):
+
+            # Use the selection model to skip the current item without O(N) search
+            selection_model = self.selectionModel()
+            if selection_model is not None:
+                current = selection_model.currentIndex()
+                if current.isValid() and current == index:
+                    continue
+            elif bool(index.data(Roles.IS_CURRENT)):
+                # Fallback to role check if selection model missing (unlikely but safe for small N)
                 continue
+
             width = self._visual_width(index)
             if width <= 0:
                 size = delegate.sizeHint(option, index)
@@ -181,22 +186,7 @@ class FilmstripView(AssetGrid):
             if width > 0:
                 return width
 
-        # Fall back to the first real item or the delegate ratio if needed.
-        fallback_index = None
-        for candidate_row in range(model.rowCount()):
-            candidate = model.index(candidate_row, 0)
-            if not candidate.isValid() or bool(candidate.data(Roles.IS_SPACER)):
-                continue
-            fallback_index = candidate
-            break
-
-        if fallback_index is not None and fallback_index.isValid():
-            width = self._visual_width(fallback_index)
-            if width <= 0:
-                size = delegate.sizeHint(option, fallback_index)
-                width = size.width()
-            if width > 0:
-                return width
+        # Fall back to the delegate ratio if needed.
         ratio = self._delegate_ratio(delegate)
         return max(1, int(round(self._base_height * ratio)))
 

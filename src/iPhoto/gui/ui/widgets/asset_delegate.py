@@ -10,6 +10,7 @@ from PySide6.QtGui import (
     QFont,
     QFontMetrics,
     QIcon,
+    QImage,
     QPainter,
     QPainterPath,
     QPalette,
@@ -18,7 +19,8 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import QStyle, QStyleOptionViewItem, QStyledItemDelegate
 
-from ..icons import load_icon
+from ..badge_renderer import BadgeRenderer
+from ..geometry_utils import calculate_center_crop
 from ..models.asset_model import Roles
 
 
@@ -29,17 +31,12 @@ class AssetGridDelegate(QStyledItemDelegate):
 
     def __init__(self, parent=None, *, filmstrip_mode: bool = False) -> None:  # type: ignore[override]
         super().__init__(parent)
-        self._duration_font: Optional[QFont] = None
-        self._live_icon: QIcon = load_icon("livephoto.svg", color="white")
-        self._favorite_icon: QIcon = load_icon("suit.heart.fill.svg", color="#ff4d67")
-        # ``_pano_icon`` is rendered in the lower-right corner when the asset is a panorama.
-        self._pano_icon: QIcon = load_icon("pano.svg", color="white")
         self._filmstrip_mode = filmstrip_mode
         self._base_size = 192
         self._filmstrip_height = 120
         self._filmstrip_border_width = 2
         self._selection_mode_active = False
-        self._selection_icon: QIcon = load_icon("checkmark.circle.svg")
+        self._badge_renderer = BadgeRenderer()
 
     def set_base_size(self, size: int) -> None:
         """Update the target rendering size for standard grid tiles."""
@@ -77,6 +74,10 @@ class AssetGridDelegate(QStyledItemDelegate):
         corner_radius = 8.0 if self._filmstrip_mode else 0.0
 
         pixmap = index.data(Qt.DecorationRole)
+        micro_thumb = None
+        if not (isinstance(pixmap, QPixmap) and not pixmap.isNull()):
+            # Fallback to micro thumbnail
+            micro_thumb = index.data(Roles.MICRO_THUMBNAIL)
 
         clip_path: QPainterPath | None = None
         if self._filmstrip_mode and corner_radius > 0.0:
@@ -92,23 +93,25 @@ class AssetGridDelegate(QStyledItemDelegate):
         if isinstance(pixmap, QPixmap) and not pixmap.isNull():
             painter.setRenderHint(QPainter.Antialiasing, True)
             painter.setRenderHint(QPainter.SmoothPixmapTransform, True)
-            scaled = pixmap.scaled(
-                thumb_rect.size(),
-                Qt.KeepAspectRatioByExpanding,
-                Qt.SmoothTransformation,
-            )
-            source = scaled.rect()
-            if source.width() > thumb_rect.width():
-                diff = source.width() - thumb_rect.width()
-                left = diff // 2
-                right = diff - left
-                source.adjust(left, 0, -right, 0)
-            if source.height() > thumb_rect.height():
-                diff = source.height() - thumb_rect.height()
-                top = diff // 2
-                bottom = diff - top
-                source.adjust(0, top, 0, -bottom)
-            painter.drawPixmap(thumb_rect, scaled, source)
+
+            source_rect = calculate_center_crop(pixmap.size(), thumb_rect.size())
+            if not source_rect.isEmpty():
+                painter.drawPixmap(QRectF(thumb_rect), pixmap, source_rect)
+            else:
+                painter.fillRect(thumb_rect, QColor("#1b1b1b"))
+        elif isinstance(micro_thumb, QImage) and not micro_thumb.isNull():
+            # Draw micro thumbnail scaled
+            painter.setRenderHint(QPainter.Antialiasing, True)
+            painter.setRenderHint(QPainter.SmoothPixmapTransform, True)
+
+            # Simple scaling to fill the thumb_rect, using center crop logic
+            source_rect = calculate_center_crop(micro_thumb.size(), thumb_rect.size())
+            if not source_rect.isEmpty():
+                # We can draw QImage directly. QPainter handles scaling.
+                # Since it's a tiny image, SmoothPixmapTransform (bilinear) is important.
+                painter.drawImage(QRectF(thumb_rect), micro_thumb, QRectF(source_rect))
+            else:
+                painter.fillRect(thumb_rect, QColor("#1b1b1b"))
         else:
             painter.fillRect(thumb_rect, QColor("#1b1b1b"))
 
@@ -137,23 +140,25 @@ class AssetGridDelegate(QStyledItemDelegate):
             painter.drawRoundedRect(QRectF(adjusted), radius, radius)
 
         if index.data(Roles.IS_LIVE):
-            self._draw_live_badge(painter, option, thumb_rect)
+            self._badge_renderer.draw_live_badge(painter, thumb_rect)
 
         if index.data(Roles.IS_PANO):
-            self._draw_pano_badge(painter, option, thumb_rect)
+            self._badge_renderer.draw_pano_badge(painter, thumb_rect)
 
         if index.data(Roles.IS_VIDEO):
-            self._draw_duration_badge(painter, option, thumb_rect, index.data(Roles.SIZE))
+            duration = self._extract_duration(index)
+            if duration > 0:
+                self._badge_renderer.draw_duration_badge(painter, thumb_rect, duration, option.font)
 
         if bool(index.data(Roles.FEATURED)):
-            self._draw_favorite_badge(painter, option, thumb_rect)
+            self._badge_renderer.draw_favorite_badge(painter, thumb_rect)
 
         if (
             self._selection_mode_active
             and not self._filmstrip_mode
             and option.state & QStyle.State_Selected
         ):
-            self._draw_selection_badge(painter, thumb_rect)
+            self._badge_renderer.draw_selection_badge(painter, thumb_rect)
 
         painter.restore()
 
@@ -165,167 +170,12 @@ class AssetGridDelegate(QStyledItemDelegate):
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
-    def _draw_duration_badge(
-        self,
-        painter: QPainter,
-        option: QStyleOptionViewItem,
-        rect: QRect,
-        size_info: object,
-    ) -> None:
-        duration = None
+    @staticmethod
+    def _extract_duration(index) -> float:
+        """Safely extract the duration from the size role data."""
+        size_info = index.data(Roles.SIZE)
         if isinstance(size_info, dict):
             raw = size_info.get("duration")  # type: ignore[arg-type]
             if isinstance(raw, (int, float)):
-                duration = max(0, float(raw))
-        if duration is None:
-            return
-        text = self._format_duration(duration)
-        if not text:
-            return
-        font = self._duration_font or QFont(option.font)
-        font.setPointSizeF(max(9.0, option.font.pointSizeF() - 1))
-        font.setBold(True)
-        self._duration_font = font
-        metrics = QFontMetrics(font)
-        padding = 6
-        height = metrics.height() + padding
-        width = metrics.horizontalAdvance(text) + padding * 2
-        badge_rect = QRect(
-            rect.right() - width - 8,
-            rect.bottom() - height - 8,
-            width,
-            height,
-        )
-        painter.save()
-        painter.setRenderHint(QPainter.Antialiasing, True)
-        painter.setPen(Qt.NoPen)
-        painter.setBrush(QColor(0, 0, 0, 160))
-        painter.drawRoundedRect(badge_rect, 6, 6)
-        painter.setPen(QColor("white"))
-        painter.setFont(font)
-        painter.drawText(badge_rect, Qt.AlignCenter, text)
-        painter.restore()
-
-    def _draw_selection_badge(self, painter: QPainter, rect: QRect) -> None:
-        """Paint the blue circular selection badge requested for multi-select."""
-
-        if self._selection_icon.isNull():
-            return
-        margin = 10
-        badge_size = 30
-        badge_rect = QRect(
-            rect.right() - badge_size - margin,
-            rect.bottom() - badge_size - margin,
-            badge_size,
-            badge_size,
-        )
-        painter.save()
-        painter.setRenderHint(QPainter.Antialiasing, True)
-        pixmap = self._selection_icon.pixmap(badge_rect.size())
-        painter.drawPixmap(badge_rect, pixmap)
-        painter.restore()
-
-    def _draw_live_badge(
-        self,
-        painter: QPainter,
-        option: QStyleOptionViewItem,
-        rect: QRect,
-    ) -> None:
-        if self._live_icon.isNull():
-            return
-
-        padding = 6
-        icon_size = 18
-        badge_width = icon_size + padding * 2
-        badge_height = icon_size + padding * 2
-        badge_rect = QRect(rect.left() + 8, rect.top() + 8, badge_width, badge_height)
-        painter.save()
-        painter.setRenderHint(QPainter.Antialiasing, True)
-        painter.setPen(Qt.NoPen)
-        painter.setBrush(QColor(0, 0, 0, 140))
-        painter.drawRoundedRect(badge_rect, 6, 6)
-        icon_rect = QRect(
-            badge_rect.left() + padding,
-            badge_rect.top() + padding,
-            icon_size,
-            icon_size,
-        )
-        self._live_icon.paint(painter, icon_rect)
-        painter.restore()
-
-    def _draw_pano_badge(
-        self,
-        painter: QPainter,
-        option: QStyleOptionViewItem,
-        rect: QRect,
-    ) -> None:
-        """Paint the panorama indicator badge in the lower-right corner."""
-
-        if self._pano_icon.isNull():
-            return
-
-        # The badge mirrors the duration badge to provide a consistent visual language.
-        padding = 6
-        icon_size = 18
-        badge_width = icon_size + padding * 2
-        badge_height = icon_size + padding * 2
-        badge_rect = QRect(
-            rect.right() - badge_width - 8,
-            rect.bottom() - badge_height - 8,
-            badge_width,
-            badge_height,
-        )
-
-        painter.save()
-        painter.setRenderHint(QPainter.Antialiasing, True)
-        painter.setPen(Qt.NoPen)
-        painter.setBrush(QColor(0, 0, 0, 160))
-        painter.drawRoundedRect(badge_rect, 6, 6)
-        icon_rect = QRect(
-            badge_rect.left() + padding,
-            badge_rect.top() + padding,
-            icon_size,
-            icon_size,
-        )
-        self._pano_icon.paint(painter, icon_rect)
-        painter.restore()
-
-    def _draw_favorite_badge(
-        self,
-        painter: QPainter,
-        option: QStyleOptionViewItem,
-        rect: QRect,
-    ) -> None:
-        if self._favorite_icon.isNull():
-            return
-
-        # The badge mirrors the live/video overlays but anchors to the bottom-left
-        # corner so it stays readable regardless of the thumbnail content.
-        padding = 5
-        icon_size = 16
-        badge_width = icon_size + padding * 2
-        badge_height = icon_size + padding * 2
-        badge_rect = QRect(
-            rect.left() + 8,
-            rect.bottom() - badge_height - 8,
-            badge_width,
-            badge_height,
-        )
-
-        painter.save()
-        painter.setRenderHint(QPainter.Antialiasing, True)
-        painter.setPen(Qt.NoPen)
-        painter.setBrush(QColor(0, 0, 0, 160))
-        painter.drawRoundedRect(badge_rect, 6, 6)
-        icon_rect = badge_rect.adjusted(padding, padding, -padding, -padding)
-        self._favorite_icon.paint(painter, icon_rect)
-        painter.restore()
-
-    @staticmethod
-    def _format_duration(duration: float) -> str:
-        seconds = int(round(duration))
-        minutes, secs = divmod(seconds, 60)
-        hours, minutes = divmod(minutes, 60)
-        if hours:
-            return f"{hours:d}:{minutes:02d}:{secs:02d}"
-        return f"{minutes:d}:{secs:02d}"
+                return max(0.0, float(raw))
+        return 0.0

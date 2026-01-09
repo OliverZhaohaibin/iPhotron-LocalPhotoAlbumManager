@@ -12,8 +12,9 @@ from ... import app as backend
 from ...config import RECENTLY_DELETED_DIR_NAME, WORK_DIR_NAME
 from ...errors import IPhotoError
 from ..background_task_manager import BackgroundTaskManager
-from ..ui.tasks.rescan_worker import RescanSignals, RescanWorker
-from ..ui.tasks.scanner_worker import ScannerSignals, ScannerWorker
+# Updated imports to new location
+from ...library.workers.rescan_worker import RescanSignals, RescanWorker
+from ...library.workers.scanner_worker import ScannerSignals, ScannerWorker
 
 if TYPE_CHECKING:
     from ...library.manager import LibraryManager
@@ -24,6 +25,7 @@ class LibraryUpdateService(QObject):
     """Coordinate rescans, Live Photo pairing, and move aftermath bookkeeping."""
 
     scanProgress = Signal(Path, int, int)
+    scanChunkReady = Signal(Path, list)
     scanFinished = Signal(Path, bool)
     indexUpdated = Signal(Path)
     linksUpdated = Signal(Path)
@@ -46,6 +48,7 @@ class LibraryUpdateService(QObject):
         self._scan_pending = False
         self._stale_album_roots: Dict[str, Path] = {}
         self._album_root_cache: Dict[str, Optional[Path]] = {}
+        self._model_loading_due_to_scan = False
 
     # ------------------------------------------------------------------
     # Public API used by :class:`~iPhoto.gui.facade.AppFacade`
@@ -53,8 +56,13 @@ class LibraryUpdateService(QObject):
     def rescan_album(self, album: "Album") -> List[dict]:
         """Synchronously rebuild the album index and emit cache updates."""
 
+        library_root = None
+        lib_manager = self._library_manager_getter()
+        if lib_manager:
+            library_root = lib_manager.root()
+
         try:
-            rows = backend.rescan(album.root)
+            rows = backend.rescan(album.root, library_root=library_root)
         except IPhotoError as exc:
             self.errorRaised.emit(str(exc))
             return []
@@ -65,6 +73,11 @@ class LibraryUpdateService(QObject):
 
     def rescan_album_async(self, album: "Album") -> None:
         """Start an asynchronous rescan for *album* using the background pool."""
+
+        library_root = None
+        lib_manager = self._library_manager_getter()
+        if lib_manager:
+            library_root = lib_manager.root()
 
         if self._scanner_worker is not None:
             self._scanner_worker.cancel()
@@ -77,8 +90,15 @@ class LibraryUpdateService(QObject):
 
         signals = ScannerSignals()
         signals.progressUpdated.connect(self._relay_scan_progress)
+        signals.chunkReady.connect(self._relay_scan_chunk_ready)
 
-        worker = ScannerWorker(album.root, include, exclude, signals)
+        worker = ScannerWorker(
+            album.root,
+            include,
+            exclude,
+            signals,
+            library_root=library_root,
+        )
         self._scanner_worker = worker
         self._scan_pending = False
 
@@ -89,16 +109,37 @@ class LibraryUpdateService(QObject):
             finished=signals.finished,
             error=signals.error,
             pause_watcher=False,
-            on_finished=lambda root, rows: self._on_scan_finished(worker, root, rows),
+            on_finished=lambda root, rows, captured_library_root=library_root: self._on_scan_finished(
+                worker,
+                root,
+                rows,
+                library_root=captured_library_root,
+            ),
             on_error=lambda root, message: self._on_scan_error(worker, root, message),
             result_payload=lambda root, rows: rows,
         )
 
+    def cancel_active_scan(self) -> None:
+        """Request cancellation of the active scan without scheduling retries."""
+
+        if self._scanner_worker is None:
+            return
+
+        self._scanner_worker.cancel()
+        # Cancelling a scan should not schedule immediate retry attempts.
+        self._scan_pending = False
+
     def pair_live(self, album: "Album") -> List[dict]:
         """Rebuild Live Photo pairings for *album* and refresh related views."""
+        
+        # Get library root for global database access
+        library_root = None
+        lib_manager = self._library_manager_getter()
+        if lib_manager:
+            library_root = lib_manager.root()
 
         try:
-            groups = backend.pair(album.root)
+            groups = backend.pair(album.root, library_root=library_root)
         except IPhotoError as exc:
             self.errorRaised.emit(str(exc))
             return []
@@ -261,11 +302,18 @@ class LibraryUpdateService(QObject):
 
         self.scanProgress.emit(root, current, total)
 
+    def _relay_scan_chunk_ready(self, root: Path, chunk: List[dict]) -> None:
+        """Forward worker chunks to listeners."""
+
+        self.scanChunkReady.emit(root, chunk)
+
     def _on_scan_finished(
         self,
         worker: ScannerWorker,
         root: Path,
         rows: Sequence[dict],
+        *,
+        library_root: Path | None = None,
     ) -> None:
         if self._scanner_worker is not worker:
             return
@@ -286,6 +334,9 @@ class LibraryUpdateService(QObject):
                 self._schedule_scan_retry()
             return
 
+        if library_root is None:
+            library_root = getattr(worker, "library_root", None)
+
         materialised_rows = list(rows)
 
         if root.name == RECENTLY_DELETED_DIR_NAME:
@@ -302,7 +353,28 @@ class LibraryUpdateService(QObject):
                 "original_album_subpath",
             )
             try:
-                for old_row in backend.IndexStore(root).read_all():
+                db_root = library_root if library_root else root
+                album_path: str | None = None
+                # Only allow read_all() when we are directly indexing the Recently
+                # Deleted root. If album_path resolution fails relative to a
+                # library_root, we must not fall back to a global read.
+                allow_read_all = not bool(library_root)
+                if library_root:
+                    try:
+                        album_path = root.resolve().relative_to(library_root.resolve()).as_posix()
+                    except (OSError, ValueError):
+                        # Resolution failed: do not attempt a global read_all().
+                        album_path = None
+                        allow_read_all = False
+                store = backend.IndexStore(db_root)
+                if album_path:
+                    row_iter = store.read_album_assets(album_path, include_subalbums=True)
+                elif allow_read_all:
+                    row_iter = store.read_all()
+                else:
+                    # No safe way to scope the read; skip merging preserved rows.
+                    row_iter = ()
+                for old_row in row_iter:
                     rel_value = old_row.get("rel")
                     if rel_value is None:
                         continue
@@ -333,14 +405,20 @@ class LibraryUpdateService(QObject):
             # existed before the rescan.  The worker keeps the result in memory,
             # therefore we flush both ``index.jsonl`` and ``links.json`` here to
             # mirror the historical facade behaviour before notifying listeners.
-            backend._update_index_snapshot(root, materialised_rows)
-            backend._ensure_links(root, materialised_rows)
+            backend._update_index_snapshot(root, materialised_rows, library_root=library_root)
+            backend._ensure_links(root, materialised_rows, library_root=library_root)
         except IPhotoError as exc:
             self.errorRaised.emit(str(exc))
             self.scanFinished.emit(root, False)
         else:
             self.indexUpdated.emit(root)
             self.linksUpdated.emit(root)
+            # Ensure the view reloads if this scan was triggered for the current album
+            # (e.g. initial auto-scan on startup).
+            # Only emit assetReloadRequested if the model is not already loading due to this scan
+            if not self._model_loading_due_to_scan:
+                self.assetReloadRequested.emit(root, False, False)
+            self._model_loading_due_to_scan = False
             self.scanFinished.emit(root, True)
 
         should_restart = self._scan_pending
@@ -464,7 +542,7 @@ class LibraryUpdateService(QObject):
             return
 
         signals = RescanSignals()
-        worker = RescanWorker(album_root, signals)
+        worker = RescanWorker(album_root, signals, library_root=library_root)
         task_id = self._build_restore_rescan_task_id(album_root)
 
         def _on_finished(path: Path, succeeded: bool) -> None:
@@ -539,4 +617,3 @@ class LibraryUpdateService(QObject):
 
 
 __all__ = ["LibraryUpdateService"]
-

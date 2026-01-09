@@ -4,13 +4,16 @@ from __future__ import annotations
 
 from collections import defaultdict
 from pathlib import Path
-from typing import Callable, Dict, Iterable, List, Optional, Set, TYPE_CHECKING
+from typing import Callable, Dict, Iterable, List, Optional, Set, Tuple, TYPE_CHECKING
 
 from PySide6.QtCore import QObject, Signal, Slot
 
 from .. import app as backend
+from ..config import DEFAULT_INCLUDE, DEFAULT_EXCLUDE, WORK_DIR_NAME
 from ..errors import AlbumOperationError, IPhotoError
 from ..models.album import Album
+from ..utils.jsonio import read_json
+from ..utils.logging import get_logger
 from .background_task_manager import BackgroundTaskManager
 from .services import (
     AlbumMetadataService,
@@ -21,8 +24,10 @@ from .services import (
 
 if TYPE_CHECKING:
     from ..library.manager import LibraryManager
-    from .ui.models.asset_list_model import AssetListModel
+    from .ui.models.asset_list.model import AssetListModel
 
+import logging
+logger = logging.getLogger(__name__)
 
 class AppFacade(QObject):
     """Expose high-level album operations to the GUI layer."""
@@ -33,13 +38,17 @@ class AppFacade(QObject):
     linksUpdated = Signal(Path)
     errorRaised = Signal(str)
     scanProgress = Signal(Path, int, int)
+    scanChunkReady = Signal(Path, list)
     scanFinished = Signal(Path, bool)
+    scanBatchFailed = Signal(Path, int)
     loadStarted = Signal(Path)
     loadProgress = Signal(Path, int, int)
     loadFinished = Signal(Path, bool)
+    activeModelChanged = Signal(object)  # Emits AssetListModel
 
     def __init__(self) -> None:
         super().__init__()
+        self._logger = get_logger()
         self._current_album: Optional[Album] = None
         self._pending_index_announcements: Set[Path] = set()
         self._library_manager: Optional["LibraryManager"] = None
@@ -65,14 +74,24 @@ class AppFacade(QObject):
             parent=self,
         )
 
-        from .ui.models.asset_list_model import AssetListModel
+        from .ui.models.asset_list.model import AssetListModel
 
-        self._asset_list_model = AssetListModel(self)
-        self._asset_list_model.loadProgress.connect(self._on_model_load_progress)
-        self._asset_list_model.loadFinished.connect(self._on_model_load_finished)
+        self._library_list_model = AssetListModel(self)
+        self._album_list_model = AssetListModel(self)
+        # Initialize active model to the library model. This ensures consumers
+        # encountering the app in a "Library" state (e.g. at startup) receive
+        # the correct persistent model context rather than a transient album one.
+        # Although the app might launch without a bound library, defaulting to
+        # the library context avoids exposing an arbitrary transient model and
+        # aligns with the "All Photos" default view.
+        self._active_model: AssetListModel = self._library_list_model
+
+        for model in (self._library_list_model, self._album_list_model):
+            model.loadProgress.connect(self._on_model_load_progress)
+            model.loadFinished.connect(self._on_model_load_finished)
 
         self._metadata_service = AlbumMetadataService(
-            asset_list_model=self._asset_list_model,
+            asset_list_model_provider=lambda: self._active_model,
             current_album_getter=lambda: self._current_album,
             library_manager_getter=self._get_library_manager,
             refresh_view=self._refresh_view,
@@ -86,7 +105,14 @@ class AppFacade(QObject):
             library_manager_getter=self._get_library_manager,
             parent=self,
         )
+        # Signal connections after refactoring:
+        #   - Scan-related signals (scanProgress, scanChunkReady, scanFinished) are initially
+        #     connected from LibraryUpdateService here, but will be disconnected and replaced
+        #     with LibraryManager signals when bind_library() is called.
+        #   - Other signals (indexUpdated, linksUpdated, assetReloadRequested) remain
+        #     sourced from LibraryUpdateService for backwards compatibility and non-scan events.
         self._library_update_service.scanProgress.connect(self._relay_scan_progress)
+        self._library_update_service.scanChunkReady.connect(self._relay_scan_chunk_ready)
         self._library_update_service.scanFinished.connect(self._relay_scan_finished)
         self._library_update_service.indexUpdated.connect(self._relay_index_updated)
         self._library_update_service.linksUpdated.connect(self._relay_links_updated)
@@ -100,13 +126,14 @@ class AppFacade(QObject):
             current_album_root=self._current_album_root,
             update_service=self._library_update_service,
             metadata_service=self._metadata_service,
+            library_manager_getter=self._get_library_manager,
             parent=self,
         )
         self._import_service.errorRaised.connect(self._on_service_error)
 
         self._move_service = AssetMoveService(
             task_manager=self._task_manager,
-            asset_list_model=self._asset_list_model,
+            asset_list_model_provider=lambda: self._active_model,
             current_album_getter=lambda: self._current_album,
             library_manager_getter=self._get_library_manager,
             parent=self,
@@ -127,9 +154,9 @@ class AppFacade(QObject):
 
     @property
     def asset_list_model(self) -> "AssetListModel":
-        """Return the list model that backs the asset views."""
+        """Return the active list model that backs the asset views."""
 
-        return self._asset_list_model
+        return self._active_model
 
     @property
     def import_service(self) -> AssetImportService:
@@ -155,26 +182,239 @@ class AppFacade(QObject):
 
         return self._library_update_service
 
+    @property
+    def library_manager(self) -> Optional["LibraryManager"]:
+        """Expose the underlying library manager."""
+
+        return self._library_manager
+
+    def _sync_live_roles_from_links(self, library_root: Path, store: "backend.IndexStore") -> None:
+        """Sync live photo roles from links.json to the database.
+        
+        This reads the live_groups from the links.json file and updates the
+        live_role and live_partner_rel columns in the database. This is needed
+        for the "live" filter to work correctly.
+        
+        Args:
+            library_root: The library root directory.
+            store: The IndexStore instance to update.
+        """
+        links_path = library_root / WORK_DIR_NAME / "links.json"
+        if not links_path.exists():
+            return
+            
+        try:
+            data = read_json(links_path)
+        except Exception:
+            return
+            
+        # Build updates list from live_groups
+        # Format: (rel, live_role, live_partner_rel)
+        # Role 0 = Primary (still image), Role 1 = Hidden (motion component)
+        updates: List[Tuple[str, int, Optional[str]]] = []
+        
+        for group in data.get("live_groups", []):
+            still = group.get("still")
+            motion = group.get("motion")
+            
+            # Both still and motion must be non-empty strings
+            if isinstance(still, str) and still and isinstance(motion, str) and motion:
+                # Still image: Role 0, partner = motion
+                updates.append((still, 0, motion))
+                # Motion component: Role 1, partner = still
+                updates.append((motion, 1, still))
+        
+        if updates:
+            store.apply_live_role_updates(updates)
+
+    def library_model_has_cached_data(self) -> bool:
+        """Return ``True`` when the library model has valid cached data.
+
+        This allows the navigation controller to use an optimized path when
+        switching from a physical album to an aggregated album view, skipping
+        the expensive model reset and data reload when the library model already
+        contains the required data.
+        """
+        library_root = self._library_manager.root() if self._library_manager else None
+        if library_root is None:
+            return False
+
+        model = self._library_list_model
+        existing_root = model.album_root()
+        if existing_root is None:
+            return False
+
+        # Check if the model has data and is for the correct library root
+        return (
+            model.rowCount() > 0
+            and self._paths_equal(existing_root, library_root)
+        )
+
+    def switch_to_library_model_for_static_collection(
+        self,
+        library_root: Path,
+        title: str,
+        filter_mode: Optional[str] = None,
+    ) -> bool:
+        """Switch to the library model without reloading data.
+
+        This method provides an optimized path for switching from a physical
+        album to a static collection (e.g. "All Photos", "Videos") when the
+        library model already has valid cached data. It avoids the expensive
+        model reset, data reload, and UI rebuild by simply switching the active
+        model reference.
+
+        CRITICAL: The filter is applied BEFORE switching models to prevent
+        the View from attempting to render all library items (potentially 50k+)
+        before the filter takes effect. This eliminates the UI freeze/lag that
+        would otherwise occur during the intermediate layout calculation.
+
+        Returns ``True`` if the switch was successful, ``False`` if the standard
+        path should be used instead.
+        """
+        if not self.library_model_has_cached_data():
+            return False
+
+        # PERFORMANCE OPTIMIZATION: Use Album.open() directly instead of
+        # backend.open_album() since we have cached data and don't need to
+        # read from the database. Album.open() only reads the manifest file.
+        try:
+            album = Album.open(library_root)
+        except IPhotoError as exc:
+            self.errorRaised.emit(str(exc))
+            return False
+
+        self._current_album = album
+        album.manifest = {**album.manifest, "title": title}
+
+        # CRITICAL: Sync favorites and live roles from manifest/links to database
+        # before applying filters. Without this, the "favorites" and "live" filters
+        # would not find any items because the corresponding DB columns wouldn't be
+        # set. The full backend.open_album() does this, but Album.open() alone does not.
+        try:
+            store = backend.IndexStore(library_root)
+            store.sync_favorites(album.manifest.get("featured", []))
+            # Sync live roles from links.json to database
+            self._sync_live_roles_from_links(library_root, store)
+        except Exception as e:
+            # Log but don't fail - sync errors shouldn't break navigation.
+            # Favorites/Live Photos may not work correctly, but other views will function.
+            logger.exception(
+                "Failed to sync favorites or live roles for album. "
+                "library_root=%s, album=%s",
+                library_root,
+                getattr(album, "id", None),
+            )
+
+        # PERFORMANCE CRITICAL: Apply the filter to the library model BEFORE
+        # switching. This ensures when the View binds to _library_list_model,
+        # it's already in the correct filtered state (empty or filtered subset),
+        # avoiding expensive intermediate layout calculation of all items.
+        self._library_list_model.set_filter_mode(filter_mode)
+
+        # Switch to library model if not already active
+        if self._active_model is not self._library_list_model:
+            self._active_model = self._library_list_model
+            self.activeModelChanged.emit(self._library_list_model)
+
+        # Emit albumOpened signal for any listeners that need it
+        self.albumOpened.emit(library_root)
+
+        return True
+
     def open_album(self, root: Path) -> Optional[Album]:
         """Open *root* and trigger background work as needed."""
 
+        # Get library root first for global database access
+        library_root = self._library_manager.root() if self._library_manager else None
+        
         try:
-            album = backend.open_album(root)
+            album = backend.open_album(
+                root,
+                autoscan=False,
+                library_root=library_root,
+                hydrate_index=False,
+            )
         except IPhotoError as exc:
             self.errorRaised.emit(str(exc))
             return None
 
+        # Dual-Model Switching Strategy:
+        # Determine whether to use the persistent library model or the transient album model.
+        target_model = self._album_list_model
+
+        # If the requested root matches the library root, assume we are viewing the
+        # aggregated "All Photos" collection (or similar library-wide view).
+        if library_root and self._paths_equal(root, library_root):
+            target_model = self._library_list_model
+
         self._current_album = album
         album_root = album.root
-        self._asset_list_model.prepare_for_album(album_root)
+
+        # Optimization: If using the persistent library model and it already has data,
+        # skip the reset/prepare step to keep the switch instant.
+        should_prepare = True
+        if target_model is self._library_list_model:
+            # We assume a non-zero row count means the model is populated.
+            # Ideally we would check if it's populated for *this specific root*,
+            # but the library model is dedicated to the library root.
+            #
+            # Note: This check is thread-safe because `AppFacade`, `AssetListModel`,
+            # and `open_album` all run on the main UI thread. Background updates
+            # are marshaled to the main thread via signals before modifying the model.
+            existing_root = target_model.album_root()
+            if (
+                target_model.rowCount() > 0
+                and existing_root is not None
+                and self._paths_equal(existing_root, album_root)
+                and getattr(target_model, "is_valid", lambda: False)()
+            ):
+                should_prepare = False
+
+        if should_prepare:
+            target_model.prepare_for_album(album_root)
+
+        # If switching models, notify listeners (e.g. DataManager to update the proxy).
+        # We emit this AFTER preparing the target model so that the proxy receives
+        # a model that is already reset (or ready), avoiding a brief flash of stale data.
+        if target_model is not self._active_model:
+            self._active_model = target_model
+            self.activeModelChanged.emit(target_model)
+
         self.albumOpened.emit(album_root)
 
+        # Check if the index is empty (likely because it's a new or cleaned album)
+        # and trigger a background scan if necessary.
+        # Use library_root for global database if available, otherwise use album_root
+        index_root = library_root if library_root else album_root
+        has_assets = False
+        try:
+            store = backend.IndexStore(index_root)
+            # Peek at the first item to see if there is any data.
+            # read_all returns an iterator, so next() is sufficient.
+            next(store.read_all())
+            has_assets = True
+        except (StopIteration, IPhotoError):
+            pass
+
+        # We now check if the LibraryManager is ALREADY scanning this path.
+        is_already_scanning = False
+        if self._library_manager and self._library_manager.is_scanning_path(album_root):
+            is_already_scanning = True
+
+        if not has_assets and not is_already_scanning:
+            self.rescan_current_async()
+
         force_reload = self._library_update_service.consume_forced_reload(album_root)
-        self._restart_asset_load(
-            album_root,
-            announce_index=True,
-            force_reload=force_reload,
-        )
+
+        # If we skipped preparation (cached library model), we also skip the load restart
+        # unless a force reload was requested.
+        if should_prepare or force_reload:
+            self._restart_asset_load(
+                album_root,
+                announce_index=True,
+                force_reload=force_reload,
+            )
         return album
 
     def rescan_current(self) -> List[dict]:
@@ -183,6 +423,11 @@ class AppFacade(QObject):
         album = self._require_album()
         if album is None:
             return []
+
+        # We delegate synchronous rescan to backend but update the library manager state if needed
+        # Actually synchronous rescan is blocking, so maybe we shouldn't route via LibraryManager async
+        # unless we change the API.
+        # For now, we keep using LibraryUpdateService for synchronous legacy calls.
         return self._library_update_service.rescan_album(album)
 
     def rescan_current_async(self) -> None:
@@ -191,7 +436,41 @@ class AppFacade(QObject):
         album = self._require_album()
         if album is None:
             return
-        self._library_update_service.rescan_album_async(album)
+
+        # Delegate to LibraryManager for robust scanning state
+        if self._library_manager:
+            filters = album.manifest.get("filters", {}) if isinstance(album.manifest, dict) else {}
+            include = filters.get("include", DEFAULT_INCLUDE)
+            exclude = filters.get("exclude", DEFAULT_EXCLUDE)
+
+            self._library_manager.start_scanning(album.root, include, exclude)
+        else:
+            # Fallback if library manager isn't bound (unlikely in full app)
+            self._library_update_service.rescan_album_async(album)
+
+    def _inject_scan_dependencies_for_tests(
+        self,
+        *,
+        library_manager: Optional["LibraryManager"] = None,
+        library_update_service: Optional[LibraryUpdateService] = None,
+    ) -> None:
+        """Override scan collaborators during testing."""
+
+        if library_manager is not None:
+            self._library_manager = library_manager
+        if library_update_service is not None:
+            self._library_update_service = library_update_service
+
+    def cancel_active_scans(self) -> None:
+        """Request cancellation of any in-flight scan operations."""
+
+        if self._library_manager is not None:
+            try:
+                self._library_manager.stop_scanning()
+            except RuntimeError:
+                self._logger.warning("Failed to stop active scan during shutdown", exc_info=True)
+
+        self._library_update_service.cancel_active_scan()
 
     def is_performing_background_operation(self) -> bool:
         """Return ``True`` while imports or moves are still running."""
@@ -220,8 +499,47 @@ class AppFacade(QObject):
     def bind_library(self, library: "LibraryManager") -> None:
         """Remember the library manager so static collections stay in sync."""
 
+        if self._library_manager is not None:
+            try:
+                self._library_manager.treeUpdated.disconnect(self._on_library_tree_updated)
+                self._library_manager.scanProgress.disconnect(self._relay_scan_progress)
+                self._library_manager.scanChunkReady.disconnect(self._relay_scan_chunk_ready)
+                self._library_manager.scanFinished.disconnect(self._relay_scan_finished)
+            except (RuntimeError, TypeError):
+                # Ignore errors if signals were not connected or object is deleted
+                pass
+
         self._library_manager = library
         self._library_update_service.reset_cache()
+        self._library_manager.treeUpdated.connect(self._on_library_tree_updated)
+
+        # Disconnect LibraryUpdateService scan signals to prevent duplicate emissions
+        # now that LibraryManager is the primary source for scan operations
+        try:
+            self._library_update_service.scanProgress.disconnect(self._relay_scan_progress)
+            self._library_update_service.scanChunkReady.disconnect(self._relay_scan_chunk_ready)
+            self._library_update_service.scanFinished.disconnect(self._relay_scan_finished)
+        except (RuntimeError, TypeError):
+            # Ignore errors if signals were not connected
+            pass
+
+        # Hook up scanning signals from LibraryManager to Facade.
+        # LibraryManager is now the primary source for all scan operations.
+        self._library_manager.scanProgress.connect(self._relay_scan_progress)
+        self._library_manager.scanChunkReady.connect(self._relay_scan_chunk_ready)
+        self._library_manager.scanFinished.connect(self._relay_scan_finished)
+        self._library_manager.scanBatchFailed.connect(self._relay_scan_batch_failed)
+
+        if self._library_manager.root():
+            self._on_library_tree_updated()
+
+    def _on_library_tree_updated(self) -> None:
+        """Propagate library root updates to models for centralized thumbnail storage."""
+        if self._library_manager:
+            root = self._library_manager.root()
+            if root:
+                self._library_list_model.set_library_root(root)
+                self._album_list_model.set_library_root(root)
 
     def register_restore_prompt(
         self, handler: Optional[Callable[[str], bool]]
@@ -247,6 +565,7 @@ class AppFacade(QObject):
     ) -> None:
         """Import *sources* asynchronously and refresh the destination album."""
 
+        self._active_model.request_optimistic_refresh()
         self._import_service.import_files(
             sources,
             destination=destination,
@@ -293,7 +612,7 @@ class AppFacade(QObject):
         if not normalized:
             return
 
-        model = self._asset_list_model
+        model = self.asset_list_model
         for still_path in list(normalized):
             metadata = model.metadata_for_absolute_path(still_path)
             if not metadata or not metadata.get("is_live"):
@@ -365,7 +684,7 @@ class AppFacade(QObject):
         if not normalized:
             return False
 
-        model = self._asset_list_model
+        model = self.asset_list_model
         for still_path in list(normalized):
             metadata = model.metadata_for_absolute_path(still_path)
             if not metadata or not metadata.get("is_live"):
@@ -383,7 +702,23 @@ class AppFacade(QObject):
                     continue
                 normalized.append(motion_path)
 
-        index_rows = list(backend.IndexStore(trash_root).read_all())
+        try:
+            trash_resolved = trash_root.resolve()
+        except OSError:
+            trash_resolved = trash_root
+        try:
+            library_resolved = library_root.resolve()
+        except OSError:
+            library_resolved = library_root
+        try:
+            album_path = trash_resolved.relative_to(library_resolved).as_posix()
+        except ValueError:
+            album_path = None
+        store = backend.IndexStore(library_root)
+        if album_path:
+            index_rows = list(store.read_album_assets(album_path, include_subalbums=True))
+        else:
+            index_rows = list(store.read_all())
         row_lookup: Dict[str, dict] = {}
         for row in index_rows:
             if not isinstance(row, dict):
@@ -391,8 +726,8 @@ class AppFacade(QObject):
             rel_value = row.get("rel")
             if not isinstance(rel_value, str):
                 continue
-            abs_candidate = trash_root / rel_value
-            key = str(_normalize(abs_candidate))
+            candidate_path = library_root / rel_value
+            key = str(_normalize(candidate_path))
             row_lookup[key] = row
 
         grouped: Dict[Path, List[Path]] = defaultdict(list)
@@ -575,7 +910,22 @@ class AppFacade(QObject):
 
         self._current_album = refreshed
         refreshed_root = refreshed.root
-        self._asset_list_model.prepare_for_album(refreshed_root)
+
+        # Determine the correct model for the refreshed root using the same logic as open_album.
+        target_model = self._album_list_model
+        library_root = self._library_manager.root() if self._library_manager else None
+
+        if library_root and self._paths_equal(refreshed_root, library_root):
+            target_model = self._library_list_model
+
+        # Force a preparation of the target model since we are refreshing from a manifest change.
+        target_model.prepare_for_album(refreshed_root)
+
+        # Switch context if the refreshed album requires a different model.
+        if target_model is not self._active_model:
+            self._active_model = target_model
+            self.activeModelChanged.emit(target_model)
+
         self.albumOpened.emit(refreshed_root)
         force_reload = self._library_update_service.consume_forced_reload(refreshed_root)
         self._restart_asset_load(refreshed_root, force_reload=force_reload)
@@ -623,9 +973,9 @@ class AppFacade(QObject):
         if announce_index:
             self._pending_index_announcements.add(root)
         self.loadStarted.emit(root)
-        if not force_reload and self._asset_list_model.populate_from_cache():
+        if not force_reload and self._active_model.populate_from_cache():
             return
-        self._asset_list_model.start_load()
+        self._active_model.start_load()
 
     def _on_model_load_progress(self, root: Path, current: int, total: int) -> None:
         self.loadProgress.emit(root, current, total)
@@ -678,11 +1028,22 @@ class AppFacade(QObject):
 
         self.scanProgress.emit(root, current, total)
 
+    @Slot(Path, list)
+    def _relay_scan_chunk_ready(self, root: Path, chunk: List[dict]) -> None:
+        """Forward scan chunks emitted by :class:`LibraryUpdateService`."""
+
+        self.scanChunkReady.emit(root, chunk)
+
     @Slot(Path, bool)
     def _relay_scan_finished(self, root: Path, success: bool) -> None:
         """Forward scan completion events to existing facade listeners."""
 
         self.scanFinished.emit(root, success)
+
+    @Slot(Path, int)
+    def _relay_scan_batch_failed(self, root: Path, count: int) -> None:
+        """Forward partial scan failure events."""
+        self.scanBatchFailed.emit(root, count)
 
     @Slot(Path)
     def _relay_index_updated(self, root: Path) -> None:
@@ -705,11 +1066,31 @@ class AppFacade(QObject):
     ) -> None:
         """Trigger an asset reload in response to library update notifications."""
 
-        self._restart_asset_load(
-            root,
-            announce_index=announce_index,
-            force_reload=force_reload,
-        )
+        # Dual-model awareness:
+        # If the reload request targets a root that matches one of our models,
+        # we might need to reload that specific model even if it's inactive.
+        # But _restart_asset_load currently uses _active_model.
+        # To support background updates properly, we should check which model covers the root.
+
+        # Gather all models that are managing this root.
+        # This handles the case where the library root is also the currently open active album.
+        target_models: Set[AssetListModel] = set()
+
+        if self._library_manager and self._paths_equal(root, self._library_manager.root()):
+            target_models.add(self._library_list_model)
+
+        if self._current_album and self._paths_equal(root, self._current_album.root):
+            target_models.add(self._active_model)
+
+        if target_models:
+            if announce_index:
+                self._pending_index_announcements.add(root)
+            self.loadStarted.emit(root)
+
+        for model in target_models:
+            if not force_reload and model.populate_from_cache():
+                continue
+            model.start_load()
 
 
 __all__ = ["AppFacade"]

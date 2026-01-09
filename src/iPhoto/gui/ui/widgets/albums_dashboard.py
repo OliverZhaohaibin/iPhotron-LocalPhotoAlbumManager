@@ -1,8 +1,7 @@
 """Dashboard view displaying all user albums."""
 
 from __future__ import annotations
-
-import hashlib
+from collections import deque
 from pathlib import Path
 from typing import Optional, TYPE_CHECKING
 
@@ -39,8 +38,9 @@ from PySide6.QtWidgets import (
 from ....utils.pathutils import ensure_work_dir
 from ....cache.index_store import IndexStore
 from ....config import WORK_DIR_NAME
+from ....media_classifier import get_media_type, MediaType
 from ....models.album import Album
-from ..tasks.thumbnail_loader import ThumbnailJob
+from ..tasks.thumbnail_loader import ThumbnailJob, generate_cache_path, stat_mtime_ns
 from .flow_layout import FlowLayout
 from ..icon import load_icon
 
@@ -254,11 +254,18 @@ class DashboardLoaderSignals(QObject):
 class AlbumDataWorker(QRunnable):
     """Background worker to fetch metadata (count, cover path) for an album."""
 
-    def __init__(self, node: AlbumNode, signals: DashboardLoaderSignals, generation: int) -> None:
+    def __init__(
+        self,
+        node: AlbumNode,
+        signals: DashboardLoaderSignals,
+        generation: int,
+        library_root: Optional[Path] = None,
+    ) -> None:
         super().__init__()
         self.node = node
         self.signals = signals
         self.generation = generation
+        self._library_root = library_root
 
     def run(self) -> None:
         # 1. Get count and first asset for cover fallback
@@ -266,12 +273,49 @@ class AlbumDataWorker(QRunnable):
         first_rel: str | None = None
 
         try:
-            store = IndexStore(self.node.path)
-            # Efficiently count rows and find first rel
-            for i, row in enumerate(store.read_all()):
-                count += 1
-                if i == 0 and isinstance(row, dict):
-                    first_rel = str(row.get("rel", ""))
+            # Use library root for global database if available
+            index_root = self._library_root if self._library_root else self.node.path
+            store = IndexStore(index_root)
+            
+            # Compute album path for filtering
+            album_path: Optional[str] = None
+            if self._library_root:
+                try:
+                    node_resolved = self.node.path.resolve()
+                    lib_resolved = self._library_root.resolve()
+                    if node_resolved != lib_resolved:
+                        album_path = node_resolved.relative_to(lib_resolved).as_posix()
+                except (ValueError, OSError):
+                    # If we cannot resolve or relativize paths (e.g. outside library root or
+                    # due to filesystem issues), fall back to using the full index without
+                    # an album-specific filter.
+                    pass
+
+            # Count assets for this album using the count method with album filter
+            count = store.count_album_assets(album_path, include_subalbums=True) if album_path else store.count()
+            
+            # Get first asset for cover fallback
+            for row in (
+                store.read_album_assets(album_path, include_subalbums=True)
+                if album_path
+                else store.read_all()
+            ):
+                if isinstance(row, dict):
+                    rel = row.get("rel", "")
+                    if isinstance(rel, str) and rel:
+                        # If using album_path filter, rel is library-relative.
+                        # Ensure first_rel is always album-relative when joined with self.node.path.
+                        if album_path:
+                            prefix = album_path.rstrip("/") + "/"
+                            if rel.startswith(prefix):
+                                inner = rel[len(prefix):]
+                                if inner:
+                                    first_rel = inner
+                                    break
+                        else:
+                            # When there is no album_path (library root), rel is already correct.
+                            first_rel = rel
+                            break
         except Exception:
             pass
 
@@ -299,25 +343,27 @@ class DashboardThumbnailLoader(QObject):
     """Simplified thumbnail loader for dashboard cards."""
 
     thumbnailReady = Signal(Path, QPixmap)  # album_root, pixmap
-    _delivered = Signal(str, QImage, str)  # key, image, rel
+    _delivered = Signal(tuple, QImage, str)  # key (album_root_str, rel, width, height, stamp), image, rel
 
-    def __init__(self, parent: QObject | None = None) -> None:
+    def __init__(self, parent: QObject | None = None, library_root: Optional[Path] = None) -> None:
         super().__init__(parent)
         self._pool = QThreadPool.globalInstance()
         self._delivered.connect(self._handle_result)
-        # Map unique keys to album roots
-        self._key_to_root: dict[str, Path] = {}
+        # Map base keys (album_root_str, rel, width, height) to queued album root Paths
+        self._key_to_root: dict[tuple[str, str, int, int], deque[Path]] = {}
+        self._resolved_roots: dict[Path, str] = {}
+        self._library_root = library_root
 
     def request_with_absolute_key(self, album_root: Path, image_path: Path, size: QSize) -> None:
         # To avoid rel collision across albums, we use the absolute path string as the 'rel' identifier
         # passed to ThumbnailJob. This ensures the key emitted back is unique.
         unique_rel = str(image_path)
 
-        # However, we must ensure the cache path is calculated correctly.
-        # ThumbnailJob uses the passed cache_path.
+        # Use library root if available, otherwise fallback to album root
+        effective_library_root = self._library_root if self._library_root else album_root
 
         try:
-            work_dir = ensure_work_dir(album_root, WORK_DIR_NAME)
+            work_dir = ensure_work_dir(effective_library_root, WORK_DIR_NAME)
             thumbs_dir = work_dir / "thumbs"
             thumbs_dir.mkdir(parents=True, exist_ok=True)
         except OSError:
@@ -327,18 +373,10 @@ class DashboardThumbnailLoader(QObject):
             stat = image_path.stat()
         except OSError:
             return
-        stamp = int(stat.st_mtime * 1_000_000_000)
+        stamp = stat_mtime_ns(stat)
 
-        # For the cache file name, we want it to be based on the album-relative path so it's stable
-        # if the library moves (if we used real rel).
-        try:
-            real_rel = str(image_path.relative_to(album_root))
-        except ValueError:
-            real_rel = image_path.name
-
-        digest = hashlib.sha256(real_rel.encode("utf-8")).hexdigest()
-        filename = f"{digest}_{stamp}_{size.width()}x{size.height()}.png"
-        cache_path = thumbs_dir / filename
+        # Use standardized generator with absolute path
+        cache_path = generate_cache_path(effective_library_root, image_path, size, stamp)
 
         if cache_path.exists():
             pixmap = QPixmap(str(cache_path))
@@ -347,38 +385,73 @@ class DashboardThumbnailLoader(QObject):
                 return
 
         # Store mapping
-        key_str = self._make_key_str(unique_rel, size, stamp)
-        self._key_to_root[key_str] = album_root
+        job_root_str = self._album_root_str(album_root)
+        base_key: tuple[str, str, int, int] = (job_root_str, unique_rel, size.width(), size.height())
+        self._key_to_root.setdefault(base_key, deque()).append(album_root)
+
+        media_type = get_media_type(image_path)
+        is_image = media_type == MediaType.IMAGE
+        is_video = media_type == MediaType.VIDEO
+
+        # Determine cache_rel based on library root if possible to match main loader behavior,
+        # but DashboardThumbnailLoader logic uses unique_rel as the key.
+        # We pass effective_library_root as library_root to ThumbnailJob.
 
         job = ThumbnailJob(
             self,  # type: ignore
             unique_rel,  # Pass absolute path string as rel to ensure uniqueness
             image_path,
             size,
-            stamp,
-            cache_path,
-            is_image=True,
-            is_video=False,
+            None,  # Pass None as known_stamp to force regeneration if missing
+            album_root,
+            effective_library_root,
+            is_image=is_image,
+            is_video=is_video,
             still_image_time=None,
             duration=None,
+            cache_rel=None, # Not used when hashing absolute path in new logic?
+            # Wait, ThumbnailJob still uses _cache_rel if provided?
+            # In new logic: rel_for_path = self._cache_rel if self._cache_rel is not None else self._rel
+            # Then: generate_cache_path(self._library_root, self._abs_path, ...)
+            # generate_cache_path IGNORES rel/cache_rel now! It uses abs_path.
+            # So cache_rel is irrelevant for path generation, but might be used for logging?
+            # The job passes it. Let's pass None or keep it consistent?
+            # The old code calculated real_rel.
+            # Let's pass None as it's not needed for the path generation anymore.
         )
         self._pool.start(job)
 
-    def _make_key(self, rel: str, size: QSize, stamp: int) -> str:
-        # Used by ThumbnailJob to emit signal
-        return self._make_key_str(rel, size, stamp)
+    def _handle_result(
+        self, full_key: tuple[str, str, int, int, int], image: Optional[QImage], rel: str
+    ) -> None:
+        # Use the base key (without timestamp) by slicing off the stamp so sidecar or filesystem
+        # timestamp changes do not prevent delivered thumbnails from matching pending requests.
+        base_key = full_key[:-1]
+        roots = self._key_to_root.get(base_key)
+        if not roots:
+            return
+        album_root = roots.popleft()
+        if not roots:
+            self._key_to_root.pop(base_key, None)
 
-    def _make_key_str(self, rel: str, size: QSize, stamp: int) -> str:
-        return f"{rel}::{size.width()}::{size.height()}::{stamp}"
-
-    def _handle_result(self, key: str, image: Optional[QImage], rel: str) -> None:
-        album_root = self._key_to_root.pop(key, None)
-        if not album_root or image is None:
+        if image is None:
             return
 
         pixmap = QPixmap.fromImage(image)
         if not pixmap.isNull():
             self.thumbnailReady.emit(album_root, pixmap)
+
+    def _album_root_str(self, album_root: Path) -> str:
+        cached = self._resolved_roots.get(album_root)
+        if cached is not None:
+            return cached
+        try:
+            resolved_path = album_root.resolve()
+        except OSError:
+            resolved_path = album_root
+        resolved = str(resolved_path)
+        self._resolved_roots[album_root] = resolved
+        return resolved
 
 
 class AlbumsDashboard(QWidget):
@@ -398,7 +471,7 @@ class AlbumsDashboard(QWidget):
         self._loader_signals = DashboardLoaderSignals()
         self._loader_signals.albumReady.connect(self._on_album_data_ready)
 
-        self._thumb_loader = DashboardThumbnailLoader(self)
+        self._thumb_loader = DashboardThumbnailLoader(self, library_root=self._library.root())
         self._thumb_loader.thumbnailReady.connect(self._on_thumbnail_ready)
 
         self._init_ui()
@@ -462,6 +535,7 @@ class AlbumsDashboard(QWidget):
 
         pool = QThreadPool.globalInstance()
         current_gen = self._current_generation
+        library_root = self._library.root()
 
         for album in albums:
             # Create card with "0" count first
@@ -470,8 +544,8 @@ class AlbumsDashboard(QWidget):
             self.flow_layout.addWidget(card)
             self._cards[album.path] = card
 
-            # Fetch data with current generation
-            worker = AlbumDataWorker(album, self._loader_signals, current_gen)
+            # Fetch data with current generation, using library root for global DB
+            worker = AlbumDataWorker(album, self._loader_signals, current_gen, library_root=library_root)
             pool.start(worker)
 
     def _on_album_data_ready(

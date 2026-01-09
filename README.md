@@ -26,9 +26,10 @@ It organizes your media using lightweight JSON manifests and cache files —
 offering rich album functionality while **keeping all original files intact**.
 
 Key highlights:
--  🗂 No database, no import step — every folder *is* an album.
+- 🗂 Folder-native design — every folder *is* an album, no import needed.
 - ⚙️ JSON-based manifests record “human decisions” (cover, featured, order).
-- 🧠 Smart incremental scanning & caching for fast startup.
+- ⚡ **SQLite-powered global database** for lightning-fast queries on massive libraries.
+- 🧠 Smart incremental scanning with persistent SQLite index.
 - 🎥 Full **Live Photo** pairing and playback support.
 - 🗺 Map view that visualizes GPS metadata across all photos & videos.
 ![Main interface](docs/mainview.png)
@@ -88,7 +89,9 @@ Toggle a floating metadata panel showing EXIF, camera/lens info, exposure, apert
 | Concept | Description |
 |----------|--------------|
 | **Folder = Album** | Managed via `.iphoto.album.json` manifest files. |
-| **Incremental Scan** | Scans new/changed files and caches results in `.iphoto/index.jsonl`. |
+| **Global SQLite Database** | All asset metadata stored in a single high-performance database at library root (`global_index.db`). |
+| **Incremental Scan** | Scans new/changed files with idempotent upsert operations into the global database. |
+| **Smart Indexing** | Multi-column indexes on `parent_album_path`, `ts`, `media_type`, and `is_favorite` for instant queries. |
 | **Live Pairing** | Auto-matches Live Photos using `ContentIdentifier` or time proximity. |
 | **Reverse Geocoding** | Converts GPS coordinates into human-readable locations (e.g. “London”). |
 | **Non-Destructive Edit** | Stores Light/Color/B&W/Crop adjustments in `.ipo` sidecar files. |
@@ -160,7 +163,7 @@ This section is pure Python logic and **does not depend** on any GUI framework (
 | ├─ **`color_resolver.py`** | Resolves Color master slider to Saturation/Vibrance/Cast with image statistics. |
 | ├─ **`bw_resolver.py`** | Resolves B&W master slider using 3-anchor Gaussian interpolation. |
 | └─ **`filters/`** | High-performance image processing (NumPy vectorized → Numba JIT → QColor fallback). |
-| **`cache/`** | Manages disposable cache files, including `index_store.py` (read/write `index.jsonl`) and `lock.py` (file-level locking). |
+| **`cache/`** | Manages the global SQLite database (`index_store/`) with modular components: engine, migrations, recovery, queries, and repository. Includes `lock.py` for file-level locking. |
 | **`utils/`** | General utilities, especially wrappers for external tools (`exiftool.py`, `ffmpeg.py`). |
 | **`schemas/`** | JSON Schema definitions, e.g., `album.schema.json`. |
 

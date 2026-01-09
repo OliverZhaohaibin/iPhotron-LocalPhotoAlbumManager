@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import shutil
 from dataclasses import dataclass
+import sqlite3
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional
+from typing import Dict, Iterable, List, Optional, Sequence
 
-from PySide6.QtCore import QFileSystemWatcher, QObject, QTimer, Signal
+from PySide6.QtCore import QFileSystemWatcher, QObject, QTimer, Signal, QThreadPool, QMutex, QMutexLocker
 
 from ..config import (
     ALBUM_MANIFEST_NAMES,
@@ -20,14 +21,21 @@ from ..errors import (
     AlbumNameConflictError,
     AlbumOperationError,
     LibraryUnavailableError,
+    IPhotoError,
 )
 from ..media_classifier import classify_media
 from ..models.album import Album
 from ..utils.geocoding import resolve_location_name
 from ..utils.jsonio import read_json
 from ..cache.index_store import IndexStore
+from ..utils.logging import get_logger
 from .tree import AlbumNode
 
+# Adjusted imports to point to the new location in library/workers
+from .workers.scanner_worker import ScannerSignals, ScannerWorker
+from .workers.rescan_worker import RescanSignals, RescanWorker
+
+LOGGER = get_logger()
 
 @dataclass(slots=True, frozen=True)
 class GeotaggedAsset:
@@ -59,10 +67,18 @@ class GeotaggedAsset:
 
 
 class LibraryManager(QObject):
-    """Manage the Basic Library tree and provide file-system helpers."""
+    """Manage the Basic Library tree, file-system helpers, and scanning state."""
 
     treeUpdated = Signal()
     errorRaised = Signal(str)
+
+    # Scanner signals exposed for the facade
+    scanProgress = Signal(Path, int, int)
+    scanChunkReady = Signal(Path, list)
+    scanFinished = Signal(Path, bool)
+    scanBatchFailed = Signal(Path, int)
+
+    _MAX_LIVE_BUFFER_SIZE = 5000
 
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
@@ -76,13 +92,19 @@ class LibraryManager(QObject):
         self._debounce.setSingleShot(True)
         self._debounce.setInterval(500)
         # ``_watch_suspend_depth`` tracks how many in-flight operations asked us to
-        # ignore file-system notifications.  Using a counter instead of a boolean
-        # keeps the logic safe when nested saves occur (for example when both the
-        # album manifest and a library-level manifest are updated as part of a
-        # single user action).
+        # ignore file-system notifications. We use a counter instead of a boolean
+        # to correctly handle nested operations that may overlap (e.g., multiple
+        # concurrent file operations that each need to pause/resume the watcher).
         self._watch_suspend_depth = 0
         self._watcher.directoryChanged.connect(self._on_directory_changed)
         self._debounce.timeout.connect(self._refresh_tree)
+
+        # Scanner State
+        self._current_scanner_worker: Optional[ScannerWorker] = None
+        self._scan_thread_pool = QThreadPool.globalInstance()
+        self._live_scan_buffer: List[Dict] = []
+        self._live_scan_root: Optional[Path] = None
+        self._scan_buffer_lock = QMutex()
 
     # ------------------------------------------------------------------
     # Basic properties
@@ -94,6 +116,12 @@ class LibraryManager(QObject):
     # Binding and scanning
     # ------------------------------------------------------------------
     def bind_path(self, root: Path) -> None:
+        # Clear existing watches to ensure initialization operations (like creating
+        # the deleted items folder) do not trigger "directoryChanged" signals
+        # from an active watcher, which would cause a double-refresh.
+        if existing := self._watcher.directories():
+            self._watcher.removePaths(existing)
+
         normalized = root.expanduser().resolve()
         if not normalized.exists() or not normalized.is_dir():
             raise LibraryUnavailableError(f"Library path does not exist: {root}")
@@ -112,83 +140,278 @@ class LibraryManager(QObject):
         return self.list_albums()
 
     # ------------------------------------------------------------------
+    # Scanning Logic
+    # ------------------------------------------------------------------
+    def start_scanning(self, root: Path, include: Iterable[str], exclude: Iterable[str]) -> None:
+        """Start a background scan for the given root directory.
+        
+        All scanned assets are written to the global database at the library root.
+        """
+        # Prepare signals outside the lock
+        signals = ScannerSignals()
+        signals.progressUpdated.connect(self.scanProgress)
+        signals.chunkReady.connect(self._on_scan_chunk)
+        signals.finished.connect(self._on_scan_finished)
+        signals.error.connect(self._on_scan_error)
+        signals.batchFailed.connect(self._on_scan_batch_failed)
+
+        # Check if already scanning the same root (thread-safe)
+        locker = QMutexLocker(self._scan_buffer_lock)
+        if self._current_scanner_worker is not None:
+            if self._live_scan_root and self._paths_equal(self._live_scan_root, root):
+                return
+            # Cancel the old scan before starting new one (inline to avoid deadlock)
+            self._current_scanner_worker.cancel()
+            self._current_scanner_worker = None
+            self._live_scan_root = None
+
+        self._live_scan_root = root
+        self._live_scan_buffer.clear()
+
+        # Pass library root to scanner so all assets go to global database
+        worker = ScannerWorker(root, include, exclude, signals, library_root=self._root)
+        self._current_scanner_worker = worker
+        # Release lock before starting the worker
+        del locker
+
+        self._scan_thread_pool.start(worker)
+
+    def stop_scanning(self) -> None:
+        """Cancel the currently running scan, if any."""
+        locker = QMutexLocker(self._scan_buffer_lock)
+        if self._current_scanner_worker:
+            self._current_scanner_worker.cancel()
+            self._current_scanner_worker = None
+            # We don't clear the buffer immediately on stop, as the UI might still need it
+            # until a new scan starts or the app closes. Setting root to None invalidates it contextually.
+            self._live_scan_root = None
+
+    def is_scanning_path(self, path: Path) -> bool:
+        """Return True if the given path is covered by the active scan."""
+        locker = QMutexLocker(self._scan_buffer_lock)
+        if not self._live_scan_root:
+            return False
+
+        try:
+            target = path.resolve()
+            scan_root = self._live_scan_root.resolve()
+            if target == scan_root:
+                return True
+            # Check if target is a subdirectory of scan_root
+            return scan_root in target.parents
+        except (OSError, ValueError):
+            return False
+
+    def get_live_scan_results(self, relative_to: Optional[Path] = None) -> List[Dict]:
+        """Return a snapshot of valid items currently in the scan buffer.
+
+        Args:
+            relative_to: If provided, only returns items that are descendants of this path.
+        """
+        locker = QMutexLocker(self._scan_buffer_lock)
+        if not self._live_scan_buffer:
+            return []
+
+        if relative_to is None:
+            return list(self._live_scan_buffer)
+
+        # Capture root inside lock to prevent race with stop_scanning
+        scan_root = self._live_scan_root
+        if not scan_root:
+            return []
+
+        # Optimization: Resolve paths once outside the loop to avoid I/O blocking per item.
+        try:
+            scan_root_res = scan_root.resolve()
+            rel_root_res = relative_to.resolve()
+        except OSError:
+            return []
+
+        # Determine the relationship between scan root and view root.
+        # Case A: Same path. No path adjustment needed.
+        if scan_root_res == rel_root_res:
+            return list(self._live_scan_buffer)
+
+        filtered = []
+        # Case B: Scanning a child, viewing a parent (e.g., scan Vacation, view Photos).
+        # We need to prepend the relative difference to the item paths.
+        if rel_root_res in scan_root_res.parents:
+            prefix = scan_root_res.relative_to(rel_root_res).as_posix()
+            for item in self._live_scan_buffer:
+                item_rel = item.get("rel")
+                if not isinstance(item_rel, str) or not item_rel:
+                    continue
+                new_item = item.copy()
+                new_item["rel"] = f"{prefix}/{item_rel}"
+                filtered.append(new_item)
+
+        # Case C: Scanning a parent, viewing a child (e.g., scan Photos, view Vacation).
+        # We need to filter items that belong to the child and strip the prefix.
+        elif scan_root_res in rel_root_res.parents:
+            prefix = rel_root_res.relative_to(scan_root_res).as_posix()
+            # We add a slash to ensure we match directory boundaries (e.g. "Vacation/" vs "VacationTrip")
+            prefix_slash = f"{prefix}/"
+            for item in self._live_scan_buffer:
+                item_rel = item.get("rel")
+                if not isinstance(item_rel, str):
+                    continue
+                # Check if the item is inside the viewing directory
+                if item_rel == prefix or item_rel.startswith(prefix_slash):
+                    new_item = item.copy()
+                    # Strip the prefix to make it relative to the viewing directory
+                    # e.g. "Vacation/img.jpg" -> "img.jpg"
+                    new_item["rel"] = item_rel[len(prefix_slash):] if item_rel != prefix else ""
+                    if not new_item["rel"]:
+                        continue # Should not happen for files, but safeguard
+                    filtered.append(new_item)
+
+        # Case D: Disjoint paths (e.g. scan Photos/A, view Photos/B).
+        # Return empty list.
+
+        return filtered
+
+    def _on_scan_chunk(self, root: Path, chunk: List[dict]) -> None:
+        """Handle incoming scan chunks: update buffer only."""
+
+        if not chunk:
+            return
+
+        # 1. Update In-Memory Buffer
+        locker = QMutexLocker(self._scan_buffer_lock)
+        # Check buffer limit
+        if len(self._live_scan_buffer) < self._MAX_LIVE_BUFFER_SIZE:
+            self._live_scan_buffer.extend(chunk)
+        else:
+            # If buffer is full, we rely on disk.
+            # We can optionally rotate, but simply stopping accumulation is safer for memory.
+            # The consuming models should have already pulled earlier data.
+            LOGGER.warning(
+                f"Live scan buffer for {root} reached its limit of {self._MAX_LIVE_BUFFER_SIZE} items. "
+                f"{len(chunk)} new items were not added to the in-memory buffer; relying on disk persistence."
+            )
+
+        # 2. Forward signal
+        # The persistence is now handled by the ScannerWorker in the background thread.
+        self.scanChunkReady.emit(root, chunk)
+
+    def _on_scan_finished(self, root: Path, rows: List[dict]) -> None:
+        # Emit scanFinished for downstream handling (e.g., updating links or finalizing scan).
+        self.scanFinished.emit(root, True)
+        # Clear worker reference after emitting signal to prevent race conditions
+        locker = QMutexLocker(self._scan_buffer_lock)
+        self._current_scanner_worker = None
+
+    def _on_scan_error(self, root: Path, message: str) -> None:
+        locker = QMutexLocker(self._scan_buffer_lock)
+        self._current_scanner_worker = None
+        self.errorRaised.emit(message)
+        self.scanFinished.emit(root, False)
+
+    def _on_scan_batch_failed(self, root: Path, count: int) -> None:
+        """Propagate partial failure notifications to the UI."""
+        self.scanBatchFailed.emit(root, count)
+
+    def _paths_equal(self, p1: Path, p2: Path) -> bool:
+        try:
+            return p1.resolve() == p2.resolve()
+        except OSError:
+            return p1 == p2
+
+    # ------------------------------------------------------------------
     # Asset helpers
     # ------------------------------------------------------------------
     def get_geotagged_assets(self) -> List[GeotaggedAsset]:
-        """Return every asset in the library that exposes GPS coordinates."""
+        """Return every asset in the library that exposes GPS coordinates.
+        
+        Uses the single global database at the library root.
+        """
 
         root = self._require_root()
-        # ``seen`` prevents duplicate entries when a sub-album and its parent
-        # both reference the same physical file in their indexes.
+        # Track resolved absolute paths we've already yielded. The global
+        # index at the library root guarantees uniqueness of library-relative
+        # paths, but files may still be reachable via multiple album roots
+        # (e.g. via symlinks or hard links), so we deduplicate on absolute
+        # paths here for safety.
         seen: set[Path] = set()
         assets: list[GeotaggedAsset] = []
 
-        album_paths: set[Path] = {root}
-        album_paths.update(self._nodes.keys())
+        try:
+            # Use single global database at library root
+            rows = IndexStore(root).read_geotagged()
+        except Exception:
+            return assets
 
-        for album_path in sorted(album_paths):
-            try:
-                rows = IndexStore(album_path).read_all()
-            except Exception:
+        for row in rows:
+            if not isinstance(row, dict):
                 continue
-            for row in rows:
-                if not isinstance(row, dict):
-                    continue
-                gps = row.get("gps")
-                if not isinstance(gps, dict):
-                    continue
-                lat = gps.get("lat")
-                lon = gps.get("lon")
-                if not isinstance(lat, (int, float)) or not isinstance(lon, (int, float)):
-                    continue
-                # ``resolve_location_name`` maps the GPS coordinate to a human-readable
-                # label (typically the city) so that low zoom levels can show a
-                # meaningful aggregate marker instead of individual thumbnails.
-                location_name = resolve_location_name(gps)
-                rel = row.get("rel")
-                if not isinstance(rel, str) or not rel:
-                    continue
-                abs_path = (album_path / rel).resolve()
-                if abs_path in seen:
-                    continue
-                seen.add(abs_path)
-                try:
-                    library_relative_path = abs_path.relative_to(root)
-                    library_relative_str = library_relative_path.as_posix()
-                except ValueError:
-                    library_relative_str = abs_path.name
-                asset_id = str(row.get("id") or rel)
-                classified_image, classified_video = classify_media(row)
-                # Combine classifier results with any persisted flags to remain
-                # compatible with older index rows that stored boolean values.
-                is_image = classified_image or bool(row.get("is_image"))
-                is_video = classified_video or bool(row.get("is_video"))
-                still_image_time = row.get("still_image_time")
-                if isinstance(still_image_time, (int, float)):
-                    still_image_value: Optional[float] = float(still_image_time)
+            gps = row.get("gps")
+            if not isinstance(gps, dict):
+                continue
+            lat = gps.get("lat")
+            lon = gps.get("lon")
+            if not isinstance(lat, (int, float)) or not isinstance(lon, (int, float)):
+                continue
+            # ``resolve_location_name`` maps the GPS coordinate to a human-readable
+            # label (typically the city) so that low zoom levels can show a
+            # meaningful aggregate marker instead of individual thumbnails.
+            location_name = resolve_location_name(gps)
+            rel = row.get("rel")
+            if not isinstance(rel, str) or not rel:
+                continue
+            abs_path = (root / rel).resolve()
+            if abs_path in seen:
+                continue
+            seen.add(abs_path)
+            library_relative_str = rel
+            # Compute album_path from the parent directory of the asset
+            parent_album_path = row.get("parent_album_path")
+            if parent_album_path:
+                album_path = root / parent_album_path
+                # Compute album-relative path by stripping the parent prefix
+                # Use string operations for robustness with paths at album root
+                prefix = parent_album_path + "/"
+                if rel.startswith(prefix):
+                    album_relative_str = rel[len(prefix):]
+                elif rel == parent_album_path:
+                    # File at the album root with same name as album (edge case)
+                    album_relative_str = ""
                 else:
-                    still_image_value = None
-                duration = row.get("dur")
-                if isinstance(duration, (int, float)):
-                    duration_value: Optional[float] = float(duration)
-                else:
-                    duration_value = None
-                assets.append(
-                    GeotaggedAsset(
-                        library_relative=library_relative_str,
-                        album_relative=rel,
-                        absolute_path=abs_path,
-                        album_path=album_path,
-                        asset_id=asset_id,
-                        latitude=float(lat),
-                        longitude=float(lon),
-                        is_image=is_image,
-                        is_video=is_video,
-                        still_image_time=still_image_value,
-                        duration=duration_value,
-                        location_name=location_name,
-                    )
+                    album_relative_str = Path(rel).name
+            else:
+                album_path = root
+                album_relative_str = rel
+            asset_id = str(row.get("id") or rel)
+            classified_image, classified_video = classify_media(row)
+            # Combine classifier results with any persisted flags to remain
+            # compatible with older index rows that stored boolean values.
+            is_image = classified_image or bool(row.get("is_image"))
+            is_video = classified_video or bool(row.get("is_video"))
+            still_image_time = row.get("still_image_time")
+            if isinstance(still_image_time, (int, float)):
+                still_image_value: Optional[float] = float(still_image_time)
+            else:
+                still_image_value = None
+            duration = row.get("dur")
+            if isinstance(duration, (int, float)):
+                duration_value: Optional[float] = float(duration)
+            else:
+                duration_value = None
+            assets.append(
+                GeotaggedAsset(
+                    library_relative=library_relative_str,
+                    album_relative=album_relative_str,
+                    absolute_path=abs_path,
+                    album_path=album_path,
+                    asset_id=asset_id,
+                    latitude=float(lat),
+                    longitude=float(lon),
+                    is_image=is_image,
+                    is_video=is_video,
+                    still_image_time=still_image_value,
+                    duration=duration_value,
+                    location_name=location_name,
                 )
+            )
 
         assets.sort(key=lambda item: item.library_relative)
         return assets
@@ -237,6 +460,83 @@ class LibraryManager(QObject):
             return self.ensure_deleted_directory()
         except AlbumOperationError as exc:
             self.errorRaised.emit(str(exc))
+            return None
+
+    def cleanup_deleted_index(self) -> int:
+        """Drop stale trash entries from the global index.
+
+        This performs a best-effort cleanup of index rows corresponding to items
+        in the deleted-items album that no longer exist on disk. Database-related
+        errors (for example, ``sqlite3.Error`` or ``IPhotoError`` raised by the
+        index store) are caught and suppressed. In such error conditions, the
+        method may return ``0`` or remove only a subset of stale entries, so
+        callers should not rely on it to guarantee a fully cleaned index.
+
+        Returns the number of rows removed.
+        """
+
+        root = self._root
+        trash_root = self.deleted_directory()
+        if root is None or trash_root is None:
+            return 0
+
+        album_path = self._relative_deleted_album_path(trash_root, root)
+        if album_path is None:
+            return 0
+
+        try:
+            has_files = next(trash_root.iterdir(), None) is not None
+        except OSError:
+            has_files = False
+
+        store = IndexStore(root)
+        try:
+            entry_count = store.count(
+                album_path=album_path,
+                include_subalbums=True,
+                filter_hidden=False,
+            )
+        except (sqlite3.Error, IPhotoError) as exc:
+            LOGGER.warning(
+                "Failed to count deleted items for album %s during cleanup: %s",
+                album_path,
+                exc,
+            )
+            return 0
+
+        if entry_count == 0:
+            return 0
+
+        missing: list[str] = []
+
+        def _is_missing(rel: str) -> bool:
+            return not has_files or not (root / rel).exists()
+
+        for row in store.read_album_assets(
+            album_path,
+            include_subalbums=True,
+            filter_hidden=False,
+        ):
+            rel = row.get("rel")
+            if not isinstance(rel, str):
+                continue
+            if _is_missing(rel):
+                missing.append(rel)
+
+        if missing:
+            store.remove_rows(missing)
+        return len(missing)
+
+    def _relative_deleted_album_path(self, trash_root: Path, root: Path) -> Optional[str]:
+        """Return the trash path relative to the library root, or ``None``."""
+
+        try:
+            return trash_root.resolve().relative_to(root.resolve()).as_posix()
+        except OSError:
+            pass
+        try:
+            return trash_root.relative_to(root).as_posix()
+        except ValueError:
             return None
 
     def create_subalbum(self, parent: AlbumNode, name: str) -> AlbumNode:

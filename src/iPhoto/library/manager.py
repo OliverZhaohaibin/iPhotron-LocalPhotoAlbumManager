@@ -460,6 +460,82 @@ class LibraryManager(QObject):
             self.errorRaised.emit(str(exc))
             return None
 
+    def cleanup_deleted_index(self) -> int:
+        """Drop stale trash entries from the global index.
+
+        Returns the number of rows removed.
+        """
+
+        root = self._root
+        trash_root = self.deleted_directory()
+        if root is None or trash_root is None:
+            return 0
+
+        try:
+            album_path = trash_root.resolve().relative_to(root.resolve()).as_posix()
+        except OSError:
+            try:
+                album_path = trash_root.relative_to(root).as_posix()
+            except ValueError:
+                return 0
+
+        store = IndexStore(root)
+        try:
+            entry_count = store.count(
+                album_path=album_path,
+                include_subalbums=True,
+                filter_hidden=False,
+            )
+        except Exception:
+            return 0
+
+        if entry_count == 0:
+            return 0
+
+        try:
+            has_files = next(trash_root.iterdir(), None) is not None
+        except (OSError, StopIteration):
+            has_files = False
+
+        missing: list[str] = []
+        if not has_files:
+            for row in store.read_album_assets(
+                album_path,
+                include_subalbums=True,
+                filter_hidden=False,
+            ):
+                rel = row.get("rel")
+                if isinstance(rel, str):
+                    missing.append(rel)
+        else:
+            dir_cache: dict[Path, set[str] | None] = {}
+
+            def _cached_exists(path: Path) -> bool:
+                parent = path.parent
+                names = dir_cache.get(parent)
+                if names is None:
+                    try:
+                        names = {entry.name for entry in parent.iterdir()}
+                    except OSError:
+                        names = set()
+                    dir_cache[parent] = names
+                return path.name in names
+
+            for row in store.read_album_assets(
+                album_path,
+                include_subalbums=True,
+                filter_hidden=False,
+            ):
+                rel = row.get("rel")
+                if not isinstance(rel, str):
+                    continue
+                if not _cached_exists(root / rel):
+                    missing.append(rel)
+
+        if missing:
+            store.remove_rows(missing)
+        return len(missing)
+
     def create_subalbum(self, parent: AlbumNode, name: str) -> AlbumNode:
         if parent.level != 1:
             raise AlbumDepthError("Sub-albums can only be created under top-level albums.")

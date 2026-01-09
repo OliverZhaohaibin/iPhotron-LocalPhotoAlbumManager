@@ -260,6 +260,11 @@ class NavigationController:
             self._dialog.show_error(str(exc))
             return
 
+        try:
+            self._context.library.cleanup_deleted_index()
+        except Exception as exc:  # pragma: no cover - defensive guard
+            self._dialog.show_error(str(exc))
+
         self._reset_playback_for_gallery_navigation()
         self._view_controller.restore_default_gallery()
         self._view_controller.show_gallery_view()

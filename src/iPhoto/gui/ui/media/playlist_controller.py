@@ -165,7 +165,7 @@ class PlaylistController(QObject):
                 continue
             try:
                 candidate = normalise_for_compare(Path(raw))
-            except Exception:
+            except (TypeError, ValueError, OSError):
                 continue
             if candidate == target:
                 return self.set_current(row) is not None

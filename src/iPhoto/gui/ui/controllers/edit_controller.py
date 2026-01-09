@@ -690,9 +690,7 @@ class EditController(QObject):
         self._current_mode.enter()
 
     def _handle_playlist_change(self) -> None:
-        if not self._view_controller.is_edit_view_active():
-            return
-        if self._suppress_playlist_changes:
+        if not self._view_controller.is_edit_view_active() or self._suppress_playlist_changes:
             return
         playlist_source = self._playlist.current_source()
         if playlist_source is not None and self._current_source is not None:
@@ -742,8 +740,9 @@ class EditController(QObject):
     def _paths_equal(left: Path, right: Path) -> bool:
         try:
             return normalise_for_compare(left) == normalise_for_compare(right)
-        except Exception:
-            return left == right
+        except (OSError, TypeError):
+            return str(left) == str(right)
+
     def set_navigation_controller(self, navigation: "NavigationController") -> None:
         """Attach the navigation controller after construction.
 

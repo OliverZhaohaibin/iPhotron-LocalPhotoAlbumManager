@@ -8,6 +8,7 @@ from typing import Optional
 from PySide6.QtCore import QObject, QModelIndex, Signal
 
 from ..models.asset_model import AssetModel, Roles
+from ....utils.pathutils import normalise_for_compare
 
 
 class PlaylistController(QObject):
@@ -151,9 +152,9 @@ class PlaylistController(QObject):
         if self._model is None:
             return False
 
-        target = self._safe_resolve(path)
+        target = normalise_for_compare(path)
         current = self.current_source()
-        if current is not None and self._paths_equal(current, target):
+        if current is not None and normalise_for_compare(current) == target:
             return True
 
         count = self._model.rowCount()
@@ -163,10 +164,10 @@ class PlaylistController(QObject):
             if not raw:
                 continue
             try:
-                candidate = self._safe_resolve(Path(raw))
-            except TypeError:
+                candidate = normalise_for_compare(Path(raw))
+            except Exception:
                 continue
-            if self._paths_equal(candidate, target):
+            if candidate == target:
                 return self.set_current(row) is not None
         return False
 
@@ -306,17 +307,3 @@ class PlaylistController(QObject):
             if _consider(candidate):
                 return
         self.clear()
-
-    @staticmethod
-    def _paths_equal(left: Path, right: Path) -> bool:
-        try:
-            return left.resolve() == right.resolve()
-        except OSError:
-            return left == right
-
-    @staticmethod
-    def _safe_resolve(path: Path) -> Path:
-        try:
-            return path.resolve()
-        except OSError:
-            return path

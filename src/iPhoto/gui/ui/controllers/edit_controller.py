@@ -12,6 +12,7 @@ from PySide6.QtGui import QImage
 from ....io import sidecar
 from ....core.bw_resolver import BWParams
 from ....settings import SettingsManager
+from ....utils.pathutils import normalise_for_compare
 from ..models.asset_model import AssetModel
 from ..models.edit_session import EditSession
 from .edit_history_manager import EditHistoryManager
@@ -740,8 +741,8 @@ class EditController(QObject):
     @staticmethod
     def _paths_equal(left: Path, right: Path) -> bool:
         try:
-            return left.resolve() == right.resolve()
-        except OSError:
+            return normalise_for_compare(left) == normalise_for_compare(right)
+        except Exception:
             return left == right
     def set_navigation_controller(self, navigation: "NavigationController") -> None:
         """Attach the navigation controller after construction.

@@ -359,6 +359,12 @@ class AssetListModel(QAbstractListModel):
 
         applied = self._apply_incremental_rows(chunk)
         self._optimistic_refresh_requested = False
+        if applied and chunk:
+            row_count = self._state_manager.row_count()
+            if row_count:
+                end = min(len(chunk) - 1, row_count - 1)
+                if end >= 0:
+                    self.prioritize_rows(0, end)
         return applied
 
     def _on_batch_ready(self, chunk: List[Dict[str, object]], is_reset: bool) -> None:

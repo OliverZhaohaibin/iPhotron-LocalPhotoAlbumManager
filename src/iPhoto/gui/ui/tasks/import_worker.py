@@ -9,7 +9,6 @@ import time
 from PySide6.QtCore import QObject, QRunnable, Signal
 
 from .... import app as backend
-from ....errors import IPhotoError
 
 # Max updates per second for progress signal
 MAX_UPDATES_PER_SEC = 10
@@ -35,6 +34,8 @@ class ImportWorker(QRunnable):
         destination: Path,
         copier: Callable[[Path, Path], Path],
         signals: ImportSignals,
+        *,
+        library_root: Path | None = None,
     ) -> None:
         super().__init__()
         self.setAutoDelete(False)
@@ -43,6 +44,8 @@ class ImportWorker(QRunnable):
         self._copier = copier
         self._signals = signals
         self._is_cancelled = False
+        self._library_root = library_root
+        self._had_incremental_error = False
 
     @property
     def signals(self) -> ImportSignals:
@@ -101,16 +104,21 @@ class ImportWorker(QRunnable):
 
         # Final full rescan/link check if not cancelled
         rescan_success = False
+
         if imported and not self._is_cancelled:
             try:
-                # We still do a full rescan/pair at the end to ensure consistency (like Live Photo pairing)
-                # that might span across chunks, and to catch any edge cases.
-                # However, since we've been incrementally updating, the UI should already show most items.
-                backend.rescan(self._destination)
-            except IPhotoError as exc:
-                self._signals.error.emit(str(exc))
+                if self._had_incremental_error:
+                    backend.rescan(self._destination, library_root=self._library_root)
+                else:
+                    backend.pair(self._destination, library_root=self._library_root)
             except Exception as exc:  # pragma: no cover - defensive fallback
                 self._signals.error.emit(str(exc))
+                try:
+                    backend.rescan(self._destination, library_root=self._library_root)
+                except Exception as fallback_exc:  # pragma: no cover - defensive fallback
+                    self._signals.error.emit(str(fallback_exc))
+                else:
+                    rescan_success = True
             else:
                 rescan_success = True
 
@@ -121,7 +129,10 @@ class ImportWorker(QRunnable):
         if not batch or self._is_cancelled:
             return
         try:
-            backend.scan_specific_files(self._destination, batch)
+            backend.scan_specific_files(
+                self._destination, batch, library_root=self._library_root
+            )
         except Exception as exc:
             # Log error but don't fail the whole import; final rescan might fix it
+            self._had_incremental_error = True
             self._signals.error.emit(f"Incremental scan failed: {exc}")

@@ -26,6 +26,7 @@ from ...tasks.incremental_refresh_worker import (
     IncrementalRefreshWorker,
 )
 from ..asset_data_loader import AssetDataLoader
+from .....config import RECENTLY_DELETED_DIR_NAME
 from .....utils.pathutils import (
     normalise_for_compare,
     is_descendant_path,
@@ -186,9 +187,23 @@ class AssetListController(QObject):
         featured = manifest.get("featured", []) or []
 
         self._pending_loader_root = self._album_root
-        filter_params = {}
+        filter_params: Dict[str, object] = {}
         if self._active_filter:
             filter_params["filter_mode"] = self._active_filter
+
+        library_root = None
+        if self._facade.library_manager:
+            library_root = self._facade.library_manager.root()
+        if library_root is not None and self._album_root is not None:
+            def _normalise(path: Path) -> Path:
+                try:
+                    return path.resolve()
+                except OSError:
+                    return path
+
+            is_library_root = _normalise(library_root) == _normalise(self._album_root)
+            if is_library_root:
+                filter_params["exclude_path_prefix"] = RECENTLY_DELETED_DIR_NAME
 
         # Ensure library_root is set from facade if not already configured
         # This provides a fallback in case set_library_root wasn't called yet

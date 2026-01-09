@@ -143,7 +143,12 @@ class _StubContext:
     def __init__(self, library_root: Path) -> None:
         self._library_root = library_root
         self.facade = None
-        self.library = SimpleNamespace(root=lambda: self._library_root)
+        self.library = SimpleNamespace(
+            root=lambda: self._library_root,
+            ensure_deleted_directory=lambda: None,
+            deleted_directory=lambda: None,
+            cleanup_deleted_index=lambda: None,
+        )
         self.remembered: Optional[Path] = None
 
     def remember_album(self, root: Path) -> None:
@@ -422,6 +427,7 @@ def test_open_recently_deleted_refresh_skips_gallery(
     deleted_dir.mkdir()
     context.library.ensure_deleted_directory = lambda: deleted_dir
     context.library.deleted_directory = lambda: deleted_dir
+    context.library.cleanup_deleted_index = lambda: None
 
     context.facade = facade
     asset_model = _StubAssetModel()

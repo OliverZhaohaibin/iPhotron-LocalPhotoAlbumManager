@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import sqlite3
 import xxhash
 from datetime import datetime, timezone
 import copy
@@ -13,7 +14,7 @@ from typing import Callable, Dict, Iterable, List, Optional, Set, Tuple
 from PySide6.QtCore import QObject, QRunnable, Signal, QThread
 
 from ....cache.index_store import IndexStore
-from ....config import WORK_DIR_NAME
+from ....config import RECENTLY_DELETED_DIR_NAME, WORK_DIR_NAME
 from ....media_classifier import classify_media
 from ....utils.geocoding import resolve_location_name
 from ....utils.pathutils import ensure_work_dir
@@ -262,6 +263,11 @@ def build_asset_entry(
             if location_name and store:
                 try:
                     store.update_location(rel, location_name)
+                except sqlite3.OperationalError:
+                    LOGGER.debug(
+                        "Skipping location cache update for %s due to locked database",
+                        rel,
+                    )
                 except Exception:
                     # Log write failures during read operations to aid debugging, but do not crash
                     LOGGER.warning(
@@ -374,6 +380,9 @@ def compute_asset_rows(
 
     # Determine the effective index root and album filter using helper
     effective_index_root, album_path = compute_album_path(root, library_root)
+
+    if album_path is None and library_root is not None:
+        params.setdefault("exclude_path_prefix", RECENTLY_DELETED_DIR_NAME)
 
     store = IndexStore(effective_index_root)
     dir_cache: Dict[Path, Optional[Set[str]]] = {}
@@ -520,6 +529,8 @@ class AssetLoaderWorker(QRunnable):
 
         # Prepare filter params with featured list if needed
         params = copy.deepcopy(self._filter_params) if self._filter_params else {}
+        if album_path is None and self._library_root is not None:
+            params.setdefault("exclude_path_prefix", RECENTLY_DELETED_DIR_NAME)
 
         # 2. Stream rows using lightweight geometry-first query
         # Use a transaction context to keep the connection open for both the read and count queries.
@@ -644,6 +655,16 @@ class LiveIngestWorker(QRunnable):
           may not yet have is_favorite persisted in the database.
         """
         filter_mode = self._filter_params.get("filter_mode")
+        prefix = self._filter_params.get("exclude_path_prefix")
+        prefix_norm = Path(prefix).as_posix() if isinstance(prefix, str) and prefix.strip() else None
+        if prefix_norm:
+            # Live ingest rows bypass the database-level filter, so guard here as well.
+            rel_value = row.get("rel")
+            if isinstance(rel_value, str):
+                rel_norm = Path(rel_value).as_posix()
+                if rel_norm == prefix_norm or rel_norm.startswith(prefix_norm + "/"):
+                    return False
+
         if not filter_mode:
             return True
 

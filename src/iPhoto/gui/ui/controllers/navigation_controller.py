@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import logging
+import threading
+import time
 from pathlib import Path
 from typing import Literal, Optional, TYPE_CHECKING
 
@@ -26,8 +29,19 @@ if TYPE_CHECKING:  # pragma: no cover - runtime import cycle guard
     from .playback_controller import PlaybackController
 
 
+LOGGER = logging.getLogger(__name__)
+
 class NavigationController:
     """Handle opening albums and switching between static collections."""
+
+    # Delay kicking off trash cleanup so album loading can settle first. Tuned to
+    # keep initial navigation responsive; adjust if UI still stalls before the
+    # loader warms the model.
+    _TRASH_CLEANUP_DELAY_MS = 750
+    # Minimum spacing between cleanup runs to avoid repeated DB contention. Five
+    # minutes keeps bounce-in/bounce-out navigation snappy while still pruning
+    # stale rows within a session.
+    _TRASH_CLEANUP_THROTTLE_SEC = 300.0
 
     def __init__(
         self,
@@ -58,6 +72,8 @@ class NavigationController:
         # reissued the currently open album.  When ``True`` the main window can
         # keep the detail pane visible rather than reverting to the gallery.
         self._last_open_was_refresh: bool = False
+        self._trash_cleanup_running: bool = False
+        self._trash_cleanup_lock = threading.Lock()
         # ``_suppress_tree_refresh`` is toggled when the filesystem watcher
         # rebuilds the sidebar tree while a background worker (move/import) is
         # still shuffling files.  Those rebuilds re-select the current item in
@@ -72,6 +88,7 @@ class NavigationController:
         # reselection once).  ``Literal`` keeps the intent self-documenting and
         # avoids mistyped sentinel strings.
         self._tree_refresh_suppression_reason: Optional[Literal["edit", "operation"]] = None
+        self._last_trash_cleanup_at: Optional[float] = None
 
     def bind_playback_controller(self, playback: "PlaybackController") -> None:
         """Provide the playback controller once it has been constructed.
@@ -260,6 +277,30 @@ class NavigationController:
             self._dialog.show_error(str(exc))
             return
 
+        # Run cleanup asynchronously to avoid blocking the UI when switching
+        # immediately after a delete operation. Only one cleanup runs at a time.
+        def _cleanup_trash() -> None:
+            try:
+                self._context.library.cleanup_deleted_index()
+            except Exception:
+                LOGGER.debug("Trash cleanup failed", exc_info=True)
+            finally:
+                with self._trash_cleanup_lock:
+                    self._trash_cleanup_running = False
+
+        with self._trash_cleanup_lock:
+            should_start = (
+                not self._trash_cleanup_running and self._should_run_trash_cleanup()
+            )
+            if should_start:
+                self._trash_cleanup_running = True
+                self._last_trash_cleanup_at = time.monotonic()
+
+        if should_start:
+            threading.Thread(
+                target=_cleanup_trash, daemon=True, name="trash-cleanup"
+            ).start()
+
         self._reset_playback_for_gallery_navigation()
         self._view_controller.restore_default_gallery()
         self._view_controller.show_gallery_view()
@@ -272,6 +313,14 @@ class NavigationController:
             return
 
         album.manifest = {**album.manifest, "title": "Recently Deleted"}
+
+    def _should_run_trash_cleanup(self) -> bool:
+        """Throttle trash cleanup to avoid repeated DB churn during navigation."""
+
+        if self._last_trash_cleanup_at is None:
+            return True
+        elapsed = time.monotonic() - self._last_trash_cleanup_at
+        return elapsed >= self._TRASH_CLEANUP_THROTTLE_SEC
 
     def open_static_collection(
         self,

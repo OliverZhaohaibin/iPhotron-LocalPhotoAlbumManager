@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import shutil
+import sqlite3
+import os
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple
 
@@ -225,6 +227,27 @@ class MoveWorker(QRunnable):
         
         # Process media relative to the library root for global database
         process_root = self._library_root if self._library_root else self._destination_root
+        if self._is_trash_destination:
+            try:
+                existing_trash_rows = list(
+                    store.read_album_assets(
+                        RECENTLY_DELETED_DIR_NAME,
+                        include_subalbums=True,
+                        filter_hidden=False,
+                    )
+                )
+                missing_rels = [
+                    row_rel
+                    for row_rel in (row.get("rel") for row in existing_trash_rows)
+                    if isinstance(row_rel, str)
+                    and not (process_root / row_rel).exists()
+                ]
+                if missing_rels:
+                    store.remove_rows(missing_rels)
+            except (IPhotoError, sqlite3.Error, OSError) as exc:
+                # Best-effort cleanup; continue with insertion even if pruning fails.
+                LOGGER.debug("Trash cleanup during move skipped: %s", exc)
+
         new_rows = list(
             process_media_paths(process_root, image_paths, video_paths)
         )
@@ -247,7 +270,8 @@ class MoveWorker(QRunnable):
                 if not isinstance(rel_value, str):
                     annotated_rows.append(row)
                     continue
-                absolute_target = self._destination_root / rel_value
+                base_for_lookup: Path = process_root
+                absolute_target = base_for_lookup / rel_value
                 target_key = self._normalised_string(absolute_target)
                 original_path = source_lookup.get(target_key) if target_key else None
                 if original_path is None:
@@ -466,7 +490,20 @@ class MoveWorker(QRunnable):
             try:
                 relative = original_path.relative_to(library_root)
             except ValueError:
-                return None
+                try:
+                    relative_str = os.path.relpath(original_path, library_root)
+                except Exception:
+                    return None
+                else:
+                    if relative_str.startswith(".."):
+                        return None
+                    try:
+                        candidate = (library_root / relative_str).resolve()
+                        root_resolved = library_root.resolve()
+                        candidate.relative_to(root_resolved)
+                    except (OSError, ValueError):
+                        return None
+                    return Path(relative_str).as_posix()
         return relative.as_posix()
 
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import asdict
 from pathlib import Path
 import os
+import sqlite3
 from typing import Callable, Dict, List, Optional, Tuple
 
 from .cache.index_store import IndexStore
@@ -23,6 +24,12 @@ from .utils.jsonio import read_json, write_json
 from .utils.logging import get_logger
 
 LOGGER = get_logger()
+
+
+def _is_index_recoverable_error(exc: Exception) -> bool:
+    """Return ``True`` when *exc* stems from recoverable index state."""
+
+    return isinstance(exc, (sqlite3.Error, IndexCorruptedError, ManifestInvalidError))
 
 
 def _compute_album_path(root: Path, library_root: Optional[Path]) -> Optional[str]:
@@ -49,12 +56,6 @@ def _compute_album_path(root: Path, library_root: Optional[Path]) -> Optional[st
         library_root,
         rel,
     )
-    LOGGER.debug(
-        "Computed album path: root=%s, library_root=%s, rel=%s",
-        root,
-        library_root,
-        rel,
-    )
     return rel
 
 
@@ -62,6 +63,8 @@ def open_album(
     root: Path,
     autoscan: bool = True,
     library_root: Optional[Path] = None,
+    *,
+    hydrate_index: bool = True,
 ) -> Album:
     """Open an album directory, scanning and pairing as required.
     
@@ -70,6 +73,9 @@ def open_album(
         autoscan: Whether to scan automatically if the index is empty.
         library_root: If provided, use this as the database root (global database).
                      If None, defaults to root for backward compatibility.
+        hydrate_index: When ``False``, skip eager index hydration to avoid blocking
+                       the caller; still performs a lightweight emptiness check and
+                       optional autoscan.
     """
 
     album = Album.open(root)
@@ -81,47 +87,82 @@ def open_album(
     # If using global DB, we need to filter by album path
     album_path = _compute_album_path(root, library_root)
     
+    # Hydrated index rows when available; ``None`` when the lazy path skips loading.
+    rows: list[dict] | None = None
     # Read rows from the database, filtered by album if using global DB
-    if album_path:
-        rows = list(store.read_album_assets(album_path, include_subalbums=True))
+    if hydrate_index:
+        if album_path:
+            rows = list(store.read_album_assets(album_path, include_subalbums=True))
+        else:
+            rows = list(store.read_all())
     else:
-        rows = list(store.read_all())
-    if not rows and autoscan:
-        include = album.manifest.get("filters", {}).get("include", DEFAULT_INCLUDE)
-        exclude = album.manifest.get("filters", {}).get("exclude", DEFAULT_EXCLUDE)
-        from .io.scanner import scan_album
+        try:
+            existing_count = store.count(
+                filter_hidden=True,
+                album_path=album_path,
+                include_subalbums=True,
+            )
+        except Exception as exc:
+            if not _is_index_recoverable_error(exc):
+                raise
+            LOGGER.warning(
+                "Index count failed for %s [%s]; assuming empty index: %s",
+                root,
+                type(exc).__name__,
+                exc,
+            )
+            existing_count = 0
 
-        rows = list(scan_album(root, include, exclude))
-        
-        # If using global DB, convert to library-relative paths before writing
-        if library_root and album_path:
-            for row in rows:
-                if "rel" in row:
-                    row["rel"] = f"{album_path}/{row['rel']}"
-        
-        store.write_rows(rows)
+        if existing_count == 0 and autoscan:
+            include = album.manifest.get("filters", {}).get("include", DEFAULT_INCLUDE)
+            exclude = album.manifest.get("filters", {}).get("exclude", DEFAULT_EXCLUDE)
+            from .io.scanner import scan_album
+
+            rows = list(scan_album(root, include, exclude))
+            
+            # If using global DB, convert to library-relative paths before writing
+            if library_root and album_path:
+                for row in rows:
+                    if "rel" in row:
+                        row["rel"] = f"{album_path}/{row['rel']}"
+            
+            store.write_rows(rows)
+        elif existing_count == 0:
+            # Preserve legacy behavior where an empty index results in empty link payloads.
+            rows = []
     
     # For links and sync_favorites, we need album-relative rows
     # If using global DB, adjust rel paths for _ensure_links
-    if album_path:
-        # Create album-relative rows for _ensure_links
-        album_rows = []
-        prefix = album_path + "/"
-        for row in rows:
-            rel = row.get("rel", "")
-            if rel.startswith(prefix):
-                adj_row = dict(row)
-                adj_row["rel"] = rel[len(prefix):]
-                album_rows.append(adj_row)
-            elif "/" not in rel:
-                # File directly in album root
-                album_rows.append(row)
-        _ensure_links(root, album_rows, library_root=library_root)
-        
+    if rows is not None:
+        if album_path:
+            # Create album-relative rows for _ensure_links
+            album_rows = []
+            prefix = album_path + "/"
+            for row in rows:
+                rel = row.get("rel", "")
+                if rel.startswith(prefix):
+                    adj_row = dict(row)
+                    adj_row["rel"] = rel[len(prefix):]
+                    album_rows.append(adj_row)
+                elif "/" not in rel:
+                    # File directly in album root
+                    album_rows.append(row)
+            _ensure_links(root, album_rows, library_root=library_root)
+        else:
+            _ensure_links(root, rows, library_root=library_root)
+    
+    # Keep favorites aligned with the manifest even when we skip hydration.
+    try:
         store.sync_favorites(album.manifest.get("featured", []))
-    else:
-        _ensure_links(root, rows, library_root=library_root)
-        store.sync_favorites(album.manifest.get("featured", []))
+    except Exception as exc:
+        if not _is_index_recoverable_error(exc):
+            raise
+        LOGGER.warning(
+            "sync_favorites failed for %s [%s]: %s",
+            root,
+            type(exc).__name__,
+            exc,
+        )
     
     return album
 

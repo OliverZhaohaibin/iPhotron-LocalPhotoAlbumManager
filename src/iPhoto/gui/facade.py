@@ -329,7 +329,12 @@ class AppFacade(QObject):
         library_root = self._library_manager.root() if self._library_manager else None
         
         try:
-            album = backend.open_album(root, autoscan=False, library_root=library_root)
+            album = backend.open_album(
+                root,
+                autoscan=False,
+                library_root=library_root,
+                hydrate_index=False,
+            )
         except IPhotoError as exc:
             self.errorRaised.emit(str(exc))
             return None

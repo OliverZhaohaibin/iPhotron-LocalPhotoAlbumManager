@@ -471,25 +471,8 @@ class LibraryManager(QObject):
         if root is None or trash_root is None:
             return 0
 
-        try:
-            album_path = trash_root.resolve().relative_to(root.resolve()).as_posix()
-        except OSError:
-            try:
-                album_path = trash_root.relative_to(root).as_posix()
-            except ValueError:
-                return 0
-
-        store = IndexStore(root)
-        try:
-            entry_count = store.count(
-                album_path=album_path,
-                include_subalbums=True,
-                filter_hidden=False,
-            )
-        except Exception:
-            return 0
-
-        if entry_count == 0:
+        album_path = self._relative_deleted_album_path(trash_root, root)
+        if album_path is None:
             return 0
 
         try:
@@ -497,10 +480,24 @@ class LibraryManager(QObject):
         except OSError:
             has_files = False
 
+        store = IndexStore(root)
+        if has_files:
+            try:
+                entry_count = store.count(
+                    album_path=album_path,
+                    include_subalbums=True,
+                    filter_hidden=False,
+                )
+            except Exception:
+                entry_count = 0
+
+            if entry_count == 0:
+                return 0
+
         missing: list[str] = []
 
         def _is_missing(rel: str) -> bool:
-            return True if not has_files else not (root / rel).exists()
+            return not has_files or not (root / rel).exists()
 
         for row in store.read_album_assets(
             album_path,
@@ -516,6 +513,18 @@ class LibraryManager(QObject):
         if missing:
             store.remove_rows(missing)
         return len(missing)
+
+    def _relative_deleted_album_path(self, trash_root: Path, root: Path) -> Optional[str]:
+        """Return the trash path relative to the library root, or ``None``."""
+
+        try:
+            return trash_root.resolve().relative_to(root.resolve()).as_posix()
+        except OSError:
+            pass
+        try:
+            return trash_root.relative_to(root).as_posix()
+        except ValueError:
+            return None
 
     def create_subalbum(self, parent: AlbumNode, name: str) -> AlbumNode:
         if parent.level != 1:

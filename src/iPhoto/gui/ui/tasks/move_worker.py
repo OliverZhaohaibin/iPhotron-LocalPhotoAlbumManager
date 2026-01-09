@@ -226,6 +226,27 @@ class MoveWorker(QRunnable):
         
         # Process media relative to the library root for global database
         process_root = self._library_root if self._library_root else self._destination_root
+        if self._is_trash_destination:
+            try:
+                existing_trash_rows = list(
+                    store.read_album_assets(
+                        RECENTLY_DELETED_DIR_NAME,
+                        include_subalbums=True,
+                        filter_hidden=False,
+                    )
+                )
+                missing_rels = [
+                    row_rel
+                    for row_rel in (row.get("rel") for row in existing_trash_rows)
+                    if isinstance(row_rel, str)
+                    and not (process_root / row_rel).exists()
+                ]
+                if missing_rels:
+                    store.remove_rows(missing_rels)
+            except Exception:
+                # Best-effort cleanup; continue with insertion even if pruning fails.
+                pass
+
         new_rows = list(
             process_media_paths(process_root, image_paths, video_paths)
         )

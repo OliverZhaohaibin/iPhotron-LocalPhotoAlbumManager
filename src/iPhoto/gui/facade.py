@@ -560,6 +560,7 @@ class AppFacade(QObject):
     ) -> None:
         """Import *sources* asynchronously and refresh the destination album."""
 
+        self._active_model.request_optimistic_refresh()
         self._import_service.import_files(
             sources,
             destination=destination,

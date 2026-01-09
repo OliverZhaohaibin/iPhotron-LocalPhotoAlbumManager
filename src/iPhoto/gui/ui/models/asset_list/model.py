@@ -71,6 +71,11 @@ class AssetListModel(QAbstractListModel):
             duplication_checker=self._check_duplication,
             parent=self,
         )
+        # Legacy compatibility for buffered chunk handling expected by tests and callers.
+        self._pending_chunks_buffer = self._controller._pending_chunks_buffer
+        self._flush_timer = self._controller._flush_timer
+        self._is_first_chunk = self._controller._is_first_chunk
+        self._pending_loader_root = self._controller._pending_loader_root
         self._controller.batchReady.connect(self._on_batch_ready)
         self._controller.incrementalReady.connect(self._apply_incremental_results)
         self._controller.loadProgress.connect(self.loadProgress)
@@ -79,6 +84,7 @@ class AssetListModel(QAbstractListModel):
 
         self._facade.linksUpdated.connect(self.handle_links_updated)
         self._facade.assetUpdated.connect(self.handle_asset_updated)
+        self._optimistic_refresh_requested = False
 
     def _check_duplication(self, rel: str, abs_key: Optional[str]) -> bool:
         """Callback for Controller to check if an item exists in the model."""
@@ -327,9 +333,48 @@ class AssetListModel(QAbstractListModel):
         self._cache_manager.clear_recently_removed()
         self._controller.start_load()
 
+    def request_optimistic_refresh(self) -> None:
+        """Keep existing rows visible while upcoming reset batches arrive.
+
+        The flag stays active until an optimistic reset batch is attempted or
+        the load cycle finishes, preventing the gallery from flickering during
+        import-triggered refreshes.
+        """
+
+        self._optimistic_refresh_requested = True
+
+    def _try_optimistic_refresh(self, chunk: List[Dict[str, object]], is_reset: bool) -> bool:
+        """
+        Apply incremental rows without clearing existing items during reset batches.
+
+        Returns ``True`` when the optimistic merge applied changes, ``False`` otherwise.
+        """
+
+        if (
+            not is_reset
+            or not self._optimistic_refresh_requested
+            or not self._state_manager.rows
+        ):
+            return False
+
+        applied = self._apply_incremental_rows(chunk)
+        self._optimistic_refresh_requested = False
+        if applied and chunk:
+            row_count = self._state_manager.row_count()
+            if row_count:
+                end = min(len(chunk) - 1, row_count - 1)
+                if end >= 0:
+                    self.prioritize_rows(0, end)
+        return applied
+
     def _on_batch_ready(self, chunk: List[Dict[str, object]], is_reset: bool) -> None:
         """Handle incoming data batch from Controller."""
         if not chunk:
+            if is_reset and self._optimistic_refresh_requested:
+                self._optimistic_refresh_requested = False
+            return
+
+        if self._try_optimistic_refresh(chunk, is_reset):
             return
 
         if is_reset:
@@ -352,6 +397,7 @@ class AssetListModel(QAbstractListModel):
 
     def _on_controller_load_finished(self, root: Path, success: bool) -> None:
         """Handle load completion."""
+        self._optimistic_refresh_requested = False
         # Check for pending reload in state manager
         should_restart = self._state_manager.consume_pending_reload(
             self._album_root, root
@@ -496,6 +542,86 @@ class AssetListModel(QAbstractListModel):
     def _apply_incremental_rows(self, new_rows: List[Dict[str, object]]) -> bool:
         """Merge *new_rows* into the model without clearing the entire view."""
         current_rows = self._state_manager.rows
+        existing_lookup = self._state_manager.row_lookup.copy()
+
+        # Optimistic merge when incoming snapshot is a subset of existing rows
+        if current_rows and new_rows:
+            fresh_rels = {
+                normalise_rel_value(row.get("rel"))
+                for row in new_rows
+                if normalise_rel_value(row.get("rel"))
+            }
+            if fresh_rels and fresh_rels.issubset(set(existing_lookup.keys())):
+                changed = False
+                for replacement in new_rows:
+                    rel_key = normalise_rel_value(replacement.get("rel"))
+                    if not rel_key:
+                        continue
+                    row_index = existing_lookup.get(rel_key)
+                    if row_index is None or not (0 <= row_index < len(current_rows)):
+                        continue
+                    original = current_rows[row_index]
+                    if original == replacement:
+                        continue
+                    current_rows[row_index] = replacement
+                    model_index = self.index(row_index, 0)
+                    affected_roles = [
+                        Roles.REL,
+                        Roles.ABS,
+                        Roles.SIZE,
+                        Roles.DT,
+                        Roles.IS_IMAGE,
+                        Roles.IS_VIDEO,
+                        Roles.IS_LIVE,
+                        Qt.DecorationRole,
+                    ]
+                    self.dataChanged.emit(model_index, model_index, affected_roles)
+                    if self._should_invalidate_thumbnail(original, replacement):
+                        self.invalidate_thumbnail(rel_key)
+                    changed = True
+                return changed
+
+        # Heuristic: incremental import chunks should only add/update rows, not drop existing ones.
+        if current_rows and new_rows and len(new_rows) < len(current_rows):
+            changed = False
+            for replacement in new_rows:
+                rel_key = normalise_rel_value(replacement.get("rel"))
+                if not rel_key:
+                    continue
+                row_index = existing_lookup.get(rel_key)
+                if row_index is None:
+                    position = len(current_rows)
+                    self.beginInsertRows(QModelIndex(), position, position)
+                    current_rows.insert(position, replacement)
+                    existing_lookup[rel_key] = position
+                    self.endInsertRows()
+                    self._state_manager.on_external_row_inserted(position)
+                    changed = True
+                    continue
+
+                original = current_rows[row_index]
+                if original == replacement:
+                    continue
+                current_rows[row_index] = replacement
+                model_index = self.index(row_index, 0)
+                affected_roles = [
+                    Roles.REL,
+                    Roles.ABS,
+                    Roles.SIZE,
+                    Roles.DT,
+                    Roles.IS_IMAGE,
+                    Roles.IS_VIDEO,
+                    Roles.IS_LIVE,
+                    Qt.DecorationRole,
+                ]
+                self.dataChanged.emit(model_index, model_index, affected_roles)
+                if self._should_invalidate_thumbnail(original, replacement):
+                    self.invalidate_thumbnail(rel_key)
+                changed = True
+
+            if changed:
+                self._state_manager.rebuild_lookup()
+            return changed
 
         diff = ListDiffCalculator.calculate_diff(current_rows, new_rows)
 
@@ -510,36 +636,92 @@ class AssetListModel(QAbstractListModel):
         if diff.is_empty_to_empty:
             return False
 
-        # Apply removals
-        for index in diff.removed_indices:
-            if not (0 <= index < len(current_rows)):
-                continue
-            row_snapshot = current_rows[index]
-            rel_key = normalise_rel_value(row_snapshot.get("rel"))
-            abs_key = row_snapshot.get("abs")
-            self.beginRemoveRows(QModelIndex(), index, index)
-            current_rows.pop(index)
-            self.endRemoveRows()
-            self._state_manager.on_external_row_removed(index, rel_key)
-            if rel_key:
-                self._cache_manager.remove_thumbnail(rel_key)
-                self._cache_manager.remove_placeholder(rel_key)
-            if abs_key:
-                self._cache_manager.remove_recently_removed(str(abs_key))
+        def _collapse_indices(descending_indices: List[int]) -> List[Tuple[int, int]]:
+            """Return contiguous ranges from a descending list of indices."""
+            ordered = sorted(descending_indices, reverse=True)
+            if not ordered:
+                return []
+            ranges: List[Tuple[int, int]] = []
+            range_start = range_end = ordered[0]
+            for idx in ordered[1:]:
+                if idx == range_start - 1:
+                    range_start = idx
+                else:
+                    ranges.append((min(range_start, range_end), max(range_start, range_end)))
+                    range_start = range_end = idx
+            ranges.append((min(range_start, range_end), max(range_start, range_end)))
+            return ranges
 
-        # Apply insertions
-        for insert_index, row_data, rel_key in diff.inserted_items:
-            position = max(0, min(insert_index, len(current_rows)))
-            self.beginInsertRows(QModelIndex(), position, position)
-            current_rows.insert(position, row_data)
-            self.endInsertRows()
-            self._state_manager.on_external_row_inserted(position)
-            if rel_key:
-                self._cache_manager.remove_thumbnail(rel_key)
-                self._cache_manager.remove_placeholder(rel_key)
-            abs_value = row_data.get("abs")
-            if abs_value:
-                self._cache_manager.remove_recently_removed(str(abs_value))
+        # Apply removals in contiguous batches to reduce signal churn
+        for start, end in _collapse_indices(diff.removed_indices):
+            if start >= len(current_rows):
+                continue
+            end = min(end, len(current_rows) - 1)
+            if start < 0 or end < start:
+                continue
+
+            removed_pairs = [
+                (idx, current_rows[idx])
+                for idx in range(start, end + 1)
+                if 0 <= idx < len(current_rows)
+            ]
+            if not removed_pairs:
+                continue
+
+            for idx, row_snapshot in reversed(removed_pairs):
+                rel_key = normalise_rel_value(row_snapshot.get("rel"))
+                abs_key = row_snapshot.get("abs")
+                self._state_manager.on_external_row_removed(idx, rel_key)
+                if rel_key:
+                    self._cache_manager.remove_thumbnail(rel_key)
+                    self._cache_manager.remove_placeholder(rel_key)
+                if abs_key:
+                    self._cache_manager.remove_recently_removed(str(abs_key))
+
+            self.beginRemoveRows(QModelIndex(), start, end)
+            del current_rows[start : end + 1]
+            self.endRemoveRows()
+
+        # Apply insertions in contiguous batches to reduce signal churn
+        insert_items = sorted(diff.inserted_items, key=lambda item: item[0])
+        insert_pos = 0
+        MAX_INSERT_BATCH = 256
+        cumulative_inserted = 0
+        while insert_pos < len(insert_items):
+            insert_index, row_data, rel_key = insert_items[insert_pos]
+            position = max(0, min(insert_index + cumulative_inserted, len(current_rows)))
+            batch: List[Tuple[Dict[str, object], Optional[str]]] = [(row_data, rel_key)]
+
+            expected_position = position + 1
+            insert_pos += 1
+            while insert_pos < len(insert_items):
+                next_index, next_row, next_rel = insert_items[insert_pos]
+                if next_index + cumulative_inserted != expected_position:
+                    break
+                batch.append((next_row, next_rel))
+                expected_position += 1
+                insert_pos += 1
+
+            start_position = position
+            chunk_offset = 0
+            while chunk_offset < len(batch):
+                chunk = batch[chunk_offset : chunk_offset + MAX_INSERT_BATCH]
+                chunk_start = start_position + chunk_offset
+                chunk_end = chunk_start + len(chunk) - 1
+                self.beginInsertRows(QModelIndex(), chunk_start, chunk_end)
+                current_rows[chunk_start:chunk_start] = [row for (row, _rel) in chunk]
+                for offset, (_row_data, rel_key) in enumerate(chunk):
+                    if rel_key:
+                        self._cache_manager.remove_thumbnail(rel_key)
+                        self._cache_manager.remove_placeholder(rel_key)
+                    abs_value = chunk[offset][0].get("abs")
+                    if abs_value:
+                        self._cache_manager.remove_recently_removed(str(abs_value))
+                self.endInsertRows()
+                for offset in range(len(chunk)):
+                    self._state_manager.on_external_row_inserted(chunk_start + offset)
+                chunk_offset += len(chunk)
+            cumulative_inserted += len(batch)
 
         # Apply updates
         if diff.structure_changed:
@@ -598,3 +780,39 @@ class AssetListModel(QAbstractListModel):
             if old_row.get(key) != new_row.get(key):
                 return True
         return False
+
+    # ------------------------------------------------------------------
+    # Legacy streaming buffer proxies (for tests and compatibility)
+    # ------------------------------------------------------------------
+    def _on_loader_chunk_ready(self, root: Path, chunk: List[Dict[str, object]]) -> None:
+        if (
+            not self._album_root
+            or root != self._album_root
+            or not chunk
+        ):
+            return
+
+        if self._is_first_chunk:
+            self._is_first_chunk = False
+            self._pending_loader_root = root
+            self._on_batch_ready(chunk, True)
+            return
+
+        self._pending_chunks_buffer.append(chunk)
+        if not self._flush_timer.isActive():
+            try:
+                self._flush_timer.start()
+            except Exception:
+                # In test environments without an event loop, flush synchronously.
+                self._flush_pending_chunks()
+
+    def _flush_pending_chunks(self) -> None:
+        if not self._pending_chunks_buffer:
+            return
+        # Flatten buffered chunks and append them
+        buffered = self._pending_chunks_buffer[:]
+        self._pending_chunks_buffer.clear()
+        for chunk in buffered:
+            if not chunk:
+                continue
+            self._on_batch_ready(chunk, False)

@@ -45,7 +45,7 @@ class MockAssetCacheManager(QObject):
 def model(tmp_path):
     facade = MockFacade()
 
-    with patch('src.iPhoto.gui.ui.models.asset_list_model.AssetCacheManager', side_effect=MockAssetCacheManager):
+    with patch('src.iPhoto.gui.ui.models.asset_list.model.AssetCacheManager', side_effect=MockAssetCacheManager):
         model = AssetListModel(facade)
         yield model
 
@@ -198,6 +198,37 @@ def test_incremental_update_existing_row(model):
     assert model.dataChanged.emit.call_count == 1
     args = model.dataChanged.emit.call_args[0]
     assert args[0].row() == 1
+
+
+def test_incremental_batches_adjacent_changes(model):
+    """Contiguous removals/insertions should emit batched Qt signals."""
+
+    # Initial state: 3 rows
+    rows = [
+        {"rel": "a.jpg", "val": 1},
+        {"rel": "b.jpg", "val": 1},
+        {"rel": "c.jpg", "val": 1},
+    ]
+    model._state_manager.set_rows(rows)
+    model._state_manager.rebuild_lookup()
+
+    new_rows = [
+        {"rel": "a.jpg", "val": 1},
+        {"rel": "d.jpg", "val": 2},
+        {"rel": "e.jpg", "val": 3},
+    ]
+
+    model.beginRemoveRows = MagicMock()
+    model.endRemoveRows = MagicMock()
+    model.beginInsertRows = MagicMock()
+    model.endInsertRows = MagicMock()
+
+    model._apply_incremental_rows(new_rows)
+
+    assert model.beginRemoveRows.call_count == 1
+    assert model.beginRemoveRows.call_args[0][1:] == (1, 2)
+    assert model.beginInsertRows.call_count == 1
+    assert model.beginInsertRows.call_args[0][1:] == (1, 2)
 
 def test_buffer_add_new_row(model):
     """Regression test: Buffer merging should add new rows."""

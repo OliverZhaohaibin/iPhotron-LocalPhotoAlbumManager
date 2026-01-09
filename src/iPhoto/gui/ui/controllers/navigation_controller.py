@@ -73,6 +73,7 @@ class NavigationController:
         # keep the detail pane visible rather than reverting to the gallery.
         self._last_open_was_refresh: bool = False
         self._trash_cleanup_running: bool = False
+        self._trash_cleanup_lock = threading.Lock()
         # ``_suppress_tree_refresh`` is toggled when the filesystem watcher
         # rebuilds the sidebar tree while a background worker (move/import) is
         # still shuffling files.  Those rebuilds re-select the current item in
@@ -284,14 +285,18 @@ class NavigationController:
             except Exception:
                 LOGGER.debug("Trash cleanup failed", exc_info=True)
             finally:
-                self._trash_cleanup_running = False
+                with self._trash_cleanup_lock:
+                    self._trash_cleanup_running = False
 
-        if (
-            not self._trash_cleanup_running
-            and self._should_run_trash_cleanup()
-        ):
-            self._trash_cleanup_running = True
-            self._last_trash_cleanup_at = time.monotonic()
+        with self._trash_cleanup_lock:
+            should_start = (
+                not self._trash_cleanup_running and self._should_run_trash_cleanup()
+            )
+            if should_start:
+                self._trash_cleanup_running = True
+                self._last_trash_cleanup_at = time.monotonic()
+
+        if should_start:
             QTimer.singleShot(
                 self._TRASH_CLEANUP_DELAY_MS,
                 lambda: threading.Thread(

@@ -593,6 +593,7 @@ class AssetListModel(QAbstractListModel):
                     position = len(current_rows)
                     self.beginInsertRows(QModelIndex(), position, position)
                     current_rows.insert(position, replacement)
+                    existing_lookup[rel_key] = position
                     self.endInsertRows()
                     self._state_manager.on_external_row_inserted(position)
                     changed = True
@@ -667,10 +668,6 @@ class AssetListModel(QAbstractListModel):
             if not removed_pairs:
                 continue
 
-            self.beginRemoveRows(QModelIndex(), start, end)
-            del current_rows[start : end + 1]
-            self.endRemoveRows()
-
             for idx, row_snapshot in reversed(removed_pairs):
                 rel_key = normalise_rel_value(row_snapshot.get("rel"))
                 abs_key = row_snapshot.get("abs")
@@ -681,20 +678,25 @@ class AssetListModel(QAbstractListModel):
                 if abs_key:
                     self._cache_manager.remove_recently_removed(str(abs_key))
 
+            self.beginRemoveRows(QModelIndex(), start, end)
+            del current_rows[start : end + 1]
+            self.endRemoveRows()
+
         # Apply insertions in contiguous batches to reduce signal churn
         insert_items = sorted(diff.inserted_items, key=lambda item: item[0])
         insert_pos = 0
         MAX_INSERT_BATCH = 256
+        cumulative_inserted = 0
         while insert_pos < len(insert_items):
             insert_index, row_data, rel_key = insert_items[insert_pos]
-            position = max(0, min(insert_index, len(current_rows)))
+            position = max(0, min(insert_index + cumulative_inserted, len(current_rows)))
             batch: List[Tuple[Dict[str, object], Optional[str]]] = [(row_data, rel_key)]
 
             expected_position = position + 1
             insert_pos += 1
             while insert_pos < len(insert_items):
                 next_index, next_row, next_rel = insert_items[insert_pos]
-                if next_index != expected_position:
+                if next_index + cumulative_inserted != expected_position:
                     break
                 batch.append((next_row, next_rel))
                 expected_position += 1
@@ -707,18 +709,19 @@ class AssetListModel(QAbstractListModel):
                 chunk_start = start_position + chunk_offset
                 chunk_end = chunk_start + len(chunk) - 1
                 self.beginInsertRows(QModelIndex(), chunk_start, chunk_end)
-                for offset, (row_data, rel_key) in enumerate(chunk):
-                    current_rows.insert(chunk_start + offset, row_data)
+                current_rows[chunk_start:chunk_start] = [row for (row, _rel) in chunk]
+                for offset, (_row_data, rel_key) in enumerate(chunk):
                     if rel_key:
                         self._cache_manager.remove_thumbnail(rel_key)
                         self._cache_manager.remove_placeholder(rel_key)
-                    abs_value = row_data.get("abs")
+                    abs_value = chunk[offset][0].get("abs")
                     if abs_value:
                         self._cache_manager.remove_recently_removed(str(abs_value))
                 self.endInsertRows()
-            for offset in range(len(chunk)):
-                self._state_manager.on_external_row_inserted(chunk_start + offset)
+                for offset in range(len(chunk)):
+                    self._state_manager.on_external_row_inserted(chunk_start + offset)
                 chunk_offset += len(chunk)
+            cumulative_inserted += len(batch)
 
         # Apply updates
         if diff.structure_changed:

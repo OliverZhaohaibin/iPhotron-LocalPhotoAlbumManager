@@ -465,6 +465,13 @@ class LibraryManager(QObject):
     def cleanup_deleted_index(self) -> int:
         """Drop stale trash entries from the global index.
 
+        This performs a best-effort cleanup of index rows corresponding to items
+        in the deleted-items album that no longer exist on disk. Database-related
+        errors (for example, ``sqlite3.Error`` or ``IPhotoError`` raised by the
+        index store) are caught and suppressed. In such error conditions, the
+        method may return ``0`` or remove only a subset of stale entries, so
+        callers should not rely on it to guarantee a fully cleaned index.
+
         Returns the number of rows removed.
         """
 
@@ -490,7 +497,12 @@ class LibraryManager(QObject):
                     include_subalbums=True,
                     filter_hidden=False,
                 )
-            except (sqlite3.Error, IPhotoError):
+            except (sqlite3.Error, IPhotoError) as exc:
+                LOGGER.warning(
+                    "Failed to count deleted items for album %s: %s",
+                    album_path,
+                    exc,
+                )
                 entry_count = 0
 
             if entry_count == 0:
@@ -503,8 +515,12 @@ class LibraryManager(QObject):
                     filter_hidden=False,
                 ) == 0:
                     return 0
-            except (sqlite3.Error, IPhotoError):
-                pass
+            except (sqlite3.Error, IPhotoError) as exc:
+                LOGGER.warning(
+                    "Failed to count deleted items for album %s during cleanup: %s",
+                    album_path,
+                    exc,
+                )
 
         missing: list[str] = []
 

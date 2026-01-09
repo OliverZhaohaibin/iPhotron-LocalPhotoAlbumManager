@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Optional
 
@@ -9,6 +10,8 @@ from PySide6.QtCore import QObject, QModelIndex, Signal
 
 from ..models.asset_model import AssetModel, Roles
 from ....utils.pathutils import normalise_for_compare
+
+logger = logging.getLogger(__name__)
 
 
 class PlaylistController(QObject):
@@ -165,7 +168,8 @@ class PlaylistController(QObject):
                 continue
             try:
                 candidate = normalise_for_compare(Path(raw))
-            except (TypeError, ValueError, OSError):
+            except (TypeError, ValueError, OSError) as exc:
+                logger.debug("Skipping invalid path data %r in playlist: %s", raw, exc)
                 continue
             if candidate == target:
                 return self.set_current(row) is not None

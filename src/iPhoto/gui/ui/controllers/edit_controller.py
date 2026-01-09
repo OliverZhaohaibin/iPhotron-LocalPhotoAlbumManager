@@ -740,7 +740,8 @@ class EditController(QObject):
     def _paths_equal(left: Path, right: Path) -> bool:
         try:
             return normalise_for_compare(left) == normalise_for_compare(right)
-        except (OSError, TypeError):
+        except (OSError, TypeError) as exc:
+            _LOGGER.debug("Falling back to string comparison for %s and %s: %s", left, right, exc)
             return str(left) == str(right)
 
     def set_navigation_controller(self, navigation: "NavigationController") -> None:

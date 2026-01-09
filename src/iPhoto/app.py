@@ -80,6 +80,7 @@ def open_album(
     # If using global DB, we need to filter by album path
     album_path = _compute_album_path(root, library_root)
     
+    # Hydrated index rows when available; ``None`` when the lazy path skips loading.
     rows: list[dict] | None = None
     # Read rows from the database, filtered by album if using global DB
     if hydrate_index:
@@ -95,7 +96,12 @@ def open_album(
                 include_subalbums=True,
             )
         except Exception as exc:
-            LOGGER.warning("Index count failed for %s; assuming empty index: %s", root, exc)
+            LOGGER.warning(
+                "Index count failed for %s [%s]; assuming empty index: %s",
+                root,
+                type(exc).__name__,
+                exc,
+            )
             existing_count = 0
 
         if existing_count == 0 and autoscan:
@@ -113,7 +119,7 @@ def open_album(
             
             store.write_rows(rows)
         elif existing_count == 0:
-            # Preserve legacy behaviour where an empty index results in empty link payloads.
+            # Preserve legacy behavior where an empty index results in empty link payloads.
             rows = []
     
     # For links and sync_favorites, we need album-relative rows
@@ -140,7 +146,12 @@ def open_album(
     try:
         store.sync_favorites(album.manifest.get("featured", []))
     except Exception as exc:
-        LOGGER.warning("Failed to sync favorites for %s: %s", root, exc)
+        LOGGER.warning(
+            "sync_favorites failed for %s [%s]: %s",
+            root,
+            type(exc).__name__,
+            exc,
+        )
     
     return album
 

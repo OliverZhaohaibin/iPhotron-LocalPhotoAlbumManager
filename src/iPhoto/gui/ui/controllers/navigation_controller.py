@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+import threading
 from pathlib import Path
 from typing import Literal, Optional, TYPE_CHECKING
 
@@ -58,6 +60,7 @@ class NavigationController:
         # reissued the currently open album.  When ``True`` the main window can
         # keep the detail pane visible rather than reverting to the gallery.
         self._last_open_was_refresh: bool = False
+        self._trash_cleanup_running: bool = False
         # ``_suppress_tree_refresh`` is toggled when the filesystem watcher
         # rebuilds the sidebar tree while a background worker (move/import) is
         # still shuffling files.  Those rebuilds re-select the current item in
@@ -259,6 +262,25 @@ class NavigationController:
         except AlbumOperationError as exc:
             self._dialog.show_error(str(exc))
             return
+
+        # Run cleanup asynchronously to avoid blocking the UI when switching
+        # immediately after a delete operation. Only one cleanup runs at a time.
+        def _cleanup_trash() -> None:
+            try:
+                self._context.library.cleanup_deleted_index()
+            except Exception:
+                LOGGER.debug("Trash cleanup failed", exc_info=True)
+            finally:
+                self._trash_cleanup_running = False
+
+        if not self._trash_cleanup_running:
+            self._trash_cleanup_running = True
+            QTimer.singleShot(
+                0,
+                lambda: threading.Thread(
+                    target=_cleanup_trash, daemon=True
+                ).start(),
+            )
 
         self._reset_playback_for_gallery_navigation()
         self._view_controller.restore_default_gallery()

@@ -494,43 +494,24 @@ class LibraryManager(QObject):
 
         try:
             has_files = next(trash_root.iterdir(), None) is not None
-        except (OSError, StopIteration):
+        except OSError:
             has_files = False
 
         missing: list[str] = []
-        if not has_files:
-            for row in store.read_album_assets(
-                album_path,
-                include_subalbums=True,
-                filter_hidden=False,
-            ):
-                rel = row.get("rel")
-                if isinstance(rel, str):
-                    missing.append(rel)
-        else:
-            dir_cache: dict[Path, set[str] | None] = {}
 
-            def _cached_exists(path: Path) -> bool:
-                parent = path.parent
-                names = dir_cache.get(parent)
-                if names is None:
-                    try:
-                        names = {entry.name for entry in parent.iterdir()}
-                    except OSError:
-                        names = set()
-                    dir_cache[parent] = names
-                return path.name in names
+        def _is_missing(rel: str) -> bool:
+            return True if not has_files else not (root / rel).exists()
 
-            for row in store.read_album_assets(
-                album_path,
-                include_subalbums=True,
-                filter_hidden=False,
-            ):
-                rel = row.get("rel")
-                if not isinstance(rel, str):
-                    continue
-                if not _cached_exists(root / rel):
-                    missing.append(rel)
+        for row in store.read_album_assets(
+            album_path,
+            include_subalbums=True,
+            filter_hidden=False,
+        ):
+            rel = row.get("rel")
+            if not isinstance(rel, str):
+                continue
+            if _is_missing(rel):
+                missing.append(rel)
 
         if missing:
             store.remove_rows(missing)

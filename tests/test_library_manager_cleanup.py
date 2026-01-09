@@ -10,6 +10,7 @@ pytest.importorskip("PySide6.QtWidgets", reason="Qt widgets not available for te
 
 from PySide6.QtWidgets import QApplication
 
+from src.iPhoto.config import RECENTLY_DELETED_DIR_NAME
 from src.iPhoto.cache.index_store import IndexStore
 from src.iPhoto.library.manager import LibraryManager
 
@@ -41,8 +42,8 @@ def test_cleanup_deleted_index_removes_missing_rows(tmp_path: Path, qapp: QAppli
     keep = trash_root / "keep.jpg"
     keep.write_bytes(b"data")
 
-    missing = ".Trash/missing.jpg"
-    present = f".Trash/{keep.name}"
+    missing = f"{RECENTLY_DELETED_DIR_NAME}/missing.jpg"
+    present = f"{RECENTLY_DELETED_DIR_NAME}/{keep.name}"
     store = IndexStore(library_root)
     _write_index_rows(store, [present, missing])
 

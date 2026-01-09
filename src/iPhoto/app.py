@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import asdict
 from pathlib import Path
 import os
+import sqlite3
 from typing import Callable, Dict, List, Optional, Tuple
 
 from .cache.index_store import IndexStore
@@ -96,6 +97,10 @@ def open_album(
                 include_subalbums=True,
             )
         except Exception as exc:
+            if not isinstance(
+                exc, (sqlite3.Error, IndexCorruptedError, ManifestInvalidError)
+            ):
+                raise
             LOGGER.warning(
                 "Index count failed for %s [%s]; assuming empty index: %s",
                 root,
@@ -146,6 +151,10 @@ def open_album(
     try:
         store.sync_favorites(album.manifest.get("featured", []))
     except Exception as exc:
+        if not isinstance(
+            exc, (sqlite3.Error, IndexCorruptedError, ManifestInvalidError)
+        ):
+            raise
         LOGGER.warning(
             "sync_favorites failed for %s [%s]: %s",
             root,

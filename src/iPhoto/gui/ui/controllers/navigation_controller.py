@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 from pathlib import Path
 from typing import Literal, Optional, TYPE_CHECKING
 
@@ -30,6 +31,9 @@ if TYPE_CHECKING:  # pragma: no cover - runtime import cycle guard
 
 class NavigationController:
     """Handle opening albums and switching between static collections."""
+
+    _TRASH_CLEANUP_DELAY_MS = 750
+    _TRASH_CLEANUP_THROTTLE_SEC = 300.0
 
     def __init__(
         self,
@@ -75,6 +79,7 @@ class NavigationController:
         # reselection once).  ``Literal`` keeps the intent self-documenting and
         # avoids mistyped sentinel strings.
         self._tree_refresh_suppression_reason: Optional[Literal["edit", "operation"]] = None
+        self._last_trash_cleanup_at: float = 0.0
 
     def bind_playback_controller(self, playback: "PlaybackController") -> None:
         """Provide the playback controller once it has been constructed.
@@ -273,12 +278,16 @@ class NavigationController:
             finally:
                 self._trash_cleanup_running = False
 
-        if not self._trash_cleanup_running:
+        if (
+            not self._trash_cleanup_running
+            and self._should_run_trash_cleanup()
+        ):
             self._trash_cleanup_running = True
+            self._last_trash_cleanup_at = time.monotonic()
             QTimer.singleShot(
-                0,
+                self._TRASH_CLEANUP_DELAY_MS,
                 lambda: threading.Thread(
-                    target=_cleanup_trash, daemon=True
+                    target=_cleanup_trash, daemon=True, name="trash-cleanup"
                 ).start(),
             )
 
@@ -294,6 +303,13 @@ class NavigationController:
             return
 
         album.manifest = {**album.manifest, "title": "Recently Deleted"}
+
+    def _should_run_trash_cleanup(self) -> bool:
+        """Throttle trash cleanup to avoid repeated DB churn during navigation."""
+
+        if self._last_trash_cleanup_at <= 0:
+            return True
+        return (time.monotonic() - self._last_trash_cleanup_at) >= self._TRASH_CLEANUP_THROTTLE_SEC
 
     def open_static_collection(
         self,

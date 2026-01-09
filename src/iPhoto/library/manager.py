@@ -495,6 +495,16 @@ class LibraryManager(QObject):
 
             if entry_count == 0:
                 return 0
+        else:
+            try:
+                if store.count(
+                    album_path=album_path,
+                    include_subalbums=True,
+                    filter_hidden=False,
+                ) == 0:
+                    return 0
+            except (sqlite3.Error, IPhotoError):
+                pass
 
         missing: list[str] = []
 

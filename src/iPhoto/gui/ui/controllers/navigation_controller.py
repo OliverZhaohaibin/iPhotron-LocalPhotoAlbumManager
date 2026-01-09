@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
+import logging
 import threading
-import time
 from pathlib import Path
 from typing import Literal, Optional, TYPE_CHECKING
 
@@ -267,16 +267,20 @@ class NavigationController:
         # immediately after a delete operation. Only one cleanup runs at a time.
         def _cleanup_trash() -> None:
             try:
-                time.sleep(0.2)  # allow the UI load to begin before acquiring DB locks
                 self._context.library.cleanup_deleted_index()
-            except Exception:  # pragma: no cover - defensive guard
-                pass
+            except Exception:
+                LOGGER.debug("Trash cleanup failed", exc_info=True)
             finally:
                 self._trash_cleanup_running = False
 
         if not self._trash_cleanup_running:
             self._trash_cleanup_running = True
-            threading.Thread(target=_cleanup_trash, daemon=True).start()
+            QTimer.singleShot(
+                0,
+                lambda: threading.Thread(
+                    target=_cleanup_trash, daemon=True
+                ).start(),
+            )
 
         self._reset_playback_for_gallery_navigation()
         self._view_controller.restore_default_gallery()

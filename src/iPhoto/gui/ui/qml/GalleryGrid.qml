@@ -59,6 +59,7 @@ Rectangle {
         anchors.margins: 0
         focus: true
         clip: true
+        interactive: true
 
         model: assetModel
 
@@ -74,8 +75,13 @@ Rectangle {
         onHeightChanged: visibleRowsDebounceTimer.restart()
         onCurrentIndexChanged: root.currentIndexChanged(currentIndex)
 
-        // Initial check after layout
+        // Initial check after layout and whenever the model count changes
         Component.onCompleted: updateVisibleRows()
+        onCountChanged: updateVisibleRows()
+
+        ScrollBar.vertical: ScrollBar {
+            policy: ScrollBar.AsNeeded
+        }
 
         function formatDuration(seconds) {
             if (seconds === null || seconds === undefined) return ""

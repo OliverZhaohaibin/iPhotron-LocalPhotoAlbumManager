@@ -8,7 +8,7 @@ import sys
 from pathlib import Path
 from typing import Callable, List, Optional, TYPE_CHECKING
 
-from PySide6.QtCore import QModelIndex, QPoint, QSize, Qt, QUrl, Signal, Slot
+from PySide6.QtCore import QModelIndex, QPoint, QSize, Qt, QUrl, Signal, Slot, QMetaObject
 from PySide6.QtGui import QColor, QImage, QPalette, QPixmap, QSurfaceFormat
 from PySide6.QtQml import QQmlApplicationEngine
 from PySide6.QtQuick import QQuickImageProvider, QQuickWindow, QSGRendererInterface
@@ -97,6 +97,7 @@ class GalleryQuickWidget(QQuickWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, False)
         self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent, True)
         self.setAutoFillBackground(True)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
 
         # Force a clear color immediately to prevent transparency during initialization
         self.setClearColor(QColor("#2b2b2b"))
@@ -241,6 +242,11 @@ class GalleryQuickWidget(QQuickWidget):
             model.modelReset.connect(self._on_model_reset)
             model.rowsInserted.connect(self._on_rows_inserted)
             model.rowsRemoved.connect(self._on_rows_removed)
+
+        # Refresh visible rows so streaming thumbnails start immediately.
+        root = self.rootObject()
+        if root is not None:
+            QMetaObject.invokeMethod(root, "updateVisibleRows", Qt.ConnectionType.QueuedConnection)
 
     def _on_model_reset(self) -> None:
         """Handle model reset."""

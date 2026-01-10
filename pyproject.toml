@@ -61,6 +61,7 @@ line-length = 100
 testpaths = ["tests"]
 addopts = "-ra"
 pythonpath = ["src"]
+qt_api = "pyside6"
 
 [tool.typer]
 pretty_exceptions_enable = true

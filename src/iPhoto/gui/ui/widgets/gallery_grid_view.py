@@ -21,9 +21,6 @@ from PySide6.QtCore import (
 )
 from PySide6.QtGui import (
     QColor,
-    QDragEnterEvent,
-    QDragMoveEvent,
-    QDropEvent,
     QPalette,
     QSurfaceFormat,
 )
@@ -390,7 +387,7 @@ class GalleryQuickWidget(QQuickWidget):
         self.setAutoFillBackground(True)
 
     def _sync_theme_to_qml(self) -> None:
-        """Push stored theme colours into the QML root if available."""
+        """Push stored theme colors into the QML root if available."""
         if self._theme_colors is None:
             return
 

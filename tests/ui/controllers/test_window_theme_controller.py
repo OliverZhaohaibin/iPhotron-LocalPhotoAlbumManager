@@ -10,6 +10,7 @@ from PySide6.QtWidgets import QWidget, QToolButton, QLabel, QPushButton
 from src.iPhoto.gui.ui.controllers.window_theme_controller import WindowThemeController
 from src.iPhoto.gui.ui.theme_manager import ThemeManager, LIGHT_THEME, DARK_THEME
 from src.iPhoto.gui.ui.widgets.collapsible_section import CollapsibleSection
+from src.iPhoto.gui.ui.widgets.gallery_grid_view import GalleryQuickWidget
 from src.iPhoto.gui.ui.window_manager import RoundedWindowShell
 
 # Mock load_icon globally to avoid disk/resource access and crashes during tests
@@ -335,3 +336,74 @@ def test_window_shell_palette_update(window_theme_controller, mock_window_shell)
 
     # Verify override color
     mock_window_shell.set_override_color.assert_called_with(LIGHT_THEME.window_background)
+
+
+def test_gallery_grid_view_theme_application(window_theme_controller, mock_theme_manager):
+    """Test that GalleryQuickWidget theme is applied correctly."""
+    controller, ui, _ = window_theme_controller
+    
+    # Create a mock GalleryQuickWidget
+    mock_grid_view = MagicMock(spec=GalleryQuickWidget)
+    ui.grid_view = mock_grid_view
+    
+    # Trigger theme application
+    controller._apply_colors(LIGHT_THEME)
+    
+    # Verify apply_theme was called with correct colors
+    mock_grid_view.apply_theme.assert_called_with(LIGHT_THEME)
+
+
+def test_gallery_grid_view_attribute_check(window_theme_controller, mock_theme_manager):
+    """Test that code correctly checks for grid_view attribute."""
+    controller, ui, _ = window_theme_controller
+    
+    # Case 1: grid_view attribute doesn't exist
+    if hasattr(ui, 'grid_view'):
+        delattr(ui, 'grid_view')
+    
+    # Should not raise an exception
+    controller._apply_colors(LIGHT_THEME)
+    
+    # Case 2: grid_view is not a GalleryQuickWidget
+    ui.grid_view = MagicMock()  # Not a GalleryQuickWidget
+    controller._apply_colors(LIGHT_THEME)
+    
+    # Verify apply_theme was not called (since it's not a GalleryQuickWidget)
+    if hasattr(ui.grid_view, 'apply_theme'):
+        assert not ui.grid_view.apply_theme.called
+
+
+def test_gallery_grid_view_theme_on_theme_change(window_theme_controller, mock_theme_manager):
+    """Test that GalleryQuickWidget theme updates when theme changes."""
+    controller, ui, _ = window_theme_controller
+    
+    # Create a mock GalleryQuickWidget
+    mock_grid_view = MagicMock(spec=GalleryQuickWidget)
+    ui.grid_view = mock_grid_view
+    
+    # Switch to dark theme
+    mock_theme_manager.current_colors.return_value = DARK_THEME
+    controller._on_theme_changed(True)
+    
+    # Verify apply_theme was called with dark theme colors
+    # The call_args_list will have multiple calls, we need the most recent one
+    calls = mock_grid_view.apply_theme.call_args_list
+    assert len(calls) > 0
+    # Check that one of the calls used DARK_THEME
+    assert any(call[0][0] == DARK_THEME for call in calls)
+
+
+def test_gallery_grid_view_isinstance_check(window_theme_controller, mock_theme_manager):
+    """Test that code correctly uses isinstance check for GalleryQuickWidget."""
+    controller, ui, _ = window_theme_controller
+    
+    # Create a real-looking mock that passes isinstance check
+    mock_grid_view = MagicMock(spec=GalleryQuickWidget)
+    mock_grid_view.__class__ = GalleryQuickWidget
+    ui.grid_view = mock_grid_view
+    
+    # Apply colors
+    controller._apply_colors(LIGHT_THEME)
+    
+    # Verify the method was called
+    mock_grid_view.apply_theme.assert_called_with(LIGHT_THEME)

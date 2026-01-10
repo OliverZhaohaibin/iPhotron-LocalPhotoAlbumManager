@@ -15,7 +15,7 @@ from PySide6.QtCore import (
     Signal,
     QUrl,
 )
-from PySide6.QtGui import QImage, QPalette, QPixmap, QColor, QSurfaceFormat
+from PySide6.QtGui import QImage, QPalette, QPixmap, QColor, QSurfaceFormat, QPainter
 from PySide6.QtQuick import QQuickImageProvider
 from PySide6.QtQuickWidgets import QQuickWidget
 
@@ -81,7 +81,7 @@ class GalleryQuickWidget(QQuickWidget):
         self.setFormat(surface_format)
 
         self.setResizeMode(QQuickWidget.ResizeMode.SizeRootObjectToView)
-        base_color = self.palette().color(QPalette.ColorRole.Window)
+        base_color = self._opaque_color(self.palette().color(QPalette.ColorRole.Window))
         self.setClearColor(base_color)
         self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent, True)
 
@@ -153,14 +153,16 @@ class GalleryQuickWidget(QQuickWidget):
         """Apply theme colors to both the widget and underlying QML."""
 
         self._theme_colors = colors
-        self._apply_background_color(colors.window_background)
+        opaque_background = self._opaque_color(colors.window_background)
+        self._apply_background_color(opaque_background)
+        self.setClearColor(opaque_background)
         self._sync_theme_to_qml()
-        self.setClearColor(colors.window_background)
 
     def _apply_background_color(self, color: QColor) -> None:
         palette = self.palette()
-        palette.setColor(QPalette.ColorRole.Window, color)
-        palette.setColor(QPalette.ColorRole.Base, color)
+        opaque_color = self._opaque_color(color)
+        palette.setColor(QPalette.ColorRole.Window, opaque_color)
+        palette.setColor(QPalette.ColorRole.Base, opaque_color)
         self.setPalette(palette)
         self.setAutoFillBackground(True)
 
@@ -175,7 +177,7 @@ class GalleryQuickWidget(QQuickWidget):
         self._qml_signals_connected = False
         root = self.rootObject()
         if root is not None and self._theme_colors is None:
-            base_color = self.palette().color(QPalette.ColorRole.Window)
+            base_color = self._opaque_color(self.palette().color(QPalette.ColorRole.Window))
             self.setClearColor(base_color)
             root.setProperty("backgroundColor", base_color)
             root.setProperty("itemBackgroundColor", base_color)
@@ -305,13 +307,28 @@ class GalleryQuickWidget(QQuickWidget):
             return
 
         colors = self._theme_colors
-        item_bg = colors.window_background.darker(115 if colors.is_dark else 105)
+        background_color = self._opaque_color(colors.window_background)
+        item_bg = self._opaque_color(colors.window_background.darker(115 if colors.is_dark else 105))
 
-        self.setClearColor(colors.window_background)
-        root.setProperty("backgroundColor", colors.window_background)
+        self.setClearColor(background_color)
+        root.setProperty("backgroundColor", background_color)
         root.setProperty("itemBackgroundColor", item_bg)
         root.setProperty("selectionBorderColor", colors.accent_color)
         root.setProperty("currentBorderColor", colors.text_primary)
+
+    @staticmethod
+    def _opaque_color(color: QColor) -> QColor:
+        if color.alpha() >= 255:
+            return color
+        opaque_color = QColor(color)
+        opaque_color.setAlpha(255)
+        return opaque_color
+
+    def paintEvent(self, event) -> None:  # type: ignore[override]
+        painter = QPainter(self)
+        painter.fillRect(self.rect(), self.palette().color(QPalette.ColorRole.Window))
+        painter.end()
+        super().paintEvent(event)
 
 
 __all__ = ["GalleryQuickWidget"]

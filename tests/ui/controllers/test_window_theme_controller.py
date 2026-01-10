@@ -52,11 +52,16 @@ class StubUi(QObject):
         self.selection_button = make_widget("selectionButton", QToolButton)
         self.status_bar = make_widget("chromeStatusBar")
 
+        # --- Content containers ---
+        self.view_stack = make_widget("viewStack")
+        self.gallery_page = make_widget("galleryPage")
+        self.map_page = make_widget("mapPage")
+
         # --- Sidebar ---
         self.sidebar = make_widget("albumSidebar")
 
         # --- Detail/Edit View ---
-        self.detail_page = MagicMock()
+        self.detail_page = make_widget("detailPage")
         self.detail_page.edit_container = make_widget("editPage")
 
         self.image_viewer = MagicMock()
@@ -138,6 +143,18 @@ def test_initialization(window_theme_controller, mock_theme_manager):
     # 2. Window title label color
     expected_fg = LIGHT_THEME.text_primary.name()
     assert f"color: {expected_fg}" in ui.window_title_label.setStyleSheet.call_args[0][0]
+
+
+def test_primary_containers_receive_background(window_theme_controller):
+    """Ensure stacked pages paint opaque backgrounds."""
+    _, ui, _ = window_theme_controller
+
+    for name in ("view_stack", "gallery_page", "map_page", "detail_page"):
+        widget = getattr(ui, name)
+        widget.setAutoFillBackground.assert_called_with(True)
+        palette = widget.setPalette.call_args[0][0]
+        assert palette.color(QPalette.ColorRole.Window) == LIGHT_THEME.window_background
+        assert palette.color(QPalette.ColorRole.Base) == LIGHT_THEME.window_background
 
 
 def test_theme_change_handler(window_theme_controller, mock_theme_manager):

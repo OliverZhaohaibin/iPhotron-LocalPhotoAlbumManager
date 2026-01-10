@@ -3,6 +3,7 @@ import QtQuick.Controls 2.15
 
 Rectangle {
     id: root
+    anchors.fill: parent
     color: backgroundColor
 
     // Signals to communicate with Python controller

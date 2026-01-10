@@ -108,6 +108,16 @@ class WindowThemeController(QObject):
         if isinstance(grid_view, GalleryQuickWidget):
             grid_view.apply_theme(colors)
 
+        opaque_bg = colors.window_background
+        for widget_name in ("view_stack", "gallery_page", "map_page", "detail_page"):
+            widget = getattr(self._ui, widget_name, None)
+            if widget is not None:
+                widget.setAutoFillBackground(True)
+                palette = widget.palette()
+                palette.setColor(QPalette.ColorRole.Window, opaque_bg)
+                palette.setColor(QPalette.ColorRole.Base, opaque_bg)
+                widget.setPalette(palette)
+
         # Sidebar (Navigation)
         # Apply theme-aware background to ensure visual hierarchy (Light Blue in Light Mode, Gray in Dark Mode).
         sidebar_bg = colors.sidebar_background.name()

@@ -18,6 +18,9 @@ class GalleryPageWidget(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
 
+        # Force a native window to improve composition with QQuickWidget
+        self.setAttribute(Qt.WidgetAttribute.WA_NativeWindow, True)
+
         self.grid_view = GalleryQuickWidget()
         self.grid_view.setObjectName("galleryGridView")
         layout.addWidget(self.grid_view)

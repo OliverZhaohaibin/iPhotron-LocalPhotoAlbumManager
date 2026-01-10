@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 from pathlib import Path
 from typing import Callable, List, Optional, TYPE_CHECKING
@@ -9,7 +10,7 @@ from typing import Callable, List, Optional, TYPE_CHECKING
 from PySide6.QtCore import QModelIndex, QPoint, QSize, Qt, QUrl, Signal, Slot
 from PySide6.QtGui import QColor, QImage, QPalette, QPixmap, QSurfaceFormat
 from PySide6.QtQml import QQmlApplicationEngine
-from PySide6.QtQuick import QQuickImageProvider
+from PySide6.QtQuick import QQuickImageProvider, QQuickWindow
 from PySide6.QtQuickWidgets import QQuickWidget
 
 if TYPE_CHECKING:
@@ -54,7 +55,7 @@ class ThumbnailImageProvider(QQuickImageProvider):
                 return placeholder
         except Exception:
             # Fallback for any error during lookup
-            pass
+            logging.exception("Error loading thumbnail for id: %s", id)
 
         # Return empty pixmap as fallback
         return QPixmap()
@@ -77,7 +78,7 @@ class GalleryQuickWidget(QQuickWidget):
     def __init__(self, parent=None) -> None:  # type: ignore[override]
         super().__init__(parent)
 
-        # Disable alpha buffer to prevent transparency issues with DWM
+        # Enable 8-bit alpha buffer for proper blending and to avoid transparency issues with DWM
         fmt = QSurfaceFormat()
         fmt.setAlphaBufferSize(8)
         self.setFormat(fmt)
@@ -121,7 +122,9 @@ class GalleryQuickWidget(QQuickWidget):
 
         # Connect to the status changed signal for error handling
         self.statusChanged.connect(self._on_status_changed)
-        self.quickWindow().sceneGraphError.connect(self._on_scene_graph_error)
+        quick_window = self.quickWindow()
+        if quick_window is not None:
+            quick_window.sceneGraphError.connect(self._on_scene_graph_error)
 
         # Connect QML signals to Python after component loads
         self._connect_qml_signals()

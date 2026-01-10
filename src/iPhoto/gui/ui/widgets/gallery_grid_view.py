@@ -22,7 +22,6 @@ if TYPE_CHECKING:
 # so force a software renderer on Windows to avoid GPU backend conflicts.
 if sys.platform.startswith("win"):
     QQuickWindow.setGraphicsApi(QSGRendererInterface.GraphicsApi.Software)
-    QQuickWidget.setGraphicsApi(QSGRendererInterface.GraphicsApi.Software)
 
 class ThumbnailImageProvider(QQuickImageProvider):
     """QML image provider that serves thumbnails from the asset model's cache."""

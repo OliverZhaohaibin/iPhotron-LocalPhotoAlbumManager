@@ -59,7 +59,11 @@ class ThumbnailImageProvider(QQuickImageProvider):
             pass
 
         # Return empty pixmap as fallback
-        return QPixmap()
+        # Debug: Return Red pixmap on failure to see if rendering works
+        print("DEBUG: Returning RED placeholder pixmap")
+        red = QPixmap(100, 100)
+        red.fill(QColor("red"))
+        return red
 
 
 class GalleryQuickWidget(QQuickWidget):
@@ -304,6 +308,7 @@ class GalleryQuickWidget(QQuickWidget):
 
     def apply_theme(self, colors: "ThemeColors") -> None:
         """Apply theme colors to the QML view."""
+        print(f"DEBUG: apply_theme called with bg={colors.window_background.name()}")
         self._theme_colors = colors
 
         # Apply background color to the widget

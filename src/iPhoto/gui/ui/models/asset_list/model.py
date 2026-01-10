@@ -227,7 +227,10 @@ class AssetListModel(QAbstractListModel):
         rows = self._state_manager.rows
         if not index.isValid() or not (0 <= index.row() < len(rows)):
             return None
-        return self._row_adapter.data(rows[index.row()], role)
+        val = self._row_adapter.data(rows[index.row()], role)
+        if role == Roles.REL and index.row() < 5:
+            print(f"DEBUG: AssetListModel.data({index.row()}, REL) -> {val!r}")
+        return val
 
     def roleNames(self) -> Dict[int, bytes]:  # type: ignore[override]
         return role_names(super().roleNames())

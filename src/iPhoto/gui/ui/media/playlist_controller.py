@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Optional
 
 from PySide6.QtCore import QObject, QModelIndex, Signal
 
 from ..models.asset_model import AssetModel, Roles
+from ....utils.pathutils import normalise_for_compare
+
+logger = logging.getLogger(__name__)
 
 
 class PlaylistController(QObject):
@@ -144,6 +148,41 @@ class PlaylistController(QObject):
         if row is None:
             return False
         return self.set_current(row) is not None
+
+    def set_current_by_path(self, path: Path) -> bool:
+        """Select the asset identified by *path* when it exists in the model."""
+
+        if self._model is None:
+            return False
+
+        try:
+            target = normalise_for_compare(path)
+        except (TypeError, ValueError, OSError) as exc:
+            logger.debug("Skipping invalid target path %r in playlist: %s", path, exc)
+            return False
+
+        current = self.current_source()
+        if current is not None:
+            try:
+                if normalise_for_compare(current) == target:
+                    return True
+            except (TypeError, ValueError, OSError) as exc:
+                logger.debug("Skipping invalid current path %r in playlist: %s", current, exc)
+
+        count = self._model.rowCount()
+        for row in range(count):
+            index = self._model.index(row, 0)
+            raw = index.data(Roles.ABS)
+            if not raw:
+                continue
+            try:
+                candidate = normalise_for_compare(Path(raw))
+            except (TypeError, ValueError, OSError) as exc:
+                logger.debug("Skipping invalid path data %r in playlist: %s", raw, exc)
+                continue
+            if candidate == target:
+                return self.set_current(row) is not None
+        return False
 
     def previous_row(self) -> int:
         """Return the previously active row, or ``-1`` if unavailable."""

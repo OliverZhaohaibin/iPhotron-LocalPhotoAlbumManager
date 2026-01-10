@@ -151,6 +151,8 @@ class MainController(QObject):
         self._facade.loadStarted.connect(self._status_bar.handle_load_started)
         self._facade.loadProgress.connect(self._status_bar.handle_load_progress)
         self._facade.loadFinished.connect(self._status_bar.handle_load_finished)
+        self._facade.loadStarted.connect(self._edit_controller.handle_model_reload_started)
+        self._facade.loadFinished.connect(self._edit_controller.handle_model_reload_finished)
 
         import_service = self._facade.import_service
         import_service.importStarted.connect(self._status_bar.handle_import_started)

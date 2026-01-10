@@ -12,6 +12,7 @@ from PySide6.QtGui import QImage
 from ....io import sidecar
 from ....core.bw_resolver import BWParams
 from ....settings import SettingsManager
+from ....utils.pathutils import normalise_for_compare
 from ..models.asset_model import AssetModel
 from ..models.edit_session import EditSession
 from .edit_history_manager import EditHistoryManager
@@ -146,6 +147,8 @@ class EditController(QObject):
 
         self._session: Optional[EditSession] = None
         self._current_source: Optional[Path] = None
+        self._suppress_playlist_changes = False
+        self._guarded_reload_roots: set[Path] = set()
         self._compare_active = False
         # ``_active_adjustments`` caches the resolved shader values representing the
         # most recent session state.  Storing the mapping lets compare mode and
@@ -374,6 +377,8 @@ class EditController(QObject):
         if self._theme_controller:
             self._theme_controller.restore_global_theme()
 
+        self._suppress_playlist_changes = False
+        self._guarded_reload_roots.clear()
         self._preview_manager.cancel_pending_updates()
         if self._is_loading_edit_image:
             self._is_loading_edit_image = False
@@ -685,8 +690,73 @@ class EditController(QObject):
         self._current_mode.enter()
 
     def _handle_playlist_change(self) -> None:
-        if self._view_controller.is_edit_view_active():
-            self.leave_edit_mode()
+        if not self._view_controller.is_edit_view_active():
+            return
+        if self._suppress_playlist_changes:
+            return
+        playlist_source = self._playlist.current_source()
+        if playlist_source is not None and self._current_source is not None:
+            if self._paths_equal(playlist_source, self._current_source):
+                return
+        self.leave_edit_mode()
+
+    @Slot(Path)
+    def handle_model_reload_started(self, root: Path) -> None:
+        """Ignore playlist churn when the current album reloads during editing."""
+
+        if not self._view_controller.is_edit_view_active():
+            return
+        album_root = self._current_album_root()
+        if album_root is None:
+            return
+        if not self._paths_equal(album_root, root):
+            return
+        self._guarded_reload_roots.add(root)
+        self._suppress_playlist_changes = True
+
+    @Slot(Path, bool)
+    def handle_model_reload_finished(self, root: Path, success: bool) -> None:
+        """Restore the edited asset after a background reload completes."""
+
+        if not self._guarded_reload_roots:
+            return
+
+        matching = {candidate for candidate in self._guarded_reload_roots if self._paths_equal(root, candidate)}
+        if not matching:
+            return
+        self._guarded_reload_roots.difference_update(matching)
+        if not self._guarded_reload_roots:
+            self._suppress_playlist_changes = False
+
+        if not self._view_controller.is_edit_view_active():
+            return
+        album_root = self._current_album_root()
+        if album_root is None or not self._paths_equal(album_root, root):
+            return
+        if not success:
+            self.leave_edit_mode(animate=False)
+            return
+        if self._current_source and self._playlist.set_current_by_path(self._current_source):
+            return
+        # If the active asset vanished during the reload, exit edit mode to avoid
+        # leaving the UI bound to stale state.
+        self.leave_edit_mode(animate=False)
+
+    def _current_album_root(self) -> Optional[Path]:
+        source_model = self._asset_model.source_model()
+        try:
+            return source_model.album_root()
+        except AttributeError:
+            return None
+
+    @staticmethod
+    def _paths_equal(left: Path, right: Path) -> bool:
+        try:
+            return normalise_for_compare(left) == normalise_for_compare(right)
+        except (OSError, TypeError) as exc:
+            _LOGGER.debug("Falling back to string comparison for %s and %s: %s", left, right, exc)
+            return str(left) == str(right)
+
     def set_navigation_controller(self, navigation: "NavigationController") -> None:
         """Attach the navigation controller after construction.
 

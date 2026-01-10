@@ -10,12 +10,16 @@ from typing import Callable, List, Optional, TYPE_CHECKING
 from PySide6.QtCore import QModelIndex, QPoint, QSize, Qt, QUrl, Signal, Slot
 from PySide6.QtGui import QColor, QImage, QPalette, QPixmap, QSurfaceFormat
 from PySide6.QtQml import QQmlApplicationEngine
-from PySide6.QtQuick import QQuickImageProvider, QQuickWindow
+from PySide6.QtQuick import QQuickImageProvider, QQuickWindow, QSGRendererInterface
 from PySide6.QtQuickWidgets import QQuickWidget
 
 if TYPE_CHECKING:
     from ..theme_manager import ThemeColors
 
+# QQuickWidget defaults to the platform's scene graph backend (Direct3D on Windows).
+# Frameless, translucent windows render the gallery as a black rectangle under D3D,
+# so force the OpenGL path to ensure thumbnails are painted.
+QQuickWindow.setGraphicsApi(QSGRendererInterface.GraphicsApi.OpenGL)
 
 class ThumbnailImageProvider(QQuickImageProvider):
     """QML image provider that serves thumbnails from the asset model's cache."""

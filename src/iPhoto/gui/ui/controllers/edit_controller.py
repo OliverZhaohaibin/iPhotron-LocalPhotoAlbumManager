@@ -148,7 +148,7 @@ class EditController(QObject):
         self._session: Optional[EditSession] = None
         self._current_source: Optional[Path] = None
         self._suppress_playlist_changes = False
-        self._guarded_reload_root: Optional[Path] = None
+        self._guarded_reload_roots: set[Path] = set()
         self._compare_active = False
         # ``_active_adjustments`` caches the resolved shader values representing the
         # most recent session state.  Storing the mapping lets compare mode and
@@ -378,7 +378,7 @@ class EditController(QObject):
             self._theme_controller.restore_global_theme()
 
         self._suppress_playlist_changes = False
-        self._guarded_reload_root = None
+        self._guarded_reload_roots.clear()
         self._preview_manager.cancel_pending_updates()
         if self._is_loading_edit_image:
             self._is_loading_edit_image = False
@@ -711,21 +711,30 @@ class EditController(QObject):
             return
         if not self._paths_equal(album_root, root):
             return
+        self._guarded_reload_roots.add(root)
         self._suppress_playlist_changes = True
-        self._guarded_reload_root = root
 
     @Slot(Path, bool)
-    def handle_model_reload_finished(self, root: Path, _success: bool) -> None:
+    def handle_model_reload_finished(self, root: Path, success: bool) -> None:
         """Restore the edited asset after a background reload completes."""
 
-        if self._guarded_reload_root is None:
+        if not self._guarded_reload_roots:
             return
-        if not self._paths_equal(root, self._guarded_reload_root):
+
+        matching = {candidate for candidate in self._guarded_reload_roots if self._paths_equal(root, candidate)}
+        if not matching:
             return
-        self._guarded_reload_root = None
-        self._suppress_playlist_changes = False
+        self._guarded_reload_roots.difference_update(matching)
+        if not self._guarded_reload_roots:
+            self._suppress_playlist_changes = False
 
         if not self._view_controller.is_edit_view_active():
+            return
+        album_root = self._current_album_root()
+        if album_root is None or not self._paths_equal(album_root, root):
+            return
+        if not success:
+            self.leave_edit_mode(animate=False)
             return
         if self._current_source and self._playlist.set_current_by_path(self._current_source):
             return

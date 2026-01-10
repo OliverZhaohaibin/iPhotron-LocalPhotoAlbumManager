@@ -155,10 +155,19 @@ class PlaylistController(QObject):
         if self._model is None:
             return False
 
-        target = normalise_for_compare(path)
+        try:
+            target = normalise_for_compare(path)
+        except (TypeError, ValueError, OSError) as exc:
+            logger.debug("Skipping invalid target path %r in playlist: %s", path, exc)
+            return False
+
         current = self.current_source()
-        if current is not None and normalise_for_compare(current) == target:
-            return True
+        if current is not None:
+            try:
+                if normalise_for_compare(current) == target:
+                    return True
+            except (TypeError, ValueError, OSError) as exc:
+                logger.debug("Skipping invalid current path %r in playlist: %s", current, exc)
 
         count = self._model.rowCount()
         for row in range(count):

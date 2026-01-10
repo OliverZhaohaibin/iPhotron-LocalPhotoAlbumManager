@@ -8,7 +8,17 @@ import sys
 from pathlib import Path
 from typing import Callable, List, Optional, TYPE_CHECKING
 
-from PySide6.QtCore import QModelIndex, QPoint, QSize, Qt, QUrl, Signal, Slot, QMetaObject
+from PySide6.QtCore import (
+    QModelIndex,
+    QPoint,
+    QSize,
+    Qt,
+    QUrl,
+    Signal,
+    Slot,
+    QMetaObject,
+    QObject,
+)
 from PySide6.QtGui import QColor, QImage, QPalette, QPixmap, QSurfaceFormat
 from PySide6.QtQml import QQmlApplicationEngine
 from PySide6.QtQuick import QQuickImageProvider, QQuickWindow, QSGRendererInterface
@@ -246,7 +256,11 @@ class GalleryQuickWidget(QQuickWidget):
         # Refresh visible rows so streaming thumbnails start immediately.
         root = self.rootObject()
         if root is not None:
-            QMetaObject.invokeMethod(root, "updateVisibleRows", Qt.ConnectionType.QueuedConnection)
+            grid_obj = root.findChild(QObject, "galleryGrid")
+            if grid_obj is not None:
+                QMetaObject.invokeMethod(
+                    grid_obj, "updateVisibleRows", Qt.ConnectionType.QueuedConnection
+                )
 
     def _on_model_reset(self) -> None:
         """Handle model reset."""

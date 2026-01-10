@@ -55,6 +55,7 @@ Rectangle {
 
     GridView {
         id: grid
+        objectName: "galleryGrid"
         anchors.fill: parent
         anchors.margins: 0
         focus: true
@@ -121,9 +122,9 @@ Rectangle {
                 Rectangle {
                     anchors.fill: parent
                     color: "transparent"
-                    border.color: model.isCurrent && !model.isSelected ? root.currentBorderColor : root.selectionBorderColor
+                    border.color: (model.isCurrent === true && model.isSelected !== true) ? root.currentBorderColor : root.selectionBorderColor
                     border.width: 3
-                    visible: model.isSelected || model.isCurrent
+                    visible: (model.isSelected === true) || (model.isCurrent === true)
                     z: 2
                 }
 
@@ -131,7 +132,7 @@ Rectangle {
                 Image {
                     id: thumb
                     anchors.fill: parent
-                    anchors.margins: (model.isSelected || model.isCurrent) ? 3 : 0
+                    anchors.margins: (model.isSelected === true || model.isCurrent === true) ? 3 : 0
                     fillMode: Image.PreserveAspectCrop
                     asynchronous: true
                     cache: false
@@ -153,12 +154,12 @@ Rectangle {
                         height: durationLabel.height + 4
                         radius: 4
                         color: "#80000000"
-                        visible: model.isVideo
+                        visible: model.isVideo === true
 
                         Text {
                             id: durationLabel
                             anchors.centerIn: parent
-                            text: grid.formatDuration(model.info.dur)
+                            text: grid.formatDuration(model.info && model.info.dur)
                             color: "white"
                             font.pixelSize: 10
                         }
@@ -173,7 +174,7 @@ Rectangle {
                         height: 16
                         radius: 8
                         color: "#80000000"
-                        visible: model.isLive
+                        visible: model.isLive === true
 
                         Rectangle {
                             anchors.centerIn: parent
@@ -218,8 +219,5 @@ Rectangle {
             }
         }
 
-        ScrollBar.vertical: ScrollBar {
-            active: true
-        }
     }
 }

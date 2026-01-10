@@ -2,6 +2,9 @@
 import io
 from PIL import Image
 from iPhoto.utils.image_loader import generate_micro_thumbnail
+import tempfile
+import os
+from pathlib import Path
 
 def create_test_image_with_exif(orientation=6):
     """
@@ -21,15 +24,12 @@ def test_generate_micro_thumbnail_preserves_orientation():
     source_buf = create_test_image_with_exif(orientation=6)
 
     # Write to a temporary file
-    import tempfile
-    import os
 
     with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
         tmp.write(source_buf.getvalue())
         tmp_path = tmp.name
 
     try:
-        from pathlib import Path
         thumb_bytes = generate_micro_thumbnail(Path(tmp_path))
 
         assert thumb_bytes is not None

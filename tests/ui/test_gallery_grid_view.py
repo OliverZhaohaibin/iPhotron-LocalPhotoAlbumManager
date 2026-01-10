@@ -1,10 +1,12 @@
+"""Unit tests for GalleryQuickWidget theme functionality."""
+
+from unittest.mock import MagicMock, patch
 import pytest
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QStandardItem, QStandardItemModel, QPixmap
+from PySide6.QtGui import QColor, QPalette, QPixmap, QStandardItem, QStandardItemModel
 from PySide6.QtWidgets import QApplication
 
-from src.iPhoto.gui.ui.widgets.gallery_grid_view import GalleryGridView
-from src.iPhoto.gui.ui.widgets.asset_delegate import AssetGridDelegate
+from src.iPhoto.gui.ui.widgets.gallery_grid_view import GalleryQuickWidget
 from src.iPhoto.gui.ui.models.roles import Roles
 
 # Attempt to patch load_icon in asset_delegate if it exists
@@ -21,6 +23,7 @@ def patch_delegate_icons(monkeypatch):
     except (ImportError, AttributeError) as e:
         print(f"patch_delegate_icons: Could not patch load_icon: {e}")
 
+
 @pytest.fixture(scope="module")
 def qapp_instance():
     import os
@@ -30,121 +33,114 @@ def qapp_instance():
         app = QApplication([])
     yield app
 
-def test_gallery_responsive_layout(qapp_instance, monkeypatch):
-    patch_delegate_icons(monkeypatch)
 
-    # Setup view
-    view = GalleryGridView()
-    delegate = AssetGridDelegate(view)
-    view.setItemDelegate(delegate)
+@pytest.fixture
+def gallery_widget(qapp_instance):
+    """Create a GalleryQuickWidget for testing."""
+    widget = GalleryQuickWidget()
+    yield widget
+    widget.deleteLater()
 
+
+def test_gallery_quick_widget_initialization(gallery_widget):
+    """Test that GalleryQuickWidget initializes correctly."""
+    assert gallery_widget._model is None
+    assert gallery_widget._theme_colors is None
+    assert gallery_widget._selection_mode_enabled is False
+    assert gallery_widget._preview_enabled is True
+    assert gallery_widget._external_drop_enabled is False
+
+
+def test_gallery_quick_widget_selection_mode(gallery_widget):
+    """Test that selection mode can be toggled."""
+    # Initially disabled
+    assert gallery_widget.selection_mode_active() is False
+
+    # Enable selection mode
+    gallery_widget.set_selection_mode_enabled(True)
+    assert gallery_widget.selection_mode_active() is True
+
+    # Disable selection mode
+    gallery_widget.set_selection_mode_enabled(False)
+    assert gallery_widget.selection_mode_active() is False
+
+
+def test_gallery_quick_widget_preview_enabled(gallery_widget):
+    """Test that preview can be enabled/disabled."""
+    # Initially enabled
+    assert gallery_widget.preview_enabled() is True
+
+    # Disable preview
+    gallery_widget.set_preview_enabled(False)
+    assert gallery_widget.preview_enabled() is False
+
+    # Enable preview
+    gallery_widget.set_preview_enabled(True)
+    assert gallery_widget.preview_enabled() is True
+
+
+def test_gallery_quick_widget_configure_external_drop(gallery_widget):
+    """Test external drop configuration."""
+    # Initially disabled
+    assert gallery_widget._external_drop_enabled is False
+    assert gallery_widget._drop_handler is None
+    assert gallery_widget._drop_validator is None
+
+    # Configure with handler
+    handler = MagicMock()
+    validator = MagicMock()
+    gallery_widget.configure_external_drop(handler=handler, validator=validator)
+
+    assert gallery_widget._external_drop_enabled is True
+    assert gallery_widget._drop_handler is handler
+    assert gallery_widget._drop_validator is validator
+
+    # Disable by setting handler to None
+    gallery_widget.configure_external_drop(handler=None)
+    assert gallery_widget._external_drop_enabled is False
+
+
+def test_gallery_quick_widget_set_model(qapp_instance, gallery_widget):
+    """Test setting a model on the gallery widget."""
     model = QStandardItemModel()
-    for i in range(12):
+    for i in range(3):
         item = QStandardItem()
-        item.setData(False, Roles.IS_SPACER)
-        pix = QPixmap(100, 100)
-        pix.fill(Qt.red)
-        item.setData(pix, Qt.DecorationRole)
+        item.setData(f"item_{i}", Qt.DisplayRole)
         model.appendRow(item)
 
-    view.setModel(model)
-    view.show()
+    gallery_widget.setModel(model)
+    assert gallery_widget.model() is model
 
-    # Helper to calculate expectation
-    def get_expectations(viewport_w):
-        min_w = GalleryGridView.MIN_ITEM_WIDTH
-        gap = GalleryGridView.ITEM_GAP
-        # Use the safety margin from the implementation
-        safety = GalleryGridView.SAFETY_MARGIN
-        # Code uses safety margin for column count too (Bug fix)
-        avail = viewport_w - safety
-        cols = max(1, int(avail / (min_w + gap)))
-        # Code uses safety margin for cell size calculation
-        cell = int(avail / cols)
-        item = cell - gap
-        return cols, cell, item
 
-    # -------------------------------------------------------------------------
-    # Test Case 1: Standard scaling
-    # -------------------------------------------------------------------------
-    view.resize(800, 1200)
-    qapp_instance.processEvents()
-    view.doItemsLayout()
-    qapp_instance.processEvents()
+def test_gallery_quick_widget_apply_background_color(gallery_widget):
+    """Test that _apply_background_color correctly sets palette colors."""
+    test_color = QColor("#123456")
+    gallery_widget._apply_background_color(test_color)
 
-    vp_w = view.viewport().width()
-    cols, cell, item = get_expectations(vp_w)
+    palette = gallery_widget.palette()
+    assert palette.color(QPalette.ColorRole.Window) == test_color
+    assert palette.color(QPalette.ColorRole.Base) == test_color
 
-    assert view.gridSize().width() == cell
-    assert view.iconSize().width() == item
-    assert delegate._base_size == item
 
-    # Check gap is strictly 2px
-    r0 = view.visualRect(model.index(0, 0))
-    r1 = view.visualRect(model.index(1, 0))
-    gap = r1.x() - (r0.x() + r0.width())
-    assert gap == 2
+def test_gallery_quick_widget_apply_background_color_enables_autofill(gallery_widget):
+    """Test that _apply_background_color enables auto fill background."""
+    test_color = QColor("#123456")
+    gallery_widget._apply_background_color(test_color)
 
-    # -------------------------------------------------------------------------
-    # Test Case 2: Edge case handling (prevent column drop)
-    # Width 784.
-    # -------------------------------------------------------------------------
-    view.resize(784, 1200)
-    qapp_instance.processEvents()
-    view.doItemsLayout()
-    qapp_instance.processEvents()
+    assert gallery_widget.autoFillBackground() is True
 
-    vp_w = view.viewport().width()
-    cols, cell, item = get_expectations(vp_w)
 
-    assert view.gridSize().width() == cell
+def test_gallery_quick_widget_viewport(gallery_widget):
+    """Test that viewport() returns self for compatibility."""
+    assert gallery_widget.viewport() is gallery_widget
 
-    # Verify no wrap (all items up to `cols` are on first row)
-    # index is 0-based. items 0 to cols-1 should be on row 0.
-    last_item_idx = cols - 1
-    r_last = view.visualRect(model.index(last_item_idx, 0))
-    r0 = view.visualRect(model.index(0, 0))
-    assert r_last.y() == r0.y()
 
-    # -------------------------------------------------------------------------
-    # Test Case 3: Expanding back to more columns
-    # -------------------------------------------------------------------------
-    view.resize(790, 1200)
-    qapp_instance.processEvents()
-    view.doItemsLayout()
-    qapp_instance.processEvents()
+def test_gallery_quick_widget_selection_model(gallery_widget):
+    """Test that selectionModel() returns None (selection is QML-managed)."""
+    assert gallery_widget.selectionModel() is None
 
-    vp_w = view.viewport().width()
-    cols, cell, item = get_expectations(vp_w)
 
-    assert view.gridSize().width() == cell
-
-    last_item_idx = cols - 1
-    r_last = view.visualRect(model.index(last_item_idx, 0))
-    r0 = view.visualRect(model.index(0, 0))
-    assert r_last.y() == r0.y()
-
-    # -------------------------------------------------------------------------
-    # Test Case 4: Dead Zone check (Bug Fix Verification)
-    # Width 582px triggers the dead zone where:
-    #   Old logic: 582 / 194 = 3 cols. (582-10)/3 = 190.6 < 192. Reject.
-    #   New logic: (582-10) / 194 = 2 cols. (582-10)/2 = 286. Item 284. Accept.
-    # -------------------------------------------------------------------------
-    view.resize(582, 1200)
-    qapp_instance.processEvents()
-    view.doItemsLayout()
-    qapp_instance.processEvents()
-
-    vp_w = view.viewport().width()
-    cols, cell, item = get_expectations(vp_w)
-
-    # Assert that we DO get an update (item size matches expectation)
-    # If the bug were present, the item size would remain from previous step (Test Case 3)
-    # Test Case 3 ended with ~790px -> 4 cols.
-    # If update rejected, we would still have 4 cols logic on 582px? No, QListView would reflow.
-    # But GridSize would be from Test Case 3 (approx 196px).
-    # New expectation is 2 cols -> Cell ~288px.
-
-    assert cols == 2
-    assert view.gridSize().width() == cell
-    assert view.iconSize().width() == item
+def test_gallery_quick_widget_item_delegate(gallery_widget):
+    """Test that setItemDelegate is a no-op and itemDelegate returns None."""
+    gallery_widget.setItemDelegate(MagicMock())
+    assert gallery_widget.itemDelegate() is None

@@ -170,6 +170,8 @@ class Ui_MainWindow(object):
         right_panel = QWidget()
         right_panel.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         right_panel.setAutoFillBackground(True)
+        # Ensure right_panel is opaque to act as a fallback background
+        right_panel.setStyleSheet("background-color: palette(window);")
         right_layout = QVBoxLayout(right_panel)
         right_layout.setContentsMargins(8, 8, 8, 8)
 

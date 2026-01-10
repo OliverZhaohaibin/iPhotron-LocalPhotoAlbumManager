@@ -18,10 +18,6 @@ class GalleryPageWidget(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
 
-        self.setAutoFillBackground(True)
-        # Debug: Bright pink background to verify opacity
-        self.setStyleSheet("background-color: #ff00ff;")
-
         self.grid_view = GalleryQuickWidget()
         self.grid_view.setObjectName("galleryGridView")
         layout.addWidget(self.grid_view)

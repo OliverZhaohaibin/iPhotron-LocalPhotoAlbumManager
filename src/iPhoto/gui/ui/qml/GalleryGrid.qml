@@ -8,7 +8,7 @@ Rectangle {
     // Backup background to prevent transparency if property binding fails
     Rectangle {
         anchors.fill: parent
-        color: "#00ffff" // DEBUG: Cyan background
+        color: "#2b2b2b"
         z: -100
     }
 
@@ -19,13 +19,6 @@ Rectangle {
     signal showContextMenu(int index, int globalX, int globalY)
     signal visibleRowsChanged(int first, int last)
     signal filesDropped(var urls)
-
-    Component.onCompleted: {
-        console.log("DEBUG: GalleryGrid.qml loaded successfully")
-    }
-
-    onWidthChanged: console.log("DEBUG: GalleryGrid width changed to " + width)
-    onHeightChanged: console.log("DEBUG: GalleryGrid height changed to " + height)
 
     property int minItemWidth: 192
     property int itemGap: 2

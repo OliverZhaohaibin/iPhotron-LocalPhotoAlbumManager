@@ -34,13 +34,11 @@ class ThumbnailImageProvider(QQuickImageProvider):
 
     def requestPixmap(self, id: str, size: QSize, requestedSize: QSize) -> QPixmap:
         """Return the thumbnail pixmap for the given relative path."""
-        print(f"DEBUG: requestPixmap called for {id}")
         try:
             # Parse the id - it includes the rel path and optionally a version query parameter
             rel = id.split('?')[0] if '?' in id else id
 
             if not self._model or not self._cache_manager:
-                print("DEBUG: requestPixmap failed - model or cache manager missing")
                 return QPixmap()
 
             # Try to get from cache first
@@ -77,23 +75,23 @@ class GalleryQuickWidget(QQuickWidget):
     visibleRowsChanged = Signal(int, int)
 
     def __init__(self, parent=None) -> None:  # type: ignore[override]
-        print(f"DEBUG: GalleryQuickWidget.__init__ called. Parent: {parent}")
         super().__init__(parent)
 
         # Disable alpha buffer to prevent transparency issues with DWM
         fmt = QSurfaceFormat()
-        fmt.setAlphaBufferSize(0)
+        fmt.setAlphaBufferSize(8)
         self.setFormat(fmt)
 
         # Configure the widget for opaque rendering
-        self.setAttribute(Qt.WidgetAttribute.WA_AlwaysStackOnTop, False)
+        # WA_AlwaysStackOnTop is required to ensure the QQuickWidget renders correctly
+        # when embedded in a window with WA_TranslucentBackground enabled.
+        self.setAttribute(Qt.WidgetAttribute.WA_AlwaysStackOnTop, True)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, False)
         self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent, True)
         self.setAutoFillBackground(True)
 
         # Force a clear color immediately to prevent transparency during initialization
-        # DEBUG: Green clear color
-        self.setClearColor(QColor("#00ff00"))
+        self.setClearColor(QColor("#2b2b2b"))
 
         # Set resize mode to follow widget size
         self.setResizeMode(QQuickWidget.ResizeMode.SizeRootObjectToView)
@@ -130,19 +128,13 @@ class GalleryQuickWidget(QQuickWidget):
 
     def _on_status_changed(self, status: QQuickWidget.Status) -> None:
         """Handle status changes during QML loading."""
-        print(f"DEBUG: GalleryQuickWidget status changed to: {status}")
         if status == QQuickWidget.Status.Error:
             for error in self.errors():
                 print(f"QML Error: {error.toString()}")
 
     def _on_scene_graph_error(self, error: QQuickWindow.SceneGraphError, message: str) -> None:
         """Handle OpenGL errors from the scene graph."""
-        print(f"DEBUG: SceneGraph Error ({error}): {message}")
-
-    def paintEvent(self, event) -> None:
-        """Debug paint event."""
-        # print("DEBUG: GalleryQuickWidget paintEvent")  # Too spammy usually, uncomment if needed
-        super().paintEvent(event)
+        print(f"SceneGraph Error ({error}): {message}")
 
     def _connect_qml_signals(self) -> None:
         """Connect QML signals to Python slots."""
@@ -219,7 +211,6 @@ class GalleryQuickWidget(QQuickWidget):
 
     def setModel(self, model) -> None:  # type: ignore[override]
         """Set the data model for the grid view."""
-        print(f"DEBUG: GalleryQuickWidget.setModel called with {model}")
         self._model = model
 
         # Update the thumbnail provider with the model
@@ -305,7 +296,6 @@ class GalleryQuickWidget(QQuickWidget):
 
     def apply_theme(self, colors: "ThemeColors") -> None:
         """Apply theme colors to the QML view."""
-        print(f"DEBUG: apply_theme called with bg={colors.window_background.name()}")
         self._theme_colors = colors
 
         # Apply background color to the widget

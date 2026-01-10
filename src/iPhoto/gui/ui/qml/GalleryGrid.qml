@@ -3,7 +3,14 @@ import QtQuick.Controls 2.15
 
 Rectangle {
     id: root
-    color: backgroundColor
+    color: backgroundColor || "#2b2b2b"
+
+    // Backup background to prevent transparency if property binding fails
+    Rectangle {
+        anchors.fill: parent
+        color: "#2b2b2b"
+        z: -100
+    }
 
     // Signals to communicate with Python controller
     signal itemClicked(int index, int modifiers)

@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QVBoxLayout, QWidget
 
-from .gallery_grid_view import GalleryGridView
+from .gallery_grid_view import GalleryQuickWidget
 
 
 class GalleryPageWidget(QWidget):
@@ -18,7 +19,7 @@ class GalleryPageWidget(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
 
-        self.grid_view = GalleryGridView()
+        self.grid_view = GalleryQuickWidget()
         self.grid_view.setObjectName("galleryGridView")
         layout.addWidget(self.grid_view)
 

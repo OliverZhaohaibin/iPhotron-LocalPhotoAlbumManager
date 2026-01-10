@@ -175,6 +175,22 @@ class WindowThemeController(QObject):
             self._rounded_window_shell.setPalette(rounded_palette)
             self._rounded_window_shell.set_override_color(colors.window_background)
 
+        # Ensure stacked views paint an opaque background (frameless windows on Windows treat
+        # unpainted regions as transparent).
+        for widget in (
+            getattr(self._ui, "view_stack", None),
+            getattr(self._ui, "gallery_page", None),
+            getattr(self._ui, "map_page", None),
+            getattr(self._ui, "detail_page", None),
+        ):
+            if widget is None:
+                continue
+            widget.setAutoFillBackground(True)
+            widget_palette = widget.palette()
+            widget_palette.setColor(QPalette.ColorRole.Window, colors.window_background)
+            widget_palette.setColor(QPalette.ColorRole.Base, colors.window_background)
+            widget.setPalette(widget_palette)
+
         # 2. Update Edit Container
         # The edit container always needs to look dark-ish, but if we are in Light Mode,
         # it is hidden. When in Edit Mode, force_dark is True, so `colors` IS Dark Theme.

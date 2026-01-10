@@ -124,7 +124,12 @@ Rectangle {
                     cache: false
 
                     // Bind source to rel AND revision to force reload
-                    source: "image://thumbnails/" + model.rel + "?v=" + model.thumbnailRev
+                    // Use default values to prevent undefined errors
+                    source: {
+                        var relPath = model.rel || ""
+                        var rev = model.thumbnailRev || 0
+                        return "image://thumbnails/" + relPath + "?v=" + rev
+                    }
 
                     // Video duration badge
                     Rectangle {

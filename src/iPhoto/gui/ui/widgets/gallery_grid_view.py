@@ -248,18 +248,38 @@ class GalleryQuickWidget(QQuickWidget):
         """Clear all selection in the grid."""
         if self._model is None:
             return
+
         # Import Roles here to avoid circular imports
         from ..models.roles import Roles
-        # Clear is_selected flag on all rows
-        for row in range(self._model.rowCount()):
-            index = self._model.index(row, 0)
-            self._model.setData(index, False, Roles.IS_SELECTED)
+
+        # Get the source model if this is a proxy model
+        source_model = self._model
+        if hasattr(self._model, 'sourceModel'):
+            source_model = self._model.sourceModel()
+
+        # Clear is_selected flag on all rows with a single dataChanged signal
+        row_count = source_model.rowCount()
+        if row_count == 0:
+            return
+
+        # Access internal rows directly for efficient batch clear
+        if hasattr(source_model, '_state_manager') and hasattr(source_model._state_manager, 'rows'):
+            rows = source_model._state_manager.rows
+            for row in rows:
+                row["is_selected"] = False
+
+            # Emit single dataChanged for all rows
+            first_index = source_model.index(0, 0)
+            last_index = source_model.index(row_count - 1, 0)
+            source_model.dataChanged.emit(first_index, last_index, [Roles.IS_SELECTED])
 
     def indexAt(self, point: QPoint) -> QModelIndex:
-        """Get model index at the given point - stub for compatibility."""
-        # This would require QML coordination; return invalid for now
-        if self._model:
-            return QModelIndex()
+        """Get model index at the given point - stub for compatibility.
+
+        Note: This method returns an invalid QModelIndex because QML handles
+        hit testing internally. For context menus, the index is determined
+        from QML signals.
+        """
         return QModelIndex()
 
     def viewport(self):

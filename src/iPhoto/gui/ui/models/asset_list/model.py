@@ -280,7 +280,9 @@ class AssetListModel(QAbstractListModel):
             return None
 
         # Force a revision bump so QML reload logic detects the change
-        rows[row_index]["thumbnail_rev"] = rows[row_index].get("thumbnail_rev", 0) + 1
+        # Use modulo to prevent overflow while ensuring changes are detected
+        current_rev = rows[row_index].get("thumbnail_rev", 0)
+        rows[row_index]["thumbnail_rev"] = (current_rev + 1) % 1_000_000_000
 
         model_index = self.index(row_index, 0)
         self.dataChanged.emit(

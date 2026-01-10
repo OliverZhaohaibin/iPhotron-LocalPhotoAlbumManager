@@ -175,8 +175,10 @@ def generate_micro_thumbnail(source: Path) -> Optional[bytes]:
             # If we transpose first (which creates a copy), we might be allocating a full-res
             # rotated copy of a large image (e.g. 20MP PNG), which is slow and memory-heavy.
             # By thumbnailing first, we only transpose a tiny 16x16 image.
-            # This is safe because thumbnail() preserves EXIF info, and for a square target box (16x16),
-            # the operations effectively commute regarding final dimensions.
+            # This ordering is safe for any rectangular target box: thumbnail() fits the image
+            # into a bounding box while preserving aspect ratio, and exif_transpose() only
+            # rotates/flips the image (swapping width/height), so the final dimensions match
+            # regardless of the order.
             img.thumbnail(target_size, resample_filter)
 
             # Handle orientation

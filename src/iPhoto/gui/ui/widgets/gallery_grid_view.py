@@ -15,7 +15,7 @@ from PySide6.QtCore import (
     Signal,
     QUrl,
 )
-from PySide6.QtGui import QImage, QPalette, QPixmap, QColor, QSurfaceFormat
+from PySide6.QtGui import QImage, QPalette, QPixmap, QColor, QSurfaceFormat, QPainter
 from PySide6.QtQuick import QQuickImageProvider
 from PySide6.QtQuickWidgets import QQuickWidget
 
@@ -153,9 +153,21 @@ class GalleryQuickWidget(QQuickWidget):
         """Apply theme colors to both the widget and underlying QML."""
 
         self._theme_colors = colors
-        self._apply_background_color(colors.window_background)
+
+        # Force opaque color
+        opaque_bg = QColor(colors.window_background)
+        opaque_bg.setAlpha(255)
+
+        self._apply_background_color(opaque_bg)
         self._sync_theme_to_qml()
-        self.setClearColor(colors.window_background)
+        self.setClearColor(opaque_bg)
+
+    def paintEvent(self, event) -> None:
+        """Manually fill background before QML rendering to prevent transparency issues on Windows."""
+        painter = QPainter(self)
+        painter.fillRect(self.rect(), self.palette().color(QPalette.ColorRole.Window))
+        painter.end()
+        super().paintEvent(event)
 
     def _apply_background_color(self, color: QColor) -> None:
         palette = self.palette()

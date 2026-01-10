@@ -104,6 +104,18 @@ class WindowThemeController(QObject):
         # Update window title label color directly
         self._ui.window_title_label.setStyleSheet(f"color: {fg_color};")
 
+        # [Fix] Ensure all container views paint opaque backgrounds
+        # This resolves the issue where unpainted areas in frameless windows are transparent to the desktop.
+        opaque_bg = colors.window_background
+        for widget_name in ("view_stack", "gallery_page", "map_page", "detail_page"):
+            widget = getattr(self._ui, widget_name, None)
+            if widget is not None:
+                widget.setAutoFillBackground(True)
+                p = widget.palette()
+                p.setColor(QPalette.ColorRole.Window, opaque_bg)
+                p.setColor(QPalette.ColorRole.Base, opaque_bg)
+                widget.setPalette(p)
+
         grid_view = getattr(self._ui, "grid_view", None)
         if isinstance(grid_view, GalleryQuickWidget):
             grid_view.apply_theme(colors)

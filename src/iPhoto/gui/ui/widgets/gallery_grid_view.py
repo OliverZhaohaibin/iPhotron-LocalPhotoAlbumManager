@@ -6,17 +6,8 @@ import os
 from pathlib import Path
 from typing import Callable, List, Optional, TYPE_CHECKING
 
-from PySide6.QtCore import (
-    QModelIndex,
-    QPoint,
-    QSize,
-    QSurfaceFormat,
-    Qt,
-    QUrl,
-    Signal,
-    Slot,
-)
-from PySide6.QtGui import QColor, QImage, QPalette, QPixmap
+from PySide6.QtCore import QModelIndex, QPoint, QSize, Qt, QUrl, Signal, Slot
+from PySide6.QtGui import QColor, QImage, QPalette, QPixmap, QSurfaceFormat
 from PySide6.QtQml import QQmlApplicationEngine
 from PySide6.QtQuick import QQuickImageProvider
 from PySide6.QtQuickWidgets import QQuickWidget
@@ -400,4 +391,3 @@ class GalleryQuickWidget(QQuickWidget):
 
 # Keep GalleryGridView as an alias for backwards compatibility
 GalleryGridView = GalleryQuickWidget
-

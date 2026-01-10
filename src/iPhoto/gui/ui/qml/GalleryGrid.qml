@@ -8,7 +8,7 @@ Rectangle {
     // Backup background to prevent transparency if property binding fails
     Rectangle {
         anchors.fill: parent
-        color: "#2b2b2b"
+        color: "#00ffff" // DEBUG: Cyan background
         z: -100
     }
 

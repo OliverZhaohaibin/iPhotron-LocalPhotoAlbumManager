@@ -56,7 +56,7 @@ class FramelessWindowManager(QObject):
 
         # Frameless setup -------------------------------------------------
         self._window.setWindowFlag(Qt.WindowType.FramelessWindowHint, True)
-        # self._window.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self._window.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self._window.setAutoFillBackground(False)
 
         self._window_corner_radius = 12

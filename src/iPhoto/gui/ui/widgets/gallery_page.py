@@ -19,8 +19,6 @@ class GalleryPageWidget(QWidget):
         layout.setSpacing(0)
 
         self.setAutoFillBackground(True)
-        # Force a native window to improve composition with QQuickWidget
-        self.setAttribute(Qt.WidgetAttribute.WA_NativeWindow, True)
         # Debug: Bright pink background to verify opacity
         self.setStyleSheet("background-color: #ff00ff;")
 

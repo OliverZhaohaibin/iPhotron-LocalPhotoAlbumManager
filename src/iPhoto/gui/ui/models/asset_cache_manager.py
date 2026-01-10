@@ -271,6 +271,7 @@ class AssetCacheManager(QObject):
 
     def _on_thumb_ready(self, root: Path, rel: str, pixmap: QPixmap) -> None:
         """Store thumbnails produced by :class:`ThumbnailLoader` and relay them."""
+        print(f"DEBUG: AssetCacheManager._on_thumb_ready for {rel}")
 
         if self._album_root and root != self._album_root:
             return
@@ -305,10 +306,10 @@ class AssetCacheManager(QObject):
         """Render a text-based placeholder pixmap for *suffix*."""
 
         canvas = QPixmap(self._thumb_size)
-        canvas.fill(QColor("#1b1b1b"))
+        canvas.fill(QColor("yellow"))  # DEBUG: Yellow placeholder
         painter = QPainter(canvas)
         painter.setRenderHint(QPainter.Antialiasing)
-        painter.setPen(QColor("#f0f0f0"))
+        painter.setPen(QColor("#000000"))
 
         font = QFont()
         font.setPointSize(14)

@@ -92,7 +92,8 @@ class GalleryQuickWidget(QQuickWidget):
         self.setAutoFillBackground(True)
 
         # Force a clear color immediately to prevent transparency during initialization
-        self.setClearColor(QColor("#2b2b2b"))
+        # DEBUG: Green clear color
+        self.setClearColor(QColor("#00ff00"))
 
         # Set resize mode to follow widget size
         self.setResizeMode(QQuickWidget.ResizeMode.SizeRootObjectToView)

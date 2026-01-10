@@ -96,6 +96,17 @@ def test_apply_background_color_enables_autofill(gallery_widget):
     assert gallery_widget.autoFillBackground() is True
 
 
+def test_apply_background_color_forces_opaque_alpha(gallery_widget):
+    """Background application should normalise alpha to prevent transparency."""
+    translucent = QColor(10, 20, 30, 0)
+
+    gallery_widget._apply_background_color(translucent)
+
+    palette = gallery_widget.palette()
+    applied = palette.color(QPalette.ColorRole.Window)
+    assert applied.alpha() == 255
+
+
 def test_sync_theme_to_qml_light_theme(gallery_widget):
     """Test that _sync_theme_to_qml correctly calculates colors for light theme."""
     mock_root = MagicMock()

@@ -3,10 +3,11 @@ import QtQuick.Controls 2.15
 
 Rectangle {
     id: root
-    color: "#2b2b2b" // Fallback color, normally covered by opaque items or theme
+    color: backgroundColor
 
     // Signals to communicate with Python controller
     signal itemClicked(int index, int modifiers)
+    signal itemDoubleClicked(int index)
     signal currentIndexChanged(int index)
     signal showContextMenu(int index, int globalX, int globalY)
     signal visibleRowsChanged(int first, int last)
@@ -16,6 +17,20 @@ Rectangle {
     property int itemGap: 2
     property int safetyMargin: 10
     property bool selectionMode: false
+    
+    // Themeable colors
+    property color backgroundColor: "#2b2b2b"
+    property color itemBackgroundColor: "#1e1e1e"
+    property color selectionBorderColor: "#007AFF"
+    property color currentBorderColor: "#FFFFFF"
+
+    // Debounce timer for visible rows update
+    Timer {
+        id: visibleRowsDebounceTimer
+        interval: 100
+        repeat: false
+        onTriggered: grid.updateVisibleRows()
+    }
 
     DropArea {
         anchors.fill: parent
@@ -48,8 +63,8 @@ Rectangle {
         }
         cellHeight: cellWidth
 
-        onContentYChanged: updateVisibleRows()
-        onHeightChanged: updateVisibleRows()
+        onContentYChanged: visibleRowsDebounceTimer.restart()
+        onHeightChanged: visibleRowsDebounceTimer.restart()
         onCurrentIndexChanged: root.currentIndexChanged(currentIndex)
 
         // Initial check after layout
@@ -87,15 +102,15 @@ Rectangle {
             Rectangle {
                 anchors.fill: parent
                 anchors.margins: 1 // Half of gap
-                color: "#1e1e1e"
+                color: root.itemBackgroundColor
 
                 // Selection Background
                 Rectangle {
                     anchors.fill: parent
                     color: "transparent"
-                    border.color: "#007AFF" // System highlight color
+                    border.color: model.isCurrent && !model.isSelected ? root.currentBorderColor : root.selectionBorderColor
                     border.width: 3
-                    visible: model.isSelected
+                    visible: model.isSelected || model.isCurrent
                     z: 2
                 }
 
@@ -103,7 +118,7 @@ Rectangle {
                 Image {
                     id: thumb
                     anchors.fill: parent
-                    anchors.margins: model.isSelected ? 3 : 0
+                    anchors.margins: (model.isSelected || model.isCurrent) ? 3 : 0
                     fillMode: Image.PreserveAspectCrop
                     asynchronous: true
                     cache: false
@@ -169,6 +184,12 @@ Rectangle {
                             // mapToGlobal returns point relative to screen
                             var globalPt = mapToGlobal(mouse.x, mouse.y)
                             root.showContextMenu(index, globalPt.x, globalPt.y)
+                        }
+                    }
+
+                    onDoubleClicked: (mouse) => {
+                        if (mouse.button === Qt.LeftButton) {
+                            root.itemDoubleClicked(index)
                         }
                     }
 

@@ -58,7 +58,7 @@ class SelectionModelShim(QObject):
         self._current_index_cache = None
 
     @Slot(QModelIndex, QModelIndex, list)
-    def _on_data_changed(self, top: QModelIndex, bottom: QModelIndex, roles: List[int] = []) -> None:
+    def _on_data_changed(self, top: QModelIndex, bottom: QModelIndex, roles: Optional[List[int]] = None) -> None:
         if not roles or Roles.IS_SELECTED in roles:
             self._selection_cache = None
         if not roles or Roles.IS_CURRENT in roles:
@@ -84,7 +84,6 @@ class SelectionModelShim(QObject):
         else:
             return
 
-        is_clear = command & QItemSelectionModel.SelectionFlag.Clear
         is_select = command & QItemSelectionModel.SelectionFlag.Select
         is_deselect = command & QItemSelectionModel.SelectionFlag.Deselect
         is_toggle = command & QItemSelectionModel.SelectionFlag.Toggle
@@ -102,7 +101,7 @@ class SelectionModelShim(QObject):
             for i in range(row_count):
                 idx = self._model.index(i, 0)
                 if self._model.data(idx, Roles.IS_SELECTED):
-                    if idx.row() not in rows_to_keep: # Unless we are re-selecting it later
+                    if idx.row() not in rows_to_keep:  # Unless we are re-selecting it later
                         self._model.setData(idx, False, Roles.IS_SELECTED)
                         deselected_indexes.append(idx)
             is_select = True
@@ -310,6 +309,7 @@ class GalleryQuickWidget(QQuickWidget):
             return
 
         root.itemClicked.connect(self._on_item_clicked)
+        root.itemDoubleClicked.connect(self._on_item_double_clicked)
         root.currentIndexChanged.connect(self._on_current_index_changed)
         root.visibleRowsChanged.connect(self._on_visible_rows_changed)
         root.showContextMenu.connect(self._on_show_context_menu)
@@ -355,14 +355,10 @@ class GalleryQuickWidget(QQuickWidget):
         if self._selection_shim:
             self._selection_shim.setCurrentIndex(index, QItemSelectionModel.SelectionFlag.NoUpdate)
 
-        # Also update QML view focus?
-        # Since we use two-way binding via model roles, if model updates, QML should reflect it
-        # IF QML binds to isCurrent. But QML GridView uses its own 'currentIndex'.
-        # We need to sync back to QML if Python changes it.
-        # Currently, we only support QML -> Python via signal.
-        # Python -> QML would require setting 'currentIndex' property on GridView via root function.
-        # For now, we rely on the fact that keyboard nav in QML updates QML index, which calls us.
-        pass
+        # TODO: Implement Python -> QML GridView `currentIndex` synchronization if/when needed.
+        # Currently, only QML -> Python synchronization is supported via signals. Implementing
+        # the reverse direction would require exposing a root-level QML API to set the
+        # GridView's `currentIndex` property from Python.
 
     # ------------------------------------------------------------------
     # QML Signal Handlers
@@ -393,7 +389,7 @@ class GalleryQuickWidget(QQuickWidget):
         """Handle keyboard navigation or click updates from QML."""
         index = self._model.index(row, 0)
         if index.isValid():
-             if self._selection_shim:
+            if self._selection_shim:
                 self._selection_shim.setCurrentIndex(index, QItemSelectionModel.SelectionFlag.NoUpdate)
 
     @Slot(int)

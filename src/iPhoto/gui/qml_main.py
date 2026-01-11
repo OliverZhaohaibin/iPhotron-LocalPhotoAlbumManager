@@ -88,15 +88,15 @@ class QMLApplication:
         Context properties are accessible from any QML file without imports
         and provide a clean way to expose singleton services.
         """
-        from .ui.controllers.qml_controllers import (
+        from src.iPhoto.gui.ui.controllers.qml_controllers import (
             AlbumController,
             AssetController,
             EditSessionController,
             StatusController,
             ThemeController,
         )
-        from .ui.models.album_tree_model import AlbumTreeModel
-        from .ui.models.asset_model import AssetListModel
+        from src.iPhoto.gui.ui.models.album_tree_model import AlbumTreeModel
+        from src.iPhoto.gui.ui.models.asset_model import AssetListModel
 
         root = self._engine.rootContext()
 
@@ -177,7 +177,7 @@ def main(argv: list[str] | None = None) -> int:
     Returns:
         The application exit code.
     """
-    from ..appctx import AppContext
+    from src.iPhoto.appctx import AppContext
 
     arguments = list(sys.argv if argv is None else argv)
 

@@ -234,7 +234,8 @@ Rectangle {
                 Text {
                     id: liveText
                     text: "LIVE"
-                    font: Styles.Theme.smallFont
+                    font.family: Styles.Theme.smallFont.family
+                    font.pixelSize: Styles.Theme.smallFont.pixelSize
                     font.bold: true
                     color: "white"
                 }

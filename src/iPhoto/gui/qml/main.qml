@@ -2,9 +2,9 @@ import QtQuick 2.15
 import QtQuick.Controls 2.15
 import QtQuick.Layouts 1.15
 import QtQuick.Window 2.15
-import "styles" as Styles
-import "components" as Components
-import "views" as Views
+import styles 1.0 as Styles
+import components 1.0 as Components
+import views 1.0 as Views
 
 /**
  * Main application window for iPhoto.

@@ -1,8 +1,8 @@
 import QtQuick 2.15
 import QtQuick.Controls 2.15
 import QtQuick.Layouts 1.15
-import "../styles" as Styles
-import "../components" as Components
+import styles 1.0 as Styles
+import components 1.0 as Components
 
 /**
  * Media player control bar for video and Live Photo playback.

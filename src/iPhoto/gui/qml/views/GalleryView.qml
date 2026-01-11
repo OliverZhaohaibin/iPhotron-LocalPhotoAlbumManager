@@ -1,6 +1,6 @@
 import QtQuick 2.15
 import QtQuick.Controls 2.15
-import "../styles" as Styles
+import styles 1.0 as Styles
 
 /**
  * Gallery view displaying assets in a responsive grid layout.

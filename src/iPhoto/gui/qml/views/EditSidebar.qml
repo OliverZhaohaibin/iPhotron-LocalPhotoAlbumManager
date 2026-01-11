@@ -1,7 +1,7 @@
 import QtQuick 2.15
 import QtQuick.Controls 2.15
-import "../styles" as Styles
-import "../components" as Components
+import styles 1.0 as Styles
+import components 1.0 as Components
 
 /**
  * Edit sidebar containing adjustment controls organized in collapsible sections.

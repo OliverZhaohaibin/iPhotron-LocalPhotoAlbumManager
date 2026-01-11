@@ -1,6 +1,6 @@
 import QtQuick 2.15
 import QtQuick.Controls 2.15
-import "../styles" as Styles
+import styles 1.0 as Styles
 
 /**
  * Custom styled slider component following the iPhoto design language.

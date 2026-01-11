@@ -64,7 +64,8 @@ Item {
             Text {
                 anchors.verticalCenter: parent.verticalCenter
                 text: root.title
-                font: Styles.Theme.bodyFont
+                font.family: Styles.Theme.bodyFont.family
+                font.pixelSize: Styles.Theme.bodyFont.pixelSize
                 font.weight: Font.DemiBold
                 color: Styles.Theme.text
             }

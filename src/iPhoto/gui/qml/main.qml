@@ -1,0 +1,428 @@
+import QtQuick 2.15
+import QtQuick.Controls 2.15
+import QtQuick.Layouts 1.15
+import QtQuick.Window 2.15
+import "styles"
+import "components"
+import "views"
+
+/**
+ * Main application window for iPhoto.
+ * 
+ * This is the root QML component that orchestrates the entire UI.
+ * It provides:
+ * - Frameless window with custom title bar
+ * - Navigation sidebar with album tree
+ * - Main content area with view switching
+ * - Status bar with progress indicators
+ * 
+ * The window connects to Python controllers via context properties:
+ * - albumController: Album navigation and selection
+ * - assetController: Asset list and thumbnail loading
+ * - editController: Edit session management
+ * - themeController: Theme switching
+ */
+ApplicationWindow {
+    id: mainWindow
+    
+    visible: true
+    width: 1200
+    height: 720
+    minimumWidth: 800
+    minimumHeight: 600
+    title: "iPhoto"
+    
+    // Frameless window flags (optional, can be enabled for custom chrome)
+    // flags: Qt.FramelessWindowHint | Qt.Window
+    
+    // Apply theme colors
+    color: Theme.background
+    
+    // ========================================================================
+    // Window Chrome
+    // ========================================================================
+    
+    header: Column {
+        width: parent.width
+        
+        // Title bar
+        TitleBar {
+            id: titleBar
+            width: parent.width
+            windowTitle: mainWindow.title
+            isMaximized: mainWindow.visibility === Window.Maximized
+            
+            onMinimizeClicked: mainWindow.showMinimized()
+            onFullscreenClicked: {
+                if (mainWindow.visibility === Window.Maximized) {
+                    mainWindow.showNormal()
+                } else {
+                    mainWindow.showMaximized()
+                }
+            }
+            onCloseClicked: mainWindow.close()
+            
+            // Window dragging
+            onDragStarted: function(pos) {
+                mainWindow.startSystemMove()
+            }
+        }
+        
+        // Main header with menu
+        MainHeader {
+            id: mainHeader
+            width: parent.width
+            
+            onOpenAlbumRequested: {
+                if (typeof dialogController !== "undefined") {
+                    dialogController.openAlbumDialog()
+                }
+            }
+            
+            onRescanRequested: {
+                if (typeof facade !== "undefined") {
+                    facade.rescanCurrentAsync()
+                }
+            }
+            
+            onSelectionModeToggled: function(enabled) {
+                galleryView.selectionMode = enabled
+            }
+            
+            onThemeChanged: function(theme) {
+                Theme.mode = theme
+            }
+        }
+    }
+    
+    // ========================================================================
+    // Main Content
+    // ========================================================================
+    
+    SplitView {
+        id: mainSplit
+        anchors.fill: parent
+        orientation: Qt.Horizontal
+        
+        // Album Sidebar
+        AlbumSidebar {
+            id: albumSidebar
+            SplitView.minimumWidth: Theme.sidebarMinWidth
+            SplitView.preferredWidth: Theme.sidebarWidth
+            SplitView.maximumWidth: Theme.sidebarMaxWidth
+            
+            // Connect to controller if available
+            model: typeof albumController !== "undefined" ? albumController.model : null
+            
+            onAlbumSelected: function(path) {
+                if (typeof navigationController !== "undefined") {
+                    navigationController.openAlbum(path)
+                }
+                viewStack.currentIndex = 0  // Show gallery
+            }
+            
+            onAllPhotosSelected: {
+                if (typeof navigationController !== "undefined") {
+                    navigationController.openAllPhotos()
+                }
+                viewStack.currentIndex = 0
+            }
+            
+            onStaticNodeSelected: function(title) {
+                if (title === "Location") {
+                    viewStack.currentIndex = 1  // Show map
+                } else if (title === "Albums") {
+                    viewStack.currentIndex = 3  // Show albums dashboard
+                } else {
+                    if (typeof navigationController !== "undefined") {
+                        navigationController.openStaticNode(title)
+                    }
+                    viewStack.currentIndex = 0
+                }
+            }
+            
+            onBindLibraryRequested: {
+                if (typeof dialogController !== "undefined") {
+                    dialogController.bindLibraryDialog()
+                }
+            }
+            
+            onFilesDropped: function(targetPath, urls) {
+                if (typeof importService !== "undefined") {
+                    importService.importFiles(targetPath, urls)
+                }
+            }
+        }
+        
+        // Content Area
+        Item {
+            SplitView.fillWidth: true
+            
+            Rectangle {
+                anchors.fill: parent
+                anchors.margins: 8
+                color: Theme.surface
+                radius: 4
+                
+                StackLayout {
+                    id: viewStack
+                    anchors.fill: parent
+                    currentIndex: 0
+                    
+                    // Gallery View (index 0)
+                    GalleryView {
+                        id: galleryView
+                        
+                        // Connect to controller if available
+                        model: typeof assetController !== "undefined" ? assetController.model : null
+                        
+                        onItemClicked: function(index, modifiers) {
+                            if (typeof selectionController !== "undefined") {
+                                selectionController.handleItemClick(index, modifiers)
+                            }
+                        }
+                        
+                        onItemDoubleClicked: function(index) {
+                            if (typeof playbackController !== "undefined") {
+                                playbackController.activateIndex(index)
+                            }
+                            viewStack.currentIndex = 2  // Show detail view
+                        }
+                        
+                        onShowContextMenu: function(index, globalX, globalY) {
+                            if (typeof contextMenuController !== "undefined") {
+                                contextMenuController.showMenu(index, globalX, globalY)
+                            }
+                        }
+                        
+                        onFilesDropped: function(urls) {
+                            if (typeof importService !== "undefined") {
+                                importService.importFiles(albumSidebar.currentSelection, urls)
+                            }
+                        }
+                    }
+                    
+                    // Map View (index 1)
+                    Rectangle {
+                        id: mapViewPlaceholder
+                        color: Theme.viewerBackground
+                        
+                        Text {
+                            anchors.centerIn: parent
+                            text: qsTr("Map View")
+                            font: Theme.titleFont
+                            color: Theme.textSecondary
+                        }
+                        
+                        // In full implementation, this would load the QQuickFramebufferObject
+                        // based MapView component
+                    }
+                    
+                    // Detail View (index 2)
+                    DetailView {
+                        id: detailView
+                        
+                        onBackClicked: {
+                            viewStack.currentIndex = 0  // Return to gallery
+                        }
+                        
+                        onEditClicked: {
+                            detailView.editMode = true
+                            // Show edit sidebar
+                            editSidebar.visible = true
+                        }
+                        
+                        onZoomSliderChanged: function(value) {
+                            // Forward to image viewer
+                        }
+                    }
+                    
+                    // Albums Dashboard (index 3)
+                    Rectangle {
+                        id: albumsDashboard
+                        color: Theme.viewerBackground
+                        
+                        Text {
+                            anchors.centerIn: parent
+                            text: qsTr("Albums Dashboard")
+                            font: Theme.titleFont
+                            color: Theme.textSecondary
+                        }
+                    }
+                }
+            }
+        }
+        
+        // Edit Sidebar (shown only in edit mode)
+        EditSidebar {
+            id: editSidebar
+            visible: false
+            SplitView.minimumWidth: 240
+            SplitView.preferredWidth: 280
+            SplitView.maximumWidth: 350
+            
+            // Connect to edit session if available
+            Component.onCompleted: {
+                if (typeof editSession !== "undefined") {
+                    brilliance = Qt.binding(function() { return editSession.brilliance })
+                    exposure = Qt.binding(function() { return editSession.exposure })
+                    highlights = Qt.binding(function() { return editSession.highlights })
+                    shadows = Qt.binding(function() { return editSession.shadows })
+                    contrast = Qt.binding(function() { return editSession.contrast })
+                    brightness = Qt.binding(function() { return editSession.brightness })
+                    blackPoint = Qt.binding(function() { return editSession.blackPoint })
+                    
+                    saturation = Qt.binding(function() { return editSession.saturation })
+                    vibrance = Qt.binding(function() { return editSession.vibrance })
+                    warmth = Qt.binding(function() { return editSession.warmth })
+                    tint = Qt.binding(function() { return editSession.tint })
+                }
+            }
+            
+            onBrillianceChanged: function(v) {
+                if (typeof editSession !== "undefined") editSession.brilliance = v
+            }
+            onExposureChanged: function(v) {
+                if (typeof editSession !== "undefined") editSession.exposure = v
+            }
+            onHighlightsChanged: function(v) {
+                if (typeof editSession !== "undefined") editSession.highlights = v
+            }
+            onShadowsChanged: function(v) {
+                if (typeof editSession !== "undefined") editSession.shadows = v
+            }
+            onContrastChanged: function(v) {
+                if (typeof editSession !== "undefined") editSession.contrast = v
+            }
+            onBrightnessChanged: function(v) {
+                if (typeof editSession !== "undefined") editSession.brightness = v
+            }
+            onBlackPointChanged: function(v) {
+                if (typeof editSession !== "undefined") editSession.blackPoint = v
+            }
+            
+            onSaturationChanged: function(v) {
+                if (typeof editSession !== "undefined") editSession.saturation = v
+            }
+            onVibranceChanged: function(v) {
+                if (typeof editSession !== "undefined") editSession.vibrance = v
+            }
+            onWarmthChanged: function(v) {
+                if (typeof editSession !== "undefined") editSession.warmth = v
+            }
+            onTintChanged: function(v) {
+                if (typeof editSession !== "undefined") editSession.tint = v
+            }
+        }
+    }
+    
+    // ========================================================================
+    // Status Bar
+    // ========================================================================
+    
+    footer: StatusBar {
+        id: statusBar
+        
+        // Connect to status controller if available
+        itemCount: typeof assetController !== "undefined" ? assetController.totalCount : 0
+        
+        Component.onCompleted: {
+            if (typeof statusController !== "undefined") {
+                statusController.messageChanged.connect(function(msg, timeout) {
+                    statusBar.showMessage(msg, timeout)
+                })
+                statusController.progressChanged.connect(function(value) {
+                    if (value < 0) {
+                        statusBar.showIndeterminateProgress()
+                    } else if (value >= 100) {
+                        statusBar.hideProgress()
+                    } else {
+                        statusBar.showProgress(0, 100, value)
+                    }
+                })
+            }
+        }
+    }
+    
+    // ========================================================================
+    // Keyboard Shortcuts
+    // ========================================================================
+    
+    Shortcut {
+        sequence: "Escape"
+        onActivated: {
+            if (editSidebar.visible) {
+                editSidebar.visible = false
+                detailView.editMode = false
+            } else if (viewStack.currentIndex !== 0) {
+                viewStack.currentIndex = 0
+            }
+        }
+    }
+    
+    Shortcut {
+        sequence: StandardKey.Quit
+        onActivated: mainWindow.close()
+    }
+    
+    Shortcut {
+        sequence: "Space"
+        onActivated: {
+            if (typeof playbackController !== "undefined") {
+                playbackController.togglePlayback()
+            }
+        }
+    }
+    
+    Shortcut {
+        sequence: "Left"
+        onActivated: {
+            if (viewStack.currentIndex === 2) {  // Detail view
+                if (typeof playbackController !== "undefined") {
+                    playbackController.requestPreviousItem()
+                }
+            }
+        }
+    }
+    
+    Shortcut {
+        sequence: "Right"
+        onActivated: {
+            if (viewStack.currentIndex === 2) {  // Detail view
+                if (typeof playbackController !== "undefined") {
+                    playbackController.requestNextItem()
+                }
+            }
+        }
+    }
+    
+    // ========================================================================
+    // Window State Persistence
+    // ========================================================================
+    
+    Component.onCompleted: {
+        // Restore window geometry if settings available
+        if (typeof settings !== "undefined") {
+            var geometry = settings.get("ui.windowGeometry")
+            if (geometry) {
+                x = geometry.x
+                y = geometry.y
+                width = geometry.width
+                height = geometry.height
+            }
+        }
+    }
+    
+    onClosing: function(close) {
+        // Save window geometry
+        if (typeof settings !== "undefined") {
+            settings.set("ui.windowGeometry", {
+                x: x,
+                y: y,
+                width: width,
+                height: height
+            })
+        }
+        close.accepted = true
+    }
+}

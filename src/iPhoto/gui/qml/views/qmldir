@@ -1,0 +1,12 @@
+module iPhoto.views
+
+StatusBar 1.0 StatusBar.qml
+TitleBar 1.0 TitleBar.qml
+MainHeader 1.0 MainHeader.qml
+AlbumSidebar 1.0 AlbumSidebar.qml
+GalleryView 1.0 GalleryView.qml
+DetailView 1.0 DetailView.qml
+ImageViewer 1.0 ImageViewer.qml
+EditSidebar 1.0 EditSidebar.qml
+PlayerBar 1.0 PlayerBar.qml
+Filmstrip 1.0 Filmstrip.qml

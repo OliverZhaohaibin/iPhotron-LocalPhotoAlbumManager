@@ -1,0 +1,8 @@
+module iPhoto.components
+
+Button 1.0 Button.qml
+IconButton 1.0 IconButton.qml
+Slider 1.0 Slider.qml
+CollapsibleSection 1.0 CollapsibleSection.qml
+SliderRow 1.0 SliderRow.qml
+SegmentedControl 1.0 SegmentedControl.qml

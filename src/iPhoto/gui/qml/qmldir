@@ -1,0 +1,24 @@
+module iPhoto
+
+# Singleton
+singleton Theme 1.0 styles/Theme.qml
+
+# Base Components
+Button 1.0 components/Button.qml
+IconButton 1.0 components/IconButton.qml
+Slider 1.0 components/Slider.qml
+CollapsibleSection 1.0 components/CollapsibleSection.qml
+SliderRow 1.0 components/SliderRow.qml
+SegmentedControl 1.0 components/SegmentedControl.qml
+
+# Views
+StatusBar 1.0 views/StatusBar.qml
+TitleBar 1.0 views/TitleBar.qml
+MainHeader 1.0 views/MainHeader.qml
+AlbumSidebar 1.0 views/AlbumSidebar.qml
+GalleryView 1.0 views/GalleryView.qml
+DetailView 1.0 views/DetailView.qml
+ImageViewer 1.0 views/ImageViewer.qml
+EditSidebar 1.0 views/EditSidebar.qml
+PlayerBar 1.0 views/PlayerBar.qml
+Filmstrip 1.0 views/Filmstrip.qml

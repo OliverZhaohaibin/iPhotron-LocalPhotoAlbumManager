@@ -1,5 +1,5 @@
 import QtQuick
-import QtQuick.Controls
+import QtQuick.Controls.Basic
 import Qt.labs.qmlmodels 1.0
 import styles 1.0 as Styles
 
@@ -92,7 +92,7 @@ Rectangle {
             property string nodeKey: (nodeType !== undefined && nodeType !== null) ? nodeType.toString().toLowerCase() : ""
             property bool isStatic: nodeKey.indexOf("static") !== -1
             property bool isAction: nodeKey.indexOf("action") !== -1
-            property bool isSelected: isStatic ? display === root.currentStaticSelection : path === root.currentSelection
+            property bool isSelected: (isStatic && display && root.currentStaticSelection === display) || (!isStatic && path && root.currentSelection === path)
 
             Rectangle {
                 anchors.fill: parent
@@ -115,7 +115,7 @@ Rectangle {
                 Item {
                     width: 16
                     height: parent.height
-                    visible: TreeView.hasChildren
+                    visible: TreeView.hasChildren ?? false
 
                     Image {
                         anchors.centerIn: parent

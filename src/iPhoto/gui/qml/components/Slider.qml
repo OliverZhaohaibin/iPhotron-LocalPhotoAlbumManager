@@ -1,5 +1,5 @@
 import QtQuick 2.15
-import QtQuick.Controls
+import QtQuick.Controls.Basic
 import styles 1.0 as Styles
 
 /**

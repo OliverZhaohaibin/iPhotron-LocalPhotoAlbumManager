@@ -120,7 +120,16 @@ class AssetController(QObject):
 
         if model is None or model is self._model:
             return
+        try:
+            self._model.rowsInserted.disconnect(self._on_model_changed)
+            self._model.rowsRemoved.disconnect(self._on_model_changed)
+            self._model.modelReset.disconnect(self._on_model_changed)
+        except (RuntimeError, TypeError):
+            pass
         self._model = model
+        self._model.rowsInserted.connect(self._on_model_changed)
+        self._model.rowsRemoved.connect(self._on_model_changed)
+        self._model.modelReset.connect(self._on_model_changed)
         self.modelChanged.emit()
 
     @Property(int, notify=totalCountChanged)

@@ -319,13 +319,7 @@ class QMLApplication:
         """Update QML bindings when the active asset model switches."""
         controller = self._controllers.get("asset")
         if controller is not None:
-            try:
-                controller.setModel(model)  # type: ignore[attr-defined]
-            except AttributeError:
-                print(
-                    "Asset controller does not support dynamic model updates; skipping.",
-                    file=sys.stderr,
-                )
+            controller.setModel(model)  # type: ignore[attr-defined]
         provider = getattr(self, "_thumbnail_provider", None)
         if provider is not None:
             provider.set_model(model)

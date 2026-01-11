@@ -1,6 +1,6 @@
 import QtQuick 2.15
 import QtQuick.Controls 2.15
-import "../styles" as Styles
+import styles 1.0 as Styles
 
 /**
  * Collapsible section container for organizing edit controls.
@@ -49,7 +49,7 @@ Item {
                 anchors.verticalCenter: parent.verticalCenter
                 width: Styles.Theme.iconSizeSmall
                 height: Styles.Theme.iconSizeSmall
-                source: "qrc:/icons/chevron.right.svg"
+                source: iconPrefix + "/chevron.right.svg"
                 rotation: root.expanded ? 90 : 0
                 opacity: 0.7
                 
@@ -64,7 +64,8 @@ Item {
             Text {
                 anchors.verticalCenter: parent.verticalCenter
                 text: root.title
-                font: Styles.Theme.bodyFont
+                font.family: Styles.Theme.bodyFont.family
+                font.pixelSize: Styles.Theme.bodyFont.pixelSize
                 font.weight: Font.DemiBold
                 color: Styles.Theme.text
             }

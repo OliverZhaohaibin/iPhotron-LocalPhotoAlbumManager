@@ -1,4 +1,4 @@
-module iPhoto.views
+module views
 
 StatusBar 1.0 StatusBar.qml
 TitleBar 1.0 TitleBar.qml

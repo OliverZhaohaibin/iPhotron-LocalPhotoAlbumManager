@@ -1,8 +1,8 @@
 import QtQuick 2.15
 import QtQuick.Controls 2.15
 import QtQuick.Layouts 1.15
-import "../styles" as Styles
-import "../components" as Components
+import styles 1.0 as Styles
+import components 1.0 as Components
 
 /**
  * Detail view for displaying and editing a single asset.
@@ -57,7 +57,7 @@ Rectangle {
             
             // Back button
             Components.IconButton {
-                iconSource: "qrc:/icons/chevron.left.svg"
+                iconSource: iconPrefix + "/chevron.left.svg"
                 tooltipText: qsTr("Return to grid view")
                 onClicked: root.backClicked()
             }
@@ -70,7 +70,7 @@ Rectangle {
                 Layout.leftMargin: Styles.Theme.spacingMedium
                 
                 Components.IconButton {
-                    iconSource: "qrc:/icons/minus.svg"
+                    iconSource: iconPrefix + "/minus.svg"
                     tooltipText: qsTr("Zoom Out")
                     iconSize: Styles.Theme.iconSizeSmall
                     implicitWidth: 20
@@ -94,7 +94,7 @@ Rectangle {
                 }
                 
                 Components.IconButton {
-                    iconSource: "qrc:/icons/plus.svg"
+                    iconSource: iconPrefix + "/plus.svg"
                     tooltipText: qsTr("Zoom In")
                     iconSize: Styles.Theme.iconSizeSmall
                     implicitWidth: 20
@@ -135,27 +135,27 @@ Rectangle {
                 spacing: Styles.Theme.spacingMedium
                 
                 Components.IconButton {
-                    iconSource: "qrc:/icons/info.circle.svg"
+                    iconSource: iconPrefix + "/info.circle.svg"
                     tooltipText: qsTr("Info")
                     onClicked: root.infoClicked()
                 }
                 
                 Components.IconButton {
-                    iconSource: "qrc:/icons/square.and.arrow.up.svg"
+                    iconSource: iconPrefix + "/square.and.arrow.up.svg"
                     tooltipText: qsTr("Share")
                     onClicked: root.shareClicked()
                 }
                 
                 Components.IconButton {
                     iconSource: root.isFavorite ? 
-                               "qrc:/icons/suit.heart.fill.svg" : 
-                               "qrc:/icons/suit.heart.svg"
+                               iconPrefix + "/suit.heart.fill.svg" :
+                               iconPrefix + "/suit.heart.svg"
                     tooltipText: qsTr("Add to Favorites")
                     onClicked: root.favoriteClicked()
                 }
                 
                 Components.IconButton {
-                    iconSource: "qrc:/icons/rotate.left.svg"
+                    iconSource: iconPrefix + "/rotate.left.svg"
                     tooltipText: qsTr("Rotate Left")
                     onClicked: root.rotateLeftClicked()
                 }
@@ -234,7 +234,8 @@ Rectangle {
                 Text {
                     id: liveText
                     text: "LIVE"
-                    font: Styles.Theme.smallFont
+                    font.family: Styles.Theme.smallFont.family
+                    font.pixelSize: Styles.Theme.smallFont.pixelSize
                     font.bold: true
                     color: "white"
                 }

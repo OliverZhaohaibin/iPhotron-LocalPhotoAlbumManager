@@ -2,9 +2,9 @@ import QtQuick 2.15
 import QtQuick.Controls 2.15
 import QtQuick.Layouts 1.15
 import QtQuick.Window 2.15
-import "styles" as Styles
-import "components" as Components
-import "views" as Views
+import styles 1.0 as Styles
+import components 1.0 as Components
+import views 1.0 as Views
 
 /**
  * Main application window for iPhoto.
@@ -284,38 +284,38 @@ ApplicationWindow {
                 }
             }
             
-            onBrillianceChanged: function(v) {
+            onBrillianceModified: function(v) {
                 if (typeof editSession !== "undefined") editSession.brilliance = v
             }
-            onExposureChanged: function(v) {
+            onExposureModified: function(v) {
                 if (typeof editSession !== "undefined") editSession.exposure = v
             }
-            onHighlightsChanged: function(v) {
+            onHighlightsModified: function(v) {
                 if (typeof editSession !== "undefined") editSession.highlights = v
             }
-            onShadowsChanged: function(v) {
+            onShadowsModified: function(v) {
                 if (typeof editSession !== "undefined") editSession.shadows = v
             }
-            onContrastChanged: function(v) {
+            onContrastModified: function(v) {
                 if (typeof editSession !== "undefined") editSession.contrast = v
             }
-            onBrightnessChanged: function(v) {
+            onBrightnessModified: function(v) {
                 if (typeof editSession !== "undefined") editSession.brightness = v
             }
-            onBlackPointChanged: function(v) {
+            onBlackPointModified: function(v) {
                 if (typeof editSession !== "undefined") editSession.blackPoint = v
             }
             
-            onSaturationChanged: function(v) {
+            onSaturationModified: function(v) {
                 if (typeof editSession !== "undefined") editSession.saturation = v
             }
-            onVibranceChanged: function(v) {
+            onVibranceModified: function(v) {
                 if (typeof editSession !== "undefined") editSession.vibrance = v
             }
-            onWarmthChanged: function(v) {
+            onWarmthModified: function(v) {
                 if (typeof editSession !== "undefined") editSession.warmth = v
             }
-            onTintChanged: function(v) {
+            onTintModified: function(v) {
                 if (typeof editSession !== "undefined") editSession.tint = v
             }
         }

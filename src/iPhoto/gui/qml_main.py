@@ -12,6 +12,7 @@ Usage:
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -123,6 +124,11 @@ class QMLApplication:
         root.setContextProperty("statusController", status_controller)
         root.setContextProperty("editSession", edit_session_controller)
 
+        # Expose icon path for dev environment (where qrc is not compiled)
+        # Assuming icons are in ../ui/icon relative to this file
+        icon_path = Path(__file__).parent / "ui" / "icon"
+        root.setContextProperty("iconPrefix", QUrl.fromLocalFile(str(icon_path)).toString())
+
         # Also expose the facade and settings for advanced operations
         root.setContextProperty("facade", self._context.facade)
         root.setContextProperty("settings", self._context.settings)
@@ -185,6 +191,9 @@ def main(argv: list[str] | None = None) -> int:
     from iPhoto.appctx import AppContext
 
     arguments = list(sys.argv if argv is None else argv)
+
+    # Set the Quick Controls style to Basic to allow customization
+    os.environ["QT_QUICK_CONTROLS_STYLE"] = "Basic"
 
     # Use QGuiApplication for pure QML (no QWidget)
     # If mixing with QWidgets, use QApplication instead

@@ -1,6 +1,6 @@
 import QtQuick 2.15
 import QtQuick.Controls 2.15
-import "../styles" as Styles
+import styles 1.0 as Styles
 
 /**
  * Filmstrip navigation component for browsing assets horizontally.
@@ -16,13 +16,12 @@ Rectangle {
     
     // Properties
     property alias model: listView.model
-    property int currentIndex: -1
+    property alias currentIndex: listView.currentIndex
     property int itemWidth: 70
     property int itemHeight: 70
     
     // Signals
     signal itemClicked(int index)
-    signal currentIndexChanged(int index)
     
     implicitWidth: parent ? parent.width : 400
     implicitHeight: itemHeight + 10
@@ -50,15 +49,9 @@ Rectangle {
         header: Item { width: Math.max(0, (root.width - root.itemWidth) / 2) }
         footer: Item { width: Math.max(0, (root.width - root.itemWidth) / 2) }
         
-        currentIndex: root.currentIndex
-        
         // Smooth scrolling
         highlightMoveDuration: Styles.Theme.animationNormal
         highlightMoveVelocity: -1
-        
-        onCurrentIndexChanged: {
-            root.currentIndexChanged(currentIndex)
-        }
         
         delegate: Item {
             id: delegateRoot
@@ -204,7 +197,7 @@ Rectangle {
     
     // Public methods
     function setCurrentIndex(idx) {
-        root.currentIndex = idx
+        listView.currentIndex = idx
         listView.positionViewAtIndex(idx, ListView.Center)
     }
     

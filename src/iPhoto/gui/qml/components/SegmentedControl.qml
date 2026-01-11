@@ -1,6 +1,6 @@
 import QtQuick 2.15
 import QtQuick.Controls 2.15
-import "../styles" as Styles
+import styles 1.0 as Styles
 
 /**
  * Segmented control for switching between modes.
@@ -64,7 +64,8 @@ Item {
                     id: itemText
                     anchors.centerIn: parent
                     text: modelData
-                    font: Styles.Theme.bodyFont
+                    font.family: Styles.Theme.bodyFont.family
+                    font.pixelSize: Styles.Theme.bodyFont.pixelSize
                     font.weight: index === root.currentIndex ? Font.DemiBold : Font.Normal
                     color: index === root.currentIndex ? Styles.Theme.textInverse : Styles.Theme.text
                     

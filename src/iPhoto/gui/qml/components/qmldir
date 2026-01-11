@@ -1,4 +1,4 @@
-module iPhoto.components
+module components
 
 Button 1.0 Button.qml
 IconButton 1.0 IconButton.qml

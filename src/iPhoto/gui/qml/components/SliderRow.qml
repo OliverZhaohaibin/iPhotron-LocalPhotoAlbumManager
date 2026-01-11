@@ -51,15 +51,17 @@ Item {
                 anchors.left: labelText.right
                 anchors.leftMargin: Theme.spacingSmall
                 anchors.verticalCenter: parent.verticalCenter
-                text: root.value.toFixed(root.decimals)
+                text: formatValue(root.value)
                 font: Theme.smallFont
                 color: Theme.textSecondary
                 
-                // Show +/- sign for non-zero values when range includes negatives
-                Component.onCompleted: {
-                    if (root.from < 0 && root.value > 0) {
-                        text = "+" + root.value.toFixed(root.decimals)
+                // Format value with +/- sign for bipolar ranges
+                function formatValue(val) {
+                    var formatted = val.toFixed(root.decimals)
+                    if (root.from < 0 && val > 0) {
+                        return "+" + formatted
                     }
+                    return formatted
                 }
             }
             

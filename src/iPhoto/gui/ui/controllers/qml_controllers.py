@@ -147,8 +147,12 @@ class AssetController(QObject):
 
     @Slot(int)
     def openDetail(self, index: int) -> None:  # noqa: N802 - Qt slot naming
-        """Open the detail view for an asset."""
-        # This would trigger navigation to detail view
+        """Open the detail view for an asset.
+
+        TODO: Implement navigation to detail view. This is a placeholder
+        that will be connected to the view controller when the full
+        QML migration is complete.
+        """
 
 
 class StatusController(QObject):

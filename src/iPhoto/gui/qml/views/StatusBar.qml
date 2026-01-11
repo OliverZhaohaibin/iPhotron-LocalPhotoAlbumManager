@@ -131,6 +131,10 @@ Rectangle {
         clearTimer.stop()
     }
     
+    /**
+     * Returns the currently displayed message text.
+     * Provided for API compatibility with the QWidget-based ChromeStatusBar.
+     */
     function currentMessage() {
         return messageLabel.text
     }

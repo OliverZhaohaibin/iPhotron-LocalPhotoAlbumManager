@@ -262,6 +262,11 @@ ApplicationWindow {
             SplitView.maximumWidth: 350
             
             // Connect to edit session if available
+            // Note: We use explicit Qt.binding() here because editSession is a
+            // context property that may not be defined at parse time. This pattern
+            // ensures bindings are established dynamically after the controller
+            // is registered. A more declarative approach would require the controller
+            // to always exist, which isn't guaranteed during development/testing.
             Component.onCompleted: {
                 if (typeof editSession !== "undefined") {
                     brilliance = Qt.binding(function() { return editSession.brilliance })

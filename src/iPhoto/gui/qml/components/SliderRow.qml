@@ -84,6 +84,11 @@ Item {
             width: parent.width - labelText.width - (root.showValue ? valueText.width + Styles.Theme.spacingSmall : 0) - Styles.Theme.spacingMedium
             height: parent.height
             
+            from: -100
+            to: 100
+            value: 0
+            stepSize: 1
+            
             // Custom styling for edit slider
             background: Rectangle {
                 x: slider.leftPadding

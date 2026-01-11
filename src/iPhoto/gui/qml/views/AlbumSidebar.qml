@@ -126,7 +126,7 @@ Rectangle {
                 Item {
                     width: 16
                     height: parent.height
-                    visible: TreeView.hasChildren ?? false
+                    visible: TreeView.hasChildren
 
                     Image {
                         anchors.centerIn: parent
@@ -215,7 +215,7 @@ Rectangle {
                             root.staticNodeSelected("Albums")
                         } else {
                             // Toggle expansion for other headers
-                            TreeView.view.toggleExpanded(index)
+                            treeView.toggleExpanded(index)
                         }
                         return
                     }

@@ -277,18 +277,18 @@ ApplicationWindow {
             // to always exist, which isn't guaranteed during development/testing.
             Component.onCompleted: {
                 if (typeof editSession !== "undefined" && editSession) {
-                    brilliance = Qt.binding(function() { return editSession ? editSession.brilliance : 0 })
-                    exposure = Qt.binding(function() { return editSession ? editSession.exposure : 0 })
-                    highlights = Qt.binding(function() { return editSession ? editSession.highlights : 0 })
-                    shadows = Qt.binding(function() { return editSession ? editSession.shadows : 0 })
-                    contrast = Qt.binding(function() { return editSession ? editSession.contrast : 0 })
-                    brightness = Qt.binding(function() { return editSession ? editSession.brightness : 0 })
-                    blackPoint = Qt.binding(function() { return editSession ? editSession.blackPoint : 0 })
+                    brilliance = Qt.binding(function() { return editSession.brilliance })
+                    exposure = Qt.binding(function() { return editSession.exposure })
+                    highlights = Qt.binding(function() { return editSession.highlights })
+                    shadows = Qt.binding(function() { return editSession.shadows })
+                    contrast = Qt.binding(function() { return editSession.contrast })
+                    brightness = Qt.binding(function() { return editSession.brightness })
+                    blackPoint = Qt.binding(function() { return editSession.blackPoint })
                     
-                    saturation = Qt.binding(function() { return editSession ? editSession.saturation : 0 })
-                    vibrance = Qt.binding(function() { return editSession ? editSession.vibrance : 0 })
-                    warmth = Qt.binding(function() { return editSession ? editSession.warmth : 0 })
-                    tint = Qt.binding(function() { return editSession ? editSession.tint : 0 })
+                    saturation = Qt.binding(function() { return editSession.saturation })
+                    vibrance = Qt.binding(function() { return editSession.vibrance })
+                    warmth = Qt.binding(function() { return editSession.warmth })
+                    tint = Qt.binding(function() { return editSession.tint })
                 }
             }
             

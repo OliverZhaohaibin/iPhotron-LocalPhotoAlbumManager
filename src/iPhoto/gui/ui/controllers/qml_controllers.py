@@ -125,12 +125,14 @@ class AssetController(QObject):
             self._model.rowsRemoved.disconnect(self._on_model_changed)
             self._model.modelReset.disconnect(self._on_model_changed)
         except (RuntimeError, TypeError):
+            # Safe to ignore if connections were already cleared or model is gone
             pass
         self._model = model
         self._model.rowsInserted.connect(self._on_model_changed)
         self._model.rowsRemoved.connect(self._on_model_changed)
         self._model.modelReset.connect(self._on_model_changed)
         self.modelChanged.emit()
+        self._on_model_changed()
 
     @Property(int, notify=totalCountChanged)
     def totalCount(self) -> int:

@@ -26,8 +26,7 @@ if str(_SRC_DIR) not in sys.path:
 
 from PySide6.QtCore import QObject, QUrl, Slot
 from PySide6.QtQml import QQmlApplicationEngine
-from PySide6.QtQuickControls2 import QQuickStyle
-from PySide6.QtWidgets import QApplication, QFileDialog
+from PySide6.QtWidgets import QFileDialog
 
 if TYPE_CHECKING:
     from iPhoto.appctx import AppContext

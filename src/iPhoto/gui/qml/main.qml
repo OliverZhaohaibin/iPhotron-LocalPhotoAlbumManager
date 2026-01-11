@@ -78,6 +78,12 @@ ApplicationWindow {
                     dialogController.openAlbumDialog()
                 }
             }
+
+            onBindLibraryRequested: {
+                if (typeof dialogController !== "undefined") {
+                    dialogController.bindLibraryDialog()
+                }
+            }
             
             onRescanRequested: {
                 if (typeof navigationController !== "undefined") {

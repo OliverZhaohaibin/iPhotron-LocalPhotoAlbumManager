@@ -16,6 +16,7 @@ Rectangle {
     property bool selectionModeEnabled: false
     
     signal openAlbumRequested()
+    signal bindLibraryRequested()
     signal rescanRequested()
     signal selectionModeToggled(bool enabled)
     signal themeChanged(string theme)
@@ -52,7 +53,7 @@ Rectangle {
                 MenuSeparator {}
                 MenuItem {
                     text: qsTr("Set Basic Library…")
-                    onTriggered: root.openAlbumRequested()
+                    onTriggered: root.bindLibraryRequested()
                 }
                 MenuSeparator {}
                 MenuItem { text: qsTr("Export All Edited") }
@@ -65,7 +66,7 @@ Rectangle {
                 title: qsTr("&Settings")
                 MenuItem {
                     text: qsTr("Set Basic Library…")
-                    onTriggered: root.openAlbumRequested()
+                    onTriggered: root.bindLibraryRequested()
                 }
                 MenuSeparator {}
                 MenuItem {

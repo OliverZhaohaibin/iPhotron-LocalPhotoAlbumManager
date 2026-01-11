@@ -49,7 +49,7 @@ Item {
                 anchors.verticalCenter: parent.verticalCenter
                 width: Styles.Theme.iconSizeSmall
                 height: Styles.Theme.iconSizeSmall
-                source: "qrc:/icons/chevron.right.svg"
+                source: iconPrefix + "/chevron.right.svg"
                 rotation: root.expanded ? 90 : 0
                 opacity: 0.7
                 

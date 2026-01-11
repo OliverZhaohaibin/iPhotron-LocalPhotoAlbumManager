@@ -127,7 +127,7 @@ Rectangle {
                         anchors.centerIn: parent
                         width: 12
                         height: 12
-                        source: "qrc:/icons/chevron.right.svg"
+                        source: iconPrefix + "/chevron.right.svg"
                         rotation: delegateRoot.isExpanded ? 90 : 0
                         opacity: 0.6
                         
@@ -165,19 +165,19 @@ Rectangle {
                     source: {
                         switch (delegateRoot.nodeType) {
                             case "static":
-                                if (model.title === "All Photos") return "qrc:/icons/photo.on.rectangle.svg"
-                                if (model.title === "Location") return "qrc:/icons/map.svg"
-                                if (model.title === "Recently Deleted") return "qrc:/icons/trash.svg"
-                                return "qrc:/icons/folder.svg"
+                                if (model.title === "All Photos") return iconPrefix + "/photo.on.rectangle.svg"
+                                if (model.title === "Location") return iconPrefix + "/map.svg"
+                                if (model.title === "Recently Deleted") return iconPrefix + "/trash.svg"
+                                return iconPrefix + "/folder.svg"
                             case "header":
-                                return "qrc:/icons/folder.badge.svg"
+                                return iconPrefix + "/folder.badge.svg"
                             case "album":
                             case "subalbum":
-                                return "qrc:/icons/folder.svg"
+                                return iconPrefix + "/folder.svg"
                             case "action":
-                                return "qrc:/icons/plus.circle.svg"
+                                return iconPrefix + "/plus.circle.svg"
                             default:
-                                return "qrc:/icons/folder.svg"
+                                return iconPrefix + "/folder.svg"
                         }
                     }
                     opacity: delegateRoot.nodeType === "action" ? 0.6 : 1.0

@@ -55,8 +55,8 @@ Rectangle {
         // Play/Pause button
         Components.IconButton {
             iconSource: root.playing ? 
-                       "qrc:/icons/pause.fill.svg" : 
-                       "qrc:/icons/play.fill.svg"
+                       iconPrefix + "/pause.fill.svg" :
+                       iconPrefix + "/play.fill.svg"
             tooltipText: root.playing ? qsTr("Pause") : qsTr("Play")
             onClicked: root.playPauseClicked()
         }
@@ -142,13 +142,13 @@ Rectangle {
             Components.IconButton {
                 iconSource: {
                     if (root.muted || root.volume === 0) {
-                        return "qrc:/icons/speaker.slash.fill.svg"
+                        return iconPrefix + "/speaker.slash.fill.svg"
                     } else if (root.volume < 33) {
-                        return "qrc:/icons/speaker.wave.1.fill.svg"
+                        return iconPrefix + "/speaker.wave.1.fill.svg"
                     } else if (root.volume < 66) {
-                        return "qrc:/icons/speaker.wave.2.fill.svg"
+                        return iconPrefix + "/speaker.wave.2.fill.svg"
                     } else {
-                        return "qrc:/icons/speaker.wave.3.fill.svg"
+                        return iconPrefix + "/speaker.wave.3.fill.svg"
                     }
                 }
                 tooltipText: root.muted ? qsTr("Unmute") : qsTr("Mute")

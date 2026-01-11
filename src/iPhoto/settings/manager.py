@@ -8,7 +8,7 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
-from PySide6.QtCore import QObject, Signal
+from PySide6.QtCore import QObject, Signal, Slot
 
 from ..errors import SettingsLoadError, SettingsValidationError
 from ..utils.jsonio import read_json, write_json
@@ -62,6 +62,8 @@ class SettingsManager(QObject):
             raise SettingsValidationError(str(exc)) from exc
         self._write()
 
+    @Slot(str, result="QVariant")
+    @Slot(str, "QVariant", result="QVariant")
     def get(self, key: str, default: Any | None = None) -> Any:
         """Return the value for *key*, supporting dotted access for nested keys."""
 
@@ -76,6 +78,7 @@ class SettingsManager(QObject):
             target = value
         return default
 
+    @Slot(str, "QVariant")
     def set(self, key: str, value: Any) -> None:
         """Update *key* with *value* and persist the change."""
 

@@ -1,7 +1,6 @@
-import QtQuick 2.15
+import QtQuick
 import QtQuick.Controls
 import Qt.labs.qmlmodels 1.0
-import Qt.labs.treeview 1.0
 import styles 1.0 as Styles
 
 /**

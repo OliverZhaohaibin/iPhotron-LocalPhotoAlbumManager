@@ -106,7 +106,7 @@ class _NavigationController(QObject):
         try:
             self._context.library.bind_path(target)
         except Exception as exc:  # pragma: no cover - dialog feedback only
-            print(f"Failed to bind library: {exc}", file=sys.stderr)
+            print(f"Failed to bind library at {target}: {exc}", file=sys.stderr)
             return
         self._context.settings.set("basic_library_path", str(target))
         self.openAlbum(str(target))
@@ -322,7 +322,10 @@ class QMLApplication:
             try:
                 controller.setModel(model)  # type: ignore[attr-defined]
             except AttributeError:
-                pass
+                print(
+                    "Asset controller does not support dynamic model updates; skipping.",
+                    file=sys.stderr,
+                )
         provider = getattr(self, "_thumbnail_provider", None)
         if provider is not None:
             provider.set_model(model)

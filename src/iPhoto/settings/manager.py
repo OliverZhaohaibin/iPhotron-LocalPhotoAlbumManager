@@ -94,8 +94,8 @@ class SettingsManager(QObject):
                 try:
                     payload = payload.toVariant()
                 except (AttributeError, RuntimeError, TypeError):
-                    # Fallback: treat as primitive to avoid serialisation failures
-                    return None
+                    # Preserve intent while staying JSON-safe
+                    return str(payload)
 
             if isinstance(payload, dict):
                 return {k: _normalise(v) for k, v in payload.items()}

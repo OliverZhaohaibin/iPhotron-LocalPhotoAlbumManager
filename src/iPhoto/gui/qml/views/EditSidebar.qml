@@ -93,7 +93,7 @@ Rectangle {
                         value: root.brilliance
                         from: -100
                         to: 100
-                        onValueChanged: function(v) { root.brillianceChanged(v) }
+                        onValueChanged: root.brillianceChanged(value)
                     }
                     
                     Components.SliderRow {
@@ -101,7 +101,7 @@ Rectangle {
                         value: root.exposure
                         from: -100
                         to: 100
-                        onValueChanged: function(v) { root.exposureChanged(v) }
+                        onValueChanged: root.exposureChanged(value)
                     }
                     
                     Components.SliderRow {
@@ -109,7 +109,7 @@ Rectangle {
                         value: root.highlights
                         from: -100
                         to: 100
-                        onValueChanged: function(v) { root.highlightsChanged(v) }
+                        onValueChanged: root.highlightsChanged(value)
                     }
                     
                     Components.SliderRow {
@@ -117,7 +117,7 @@ Rectangle {
                         value: root.shadows
                         from: -100
                         to: 100
-                        onValueChanged: function(v) { root.shadowsChanged(v) }
+                        onValueChanged: root.shadowsChanged(value)
                     }
                     
                     Components.SliderRow {
@@ -125,7 +125,7 @@ Rectangle {
                         value: root.contrast
                         from: -100
                         to: 100
-                        onValueChanged: function(v) { root.contrastChanged(v) }
+                        onValueChanged: root.contrastChanged(value)
                     }
                     
                     Components.SliderRow {
@@ -133,7 +133,7 @@ Rectangle {
                         value: root.brightness
                         from: -100
                         to: 100
-                        onValueChanged: function(v) { root.brightnessChanged(v) }
+                        onValueChanged: root.brightnessChanged(value)
                     }
                     
                     Components.SliderRow {
@@ -141,7 +141,7 @@ Rectangle {
                         value: root.blackPoint
                         from: -100
                         to: 100
-                        onValueChanged: function(v) { root.blackPointChanged(v) }
+                        onValueChanged: root.blackPointChanged(value)
                     }
                 }
             }
@@ -161,7 +161,7 @@ Rectangle {
                         value: root.saturation
                         from: -100
                         to: 100
-                        onValueChanged: function(v) { root.saturationChanged(v) }
+                        onValueChanged: root.saturationChanged(value)
                     }
                     
                     Components.SliderRow {
@@ -169,7 +169,7 @@ Rectangle {
                         value: root.vibrance
                         from: -100
                         to: 100
-                        onValueChanged: function(v) { root.vibranceChanged(v) }
+                        onValueChanged: root.vibranceChanged(value)
                     }
                     
                     Components.SliderRow {
@@ -177,7 +177,7 @@ Rectangle {
                         value: root.warmth
                         from: -100
                         to: 100
-                        onValueChanged: function(v) { root.warmthChanged(v) }
+                        onValueChanged: root.warmthChanged(value)
                     }
                     
                     Components.SliderRow {
@@ -185,7 +185,7 @@ Rectangle {
                         value: root.tint
                         from: -100
                         to: 100
-                        onValueChanged: function(v) { root.tintChanged(v) }
+                        onValueChanged: root.tintChanged(value)
                     }
                 }
             }
@@ -206,7 +206,7 @@ Rectangle {
                         from: 0
                         to: 100
                         defaultValue: 0
-                        onValueChanged: function(v) { root.intensityChanged(v) }
+                        onValueChanged: root.intensityChanged(value)
                     }
                     
                     Components.SliderRow {
@@ -214,7 +214,7 @@ Rectangle {
                         value: root.neutrals
                         from: -100
                         to: 100
-                        onValueChanged: function(v) { root.neutralsChanged(v) }
+                        onValueChanged: root.neutralsChanged(value)
                     }
                     
                     Components.SliderRow {
@@ -222,7 +222,7 @@ Rectangle {
                         value: root.tone
                         from: -100
                         to: 100
-                        onValueChanged: function(v) { root.toneChanged(v) }
+                        onValueChanged: root.toneChanged(value)
                     }
                     
                     Components.SliderRow {
@@ -231,7 +231,7 @@ Rectangle {
                         from: 0
                         to: 100
                         defaultValue: 0
-                        onValueChanged: function(v) { root.grainChanged(v) }
+                        onValueChanged: root.grainChanged(value)
                     }
                 }
             }

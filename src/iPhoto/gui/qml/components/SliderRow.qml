@@ -15,15 +15,13 @@ Item {
     id: root
     
     property string label: "Parameter"
-    property real value: 0
-    property real from: -100
-    property real to: 100
+    property alias value: slider.value
+    property alias from: slider.from
+    property alias to: slider.to
+    property alias stepSize: slider.stepSize
     property real defaultValue: 0
-    property real stepSize: 1
     property int decimals: 0
     property bool showValue: true
-    
-    signal valueChanged(real newValue)
     
     implicitWidth: parent ? parent.width : 260
     implicitHeight: 32
@@ -70,7 +68,6 @@ Item {
                 anchors.fill: parent
                 onDoubleClicked: {
                     root.value = root.defaultValue
-                    root.valueChanged(root.defaultValue)
                 }
                 
                 ToolTip {
@@ -87,17 +84,10 @@ Item {
             width: parent.width - labelText.width - (root.showValue ? valueText.width + Styles.Theme.spacingSmall : 0) - Styles.Theme.spacingMedium
             height: parent.height
             
-            from: root.from
-            to: root.to
-            value: root.value
-            stepSize: root.stepSize
-            
-            onValueChanged: {
-                if (root.value !== value) {
-                    root.value = value
-                    root.valueChanged(value)
-                }
-            }
+            from: -100
+            to: 100
+            value: 0
+            stepSize: 1
             
             // Custom styling for edit slider
             background: Rectangle {

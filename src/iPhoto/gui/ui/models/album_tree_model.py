@@ -154,13 +154,13 @@ class AlbumTreeModel(QAbstractItemModel):
     def roleNames(self) -> dict[int, bytes]:  # type: ignore[override]
         """Expose friendly role names for QML consumption."""
 
-        return {
-            int(Qt.ItemDataRole.DisplayRole): b"display",
-            int(Qt.ItemDataRole.DecorationRole): b"decoration",
-            int(AlbumTreeRole.NODE_TYPE): b"nodeType",
-            int(AlbumTreeRole.ALBUM_NODE): b"albumNode",
-            int(AlbumTreeRole.FILE_PATH): b"path",
-        }
+        roles = super().roleNames()
+        roles[int(Qt.ItemDataRole.DisplayRole)] = b"display"
+        roles[int(Qt.ItemDataRole.DecorationRole)] = b"decoration"
+        roles[int(AlbumTreeRole.NODE_TYPE)] = b"nodeType"
+        roles[int(AlbumTreeRole.ALBUM_NODE)] = b"albumNode"
+        roles[int(AlbumTreeRole.FILE_PATH)] = b"path"
+        return roles
 
     def flags(self, index: QModelIndex) -> Qt.ItemFlag:  # noqa: N802
         if not index.isValid():

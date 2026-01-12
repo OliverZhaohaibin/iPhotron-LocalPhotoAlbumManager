@@ -7,7 +7,7 @@ from enum import Enum, auto
 from pathlib import Path
 from typing import Dict, List, Optional
 
-from PySide6.QtCore import QAbstractItemModel, QModelIndex, QObject, Qt
+from PySide6.QtCore import QAbstractItemModel, QByteArray, QModelIndex, QObject, Qt
 from PySide6.QtGui import QIcon
 
 from ....library.manager import LibraryManager
@@ -151,15 +151,15 @@ class AlbumTreeModel(QAbstractItemModel):
             return self._icon_for_item(item)
         return None
 
-    def roleNames(self) -> dict[int, bytes]:  # type: ignore[override]
+    def roleNames(self) -> dict[int, QByteArray]:  # type: ignore[override]
         """Expose friendly role names for QML consumption."""
 
         return {
-            Qt.ItemDataRole.DisplayRole: b"display",
-            Qt.ItemDataRole.DecorationRole: b"decoration",
-            AlbumTreeRole.NODE_TYPE: b"nodeType",
-            AlbumTreeRole.ALBUM_NODE: b"albumNode",
-            AlbumTreeRole.FILE_PATH: b"path",
+            int(Qt.ItemDataRole.DisplayRole): QByteArray(b"display"),
+            int(Qt.ItemDataRole.DecorationRole): QByteArray(b"decoration"),
+            int(AlbumTreeRole.NODE_TYPE): QByteArray(b"nodeType"),
+            int(AlbumTreeRole.ALBUM_NODE): QByteArray(b"albumNode"),
+            int(AlbumTreeRole.FILE_PATH): QByteArray(b"path"),
         }
 
     def flags(self, index: QModelIndex) -> Qt.ItemFlag:  # noqa: N802

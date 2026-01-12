@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 try:  # PySide may omit QJSValue in some environments
-    from PySide6.QtCore import QJSValue
+    from PySide6.QtQml import QJSValue
 except ImportError:  # pragma: no cover - fallback for non-Qt contexts
     QJSValue = None  # type: ignore[misc,assignment]
 
@@ -90,9 +90,18 @@ class SettingsManager(QObject):
         def _normalise(payload: Any) -> Any:
             """Convert QML values to JSON-friendly Python types."""
 
-            if QJSValue is not None and isinstance(payload, QJSValue):
+            # Check for QJSValue both via isinstance (if imported) and by type name
+            # (fallback) to ensure we never pass a QJSValue wrapper to json.dump.
+            is_js_value = (QJSValue is not None and isinstance(payload, QJSValue)) or (
+                type(payload).__name__ == "QJSValue"
+            )
+
+            if is_js_value:
                 try:
-                    payload = payload.toVariant()
+                    if hasattr(payload, "toVariant"):
+                        payload = payload.toVariant()
+                    else:
+                        payload = str(payload)
                 except (AttributeError, RuntimeError, TypeError):
                     # Preserve intent while staying JSON-safe
                     return str(payload)

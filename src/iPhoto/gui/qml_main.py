@@ -68,6 +68,8 @@ class _NavigationController(QObject):
         if library_root is None:
             return
         self._context.facade.open_album(library_root)
+        # Ensure any leftover filter from static views is cleared
+        self._context.facade.asset_list_model.set_filter_mode(None)
         self._album_controller.selectAllPhotos()
         self._on_model_changed(self._context.facade.asset_list_model)
 

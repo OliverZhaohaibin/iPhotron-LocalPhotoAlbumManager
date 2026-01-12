@@ -13,7 +13,7 @@
 
 ## 📥 Download
 
-[![Download iPhoto](https://img.shields.io/badge/⬇️%20Download-iPhoto%20Latest%20Release-blue?style=for-the-badge&logo=windows)](https://github.com/OliverZhaohaibin/iPhotos-LocalPhotoAlbumManager/releases/download/v3.0.0/v3.00.exe)
+[![Download iPhoto](https://img.shields.io/badge/⬇️%20Download-iPhoto%20Latest%20Release-blue?style=for-the-badge&logo=windows)](https://github.com/OliverZhaohaibin/iPhotos-LocalPhotoAlbumManager/releases/download/v3.1.0/v3.10.exe)
 
 **💡 Quick Install:** Click the button above to download the latest Windows installer (.exe) directly.
 

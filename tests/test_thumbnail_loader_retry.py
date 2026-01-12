@@ -49,6 +49,6 @@ def test_thumbnail_loader_retries_once_on_failure(tmp_path):
 
     loader._handle_result((*base_key, 0), None, rel)
 
-    assert loader._failure_counts[base_key] == 2
+    assert loader._failure_counts[base_key] == 1
     assert base_key in loader._failures
     assert not loader._pending_deque

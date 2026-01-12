@@ -138,7 +138,6 @@ class ThumbnailJob(QRunnable):
         )
 
     def run(self) -> None:  # pragma: no cover - executed in worker thread
-        rel_for_path = self._cache_rel if self._cache_rel is not None else self._rel
         try:
             # Memory Guard
             if psutil:
@@ -236,6 +235,7 @@ class ThumbnailJob(QRunnable):
             except RuntimeError:  # pragma: no cover - race with QObject deletion
                 pass
         except Exception:
+            rel_for_path = self._cache_rel if self._cache_rel is not None else self._rel
             LOGGER.exception("ThumbnailJob failed for %s (rel=%s)", self._abs_path, rel_for_path)
             loader = getattr(self, "_loader", None)
             if loader:
@@ -759,8 +759,14 @@ class ThumbnailLoader(QObject):
             duration=duration,
         )
 
-    def _record_terminal_failure(self, base_key: Tuple[str, str, int, int]) -> None:
-        self._failure_counts[base_key] = self._failure_counts.get(base_key, 0) + 1
+    def _record_terminal_failure(
+        self,
+        base_key: Tuple[str, str, int, int],
+        *,
+        increment: bool = True,
+    ) -> None:
+        if increment:
+            self._failure_counts[base_key] = self._failure_counts.get(base_key, 0) + 1
         self._failures.add(base_key)
         self._missing.add(base_key)
 
@@ -789,7 +795,8 @@ class ThumbnailLoader(QObject):
             if self._retry_after_failure(base_key, rel, spec):
                 self._drain_queue()
                 return
-            self._record_terminal_failure(base_key)
+            already_retried = self._failure_counts.get(base_key, 0) >= 1
+            self._record_terminal_failure(base_key, increment=not already_retried)
             self._job_specs.pop(base_key, None)
             self._drain_queue()
             return
@@ -799,7 +806,8 @@ class ThumbnailLoader(QObject):
             if self._retry_after_failure(base_key, rel, spec):
                 self._drain_queue()
                 return
-            self._record_terminal_failure(base_key)
+            already_retried = self._failure_counts.get(base_key, 0) >= 1
+            self._record_terminal_failure(base_key, increment=not already_retried)
             self._job_specs.pop(base_key, None)
             self._drain_queue()
             return
@@ -895,6 +903,7 @@ class ThumbnailLoader(QObject):
             duration,
         ) = spec
 
+        retry_rel = stored_rel or rel
         try:
             cache_path = generate_cache_path(library_root, abs_path, size, known_stamp or 0)
             safe_unlink(cache_path)
@@ -902,7 +911,7 @@ class ThumbnailLoader(QObject):
             LOGGER.debug("Failed to cleanup cache for %s", abs_path, exc_info=True)
 
         retry_job = self._create_job_from_spec(
-            stored_rel or rel,
+            retry_rel,
             abs_path,
             size,
             None,
@@ -916,7 +925,7 @@ class ThumbnailLoader(QObject):
 
         self._store_job_spec(
             base_key,
-            stored_rel or rel,
+            retry_rel,
             abs_path,
             size,
             None,

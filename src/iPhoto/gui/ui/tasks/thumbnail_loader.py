@@ -205,7 +205,7 @@ class ThumbnailJob(QRunnable):
             rel_for_path = self._cache_rel if self._cache_rel is not None else self._rel
             try:
                 image = self._render_media()
-            except (OSError, ValueError, RuntimeError, np.linalg.LinAlgError):
+            except (OSError, ValueError, np.linalg.LinAlgError):
                 LOGGER.exception("ThumbnailJob failed for %s (rel=%s)", self._abs_path, rel_for_path)
                 loader = getattr(self, "_loader", None)
                 if loader:
@@ -880,7 +880,27 @@ class ThumbnailLoader(QObject):
             ]
         ],
     ) -> bool:
-        """Schedule a one-shot retry when thumbnail rendering fails."""
+        """
+        Attempt to schedule a single retry after a thumbnail rendering failure.
+
+        A retry is only scheduled when ``spec`` is available and the given
+        ``base_key`` has not already been retried (tracked via
+        ``self._failure_counts``). When eligible, this method:
+
+        * chooses the effective rel path from the stored spec (if present),
+        * cleans up any cached thumbnail derived from the known stamp to avoid
+          reusing corrupt data,
+        * recreates a :class:`ThumbnailJob` from the stored parameters, and
+        * reschedules that job via ``_schedule_job`` while persisting the spec.
+
+        Args:
+            base_key: Cache key for the job.
+            rel: The rel path passed to the original request.
+            spec: Stored job parameters needed to recreate the job.
+
+        Returns:
+            True if a retry was scheduled; False if no retry will occur.
+        """
 
         if spec is None:
             return False
@@ -905,11 +925,12 @@ class ThumbnailLoader(QObject):
         ) = spec
 
         retry_rel = stored_rel if stored_rel is not None else rel
-        try:
-            cache_path = generate_cache_path(library_root, abs_path, size, known_stamp or 0)
-            safe_unlink(cache_path)
-        except OSError:
-            LOGGER.debug("Failed to cleanup cache for %s", abs_path, exc_info=True)
+        if known_stamp is not None:
+            try:
+                cache_path = generate_cache_path(library_root, abs_path, size, known_stamp)
+                safe_unlink(cache_path)
+            except OSError:
+                LOGGER.debug("Failed to cleanup cache for %s", abs_path, exc_info=True)
 
         retry_job = self._create_job_from_spec(
             retry_rel,

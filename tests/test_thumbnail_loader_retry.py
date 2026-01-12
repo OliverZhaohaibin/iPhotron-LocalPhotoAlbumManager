@@ -42,6 +42,9 @@ def test_thumbnail_loader_retries_once_on_failure(tmp_path):
     assert loader._failure_counts[base_key] == 1
     assert base_key not in loader._failures
     assert loader._pending_deque
+    retry_key, retry_job = loader._pending_deque[0]
+    assert retry_key == base_key
+    assert getattr(retry_job, "_rel") == rel
 
     loader._pending_deque.clear()
     loader._pending_keys.add(base_key)

@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 try:  # PySide may omit QJSValue in some environments
-    from PySide6.QtCore import QJSValue
+    from PySide6.QtQml import QJSValue
 except ImportError:  # pragma: no cover - fallback for non-Qt contexts
     QJSValue = None  # type: ignore[misc,assignment]
 

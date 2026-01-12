@@ -120,6 +120,56 @@ Rectangle {
                 return false
             }
 
+            MouseArea {
+                id: mouseArea
+                anchors.fill: parent
+                hoverEnabled: true
+                cursorShape: Qt.PointingHandCursor
+
+                onClicked: {
+                    if (isSeparator) return
+
+                    if (isAction) {
+                        root.bindLibraryRequested()
+                        return
+                    }
+
+                    if (isHeader) {
+                        if (display === "Albums") {
+                            root.currentStaticSelection = "Albums"
+                            root.currentSelection = null
+                            root.staticNodeSelected("Albums")
+                        } else if (display !== "Basic Library") {
+                            // Toggle expansion for headers other than Basic Library
+                            treeView.toggleExpanded(index)
+                        }
+                        return
+                    }
+
+                    if (isStatic) {
+                        root.currentStaticSelection = display
+                        root.currentSelection = null
+                        if (display === "All Photos") {
+                            root.allPhotosSelected()
+                        } else {
+                            root.staticNodeSelected(display)
+                        }
+                        return
+                    }
+
+                    if (isAlbum) {
+                        if (path !== undefined && path !== null) {
+                            var pathStr = path.toString()
+                            root.currentSelection = pathStr
+                            root.currentStaticSelection = ""
+                            root.albumSelected(pathStr)
+                        } else {
+                            console.warn("AlbumSidebar: path is undefined for album node " + display)
+                        }
+                    }
+                }
+            }
+
             Rectangle {
                 anchors.fill: parent
                 anchors.leftMargin: 4
@@ -218,56 +268,6 @@ Rectangle {
                     opacity: isAction ? 0.7 : 1.0
                     elide: Text.ElideRight
                     width: parent.width - nodeIcon.width - 32 - (TreeView.depth * 16)
-                }
-            }
-
-            MouseArea {
-                id: mouseArea
-                anchors.fill: parent
-                hoverEnabled: true
-                cursorShape: Qt.PointingHandCursor
-
-                onClicked: {
-                    if (isSeparator) return
-
-                    if (isAction) {
-                        root.bindLibraryRequested()
-                        return
-                    }
-
-                    if (isHeader) {
-                        if (display === "Albums") {
-                            root.currentStaticSelection = "Albums"
-                            root.currentSelection = null
-                            root.staticNodeSelected("Albums")
-                        } else if (display !== "Basic Library") {
-                            // Toggle expansion for headers other than Basic Library
-                            treeView.toggleExpanded(index)
-                        }
-                        return
-                    }
-
-                    if (isStatic) {
-                        root.currentStaticSelection = display
-                        root.currentSelection = null
-                        if (display === "All Photos") {
-                            root.allPhotosSelected()
-                        } else {
-                            root.staticNodeSelected(display)
-                        }
-                        return
-                    }
-
-                    if (isAlbum) {
-                        if (path !== undefined && path !== null) {
-                            var pathStr = path.toString()
-                            root.currentSelection = pathStr
-                            root.currentStaticSelection = ""
-                            root.albumSelected(pathStr)
-                        } else {
-                            console.warn("AlbumSidebar: path is undefined for album node " + display)
-                        }
-                    }
                 }
             }
 

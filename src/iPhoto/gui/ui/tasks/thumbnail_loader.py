@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections import OrderedDict, deque
 from enum import IntEnum
 import hashlib
+import logging
 import os
 import time
 from pathlib import Path
@@ -36,6 +37,9 @@ from ....core.color_resolver import compute_color_statistics
 from ....io import sidecar
 from .video_frame_grabber import grab_video_frame
 from . import geo_utils
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 def safe_unlink(path: Path) -> None:
@@ -138,7 +142,7 @@ class ThumbnailJob(QRunnable):
         if psutil:
             mem = psutil.virtual_memory()
             if mem.percent > 80.0:
-                 time.sleep(0.5)
+                time.sleep(0.5)
 
         # 1. Stat the file to get actual timestamp
         try:
@@ -167,8 +171,6 @@ class ThumbnailJob(QRunnable):
             pass
 
         actual_stamp = int(stamp_ns)
-
-        rel_for_path = self._cache_rel if self._cache_rel is not None else self._rel
 
         # 2. Validation
         if self._known_stamp is not None:
@@ -200,7 +202,22 @@ class ThumbnailJob(QRunnable):
                 image = None
 
         if image is None:
-            image = self._render_media()
+            rel_for_path = self._cache_rel if self._cache_rel is not None else self._rel
+            try:
+                image = self._render_media()
+            except (OSError, ValueError, np.linalg.LinAlgError):
+                LOGGER.exception("ThumbnailJob failed for %s (rel=%s)", self._abs_path, rel_for_path)
+                loader = getattr(self, "_loader", None)
+                if loader:
+                    try:
+                        loader._delivered.emit(
+                            self._make_local_key(0),
+                            None,
+                            self._rel,
+                        )
+                    except RuntimeError:
+                        pass
+                return
 
         success = False
         if image is not None:
@@ -533,6 +550,22 @@ class ThumbnailLoader(QObject):
 
         self._failures: Set[Tuple[str, str, int, int]] = set()
         self._missing: Set[Tuple[str, str, int, int]] = set()
+        self._failure_counts: Dict[Tuple[str, str, int, int], int] = {}
+        self._job_specs: Dict[
+            Tuple[str, str, int, int],
+            Tuple[
+                str,
+                Path,
+                QSize,
+                Optional[int],
+                Path,
+                Path,
+                bool,
+                bool,
+                Optional[float],
+                Optional[float],
+            ],
+        ] = {}
 
         self._delivered.connect(self._handle_result)
         self._validation_success.connect(self._handle_validation_success)
@@ -562,6 +595,8 @@ class ThumbnailLoader(QObject):
         self._pending_keys.clear()
         self._failures.clear()
         self._missing.clear()
+        self._failure_counts.clear()
+        self._job_specs.clear()
 
         # Ensure the thumbnail directory exists in the library root (if set)
         if self._library_root:
@@ -620,18 +655,31 @@ class ThumbnailLoader(QObject):
         if base_key in self._failures:
             return None
 
-        job = ThumbnailJob(
-            self,
+        job = self._create_job_from_spec(
             rel,
             path,
             fixed_size,
             known_stamp,
             self._album_root,
             lib_root,
-            is_image=is_image,
-            is_video=is_video,
-            still_image_time=still_image_time,
-            duration=duration,
+            is_image,
+            is_video,
+            still_image_time,
+            duration,
+        )
+
+        self._store_job_spec(
+            base_key,
+            rel,
+            path,
+            fixed_size,
+            known_stamp,
+            self._album_root,
+            lib_root,
+            is_image,
+            is_video,
+            still_image_time,
+            duration,
         )
 
         self._schedule_job(base_key, job)
@@ -658,6 +706,71 @@ class ThumbnailLoader(QObject):
         self._active_jobs_count += 1
         self._pool.start(job)
 
+    def _store_job_spec(
+        self,
+        base_key: Tuple[str, str, int, int],
+        rel: str,
+        path: Path,
+        size: QSize,
+        known_stamp: Optional[int],
+        album_root: Path,
+        library_root: Path,
+        is_image: bool,
+        is_video: bool,
+        still_image_time: Optional[float],
+        duration: Optional[float],
+    ) -> None:
+        self._job_specs[base_key] = (
+            rel,
+            path,
+            size,
+            known_stamp,
+            album_root,
+            library_root,
+            is_image,
+            is_video,
+            still_image_time,
+            duration,
+        )
+
+    def _create_job_from_spec(
+        self,
+        rel: str,
+        abs_path: Path,
+        size: QSize,
+        known_stamp: Optional[int],
+        album_root: Path,
+        library_root: Path,
+        is_image: bool,
+        is_video: bool,
+        still_image_time: Optional[float],
+        duration: Optional[float],
+    ) -> ThumbnailJob:
+        return ThumbnailJob(
+            self,
+            rel,
+            abs_path,
+            size,
+            known_stamp,
+            album_root,
+            library_root,
+            is_image=is_image,
+            is_video=is_video,
+            still_image_time=still_image_time,
+            duration=duration,
+        )
+
+    def _record_terminal_failure(
+        self,
+        base_key: Tuple[str, str, int, int],
+        *,
+        increment: bool = True,
+    ) -> None:
+        if increment:
+            self._failure_counts[base_key] = self._failure_counts.get(base_key, 0) + 1
+        self._failures.add(base_key)
+        self._missing.add(base_key)
+
     def _base_key(self, rel: str, size: QSize) -> Tuple[str, str, int, int]:
         assert self._album_root_str is not None
         return (self._album_root_str, rel, size.width(), size.height())
@@ -677,20 +790,31 @@ class ThumbnailLoader(QObject):
 
         self._active_jobs_count = max(0, self._active_jobs_count - 1)
         self._pending_keys.discard(base_key)
+        spec = self._job_specs.get(base_key)
 
         if image is None:
-            self._failures.add(base_key)
-            self._missing.add(base_key)
+            if self._retry_after_failure(base_key, rel, spec):
+                self._drain_queue()
+                return
+            already_retried = self._failure_counts.get(base_key, 0) >= 1
+            self._record_terminal_failure(base_key, increment=not already_retried)
+            self._job_specs.pop(base_key, None)
             self._drain_queue()
             return
 
         pixmap = QPixmap.fromImage(image)
         if pixmap.isNull():
-            self._failures.add(base_key)
-            self._missing.add(base_key)
+            if self._retry_after_failure(base_key, rel, spec):
+                self._drain_queue()
+                return
+            already_retried = self._failure_counts.get(base_key, 0) >= 1
+            self._record_terminal_failure(base_key, increment=not already_retried)
+            self._job_specs.pop(base_key, None)
             self._drain_queue()
             return
 
+        self._failure_counts.pop(base_key, None)
+        self._job_specs.pop(base_key, None)
         self._memory[base_key] = (stamp, pixmap)
 
         while len(self._memory) > self._max_memory_items:
@@ -729,8 +853,111 @@ class ThumbnailLoader(QObject):
         self._pending_keys = {k for k in self._pending_keys if k[1] != rel}
         self._failures = {k for k in self._failures if k[1] != rel}
         self._missing = {k for k in self._missing if k[1] != rel}
+        self._failure_counts = {k: v for k, v in self._failure_counts.items() if k[1] != rel}
+        self._job_specs = {k: v for k, v in self._job_specs.items() if k[1] != rel}
         # Remove jobs for the invalidated rel from the pending deque to avoid zombie entries
         self._pending_deque = deque(
             (key, job) for key, job in self._pending_deque
             if key[1] != rel
         )
+
+    def _retry_after_failure(
+        self,
+        base_key: Tuple[str, str, int, int],
+        rel: str,
+        spec: Optional[
+            Tuple[
+                str,
+                Path,
+                QSize,
+                Optional[int],
+                Path,
+                Path,
+                bool,
+                bool,
+                Optional[float],
+                Optional[float],
+            ]
+        ],
+    ) -> bool:
+        """
+        Attempt to schedule a single retry after a thumbnail rendering failure.
+
+        A retry is only scheduled when ``spec`` is available and the given
+        ``base_key`` has not already been retried (tracked via
+        ``self._failure_counts``). When eligible, this method:
+
+        * chooses the effective rel path from the stored spec (if present),
+        * cleans up any cached thumbnail derived from the known stamp to avoid
+          reusing corrupt data,
+        * recreates a :class:`ThumbnailJob` from the stored parameters, and
+        * reschedules that job via ``_schedule_job`` while persisting the spec.
+
+        Args:
+            base_key: Cache key for the job.
+            rel: The rel path passed to the original request.
+            spec: Stored job parameters needed to recreate the job.
+
+        Returns:
+            True if a retry was scheduled; False if no retry will occur.
+        """
+
+        if spec is None:
+            return False
+
+        attempts = self._failure_counts.get(base_key, 0)
+        if attempts >= 1:
+            return False
+
+        self._failure_counts[base_key] = attempts + 1
+
+        (
+            stored_rel,
+            abs_path,
+            size,
+            known_stamp,
+            album_root,
+            library_root,
+            is_image,
+            is_video,
+            still_image_time,
+            duration,
+        ) = spec
+
+        retry_rel = stored_rel if stored_rel is not None else rel
+        if known_stamp is not None:
+            try:
+                cache_path = generate_cache_path(library_root, abs_path, size, known_stamp)
+                safe_unlink(cache_path)
+            except OSError:
+                LOGGER.debug("Failed to cleanup cache for %s", abs_path, exc_info=True)
+
+        retry_job = self._create_job_from_spec(
+            retry_rel,
+            abs_path,
+            size,
+            known_stamp,
+            album_root,
+            library_root,
+            is_image,
+            is_video,
+            still_image_time,
+            duration,
+        )
+
+        self._store_job_spec(
+            base_key,
+            retry_rel,
+            abs_path,
+            size,
+            known_stamp,
+            album_root,
+            library_root,
+            is_image,
+            is_video,
+            still_image_time,
+            duration,
+        )
+
+        self._schedule_job(base_key, retry_job)
+        return True

@@ -51,7 +51,7 @@ def test_placeholder_when_unbound(qapp: QApplication) -> None:
     assert model.rowCount() == 1
     index = model.index(0, 0)
     assert model.data(index) == "Bind Basic Library…"
-    assert model.data(index, AlbumTreeRole.NODE_TYPE) == NodeType.ACTION
+    assert model.data(index, AlbumTreeRole.NODE_TYPE) == NodeType.ACTION.name
 
 
 def test_model_populates_albums(tmp_path: Path, qapp: QApplication) -> None:
@@ -77,7 +77,7 @@ def test_model_populates_albums(tmp_path: Path, qapp: QApplication) -> None:
     # Validating the node type ensures the delegate will render the correct font
     # weight and icon treatment associated with header entries, which was the
     # original motivation for promoting the section.
-    assert model.data(albums_index, AlbumTreeRole.NODE_TYPE) == NodeType.HEADER
+    assert model.data(albums_index, AlbumTreeRole.NODE_TYPE) == NodeType.HEADER.name
     albums_item = model.item_from_index(albums_index)
     assert albums_item is not None
     # The Albums header must reference the dedicated folder SVG so the sidebar
@@ -86,10 +86,10 @@ def test_model_populates_albums(tmp_path: Path, qapp: QApplication) -> None:
     assert albums_item.icon_name == "folder.svg"
     trip_index = _find_child(model, albums_index, "Trip")
     assert trip_index is not None
-    assert model.data(trip_index, AlbumTreeRole.NODE_TYPE) == NodeType.ALBUM
+    assert model.data(trip_index, AlbumTreeRole.NODE_TYPE) == NodeType.ALBUM.name
     child_index = _find_child(model, trip_index, "Day1")
     assert child_index is not None
-    assert model.data(child_index, AlbumTreeRole.NODE_TYPE) == NodeType.SUBALBUM
+    assert model.data(child_index, AlbumTreeRole.NODE_TYPE) == NodeType.SUBALBUM.name
 
     mapped_index = model.index_for_path(album_dir)
     assert mapped_index.isValid()

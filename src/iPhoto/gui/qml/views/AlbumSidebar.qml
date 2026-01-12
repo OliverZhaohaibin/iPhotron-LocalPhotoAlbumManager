@@ -63,6 +63,21 @@ Rectangle {
         anchors.margins: 0
         model: root.model
 
+        // Auto-expand headers on startup
+        Timer {
+            id: startupExpand
+            interval: 50
+            running: true
+            repeat: false
+            onTriggered: {
+                // Expand "Basic Library" (usually row 0) and "Albums" (usually row 2)
+                // We expand indices 0 to 5 to be safe covering headers in standard layout
+                for (var i = 0; i < 5; i++) {
+                     treeView.expand(i)
+                }
+            }
+        }
+
         ScrollBar.vertical: ScrollBar {
             active: treeView.moving
 
@@ -92,7 +107,7 @@ Rectangle {
             property string nodeKey: (nodeType !== undefined && nodeType !== null) ? nodeType.toString().toLowerCase() : ""
 
             // Classification helpers
-            property bool isStatic: nodeKey.indexOf("static") !== -1
+            property bool isStatic: nodeKey === "static"
             property bool isAction: nodeKey.indexOf("action") !== -1
             property bool isHeader: nodeKey.indexOf("header") !== -1
             property bool isSeparator: nodeKey.indexOf("separator") !== -1

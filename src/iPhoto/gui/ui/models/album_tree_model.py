@@ -142,11 +142,11 @@ class AlbumTreeModel(QAbstractItemModel):
         if role == Qt.ItemDataRole.ToolTipRole and item.album is not None:
             return str(item.album.path)
         if role == AlbumTreeRole.NODE_TYPE:
-            return item.node_type
+            return item.node_type.name
         if role == AlbumTreeRole.ALBUM_NODE:
             return item.album
         if role == AlbumTreeRole.FILE_PATH and item.album is not None:
-            return item.album.path
+            return str(item.album.path)
         if role == Qt.ItemDataRole.DecorationRole:
             return self._icon_for_item(item)
         return None

@@ -163,7 +163,7 @@ Rectangle {
                         anchors.fill: parent
                         anchors.margins: -4
                         cursorShape: Qt.PointingHandCursor
-                        onClicked: TreeView.view.toggleExpanded(index)
+                        onClicked: treeView.toggleExpanded(index)
                     }
                 }
 
@@ -181,14 +181,14 @@ Rectangle {
                     source: {
                         if (isStatic) {
                             if (display === "All Photos") return iconPrefix + "/photo.on.rectangle.svg"
-                            if (display === "Location") return iconPrefix + "/map.svg"
+                            if (display === "Location") return iconPrefix + "/mappin.and.ellipse.svg"
                             if (display === "Recently Deleted") return iconPrefix + "/trash.svg"
                             if (display === "Videos") return iconPrefix + "/video.svg"
                             if (display === "Live Photos") return iconPrefix + "/livephoto.svg"
                             if (display === "Favorites") return iconPrefix + "/suit.heart.svg"
                             return iconPrefix + "/folder.svg"
                         }
-                        if (nodeKey.indexOf("header") !== -1) return iconPrefix + "/folder.badge.svg"
+                        if (nodeKey.indexOf("header") !== -1) return iconPrefix + "/folder.svg"
                         if (nodeKey.indexOf("action") !== -1) return iconPrefix + "/plus.circle.svg"
                         return iconPrefix + "/folder.svg"
                     }
@@ -230,7 +230,7 @@ Rectangle {
                             root.staticNodeSelected("Albums")
                         } else {
                             // Toggle expansion for other headers
-                            TreeView.view.toggleExpanded(index)
+                            treeView.toggleExpanded(index)
                         }
                         return
                     }

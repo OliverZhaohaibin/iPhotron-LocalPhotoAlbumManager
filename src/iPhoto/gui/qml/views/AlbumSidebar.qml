@@ -102,7 +102,7 @@ Rectangle {
             implicitWidth: treeView.width
             width: treeView.width
 
-            property string displayText: (model && model.display !== undefined) ? model.display : ""
+            property string displayText: (model && model.label !== undefined) ? model.label : ""
             property var nodeTypeValue: (model && model.nodeType !== undefined) ? model.nodeType : null
             property var pathValue: (model && model.path !== undefined) ? model.path : null
 

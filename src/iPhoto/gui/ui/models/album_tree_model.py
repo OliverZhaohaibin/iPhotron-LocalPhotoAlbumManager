@@ -155,7 +155,7 @@ class AlbumTreeModel(QAbstractItemModel):
         """Expose friendly role names for QML consumption."""
 
         return {
-            int(Qt.ItemDataRole.DisplayRole): QByteArray(b"display"),
+            int(Qt.ItemDataRole.DisplayRole): QByteArray(b"label"),
             int(Qt.ItemDataRole.DecorationRole): QByteArray(b"decoration"),
             int(AlbumTreeRole.NODE_TYPE): QByteArray(b"nodeType"),
             int(AlbumTreeRole.ALBUM_NODE): QByteArray(b"albumNode"),

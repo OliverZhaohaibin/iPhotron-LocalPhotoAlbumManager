@@ -6,19 +6,125 @@ implementation in main.py.
 
 from __future__ import annotations
 
+import platform
 import sys
 from pathlib import Path
+import os
 
-from PySide6.QtCore import Property, QObject, QUrl, Signal, Slot
+from typing import Callable
+
+from PySide6.QtCore import (
+    Property,
+    QCoreApplication,
+    QObject,
+    QMessageLogContext,
+    Qt,
+    QtMsgType,
+    QUrl,
+    Signal,
+    Slot,
+    qInstallMessageHandler,
+)
 from PySide6.QtGui import QGuiApplication
-from PySide6.QtQml import QQmlApplicationEngine, qmlRegisterType
+from PySide6.QtQml import QQmlApplicationEngine, QQmlError, qmlRegisterType
+from PySide6.QtQuick import QQuickWindow, QSGRendererInterface
 
-from ..appctx import AppContext
-from .ui.models.gallery_model import GalleryModel
-from .ui.models.sidebar_model import SidebarModel
+from src.iPhoto.appctx import AppContext
+from src.iPhoto.gui.ui.models.gallery_model import GalleryModel
+from src.iPhoto.gui.ui.models.sidebar_model import SidebarModel
 
 # Icon directory path
 ICON_DIR = Path(__file__).parent / "ui" / "icon"
+
+
+def _qt_message_handler(mode: QtMsgType, context: QMessageLogContext | None, message: str) -> None:
+    """Route Qt/QML messages to the Python console for easier debugging."""
+    level_map = {
+        QtMsgType.QtDebugMsg: "DEBUG",
+        QtMsgType.QtInfoMsg: "INFO",
+        QtMsgType.QtWarningMsg: "WARNING",
+        QtMsgType.QtCriticalMsg: "CRITICAL",
+        QtMsgType.QtFatalMsg: "FATAL",
+    }
+    level = level_map.get(mode, f"LEVEL_{int(mode)}")
+    location = ""
+    if context and context.file:
+        location = f" ({context.file}:{context.line})"
+    print(f"[Qt/{level}] {message}{location}")
+
+
+def _install_qt_logger() -> None:
+    """Install a Qt message handler to forward QML/Qt errors to stdout."""
+    try:
+        qInstallMessageHandler(_qt_message_handler)
+    except Exception as exc:  # pragma: no cover - defensive
+        print(f"[Qt] Failed to install message handler: {exc}")
+
+
+def _enable_windows_software_opengl() -> None:
+    """Enable software OpenGL fallback on Windows before app creation."""
+    if platform.system().lower() != "windows":
+        return
+    try:
+        QCoreApplication.setAttribute(Qt.ApplicationAttribute.AA_UseSoftwareOpenGL)
+        print("[Qt] Enabled software OpenGL fallback for Windows.")
+    except Exception as exc:  # pragma: no cover - defensive
+        print(f"[Qt] Unable to configure Qt Quick software rendering: {exc}")
+
+
+def _set_windows_quick_software_backend() -> None:
+    """Select the Qt Quick software renderer on Windows.
+    
+    Call this after creating the Qt application but before any QQuickWindow
+    instances are constructed.
+    """
+    if platform.system().lower() != "windows":
+        return
+    try:
+        QQuickWindow.setGraphicsApi(QSGRendererInterface.GraphicsApi.Software)
+        print("[Qt] Using software renderer for Qt Quick.")
+    except Exception as exc:  # pragma: no cover - defensive
+        print(f"[Qt] Unable to configure Qt Quick software rendering: {exc}")
+
+
+def _apply_windows_env_fallbacks() -> None:
+    """Set environment-based fallbacks for Windows Qt rendering."""
+    if platform.system().lower() != "windows":
+        return
+    env_overrides = {
+        "QSG_RHI_BACKEND": "software",  # Force Qt Quick to software scene graph
+        "QT_OPENGL": "software",  # Prefer software OpenGL if still used
+        "QT_QUICK_BACKEND": "software",  # Explicit Qt Quick software backend hint
+        "QSG_INFO": "1",  # Print scene graph backend info to console
+        "QT_DEBUG_PLUGINS": "1",  # Plugin loading diagnostics
+        "QT_QPA_PLATFORM": "windows:renderer=software",  # Force software renderer in platform plugin
+        "QT_D3D_ADAPTER_INDEX": "-1",  # Avoid specific GPU adapters; prefer WARP/software
+        "QSG_RENDER_LOOP": "basic",  # Disable threaded render loop which can crash on some setups
+    }
+    for key, value in env_overrides.items():
+        if os.environ.get(key, "").lower() != value:
+            os.environ[key] = value
+            print(f"[Qt] Set {key}={value} for Windows fallback.")
+
+
+def _make_qml_warning_logger() -> tuple[Callable[[list[QQmlError]], None], list[str]]:
+    """Return a QML warning handler and captured storage."""
+    storage: list[str] = []
+    seen: set[str] = set()
+
+    def _log_qml_warnings(warnings: list[QQmlError]) -> None:
+        for warning in warnings:
+            try:
+                text = warning.toString()
+            except AttributeError:  # pragma: no cover - defensive
+                text = str(warning)
+            if text in seen:
+                continue
+            seen.add(text)
+            storage.append(text)
+            print(f"[QML warning] {text}")
+
+    return _log_qml_warnings, storage
 
 
 class SidebarBridge(QObject):
@@ -105,13 +211,28 @@ def main(argv: list[str] | None = None) -> int:
     """Launch the QML application and return the exit code."""
     
     arguments = list(sys.argv if argv is None else argv)
+    # Install logger early to capture startup/plugin diagnostics.
+    _install_qt_logger()
+    _apply_windows_env_fallbacks()
+    _enable_windows_software_opengl()
+    
+    print(f"[qml_main] Starting QML engine with arguments: {arguments}")
     app = QGuiApplication(arguments)
+    _set_windows_quick_software_backend()
     
     # Register custom types with QML
     qmlRegisterType(SidebarModel, "iPhoto", 1, 0, "SidebarModel")
     qmlRegisterType(GalleryModel, "iPhoto", 1, 0, "GalleryModel")
     
+    qml_warning_handler, captured_warnings = _make_qml_warning_logger()
     engine = QQmlApplicationEngine()
+
+    def _on_object_created(obj: QObject | None, url: QUrl) -> None:
+        if obj is None:
+            print(f"[qml_main] Failed to create root object from {url.toString()}")
+
+    engine.warnings.connect(qml_warning_handler)
+    engine.objectCreated.connect(_on_object_created)
     
     # Create application context and sidebar bridge
     context = AppContext()
@@ -127,15 +248,21 @@ def main(argv: list[str] | None = None) -> int:
     # Add QML import path so components can be found
     engine.addImportPath(str(qml_dir.parent))
     engine.addImportPath(str(qml_dir))
+    print(f"[qml_main] QML import paths: {engine.importPathList()}")
     
     if not main_qml.exists():
         print(f"Error: Main.qml not found at {main_qml}")
         return 1
     
+    print(f"[qml_main] Loading QML from: {main_qml}")
     engine.load(QUrl.fromLocalFile(str(main_qml)))
     
     if not engine.rootObjects():
         print("Error: Failed to load QML root objects")
+        if captured_warnings:
+            print(
+                f"[qml_main] {len(captured_warnings)} QML warning(s) were captured during load."
+            )
         return 1
     
     # Allow opening an album directly via argv[1]

@@ -9,6 +9,7 @@ from __future__ import annotations
 import platform
 import sys
 from pathlib import Path
+import os
 
 from typing import Callable
 
@@ -84,6 +85,20 @@ def _set_windows_quick_software_backend() -> None:
         print("[Qt] Using software renderer for Qt Quick.")
     except Exception as exc:  # pragma: no cover - defensive
         print(f"[Qt] Unable to configure Qt Quick software rendering: {exc}")
+
+
+def _apply_windows_env_fallbacks() -> None:
+    """Set environment-based fallbacks for Windows Qt rendering."""
+    if platform.system().lower() != "windows":
+        return
+    env_overrides = {
+        "QSG_RHI_BACKEND": "software",  # Force Qt Quick to software scene graph
+        "QT_OPENGL": "software",  # Prefer software OpenGL if still used
+    }
+    for key, value in env_overrides.items():
+        if os.environ.get(key, "").lower() != value:
+            os.environ[key] = value
+            print(f"[Qt] Set {key}={value} for Windows fallback.")
 
 
 def _make_qml_warning_logger() -> tuple[Callable[[list[QQmlError]], None], list[str]]:
@@ -192,6 +207,7 @@ def main(argv: list[str] | None = None) -> int:
     arguments = list(sys.argv if argv is None else argv)
     # Install logger early to capture startup/plugin diagnostics.
     _install_qt_logger()
+    _apply_windows_env_fallbacks()
     _enable_windows_software_opengl()
     
     print(f"[qml_main] Starting QML engine with arguments: {arguments}")

@@ -74,13 +74,18 @@ def _force_software_rendering_on_windows() -> None:
         print(f"[Qt] Unable to set Qt Quick renderer: {exc}")
 
 
-def _log_qml_warnings(storage: list[str], warnings: list[QQmlError]) -> None:
+def _log_qml_warnings(
+    storage: list[str], seen: set[str], warnings: list[QQmlError]
+) -> None:
     """Log QML warnings surfaced by the engine."""
     for warning in warnings:
         try:
             text = warning.toString()
         except Exception:  # pragma: no cover - defensive
             text = str(warning)
+        if text in seen:
+            continue
+        seen.add(text)
         storage.append(text)
         print(f"[QML warning] {text}")
 
@@ -169,8 +174,8 @@ def main(argv: list[str] | None = None) -> int:
     """Launch the QML application and return the exit code."""
     
     arguments = list(sys.argv if argv is None else argv)
-    _install_qt_logger()
     _force_software_rendering_on_windows()
+    _install_qt_logger()
     
     print(f"[qml_main] Starting QML engine with arguments: {arguments}")
     app = QGuiApplication(arguments)
@@ -180,13 +185,18 @@ def main(argv: list[str] | None = None) -> int:
     qmlRegisterType(GalleryModel, "iPhoto", 1, 0, "GalleryModel")
     
     captured_warnings: list[str] = []
+    seen_warnings: set[str] = set()
     engine = QQmlApplicationEngine()
-    engine.warnings.connect(lambda warnings: _log_qml_warnings(captured_warnings, warnings))
-    engine.objectCreated.connect(
-        lambda obj, url: print(f"[qml_main] Failed to create root object from {url.toString()}")
-        if obj is None
-        else None
-    )
+
+    def _on_qml_warnings(warnings: list[QQmlError]) -> None:
+        _log_qml_warnings(captured_warnings, seen_warnings, warnings)
+
+    def _on_object_created(obj, url) -> None:
+        if obj is None:
+            print(f"[qml_main] Failed to create root object from {url.toString()}")
+
+    engine.warnings.connect(_on_qml_warnings)
+    engine.objectCreated.connect(_on_object_created)
     
     # Create application context and sidebar bridge
     context = AppContext()

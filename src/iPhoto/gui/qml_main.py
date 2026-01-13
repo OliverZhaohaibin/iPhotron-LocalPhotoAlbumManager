@@ -94,6 +94,9 @@ def _apply_windows_env_fallbacks() -> None:
     env_overrides = {
         "QSG_RHI_BACKEND": "software",  # Force Qt Quick to software scene graph
         "QT_OPENGL": "software",  # Prefer software OpenGL if still used
+        "QT_QUICK_BACKEND": "software",  # Explicit Qt Quick software backend hint
+        "QSG_INFO": "1",  # Print scene graph backend info to console
+        "QT_DEBUG_PLUGINS": "1",  # Plugin loading diagnostics
     }
     for key, value in env_overrides.items():
         if os.environ.get(key, "").lower() != value:

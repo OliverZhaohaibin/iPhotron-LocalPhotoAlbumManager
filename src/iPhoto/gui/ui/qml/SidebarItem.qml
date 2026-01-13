@@ -118,7 +118,7 @@ Item {
                 width: iconSize
                 height: iconSize
                 anchors.verticalCenter: parent.verticalCenter
-                source: itemIconPath ? Qt.resolvedUrl("file:" + itemIconPath) : ""
+                source: itemIconPath
                 sourceSize.width: iconSize
                 sourceSize.height: iconSize
                 visible: itemIconPath !== ""

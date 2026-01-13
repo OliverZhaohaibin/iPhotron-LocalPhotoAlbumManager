@@ -6,6 +6,7 @@ implementation in main.py.
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -63,7 +64,8 @@ class SidebarBridge(QObject):
     @Property(str, constant=True)
     def iconDir(self) -> str:  # noqa: N802
         """Return the path to the icon directory for QML."""
-        return str(ICON_DIR)
+        # Return as a URL string for QML
+        return QUrl.fromLocalFile(str(ICON_DIR)).toString()
     
     @Property(bool, constant=False, notify=hasLibraryChanged)
     def hasLibrary(self) -> bool:  # noqa: N802  # Qt property uses camelCase
@@ -104,9 +106,18 @@ class SidebarBridge(QObject):
 def main(argv: list[str] | None = None) -> int:
     """Launch the QML application and return the exit code."""
     
+    # Force software rendering on Windows to prevent C++ crashes on some systems
+    if os.name == "nt":
+        print("Windows detected: forcing software backend for stability")
+        os.environ["QT_QUICK_BACKEND"] = "software"
+
+    print("Starting QML application...")
+
     arguments = list(sys.argv if argv is None else argv)
     app = QGuiApplication(arguments)
     
+    print("QGuiApplication created")
+
     # Register custom types with QML
     qmlRegisterType(SidebarModel, "iPhoto", 1, 0, "SidebarModel")
     qmlRegisterType(GalleryModel, "iPhoto", 1, 0, "GalleryModel")
@@ -114,7 +125,9 @@ def main(argv: list[str] | None = None) -> int:
     engine = QQmlApplicationEngine()
     
     # Create application context and sidebar bridge
+    print("Initializing AppContext...")
     context = AppContext()
+    print("Initializing SidebarBridge...")
     sidebar_bridge = SidebarBridge(context)
     
     # Expose the bridge to QML
@@ -132,16 +145,20 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Error: Main.qml not found at {main_qml}")
         return 1
     
+    print(f"Loading QML from: {main_qml}")
     engine.load(QUrl.fromLocalFile(str(main_qml)))
     
     if not engine.rootObjects():
         print("Error: Failed to load QML root objects")
         return 1
     
+    print("QML loaded successfully")
+
     # Allow opening an album directly via argv[1]
     if len(arguments) > 1:
         sidebar_bridge.bindLibrary(arguments[1])
     
+    print("Entering event loop...")
     return app.exec()
 
 

@@ -127,7 +127,7 @@ Rectangle {
                                 anchors.centerIn: parent
                                 width: 18
                                 height: 18
-                                source: "file:" + sidebarBridge.iconDir + "/livephoto.svg"
+                                source: sidebarBridge.iconDir + "/livephoto.svg"
                                 sourceSize.width: 18
                                 sourceSize.height: 18
                             }

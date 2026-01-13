@@ -14,6 +14,7 @@ from PySide6.QtCore import (
     Qt,
     Signal,
     Slot,
+    QUrl,
 )
 
 from ....library.manager import LibraryManager
@@ -368,7 +369,7 @@ class SidebarModel(QAbstractListModel):
         
         path = get_icon_path(icon_name)
         if path.exists():
-            return str(path)
+            return QUrl.fromLocalFile(str(path)).toString()
         return ""
 
 

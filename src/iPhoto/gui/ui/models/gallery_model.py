@@ -14,6 +14,7 @@ from PySide6.QtCore import (
     Qt,
     Signal,
     Slot,
+    QUrl,
 )
 
 from ....cache.index_store import IndexStore
@@ -88,13 +89,13 @@ class GalleryModel(QAbstractListModel):
         elif role == GalleryRoles.AbsPathRole:
             rel = item.get("rel", "")
             if library_root and rel:
-                return str(library_root / rel)
+                return QUrl.fromLocalFile(str(library_root / rel)).toString()
             return ""
         elif role == GalleryRoles.ThumbnailRole:
             # Return full path for Image source
             rel = item.get("rel", "")
             if library_root and rel:
-                return "file:///" + str(library_root / rel)
+                return QUrl.fromLocalFile(str(library_root / rel)).toString()
             return ""
         elif role == GalleryRoles.IsImageRole:
             media_type = item.get("media_type", "")

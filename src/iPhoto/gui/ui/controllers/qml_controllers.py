@@ -10,9 +10,14 @@ from typing import TYPE_CHECKING
 
 from PySide6.QtCore import Property, QObject, Signal, Slot
 
+from ....settings import SettingsManager
+
 if TYPE_CHECKING:
     from ..models.album_tree_model import AlbumTreeModel
     from ..models.asset_model import AssetListModel
+
+
+DEFAULT_THEME_MODE = "system"
 
 
 class ThemeController(QObject):
@@ -20,9 +25,20 @@ class ThemeController(QObject):
 
     modeChanged = Signal(str)
 
-    def __init__(self, parent: QObject | None = None) -> None:
+    def __init__(
+        self,
+        settings: SettingsManager | None = None,
+        parent: QObject | None = None,
+    ) -> None:
         super().__init__(parent)
-        self._mode = "dark"
+        self._settings = settings
+        valid_modes = ("light", "dark", DEFAULT_THEME_MODE)
+        stored = (
+            settings.get("ui.theme", DEFAULT_THEME_MODE)
+            if settings is not None
+            else DEFAULT_THEME_MODE
+        )
+        self._mode = stored if stored in valid_modes else DEFAULT_THEME_MODE
 
     @Property(str, notify=modeChanged)
     def mode(self) -> str:
@@ -31,8 +47,10 @@ class ThemeController(QObject):
 
     @mode.setter
     def mode(self, value: str) -> None:
-        if self._mode != value and value in ("light", "dark", "system"):
+        if self._mode != value and value in ("light", "dark", DEFAULT_THEME_MODE):
             self._mode = value
+            if self._settings is not None:
+                self._settings.set("ui.theme", value)
             self.modeChanged.emit(value)
 
     @Slot(str)

@@ -37,6 +37,27 @@ ApplicationWindow {
     
     // Apply theme colors
     color: Styles.Theme.background
+    Component.onCompleted: {
+        if (themeController) {
+            Styles.Theme.mode = themeController.mode
+        }
+        // Restore window geometry if settings available
+        if (typeof settings !== "undefined") {
+            var geometry = settings.get("ui.windowGeometry")
+            if (geometry) {
+                x = geometry.x
+                y = geometry.y
+                width = geometry.width
+                height = geometry.height
+            }
+        }
+    }
+    Connections {
+        target: themeController
+        function onModeChanged(mode) {
+            Styles.Theme.mode = mode
+        }
+    }
     
     // ========================================================================
     // Window Chrome
@@ -98,7 +119,11 @@ ApplicationWindow {
             }
             
             onThemeChanged: function(theme) {
-                Styles.Theme.mode = theme
+                if (themeController) {
+                    themeController.setMode(theme)
+                } else {
+                    Styles.Theme.mode = theme
+                }
             }
         }
     }
@@ -412,20 +437,6 @@ ApplicationWindow {
     // ========================================================================
     // Window State Persistence
     // ========================================================================
-    
-    Component.onCompleted: {
-        // Restore window geometry if settings available
-        if (typeof settings !== "undefined") {
-            var geometry = settings.get("ui.windowGeometry")
-            if (geometry) {
-                x = geometry.x
-                y = geometry.y
-                width = geometry.width
-                height = geometry.height
-            }
-        }
-    }
-    
     onClosing: function(close) {
         // Save window geometry
         if (typeof settings !== "undefined") {

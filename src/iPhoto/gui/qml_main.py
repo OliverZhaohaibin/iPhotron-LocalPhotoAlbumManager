@@ -231,7 +231,7 @@ class QMLApplication:
         asset_list_model = self._context.facade.asset_list_model
 
         # Create controllers
-        theme_controller = ThemeController()
+        theme_controller = ThemeController(self._context.settings)
         album_controller = AlbumController(album_tree_model)
         asset_controller = AssetController(asset_list_model)
         status_controller = StatusController()

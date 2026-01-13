@@ -96,15 +96,17 @@ Rectangle {
         }
 
         delegate: Item {
-            required property string display
-            required property var nodeType
-            required property var path
+            required property var model
 
             implicitHeight: 32
             implicitWidth: treeView.width
             width: treeView.width
 
-            property string nodeKey: (nodeType !== undefined && nodeType !== null) ? nodeType.toString().toLowerCase() : ""
+            property string displayText: (model && model.display !== undefined) ? model.display : ""
+            property var nodeTypeValue: (model && model.nodeType !== undefined) ? model.nodeType : null
+            property var pathValue: (model && model.path !== undefined) ? model.path : null
+
+            property string nodeKey: (nodeTypeValue !== undefined && nodeTypeValue !== null) ? nodeTypeValue.toString().toLowerCase() : ""
 
             // Classification helpers
             property bool isStatic: nodeKey === "static"
@@ -114,9 +116,9 @@ Rectangle {
             property bool isAlbum: nodeKey.indexOf("album") !== -1 && !isStatic // ALBUM or SUBALBUM match 'album'
 
             property bool isSelected: {
-                if (isStatic) return display && root.currentStaticSelection === display
-                if (isHeader) return display === "Albums" && root.currentStaticSelection === "Albums"
-                if (isAlbum) return path && root.currentSelection === path.toString()
+                if (isStatic) return displayText && root.currentStaticSelection === displayText
+                if (isHeader) return displayText === "Albums" && root.currentStaticSelection === "Albums"
+                if (isAlbum) return pathValue && root.currentSelection === pathValue.toString()
                 return false
             }
 
@@ -135,11 +137,11 @@ Rectangle {
                     }
 
                     if (isHeader) {
-                        if (display === "Albums") {
+                        if (displayText === "Albums") {
                             root.currentStaticSelection = "Albums"
                             root.currentSelection = null
                             root.staticNodeSelected("Albums")
-                        } else if (display !== "Basic Library") {
+                        } else if (displayText !== "Basic Library") {
                             // Toggle expansion for headers other than Basic Library
                             treeView.toggleExpanded(index)
                         }
@@ -147,24 +149,24 @@ Rectangle {
                     }
 
                     if (isStatic) {
-                        root.currentStaticSelection = display
+                        root.currentStaticSelection = displayText
                         root.currentSelection = null
-                        if (display === "All Photos") {
+                        if (displayText === "All Photos") {
                             root.allPhotosSelected()
                         } else {
-                            root.staticNodeSelected(display)
+                            root.staticNodeSelected(displayText)
                         }
                         return
                     }
 
                     if (isAlbum) {
-                        if (path !== undefined && path !== null) {
-                            var pathStr = path.toString()
+                        if (pathValue !== undefined && pathValue !== null) {
+                            var pathStr = pathValue.toString()
                             root.currentSelection = pathStr
                             root.currentStaticSelection = ""
                             root.albumSelected(pathStr)
                         } else {
-                            console.warn("AlbumSidebar: path is undefined for album node " + display)
+                            console.warn("AlbumSidebar: path is undefined for album node " + displayText)
                         }
                     }
                 }
@@ -203,7 +205,7 @@ Rectangle {
                     width: 16
                     height: parent.height
                     // Hide chevron for Basic Library (it should always be expanded/resident)
-                    visible: (TreeView.hasChildren ?? false) && display !== "Basic Library"
+                    visible: (TreeView.hasChildren ?? false) && displayText !== "Basic Library"
 
                     Image {
                         anchors.centerIn: parent
@@ -242,12 +244,12 @@ Rectangle {
                     height: Styles.Theme.iconSizeSmall
                     source: {
                         if (isStatic) {
-                            if (display === "All Photos") return iconPrefix + "/photo.on.rectangle.svg"
-                            if (display === "Location") return iconPrefix + "/mappin.and.ellipse.svg"
-                            if (display === "Recently Deleted") return iconPrefix + "/trash.svg"
-                            if (display === "Videos") return iconPrefix + "/video.svg"
-                            if (display === "Live Photos") return iconPrefix + "/livephoto.svg"
-                            if (display === "Favorites") return iconPrefix + "/suit.heart.svg"
+                            if (displayText === "All Photos") return iconPrefix + "/photo.on.rectangle.svg"
+                            if (displayText === "Location") return iconPrefix + "/mappin.and.ellipse.svg"
+                            if (displayText === "Recently Deleted") return iconPrefix + "/trash.svg"
+                            if (displayText === "Videos") return iconPrefix + "/video.svg"
+                            if (displayText === "Live Photos") return iconPrefix + "/livephoto.svg"
+                            if (displayText === "Favorites") return iconPrefix + "/suit.heart.svg"
                             return iconPrefix + "/folder.svg"
                         }
                         if (nodeKey.indexOf("header") !== -1) return iconPrefix + "/folder.svg"
@@ -259,7 +261,7 @@ Rectangle {
 
                 Text {
                     anchors.verticalCenter: parent.verticalCenter
-                    text: display || ""
+                    text: displayText || ""
                     font.family: Styles.Theme.bodyFont.family
                     font.pixelSize: Styles.Theme.bodyFont.pixelSize
                     font.weight: nodeKey.indexOf("header") !== -1 ? Font.DemiBold : Font.Normal
@@ -281,7 +283,7 @@ Rectangle {
 
                 onDropped: function(drag) {
                     if (drag.hasUrls) {
-                        root.filesDropped(path, drag.urls)
+                        root.filesDropped(pathValue, drag.urls)
                     }
                 }
             }

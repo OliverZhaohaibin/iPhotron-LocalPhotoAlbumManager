@@ -29,9 +29,9 @@ from PySide6.QtGui import QGuiApplication
 from PySide6.QtQml import QQmlApplicationEngine, QQmlError, qmlRegisterType
 from PySide6.QtQuick import QQuickWindow, QSGRendererInterface
 
-from ..appctx import AppContext
-from .ui.models.gallery_model import GalleryModel
-from .ui.models.sidebar_model import SidebarModel
+from src.iPhoto.appctx import AppContext
+from src.iPhoto.gui.ui.models.gallery_model import GalleryModel
+from src.iPhoto.gui.ui.models.sidebar_model import SidebarModel
 
 # Icon directory path
 ICON_DIR = Path(__file__).parent / "ui" / "icon"

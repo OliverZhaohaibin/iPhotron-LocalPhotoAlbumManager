@@ -14,6 +14,7 @@ Item {
     property bool itemHasChildren: false
     property bool itemIsSelectable: true
     property string itemIconName: ""
+    property string itemIconPath: ""  // Full path to SVG icon
     
     // Signals
     signal clicked()
@@ -111,41 +112,22 @@ Item {
                 }
             }
             
-            // Icon
-            Text {
-                id: iconText
+            // Icon using SVG image
+            Image {
+                id: iconImage
                 width: iconSize
                 height: iconSize
                 anchors.verticalCenter: parent.verticalCenter
-                font.family: Qt.platform.os === "osx" ? "SF Pro" : "Segoe UI"  // Fallback for non-macOS
-                font.pixelSize: iconSize
-                color: iconColor
-                text: getIconText(itemIconName, itemNodeType)
-                visible: text !== ""
-                horizontalAlignment: Text.AlignHCenter
-                verticalAlignment: Text.AlignVCenter
-                
-                function getIconText(iconName, nodeType) {
-                    // Map icon names to Unicode emoji/symbols as fallback
-                    // In a full implementation, these would be SF Symbols or custom icons
-                    switch (iconName) {
-                        case "photo.on.rectangle": return "📷"
-                        case "video": return "🎬"
-                        case "livephoto": return "◉"
-                        case "suit.heart": return "❤️"
-                        case "mappin.and.ellipse": return "📍"
-                        case "trash": return "🗑️"
-                        case "folder": return "📁"
-                        case "rectangle.stack": return "📂"
-                        case "plus.circle": return "➕"
-                        default: return ""
-                    }
-                }
+                source: itemIconPath ? Qt.resolvedUrl("file:" + itemIconPath) : ""
+                sourceSize.width: iconSize
+                sourceSize.height: iconSize
+                visible: itemIconPath !== ""
+                fillMode: Image.PreserveAspectFit
             }
             
             // Spacer between icon and text
             Item {
-                width: iconText.visible ? iconTextGap : 0
+                width: iconImage.visible ? iconTextGap : 0
                 height: 1
             }
             

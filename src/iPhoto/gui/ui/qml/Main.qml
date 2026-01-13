@@ -30,40 +30,25 @@ ApplicationWindow {
             SplitView.maximumWidth: 350
         }
         
-        // Main content area (placeholder)
-        Rectangle {
-            id: contentArea
+        // Main content area - Gallery View
+        GalleryView {
+            id: galleryView
             SplitView.fillWidth: true
-            color: "#ffffff"
-            
-            ColumnLayout {
-                anchors.centerIn: parent
-                spacing: 20
-                
-                Text {
-                    Layout.alignment: Qt.AlignHCenter
-                    text: "📸 iPhoto QML"
-                    font.pixelSize: 32
-                    font.bold: true
-                    color: "#333333"
-                }
-                
-                Text {
-                    Layout.alignment: Qt.AlignHCenter
-                    text: "Select an album from the sidebar to view photos"
-                    font.pixelSize: 16
-                    color: "#666666"
-                }
-                
-                Text {
-                    id: statusText
-                    Layout.alignment: Qt.AlignHCenter
-                    text: sidebarBridge.hasLibrary ? "Library bound" : "No library bound"
-                    font.pixelSize: 14
-                    color: sidebarBridge.hasLibrary ? "#28a745" : "#dc3545"
-                }
+        }
+    }
+    
+    // Helper function to get album name from path
+    function getAlbumNameFromPath(path) {
+        if (!path || path.length === 0) return "Unknown Album"
+        // Handle both Windows and Unix paths
+        var parts = path.replace(/\\/g, "/").split("/")
+        // Filter out empty parts and return the last non-empty part
+        for (var i = parts.length - 1; i >= 0; i--) {
+            if (parts[i] && parts[i].length > 0) {
+                return parts[i]
             }
         }
+        return "Unknown Album"
     }
     
     // Handle album selection
@@ -71,20 +56,20 @@ ApplicationWindow {
         target: sidebarBridge
         
         function onAlbumSelected(path) {
-            statusText.text = "Selected album: " + path
+            galleryView.currentTitle = getAlbumNameFromPath(path)
         }
         
         function onAllPhotosSelected() {
-            statusText.text = "Viewing: All Photos"
+            galleryView.currentTitle = "All Photos"
         }
         
         function onStaticNodeSelected(title) {
-            statusText.text = "Viewing: " + title
+            galleryView.currentTitle = title
         }
         
         function onBindLibraryRequested() {
             // In a full implementation, this would open a folder dialog
-            statusText.text = "Library binding requested"
+            console.log("Library binding requested")
         }
     }
 }

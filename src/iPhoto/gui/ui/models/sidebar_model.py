@@ -18,6 +18,7 @@ from PySide6.QtCore import (
 
 from ....library.manager import LibraryManager
 from ....library.tree import AlbumNode
+from ..icon import icon_path as get_icon_path
 
 
 class NodeType(IntEnum):
@@ -44,6 +45,7 @@ class SidebarRoles(IntEnum):
     IsSelectableRole = Qt.ItemDataRole.UserRole + 6
     IconNameRole = Qt.ItemDataRole.UserRole + 7
     FilePathRole = Qt.ItemDataRole.UserRole + 8
+    IconPathRole = Qt.ItemDataRole.UserRole + 9  # Full path to SVG icon file
 
 
 @dataclass
@@ -118,6 +120,7 @@ class SidebarModel(QAbstractListModel):
             SidebarRoles.IsSelectableRole: b"isSelectable",
             SidebarRoles.IconNameRole: b"iconName",
             SidebarRoles.FilePathRole: b"filePath",
+            SidebarRoles.IconPathRole: b"iconPath",
         }
     
     def rowCount(self, parent: QModelIndex | None = None) -> int:  # noqa: N802  # Qt override
@@ -152,6 +155,8 @@ class SidebarModel(QAbstractListModel):
             if item.album is not None:
                 return str(item.album.path)
             return ""
+        elif role == SidebarRoles.IconPathRole:
+            return self._icon_path_for_item(item)
         
         return None
     
@@ -353,6 +358,17 @@ class SidebarModel(QAbstractListModel):
         elif item.node_type == NodeType.HEADER:
             return "photo.on.rectangle"
         
+        return ""
+    
+    def _icon_path_for_item(self, item: SidebarItem) -> str:
+        """Return the full path to the SVG icon for an item."""
+        icon_name = self._icon_for_item(item)
+        if not icon_name:
+            return ""
+        
+        path = get_icon_path(icon_name)
+        if path.exists():
+            return str(path)
         return ""
 
 

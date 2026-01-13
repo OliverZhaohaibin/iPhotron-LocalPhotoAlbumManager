@@ -13,8 +13,9 @@ from PySide6.QtCore import Property, QObject, QUrl, Signal, Slot
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtQml import QQmlApplicationEngine, qmlRegisterType
 
-from src.iPhoto.appctx import AppContext
-from src.iPhoto.gui.ui.models.sidebar_model import SidebarModel
+from ..appctx import AppContext
+from .ui.models.gallery_model import GalleryModel
+from .ui.models.sidebar_model import SidebarModel
 
 
 class SidebarBridge(QObject):
@@ -35,10 +36,11 @@ class SidebarBridge(QObject):
         super().__init__(parent)
         self._context = context
         self._model = SidebarModel(context.library, self)
+        self._gallery_model = GalleryModel(context.library, self)
         
         # Connect model signals
         self._model.albumSelected.connect(self._on_album_selected)
-        self._model.allPhotosSelected.connect(self.allPhotosSelected)
+        self._model.allPhotosSelected.connect(self._on_all_photos_selected)
         self._model.staticNodeSelected.connect(self.staticNodeSelected)
         self._model.bindLibraryRequested.connect(self.bindLibraryRequested)
         
@@ -49,6 +51,11 @@ class SidebarBridge(QObject):
     def model(self) -> SidebarModel:
         """Return the sidebar model for QML binding."""
         return self._model
+    
+    @Property(QObject, constant=True)
+    def galleryModel(self) -> GalleryModel:  # noqa: N802
+        """Return the gallery model for QML binding."""
+        return self._gallery_model
     
     @Property(bool, constant=False, notify=hasLibraryChanged)
     def hasLibrary(self) -> bool:  # noqa: N802  # Qt property uses camelCase
@@ -76,8 +83,14 @@ class SidebarBridge(QObject):
         self._model.toggle_expansion(index)
     
     def _on_album_selected(self, path: Path) -> None:
-        """Convert Path to string for QML compatibility."""
+        """Handle album selection - load gallery and emit signal."""
+        self._gallery_model.loadAlbum(str(path))
         self.albumSelected.emit(str(path))
+    
+    def _on_all_photos_selected(self) -> None:
+        """Handle All Photos selection."""
+        self._gallery_model.loadAllPhotos()
+        self.allPhotosSelected.emit()
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -88,6 +101,7 @@ def main(argv: list[str] | None = None) -> int:
     
     # Register custom types with QML
     qmlRegisterType(SidebarModel, "iPhoto", 1, 0, "SidebarModel")
+    qmlRegisterType(GalleryModel, "iPhoto", 1, 0, "GalleryModel")
     
     engine = QQmlApplicationEngine()
     

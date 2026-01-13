@@ -60,6 +60,7 @@ Rectangle {
                 itemHasChildren: hasChildren
                 itemIsSelectable: isSelectable
                 itemIconName: iconName
+                itemIconPath: iconPath
                 
                 onClicked: {
                     if (isSelectable) {

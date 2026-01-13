@@ -81,8 +81,21 @@ Rectangle {
             }
             highlightFollowsCurrentItem: true
             
-            ScrollBar.vertical: ScrollBar {
+            ScrollBar {
+                id: sidebarScrollBar
                 policy: ScrollBar.AsNeeded
+                orientation: Qt.Vertical
+                anchors.right: parent.right
+                anchors.top: parent.top
+                anchors.bottom: parent.bottom
+                size: treeView.visibleArea.heightRatio
+                position: treeView.visibleArea.yPosition
+                onPositionChanged: {
+                    const maxContentY = treeView.contentHeight - treeView.height
+                    if (maxContentY > 0) {
+                        treeView.contentY = position * maxContentY
+                    }
+                }
             }
         }
     }

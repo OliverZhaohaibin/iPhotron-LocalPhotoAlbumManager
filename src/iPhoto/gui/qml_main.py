@@ -191,7 +191,7 @@ def main(argv: list[str] | None = None) -> int:
     def _on_qml_warnings(warnings: list[QQmlError]) -> None:
         _log_qml_warnings(captured_warnings, seen_warnings, warnings)
 
-    def _on_object_created(obj, url) -> None:
+    def _on_object_created(obj: QObject | None, url: QUrl) -> None:
         if obj is None:
             print(f"[qml_main] Failed to create root object from {url.toString()}")
 

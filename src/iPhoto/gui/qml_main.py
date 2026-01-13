@@ -60,7 +60,7 @@ def _install_qt_logger() -> None:
 
 def _force_software_rendering_on_windows() -> None:
     """Fallback to software rendering to avoid native GPU failures on Windows."""
-    if platform.system() != "Windows":
+    if platform.system().lower() != "windows":
         return
     try:
         QCoreApplication.setAttribute(Qt.ApplicationAttribute.AA_UseSoftwareOpenGL)
@@ -175,6 +175,7 @@ def main(argv: list[str] | None = None) -> int:
     
     arguments = list(sys.argv if argv is None else argv)
     _force_software_rendering_on_windows()
+    # Install logger early to capture startup/plugin diagnostics.
     _install_qt_logger()
     
     print(f"[qml_main] Starting QML engine with arguments: {arguments}")

@@ -13,6 +13,7 @@ from pathlib import Path
 from PySide6.QtCore import Property, QObject, QUrl, Signal, Slot
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtQml import QQmlApplicationEngine, qmlRegisterType
+from PySide6.QtQuickControls2 import QQuickStyle
 
 from ..appctx import AppContext
 from .ui.models.gallery_model import GalleryModel
@@ -106,10 +107,15 @@ class SidebarBridge(QObject):
 def main(argv: list[str] | None = None) -> int:
     """Launch the QML application and return the exit code."""
     
-    # Force software rendering on Windows to prevent C++ crashes on some systems
+    # Force software rendering and basic styling on Windows to prevent C++ crashes
+    # This addresses issues with OpenGL drivers and complex styles causing access violations (0xC0000005)
     if os.name == "nt":
-        print("Windows detected: forcing software backend for stability")
+        print("Windows detected: forcing software backend and basic style for stability")
         os.environ["QT_QUICK_BACKEND"] = "software"
+        os.environ["QT_OPENGL"] = "software"
+        os.environ["QSG_RHI_BACKEND"] = "software"
+        os.environ["QML_DISABLE_DISK_CACHE"] = "1"
+        os.environ["QT_QUICK_CONTROLS_STYLE"] = "Basic"
 
     print("Starting QML application...")
 
@@ -117,6 +123,9 @@ def main(argv: list[str] | None = None) -> int:
     app = QGuiApplication(arguments)
     
     print("QGuiApplication created")
+
+    # Enforce Basic style to avoid plugin issues with Fusion/Material on some systems
+    QQuickStyle.setStyle("Basic")
 
     # Register custom types with QML
     qmlRegisterType(SidebarModel, "iPhoto", 1, 0, "SidebarModel")
@@ -141,6 +150,10 @@ def main(argv: list[str] | None = None) -> int:
     engine.addImportPath(str(qml_dir.parent))
     engine.addImportPath(str(qml_dir))
     
+    print("Import paths:")
+    for path in engine.importPathList():
+        print(f"  - {path}")
+
     if not main_qml.exists():
         print(f"Error: Main.qml not found at {main_qml}")
         return 1

@@ -51,6 +51,7 @@ class GalleryItem:
     is_pano: bool = False
     is_favorite: bool = False
     duration: float = 0.0
+    mtime: float = 0.0  # Cached modification time for efficient sorting
 
 
 class GalleryModel(QAbstractListModel):
@@ -178,8 +179,8 @@ class GalleryModel(QAbstractListModel):
         # Recursively scan library for media files
         self._scan_directory_recursive(root)
         
-        # Sort by modification time (newest first)
-        self._items.sort(key=lambda x: x.file_path.stat().st_mtime, reverse=True)
+        # Sort by cached modification time (newest first)
+        self._items.sort(key=lambda x: x.mtime, reverse=True)
         
         self.endResetModel()
         self.countChanged.emit()
@@ -204,8 +205,8 @@ class GalleryModel(QAbstractListModel):
         # Recursively scan library for video files only
         self._scan_directory_recursive(root, filter_mode="videos")
 
-        # Sort by modification time (newest first)
-        self._items.sort(key=lambda x: x.file_path.stat().st_mtime, reverse=True)
+        # Sort by cached modification time (newest first)
+        self._items.sort(key=lambda x: x.mtime, reverse=True)
 
         self.endResetModel()
         self.countChanged.emit()
@@ -230,8 +231,8 @@ class GalleryModel(QAbstractListModel):
         # Recursively scan library for live photos only
         self._scan_directory_recursive(root, filter_mode="live")
 
-        # Sort by modification time (newest first)
-        self._items.sort(key=lambda x: x.file_path.stat().st_mtime, reverse=True)
+        # Sort by cached modification time (newest first)
+        self._items.sort(key=lambda x: x.mtime, reverse=True)
 
         self.endResetModel()
         self.countChanged.emit()
@@ -256,8 +257,8 @@ class GalleryModel(QAbstractListModel):
         # Recursively scan library for favorites only
         self._scan_directory_recursive(root, filter_mode="favorites")
 
-        # Sort by modification time (newest first)
-        self._items.sort(key=lambda x: x.file_path.stat().st_mtime, reverse=True)
+        # Sort by cached modification time (newest first)
+        self._items.sort(key=lambda x: x.mtime, reverse=True)
 
         self.endResetModel()
         self.countChanged.emit()
@@ -323,6 +324,12 @@ class GalleryModel(QAbstractListModel):
             filter_mode: Optional filter - "videos", "live", or "favorites".
         """
         suffix = path.suffix.lower()
+
+        # Get modification time once for caching
+        try:
+            mtime = path.stat().st_mtime
+        except OSError:
+            mtime = 0.0
         
         if suffix in self.IMAGE_EXTENSIONS:
             # Check if it's a live photo
@@ -344,6 +351,7 @@ class GalleryModel(QAbstractListModel):
                 is_live=is_live,
                 is_pano=is_pano,
                 is_favorite=is_favorite,
+                mtime=mtime,
             )
             self._items.append(item)
             
@@ -363,6 +371,7 @@ class GalleryModel(QAbstractListModel):
                 is_pano=False,
                 is_favorite=is_favorite,
                 duration=self._get_video_duration(path),
+                mtime=mtime,
             )
             self._items.append(item)
     

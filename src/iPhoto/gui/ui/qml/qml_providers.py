@@ -73,21 +73,31 @@ class IconImageProvider(QQuickImageProvider):
 
         # Get the SVG's default size to calculate aspect ratio
         svg_size = renderer.defaultSize()
-        if not svg_size.isValid():
+        if not svg_size.isValid() or svg_size.width() <= 0 or svg_size.height() <= 0:
+            # Fall back to target size if SVG has invalid dimensions
             svg_size = target_size
 
         # Calculate the scaled size preserving aspect ratio
-        svg_aspect = svg_size.width() / max(1, svg_size.height())
-        target_aspect = target_size.width() / max(1, target_size.height())
+        svg_height = svg_size.height() if svg_size.height() > 0 else 1
+        target_height = target_size.height() if target_size.height() > 0 else 1
+        svg_aspect = svg_size.width() / svg_height
+        target_aspect = target_size.width() / target_height
 
         if svg_aspect > target_aspect:
             # SVG is wider than target - fit to width
             scaled_width = target_size.width()
-            scaled_height = int(target_size.width() / svg_aspect)
+            if svg_aspect > 0:
+                scaled_height = int(target_size.width() / svg_aspect)
+            else:
+                scaled_height = target_size.height()
         else:
             # SVG is taller than target - fit to height
             scaled_height = target_size.height()
             scaled_width = int(target_size.height() * svg_aspect)
+
+        # Ensure non-zero dimensions
+        scaled_width = max(1, scaled_width)
+        scaled_height = max(1, scaled_height)
 
         # Create pixmap at target size (may have transparent padding)
         pixmap = QPixmap(target_size)

@@ -27,6 +27,11 @@ ApplicationWindow {
     property string currentAlbumTitle: ""
     property int sidebarWidth: 220
 
+    // Helper function to convert file:// URL to path
+    function urlToPath(urlString) {
+        return urlString.toString().replace("file://", "")
+    }
+
     // Menu bar
     menuBar: MenuBar {
         Menu {
@@ -110,7 +115,7 @@ ApplicationWindow {
         id: folderDialog
         title: "Select Album Folder"
         onAccepted: {
-            var path = folder.toString().replace("file://", "")
+            var path = urlToPath(folder)
             if (isSidebarReady()) {
                 currentAlbumPath = path
                 currentAlbumTitle = path.split("/").pop()
@@ -127,7 +132,7 @@ ApplicationWindow {
         id: libraryDialog
         title: "Select Library Folder"
         onAccepted: {
-            var path = folder.toString().replace("file://", "")
+            var path = urlToPath(folder)
             if (isSidebarReady()) {
                 sidebarBridge.bindLibrary(path)
             }

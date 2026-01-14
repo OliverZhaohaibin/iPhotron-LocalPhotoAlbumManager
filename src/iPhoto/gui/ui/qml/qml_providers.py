@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from PySide6.QtCore import QRectF, QSize, Qt
-from PySide6.QtGui import QColor, QImage, QPainter, QPixmap
+from PySide6.QtGui import QColor, QImage, QImageReader, QPainter, QPixmap
 from PySide6.QtQuick import QQuickImageProvider
 from PySide6.QtSvg import QSvgRenderer
 
@@ -170,11 +170,17 @@ class ThumbnailImageProvider(QQuickImageProvider):
         image = QImage()
         file_path = Path(id_str)
         
-        # Attempt to find cached thumbnail in .lexiphoto/thumbs
-        if self._library_root and file_path.exists():
+        # Normalize the path for cache lookup
+        try:
+            resolved_path = file_path.resolve()
+        except OSError:
+            resolved_path = file_path
+        
+        # Attempt to find cached thumbnail in .iPhoto/thumbs
+        if self._library_root:
             try:
                 # Logic matching generate_cache_path in thumbnail_loader.py
-                path_str = str(file_path.resolve())
+                path_str = str(resolved_path)
                 digest = hashlib.blake2b(path_str.encode("utf-8"), digest_size=20).hexdigest()
                 thumbs_dir = self._library_root / WORK_DIR_NAME / "thumbs"
 
@@ -197,13 +203,23 @@ class ThumbnailImageProvider(QQuickImageProvider):
 
                         # Load from cache file
                         image.load(str(best_candidate))
-            except Exception:
+            except OSError:
                 # Fallback to loading original if cache lookup fails
                 pass
 
         # Fallback: Load original file if no cache found or cache load failed
-        if image.isNull() and file_path.exists():
-            image.load(str(file_path))
+        if image.isNull():
+            try:
+                if file_path.exists():
+                    # Try to load the original file
+                    if not image.load(str(file_path)):
+                        # QImage.load() returns False on failure
+                        # Try using a QImageReader for better format support
+                        reader = QImageReader(str(file_path))
+                        reader.setAutoTransform(True)
+                        image = reader.read()
+            except OSError:
+                pass
         
         if image.isNull():
             # Return placeholder

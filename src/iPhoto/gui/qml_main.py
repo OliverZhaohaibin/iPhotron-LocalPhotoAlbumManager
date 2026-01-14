@@ -46,7 +46,7 @@ class SidebarBridge(QObject):
             return
             
         try:
-            from .ui.models.sidebar_model import SidebarModel
+            from iPhoto.gui.ui.models.sidebar_model import SidebarModel
             self._model = SidebarModel(self._context.library, self)
             
             # Connect model signals
@@ -128,7 +128,7 @@ class GalleryBridge(QObject):
             return
             
         try:
-            from .ui.qml.gallery_model import GalleryModel
+            from iPhoto.gui.ui.qml.gallery_model import GalleryModel
             self._model = GalleryModel(self._context.library, self)
             self._model.countChanged.connect(self.countChanged)
             self._model.loadingChanged.connect(self.loadingChanged)
@@ -218,7 +218,7 @@ def main(argv: list[str] | None = None) -> int:
     
     # Add image providers for icons and thumbnails
     try:
-        from .ui.qml.qml_providers import IconImageProvider, ThumbnailImageProvider
+        from iPhoto.gui.ui.qml.qml_providers import IconImageProvider, ThumbnailImageProvider
         engine.addImageProvider("icons", IconImageProvider())
         engine.addImageProvider("thumbnails", ThumbnailImageProvider())
     except Exception as e:

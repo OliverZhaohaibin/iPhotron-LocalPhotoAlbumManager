@@ -264,7 +264,8 @@ def main(argv: list[str] | None = None) -> int:
     
     if not engine.rootObjects():
         print("Error: Failed to load QML root objects")
-        # Print any QML errors
+        for warning in engine.warnings():
+            print(f"QML Warning: {warning.toString()}")
         return 1
     
     # Allow opening an album directly via argv[1]

@@ -88,6 +88,19 @@ Item {
             }
         }
         
+        // Click handler - moved BEFORE rowContent so it's behind it in z-order
+        // This allows child items in rowContent (like branchIndicator) to receive mouse events
+        MouseArea {
+            id: mouseArea
+            anchors.fill: parent
+            hoverEnabled: true
+            onClicked: {
+                if (itemIsSelectable) {
+                    root.clicked()
+                }
+            }
+        }
+
         // Content layout
         Row {
             id: rowContent
@@ -218,18 +231,6 @@ Item {
                     if (itemNodeType === nodeTypeAction) return actionColor
                     if (itemNodeType === nodeTypeSection) return sectionColor
                     return textColor
-                }
-            }
-        }
-        
-        // Click handler
-        MouseArea {
-            id: mouseArea
-            anchors.fill: parent
-            hoverEnabled: true
-            onClicked: {
-                if (itemIsSelectable) {
-                    root.clicked()
                 }
             }
         }

@@ -217,10 +217,12 @@ def main(argv: list[str] | None = None) -> int:
     engine = QQmlApplicationEngine()
     
     # Add image providers for icons and thumbnails
+    thumbnail_provider = None
     try:
         from iPhoto.gui.ui.qml.qml_providers import IconImageProvider, ThumbnailImageProvider
         engine.addImageProvider("icons", IconImageProvider())
-        engine.addImageProvider("thumbnails", ThumbnailImageProvider())
+        thumbnail_provider = ThumbnailImageProvider()
+        engine.addImageProvider("thumbnails", thumbnail_provider)
     except Exception as e:
         print(f"Warning: Failed to register image providers: {e}")
         traceback.print_exc()
@@ -247,12 +249,23 @@ def main(argv: list[str] | None = None) -> int:
     sidebar_bridge.initialize()
     gallery_bridge.initialize()
     
+    # Setup connection to update thumbnail provider with library root
+    def update_thumbnail_provider_root():
+        if thumbnail_provider and context.library.root():
+            thumbnail_provider.set_library_root(context.library.root())
+
+    # Connect signals
+    context.library.treeUpdated.connect(update_thumbnail_provider_root)
+    # Initial set if library is already bound
+    update_thumbnail_provider_root()
+
     # Load the main QML file
     engine.load(QUrl.fromLocalFile(str(main_qml)))
     
     if not engine.rootObjects():
         print("Error: Failed to load QML root objects")
-        # Print any QML errors
+        for warning in engine.warnings():
+            print(f"QML Warning: {warning.toString()}")
         return 1
     
     # Allow opening an album directly via argv[1]

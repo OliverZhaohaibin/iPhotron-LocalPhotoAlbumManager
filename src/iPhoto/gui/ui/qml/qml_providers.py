@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
+import hashlib
+import os
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
 
 from PySide6.QtCore import QSize, Qt
 from PySide6.QtGui import QColor, QImage, QPainter, QPixmap
 from PySide6.QtQuick import QQuickImageProvider
 from PySide6.QtSvg import QSvgRenderer
+
+from ....config import WORK_DIR_NAME
 
 if TYPE_CHECKING:  # pragma: no cover
     from PySide6.QtCore import QByteArray
@@ -108,6 +112,11 @@ class ThumbnailImageProvider(QQuickImageProvider):
         self._cache: dict[str, QImage] = {}
         self._cache_order: list[str] = []  # LRU order tracking
         self._cache_size = 0
+        self._library_root: Optional[Path] = None
+
+    def set_library_root(self, root: Path) -> None:
+        """Set the library root path for locating cached thumbnails."""
+        self._library_root = root
         
     def requestImage(  # noqa: N802 - Qt override
         self,
@@ -132,11 +141,43 @@ class ThumbnailImageProvider(QQuickImageProvider):
                 )
             return cached
         
-        # Try to load the image
+        # Try to find a cached thumbnail file first
         image = QImage()
         file_path = Path(id_str)
         
-        if file_path.exists():
+        # Attempt to find cached thumbnail in .lexiphoto/thumbs
+        if self._library_root and file_path.exists():
+            try:
+                # Logic matching generate_cache_path in thumbnail_loader.py
+                path_str = str(file_path.resolve())
+                digest = hashlib.blake2b(path_str.encode("utf-8"), digest_size=20).hexdigest()
+                thumbs_dir = self._library_root / WORK_DIR_NAME / "thumbs"
+
+                if thumbs_dir.exists():
+                    # Find any file starting with digest_
+                    # The filenames are digest_stamp_WxH.png
+                    # We want the most recent one if possible, or just any valid one.
+                    # Since we don't know the exact size or stamp, we search.
+
+                    candidates = []
+                    prefix = f"{digest}_"
+                    for entry in thumbs_dir.iterdir():
+                        if entry.name.startswith(prefix) and entry.suffix == ".png":
+                            candidates.append(entry)
+
+                    if candidates:
+                        # Sort by mtime descending to get latest
+                        candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+                        best_candidate = candidates[0]
+
+                        # Load from cache file
+                        image.load(str(best_candidate))
+            except Exception:
+                # Fallback to loading original if cache lookup fails
+                pass
+
+        # Fallback: Load original file if no cache found or cache load failed
+        if image.isNull() and file_path.exists():
             image.load(str(file_path))
         
         if image.isNull():

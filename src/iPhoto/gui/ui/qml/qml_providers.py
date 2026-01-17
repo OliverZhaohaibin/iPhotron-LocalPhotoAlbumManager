@@ -176,12 +176,7 @@ class ThumbnailImageProvider(QQuickImageProvider):
         if not file_path.is_absolute() and self._library_root:
             file_path = self._library_root / file_path
 
-        if requested_size.isValid():
-            target_size = requested_size
-        elif size.isValid():
-            target_size = size
-        else:
-            target_size = self.DEFAULT_SIZE
+        target_size = requested_size if requested_size.isValid() else self.DEFAULT_SIZE
         
         # Attempt to find cached thumbnail in .lexiphoto/thumbs
         if self._library_root and file_path.exists():

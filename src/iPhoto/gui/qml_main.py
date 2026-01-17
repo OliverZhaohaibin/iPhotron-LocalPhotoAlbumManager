@@ -210,7 +210,9 @@ class AppBridge(QObject):
             except Exception:
                 pass
 
-    def _emit_error(self, message: str) -> None:
+    def _emit_error(self, message: str, exc: Exception | None = None) -> None:
+        if exc is not None:
+            traceback.print_exception(exc)
         print(message)
         self.errorRaised.emit(message)
 
@@ -225,7 +227,7 @@ class AppBridge(QObject):
             self._set_library_root_on_provider()
             self.libraryBound.emit(path)
         except Exception as exc:  # noqa: BLE001
-            self._emit_error(f"Failed to bind library: {exc}")
+            self._emit_error(f"Failed to bind library: {exc}", exc)
 
     @Slot(str)
     def openAlbum(self, path: str) -> None:  # noqa: N802
@@ -237,14 +239,14 @@ class AppBridge(QObject):
         try:
             # Remember album for parity with widget workflow
             self._context.remember_album(album_path)
-        except Exception:
-            pass
+        except Exception as exc:  # noqa: BLE001
+            self._emit_error(f"Failed to remember album: {album_path}", exc)
         try:
             # Attempt to leverage the backend facade when available
             self._context.facade.open_album(album_path)
-        except Exception:
+        except Exception as exc:  # noqa: BLE001
             # Facade may raise if library is not bound; fall back to direct load
-            pass
+            self._emit_error(f"Facade could not open album {album_path}", exc)
         self._gallery.loadAlbum(str(album_path))
         self.albumOpened.emit(str(album_path))
 
@@ -259,7 +261,7 @@ class AppBridge(QObject):
         try:
             self._context.facade.pair_live_current()
         except Exception as exc:  # noqa: BLE001
-            self._emit_error(f"Failed to rebuild live links: {exc}")
+            self._emit_error(f"Failed to rebuild live links: {exc}", exc)
 
     @Slot()
     def rescanCurrent(self) -> None:  # noqa: N802
@@ -267,7 +269,7 @@ class AppBridge(QObject):
         try:
             self._context.facade.rescan_current_async()
         except Exception as exc:  # noqa: BLE001
-            self._emit_error(f"Failed to start rescan: {exc}")
+            self._emit_error(f"Failed to start rescan: {exc}", exc)
 
 
 def main(argv: list[str] | None = None) -> int:

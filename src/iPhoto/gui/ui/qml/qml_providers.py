@@ -223,8 +223,7 @@ class ThumbnailImageProvider(QQuickImageProvider):
         
         if image.isNull():
             # Return placeholder
-            placeholder_size = target_size if target_size.isValid() else self.PLACEHOLDER_SIZE
-            placeholder = QImage(placeholder_size, QImage.Format.Format_ARGB32)
+            placeholder = QImage(target_size, QImage.Format.Format_ARGB32)
             placeholder.fill(QColor("#1b1b1b"))
             return placeholder
         

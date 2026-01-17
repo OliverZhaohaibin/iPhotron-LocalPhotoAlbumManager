@@ -182,6 +182,96 @@ class GalleryBridge(QObject):
             self._model.selectItem(index)
 
 
+class AppBridge(QObject):
+    """Bridge exposing high-level actions to QML menus."""
+
+    libraryBound = Signal(str)  # noqa: N815
+    albumOpened = Signal(str)  # noqa: N815
+    errorRaised = Signal(str)  # noqa: N815
+
+    def __init__(
+        self,
+        context: AppContext,
+        sidebar: SidebarBridge,
+        gallery: GalleryBridge,
+        thumbnail_provider: QObject | None,
+        parent: QObject | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self._context = context
+        self._sidebar = sidebar
+        self._gallery = gallery
+        self._thumbnail_provider = thumbnail_provider
+
+    def _set_library_root_on_provider(self) -> None:
+        if self._thumbnail_provider and self._context.library.root():
+            try:
+                self._thumbnail_provider.set_library_root(self._context.library.root())
+            except Exception:
+                pass
+
+    @Slot(str)
+    def bindLibrary(self, path: str) -> None:  # noqa: N802
+        """Bind the basic library and refresh related models."""
+        try:
+            self._context.library.bind_path(Path(path))
+            self._context.settings.set("basic_library_path", str(self._context.library.root()))
+            self._sidebar.initialize()
+            self._gallery.initialize()
+            self._set_library_root_on_provider()
+            self.libraryBound.emit(path)
+        except Exception as exc:  # noqa: BLE001
+            msg = str(exc)
+            print(f"Failed to bind library: {msg}")
+            self.errorRaised.emit(msg)
+
+    @Slot(str)
+    def openAlbum(self, path: str) -> None:  # noqa: N802
+        """Open an album folder and populate the gallery view."""
+        album_path = Path(path)
+        if not album_path.exists() or not album_path.is_dir():
+            self.errorRaised.emit(f"Album path not found: {path}")
+            return
+        try:
+            # Remember album for parity with widget workflow
+            self._context.remember_album(album_path)
+        except Exception:
+            pass
+        try:
+            # Attempt to leverage the backend facade when available
+            self._context.facade.open_album(album_path)
+        except Exception:
+            # Facade may raise if library is not bound; fall back to direct load
+            pass
+        self._gallery.loadAlbum(str(album_path))
+        self.albumOpened.emit(str(album_path))
+
+    @Slot()
+    def openAllPhotos(self) -> None:  # noqa: N802
+        """Load all photos from the bound library."""
+        self._gallery.loadAllPhotos()
+
+    @Slot()
+    def rebuildLiveLinks(self) -> None:  # noqa: N802
+        """Trigger live link pairing on the current album."""
+        try:
+            self._context.facade.pair_live_current()
+        except Exception as exc:  # noqa: BLE001
+            msg = str(exc)
+            print(f"Failed to rebuild live links: {msg}")
+            self.errorRaised.emit(msg)
+
+    @Slot()
+    def rescanCurrent(self) -> None:  # noqa: N802
+        """Start a background rescan for the current album."""
+        try:
+            self._context.facade.rescan_current_async()
+        except Exception as exc:  # noqa: BLE001
+            msg = str(exc)
+            print(f"Failed to start rescan: {msg}")
+            self.errorRaised.emit(msg)
+
+
 def main(argv: list[str] | None = None) -> int:
     """Launch the QML application and return the exit code."""
     
@@ -212,6 +302,7 @@ def main(argv: list[str] | None = None) -> int:
     # Create bridges with lazy initialization
     sidebar_bridge = SidebarBridge(context)
     gallery_bridge = GalleryBridge(context)
+    app_bridge: AppBridge | None = None
     
     # Create QML engine
     engine = QQmlApplicationEngine()
@@ -231,6 +322,8 @@ def main(argv: list[str] | None = None) -> int:
     root_context = engine.rootContext()
     root_context.setContextProperty("sidebarBridge", sidebar_bridge)
     root_context.setContextProperty("galleryBridge", gallery_bridge)
+    app_bridge = AppBridge(context, sidebar_bridge, gallery_bridge, thumbnail_provider)
+    root_context.setContextProperty("appBridge", app_bridge)
     
     # Determine QML file path
     qml_dir = Path(__file__).parent / "ui" / "qml"

@@ -6,13 +6,15 @@ import hashlib
 import os
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional
+from urllib.parse import unquote
 
-from PySide6.QtCore import QSize, Qt
+from PySide6.QtCore import QSize, Qt, QUrl
 from PySide6.QtGui import QColor, QImage, QPainter, QPixmap
 from PySide6.QtQuick import QQuickImageProvider
 from PySide6.QtSvg import QSvgRenderer
 
 from ....config import WORK_DIR_NAME
+from ....utils import image_loader
 
 if TYPE_CHECKING:  # pragma: no cover
     from PySide6.QtCore import QByteArray
@@ -144,14 +146,20 @@ class ThumbnailImageProvider(QQuickImageProvider):
         requested_size: QSize
     ) -> QImage:
         """Load a thumbnail image for the given file path."""
+        # Normalize the identifier: decode URL encoding and strip file:// if present
+        normalized_id = unquote(id_str)
+        if normalized_id.startswith("file://"):
+            normalized_id = QUrl(normalized_id).toLocalFile()
+
         # Check cache and update LRU order
-        if id_str in self._cache:
+        cache_key = normalized_id
+        if cache_key in self._cache:
             # Move to end of LRU list (most recently used)
-            if id_str in self._cache_order:
-                self._cache_order.remove(id_str)
-            self._cache_order.append(id_str)
+            if cache_key in self._cache_order:
+                self._cache_order.remove(cache_key)
+            self._cache_order.append(cache_key)
             
-            cached = self._cache[id_str]
+            cached = self._cache[cache_key]
             if requested_size.isValid():
                 return cached.scaled(
                     requested_size, 
@@ -162,7 +170,10 @@ class ThumbnailImageProvider(QQuickImageProvider):
         
         # Try to find a cached thumbnail file first
         image = QImage()
-        file_path = Path(id_str)
+        file_path = Path(normalized_id)
+        if not file_path.is_absolute() and self._library_root:
+            file_path = self._library_root / file_path
+        target_size = requested_size if requested_size.isValid() else (size if size.isValid() else QSize(512, 512))
         
         # Attempt to find cached thumbnail in .lexiphoto/thumbs
         if self._library_root and file_path.exists():
@@ -190,18 +201,22 @@ class ThumbnailImageProvider(QQuickImageProvider):
                         best_candidate = candidates[0]
 
                         # Load from cache file
-                        image.load(str(best_candidate))
+                        loaded = image_loader.load_qimage(best_candidate, target_size)
+                        if loaded is not None:
+                            image = loaded
             except Exception:
                 # Fallback to loading original if cache lookup fails
                 pass
 
         # Fallback: Load original file if no cache found or cache load failed
         if image.isNull() and file_path.exists():
-            image.load(str(file_path))
+            loaded = image_loader.load_qimage(file_path, target_size)
+            if loaded is not None:
+                image = loaded
         
         if image.isNull():
             # Return placeholder
-            placeholder_size = requested_size if requested_size.isValid() else QSize(192, 192)
+            placeholder_size = target_size if target_size.isValid() else QSize(192, 192)
             placeholder = QImage(placeholder_size, QImage.Format.Format_ARGB32)
             placeholder.fill(QColor("#1b1b1b"))
             return placeholder
@@ -216,8 +231,8 @@ class ThumbnailImageProvider(QQuickImageProvider):
                 old_image = self._cache.pop(oldest_key)
                 self._cache_size -= old_image.sizeInBytes()
         
-        self._cache[id_str] = image
-        self._cache_order.append(id_str)
+        self._cache[cache_key] = image
+        self._cache_order.append(cache_key)
         self._cache_size += image_size
         
         # Scale if requested

@@ -129,7 +129,8 @@ class ThumbnailImageProvider(QQuickImageProvider):
     """QML image provider for asset thumbnails.
     
     This provider connects to the existing thumbnail loading infrastructure
-    and exposes thumbnails to QML components.
+    and exposes thumbnails to QML components. It uses the same cache path
+    generation logic as thumbnail_loader.py for compatibility.
     
     Usage in QML:
         Image { source: "image://thumbnails/" + model.filePath }
@@ -179,11 +180,14 @@ class ThumbnailImageProvider(QQuickImageProvider):
         file_path = Path(id_str)
         
         # Attempt to find cached thumbnail in .iPhoto/thumbs
+        # Use the same path resolution as thumbnail_loader.py for cache key compatibility
         if self._library_root:
             try:
-                # Compute the path string for digest - use the raw id_str if file doesn't exist
+                # Resolve the absolute path - this matches thumbnail_loader.py behavior
+                # The cache key in thumbnail_loader.py is based on str(abs_path.resolve())
                 try:
-                    path_str = str(file_path.resolve()) if file_path.exists() else id_str
+                    abs_path = file_path.resolve()
+                    path_str = str(abs_path)
                 except OSError:
                     path_str = id_str
                     

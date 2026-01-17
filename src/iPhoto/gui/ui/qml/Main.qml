@@ -41,6 +41,159 @@ ApplicationWindow {
         return typeof galleryBridge !== 'undefined' && galleryBridge !== null
     }
     
+    // Use native MenuBar for cross-platform stability
+    menuBar: MenuBar {
+        id: appMenuBar
+        
+        Menu {
+            title: qsTr("File")
+            
+            Action {
+                text: qsTr("Open Album Folder…")
+                onTriggered: {
+                    console.log("Open Album Folder triggered")
+                    folderDialog.open()
+                }
+            }
+            
+            MenuSeparator {}
+            
+            Action {
+                text: qsTr("Set Basic Library…")
+                onTriggered: {
+                    console.log("Set Basic Library triggered")
+                    folderDialog.open()
+                }
+            }
+            
+            MenuSeparator {}
+            
+            Action {
+                text: qsTr("Export All Edited")
+                enabled: false
+            }
+            
+            Action {
+                text: qsTr("Export Selected")
+                enabled: false
+            }
+            
+            MenuSeparator {}
+            
+            Action {
+                text: qsTr("Rebuild Live Links")
+                enabled: isSidebarReady() && sidebarBridge.hasLibrary
+                onTriggered: {
+                    console.log("Rebuild Live Links triggered")
+                }
+            }
+        }
+        
+        Menu {
+            title: qsTr("Settings")
+            
+            Action {
+                text: qsTr("Set Basic Library…")
+                onTriggered: {
+                    console.log("Set Basic Library triggered from Settings")
+                    folderDialog.open()
+                }
+            }
+            
+            MenuSeparator {}
+            
+            Action {
+                id: showFilmstripAction
+                text: qsTr("Show Filmstrip")
+                checkable: true
+                checked: true
+                onTriggered: {
+                    console.log("Show Filmstrip toggled:", checked)
+                }
+            }
+            
+            MenuSeparator {}
+            
+            Menu {
+                title: qsTr("Appearance")
+                
+                ActionGroup {
+                    id: themeGroup
+                    exclusive: true
+                }
+                
+                Action {
+                    text: qsTr("System Default")
+                    checkable: true
+                    checked: true
+                    ActionGroup.group: themeGroup
+                }
+                
+                Action {
+                    text: qsTr("Light Mode")
+                    checkable: true
+                    ActionGroup.group: themeGroup
+                }
+                
+                Action {
+                    text: qsTr("Dark Mode")
+                    checkable: true
+                    ActionGroup.group: themeGroup
+                }
+            }
+            
+            Menu {
+                title: qsTr("Wheel Action")
+                
+                ActionGroup {
+                    id: wheelGroup
+                    exclusive: true
+                }
+                
+                Action {
+                    text: qsTr("Navigate")
+                    checkable: true
+                    checked: true
+                    ActionGroup.group: wheelGroup
+                }
+                
+                Action {
+                    text: qsTr("Zoom")
+                    checkable: true
+                    ActionGroup.group: wheelGroup
+                }
+            }
+            
+            Menu {
+                title: qsTr("Share Action")
+                
+                ActionGroup {
+                    id: shareGroup
+                    exclusive: true
+                }
+                
+                Action {
+                    text: qsTr("Copy File")
+                    checkable: true
+                    ActionGroup.group: shareGroup
+                }
+                
+                Action {
+                    text: qsTr("Copy Path")
+                    checkable: true
+                    ActionGroup.group: shareGroup
+                }
+                
+                Action {
+                    text: qsTr("Reveal in File Manager")
+                    checkable: true
+                    checked: true
+                    ActionGroup.group: shareGroup
+                }
+            }
+        }
+    }
+    
     // Folder dialog for binding library
     FolderDialog {
         id: folderDialog
@@ -76,237 +229,18 @@ ApplicationWindow {
         }
     }
     
-    // Main layout with header bar and content
-    ColumnLayout {
+    // Main layout with content
+    RowLayout {
         anchors.fill: parent
         spacing: 0
         
-        // Header bar with menu buttons
-        Rectangle {
-            id: headerBar
-            Layout.fillWidth: true
-            Layout.preferredHeight: 32
-            color: sidebarBackground
-            
-            Row {
-                id: menuRow
-                anchors.left: parent.left
-                anchors.leftMargin: 12
-                anchors.verticalCenter: parent.verticalCenter
-                spacing: 4
-                
-                // File menu button
-                Button {
-                    id: fileMenuButton
-                    text: qsTr("File")
-                    flat: true
-                    font.pixelSize: menuFontSize
-                    implicitWidth: 50
-                    implicitHeight: menuButtonHeight
-                    
-                    background: Rectangle {
-                        color: fileMenuButton.hovered || fileMenu.opened ? hoverBackground : "transparent"
-                        radius: 4
-                    }
-                    
-                    contentItem: Text {
-                        text: fileMenuButton.text
-                        font: fileMenuButton.font
-                        color: sidebarTextColor
-                        horizontalAlignment: Text.AlignHCenter
-                        verticalAlignment: Text.AlignVCenter
-                    }
-                    
-                    onClicked: {
-                        console.log("File menu button clicked")
-                        fileMenu.popup(fileMenuButton, 0, fileMenuButton.height)
-                    }
-                    
-                    Menu {
-                        id: fileMenu
-                        
-                        MenuItem {
-                            text: qsTr("Open Album Folder…")
-                            onTriggered: {
-                                console.log("Open Album Folder triggered")
-                                folderDialog.open()
-                            }
-                        }
-                        
-                        MenuSeparator {}
-                        
-                        MenuItem {
-                            text: qsTr("Set Basic Library…")
-                            onTriggered: {
-                                console.log("Set Basic Library triggered")
-                                folderDialog.open()
-                            }
-                        }
-                        
-                        MenuSeparator {}
-                        
-                        MenuItem {
-                            text: qsTr("Export All Edited")
-                            enabled: false
-                        }
-                        
-                        MenuItem {
-                            text: qsTr("Export Selected")
-                            enabled: false
-                        }
-                        
-                        MenuSeparator {}
-                        
-                        MenuItem {
-                            text: qsTr("Rebuild Live Links")
-                            enabled: isSidebarReady() && sidebarBridge.hasLibrary
-                            onTriggered: {
-                                console.log("Rebuild Live Links triggered")
-                            }
-                        }
-                    }
-                }
-                
-                // Settings menu button
-                Button {
-                    id: settingsMenuButton
-                    text: qsTr("Settings")
-                    flat: true
-                    font.pixelSize: menuFontSize
-                    implicitWidth: 70
-                    implicitHeight: menuButtonHeight
-                    
-                    background: Rectangle {
-                        color: settingsMenuButton.hovered || settingsMenu.opened ? hoverBackground : "transparent"
-                        radius: 4
-                    }
-                    
-                    contentItem: Text {
-                        text: settingsMenuButton.text
-                        font: settingsMenuButton.font
-                        color: sidebarTextColor
-                        horizontalAlignment: Text.AlignHCenter
-                        verticalAlignment: Text.AlignVCenter
-                    }
-                    
-                    onClicked: {
-                        console.log("Settings menu button clicked")
-                        settingsMenu.popup(settingsMenuButton, 0, settingsMenuButton.height)
-                    }
-                    
-                    Menu {
-                        id: settingsMenu
-                        
-                        MenuItem {
-                            text: qsTr("Set Basic Library…")
-                            onTriggered: {
-                                console.log("Set Basic Library triggered from Settings")
-                                folderDialog.open()
-                            }
-                        }
-                        
-                        MenuSeparator {}
-                        
-                        MenuItem {
-                            id: showFilmstripMenuItem
-                            text: qsTr("Show Filmstrip")
-                            checkable: true
-                            checked: true
-                            onTriggered: {
-                                console.log("Show Filmstrip toggled:", checked)
-                            }
-                        }
-                        
-                        MenuSeparator {}
-                        
-                        Menu {
-                            title: qsTr("Appearance")
-                            
-                            MenuItem {
-                                text: qsTr("System Default")
-                                checkable: true
-                                checked: true
-                                autoExclusive: true
-                            }
-                            
-                            MenuItem {
-                                text: qsTr("Light Mode")
-                                checkable: true
-                                autoExclusive: true
-                            }
-                            
-                            MenuItem {
-                                text: qsTr("Dark Mode")
-                                checkable: true
-                                autoExclusive: true
-                            }
-                        }
-                        
-                        Menu {
-                            title: qsTr("Wheel Action")
-                            
-                            MenuItem {
-                                text: qsTr("Navigate")
-                                checkable: true
-                                checked: true
-                                autoExclusive: true
-                            }
-                            
-                            MenuItem {
-                                text: qsTr("Zoom")
-                                checkable: true
-                                autoExclusive: true
-                            }
-                        }
-                        
-                        Menu {
-                            title: qsTr("Share Action")
-                            
-                            MenuItem {
-                                text: qsTr("Copy File")
-                                checkable: true
-                                autoExclusive: true
-                            }
-                            
-                            MenuItem {
-                                text: qsTr("Copy Path")
-                                checkable: true
-                                autoExclusive: true
-                            }
-                            
-                            MenuItem {
-                                text: qsTr("Reveal in File Manager")
-                                checkable: true
-                                checked: true
-                                autoExclusive: true
-                            }
-                        }
-                    }
-                }
-            }
-            
-            // Bottom separator
-            Rectangle {
-                anchors.bottom: parent.bottom
-                width: parent.width
-                height: 1
-                color: separatorColor
-            }
-        }
-        
-        // Main content area
-        RowLayout {
-            Layout.fillWidth: true
+        // Sidebar with drag handle
+        Item {
+            id: sidebarContainer
+            Layout.preferredWidth: sidebarWidth
+            Layout.minimumWidth: 180
+            Layout.maximumWidth: 350
             Layout.fillHeight: true
-            spacing: 0
-            
-            // Sidebar with drag handle
-            Item {
-                id: sidebarContainer
-                Layout.preferredWidth: sidebarWidth
-                Layout.minimumWidth: 180
-                Layout.maximumWidth: 350
-                Layout.fillHeight: true
             
             Sidebar {
                 id: sidebar
@@ -418,8 +352,7 @@ ApplicationWindow {
                 albumTitle: currentAlbumTitle
             }
         }
-        }  // End RowLayout (main content)
-    }  // End ColumnLayout
+    }  // End RowLayout (main content)
     
     // Handle signals from bridges - use Loader to defer connection
     Loader {

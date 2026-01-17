@@ -77,65 +77,14 @@ ApplicationWindow {
             }
         }
     }
-
-    // Main layout with header bar and content
-    ColumnLayout {
-        anchors.fill: parent
-        spacing: 0
+    
+    // MenuBar attached to ApplicationWindow for proper visibility
+    menuBar: MenuBar {
+        id: mainMenuBar
         
-        // Header bar with menu buttons
-        Rectangle {
-            id: headerBar
-            Layout.fillWidth: true
-            Layout.preferredHeight: 32
+        // Style the menubar background
+        background: Rectangle {
             color: sidebarBackground
-            
-            MenuBar {
-                id: inlineMenuBar
-                anchors.fill: parent
-                background: Rectangle { color: "transparent" }
-                Menu {
-                    title: qsTr("File")
-                    MenuItem { text: qsTr("Open Album Folder…"); onTriggered: albumFolderDialog.open() }
-                    MenuSeparator {}
-                    MenuItem { text: qsTr("Set Basic Library…"); onTriggered: libraryFolderDialog.open() }
-                    MenuSeparator {}
-                    MenuItem { text: qsTr("Export All Edited"); enabled: false }
-                    MenuItem { text: qsTr("Export Selected"); enabled: false }
-                    MenuSeparator {}
-                    MenuItem {
-                        text: qsTr("Rebuild Live Links")
-                        enabled: isSidebarReady() && sidebarBridge.hasLibrary
-                        onTriggered: {
-                            if (appBridge) { appBridge.rebuildLiveLinks() }
-                        }
-                    }
-                }
-                Menu {
-                    title: qsTr("Settings")
-                    MenuItem { text: qsTr("Show Filmstrip"); checkable: true; checked: true }
-                    MenuSeparator {}
-                    Menu {
-                        title: qsTr("Appearance")
-                        MenuItem { text: qsTr("System Default"); checkable: true; checked: true }
-                        MenuItem { text: qsTr("Light Mode"); checkable: true }
-                        MenuItem { text: qsTr("Dark Mode"); checkable: true }
-                    }
-                    Menu {
-                        title: qsTr("Wheel Action")
-                        MenuItem { text: qsTr("Navigate"); checkable: true; checked: true }
-                        MenuItem { text: qsTr("Zoom"); checkable: true }
-                    }
-                    Menu {
-                        title: qsTr("Share Action")
-                        MenuItem { text: qsTr("Copy File"); checkable: true }
-                        MenuItem { text: qsTr("Copy Path"); checkable: true }
-                        MenuItem { text: qsTr("Reveal in File Manager"); checkable: true; checked: true }
-                    }
-                }
-            }
-            
-            // Bottom separator
             Rectangle {
                 anchors.bottom: parent.bottom
                 width: parent.width
@@ -144,14 +93,54 @@ ApplicationWindow {
             }
         }
         
-        // Main content area
-        RowLayout {
-            Layout.fillWidth: true
-            Layout.fillHeight: true
-            spacing: 0
-            
-            // Sidebar with drag handle
-            Item {
+        Menu {
+            title: qsTr("File")
+            MenuItem { text: qsTr("Open Album Folder…"); onTriggered: albumFolderDialog.open() }
+            MenuSeparator {}
+            MenuItem { text: qsTr("Set Basic Library…"); onTriggered: libraryFolderDialog.open() }
+            MenuSeparator {}
+            MenuItem { text: qsTr("Export All Edited"); enabled: false }
+            MenuItem { text: qsTr("Export Selected"); enabled: false }
+            MenuSeparator {}
+            MenuItem {
+                text: qsTr("Rebuild Live Links")
+                enabled: isSidebarReady() && sidebarBridge.hasLibrary
+                onTriggered: {
+                    if (appBridge) { appBridge.rebuildLiveLinks() }
+                }
+            }
+        }
+        Menu {
+            title: qsTr("Settings")
+            MenuItem { text: qsTr("Show Filmstrip"); checkable: true; checked: true }
+            MenuSeparator {}
+            Menu {
+                title: qsTr("Appearance")
+                MenuItem { text: qsTr("System Default"); checkable: true; checked: true }
+                MenuItem { text: qsTr("Light Mode"); checkable: true }
+                MenuItem { text: qsTr("Dark Mode"); checkable: true }
+            }
+            Menu {
+                title: qsTr("Wheel Action")
+                MenuItem { text: qsTr("Navigate"); checkable: true; checked: true }
+                MenuItem { text: qsTr("Zoom"); checkable: true }
+            }
+            Menu {
+                title: qsTr("Share Action")
+                MenuItem { text: qsTr("Copy File"); checkable: true }
+                MenuItem { text: qsTr("Copy Path"); checkable: true }
+                MenuItem { text: qsTr("Reveal in File Manager"); checkable: true; checked: true }
+            }
+        }
+    }
+
+    // Main layout with content area
+    RowLayout {
+        anchors.fill: parent
+        spacing: 0
+        
+        // Sidebar with drag handle
+        Item {
                 id: sidebarContainer
                 Layout.preferredWidth: sidebarWidth
                 Layout.minimumWidth: 180
@@ -268,8 +257,7 @@ ApplicationWindow {
                 albumTitle: currentAlbumTitle
             }
         }
-        }  // End RowLayout (main content)
-    }  // End ColumnLayout
+    }  // End RowLayout (main content)
     
     // Handle signals from bridges - use Loader to defer connection
     Loader {

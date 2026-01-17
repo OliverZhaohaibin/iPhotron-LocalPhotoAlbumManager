@@ -121,9 +121,16 @@ Item {
             cellHeight: cellSize
             clip: true
             
+            // Critical: Large cacheBuffer to keep items in memory when scrolling
+            // This prevents thumbnails from disappearing when scrolling back
+            cacheBuffer: 2000
+            
             // Smooth scrolling
             flickableDirection: Flickable.VerticalFlick
             boundsBehavior: Flickable.StopAtBounds
+            
+            // Disable highlight animation for better performance
+            highlightMoveDuration: 0
             
             ScrollBar.vertical: ScrollBar {
                 policy: ScrollBar.AsNeeded
@@ -142,7 +149,19 @@ Item {
                     color: "#1b1b1b"
                     clip: true
                     
-                    // Thumbnail image
+                    // Micro thumbnail (16x16 placeholder from database)
+                    Image {
+                        id: microThumbnail
+                        anchors.fill: parent
+                        source: model.microThumbnailUrl || ""
+                        fillMode: Image.PreserveAspectCrop
+                        visible: thumbnail.status !== Image.Ready && source !== ""
+                        sourceSize.width: 16
+                        sourceSize.height: 16
+                        smooth: false  // Pixelated look for micro thumbnail
+                    }
+                    
+                    // Main thumbnail image
                     Image {
                         id: thumbnail
                         anchors.fill: parent
@@ -150,12 +169,15 @@ Item {
                         fillMode: Image.PreserveAspectCrop
                         asynchronous: true
                         cache: true
+                        // Use sourceSize to request a reasonable thumbnail size
+                        sourceSize.width: 512
+                        sourceSize.height: 512
                         
-                        // Loading placeholder
+                        // Loading placeholder (only show if no micro thumbnail)
                         Rectangle {
                             anchors.fill: parent
                             color: "#1b1b1b"
-                            visible: thumbnail.status !== Image.Ready
+                            visible: thumbnail.status !== Image.Ready && microThumbnail.source === ""
                             
                             BusyIndicator {
                                 anchors.centerIn: parent

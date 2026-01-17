@@ -47,11 +47,17 @@ ApplicationWindow {
         title: "Select Library Folder"
         onAccepted: {
             if (isSidebarReady()) {
-                // Convert file:// URL to path string
+                // Convert file:// URL to path string properly
+                // On Unix: file:///path/to/folder -> /path/to/folder
+                // On Windows: file:///C:/path -> C:/path
                 var path = selectedFolder.toString()
-                if (path.startsWith("file://")) {
+                if (path.startsWith("file:///")) {
+                    // Handle both Unix and Windows paths
+                    path = path.substring(7)  // Keep one leading slash for Unix
+                } else if (path.startsWith("file://")) {
                     path = path.substring(7)
                 }
+                console.log("Binding library to:", path)
                 sidebarBridge.bindLibrary(path)
             }
         }

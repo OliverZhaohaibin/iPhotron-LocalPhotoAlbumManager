@@ -13,6 +13,11 @@ from PySide6.QtQuick import QQuickImageProvider
 from PySide6.QtSvg import QSvgRenderer
 
 from ....config import WORK_DIR_NAME
+from ....utils import image_loader
+from ..tasks.video_frame_grabber import grab_video_frame
+
+# Video extensions that need frame extraction
+VIDEO_EXTENSIONS = {".mp4", ".mov", ".avi", ".mkv", ".m4v"}
 
 if TYPE_CHECKING:  # pragma: no cover
     from PySide6.QtCore import QByteArray
@@ -196,8 +201,21 @@ class ThumbnailImageProvider(QQuickImageProvider):
                 pass
 
         # Fallback: Load original file if no cache found or cache load failed
+        # Use image_loader which supports HEIC/HEIF via Pillow fallback
         if image.isNull() and file_path.exists():
-            image.load(str(file_path))
+            target_size = requested_size if requested_size.isValid() else QSize(512, 512)
+            
+            # Check if this is a video file
+            suffix = file_path.suffix.lower()
+            if suffix in VIDEO_EXTENSIONS:
+                # Extract a frame from the video
+                loaded_image = grab_video_frame(file_path, target_size)
+            else:
+                # Load image file
+                loaded_image = image_loader.load_qimage(file_path, target_size)
+            
+            if loaded_image is not None and not loaded_image.isNull():
+                image = loaded_image
         
         if image.isNull():
             # Return placeholder

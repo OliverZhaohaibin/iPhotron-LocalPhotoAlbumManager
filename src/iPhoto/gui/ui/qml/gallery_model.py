@@ -27,8 +27,12 @@ try:
     from iPhoto.library.manager import LibraryManager
     from iPhoto.errors import IPhotoError
 except ImportError:
-    from src.iPhoto.library.manager import LibraryManager
-    from src.iPhoto.errors import IPhotoError
+    try:
+        from src.iPhoto.library.manager import LibraryManager
+        from src.iPhoto.errors import IPhotoError
+    except ImportError:
+        from .....library.manager import LibraryManager
+        from .....errors import IPhotoError
 
 
 class GalleryRoles(IntEnum):
@@ -300,9 +304,12 @@ class GalleryModel(QAbstractListModel):
         except ImportError:
             try:
                 from src.iPhoto.cache.index_store import IndexStore
-            except ImportError as exc:
-                logger.debug("IndexStore unavailable: %s", exc)
-                return False
+            except ImportError:
+                try:
+                    from .....cache.index_store import IndexStore
+                except ImportError as exc:
+                    logger.debug("IndexStore unavailable: %s", exc)
+                    return False
 
         store = IndexStore(root)
         loaded = False
@@ -331,17 +338,6 @@ class GalleryModel(QAbstractListModel):
                 is_favorite = bool(row.get("is_favorite"))
                 duration_val = row.get("dur") or 0.0
 
-                micro_thumb_blob = row.get("micro_thumbnail")
-                micro_data = None
-                if isinstance(micro_thumb_blob, (bytes, bytearray)) and micro_thumb_blob:
-                    try:
-                        micro_data = "data:image/jpeg;base64," + base64.b64encode(
-                            bytes(micro_thumb_blob)
-                        ).decode("ascii")
-                    except (ValueError, UnicodeDecodeError) as exc:
-                        logger.debug("Failed to decode micro thumbnail for %s: %s", rel, exc)
-                        micro_data = None
-
                 item = GalleryItem(
                     file_path=abs_path,
                     is_video=is_video,
@@ -349,7 +345,9 @@ class GalleryModel(QAbstractListModel):
                     is_pano=False,
                     is_favorite=is_favorite,
                     duration=float(duration_val) if duration_val else 0.0,
-                    micro_thumbnail=micro_data,
+                    micro_thumbnail=self._decode_micro_thumbnail(
+                        row.get("micro_thumbnail"), rel
+                    ),
                 )
                 self._items.append(item)
                 loaded = True
@@ -364,6 +362,17 @@ class GalleryModel(QAbstractListModel):
             self._items.clear()
             loaded = False
         return loaded
+    
+    def _decode_micro_thumbnail(self, blob: object, rel: str | None = None) -> str | None:
+        """Return a base64 data URL for the micro thumbnail blob if valid."""
+        if not isinstance(blob, (bytes, bytearray)) or not blob:
+            return None
+        try:
+            encoded = base64.b64encode(bytes(blob)).decode("ascii")
+            return f"data:image/jpeg;base64,{encoded}"
+        except (ValueError, UnicodeDecodeError) as exc:
+            logger.debug("Failed to decode micro thumbnail for %s: %s", rel or "<unknown>", exc)
+            return None
     
     def _check_is_live(self, path: Path) -> bool:
         """Check if the image is part of a Live Photo."""

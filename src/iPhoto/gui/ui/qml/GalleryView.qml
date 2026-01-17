@@ -132,7 +132,7 @@ Item {
             
             delegate: Item {
                 id: delegateRoot
-                property bool showPlaceholder: thumbnail.status !== Image.Ready && microThumb.source === ""
+                property bool showPlaceholder: thumbnail.status !== Image.Ready && (microThumb.source || "") === ""
                 width: cellSize
                 height: cellSize
                 

@@ -296,10 +296,13 @@ class GalleryModel(QAbstractListModel):
             return False
 
         try:
-            from .....cache.index_store import IndexStore
-        except (ImportError, ModuleNotFoundError) as exc:
-            logger.debug("IndexStore unavailable: %s", exc)
-            return False
+            from iPhoto.cache.index_store import IndexStore
+        except ImportError:
+            try:
+                from src.iPhoto.cache.index_store import IndexStore
+            except ImportError as exc:
+                logger.debug("IndexStore unavailable: %s", exc)
+                return False
 
         store = IndexStore(root)
         loaded = False

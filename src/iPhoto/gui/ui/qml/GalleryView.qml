@@ -132,11 +132,12 @@ Item {
             
             delegate: Item {
                 id: delegateRoot
+                property bool showPlaceholder: thumbnail.status !== Image.Ready && microThumb.source === ""
                 width: cellSize
                 height: cellSize
                 
-                    // Thumbnail container with gap
-                    Rectangle {
+                // Thumbnail container with gap
+                Rectangle {
                         id: thumbnailContainer
                         anchors.fill: parent
                         anchors.margins: itemGap / 2
@@ -174,7 +175,7 @@ Item {
                             Rectangle {
                                 anchors.fill: parent
                                 color: "#1b1b1b"
-                                visible: thumbnail.status !== Image.Ready && microThumb.source === ""
+                                visible: delegateRoot.showPlaceholder
                             
                             BusyIndicator {
                                 anchors.centerIn: parent

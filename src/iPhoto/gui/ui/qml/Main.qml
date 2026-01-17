@@ -144,62 +144,62 @@ ApplicationWindow {
                 Layout.minimumWidth: 180
                 Layout.maximumWidth: 350
                 Layout.fillHeight: true
-            
-            Sidebar {
-                id: sidebar
-                anchors.fill: parent
-            }
-            
-            // Resize handle
-            Rectangle {
-                id: resizeHandle
-                width: 4
-                anchors.right: parent.right
-                anchors.top: parent.top
-                anchors.bottom: parent.bottom
-                color: mouseAreaResize.containsMouse || mouseAreaResize.drag.active ? "#007AFF" : "transparent"
                 
-                Behavior on color { ColorAnimation { duration: 150 } }
-                
-                MouseArea {
-                    id: mouseAreaResize
+                Sidebar {
+                    id: sidebar
                     anchors.fill: parent
-                    anchors.margins: -2
-                    hoverEnabled: true
-                    cursorShape: Qt.SizeHorCursor
+                }
+                
+                // Resize handle
+                Rectangle {
+                    id: resizeHandle
+                    width: 4
+                    anchors.right: parent.right
+                    anchors.top: parent.top
+                    anchors.bottom: parent.bottom
+                    color: mouseAreaResize.containsMouse || mouseAreaResize.drag.active ? "#007AFF" : "transparent"
                     
-                    property real startX: 0
-                    property real startWidth: 0
+                    Behavior on color { ColorAnimation { duration: 150 } }
                     
-                    onPressed: {
-                        startX = mouseX
-                        startWidth = sidebarWidth
-                    }
-                    
-                    onPositionChanged: {
-                        if (pressed) {
-                            var delta = mouseX - startX
-                            var newWidth = startWidth + delta
-                            sidebarWidth = Math.max(180, Math.min(350, newWidth))
+                    MouseArea {
+                        id: mouseAreaResize
+                        anchors.fill: parent
+                        anchors.margins: -2
+                        hoverEnabled: true
+                        cursorShape: Qt.SizeHorCursor
+                        
+                        property real startX: 0
+                        property real startWidth: 0
+                        
+                        onPressed: {
+                            startX = mouseX
+                            startWidth = sidebarWidth
+                        }
+                        
+                        onPositionChanged: {
+                            if (pressed) {
+                                var delta = mouseX - startX
+                                var newWidth = startWidth + delta
+                                sidebarWidth = Math.max(180, Math.min(350, newWidth))
+                            }
                         }
                     }
                 }
             }
-        }
-        
-        // Separator line
-        Rectangle {
-            Layout.fillHeight: true
-            Layout.preferredWidth: 1
-            color: separatorColor
-        }
-        
-        // Main content area
-        Rectangle {
-            id: contentArea
-            Layout.fillWidth: true
-            Layout.fillHeight: true
-            color: contentBackground
+            
+            // Separator line
+            Rectangle {
+                Layout.fillHeight: true
+                Layout.preferredWidth: 1
+                color: separatorColor
+            }
+            
+            // Main content area
+            Rectangle {
+                id: contentArea
+                Layout.fillWidth: true
+                Layout.fillHeight: true
+                color: contentBackground
             
             // Empty state / Welcome screen (always shown in current state)
             Item {

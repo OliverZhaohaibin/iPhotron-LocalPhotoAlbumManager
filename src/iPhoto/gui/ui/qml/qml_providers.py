@@ -127,6 +127,8 @@ class ThumbnailImageProvider(QQuickImageProvider):
     
     # Maximum cache size in bytes (default 100MB)
     MAX_CACHE_SIZE = 100 * 1024 * 1024
+    DEFAULT_SIZE = QSize(512, 512)
+    PLACEHOLDER_SIZE = QSize(192, 192)
     
     def __init__(self) -> None:
         super().__init__(QQuickImageProvider.ImageType.Image)
@@ -173,7 +175,13 @@ class ThumbnailImageProvider(QQuickImageProvider):
         file_path = Path(normalized_id)
         if not file_path.is_absolute() and self._library_root:
             file_path = self._library_root / file_path
-        target_size = requested_size if requested_size.isValid() else (size if size.isValid() else QSize(512, 512))
+
+        if requested_size.isValid():
+            target_size = requested_size
+        elif size.isValid():
+            target_size = size
+        else:
+            target_size = self.DEFAULT_SIZE
         
         # Attempt to find cached thumbnail in .lexiphoto/thumbs
         if self._library_root and file_path.exists():
@@ -216,7 +224,7 @@ class ThumbnailImageProvider(QQuickImageProvider):
         
         if image.isNull():
             # Return placeholder
-            placeholder_size = target_size if target_size.isValid() else QSize(192, 192)
+            placeholder_size = target_size if target_size.isValid() else self.PLACEHOLDER_SIZE
             placeholder = QImage(placeholder_size, QImage.Format.Format_ARGB32)
             placeholder.fill(QColor("#1b1b1b"))
             return placeholder

@@ -210,6 +210,10 @@ class AppBridge(QObject):
             except Exception:
                 pass
 
+    def _emit_error(self, message: str) -> None:
+        print(message)
+        self.errorRaised.emit(message)
+
     @Slot(str)
     def bindLibrary(self, path: str) -> None:  # noqa: N802
         """Bind the basic library and refresh related models."""
@@ -221,16 +225,14 @@ class AppBridge(QObject):
             self._set_library_root_on_provider()
             self.libraryBound.emit(path)
         except Exception as exc:  # noqa: BLE001
-            msg = str(exc)
-            print(f"Failed to bind library: {msg}")
-            self.errorRaised.emit(msg)
+            self._emit_error(f"Failed to bind library: {exc}")
 
     @Slot(str)
     def openAlbum(self, path: str) -> None:  # noqa: N802
         """Open an album folder and populate the gallery view."""
         album_path = Path(path)
         if not album_path.exists() or not album_path.is_dir():
-            self.errorRaised.emit(f"Album path not found: {path}")
+            self._emit_error(f"Album path not found: {path}")
             return
         try:
             # Remember album for parity with widget workflow
@@ -257,9 +259,7 @@ class AppBridge(QObject):
         try:
             self._context.facade.pair_live_current()
         except Exception as exc:  # noqa: BLE001
-            msg = str(exc)
-            print(f"Failed to rebuild live links: {msg}")
-            self.errorRaised.emit(msg)
+            self._emit_error(f"Failed to rebuild live links: {exc}")
 
     @Slot()
     def rescanCurrent(self) -> None:  # noqa: N802
@@ -267,9 +267,7 @@ class AppBridge(QObject):
         try:
             self._context.facade.rescan_current_async()
         except Exception as exc:  # noqa: BLE001
-            msg = str(exc)
-            print(f"Failed to start rescan: {msg}")
-            self.errorRaised.emit(msg)
+            self._emit_error(f"Failed to start rescan: {exc}")
 
 
 def main(argv: list[str] | None = None) -> int:

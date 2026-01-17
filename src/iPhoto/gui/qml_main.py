@@ -227,7 +227,7 @@ class AppBridge(QObject):
             self._gallery.initialize()
             self._set_library_root_on_provider()
             self.libraryBound.emit(path)
-        except Exception as exc:  # noqa: BLE001
+        except (IPhotoError, OSError, ValueError) as exc:
             self._emit_error(f"Failed to bind library: {exc}", exc)
 
     @Slot(str)
@@ -240,12 +240,12 @@ class AppBridge(QObject):
         try:
             # Remember album for parity with widget workflow
             self._context.remember_album(album_path)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             self._emit_error(f"Failed to remember album: {album_path}", exc)
         try:
             # Attempt to leverage the backend facade when available
             self._context.facade.open_album(album_path)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             # Facade may raise if library is not bound; fall back to direct load
             self._emit_error(f"Facade could not open album {album_path}", exc)
         self._gallery.loadAlbum(str(album_path))
@@ -261,7 +261,7 @@ class AppBridge(QObject):
         """Trigger live link pairing on the current album."""
         try:
             self._context.facade.pair_live_current()
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             self._emit_error(f"Failed to rebuild live links: {exc}", exc)
 
     @Slot()
@@ -269,7 +269,7 @@ class AppBridge(QObject):
         """Start a background rescan for the current album."""
         try:
             self._context.facade.rescan_current_async()
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             self._emit_error(f"Failed to start rescan: {exc}", exc)
 
 

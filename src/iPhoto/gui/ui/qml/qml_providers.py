@@ -155,9 +155,11 @@ class ThumbnailImageProvider(QQuickImageProvider):
     ) -> QImage:
         """Load a thumbnail image for the given file path."""
         # Normalize the identifier: decode URL encoding and strip file:// if present
-        normalized_id = unquote(id_str)
+        normalized_id = id_str
         if normalized_id.startswith("file://"):
             normalized_id = QUrl(normalized_id).toLocalFile()
+        else:
+            normalized_id = unquote(normalized_id)
 
         # Check cache and update LRU order
         cache_key = normalized_id

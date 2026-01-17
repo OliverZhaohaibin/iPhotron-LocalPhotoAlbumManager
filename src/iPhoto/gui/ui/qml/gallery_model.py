@@ -114,6 +114,7 @@ class GalleryModel(QAbstractListModel):
             return str(item.file_path)
         elif role == GalleryRoles.ThumbnailUrlRole:
             # Return the URL for the thumbnail image provider
+            # Path objects convert to strings with their absolute path
             return f"image://thumbnails/{item.file_path}"
         elif role == GalleryRoles.IsVideoRole:
             return item.is_video

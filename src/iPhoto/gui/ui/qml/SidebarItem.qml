@@ -141,17 +141,14 @@ Item {
             }
             
             // Icon using image provider
-            Image {
-                id: iconImage
+            Item {
+                id: iconContainer
                 width: iconSize
                 height: iconSize
                 anchors.verticalCenter: parent.verticalCenter
-                source: getIconSource(itemIconName, itemNodeType, isSelected)
-                sourceSize.width: iconSize
-                sourceSize.height: iconSize
-                fillMode: Image.PreserveAspectFit
-                visible: source !== ""
+                visible: iconImage.source !== ""
                 
+                // Function to get icon source URL
                 function getIconSource(iconName, nodeType, selected) {
                     // Map icon names to bundled SVG files via image provider
                     var baseName = ""
@@ -200,11 +197,24 @@ Item {
                     // Return URL for icon image provider with color parameter
                     return "image://icons/" + baseName + ".svg?color=" + color
                 }
+                
+                Image {
+                    id: iconImage
+                    anchors.centerIn: parent
+                    // Use sourceSize to control rendering size, but let the image be its natural size
+                    sourceSize.width: iconSize
+                    sourceSize.height: iconSize
+                    source: iconContainer.getIconSource(itemIconName, itemNodeType, isSelected)
+                    fillMode: Image.PreserveAspectFit
+                    // Constrain to container size
+                    width: Math.min(sourceSize.width, iconSize)
+                    height: Math.min(sourceSize.height, iconSize)
+                }
             }
             
             // Spacer between icon and text
             Item {
-                width: iconImage.visible ? iconTextGap : 0
+                width: iconContainer.visible ? iconTextGap : 0
                 height: 1
             }
             

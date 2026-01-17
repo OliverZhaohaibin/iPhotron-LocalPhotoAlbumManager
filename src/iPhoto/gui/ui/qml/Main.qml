@@ -2,6 +2,7 @@ import QtQuick 2.15
 import QtQuick.Controls 2.15
 import QtQuick.Layouts 1.15
 import QtQuick.Window 2.15
+import QtQuick.Dialogs
 import "."  // Import local QML files
 
 ApplicationWindow {
@@ -33,6 +34,160 @@ ApplicationWindow {
     
     function isGalleryReady() {
         return typeof galleryBridge !== 'undefined' && galleryBridge !== null
+    }
+    
+    // Folder dialog for binding library
+    FolderDialog {
+        id: folderDialog
+        title: "Select Library Folder"
+        onAccepted: {
+            if (isSidebarReady()) {
+                // Convert file:// URL to path string
+                var path = selectedFolder.toString()
+                if (path.startsWith("file://")) {
+                    path = path.substring(7)
+                }
+                sidebarBridge.bindLibrary(path)
+            }
+        }
+    }
+    
+    // Menu bar matching the widget implementation
+    menuBar: MenuBar {
+        id: appMenuBar
+        
+        Menu {
+            title: qsTr("&File")
+            
+            Action {
+                text: qsTr("Open Album Folder…")
+                onTriggered: folderDialog.open()
+            }
+            
+            MenuSeparator {}
+            
+            Action {
+                text: qsTr("Set Basic Library…")
+                onTriggered: folderDialog.open()
+            }
+            
+            MenuSeparator {}
+            
+            Action {
+                text: qsTr("Export All Edited")
+                enabled: false
+            }
+            
+            Action {
+                text: qsTr("Export Selected")
+                enabled: false
+            }
+            
+            MenuSeparator {}
+            
+            Action {
+                text: qsTr("Rebuild Live Links")
+                enabled: isSidebarReady() && sidebarBridge.hasLibrary
+            }
+        }
+        
+        Menu {
+            title: qsTr("&Settings")
+            
+            Action {
+                text: qsTr("Set Basic Library…")
+                onTriggered: folderDialog.open()
+            }
+            
+            MenuSeparator {}
+            
+            Action {
+                id: showFilmstripAction
+                text: qsTr("Show Filmstrip")
+                checkable: true
+                checked: true
+            }
+            
+            MenuSeparator {}
+            
+            Menu {
+                title: qsTr("Appearance")
+                
+                ActionGroup {
+                    id: themeGroup
+                    exclusive: true
+                }
+                
+                Action {
+                    text: qsTr("System Default")
+                    checkable: true
+                    checked: true
+                    ActionGroup.group: themeGroup
+                }
+                
+                Action {
+                    text: qsTr("Light Mode")
+                    checkable: true
+                    ActionGroup.group: themeGroup
+                }
+                
+                Action {
+                    text: qsTr("Dark Mode")
+                    checkable: true
+                    ActionGroup.group: themeGroup
+                }
+            }
+            
+            Menu {
+                title: qsTr("Wheel Action")
+                
+                ActionGroup {
+                    id: wheelGroup
+                    exclusive: true
+                }
+                
+                Action {
+                    text: qsTr("Navigate")
+                    checkable: true
+                    checked: true
+                    ActionGroup.group: wheelGroup
+                }
+                
+                Action {
+                    text: qsTr("Zoom")
+                    checkable: true
+                    ActionGroup.group: wheelGroup
+                }
+            }
+            
+            Menu {
+                title: qsTr("Share Action")
+                
+                ActionGroup {
+                    id: shareGroup
+                    exclusive: true
+                }
+                
+                Action {
+                    text: qsTr("Copy File")
+                    checkable: true
+                    ActionGroup.group: shareGroup
+                }
+                
+                Action {
+                    text: qsTr("Copy Path")
+                    checkable: true
+                    ActionGroup.group: shareGroup
+                }
+                
+                Action {
+                    text: qsTr("Reveal in File Manager")
+                    checkable: true
+                    checked: true
+                    ActionGroup.group: shareGroup
+                }
+            }
+        }
     }
     
     // Use RowLayout instead of SplitView for better compatibility
@@ -204,7 +359,7 @@ ApplicationWindow {
                     
                     function onBindLibraryRequested() {
                         console.log("Library binding requested")
-                        statusText.text = "Library binding requested - use command line argument"
+                        folderDialog.open()
                     }
                     
                     function onHasLibraryChanged() {

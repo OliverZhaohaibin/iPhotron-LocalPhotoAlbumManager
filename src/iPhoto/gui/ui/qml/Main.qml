@@ -47,25 +47,27 @@ ApplicationWindow {
         title: "Select Library Folder"
         onAccepted: {
             if (isSidebarReady()) {
-                // Convert file:// URL to path string properly using Qt.resolvedUrl
-                // On Unix: file:///path/to/folder -> /path/to/folder
-                // On Windows: file:///C:/path -> C:/path
-                var url = selectedFolder.toString()
-                var path = url
+                // Use Qt.resolvedUrl and proper URL to path conversion
+                // This works correctly on both Windows and Unix
+                var url = selectedFolder
+                var urlString = url.toString()
+                var path = urlString
                 
-                // Handle file:// URLs
-                if (url.startsWith("file:///")) {
-                    // Unix: file:///path -> /path (remove file://)
-                    // Windows: file:///C:/path -> C:/path (remove file:///)
-                    var afterPrefix = url.substring(8)  // Remove "file:///"
-                    // Check if it's a Windows path (has drive letter like C:)
+                // Handle file:// URLs properly for both platforms
+                if (urlString.startsWith("file:///")) {
+                    // Remove file:/// prefix
+                    var afterPrefix = urlString.substring(8)
+                    // On Windows: file:///C:/path -> afterPrefix is "C:/path"  
+                    // On Unix: file:///home/user -> afterPrefix is "home/user"
                     if (afterPrefix.length >= 2 && afterPrefix.charAt(1) === ':') {
-                        path = afterPrefix  // Windows: C:/path
+                        // Windows path with drive letter
+                        path = afterPrefix
                     } else {
-                        path = "/" + afterPrefix  // Unix: /path
+                        // Unix path - add back leading slash
+                        path = "/" + afterPrefix
                     }
-                } else if (url.startsWith("file://")) {
-                    path = url.substring(7)
+                } else if (urlString.startsWith("file://")) {
+                    path = urlString.substring(7)
                 }
                 
                 console.log("Binding library to:", path)
@@ -103,7 +105,7 @@ ApplicationWindow {
                     implicitHeight: menuButtonHeight
                     
                     background: Rectangle {
-                        color: fileMenuButton.hovered || fileMenu.visible ? hoverBackground : "transparent"
+                        color: fileMenuButton.hovered || fileMenu.opened ? hoverBackground : "transparent"
                         radius: 4
                     }
                     
@@ -117,14 +119,9 @@ ApplicationWindow {
                     
                     onClicked: {
                         console.log("File menu button clicked")
-                        // Position menu relative to the button using mapToItem
-                        var pos = fileMenuButton.mapToItem(headerBar, 0, fileMenuButton.height)
-                        fileMenu.x = pos.x
-                        fileMenu.y = pos.y
-                        fileMenu.open()
+                        fileMenu.popup(fileMenuButton, 0, fileMenuButton.height)
                     }
                     
-                    // File menu - parented to button for proper positioning
                     Menu {
                         id: fileMenu
                         
@@ -180,7 +177,7 @@ ApplicationWindow {
                     implicitHeight: menuButtonHeight
                     
                     background: Rectangle {
-                        color: settingsMenuButton.hovered || settingsMenu.visible ? hoverBackground : "transparent"
+                        color: settingsMenuButton.hovered || settingsMenu.opened ? hoverBackground : "transparent"
                         radius: 4
                     }
                     
@@ -194,14 +191,9 @@ ApplicationWindow {
                     
                     onClicked: {
                         console.log("Settings menu button clicked")
-                        // Position menu relative to the button using mapToItem
-                        var pos = settingsMenuButton.mapToItem(headerBar, 0, settingsMenuButton.height)
-                        settingsMenu.x = pos.x
-                        settingsMenu.y = pos.y
-                        settingsMenu.open()
+                        settingsMenu.popup(settingsMenuButton, 0, settingsMenuButton.height)
                     }
                     
-                    // Settings menu - parented to button for proper positioning
                     Menu {
                         id: settingsMenu
                         

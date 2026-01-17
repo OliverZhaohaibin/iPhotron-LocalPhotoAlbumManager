@@ -303,16 +303,20 @@ class GalleryModel(QAbstractListModel):
     def _get_video_duration(self, path: Path) -> float:
         """Get the duration of a video file in seconds.
         
-        Note: This is a placeholder implementation. Full video duration
-        detection would require using ffprobe, PyAV, or similar libraries.
-        For now, this returns 0.0 which will display '0:00' for videos.
-        A proper implementation would be added when video playback is
-        migrated to QML.
+        Uses PyAV for efficient video metadata extraction.
         """
-        # TODO: Implement proper video duration extraction using:
-        # - PyAV (already available in the project)
-        # - ffprobe subprocess call
-        # - Or integrate with existing media metadata extraction
+        try:
+            import av
+            with av.open(str(path)) as container:
+                if container.duration is not None:
+                    # Duration is in microseconds
+                    return container.duration / 1_000_000.0
+                # Fallback: try to get from video stream
+                for stream in container.streams.video:
+                    if stream.duration is not None and stream.time_base is not None:
+                        return float(stream.duration * stream.time_base)
+        except Exception:
+            pass
         return 0.0
 
 

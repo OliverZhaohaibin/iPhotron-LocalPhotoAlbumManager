@@ -14,10 +14,9 @@ from PySide6.QtSvg import QSvgRenderer
 
 from ....config import WORK_DIR_NAME
 from ....utils import image_loader
-from ..tasks.video_frame_grabber import grab_video_frame
 
 # Video extensions that need frame extraction
-VIDEO_EXTENSIONS = {".mp4", ".mov", ".avi", ".mkv", ".m4v"}
+VIDEO_EXTENSIONS = {".mp4", ".mov", ".avi", ".mkv", ".m4v", ".qt"}
 
 if TYPE_CHECKING:  # pragma: no cover
     from PySide6.QtCore import QByteArray
@@ -174,21 +173,18 @@ class ThumbnailImageProvider(QQuickImageProvider):
         # Attempt to find cached thumbnail in .iPhoto/thumbs
         if self._library_root:
             try:
-                # Logic matching generate_cache_path in thumbnail_loader.py
-                # Use resolved path if file exists, otherwise use the raw id_str
+                # Compute the path string for digest - use the raw id_str if file doesn't exist
                 try:
                     path_str = str(file_path.resolve()) if file_path.exists() else id_str
                 except OSError:
                     path_str = id_str
+                    
                 digest = hashlib.blake2b(path_str.encode("utf-8"), digest_size=20).hexdigest()
                 thumbs_dir = self._library_root / WORK_DIR_NAME / "thumbs"
 
                 if thumbs_dir.exists():
                     # Find any file starting with digest_
                     # The filenames are digest_stamp_WxH.png
-                    # We want the most recent one if possible, or just any valid one.
-                    # Since we don't know the exact size or stamp, we search.
-
                     candidates = []
                     prefix = f"{digest}_"
                     for entry in thumbs_dir.iterdir():
@@ -199,7 +195,6 @@ class ThumbnailImageProvider(QQuickImageProvider):
                         # Sort by mtime descending to get latest
                         candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
                         best_candidate = candidates[0]
-
                         # Load from cache file
                         image.load(str(best_candidate))
             except Exception:
@@ -214,10 +209,14 @@ class ThumbnailImageProvider(QQuickImageProvider):
             # Check if this is a video file
             suffix = file_path.suffix.lower()
             if suffix in VIDEO_EXTENSIONS:
-                # Extract a frame from the video
-                loaded_image = grab_video_frame(file_path, target_size)
+                # Try to extract a frame from the video
+                try:
+                    from ..tasks.video_frame_grabber import grab_video_frame
+                    loaded_image = grab_video_frame(file_path, target_size)
+                except Exception:
+                    loaded_image = None
             else:
-                # Load image file
+                # Load image file using image_loader (supports HEIC/HEIF)
                 loaded_image = image_loader.load_qimage(file_path, target_size)
             
             if loaded_image is not None and not loaded_image.isNull():

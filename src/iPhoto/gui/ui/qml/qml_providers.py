@@ -141,6 +141,8 @@ class ThumbnailImageProvider(QQuickImageProvider):
     def set_library_root(self, root: Path) -> None:
         """Set the library root path for locating cached thumbnails."""
         self._library_root = root
+        # Clear cache when library root changes
+        self.clear_cache()
         
     def requestImage(  # noqa: N802 - Qt override
         self,
@@ -169,11 +171,11 @@ class ThumbnailImageProvider(QQuickImageProvider):
         image = QImage()
         file_path = Path(id_str)
         
-        # Attempt to find cached thumbnail in .lexiphoto/thumbs
-        if self._library_root and file_path.exists():
+        # Attempt to find cached thumbnail in .iPhoto/thumbs
+        if self._library_root:
             try:
                 # Logic matching generate_cache_path in thumbnail_loader.py
-                path_str = str(file_path.resolve())
+                path_str = str(file_path.resolve()) if file_path.exists() else id_str
                 digest = hashlib.blake2b(path_str.encode("utf-8"), digest_size=20).hexdigest()
                 thumbs_dir = self._library_root / WORK_DIR_NAME / "thumbs"
 

@@ -117,7 +117,56 @@ ApplicationWindow {
                     
                     onClicked: {
                         console.log("File menu button clicked")
-                        fileMenu.popup(0, fileMenuButton.height)
+                        // Position menu relative to the button using mapToItem
+                        var pos = fileMenuButton.mapToItem(headerBar, 0, fileMenuButton.height)
+                        fileMenu.x = pos.x
+                        fileMenu.y = pos.y
+                        fileMenu.open()
+                    }
+                    
+                    // File menu - parented to button for proper positioning
+                    Menu {
+                        id: fileMenu
+                        
+                        MenuItem {
+                            text: qsTr("Open Album Folder…")
+                            onTriggered: {
+                                console.log("Open Album Folder triggered")
+                                folderDialog.open()
+                            }
+                        }
+                        
+                        MenuSeparator {}
+                        
+                        MenuItem {
+                            text: qsTr("Set Basic Library…")
+                            onTriggered: {
+                                console.log("Set Basic Library triggered")
+                                folderDialog.open()
+                            }
+                        }
+                        
+                        MenuSeparator {}
+                        
+                        MenuItem {
+                            text: qsTr("Export All Edited")
+                            enabled: false
+                        }
+                        
+                        MenuItem {
+                            text: qsTr("Export Selected")
+                            enabled: false
+                        }
+                        
+                        MenuSeparator {}
+                        
+                        MenuItem {
+                            text: qsTr("Rebuild Live Links")
+                            enabled: isSidebarReady() && sidebarBridge.hasLibrary
+                            onTriggered: {
+                                console.log("Rebuild Live Links triggered")
+                            }
+                        }
                     }
                 }
                 
@@ -145,142 +194,101 @@ ApplicationWindow {
                     
                     onClicked: {
                         console.log("Settings menu button clicked")
-                        settingsMenu.popup(0, settingsMenuButton.height)
-                    }
-                }
-            }
-            
-            // File menu (defined outside button for proper popup behavior)
-            Menu {
-                id: fileMenu
-                
-                MenuItem {
-                    text: qsTr("Open Album Folder…")
-                    onTriggered: {
-                        console.log("Open Album Folder triggered")
-                        folderDialog.open()
-                    }
-                }
-                
-                MenuSeparator {}
-                
-                MenuItem {
-                    text: qsTr("Set Basic Library…")
-                    onTriggered: {
-                        console.log("Set Basic Library triggered")
-                        folderDialog.open()
-                    }
-                }
-                
-                MenuSeparator {}
-                
-                MenuItem {
-                    text: qsTr("Export All Edited")
-                    enabled: false
-                }
-                
-                MenuItem {
-                    text: qsTr("Export Selected")
-                    enabled: false
-                }
-                
-                MenuSeparator {}
-                
-                MenuItem {
-                    text: qsTr("Rebuild Live Links")
-                    enabled: isSidebarReady() && sidebarBridge.hasLibrary
-                    onTriggered: {
-                        console.log("Rebuild Live Links triggered")
-                    }
-                }
-            }
-            
-            // Settings menu (defined outside button for proper popup behavior)
-            Menu {
-                id: settingsMenu
-                
-                MenuItem {
-                    text: qsTr("Set Basic Library…")
-                    onTriggered: {
-                        console.log("Set Basic Library triggered from Settings")
-                        folderDialog.open()
-                    }
-                }
-                
-                MenuSeparator {}
-                
-                MenuItem {
-                    id: showFilmstripMenuItem
-                    text: qsTr("Show Filmstrip")
-                    checkable: true
-                    checked: true
-                    onTriggered: {
-                        console.log("Show Filmstrip toggled:", checked)
-                    }
-                }
-                
-                MenuSeparator {}
-                
-                Menu {
-                    title: qsTr("Appearance")
-                    
-                    MenuItem {
-                        text: qsTr("System Default")
-                        checkable: true
-                        checked: true
-                        autoExclusive: true
+                        // Position menu relative to the button using mapToItem
+                        var pos = settingsMenuButton.mapToItem(headerBar, 0, settingsMenuButton.height)
+                        settingsMenu.x = pos.x
+                        settingsMenu.y = pos.y
+                        settingsMenu.open()
                     }
                     
-                    MenuItem {
-                        text: qsTr("Light Mode")
-                        checkable: true
-                        autoExclusive: true
-                    }
-                    
-                    MenuItem {
-                        text: qsTr("Dark Mode")
-                        checkable: true
-                        autoExclusive: true
-                    }
-                }
-                
-                Menu {
-                    title: qsTr("Wheel Action")
-                    
-                    MenuItem {
-                        text: qsTr("Navigate")
-                        checkable: true
-                        checked: true
-                        autoExclusive: true
-                    }
-                    
-                    MenuItem {
-                        text: qsTr("Zoom")
-                        checkable: true
-                        autoExclusive: true
-                    }
-                }
-                
-                Menu {
-                    title: qsTr("Share Action")
-                    
-                    MenuItem {
-                        text: qsTr("Copy File")
-                        checkable: true
-                        autoExclusive: true
-                    }
-                    
-                    MenuItem {
-                        text: qsTr("Copy Path")
-                        checkable: true
-                        autoExclusive: true
-                    }
-                    
-                    MenuItem {
-                        text: qsTr("Reveal in File Manager")
-                        checkable: true
-                        checked: true
-                        autoExclusive: true
+                    // Settings menu - parented to button for proper positioning
+                    Menu {
+                        id: settingsMenu
+                        
+                        MenuItem {
+                            text: qsTr("Set Basic Library…")
+                            onTriggered: {
+                                console.log("Set Basic Library triggered from Settings")
+                                folderDialog.open()
+                            }
+                        }
+                        
+                        MenuSeparator {}
+                        
+                        MenuItem {
+                            id: showFilmstripMenuItem
+                            text: qsTr("Show Filmstrip")
+                            checkable: true
+                            checked: true
+                            onTriggered: {
+                                console.log("Show Filmstrip toggled:", checked)
+                            }
+                        }
+                        
+                        MenuSeparator {}
+                        
+                        Menu {
+                            title: qsTr("Appearance")
+                            
+                            MenuItem {
+                                text: qsTr("System Default")
+                                checkable: true
+                                checked: true
+                                autoExclusive: true
+                            }
+                            
+                            MenuItem {
+                                text: qsTr("Light Mode")
+                                checkable: true
+                                autoExclusive: true
+                            }
+                            
+                            MenuItem {
+                                text: qsTr("Dark Mode")
+                                checkable: true
+                                autoExclusive: true
+                            }
+                        }
+                        
+                        Menu {
+                            title: qsTr("Wheel Action")
+                            
+                            MenuItem {
+                                text: qsTr("Navigate")
+                                checkable: true
+                                checked: true
+                                autoExclusive: true
+                            }
+                            
+                            MenuItem {
+                                text: qsTr("Zoom")
+                                checkable: true
+                                autoExclusive: true
+                            }
+                        }
+                        
+                        Menu {
+                            title: qsTr("Share Action")
+                            
+                            MenuItem {
+                                text: qsTr("Copy File")
+                                checkable: true
+                                autoExclusive: true
+                            }
+                            
+                            MenuItem {
+                                text: qsTr("Copy Path")
+                                checkable: true
+                                autoExclusive: true
+                            }
+                            
+                            MenuItem {
+                                text: qsTr("Reveal in File Manager")
+                                checkable: true
+                                checked: true
+                                autoExclusive: true
+                            }
+                        }
                     }
                 }
             }

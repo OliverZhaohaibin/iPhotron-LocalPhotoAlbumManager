@@ -45,7 +45,7 @@ logger = logging.getLogger(__name__)
 
 # Micro thumbnails are expected to be 16x16 JPEGs; guard against unexpectedly large blobs.
 MAX_MICRO_THUMBNAIL_BYTES = 16 * 1024
-# Data URLs grow by ~33%, so cap the encoded payload to keep QML sources lightweight.
+# Base64 expands the payload by ~33%; allow extra headroom for data URL overhead.
 MAX_MICRO_THUMBNAIL_URL_BYTES = 32 * 1024
 PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
 WEBP_RIFF = b"RIFF"
@@ -368,9 +368,10 @@ class GalleryModel(QAbstractListModel):
         """Return a data URL for micro thumbnail bytes."""
         if len(blob) > MAX_MICRO_THUMBNAIL_BYTES:
             return ""
-        encoded = base64.b64encode(blob).decode("ascii")
-        if len(encoded) > MAX_MICRO_THUMBNAIL_URL_BYTES:
+        estimated_encoded_len = ((len(blob) + 2) // 3) * 4
+        if estimated_encoded_len > MAX_MICRO_THUMBNAIL_URL_BYTES:
             return ""
+        encoded = base64.b64encode(blob).decode("ascii")
         mime = GalleryModel._micro_thumbnail_mime(blob)
         return f"data:{mime};base64,{encoded}"
 

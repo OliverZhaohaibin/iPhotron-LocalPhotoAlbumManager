@@ -366,13 +366,18 @@ class QmlGalleryGridView(QWidget):
     # ------------------------------------------------------------------
 
     def clearSelection(self) -> None:  # noqa: N802 - Qt API compatibility
-        """Clear the current selection in the QML grid."""
+        """Clear the current selection in the QML grid.
+
+        The QML layer exposes a ``clearSelection`` helper; if that cannot be
+        invoked, the method falls back to resetting the ``currentIndex`` on the
+        GridView object directly.
+        """
         root = self._quick_widget.rootObject()
         if root is None:
             return
         try:
             QMetaObject.invokeMethod(root, "clearSelection")
-        except Exception:
+        except (RuntimeError, TypeError, AttributeError):
             grid_view = root.findChild(QObject, "gridView")
             if grid_view is not None:
                 grid_view.setProperty("currentIndex", -1)

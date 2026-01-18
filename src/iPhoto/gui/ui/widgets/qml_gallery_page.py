@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 from PySide6.QtCore import (
     Property,
     QModelIndex,
+    QMetaObject,
     QObject,
     QSize,
     Qt,
@@ -261,7 +262,8 @@ class QmlGalleryGridView(QWidget):
 
     def _apply_background_color(self) -> None:
         """Apply the palette base color as the clear color."""
-        base_color = self.palette().color(QPalette.ColorRole.Base)
+        base_color = QColor(self.palette().color(QPalette.ColorRole.Base))
+        base_color.setAlpha(255)
         self._quick_widget.setClearColor(base_color)
 
         # Update the QML root item's color
@@ -362,6 +364,18 @@ class QmlGalleryGridView(QWidget):
     # ------------------------------------------------------------------
     # Selection mode
     # ------------------------------------------------------------------
+
+    def clearSelection(self) -> None:  # noqa: N802 - Qt API compatibility
+        """Clear the current selection in the QML grid."""
+        root = self._quick_widget.rootObject()
+        if root is None:
+            return
+        try:
+            QMetaObject.invokeMethod(root, "clearSelection")
+        except Exception:
+            grid_view = root.findChild(QObject, "gridView")
+            if grid_view is not None:
+                grid_view.setProperty("currentIndex", -1)
 
     def selection_mode_active(self) -> bool:
         """Return whether multi-selection mode is enabled."""

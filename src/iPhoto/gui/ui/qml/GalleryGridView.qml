@@ -48,6 +48,10 @@ Rectangle {
         return cellSize - itemGap
     }
 
+    function clearSelection() {
+        gridView.currentIndex = -1
+    }
+
     // Access the system palette for theming
     SystemPalette {
         id: palette
@@ -55,6 +59,7 @@ Rectangle {
 
     GridView {
         id: gridView
+        objectName: "gridView"
         anchors.fill: parent
         anchors.margins: 0
 

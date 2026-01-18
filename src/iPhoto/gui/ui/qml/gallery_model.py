@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import sqlite3
 from dataclasses import dataclass
 from enum import IntEnum
 from pathlib import Path
@@ -293,24 +294,26 @@ class GalleryModel(QAbstractListModel):
             return False
         try:
             index_root, album_path = compute_album_path(album_root, library_root)
-        except Exception:
+        except (OSError, ValueError):
             return False
 
         try:
             store = IndexStore(index_root)
             rows = store.read_album_assets(
-                album_path,  # type: ignore[arg-type]
+                album_path,
                 include_subalbums=include_subalbums,
                 sort_by_date=True,
                 filter_hidden=True,
             )
-        except Exception:
+        except (OSError, ValueError, sqlite3.Error):
             return False
-
-        for row in rows:
-            item = self._item_from_row(index_root, row)
-            if item is not None:
-                self._items.append(item)
+        try:
+            for row in rows:
+                item = self._item_from_row(index_root, row)
+                if item is not None:
+                    self._items.append(item)
+        except (OSError, ValueError, sqlite3.Error):
+            return False
 
         return True
 

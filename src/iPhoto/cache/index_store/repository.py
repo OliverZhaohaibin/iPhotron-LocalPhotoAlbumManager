@@ -357,7 +357,7 @@ class AssetRepository:
 
     def read_album_assets(
         self,
-        album_path: str,
+        album_path: Optional[str],
         include_subalbums: bool = False,
         sort_by_date: bool = True,
         filter_hidden: bool = True,
@@ -366,7 +366,7 @@ class AssetRepository:
         """Yield assets belonging to a specific album.
         
         Args:
-            album_path: The album path to filter (e.g., "2023/Trip").
+            album_path: The album path to filter (e.g., "2023/Trip"), or None for all assets.
             include_subalbums: If True, include assets from sub-albums.
             sort_by_date: If True, order results by date descending.
             filter_hidden: If True, exclude hidden assets.

@@ -135,6 +135,7 @@ Item {
                 width: cellSize
                 height: cellSize
                 property bool thumbnailReady: thumbnail.status === Image.Ready
+                property bool showPlaceholder: !thumbnailReady && !microThumbnail.visible
                 
                 // Thumbnail container with gap
                 Rectangle {
@@ -167,7 +168,7 @@ Item {
                         Rectangle {
                             anchors.fill: parent
                             color: "#1b1b1b"
-                            visible: !delegateRoot.thumbnailReady && !microThumbnail.visible
+                            visible: delegateRoot.showPlaceholder
                             
                             BusyIndicator {
                                 anchors.centerIn: parent

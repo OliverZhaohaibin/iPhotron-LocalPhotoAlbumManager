@@ -32,21 +32,23 @@ except ImportError:
         from iPhoto.library.manager import LibraryManager
 
 try:
-    from .....cache.index_store import IndexStore
-    from .....media_classifier import classify_media
-    from .....gui.ui.tasks.asset_loader_worker import compute_album_path
+    from iPhoto.cache.index_store import IndexStore
+    from iPhoto.media_classifier import classify_media
+    from iPhoto.gui.ui.tasks.asset_loader_worker import compute_album_path
 except ImportError:
-    try:
-        from src.iPhoto.cache.index_store import IndexStore
-        from src.iPhoto.media_classifier import classify_media
-        from src.iPhoto.gui.ui.tasks.asset_loader_worker import compute_album_path
-    except ImportError:
-        from iPhoto.cache.index_store import IndexStore
-        from iPhoto.media_classifier import classify_media
-        from iPhoto.gui.ui.tasks.asset_loader_worker import compute_album_path
+    from src.iPhoto.cache.index_store import IndexStore
+    from src.iPhoto.media_classifier import classify_media
+    from src.iPhoto.gui.ui.tasks.asset_loader_worker import compute_album_path
 
 
 logger = logging.getLogger(__name__)
+
+MAX_MICRO_THUMBNAIL_BYTES = 16 * 1024
+PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
+WEBP_RIFF = b"RIFF"
+WEBP_MAGIC = b"WEBP"
+GIF87A_MAGIC = b"GIF87a"
+GIF89A_MAGIC = b"GIF89a"
 
 
 class GalleryRoles(IntEnum):
@@ -361,17 +363,19 @@ class GalleryModel(QAbstractListModel):
     @staticmethod
     def _micro_thumbnail_url(blob: bytes) -> str:
         """Return a data URL for micro thumbnail bytes."""
+        if len(blob) > MAX_MICRO_THUMBNAIL_BYTES:
+            return ""
         encoded = base64.b64encode(blob).decode("ascii")
         mime = GalleryModel._micro_thumbnail_mime(blob)
         return f"data:{mime};base64,{encoded}"
 
     @staticmethod
     def _micro_thumbnail_mime(blob: bytes) -> str:
-        if blob.startswith(b"\x89PNG\r\n\x1a\n"):
+        if blob.startswith(PNG_MAGIC):
             return "image/png"
-        if blob.startswith(b"RIFF") and blob[8:12] == b"WEBP":
+        if blob.startswith(WEBP_RIFF) and blob[8:12] == WEBP_MAGIC:
             return "image/webp"
-        if blob.startswith(b"GIF87a") or blob.startswith(b"GIF89a"):
+        if blob.startswith(GIF87A_MAGIC) or blob.startswith(GIF89A_MAGIC):
             return "image/gif"
         return "image/jpeg"
     

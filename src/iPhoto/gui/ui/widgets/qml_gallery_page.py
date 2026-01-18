@@ -23,7 +23,7 @@ from PySide6.QtGui import (
     QPixmap,
     QSurfaceFormat,
 )
-from PySide6.QtQuick import QQuickImageProvider
+from PySide6.QtQuick import QQuickImageProvider, QSGRendererInterface
 from PySide6.QtQuickWidgets import QQuickWidget
 from PySide6.QtWidgets import QVBoxLayout, QWidget
 
@@ -189,6 +189,7 @@ class QmlGalleryGridView(QWidget):
         # Create the QQuickWidget
         self._quick_widget = QQuickWidget()
         self._quick_widget.setFormat(surface_format)
+        self._quick_widget.setGraphicsApi(QSGRendererInterface.GraphicsApi.OpenGL)
 
         # Configure rendering behavior
         # Use SizeRootObjectToView to make the QML root item fill the widget

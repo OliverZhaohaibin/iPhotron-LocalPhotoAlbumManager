@@ -125,8 +125,8 @@ class ThumbnailImageProvider(QQuickImageProvider):
         Image { source: "image://thumbnails/" + model.filePath }
     """
     
-    # Maximum cache size in bytes (default 100MB)
-    MAX_CACHE_SIZE = 100 * 1024 * 1024
+    # Maximum cache size in bytes (default 256MB)
+    MAX_CACHE_SIZE = 256 * 1024 * 1024
     DEFAULT_SIZE = QSize(512, 512)
     PLACEHOLDER_SIZE = QSize(192, 192)
     

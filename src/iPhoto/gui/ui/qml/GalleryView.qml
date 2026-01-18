@@ -120,6 +120,7 @@ Item {
             cellWidth: cellSize
             cellHeight: cellSize
             clip: true
+            cacheBuffer: cellSize * 6
             
             // Smooth scrolling
             flickableDirection: Flickable.VerticalFlick
@@ -144,9 +145,19 @@ Item {
                     
                     // Thumbnail image
                     Image {
+                        id: microThumbnail
+                        anchors.fill: parent
+                        source: model.microThumbnailUrl || ""
+                        fillMode: Image.PreserveAspectCrop
+                        visible: source !== "" && thumbnail.status !== Image.Ready
+                    }
+
+                    Image {
                         id: thumbnail
                         anchors.fill: parent
                         source: model.thumbnailUrl || ""
+                        sourceSize.width: itemSize
+                        sourceSize.height: itemSize
                         fillMode: Image.PreserveAspectCrop
                         asynchronous: true
                         cache: true
@@ -155,7 +166,7 @@ Item {
                         Rectangle {
                             anchors.fill: parent
                             color: "#1b1b1b"
-                            visible: thumbnail.status !== Image.Ready
+                            visible: thumbnail.status !== Image.Ready && !microThumbnail.visible
                             
                             BusyIndicator {
                                 anchors.centerIn: parent

@@ -18,6 +18,9 @@
 **💡 Quick Install:** Click the button above to download the latest Windows installer (.exe) directly.
 
 ---
+## 🌟 Star History
+
+[![Star History Chart](https://api.star-history.com/svg?repos=OliverZhaohaibin/iPhotron-LocalPhotoAlbumManager&type=date&legend=bottom-right)](https://www.star-history.com/#OliverZhaohaibin/iPhotron-LocalPhotoAlbumManager&type=date&legend=bottom-right)
 
 ## 🌟 Overview
 

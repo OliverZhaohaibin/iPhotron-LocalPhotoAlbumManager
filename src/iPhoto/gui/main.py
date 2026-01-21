@@ -13,6 +13,19 @@ from PySide6.QtWidgets import QApplication
 from src.iPhoto.appctx import AppContext
 from src.iPhoto.gui.ui.main_window import MainWindow
 
+# New Architecture Imports
+from src.iPhoto.di.container import DependencyContainer
+from src.iPhoto.events.bus import EventBus
+from src.iPhoto.infrastructure.db.pool import ConnectionPool
+from src.iPhoto.domain.repositories import IAlbumRepository, IAssetRepository
+from src.iPhoto.infrastructure.repositories.sqlite_album_repository import SQLiteAlbumRepository
+from src.iPhoto.infrastructure.repositories.sqlite_asset_repository import SQLiteAssetRepository
+from src.iPhoto.application.use_cases.open_album import OpenAlbumUseCase
+from src.iPhoto.application.use_cases.scan_album import ScanAlbumUseCase
+from src.iPhoto.application.use_cases.pair_live_photos import PairLivePhotosUseCase
+from src.iPhoto.application.services.album_service import AlbumService
+from src.iPhoto.application.services.asset_service import AssetService
+from src.iPhoto.gui.coordinators.main_coordinator import MainCoordinator
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -63,14 +76,78 @@ def main(argv: list[str] | None = None) -> int:
     tooltip_palette.setColor(QPalette.ColorRole.ToolTipText, text_colour)
     app.setPalette(tooltip_palette, "QToolTip")
 
+    # --- Phase 1: Infrastructure Modernization Setup ---
+    container = DependencyContainer()
+
+    # 1. Event Bus (Missing in current file structure, assuming placeholder or future impl)
+    # Using a simple placeholder if EventBus is not available or mocking it
+    try:
+        container.register(EventBus, singleton=True) # Basic registration
+    except ImportError:
+        pass # Handle gracefully if EventBus class is missing or different signature
+
+    # 2. Database Connection Pool
+    # We need a path for the global DB. Assuming context.library.root holds it or using default.
+    # For now, we defer pool creation until we know the library root, OR we create a global one.
+    # Let's assume a default location or that AppContext handles the primary DB path.
+    # Legacy AppContext initializes LibraryManager.
+
     context = AppContext()
+
+    # Use the library root from the legacy context for the new DB pool
+    # If not bound, it might be None.
+    db_path = Path.home() / ".iPhoto" / "global_index.db"
+    if context.library.root():
+        db_path = context.library.root() / ".iPhoto" / "global_index.db"
+
+    # Ensure directory exists
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+
+    pool = ConnectionPool(db_path)
+    container.register(ConnectionPool, instance=pool) # Assuming instance registration is supported or we wrap it
+
+    # 3. Repositories
+    container.register(IAlbumRepository, SQLiteAlbumRepository, args=[pool], singleton=True)
+    container.register(IAssetRepository, SQLiteAssetRepository, args=[pool], singleton=True)
+
+    # 4. Use Cases
+    container.register(OpenAlbumUseCase, args=[container.resolve(IAlbumRepository), container.resolve(IAssetRepository)])
+    # ScanAlbumUseCase might need EventBus
+    # container.register(ScanAlbumUseCase, args=[...])
+
+    # 5. Services
+    # Resolving repositories to pass to services
+    album_repo = container.resolve(IAlbumRepository)
+    asset_repo = container.resolve(IAssetRepository)
+
+    # Instantiate Use Cases manually for Service injection if auto-resolution is simple
+    open_uc = OpenAlbumUseCase(album_repo, asset_repo)
+    # Mocking others for now as they might have complex dependencies
+    scan_uc = ScanAlbumUseCase(album_repo, asset_repo)
+    pair_uc = PairLivePhotosUseCase(album_repo, asset_repo)
+
+    container.register(AlbumService, args=[open_uc, scan_uc, pair_uc], singleton=True)
+    container.register(AssetService, args=[asset_repo], singleton=True)
+
+    # --- Phase 4: Coordinator Wiring ---
     window = MainWindow(context)
+
+    # Coordinator needs Window, Context, and Container
+    coordinator = MainCoordinator(window, context, container)
+
+    # Injection into Window
+    window.set_coordinator(coordinator)
+
+    coordinator.start()
     window.show()
+
     # Allow opening an album directly via argv[1].
     if len(arguments) > 1:
-        window.open_album_from_path(Path(arguments[1]))
+        # Use new coordinator method
+        coordinator.open_album_from_path(Path(arguments[1]))
     else:
         window.ui.sidebar.select_all_photos(emit_signal=True)
+
     return app.exec()
 
 

@@ -13,10 +13,10 @@ try:  # pragma: no cover - exercised in packaging scenarios
 except ImportError:  # pragma: no cover - script execution fallback
     from src.iPhoto.appctx import AppContext
 
-from .controllers.main_controller import MainController
 from .media import require_multimedia
 from .ui_main_window import ChromeStatusBar, Ui_MainWindow
 from .window_manager import FramelessWindowManager
+# MainController import removed; logic is now in MainCoordinator via self.coordinator
 
 
 class MainWindow(QMainWindow):
@@ -41,16 +41,20 @@ class MainWindow(QMainWindow):
         # simply forwards lifecycle events to the helper.
         self.window_manager = FramelessWindowManager(self, self.ui)
 
-        # ``MainController`` wires the widgets to the application logic.  The
-        # controller reference is forwarded to the window manager so immersive
-        # mode can temporarily suspend playback when the window animates.
-        self.controller = MainController(self, context)
-        self.window_manager.set_controller(self.controller)
+        # The controller (now coordinator) is assigned via setter or set later.
+        self.coordinator = None
 
         # Retain the behaviour where clicking the chrome gives the window focus
         # so global shortcuts continue to function when no child widget is
         # active.
         self.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
+
+    def set_coordinator(self, coordinator):
+        """Inject the MainCoordinator."""
+        self.coordinator = coordinator
+        # The window manager needs a reference to the 'controller' to handle immersive mode.
+        # MainCoordinator implements the necessary interface.
+        self.window_manager.set_controller(self.coordinator)
 
     # ------------------------------------------------------------------
     # QWidget overrides
@@ -59,7 +63,8 @@ class MainWindow(QMainWindow):
 
         if self.window_manager is not None:
             self.window_manager.cleanup()
-        self.controller.shutdown()
+        if self.coordinator:
+            self.coordinator.shutdown()
         super().closeEvent(event)
 
     def resizeEvent(self, event: QResizeEvent) -> None:  # type: ignore[override]
@@ -138,8 +143,8 @@ class MainWindow(QMainWindow):
     # Public API used by sidebar/actions
     def open_album_from_path(self, path: Path) -> None:
         """Expose navigation for legacy callers."""
-
-        self.controller.open_album_from_path(path)
+        if self.coordinator:
+            self.coordinator.open_album_from_path(path)
 
     def current_selection(self) -> list[Path]:
         """Return absolute paths for every asset selected in the active view."""
@@ -148,13 +153,15 @@ class MainWindow(QMainWindow):
         if self.ui.grid_view.selectionModel() is not None:
             grid_indexes = self.ui.grid_view.selectionModel().selectedIndexes()
             if grid_indexes:
-                return self.controller.paths_from_indexes(grid_indexes)
+                if self.coordinator:
+                    return self.coordinator.paths_from_indexes(grid_indexes)
 
         # Priority 2: Filmstrip View
         if self.ui.filmstrip_view.selectionModel() is not None:
             indexes = self.ui.filmstrip_view.selectionModel().selectedIndexes()
             if indexes:
-                return self.controller.paths_from_indexes(indexes)
+                if self.coordinator:
+                    return self.coordinator.paths_from_indexes(indexes)
 
         return []
 

@@ -11,6 +11,7 @@ from typing import Dict, Iterable, List, Optional, Tuple
 from PySide6.QtCore import QObject, QRunnable, Signal
 
 from .... import app as backend
+from ....app import LOGGER
 from ....errors import IPhotoError
 from ....cache.index_store import IndexStore
 from ....io.scanner_adapter import process_media_paths

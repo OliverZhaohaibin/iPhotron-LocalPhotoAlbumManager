@@ -3,18 +3,20 @@ import os
 import uuid
 from datetime import datetime
 from pathlib import Path
+from typing import List, Set, Dict
 from dataclasses import dataclass
 
 from src.iPhoto.application.dtos import ScanAlbumRequest, ScanAlbumResponse
-from src.iPhoto.domain.models import Asset, MediaType
+from src.iPhoto.domain.models import Album, Asset, MediaType
 from src.iPhoto.domain.repositories import IAlbumRepository, IAssetRepository
 from src.iPhoto.events.bus import EventBus, Event
 
 @dataclass(kw_only=True)
 class AlbumScannedEvent(Event):
     album_id: str
-    added: int
-    updated: int
+    added_count: int
+    updated_count: int
+    deleted_count: int
 
 class ScanAlbumUseCase:
     def __init__(
@@ -29,74 +31,107 @@ class ScanAlbumUseCase:
         self._logger = logging.getLogger(__name__)
 
     def execute(self, request: ScanAlbumRequest) -> ScanAlbumResponse:
+        self._logger.info(f"Scanning album {request.album_id}")
+
         album = self._album_repo.get(request.album_id)
         if not album:
             raise ValueError(f"Album {request.album_id} not found")
 
-        self._logger.info(f"Scanning album {album.title} at {album.path}")
+        # 1. Load existing assets to handle duplicates/updates/deletes
+        existing_assets = self._asset_repo.get_by_album(album.id)
+        existing_map: Dict[str, Asset] = {str(a.path): a for a in existing_assets}
 
-        # Simple implementation for Phase 2: synchronous scan
-        # In later phases this should be async/parallel
+        found_assets: List[Asset] = []
+        found_paths: Set[str] = set()
 
-        existing_assets = {a.path: a for a in self._asset_repo.get_by_album(album.id)}
-        found_files = []
-
-        # Walk directory
-        for root, _, files in os.walk(album.path):
-            for file in files:
-                file_path = Path(root) / file
-                rel_path = file_path.relative_to(album.path)
-
-                # Check extension
-                ext = file_path.suffix.lower()
-                media_type = None
-                if ext in {'.jpg', '.jpeg', '.png', '.heic', '.webp'}:
-                    media_type = MediaType.PHOTO
-                elif ext in {'.mp4', '.mov', '.avi', '.mkv'}:
-                    media_type = MediaType.VIDEO
-
-                if media_type:
-                    found_files.append((rel_path, media_type, file_path.stat().st_size))
+        # Valid extensions
+        image_exts = {'.jpg', '.jpeg', '.png', '.heic', '.webp'}
+        video_exts = {'.mp4', '.mov', '.avi', '.mkv'}
 
         added_count = 0
         updated_count = 0
-        new_assets = []
 
-        for rel_path, media_type, size in found_files:
-            if rel_path in existing_assets:
-                asset = existing_assets[rel_path]
-                if asset.size_bytes != size:
-                    asset.size_bytes = size
-                    # In real app, we would re-read metadata here
-                    self._asset_repo.save(asset)
-                    updated_count += 1
-            else:
-                asset = Asset(
-                    id=str(uuid.uuid4()),
-                    album_id=album.id,
-                    path=rel_path,
-                    media_type=media_type,
-                    size_bytes=size,
-                    created_at=datetime.now()
-                )
-                new_assets.append(asset)
-                added_count += 1
+        for root, dirs, files in os.walk(album.path):
+            for file in files:
+                file_path = Path(root) / file
+                suffix = file_path.suffix.lower()
 
-        if new_assets:
-            self._asset_repo.save_all(new_assets)
+                media_type = None
+                if suffix in image_exts:
+                    media_type = MediaType.IMAGE
+                elif suffix in video_exts:
+                    media_type = MediaType.VIDEO
 
-        # Determine deleted assets
-        found_paths = {f[0] for f in found_files}
-        deleted_count = 0
-        for path, asset in existing_assets.items():
-            if path not in found_paths:
-                self._asset_repo.delete(asset.id)
-                deleted_count += 1
+                if media_type:
+                    rel_path = file_path.relative_to(album.path)
+                    str_rel_path = str(rel_path)
+                    found_paths.add(str_rel_path)
+
+                    stat = file_path.stat()
+
+                    # Check if exists
+                    existing = existing_map.get(str_rel_path)
+
+                    if existing:
+                        # Update existing, BUT PRESERVE METADATA
+                        asset_id = existing.id
+                        updated_count += 1
+
+                        asset = Asset(
+                            id=asset_id,
+                            album_id=album.id,
+                            path=rel_path,
+                            media_type=media_type,
+                            size_bytes=stat.st_size,
+                            created_at=datetime.fromtimestamp(stat.st_mtime),
+                            parent_album_path=None,
+                            is_favorite=existing.is_favorite,
+                            # Preserved metadata fields
+                            width=existing.width,
+                            height=existing.height,
+                            duration=existing.duration,
+                            metadata=existing.metadata,
+                            content_identifier=existing.content_identifier,
+                            live_photo_group_id=existing.live_photo_group_id
+                        )
+                    else:
+                        # Create new
+                        asset_id = str(uuid.uuid4())
+                        added_count += 1
+
+                        asset = Asset(
+                            id=asset_id,
+                            album_id=album.id,
+                            path=rel_path,
+                            media_type=media_type,
+                            size_bytes=stat.st_size,
+                            created_at=datetime.fromtimestamp(stat.st_mtime),
+                            parent_album_path=None,
+                            is_favorite=False
+                        )
+
+                    found_assets.append(asset)
+
+        # 2. Identify deletions
+        deleted_ids = []
+        for path_str, asset in existing_map.items():
+            if path_str not in found_paths:
+                deleted_ids.append(asset.id)
+
+        # 3. Batch operations
+        if found_assets:
+            self._asset_repo.save_batch(found_assets)
+
+        for del_id in deleted_ids:
+            self._asset_repo.delete(del_id)
+
+        deleted_count = len(deleted_ids)
 
         self._events.publish(AlbumScannedEvent(
             album_id=album.id,
-            added=added_count,
-            updated=updated_count
+            added_count=added_count,
+            updated_count=updated_count,
+            deleted_count=deleted_count
         ))
 
         return ScanAlbumResponse(

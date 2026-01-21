@@ -1,17 +1,18 @@
+import uuid
 import logging
 from dataclasses import dataclass
-from collections import defaultdict
-from pathlib import Path
+from typing import List, Dict, Optional
 
 from src.iPhoto.application.dtos import PairLivePhotosRequest, PairLivePhotosResponse
-from src.iPhoto.domain.models import MediaType
+from src.iPhoto.domain.models import Asset, MediaType
+from src.iPhoto.domain.models.query import AssetQuery
 from src.iPhoto.domain.repositories import IAssetRepository
 from src.iPhoto.events.bus import EventBus, Event
 
 @dataclass(kw_only=True)
 class LivePhotosPairedEvent(Event):
     album_id: str
-    count: int
+    paired_count: int
 
 class PairLivePhotosUseCase:
     def __init__(
@@ -24,49 +25,62 @@ class PairLivePhotosUseCase:
         self._logger = logging.getLogger(__name__)
 
     def execute(self, request: PairLivePhotosRequest) -> PairLivePhotosResponse:
-        assets = self._asset_repo.get_by_album(request.album_id)
+        self._logger.info(f"Pairing live photos for album {request.album_id}")
 
-        # Group by parent + stem (filename without extension)
-        # This is a naive implementation (Weak pairing)
-        # Real implementation should also check content identifiers
+        # 1. Fetch all assets in album
+        query = AssetQuery().with_album_id(request.album_id)
+        assets = self._asset_repo.find_by_query(query)
 
-        by_key = defaultdict(list)
+        # 2. Group by potential content identifier or filename
+        # Simplified logic: match by filename stem (IMG_1234.JPG + IMG_1234.MOV)
+        # Real logic would use content_identifier from metadata
+
+        assets_by_stem: Dict[str, List[Asset]] = {}
         for asset in assets:
-            if asset.live_photo_group_id:
-                continue # Already paired
-            # Key is (parent_path, stem) to ensure we don't pair files in different folders
-            key = (str(asset.path.parent), asset.path.stem)
-            by_key[key].append(asset)
+            stem = str(asset.path.with_suffix(""))
+            if stem not in assets_by_stem:
+                assets_by_stem[stem] = []
+            assets_by_stem[stem].append(asset)
 
         paired_count = 0
-        updates = []
+        to_update: List[Asset] = []
 
-        for key, group in by_key.items():
-            photos = [a for a in group if a.media_type == MediaType.PHOTO]
+        for stem, group in assets_by_stem.items():
+            images = [a for a in group if a.media_type == MediaType.IMAGE]
             videos = [a for a in group if a.media_type == MediaType.VIDEO]
 
-            # Simple case: 1 photo + 1 video with same name in same folder
-            if len(photos) == 1 and len(videos) == 1:
-                import uuid
-                group_id = str(uuid.uuid4())
-
-                photo = photos[0]
+            if images and videos:
+                # Potential pair
+                # Take first image and first video for simplicity
+                image = images[0]
                 video = videos[0]
 
-                photo.live_photo_group_id = group_id
-                video.live_photo_group_id = group_id
+                # Check if they are already paired or have metadata linking them
+                # Here we force pairing by filename convention
 
-                updates.append(photo)
-                updates.append(video)
-                paired_count += 1
+                # Mark image as LIVE_PHOTO if not already
+                # But wait, MediaType.LIVE_PHOTO usually implies the container or the image part acting as key
+                # The architecture might treat them as separate assets linked by group_id
 
-        if updates:
-            self._asset_repo.save_all(updates)
+                group_id = image.live_photo_group_id or video.live_photo_group_id or str(uuid.uuid4())
 
-        if paired_count > 0:
-            self._events.publish(LivePhotosPairedEvent(
-                album_id=request.album_id,
-                count=paired_count
-            ))
+                if image.live_photo_group_id != group_id or video.live_photo_group_id != group_id:
+                    image.live_photo_group_id = group_id
+                    video.live_photo_group_id = group_id
+
+                    # Update media type if appropriate
+                    # image.media_type = MediaType.LIVE_PHOTO # Optional depending on how we model it
+
+                    to_update.append(image)
+                    to_update.append(video)
+                    paired_count += 1
+
+        if to_update:
+            self._asset_repo.save_batch(to_update)
+
+        self._events.publish(LivePhotosPairedEvent(
+            album_id=request.album_id,
+            paired_count=paired_count
+        ))
 
         return PairLivePhotosResponse(paired_count=paired_count)

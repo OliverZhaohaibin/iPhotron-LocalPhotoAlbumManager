@@ -1,6 +1,7 @@
 import sqlite3
+import json
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 from datetime import datetime
 
 from src.iPhoto.domain.models import Album
@@ -33,8 +34,9 @@ class SQLiteAlbumRepository(IAlbumRepository):
             return None
 
     def get_by_path(self, path: Path) -> Optional[Album]:
+        path_str = str(path)
         with self._pool.connection() as conn:
-            row = conn.execute("SELECT * FROM albums WHERE path = ?", (str(path),)).fetchone()
+            row = conn.execute("SELECT * FROM albums WHERE path = ?", (path_str,)).fetchone()
             if row:
                 return self._map_row_to_album(row)
             return None

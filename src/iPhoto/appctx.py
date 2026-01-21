@@ -5,6 +5,23 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, TYPE_CHECKING
+import os
+
+from .di.container import DependencyContainer
+from .domain.repositories import IAlbumRepository, IAssetRepository
+from .infrastructure.repositories.sqlite_asset_repository import SQLiteAssetRepository
+from .infrastructure.repositories.sqlite_album_repository import SQLiteAlbumRepository
+from .infrastructure.db.pool import ConnectionPool
+from .events.bus import EventBus
+from .application.use_cases.open_album import OpenAlbumUseCase
+from .application.use_cases.scan_album import ScanAlbumUseCase
+from .application.use_cases.pair_live_photos import PairLivePhotosUseCase
+from .application.services.album_service import AlbumService
+from .application.services.asset_service import AssetService
+from .domain.models import Album
+import uuid
+from typing import Optional
+
 
 if TYPE_CHECKING:  # pragma: no cover - only for type checking
     from .gui.facade import AppFacade
@@ -33,6 +50,69 @@ def _create_library_manager():
 
     return LibraryManager()
 
+def _create_di_container() -> DependencyContainer:
+    container = DependencyContainer()
+
+    # Infrastructure
+    db_path = Path.home() / ".iPhoto" / "global_index.db"
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Register Connection Pool (Singleton)
+    pool = ConnectionPool(db_path)
+    # Removing redundant/conflicting registration as per review
+    # container.register(ConnectionPool, implementation=pool, singleton=True)
+
+    # Use just one registration
+    container.register(ConnectionPool, implementation=pool, singleton=True)
+
+    # Event Bus
+    # Need a logger
+    import logging
+    logger = logging.getLogger("EventBus")
+    container.register(EventBus, factory=lambda: EventBus(logger), singleton=True)
+
+    # Repositories
+    container.register(IAlbumRepository, SQLiteAlbumRepository,
+                       factory=lambda: SQLiteAlbumRepository(container.resolve(ConnectionPool)),
+                       singleton=True)
+
+    container.register(IAssetRepository, SQLiteAssetRepository,
+                       factory=lambda: SQLiteAssetRepository(container.resolve(ConnectionPool)),
+                       singleton=True)
+
+    # Use Cases
+    container.register(OpenAlbumUseCase,
+                       factory=lambda: OpenAlbumUseCase(
+                           container.resolve(IAlbumRepository),
+                           container.resolve(IAssetRepository),
+                           container.resolve(EventBus)
+                       ))
+    container.register(ScanAlbumUseCase,
+                       factory=lambda: ScanAlbumUseCase(
+                           container.resolve(IAlbumRepository),
+                           container.resolve(IAssetRepository),
+                           container.resolve(EventBus)
+                       ))
+    container.register(PairLivePhotosUseCase,
+                       factory=lambda: PairLivePhotosUseCase(
+                           container.resolve(IAssetRepository),
+                           container.resolve(EventBus)
+                       ))
+
+    # Services
+    container.register(AlbumService,
+                       factory=lambda: AlbumService(
+                           container.resolve(OpenAlbumUseCase),
+                           container.resolve(ScanAlbumUseCase),
+                           container.resolve(PairLivePhotosUseCase)
+                       ), singleton=True)
+
+    container.register(AssetService,
+                       factory=lambda: AssetService(
+                           container.resolve(IAssetRepository)
+                       ), singleton=True)
+
+    return container
 
 @dataclass
 class AppContext:
@@ -43,6 +123,9 @@ class AppContext:
     facade: "AppFacade" = field(default_factory=_create_facade)
     recent_albums: List[Path] = field(default_factory=list)
     theme: "ThemeManager" = field(init=False)
+
+    # DI Container integration
+    container: DependencyContainer = field(default_factory=_create_di_container)
 
     def __post_init__(self) -> None:
         from .errors import LibraryError

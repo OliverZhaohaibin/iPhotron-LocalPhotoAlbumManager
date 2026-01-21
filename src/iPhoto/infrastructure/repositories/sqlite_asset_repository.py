@@ -18,46 +18,80 @@ class SQLiteAssetRepository(IAssetRepository):
 
     def _init_table(self):
         with self._pool.connection() as conn:
-            # Create table with FULL current schema for new DBs
+            # Match Legacy Schema: PK is 'rel' (path)
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS assets (
-                    id TEXT PRIMARY KEY,
-                    album_id TEXT,
-                    path TEXT,
-                    media_type TEXT,
-                    size_bytes INTEGER,
-                    created_at TEXT,
-                    width INTEGER,
-                    height INTEGER,
-                    duration REAL,
-                    metadata TEXT,
-                    content_identifier TEXT,
-                    live_photo_group_id TEXT,
+                    rel TEXT PRIMARY KEY,
+                    id TEXT,
+                    parent_album_path TEXT,
+                    dt TEXT,
+                    ts INTEGER,
+                    bytes INTEGER,
+                    mime TEXT,
+                    make TEXT,
+                    model TEXT,
+                    lens TEXT,
+                    iso INTEGER,
+                    f_number REAL,
+                    exposure_time REAL,
+                    exposure_compensation REAL,
+                    focal_length REAL,
+                    w INTEGER,
+                    h INTEGER,
+                    gps TEXT,
+                    content_id TEXT,
+                    frame_rate REAL,
+                    codec TEXT,
+                    still_image_time REAL,
+                    dur REAL,
+                    original_rel_path TEXT,
+                    original_album_id TEXT,
+                    original_album_subpath TEXT,
+                    live_role INTEGER DEFAULT 0,
+                    live_partner_rel TEXT,
+                    aspect_ratio REAL,
+                    year INTEGER,
+                    month INTEGER,
+                    media_type INTEGER,
                     is_favorite INTEGER DEFAULT 0,
-                    parent_album_path TEXT
+                    location TEXT,
+                    micro_thumbnail BLOB,
+                    album_id TEXT,
+                    live_photo_group_id TEXT,
+                    metadata TEXT
                 )
             """)
 
     def _migrate_schema(self):
         """Ensure schema has all required columns for existing databases."""
         with self._pool.connection() as conn:
-            # Check existing columns
             cursor = conn.execute("PRAGMA table_info(assets)")
             columns = {row["name"] for row in cursor.fetchall()}
 
-            if "is_favorite" not in columns:
-                conn.execute("ALTER TABLE assets ADD COLUMN is_favorite INTEGER DEFAULT 0")
+            # Critical missing columns
+            missing_cols = {
+                "album_id": "TEXT",
+                "live_photo_group_id": "TEXT",
+                "metadata": "TEXT",
+                "content_identifier": "TEXT",
+                "is_favorite": "INTEGER DEFAULT 0",
+                "parent_album_path": "TEXT",
+                "media_type": "INTEGER"
+            }
 
-            if "parent_album_path" not in columns:
-                conn.execute("ALTER TABLE assets ADD COLUMN parent_album_path TEXT")
+            for col, dtype in missing_cols.items():
+                if col not in columns:
+                    conn.execute(f"ALTER TABLE assets ADD COLUMN {col} {dtype}")
 
     def _ensure_indices(self):
         """Create indices after table and columns exist."""
         with self._pool.connection() as conn:
+            # Safe to create index even if column contains NULLs
             conn.execute("CREATE INDEX IF NOT EXISTS idx_assets_album_id ON assets(album_id)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_assets_parent_album_path ON assets(parent_album_path)")
 
     def get(self, id: str) -> Optional[Asset]:
+        # Note: legacy schema doesn't force ID uniqueness globally, but practically it's our Entity ID.
         with self._pool.connection() as conn:
             row = conn.execute("SELECT * FROM assets WHERE id = ?", (id,)).fetchone()
             if row:
@@ -65,7 +99,6 @@ class SQLiteAssetRepository(IAssetRepository):
             return None
 
     def get_by_album(self, album_id: str) -> List[Asset]:
-        # Legacy implementation
         with self._pool.connection() as conn:
             rows = conn.execute("SELECT * FROM assets WHERE album_id = ?", (album_id,)).fetchall()
             return [self._map_row_to_asset(row) for row in rows]
@@ -90,11 +123,14 @@ class SQLiteAssetRepository(IAssetRepository):
     def save_batch(self, assets: List[Asset]) -> None:
         data = []
         for asset in assets:
+            # Map Enum to Int (0=Photo, 1=Video)
+            mt_int = 1 if asset.media_type == MediaType.VIDEO else 0
+
             data.append((
+                str(asset.path), # rel (PK)
                 asset.id,
                 asset.album_id,
-                str(asset.path),
-                asset.media_type.value,
+                mt_int, # media_type as int
                 asset.size_bytes,
                 asset.created_at.isoformat() if asset.created_at else None,
                 asset.width,
@@ -107,10 +143,11 @@ class SQLiteAssetRepository(IAssetRepository):
                 asset.parent_album_path
             ))
 
+        # Note: Writing to 'rel' as PK
         with self._pool.connection() as conn:
             conn.executemany("""
                 INSERT OR REPLACE INTO assets
-                (id, album_id, path, media_type, size_bytes, created_at, width, height, duration, metadata, content_identifier, live_photo_group_id, is_favorite, parent_album_path)
+                (rel, id, album_id, media_type, bytes, dt, w, h, dur, metadata, content_identifier, live_photo_group_id, is_favorite, parent_album_path)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, data)
 
@@ -175,25 +212,59 @@ class SQLiteAssetRepository(IAssetRepository):
         return sql, params
 
     def _map_row_to_asset(self, row) -> Asset:
-        created_at = datetime.fromisoformat(row["created_at"]) if row["created_at"] else None
-
+        # Handle column name differences (rel vs path, dt vs created_at, bytes vs size_bytes)
         keys = row.keys()
-        is_favorite = bool(row["is_favorite"]) if "is_favorite" in keys and row["is_favorite"] is not None else False
-        parent_album_path = row["parent_album_path"] if "parent_album_path" in keys else None
+
+        # 1. Path/Rel
+        rel_path = row["rel"] if "rel" in keys else row.get("path")
+
+        # 2. DateTime
+        created_at = None
+        if "dt" in keys and row["dt"]:
+             try:
+                 created_at = datetime.fromisoformat(row["dt"].replace("Z", "+00:00"))
+             except ValueError:
+                 pass
+        elif "created_at" in keys and row["created_at"]:
+             created_at = datetime.fromisoformat(row["created_at"])
+
+        # 3. Media Type (Int -> Enum)
+        mt_raw = row["media_type"]
+        if isinstance(mt_raw, int):
+            media_type = MediaType.VIDEO if mt_raw == 1 else MediaType.IMAGE
+        else:
+            try:
+                media_type = MediaType(mt_raw)
+            except (ValueError, TypeError):
+                media_type = MediaType.IMAGE
+
+        # 4. JSON Fields
+        meta = {}
+        if "metadata" in keys and row["metadata"]:
+            try:
+                meta = json.loads(row["metadata"])
+            except json.JSONDecodeError:
+                pass
+
+        # 5. Optional columns handling
+        is_favorite = bool(row["is_favorite"]) if "is_favorite" in keys and row["is_favorite"] else False
+        album_id = row["album_id"] if "album_id" in keys else None
+        live_group = row["live_photo_group_id"] if "live_photo_group_id" in keys else None
+        content_id = row["content_identifier"] if "content_identifier" in keys else row.get("content_id")
 
         return Asset(
             id=row["id"],
-            album_id=row["album_id"],
-            path=Path(row["path"]),
-            media_type=MediaType(row["media_type"]),
-            size_bytes=row["size_bytes"],
+            album_id=album_id or "", # Default to empty string if missing? Or Optional
+            path=Path(rel_path),
+            media_type=media_type,
+            size_bytes=row["bytes"] if "bytes" in keys else row.get("size_bytes", 0),
             created_at=created_at,
-            width=row["width"],
-            height=row["height"],
-            duration=row["duration"],
-            metadata=json.loads(row["metadata"]),
-            content_identifier=row["content_identifier"],
-            live_photo_group_id=row["live_photo_group_id"],
+            width=row["w"] if "w" in keys else row.get("width"),
+            height=row["h"] if "h" in keys else row.get("height"),
+            duration=row["dur"] if "dur" in keys else row.get("duration"),
+            metadata=meta,
+            content_identifier=content_id,
+            live_photo_group_id=live_group,
             is_favorite=is_favorite,
-            parent_album_path=parent_album_path
+            parent_album_path=row.get("parent_album_path")
         )

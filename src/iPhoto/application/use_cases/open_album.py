@@ -6,6 +6,7 @@ from dataclasses import dataclass
 
 from src.iPhoto.application.dtos import OpenAlbumRequest, OpenAlbumResponse
 from src.iPhoto.domain.models import Album
+from src.iPhoto.domain.models.query import AssetQuery
 from src.iPhoto.domain.repositories import IAlbumRepository, IAssetRepository
 from src.iPhoto.events.bus import EventBus, Event
 
@@ -32,14 +33,15 @@ class OpenAlbumUseCase:
         album = self._album_repo.get_by_path(request.path)
 
         if not album:
-            # If not in DB, try to load from disk (e.g. manifest.json) or create new
-            # For this phase, we'll assume creation if not exists
-            # In real migration, we would read manifest.json here
+            # Create new album entry if not exists
             album = Album.create(request.path)
             self._album_repo.save(album)
             self._logger.info(f"Created new album entry for {request.path}")
 
-        assets = self._asset_repo.get_by_album(album.id)
+        # Use the new find_by_query to get asset count or first page
+        # For the response, we might just want the count
+        query = AssetQuery().with_album_id(album.id)
+        asset_count = self._asset_repo.count(query)
 
         self._events.publish(AlbumOpenedEvent(
             album_id=album.id,
@@ -49,5 +51,5 @@ class OpenAlbumUseCase:
         return OpenAlbumResponse(
             album_id=album.id,
             title=album.title,
-            asset_count=len(assets)
+            asset_count=asset_count
         )

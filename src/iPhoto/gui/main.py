@@ -20,6 +20,9 @@ from src.iPhoto.infrastructure.db.pool import ConnectionPool
 from src.iPhoto.domain.repositories import IAlbumRepository, IAssetRepository
 from src.iPhoto.infrastructure.repositories.sqlite_album_repository import SQLiteAlbumRepository
 from src.iPhoto.infrastructure.repositories.sqlite_asset_repository import SQLiteAssetRepository
+from src.iPhoto.infrastructure.services.metadata_provider import ExifToolMetadataProvider
+from src.iPhoto.infrastructure.services.thumbnail_generator import PillowThumbnailGenerator
+from src.iPhoto.application.interfaces import IMetadataProvider, IThumbnailGenerator
 from src.iPhoto.application.use_cases.open_album import OpenAlbumUseCase
 from src.iPhoto.application.use_cases.scan_album import ScanAlbumUseCase
 from src.iPhoto.application.use_cases.pair_live_photos import PairLivePhotosUseCase
@@ -79,19 +82,11 @@ def main(argv: list[str] | None = None) -> int:
     # --- Phase 1: Infrastructure Modernization Setup ---
     container = DependencyContainer()
 
-    # 1. Event Bus (Missing in current file structure, assuming placeholder or future impl)
-    # Using a simple placeholder if EventBus is not available or mocking it
-    try:
-        container.register(EventBus, singleton=True) # Basic registration
-    except ImportError:
-        pass # Handle gracefully if EventBus class is missing or different signature
+    # 1. Event Bus
+    container.register(EventBus, singleton=True)
 
     # 2. Database Connection Pool
     # We need a path for the global DB. Assuming context.library.root holds it or using default.
-    # For now, we defer pool creation until we know the library root, OR we create a global one.
-    # Let's assume a default location or that AppContext handles the primary DB path.
-    # Legacy AppContext initializes LibraryManager.
-
     context = AppContext()
 
     # Use the library root from the legacy context for the new DB pool
@@ -104,27 +99,29 @@ def main(argv: list[str] | None = None) -> int:
     db_path.parent.mkdir(parents=True, exist_ok=True)
 
     pool = ConnectionPool(db_path)
-    container.register(ConnectionPool, instance=pool) # Assuming instance registration is supported or we wrap it
+    # Fix: Register instance using factory lambda
+    container.register(ConnectionPool, factory=lambda: pool, singleton=True)
 
     # 3. Repositories
     container.register(IAlbumRepository, SQLiteAlbumRepository, args=[pool], singleton=True)
     container.register(IAssetRepository, SQLiteAssetRepository, args=[pool], singleton=True)
 
-    # 4. Use Cases
-    container.register(OpenAlbumUseCase, args=[container.resolve(IAlbumRepository), container.resolve(IAssetRepository)])
-    # ScanAlbumUseCase might need EventBus
-    # container.register(ScanAlbumUseCase, args=[...])
+    # 4. Infrastructure Services
+    container.register(IMetadataProvider, ExifToolMetadataProvider, singleton=True)
+    container.register(IThumbnailGenerator, PillowThumbnailGenerator, singleton=True)
 
-    # 5. Services
-    # Resolving repositories to pass to services
+    # 5. Services & Use Cases
+    # Resolving dependencies for Use Cases
     album_repo = container.resolve(IAlbumRepository)
     asset_repo = container.resolve(IAssetRepository)
+    event_bus = container.resolve(EventBus)
+    metadata_provider = container.resolve(IMetadataProvider)
+    thumbnail_generator = container.resolve(IThumbnailGenerator)
 
-    # Instantiate Use Cases manually for Service injection if auto-resolution is simple
-    open_uc = OpenAlbumUseCase(album_repo, asset_repo)
-    # Mocking others for now as they might have complex dependencies
-    scan_uc = ScanAlbumUseCase(album_repo, asset_repo)
-    pair_uc = PairLivePhotosUseCase(album_repo, asset_repo)
+    # Instantiate Use Cases manually
+    open_uc = OpenAlbumUseCase(album_repo, asset_repo, event_bus)
+    scan_uc = ScanAlbumUseCase(album_repo, asset_repo, event_bus, metadata_provider, thumbnail_generator)
+    pair_uc = PairLivePhotosUseCase(asset_repo, event_bus)
 
     container.register(AlbumService, args=[open_uc, scan_uc, pair_uc], singleton=True)
     container.register(AssetService, args=[asset_repo], singleton=True)

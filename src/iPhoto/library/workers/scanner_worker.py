@@ -10,7 +10,7 @@ from PySide6.QtCore import QObject, QRunnable, Signal
 from ...app import load_incremental_index_cache
 from ...cache.index_store import IndexStore
 from ...config import WORK_DIR_NAME
-from ...io.scanner import scan_album
+from ...io.scanner_adapter import scan_album
 from ...utils.pathutils import ensure_work_dir
 from ...utils.logging import get_logger
 

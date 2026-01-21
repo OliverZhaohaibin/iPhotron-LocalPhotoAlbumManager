@@ -116,7 +116,7 @@ def open_album(
         if existing_count == 0 and autoscan:
             include = album.manifest.get("filters", {}).get("include", DEFAULT_INCLUDE)
             exclude = album.manifest.get("filters", {}).get("exclude", DEFAULT_EXCLUDE)
-            from .io.scanner import scan_album
+            from .io.scanner_adapter import scan_album
 
             rows = list(scan_album(root, include, exclude))
             
@@ -410,7 +410,7 @@ def rescan(
     album = Album.open(root)
     include = album.manifest.get("filters", {}).get("include", DEFAULT_INCLUDE)
     exclude = album.manifest.get("filters", {}).get("exclude", DEFAULT_EXCLUDE)
-    from .io.scanner import scan_album
+    from .io.scanner_adapter import scan_album
 
     # Load existing index for incremental scanning
     existing_index = load_incremental_index_cache(root, library_root=library_root)
@@ -477,7 +477,7 @@ def scan_specific_files(
         files: List of files to scan.
         library_root: If provided, use this as the database root (global database).
     """
-    from .io.scanner import process_media_paths
+    from .io.scanner_adapter import process_media_paths
 
     # We need to separate images and videos for process_media_paths, but
     # since we already have the specific file list, we can just split them manually

@@ -55,6 +55,9 @@ class FileDiscoveryThread(threading.Thread):
         finally:
             self._queue.put(None) # Signal end
 
+    def stop(self):
+        self._stop_event.set()
+
 class ScanAlbumUseCase:
     def __init__(
         self,
@@ -90,6 +93,7 @@ class ScanAlbumUseCase:
         discoverer.start()
 
         found_paths: Set[str] = set()
+        processed_ids: Set[str] = set() # Track IDs of assets found/updated
         added_count = 0
         updated_count = 0
         batch: List[Path] = []
@@ -131,6 +135,7 @@ class ScanAlbumUseCase:
                         # Cache hit
                         # Check for missing micro-thumbnail
                         # (Not implementing backfill here for simplicity, but could be added)
+                        processed_ids.add(existing.id)
                         continue
 
                 # Process new/changed
@@ -187,6 +192,7 @@ class ScanAlbumUseCase:
                 )
 
                 assets_to_save.append(asset)
+                processed_ids.add(asset.id)
                 if existing:
                     updated_count += 1
                 else:
@@ -212,10 +218,15 @@ class ScanAlbumUseCase:
             process_batch(batch)
 
         # 3. Identify Deletions
+        # Deletion logic:
+        # An asset is deleted if its path was not found AND its ID was not encountered/processed elsewhere.
+        # This protects against deleting an asset that was just moved (same ID, new path).
         deleted_ids = []
         for path_str, asset in existing_map.items():
             if path_str not in found_paths:
-                deleted_ids.append(asset.id)
+                # If ID was seen in processed_ids (meaning it was found at another path), do not delete.
+                if asset.id not in processed_ids:
+                    deleted_ids.append(asset.id)
 
         for did in deleted_ids:
             self._asset_repo.delete(did)

@@ -6,6 +6,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, TYPE_CHECKING
 import os
+import logging
+import uuid
+from typing import Optional
 
 from .di.container import DependencyContainer
 from .domain.repositories import IAlbumRepository, IAssetRepository
@@ -18,9 +21,9 @@ from .application.use_cases.scan_album import ScanAlbumUseCase
 from .application.use_cases.pair_live_photos import PairLivePhotosUseCase
 from .application.services.album_service import AlbumService
 from .application.services.asset_service import AssetService
-from .domain.models import Album
-import uuid
-from typing import Optional
+from .infrastructure.services.metadata_provider import ExifToolMetadataProvider
+from .infrastructure.services.thumbnail_generator import PillowThumbnailGenerator
+from .application.interfaces import IMetadataProvider, IThumbnailGenerator
 
 
 if TYPE_CHECKING:  # pragma: no cover - only for type checking
@@ -59,17 +62,18 @@ def _create_di_container() -> DependencyContainer:
 
     # Register Connection Pool (Singleton)
     pool = ConnectionPool(db_path)
-    # Removing redundant/conflicting registration as per review
-    # container.register(ConnectionPool, implementation=pool, singleton=True)
 
     # Use just one registration
     container.register(ConnectionPool, implementation=pool, singleton=True)
 
     # Event Bus
     # Need a logger
-    import logging
     logger = logging.getLogger("EventBus")
     container.register(EventBus, factory=lambda: EventBus(logger), singleton=True)
+
+    # Infrastructure Services
+    container.register(IMetadataProvider, ExifToolMetadataProvider, singleton=True)
+    container.register(IThumbnailGenerator, PillowThumbnailGenerator, singleton=True)
 
     # Repositories
     container.register(IAlbumRepository, SQLiteAlbumRepository,
@@ -83,33 +87,35 @@ def _create_di_container() -> DependencyContainer:
     # Use Cases
     container.register(OpenAlbumUseCase,
                        factory=lambda: OpenAlbumUseCase(
-                           container.resolve(IAlbumRepository),
-                           container.resolve(IAssetRepository),
-                           container.resolve(EventBus)
+                           album_repo=container.resolve(IAlbumRepository),
+                           asset_repo=container.resolve(IAssetRepository),
+                           event_bus=container.resolve(EventBus)
                        ))
     container.register(ScanAlbumUseCase,
                        factory=lambda: ScanAlbumUseCase(
-                           container.resolve(IAlbumRepository),
-                           container.resolve(IAssetRepository),
-                           container.resolve(EventBus)
+                           album_repo=container.resolve(IAlbumRepository),
+                           asset_repo=container.resolve(IAssetRepository),
+                           event_bus=container.resolve(EventBus),
+                           metadata_provider=container.resolve(IMetadataProvider),
+                           thumbnail_generator=container.resolve(IThumbnailGenerator)
                        ))
     container.register(PairLivePhotosUseCase,
                        factory=lambda: PairLivePhotosUseCase(
-                           container.resolve(IAssetRepository),
-                           container.resolve(EventBus)
+                           asset_repo=container.resolve(IAssetRepository),
+                           event_bus=container.resolve(EventBus)
                        ))
 
     # Services
     container.register(AlbumService,
                        factory=lambda: AlbumService(
-                           container.resolve(OpenAlbumUseCase),
-                           container.resolve(ScanAlbumUseCase),
-                           container.resolve(PairLivePhotosUseCase)
+                           open_album_use_case=container.resolve(OpenAlbumUseCase),
+                           scan_album_use_case=container.resolve(ScanAlbumUseCase),
+                           pair_live_photos_use_case=container.resolve(PairLivePhotosUseCase)
                        ), singleton=True)
 
     container.register(AssetService,
                        factory=lambda: AssetService(
-                           container.resolve(IAssetRepository)
+                           asset_repo=container.resolve(IAssetRepository)
                        ), singleton=True)
 
     return container

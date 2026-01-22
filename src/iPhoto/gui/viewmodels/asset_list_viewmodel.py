@@ -51,9 +51,31 @@ class AssetListViewModel(QAbstractListModel):
         """Invalidate thumbnail for path. (No-op stub)"""
         pass
 
-    def thumbnail_loader(self):
-        """Return thumbnail loader. (No-op stub)"""
+    def set_library_root(self, root: Path):
+        """Update library root path (No-op for ViewModel)."""
+        pass
+
+    def album_root(self) -> Optional[Path]:
+        """Return the current album path."""
+        if self._current_album_path:
+            return Path(self._current_album_path)
         return None
+
+    def populate_from_cache(self) -> bool:
+        """Synchronously load cached data (No-op stub)."""
+        return False
+
+    def start_load(self):
+        """Start loading data (triggers refresh)."""
+        self.refresh()
+
+    class _DummyThumbnailLoader:
+        def shutdown(self): pass
+        def invalidate(self, rel): pass
+
+    def thumbnail_loader(self):
+        """Return thumbnail loader. (Stub returning dummy object)"""
+        return self._DummyThumbnailLoader()
 
     def update_featured_status(self, rel: str, is_featured: bool):
         """Update featured status for an asset identified by relative path."""

@@ -16,6 +16,7 @@ from src.iPhoto.gui.coordinators.view_router import ViewRouter
 from src.iPhoto.gui.ui.widgets.album_sidebar import AlbumSidebar
 from src.iPhoto.gui.viewmodels.asset_list_viewmodel import AssetListViewModel
 from src.iPhoto.domain.models.query import AssetQuery
+from src.iPhoto.domain.models.core import MediaType
 from src.iPhoto.errors import AlbumOperationError
 
 # Use legacy imports for context/facade compatibility until full migration
@@ -99,7 +100,12 @@ class NavigationCoordinator(QObject):
             self._context.remember_album(album.root)
 
         # Update ViewModel
+        # When opening an album folder, we usually want to see its contents.
+        # SQLiteAssetRepository logic for album_path usually implies parent_album_path match.
+        # For legacy behavior, we often want subalbums if it's a folder structure.
+        # Let's set include_subalbums=True implicitly for file-system browsing behavior.
         query = AssetQuery(album_path=album.root.name if album else str(path.name))
+        query.include_subalbums = True # Ensure recursive view by default
         self._asset_vm.load_query(query)
 
     def open_all_photos(self):
@@ -119,14 +125,15 @@ class NavigationCoordinator(QObject):
         elif normalized == "recently deleted":
             self.open_recently_deleted()
         elif normalized == "albums":
-            # Dashboard View
-            pass # TODO: Implement dashboard switch in Router
+            self._reset_playback()
+            self._router.show_albums_dashboard()
+            self._static_selection = "Albums"
         elif normalized == "favorites":
             self._open_filtered_collection(name, is_favorite=True)
         elif normalized == "videos":
-            self._open_filtered_collection(name, media_types=["video"])
+            self._open_filtered_collection(name, media_types=[MediaType.VIDEO])
         elif normalized == "live photos":
-            self._open_filtered_collection(name, media_types=["live"])
+            self._open_filtered_collection(name, media_types=[MediaType.LIVE_PHOTO])
 
     def open_recently_deleted(self):
         """Open the trash collection."""
@@ -141,7 +148,6 @@ class NavigationCoordinator(QObject):
         try:
             deleted_root = self._context.library.ensure_deleted_directory()
         except AlbumOperationError as exc:
-            # Handle error (dialog/log)
             LOGGER.error(f"Failed to open trash: {exc}")
             return
 
@@ -153,8 +159,7 @@ class NavigationCoordinator(QObject):
         self._facade.open_album(deleted_root)
 
         # ViewModel Update
-        # Ideally we query by path or ID. Trash usually has specific path.
-        query = AssetQuery(album_path="Recently Deleted") # Depends on Repo logic
+        query = AssetQuery(album_path="Recently Deleted")
         self._asset_vm.load_query(query)
 
     def _open_filtered_collection(self, title: str, is_favorite=None, media_types=None):
@@ -162,13 +167,12 @@ class NavigationCoordinator(QObject):
         self._router.show_gallery()
         self._static_selection = title
 
-        # Apply filters
-        # Note: We need a valid root query first? Or global query.
         query = AssetQuery()
         if is_favorite:
             query.is_favorite = True
-        # if media_types:
-            # query.media_types = ... (need to map strings to Enums)
+
+        if media_types:
+            query.media_types = media_types
 
         self._asset_vm.load_query(query)
 

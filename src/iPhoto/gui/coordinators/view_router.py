@@ -22,6 +22,7 @@ class ViewRouter(QObject):
     detailViewShown = Signal()
     editViewShown = Signal()
     mapViewShown = Signal()
+    dashboardViewShown = Signal() # Added signal for dashboard
 
     def __init__(self, ui: Ui_MainWindow):
         super().__init__()
@@ -38,10 +39,12 @@ class ViewRouter(QObject):
         if hasattr(ui, 'map_page'):
             self._map_idx = self._stack.indexOf(ui.map_page)
 
+        # Dashboard View
+        self._dashboard_idx = -1
+        if hasattr(ui, 'albums_dashboard_page'):
+            self._dashboard_idx = self._stack.indexOf(ui.albums_dashboard_page)
+
         # Edit View: Currently part of Detail Page structure
-        # There is no separate edit_page in the main stack.
-        # We reuse detail index or handle it as a state of detail page.
-        # If edit_page existed, we'd look it up.
         self._edit_idx = -1
         if hasattr(ui, 'edit_page'):
             self._edit_idx = self._stack.indexOf(ui.edit_page)
@@ -78,6 +81,12 @@ class ViewRouter(QObject):
         if self._map_idx != -1 and self._stack.currentIndex() != self._map_idx:
             self._stack.setCurrentIndex(self._map_idx)
             self.mapViewShown.emit()
+
+    def show_albums_dashboard(self):
+        """Switch to the Albums Dashboard."""
+        if self._dashboard_idx != -1 and self._stack.currentIndex() != self._dashboard_idx:
+            self._stack.setCurrentIndex(self._dashboard_idx)
+            self.dashboardViewShown.emit()
 
     def is_detail_view_active(self) -> bool:
         return self._stack.currentIndex() == self._detail_idx

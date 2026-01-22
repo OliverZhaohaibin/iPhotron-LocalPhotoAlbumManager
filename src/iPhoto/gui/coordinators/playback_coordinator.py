@@ -6,7 +6,7 @@ import logging
 from typing import TYPE_CHECKING, Optional, Any
 from pathlib import Path
 
-from PySide6.QtCore import QObject, Slot, QTimer
+from PySide6.QtCore import QObject, Slot, QTimer, Signal
 from PySide6.QtGui import QIcon
 
 from src.iPhoto.gui.coordinators.view_router import ViewRouter
@@ -21,6 +21,7 @@ if TYPE_CHECKING:
     from src.iPhoto.gui.ui.controllers.player_view_controller import PlayerViewController
     from src.iPhoto.gui.viewmodels.asset_list_viewmodel import AssetListViewModel
     from src.iPhoto.gui.coordinators.navigation_coordinator import NavigationCoordinator
+    from PySide6.QtWidgets import QSlider, QToolButton, QWidget
 
 LOGGER = logging.getLogger(__name__)
 
@@ -30,12 +31,19 @@ class PlaybackCoordinator(QObject):
     Replaces PlaybackController and DetailUiController.
     """
 
+    assetChanged = Signal(int)
+
     def __init__(
         self,
         player_bar: PlayerBar,
         player_view: PlayerViewController,
         router: ViewRouter,
-        asset_vm: AssetListViewModel
+        asset_vm: AssetListViewModel,
+        # Zoom Controls
+        zoom_slider: QSlider,
+        zoom_in_button: QToolButton,
+        zoom_out_button: QToolButton,
+        zoom_widget: QWidget
     ):
         super().__init__()
         self._player_bar = player_bar
@@ -43,12 +51,18 @@ class PlaybackCoordinator(QObject):
         self._router = router
         self._asset_vm = asset_vm
 
+        self._zoom_slider = zoom_slider
+        self._zoom_in = zoom_in_button
+        self._zoom_out = zoom_out_button
+        self._zoom_widget = zoom_widget
+
         self._is_playing = False
         self._current_row = -1
         self._navigation: Optional[NavigationCoordinator] = None
         self._info_panel: Optional[InfoPanel] = None
 
         self._connect_signals()
+        self._connect_zoom_controls()
 
     def set_navigation_coordinator(self, nav: NavigationCoordinator):
         self._navigation = nav
@@ -62,6 +76,25 @@ class PlaybackCoordinator(QObject):
 
         # Player View -> Coordinator
         self._player_view.liveReplayRequested.connect(self.replay_live_photo)
+
+    def _connect_zoom_controls(self):
+        viewer = self._player_view.image_viewer
+        self._zoom_in.clicked.connect(viewer.zoom_in)
+        self._zoom_out.clicked.connect(viewer.zoom_out)
+        self._zoom_slider.valueChanged.connect(self._handle_zoom_slider_changed)
+        viewer.zoomChanged.connect(self._handle_viewer_zoom_changed)
+
+    @Slot(int)
+    def _handle_zoom_slider_changed(self, value: int):
+        target = float(max(1, value)) / 100.0
+        self._player_view.image_viewer.set_zoom(target)
+
+    @Slot(float)
+    def _handle_viewer_zoom_changed(self, factor: float):
+        val = int(round(factor * 100))
+        self._zoom_slider.blockSignals(True)
+        self._zoom_slider.setValue(val)
+        self._zoom_slider.blockSignals(False)
 
     @Slot()
     def toggle_playback(self):
@@ -95,6 +128,9 @@ class PlaybackCoordinator(QObject):
         self._router.show_detail()
         self._current_row = row
 
+        # Notify selection change
+        self.assetChanged.emit(row)
+
         idx = self._asset_vm.index(row, 0)
         abs_path = self._asset_vm.data(idx, Roles.ABS)
         is_video = self._asset_vm.data(idx, Roles.IS_VIDEO)
@@ -110,11 +146,13 @@ class PlaybackCoordinator(QObject):
             self._player_view.show_video_surface(interactive=True)
             self._player_view.video_area.load_video(source)
             self._player_bar.setEnabled(True)
+            self._zoom_widget.hide()
         else:
             # Image or Live Photo
             self._player_view.show_image_surface()
             self._player_view.display_image(source)
             self._player_bar.setEnabled(False)
+            self._zoom_widget.show()
 
             if is_live:
                 self._player_view.show_live_badge()

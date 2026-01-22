@@ -16,6 +16,7 @@ from src.iPhoto.gui.ui.models.asset_model import Roles
 from src.iPhoto.gui.ui.controllers.data_manager import DataManager
 from src.iPhoto.gui.ui.controllers.dialog_controller import DialogController
 from src.iPhoto.gui.ui.controllers.status_bar_controller import StatusBarController
+from src.iPhoto.gui.ui.widgets.asset_delegate import AssetGridDelegate
 
 # New Architecture Imports
 from src.iPhoto.gui.viewmodels.album_viewmodel import AlbumViewModel
@@ -132,7 +133,16 @@ class MainCoordinator(QObject):
 
         # --- Binding Data to Views ---
         window.ui.grid_view.setModel(self._asset_list_vm)
+
+        # Assign Delegate for Grid View (Fixes text display and spacing)
+        self._grid_delegate = AssetGridDelegate(window.ui.grid_view, filmstrip_mode=False)
+        window.ui.grid_view.setItemDelegate(self._grid_delegate)
+
         window.ui.filmstrip_view.setModel(self._asset_list_vm)
+
+        # Assign Delegate for Filmstrip View
+        self._filmstrip_delegate = AssetGridDelegate(window.ui.filmstrip_view, filmstrip_mode=True)
+        window.ui.filmstrip_view.setItemDelegate(self._filmstrip_delegate)
 
         self._connect_signals()
 

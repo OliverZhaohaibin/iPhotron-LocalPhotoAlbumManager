@@ -32,6 +32,7 @@ class AssetListViewModel(QAbstractListModel):
 
         # Connect signals
         self._data_source.dataChanged.connect(self._on_source_changed)
+        self._thumbnails.thumbnailReady.connect(self._on_thumbnail_ready)
 
     def load_query(self, query: AssetQuery):
         """Triggers data loading for a new query."""
@@ -54,10 +55,14 @@ class AssetListViewModel(QAbstractListModel):
 
         # --- Standard Roles ---
         if role_int == Qt.ItemDataRole.DisplayRole:
+            # Delegate handles drawing, but we return filename for accessibility/fallback.
+            # If the delegate is missing, this causes text to appear.
+            # With AssetGridDelegate now set, this shouldn't be visible, but if it is,
+            # we could return None. However, returning name is correct semantic behavior.
             return asset.rel_path.name
 
         if role_int == Qt.DecorationRole:
-            # Main thumbnail
+            # Main thumbnail - Async: returns None if not ready
             return self._thumbnails.get_thumbnail(asset.abs_path, self._thumb_size)
 
         if role_int == Qt.ItemDataRole.ToolTipRole:
@@ -137,6 +142,17 @@ class AssetListViewModel(QAbstractListModel):
         self.beginResetModel()
         self.endResetModel()
 
+    def _on_thumbnail_ready(self, path: Path):
+        # Find index for path and emit dataChanged
+        # Linear search for now (optimization: use a dict map in DataSource)
+        count = self.rowCount()
+        for row in range(count):
+            asset = self._data_source.asset_at(row)
+            if asset and asset.abs_path == path:
+                idx = self.index(row, 0)
+                self.dataChanged.emit(idx, idx, [Qt.DecorationRole])
+                break
+
     # --- QML / Scriptable Helpers ---
 
     @Slot(int, result="QVariant")
@@ -146,33 +162,20 @@ class AssetListViewModel(QAbstractListModel):
 
     def invalidate_thumbnail(self, path_str: str):
         """Forces a thumbnail refresh for the given path."""
-        # Find the row(s) matching this path
-        # In a real app, use a path->row index for speed.
-        # Here we do a linear scan for simplicity (assuming path_str is absolute or relative).
-
         path = Path(path_str)
-        # Invalidate in service first
         self._thumbnails.invalidate(path)
-
         # Notify views
         count = self.rowCount()
         for row in range(count):
             asset = self._data_source.asset_at(row)
             if asset:
-                # Check match (abs or rel)
                 if str(asset.abs_path) == path_str or str(asset.rel_path) == path_str:
                     idx = self.index(row, 0)
                     self.dataChanged.emit(idx, idx, [Qt.DecorationRole])
                     break
 
     def thumbnail_loader(self):
-        # Legacy compatibility hook
-        # The new architecture shouldn't expose the loader directly,
-        # but AssetModel proxy might call this.
-        # We return a dummy or wrapper if needed, or update AssetModel to use service.
         pass
 
     def prioritize_rows(self, first: int, last: int):
-        # Hint to data source / thumbnail service to prefetch
-        # self._data_source.prefetch(first, last)
         pass

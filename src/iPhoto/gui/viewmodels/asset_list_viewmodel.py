@@ -148,16 +148,20 @@ class AssetListViewModel(QAbstractListModel):
             return str(asset.path)
         elif role == Roles.ABS:
             # Construct absolute path using library root
-            if self._library_root:
-                try:
-                    return str((self._library_root / asset.path).resolve())
-                except OSError:
-                    return str(self._library_root / asset.path)
-            elif self._current_album_path:
-                # Fallback to album path if no library root (though less likely for global assets)
-                return str(Path(self._current_album_path) / asset.path)
+            path_obj = asset.path
 
-            return str(asset.path)
+            # If path is already absolute, return it
+            if path_obj.is_absolute():
+                return str(path_obj)
+
+            if self._library_root:
+                return str(self._library_root / path_obj)
+
+            if self._current_album_path:
+                # Fallback to album path if no library root (though less likely for global assets)
+                return str(Path(self._current_album_path) / path_obj)
+
+            return str(path_obj)
         elif role == Roles.IS_IMAGE:
             return asset.media_type == MediaType.IMAGE
         elif role == Roles.IS_VIDEO:

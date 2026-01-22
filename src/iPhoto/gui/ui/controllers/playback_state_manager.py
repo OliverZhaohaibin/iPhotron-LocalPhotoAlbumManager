@@ -11,6 +11,7 @@ from PySide6.QtCore import QObject, Signal
 from ....config import VIDEO_COMPLETE_HOLD_BACKSTEP_MS
 from ..media import MediaController, PlaylistController
 from ..models.asset_model import AssetModel, Roles
+from .detail_ui_controller import DetailUIController
 from .dialog_controller import DialogController
 
 
@@ -37,6 +38,7 @@ class PlaybackStateManager(QObject):
         media: MediaController,
         playlist: PlaylistController,
         model: AssetModel,
+        detail_ui: DetailUIController,
         dialog: DialogController,
         parent: Optional[QObject] = None,
     ) -> None:
@@ -46,6 +48,7 @@ class PlaybackStateManager(QObject):
         self._media = media
         self._playlist = playlist
         self._model = model
+        self._detail_ui = detail_ui
         self._dialog = dialog
         self._state = PlayerState.IDLE
         self._pending_live_photo_still: Optional[Path] = None

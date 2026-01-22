@@ -16,6 +16,7 @@ from ...facade import AppFacade
 from ..models.asset_model import AssetModel, Roles
 from ..widgets.asset_grid import AssetGrid
 from ..widgets.notification_toast import NotificationToast
+from .navigation_controller import NavigationController
 from .selection_controller import SelectionController
 from .status_bar_controller import StatusBarController
 
@@ -29,6 +30,7 @@ class ContextMenuController(QObject):
         grid_view: AssetGrid,
         asset_model: AssetModel,
         facade: AppFacade,
+        navigation: NavigationController,
         status_bar: StatusBarController,
         notification_toast: NotificationToast,
         selection_controller: SelectionController,
@@ -39,6 +41,7 @@ class ContextMenuController(QObject):
         self._grid_view = grid_view
         self._asset_model = asset_model
         self._facade = facade
+        self._navigation = navigation
         self._status_bar = status_bar
         self._toast = notification_toast
         self._selection_controller = selection_controller

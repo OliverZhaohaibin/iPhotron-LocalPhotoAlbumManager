@@ -21,7 +21,13 @@ class AlbumViewModel(QObject):
         try:
             # 1. Open Album
             response = self._album_service.open_album(path)
-            self._current_album_id = response.album_id
+            # The response might be an AlbumDTO (id) or OpenAlbumResponse (album_id)
+            # Adjust based on actual DTO structure used in tests vs code
+            if hasattr(response, 'album_id'):
+                self._current_album_id = response.album_id
+            elif hasattr(response, 'id'):
+                self._current_album_id = response.id
+
             self.albumLoaded.emit(response)
 
             # 2. Trigger Scan (async typically, but sync for now or via service)

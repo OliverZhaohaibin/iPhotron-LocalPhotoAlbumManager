@@ -93,7 +93,7 @@ class MainCoordinator(QObject):
         from src.iPhoto.gui.ui.controllers.player_view_controller import PlayerViewController
         self._player_view_controller = PlayerViewController(
             window.ui.player_stack,
-            window.ui.image_viewer, # CORRECTED from detail_image_viewer
+            window.ui.image_viewer,
             window.ui.video_area,
             window.ui.player_placeholder,
             window.ui.live_badge

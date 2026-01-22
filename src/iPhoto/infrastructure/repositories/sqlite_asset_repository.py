@@ -178,18 +178,19 @@ class SQLiteAssetRepository(IAssetRepository):
         if query.media_types:
             placeholders = ','.join('?' * len(query.media_types))
             sql += f" AND media_type IN ({placeholders})"
-            params.extend([mt.value for mt in query.media_types])
+            # Map Enum to Int: IMAGE=0, VIDEO=1
+            params.extend([1 if mt == MediaType.VIDEO else 0 for mt in query.media_types])
 
         if query.is_favorite is not None:
             sql += " AND is_favorite = ?"
             params.append(int(query.is_favorite))
 
         if query.date_from:
-            sql += " AND created_at >= ?"
+            sql += " AND dt >= ?"
             params.append(query.date_from.isoformat())
 
         if query.date_to:
-            sql += " AND created_at <= ?"
+            sql += " AND dt <= ?"
             params.append(query.date_to.isoformat())
 
         if not count_only:
@@ -198,11 +199,13 @@ class SQLiteAssetRepository(IAssetRepository):
             ALLOWED_SORT_COLUMNS = {'created_at', 'ts', 'size_bytes', 'id', 'path', 'media_type', 'is_favorite'}
             order_col = query.order_by
 
-            if order_col == 'ts': order_col = 'created_at'
+            if order_col == 'ts': order_col = 'dt' # Correctly map to 'dt' column
+            if order_col == 'created_at': order_col = 'dt' # Correctly map to 'dt' column
 
-            if order_col not in ALLOWED_SORT_COLUMNS:
-                order_col = 'created_at' # Default fallback safe value
+            if order_col not in ALLOWED_SORT_COLUMNS and order_col != 'dt':
+                order_col = 'dt' # Default fallback safe value
 
+            # Whitelist validation for order_by prevents injection, but we must ensure column exists
             sql += f" ORDER BY {order_col} {query.order.value}"
 
             if query.limit:
@@ -266,5 +269,5 @@ class SQLiteAssetRepository(IAssetRepository):
             content_identifier=content_id,
             live_photo_group_id=live_group,
             is_favorite=is_favorite,
-            parent_album_path=row.get("parent_album_path")
+            parent_album_path=row["parent_album_path"] if "parent_album_path" in keys else None
         )

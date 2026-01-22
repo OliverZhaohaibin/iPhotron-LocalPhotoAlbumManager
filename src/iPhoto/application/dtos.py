@@ -3,6 +3,14 @@ from pathlib import Path
 from typing import List, Optional
 
 @dataclass
+class AlbumDTO:
+    id: str
+    path: Path
+    name: str
+    asset_count: int
+    cover_path: Optional[Path]
+
+@dataclass
 class OpenAlbumRequest:
     path: Path
 

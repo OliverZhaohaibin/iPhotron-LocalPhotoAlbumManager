@@ -26,6 +26,7 @@ class AssetListViewModel(QAbstractListModel):
         self._current_album_id: Optional[str] = None
         self._current_album_path: Optional[str] = None
         self._filter_mode: Optional[str] = None
+        self._library_root: Optional[Path] = None
 
         # Mapping for O(1) lookups if needed
         self._asset_map: Dict[str, Asset] = {}
@@ -52,8 +53,8 @@ class AssetListViewModel(QAbstractListModel):
         pass
 
     def set_library_root(self, root: Path):
-        """Update library root path (No-op for ViewModel)."""
-        pass
+        """Update library root path."""
+        self._library_root = root
 
     def album_root(self) -> Optional[Path]:
         """Return the current album path."""
@@ -146,10 +147,16 @@ class AssetListViewModel(QAbstractListModel):
         elif role == Roles.REL:
             return str(asset.path)
         elif role == Roles.ABS:
-            # We need absolute path. Domain model has 'path' which might be relative or absolute.
-            # In SQLiteAssetRepository it comes from 'rel'.
-            # If we need absolute, we might need context.
-            # For now returning str(path)
+            # Construct absolute path using library root
+            if self._library_root:
+                try:
+                    return str((self._library_root / asset.path).resolve())
+                except OSError:
+                    return str(self._library_root / asset.path)
+            elif self._current_album_path:
+                # Fallback to album path if no library root (though less likely for global assets)
+                return str(Path(self._current_album_path) / asset.path)
+
             return str(asset.path)
         elif role == Roles.IS_IMAGE:
             return asset.media_type == MediaType.IMAGE

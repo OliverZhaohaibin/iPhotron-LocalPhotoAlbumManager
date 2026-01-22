@@ -59,6 +59,24 @@ def test_data_returns_correct_values(view_model, mock_data_source):
     assert view_model.data(index, Roles.DT) == dt
     assert view_model.data(index, Roles.FEATURED) is True
 
+def test_data_abs_path(view_model, mock_data_source):
+    # Arrange
+    asset = Asset(id="1", album_id="alb1", path=Path("sub/img.jpg"), media_type=MediaType.IMAGE, size_bytes=100)
+    mock_data_source.fetch_assets.return_value = [asset]
+    view_model.load_album("alb1")
+
+    # Set library root
+    lib_root = Path("/library")
+    view_model.set_library_root(lib_root)
+
+    index = view_model.index(0, 0)
+
+    # Act
+    abs_path = view_model.data(index, Roles.ABS)
+
+    # Assert
+    assert abs_path == str(lib_root / "sub/img.jpg")
+
 def test_invalid_index_returns_none(view_model):
     assert view_model.data(QModelIndex(), Roles.ASSET_ID) is None
     assert view_model.data(view_model.index(999, 0), Roles.ASSET_ID) is None

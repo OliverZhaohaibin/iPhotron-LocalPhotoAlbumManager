@@ -126,6 +126,11 @@ class SQLiteAssetRepository(IAssetRepository):
             # Map Enum to Int (0=Photo, 1=Video)
             mt_int = 1 if asset.media_type == MediaType.VIDEO else 0
 
+            # Extract micro_thumbnail from metadata if present to avoid JSON serialization error
+            # Copy metadata to avoid mutating the object
+            meta_copy = asset.metadata.copy()
+            micro_thumbnail = meta_copy.pop("micro_thumbnail", None)
+
             data.append((
                 str(asset.path), # rel (PK)
                 asset.id,
@@ -136,19 +141,20 @@ class SQLiteAssetRepository(IAssetRepository):
                 asset.width,
                 asset.height,
                 asset.duration,
-                json.dumps(asset.metadata),
+                json.dumps(meta_copy),
                 asset.content_identifier,
                 asset.live_photo_group_id,
                 1 if asset.is_favorite else 0,
-                asset.parent_album_path
+                asset.parent_album_path,
+                micro_thumbnail
             ))
 
         # Note: Writing to 'rel' as PK
         with self._pool.connection() as conn:
             conn.executemany("""
                 INSERT OR REPLACE INTO assets
-                (rel, id, album_id, media_type, bytes, dt, w, h, dur, metadata, content_identifier, live_photo_group_id, is_favorite, parent_album_path)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                (rel, id, album_id, media_type, bytes, dt, w, h, dur, metadata, content_identifier, live_photo_group_id, is_favorite, parent_album_path, micro_thumbnail)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, data)
 
     def delete(self, id: str) -> None:

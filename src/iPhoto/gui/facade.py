@@ -393,7 +393,19 @@ class AppFacade(QObject):
         if response.asset_count == 0 and not is_already_scanning:
             # Trigger async scan via Worker
             worker = ScanWorker(self._album_service, response.album_id, root, self._scan_signals)
-            self._task_manager.submit_task(worker)
+            task_id = f"autoscan-{response.album_id}"
+
+            # Simple completion callback
+            def _on_scan_finished(path, success):
+                if success and self._active_model:
+                    self._active_model.refresh()
+
+            self._task_manager.submit_task(
+                task_id=task_id,
+                worker=worker,
+                finished=self._scan_signals.finished,
+                on_finished=_on_scan_finished
+            )
 
         # 6. Load Data into ViewModel
         if hasattr(self._active_model, 'load_album'):
@@ -433,7 +445,18 @@ class AppFacade(QObject):
         # Use new architecture if available
         if self._album_service and self._current_album:
             worker = ScanWorker(self._album_service, album.id, album.root, self._scan_signals)
-            self._task_manager.submit_task(worker)
+            task_id = f"rescan-{album.id}"
+
+            def _on_scan_finished(path, success):
+                if success and self._active_model:
+                    self._active_model.refresh()
+
+            self._task_manager.submit_task(
+                task_id=task_id,
+                worker=worker,
+                finished=self._scan_signals.finished,
+                on_finished=_on_scan_finished
+            )
             return
 
         # Delegate to LibraryManager for robust scanning state (Legacy fallback)

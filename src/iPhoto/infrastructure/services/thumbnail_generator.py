@@ -2,15 +2,17 @@ from pathlib import Path
 from typing import Optional, Tuple
 from PIL import Image, ImageOps
 import logging
+import io
 
 from src.iPhoto.application.interfaces import IThumbnailGenerator
 from src.iPhoto.utils.image_loader import generate_micro_thumbnail
+from src.iPhoto.utils.ffmpeg import extract_video_frame
 
 LOGGER = logging.getLogger(__name__)
 
 class PillowThumbnailGenerator(IThumbnailGenerator):
     """
-    Generates thumbnails using Pillow.
+    Generates thumbnails using Pillow for images and FFmpeg for videos.
     """
 
     def generate_micro_thumbnail(self, path: Path) -> Optional[str]:
@@ -23,26 +25,43 @@ class PillowThumbnailGenerator(IThumbnailGenerator):
         Returns a PIL Image object or None on failure.
         """
         try:
-            # Open the image file
-            with Image.open(path) as img:
-                # Convert to RGB to handle various formats (RGBA, P, etc.)
-                if img.mode != "RGB":
-                    img = img.convert("RGB")
+            # Determine if video based on extension
+            # A robust check would use mime type, but extension is fast for cache generation.
+            # Common video extensions:
+            video_exts = {'.mp4', '.mov', '.avi', '.mkv', '.webm', '.m4v'}
+            if path.suffix.lower() in video_exts:
+                return self._generate_video_thumbnail(path, size)
 
-                # Create thumbnail (preserves aspect ratio)
-                # Image.thumbnail modifies in-place
-                # We use ImageOps.fit to fill the box if needed, or stick to thumbnail for speed.
-                # Grid view usually prefers consistent sizing, so `fit` (center crop) might be better
-                # but `thumbnail` is safer for now to avoid cropping heads.
-                # Actually, standard thumbnails are often fit-to-box.
-                # Let's use `thumbnail` which fits WITHIN the box.
+            # Default to Image
+            return self._generate_image_thumbnail(path, size)
 
-                # Note: PIL.Image.thumbnail is destructive to the object, but we opened it fresh.
-                # We want a high-quality resize.
-                img.thumbnail(size, Image.Resampling.LANCZOS)
-
-                # Copy the image because the context manager will close the file
-                return img.copy()
         except Exception as e:
             LOGGER.warning(f"Failed to generate thumbnail for {path}: {e}")
             return None
+
+    def _generate_image_thumbnail(self, path: Path, size: Tuple[int, int]) -> Optional[Image.Image]:
+        try:
+            with Image.open(path) as img:
+                if img.mode != "RGB":
+                    img = img.convert("RGB")
+                img.thumbnail(size, Image.Resampling.LANCZOS)
+                return img.copy()
+        except Exception as e:
+            LOGGER.warning(f"Pillow failed to open {path}: {e}")
+            return None
+
+    def _generate_video_thumbnail(self, path: Path, size: Tuple[int, int]) -> Optional[Image.Image]:
+        try:
+            # extract_video_frame returns bytes (jpeg by default)
+            data = extract_video_frame(path, at=0.0, scale=size, format="jpeg")
+            if data:
+                with io.BytesIO(data) as bio:
+                    img = Image.open(bio)
+                    img.load() # Ensure data is read
+                    # FFmpeg scale might be approximate or different, we can resize again if needed
+                    # But extract_video_frame handles scaling.
+                    return img.copy()
+        except Exception as e:
+            LOGGER.warning(f"FFmpeg failed to extract frame from {path}: {e}")
+            return None
+        return None

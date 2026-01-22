@@ -22,9 +22,15 @@ from .services import (
     LibraryUpdateService,
 )
 
+# New Architecture Imports
+from src.iPhoto.gui.viewmodels.asset_list_viewmodel import AssetListViewModel
+from src.iPhoto.gui.viewmodels.asset_data_source import AssetDataSource
+from src.iPhoto.application.services.album_service import AlbumService
+from src.iPhoto.application.services.asset_service import AssetService
+from src.iPhoto.domain.repositories import IAssetRepository
+
 if TYPE_CHECKING:
     from ..library.manager import LibraryManager
-    from .ui.models.asset_list.model import AssetListModel
 
 import logging
 logger = logging.getLogger(__name__)
@@ -74,21 +80,15 @@ class AppFacade(QObject):
             parent=self,
         )
 
-        from .ui.models.asset_list.model import AssetListModel
+        # Placeholders for new services
+        self._album_service: Optional[AlbumService] = None
+        self._asset_service: Optional[AssetService] = None
 
-        self._library_list_model = AssetListModel(self)
-        self._album_list_model = AssetListModel(self)
-        # Initialize active model to the library model. This ensures consumers
-        # encountering the app in a "Library" state (e.g. at startup) receive
-        # the correct persistent model context rather than a transient album one.
-        # Although the app might launch without a bound library, defaulting to
-        # the library context avoids exposing an arbitrary transient model and
-        # aligns with the "All Photos" default view.
-        self._active_model: AssetListModel = self._library_list_model
-
-        for model in (self._library_list_model, self._album_list_model):
-            model.loadProgress.connect(self._on_model_load_progress)
-            model.loadFinished.connect(self._on_model_load_finished)
+        # Models will be initialized in set_services
+        # Note: Accessing them before set_services will raise AttributeError
+        self._library_list_model = None
+        self._album_list_model = None
+        self._active_model = None
 
         self._metadata_service = AlbumMetadataService(
             asset_list_model_provider=lambda: self._active_model,
@@ -152,10 +152,27 @@ class AppFacade(QObject):
 
         return self._current_album
 
-    @property
-    def asset_list_model(self) -> "AssetListModel":
-        """Return the active list model that backs the asset views."""
+    def set_services(self, album_service: AlbumService, asset_service: AssetService, asset_repo: IAssetRepository):
+        """Inject new architecture services and switch models."""
+        self._album_service = album_service
+        self._asset_service = asset_service
 
+        # Create new ViewModels
+        data_source = AssetDataSource(asset_repo)
+        self._library_list_model = AssetListViewModel(data_source, self)
+        self._album_list_model = AssetListViewModel(data_source, self)
+
+        # Switch active model logic
+        self._active_model = self._library_list_model
+
+        # Notify listeners of model change (if anyone is listening already)
+        self.activeModelChanged.emit(self._active_model)
+
+        logger.info("AppFacade services set and ViewModels initialized.")
+
+    @property
+    def asset_list_model(self) -> object:
+        """Return the active list model that backs the asset views."""
         return self._active_model
 
     @property
@@ -328,93 +345,61 @@ class AppFacade(QObject):
         # Get library root first for global database access
         library_root = self._library_manager.root() if self._library_manager else None
         
-        try:
-            album = backend.open_album(
-                root,
-                autoscan=False,
-                library_root=library_root,
-                hydrate_index=False,
-            )
-        except IPhotoError as exc:
-            self.errorRaised.emit(str(exc))
-            return None
-
-        # Dual-Model Switching Strategy:
-        # Determine whether to use the persistent library model or the transient album model.
+        # MVVM / New Architecture Path
+        # 1. Determine Target Model
         target_model = self._album_list_model
-
-        # If the requested root matches the library root, assume we are viewing the
-        # aggregated "All Photos" collection (or similar library-wide view).
         if library_root and self._paths_equal(root, library_root):
             target_model = self._library_list_model
 
-        self._current_album = album
-        album_root = album.root
-
-        # Optimization: If using the persistent library model and it already has data,
-        # skip the reset/prepare step to keep the switch instant.
-        should_prepare = True
-        if target_model is self._library_list_model:
-            # We assume a non-zero row count means the model is populated.
-            # Ideally we would check if it's populated for *this specific root*,
-            # but the library model is dedicated to the library root.
-            #
-            # Note: This check is thread-safe because `AppFacade`, `AssetListModel`,
-            # and `open_album` all run on the main UI thread. Background updates
-            # are marshaled to the main thread via signals before modifying the model.
-            existing_root = target_model.album_root()
-            if (
-                target_model.rowCount() > 0
-                and existing_root is not None
-                and self._paths_equal(existing_root, album_root)
-                and getattr(target_model, "is_valid", lambda: False)()
-            ):
-                should_prepare = False
-
-        if should_prepare:
-            target_model.prepare_for_album(album_root)
-
-        # If switching models, notify listeners (e.g. DataManager to update the proxy).
-        # We emit this AFTER preparing the target model so that the proxy receives
-        # a model that is already reset (or ready), avoiding a brief flash of stale data.
+        # 2. Switch Active Model
         if target_model is not self._active_model:
             self._active_model = target_model
             self.activeModelChanged.emit(target_model)
 
-        self.albumOpened.emit(album_root)
+        # 3. Call Album Service
+        # We rely on AlbumService to handle repo/DB logic
+        if self._album_service:
+            try:
+                response = self._album_service.open_album(root)
+            except Exception as e:
+                logger.exception("Service error opening album")
+                self.errorRaised.emit(str(e))
+                return None
+        else:
+            # Should not happen in new arch
+            self.errorRaised.emit("Album service not initialized")
+            return None
 
-        # Check if the index is empty (likely because it's a new or cleaned album)
-        # and trigger a background scan if necessary.
-        # Use library_root for global database if available, otherwise use album_root
-        index_root = library_root if library_root else album_root
-        has_assets = False
+        # 4. Handle Album Object
         try:
-            store = backend.IndexStore(index_root)
-            # Peek at the first item to see if there is any data.
-            # read_all returns an iterator, so next() is sufficient.
-            next(store.read_all())
-            has_assets = True
-        except (StopIteration, IPhotoError):
-            pass
+            album = Album.open(root)
+        except IPhotoError as exc:
+            self.errorRaised.emit(str(exc))
+            return None
 
-        # We now check if the LibraryManager is ALREADY scanning this path.
+        self._current_album = album
+
+        # 5. Check Autoscan
         is_already_scanning = False
-        if self._library_manager and self._library_manager.is_scanning_path(album_root):
+        if self._library_manager and self._library_manager.is_scanning_path(root):
             is_already_scanning = True
 
-        if not has_assets and not is_already_scanning:
-            self.rescan_current_async()
+        if response.asset_count == 0 and not is_already_scanning:
+            self._album_service.scan_album(response.album_id)
 
-        force_reload = self._library_update_service.consume_forced_reload(album_root)
+        # 6. Load Data into ViewModel
+        if hasattr(self._active_model, 'load_album'):
+            album_path_str = None
+            if library_root:
+                try:
+                    rel = root.relative_to(library_root).as_posix()
+                    if rel != ".":
+                        album_path_str = rel
+                except ValueError:
+                    pass
+            self._active_model.load_album(album_id=response.album_id, album_path=album_path_str)
 
-        # If we skipped preparation (cached library model), we also skip the load restart
-        # unless a force reload was requested.
-        if should_prepare or force_reload:
-            self._restart_asset_load(
-                album_root,
-                announce_index=True,
-                force_reload=force_reload,
-            )
+        self.albumOpened.emit(root)
         return album
 
     def rescan_current(self) -> List[dict]:

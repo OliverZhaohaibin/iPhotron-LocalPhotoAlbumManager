@@ -140,6 +140,13 @@ class AppContext:
         self.theme = ThemeManager(self.settings)
         self.theme.apply_theme()
 
+        # Inject services into Facade (MVVM Migration)
+        self.facade.set_services(
+            self.container.resolve(AlbumService),
+            self.container.resolve(AssetService),
+            self.container.resolve(IAssetRepository)
+        )
+
         # ``AppFacade`` needs to observe the shared library manager so that
         # manifest writes performed while browsing nested albums can keep the
         # global "Favorites" collection in sync.  The binding is established

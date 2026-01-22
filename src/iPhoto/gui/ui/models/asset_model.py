@@ -2,14 +2,14 @@
 
 from __future__ import annotations
 
-from typing import Optional, TYPE_CHECKING
+from typing import Optional, TYPE_CHECKING, Any
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QAbstractListModel
 
 if TYPE_CHECKING:  # pragma: no cover - import for type checking only
     from ...facade import AppFacade
 from ..tasks.thumbnail_loader import ThumbnailLoader
-from .asset_list.model import AssetListModel
+# from .asset_list.model import AssetListModel
 from .proxy_filter import AssetFilterProxyModel
 from .roles import Roles
 
@@ -24,15 +24,9 @@ class AssetModel(AssetFilterProxyModel):
         self._list_model = facade.asset_list_model
         self.setSourceModel(self._list_model)
 
-    def setSourceModel(self, source_model: AssetListModel) -> None:  # type: ignore[override]
+    def setSourceModel(self, source_model: QAbstractListModel) -> None:
         """
         Update the source model reference when switching contexts.
-
-        This override intentionally narrows the accepted type from the parent's
-        generic QAbstractItemModel to specifically AssetListModel. This constraint
-        ensures that only compatible models are used with AssetModel, and is
-        required for correct operation of methods that depend on AssetListModel's
-        interface. See type: ignore[override] for rationale.
         """
         super().setSourceModel(source_model)
         self._list_model = source_model
@@ -42,7 +36,7 @@ class AssetModel(AssetFilterProxyModel):
     # ------------------------------------------------------------------
     # Convenience accessors
     # ------------------------------------------------------------------
-    def source_model(self) -> AssetListModel:
+    def source_model(self) -> Any:
         return self._list_model
 
     def thumbnail_loader(self) -> ThumbnailLoader:

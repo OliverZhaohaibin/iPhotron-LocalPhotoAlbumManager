@@ -195,13 +195,20 @@ class SQLiteAssetRepository(IAssetRepository):
         if not count_only:
             # Map 'ts' to 'created_at' if needed, or stick to field names
             # Whitelist validation for order_by
-            ALLOWED_SORT_COLUMNS = {'created_at', 'ts', 'size_bytes', 'id', 'path', 'media_type', 'is_favorite'}
-            order_col = query.order_by
+            # Mapping: Domain Field -> DB Column
+            FIELD_MAP = {
+                'created_at': 'dt',
+                'size_bytes': 'bytes',
+                'path': 'rel'
+            }
+            ALLOWED_SORT_COLUMNS = {'created_at', 'ts', 'size_bytes', 'id', 'path', 'media_type', 'is_favorite', 'dt', 'bytes', 'rel'}
 
-            if order_col == 'ts': order_col = 'created_at'
+            order_col = query.order_by
+            if order_col in FIELD_MAP:
+                order_col = FIELD_MAP[order_col]
 
             if order_col not in ALLOWED_SORT_COLUMNS:
-                order_col = 'created_at' # Default fallback safe value
+                order_col = 'dt' # Default fallback safe value
 
             sql += f" ORDER BY {order_col} {query.order.value}"
 
@@ -213,23 +220,27 @@ class SQLiteAssetRepository(IAssetRepository):
 
     def _map_row_to_asset(self, row) -> Asset:
         # Handle column name differences (rel vs path, dt vs created_at, bytes vs size_bytes)
-        keys = row.keys()
+        # Convert sqlite3.Row to dict for .get() access
+        row_dict = dict(row)
 
         # 1. Path/Rel
-        rel_path = row["rel"] if "rel" in keys else row.get("path")
+        rel_path = row_dict.get("rel") or row_dict.get("path")
 
         # 2. DateTime
         created_at = None
-        if "dt" in keys and row["dt"]:
+        if row_dict.get("dt"):
              try:
-                 created_at = datetime.fromisoformat(row["dt"].replace("Z", "+00:00"))
+                 created_at = datetime.fromisoformat(row_dict["dt"].replace("Z", "+00:00"))
              except ValueError:
                  pass
-        elif "created_at" in keys and row["created_at"]:
-             created_at = datetime.fromisoformat(row["created_at"])
+        elif row_dict.get("created_at"):
+             try:
+                 created_at = datetime.fromisoformat(row_dict["created_at"])
+             except ValueError:
+                 pass
 
         # 3. Media Type (Int -> Enum)
-        mt_raw = row["media_type"]
+        mt_raw = row_dict.get("media_type")
         if isinstance(mt_raw, int):
             media_type = MediaType.VIDEO if mt_raw == 1 else MediaType.IMAGE
         else:
@@ -240,31 +251,31 @@ class SQLiteAssetRepository(IAssetRepository):
 
         # 4. JSON Fields
         meta = {}
-        if "metadata" in keys and row["metadata"]:
+        if row_dict.get("metadata"):
             try:
-                meta = json.loads(row["metadata"])
+                meta = json.loads(row_dict["metadata"])
             except json.JSONDecodeError:
                 pass
 
         # 5. Optional columns handling
-        is_favorite = bool(row["is_favorite"]) if "is_favorite" in keys and row["is_favorite"] else False
-        album_id = row["album_id"] if "album_id" in keys else None
-        live_group = row["live_photo_group_id"] if "live_photo_group_id" in keys else None
-        content_id = row["content_identifier"] if "content_identifier" in keys else row.get("content_id")
+        is_favorite = bool(row_dict.get("is_favorite")) if row_dict.get("is_favorite") else False
+        album_id = row_dict.get("album_id")
+        live_group = row_dict.get("live_photo_group_id")
+        content_id = row_dict.get("content_identifier") or row_dict.get("content_id")
 
         return Asset(
-            id=row["id"],
+            id=row_dict["id"],
             album_id=album_id or "", # Default to empty string if missing? Or Optional
             path=Path(rel_path),
             media_type=media_type,
-            size_bytes=row["bytes"] if "bytes" in keys else row.get("size_bytes", 0),
+            size_bytes=row_dict.get("bytes") or row_dict.get("size_bytes", 0),
             created_at=created_at,
-            width=row["w"] if "w" in keys else row.get("width"),
-            height=row["h"] if "h" in keys else row.get("height"),
-            duration=row["dur"] if "dur" in keys else row.get("duration"),
+            width=row_dict.get("w") or row_dict.get("width"),
+            height=row_dict.get("h") or row_dict.get("height"),
+            duration=row_dict.get("dur") or row_dict.get("duration"),
             metadata=meta,
             content_identifier=content_id,
             live_photo_group_id=live_group,
             is_favorite=is_favorite,
-            parent_album_path=row.get("parent_album_path")
+            parent_album_path=row_dict.get("parent_album_path")
         )

@@ -64,7 +64,7 @@ def _create_di_container() -> DependencyContainer:
     pool = ConnectionPool(db_path)
 
     # Use just one registration
-    container.register(ConnectionPool, implementation=pool, singleton=True)
+    container.register(ConnectionPool, factory=lambda: pool, singleton=True)
 
     # Event Bus
     # Need a logger

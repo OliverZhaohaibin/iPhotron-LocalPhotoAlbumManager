@@ -93,7 +93,7 @@ class MainCoordinator(QObject):
         from src.iPhoto.gui.ui.controllers.player_view_controller import PlayerViewController
         self._player_view_controller = PlayerViewController(
             window.ui.player_stack,
-            window.ui.detail_image_viewer,
+            window.ui.image_viewer, # CORRECTED from detail_image_viewer
             window.ui.video_area,
             window.ui.player_placeholder,
             window.ui.live_badge
@@ -111,7 +111,7 @@ class MainCoordinator(QObject):
         self._navigation.set_playback_coordinator(self._playback)
         # Manually attach info panel if available
         if hasattr(window.ui, 'info_panel'):
-            self._playback._info_panel = window.ui.info_panel
+            self._playback._info_panel = window.ui.info_panel # Direct private access for MVP wiring
 
         # 4. Edit Coordinator
         self._edit = EditCoordinator(

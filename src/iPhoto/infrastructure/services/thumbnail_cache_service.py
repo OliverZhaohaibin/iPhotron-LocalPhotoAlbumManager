@@ -64,6 +64,29 @@ class ThumbnailCacheService(QObject):
 
         return None
 
+    def invalidate(self, path: Path):
+        """Removes the thumbnail from cache to force regeneration."""
+        # We need to match keys that start with the path.
+        # Since keys are md5 hashes, we can't easily find them unless we know the size.
+        # However, for MVP, we assume standard size 256x256 is the main one.
+        # Ideally, we clear by path lookup or clear all related keys if possible.
+
+        # Strategy: Clear memory cache completely for simplicity or iterate (slow).
+        # Better: Store reverse mapping or just rely on disk timestamp check (future).
+        # For now, let's clear keys matching the standard thumb size.
+        size = QSize(256, 256)
+        key = self._cache_key(path, size)
+
+        if key in self._memory_cache:
+            del self._memory_cache[key]
+
+        disk_file = self._disk_cache_path / f"{key}.jpg"
+        if disk_file.exists():
+            try:
+                disk_file.unlink()
+            except OSError:
+                pass
+
     def _cache_key(self, path: Path, size: QSize) -> str:
         # Simple hash of path + size
         import hashlib

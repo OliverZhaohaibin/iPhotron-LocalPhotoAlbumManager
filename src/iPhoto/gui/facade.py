@@ -28,6 +28,7 @@ from src.iPhoto.gui.viewmodels.asset_data_source import AssetDataSource
 from src.iPhoto.application.services.album_service import AlbumService
 from src.iPhoto.application.services.asset_service import AssetService
 from src.iPhoto.domain.repositories import IAssetRepository
+from src.iPhoto.gui.ui.tasks.scan_worker import ScanWorker, ScanSignals
 
 if TYPE_CHECKING:
     from ..library.manager import LibraryManager
@@ -79,6 +80,11 @@ class AppFacade(QObject):
             resume_watcher=_resume_watcher,
             parent=self,
         )
+
+        self._scan_signals = ScanSignals()
+        self._scan_signals.finished.connect(self.scanFinished)
+        # Indeterminate start
+        self._scan_signals.started.connect(lambda p: self.scanProgress.emit(p, 0, 0))
 
         # Placeholders for new services
         self._album_service: Optional[AlbumService] = None
@@ -385,7 +391,9 @@ class AppFacade(QObject):
             is_already_scanning = True
 
         if response.asset_count == 0 and not is_already_scanning:
-            self._album_service.scan_album(response.album_id)
+            # Trigger async scan via Worker
+            worker = ScanWorker(self._album_service, response.album_id, root, self._scan_signals)
+            self._task_manager.submit_task(worker)
 
         # 6. Load Data into ViewModel
         if hasattr(self._active_model, 'load_album'):
@@ -422,7 +430,13 @@ class AppFacade(QObject):
         if album is None:
             return
 
-        # Delegate to LibraryManager for robust scanning state
+        # Use new architecture if available
+        if self._album_service and self._current_album:
+            worker = ScanWorker(self._album_service, album.id, album.root, self._scan_signals)
+            self._task_manager.submit_task(worker)
+            return
+
+        # Delegate to LibraryManager for robust scanning state (Legacy fallback)
         if self._library_manager:
             filters = album.manifest.get("filters", {}) if isinstance(album.manifest, dict) else {}
             include = filters.get("include", DEFAULT_INCLUDE)

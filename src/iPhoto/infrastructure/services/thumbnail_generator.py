@@ -26,8 +26,6 @@ class PillowThumbnailGenerator(IThumbnailGenerator):
         """
         try:
             # Determine if video based on extension
-            # A robust check would use mime type, but extension is fast for cache generation.
-            # Common video extensions:
             video_exts = {'.mp4', '.mov', '.avi', '.mkv', '.webm', '.m4v'}
             if path.suffix.lower() in video_exts:
                 return self._generate_video_thumbnail(path, size)
@@ -44,6 +42,11 @@ class PillowThumbnailGenerator(IThumbnailGenerator):
             with Image.open(path) as img:
                 if img.mode != "RGB":
                     img = img.convert("RGB")
+
+                # Apply EXIF orientation
+                img = ImageOps.exif_transpose(img)
+
+                # Create thumbnail using LANCZOS for quality
                 img.thumbnail(size, Image.Resampling.LANCZOS)
                 return img.copy()
         except Exception as e:
@@ -52,14 +55,11 @@ class PillowThumbnailGenerator(IThumbnailGenerator):
 
     def _generate_video_thumbnail(self, path: Path, size: Tuple[int, int]) -> Optional[Image.Image]:
         try:
-            # extract_video_frame returns bytes (jpeg by default)
             data = extract_video_frame(path, at=0.0, scale=size, format="jpeg")
             if data:
                 with io.BytesIO(data) as bio:
                     img = Image.open(bio)
-                    img.load() # Ensure data is read
-                    # FFmpeg scale might be approximate or different, we can resize again if needed
-                    # But extract_video_frame handles scaling.
+                    img.load()
                     return img.copy()
         except Exception as e:
             LOGGER.warning(f"FFmpeg failed to extract frame from {path}: {e}")

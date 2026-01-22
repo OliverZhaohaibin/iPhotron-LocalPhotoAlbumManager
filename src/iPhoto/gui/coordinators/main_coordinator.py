@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Iterable, TYPE_CHECKING, Optional
 import logging
 
-from PySide6.QtCore import QObject, QThreadPool, QModelIndex, QItemSelectionModel
+from PySide6.QtCore import QObject, QThreadPool, QModelIndex
 
 from src.iPhoto.appctx import AppContext
 from src.iPhoto.gui.ui.models.asset_model import Roles
@@ -180,6 +180,14 @@ class MainCoordinator(QObject):
         if hasattr(ui, 'info_button'):
             ui.info_button.clicked.connect(self._playback.toggle_info_panel)
 
+        # Back Button
+        if hasattr(ui, 'back_button'):
+            ui.back_button.clicked.connect(self._handle_back_button)
+
+        # Dashboard Click
+        if hasattr(ui, 'albums_dashboard_page'):
+            ui.albums_dashboard_page.albumSelected.connect(self.open_album_from_path)
+
         # Navigation
         self._navigation.bindLibraryRequested.connect(self._dialog.bind_library_dialog)
 
@@ -242,19 +250,17 @@ class MainCoordinator(QObject):
 
     def _handle_edit_clicked(self):
         # Trigger Edit Mode from Detail View context
-        # We need the current asset path from the View Model via current row in Playback
-        # PlaybackCoordinator knows _current_row.
-        # But we don't expose it.
-        # Workaround: Check current item in grid selection (synced)
-        # or expose current_asset_path on PlaybackCoordinator.
-
-        # Let's use selection model
         indexes = self._window.ui.grid_view.selectionModel().selectedIndexes()
         if indexes:
             idx = indexes[0]
             path_str = self._asset_list_vm.data(idx, Roles.ABS)
             if path_str:
                 self._edit.enter_edit_mode(Path(path_str))
+
+    def _handle_back_button(self):
+        """Returns to the gallery view."""
+        self._playback.reset_for_gallery()
+        self._view_router.show_gallery()
 
     def open_album_from_path(self, path: Path):
         self._navigation.open_album(path)

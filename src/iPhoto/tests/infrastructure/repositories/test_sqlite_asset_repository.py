@@ -128,3 +128,44 @@ def test_save_with_micro_thumbnail(repo):
     fetched = repo.get("thumb_test")
     # If micro_thumbnail logic is incomplete on read, fetched.metadata["micro_thumbnail"] might be missing.
     # But the fix was primarily to prevent crash.
+
+def test_find_by_query_hybrid_legacy_and_new(repo):
+    # Case 1: New Asset (has album_id, maybe no parent_album_path)
+    asset_new = Asset(
+        id="new_1",
+        album_id="alb_hybrid",
+        path=Path("new.jpg"),
+        media_type=MediaType.IMAGE,
+        size_bytes=100,
+        parent_album_path=None # Simulate missing path logic in new scanner
+    )
+    repo.save(asset_new)
+
+    # Case 2: Legacy Asset (has parent_album_path, maybe no album_id)
+    # Note: save() might enforce schema, but we can insert manually or simulate empty album_id
+    asset_old = Asset(
+        id="old_1",
+        album_id="", # Empty or None in DB
+        path=Path("old.jpg"),
+        media_type=MediaType.IMAGE,
+        size_bytes=100,
+        parent_album_path="path/to/alb"
+    )
+    repo.save(asset_old)
+
+    # Manually unset album_id for old asset to simulate legacy state
+    with repo._pool.connection() as conn:
+        conn.execute("UPDATE assets SET album_id = NULL WHERE id = 'old_1'")
+
+    # Query with BOTH ID and Path
+    query = AssetQuery()
+    query.album_id = "alb_hybrid"
+    query.album_path = "path/to/alb"
+
+    # This should find BOTH if we use OR logic
+    results = repo.find_by_query(query)
+
+    assert len(results) == 2
+    ids = {a.id for a in results}
+    assert "new_1" in ids
+    assert "old_1" in ids

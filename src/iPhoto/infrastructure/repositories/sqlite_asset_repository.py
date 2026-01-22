@@ -169,17 +169,23 @@ class SQLiteAssetRepository(IAssetRepository):
 
         params = []
 
+        # Album filtering logic (Hybrid Support: Match ID OR Path)
+        album_criteria = []
+
         if query.album_id:
-            sql += " AND album_id = ?"
+            album_criteria.append("album_id = ?")
             params.append(query.album_id)
 
         if query.album_path:
             if query.include_subalbums:
-                sql += " AND (parent_album_path = ? OR parent_album_path LIKE ?)"
+                album_criteria.append("(parent_album_path = ? OR parent_album_path LIKE ?)")
                 params.extend([query.album_path, f"{query.album_path}/%"])
             else:
-                sql += " AND parent_album_path = ?"
+                album_criteria.append("parent_album_path = ?")
                 params.append(query.album_path)
+
+        if album_criteria:
+            sql += " AND (" + " OR ".join(album_criteria) + ")"
 
         if query.media_types:
             placeholders = ','.join('?' * len(query.media_types))

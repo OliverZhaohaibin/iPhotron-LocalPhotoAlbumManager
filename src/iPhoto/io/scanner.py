@@ -159,6 +159,7 @@ def _process_path_stream(
     progress_callback: Optional[Callable[[int, int], None]] = None,
     total_provider: Optional[Callable[[], int]] = None,
     batch_size: int = 50,
+    force_refresh_live_candidates: bool = False,
 ) -> Iterator[Dict[str, Any]]:
     """
     Internal helper to process a stream of paths in batches.
@@ -272,20 +273,28 @@ def _process_path_stream(
                     ):
                         # Verify we have essential fields
                         if "id" in existing_record:
-                            # Backfill missing micro_thumbnail if needed
-                            if existing_record.get("micro_thumbnail") is None:
+                            should_skip_cache = False
+                            if force_refresh_live_candidates:
                                 suffix = path.suffix.lower()
-                                if suffix in _IMAGE_EXTENSIONS:
-                                    micro_thumb = generate_micro_thumbnail(path)
-                                    if micro_thumb:
-                                        existing_record["micro_thumbnail"] = micro_thumb
+                                is_candidate = suffix in {".heic", ".heif", ".mov", ".qt"}
+                                if is_candidate and not existing_record.get("content_id"):
+                                    should_skip_cache = True
 
-                            yield existing_record
-                            processed_count += 1
-                            if progress_callback and total_provider and processed_count != last_reported_count:
-                                progress_callback(processed_count, total_provider())
-                                last_reported_count = processed_count
-                            continue
+                            if not should_skip_cache:
+                                # Backfill missing micro_thumbnail if needed
+                                if existing_record.get("micro_thumbnail") is None:
+                                    suffix = path.suffix.lower()
+                                    if suffix in _IMAGE_EXTENSIONS:
+                                        micro_thumb = generate_micro_thumbnail(path)
+                                        if micro_thumb:
+                                            existing_record["micro_thumbnail"] = micro_thumb
+
+                                yield existing_record
+                                processed_count += 1
+                                if progress_callback and total_provider and processed_count != last_reported_count:
+                                    progress_callback(processed_count, total_provider())
+                                    last_reported_count = processed_count
+                                continue
         except (ValueError, OSError) as e:
             # It is possible for files to be deleted or become inaccessible between directory listing and stat calls.
             LOGGER.debug(f"Skipping file {path} due to exception during cache check: {e}")
@@ -304,6 +313,7 @@ def scan_album(
     exclude_globs: Iterable[str],
     existing_index: Optional[Dict[str, Dict[str, Any]]] = None,
     progress_callback: Optional[Callable[[int, int], None]] = None,
+    force_refresh_live_candidates: bool = False,
 ) -> Iterator[Dict[str, Any]]:
     """Yield index rows for all matching assets in *root*, scanning in parallel.
 
@@ -360,7 +370,8 @@ def scan_album(
             _queue_iterator(),
             existing_index=existing_index,
             progress_callback=progress_callback,
-            total_provider=lambda: discoverer.total_found
+            total_provider=lambda: discoverer.total_found,
+            force_refresh_live_candidates=force_refresh_live_candidates,
         )
     finally:
         # Ensure proper cleanup even if the generator is closed early (cancellation)

@@ -420,7 +420,8 @@ def rescan(
         include,
         exclude,
         existing_index=existing_index,
-        progress_callback=progress_callback
+        progress_callback=progress_callback,
+        force_refresh_live_candidates=True,
     ))
     
     # If using global DB, convert to library-relative paths

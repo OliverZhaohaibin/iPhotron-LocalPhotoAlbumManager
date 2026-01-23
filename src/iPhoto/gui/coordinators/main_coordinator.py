@@ -234,7 +234,7 @@ class MainCoordinator(QObject):
             ui.theme_system.setChecked(True)
 
         # Shortcuts
-        self._favorite_shortcut = QShortcut(QKeySequence("."), window)
+        self._favorite_shortcut = QShortcut(QKeySequence("."), self._window)
         self._favorite_shortcut.activated.connect(self._handle_toggle_favorite)
 
     def _on_asset_clicked(self, index: QModelIndex):

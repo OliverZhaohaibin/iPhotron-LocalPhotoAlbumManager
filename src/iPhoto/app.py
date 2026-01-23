@@ -238,20 +238,23 @@ def _sync_live_roles_to_db(
             album_prefix = f"{rel}/"
 
     for group in groups:
+        if not group.still or not group.motion:
+            continue
+
         # Still image: Role 0 (Primary), Partner = Motion
-        if group.still:
-            still_rel = f"{album_prefix}{group.still}" if album_prefix else group.still
-            motion_rel = f"{album_prefix}{group.motion}" if album_prefix and group.motion else group.motion
-            updates.append((still_rel, 0, motion_rel))
+        still_rel = f"{album_prefix}{group.still}" if album_prefix else group.still
+        motion_rel = f"{album_prefix}{group.motion}" if album_prefix else group.motion
+        updates.append((still_rel, 0, motion_rel))
 
         # Motion component: Role 1 (Hidden), Partner = Still
-        if group.motion:
-            motion_rel = f"{album_prefix}{group.motion}" if album_prefix else group.motion
-            still_rel = f"{album_prefix}{group.still}" if album_prefix and group.still else group.still
-            updates.append((motion_rel, 1, still_rel))
+        updates.append((motion_rel, 1, still_rel))
 
     db_root = library_root if library_root else root
-    IndexStore(db_root).apply_live_role_updates(updates)
+    store = IndexStore(db_root)
+    if album_prefix:
+        store.apply_live_role_updates_for_prefix(album_prefix, updates)
+    else:
+        store.apply_live_role_updates(updates)
 
 
 def _normalise_rel_key(rel_value: object) -> Optional[str]:
@@ -538,7 +541,12 @@ def pair(root: Path, library_root: Optional[Path] = None) -> List[LiveGroup]:
     
     # Read rows from the database
     if album_path:
-        rows = list(IndexStore(db_root).read_album_assets(album_path, include_subalbums=True))
+        rows = list(
+            IndexStore(db_root).read_album_assets(
+                album_path,
+                include_subalbums=True,
+            )
+        )
         # Convert to album-relative paths for pairing
         prefix = album_path + "/"
         album_rows = []

@@ -645,6 +645,14 @@ class LiveIngestWorker(QRunnable):
     def _path_exists(self, path: Path) -> bool:
         return _cached_path_exists(path, self._dir_cache)
 
+    @staticmethod
+    def _normalize_live_role(value: object) -> Optional[int]:
+        if isinstance(value, int):
+            return value
+        if isinstance(value, str) and value.isdigit():
+            return int(value)
+        return None
+
     def _apply_live_pairing(
         self, items: List[Dict[str, object]]
     ) -> List[Dict[str, object]]:
@@ -666,12 +674,14 @@ class LiveIngestWorker(QRunnable):
         for item in items:
             rel = item.get("rel")
             updated = dict(item)
-            live_role = updated.get("live_role")
-            if isinstance(live_role, str) and live_role.isdigit():
-                updated["live_role"] = int(live_role)
+            live_role = self._normalize_live_role(updated.get("live_role"))
+            if live_role is not None:
+                updated["live_role"] = live_role
             if isinstance(rel, str) and rel in partner_map:
                 updated["live_partner_rel"] = partner_map[rel]
-                updated["live_role"] = role_map[rel]
+                pairing_role = role_map[rel]
+                if live_role is None or live_role != pairing_role:
+                    updated["live_role"] = pairing_role
             enriched.append(updated)
         return enriched
 
@@ -695,9 +705,7 @@ class LiveIngestWorker(QRunnable):
                 rel_norm = Path(rel_value).as_posix()
                 if rel_norm == prefix_norm or rel_norm.startswith(prefix_norm + "/"):
                     return False
-        live_role = row.get("live_role")
-        if isinstance(live_role, str) and live_role.isdigit():
-            live_role = int(live_role)
+        live_role = self._normalize_live_role(row.get("live_role"))
         if live_role == 1:
             return False
 

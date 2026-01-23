@@ -268,7 +268,18 @@ class NavigationController:
         )
         self._last_open_was_refresh = is_refresh
 
+        is_same_root = False
         if is_refresh:
+            target_deleted = self._context.library.deleted_directory()
+            current_root = self._facade.current_album.root if self._facade.current_album else None
+
+            if target_deleted and current_root:
+                try:
+                    is_same_root = target_deleted.resolve() == current_root.resolve()
+                except OSError:
+                    is_same_root = target_deleted == current_root
+
+        if is_refresh and is_same_root:
             return
 
         try:
@@ -352,7 +363,7 @@ class NavigationController:
         )
         self._last_open_was_refresh = is_refresh
 
-        if is_refresh:
+        if is_refresh and is_same_root:
             return
 
         # ``open_static_collection`` is always a user-driven navigation request

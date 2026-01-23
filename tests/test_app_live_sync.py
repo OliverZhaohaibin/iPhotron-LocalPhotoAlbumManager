@@ -69,3 +69,24 @@ def test_sync_live_roles_empty(temp_album):
     data = {r["rel"]: r for r in store.read_all()}
     assert data["b.mov"]["live_role"] == 0
     assert data["b.mov"]["live_partner_rel"] is None
+
+
+def test_sync_live_roles_skips_incomplete_group(temp_album):
+    """Ensure incomplete live groups do not write partial partner links."""
+    store = IndexStore(temp_album)
+    rows = [{"rel": "only.jpg"}, {"rel": "missing.mov"}]
+    store.write_rows(rows)
+
+    incomplete_group = LiveGroup(
+        id="group1",
+        still="only.jpg",
+        motion="",
+        confidence=0.5,
+        content_id=None,
+        still_image_time=None,
+    )
+
+    _sync_live_roles_to_db(temp_album, [incomplete_group])
+    data = {r["rel"]: r for r in store.read_all()}
+    assert data["only.jpg"]["live_partner_rel"] is None
+    assert data["missing.mov"]["live_partner_rel"] is None

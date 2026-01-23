@@ -179,7 +179,22 @@ def _ensure_links(
     """
     work_dir = root / WORK_DIR_NAME
     links_path = work_dir / "links.json"
-    groups, payload = _compute_links_payload(rows)
+    album_rows = rows
+    if library_root:
+        album_path = _compute_album_path(root, library_root)
+        if album_path:
+            prefix = album_path + "/"
+            adjusted_rows = []
+            for row in rows:
+                rel = row.get("rel")
+                if isinstance(rel, str) and rel.startswith(prefix):
+                    adjusted_row = dict(row)
+                    adjusted_row["rel"] = rel[len(prefix):]
+                    adjusted_rows.append(adjusted_row)
+                else:
+                    adjusted_rows.append(row)
+            album_rows = adjusted_rows
+    groups, payload = _compute_links_payload(album_rows)
 
     # Always sync the DB with the live roles derived from the link structure,
     # even if the payload matches. This ensures that in migration scenarios
@@ -238,17 +253,16 @@ def _sync_live_roles_to_db(
             album_prefix = f"{rel}/"
 
     for group in groups:
+        if not group.still or not group.motion:
+            continue
+
         # Still image: Role 0 (Primary), Partner = Motion
-        if group.still:
-            still_rel = f"{album_prefix}{group.still}" if album_prefix else group.still
-            motion_rel = f"{album_prefix}{group.motion}" if album_prefix and group.motion else group.motion
-            updates.append((still_rel, 0, motion_rel))
+        still_rel = f"{album_prefix}{group.still}" if album_prefix else group.still
+        motion_rel = f"{album_prefix}{group.motion}" if album_prefix else group.motion
+        updates.append((still_rel, 0, motion_rel))
 
         # Motion component: Role 1 (Hidden), Partner = Still
-        if group.motion:
-            motion_rel = f"{album_prefix}{group.motion}" if album_prefix else group.motion
-            still_rel = f"{album_prefix}{group.still}" if album_prefix and group.still else group.still
-            updates.append((motion_rel, 1, still_rel))
+        updates.append((motion_rel, 1, still_rel))
 
     db_root = library_root if library_root else root
     IndexStore(db_root).apply_live_role_updates(updates)

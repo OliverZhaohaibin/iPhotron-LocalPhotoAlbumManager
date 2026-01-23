@@ -11,7 +11,6 @@ from PySide6.QtCore import QObject, Signal
 from ....config import VIDEO_COMPLETE_HOLD_BACKSTEP_MS
 from ..media import MediaController, PlaylistController
 from ..models.asset_model import AssetModel, Roles
-from .detail_ui_controller import DetailUIController
 from .dialog_controller import DialogController
 
 

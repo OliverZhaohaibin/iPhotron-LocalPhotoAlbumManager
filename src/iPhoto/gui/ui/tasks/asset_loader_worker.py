@@ -676,13 +676,15 @@ class LiveIngestWorker(QRunnable):
         for item in items:
             rel = item.get("rel")
             updated = dict(item)
-            live_role = self._normalize_live_role(updated.get("live_role"))
-            if live_role is not None and isinstance(updated.get("live_role"), str):
+            raw_live_role = updated.get("live_role")
+            live_role = self._normalize_live_role(raw_live_role)
+            if live_role is not None and isinstance(raw_live_role, str):
                 updated["live_role"] = live_role
             if isinstance(rel, str) and rel in partner_map:
                 updated["live_partner_rel"] = partner_map[rel]
                 paired_live_role = role_map[rel]
-                updated["live_role"] = paired_live_role
+                if live_role is None or live_role == paired_live_role:
+                    updated["live_role"] = paired_live_role
             enriched.append(updated)
         return enriched
 

@@ -647,6 +647,7 @@ class LiveIngestWorker(QRunnable):
 
     @staticmethod
     def _normalize_live_role(value: object) -> Optional[int]:
+        """Return a normalized live role integer when possible."""
         if isinstance(value, int):
             return value
         if isinstance(value, str) and value.isdigit():
@@ -656,6 +657,7 @@ class LiveIngestWorker(QRunnable):
     def _apply_live_pairing(
         self, items: List[Dict[str, object]]
     ) -> List[Dict[str, object]]:
+        """Enrich scan items with Live Photo pairing metadata."""
         groups = pair_live(items)
         if not groups:
             return list(items)

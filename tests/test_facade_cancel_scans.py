@@ -32,6 +32,6 @@ def test_cancel_active_scans_requests_cancellation() -> None:
 
     facade.cancel_active_scans()
 
-    assert fake_library.cancelled is True
-    assert fake_library.paused is True
-    assert fake_update.cancelled is True
+    assert fake_library.cancelled
+    assert fake_library.paused
+    assert fake_update.cancelled

@@ -62,4 +62,4 @@ def test_bind_path_cancels_scans_on_rebind(tmp_path, qapp):
     with patch.object(manager, "stop_scanning") as stop_scanning:
         manager.bind_path(root)
 
-    assert stop_scanning.called is True
+    assert stop_scanning.called

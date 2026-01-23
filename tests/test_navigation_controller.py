@@ -560,3 +560,48 @@ def test_physical_album_to_all_photos_fallback_without_cached_data(
     assert len(facade.open_requests) == 2
     assert facade.open_requests[1] == tmp_path  # library root
     assert controller.static_selection() == "All Photos"
+
+def test_rebind_library_refreshes_all_photos(tmp_path: Path, qapp: QApplication) -> None:
+    """Rebinding the library root must force a refresh even if on All Photos."""
+
+    facade = _StubFacade()
+    root_a = tmp_path / "root_a"
+    root_a.mkdir()
+    root_b = tmp_path / "root_b"
+    root_b.mkdir()
+
+    context = _StubContext(root_a)
+    context.facade = facade
+    asset_model = _StubAssetModel()
+    sidebar = _StubSidebar()
+    status_bar = QStatusBar()
+    dialog = _StubDialog()
+    view_controller = _SpyViewController()
+
+    controller = NavigationController(
+        context,
+        facade,
+        asset_model,
+        sidebar,
+        status_bar,
+        dialog,  # type: ignore[arg-type]
+        view_controller,
+        QMainWindow(),
+    )
+
+    # 1. Open "All Photos" with Root A
+    controller.open_all_photos()
+    assert len(facade.open_requests) == 1
+    assert facade.open_requests[0] == root_a
+    assert controller.static_selection() == "All Photos"
+
+    # 2. Simulate rebind to Root B
+    # Updating the private attribute works because the stub uses a lambda closure
+    context._library_root = root_b
+
+    # 3. Trigger open_all_photos again (simulating sidebar re-selection)
+    controller.open_all_photos()
+
+    # Assert Root B was opened
+    assert len(facade.open_requests) == 2
+    assert facade.open_requests[1] == root_b

@@ -4,9 +4,13 @@ from iPhoto.gui.facade import AppFacade
 class _DummyLibrary:
     def __init__(self) -> None:
         self.cancelled = False
+        self.paused = False
 
     def stop_scanning(self) -> None:
         self.cancelled = True
+
+    def pause_watcher(self) -> None:
+        self.paused = True
 
 
 class _DummyUpdateService:
@@ -29,4 +33,5 @@ def test_cancel_active_scans_requests_cancellation() -> None:
     facade.cancel_active_scans()
 
     assert fake_library.cancelled is True
+    assert fake_library.paused is True
     assert fake_update.cancelled is True

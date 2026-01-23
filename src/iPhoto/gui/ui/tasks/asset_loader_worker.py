@@ -665,12 +665,13 @@ class LiveIngestWorker(QRunnable):
         enriched: List[Dict[str, object]] = []
         for item in items:
             rel = item.get("rel")
-            if not isinstance(rel, str) or rel not in partner_map:
-                enriched.append(item)
-                continue
             updated = dict(item)
-            updated["live_partner_rel"] = partner_map[rel]
-            updated["live_role"] = role_map.get(rel, 0)
+            live_role = updated.get("live_role")
+            if isinstance(live_role, str) and live_role.isdigit():
+                updated["live_role"] = int(live_role)
+            if isinstance(rel, str) and rel in partner_map:
+                updated["live_partner_rel"] = partner_map[rel]
+                updated["live_role"] = role_map[rel]
             enriched.append(updated)
         return enriched
 
@@ -695,7 +696,9 @@ class LiveIngestWorker(QRunnable):
                 if rel_norm == prefix_norm or rel_norm.startswith(prefix_norm + "/"):
                     return False
         live_role = row.get("live_role")
-        if live_role == 1 or live_role == "1":
+        if isinstance(live_role, str) and live_role.isdigit():
+            live_role = int(live_role)
+        if live_role == 1:
             return False
 
         if not filter_mode:

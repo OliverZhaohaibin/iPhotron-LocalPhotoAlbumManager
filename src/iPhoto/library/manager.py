@@ -122,6 +122,10 @@ class LibraryManager(QObject):
         if existing := self._watcher.directories():
             self._watcher.removePaths(existing)
 
+        # Cancel any in-flight scan so we do not block UI interactions while
+        # rebinding to a new library root.
+        self.stop_scanning()
+
         normalized = root.expanduser().resolve()
         if not normalized.exists() or not normalized.is_dir():
             raise LibraryUnavailableError(f"Library path does not exist: {root}")

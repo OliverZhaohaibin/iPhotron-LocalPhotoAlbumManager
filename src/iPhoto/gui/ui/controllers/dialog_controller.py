@@ -39,6 +39,8 @@ class DialogController:
         if root is None:
             return None
         try:
+            if self._context.library.root() is not None:
+                self._context.facade.cancel_active_scans()
             self._context.library.bind_path(root)
         except LibraryError as exc:
             dialogs.show_error(self._parent, str(exc))

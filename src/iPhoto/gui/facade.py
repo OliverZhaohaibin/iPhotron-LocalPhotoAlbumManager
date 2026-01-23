@@ -467,6 +467,7 @@ class AppFacade(QObject):
         if self._library_manager is not None:
             try:
                 self._library_manager.stop_scanning()
+                self._library_manager.pause_watcher()
             except RuntimeError:
                 self._logger.warning("Failed to stop active scan during shutdown", exc_info=True)
 

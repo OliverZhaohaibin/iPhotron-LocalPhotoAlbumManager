@@ -111,7 +111,7 @@ class MainController(QObject):
         ui.open_album_action.triggered.connect(self._handle_open_album_dialog)
         ui.rescan_action.triggered.connect(self._handle_rescan_request)
         ui.rebuild_links_action.triggered.connect(lambda: self._facade.pair_live_current())
-        ui.bind_library_action.triggered.connect(self._dialog.bind_library_dialog)
+        ui.bind_library_action.triggered.connect(self._handle_bind_library)
 
         # Appearance settings
         ui.theme_system.triggered.connect(lambda: self._context.settings.set("ui.theme", "system"))
@@ -136,7 +136,7 @@ class MainController(QObject):
         ui.albums_dashboard_page.albumSelected.connect(self.open_album_from_path)
         ui.sidebar.allPhotosSelected.connect(self._handle_all_photos_selected)
         ui.sidebar.staticNodeSelected.connect(self._handle_static_node_selected)
-        ui.sidebar.bindLibraryRequested.connect(self._dialog.bind_library_dialog)
+        ui.sidebar.bindLibraryRequested.connect(self._handle_bind_library)
 
         # Facade events
         self._facade.albumOpened.connect(self._handle_album_opened)
@@ -218,6 +218,11 @@ class MainController(QObject):
 
     # -----------------------------------------------------------------
     # Slots
+    def _handle_bind_library(self) -> None:
+        path = self._dialog.bind_library_dialog()
+        if path:
+            self._navigation.open_all_photos()
+
     def _handle_open_album_dialog(self) -> None:
         path = self._dialog.open_album_dialog()
         if path:

@@ -518,6 +518,24 @@ class AssetRepository:
             params = [(role, partner, rel) for rel, role, partner in updates]
             conn.executemany(query, params)
 
+    def apply_live_role_updates_for_prefix(
+        self,
+        prefix: str,
+        updates: List[Tuple[str, int, Optional[str]]],
+    ) -> None:
+        """Update live_role/live_partner_rel for assets under *prefix* only."""
+        prefix = prefix.rstrip("/")
+        prefix_like = f"{prefix}/%"
+        with self.transaction() as conn:
+            conn.execute(
+                "UPDATE assets SET live_role = 0, live_partner_rel = NULL "
+                "WHERE rel LIKE ?",
+                (prefix_like,),
+            )
+            query = "UPDATE assets SET live_role = ?, live_partner_rel = ? WHERE rel = ?"
+            params = [(role, partner, rel) for rel, role, partner in updates]
+            conn.executemany(query, params)
+
     def list_albums(self) -> List[str]:
         """Return a list of distinct album paths in the index."""
         conn = self._db_manager.get_connection()

@@ -69,3 +69,56 @@ def test_sync_live_roles_empty(temp_album):
     data = {r["rel"]: r for r in store.read_all()}
     assert data["b.mov"]["live_role"] == 0
     assert data["b.mov"]["live_partner_rel"] is None
+
+
+def test_sync_live_roles_skips_incomplete_group(temp_album):
+    """Ensure incomplete live groups do not write partial partner links."""
+    store = IndexStore(temp_album)
+    rows = [{"rel": "only.jpg"}, {"rel": "missing.mov"}]
+    store.write_rows(rows)
+
+    incomplete_group = LiveGroup(
+        id="group1",
+        still="only.jpg",
+        motion="",
+        confidence=0.5,
+        content_id=None,
+        still_image_time=None,
+    )
+
+    _sync_live_roles_to_db(temp_album, [incomplete_group])
+    data = {r["rel"]: r for r in store.read_all()}
+    assert data["only.jpg"]["live_partner_rel"] is None
+    assert data["missing.mov"]["live_partner_rel"] is None
+
+
+def test_sync_live_roles_scoped_to_library_prefix(tmp_path):
+    """Ensure syncing live roles in a global DB only clears the target album."""
+    library_root = tmp_path / "library"
+    library_root.mkdir()
+    album_root = library_root / "album"
+    album_root.mkdir()
+
+    store = IndexStore(library_root)
+    rows = [
+        {"rel": "album/photo.jpg"},
+        {"rel": "album/video.mov"},
+        {"rel": "other/keep.jpg"},
+    ]
+    store.write_rows(rows)
+    store.apply_live_role_updates([("other/keep.jpg", 1, "other/partner.mov")])
+
+    group = LiveGroup(
+        id="group1",
+        still="photo.jpg",
+        motion="video.mov",
+        confidence=1.0,
+        content_id=None,
+        still_image_time=None,
+    )
+
+    _sync_live_roles_to_db(album_root, [group], library_root=library_root)
+    data = {r["rel"]: r for r in store.read_all()}
+    assert data["album/photo.jpg"]["live_partner_rel"] == "album/video.mov"
+    assert data["album/video.mov"]["live_partner_rel"] == "album/photo.jpg"
+    assert data["other/keep.jpg"]["live_role"] == 1

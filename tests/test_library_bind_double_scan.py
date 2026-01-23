@@ -50,3 +50,16 @@ def test_watcher_active_during_init_deleted_dir(tmp_path, qapp):
     # WITHOUT THE FIX: assertion should be True (watcher was active)
     # WITH THE FIX: assertion should be False (watcher was cleared)
     assert watcher_was_active is False, "Watcher should NOT be active during init (bug fixed)"
+
+
+def test_bind_path_cancels_scans_on_rebind(tmp_path, qapp):
+    root = tmp_path / "Library"
+    root.mkdir()
+
+    manager = LibraryManager()
+    manager.bind_path(root)
+
+    with patch.object(manager, "stop_scanning") as stop_scanning:
+        manager.bind_path(root)
+
+    assert stop_scanning.called

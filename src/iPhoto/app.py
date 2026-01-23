@@ -268,12 +268,6 @@ def _sync_live_roles_to_db(
 
     db_root = library_root if library_root else root
     store = IndexStore(db_root)
-    if not updates:
-        if target_prefix:
-            store.apply_live_role_updates_for_prefix(target_prefix, updates)
-        else:
-            store.apply_live_role_updates(updates)
-        return
     if target_prefix:
         store.apply_live_role_updates_for_prefix(target_prefix, updates)
     else:

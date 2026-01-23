@@ -244,7 +244,6 @@ def _sync_live_roles_to_db(
         library_root: If provided, use this as the database root (global database).
     """
     updates: List[Tuple[str, int, Optional[str]]] = []
-    target_prefix: Optional[str] = None
     
     # Compute album path for library-relative paths
     album_prefix = ""
@@ -252,7 +251,6 @@ def _sync_live_roles_to_db(
         rel = _compute_album_path(root, library_root)
         if rel:
             album_prefix = f"{rel}/"
-            target_prefix = album_prefix
 
     for group in groups:
         if not group.still or not group.motion:
@@ -268,8 +266,8 @@ def _sync_live_roles_to_db(
 
     db_root = library_root if library_root else root
     store = IndexStore(db_root)
-    if target_prefix:
-        store.apply_live_role_updates_for_prefix(target_prefix, updates)
+    if album_prefix:
+        store.apply_live_role_updates_for_prefix(album_prefix, updates)
     else:
         store.apply_live_role_updates(updates)
 

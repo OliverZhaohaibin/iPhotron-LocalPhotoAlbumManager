@@ -120,8 +120,13 @@ class TestWorkerYielding:
         mock_thread = MagicMock()
         mock_current_thread.return_value = mock_thread
 
-        # Create worker with 120 items
+        # Create worker with 120 items (add simple pairing metadata)
         items = [{"rel": f"img{i}.jpg"} for i in range(120)]
+        items[0]["rel"] = "live.jpg"
+        items[0]["content_id"] = "cid"
+        items[1]["rel"] = "live.mov"
+        items[1]["content_id"] = "cid"
+        items[1]["mime"] = "video/quicktime"
         signals = AssetLoaderSignals()
         worker = LiveIngestWorker(MagicMock(), items, [], signals)
 

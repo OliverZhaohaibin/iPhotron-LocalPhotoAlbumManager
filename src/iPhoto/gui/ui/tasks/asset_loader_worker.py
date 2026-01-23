@@ -15,6 +15,7 @@ from PySide6.QtCore import QObject, QRunnable, Signal, QThread
 
 from ....cache.index_store import IndexStore
 from ....config import RECENTLY_DELETED_DIR_NAME, WORK_DIR_NAME
+from ....core.pairing import pair_live
 from ....media_classifier import classify_media
 from ....utils.geocoding import resolve_location_name
 from ....utils.pathutils import ensure_work_dir
@@ -634,7 +635,7 @@ class LiveIngestWorker(QRunnable):
         super().__init__()
         self.setAutoDelete(True)
         self._root = root
-        self._items = items
+        self._items = self._apply_live_pairing(items)
         self._featured = normalize_featured(featured)
         self._signals = signals
         self._filter_params = filter_params or {}
@@ -643,6 +644,35 @@ class LiveIngestWorker(QRunnable):
 
     def _path_exists(self, path: Path) -> bool:
         return _cached_path_exists(path, self._dir_cache)
+
+    def _apply_live_pairing(
+        self, items: List[Dict[str, object]]
+    ) -> List[Dict[str, object]]:
+        groups = pair_live(items)
+        if not groups:
+            return list(items)
+        partner_map: Dict[str, str] = {}
+        role_map: Dict[str, int] = {}
+        for group in groups:
+            if not group.still or not group.motion:
+                continue
+            partner_map[group.still] = group.motion
+            partner_map[group.motion] = group.still
+            role_map[group.still] = 0
+            role_map[group.motion] = 1
+        if not partner_map:
+            return list(items)
+        enriched: List[Dict[str, object]] = []
+        for item in items:
+            rel = item.get("rel")
+            if not isinstance(rel, str) or rel not in partner_map:
+                enriched.append(item)
+                continue
+            updated = dict(item)
+            updated["live_partner_rel"] = partner_map[rel]
+            updated["live_role"] = role_map.get(rel, 0)
+            enriched.append(updated)
+        return enriched
 
     def _should_include_row(self, row: Dict[str, object]) -> bool:
         """Check if a row should be included based on filter_params.
@@ -664,6 +694,9 @@ class LiveIngestWorker(QRunnable):
                 rel_norm = Path(rel_value).as_posix()
                 if rel_norm == prefix_norm or rel_norm.startswith(prefix_norm + "/"):
                     return False
+        live_role = row.get("live_role")
+        if live_role == 1 or live_role == "1":
+            return False
 
         if not filter_mode:
             return True

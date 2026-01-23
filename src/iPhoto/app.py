@@ -179,22 +179,7 @@ def _ensure_links(
     """
     work_dir = root / WORK_DIR_NAME
     links_path = work_dir / "links.json"
-    album_rows = rows
-    if library_root:
-        album_path = _compute_album_path(root, library_root)
-        if album_path:
-            prefix = album_path + "/"
-            adjusted_rows = []
-            for row in rows:
-                rel = row.get("rel")
-                if isinstance(rel, str) and rel.startswith(prefix):
-                    adjusted_row = dict(row)
-                    adjusted_row["rel"] = rel[len(prefix):]
-                    adjusted_rows.append(adjusted_row)
-                else:
-                    adjusted_rows.append(row)
-            album_rows = adjusted_rows
-    groups, payload = _compute_links_payload(album_rows)
+    groups, payload = _compute_links_payload(rows)
 
     # Always sync the DB with the live roles derived from the link structure,
     # even if the payload matches. This ensures that in migration scenarios

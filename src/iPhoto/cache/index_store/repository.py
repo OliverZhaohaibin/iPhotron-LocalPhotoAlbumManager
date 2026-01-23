@@ -529,8 +529,8 @@ class AssetRepository:
         with self.transaction() as conn:
             conn.execute(
                 "UPDATE assets SET live_role = 0, live_partner_rel = NULL "
-                "WHERE rel = ? OR rel LIKE ?",
-                (prefix, prefix_like),
+                "WHERE rel LIKE ?",
+                (prefix_like,),
             )
             if not updates:
                 return

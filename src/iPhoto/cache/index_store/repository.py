@@ -529,11 +529,9 @@ class AssetRepository:
         with self.transaction() as conn:
             conn.execute(
                 "UPDATE assets SET live_role = 0, live_partner_rel = NULL "
-                "WHERE rel LIKE ?",
-                (prefix_like,),
+                "WHERE rel = ? OR rel LIKE ?",
+                (prefix, prefix_like),
             )
-            if not updates:
-                return
             query = "UPDATE assets SET live_role = ?, live_partner_rel = ? WHERE rel = ?"
             params = [(role, partner, rel) for rel, role, partner in updates]
             conn.executemany(query, params)

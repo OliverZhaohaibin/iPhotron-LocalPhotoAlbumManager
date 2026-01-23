@@ -155,6 +155,16 @@ class SQLiteAssetRepository(IAssetRepository):
         with self._pool.connection() as conn:
             conn.execute("DELETE FROM assets WHERE id = ?", (id,))
 
+    def update_favorite_status(self, path: str, is_favorite: bool) -> None:
+        """
+        Updates the is_favorite flag for a specific asset identified by its relative path (PK).
+        """
+        with self._pool.connection() as conn:
+            conn.execute(
+                "UPDATE assets SET is_favorite = ? WHERE rel = ?",
+                (1 if is_favorite else 0, path)
+            )
+
     def _build_sql(self, query: AssetQuery, count_only: bool = False) -> Tuple[str, List[Any]]:
         if count_only:
             sql = "SELECT COUNT(*) FROM assets WHERE 1=1"
@@ -168,10 +178,17 @@ class SQLiteAssetRepository(IAssetRepository):
             params.append(query.album_id)
 
         if query.album_path:
+            # Check for special virtual albums
+            if query.album_path == "Recently Deleted":
+                # Special handling for trash if needed, or assume it's just another folder path
+                pass
+
             if query.include_subalbums:
+                # Use glob-like matching for subalbums
                 sql += " AND (parent_album_path = ? OR parent_album_path LIKE ?)"
                 params.extend([query.album_path, f"{query.album_path}/%"])
             else:
+                # Exact match
                 sql += " AND parent_album_path = ?"
                 params.append(query.album_path)
 

@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Iterable, TYPE_CHECKING, Optional
 import logging
 
-from PySide6.QtCore import QObject, QThreadPool, QModelIndex
+from PySide6.QtCore import QObject, QThreadPool, QModelIndex, QItemSelectionModel
 
 from src.iPhoto.appctx import AppContext
 from src.iPhoto.gui.ui.models.asset_model import Roles
@@ -108,7 +108,8 @@ class MainCoordinator(QObject):
             window.ui.zoom_slider,
             window.ui.zoom_in_button,
             window.ui.zoom_out_button,
-            window.ui.zoom_widget
+            window.ui.zoom_widget,
+            self._asset_service # Inject AssetService
         )
 
         # Inject optional dependencies into Playback
@@ -175,6 +176,10 @@ class MainCoordinator(QObject):
         ui.open_album_action.triggered.connect(self._handle_open_album_dialog)
         ui.edit_button.clicked.connect(self._handle_edit_clicked)
         ui.edit_rotate_left_button.clicked.connect(self._playback.rotate_current_asset)
+
+        # Favorite Button
+        if hasattr(ui, 'favorite_button'):
+            ui.favorite_button.clicked.connect(self._handle_favorite_clicked)
 
         # Info Button
         if hasattr(ui, 'info_button'):
@@ -261,6 +266,13 @@ class MainCoordinator(QObject):
         """Returns to the gallery view."""
         self._playback.reset_for_gallery()
         self._view_router.show_gallery()
+
+    def _handle_favorite_clicked(self):
+        """Toggles the favorite state of the current asset."""
+        indexes = self._window.ui.grid_view.selectionModel().selectedIndexes()
+        if indexes:
+            idx = indexes[0]
+            self._playback.toggle_favorite(idx.row())
 
     def open_album_from_path(self, path: Path):
         self._navigation.open_album(path)

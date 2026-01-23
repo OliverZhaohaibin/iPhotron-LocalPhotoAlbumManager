@@ -30,13 +30,21 @@ class AssetDataSource(QObject):
     def load(self, query: AssetQuery):
         """Loads data for the given query."""
         self._current_query = query
+        self.reload()
+
+    def reload(self):
+        """Reloads the current query."""
+        if not self._current_query:
+            return
+
+        # Reset
         self._cached_dtos.clear()
 
         # Default limit if not set
-        if not query.limit:
-            query.limit = 5000
+        if not self._current_query.limit:
+            self._current_query.limit = 5000
 
-        assets = self._repo.find_by_query(query)
+        assets = self._repo.find_by_query(self._current_query)
         self._cached_dtos = [self._to_dto(a) for a in assets]
         self._total_count = len(self._cached_dtos)
 

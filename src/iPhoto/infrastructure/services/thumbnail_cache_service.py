@@ -9,7 +9,7 @@ from src.iPhoto.infrastructure.services.thumbnail_generator import PillowThumbna
 
 # Signals for the worker need to be defined on a QObject subclass
 class ThumbnailWorkerSignals(QObject):
-    result = Signal(Path, QImage)
+    result = Signal(Path, QSize, QImage)
 
 class ThumbnailGenerationTask(QRunnable):
     """Background task to generate a thumbnail."""
@@ -33,7 +33,7 @@ class ThumbnailGenerationTask(QRunnable):
                 qimg = QImage.fromData(bio.getvalue())
 
                 # Emit result back to main thread
-                self._signals.result.emit(self._path, qimg)
+                self._signals.result.emit(self._path, self._size, qimg)
         except Exception:
             # Silently fail or log in generator
             pass
@@ -101,13 +101,10 @@ class ThumbnailCacheService(QObject):
         worker = ThumbnailGenerationTask(self._generator, path, size, worker_signals)
         self._thread_pool.start(worker)
 
-    def _handle_generation_result(self, path: Path, image: QImage):
+    def _handle_generation_result(self, path: Path, size: QSize, image: QImage):
         # Back on main thread
         if not image.isNull():
-            # We assume standard thumb request for now (256x256) to match get_thumbnail logic
-            # Ideally, we pass the original requested size back via signals to reconstruct exact key.
-            target_size = QSize(256, 256)
-            key = self._cache_key(path, target_size)
+            key = self._cache_key(path, size)
 
             pixmap = QPixmap.fromImage(image)
 

@@ -15,6 +15,7 @@ from src.iPhoto.gui.ui.models.roles import Roles
 from src.iPhoto.gui.ui.widgets.info_panel import InfoPanel
 from src.iPhoto.io.metadata import read_image_meta
 from src.iPhoto.io import sidecar
+from src.iPhoto.application.services.asset_service import AssetService
 
 if TYPE_CHECKING:
     from src.iPhoto.gui.ui.widgets.player_bar import PlayerBar
@@ -43,7 +44,8 @@ class PlaybackCoordinator(QObject):
         zoom_slider: QSlider,
         zoom_in_button: QToolButton,
         zoom_out_button: QToolButton,
-        zoom_widget: QWidget
+        zoom_widget: QWidget,
+        asset_service: Optional[AssetService] = None
     ):
         super().__init__()
         self._player_bar = player_bar
@@ -55,6 +57,8 @@ class PlaybackCoordinator(QObject):
         self._zoom_in = zoom_in_button
         self._zoom_out = zoom_out_button
         self._zoom_widget = zoom_widget
+
+        self._asset_service = asset_service
 
         self._is_playing = False
         self._current_row = -1
@@ -190,8 +194,6 @@ class PlaybackCoordinator(QObject):
 
     def replay_live_photo(self):
         # Delegate to image viewer logic
-        # Legacy: self._image_viewer.replay_live()
-        # The PlayerViewController doesn't expose it directly, but image_viewer does.
         if hasattr(self._player_view.image_viewer, "replay_live"):
             self._player_view.image_viewer.replay_live()
         else:
@@ -222,6 +224,72 @@ class PlaybackCoordinator(QObject):
 
         except Exception as e:
             LOGGER.error(f"Failed to rotate: {e}")
+
+    def toggle_favorite(self, row: int):
+        """Toggles favorite status for the given row."""
+        if row < 0: return
+
+        idx = self._asset_vm.index(row, 0)
+        rel_path = self._asset_vm.data(idx, Roles.REL)
+        is_fav = self._asset_vm.data(idx, Roles.FEATURED)
+
+        if not rel_path or self._asset_service is None:
+            return
+
+        new_state = not is_fav
+        try:
+            # Toggle in DB
+            self._asset_service.set_favorite(rel_path, new_state)
+
+            # Refresh to update UI
+            # Since VM doesn't have fine-grained setter for Favorite role yet,
+            # we rely on cache invalidation or reloading data for that row?
+            # Or assume ViewModel re-queries?
+            # Re-querying is robust.
+
+            # Let's force a reload of the current query in the VM to refresh data.
+            # (Optimizable later)
+            # self._asset_vm.load_query(...) # We don't have the query object handy here easily.
+
+            # Better: Invalidate the specific row in the model if possible.
+            # But the model is read-only from cached DTOs.
+            # We need to update the cached DTO in DataSource.
+            # Since we can't easily reach into DataSource cache from here...
+
+            # Workaround: Emit a signal that MainCoordinator catches to reload?
+            # Or just hack it by calling invalidate_thumbnail which triggers dataChanged signal?
+            # That might redraw the icon if the icon logic re-reads from DB?
+            # No, data comes from DTO.
+
+            # We really should update the DTO.
+            # But DTOs are in DataSource.
+
+            # Let's trigger a full refresh for correctness for now.
+            # Or ask Navigation to reload?
+            if self._navigation:
+                # Trigger re-open of current view?
+                # Navigation keeps state.
+                pass
+
+            # Actually, let's just use `invalidate_thumbnail` trick IF the ViewModel re-fetches.
+            # But VM data() uses DTO.
+
+            # Minimal fix: Force a reload of the current view (heavy but correct).
+            # self._navigation.refresh_current_view() if implemented.
+
+            # For this patch, since I cannot easily update the DTO in place without new API on DataSource,
+            # I will assume the user navigates or refreshes.
+            # Wait, the user complaint is "cannot operate". They click and nothing happens.
+            # Updating DB is "operating". UI feedback is secondary but important.
+
+            # Let's try to update the icon state locally in the button if possible?
+            # No, MVVM.
+
+            # I will add `reload()` to `AssetListViewModel`/`DataSource` that re-runs the last query.
+            self._asset_vm.reload()
+
+        except Exception as e:
+            LOGGER.error(f"Failed to toggle favorite: {e}")
 
     # --- Detail UI Logic Ported ---
 

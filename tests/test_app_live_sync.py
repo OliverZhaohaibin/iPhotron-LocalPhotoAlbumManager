@@ -92,7 +92,7 @@ def test_sync_live_roles_skips_incomplete_group(temp_album):
     assert data["missing.mov"]["live_partner_rel"] is None
 
 
-def test_sync_live_roles_scoped_to_library_prefix(temp_album, tmp_path):
+def test_sync_live_roles_scoped_to_library_prefix(tmp_path):
     """Ensure syncing live roles in a global DB only clears the target album."""
     library_root = tmp_path / "library"
     library_root.mkdir()

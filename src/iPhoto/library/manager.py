@@ -305,6 +305,15 @@ class LibraryManager(QObject):
         locker = QMutexLocker(self._scan_buffer_lock)
         self._current_scanner_worker = None
 
+        # Persist Live Photo pairings once a scan completes so the database and
+        # links.json reflect the latest scan results.
+        if self._root is not None:
+            try:
+                from .. import app as backend
+                backend.pair(root, library_root=self._root)
+            except Exception as exc:
+                LOGGER.warning("Failed to persist live photo pairings after scan: %s", exc)
+
     def _on_scan_error(self, root: Path, message: str) -> None:
         locker = QMutexLocker(self._scan_buffer_lock)
         self._current_scanner_worker = None

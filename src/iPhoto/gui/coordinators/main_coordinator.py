@@ -9,7 +9,8 @@ from pathlib import Path
 from typing import Iterable, TYPE_CHECKING, Optional
 import logging
 
-from PySide6.QtCore import QObject, QThreadPool, QModelIndex
+from PySide6.QtCore import QObject, QThreadPool, QModelIndex, QItemSelectionModel
+from PySide6.QtGui import QShortcut, QKeySequence
 
 from src.iPhoto.appctx import AppContext
 from src.iPhoto.gui.ui.models.asset_model import Roles
@@ -232,6 +233,10 @@ class MainCoordinator(QObject):
         else:
             ui.theme_system.setChecked(True)
 
+        # Shortcuts
+        self._favorite_shortcut = QShortcut(QKeySequence("."), window)
+        self._favorite_shortcut.activated.connect(self._handle_toggle_favorite)
+
     def _on_asset_clicked(self, index: QModelIndex):
         self._playback.play_asset(index.row())
 
@@ -261,6 +266,19 @@ class MainCoordinator(QObject):
         """Returns to the gallery view."""
         self._playback.reset_for_gallery()
         self._view_router.show_gallery()
+
+    def _handle_toggle_favorite(self):
+        """Toggles favorite status for selected assets."""
+        indexes = self._window.ui.grid_view.selectionModel().selectedIndexes()
+        if not indexes:
+            # Try filmstrip if grid has no selection
+            indexes = self._window.ui.filmstrip_view.selectionModel().selectedIndexes()
+
+        for idx in indexes:
+            asset_id = self._asset_list_vm.data(idx, Roles.ASSET_ID)
+            if asset_id:
+                new_state = self._asset_service.toggle_favorite(asset_id)
+                self._asset_list_vm.update_favorite(idx.row(), new_state)
 
     def open_album_from_path(self, path: Path):
         self._navigation.open_album(path)

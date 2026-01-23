@@ -179,3 +179,9 @@ class AssetListViewModel(QAbstractListModel):
 
     def prioritize_rows(self, first: int, last: int):
         pass
+
+    def update_favorite(self, row: int, is_favorite: bool):
+        """Updates the favorite status in the data source and notifies views."""
+        self._data_source.update_favorite_status(row, is_favorite)
+        idx = self.index(row, 0)
+        self.dataChanged.emit(idx, idx, [Roles.FEATURED])

@@ -114,6 +114,14 @@ class SchemaMigrator:
             "is_favorite": "ALTER TABLE assets ADD COLUMN is_favorite INTEGER DEFAULT 0",
             "location": "ALTER TABLE assets ADD COLUMN location TEXT",
             "parent_album_path": "ALTER TABLE assets ADD COLUMN parent_album_path TEXT",
+            "content_id": "ALTER TABLE assets ADD COLUMN content_id TEXT",
+            "frame_rate": "ALTER TABLE assets ADD COLUMN frame_rate REAL",
+            "codec": "ALTER TABLE assets ADD COLUMN codec TEXT",
+            "still_image_time": "ALTER TABLE assets ADD COLUMN still_image_time REAL",
+            "dur": "ALTER TABLE assets ADD COLUMN dur REAL",
+            "original_rel_path": "ALTER TABLE assets ADD COLUMN original_rel_path TEXT",
+            "original_album_id": "ALTER TABLE assets ADD COLUMN original_album_id TEXT",
+            "original_album_subpath": "ALTER TABLE assets ADD COLUMN original_album_subpath TEXT",
         }
 
         # Add missing columns

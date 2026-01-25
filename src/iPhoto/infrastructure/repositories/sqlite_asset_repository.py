@@ -100,9 +100,16 @@ class SQLiteAssetRepository(IAssetRepository):
 
     def get_by_path(self, path: Path) -> Optional[Asset]:
         # Find by 'rel' column which stores the path
+        # Try exact string match first (OS specific separator)
         path_str = str(path)
         with self._pool.connection() as conn:
             row = conn.execute("SELECT * FROM assets WHERE rel = ?", (path_str,)).fetchone()
+
+            # Fallback: Try POSIX style (forward slashes) if not found
+            # This handles Windows where Path('a/b') becomes 'a\b' but DB has 'a/b'
+            if not row and path_str != path.as_posix():
+                row = conn.execute("SELECT * FROM assets WHERE rel = ?", (path.as_posix(),)).fetchone()
+
             if row:
                 return self._map_row_to_asset(row)
             return None

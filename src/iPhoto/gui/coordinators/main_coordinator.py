@@ -323,6 +323,13 @@ class MainCoordinator(QObject):
     def _handle_edit_clicked(self):
         # Trigger Edit Mode from Detail View context
         indexes = self._window.ui.grid_view.selectionModel().selectedIndexes()
+
+        # Fallback: If no selection in grid, but we have a playback row?
+        if not indexes and self._playback.current_row() >= 0:
+            idx = self._asset_list_vm.index(self._playback.current_row(), 0)
+            if idx.isValid():
+                indexes = [idx]
+
         if indexes:
             idx = indexes[0]
             path_str = self._asset_list_vm.data(idx, Roles.ABS)

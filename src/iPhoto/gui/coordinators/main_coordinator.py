@@ -16,6 +16,7 @@ from src.iPhoto.appctx import AppContext
 from src.iPhoto.gui.ui.models.asset_model import Roles
 from src.iPhoto.gui.ui.controllers.data_manager import DataManager
 from src.iPhoto.gui.ui.controllers.dialog_controller import DialogController
+from src.iPhoto.gui.ui.controllers.share_controller import ShareController
 from src.iPhoto.gui.ui.controllers.status_bar_controller import StatusBarController
 from src.iPhoto.gui.ui.widgets.asset_delegate import AssetGridDelegate
 
@@ -117,7 +118,7 @@ class MainCoordinator(QObject):
         self._navigation.set_playback_coordinator(self._playback)
         # Manually attach info panel if available
         if hasattr(window.ui, 'info_panel'):
-            self._playback._info_panel = window.ui.info_panel # Direct private access for MVP wiring
+            self._playback.set_info_panel(window.ui.info_panel)
 
         # 4. Edit Coordinator
         self._edit = EditCoordinator(
@@ -135,6 +136,20 @@ class MainCoordinator(QObject):
             window.ui.rescan_action,
             context,
         )
+
+        self._share_controller = ShareController(
+            settings=context.settings,
+            playlist=self._playback,  # Acts as playlist controller (provides current_row)
+            asset_model=self._asset_list_vm,
+            status_bar=self._status_bar,
+            notification_toast=window.ui.notification_toast,
+            share_button=window.ui.share_button,
+            share_action_group=window.ui.share_action_group,
+            copy_file_action=window.ui.share_action_copy_file,
+            copy_path_action=window.ui.share_action_copy_path,
+            reveal_action=window.ui.share_action_reveal_file,
+        )
+        self._share_controller.restore_preference()
 
         # --- Binding Data to Views ---
         window.ui.grid_view.setModel(self._asset_list_vm)
@@ -180,6 +195,8 @@ class MainCoordinator(QObject):
         ui.open_album_action.triggered.connect(self._handle_open_album_dialog)
         ui.edit_button.clicked.connect(self._handle_edit_clicked)
         ui.edit_rotate_left_button.clicked.connect(self._playback.rotate_current_asset)
+        ui.rotate_left_button.clicked.connect(self._playback.rotate_current_asset)
+        ui.favorite_button.clicked.connect(self._handle_toggle_favorite)
 
         # Info Button
         if hasattr(ui, 'info_button'):

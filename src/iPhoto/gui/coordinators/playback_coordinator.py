@@ -67,6 +67,13 @@ class PlaybackCoordinator(QObject):
     def set_navigation_coordinator(self, nav: NavigationCoordinator):
         self._navigation = nav
 
+    def set_info_panel(self, panel: InfoPanel):
+        self._info_panel = panel
+
+    def current_row(self) -> int:
+        """Expose current row index for external controllers (e.g. Share)."""
+        return self._current_row
+
     def _connect_signals(self):
         # Player Bar -> Coordinator
         self._player_bar.playPauseRequested.connect(self.toggle_playback)

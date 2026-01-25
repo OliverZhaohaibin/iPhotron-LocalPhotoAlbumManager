@@ -6,8 +6,8 @@ import logging
 from typing import TYPE_CHECKING, Optional, Any
 from pathlib import Path
 
-from PySide6.QtCore import QObject, Slot, QTimer, Signal
-from PySide6.QtGui import QIcon
+from PySide6.QtCore import QObject, Slot, QTimer, Signal, QModelIndex, QItemSelectionModel
+from PySide6.QtGui import QIcon, QAction
 
 from src.iPhoto.gui.coordinators.view_router import ViewRouter
 from src.iPhoto.gui.ui.icons import load_icon
@@ -21,6 +21,8 @@ if TYPE_CHECKING:
     from src.iPhoto.gui.ui.controllers.player_view_controller import PlayerViewController
     from src.iPhoto.gui.viewmodels.asset_list_viewmodel import AssetListViewModel
     from src.iPhoto.gui.coordinators.navigation_coordinator import NavigationCoordinator
+    from src.iPhoto.gui.ui.widgets.filmstrip_view import FilmstripView
+    from src.iPhoto.utils.settings import Settings
     from PySide6.QtWidgets import QPushButton, QSlider, QToolButton, QWidget
 
 LOGGER = logging.getLogger(__name__)
@@ -50,6 +52,10 @@ class PlaybackCoordinator(QObject):
         rotate_button: QToolButton,
         edit_button: QPushButton,
         share_button: QToolButton,
+        # Filmstrip
+        filmstrip_view: FilmstripView,
+        toggle_filmstrip_action: QAction,
+        settings: Settings,
     ):
         super().__init__()
         self._player_bar = player_bar
@@ -68,6 +74,10 @@ class PlaybackCoordinator(QObject):
         self._edit_button = edit_button
         self._share_button = share_button
 
+        self._filmstrip_view = filmstrip_view
+        self._toggle_filmstrip_action = toggle_filmstrip_action
+        self._settings = settings
+
         self._is_playing = False
         self._current_row = -1
         self._navigation: Optional[NavigationCoordinator] = None
@@ -75,6 +85,7 @@ class PlaybackCoordinator(QObject):
 
         self._connect_signals()
         self._connect_zoom_controls()
+        self._restore_filmstrip_preference()
 
     def set_navigation_coordinator(self, nav: NavigationCoordinator):
         self._navigation = nav
@@ -100,12 +111,38 @@ class PlaybackCoordinator(QObject):
         # Model -> Coordinator
         self._asset_vm.dataChanged.connect(self._on_data_changed)
 
+        # Filmstrip -> Coordinator
+        self._filmstrip_view.nextItemRequested.connect(self.select_next)
+        self._filmstrip_view.prevItemRequested.connect(self.select_previous)
+        self._filmstrip_view.itemClicked.connect(self._on_filmstrip_clicked)
+        self._toggle_filmstrip_action.toggled.connect(self._handle_filmstrip_toggled)
+
     def _connect_zoom_controls(self):
         viewer = self._player_view.image_viewer
         self._zoom_in.clicked.connect(viewer.zoom_in)
         self._zoom_out.clicked.connect(viewer.zoom_out)
         self._zoom_slider.valueChanged.connect(self._handle_zoom_slider_changed)
         viewer.zoomChanged.connect(self._handle_viewer_zoom_changed)
+
+    def _restore_filmstrip_preference(self):
+        """Restore filmstrip visibility from settings."""
+        stored = self._settings.get("ui.show_filmstrip", True)
+        if isinstance(stored, str):
+            show = stored.strip().lower() in {"1", "true", "yes", "on"}
+        else:
+            show = bool(stored)
+
+        self._filmstrip_view.setVisible(show)
+        self._toggle_filmstrip_action.setChecked(show)
+
+    @Slot(bool)
+    def _handle_filmstrip_toggled(self, checked: bool):
+        self._filmstrip_view.setVisible(checked)
+        self._settings.set("ui.show_filmstrip", checked)
+
+    @Slot(QModelIndex)
+    def _on_filmstrip_clicked(self, index: QModelIndex):
+        self.play_asset(index.row())
 
     @Slot(int)
     def _handle_zoom_slider_changed(self, value: int):
@@ -159,6 +196,12 @@ class PlaybackCoordinator(QObject):
         # Notify selection change
         self.assetChanged.emit(row)
 
+        # Sync ViewModel State (for Delegate sizing)
+        self._asset_vm.set_current_row(row)
+
+        # Sync Filmstrip
+        self._sync_filmstrip_selection(row)
+
         idx = self._asset_vm.index(row, 0)
         abs_path = self._asset_vm.data(idx, Roles.ABS)
         is_video = self._asset_vm.data(idx, Roles.IS_VIDEO)
@@ -207,6 +250,15 @@ class PlaybackCoordinator(QObject):
         # Update Info Panel if visible
         if self._info_panel and self._info_panel.isVisible():
             self._refresh_info_panel(row)
+
+    def _sync_filmstrip_selection(self, row: int):
+        """Update filmstrip selection and scroll to the item."""
+        idx = self._asset_vm.index(row, 0)
+        if idx.isValid():
+             self._filmstrip_view.selectionModel().setCurrentIndex(
+                idx, QItemSelectionModel.ClearAndSelect
+             )
+             self._filmstrip_view.center_on_index(idx)
 
     def _update_favorite_icon(self, is_favorite: bool):
         icon_name = "suit.heart.fill.svg" if is_favorite else "suit.heart.svg"

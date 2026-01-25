@@ -103,19 +103,22 @@ class MainCoordinator(QObject):
         )
 
         self._playback = PlaybackCoordinator(
-            window.ui.player_bar,
-            self._player_view_controller,
-            self._view_router,
-            self._asset_list_vm,
-            window.ui.zoom_slider,
-            window.ui.zoom_in_button,
-            window.ui.zoom_out_button,
-            window.ui.zoom_widget,
+            player_bar=window.ui.player_bar,
+            player_view=self._player_view_controller,
+            router=self._view_router,
+            asset_vm=self._asset_list_vm,
+            zoom_slider=window.ui.zoom_slider,
+            zoom_in_button=window.ui.zoom_in_button,
+            zoom_out_button=window.ui.zoom_out_button,
+            zoom_widget=window.ui.zoom_widget,
             favorite_button=window.ui.favorite_button,
             info_button=window.ui.info_button,
             rotate_button=window.ui.rotate_left_button,
             edit_button=window.ui.edit_button,
             share_button=window.ui.share_button,
+            filmstrip_view=window.ui.filmstrip_view,
+            toggle_filmstrip_action=window.ui.toggle_filmstrip_action,
+            settings=context.settings
         )
 
         # Inject optional dependencies into Playback
@@ -202,7 +205,8 @@ class MainCoordinator(QObject):
 
         # Grid interactions
         ui.grid_view.itemClicked.connect(self._on_asset_clicked)
-        ui.filmstrip_view.itemClicked.connect(self._on_asset_clicked)
+
+        # Filmstrip clicks are now handled by PlaybackCoordinator
 
         # Connect favorite click from grid view
         if hasattr(ui.grid_view, "favoriteClicked"):
@@ -240,10 +244,9 @@ class MainCoordinator(QObject):
         self._navigation.bindLibraryRequested.connect(self._dialog.bind_library_dialog)
         ui.bind_library_action.triggered.connect(self._dialog.bind_library_dialog)
 
-        # Preferences (Wheel, Filmstrip, Volume)
+        # Preferences (Wheel, Volume) - Filmstrip handled in PlaybackCoordinator
         self._restore_preferences()
         ui.wheel_action_group.triggered.connect(self._handle_wheel_action_changed)
-        ui.toggle_filmstrip_action.toggled.connect(self._handle_filmstrip_toggled)
 
         # Status Bar Connections (Restored)
         # Facade Signals -> Status Bar
@@ -353,7 +356,7 @@ class MainCoordinator(QObject):
         self._navigation.open_album(path)
 
     def _restore_preferences(self) -> None:
-        """Restore UI preferences for wheel action, filmstrip, and volume."""
+        """Restore UI preferences for wheel action and volume."""
         ui = self._window.ui
         settings = self._context.settings
 
@@ -366,18 +369,7 @@ class MainCoordinator(QObject):
             ui.wheel_action_navigate.setChecked(True)
         ui.image_viewer.set_wheel_action(wheel_action)
 
-        # 2. Filmstrip
-        stored_filmstrip = settings.get("ui.show_filmstrip", True)
-        # Handle string booleans from config
-        if isinstance(stored_filmstrip, str):
-            show_filmstrip = stored_filmstrip.strip().lower() in {"1", "true", "yes", "on"}
-        else:
-            show_filmstrip = bool(stored_filmstrip)
-
-        ui.filmstrip_view.setVisible(show_filmstrip)
-        ui.toggle_filmstrip_action.setChecked(show_filmstrip)
-
-        # 3. Volume / Mute
+        # 2. Volume / Mute
         stored_volume = settings.get("ui.volume", 75)
         try:
             initial_volume = int(round(float(stored_volume)))
@@ -405,12 +397,6 @@ class MainCoordinator(QObject):
             self._context.settings.set("ui.wheel_action", selected)
 
         ui.image_viewer.set_wheel_action(selected)
-
-    def _handle_filmstrip_toggled(self, checked: bool) -> None:
-        show = bool(checked)
-        self._window.ui.filmstrip_view.setVisible(show)
-        if self._context.settings.get("ui.show_filmstrip") != show:
-            self._context.settings.set("ui.show_filmstrip", show)
 
     # --- Public Accessors for Window ---
     def toggle_playback(self):

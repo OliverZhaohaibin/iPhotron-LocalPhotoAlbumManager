@@ -58,8 +58,8 @@ class PlayerBar(QWidget):
 
         self._mute_button = self._create_tool_button("🔇", "Mute", checkable=True)
 
-        self._play_icon: QIcon = load_icon("play.fill")
-        self._pause_icon: QIcon = load_icon("pause.fill")
+        self._play_icon: QIcon = load_icon("play.fill.svg")
+        self._pause_icon: QIcon = load_icon("pause.fill.svg")
         self._speaker_unmuted_icon: QIcon = load_icon("speaker.3.fill.svg")
         self._speaker_muted_icon: QIcon = load_icon("speaker.slash.fill.svg")
         self._apply_icon(self._play_button, self._play_icon)
@@ -144,11 +144,17 @@ class PlayerBar(QWidget):
 
         return self._position_slider.value()
 
-    def set_playback_state(self, state: object) -> None:
-        """Switch the play button icon based on *state*."""
+    def set_playback_state(self, is_playing: bool | object) -> None:
+        """Switch the play button icon based on state."""
+        # Handle both boolean and QMediaPlayer.PlaybackState object
+        playing = False
+        if isinstance(is_playing, bool):
+            playing = is_playing
+        else:
+            name = getattr(is_playing, "name", None)
+            playing = (name == "PlayingState")
 
-        name = getattr(state, "name", None)
-        if name == "PlayingState":
+        if playing:
             self._apply_icon(self._play_button, self._pause_icon)
             self._play_button.setText("⏸")
         else:

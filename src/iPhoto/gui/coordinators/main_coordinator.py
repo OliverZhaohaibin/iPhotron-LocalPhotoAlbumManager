@@ -332,6 +332,15 @@ class MainCoordinator(QObject):
                 if idx.isValid():
                     target_path_str = self._asset_list_vm.data(idx, Roles.ABS)
 
+            # Fallback: Filmstrip Selection (if Playback state is stale but filmstrip has selection)
+            if not target_path_str:
+                fs_indexes = self._window.ui.filmstrip_view.selectionModel().selectedIndexes()
+                if fs_indexes:
+                    # Map proxy index to source index
+                    src_idx = self._filmstrip_proxy.mapToSource(fs_indexes[0])
+                    if src_idx.isValid():
+                        target_path_str = self._asset_list_vm.data(src_idx, Roles.ABS)
+
         # 2. Fallback: Grid View Selection
         if not target_path_str:
             indexes = self._window.ui.grid_view.selectionModel().selectedIndexes()
@@ -357,14 +366,21 @@ class MainCoordinator(QObject):
                 idx = self._asset_list_vm.index(row, 0)
                 if idx.isValid():
                     indexes = [idx]
+            else:
+                # Fallback: Filmstrip Selection (Mapped to Source)
+                fs_indexes = self._window.ui.filmstrip_view.selectionModel().selectedIndexes()
+                if fs_indexes:
+                    indexes = [self._filmstrip_proxy.mapToSource(i) for i in fs_indexes]
 
-        # 2. Fallback: Grid View or Filmstrip Selection
+        # 2. Fallback: Grid View Selection
         if not indexes:
             indexes = self._window.ui.grid_view.selectionModel().selectedIndexes()
 
+        # 3. Fallback: Filmstrip Selection (General fallback, mapped to Source)
         if not indexes:
-            # Try filmstrip if grid has no selection
-            indexes = self._window.ui.filmstrip_view.selectionModel().selectedIndexes()
+            fs_indexes = self._window.ui.filmstrip_view.selectionModel().selectedIndexes()
+            if fs_indexes:
+                indexes = [self._filmstrip_proxy.mapToSource(i) for i in fs_indexes]
 
         for idx in indexes:
             path_str = self._asset_list_vm.data(idx, Roles.REL) or self._asset_list_vm.data(idx, Roles.ABS)

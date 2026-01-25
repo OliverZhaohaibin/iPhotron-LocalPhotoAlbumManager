@@ -105,7 +105,8 @@ class EditCoordinator(QObject):
 
     def enter_edit_mode(self, asset_path: Path):
         """Prepares the edit view for the given asset and switches view."""
-        if self._router.is_edit_view_active():
+        # Check internal state instead of router, as router might report True for DetailView
+        if self._session is not None:
             return
 
         self._current_source = asset_path

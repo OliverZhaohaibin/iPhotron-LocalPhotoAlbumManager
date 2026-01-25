@@ -76,6 +76,7 @@ class PlaybackCoordinator(QObject):
 
         # Player View -> Coordinator
         self._player_view.liveReplayRequested.connect(self.replay_live_photo)
+        self._player_view.video_area.playbackStateChanged.connect(self._sync_playback_state)
 
     def _connect_zoom_controls(self):
         viewer = self._player_view.image_viewer
@@ -98,13 +99,18 @@ class PlaybackCoordinator(QObject):
 
     @Slot()
     def toggle_playback(self):
-        self._is_playing = not self._is_playing
-        self._player_bar.set_playback_state(self._is_playing)
-
+        # Delegate state logic to the player (VideoArea)
+        # We assume if it's currently playing, we pause, else we play.
+        # But relying on _is_playing is better for toggle logic.
         if self._is_playing:
-            self._player_view.video_area.play()
-        else:
             self._player_view.video_area.pause()
+        else:
+            self._player_view.video_area.play()
+
+    @Slot(bool)
+    def _sync_playback_state(self, is_playing: bool):
+        self._is_playing = is_playing
+        # PlayerBar is updated by VideoArea directly, but we keep coordinator state in sync.
 
     @Slot()
     def _on_scrub_start(self):
@@ -145,6 +151,7 @@ class PlaybackCoordinator(QObject):
         if is_video:
             self._player_view.show_video_surface(interactive=True)
             self._player_view.video_area.load_video(source)
+            self._player_view.video_area.play()
             self._player_bar.setEnabled(True)
             self._zoom_widget.hide()
         else:
@@ -170,6 +177,7 @@ class PlaybackCoordinator(QObject):
             self._refresh_info_panel(row)
 
     def reset_for_gallery(self):
+        self._player_view.video_area.stop()
         self._player_view.show_placeholder()
         self._player_bar.setEnabled(False)
         self._is_playing = False

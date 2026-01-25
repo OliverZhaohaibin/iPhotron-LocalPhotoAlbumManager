@@ -50,6 +50,12 @@ class AssetDataSource(QObject):
     def count(self) -> int:
         return len(self._cached_dtos)
 
+    def update_favorite_status(self, row: int, is_favorite: bool):
+        """Updates the favorite status of the cached DTO at the given row."""
+        if 0 <= row < len(self._cached_dtos):
+            dto = self._cached_dtos[row]
+            dto.is_favorite = is_favorite
+
     def _to_dto(self, asset: Asset) -> AssetDTO:
         # Resolve absolute path
         abs_path = asset.path # Default to path if already absolute
@@ -64,8 +70,19 @@ class AssetDataSource(QObject):
                 abs_path = Path(asset.path).resolve()
 
         # Determine derived flags
-        # Assuming asset.media_type is an Enum or compatible string
-        mt = str(asset.media_type)
+        # Robust conversion: handle both str-Enum and IntEnum/integer cases
+        mt_raw = asset.media_type
+        if hasattr(mt_raw, "value"):
+            mt = str(mt_raw.value)
+        else:
+            mt = str(mt_raw)
+
+        # Map integer/legacy values to DTO expectations
+        if mt in ("1", "2", "MediaType.VIDEO"):
+            mt = "video"
+        elif mt in ("0", "MediaType.IMAGE"):
+            mt = "image"
+
         is_video = (mt == "video")
         # Live photo check: if asset has live_photo_group_id or explicit type
         is_live = (mt == "live") or (asset.live_photo_group_id is not None)

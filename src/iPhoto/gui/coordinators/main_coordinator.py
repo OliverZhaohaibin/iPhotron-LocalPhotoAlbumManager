@@ -9,7 +9,8 @@ from pathlib import Path
 from typing import Iterable, TYPE_CHECKING, Optional
 import logging
 
-from PySide6.QtCore import QObject, QThreadPool, QModelIndex
+from PySide6.QtCore import QObject, QThreadPool, QModelIndex, QItemSelectionModel
+from PySide6.QtGui import QShortcut, QKeySequence
 
 from src.iPhoto.appctx import AppContext
 from src.iPhoto.gui.ui.models.asset_model import Roles
@@ -168,6 +169,10 @@ class MainCoordinator(QObject):
         ui.grid_view.itemClicked.connect(self._on_asset_clicked)
         ui.filmstrip_view.itemClicked.connect(self._on_asset_clicked)
 
+        # Connect favorite click from grid view
+        if hasattr(ui.grid_view, "favoriteClicked"):
+            ui.grid_view.favoriteClicked.connect(self._on_favorite_clicked)
+
         # Coordinator Signals
         self._playback.assetChanged.connect(self._sync_selection)
 
@@ -232,8 +237,32 @@ class MainCoordinator(QObject):
         else:
             ui.theme_system.setChecked(True)
 
+        # Shortcuts
+        self._favorite_shortcut = QShortcut(QKeySequence("."), self._window)
+        self._favorite_shortcut.activated.connect(self._handle_toggle_favorite)
+
     def _on_asset_clicked(self, index: QModelIndex):
         self._playback.play_asset(index.row())
+
+    def _on_favorite_clicked(self, index: QModelIndex):
+        """Handle favorite badge click from grid view."""
+        asset_id = self._asset_list_vm.data(index, Roles.ASSET_ID)
+        if asset_id:
+            new_state = self._asset_service.toggle_favorite(asset_id)
+            # The ViewModel data method might be proxy index, so we need row in source if VM expects it?
+            # update_favorite expects row in VM (which is what index.row() gives if index is from VM)
+            # GalleryGridView model is AssetListViewModel (or proxy).
+            # The signal passes index from GalleryGridView.
+            # If GalleryGridView model is proxy (AssetModel), we need to map to source?
+            # AssetListViewModel.update_favorite takes `row` (int).
+            # If it's a proxy, the row refers to proxy row? No, ViewModel is usually source.
+            # But wait, `ui.grid_view.setModel(self._asset_list_vm)` in MainCoordinator.
+            # So grid view uses AssetListViewModel directly (or AssetModel?).
+            # In MainCoordinator:
+            # self._asset_list_vm = AssetListViewModel(...)
+            # window.ui.grid_view.setModel(self._asset_list_vm)
+            # So it is the source model.
+            self._asset_list_vm.update_favorite(index.row(), new_state)
 
     def _sync_selection(self, row: int):
         """Syncs grid view selection when playback asset changes."""
@@ -261,6 +290,19 @@ class MainCoordinator(QObject):
         """Returns to the gallery view."""
         self._playback.reset_for_gallery()
         self._view_router.show_gallery()
+
+    def _handle_toggle_favorite(self):
+        """Toggles favorite status for selected assets."""
+        indexes = self._window.ui.grid_view.selectionModel().selectedIndexes()
+        if not indexes:
+            # Try filmstrip if grid has no selection
+            indexes = self._window.ui.filmstrip_view.selectionModel().selectedIndexes()
+
+        for idx in indexes:
+            asset_id = self._asset_list_vm.data(idx, Roles.ASSET_ID)
+            if asset_id:
+                new_state = self._asset_service.toggle_favorite(asset_id)
+                self._asset_list_vm.update_favorite(idx.row(), new_state)
 
     def open_album_from_path(self, path: Path):
         self._navigation.open_album(path)

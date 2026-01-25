@@ -23,3 +23,12 @@ class AssetService:
 
     def get_asset(self, asset_id: str) -> Optional[Asset]:
         return self._repo.get(asset_id)
+
+    def toggle_favorite(self, asset_id: str) -> bool:
+        """Toggles the favorite status of an asset."""
+        asset = self._repo.get(asset_id)
+        if asset:
+            asset.is_favorite = not asset.is_favorite
+            self._repo.save(asset)
+            return asset.is_favorite
+        return False

@@ -10,7 +10,7 @@ from typing import Iterable, TYPE_CHECKING, Optional
 import logging
 
 from PySide6.QtCore import QObject, QThreadPool, QModelIndex, QItemSelectionModel
-from PySide6.QtGui import QShortcut, QKeySequence
+from PySide6.QtGui import QShortcut, QKeySequence, QAction
 
 from src.iPhoto.appctx import AppContext
 from src.iPhoto.gui.ui.models.asset_model import Roles
@@ -211,6 +211,12 @@ class MainCoordinator(QObject):
         # Coordinator Signals
         self._playback.assetChanged.connect(self._sync_selection)
 
+        # Viewer Interactions (Wheel Navigation)
+        ui.image_viewer.nextItemRequested.connect(self._playback.select_next)
+        ui.image_viewer.prevItemRequested.connect(self._playback.select_previous)
+        ui.video_area.nextItemRequested.connect(self._playback.select_next)
+        ui.video_area.prevItemRequested.connect(self._playback.select_previous)
+
         # Menus
         ui.open_album_action.triggered.connect(self._handle_open_album_dialog)
         ui.edit_button.clicked.connect(self._handle_edit_clicked)
@@ -232,6 +238,12 @@ class MainCoordinator(QObject):
 
         # Navigation
         self._navigation.bindLibraryRequested.connect(self._dialog.bind_library_dialog)
+        ui.bind_library_action.triggered.connect(self._dialog.bind_library_dialog)
+
+        # Preferences (Wheel, Filmstrip, Volume)
+        self._restore_preferences()
+        ui.wheel_action_group.triggered.connect(self._handle_wheel_action_changed)
+        ui.toggle_filmstrip_action.toggled.connect(self._handle_filmstrip_toggled)
 
         # Status Bar Connections (Restored)
         # Facade Signals -> Status Bar
@@ -339,6 +351,66 @@ class MainCoordinator(QObject):
 
     def open_album_from_path(self, path: Path):
         self._navigation.open_album(path)
+
+    def _restore_preferences(self) -> None:
+        """Restore UI preferences for wheel action, filmstrip, and volume."""
+        ui = self._window.ui
+        settings = self._context.settings
+
+        # 1. Wheel Action
+        wheel_action = settings.get("ui.wheel_action", "navigate")
+        if wheel_action == "zoom":
+            ui.wheel_action_zoom.setChecked(True)
+        else:
+            wheel_action = "navigate"
+            ui.wheel_action_navigate.setChecked(True)
+        ui.image_viewer.set_wheel_action(wheel_action)
+
+        # 2. Filmstrip
+        stored_filmstrip = settings.get("ui.show_filmstrip", True)
+        # Handle string booleans from config
+        if isinstance(stored_filmstrip, str):
+            show_filmstrip = stored_filmstrip.strip().lower() in {"1", "true", "yes", "on"}
+        else:
+            show_filmstrip = bool(stored_filmstrip)
+
+        ui.filmstrip_view.setVisible(show_filmstrip)
+        ui.toggle_filmstrip_action.setChecked(show_filmstrip)
+
+        # 3. Volume / Mute
+        stored_volume = settings.get("ui.volume", 75)
+        try:
+            initial_volume = int(round(float(stored_volume)))
+        except (TypeError, ValueError):
+            initial_volume = 75
+        initial_volume = max(0, min(100, initial_volume))
+
+        stored_muted = settings.get("ui.is_muted", False)
+        if isinstance(stored_muted, str):
+            initial_muted = stored_muted.strip().lower() in {"1", "true", "yes", "on"}
+        else:
+            initial_muted = bool(stored_muted)
+
+        ui.video_area.set_volume(initial_volume)
+        ui.video_area.set_muted(initial_muted)
+
+    def _handle_wheel_action_changed(self, action: QAction) -> None:
+        ui = self._window.ui
+        if action is ui.wheel_action_zoom:
+            selected = "zoom"
+        else:
+            selected = "navigate"
+
+        if self._context.settings.get("ui.wheel_action") != selected:
+            self._context.settings.set("ui.wheel_action", selected)
+
+        ui.image_viewer.set_wheel_action(selected)
+
+    def _handle_filmstrip_toggled(self, checked: bool) -> None:
+        show = bool(checked)
+        self._window.ui.filmstrip_view.setVisible(show)
+        if self._context.settings.get("ui.show_filmstrip") != show:
+            self._context.settings.set("ui.show_filmstrip", show)
 
     # --- Public Accessors for Window ---
     def toggle_playback(self):

@@ -29,6 +29,7 @@ class AssetListViewModel(QAbstractListModel):
         self._data_source = data_source
         self._thumbnails = thumbnail_service
         self._thumb_size = QSize(256, 256)
+        self._current_row = -1
 
         # Connect signals
         self._data_source.dataChanged.connect(self._on_source_changed)
@@ -129,12 +130,7 @@ class AssetListViewModel(QAbstractListModel):
             return False # ViewModels usually don't have spacers, unless inserted
 
         if role_int == Roles.IS_CURRENT:
-            # State management should ideally be separate or injected.
-            # For now, we return False as selection state is usually handled by SelectionModel
-            # But AssetDelegate might use this for visual highlight in Filmstrip
-            # This requires the VM to know about "current" which makes it stateful.
-            # We can handle this by an external controller updating the model, or separate state.
-            return False
+            return row == self._current_row
 
         return None
 
@@ -185,3 +181,23 @@ class AssetListViewModel(QAbstractListModel):
         self._data_source.update_favorite_status(row, is_favorite)
         idx = self.index(row, 0)
         self.dataChanged.emit(idx, idx, [Roles.FEATURED])
+
+    def set_current_row(self, row: int):
+        """Update the currently active row (for filmstrip highlighting)."""
+        if self._current_row == row:
+            return
+
+        old_row = self._current_row
+        self._current_row = row
+
+        # Notify old row
+        if old_row >= 0:
+            idx = self.index(old_row, 0)
+            if idx.isValid():
+                self.dataChanged.emit(idx, idx, [Roles.IS_CURRENT])
+
+        # Notify new row
+        if row >= 0:
+            idx = self.index(row, 0)
+            if idx.isValid():
+                self.dataChanged.emit(idx, idx, [Roles.IS_CURRENT])

@@ -196,6 +196,9 @@ class PlaybackCoordinator(QObject):
         # Notify selection change
         self.assetChanged.emit(row)
 
+        # Sync ViewModel State (for Delegate sizing)
+        self._asset_vm.set_current_row(row)
+
         # Sync Filmstrip
         self._sync_filmstrip_selection(row)
 

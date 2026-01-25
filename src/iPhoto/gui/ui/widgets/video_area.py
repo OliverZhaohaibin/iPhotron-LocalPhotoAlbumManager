@@ -213,6 +213,17 @@ class VideoArea(QWidget):
     # ------------------------------------------------------------------
     # Player Control API
     # ------------------------------------------------------------------
+    def set_volume(self, volume: int) -> None:
+        """Update the audio output volume (0-100)."""
+        clamped = max(0, min(100, volume))
+        self._audio_output.setVolume(clamped / 100.0)
+        self._player_bar.set_volume(clamped)
+
+    def set_muted(self, muted: bool) -> None:
+        """Update the audio output mute state."""
+        self._audio_output.setMuted(muted)
+        self._player_bar.set_muted(muted)
+
     def load_video(self, path: Path) -> None:
         """Load a video file for playback."""
         self._player.setSource(QUrl.fromLocalFile(str(path)))
@@ -248,6 +259,16 @@ class VideoArea(QWidget):
         self.playbackStateChanged.emit(is_playing)
         if not is_playing and state == QMediaPlayer.PlaybackState.StoppedState:
             self.show_controls()
+
+    def _on_volume_changed(self, value: int) -> None:
+        """Handle volume changes from the player bar."""
+        self._audio_output.setVolume(value / 100.0)
+        self._on_mouse_activity()
+
+    def _on_mute_toggled(self, muted: bool) -> None:
+        """Handle mute toggle from the player bar."""
+        self._audio_output.setMuted(muted)
+        self._on_mouse_activity()
 
     # ------------------------------------------------------------------
     # QWidget overrides
@@ -325,8 +346,8 @@ class VideoArea(QWidget):
         ):
             signal.connect(self._on_mouse_activity)
         self._player_bar.seekRequested.connect(lambda _value: self._on_mouse_activity())
-        self._player_bar.volumeChanged.connect(lambda _value: self._on_mouse_activity())
-        self._player_bar.muteToggled.connect(lambda _state: self._on_mouse_activity())
+        self._player_bar.volumeChanged.connect(self._on_volume_changed)
+        self._player_bar.muteToggled.connect(self._on_mute_toggled)
 
     def _on_mouse_activity(self) -> None:
         if not self._controls_enabled:

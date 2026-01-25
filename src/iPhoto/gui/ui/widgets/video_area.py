@@ -51,6 +51,7 @@ class VideoArea(QWidget):
     mouseActive = Signal()
     controlsVisibleChanged = Signal(bool)
     fullscreenExitRequested = Signal()
+    playbackStateChanged = Signal(bool)
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
@@ -244,6 +245,7 @@ class VideoArea(QWidget):
     def _on_playback_state_changed(self, state: QMediaPlayer.PlaybackState) -> None:
         is_playing = (state == QMediaPlayer.PlaybackState.PlayingState)
         self._player_bar.set_playback_state(is_playing)
+        self.playbackStateChanged.emit(is_playing)
         if not is_playing and state == QMediaPlayer.PlaybackState.StoppedState:
             self.show_controls()
 

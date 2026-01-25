@@ -23,7 +23,9 @@ from .widgets import (
     CustomTitleBar,
     DetailPageWidget,
     GalleryPageWidget,
+    InfoPanel,
     MainHeaderWidget,
+    NotificationToast,
     PhotoMapView,
     PreviewWindow,
 )
@@ -206,6 +208,9 @@ class Ui_MainWindow(object):
         self.progress_bar = self.status_bar.progress_bar
 
         MainWindow.setCentralWidget(self.window_shell)
+
+        self.info_panel = InfoPanel(MainWindow)
+        self.notification_toast = NotificationToast(MainWindow)
 
         if self.player_container is not None:
             self.player_container.installEventFilter(MainWindow)

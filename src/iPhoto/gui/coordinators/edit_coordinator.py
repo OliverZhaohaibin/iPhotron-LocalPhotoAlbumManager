@@ -271,3 +271,8 @@ class EditCoordinator(QObject):
         self._current_mode.exit()
         self._current_mode = new_state
         self._current_mode.enter()
+
+    def shutdown(self):
+        """Cleanup resources on app exit."""
+        if self._session:
+            self.leave_edit_mode()

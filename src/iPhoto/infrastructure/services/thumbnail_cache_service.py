@@ -58,8 +58,17 @@ class ThumbnailCacheService(QObject):
 
         self._pending_tasks: Set[str] = set()
         self._thread_pool = QThreadPool.globalInstance()
+        self._is_shutting_down = False
+
+    def shutdown(self):
+        """Prevents new tasks from being submitted and clears pending logic."""
+        self._is_shutting_down = True
+        self._pending_tasks.clear()
 
     def get_thumbnail(self, path: Path, size: QSize) -> Optional[QPixmap]:
+        if self._is_shutting_down:
+            return None
+
         key = self._cache_key(path, size)
 
         # 1. Memory Check

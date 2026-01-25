@@ -16,6 +16,7 @@ from src.iPhoto.appctx import AppContext
 from src.iPhoto.gui.ui.models.asset_model import Roles
 from src.iPhoto.gui.ui.controllers.data_manager import DataManager
 from src.iPhoto.gui.ui.controllers.dialog_controller import DialogController
+from src.iPhoto.gui.ui.controllers.share_controller import ShareController
 from src.iPhoto.gui.ui.controllers.status_bar_controller import StatusBarController
 from src.iPhoto.gui.ui.widgets.asset_delegate import AssetGridDelegate
 
@@ -109,7 +110,12 @@ class MainCoordinator(QObject):
             window.ui.zoom_slider,
             window.ui.zoom_in_button,
             window.ui.zoom_out_button,
-            window.ui.zoom_widget
+            window.ui.zoom_widget,
+            favorite_button=window.ui.favorite_button,
+            info_button=window.ui.info_button,
+            rotate_button=window.ui.rotate_left_button,
+            edit_button=window.ui.edit_button,
+            share_button=window.ui.share_button,
         )
 
         # Inject optional dependencies into Playback
@@ -117,7 +123,7 @@ class MainCoordinator(QObject):
         self._navigation.set_playback_coordinator(self._playback)
         # Manually attach info panel if available
         if hasattr(window.ui, 'info_panel'):
-            self._playback._info_panel = window.ui.info_panel # Direct private access for MVP wiring
+            self._playback.set_info_panel(window.ui.info_panel)
 
         # 4. Edit Coordinator
         self._edit = EditCoordinator(
@@ -135,6 +141,20 @@ class MainCoordinator(QObject):
             window.ui.rescan_action,
             context,
         )
+
+        self._share_controller = ShareController(
+            settings=context.settings,
+            playlist=self._playback,  # Acts as playlist controller (provides current_row)
+            asset_model=self._asset_list_vm,
+            status_bar=self._status_bar,
+            notification_toast=window.ui.notification_toast,
+            share_button=window.ui.share_button,
+            share_action_group=window.ui.share_action_group,
+            copy_file_action=window.ui.share_action_copy_file,
+            copy_path_action=window.ui.share_action_copy_path,
+            reveal_action=window.ui.share_action_reveal_file,
+        )
+        self._share_controller.restore_preference()
 
         # --- Binding Data to Views ---
         window.ui.grid_view.setModel(self._asset_list_vm)
@@ -158,7 +178,22 @@ class MainCoordinator(QObject):
 
     def shutdown(self) -> None:
         """Stop worker threads and background jobs before the app exits."""
-        self._status_bar.stop()
+        # 1. Cancel any active background scans/imports via Facade
+        if self._facade:
+            self._facade.cancel_active_scans()
+
+        # 2. Stop playback (video/audio)
+        if self._playback:
+            self._playback.shutdown()
+
+        # 3. Shutdown other coordinators if they have cleanup logic
+        if self._edit:
+            self._edit.shutdown()
+
+        if self._thumbnail_service:
+            self._thumbnail_service.shutdown()
+
+        # 4. Wait for background threads (e.g. thumbnail generation) to finish
         QThreadPool.globalInstance().waitForDone()
 
     def _connect_signals(self) -> None:
@@ -180,6 +215,8 @@ class MainCoordinator(QObject):
         ui.open_album_action.triggered.connect(self._handle_open_album_dialog)
         ui.edit_button.clicked.connect(self._handle_edit_clicked)
         ui.edit_rotate_left_button.clicked.connect(self._playback.rotate_current_asset)
+        ui.rotate_left_button.clicked.connect(self._playback.rotate_current_asset)
+        ui.favorite_button.clicked.connect(self._handle_toggle_favorite)
 
         # Info Button
         if hasattr(ui, 'info_button'):
@@ -246,22 +283,9 @@ class MainCoordinator(QObject):
 
     def _on_favorite_clicked(self, index: QModelIndex):
         """Handle favorite badge click from grid view."""
-        asset_id = self._asset_list_vm.data(index, Roles.ASSET_ID)
-        if asset_id:
-            new_state = self._asset_service.toggle_favorite(asset_id)
-            # The ViewModel data method might be proxy index, so we need row in source if VM expects it?
-            # update_favorite expects row in VM (which is what index.row() gives if index is from VM)
-            # GalleryGridView model is AssetListViewModel (or proxy).
-            # The signal passes index from GalleryGridView.
-            # If GalleryGridView model is proxy (AssetModel), we need to map to source?
-            # AssetListViewModel.update_favorite takes `row` (int).
-            # If it's a proxy, the row refers to proxy row? No, ViewModel is usually source.
-            # But wait, `ui.grid_view.setModel(self._asset_list_vm)` in MainCoordinator.
-            # So grid view uses AssetListViewModel directly (or AssetModel?).
-            # In MainCoordinator:
-            # self._asset_list_vm = AssetListViewModel(...)
-            # window.ui.grid_view.setModel(self._asset_list_vm)
-            # So it is the source model.
+        path_str = self._asset_list_vm.data(index, Roles.REL) or self._asset_list_vm.data(index, Roles.ABS)
+        if path_str:
+            new_state = self._asset_service.toggle_favorite_by_path(Path(path_str))
             self._asset_list_vm.update_favorite(index.row(), new_state)
 
     def _sync_selection(self, row: int):
@@ -294,14 +318,23 @@ class MainCoordinator(QObject):
     def _handle_toggle_favorite(self):
         """Toggles favorite status for selected assets."""
         indexes = self._window.ui.grid_view.selectionModel().selectedIndexes()
+
+        # Fallback: If no selection in grid, but we have a playback row?
+        # This handles the case where Detail View is active but grid selection sync failed or focus issue.
+        if not indexes and self._playback.current_row() >= 0:
+             # Construct an index for the current playback row
+             idx = self._asset_list_vm.index(self._playback.current_row(), 0)
+             if idx.isValid():
+                 indexes = [idx]
+
         if not indexes:
             # Try filmstrip if grid has no selection
             indexes = self._window.ui.filmstrip_view.selectionModel().selectedIndexes()
 
         for idx in indexes:
-            asset_id = self._asset_list_vm.data(idx, Roles.ASSET_ID)
-            if asset_id:
-                new_state = self._asset_service.toggle_favorite(asset_id)
+            path_str = self._asset_list_vm.data(idx, Roles.REL) or self._asset_list_vm.data(idx, Roles.ABS)
+            if path_str:
+                new_state = self._asset_service.toggle_favorite_by_path(Path(path_str))
                 self._asset_list_vm.update_favorite(idx.row(), new_state)
 
     def open_album_from_path(self, path: Path):

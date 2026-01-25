@@ -98,6 +98,15 @@ class SQLiteAssetRepository(IAssetRepository):
                 return self._map_row_to_asset(row)
             return None
 
+    def get_by_path(self, path: Path) -> Optional[Asset]:
+        # Find by 'rel' column which stores the path
+        path_str = str(path)
+        with self._pool.connection() as conn:
+            row = conn.execute("SELECT * FROM assets WHERE rel = ?", (path_str,)).fetchone()
+            if row:
+                return self._map_row_to_asset(row)
+            return None
+
     def get_by_album(self, album_id: str) -> List[Asset]:
         with self._pool.connection() as conn:
             rows = conn.execute("SELECT * FROM assets WHERE album_id = ?", (album_id,)).fetchall()

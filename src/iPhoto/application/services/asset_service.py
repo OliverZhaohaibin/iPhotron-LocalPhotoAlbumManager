@@ -1,5 +1,6 @@
 import logging
 from typing import List, Optional
+from pathlib import Path
 
 from src.iPhoto.domain.models import Asset
 from src.iPhoto.domain.models.query import AssetQuery
@@ -27,6 +28,15 @@ class AssetService:
     def toggle_favorite(self, asset_id: str) -> bool:
         """Toggles the favorite status of an asset."""
         asset = self._repo.get(asset_id)
+        if asset:
+            asset.is_favorite = not asset.is_favorite
+            self._repo.save(asset)
+            return asset.is_favorite
+        return False
+
+    def toggle_favorite_by_path(self, path: Path) -> bool:
+        """Toggles the favorite status of an asset by path."""
+        asset = self._repo.get_by_path(path)
         if asset:
             asset.is_favorite = not asset.is_favorite
             self._repo.save(asset)

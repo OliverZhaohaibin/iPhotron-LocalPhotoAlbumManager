@@ -211,6 +211,10 @@ class MainCoordinator(QObject):
         # Coordinator Signals
         self._playback.assetChanged.connect(self._sync_selection)
 
+        # Viewer Interactions (Wheel Navigation)
+        ui.image_viewer.nextItemRequested.connect(self._playback.select_next)
+        ui.image_viewer.prevItemRequested.connect(self._playback.select_previous)
+
         # Menus
         ui.open_album_action.triggered.connect(self._handle_open_album_dialog)
         ui.edit_button.clicked.connect(self._handle_edit_clicked)

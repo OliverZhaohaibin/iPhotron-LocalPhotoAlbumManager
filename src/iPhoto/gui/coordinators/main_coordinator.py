@@ -178,7 +178,6 @@ class MainCoordinator(QObject):
 
     def shutdown(self) -> None:
         """Stop worker threads and background jobs before the app exits."""
-        self._status_bar.stop()
         QThreadPool.globalInstance().waitForDone()
 
     def _connect_signals(self) -> None:

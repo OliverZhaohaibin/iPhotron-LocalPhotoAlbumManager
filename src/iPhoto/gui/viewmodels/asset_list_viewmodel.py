@@ -42,6 +42,10 @@ class AssetListViewModel(QAbstractListModel):
     def rowCount(self, parent=QModelIndex()) -> int:
         return self._data_source.count()
 
+    def columnCount(self, parent=QModelIndex()) -> int:
+        """Explicitly return 1 column to avoid PySide6/Qt proxy model issues."""
+        return 1
+
     def data(self, index: QModelIndex, role: int = Qt.ItemDataRole.DisplayRole) -> Any:
         if not index.isValid():
             return None

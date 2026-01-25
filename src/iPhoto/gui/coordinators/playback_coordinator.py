@@ -235,6 +235,13 @@ class PlaybackCoordinator(QObject):
         if self._info_panel:
             self._info_panel.close()
 
+    def shutdown(self):
+        """Stop any active media playback and release resources."""
+        self._player_view.video_area.stop()
+        self._is_playing = False
+        if self._info_panel:
+            self._info_panel.close()
+
     def select_next(self):
         """Move to the next asset."""
         next_row = self._current_row + 1

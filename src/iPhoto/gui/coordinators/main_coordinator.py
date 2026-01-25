@@ -178,6 +178,19 @@ class MainCoordinator(QObject):
 
     def shutdown(self) -> None:
         """Stop worker threads and background jobs before the app exits."""
+        # 1. Cancel any active background scans/imports via Facade
+        if self._facade:
+            self._facade.cancel_active_scans()
+
+        # 2. Stop playback (video/audio)
+        if self._playback:
+            self._playback.shutdown()
+
+        # 3. Shutdown other coordinators if they have cleanup logic
+        # self._navigation.shutdown() # Not implemented yet
+        # self._edit.shutdown() # Not implemented yet
+
+        # 4. Wait for background threads (e.g. thumbnail generation) to finish
         QThreadPool.globalInstance().waitForDone()
 
     def _connect_signals(self) -> None:

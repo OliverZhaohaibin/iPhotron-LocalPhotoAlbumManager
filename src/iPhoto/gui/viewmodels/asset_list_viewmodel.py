@@ -194,10 +194,10 @@ class AssetListViewModel(QAbstractListModel):
         if old_row >= 0:
             idx = self.index(old_row, 0)
             if idx.isValid():
-                self.dataChanged.emit(idx, idx, [Roles.IS_CURRENT])
+                self.dataChanged.emit(idx, idx, [Roles.IS_CURRENT, Qt.ItemDataRole.SizeHintRole])
 
         # Notify new row
         if row >= 0:
             idx = self.index(row, 0)
             if idx.isValid():
-                self.dataChanged.emit(idx, idx, [Roles.IS_CURRENT])
+                self.dataChanged.emit(idx, idx, [Roles.IS_CURRENT, Qt.ItemDataRole.SizeHintRole])

@@ -72,8 +72,24 @@ class FilmstripView(AssetGrid):
             self._updating_style = False
 
     def setModel(self, model) -> None:  # type: ignore[override]
+        old = self.model()
+        if old is not None:
+            old.dataChanged.disconnect(self._on_data_changed)
+
         super().setModel(model)
+        if model is not None:
+            model.dataChanged.connect(self._on_data_changed)
+
         self.refresh_spacers()
+
+    def _on_data_changed(self, top: QModelIndex, bottom: QModelIndex, roles: list[int] = []) -> None:
+        """Handle data changes to trigger layout updates if necessary."""
+        # If no roles specified (all changed) or IS_CURRENT changed, we need to relayout
+        if not roles or Roles.IS_CURRENT in roles:
+            # Re-calculating layout is expensive, so check if we need it.
+            # QListView with uniformItemSizes=False might need a nudge.
+            self.scheduleDelayedItemsLayout()
+            self.refresh_spacers(top)
 
     def resizeEvent(self, event: QResizeEvent) -> None:  # type: ignore[override]
         super().resizeEvent(event)

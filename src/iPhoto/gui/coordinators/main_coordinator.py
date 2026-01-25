@@ -187,8 +187,11 @@ class MainCoordinator(QObject):
             self._playback.shutdown()
 
         # 3. Shutdown other coordinators if they have cleanup logic
-        # self._navigation.shutdown() # Not implemented yet
-        # self._edit.shutdown() # Not implemented yet
+        if self._edit:
+            self._edit.shutdown()
+
+        if self._thumbnail_service:
+            self._thumbnail_service.shutdown()
 
         # 4. Wait for background threads (e.g. thumbnail generation) to finish
         QThreadPool.globalInstance().waitForDone()

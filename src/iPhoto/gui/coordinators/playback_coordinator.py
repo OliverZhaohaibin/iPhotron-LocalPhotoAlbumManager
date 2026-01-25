@@ -142,7 +142,14 @@ class PlaybackCoordinator(QObject):
 
     @Slot(QModelIndex)
     def _on_filmstrip_clicked(self, index: QModelIndex):
-        self.play_asset(index.row())
+        # Handle Proxy Model (if present)
+        model = self._filmstrip_view.model()
+        if hasattr(model, "mapToSource"):
+            source_idx = model.mapToSource(index)
+            if source_idx.isValid():
+                self.play_asset(source_idx.row())
+        else:
+            self.play_asset(index.row())
 
     @Slot(int)
     def _handle_zoom_slider_changed(self, value: int):
@@ -254,6 +261,12 @@ class PlaybackCoordinator(QObject):
     def _sync_filmstrip_selection(self, row: int):
         """Update filmstrip selection and scroll to the item."""
         idx = self._asset_vm.index(row, 0)
+
+        # Handle Proxy Model (if present)
+        model = self._filmstrip_view.model()
+        if hasattr(model, "mapFromSource"):
+            idx = model.mapFromSource(idx)
+
         if idx.isValid():
              self._filmstrip_view.selectionModel().setCurrentIndex(
                 idx, QItemSelectionModel.ClearAndSelect

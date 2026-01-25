@@ -177,6 +177,7 @@ class PlaybackCoordinator(QObject):
             self._refresh_info_panel(row)
 
     def reset_for_gallery(self):
+        self._player_view.video_area.stop()
         self._player_view.show_placeholder()
         self._player_bar.setEnabled(False)
         self._is_playing = False

@@ -214,6 +214,8 @@ class MainCoordinator(QObject):
         # Viewer Interactions (Wheel Navigation)
         ui.image_viewer.nextItemRequested.connect(self._playback.select_next)
         ui.image_viewer.prevItemRequested.connect(self._playback.select_previous)
+        ui.video_area.nextItemRequested.connect(self._playback.select_next)
+        ui.video_area.prevItemRequested.connect(self._playback.select_previous)
 
         # Menus
         ui.open_album_action.triggered.connect(self._handle_open_album_dialog)

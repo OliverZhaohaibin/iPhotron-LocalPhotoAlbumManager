@@ -15,7 +15,7 @@ from PySide6.QtCore import (
     Qt,
     Signal,
 )
-from PySide6.QtGui import QColor, QCursor, QMouseEvent, QPainter, QResizeEvent
+from PySide6.QtGui import QColor, QCursor, QMouseEvent, QPainter, QResizeEvent, QWheelEvent
 from PySide6.QtWidgets import (
     QFrame,
     QGraphicsOpacityEffect,
@@ -52,6 +52,8 @@ class VideoArea(QWidget):
     controlsVisibleChanged = Signal(bool)
     fullscreenExitRequested = Signal()
     playbackStateChanged = Signal(bool)
+    nextItemRequested = Signal()
+    prevItemRequested = Signal()
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
@@ -306,6 +308,16 @@ class VideoArea(QWidget):
             event.accept()
             return
         super().mouseDoubleClickEvent(event)
+
+    def wheelEvent(self, event: QWheelEvent) -> None:
+        """Handle wheel events for navigation."""
+        delta = event.angleDelta()
+        step = delta.y() or delta.x()
+        if step < 0:
+            self.nextItemRequested.emit()
+        elif step > 0:
+            self.prevItemRequested.emit()
+        event.accept()
 
     def showEvent(self, event) -> None:  # pragma: no cover - GUI behaviour
         """Force position update when widget becomes visible."""

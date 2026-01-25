@@ -322,12 +322,24 @@ class MainCoordinator(QObject):
 
     def _handle_edit_clicked(self):
         # Trigger Edit Mode from Detail View context
-        indexes = self._window.ui.grid_view.selectionModel().selectedIndexes()
-        if indexes:
-            idx = indexes[0]
-            path_str = self._asset_list_vm.data(idx, Roles.ABS)
-            if path_str:
-                self._edit.enter_edit_mode(Path(path_str))
+        target_path_str = None
+
+        # 1. Priority: Detail View (User clicked 'Edit' on the Detail Page)
+        if self._view_router.is_detail_view_active():
+            row = self._playback.current_row()
+            if row >= 0:
+                idx = self._asset_list_vm.index(row, 0)
+                if idx.isValid():
+                    target_path_str = self._asset_list_vm.data(idx, Roles.ABS)
+
+        # 2. Fallback: Grid View Selection
+        if not target_path_str:
+            indexes = self._window.ui.grid_view.selectionModel().selectedIndexes()
+            if indexes:
+                target_path_str = self._asset_list_vm.data(indexes[0], Roles.ABS)
+
+        if target_path_str:
+            self._edit.enter_edit_mode(Path(target_path_str))
 
     def _handle_back_button(self):
         """Returns to the gallery view."""
@@ -336,15 +348,19 @@ class MainCoordinator(QObject):
 
     def _handle_toggle_favorite(self):
         """Toggles favorite status for selected assets."""
-        indexes = self._window.ui.grid_view.selectionModel().selectedIndexes()
+        indexes = []
 
-        # Fallback: If no selection in grid, but we have a playback row?
-        # This handles the case where Detail View is active but grid selection sync failed or focus issue.
-        if not indexes and self._playback.current_row() >= 0:
-             # Construct an index for the current playback row
-             idx = self._asset_list_vm.index(self._playback.current_row(), 0)
-             if idx.isValid():
-                 indexes = [idx]
+        # 1. Priority: Detail View (User clicked 'Heart' on the Detail Page or Shortcut)
+        if self._view_router.is_detail_view_active():
+            row = self._playback.current_row()
+            if row >= 0:
+                idx = self._asset_list_vm.index(row, 0)
+                if idx.isValid():
+                    indexes = [idx]
+
+        # 2. Fallback: Grid View or Filmstrip Selection
+        if not indexes:
+            indexes = self._window.ui.grid_view.selectionModel().selectedIndexes()
 
         if not indexes:
             # Try filmstrip if grid has no selection

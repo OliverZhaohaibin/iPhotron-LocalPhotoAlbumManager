@@ -23,6 +23,11 @@ class IAssetRepository(ABC):
         """Find single asset by ID"""
         pass
 
+    @abstractmethod
+    def get_by_path(self, path: Path) -> Optional[Asset]:
+        """Find single asset by Path (PK)"""
+        pass
+
     # Keeping old method for backward compatibility if needed,
     # but strictly we should move to find_by_query
     @abstractmethod

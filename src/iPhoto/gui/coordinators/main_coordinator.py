@@ -268,22 +268,9 @@ class MainCoordinator(QObject):
 
     def _on_favorite_clicked(self, index: QModelIndex):
         """Handle favorite badge click from grid view."""
-        asset_id = self._asset_list_vm.data(index, Roles.ASSET_ID)
-        if asset_id:
-            new_state = self._asset_service.toggle_favorite(asset_id)
-            # The ViewModel data method might be proxy index, so we need row in source if VM expects it?
-            # update_favorite expects row in VM (which is what index.row() gives if index is from VM)
-            # GalleryGridView model is AssetListViewModel (or proxy).
-            # The signal passes index from GalleryGridView.
-            # If GalleryGridView model is proxy (AssetModel), we need to map to source?
-            # AssetListViewModel.update_favorite takes `row` (int).
-            # If it's a proxy, the row refers to proxy row? No, ViewModel is usually source.
-            # But wait, `ui.grid_view.setModel(self._asset_list_vm)` in MainCoordinator.
-            # So grid view uses AssetListViewModel directly (or AssetModel?).
-            # In MainCoordinator:
-            # self._asset_list_vm = AssetListViewModel(...)
-            # window.ui.grid_view.setModel(self._asset_list_vm)
-            # So it is the source model.
+        path_str = self._asset_list_vm.data(index, Roles.REL) or self._asset_list_vm.data(index, Roles.ABS)
+        if path_str:
+            new_state = self._asset_service.toggle_favorite_by_path(Path(path_str))
             self._asset_list_vm.update_favorite(index.row(), new_state)
 
     def _sync_selection(self, row: int):
@@ -316,14 +303,23 @@ class MainCoordinator(QObject):
     def _handle_toggle_favorite(self):
         """Toggles favorite status for selected assets."""
         indexes = self._window.ui.grid_view.selectionModel().selectedIndexes()
+
+        # Fallback: If no selection in grid, but we have a playback row?
+        # This handles the case where Detail View is active but grid selection sync failed or focus issue.
+        if not indexes and self._playback.current_row() >= 0:
+             # Construct an index for the current playback row
+             idx = self._asset_list_vm.index(self._playback.current_row(), 0)
+             if idx.isValid():
+                 indexes = [idx]
+
         if not indexes:
             # Try filmstrip if grid has no selection
             indexes = self._window.ui.filmstrip_view.selectionModel().selectedIndexes()
 
         for idx in indexes:
-            asset_id = self._asset_list_vm.data(idx, Roles.ASSET_ID)
-            if asset_id:
-                new_state = self._asset_service.toggle_favorite(asset_id)
+            path_str = self._asset_list_vm.data(idx, Roles.REL) or self._asset_list_vm.data(idx, Roles.ABS)
+            if path_str:
+                new_state = self._asset_service.toggle_favorite_by_path(Path(path_str))
                 self._asset_list_vm.update_favorite(idx.row(), new_state)
 
     def open_album_from_path(self, path: Path):

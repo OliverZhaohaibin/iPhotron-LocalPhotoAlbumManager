@@ -110,7 +110,12 @@ class MainCoordinator(QObject):
             window.ui.zoom_slider,
             window.ui.zoom_in_button,
             window.ui.zoom_out_button,
-            window.ui.zoom_widget
+            window.ui.zoom_widget,
+            favorite_button=window.ui.favorite_button,
+            info_button=window.ui.info_button,
+            rotate_button=window.ui.rotate_left_button,
+            edit_button=window.ui.edit_button,
+            share_button=window.ui.share_button,
         )
 
         # Inject optional dependencies into Playback

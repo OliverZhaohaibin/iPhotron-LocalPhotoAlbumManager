@@ -21,7 +21,7 @@ if TYPE_CHECKING:
     from src.iPhoto.gui.ui.controllers.player_view_controller import PlayerViewController
     from src.iPhoto.gui.viewmodels.asset_list_viewmodel import AssetListViewModel
     from src.iPhoto.gui.coordinators.navigation_coordinator import NavigationCoordinator
-    from PySide6.QtWidgets import QSlider, QToolButton, QWidget
+    from PySide6.QtWidgets import QPushButton, QSlider, QToolButton, QWidget
 
 LOGGER = logging.getLogger(__name__)
 
@@ -43,7 +43,13 @@ class PlaybackCoordinator(QObject):
         zoom_slider: QSlider,
         zoom_in_button: QToolButton,
         zoom_out_button: QToolButton,
-        zoom_widget: QWidget
+        zoom_widget: QWidget,
+        # Action Buttons
+        favorite_button: QToolButton,
+        info_button: QToolButton,
+        rotate_button: QToolButton,
+        edit_button: QPushButton,
+        share_button: QToolButton,
     ):
         super().__init__()
         self._player_bar = player_bar
@@ -55,6 +61,12 @@ class PlaybackCoordinator(QObject):
         self._zoom_in = zoom_in_button
         self._zoom_out = zoom_out_button
         self._zoom_widget = zoom_widget
+
+        self._favorite_button = favorite_button
+        self._info_button = info_button
+        self._rotate_button = rotate_button
+        self._edit_button = edit_button
+        self._share_button = share_button
 
         self._is_playing = False
         self._current_row = -1
@@ -84,6 +96,9 @@ class PlaybackCoordinator(QObject):
         # Player View -> Coordinator
         self._player_view.liveReplayRequested.connect(self.replay_live_photo)
         self._player_view.video_area.playbackStateChanged.connect(self._sync_playback_state)
+
+        # Model -> Coordinator
+        self._asset_vm.dataChanged.connect(self._on_data_changed)
 
     def _connect_zoom_controls(self):
         viewer = self._player_view.image_viewer
@@ -148,11 +163,21 @@ class PlaybackCoordinator(QObject):
         abs_path = self._asset_vm.data(idx, Roles.ABS)
         is_video = self._asset_vm.data(idx, Roles.IS_VIDEO)
         is_live = self._asset_vm.data(idx, Roles.IS_LIVE)
+        is_fav = self._asset_vm.data(idx, Roles.FEATURED)
 
         if not abs_path:
             return
 
         source = Path(abs_path)
+
+        # Enable detail page actions
+        self._favorite_button.setEnabled(True)
+        self._info_button.setEnabled(True)
+        self._share_button.setEnabled(True)
+        self._edit_button.setEnabled(True)
+        self._rotate_button.setEnabled(not is_video)  # Simple logic for now
+
+        self._update_favorite_icon(bool(is_fav))
 
         # Load Media
         if is_video:
@@ -182,6 +207,25 @@ class PlaybackCoordinator(QObject):
         # Update Info Panel if visible
         if self._info_panel and self._info_panel.isVisible():
             self._refresh_info_panel(row)
+
+    def _update_favorite_icon(self, is_favorite: bool):
+        icon_name = "suit.heart.fill.svg" if is_favorite else "suit.heart.svg"
+        self._favorite_button.setIcon(load_icon(icon_name))
+
+    def _on_data_changed(self, top, bottom, roles):
+        if self._current_row < 0:
+            return
+
+        # Check if the current asset is affected
+        # Since we use row index, we just check if current_row is within top/bottom
+        # Note: Qt models can emit ranges.
+
+        # Check if current row is in the range
+        if top.row() <= self._current_row <= bottom.row():
+            if not roles or Roles.FEATURED in roles:
+                idx = self._asset_vm.index(self._current_row, 0)
+                is_fav = self._asset_vm.data(idx, Roles.FEATURED)
+                self._update_favorite_icon(bool(is_fav))
 
     def reset_for_gallery(self):
         self._player_view.video_area.stop()

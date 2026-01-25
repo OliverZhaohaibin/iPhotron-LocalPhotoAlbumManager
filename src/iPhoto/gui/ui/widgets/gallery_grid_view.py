@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from OpenGL import GL as gl
-from PySide6.QtCore import QEvent, QSize, Qt
+from PySide6.QtCore import QEvent, QSize, Qt, Signal
 from PySide6.QtGui import QPaintEvent, QPalette, QSurfaceFormat, QColor, QGuiApplication
 from PySide6.QtOpenGLWidgets import QOpenGLWidget
 from PySide6.QtWidgets import QAbstractItemView, QListView

@@ -264,7 +264,9 @@ class EditCoordinator(QObject):
 
     def _handle_session_changed(self, values: dict):
         if self._session:
-            self._preview_manager.update_adjustments(self._session.values())
+            # Note: We do not call _preview_manager.update_adjustments() here because
+            # we are using GLImageViewer for realtime rendering. The preview manager's
+            # CPU rendering path is unobserved and causes unnecessary thread pool load.
             self._apply_session_adjustments_to_viewer()
 
     def _apply_session_adjustments_to_viewer(self):

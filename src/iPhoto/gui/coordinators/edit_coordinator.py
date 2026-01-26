@@ -111,6 +111,8 @@ class EditCoordinator(QObject):
 
         # Sidebar interactions
         self._ui.edit_sidebar.interactionStarted.connect(self.push_undo_state)
+        self._ui.edit_sidebar.bwParamsPreviewed.connect(self._handle_bw_preview)
+        self._ui.edit_sidebar.bwParamsCommitted.connect(self._handle_bw_commit)
         self._ui.edit_image_viewer.cropInteractionStarted.connect(self.push_undo_state)
         self._ui.edit_image_viewer.cropChanged.connect(self._handle_crop_changed)
 
@@ -251,6 +253,40 @@ class EditCoordinator(QObject):
         self._compare_active = False
         self._apply_session_adjustments_to_viewer()
 
+    def _handle_bw_preview(self, params):
+        if not self._session: return
+        current_values = self._session.values()
+        updates = {
+            "BW_Intensity": params.intensity,
+            "BW_Neutrals": params.neutrals,
+            "BW_Tone": params.tone,
+            "BW_Grain": params.grain,
+            "BW_Master": params.master,
+            # Ensure the shader sees the effect enabled during preview drag
+            "BW_Enabled": True
+        }
+        current_values.update(updates)
+
+        # Use existing optimized path: resolve only, skip manager update
+        try:
+            adj = self._preview_manager.resolve_adjustments(current_values)
+        except AttributeError:
+            from src.iPhoto.gui.ui.controllers.edit_preview_manager import resolve_adjustment_mapping
+            adj = resolve_adjustment_mapping(current_values, stats=self._preview_manager.color_stats())
+
+        self._ui.edit_image_viewer.set_adjustments(adj)
+
+    def _handle_bw_commit(self, params):
+        if not self._session: return
+        updates = {
+            "BW_Intensity": params.intensity,
+            "BW_Neutrals": params.neutrals,
+            "BW_Tone": params.tone,
+            "BW_Grain": params.grain,
+            "BW_Master": params.master,
+        }
+        self._session.set_values(updates)
+
     def push_undo_state(self):
         self._history_manager.push_undo_state()
 
@@ -267,13 +303,19 @@ class EditCoordinator(QObject):
             # Note: We do not call _preview_manager.update_adjustments() here because
             # we are using GLImageViewer for realtime rendering. The preview manager's
             # CPU rendering path is unobserved and causes unnecessary thread pool load.
+            _LOGGER.debug(f"Session changed: updating viewer with {len(values)} values")
             self._apply_session_adjustments_to_viewer()
 
     def _apply_session_adjustments_to_viewer(self):
         if self._session and not self._compare_active:
+            import time
+            t0 = time.perf_counter()
             adj = self._resolve_session_adjustments()
+            t1 = time.perf_counter()
             self._active_adjustments = adj
             self._ui.edit_image_viewer.set_adjustments(adj)
+            t2 = time.perf_counter()
+            _LOGGER.debug(f"Applied adjustments: resolve={t1-t0:.4f}s, set_gl={t2-t1:.4f}s")
 
     def _resolve_session_adjustments(self):
         if not self._session: return {}

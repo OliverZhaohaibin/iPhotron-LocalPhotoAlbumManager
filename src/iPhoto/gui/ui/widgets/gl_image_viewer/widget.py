@@ -248,6 +248,8 @@ class GLImageViewer(QOpenGLWidget):
 
     def set_adjustments(self, adjustments: Mapping[str, float] | None = None) -> None:
         """Update the active adjustment uniforms without replacing the texture."""
+        import time
+        t0 = time.perf_counter()
 
         mapped_adjustments = dict(adjustments or {})
         self._adjustments = mapped_adjustments
@@ -260,6 +262,9 @@ class GLImageViewer(QOpenGLWidget):
         if self._auto_crop_view_locked and not self._crop_controller.is_active():
             self._reapply_locked_crop_view()
         self.update()
+        t1 = time.perf_counter()
+        if t1 - t0 > 0.005:
+            _LOGGER.debug(f"GLImageViewer set_adjustments took {t1-t0:.4f}s")
 
     def current_image_source(self) -> object | None:
         """Return the identifier describing the currently displayed image."""

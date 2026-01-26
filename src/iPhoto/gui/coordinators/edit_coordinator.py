@@ -27,6 +27,7 @@ from src.iPhoto.io import sidecar
 if TYPE_CHECKING:
     from src.iPhoto.gui.ui.widgets.edit_view import EditView
     from src.iPhoto.gui.viewmodels.asset_list_viewmodel import AssetListViewModel
+    from src.iPhoto.gui.ui.controllers.window_theme_controller import WindowThemeController
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -41,7 +42,9 @@ class EditCoordinator(QObject):
         edit_page: QObject, # The widget containing edit UI (Ui_MainWindow components)
         router: ViewRouter,
         event_bus: EventBus,
-        asset_vm: AssetListViewModel
+        asset_vm: AssetListViewModel,
+        window: QObject | None = None,
+        theme_controller: WindowThemeController | None = None
     ):
         super().__init__()
         # We need access to specific UI elements within edit_page (which is likely MainWindow.ui)
@@ -49,6 +52,14 @@ class EditCoordinator(QObject):
         self._router = router
         self._bus = event_bus
         self._asset_vm = asset_vm
+        self._theme_controller = theme_controller
+
+        self._transition_manager = EditViewTransitionManager(
+            self._ui,
+            window,
+            parent=self,
+            theme_controller=theme_controller
+        )
 
         # State
         self._session: Optional[EditSession] = None
@@ -105,7 +116,7 @@ class EditCoordinator(QObject):
 
     def enter_edit_mode(self, asset_path: Path):
         """Prepares the edit view for the given asset and switches view."""
-        if self._router.is_edit_view_active():
+        if self._session is not None:
             return
 
         self._current_source = asset_path
@@ -137,8 +148,12 @@ class EditCoordinator(QObject):
         self._header_layout_manager.switch_to_edit_mode()
         self._zoom_handler.connect_controls()
 
+        if self._theme_controller:
+            self._theme_controller.apply_edit_theme()
+
         # Switch View
         self._router.show_edit()
+        self._transition_manager.enter_edit_mode(animate=True)
 
         # Start Loading High-Res Image
         self._start_async_edit_load(asset_path)
@@ -166,8 +181,16 @@ class EditCoordinator(QObject):
         self._is_loading_edit_image = False
         self._ui.edit_image_viewer.set_loading(False)
 
-        # Sidebar Preview logic (omitted complex scaling for brevity, assumes loader handles basic)
-        # self._pipeline_loader.prepare_sidebar_preview(...)
+        # Calculate target height for sidebar previews
+        target_height = self._ui.edit_sidebar.preview_thumbnail_height()
+        if target_height <= 0:
+            target_height = 64  # Fallback
+
+        self._pipeline_loader.prepare_sidebar_preview(
+            image,
+            target_height=target_height,
+            full_res_image_for_fallback=image
+        )
 
     def _on_edit_image_load_failed(self, path: Path, msg: str):
         _LOGGER.error(f"Failed to load edit image: {msg}")
@@ -185,7 +208,12 @@ class EditCoordinator(QObject):
         self._preview_manager.stop_session()
         self._zoom_handler.disconnect_controls()
         self._header_layout_manager.restore_detail_mode()
+
+        if self._theme_controller:
+            self._theme_controller.restore_global_theme()
+
         self._router.show_detail()
+        self._transition_manager.leave_edit_mode(animate=True)
 
     # --- Actions ---
 

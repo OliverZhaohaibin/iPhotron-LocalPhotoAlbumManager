@@ -52,6 +52,7 @@ class EditCoordinator(QObject):
         self._router = router
         self._bus = event_bus
         self._asset_vm = asset_vm
+        self._theme_controller = theme_controller
 
         self._transition_manager = EditViewTransitionManager(
             self._ui,
@@ -147,6 +148,9 @@ class EditCoordinator(QObject):
         self._header_layout_manager.switch_to_edit_mode()
         self._zoom_handler.connect_controls()
 
+        if self._theme_controller:
+            self._theme_controller.apply_edit_theme()
+
         # Switch View
         self._router.show_edit()
         self._transition_manager.enter_edit_mode(animate=True)
@@ -196,6 +200,10 @@ class EditCoordinator(QObject):
         self._preview_manager.stop_session()
         self._zoom_handler.disconnect_controls()
         self._header_layout_manager.restore_detail_mode()
+
+        if self._theme_controller:
+            self._theme_controller.restore_global_theme()
+
         self._router.show_detail()
         self._transition_manager.leave_edit_mode(animate=True)
 

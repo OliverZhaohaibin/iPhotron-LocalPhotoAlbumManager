@@ -318,8 +318,9 @@ class GLImageViewer(QOpenGLWidget):
         quarter-turn counter.  The zoom stack is reset so the fit-to-view baseline adapts
         to the swapped logical dimensions after the aspect ratio flips.
         """
-
-        rotated_steps = (geometry.get_rotate_steps(self._adjustments) - 1) % 4
+        current_steps = geometry.get_rotate_steps(self._adjustments)
+        rotated_steps = (current_steps - 1) % 4
+        print(f"[DEBUG] rotate_image_ccw: current={current_steps}, new={rotated_steps}")
 
         # Remap perspective sliders into the rotated coordinate frame so that the visual
         # effect stays consistent with what the user saw pre-rotation.  Perspective

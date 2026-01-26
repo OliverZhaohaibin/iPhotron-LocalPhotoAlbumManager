@@ -244,6 +244,7 @@ class EditCoordinator(QObject):
             self._session.reset()
 
     def _handle_rotate_left_clicked(self):
+        print(f"[DEBUG] _handle_rotate_left_clicked called")
         if self._session:
             self.push_undo_state()
             updates = self._ui.edit_image_viewer.rotate_image_ccw()

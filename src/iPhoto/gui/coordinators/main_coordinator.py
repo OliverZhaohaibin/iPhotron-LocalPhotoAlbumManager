@@ -327,20 +327,32 @@ class MainCoordinator(QObject):
             self.open_album_from_path(path)
 
     def _handle_edit_clicked(self):
+        print(f"DEBUG: _handle_edit_clicked triggered")
         # Trigger Edit Mode from Detail View context
         indexes = self._window.ui.grid_view.selectionModel().selectedIndexes()
+        print(f"DEBUG: Initial indexes from grid: {len(indexes)}")
 
         # Fallback: If no selection in grid, but we have a playback row?
         if not indexes and self._playback.current_row() >= 0:
-            idx = self._asset_list_vm.index(self._playback.current_row(), 0)
+            row = self._playback.current_row()
+            print(f"DEBUG: No grid selection, fallback to playback row: {row}")
+            idx = self._asset_list_vm.index(row, 0)
             if idx.isValid():
                 indexes = [idx]
+            else:
+                print(f"DEBUG: Index for row {row} is invalid")
 
         if indexes:
             idx = indexes[0]
             path_str = self._asset_list_vm.data(idx, Roles.ABS)
+            print(f"DEBUG: Selected path: {path_str}")
             if path_str:
+                print(f"DEBUG: Entering edit mode for {path_str}")
                 self._edit.enter_edit_mode(Path(path_str))
+            else:
+                print("DEBUG: path_str is empty")
+        else:
+            print("DEBUG: No indexes found to edit")
 
     def _handle_back_button(self):
         """Returns to the gallery view."""

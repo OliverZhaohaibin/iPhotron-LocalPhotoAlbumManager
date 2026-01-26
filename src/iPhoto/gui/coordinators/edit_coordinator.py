@@ -75,6 +75,7 @@ class EditCoordinator(QObject):
 
         self._header_layout_manager = HeaderLayoutManager(self._ui, parent=self)
         self._preview_manager = EditPreviewManager(self._ui.edit_image_viewer, self)
+        self._transition_manager = EditViewTransitionManager(self._ui, None, parent=self)
 
         self._connect_signals()
 
@@ -140,6 +141,7 @@ class EditCoordinator(QObject):
 
         # Switch View
         self._router.show_edit()
+        self._transition_manager.enter_edit_mode()
 
         # Start Loading High-Res Image
         self._start_async_edit_load(asset_path)
@@ -186,6 +188,7 @@ class EditCoordinator(QObject):
         self._preview_manager.stop_session()
         self._zoom_handler.disconnect_controls()
         self._header_layout_manager.restore_detail_mode()
+        self._transition_manager.leave_edit_mode()
         self._router.show_detail()
 
     # --- Actions ---

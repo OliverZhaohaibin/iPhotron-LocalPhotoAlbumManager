@@ -169,8 +169,15 @@ class EditCoordinator(QObject):
         self._is_loading_edit_image = False
         self._ui.edit_image_viewer.set_loading(False)
 
-        # Sidebar Preview logic (omitted complex scaling for brevity, assumes loader handles basic)
-        # self._pipeline_loader.prepare_sidebar_preview(...)
+        # Generate Sidebar Preview
+        # Target height is typically small for sidebar thumbs (e.g. 150-200px) but we pass a larger value
+        # to ensure crispness on high DPI or if the sidebar is resized.
+        # The loader handles scaling logic.
+        self._pipeline_loader.prepare_sidebar_preview(
+            image,
+            target_height=1000, # Sufficient resolution for sidebar elements
+            full_res_image_for_fallback=image
+        )
 
     def _on_edit_image_load_failed(self, path: Path, msg: str):
         _LOGGER.error(f"Failed to load edit image: {msg}")

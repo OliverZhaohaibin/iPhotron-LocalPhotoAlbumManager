@@ -234,7 +234,7 @@ class MainCoordinator(QObject):
         # Menus
         ui.open_album_action.triggered.connect(self._handle_open_album_dialog)
         ui.edit_button.clicked.connect(self._handle_edit_clicked)
-        ui.edit_rotate_left_button.clicked.connect(self._playback.rotate_current_asset)
+        # ui.edit_rotate_left_button is handled by EditCoordinator in Edit Mode
         ui.rotate_left_button.clicked.connect(self._playback.rotate_current_asset)
         ui.favorite_button.clicked.connect(self._handle_toggle_favorite)
 

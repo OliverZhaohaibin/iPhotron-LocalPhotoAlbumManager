@@ -6,7 +6,7 @@ import logging
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional
 
-from PySide6.QtCore import QObject, Slot, QSize
+from PySide6.QtCore import QObject, Slot, QSize, QTimer
 from PySide6.QtGui import QImage
 
 from src.iPhoto.gui.coordinators.view_router import ViewRouter
@@ -86,6 +86,12 @@ class EditCoordinator(QObject):
 
         self._header_layout_manager = HeaderLayoutManager(self._ui, parent=self)
         self._preview_manager = EditPreviewManager(self._ui.edit_image_viewer, self)
+
+        self._update_throttler = QTimer(self)
+        self._update_throttler.setSingleShot(True)
+        self._update_throttler.setInterval(30)  # ~30fps cap
+        self._update_throttler.timeout.connect(self._perform_deferred_update)
+        self._pending_session_values: Optional[dict] = None
 
         self._connect_signals()
 
@@ -263,9 +269,19 @@ class EditCoordinator(QObject):
     # --- Helpers ---
 
     def _handle_session_changed(self, values: dict):
+        """Buffer session updates to avoid spamming the preview pipeline."""
+        self._pending_session_values = values
+        if not self._update_throttler.isActive():
+            self._perform_deferred_update()
+            self._update_throttler.start()
+
+    def _perform_deferred_update(self):
         if self._session:
-            self._preview_manager.update_adjustments(self._session.values())
+            # Always fetch the authoritative state from the session
+            current_values = self._session.values()
+            self._preview_manager.update_adjustments(current_values)
             self._apply_session_adjustments_to_viewer()
+            self._pending_session_values = None
 
     def _apply_session_adjustments_to_viewer(self):
         if self._session and not self._compare_active:

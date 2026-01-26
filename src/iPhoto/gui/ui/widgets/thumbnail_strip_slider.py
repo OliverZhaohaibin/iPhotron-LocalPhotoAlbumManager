@@ -408,6 +408,7 @@ class _ThumbnailTrack(QWidget):
         if self._slider is None or not self._slider._pressed:
             super().mouseMoveEvent(event)
             return
+        # print(f"[DEBUG] Slider drag: {event.position().x()}")
         self._update_value_from_position(event.position().x())
         event.accept()
 

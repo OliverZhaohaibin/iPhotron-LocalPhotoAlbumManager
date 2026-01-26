@@ -240,6 +240,7 @@ class EditBWSection(QWidget):
     def _handle_master_slider_changed(self, value: float) -> None:
         if self._updating_ui:
             return
+        print(f"[DEBUG] BW master slider changed: {value:.3f}")
         params = params_from_master(value, grain=self._sliders["BW_Grain"].value())
         self._updating_ui = True
         try:

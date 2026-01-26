@@ -263,8 +263,7 @@ class GLImageViewer(QOpenGLWidget):
             self._reapply_locked_crop_view()
         self.update()
         t1 = time.perf_counter()
-        if t1 - t0 > 0.005:
-            _LOGGER.debug(f"GLImageViewer set_adjustments took {t1-t0:.4f}s")
+        print(f"[DEBUG] GLImageViewer.set_adjustments: {t1-t0:.4f}s, {len(mapped_adjustments)} uniforms")
 
     def current_image_source(self) -> object | None:
         """Return the identifier describing the currently displayed image."""
@@ -449,6 +448,8 @@ class GLImageViewer(QOpenGLWidget):
         print("[GL INIT] initializeGL completed.")
 
     def paintGL(self) -> None:
+        import time
+        t_start = time.perf_counter()
         gf = self._gl_funcs
         if gf is None or self._renderer is None:
             return
@@ -526,6 +527,9 @@ class GLImageViewer(QOpenGLWidget):
                     crop_rect=crop_rect,
                     faded=self._crop_controller.is_faded_out(),
                 )
+        t_end = time.perf_counter()
+        if t_end - t_start > 0.010:
+            print(f"[DEBUG] paintGL slow: {t_end - t_start:.4f}s")
 
     # --------------------------- Crop helpers ---------------------------
 

@@ -118,6 +118,7 @@ class EditCoordinator(QObject):
 
     def enter_edit_mode(self, asset_path: Path):
         """Prepares the edit view for the given asset and switches view."""
+        print(f"[DEBUG] Enter edit mode: {asset_path}")
         if self._session is not None:
             return
 
@@ -125,10 +126,13 @@ class EditCoordinator(QObject):
 
         # Load Adjustments
         adjustments = sidecar.load_adjustments(asset_path)
+        print(f"[DEBUG] Loaded adjustments: {adjustments.keys()}")
 
         # Setup Session
         session = EditSession(self)
         session.set_values(adjustments, emit_individual=False)
+        print(f"[DEBUG] Session init state: Light={session.value('Light_Enabled')}, Color={session.value('Color_Enabled')}, BW={session.value('BW_Enabled')}")
+
         session.valuesChanged.connect(self._handle_session_changed)
         self._session = session
         self._history_manager.set_session(session)
@@ -254,6 +258,7 @@ class EditCoordinator(QObject):
         self._apply_session_adjustments_to_viewer()
 
     def _handle_bw_preview(self, params):
+        print(f"[DEBUG] BW Preview: {params}")
         if not self._session: return
         current_values = self._session.values()
         updates = {
@@ -277,6 +282,7 @@ class EditCoordinator(QObject):
         self._ui.edit_image_viewer.set_adjustments(adj)
 
     def _handle_bw_commit(self, params):
+        print(f"[DEBUG] BW Commit: {params}")
         if not self._session: return
         updates = {
             "BW_Intensity": params.intensity,
@@ -303,7 +309,7 @@ class EditCoordinator(QObject):
             # Note: We do not call _preview_manager.update_adjustments() here because
             # we are using GLImageViewer for realtime rendering. The preview manager's
             # CPU rendering path is unobserved and causes unnecessary thread pool load.
-            _LOGGER.debug(f"Session changed: updating viewer with {len(values)} values")
+            print(f"[DEBUG] Session changed: {len(values)} values")
             self._apply_session_adjustments_to_viewer()
 
     def _apply_session_adjustments_to_viewer(self):
@@ -315,7 +321,7 @@ class EditCoordinator(QObject):
             self._active_adjustments = adj
             self._ui.edit_image_viewer.set_adjustments(adj)
             t2 = time.perf_counter()
-            _LOGGER.debug(f"Applied adjustments: resolve={t1-t0:.4f}s, set_gl={t2-t1:.4f}s")
+            print(f"[DEBUG] Applied adjustments: resolve={t1-t0:.4f}s, set_gl={t2-t1:.4f}s")
 
     def _resolve_session_adjustments(self):
         if not self._session: return {}

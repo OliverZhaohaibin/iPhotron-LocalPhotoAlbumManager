@@ -319,7 +319,14 @@ class EditCoordinator(QObject):
             adj = self._resolve_session_adjustments()
             t1 = time.perf_counter()
             self._active_adjustments = adj
-            self._ui.edit_image_viewer.set_adjustments(adj)
+
+            # Block signals to prevent 'cropChanged' feedback loop when setting adjustments programmatically
+            was_blocked = self._ui.edit_image_viewer.blockSignals(True)
+            try:
+                self._ui.edit_image_viewer.set_adjustments(adj)
+            finally:
+                self._ui.edit_image_viewer.blockSignals(was_blocked)
+
             t2 = time.perf_counter()
             print(f"[DEBUG] Applied adjustments: resolve={t1-t0:.4f}s, set_gl={t2-t1:.4f}s")
 

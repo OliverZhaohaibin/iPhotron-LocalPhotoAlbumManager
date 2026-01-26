@@ -27,6 +27,7 @@ from src.iPhoto.io import sidecar
 if TYPE_CHECKING:
     from src.iPhoto.gui.ui.widgets.edit_view import EditView
     from src.iPhoto.gui.viewmodels.asset_list_viewmodel import AssetListViewModel
+    from src.iPhoto.gui.ui.controllers.window_theme_controller import WindowThemeController
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -41,7 +42,9 @@ class EditCoordinator(QObject):
         edit_page: QObject, # The widget containing edit UI (Ui_MainWindow components)
         router: ViewRouter,
         event_bus: EventBus,
-        asset_vm: AssetListViewModel
+        asset_vm: AssetListViewModel,
+        window: QObject | None = None,
+        theme_controller: WindowThemeController | None = None
     ):
         super().__init__()
         # We need access to specific UI elements within edit_page (which is likely MainWindow.ui)
@@ -49,6 +52,13 @@ class EditCoordinator(QObject):
         self._router = router
         self._bus = event_bus
         self._asset_vm = asset_vm
+
+        self._transition_manager = EditViewTransitionManager(
+            self._ui,
+            window,
+            parent=self,
+            theme_controller=theme_controller
+        )
 
         # State
         self._session: Optional[EditSession] = None
@@ -139,6 +149,7 @@ class EditCoordinator(QObject):
 
         # Switch View
         self._router.show_edit()
+        self._transition_manager.enter_edit_mode(animate=True)
 
         # Start Loading High-Res Image
         self._start_async_edit_load(asset_path)
@@ -186,6 +197,7 @@ class EditCoordinator(QObject):
         self._zoom_handler.disconnect_controls()
         self._header_layout_manager.restore_detail_mode()
         self._router.show_detail()
+        self._transition_manager.leave_edit_mode(animate=True)
 
     # --- Actions ---
 

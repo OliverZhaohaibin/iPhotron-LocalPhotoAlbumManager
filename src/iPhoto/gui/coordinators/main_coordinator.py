@@ -19,6 +19,7 @@ from src.iPhoto.gui.ui.controllers.data_manager import DataManager
 from src.iPhoto.gui.ui.controllers.dialog_controller import DialogController
 from src.iPhoto.gui.ui.controllers.share_controller import ShareController
 from src.iPhoto.gui.ui.controllers.status_bar_controller import StatusBarController
+from src.iPhoto.gui.ui.controllers.window_theme_controller import WindowThemeController
 from src.iPhoto.gui.ui.widgets.asset_delegate import AssetGridDelegate
 
 # New Architecture Imports
@@ -129,12 +130,17 @@ class MainCoordinator(QObject):
         if hasattr(window.ui, 'info_panel'):
             self._playback.set_info_panel(window.ui.info_panel)
 
-        # 4. Edit Coordinator
+        # 4. Theme Controller
+        self._theme_controller = WindowThemeController(window.ui, window, context.theme)
+
+        # 5. Edit Coordinator
         self._edit = EditCoordinator(
             window.ui, # Pass UI root for access to sidebar/header/viewer
             self._view_router,
             self._event_bus,
-            self._asset_list_vm # Injected for invalidation
+            self._asset_list_vm, # Injected for invalidation
+            window,
+            self._theme_controller
         )
 
         # --- Legacy Controllers ---

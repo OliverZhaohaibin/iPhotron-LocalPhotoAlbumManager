@@ -265,11 +265,20 @@ class MainCoordinator(QObject):
         if self._thumbnail_service:
             self._thumbnail_service.shutdown()
 
-        # 4. Wait for background threads (e.g. thumbnail generation) to finish
-        QThreadPool.globalInstance().waitForDone()
+        if hasattr(self._window.ui, "preview_window"):
+            try:
+                self._window.ui.preview_window.close_preview(False)
+            except AttributeError:
+                self._window.ui.preview_window.close()
+
+        # 4. Wait briefly for background threads (e.g. thumbnail generation) to finish
+        thread_pool = QThreadPool.globalInstance()
+        if not thread_pool.waitForDone(2000):
+            thread_pool.clear()
 
         app = QCoreApplication.instance()
         if app is not None:
+            app.closeAllWindows()
             app.quit()
 
     def _connect_signals(self) -> None:

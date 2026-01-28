@@ -5,9 +5,9 @@ This replaces the legacy MainController as the top-level orchestrator.
 
 from __future__ import annotations
 
-from pathlib import Path
-from typing import Iterable, TYPE_CHECKING, Optional
 import logging
+from pathlib import Path
+from typing import TYPE_CHECKING, Iterable, Optional
 
 from PySide6.QtCore import QObject, QThreadPool, QModelIndex, QItemSelectionModel
 from PySide6.QtGui import QShortcut, QKeySequence, QAction
@@ -17,6 +17,7 @@ from src.iPhoto.gui.ui.models.asset_model import Roles
 from src.iPhoto.gui.ui.models.spacer_proxy_model import SpacerProxyModel
 from src.iPhoto.gui.ui.controllers.data_manager import DataManager
 from src.iPhoto.gui.ui.controllers.dialog_controller import DialogController
+from src.iPhoto.gui.ui.controllers.header_controller import HeaderController
 from src.iPhoto.gui.ui.controllers.share_controller import ShareController
 from src.iPhoto.gui.ui.controllers.status_bar_controller import StatusBarController
 from src.iPhoto.gui.ui.controllers.window_theme_controller import WindowThemeController
@@ -41,6 +42,7 @@ from src.iPhoto.gui.coordinators.edit_coordinator import EditCoordinator
 
 if TYPE_CHECKING:
     from src.iPhoto.gui.ui.main_window import MainWindow
+
 
 class MainCoordinator(QObject):
     """High-level coordinator for the main window.
@@ -91,7 +93,7 @@ class MainCoordinator(QObject):
             self._asset_list_vm,
             self._event_bus,
             context,
-            context.facade # Legacy Facade Bridge
+            context.facade,  # Legacy Facade Bridge
         )
 
         # 3. Playback Coordinator
@@ -102,6 +104,10 @@ class MainCoordinator(QObject):
             window.ui.video_area,
             window.ui.player_placeholder,
             window.ui.live_badge
+        )
+        self._header_controller = HeaderController(
+            window.ui.location_label,
+            window.ui.timestamp_label,
         )
 
         self._playback = PlaybackCoordinator(
@@ -120,7 +126,8 @@ class MainCoordinator(QObject):
             share_button=window.ui.share_button,
             filmstrip_view=window.ui.filmstrip_view,
             toggle_filmstrip_action=window.ui.toggle_filmstrip_action,
-            settings=context.settings
+            settings=context.settings,
+            header_controller=self._header_controller,
         )
 
         # Inject optional dependencies into Playback

@@ -6,7 +6,7 @@ import threading
 import time
 import logging
 from pathlib import Path
-from typing import Optional, TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Literal, Optional
 
 from PySide6.QtCore import QObject, QTimer, Signal
 
@@ -27,6 +27,7 @@ if TYPE_CHECKING:
     from src.iPhoto.gui.coordinators.playback_coordinator import PlaybackCoordinator
 
 LOGGER = logging.getLogger(__name__)
+
 
 class NavigationCoordinator(QObject):
     """
@@ -105,7 +106,7 @@ class NavigationCoordinator(QObject):
         # For legacy behavior, we often want subalbums if it's a folder structure.
         # Let's set include_subalbums=True implicitly for file-system browsing behavior.
         query = AssetQuery(album_path=album.root.name if album else str(path.name))
-        query.include_subalbums = True # Ensure recursive view by default
+        query.include_subalbums = True  # Ensure recursive view by default
         self._asset_vm.load_query(query)
 
     def open_all_photos(self):
@@ -114,7 +115,7 @@ class NavigationCoordinator(QObject):
         self._router.show_gallery()
         self._static_selection = AlbumSidebar.ALL_PHOTOS_TITLE
 
-        query = AssetQuery() # No filters = All Photos
+        query = AssetQuery()  # No filters = All Photos
         self._asset_vm.load_query(query)
 
     def _handle_static_node(self, name: str):
@@ -184,7 +185,7 @@ class NavigationCoordinator(QObject):
     def _should_treat_as_refresh(self, path: Path) -> bool:
         # Check if re-opening same album to avoid UI flicker
         if self._facade.current_album and self._facade.current_album.root.resolve() == path.resolve():
-            return True
+            return self._router.is_gallery_view_active()
         return False
 
     def _reset_playback(self):

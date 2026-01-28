@@ -7,11 +7,11 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from dateutil.parser import isoparse
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QAbstractItemModel, Qt
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import QLabel
 
-from ..models.asset_model import AssetModel, Roles
+from ..models.roles import Roles
 
 
 class HeaderController:
@@ -41,7 +41,7 @@ class HeaderController:
         self._timestamp_label.hide()
         self._timestamp_label.setFont(self._timestamp_default_font)
 
-    def update_for_row(self, row: Optional[int], model: AssetModel) -> None:
+    def update_for_row(self, row: Optional[int], model: QAbstractItemModel) -> None:
         """Populate labels with metadata for ``row`` in ``model``."""
 
         if row is None or row < 0:
@@ -88,11 +88,16 @@ class HeaderController:
     def _format_timestamp(self, dt_value: object) -> Optional[str]:
         """Convert ISO-8601 strings into a friendly, localised label."""
 
-        if not dt_value or not isinstance(dt_value, str):
+        if not dt_value:
             return None
-        try:
-            parsed = isoparse(dt_value)
-        except (ValueError, TypeError):
+        if isinstance(dt_value, datetime):
+            parsed = dt_value
+        elif isinstance(dt_value, str):
+            try:
+                parsed = isoparse(dt_value)
+            except (ValueError, TypeError):
+                return None
+        else:
             return None
         if parsed.tzinfo is None:
             local_tz = datetime.now().astimezone().tzinfo or timezone.utc

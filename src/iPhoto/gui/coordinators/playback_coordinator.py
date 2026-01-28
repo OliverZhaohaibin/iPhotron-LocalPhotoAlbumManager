@@ -2,15 +2,16 @@
 
 from __future__ import annotations
 
-import logging
-from typing import TYPE_CHECKING, Optional, Any
 from pathlib import Path
+import logging
+from typing import TYPE_CHECKING, Any, Optional
 
 from PySide6.QtCore import QObject, Slot, QTimer, Signal, QModelIndex, QItemSelectionModel
 from PySide6.QtGui import QIcon, QAction
 
 from src.iPhoto.gui.coordinators.view_router import ViewRouter
 from src.iPhoto.gui.ui.icons import load_icon
+from src.iPhoto.gui.ui.controllers.header_controller import HeaderController
 from src.iPhoto.gui.ui.models.roles import Roles
 from src.iPhoto.gui.ui.widgets.info_panel import InfoPanel
 from src.iPhoto.io.metadata import read_image_meta
@@ -26,6 +27,7 @@ if TYPE_CHECKING:
     from PySide6.QtWidgets import QPushButton, QSlider, QToolButton, QWidget
 
 LOGGER = logging.getLogger(__name__)
+
 
 class PlaybackCoordinator(QObject):
     """
@@ -56,6 +58,7 @@ class PlaybackCoordinator(QObject):
         filmstrip_view: FilmstripView,
         toggle_filmstrip_action: QAction,
         settings: Settings,
+        header_controller: Optional[HeaderController] = None,
     ):
         super().__init__()
         self._player_bar = player_bar
@@ -77,6 +80,7 @@ class PlaybackCoordinator(QObject):
         self._filmstrip_view = filmstrip_view
         self._toggle_filmstrip_action = toggle_filmstrip_action
         self._settings = settings
+        self._header_controller = header_controller
 
         self._is_playing = False
         self._current_row = -1
@@ -205,6 +209,7 @@ class PlaybackCoordinator(QObject):
 
         # Sync ViewModel State (for Delegate sizing)
         self._asset_vm.set_current_row(row)
+        self._update_header(row)
 
         # Sync Filmstrip
         self._sync_filmstrip_selection(row)
@@ -291,12 +296,15 @@ class PlaybackCoordinator(QObject):
                 idx = self._asset_vm.index(self._current_row, 0)
                 is_fav = self._asset_vm.data(idx, Roles.FEATURED)
                 self._update_favorite_icon(bool(is_fav))
+            if not roles or Roles.DT in roles or Roles.LOCATION in roles:
+                self._update_header(self._current_row)
 
     def reset_for_gallery(self):
         self._player_view.video_area.stop()
         self._player_view.show_placeholder()
         self._player_bar.setEnabled(False)
         self._is_playing = False
+        self._update_header(None)
         if self._info_panel:
             self._info_panel.close()
 
@@ -304,8 +312,17 @@ class PlaybackCoordinator(QObject):
         """Stop any active media playback and release resources."""
         self._player_view.video_area.stop()
         self._is_playing = False
+        self._update_header(None)
         if self._info_panel:
             self._info_panel.close()
+
+    def _update_header(self, row: Optional[int]) -> None:
+        if not self._header_controller:
+            return
+        if row is None or row < 0:
+            self._header_controller.clear()
+            return
+        self._header_controller.update_for_row(row, self._asset_vm)
 
     def select_next(self):
         """Move to the next asset."""

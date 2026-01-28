@@ -1,22 +1,22 @@
 from __future__ import annotations
-from typing import Any, Optional, Dict, cast
+
+from pathlib import Path
+from typing import Any, Dict, Optional, cast
 
 from PySide6.QtCore import (
     QAbstractListModel,
     QModelIndex,
     QObject,
-    Qt,
     QSize,
+    Qt,
     Slot
 )
-from PySide6.QtGui import QPixmap
-
-from src.iPhoto.gui.viewmodels.asset_data_source import AssetDataSource
-from src.iPhoto.infrastructure.services.thumbnail_cache_service import ThumbnailCacheService
+from src.iPhoto.application.dtos import AssetDTO
 from src.iPhoto.domain.models.query import AssetQuery
 from src.iPhoto.gui.ui.models.roles import Roles
-from src.iPhoto.application.dtos import AssetDTO
-from pathlib import Path
+from src.iPhoto.gui.viewmodels.asset_data_source import AssetDataSource
+from src.iPhoto.infrastructure.services.thumbnail_cache_service import ThumbnailCacheService
+
 
 class AssetListViewModel(QAbstractListModel):
     """
@@ -28,7 +28,7 @@ class AssetListViewModel(QAbstractListModel):
         super().__init__(parent)
         self._data_source = data_source
         self._thumbnails = thumbnail_service
-        self._thumb_size = QSize(256, 256)
+        self._thumb_size = QSize(512, 512)
         self._current_row = -1
 
         # Connect signals
@@ -109,6 +109,19 @@ class AssetListViewModel(QAbstractListModel):
         if role_int == Roles.FEATURED:
             return asset.is_favorite
 
+        if role_int == Roles.LOCATION:
+            metadata = asset.metadata or {}
+            location = metadata.get("location") or metadata.get("place")
+            if isinstance(location, str) and location.strip():
+                return location
+            components = [
+                metadata.get("city"),
+                metadata.get("state"),
+                metadata.get("country"),
+            ]
+            normalized = [str(item).strip() for item in components if item]
+            return ", ".join(normalized) if normalized else None
+
         if role_int == Roles.MICRO_THUMBNAIL:
             # Optional: Return a tiny cached image if available
             return asset.micro_thumbnail
@@ -163,7 +176,7 @@ class AssetListViewModel(QAbstractListModel):
     def invalidate_thumbnail(self, path_str: str):
         """Forces a thumbnail refresh for the given path."""
         path = Path(path_str)
-        self._thumbnails.invalidate(path)
+        self._thumbnails.invalidate(path, size=self._thumb_size)
         # Notify views
         count = self.rowCount()
         for row in range(count):

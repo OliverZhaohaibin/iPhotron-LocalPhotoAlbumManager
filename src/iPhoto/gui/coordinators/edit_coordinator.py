@@ -25,7 +25,6 @@ from src.iPhoto.gui.ui.controllers.edit_preview_manager import resolve_adjustmen
 from src.iPhoto.io import sidecar
 
 if TYPE_CHECKING:
-    from src.iPhoto.gui.ui.widgets.edit_view import EditView
     from src.iPhoto.gui.viewmodels.asset_list_viewmodel import AssetListViewModel
     from src.iPhoto.gui.ui.controllers.window_theme_controller import WindowThemeController
 
@@ -92,6 +91,8 @@ class EditCoordinator(QObject):
         self._update_throttler.setInterval(30)  # ~30fps cap
         self._update_throttler.timeout.connect(self._perform_deferred_update)
         self._pending_session_values: Optional[dict] = None
+        self._preview_updates_suspended = False
+        self._interaction_depth = 0
 
         self._connect_signals()
 
@@ -117,6 +118,16 @@ class EditCoordinator(QObject):
 
         # Sidebar interactions
         self._ui.edit_sidebar.interactionStarted.connect(self.push_undo_state)
+        self._ui.edit_sidebar.interactionStarted.connect(self._handle_sidebar_interaction_started)
+        self._ui.edit_sidebar.interactionFinished.connect(self._handle_sidebar_interaction_finished)
+        self._ui.edit_sidebar.bwParamsPreviewed.connect(self._handle_bw_params_previewed)
+        self._ui.edit_sidebar.bwParamsCommitted.connect(self._handle_bw_params_committed)
+        self._ui.edit_sidebar.perspectiveInteractionStarted.connect(
+            self._ui.edit_image_viewer.start_perspective_interaction
+        )
+        self._ui.edit_sidebar.perspectiveInteractionFinished.connect(
+            self._ui.edit_image_viewer.end_perspective_interaction
+        )
         self._ui.edit_image_viewer.cropInteractionStarted.connect(self.push_undo_state)
         self._ui.edit_image_viewer.cropChanged.connect(self._handle_crop_changed)
 
@@ -136,6 +147,7 @@ class EditCoordinator(QObject):
         session.valuesChanged.connect(self._handle_session_changed)
         self._session = session
         self._history_manager.set_session(session)
+        self._ui.edit_sidebar.set_session(session)
 
         # Apply to Viewer
         self._apply_session_adjustments_to_viewer()
@@ -218,6 +230,7 @@ class EditCoordinator(QObject):
         if self._theme_controller:
             self._theme_controller.restore_global_theme()
 
+        self._ui.edit_sidebar.set_session(None)
         self._router.show_detail()
         self._transition_manager.leave_edit_mode(animate=True)
 
@@ -279,7 +292,8 @@ class EditCoordinator(QObject):
         if self._session:
             # Always fetch the authoritative state from the session
             current_values = self._session.values()
-            self._preview_manager.update_adjustments(current_values)
+            if not self._preview_updates_suspended:
+                self._preview_manager.update_adjustments(current_values)
             self._apply_session_adjustments_to_viewer()
             self._pending_session_values = None
 
@@ -303,6 +317,45 @@ class EditCoordinator(QObject):
                 "Crop_W": float(w), "Crop_H": float(h)
             }, emit_individual=False)
 
+    def _handle_bw_params_previewed(self, params) -> None:
+        """Apply transient Black & White previews without mutating session state."""
+
+        if self._session is None or self._compare_active:
+            return
+
+        try:
+            preview_values = self._session.values()
+            preview_values.update({
+                "BW_Enabled": True,
+                "BW_Intensity": float(params.intensity),
+                "BW_Neutrals": float(params.neutrals),
+                "BW_Tone": float(params.tone),
+                "BW_Grain": float(params.grain),
+                "BW_Master": float(params.master),
+            })
+            adjustments = self._preview_manager.resolve_adjustments(preview_values)
+        except Exception:
+            _LOGGER.exception("Failed to resolve BW preview adjustments")
+            return
+
+        self._ui.edit_image_viewer.set_adjustments(adjustments)
+
+    def _handle_bw_params_committed(self, params) -> None:
+        """Persist Black & White adjustments into the active edit session."""
+
+        if self._session is None:
+            return
+
+        updates = {
+            "BW_Enabled": True,
+            "BW_Intensity": float(params.intensity),
+            "BW_Neutrals": float(params.neutrals),
+            "BW_Tone": float(params.tone),
+            "BW_Grain": float(params.grain),
+            "BW_Master": float(params.master),
+        }
+        self._session.set_values(updates)
+
     def _handle_mode_change(self, mode: str, checked: bool):
         if checked: self._set_mode(mode)
 
@@ -315,6 +368,24 @@ class EditCoordinator(QObject):
         self._current_mode.exit()
         self._current_mode = new_state
         self._current_mode.enter()
+
+    def _handle_sidebar_interaction_started(self) -> None:
+        """Suspend heavy preview rendering while the user drags adjustment sliders."""
+
+        self._interaction_depth += 1
+        if self._interaction_depth == 1:
+            self._preview_updates_suspended = True
+            self._preview_manager.cancel_pending_updates()
+
+    def _handle_sidebar_interaction_finished(self) -> None:
+        """Re-enable preview rendering after slider interaction completes."""
+
+        if self._interaction_depth > 0:
+            self._interaction_depth -= 1
+        if self._interaction_depth == 0:
+            self._preview_updates_suspended = False
+            if self._session is not None:
+                self._preview_manager.update_adjustments(self._session.values())
 
     def shutdown(self):
         """Cleanup resources on app exit."""

@@ -7,7 +7,7 @@ import logging
 from typing import TYPE_CHECKING, Any, Optional
 
 from PySide6.QtCore import QObject, Slot, QTimer, Signal, QModelIndex, QItemSelectionModel
-from PySide6.QtGui import QIcon, QAction
+from PySide6.QtGui import QAction, QColor, QPalette
 
 from src.iPhoto.gui.coordinators.view_router import ViewRouter
 from src.iPhoto.gui.ui.icons import load_icon
@@ -280,7 +280,17 @@ class PlaybackCoordinator(QObject):
 
     def _update_favorite_icon(self, is_favorite: bool):
         icon_name = "suit.heart.fill.svg" if is_favorite else "suit.heart.svg"
-        self._favorite_button.setIcon(load_icon(icon_name))
+        icon_color = self._resolve_icon_tint()
+        self._favorite_button.setIcon(load_icon(icon_name, color=icon_color))
+
+    def _resolve_icon_tint(self) -> str | None:
+        palette = self._favorite_button.palette()
+        color = palette.color(QPalette.ColorRole.ButtonText)
+        if not color.isValid():
+            color = palette.color(QPalette.ColorRole.WindowText)
+        if not color.isValid():
+            return None
+        return color.name(QColor.NameFormat.HexArgb)
 
     def _on_data_changed(self, top, bottom, roles):
         if self._current_row < 0:

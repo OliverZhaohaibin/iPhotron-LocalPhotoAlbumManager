@@ -259,3 +259,9 @@ class NavigationCoordinator(QObject):
 
     def is_all_photos_view(self) -> bool:
         return self._static_selection and self._static_selection.casefold() == AlbumSidebar.ALL_PHOTOS_TITLE.casefold()
+
+    def is_recently_deleted_view(self) -> bool:
+        return bool(self._static_selection) and self._static_selection.casefold() == "recently deleted"
+
+    def sidebar_model(self):
+        return self._sidebar.tree_model()

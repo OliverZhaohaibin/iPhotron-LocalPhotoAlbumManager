@@ -9,7 +9,14 @@ import logging
 from pathlib import Path
 from typing import TYPE_CHECKING, Iterable, Optional
 
-from PySide6.QtCore import QObject, QThreadPool, QModelIndex, QItemSelectionModel
+from PySide6.QtCore import (
+    QObject,
+    QThreadPool,
+    QModelIndex,
+    QItemSelectionModel,
+    QCoreApplication,
+    Qt,
+)
 from PySide6.QtGui import QShortcut, QKeySequence, QAction
 
 from src.iPhoto.appctx import AppContext
@@ -21,6 +28,10 @@ from src.iPhoto.gui.ui.controllers.header_controller import HeaderController
 from src.iPhoto.gui.ui.controllers.share_controller import ShareController
 from src.iPhoto.gui.ui.controllers.status_bar_controller import StatusBarController
 from src.iPhoto.gui.ui.controllers.window_theme_controller import WindowThemeController
+from src.iPhoto.gui.ui.controllers.preview_controller import PreviewController
+from src.iPhoto.gui.ui.controllers.context_menu_controller import ContextMenuController
+from src.iPhoto.gui.ui.controllers.selection_controller import SelectionController
+from src.iPhoto.gui.ui.controllers.export_controller import ExportController
 from src.iPhoto.gui.ui.widgets.asset_delegate import AssetGridDelegate
 
 # New Architecture Imports
@@ -173,12 +184,28 @@ class MainCoordinator(QObject):
         )
         self._share_controller.restore_preference()
 
+        self._export_controller = ExportController(
+            settings=context.settings,
+            library=context.library,
+            status_bar=self._status_bar,
+            toast=window.ui.notification_toast,
+            export_all_action=window.ui.export_all_edited_action,
+            export_selected_action=window.ui.export_selected_action,
+            destination_group=window.ui.export_destination_group,
+            destination_library=window.ui.export_destination_library,
+            destination_ask=window.ui.export_destination_ask,
+            main_window=window,
+            selection_callback=window.current_selection,
+        )
+
         # --- Binding Data to Views ---
         window.ui.grid_view.setModel(self._asset_list_vm)
 
         # Assign Delegate for Grid View (Fixes text display and spacing)
         self._grid_delegate = AssetGridDelegate(window.ui.grid_view, filmstrip_mode=False)
         window.ui.grid_view.setItemDelegate(self._grid_delegate)
+
+        window.ui.grid_view.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
 
         # Use SpacerProxyModel for Filmstrip to allow centering of first/last items
         self._filmstrip_proxy = SpacerProxyModel(window.ui.filmstrip_view)
@@ -188,6 +215,31 @@ class MainCoordinator(QObject):
         # Assign Delegate for Filmstrip View
         self._filmstrip_delegate = AssetGridDelegate(window.ui.filmstrip_view, filmstrip_mode=True)
         window.ui.filmstrip_view.setItemDelegate(self._filmstrip_delegate)
+
+        self._preview_controller = PreviewController(window.ui.preview_window)
+        self._preview_controller.bind_view(window.ui.grid_view)
+
+        self._selection_controller = SelectionController(
+            selection_button=window.ui.selection_button,
+            grid_view=window.ui.grid_view,
+            grid_delegate=self._grid_delegate,
+            preview_controller=self._preview_controller,
+            playback=None,
+            handle_grid_clicks=False,
+            parent=self,
+        )
+
+        self._context_menu = ContextMenuController(
+            grid_view=window.ui.grid_view,
+            asset_model=self._asset_list_vm,
+            facade=self._facade,
+            status_bar=self._status_bar,
+            notification_toast=window.ui.notification_toast,
+            selection_controller=self._selection_controller,
+            navigation=self._navigation,
+            export_callback=window.ui.export_selected_action.trigger,
+            parent=self,
+        )
 
         self._connect_signals()
 
@@ -215,6 +267,10 @@ class MainCoordinator(QObject):
 
         # 4. Wait for background threads (e.g. thumbnail generation) to finish
         QThreadPool.globalInstance().waitForDone()
+
+        app = QCoreApplication.instance()
+        if app is not None:
+            app.quit()
 
     def _connect_signals(self) -> None:
         """Connect application signals."""
@@ -311,6 +367,8 @@ class MainCoordinator(QObject):
         self._favorite_shortcut.activated.connect(self._handle_toggle_favorite)
 
     def _on_asset_clicked(self, index: QModelIndex):
+        if self._selection_controller and self._selection_controller.is_active():
+            return
         self._playback.play_asset(index.row())
 
     def _on_favorite_clicked(self, index: QModelIndex):

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Optional, TYPE_CHECKING
+from typing import TYPE_CHECKING
 from PySide6.QtCore import QObject, Signal
 
 if TYPE_CHECKING:
@@ -10,6 +10,7 @@ if TYPE_CHECKING:
     from src.iPhoto.gui.ui.widgets.detail_page import DetailPage
     from src.iPhoto.gui.ui.widgets.edit_view import EditView
     from src.iPhoto.gui.ui.widgets.photo_map_view import PhotoMapView
+
 
 class ViewRouter(QObject):
     """
@@ -22,7 +23,7 @@ class ViewRouter(QObject):
     detailViewShown = Signal()
     editViewShown = Signal()
     mapViewShown = Signal()
-    dashboardViewShown = Signal() # Added signal for dashboard
+    dashboardViewShown = Signal()  # Added signal for dashboard
 
     def __init__(self, ui: Ui_MainWindow):
         super().__init__()
@@ -36,17 +37,17 @@ class ViewRouter(QObject):
 
         # Map View
         self._map_idx = -1
-        if hasattr(ui, 'map_page'):
+        if hasattr(ui, "map_page"):
             self._map_idx = self._stack.indexOf(ui.map_page)
 
         # Dashboard View
         self._dashboard_idx = -1
-        if hasattr(ui, 'albums_dashboard_page'):
+        if hasattr(ui, "albums_dashboard_page"):
             self._dashboard_idx = self._stack.indexOf(ui.albums_dashboard_page)
 
         # Edit View: Currently part of Detail Page structure
         self._edit_idx = -1
-        if hasattr(ui, 'edit_page'):
+        if hasattr(ui, "edit_page"):
             self._edit_idx = self._stack.indexOf(ui.edit_page)
 
     def show_gallery(self):
@@ -90,6 +91,12 @@ class ViewRouter(QObject):
 
     def is_detail_view_active(self) -> bool:
         return self._stack.currentIndex() == self._detail_idx
+
+    def is_gallery_view_active(self) -> bool:
+        return self._stack.currentIndex() == self._gallery_idx
+
+    def is_dashboard_view_active(self) -> bool:
+        return self._dashboard_idx != -1 and self._stack.currentIndex() == self._dashboard_idx
 
     def is_edit_view_active(self) -> bool:
         if self._edit_idx != -1:

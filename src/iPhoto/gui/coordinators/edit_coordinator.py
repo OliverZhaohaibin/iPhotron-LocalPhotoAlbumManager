@@ -22,6 +22,7 @@ from src.iPhoto.gui.ui.controllers.edit_fullscreen_manager import EditFullscreen
 from src.iPhoto.gui.ui.controllers.edit_view_transition import EditViewTransitionManager
 from src.iPhoto.gui.ui.tasks.edit_sidebar_preview_worker import EditSidebarPreviewResult
 from src.iPhoto.gui.ui.controllers.edit_preview_manager import resolve_adjustment_mapping
+from src.iPhoto.gui.ui.palette import viewer_surface_color
 from src.iPhoto.io import sidecar
 
 if TYPE_CHECKING:
@@ -29,6 +30,7 @@ if TYPE_CHECKING:
     from src.iPhoto.gui.ui.controllers.window_theme_controller import WindowThemeController
 
 _LOGGER = logging.getLogger(__name__)
+
 
 class EditCoordinator(QObject):
     """
@@ -221,6 +223,8 @@ class EditCoordinator(QObject):
 
     def leave_edit_mode(self):
         """Returns to detail view."""
+        if self._session is not None:
+            self._ui.edit_image_viewer.setCropMode(False, self._session.values())
         self._current_source = None
         self._session = None
         self._preview_manager.stop_session()
@@ -229,6 +233,10 @@ class EditCoordinator(QObject):
 
         if self._theme_controller:
             self._theme_controller.restore_global_theme()
+
+        self._ui.edit_image_viewer.set_surface_color_override(
+            viewer_surface_color(self._ui.edit_image_viewer)
+        )
 
         self._ui.edit_sidebar.set_session(None)
         self._router.show_detail()

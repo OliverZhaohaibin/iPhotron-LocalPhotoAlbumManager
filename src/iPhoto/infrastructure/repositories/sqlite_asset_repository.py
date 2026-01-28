@@ -142,29 +142,33 @@ class SQLiteAssetRepository(IAssetRepository):
             # Map Enum to Int (0=Photo, 1=Video)
             mt_int = 1 if asset.media_type == MediaType.VIDEO else 0
 
+            metadata = asset.metadata or {}
+            micro_thumbnail = metadata.get("micro_thumbnail")
+
             data.append((
-                str(asset.path), # rel (PK)
+                str(asset.path),  # rel (PK)
                 asset.id,
                 asset.album_id,
-                mt_int, # media_type as int
+                mt_int,  # media_type as int
                 asset.size_bytes,
                 asset.created_at.isoformat() if asset.created_at else None,
                 asset.width,
                 asset.height,
                 asset.duration,
-                json.dumps(asset.metadata),
+                json.dumps(metadata),
                 asset.content_identifier,
                 asset.live_photo_group_id,
                 1 if asset.is_favorite else 0,
-                asset.parent_album_path
+                asset.parent_album_path,
+                micro_thumbnail,
             ))
 
         # Note: Writing to 'rel' as PK
         with self._pool.connection() as conn:
             conn.executemany("""
                 INSERT OR REPLACE INTO assets
-                (rel, id, album_id, media_type, bytes, dt, w, h, dur, metadata, content_identifier, live_photo_group_id, is_favorite, parent_album_path)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                (rel, id, album_id, media_type, bytes, dt, w, h, dur, metadata, content_identifier, live_photo_group_id, is_favorite, parent_album_path, micro_thumbnail)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, data)
 
     def delete(self, id: str) -> None:
@@ -270,6 +274,15 @@ class SQLiteAssetRepository(IAssetRepository):
         album_id = row["album_id"] if "album_id" in keys else None
         live_group = row["live_photo_group_id"] if "live_photo_group_id" in keys else None
         content_id = row["content_identifier"] if "content_identifier" in keys else row.get("content_id")
+        location = row["location"] if "location" in keys else None
+        micro_thumbnail = row["micro_thumbnail"] if "micro_thumbnail" in keys else None
+        if micro_thumbnail is None and "thumb_16" in keys:
+            micro_thumbnail = row["thumb_16"]
+
+        if location:
+            meta["location"] = location
+        if micro_thumbnail and "micro_thumbnail" not in meta:
+            meta["micro_thumbnail"] = micro_thumbnail
 
         return Asset(
             id=row["id"],

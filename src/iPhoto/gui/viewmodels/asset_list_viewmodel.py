@@ -16,6 +16,7 @@ from src.iPhoto.domain.models.query import AssetQuery
 from src.iPhoto.gui.ui.models.roles import Roles
 from src.iPhoto.gui.viewmodels.asset_data_source import AssetDataSource
 from src.iPhoto.infrastructure.services.thumbnail_cache_service import ThumbnailCacheService
+from src.iPhoto.utils.geocoding import resolve_location_name
 
 
 class AssetListViewModel(QAbstractListModel):
@@ -114,6 +115,12 @@ class AssetListViewModel(QAbstractListModel):
             location = metadata.get("location") or metadata.get("place")
             if isinstance(location, str) and location.strip():
                 return location
+            gps = metadata.get("gps")
+            if isinstance(gps, dict):
+                resolved = resolve_location_name(gps)
+                if resolved:
+                    metadata["location"] = resolved
+                    return resolved
             components = [
                 metadata.get("city"),
                 metadata.get("state"),

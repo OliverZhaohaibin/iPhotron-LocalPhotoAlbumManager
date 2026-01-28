@@ -99,6 +99,9 @@ class NavigationCoordinator(QObject):
         album = self._facade.open_album(path)
         if album:
             self._context.remember_album(album.root)
+            self._sidebar.select_path(album.root)
+        else:
+            self._sidebar.select_path(path)
 
         # Update ViewModel
         # When opening an album folder, we usually want to see its contents.

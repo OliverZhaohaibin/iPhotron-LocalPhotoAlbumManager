@@ -6,6 +6,7 @@ from src.iPhoto.domain.models import Asset
 from src.iPhoto.domain.models.query import AssetQuery
 from src.iPhoto.domain.repositories import IAssetRepository
 from src.iPhoto.application.dtos import AssetDTO
+from src.iPhoto.utils import image_loader
 
 class AssetDataSource(QObject):
     """
@@ -92,6 +93,11 @@ class AssetDataSource(QObject):
         if asset.metadata and asset.metadata.get("is_pano"):
             is_pano = True
 
+        micro_thumbnail = asset.metadata.get("micro_thumbnail") if asset.metadata else None
+        micro_thumbnail_image = None
+        if isinstance(micro_thumbnail, (bytes, bytearray, memoryview)):
+            micro_thumbnail_image = image_loader.qimage_from_bytes(bytes(micro_thumbnail))
+
         return AssetDTO(
             id=asset.id,
             abs_path=abs_path,
@@ -105,5 +111,6 @@ class AssetDataSource(QObject):
             metadata=asset.metadata,
             is_favorite=asset.is_favorite,
             is_live=is_live,
-            is_pano=is_pano
+            is_pano=is_pano,
+            micro_thumbnail=micro_thumbnail_image,
         )

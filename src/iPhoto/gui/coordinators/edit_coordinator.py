@@ -223,6 +223,8 @@ class EditCoordinator(QObject):
 
     def leave_edit_mode(self):
         """Returns to detail view."""
+        if self._session is not None:
+            self._ui.edit_image_viewer.setCropMode(False, self._session.values())
         self._current_source = None
         self._session = None
         self._preview_manager.stop_session()

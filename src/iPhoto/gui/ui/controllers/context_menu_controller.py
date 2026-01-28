@@ -8,7 +8,16 @@ from functools import partial
 from pathlib import Path
 from typing import Callable, Optional, TYPE_CHECKING
 
-from PySide6.QtCore import QAbstractItemModel, QCoreApplication, QMimeData, QObject, QPoint, QUrl, Qt
+from PySide6.QtCore import (
+    QAbstractItemModel,
+    QCoreApplication,
+    QMimeData,
+    QObject,
+    QPoint,
+    QUrl,
+    Qt,
+    QItemSelectionModel,
+)
 from PySide6.QtGui import QGuiApplication, QPalette
 from PySide6.QtWidgets import QMenu
 
@@ -95,6 +104,12 @@ class ContextMenuController(QObject):
         menu.setGraphicsEffect(None)
 
         selection_model = self._grid_view.selectionModel()
+
+        if index.isValid() and selection_model and not selection_model.isSelected(index):
+            selection_model.setCurrentIndex(
+                index,
+                QItemSelectionModel.ClearAndSelect | QItemSelectionModel.Rows,
+            )
 
         # When the cursor is above an already selected item we expose actions that operate on
         # the selection (copy, reveal, move). This mirrors native file explorer conventions and
@@ -208,8 +223,6 @@ class ContextMenuController(QObject):
             self._status_bar.show_message("Select items to restore first.", 3000)
             return
 
-        source_model = self._asset_model
-
         try:
             queued_restore = self._facade.restore_assets(paths)
         except Exception:
@@ -224,7 +237,7 @@ class ContextMenuController(QObject):
                 # Removing the rows only after the restore task has been accepted
                 # avoids hiding assets when the backend declined to queue any
                 # work (for example because the user rejected every fallback).
-                source_model.remove_rows(selected_indexes)
+                self._remove_selection_rows(selected_indexes)
             self._toast.show_toast("Restoring ...")
 
     def _copy_selection_to_clipboard(self) -> None:
@@ -398,3 +411,9 @@ class ContextMenuController(QObject):
         remove_rows = getattr(self._asset_model, "remove_rows", None)
         if callable(remove_rows):
             remove_rows(selected_indexes)
+            return
+        remove_rows = getattr(self._asset_model, "removeRows", None)
+        if callable(remove_rows):
+            rows = sorted({index.row() for index in selected_indexes}, reverse=True)
+            for row in rows:
+                remove_rows(row, 1)

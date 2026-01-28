@@ -15,6 +15,7 @@ from src.iPhoto.application.services.album_service import AlbumService
 from src.iPhoto.gui.coordinators.view_router import ViewRouter
 from src.iPhoto.gui.ui.widgets.album_sidebar import AlbumSidebar
 from src.iPhoto.gui.viewmodels.asset_list_viewmodel import AssetListViewModel
+from src.iPhoto.config import RECENTLY_DELETED_DIR_NAME
 from src.iPhoto.domain.models.query import AssetQuery
 from src.iPhoto.domain.models.core import MediaType
 from src.iPhoto.errors import AlbumOperationError
@@ -163,7 +164,7 @@ class NavigationCoordinator(QObject):
         self._facade.open_album(deleted_root)
 
         # ViewModel Update
-        query = AssetQuery(album_path="Recently Deleted")
+        query = AssetQuery(album_path=RECENTLY_DELETED_DIR_NAME)
         self._asset_vm.load_query(query)
 
     def _open_filtered_collection(self, title: str, is_favorite=None, media_types=None):

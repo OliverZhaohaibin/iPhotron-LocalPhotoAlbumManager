@@ -72,11 +72,16 @@ class AssetMoveService(QObject):
             return
 
         album = self._current_album_getter()
+        library_manager = self._library_manager_getter()
+        library_root = library_manager.root() if library_manager is not None else None
         if album is None:
-            list_model.rollback_pending_moves()
-            self.errorRaised.emit("No album is currently open.")
-            return
-        source_root = album.root
+            if library_root is None:
+                list_model.rollback_pending_moves()
+                self.errorRaised.emit("No album is currently open.")
+                return
+            source_root = library_root
+        else:
+            source_root = album.root
 
         try:
             destination_root = Path(destination).resolve()
@@ -152,11 +157,8 @@ class AssetMoveService(QObject):
         signals.started.connect(self._on_move_started)
         signals.progress.connect(self._on_move_progress)
 
-        library_root: Optional[Path] = None
         trash_root: Optional[Path] = None
-        library_manager = self._library_manager_getter()
         if library_manager is not None:
-            library_root = library_manager.root()
             trash_candidate = library_manager.deleted_directory()
             if trash_candidate is not None:
                 try:

@@ -148,6 +148,19 @@ class AssetDataSource(QObject):
         self._cached_dtos.extend(dtos)
 
     def _to_dto(self, asset: Asset) -> AssetDTO:
+        def _coerce_positive_number(value: object) -> Optional[float]:
+            if isinstance(value, bool):
+                return None
+            if isinstance(value, (int, float)):
+                return float(value) if value > 0 else None
+            if isinstance(value, str):
+                try:
+                    parsed = float(value)
+                except ValueError:
+                    return None
+                return parsed if parsed > 0 else None
+            return None
+
         # Resolve absolute path
         abs_path = asset.path # Default to path if already absolute
         if not asset.path.is_absolute():
@@ -175,6 +188,7 @@ class AssetDataSource(QObject):
             mt = "image"
 
         is_video = (mt == "video")
+        is_image_type = mt in {"image", "photo"}
         # Live photo check: if asset has live_photo_group_id or explicit type
         is_live = (mt == "live") or (asset.live_photo_group_id is not None)
         if is_video and asset.live_photo_group_id is not None:
@@ -190,24 +204,49 @@ class AssetDataSource(QObject):
 
         # Pano check: usually in metadata, otherwise infer from dimensions.
         is_pano = False
-        if asset.metadata and asset.metadata.get("is_pano"):
+        metadata = asset.metadata or {}
+        if metadata.get("is_pano"):
             is_pano = True
         else:
-            width = asset.width or 0
-            height = asset.height or 0
-            if mt == "image" and width > 0 and height > 0:
+            width = _coerce_positive_number(asset.width) or _coerce_positive_number(metadata.get("w"))
+            if width is None:
+                width = _coerce_positive_number(metadata.get("width"))
+            height = _coerce_positive_number(asset.height) or _coerce_positive_number(metadata.get("h"))
+            if height is None:
+                height = _coerce_positive_number(metadata.get("height"))
+            aspect_ratio = _coerce_positive_number(metadata.get("aspect_ratio"))
+            size_bytes = _coerce_positive_number(asset.size_bytes)
+            if size_bytes is None:
+                size_bytes = _coerce_positive_number(metadata.get("bytes"))
+
+            if is_image_type and width > 0 and height > 0:
                 aspect_ratio = width / height
                 if aspect_ratio >= 2.0:
-                    if isinstance(asset.size_bytes, int) and asset.size_bytes > 1 * 1024 * 1024:
+                    if size_bytes is not None and size_bytes > 1 * 1024 * 1024:
                         is_pano = True
-                    elif asset.size_bytes in (None, 0):
-                        if width * height >= 1_000_000:
-                            is_pano = True
+                    elif size_bytes is None and width * height >= 1_000_000:
+                        is_pano = True
+            elif is_image_type and aspect_ratio is not None and aspect_ratio >= 2.0:
+                if size_bytes is None or size_bytes > 1 * 1024 * 1024:
+                    is_pano = True
 
-        micro_thumbnail = asset.metadata.get("micro_thumbnail") if asset.metadata else None
+        micro_thumbnail = metadata.get("micro_thumbnail")
         micro_thumbnail_image = None
         if isinstance(micro_thumbnail, (bytes, bytearray, memoryview)):
             micro_thumbnail_image = image_loader.qimage_from_bytes(bytes(micro_thumbnail))
+
+        width_value = (
+            _coerce_positive_number(asset.width)
+            or _coerce_positive_number(metadata.get("w"))
+            or _coerce_positive_number(metadata.get("width"))
+            or 0
+        )
+        height_value = (
+            _coerce_positive_number(asset.height)
+            or _coerce_positive_number(metadata.get("h"))
+            or _coerce_positive_number(metadata.get("height"))
+            or 0
+        )
 
         return AssetDTO(
             id=asset.id,
@@ -215,11 +254,11 @@ class AssetDataSource(QObject):
             rel_path=asset.path,
             media_type=mt,
             created_at=asset.created_at,
-            width=asset.width or 0,
-            height=asset.height or 0,
+            width=int(width_value),
+            height=int(height_value),
             duration=asset.duration or 0.0,
             size_bytes=asset.size_bytes,
-            metadata=asset.metadata,
+            metadata=metadata,
             is_favorite=asset.is_favorite,
             is_live=is_live,
             is_pano=is_pano,

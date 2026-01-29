@@ -266,6 +266,12 @@ class VideoArea(QWidget):
 
     def _on_media_status_changed(self, status: QMediaPlayer.MediaStatus) -> None:
         if status == QMediaPlayer.MediaStatus.EndOfMedia:
+            duration = self._player.duration()
+            if duration <= 0:
+                return
+            position = self._player.position()
+            if position + 200 < duration:
+                return
             self.playbackFinished.emit()
 
     def _on_volume_changed(self, value: int) -> None:

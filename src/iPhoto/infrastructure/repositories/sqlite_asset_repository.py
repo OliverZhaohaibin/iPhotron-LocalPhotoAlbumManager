@@ -77,7 +77,9 @@ class SQLiteAssetRepository(IAssetRepository):
                 "content_identifier": "TEXT",
                 "is_favorite": "INTEGER DEFAULT 0",
                 "parent_album_path": "TEXT",
-                "media_type": "INTEGER"
+                "media_type": "INTEGER",
+                "live_role": "INTEGER DEFAULT 0",
+                "live_partner_rel": "TEXT",
             }
 
             for col, dtype in missing_cols.items():
@@ -205,6 +207,14 @@ class SQLiteAssetRepository(IAssetRepository):
             sql = "SELECT * FROM assets WHERE 1=1"
 
         params = []
+        sql += (
+            " AND ("
+            "live_role IS NULL OR live_role != 1"
+            ")"
+            " AND NOT ("
+            "live_role IS NULL AND live_photo_group_id IS NOT NULL AND media_type = 1"
+            ")"
+        )
 
         if query.album_id:
             sql += " AND album_id = ?"
@@ -225,10 +235,27 @@ class SQLiteAssetRepository(IAssetRepository):
             params.extend([RECENTLY_DELETED_DIR_NAME, f"{RECENTLY_DELETED_DIR_NAME}/%"])
 
         if query.media_types:
-            placeholders = ','.join('?' * len(query.media_types))
-            sql += f" AND media_type IN ({placeholders})"
-            # Map Enum to Int: IMAGE=0, VIDEO=1
-            params.extend([1 if mt == MediaType.VIDEO else 0 for mt in query.media_types])
+            includes_live = MediaType.LIVE_PHOTO in query.media_types
+            includes_image = MediaType.IMAGE in query.media_types or MediaType.PHOTO in query.media_types
+            includes_video = MediaType.VIDEO in query.media_types
+
+            media_clauses: list[str] = []
+            if includes_live and not includes_image:
+                media_clauses.append(
+                    "("
+                    "(live_role = 0 AND live_partner_rel IS NOT NULL)"
+                    " OR "
+                    "(live_photo_group_id IS NOT NULL AND media_type != 1)"
+                    ")"
+                )
+
+            if includes_image:
+                media_clauses.append("media_type = 0")
+            if includes_video:
+                media_clauses.append("media_type = 1")
+
+            if media_clauses:
+                sql += " AND (" + " OR ".join(media_clauses) + ")"
 
         if query.is_favorite is not None:
             sql += " AND is_favorite = ?"
@@ -302,6 +329,8 @@ class SQLiteAssetRepository(IAssetRepository):
         is_favorite = bool(row["is_favorite"]) if "is_favorite" in keys and row["is_favorite"] else False
         album_id = row["album_id"] if "album_id" in keys else None
         live_group = row["live_photo_group_id"] if "live_photo_group_id" in keys else None
+        live_partner_rel = row["live_partner_rel"] if "live_partner_rel" in keys else None
+        live_role = row["live_role"] if "live_role" in keys else None
         content_id = row["content_identifier"] if "content_identifier" in keys else row.get("content_id")
         location = row["location"] if "location" in keys else None
         micro_thumbnail = row["micro_thumbnail"] if "micro_thumbnail" in keys else None
@@ -312,6 +341,13 @@ class SQLiteAssetRepository(IAssetRepository):
             meta["location"] = location
         if micro_thumbnail and "micro_thumbnail" not in meta:
             meta["micro_thumbnail"] = micro_thumbnail
+        if live_partner_rel:
+            meta["live_partner_rel"] = live_partner_rel
+        if live_role is not None:
+            meta["live_role"] = live_role
+
+        if not live_group and live_partner_rel and live_role != 1:
+            live_group = live_partner_rel
 
         return Asset(
             id=row["id"],

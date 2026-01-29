@@ -44,6 +44,10 @@ class AssetDataSource(QObject):
     def set_library_root(self, root: Path):
         self._library_root = root
 
+    def library_root(self) -> Optional[Path]:
+        """Return the configured library root for absolute-path resolution."""
+        return self._library_root
+
     def load(self, query: AssetQuery):
         """Loads data for the given query."""
         self._current_query = query
@@ -173,6 +177,16 @@ class AssetDataSource(QObject):
         is_video = (mt == "video")
         # Live photo check: if asset has live_photo_group_id or explicit type
         is_live = (mt == "live") or (asset.live_photo_group_id is not None)
+        if is_video and asset.live_photo_group_id is not None:
+            is_live = False
+        if not is_live and asset.metadata:
+            live_partner = asset.metadata.get("live_partner_rel")
+            live_role = asset.metadata.get("live_role")
+            if live_partner and live_role != 1 and not is_video:
+                is_live = True
+
+        if asset.live_photo_group_id and asset.metadata is not None:
+            asset.metadata.setdefault("live_photo_group_id", asset.live_photo_group_id)
 
         # Pano check: usually in metadata
         is_pano = False

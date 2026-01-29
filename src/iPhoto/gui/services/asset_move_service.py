@@ -74,7 +74,9 @@ class AssetMoveService(QObject):
         album = self._current_album_getter()
         library_manager = self._library_manager_getter()
         library_root = library_manager.root() if library_manager is not None else None
-        if album is None:
+        if operation_normalized == "delete" and library_root is not None:
+            source_root = library_root
+        elif album is None:
             if library_root is None:
                 list_model.rollback_pending_moves()
                 self.errorRaised.emit("No album is currently open.")

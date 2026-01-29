@@ -20,6 +20,7 @@ from PySide6.QtCore import (
 from PySide6.QtGui import QShortcut, QKeySequence, QAction
 
 from src.iPhoto.appctx import AppContext
+from src.iPhoto.config import DEFAULT_EXCLUDE, DEFAULT_INCLUDE
 from src.iPhoto.gui.ui.models.asset_model import Roles
 from src.iPhoto.gui.ui.models.spacer_proxy_model import SpacerProxyModel
 from src.iPhoto.gui.ui.controllers.data_manager import DataManager
@@ -411,11 +412,20 @@ class MainCoordinator(QObject):
     def _handle_rescan_clicked(self) -> None:
         """Trigger a background rescan and surface progress feedback."""
 
-        if self._facade.current_album is None:
+        self._status_bar.begin_scan()
+
+        if self._facade.current_album is not None:
+            self._facade.rescan_current_async()
+            return
+
+        library_root = self._context.library.root()
+        if library_root is None:
             self._status_bar.show_message("No album is currently open.", 3000)
             return
-        self._status_bar.begin_scan()
-        self._facade.rescan_current_async()
+
+        self._context.library.start_scanning(
+            library_root, DEFAULT_INCLUDE, DEFAULT_EXCLUDE
+        )
 
     def _handle_edit_clicked(self):
         # Trigger Edit Mode from Detail View context

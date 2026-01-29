@@ -206,6 +206,16 @@ class LibraryManager(QObject):
         except (OSError, ValueError):
             return False
 
+    def shutdown(self) -> None:
+        """Stop background workers and watchers during application shutdown."""
+
+        self.stop_scanning()
+        self._debounce.stop()
+        if self._watcher.directories():
+            self._watcher.removePaths(self._watcher.directories())
+        self._live_scan_buffer.clear()
+        self._live_scan_root = None
+
     def get_live_scan_results(self, relative_to: Optional[Path] = None) -> List[Dict]:
         """Return a snapshot of valid items currently in the scan buffer.
 

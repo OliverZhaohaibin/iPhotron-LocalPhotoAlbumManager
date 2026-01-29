@@ -167,6 +167,12 @@ class DetailPageWidget(QWidget):
 
         self.location_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.location_label.setFont(location_font)
+        self.location_label.setTextElideMode(Qt.TextElideMode.ElideRight)
+        self.location_label.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Preferred,
+        )
+        self.location_label.setMinimumWidth(0)
         self.location_label.setVisible(False)
 
         self.timestamp_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -199,6 +205,16 @@ class DetailPageWidget(QWidget):
         self._configure_header_button(self.zoom_in_button, "plus.svg", "Zoom In")
         self.zoom_in_button.setFixedSize(small_button_size)
         zoom_layout.addWidget(self.zoom_in_button)
+        zoom_width = (
+            small_button_size.width() * 2
+            + self.zoom_slider.width()
+            + zoom_layout.spacing() * 2
+        )
+        self.zoom_widget.setMinimumWidth(zoom_width)
+        self.zoom_widget.setSizePolicy(
+            QSizePolicy.Policy.Fixed,
+            QSizePolicy.Policy.Fixed,
+        )
 
         actions_container = QWidget(header)
         actions_layout = QHBoxLayout(actions_container)

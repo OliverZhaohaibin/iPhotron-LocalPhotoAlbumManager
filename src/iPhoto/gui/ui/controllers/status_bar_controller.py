@@ -52,6 +52,7 @@ class StatusBarController(QObject):
         """Prepare the UI for a long-running scan operation."""
 
         self._progress_context = "scan"
+        self._status_bar.setVisible(True)
         self._progress_bar.setRange(0, 0)
         self._progress_bar.setValue(0)
         self._progress_bar.setVisible(True)
@@ -64,7 +65,9 @@ class StatusBarController(QObject):
         """Update the progress bar while the library is being scanned."""
 
         if self._progress_context not in {"scan", None}:
-            return
+            if self._progress_context != "load":
+                return
+            self._progress_context = "scan"
         if self._progress_context is None:
             # A scan triggered from outside the controller started without
             # calling :meth:`begin_scan`; bootstrap the UI lazily.
@@ -263,4 +266,3 @@ class StatusBarController(QObject):
         except OSError:
             second_resolved = second
         return first_resolved == second_resolved
-

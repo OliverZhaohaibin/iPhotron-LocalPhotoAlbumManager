@@ -5,6 +5,26 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, TYPE_CHECKING
+import os
+import logging
+import uuid
+from typing import Optional
+
+from .di.container import DependencyContainer
+from .domain.repositories import IAlbumRepository, IAssetRepository
+from .infrastructure.repositories.sqlite_asset_repository import SQLiteAssetRepository
+from .infrastructure.repositories.sqlite_album_repository import SQLiteAlbumRepository
+from .infrastructure.db.pool import ConnectionPool
+from .events.bus import EventBus
+from .application.use_cases.open_album import OpenAlbumUseCase
+from .application.use_cases.scan_album import ScanAlbumUseCase
+from .application.use_cases.pair_live_photos import PairLivePhotosUseCase
+from .application.services.album_service import AlbumService
+from .application.services.asset_service import AssetService
+from .infrastructure.services.metadata_provider import ExifToolMetadataProvider
+from .infrastructure.services.thumbnail_generator import PillowThumbnailGenerator
+from .application.interfaces import IMetadataProvider, IThumbnailGenerator
+
 
 if TYPE_CHECKING:  # pragma: no cover - only for type checking
     from .gui.facade import AppFacade
@@ -33,6 +53,72 @@ def _create_library_manager():
 
     return LibraryManager()
 
+def _create_di_container() -> DependencyContainer:
+    container = DependencyContainer()
+
+    # Infrastructure
+    db_path = Path.home() / ".iPhoto" / "global_index.db"
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Register Connection Pool (Singleton)
+    pool = ConnectionPool(db_path)
+
+    # Use just one registration
+    container.register(ConnectionPool, implementation=pool, singleton=True)
+
+    # Event Bus
+    # Need a logger
+    logger = logging.getLogger("EventBus")
+    container.register(EventBus, factory=lambda: EventBus(logger), singleton=True)
+
+    # Infrastructure Services
+    container.register(IMetadataProvider, ExifToolMetadataProvider, singleton=True)
+    container.register(IThumbnailGenerator, PillowThumbnailGenerator, singleton=True)
+
+    # Repositories
+    container.register(IAlbumRepository, SQLiteAlbumRepository,
+                       factory=lambda: SQLiteAlbumRepository(container.resolve(ConnectionPool)),
+                       singleton=True)
+
+    container.register(IAssetRepository, SQLiteAssetRepository,
+                       factory=lambda: SQLiteAssetRepository(container.resolve(ConnectionPool)),
+                       singleton=True)
+
+    # Use Cases
+    container.register(OpenAlbumUseCase,
+                       factory=lambda: OpenAlbumUseCase(
+                           album_repo=container.resolve(IAlbumRepository),
+                           asset_repo=container.resolve(IAssetRepository),
+                           event_bus=container.resolve(EventBus)
+                       ))
+    container.register(ScanAlbumUseCase,
+                       factory=lambda: ScanAlbumUseCase(
+                           album_repo=container.resolve(IAlbumRepository),
+                           asset_repo=container.resolve(IAssetRepository),
+                           event_bus=container.resolve(EventBus),
+                           metadata_provider=container.resolve(IMetadataProvider),
+                           thumbnail_generator=container.resolve(IThumbnailGenerator)
+                       ))
+    container.register(PairLivePhotosUseCase,
+                       factory=lambda: PairLivePhotosUseCase(
+                           asset_repo=container.resolve(IAssetRepository),
+                           event_bus=container.resolve(EventBus)
+                       ))
+
+    # Services
+    container.register(AlbumService,
+                       factory=lambda: AlbumService(
+                           open_album_use_case=container.resolve(OpenAlbumUseCase),
+                           scan_album_use_case=container.resolve(ScanAlbumUseCase),
+                           pair_live_photos_use_case=container.resolve(PairLivePhotosUseCase)
+                       ), singleton=True)
+
+    container.register(AssetService,
+                       factory=lambda: AssetService(
+                           asset_repo=container.resolve(IAssetRepository)
+                       ), singleton=True)
+
+    return container
 
 @dataclass
 class AppContext:
@@ -43,6 +129,9 @@ class AppContext:
     facade: "AppFacade" = field(default_factory=_create_facade)
     recent_albums: List[Path] = field(default_factory=list)
     theme: "ThemeManager" = field(init=False)
+
+    # DI Container integration
+    container: DependencyContainer = field(default_factory=_create_di_container)
 
     def __post_init__(self) -> None:
         from .errors import LibraryError

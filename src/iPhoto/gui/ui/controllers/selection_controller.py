@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Optional
+from typing import Optional, TYPE_CHECKING
 
 from PySide6.QtCore import QModelIndex, QObject, QCoreApplication, Signal
 from PySide6.QtWidgets import QPushButton
@@ -10,7 +10,10 @@ from PySide6.QtWidgets import QPushButton
 from ..widgets.asset_grid import AssetGrid
 from ..widgets.asset_delegate import AssetGridDelegate
 from .preview_controller import PreviewController
-from .playback_controller import PlaybackController
+
+
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    from ...coordinators.playback_coordinator import PlaybackCoordinator
 
 
 class SelectionController(QObject):
@@ -24,7 +27,9 @@ class SelectionController(QObject):
         grid_view: AssetGrid,
         grid_delegate: AssetGridDelegate | None,
         preview_controller: PreviewController,
-        playback_controller: PlaybackController,
+        playback: Optional["PlaybackCoordinator"] = None,
+        *,
+        handle_grid_clicks: bool = True,
         parent: Optional[QObject] = None,
     ) -> None:
         super().__init__(parent)
@@ -32,11 +37,12 @@ class SelectionController(QObject):
         self._grid_view = grid_view
         self._grid_delegate = grid_delegate
         self._preview_controller = preview_controller
-        self._playback = playback_controller
+        self._playback = playback
         self._active = False
 
         self._selection_button.clicked.connect(self._handle_toggle_requested)
-        self._grid_view.itemClicked.connect(self._handle_grid_item_clicked)
+        if handle_grid_clicks and self._playback is not None:
+            self._grid_view.itemClicked.connect(self._handle_grid_item_clicked)
 
     # ------------------------------------------------------------------
     # Public API
@@ -100,4 +106,6 @@ class SelectionController(QObject):
     def _handle_grid_item_clicked(self, index: QModelIndex) -> None:
         if self._active:
             return
-        self._playback.activate_index(index)
+        if self._playback is None:
+            return
+        self._playback.play_asset(index.row())

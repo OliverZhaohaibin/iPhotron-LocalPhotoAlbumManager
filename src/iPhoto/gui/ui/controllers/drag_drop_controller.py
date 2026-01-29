@@ -16,7 +16,6 @@ from ...facade import AppFacade
 from ..widgets.asset_grid import AssetGrid
 from ..widgets.album_sidebar import AlbumSidebar
 from .dialog_controller import DialogController
-from .navigation_controller import NavigationController
 from .status_bar_controller import StatusBarController
 
 
@@ -32,7 +31,6 @@ class DragDropController(QObject):
         facade: AppFacade,
         status_bar: StatusBarController,
         dialog: DialogController,
-        navigation: NavigationController,
         parent: Optional[QObject] = None,
     ) -> None:
         super().__init__(parent)
@@ -42,7 +40,6 @@ class DragDropController(QObject):
         self._facade = facade
         self._status_bar = status_bar
         self._dialog = dialog
-        self._navigation = navigation
 
         self._grid_view.configure_external_drop(
             handler=self._handle_grid_drop,

@@ -15,7 +15,7 @@ from PySide6.QtCore import (
     Qt,
     Signal,
 )
-from PySide6.QtGui import QColor, QCursor, QMouseEvent, QPainter, QResizeEvent
+from PySide6.QtGui import QColor, QCursor, QMouseEvent, QPainter, QResizeEvent, QWheelEvent
 from PySide6.QtWidgets import (
     QFrame,
     QGraphicsOpacityEffect,
@@ -26,9 +26,15 @@ from PySide6.QtWidgets import (
 )
 
 try:  # pragma: no cover - optional Qt module
+    from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
     from PySide6.QtMultimediaWidgets import QGraphicsVideoItem
 except (ModuleNotFoundError, ImportError):  # pragma: no cover - handled by main window guard
     QGraphicsVideoItem = None  # type: ignore[assignment, misc]
+    QMediaPlayer = None
+    QAudioOutput = None
+
+from pathlib import Path
+from PySide6.QtCore import QUrl
 
 from ....config import (
     PLAYER_CONTROLS_HIDE_DELAY_MS,
@@ -45,6 +51,9 @@ class VideoArea(QWidget):
     mouseActive = Signal()
     controlsVisibleChanged = Signal(bool)
     fullscreenExitRequested = Signal()
+    playbackStateChanged = Signal(bool)
+    nextItemRequested = Signal()
+    prevItemRequested = Signal()
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
@@ -98,6 +107,17 @@ class VideoArea(QWidget):
         self.setStyleSheet(f"background-color: {surface_color};")
         self._scene.setBackgroundBrush(QColor(surface_color))
         # --- End Graphics View Setup ---
+
+        # --- Media Player Setup ---
+        self._player = QMediaPlayer(self)
+        self._audio_output = QAudioOutput(self)
+        self._player.setAudioOutput(self._audio_output)
+        self._player.setVideoOutput(self._video_item)
+
+        self._player.positionChanged.connect(self._on_position_changed)
+        self._player.durationChanged.connect(self._on_duration_changed)
+        self._player.playbackStateChanged.connect(self._on_playback_state_changed)
+        # --- End Media Player Setup ---
 
         self._overlay_margin = 48
         self._player_bar = PlayerBar(self)
@@ -193,6 +213,66 @@ class VideoArea(QWidget):
             self.show_controls()
 
     # ------------------------------------------------------------------
+    # Player Control API
+    # ------------------------------------------------------------------
+    def set_volume(self, volume: int) -> None:
+        """Update the audio output volume (0-100)."""
+        clamped = max(0, min(100, volume))
+        self._audio_output.setVolume(clamped / 100.0)
+        self._player_bar.set_volume(clamped)
+
+    def set_muted(self, muted: bool) -> None:
+        """Update the audio output mute state."""
+        self._audio_output.setMuted(muted)
+        self._player_bar.set_muted(muted)
+
+    def load_video(self, path: Path) -> None:
+        """Load a video file for playback."""
+        self._player.setSource(QUrl.fromLocalFile(str(path)))
+        # Do not auto-play; let the coordinator decide.
+        # But ensure we are at start
+        self._player.setPosition(0)
+
+    def play(self) -> None:
+        """Start or resume playback."""
+        self._player.play()
+
+    def pause(self) -> None:
+        """Pause playback."""
+        self._player.pause()
+
+    def seek(self, position: int) -> None:
+        """Seek to a specific position in milliseconds."""
+        self._player.setPosition(position)
+
+    def stop(self) -> None:
+        """Stop playback and reset."""
+        self._player.stop()
+
+    def _on_position_changed(self, position: int) -> None:
+        self._player_bar.set_position(position)
+
+    def _on_duration_changed(self, duration: int) -> None:
+        self._player_bar.set_duration(duration)
+
+    def _on_playback_state_changed(self, state: QMediaPlayer.PlaybackState) -> None:
+        is_playing = (state == QMediaPlayer.PlaybackState.PlayingState)
+        self._player_bar.set_playback_state(is_playing)
+        self.playbackStateChanged.emit(is_playing)
+        if not is_playing and state == QMediaPlayer.PlaybackState.StoppedState:
+            self.show_controls()
+
+    def _on_volume_changed(self, value: int) -> None:
+        """Handle volume changes from the player bar."""
+        self._audio_output.setVolume(value / 100.0)
+        self._on_mouse_activity()
+
+    def _on_mute_toggled(self, muted: bool) -> None:
+        """Handle mute toggle from the player bar."""
+        self._audio_output.setMuted(muted)
+        self._on_mouse_activity()
+
+    # ------------------------------------------------------------------
     # QWidget overrides
     # ------------------------------------------------------------------
     def resizeEvent(self, event: QResizeEvent) -> None:  # pragma: no cover - GUI behaviour
@@ -228,6 +308,16 @@ class VideoArea(QWidget):
             event.accept()
             return
         super().mouseDoubleClickEvent(event)
+
+    def wheelEvent(self, event: QWheelEvent) -> None:
+        """Handle wheel events for navigation."""
+        delta = event.angleDelta()
+        step = delta.y() or delta.x()
+        if step < 0:
+            self.nextItemRequested.emit()
+        elif step > 0:
+            self.prevItemRequested.emit()
+        event.accept()
 
     def showEvent(self, event) -> None:  # pragma: no cover - GUI behaviour
         """Force position update when widget becomes visible."""
@@ -268,8 +358,8 @@ class VideoArea(QWidget):
         ):
             signal.connect(self._on_mouse_activity)
         self._player_bar.seekRequested.connect(lambda _value: self._on_mouse_activity())
-        self._player_bar.volumeChanged.connect(lambda _value: self._on_mouse_activity())
-        self._player_bar.muteToggled.connect(lambda _state: self._on_mouse_activity())
+        self._player_bar.volumeChanged.connect(self._on_volume_changed)
+        self._player_bar.muteToggled.connect(self._on_mute_toggled)
 
     def _on_mouse_activity(self) -> None:
         if not self._controls_enabled:

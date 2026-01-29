@@ -9,7 +9,7 @@ from PySide6.QtCore import (
     QObject,
     QSize,
     Qt,
-    Slot
+    Slot,
 )
 from src.iPhoto.application.dtos import AssetDTO
 from src.iPhoto.domain.models.query import AssetQuery
@@ -205,6 +205,40 @@ class AssetListViewModel(QAbstractListModel):
         self._data_source.update_favorite_status(row, is_favorite)
         idx = self.index(row, 0)
         self.dataChanged.emit(idx, idx, [Roles.FEATURED])
+
+    def optimistic_move_paths(self, paths: list[Path], destination_root: Path, *, is_delete: bool) -> bool:
+        removed_rows, inserted_dtos = self._data_source.apply_optimistic_move(
+            paths,
+            destination_root,
+            is_delete=is_delete,
+        )
+        if removed_rows:
+            rows = sorted(set(removed_rows), reverse=True)
+            for row in rows:
+                self.beginRemoveRows(QModelIndex(), row, row)
+                self._data_source.remove_rows([row], emit=False)
+                self.endRemoveRows()
+        if inserted_dtos:
+            start = self.rowCount()
+            end = start + len(inserted_dtos) - 1
+            self.beginInsertRows(QModelIndex(), start, end)
+            self._data_source.append_dtos(inserted_dtos)
+            self.endInsertRows()
+        return bool(removed_rows or inserted_dtos)
+
+    def removeRows(
+        self,
+        row: int,
+        count: int,
+        parent: QModelIndex = QModelIndex(),
+    ) -> bool:  # type: ignore[override]
+        if count <= 0 or row < 0:
+            return False
+        rows = list(range(row, row + count))
+        self.beginRemoveRows(parent, row, row + count - 1)
+        self._data_source.remove_rows(rows)
+        self.endRemoveRows()
+        return True
 
     def set_current_row(self, row: int):
         """Update the currently active row (for filmstrip highlighting)."""

@@ -6,18 +6,30 @@ import subprocess
 import sys
 from functools import partial
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Callable, Optional, TYPE_CHECKING
 
-from PySide6.QtCore import QCoreApplication, QMimeData, QObject, QPoint, QUrl, Qt
+from PySide6.QtCore import (
+    QAbstractItemModel,
+    QCoreApplication,
+    QMimeData,
+    QObject,
+    QPoint,
+    QUrl,
+    Qt,
+    QItemSelectionModel,
+)
 from PySide6.QtGui import QGuiApplication, QPalette
 from PySide6.QtWidgets import QMenu
 
 from ...facade import AppFacade
-from ..models.asset_model import AssetModel, Roles
+from ..models.roles import Roles
 from ..widgets.asset_grid import AssetGrid
 from ..widgets.notification_toast import NotificationToast
 from .selection_controller import SelectionController
 from .status_bar_controller import StatusBarController
+
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    from ...coordinators.navigation_coordinator import NavigationCoordinator
 
 
 class ContextMenuController(QObject):
@@ -27,11 +39,12 @@ class ContextMenuController(QObject):
         self,
         *,
         grid_view: AssetGrid,
-        asset_model: AssetModel,
+        asset_model: QAbstractItemModel,
         facade: AppFacade,
         status_bar: StatusBarController,
         notification_toast: NotificationToast,
-        selection_controller: SelectionController,
+        selection_controller: SelectionController | None,
+        navigation: "NavigationCoordinator" | None,
         export_callback: Callable[[], None],
         parent: Optional[QObject] = None,
     ) -> None:
@@ -42,6 +55,7 @@ class ContextMenuController(QObject):
         self._status_bar = status_bar
         self._toast = notification_toast
         self._selection_controller = selection_controller
+        self._navigation = navigation
         self._export_callback = export_callback
 
         self._grid_view.customContextMenuRequested.connect(self._handle_context_menu)
@@ -91,6 +105,12 @@ class ContextMenuController(QObject):
 
         selection_model = self._grid_view.selectionModel()
 
+        if index.isValid() and selection_model and not selection_model.isSelected(index):
+            selection_model.setCurrentIndex(
+                index,
+                QItemSelectionModel.ClearAndSelect | QItemSelectionModel.Rows,
+            )
+
         # When the cursor is above an already selected item we expose actions that operate on
         # the selection (copy, reveal, move). This mirrors native file explorer conventions and
         # ensures that selection mode is not a prerequisite for quick actions.
@@ -126,7 +146,11 @@ class ContextMenuController(QObject):
             copy_action.triggered.connect(self._copy_selection_to_clipboard)
             reveal_action.triggered.connect(self._reveal_selection_in_file_manager)
             export_action.triggered.connect(self._export_callback)
-            is_recently_deleted = self._navigation.is_recently_deleted_view()
+            is_recently_deleted = (
+                self._navigation.is_recently_deleted_view()
+                if self._navigation is not None
+                else False
+            )
             if is_recently_deleted:
                 delete_action.setVisible(False)
                 move_menu.menuAction().setVisible(False)
@@ -156,7 +180,7 @@ class ContextMenuController(QObject):
     def delete_selection(self) -> bool:
         """Move the current selection into the deleted-items collection."""
 
-        if self._navigation.is_recently_deleted_view():
+        if self._navigation is not None and self._navigation.is_recently_deleted_view():
             self._status_bar.show_message(
                 "Items inside Recently Deleted cannot be deleted again.",
                 3000,
@@ -172,9 +196,8 @@ class ContextMenuController(QObject):
             self._status_bar.show_message("Select items to delete first.", 3000)
             return False
 
-        source_model = self._asset_model.source_model()
-        if selected_indexes:
-            source_model.remove_rows(selected_indexes)
+        if not self._apply_optimistic_move(paths, is_delete=True):
+            self._remove_selection_rows(selected_indexes)
 
         try:
             self._facade.delete_assets(paths)
@@ -183,7 +206,8 @@ class ContextMenuController(QObject):
             self._facade.rescan_current()
             raise
         finally:
-            self._selection_controller.set_selection_mode(False)
+            if self._selection_controller is not None:
+                self._selection_controller.set_selection_mode(False)
 
         self._toast.show_toast("Deleted")
         return True
@@ -200,22 +224,22 @@ class ContextMenuController(QObject):
             self._status_bar.show_message("Select items to restore first.", 3000)
             return
 
-        source_model = self._asset_model.source_model()
-
         try:
             queued_restore = self._facade.restore_assets(paths)
         except Exception:
             self._facade.rescan_current()
             raise
         finally:
-            self._selection_controller.set_selection_mode(False)
+            if self._selection_controller is not None:
+                self._selection_controller.set_selection_mode(False)
 
         if queued_restore:
             if selected_indexes:
                 # Removing the rows only after the restore task has been accepted
                 # avoids hiding assets when the backend declined to queue any
                 # work (for example because the user rejected every fallback).
-                source_model.remove_rows(selected_indexes)
+                if not self._apply_optimistic_move(paths, is_delete=False):
+                    self._remove_selection_rows(selected_indexes)
             self._toast.show_toast("Restoring ...")
 
     def _copy_selection_to_clipboard(self) -> None:
@@ -316,13 +340,18 @@ class ContextMenuController(QObject):
             self._status_bar.show_message("Select items to move first.", 3000)
             return
 
+        self._apply_optimistic_move(paths, destination_root=target)
+
         try:
             self._facade.move_assets(paths, target)
         except Exception:
-            self._asset_model.source_model().rollback_pending_moves()
+            rollback = getattr(self._asset_model, "rollback_pending_moves", None)
+            if callable(rollback):
+                rollback()
             raise
         finally:
-            self._selection_controller.set_selection_mode(False)
+            if self._selection_controller is not None:
+                self._selection_controller.set_selection_mode(False)
 
     # ------------------------------------------------------------------
     # Utilities
@@ -349,6 +378,8 @@ class ContextMenuController(QObject):
     def _collect_move_targets(self) -> list[tuple[str, Path]]:
         """Build a list of (label, path) destinations excluding the currently open album."""
 
+        if self._navigation is None:
+            return []
         model = self._navigation.sidebar_model()
         entries = model.iter_album_entries()
         current_album = self._facade.current_album
@@ -369,3 +400,43 @@ class ContextMenuController(QObject):
                 continue
             destinations.append((label, path))
         return destinations
+
+    def _remove_selection_rows(self, selected_indexes: list) -> None:
+        if not selected_indexes:
+            return
+        source_model = getattr(self._asset_model, "source_model", None)
+        if callable(source_model):
+            resolved_model = source_model()
+        else:
+            resolved_model = None
+        if resolved_model is not None and hasattr(resolved_model, "remove_rows"):
+            resolved_model.remove_rows(selected_indexes)
+            return
+        remove_rows = getattr(self._asset_model, "remove_rows", None)
+        if callable(remove_rows):
+            remove_rows(selected_indexes)
+            return
+        remove_rows = getattr(self._asset_model, "removeRows", None)
+        if callable(remove_rows):
+            rows = sorted({index.row() for index in selected_indexes}, reverse=True)
+            for row in rows:
+                remove_rows(row, 1)
+
+    def _apply_optimistic_move(
+        self,
+        paths: list[Path],
+        *,
+        destination_root: Path | None = None,
+        is_delete: bool = False,
+    ) -> bool:
+        handler = getattr(self._asset_model, "optimistic_move_paths", None)
+        if not callable(handler):
+            return False
+        if destination_root is None and is_delete:
+            library = self._facade.library_manager
+            if library is None:
+                return False
+            destination_root = library.deleted_directory()
+        if destination_root is None:
+            return False
+        return bool(handler(paths, destination_root, is_delete=is_delete))

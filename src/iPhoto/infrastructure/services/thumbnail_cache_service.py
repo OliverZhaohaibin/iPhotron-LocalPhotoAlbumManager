@@ -164,7 +164,12 @@ class ThumbnailCacheService(QObject):
         if size.isEmpty() or not size.isValid():
             return None
 
-        qimage = image_loader.load_qimage(path, size)
+        video_exts = {".mp4", ".mov", ".avi", ".mkv", ".webm", ".m4v"}
+        is_video = path.suffix.lower() in video_exts
+        qimage: Optional[QImage] = None
+        if not is_video:
+            qimage = image_loader.load_qimage(path, size)
+
         if qimage is None or qimage.isNull():
             pil_image = self._generator.generate(path, (size.width(), size.height()))
             if pil_image is None:

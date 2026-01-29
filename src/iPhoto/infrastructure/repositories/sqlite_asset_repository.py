@@ -8,6 +8,7 @@ from src.iPhoto.domain.models import Asset, MediaType
 from src.iPhoto.domain.models.query import AssetQuery, SortOrder
 from src.iPhoto.domain.repositories import IAssetRepository
 from src.iPhoto.infrastructure.db.pool import ConnectionPool
+from src.iPhoto.config import RECENTLY_DELETED_DIR_NAME
 
 class SQLiteAssetRepository(IAssetRepository):
     def __init__(self, pool: ConnectionPool):
@@ -142,8 +143,10 @@ class SQLiteAssetRepository(IAssetRepository):
             # Map Enum to Int (0=Photo, 1=Video)
             mt_int = 1 if asset.media_type == MediaType.VIDEO else 0
 
-            metadata = asset.metadata or {}
-            micro_thumbnail = metadata.get("micro_thumbnail")
+            metadata = self._sanitize_metadata(asset.metadata)
+            micro_thumbnail = metadata.pop("micro_thumbnail", None)
+            if micro_thumbnail is None and asset.metadata:
+                micro_thumbnail = asset.metadata.get("micro_thumbnail")
 
             data.append((
                 str(asset.path),  # rel (PK)
@@ -171,6 +174,26 @@ class SQLiteAssetRepository(IAssetRepository):
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, data)
 
+    def _sanitize_metadata(self, metadata: Optional[dict]) -> dict:
+        if not metadata:
+            return {}
+
+        def _coerce(value: Any) -> Any:
+            if isinstance(value, (bytes, bytearray, memoryview)):
+                return None
+            if isinstance(value, Path):
+                return str(value)
+            if isinstance(value, dict):
+                return {key: _coerce(val) for key, val in value.items()}
+            if isinstance(value, (list, tuple)):
+                return [_coerce(val) for val in value]
+            return value
+
+        sanitized = _coerce(metadata)
+        if isinstance(sanitized, dict):
+            return sanitized
+        return {}
+
     def delete(self, id: str) -> None:
         with self._pool.connection() as conn:
             conn.execute("DELETE FROM assets WHERE id = ?", (id,))
@@ -194,6 +217,12 @@ class SQLiteAssetRepository(IAssetRepository):
             else:
                 sql += " AND parent_album_path = ?"
                 params.append(query.album_path)
+        if query.album_path != RECENTLY_DELETED_DIR_NAME:
+            sql += (
+                " AND (parent_album_path IS NULL"
+                " OR (parent_album_path != ? AND parent_album_path NOT LIKE ?))"
+            )
+            params.extend([RECENTLY_DELETED_DIR_NAME, f"{RECENTLY_DELETED_DIR_NAME}/%"])
 
         if query.media_types:
             placeholders = ','.join('?' * len(query.media_types))

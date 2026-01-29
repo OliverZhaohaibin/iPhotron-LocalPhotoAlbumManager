@@ -74,13 +74,14 @@ class AssetDataSource(QObject):
             dto = self._cached_dtos[row]
             dto.is_favorite = is_favorite
 
-    def remove_rows(self, rows: List[int]) -> None:
+    def remove_rows(self, rows: List[int], *, emit: bool = True) -> None:
         if not rows:
             return
         for row in sorted(set(rows), reverse=True):
             if 0 <= row < len(self._cached_dtos):
                 self._cached_dtos.pop(row)
-        self.dataChanged.emit()
+        if emit:
+            self.dataChanged.emit()
 
     def apply_optimistic_move(
         self,
@@ -88,20 +89,22 @@ class AssetDataSource(QObject):
         destination_root: Path,
         *,
         is_delete: bool,
-    ) -> bool:
+    ) -> tuple[list[int], list[AssetDTO]]:
         if not paths:
-            return False
+            return [], []
         destination_album_path = self._album_path_for_root(destination_root)
-        updated = False
+        removed_rows: list[int] = []
+        inserted_dtos: list[AssetDTO] = []
+        cached_map = {str(dto.abs_path): (idx, dto) for idx, dto in enumerate(self._cached_dtos)}
         for path in paths:
             key = str(path)
             if key in self._pending_paths:
                 continue
-            dto = self._find_cached_dto(path)
-            if dto is None:
+            found = cached_map.get(key)
+            if found is None:
                 continue
-            self._cached_dtos = [item for item in self._cached_dtos if item is not dto]
-            updated = True
+            row, dto = found
+            removed_rows.append(row)
             destination_abs = destination_root / path.name
             destination_rel = self._rel_path_for_abs(destination_abs)
             moved_dto = AssetDTO(
@@ -120,21 +123,25 @@ class AssetDataSource(QObject):
                 is_pano=dto.is_pano,
                 micro_thumbnail=dto.micro_thumbnail,
             )
-            self._pending_moves.append(
-                _PendingMove(
-                    dto=moved_dto,
-                    source_abs=path,
-                    destination_root=destination_root,
-                    destination_album_path=destination_album_path,
-                    destination_abs=destination_abs,
-                    destination_rel=destination_rel,
-                    is_delete=is_delete,
-                )
+            pending = _PendingMove(
+                dto=moved_dto,
+                source_abs=path,
+                destination_root=destination_root,
+                destination_album_path=destination_album_path,
+                destination_abs=destination_abs,
+                destination_rel=destination_rel,
+                is_delete=is_delete,
             )
+            self._pending_moves.append(pending)
             self._pending_paths.add(key)
-        if updated:
-            self.dataChanged.emit()
-        return updated
+            if self._current_query and self._should_include_pending(pending, self._current_query):
+                inserted_dtos.append(moved_dto)
+        return removed_rows, inserted_dtos
+
+    def append_dtos(self, dtos: List[AssetDTO]) -> None:
+        if not dtos:
+            return
+        self._cached_dtos.extend(dtos)
 
     def _to_dto(self, asset: Asset) -> AssetDTO:
         # Resolve absolute path

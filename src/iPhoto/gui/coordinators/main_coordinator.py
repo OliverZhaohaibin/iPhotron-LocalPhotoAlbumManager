@@ -253,6 +253,8 @@ class MainCoordinator(QObject):
         # 1. Cancel any active background scans/imports via Facade
         if self._facade:
             self._facade.cancel_active_scans()
+        if self._context and self._context.library:
+            self._context.library.shutdown()
 
         # 2. Stop playback (video/audio)
         if self._playback:
@@ -270,6 +272,11 @@ class MainCoordinator(QObject):
                 self._window.ui.preview_window.close_preview(False)
             except AttributeError:
                 self._window.ui.preview_window.close()
+        if hasattr(self._window.ui, "map_view"):
+            try:
+                self._window.ui.map_view.close()
+            except RuntimeError:
+                self._logger.warning("Failed to close map view during shutdown", exc_info=True)
 
         # 4. Wait briefly for background threads (e.g. thumbnail generation) to finish
         thread_pool = QThreadPool.globalInstance()

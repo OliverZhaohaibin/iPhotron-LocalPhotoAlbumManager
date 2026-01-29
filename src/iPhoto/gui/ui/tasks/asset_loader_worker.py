@@ -133,18 +133,32 @@ def _is_panorama_candidate(row: Dict[str, object], is_image: bool) -> bool:
     if not is_image:
         return False
 
-    width = row.get("w")
-    height = row.get("h")
-    byte_size = row.get("bytes")
+    def _coerce_positive_number(value: object) -> Optional[float]:
+        if isinstance(value, bool):
+            return None
+        if isinstance(value, (int, float)):
+            return float(value) if value > 0 else None
+        if isinstance(value, str):
+            try:
+                parsed = float(value)
+            except ValueError:
+                return None
+            return parsed if parsed > 0 else None
+        return None
 
-    if not isinstance(width, int) or not isinstance(height, int):
-        return False
-    if width <= 0 or height <= 0:
-        return False
-    if not isinstance(byte_size, int) or byte_size <= 1 * 1024 * 1024:
+    width = _coerce_positive_number(row.get("w"))
+    height = _coerce_positive_number(row.get("h"))
+    aspect_ratio = _coerce_positive_number(row.get("aspect_ratio"))
+    byte_size = _coerce_positive_number(row.get("bytes"))
+
+    if width is not None and height is not None:
+        aspect_ratio = width / height
+    if aspect_ratio is None:
         return False
 
-    aspect_ratio = width / height
+    if byte_size is not None and byte_size <= 1 * 1024 * 1024:
+        return False
+
     return aspect_ratio >= 2.0
 
 

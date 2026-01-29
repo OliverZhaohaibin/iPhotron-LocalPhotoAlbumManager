@@ -281,6 +281,7 @@ class PlaybackCoordinator(QObject):
         motion_path = Path(str(motion_abs))
         self._active_live_motion = motion_path
         self._active_live_still = still_source
+        self._player_view.defer_still_updates(True)
         self._player_view.show_video_surface(interactive=False)
         self._player_view.video_area.load_video(motion_path)
         self._player_view.video_area.play()
@@ -292,8 +293,9 @@ class PlaybackCoordinator(QObject):
             return
         still = self._active_live_still
         self._active_live_motion = None
-        self._player_view.show_image_surface()
-        self._player_view.display_image(still)
+        self._player_view.defer_still_updates(False)
+        if not self._player_view.apply_pending_still():
+            self._player_view.display_image(still)
         self._player_bar.setEnabled(False)
         self._player_view.show_live_badge()
         self._player_view.set_live_replay_enabled(True)

@@ -207,6 +207,14 @@ class SQLiteAssetRepository(IAssetRepository):
             sql = "SELECT * FROM assets WHERE 1=1"
 
         params = []
+        sql += (
+            " AND ("
+            "live_role IS NULL OR live_role != 1"
+            ")"
+            " AND NOT ("
+            "live_role IS NULL AND live_photo_group_id IS NOT NULL AND media_type = 1"
+            ")"
+        )
 
         if query.album_id:
             sql += " AND album_id = ?"
@@ -233,7 +241,13 @@ class SQLiteAssetRepository(IAssetRepository):
 
             media_clauses: list[str] = []
             if includes_live and not includes_image:
-                media_clauses.append("live_role = 0 AND live_partner_rel IS NOT NULL")
+                media_clauses.append(
+                    "("
+                    "(live_role = 0 AND live_partner_rel IS NOT NULL)"
+                    " OR "
+                    "(live_photo_group_id IS NOT NULL AND media_type != 1)"
+                    ")"
+                )
 
             if includes_image:
                 media_clauses.append("media_type = 0")

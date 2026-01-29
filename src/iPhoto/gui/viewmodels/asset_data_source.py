@@ -195,9 +195,14 @@ class AssetDataSource(QObject):
         else:
             width = asset.width or 0
             height = asset.height or 0
-            if mt == "image" and width > 0 and height > 0 and asset.size_bytes:
-                if asset.size_bytes > 1 * 1024 * 1024 and (width / height) >= 2.0:
-                    is_pano = True
+            if mt == "image" and width > 0 and height > 0:
+                aspect_ratio = width / height
+                if aspect_ratio >= 2.0:
+                    if isinstance(asset.size_bytes, int) and asset.size_bytes > 1 * 1024 * 1024:
+                        is_pano = True
+                    elif asset.size_bytes in (None, 0):
+                        if width * height >= 1_000_000:
+                            is_pano = True
 
         micro_thumbnail = asset.metadata.get("micro_thumbnail") if asset.metadata else None
         micro_thumbnail_image = None

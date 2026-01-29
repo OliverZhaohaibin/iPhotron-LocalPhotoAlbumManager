@@ -196,7 +196,8 @@ class ContextMenuController(QObject):
             self._status_bar.show_message("Select items to delete first.", 3000)
             return False
 
-        self._remove_selection_rows(selected_indexes)
+        if not self._apply_optimistic_move(paths, is_delete=True):
+            self._remove_selection_rows(selected_indexes)
 
         try:
             self._facade.delete_assets(paths)
@@ -237,7 +238,8 @@ class ContextMenuController(QObject):
                 # Removing the rows only after the restore task has been accepted
                 # avoids hiding assets when the backend declined to queue any
                 # work (for example because the user rejected every fallback).
-                self._remove_selection_rows(selected_indexes)
+                if not self._apply_optimistic_move(paths, is_delete=False):
+                    self._remove_selection_rows(selected_indexes)
             self._toast.show_toast("Restoring ...")
 
     def _copy_selection_to_clipboard(self) -> None:
@@ -338,6 +340,8 @@ class ContextMenuController(QObject):
             self._status_bar.show_message("Select items to move first.", 3000)
             return
 
+        self._apply_optimistic_move(paths, destination_root=target)
+
         try:
             self._facade.move_assets(paths, target)
         except Exception:
@@ -417,3 +421,22 @@ class ContextMenuController(QObject):
             rows = sorted({index.row() for index in selected_indexes}, reverse=True)
             for row in rows:
                 remove_rows(row, 1)
+
+    def _apply_optimistic_move(
+        self,
+        paths: list[Path],
+        *,
+        destination_root: Path | None = None,
+        is_delete: bool = False,
+    ) -> bool:
+        handler = getattr(self._asset_model, "optimistic_move_paths", None)
+        if not callable(handler):
+            return False
+        if destination_root is None and is_delete:
+            library = self._facade.library_manager
+            if library is None:
+                return False
+            destination_root = library.deleted_directory()
+        if destination_root is None:
+            return False
+        return bool(handler(paths, destination_root, is_delete=is_delete))

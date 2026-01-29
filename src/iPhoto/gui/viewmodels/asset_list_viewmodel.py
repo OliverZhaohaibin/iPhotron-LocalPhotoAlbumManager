@@ -9,7 +9,7 @@ from PySide6.QtCore import (
     QObject,
     QSize,
     Qt,
-    Slot
+    Slot,
 )
 from src.iPhoto.application.dtos import AssetDTO
 from src.iPhoto.domain.models.query import AssetQuery
@@ -205,6 +205,27 @@ class AssetListViewModel(QAbstractListModel):
         self._data_source.update_favorite_status(row, is_favorite)
         idx = self.index(row, 0)
         self.dataChanged.emit(idx, idx, [Roles.FEATURED])
+
+    def optimistic_move_paths(self, paths: list[Path], destination_root: Path, *, is_delete: bool) -> bool:
+        if self._data_source.apply_optimistic_move(paths, destination_root, is_delete=is_delete):
+            self.beginResetModel()
+            self.endResetModel()
+            return True
+        return False
+
+    def removeRows(
+        self,
+        row: int,
+        count: int,
+        parent: QModelIndex = QModelIndex(),
+    ) -> bool:  # type: ignore[override]
+        if count <= 0 or row < 0:
+            return False
+        rows = list(range(row, row + count))
+        self.beginRemoveRows(parent, row, row + count - 1)
+        self._data_source.remove_rows(rows)
+        self.endRemoveRows()
+        return True
 
     def set_current_row(self, row: int):
         """Update the currently active row (for filmstrip highlighting)."""

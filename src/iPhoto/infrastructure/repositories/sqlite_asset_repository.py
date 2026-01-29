@@ -8,6 +8,7 @@ from src.iPhoto.domain.models import Asset, MediaType
 from src.iPhoto.domain.models.query import AssetQuery, SortOrder
 from src.iPhoto.domain.repositories import IAssetRepository
 from src.iPhoto.infrastructure.db.pool import ConnectionPool
+from src.iPhoto.config import RECENTLY_DELETED_DIR_NAME
 
 class SQLiteAssetRepository(IAssetRepository):
     def __init__(self, pool: ConnectionPool):
@@ -216,6 +217,12 @@ class SQLiteAssetRepository(IAssetRepository):
             else:
                 sql += " AND parent_album_path = ?"
                 params.append(query.album_path)
+        if query.album_path != RECENTLY_DELETED_DIR_NAME:
+            sql += (
+                " AND (parent_album_path IS NULL"
+                " OR (parent_album_path != ? AND parent_album_path NOT LIKE ?))"
+            )
+            params.extend([RECENTLY_DELETED_DIR_NAME, f"{RECENTLY_DELETED_DIR_NAME}/%"])
 
         if query.media_types:
             placeholders = ','.join('?' * len(query.media_types))

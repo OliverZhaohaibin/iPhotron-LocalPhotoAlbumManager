@@ -173,6 +173,11 @@ class AssetDataSource(QObject):
         is_video = (mt == "video")
         # Live photo check: if asset has live_photo_group_id or explicit type
         is_live = (mt == "live") or (asset.live_photo_group_id is not None)
+        if not is_live and asset.metadata:
+            live_partner = asset.metadata.get("live_partner_rel")
+            live_role = asset.metadata.get("live_role")
+            if live_partner and live_role != 1:
+                is_live = True
 
         # Pano check: usually in metadata
         is_pano = False

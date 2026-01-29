@@ -86,6 +86,8 @@ class PlaybackCoordinator(QObject):
         self._current_row = -1
         self._navigation: Optional[NavigationCoordinator] = None
         self._info_panel: Optional[InfoPanel] = None
+        self._active_live_motion: Optional[Path] = None
+        self._active_live_still: Optional[Path] = None
 
         self._connect_signals()
         self._connect_zoom_controls()
@@ -111,6 +113,7 @@ class PlaybackCoordinator(QObject):
         # Player View -> Coordinator
         self._player_view.liveReplayRequested.connect(self.replay_live_photo)
         self._player_view.video_area.playbackStateChanged.connect(self._sync_playback_state)
+        self._player_view.video_area.playbackFinished.connect(self._handle_playback_finished)
 
         # Model -> Coordinator
         self._asset_vm.dataChanged.connect(self._on_data_changed)
@@ -224,6 +227,8 @@ class PlaybackCoordinator(QObject):
             return
 
         source = Path(abs_path)
+        self._active_live_motion = None
+        self._active_live_still = None
 
         # Enable detail page actions
         self._favorite_button.setEnabled(True)
@@ -251,6 +256,7 @@ class PlaybackCoordinator(QObject):
             if is_live:
                 self._player_view.show_live_badge()
                 self._player_view.set_live_replay_enabled(True)
+                self._autoplay_live_motion(row, source)
             else:
                 self._player_view.hide_live_badge()
                 self._player_view.set_live_replay_enabled(False)
@@ -262,6 +268,36 @@ class PlaybackCoordinator(QObject):
         # Update Info Panel if visible
         if self._info_panel and self._info_panel.isVisible():
             self._refresh_info_panel(row)
+
+    def _autoplay_live_motion(self, row: int, still_source: Path) -> None:
+        idx = self._asset_vm.index(row, 0)
+        motion_abs = self._asset_vm.data(idx, Roles.LIVE_MOTION_ABS)
+        if not motion_abs:
+            motion_rel = self._asset_vm.data(idx, Roles.LIVE_MOTION_REL)
+            if motion_rel and Path(str(motion_rel)).is_absolute():
+                motion_abs = motion_rel
+        if not motion_abs:
+            return
+        motion_path = Path(str(motion_abs))
+        self._active_live_motion = motion_path
+        self._active_live_still = still_source
+        self._player_view.show_video_surface(interactive=False)
+        self._player_view.video_area.load_video(motion_path)
+        self._player_view.video_area.play()
+        self._player_bar.setEnabled(False)
+        self._is_playing = True
+
+    def _handle_playback_finished(self) -> None:
+        if not self._active_live_motion or not self._active_live_still:
+            return
+        still = self._active_live_still
+        self._active_live_motion = None
+        self._player_view.show_image_surface()
+        self._player_view.display_image(still)
+        self._player_bar.setEnabled(False)
+        self._player_view.show_live_badge()
+        self._player_view.set_live_replay_enabled(True)
+        self._is_playing = False
 
     def _sync_filmstrip_selection(self, row: int):
         """Update filmstrip selection and scroll to the item."""
@@ -347,14 +383,14 @@ class PlaybackCoordinator(QObject):
             self.play_asset(prev_row)
 
     def replay_live_photo(self):
-        # Delegate to image viewer logic
-        # Legacy: self._image_viewer.replay_live()
-        # The PlayerViewController doesn't expose it directly, but image_viewer does.
-        if hasattr(self._player_view.image_viewer, "replay_live"):
-            self._player_view.image_viewer.replay_live()
-        else:
-            # Check if PlayerViewController has it
-            pass
+        if self._current_row < 0:
+            return
+        idx = self._asset_vm.index(self._current_row, 0)
+        abs_path = self._asset_vm.data(idx, Roles.ABS)
+        is_live = self._asset_vm.data(idx, Roles.IS_LIVE)
+        if not abs_path or not is_live:
+            return
+        self._autoplay_live_motion(self._current_row, Path(abs_path))
 
     def rotate_current_asset(self):
         if self._current_row < 0: return

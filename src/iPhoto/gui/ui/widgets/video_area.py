@@ -52,6 +52,7 @@ class VideoArea(QWidget):
     controlsVisibleChanged = Signal(bool)
     fullscreenExitRequested = Signal()
     playbackStateChanged = Signal(bool)
+    playbackFinished = Signal()
     nextItemRequested = Signal()
     prevItemRequested = Signal()
 
@@ -117,6 +118,7 @@ class VideoArea(QWidget):
         self._player.positionChanged.connect(self._on_position_changed)
         self._player.durationChanged.connect(self._on_duration_changed)
         self._player.playbackStateChanged.connect(self._on_playback_state_changed)
+        self._player.mediaStatusChanged.connect(self._on_media_status_changed)
         # --- End Media Player Setup ---
 
         self._overlay_margin = 48
@@ -261,6 +263,10 @@ class VideoArea(QWidget):
         self.playbackStateChanged.emit(is_playing)
         if not is_playing and state == QMediaPlayer.PlaybackState.StoppedState:
             self.show_controls()
+
+    def _on_media_status_changed(self, status: QMediaPlayer.MediaStatus) -> None:
+        if status == QMediaPlayer.MediaStatus.EndOfMedia:
+            self.playbackFinished.emit()
 
     def _on_volume_changed(self, value: int) -> None:
         """Handle volume changes from the player bar."""
@@ -501,4 +507,3 @@ class VideoArea(QWidget):
         """Return ``True`` when the playback controls are currently enabled."""
 
         return self._controls_enabled
-

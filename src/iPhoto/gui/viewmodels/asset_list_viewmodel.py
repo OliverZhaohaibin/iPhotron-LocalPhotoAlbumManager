@@ -94,6 +94,16 @@ class AssetListViewModel(QAbstractListModel):
         if role_int == Roles.IS_LIVE:
             return asset.is_live
 
+        if role_int == Roles.LIVE_GROUP_ID:
+            metadata = asset.metadata or {}
+            return metadata.get("live_photo_group_id")
+
+        if role_int in (Roles.LIVE_MOTION_REL, Roles.LIVE_MOTION_ABS):
+            motion_rel, motion_abs = self._resolve_live_motion(asset)
+            if role_int == Roles.LIVE_MOTION_ABS:
+                return str(motion_abs) if motion_abs else None
+            return str(motion_rel) if motion_rel else None
+
         if role_int == Roles.SIZE:
             # Delegate expects a dict with 'duration', 'width', 'height' etc.
             # or just for duration extraction.
@@ -157,6 +167,32 @@ class AssetListViewModel(QAbstractListModel):
             return row == self._current_row
 
         return None
+
+    def _resolve_live_motion(self, asset: AssetDTO) -> tuple[Optional[Path], Optional[Path]]:
+        """Return the Live Photo motion relative/absolute paths if known."""
+        metadata = asset.metadata or {}
+        live_partner_rel = metadata.get("live_partner_rel")
+        live_role = metadata.get("live_role")
+        if isinstance(live_partner_rel, str) and live_partner_rel and live_role != 1:
+            rel_path = Path(live_partner_rel)
+            if rel_path.is_absolute():
+                return rel_path, rel_path
+            library_root = self._data_source.library_root()
+            if library_root is not None:
+                return rel_path, (library_root / rel_path).resolve()
+            return rel_path, None
+
+        group_id = metadata.get("live_photo_group_id")
+        if not group_id:
+            return None, None
+        for idx in range(self._data_source.count()):
+            candidate = self._data_source.asset_at(idx)
+            if candidate is None or not candidate.is_video:
+                continue
+            candidate_group = (candidate.metadata or {}).get("live_photo_group_id")
+            if candidate_group == group_id:
+                return candidate.rel_path, candidate.abs_path
+        return None, None
 
     def _on_source_changed(self):
         self.beginResetModel()

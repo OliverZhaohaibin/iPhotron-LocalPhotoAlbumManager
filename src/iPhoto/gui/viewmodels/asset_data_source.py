@@ -188,10 +188,16 @@ class AssetDataSource(QObject):
         if asset.live_photo_group_id and asset.metadata is not None:
             asset.metadata.setdefault("live_photo_group_id", asset.live_photo_group_id)
 
-        # Pano check: usually in metadata
+        # Pano check: usually in metadata, otherwise infer from dimensions.
         is_pano = False
         if asset.metadata and asset.metadata.get("is_pano"):
             is_pano = True
+        else:
+            width = asset.width or 0
+            height = asset.height or 0
+            if mt == "image" and width > 0 and height > 0 and asset.size_bytes:
+                if asset.size_bytes > 1 * 1024 * 1024 and (width / height) >= 2.0:
+                    is_pano = True
 
         micro_thumbnail = asset.metadata.get("micro_thumbnail") if asset.metadata else None
         micro_thumbnail_image = None

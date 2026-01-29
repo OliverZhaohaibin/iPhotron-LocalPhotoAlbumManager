@@ -167,7 +167,6 @@ class DetailPageWidget(QWidget):
 
         self.location_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.location_label.setFont(location_font)
-        self.location_label.setTextElideMode(Qt.TextElideMode.ElideRight)
         self.location_label.setSizePolicy(
             QSizePolicy.Policy.Expanding,
             QSizePolicy.Policy.Preferred,

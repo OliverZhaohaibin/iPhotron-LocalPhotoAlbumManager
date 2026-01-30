@@ -45,6 +45,7 @@ from ....models.album import Album
 from ..tasks.thumbnail_loader import ThumbnailJob, generate_cache_path, stat_mtime_ns
 from .flow_layout import FlowLayout
 from ..icon import load_icon
+from ..theme_manager import DARK_THEME
 
 if TYPE_CHECKING:
     from ....library.manager import LibraryManager
@@ -266,7 +267,7 @@ class AlbumCard(QFrame):
 
         is_dark = window_color.lightness() < 128
         if is_dark:
-            base_color = window_color.lighter(120)
+            base_color = QColor(DARK_THEME.sidebar_background)
             hover_center = base_color.lighter(110)
             hover_outer = base_color
         else:

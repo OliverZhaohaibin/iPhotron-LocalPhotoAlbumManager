@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from datetime import datetime
 from typing import List, Optional, cast
 from pathlib import Path
 from PySide6.QtCore import QObject, Signal
@@ -40,9 +41,29 @@ class AssetDataSource(QObject):
         self._page_size = 1000
         self._pending_moves: List[_PendingMove] = []
         self._pending_paths: set[str] = set()
+        self._active_root: Optional[Path] = None
+        self._seen_abs_paths: set[str] = set()
 
-    def set_library_root(self, root: Path):
+    def set_library_root(self, root: Optional[Path]):
+        if self._library_root == root:
+            return
         self._library_root = root
+        self._cached_dtos.clear()
+        self._total_count = 0
+        self._seen_abs_paths.clear()
+        self.dataChanged.emit()
+
+    def set_repository(self, repo: IAssetRepository) -> None:
+        if self._repo is repo:
+            return
+        self._repo = repo
+        self._cached_dtos.clear()
+        self._total_count = 0
+        self._seen_abs_paths.clear()
+        self.dataChanged.emit()
+
+    def set_active_root(self, root: Optional[Path]) -> None:
+        self._active_root = root
 
     def library_root(self) -> Optional[Path]:
         """Return the configured library root for absolute-path resolution."""
@@ -61,8 +82,14 @@ class AssetDataSource(QObject):
         self._cached_dtos = [self._to_dto(a) for a in assets]
         self._apply_pending_moves(query)
         self._total_count = len(self._cached_dtos)
+        self._seen_abs_paths = {str(dto.abs_path) for dto in self._cached_dtos}
 
         self.dataChanged.emit()
+
+    def reload_current_query(self) -> None:
+        if self._current_query is None:
+            return
+        self.load(self._current_query)
 
     def asset_at(self, index: int) -> Optional[AssetDTO]:
         if 0 <= index < len(self._cached_dtos):
@@ -146,6 +173,177 @@ class AssetDataSource(QObject):
         if not dtos:
             return
         self._cached_dtos.extend(dtos)
+        for dto in dtos:
+            self._seen_abs_paths.add(str(dto.abs_path))
+
+    def handle_scan_chunk(self, scan_root: Path, chunk: List[dict]) -> None:
+        if not chunk or self._current_query is None:
+            return
+
+        if self._active_root is None:
+            return
+
+        try:
+            scan_root_resolved = scan_root.resolve()
+            view_root_resolved = self._active_root.resolve()
+        except OSError:
+            return
+
+        is_direct_match = scan_root_resolved == view_root_resolved
+        is_scan_parent = scan_root_resolved in view_root_resolved.parents
+        is_scan_child = view_root_resolved in scan_root_resolved.parents
+
+        if not (is_direct_match or is_scan_parent or is_scan_child):
+            return
+
+        appended: List[AssetDTO] = []
+
+        for row in chunk:
+            raw_rel = row.get("rel")
+            if not isinstance(raw_rel, str) or not raw_rel:
+                continue
+
+            view_rel = self._resolve_view_rel(
+                raw_rel,
+                scan_root_resolved,
+                view_root_resolved,
+                is_scan_parent=is_scan_parent,
+                is_scan_child=is_scan_child,
+            )
+            if view_rel is None:
+                continue
+
+            dto = self._scan_row_to_dto(view_root_resolved, view_rel, row)
+            if dto is None:
+                continue
+
+            if not self._scan_row_matches_query(dto, row, self._current_query):
+                continue
+
+            abs_key = str(dto.abs_path)
+            if abs_key in self._seen_abs_paths:
+                continue
+
+            appended.append(dto)
+
+        if not appended:
+            return
+
+        self.append_dtos(appended)
+        self._total_count = len(self._cached_dtos)
+        self.dataChanged.emit()
+
+    def _resolve_view_rel(
+        self,
+        raw_rel: str,
+        scan_root: Path,
+        view_root: Path,
+        *,
+        is_scan_parent: bool,
+        is_scan_child: bool,
+    ) -> Optional[str]:
+        if scan_root == view_root:
+            return raw_rel
+
+        if is_scan_parent:
+            full_path = scan_root / raw_rel
+            try:
+                return full_path.relative_to(view_root).as_posix()
+            except ValueError:
+                return None
+            except OSError:
+                return None
+
+        if is_scan_child:
+            try:
+                prefix = scan_root.relative_to(view_root).as_posix()
+            except ValueError:
+                return None
+            prefix_slash = f"{prefix}/" if prefix else ""
+            return f"{prefix_slash}{raw_rel}" if prefix_slash else raw_rel
+
+        return None
+
+    def _scan_row_to_dto(
+        self,
+        view_root: Path,
+        view_rel: str,
+        row: dict,
+    ) -> Optional[AssetDTO]:
+        abs_path = view_root / view_rel
+        rel_path = Path(view_rel)
+
+        media_type_value = row.get("media_type")
+        is_video = False
+        if isinstance(media_type_value, str):
+            is_video = media_type_value.lower() in {"1", "video"}
+        elif isinstance(media_type_value, int):
+            is_video = media_type_value == 1
+
+        if not is_video and row.get("is_video"):
+            is_video = True
+
+        is_live = bool(
+            row.get("is_live")
+            or row.get("live_photo_group_id")
+            or row.get("live_partner_rel")
+        )
+        if is_video:
+            is_live = False
+
+        media_type = MediaType.VIDEO.value if is_video else MediaType.IMAGE.value
+        if is_live:
+            media_type = MediaType.LIVE_PHOTO.value
+
+        created_at = None
+        dt_raw = row.get("dt")
+        if isinstance(dt_raw, str):
+            try:
+                created_at = datetime.fromisoformat(dt_raw.replace("Z", "+00:00"))
+            except ValueError:
+                created_at = None
+
+        width = row.get("w") or row.get("width") or 0
+        height = row.get("h") or row.get("height") or 0
+        duration = row.get("dur") or row.get("duration") or 0.0
+        size_bytes = row.get("bytes") or 0
+        is_favorite = bool(row.get("featured") or row.get("favorite") or row.get("is_favorite"))
+        is_pano = bool(row.get("is_pano"))
+
+        return AssetDTO(
+            id=str(row.get("id") or abs_path),
+            abs_path=abs_path,
+            rel_path=rel_path,
+            media_type=media_type,
+            created_at=created_at,
+            width=int(width or 0),
+            height=int(height or 0),
+            duration=float(duration or 0.0),
+            size_bytes=int(size_bytes or 0),
+            metadata=dict(row),
+            is_favorite=is_favorite,
+            is_live=is_live,
+            is_pano=is_pano,
+            micro_thumbnail=row.get("micro_thumbnail"),
+        )
+
+    def _scan_row_matches_query(
+        self,
+        dto: AssetDTO,
+        row: dict,
+        query: AssetQuery,
+    ) -> bool:
+        if query.media_types:
+            allowed = {media_type.value for media_type in query.media_types}
+            if dto.media_type not in allowed:
+                return False
+
+        if query.is_favorite:
+            is_favorite = bool(row.get("featured") or row.get("favorite") or row.get("is_favorite"))
+            if not is_favorite:
+                return False
+
+        return True
 
     def _to_dto(self, asset: Asset) -> AssetDTO:
         def _coerce_positive_number(value: object) -> Optional[float]:

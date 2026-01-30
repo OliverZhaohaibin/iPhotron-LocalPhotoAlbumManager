@@ -95,6 +95,7 @@ class NavigationCoordinator(QObject):
         self._reset_playback()
         self._static_selection = None
         self._router.show_gallery()
+        self._asset_vm.set_active_root(path)
 
         # Application Service call to maintain domain/application state.
         try:
@@ -115,7 +116,7 @@ class NavigationCoordinator(QObject):
         # SQLiteAssetRepository logic for album_path usually implies parent_album_path match.
         # For legacy behavior, we often want subalbums if it's a folder structure.
         # Let's set include_subalbums=True implicitly for file-system browsing behavior.
-        query = AssetQuery(album_path=album.root.name if album else str(path.name))
+        query = AssetQuery(album_path=self._album_path_for_query(album.root if album else path))
         query.include_subalbums = True  # Ensure recursive view by default
         self._asset_vm.load_query(query)
 
@@ -124,6 +125,7 @@ class NavigationCoordinator(QObject):
         self._reset_playback()
         self._router.show_gallery()
         self._static_selection = AlbumSidebar.ALL_PHOTOS_TITLE
+        self._asset_vm.set_active_root(self._context.library.root())
 
         query = AssetQuery()  # No filters = All Photos
         self._asset_vm.load_query(query)
@@ -165,6 +167,7 @@ class NavigationCoordinator(QObject):
         self._reset_playback()
         self._router.show_gallery()
         self._static_selection = "Recently Deleted"
+        self._asset_vm.set_active_root(deleted_root)
 
         # Application Service call to maintain domain/application state.
         try:
@@ -183,6 +186,7 @@ class NavigationCoordinator(QObject):
         self._reset_playback()
         self._router.show_gallery()
         self._static_selection = title
+        self._asset_vm.set_active_root(self._context.library.root())
 
         query = AssetQuery()
         if is_favorite:
@@ -192,6 +196,22 @@ class NavigationCoordinator(QObject):
             query.media_types = media_types
 
         self._asset_vm.load_query(query)
+
+    def _album_path_for_query(self, path: Path) -> Optional[str]:
+        library_root = self._context.library.root()
+        if library_root is None:
+            return path.name
+        try:
+            rel = path.resolve().relative_to(library_root.resolve())
+        except (OSError, ValueError):
+            try:
+                rel = path.relative_to(library_root)
+            except ValueError:
+                return path.name
+        rel_str = rel.as_posix()
+        if rel_str in ("", "."):
+            return None
+        return rel_str
 
     def _handle_bind_library(self):
         self.bindLibraryRequested.emit()

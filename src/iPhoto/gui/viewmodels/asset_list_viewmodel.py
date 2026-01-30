@@ -40,6 +40,10 @@ class AssetListViewModel(QAbstractListModel):
         """Triggers data loading for a new query."""
         self._data_source.load(query)
 
+    def set_active_root(self, root: Optional[Path]) -> None:
+        """Update the active root so scan chunks map to the current view."""
+        self._data_source.set_active_root(root)
+
     def rowCount(self, parent=QModelIndex()) -> int:
         return self._data_source.count()
 

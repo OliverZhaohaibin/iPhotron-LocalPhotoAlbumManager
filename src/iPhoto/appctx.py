@@ -25,6 +25,7 @@ from .infrastructure.services.metadata_provider import ExifToolMetadataProvider
 from .infrastructure.services.thumbnail_generator import PillowThumbnailGenerator
 from .application.interfaces import IMetadataProvider, IThumbnailGenerator
 
+from .config import DEFAULT_EXCLUDE, DEFAULT_INCLUDE, WORK_DIR_NAME
 
 if TYPE_CHECKING:  # pragma: no cover - only for type checking
     from .gui.facade import AppFacade
@@ -153,6 +154,7 @@ class AppContext:
             if candidate.exists():
                 try:
                     self.library.bind_path(candidate)
+                    self._start_initial_scan_if_needed(candidate)
                 except LibraryError as exc:
                     self.library.errorRaised.emit(str(exc))
             else:
@@ -168,6 +170,15 @@ class AppContext:
                 continue
         if resolved:
             self.recent_albums = resolved[:10]
+
+    def _start_initial_scan_if_needed(self, library_root: Path) -> None:
+        work_dir = library_root / WORK_DIR_NAME
+        db_path = work_dir / "global_index.db"
+        if work_dir.exists() and db_path.exists():
+            return
+        if self.library.is_scanning_path(library_root):
+            return
+        self.library.start_scanning(library_root, DEFAULT_INCLUDE, DEFAULT_EXCLUDE)
 
     def remember_album(self, root: Path) -> None:
         """Track *root* in the recent albums list, keeping the most recent first."""

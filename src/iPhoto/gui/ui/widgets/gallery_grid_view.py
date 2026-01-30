@@ -6,7 +6,7 @@ from OpenGL import GL as gl
 from PySide6.QtCore import QEvent, QRect, QSize, Qt, Signal, QPoint
 from PySide6.QtGui import QMouseEvent, QPaintEvent, QPalette, QSurfaceFormat, QColor, QGuiApplication
 from PySide6.QtOpenGLWidgets import QOpenGLWidget
-from PySide6.QtWidgets import QAbstractItemView, QListView
+from PySide6.QtWidgets import QAbstractItemView, QListView, QLabel
 
 from ..styles import modern_scrollbar_style
 from .asset_grid import AssetGrid
@@ -65,6 +65,7 @@ class GalleryGridView(AssetGrid):
     def __init__(self, parent=None) -> None:  # type: ignore[override]
         super().__init__(parent)
         self._selection_mode_enabled = False
+        self._empty_label = None
         self.setSelectionMode(QListView.SelectionMode.SingleSelection)
         self.setViewMode(QListView.ViewMode.IconMode)
         # Defer initial size calculation to resizeEvent to avoid rendering the
@@ -85,9 +86,18 @@ class GalleryGridView(AssetGrid):
         # Enable hardware acceleration for the viewport to improve scrolling performance
         gl_viewport = GalleryViewport()
         self.setViewport(gl_viewport)
+        self._empty_label = QLabel(
+            "No media found. Click Rescan to scan this library.",
+            self.viewport(),
+        )
+        self._empty_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._empty_label.setWordWrap(True)
+        self._empty_label.setStyleSheet("color: #86868b; font-size: 15px;")
+        self._empty_label.hide()
 
         self._updating_style = False
         self._apply_scrollbar_style()
+        self._update_empty_state()
 
     def paintEvent(self, event: QPaintEvent) -> None:  # type: ignore[override]
         """Override paintEvent to force a GL clear before items are drawn."""
@@ -101,6 +111,9 @@ class GalleryGridView(AssetGrid):
         viewport_width = self.viewport().width()
         if viewport_width <= 0:
             return
+
+        if self._empty_label is not None:
+            self._empty_label.setGeometry(self.viewport().rect())
 
 
         # Determine how many columns can fit with the minimum size constraint.
@@ -167,6 +180,36 @@ class GalleryGridView(AssetGrid):
             self.setStyleSheet(full_style)
         finally:
             self._updating_style = False
+
+    def setModel(self, model) -> None:  # type: ignore[override]
+        previous = self.model()
+        if previous is not None:
+            try:
+                previous.modelReset.disconnect(self._update_empty_state)
+            except (RuntimeError, TypeError):
+                pass
+            try:
+                previous.rowsInserted.disconnect(self._update_empty_state)
+            except (RuntimeError, TypeError):
+                pass
+            try:
+                previous.rowsRemoved.disconnect(self._update_empty_state)
+            except (RuntimeError, TypeError):
+                pass
+        super().setModel(model)
+        if model is not None:
+            model.modelReset.connect(self._update_empty_state)
+            model.rowsInserted.connect(self._update_empty_state)
+            model.rowsRemoved.connect(self._update_empty_state)
+        self._update_empty_state()
+
+    def _update_empty_state(self) -> None:
+        model = self.model()
+        is_empty = model is None or model.rowCount() == 0
+        if self._empty_label is None:
+            return
+        self._empty_label.setGeometry(self.viewport().rect())
+        self._empty_label.setVisible(is_empty)
 
     # ------------------------------------------------------------------
     # Selection mode toggling

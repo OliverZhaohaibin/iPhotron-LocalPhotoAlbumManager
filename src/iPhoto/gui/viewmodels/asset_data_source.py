@@ -1,7 +1,9 @@
 from dataclasses import dataclass
 from datetime import datetime
-from typing import List, Optional, cast
+import os
+import re
 from pathlib import Path
+from typing import List, Optional, cast
 from PySide6.QtCore import QObject, Signal
 
 from src.iPhoto.domain.models import Asset
@@ -10,7 +12,12 @@ from src.iPhoto.domain.models.query import AssetQuery
 from src.iPhoto.domain.repositories import IAssetRepository
 from src.iPhoto.application.dtos import AssetDTO
 from src.iPhoto.utils import image_loader
-from src.iPhoto.config import RECENTLY_DELETED_DIR_NAME
+from src.iPhoto.config import RECENTLY_DELETED_DIR_NAME, WORK_DIR_NAME
+
+THUMBNAIL_SUFFIX_RE = re.compile(r"_(\d{2,4})x(\d{2,4})(?=\.[^.]+$)")
+THUMBNAIL_MAX_DIMENSION = 512
+THUMBNAIL_MAX_BYTES = 350_000
+LEGACY_THUMB_DIRS = {WORK_DIR_NAME, ".photo"}
 
 @dataclass(frozen=True)
 class _PendingMove:
@@ -79,10 +86,17 @@ class AssetDataSource(QObject):
             query.limit = 5000
 
         assets = self._repo.find_by_query(query)
-        self._cached_dtos = [self._to_dto(a) for a in assets]
+        dtos: List[AssetDTO] = []
+        for asset in assets:
+            if self._is_thumbnail_asset(asset):
+                continue
+            dtos.append(self._to_dto(asset))
+        self._cached_dtos = dtos
         self._apply_pending_moves(query)
         self._total_count = len(self._cached_dtos)
-        self._seen_abs_paths = {str(dto.abs_path) for dto in self._cached_dtos}
+        self._seen_abs_paths = {
+            self._normalize_abs_key(dto.abs_path) for dto in self._cached_dtos
+        }
 
         self.dataChanged.emit()
 
@@ -184,7 +198,7 @@ class AssetDataSource(QObject):
             return
         self._cached_dtos.extend(dtos)
         for dto in dtos:
-            self._seen_abs_paths.add(str(dto.abs_path))
+            self._seen_abs_paths.add(self._normalize_abs_key(dto.abs_path))
 
     def handle_scan_chunk(self, scan_root: Path, chunk: List[dict]) -> None:
         if not chunk or self._current_query is None:
@@ -212,6 +226,8 @@ class AssetDataSource(QObject):
             raw_rel = row.get("rel")
             if not isinstance(raw_rel, str) or not raw_rel:
                 continue
+            if self._scan_row_is_thumbnail(raw_rel, row):
+                continue
 
             view_rel = self._resolve_view_rel(
                 raw_rel,
@@ -230,7 +246,7 @@ class AssetDataSource(QObject):
             if not self._scan_row_matches_query(dto, row, self._current_query):
                 continue
 
-            abs_key = str(dto.abs_path)
+            abs_key = self._normalize_abs_key(dto.abs_path)
             if abs_key in self._seen_abs_paths:
                 continue
 
@@ -477,10 +493,10 @@ class AssetDataSource(QObject):
         if not self._pending_moves:
             return
         updated = False
-        existing_abs = {str(dto.abs_path) for dto in self._cached_dtos}
+        existing_abs = {self._normalize_abs_key(dto.abs_path) for dto in self._cached_dtos}
         remaining: List[_PendingMove] = []
         for pending in self._pending_moves:
-            if str(pending.destination_abs) in existing_abs:
+            if self._normalize_abs_key(pending.destination_abs) in existing_abs:
                 updated = True
                 self._pending_paths.discard(str(pending.source_abs))
                 continue
@@ -493,6 +509,78 @@ class AssetDataSource(QObject):
             remaining.append(pending)
         if updated:
             self._pending_moves = remaining
+
+    def _normalize_abs_key(self, path: Path) -> str:
+        try:
+            resolved = path.resolve()
+        except OSError:
+            resolved = path
+        return os.path.normcase(str(resolved))
+
+    def _is_thumbnail_asset(self, asset: Asset) -> bool:
+        rel_path = asset.path
+        if any(part in LEGACY_THUMB_DIRS for part in rel_path.parts):
+            return True
+
+        match = THUMBNAIL_SUFFIX_RE.search(rel_path.name)
+        if not match:
+            return False
+        try:
+            width = int(match.group(1))
+            height = int(match.group(2))
+        except ValueError:
+            return False
+        if max(width, height) > THUMBNAIL_MAX_DIMENSION:
+            return False
+
+        meta = asset.metadata or {}
+        row_w = asset.width or meta.get("w") or meta.get("width")
+        row_h = asset.height or meta.get("h") or meta.get("height")
+        try:
+            if row_w is not None and row_h is not None:
+                if int(row_w) != width or int(row_h) != height:
+                    return False
+        except (TypeError, ValueError):
+            return False
+
+        size_bytes = asset.size_bytes or meta.get("bytes")
+        try:
+            if size_bytes is not None and int(size_bytes) > THUMBNAIL_MAX_BYTES:
+                return False
+        except (TypeError, ValueError):
+            return False
+
+        return True
+
+    def _scan_row_is_thumbnail(self, rel: str, row: dict) -> bool:
+        rel_path = Path(rel)
+        if any(part in LEGACY_THUMB_DIRS for part in rel_path.parts):
+            return True
+        match = THUMBNAIL_SUFFIX_RE.search(rel_path.name)
+        if not match:
+            return False
+        try:
+            width = int(match.group(1))
+            height = int(match.group(2))
+        except ValueError:
+            return False
+        if max(width, height) > THUMBNAIL_MAX_DIMENSION:
+            return False
+        row_w = row.get("w") or row.get("width")
+        row_h = row.get("h") or row.get("height")
+        try:
+            if row_w is not None and row_h is not None:
+                if int(row_w) != width or int(row_h) != height:
+                    return False
+        except (TypeError, ValueError):
+            return False
+        size_bytes = row.get("bytes")
+        try:
+            if size_bytes is not None and int(size_bytes) > THUMBNAIL_MAX_BYTES:
+                return False
+        except (TypeError, ValueError):
+            return False
+        return True
 
     def _should_include_pending(self, pending: _PendingMove, query: AssetQuery) -> bool:
         if query.is_favorite is True and not pending.dto.is_favorite:

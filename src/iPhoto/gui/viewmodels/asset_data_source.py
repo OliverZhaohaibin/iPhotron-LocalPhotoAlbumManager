@@ -176,10 +176,8 @@ class AssetDataSource(QObject):
         if not asset.path.is_absolute():
             base_root = self._active_root or self._library_root
             if base_root:
-                try:
-                    abs_path = (base_root / asset.path).resolve()
-                except OSError:
-                    abs_path = base_root / asset.path
+                # Use simple join. Avoid resolve() for performance and Windows compat issues.
+                abs_path = base_root / asset.path
             else:
                 # Fallback if no root context (should be rare in valid app state)
                 # Warning: This resolves relative to CWD, which is likely wrong if opening an external album.

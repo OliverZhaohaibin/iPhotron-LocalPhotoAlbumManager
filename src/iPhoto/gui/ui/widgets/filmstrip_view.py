@@ -7,7 +7,7 @@ from PySide6.QtGui import QPalette, QResizeEvent, QWheelEvent
 from PySide6.QtWidgets import QListView, QSizePolicy, QStyleOptionViewItem
 
 from .asset_grid import AssetGrid
-from ..models.asset_model import Roles
+from ..models.roles import Roles
 from ..styles import modern_scrollbar_style
 
 

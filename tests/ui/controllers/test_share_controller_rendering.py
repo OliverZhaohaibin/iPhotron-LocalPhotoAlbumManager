@@ -11,7 +11,7 @@ from PySide6.QtGui import QImage, QAction, QActionGroup, QGuiApplication
 from PySide6.QtWidgets import QApplication, QPushButton
 
 from src.iPhoto.gui.ui.controllers.share_controller import ShareController, RenderClipboardWorker
-from src.iPhoto.gui.ui.models.asset_model import Roles
+from src.iPhoto.gui.ui.models.roles import Roles
 
 @pytest.fixture()
 def qapp() -> QApplication:

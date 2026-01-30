@@ -96,6 +96,16 @@ class AssetDataSource(QObject):
             return self._cached_dtos[index]
         return None
 
+    def find_dto_by_path(self, path: Path) -> Optional[AssetDTO]:
+        """Find a cached DTO by its absolute path."""
+        # Linear search is acceptable for small selections in restore/delete operations.
+        # For larger datasets, we might need a hash map.
+        resolved = str(path.resolve())
+        for dto in self._cached_dtos:
+            if str(dto.abs_path) == resolved:
+                return dto
+        return None
+
     def count(self) -> int:
         return len(self._cached_dtos)
 

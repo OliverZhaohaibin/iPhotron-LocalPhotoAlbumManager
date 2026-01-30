@@ -8,6 +8,7 @@ import xxhash
 from datetime import datetime, timezone
 import copy
 import os
+import re
 from pathlib import Path
 from typing import Callable, Dict, Iterable, List, Optional, Set, Tuple, TYPE_CHECKING
 
@@ -29,6 +30,10 @@ LOGGER = logging.getLogger(__name__)
 # Media type constants (matching repository schema and scanner.py)
 MEDIA_TYPE_IMAGE = 0
 MEDIA_TYPE_VIDEO = 1
+
+THUMBNAIL_SUFFIX_RE = re.compile(r"_(\d{2,4})x(\d{2,4})(?=\.[^.]+$)")
+THUMBNAIL_MAX_DIMENSION = 512
+THUMBNAIL_MAX_BYTES = 350_000
 
 
 def compute_album_path(
@@ -120,6 +125,30 @@ def _determine_size(row: Dict[str, object], is_image: bool) -> object:
     if is_image:
         return (row.get("w"), row.get("h"))
     return {"bytes": row.get("bytes"), "duration": row.get("dur")}
+
+
+def _is_thumbnail_candidate(rel: str, row: Dict[str, object], is_image: bool) -> bool:
+    if not is_image:
+        return False
+    match = THUMBNAIL_SUFFIX_RE.search(Path(rel).name)
+    if not match:
+        return False
+    try:
+        width = int(match.group(1))
+        height = int(match.group(2))
+    except ValueError:
+        return False
+    row_w = row.get("w")
+    row_h = row.get("h")
+    if isinstance(row_w, (int, float)) and isinstance(row_h, (int, float)):
+        if int(row_w) != width or int(row_h) != height:
+            return False
+    if max(width, height) > THUMBNAIL_MAX_DIMENSION:
+        return False
+    size_bytes = row.get("bytes")
+    if isinstance(size_bytes, (int, float)) and int(size_bytes) > THUMBNAIL_MAX_BYTES:
+        return False
+    return True
 
 
 def _is_panorama_candidate(row: Dict[str, object], is_image: bool) -> bool:
@@ -256,6 +285,10 @@ def build_asset_entry(
     abs_path = str(abs_path_obj)
 
     is_image, is_video = classify_media(row)
+    if is_video and row.get("live_partner_rel"):
+        return None
+    if _is_thumbnail_candidate(rel, row, is_image):
+        return None
     is_pano = _is_panorama_candidate(row, is_image)
 
     live_partner_rel = row.get("live_partner_rel")

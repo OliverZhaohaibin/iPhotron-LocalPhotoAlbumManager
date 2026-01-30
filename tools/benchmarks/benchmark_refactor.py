@@ -41,7 +41,7 @@ def _iter_media_paths(root: Path, include: Iterable[str], exclude: Iterable[str]
     for path in root.rglob("*"):
         if not path.is_file():
             continue
-        if not should_include(path, root, include, exclude):
+        if not should_include(path, include, exclude, root=root):
             continue
         yield path
 

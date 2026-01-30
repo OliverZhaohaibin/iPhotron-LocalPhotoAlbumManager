@@ -21,7 +21,7 @@ from PySide6.QtGui import QShortcut, QKeySequence, QAction
 
 from src.iPhoto.appctx import AppContext
 from src.iPhoto.config import DEFAULT_EXCLUDE, DEFAULT_INCLUDE, WORK_DIR_NAME
-from src.iPhoto.gui.ui.models.asset_model import Roles
+from src.iPhoto.gui.ui.models.roles import Roles
 from src.iPhoto.gui.ui.models.spacer_proxy_model import SpacerProxyModel
 from src.iPhoto.gui.ui.controllers.dialog_controller import DialogController
 from src.iPhoto.gui.ui.controllers.header_controller import HeaderController
@@ -93,6 +93,10 @@ class MainCoordinator(QObject):
 
         self._thumbnail_service = ThumbnailCacheService(cache_root)
         self._asset_list_vm = AssetListViewModel(self._asset_data_source, self._thumbnail_service)
+
+        # Inject ViewModel provider into Facade for legacy operations (restore/delete)
+        if self._facade:
+            self._facade.set_model_provider(lambda: self._asset_list_vm)
 
         # --- Coordinators Setup ---
 

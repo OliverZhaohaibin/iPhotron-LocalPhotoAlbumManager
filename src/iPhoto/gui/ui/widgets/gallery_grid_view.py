@@ -10,7 +10,7 @@ from PySide6.QtWidgets import QAbstractItemView, QListView, QLabel
 
 from ..styles import modern_scrollbar_style
 from .asset_grid import AssetGrid
-from ..models.asset_model import Roles
+from ..models.roles import Roles
 
 
 class GalleryViewport(QOpenGLWidget):
@@ -24,7 +24,8 @@ class GalleryViewport(QOpenGLWidget):
         # when using a frameless window configuration.
         gl_format = QSurfaceFormat()
         gl_format.setAlphaBufferSize(0)
-        self.setFormat(gl_format)
+        if hasattr(self, "setFormat"):
+            self.setFormat(gl_format)
 
     def set_background_color(self, color: QColor) -> None:
         """Set the background color for the viewport."""

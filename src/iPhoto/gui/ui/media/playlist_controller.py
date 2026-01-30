@@ -6,16 +6,16 @@ import logging
 from pathlib import Path
 from typing import Optional
 
-from PySide6.QtCore import QObject, QModelIndex, Signal
+from PySide6.QtCore import QObject, QModelIndex, Signal, QAbstractItemModel
 
-from ..models.asset_model import AssetModel, Roles
+from ..models.roles import Roles
 from ....utils.pathutils import normalise_for_compare
 
 logger = logging.getLogger(__name__)
 
 
 class PlaylistController(QObject):
-    """Coordinate playback order for assets exposed via :class:`AssetModel`."""
+    """Coordinate playback order for assets exposed via an asset model."""
 
     currentChanged = Signal(int)
     # ``sourceChanged`` always emits the absolute :class:`Path` of the selected
@@ -26,7 +26,7 @@ class PlaylistController(QObject):
 
     def __init__(self, parent: Optional[QObject] = None) -> None:
         super().__init__(parent)
-        self._model: Optional[AssetModel] = None
+        self._model: Optional[QAbstractItemModel] = None
         self._current_row: int = -1
         self._previous_row: int = -1
         # ``_current_rel`` mirrors the currently selected asset's relative path.
@@ -40,7 +40,7 @@ class PlaylistController(QObject):
     # ------------------------------------------------------------------
     # Model wiring
     # ------------------------------------------------------------------
-    def bind_model(self, model: AssetModel) -> None:
+    def bind_model(self, model: QAbstractItemModel) -> None:
         """Attach *model* as the playlist source."""
 
         if self._model is not None:
@@ -261,10 +261,14 @@ class PlaylistController(QObject):
                 return Path(motion_abs)
             motion_rel = index.data(Roles.LIVE_MOTION_REL)
             if isinstance(motion_rel, str) and motion_rel:
-                source_model = self._model.source_model()
-                album_root = source_model.album_root()
-                if album_root is not None:
-                    return (album_root / motion_rel).resolve()
+                # Try to resolve relative path if model exposes album_root via source_model
+                # or similar mechanism. This is legacy support for AssetModel.
+                if hasattr(self._model, "source_model"):
+                    source_model = self._model.source_model()
+                    if hasattr(source_model, "album_root"):
+                        album_root = source_model.album_root()
+                        if album_root is not None:
+                            return (album_root / motion_rel).resolve()
             return None
         raw = index.data(Roles.ABS)
         if isinstance(raw, str) and raw:

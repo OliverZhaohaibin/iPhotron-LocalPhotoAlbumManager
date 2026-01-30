@@ -299,3 +299,27 @@ class AssetListViewModel(QAbstractListModel):
             idx = self.index(row, 0)
             if idx.isValid():
                 self.dataChanged.emit(idx, idx, [Roles.IS_CURRENT, Qt.ItemDataRole.SizeHintRole])
+
+    def metadata_for_path(self, path: Path) -> Optional[Dict[str, Any]]:
+        """Return metadata for the given path to support legacy Facade operations."""
+        dto = self._data_source.find_dto_by_path(path)
+        if not dto:
+            return None
+
+        # Construct legacy-compatible metadata dict
+        meta = dto.metadata.copy() if dto.metadata else {}
+        meta.update({
+            "is_live": dto.is_live,
+            "rel": str(dto.rel_path),
+            "abs": str(dto.abs_path),
+        })
+
+        # Resolve live motion if needed
+        if dto.is_live:
+            motion_rel, motion_abs = self._resolve_live_motion(dto)
+            if motion_abs:
+                meta["live_motion_abs"] = str(motion_abs)
+            if motion_rel:
+                meta["live_motion_rel"] = str(motion_rel)
+
+        return meta

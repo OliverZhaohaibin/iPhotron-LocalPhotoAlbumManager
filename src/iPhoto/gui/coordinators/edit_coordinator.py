@@ -158,7 +158,11 @@ class EditCoordinator(QObject):
     def exit_fullscreen_preview(self) -> None:
         """Exit immersive full screen preview if active."""
 
-        self._fullscreen_manager.exit_fullscreen_preview()
+        source = self._current_source
+        adjustments = None
+        if self._session is not None:
+            adjustments = self._resolve_session_adjustments()
+        self._fullscreen_manager.exit_fullscreen_preview(source, adjustments)
 
     def enter_edit_mode(self, asset_path: Path):
         """Prepares the edit view for the given asset and switches view."""
@@ -251,7 +255,11 @@ class EditCoordinator(QObject):
     def leave_edit_mode(self):
         """Returns to detail view."""
         if self._fullscreen_manager.is_in_fullscreen():
-            self._fullscreen_manager.exit_fullscreen_preview()
+            source = self._current_source
+            adjustments = None
+            if self._session is not None:
+                adjustments = self._resolve_session_adjustments()
+            self._fullscreen_manager.exit_fullscreen_preview(source, adjustments)
         if self._session is not None:
             self._ui.edit_image_viewer.setCropMode(False, self._session.values())
         self._current_source = None

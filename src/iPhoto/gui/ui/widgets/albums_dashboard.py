@@ -13,6 +13,7 @@ from PySide6.QtCore import (
     Qt,
     QThreadPool,
     Signal,
+    QEvent,
 )
 from PySide6.QtGui import (
     QBrush,
@@ -23,6 +24,7 @@ from PySide6.QtGui import (
     QPainter,
     QPainterPath,
     QPixmap,
+    QPalette,
     QRadialGradient,
 )
 from PySide6.QtWidgets import (
@@ -65,6 +67,10 @@ class RoundedImageView(QWidget):
 
     def setPlaceholder(self, pixmap: QPixmap) -> None:
         self._placeholder = pixmap
+        self.update()
+
+    def set_background_color(self, color: QColor) -> None:
+        self._bg_color = color
         self.update()
 
     def paintEvent(self, event) -> None:
@@ -172,6 +178,10 @@ class AlbumCard(QFrame):
         self.layout.addWidget(self.image_view)
         self.layout.addWidget(self.text_container)
 
+        self._base_color = QColor("#F5F5F7")
+        self._hover_center_color = QColor("#FFFFFF")
+        self._hover_outer_color = QColor("#F5F5F7")
+
         # 5. Stylesheet
         # Note: Background color is handled in paintEvent for the light source effect
         self.setStyleSheet("""
@@ -188,6 +198,12 @@ class AlbumCard(QFrame):
 
         # 6. Shadow
         self.add_shadow()
+        self._apply_theme()
+
+    def changeEvent(self, event) -> None:
+        if event.type() == QEvent.Type.PaletteChange:
+            self._apply_theme()
+        super().changeEvent(event)
 
     def mouseMoveEvent(self, event) -> None:
         self._cursor_pos = event.position().toPoint()
@@ -213,14 +229,13 @@ class AlbumCard(QFrame):
 
         if self._cursor_pos:
             # Highlight effect: Radial gradient from cursor
-            # Center: White (#FFFFFF), Outer: #F5F5F7
             gradient = QRadialGradient(self._cursor_pos, 200)
-            gradient.setColorAt(0.0, QColor("#FFFFFF"))
-            gradient.setColorAt(1.0, QColor("#F5F5F7"))
+            gradient.setColorAt(0.0, self._hover_center_color)
+            gradient.setColorAt(1.0, self._hover_outer_color)
             painter.fillPath(path, QBrush(gradient))
         else:
             # Default state
-            painter.fillPath(path, QColor("#F5F5F7"))
+            painter.fillPath(path, self._base_color)
 
     def add_shadow(self) -> None:
         shadow = QGraphicsDropShadowEffect(self)
@@ -243,6 +258,47 @@ class AlbumCard(QFrame):
     def set_cover_image(self, pixmap: QPixmap) -> None:
         """Update the cover image."""
         self.image_view.setPixmap(pixmap)
+
+    def _apply_theme(self) -> None:
+        palette = self.palette()
+        window_color = palette.color(QPalette.ColorRole.Window)
+        text_primary = palette.color(QPalette.ColorRole.Text)
+
+        is_dark = window_color.lightness() < 128
+        if is_dark:
+            base_color = window_color.lighter(120)
+            hover_center = base_color.lighter(110)
+            hover_outer = base_color
+        else:
+            base_color = QColor("#F5F5F7")
+            hover_center = QColor("#FFFFFF")
+            hover_outer = base_color
+
+        text_secondary = QColor(text_primary)
+        text_secondary.setAlpha(160)
+
+        self._base_color = base_color
+        self._hover_center_color = hover_center
+        self._hover_outer_color = hover_outer
+
+        self.title_label.setStyleSheet(
+            "color: "
+            f"{text_primary.name(QColor.NameFormat.HexArgb)}; "
+            "font-size: 14px; font-weight: 600; background: transparent;"
+        )
+        self.count_label.setStyleSheet(
+            "color: "
+            f"{text_secondary.name(QColor.NameFormat.HexArgb)}; "
+            "font-size: 13px; background: transparent;"
+        )
+
+        placeholder_color = text_primary.name(QColor.NameFormat.HexArgb)
+        self.image_view.setPlaceholder(
+            load_icon("photo.on.rectangle", color=placeholder_color).pixmap(32, 32)
+        )
+        placeholder_bg = base_color.darker(110) if is_dark else QColor("#B0BEC5")
+        self.image_view.set_background_color(placeholder_bg)
+        self.update()
 
 
 class DashboardLoaderSignals(QObject):
@@ -490,7 +546,7 @@ class AlbumsDashboard(QWidget):
         font.setPixelSize(22)
         font.setBold(True)
         self.header_label.setFont(font)
-        self.header_label.setStyleSheet("color: #1d1d1f; margin-bottom: 10px;")
+        self.header_label.setStyleSheet("margin-bottom: 10px;")
         self.main_layout.addWidget(self.header_label)
 
         # Scroll Area for the grid
@@ -509,9 +565,15 @@ class AlbumsDashboard(QWidget):
         # Empty state placeholder
         self.empty_label = QLabel(self.tr("No albums available"))
         self.empty_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.empty_label.setStyleSheet("color: #86868b; font-size: 16px;")
+        self.empty_label.setStyleSheet("font-size: 16px;")
         self.empty_label.hide()
         self.main_layout.addWidget(self.empty_label)
+        self._apply_theme()
+
+    def changeEvent(self, event) -> None:
+        if event.type() == QEvent.Type.PaletteChange:
+            self._apply_theme()
+        super().changeEvent(event)
 
     def refresh(self) -> None:
         # Increment generation to invalidate pending workers from previous refresh
@@ -582,3 +644,20 @@ class AlbumsDashboard(QWidget):
 
         if scan_root == library_root or library_root in scan_root.parents:
             self.refresh()
+
+    def _apply_theme(self) -> None:
+        palette = self.palette()
+        text_primary = palette.color(QPalette.ColorRole.Text)
+        text_secondary = QColor(text_primary)
+        text_secondary.setAlpha(160)
+
+        self.header_label.setStyleSheet(
+            "color: "
+            f"{text_primary.name(QColor.NameFormat.HexArgb)}; "
+            "margin-bottom: 10px;"
+        )
+        self.empty_label.setStyleSheet(
+            "color: "
+            f"{text_secondary.name(QColor.NameFormat.HexArgb)}; "
+            "font-size: 16px;"
+        )

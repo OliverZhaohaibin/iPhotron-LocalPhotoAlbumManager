@@ -4,11 +4,15 @@ from __future__ import annotations
 
 from dataclasses import asdict
 from pathlib import Path
-import os
 import sqlite3
 from typing import Callable, Dict, List, Optional, Tuple
 
 from .cache.index_store import get_global_repository
+from .cache.index_store.index_cache import (
+    compute_album_path,
+    load_incremental_index_cache,
+    normalise_rel_key,
+)
 from .cache.lock import FileLock
 from .config import (
     DEFAULT_EXCLUDE,
@@ -30,33 +34,6 @@ def _is_index_recoverable_error(exc: Exception) -> bool:
     """Return ``True`` when *exc* stems from recoverable index state."""
 
     return isinstance(exc, (sqlite3.Error, IndexCorruptedError, ManifestInvalidError))
-
-
-def _compute_album_path(root: Path, library_root: Optional[Path]) -> Optional[str]:
-    """Return library-relative album path when root is inside library_root.
-
-    Uses os.path.relpath to tolerate case differences and symlinks. Returns
-    None when outside the library or when pointing at the library root.
-    """
-    if not library_root:
-        return None
-    try:
-        rel = Path(os.path.relpath(root, library_root)).as_posix()
-    except (ValueError, OSError):
-        return None
-
-    if rel.startswith(".."):
-        return None
-    if rel in (".", ""):
-        return None
-    # Debug trace to help diagnose album filtering issues
-    LOGGER.debug(
-        "Computed album path: root=%s, library_root=%s, rel=%s",
-        root,
-        library_root,
-        rel,
-    )
-    return rel
 
 
 def open_album(
@@ -85,7 +62,7 @@ def open_album(
     store = get_global_repository(db_root)
     
     # If using global DB, we need to filter by album path
-    album_path = _compute_album_path(root, library_root)
+    album_path = compute_album_path(root, library_root)
     
     # Hydrated index rows when available; ``None`` when the lazy path skips loading.
     rows: list[dict] | None = None
@@ -233,7 +210,7 @@ def _sync_live_roles_to_db(
     # Compute album path for library-relative paths
     album_prefix = ""
     if library_root:
-        rel = _compute_album_path(root, library_root)
+        rel = compute_album_path(root, library_root)
         if rel:
             album_prefix = f"{rel}/"
 
@@ -256,59 +233,6 @@ def _sync_live_roles_to_db(
     else:
         store.apply_live_role_updates(updates)
 
-
-def _normalise_rel_key(rel_value: object) -> Optional[str]:
-    """Return a POSIX-formatted representation of *rel_value* when possible.
-
-    The index uses the relative path under the album root as its stable
-    identifier.  Callers occasionally pass :class:`pathlib.Path` instances while
-    other code paths hand over plain strings.  Normalising via
-    :meth:`Path.as_posix` collapses both representations into a single canonical
-    form so lookups remain stable regardless of the originating caller or the
-    underlying operating system.
-    """
-
-    if isinstance(rel_value, str) and rel_value:
-        return Path(rel_value).as_posix()
-    if isinstance(rel_value, Path):
-        return rel_value.as_posix()
-    if rel_value:
-        return Path(str(rel_value)).as_posix()
-    return None
-
-
-def load_incremental_index_cache(
-    root: Path, library_root: Optional[Path] = None
-) -> Dict[str, dict]:
-    """Load the existing index into a dictionary for incremental scanning.
-
-    This helper encapsulates the logic of reading the index store and normalizing
-    keys, allowing it to be reused by both the main application facade and
-    background workers.
-    
-    Args:
-        root: The album root directory.
-        library_root: If provided, use this as the database root (global database).
-    """
-    db_root = library_root if library_root else root
-    store = get_global_repository(db_root)
-    existing_index = {}
-    
-    # If using global DB, filter by album path
-    album_path = _compute_album_path(root, library_root)
-    
-    try:
-        if album_path:
-            rows = store.read_album_assets(album_path, include_subalbums=True)
-        else:
-            rows = store.read_all()
-        for row in rows:
-            rel_key = _normalise_rel_key(row.get("rel"))
-            if rel_key:
-                existing_index[rel_key] = row
-    except IndexCorruptedError:
-        pass
-    return existing_index
 
 
 def _update_index_snapshot(
@@ -343,7 +267,7 @@ def _update_index_snapshot(
 
     fresh_rows: Dict[str, dict] = {}
     for row in materialised_rows:
-        rel_key = _normalise_rel_key(row.get("rel"))
+        rel_key = normalise_rel_key(row.get("rel"))
         if rel_key is None:
             continue
         fresh_rows[rel_key] = row
@@ -382,7 +306,7 @@ def rescan(
     store = get_global_repository(db_root)
     
     # Compute album path for library-relative paths
-    album_path = _compute_album_path(root, library_root)
+    album_path = compute_album_path(root, library_root)
 
     # ``original_rel_path`` is only populated for assets in the shared trash
     # album.  Rescanning that directory must therefore preserve the existing
@@ -510,7 +434,7 @@ def scan_specific_files(
     rows = list(process_media_paths(root, image_paths, video_paths))
     
     # If using global DB, convert to library-relative paths
-    album_path = _compute_album_path(root, library_root)
+    album_path = compute_album_path(root, library_root)
     
     if album_path:
         for row in rows:
@@ -537,7 +461,7 @@ def pair(root: Path, library_root: Optional[Path] = None) -> List[LiveGroup]:
     db_root = library_root if library_root else root
     
     # If using global DB, filter by album path
-    album_path = _compute_album_path(root, library_root)
+    album_path = compute_album_path(root, library_root)
     
     # Read rows from the database
     if album_path:

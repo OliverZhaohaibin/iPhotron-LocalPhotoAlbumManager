@@ -1,11 +1,5 @@
 import pytest
-import sqlite3
-import threading
-import time
-import os
-import uuid
 from pathlib import Path
-from unittest.mock import Mock, MagicMock
 from datetime import datetime
 
 from src.iPhoto.domain.models import Album, Asset, MediaType
@@ -17,6 +11,29 @@ from src.iPhoto.application.use_cases.open_album import OpenAlbumUseCase
 from src.iPhoto.application.use_cases.scan_album import ScanAlbumUseCase
 from src.iPhoto.application.use_cases.pair_live_photos import PairLivePhotosUseCase
 from src.iPhoto.application.dtos import OpenAlbumRequest, ScanAlbumRequest, PairLivePhotosRequest
+
+class StubMetadataProvider:
+    def get_metadata_batch(self, paths):
+        return [{"SourceFile": path.as_posix()} for path in paths]
+
+    def normalize_metadata(self, root: Path, file_path: Path, raw_metadata):
+        rel_path = file_path.relative_to(root).as_posix()
+        stat = file_path.stat()
+        suffix = file_path.suffix.lower()
+        media_type = 0 if suffix in {".jpg", ".jpeg", ".png"} else 1
+        return {
+            "id": f"asset-{rel_path}",
+            "rel": rel_path,
+            "bytes": stat.st_size,
+            "ts": int(stat.st_mtime * 1_000_000),
+            "media_type": media_type,
+        }
+
+
+class StubThumbnailGenerator:
+    def generate_micro_thumbnail(self, path: Path):
+        return None
+
 
 @pytest.fixture
 def db_pool(tmp_path):
@@ -35,6 +52,14 @@ def asset_repo(db_pool):
 @pytest.fixture
 def event_bus():
     return EventBus()
+
+@pytest.fixture
+def metadata_provider():
+    return StubMetadataProvider()
+
+@pytest.fixture
+def thumbnail_generator():
+    return StubThumbnailGenerator()
 
 # --- Repository Tests ---
 
@@ -79,7 +104,14 @@ def test_open_album_use_case(album_repo, asset_repo, event_bus, tmp_path):
     saved_album = album_repo.get(response.album_id)
     assert saved_album is not None
 
-def test_scan_album_use_case(album_repo, asset_repo, event_bus, tmp_path):
+def test_scan_album_use_case(
+    album_repo,
+    asset_repo,
+    event_bus,
+    metadata_provider,
+    thumbnail_generator,
+    tmp_path,
+):
     # Setup album
     album_path = tmp_path / "ScanTest"
     album_path.mkdir()
@@ -90,7 +122,13 @@ def test_scan_album_use_case(album_repo, asset_repo, event_bus, tmp_path):
     album_repo.save(album)
 
     # Execute scan
-    use_case = ScanAlbumUseCase(album_repo, asset_repo, event_bus)
+    use_case = ScanAlbumUseCase(
+        album_repo,
+        asset_repo,
+        event_bus,
+        metadata_provider,
+        thumbnail_generator,
+    )
     response = use_case.execute(ScanAlbumRequest(album_id=album.id))
 
     assert response.added_count == 2

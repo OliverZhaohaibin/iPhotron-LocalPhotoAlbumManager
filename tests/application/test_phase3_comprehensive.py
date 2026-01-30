@@ -1,7 +1,7 @@
 import pytest
-import sqlite3
 import os
-import uuid
+import sqlite3
+import time
 from pathlib import Path
 from datetime import datetime, timedelta
 
@@ -14,8 +14,29 @@ from src.iPhoto.events.bus import EventBus
 from src.iPhoto.application.use_cases.scan_album import ScanAlbumUseCase
 from src.iPhoto.application.dtos import ScanAlbumRequest
 from src.iPhoto.di.container import DependencyContainer
-from src.iPhoto.application.services.album_service import AlbumService
-from src.iPhoto.application.services.asset_service import AssetService
+
+class StubMetadataProvider:
+    def get_metadata_batch(self, paths):
+        return [{"SourceFile": path.as_posix()} for path in paths]
+
+    def normalize_metadata(self, root: Path, file_path: Path, raw_metadata):
+        rel_path = file_path.relative_to(root).as_posix()
+        stat = file_path.stat()
+        suffix = file_path.suffix.lower()
+        media_type = 0 if suffix in {".jpg", ".jpeg", ".png"} else 1
+        return {
+            "id": f"asset-{rel_path}",
+            "rel": rel_path,
+            "bytes": stat.st_size,
+            "ts": int(stat.st_mtime * 1_000_000),
+            "media_type": media_type,
+        }
+
+
+class StubThumbnailGenerator:
+    def generate_micro_thumbnail(self, path: Path):
+        return None
+
 
 @pytest.fixture
 def db_pool(tmp_path):
@@ -34,6 +55,14 @@ def album_repo(db_pool):
 def event_bus():
     import logging
     return EventBus(logging.getLogger("test"))
+
+@pytest.fixture
+def metadata_provider():
+    return StubMetadataProvider()
+
+@pytest.fixture
+def thumbnail_generator():
+    return StubThumbnailGenerator()
 
 # --- Repository Query Tests ---
 
@@ -112,7 +141,14 @@ def test_repository_pagination_sorting(asset_repo):
 
 # --- Scanning Tests ---
 
-def test_scan_updates_and_deletes(album_repo, asset_repo, event_bus, tmp_path):
+def test_scan_updates_and_deletes(
+    album_repo,
+    asset_repo,
+    event_bus,
+    metadata_provider,
+    thumbnail_generator,
+    tmp_path,
+):
     # Setup filesystem
     album_path = tmp_path / "ScanUpdate"
     album_path.mkdir()
@@ -127,7 +163,13 @@ def test_scan_updates_and_deletes(album_repo, asset_repo, event_bus, tmp_path):
     album = Album.create(path=album_path)
     album_repo.save(album)
 
-    uc = ScanAlbumUseCase(album_repo, asset_repo, event_bus)
+    uc = ScanAlbumUseCase(
+        album_repo,
+        asset_repo,
+        event_bus,
+        metadata_provider,
+        thumbnail_generator,
+    )
     res1 = uc.execute(ScanAlbumRequest(album_id=album.id))
     assert res1.added_count == 2
 
@@ -136,17 +178,19 @@ def test_scan_updates_and_deletes(album_repo, asset_repo, event_bus, tmp_path):
     keep_asset = next(a for a in assets if a.path.name == "keep.jpg")
     original_id = keep_asset.id
 
-    # Modify filesystem: Delete one, add one, keep one
+    # Modify filesystem: delete one, add one, update one
     file2.unlink() # Delete
     file3 = album_path / "new.jpg"
     file3.touch() # Add
+    refreshed_time = time.time() + 5
+    os.utime(file1, (refreshed_time, refreshed_time))
 
     # Second Scan
     res2 = uc.execute(ScanAlbumRequest(album_id=album.id))
 
     assert res2.added_count == 1 # new.jpg
     assert res2.deleted_count == 1 # delete.jpg
-    assert res2.updated_count == 1 # keep.jpg (re-verified)
+    assert res2.updated_count == 1 # keep.jpg (touched)
 
     # Verify ID stability
     assets_v2 = asset_repo.get_by_album(album.id)
@@ -217,10 +261,14 @@ def test_schema_migration_adds_columns(tmp_path):
         row = conn.execute("SELECT is_favorite FROM assets WHERE id='1'").fetchone()
         assert row["is_favorite"] == 0
 
-# Add Metadata Persistence Test to tests/application/test_phase3_comprehensive.py
-import json
-
-def test_scan_preserves_metadata_on_update(album_repo, asset_repo, event_bus, tmp_path):
+def test_scan_preserves_metadata_on_update(
+    album_repo,
+    asset_repo,
+    event_bus,
+    metadata_provider,
+    thumbnail_generator,
+    tmp_path,
+):
     # Setup
     album_path = tmp_path / "MetaPersist"
     album_path.mkdir()
@@ -231,7 +279,13 @@ def test_scan_preserves_metadata_on_update(album_repo, asset_repo, event_bus, tm
     album_repo.save(album)
 
     # 1. Initial Scan
-    uc = ScanAlbumUseCase(album_repo, asset_repo, event_bus)
+    uc = ScanAlbumUseCase(
+        album_repo,
+        asset_repo,
+        event_bus,
+        metadata_provider,
+        thumbnail_generator,
+    )
     uc.execute(ScanAlbumRequest(album_id=album.id))
 
     # 2. Enrich metadata manually (simulate background job)
@@ -251,7 +305,6 @@ def test_scan_preserves_metadata_on_update(album_repo, asset_repo, event_bus, tm
     # Touch file to force modification time update if logic checked mtime,
     # but here we update regardless if exists.
     # To be sure, let's update mtime.
-    import time
     time.sleep(0.01)
     file1.touch()
 

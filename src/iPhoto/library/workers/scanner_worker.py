@@ -7,8 +7,8 @@ from typing import Iterable, Iterator, List, Optional, TYPE_CHECKING
 
 from PySide6.QtCore import QObject, QRunnable, Signal
 
-from ...app import load_incremental_index_cache
 from ...cache.index_store import get_global_repository
+from ...cache.index_store.index_cache import load_incremental_index_cache
 from ...config import WORK_DIR_NAME
 from ...io.scanner_adapter import scan_album
 from ...utils.pathutils import ensure_work_dir
@@ -128,7 +128,10 @@ class ScannerWorker(QRunnable):
             chunk: List[dict] = []
 
             # Load existing index for incremental scanning
-            existing_index = load_incremental_index_cache(self._library_root)
+            existing_index = load_incremental_index_cache(
+                self._root,
+                library_root=self._library_root,
+            )
 
             # The new scan_album implementation handles parallel discovery and processing.
             # We initialize the generator but execution (and thread starting) happens on iteration.

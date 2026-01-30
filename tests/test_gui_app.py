@@ -186,7 +186,7 @@ def test_facade_open_album_emits_signals(tmp_path: Path, qapp: QApplication) -> 
     # The scanner runs in a background thread.  Pump the event loop until the
     # index file is created or we time out, to avoid race conditions.
     deadline = time.monotonic() + 5.0
-    index_path = tmp_path / ".iPhoto" / "index.jsonl"
+    index_path = tmp_path / ".iPhoto" / "global_index.db"
     while not index_path.exists() and time.monotonic() < deadline:
         qapp.processEvents()
 

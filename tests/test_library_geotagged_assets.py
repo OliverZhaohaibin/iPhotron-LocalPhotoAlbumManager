@@ -17,7 +17,7 @@ pytest.importorskip(
 
 from PySide6.QtWidgets import QApplication
 
-from src.iPhoto.config import WORK_DIR_NAME
+from src.iPhoto.cache.index_store import get_global_repository, reset_global_repository
 from src.iPhoto.library.manager import LibraryManager
 
 
@@ -54,23 +54,25 @@ def test_geotagged_assets_use_classifier(tmp_path: Path, qapp: QApplication) -> 
     asset_path.write_bytes(b"fake-image")
     _write_album_manifest(album)
 
-    work_dir = album / WORK_DIR_NAME
-    work_dir.mkdir(parents=True, exist_ok=True)
-    index_path = work_dir / "index.jsonl"
+    reset_global_repository()
+    store = get_global_repository(root)
     row = {
-        "rel": "photo.jpg",
+        "rel": "Album/photo.jpg",
         "gps": {"lat": 10.0, "lon": 20.0},
         "mime": "image/jpeg",
         "id": "asset-1",
     }
-    index_path.write_text(json.dumps(row) + "\n", encoding="utf-8")
+    store.write_rows([row])
 
     manager = LibraryManager()
     manager.bind_path(root)
     qapp.processEvents()
 
-    assets = manager.get_geotagged_assets()
-    assert len(assets) == 1
-    asset = assets[0]
-    assert asset.is_image is True
-    assert asset.is_video is False
+    try:
+        assets = manager.get_geotagged_assets()
+        assert len(assets) == 1
+        asset = assets[0]
+        assert asset.is_image is True
+        assert asset.is_video is False
+    finally:
+        reset_global_repository()

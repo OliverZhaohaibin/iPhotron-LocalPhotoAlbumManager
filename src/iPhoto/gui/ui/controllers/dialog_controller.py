@@ -63,7 +63,8 @@ class DialogController:
 
     def _start_initial_scan_if_needed(self, bound_root: Path) -> None:
         work_dir = bound_root / WORK_DIR_NAME
-        if work_dir.exists():
+        db_path = work_dir / "global_index.db"
+        if work_dir.exists() and db_path.exists():
             return
         if self._context.library.is_scanning_path(bound_root):
             return

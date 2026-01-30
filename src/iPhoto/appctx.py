@@ -173,7 +173,8 @@ class AppContext:
 
     def _start_initial_scan_if_needed(self, library_root: Path) -> None:
         work_dir = library_root / WORK_DIR_NAME
-        if work_dir.exists():
+        db_path = work_dir / "global_index.db"
+        if work_dir.exists() and db_path.exists():
             return
         if self.library.is_scanning_path(library_root):
             return

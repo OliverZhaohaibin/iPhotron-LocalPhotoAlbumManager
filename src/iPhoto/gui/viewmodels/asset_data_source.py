@@ -53,6 +53,15 @@ class AssetDataSource(QObject):
         self._seen_abs_paths.clear()
         self.dataChanged.emit()
 
+    def set_repository(self, repo: IAssetRepository) -> None:
+        if self._repo is repo:
+            return
+        self._repo = repo
+        self._cached_dtos.clear()
+        self._total_count = 0
+        self._seen_abs_paths.clear()
+        self.dataChanged.emit()
+
     def set_active_root(self, root: Optional[Path]) -> None:
         self._active_root = root
 

@@ -16,6 +16,9 @@ class AssetService:
         self._repo = asset_repo
         self._logger = logging.getLogger(__name__)
 
+    def set_repository(self, repo: IAssetRepository) -> None:
+        self._repo = repo
+
     def find_assets(self, query: AssetQuery) -> List[Asset]:
         return self._repo.find_by_query(query)
 

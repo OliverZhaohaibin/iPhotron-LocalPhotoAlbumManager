@@ -20,7 +20,7 @@ from PySide6.QtCore import (
 from PySide6.QtGui import QShortcut, QKeySequence, QAction
 
 from src.iPhoto.appctx import AppContext
-from src.iPhoto.config import DEFAULT_EXCLUDE, DEFAULT_INCLUDE
+from src.iPhoto.config import DEFAULT_EXCLUDE, DEFAULT_INCLUDE, WORK_DIR_NAME
 from src.iPhoto.gui.ui.models.asset_model import Roles
 from src.iPhoto.gui.ui.models.spacer_proxy_model import SpacerProxyModel
 from src.iPhoto.gui.ui.controllers.dialog_controller import DialogController
@@ -43,6 +43,8 @@ from src.iPhoto.application.services.asset_service import AssetService
 from src.iPhoto.di.container import DependencyContainer
 from src.iPhoto.events.bus import EventBus
 from src.iPhoto.domain.repositories import IAssetRepository
+from src.iPhoto.infrastructure.db.pool import ConnectionPool
+from src.iPhoto.infrastructure.repositories.sqlite_asset_repository import SQLiteAssetRepository
 from src.iPhoto.infrastructure.services.thumbnail_cache_service import ThumbnailCacheService
 
 # New Coordinators
@@ -78,6 +80,7 @@ class MainCoordinator(QObject):
             self._asset_repo = self._container.resolve(IAssetRepository)
         else:
             raise RuntimeError("DependencyContainer is required for MainCoordinator")
+        self._asset_pool: Optional[ConnectionPool] = None
 
         # --- ViewModels Setup ---
         lib_root = context.library.root()
@@ -426,6 +429,9 @@ class MainCoordinator(QObject):
 
     def _on_library_tree_updated(self) -> None:
         root = self._context.library.root()
+        if root is not None:
+            repo, pool = self._build_asset_repository(root)
+            self._replace_asset_repository(repo, pool)
         self._asset_data_source.set_library_root(root)
         if root is not None:
             cache_root = root / ".iPhoto" / "cache" / "thumbs"
@@ -433,6 +439,25 @@ class MainCoordinator(QObject):
             cache_root = Path.home() / ".iPhoto" / "cache" / "thumbs"
         self._thumbnail_service.set_disk_cache_path(cache_root)
         self._asset_data_source.reload_current_query()
+
+    def _build_asset_repository(
+        self, root: Path
+    ) -> tuple[SQLiteAssetRepository, ConnectionPool]:
+        db_path = root / WORK_DIR_NAME / "global_index.db"
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        pool = ConnectionPool(db_path)
+        return SQLiteAssetRepository(pool), pool
+
+    def _replace_asset_repository(
+        self, repo: SQLiteAssetRepository, pool: ConnectionPool
+    ) -> None:
+        previous_pool = self._asset_pool
+        self._asset_pool = pool
+        self._asset_repo = repo
+        self._asset_data_source.set_repository(repo)
+        self._asset_service.set_repository(repo)
+        if previous_pool is not None:
+            previous_pool.close_all()
 
     def _on_asset_clicked(self, index: QModelIndex):
         if self._selection_controller and self._selection_controller.is_active():

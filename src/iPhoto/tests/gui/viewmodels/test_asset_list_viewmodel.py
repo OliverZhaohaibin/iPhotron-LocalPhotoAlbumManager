@@ -6,7 +6,9 @@ from PySide6.QtCore import Qt, QModelIndex, QSize
 from src.iPhoto.gui.viewmodels.asset_list_viewmodel import AssetListViewModel
 from src.iPhoto.gui.viewmodels.asset_data_source import AssetDataSource
 from src.iPhoto.infrastructure.services.thumbnail_cache_service import ThumbnailCacheService
-from src.iPhoto.domain.models import Asset, MediaType
+from src.iPhoto.application.dtos import AssetDTO
+from src.iPhoto.gui.ui.models.roles import Roles
+from src.iPhoto.domain.models import MediaType
 from src.iPhoto.domain.models.query import AssetQuery
 
 @pytest.fixture
@@ -40,11 +42,12 @@ def test_data_display_role(view_model, mock_data_source):
     # Ensure rowCount > 0 so index is valid
     mock_data_source.count.return_value = 1
 
-    asset = Asset(
-        id="1", album_id="x", path=Path("photo.jpg"),
-        media_type=MediaType.IMAGE, size_bytes=100,
+    asset = AssetDTO(
+        id="1", abs_path=Path("/x/photo.jpg"), rel_path=Path("photo.jpg"),
+        media_type="image", size_bytes=100,
         created_at=None, width=100, height=100,
-        parent_album_path="x"
+        metadata={}, is_favorite=False, is_live=False, is_pano=False,
+        duration=0.0
     )
     mock_data_source.asset_at.return_value = asset
 
@@ -56,28 +59,29 @@ def test_data_display_role(view_model, mock_data_source):
 def test_data_path_role(view_model, mock_data_source):
     mock_data_source.count.return_value = 1
 
-    asset = Asset(
-        id="1", album_id="x", path=Path("/full/path/photo.jpg"),
-        media_type=MediaType.IMAGE, size_bytes=100,
+    asset = AssetDTO(
+        id="1", abs_path=Path("/full/path/photo.jpg"), rel_path=Path("photo.jpg"),
+        media_type="image", size_bytes=100,
         created_at=None, width=100, height=100,
-        parent_album_path="x"
+        metadata={}, is_favorite=False, is_live=False, is_pano=False,
+        duration=0.0
     )
     mock_data_source.asset_at.return_value = asset
 
     index = view_model.index(0, 0)
-    result = view_model.data(index, AssetListViewModel.PathRole)
+    result = view_model.data(index, Roles.ABS)
 
-    # On linux/mac this is posix, win is nt.
-    assert str(result).endswith("photo.jpg")
+    assert str(result) == str(asset.abs_path)
 
 def test_data_thumbnail_role(view_model, mock_data_source, mock_thumb_service):
     mock_data_source.count.return_value = 1
 
-    asset = Asset(
-        id="1", album_id="x", path=Path("photo.jpg"),
-        media_type=MediaType.IMAGE, size_bytes=100,
+    asset = AssetDTO(
+        id="1", abs_path=Path("/x/photo.jpg"), rel_path=Path("photo.jpg"),
+        media_type="image", size_bytes=100,
         created_at=None, width=100, height=100,
-        parent_album_path="x"
+        metadata={}, is_favorite=False, is_live=False, is_pano=False,
+        duration=0.0
     )
     mock_data_source.asset_at.return_value = asset
 
@@ -86,7 +90,7 @@ def test_data_thumbnail_role(view_model, mock_data_source, mock_thumb_service):
     mock_thumb_service.get_thumbnail.return_value = mock_pixmap
 
     index = view_model.index(0, 0)
-    result = view_model.data(index, AssetListViewModel.ThumbnailRole)
+    result = view_model.data(index, Qt.DecorationRole)
 
     assert result == mock_pixmap
     mock_thumb_service.get_thumbnail.assert_called()
@@ -94,16 +98,18 @@ def test_data_thumbnail_role(view_model, mock_data_source, mock_thumb_service):
 def test_get_qml_helper(view_model, mock_data_source):
     mock_data_source.count.return_value = 1
 
-    asset = Asset(
-        id="1", album_id="x", path=Path("photo.jpg"),
-        media_type=MediaType.IMAGE, size_bytes=100,
+    asset = AssetDTO(
+        id="1", abs_path=Path("/x/photo.jpg"), rel_path=Path("photo.jpg"),
+        media_type="image", size_bytes=100,
         created_at=None, width=100, height=100,
-        parent_album_path="x"
+        metadata={}, is_favorite=False, is_live=False, is_pano=False,
+        duration=0.0
     )
     mock_data_source.asset_at.return_value = asset
 
     result = view_model.get(0)
-    assert str(result) == "photo.jpg"
+    # get(row) returns data for Roles.ABS
+    assert str(result) == str(asset.abs_path)
 
 def test_invalid_index(view_model):
     result = view_model.data(QModelIndex(), Qt.DisplayRole)

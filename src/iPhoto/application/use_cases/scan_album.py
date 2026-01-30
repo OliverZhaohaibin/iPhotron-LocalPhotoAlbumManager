@@ -23,6 +23,12 @@ class AlbumScannedEvent(Event):
     updated_count: int
     deleted_count: int
 
+@dataclass(kw_only=True)
+class AlbumScanProgressEvent(Event):
+    album_id: str
+    processed_count: int
+    total_found: int
+
 class FileDiscoveryThread(threading.Thread):
     def __init__(self, root: Path, queue_obj: queue.Queue, include: List[str] = None, exclude: List[str] = None):
         super().__init__(name=f"ScannerDiscovery-{root.name}")
@@ -96,11 +102,12 @@ class ScanAlbumUseCase:
         processed_ids: Set[str] = set() # Track IDs of assets found/updated
         added_count = 0
         updated_count = 0
+        processed_count = 0
         batch: List[Path] = []
         BATCH_SIZE = 50
 
         def process_batch(paths: List[Path]):
-            nonlocal added_count, updated_count
+            nonlocal added_count, updated_count, processed_count
 
             # Fetch metadata for batch
             meta_batch = self._metadata.get_metadata_batch(paths)
@@ -117,13 +124,21 @@ class ScanAlbumUseCase:
             assets_to_save = []
 
             for path in paths:
-                rel_path = path.relative_to(album.path)
+                try:
+                    rel_path = path.relative_to(album.path)
+                except ValueError:
+                    # Should not happen given discovery logic, but safe guard
+                    continue
+
                 str_rel_path = str(rel_path)
                 found_paths.add(str_rel_path)
 
                 # Check cache (incremental scan)
                 existing = existing_map.get(str_rel_path)
-                stat = path.stat()
+                try:
+                    stat = path.stat()
+                except OSError:
+                    continue # File disappeared
 
                 # If existing and modified time/size matches, skip full process
                 if existing:
@@ -133,8 +148,6 @@ class ScanAlbumUseCase:
 
                     if existing.size_bytes == stat.st_size and abs(existing_ts - current_ts) <= 1_000_000:
                         # Cache hit
-                        # Check for missing micro-thumbnail
-                        # (Not implementing backfill here for simplicity, but could be added)
                         processed_ids.add(existing.id)
                         continue
 
@@ -151,18 +164,6 @@ class ScanAlbumUseCase:
                      mt = self._thumbnails.generate_micro_thumbnail(path)
                      if mt:
                          row["micro_thumbnail"] = mt
-
-                # Convert to Domain Entity
-                # row['id'] comes from provider as "as_{hash}".
-                # We prioritize existing.id to preserve relationships if the file content (hash) hasn't changed.
-                # However, if content changed (hash changed), row['id'] will differ.
-                # If we are in this block, it means either it's new, OR it's existing but modified (cache miss).
-                # If modified, we should arguably keep the stable ID if possible (by path),
-                # BUT the system relies on hash-based IDs for deduplication.
-                # The legacy system logic: ID is hash based.
-                # If we use existing.id, we might mask content changes if ID is strictly hash.
-                # BUT, if we change ID, we lose favorites/album inclusion that references the ID.
-                # Standard practice: Keep ID stable if path is same, update hash/content.
 
                 asset_id = existing.id if existing else row['id']
 
@@ -201,6 +202,13 @@ class ScanAlbumUseCase:
             if assets_to_save:
                 self._asset_repo.save_batch(assets_to_save)
 
+            processed_count += len(paths)
+            self._events.publish(AlbumScanProgressEvent(
+                album_id=album.id,
+                processed_count=processed_count,
+                total_found=discoverer.total_found
+            ))
+
 
         # Consume queue
         while True:
@@ -218,13 +226,9 @@ class ScanAlbumUseCase:
             process_batch(batch)
 
         # 3. Identify Deletions
-        # Deletion logic:
-        # An asset is deleted if its path was not found AND its ID was not encountered/processed elsewhere.
-        # This protects against deleting an asset that was just moved (same ID, new path).
         deleted_ids = []
         for path_str, asset in existing_map.items():
             if path_str not in found_paths:
-                # If ID was seen in processed_ids (meaning it was found at another path), do not delete.
                 if asset.id not in processed_ids:
                     deleted_ids.append(asset.id)
 

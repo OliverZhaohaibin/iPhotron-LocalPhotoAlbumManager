@@ -45,6 +45,9 @@ from src.iPhoto.events.bus import EventBus
 from src.iPhoto.domain.repositories import IAssetRepository
 from src.iPhoto.infrastructure.services.thumbnail_cache_service import ThumbnailCacheService
 
+# Background Tasks
+from src.iPhoto.gui.ui.tasks.background_scanner import BackgroundScanner
+
 # New Coordinators
 from src.iPhoto.gui.coordinators.view_router import ViewRouter
 from src.iPhoto.gui.coordinators.navigation_coordinator import NavigationCoordinator
@@ -90,6 +93,9 @@ class MainCoordinator(QObject):
 
         self._thumbnail_service = ThumbnailCacheService(cache_root)
         self._asset_list_vm = AssetListViewModel(self._asset_data_source, self._thumbnail_service)
+
+        # Background Scanner
+        self._background_scanner = BackgroundScanner(self._container)
 
         # --- Coordinators Setup ---
 
@@ -365,6 +371,7 @@ class MainCoordinator(QObject):
 
         # Navigation
         self._navigation.bindLibraryRequested.connect(self._dialog.bind_library_dialog)
+        self._navigation.scanRequested.connect(self._handle_scan_requested)
         ui.bind_library_action.triggered.connect(self._dialog.bind_library_dialog)
 
         # Preferences (Wheel, Volume) - Filmstrip handled in PlaybackCoordinator
@@ -380,6 +387,12 @@ class MainCoordinator(QObject):
         self._facade.scanBatchFailed.connect(self._status_bar.handle_scan_batch_failed)
         self._facade.scanProgress.connect(self._status_bar.handle_scan_progress)
         self._facade.scanFinished.connect(self._status_bar.handle_scan_finished)
+
+        # Background Scanner Signals
+        self._background_scanner.scanProgress.connect(self._status_bar.handle_scan_progress)
+        self._background_scanner.scanFinished.connect(self._status_bar.handle_scan_finished)
+        # Refresh view model when scan finishes
+        self._background_scanner.scanFinished.connect(self._on_background_scan_finished)
 
         self._facade.loadStarted.connect(self._status_bar.handle_load_started)
         self._facade.loadProgress.connect(self._status_bar.handle_load_progress)
@@ -449,6 +462,9 @@ class MainCoordinator(QObject):
 
     def _handle_rescan_clicked(self) -> None:
         """Trigger a background rescan and surface progress feedback."""
+        if self._navigation.current_album_id:
+            self._handle_scan_requested(self._navigation.current_album_id)
+            return
 
         self._status_bar.begin_scan()
 
@@ -464,6 +480,15 @@ class MainCoordinator(QObject):
         self._context.library.start_scanning(
             library_root, DEFAULT_INCLUDE, DEFAULT_EXCLUDE
         )
+
+    def _handle_scan_requested(self, album_id: str):
+        self._status_bar.begin_scan()
+        path = self._navigation.current_album_path or Path("unknown")
+        self._background_scanner.scan(album_id, path)
+
+    def _on_background_scan_finished(self, root: Path, success: bool):
+        if success:
+            self._asset_list_vm.refresh()
 
     def _handle_edit_clicked(self):
         # Trigger Edit Mode from Detail View context

@@ -299,26 +299,39 @@ class ContextMenuController(QObject):
             return
 
         files = [Path(url.toLocalFile()) for url in mime_data.urls()]
-        album = self._facade.current_album
-        if not album:
+
+        album_root = None
+        if self._navigation:
+            album_root = self._navigation.current_album_path
+
+        # Legacy fallback
+        if not album_root and self._facade.current_album:
+            album_root = self._facade.current_album.root
+
+        if not album_root:
             self._status_bar.show_message("Open an album before pasting files.", 3000)
             return
 
         # Delegate importing to the facade so that all deduplication and bookkeeping logic is
         # reused. The toast provides quick feedback because importing can take a noticeable
         # amount of time on large selections.
-        self._facade.import_files(files, destination=album.root)
+        self._facade.import_files(files, destination=album_root)
         self._toast.show_toast("Pasting files...")
 
     def _open_current_folder(self) -> None:
         """Open the current album folder in the desktop file manager."""
 
-        album = self._facade.current_album
-        if not album:
+        path = None
+        if self._navigation:
+            path = self._navigation.current_album_path
+
+        if not path and self._facade.current_album:
+            path = self._facade.current_album.root
+
+        if not path:
             self._status_bar.show_message("No album is currently open.", 3000)
             return
 
-        path = album.root
         if not path.exists():
             self._status_bar.show_message(f"Folder not found: {path}", 3000)
             return
@@ -382,13 +395,16 @@ class ContextMenuController(QObject):
             return []
         model = self._navigation.sidebar_model()
         entries = model.iter_album_entries()
-        current_album = self._facade.current_album
-        current_root: Path | None = None
-        if current_album is not None:
+
+        current_root = self._navigation.current_album_path
+        if not current_root and self._facade.current_album:
+             current_root = self._facade.current_album.root
+
+        if current_root:
             try:
-                current_root = current_album.root.resolve()
+                current_root = current_root.resolve()
             except OSError:
-                current_root = current_album.root
+                pass
 
         destinations: list[tuple[str, Path]] = []
         for label, path in entries:

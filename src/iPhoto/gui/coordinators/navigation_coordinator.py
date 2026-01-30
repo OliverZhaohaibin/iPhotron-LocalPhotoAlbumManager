@@ -37,6 +37,7 @@ class NavigationCoordinator(QObject):
     """
 
     bindLibraryRequested = Signal()
+    scanRequested = Signal(str)  # Emits album_id
 
     _TRASH_CLEANUP_DELAY_MS = 750
     _TRASH_CLEANUP_THROTTLE_SEC = 300.0
@@ -63,6 +64,9 @@ class NavigationCoordinator(QObject):
 
         self._static_selection: Optional[str] = None
         self._playback_coordinator: Optional[PlaybackCoordinator] = None
+
+        self._current_album_id: Optional[str] = None
+        self._current_album_path: Optional[Path] = None
 
         # Trash Cleanup State
         self._trash_cleanup_running = False
@@ -96,22 +100,24 @@ class NavigationCoordinator(QObject):
         self._static_selection = None
         self._router.show_gallery()
 
-        # Legacy Facade call to maintain backend state synchronization
-        album = self._facade.open_album(path)
-        if album:
-            self._context.remember_album(album.root)
-            self._sidebar.select_path(album.root)
-        else:
-            self._sidebar.select_path(path)
+        # Use Application Service
+        response = self._album_service.open_album(path)
+
+        # Update local state
+        self._current_album_id = response.album_id
+        self._current_album_path = path
+
+        self._context.remember_album(path)
+        self._sidebar.select_path(path)
 
         # Update ViewModel
-        # When opening an album folder, we usually want to see its contents.
-        # SQLiteAssetRepository logic for album_path usually implies parent_album_path match.
-        # For legacy behavior, we often want subalbums if it's a folder structure.
-        # Let's set include_subalbums=True implicitly for file-system browsing behavior.
-        query = AssetQuery(album_path=album.root.name if album else str(path.name))
-        query.include_subalbums = True  # Ensure recursive view by default
+        query = AssetQuery().with_album_id(response.album_id)
         self._asset_vm.load_query(query)
+
+        # Auto-scan check
+        if response.asset_count == 0:
+            # Trigger background scan
+            self.scanRequested.emit(response.album_id)
 
     def open_all_photos(self):
         """Loads all photos."""
@@ -160,11 +166,16 @@ class NavigationCoordinator(QObject):
         self._router.show_gallery()
         self._static_selection = "Recently Deleted"
 
-        # Legacy open
-        self._facade.open_album(deleted_root)
+        # Open via Service
+        response = self._album_service.open_album(deleted_root)
+
+        self._current_album_id = response.album_id
+        self._current_album_path = deleted_root
 
         # ViewModel Update
-        query = AssetQuery(album_path=RECENTLY_DELETED_DIR_NAME)
+        query = AssetQuery().with_album_id(response.album_id)
+        # Ensure repository knows we are looking at trash so it doesn't exclude it
+        query.album_path = RECENTLY_DELETED_DIR_NAME
         self._asset_vm.load_query(query)
 
     def _open_filtered_collection(self, title: str, is_favorite=None, media_types=None):
@@ -188,7 +199,7 @@ class NavigationCoordinator(QObject):
 
     def _should_treat_as_refresh(self, path: Path) -> bool:
         # Check if re-opening same album to avoid UI flicker
-        if self._facade.current_album and self._facade.current_album.root.resolve() == path.resolve():
+        if self._current_album_path and self._current_album_path.resolve() == path.resolve():
             return self._router.is_gallery_view_active()
         return False
 
@@ -266,3 +277,11 @@ class NavigationCoordinator(QObject):
 
     def sidebar_model(self):
         return self._sidebar.tree_model()
+
+    @property
+    def current_album_id(self) -> Optional[str]:
+        return self._current_album_id
+
+    @property
+    def current_album_path(self) -> Optional[Path]:
+        return self._current_album_path

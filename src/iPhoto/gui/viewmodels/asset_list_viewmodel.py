@@ -40,6 +40,10 @@ class AssetListViewModel(QAbstractListModel):
         """Triggers data loading for a new query."""
         self._data_source.load(query)
 
+    def refresh(self):
+        """Refreshes the data from source."""
+        self._data_source.refresh()
+
     def rowCount(self, parent=QModelIndex()) -> int:
         return self._data_source.count()
 

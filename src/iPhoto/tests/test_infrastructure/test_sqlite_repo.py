@@ -53,7 +53,11 @@ def test_save_and_get_asset(repo, sample_asset):
     assert retrieved.id == sample_asset.id
     assert retrieved.path == sample_asset.path
     assert retrieved.media_type == MediaType.IMAGE
-    assert retrieved.metadata == sample_asset.metadata
+
+    # Repository adds defaults like live_role=0
+    expected_metadata = sample_asset.metadata.copy()
+    expected_metadata["live_role"] = 0
+    assert retrieved.metadata == expected_metadata
     assert retrieved.parent_album_path == "album_1"
 
 def test_update_asset(repo, sample_asset):

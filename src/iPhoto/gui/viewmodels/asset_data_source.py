@@ -48,6 +48,11 @@ class AssetDataSource(QObject):
         """Return the configured library root for absolute-path resolution."""
         return self._library_root
 
+    def refresh(self):
+        """Reloads the current query."""
+        if self._current_query:
+            self.load(self._current_query)
+
     def load(self, query: AssetQuery):
         """Loads data for the given query."""
         self._current_query = query

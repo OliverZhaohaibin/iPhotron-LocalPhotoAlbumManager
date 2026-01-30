@@ -65,14 +65,7 @@ class GalleryGridView(AssetGrid):
     def __init__(self, parent=None) -> None:  # type: ignore[override]
         super().__init__(parent)
         self._selection_mode_enabled = False
-        self._empty_label = QLabel(
-            "No media found. Click Rescan to scan this library.",
-            self.viewport(),
-        )
-        self._empty_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._empty_label.setWordWrap(True)
-        self._empty_label.setStyleSheet("color: #86868b; font-size: 15px;")
-        self._empty_label.hide()
+        self._empty_label = None
         self.setSelectionMode(QListView.SelectionMode.SingleSelection)
         self.setViewMode(QListView.ViewMode.IconMode)
         # Defer initial size calculation to resizeEvent to avoid rendering the
@@ -93,6 +86,14 @@ class GalleryGridView(AssetGrid):
         # Enable hardware acceleration for the viewport to improve scrolling performance
         gl_viewport = GalleryViewport()
         self.setViewport(gl_viewport)
+        self._empty_label = QLabel(
+            "No media found. Click Rescan to scan this library.",
+            self.viewport(),
+        )
+        self._empty_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._empty_label.setWordWrap(True)
+        self._empty_label.setStyleSheet("color: #86868b; font-size: 15px;")
+        self._empty_label.hide()
 
         self._updating_style = False
         self._apply_scrollbar_style()
@@ -111,7 +112,8 @@ class GalleryGridView(AssetGrid):
         if viewport_width <= 0:
             return
 
-        self._empty_label.setGeometry(self.viewport().rect())
+        if self._empty_label is not None:
+            self._empty_label.setGeometry(self.viewport().rect())
 
 
         # Determine how many columns can fit with the minimum size constraint.
@@ -204,8 +206,9 @@ class GalleryGridView(AssetGrid):
     def _update_empty_state(self) -> None:
         model = self.model()
         is_empty = model is None or model.rowCount() == 0
-        if self._empty_label is not None:
-            self._empty_label.setGeometry(self.viewport().rect())
+        if self._empty_label is None:
+            return
+        self._empty_label.setGeometry(self.viewport().rect())
         self._empty_label.setVisible(is_empty)
 
     # ------------------------------------------------------------------

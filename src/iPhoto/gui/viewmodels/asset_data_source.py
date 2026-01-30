@@ -34,6 +34,7 @@ class AssetDataSource(QObject):
         super().__init__()
         self._repo = repository
         self._library_root = library_root
+        self._active_root: Optional[Path] = None
         self._current_query: Optional[AssetQuery] = None
         self._cached_dtos: List[AssetDTO] = []
         self._total_count: int = 0
@@ -43,6 +44,10 @@ class AssetDataSource(QObject):
 
     def set_library_root(self, root: Path):
         self._library_root = root
+
+    def set_active_root(self, root: Optional[Path]):
+        """Set the current album root for resolving relative paths."""
+        self._active_root = root
 
     def library_root(self) -> Optional[Path]:
         """Return the configured library root for absolute-path resolution."""
@@ -169,13 +174,15 @@ class AssetDataSource(QObject):
         # Resolve absolute path
         abs_path = asset.path # Default to path if already absolute
         if not asset.path.is_absolute():
-            if self._library_root:
+            base_root = self._active_root or self._library_root
+            if base_root:
                 try:
-                    abs_path = (self._library_root / asset.path).resolve()
+                    abs_path = (base_root / asset.path).resolve()
                 except OSError:
-                    abs_path = self._library_root / asset.path
+                    abs_path = base_root / asset.path
             else:
-                # Fallback if no library root (should be rare in valid app state)
+                # Fallback if no root context (should be rare in valid app state)
+                # Warning: This resolves relative to CWD, which is likely wrong if opening an external album.
                 abs_path = Path(asset.path).resolve()
 
         # Determine derived flags

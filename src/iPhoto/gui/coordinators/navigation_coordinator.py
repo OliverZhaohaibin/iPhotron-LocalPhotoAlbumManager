@@ -111,6 +111,7 @@ class NavigationCoordinator(QObject):
         self._sidebar.select_path(path)
 
         # Update ViewModel
+        self._asset_vm.set_active_root(path)
         query = AssetQuery().with_album_id(response.album_id)
         self._asset_vm.load_query(query)
 
@@ -124,7 +125,9 @@ class NavigationCoordinator(QObject):
         self._reset_playback()
         self._router.show_gallery()
         self._static_selection = AlbumSidebar.ALL_PHOTOS_TITLE
+        self._clear_current_album_state()
 
+        self._asset_vm.set_active_root(self._context.library.root())
         query = AssetQuery()  # No filters = All Photos
         self._asset_vm.load_query(query)
 
@@ -173,6 +176,7 @@ class NavigationCoordinator(QObject):
         self._current_album_path = deleted_root
 
         # ViewModel Update
+        self._asset_vm.set_active_root(deleted_root)
         query = AssetQuery().with_album_id(response.album_id)
         # Ensure repository knows we are looking at trash so it doesn't exclude it
         query.album_path = RECENTLY_DELETED_DIR_NAME
@@ -182,7 +186,9 @@ class NavigationCoordinator(QObject):
         self._reset_playback()
         self._router.show_gallery()
         self._static_selection = title
+        self._clear_current_album_state()
 
+        self._asset_vm.set_active_root(self._context.library.root())
         query = AssetQuery()
         if is_favorite:
             query.is_favorite = True
@@ -263,6 +269,11 @@ class NavigationCoordinator(QObject):
         manager = self._context.library
         manager.pause_watcher()
         QTimer.singleShot(duration, manager.resume_watcher)
+
+    def _clear_current_album_state(self):
+        """Reset current album tracking when switching to aggregate/static views."""
+        self._current_album_id = None
+        self._current_album_path = None
 
     # --- Accessors ---
 

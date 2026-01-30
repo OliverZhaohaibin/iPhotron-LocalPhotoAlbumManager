@@ -86,8 +86,6 @@ class QueryBuilder:
                     where_clauses.append(
                         "("
                         "(live_role = 0 AND live_partner_rel IS NOT NULL)"
-                        " OR "
-                        "(content_id IS NOT NULL AND media_type = 0)"
                         ")"
                     )
                 elif mode == "favorites":

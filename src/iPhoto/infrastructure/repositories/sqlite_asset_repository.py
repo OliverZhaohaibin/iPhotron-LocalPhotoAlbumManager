@@ -214,9 +214,6 @@ class SQLiteAssetRepository(IAssetRepository):
             " AND NOT ("
             "live_role IS NULL AND live_photo_group_id IS NOT NULL AND media_type = 1"
             ")"
-            " AND NOT ("
-            "media_type = 1 AND COALESCE(content_identifier, content_id) IS NOT NULL"
-            ")"
         )
 
         if query.album_id:
@@ -249,8 +246,6 @@ class SQLiteAssetRepository(IAssetRepository):
                     "(live_role = 0 AND live_partner_rel IS NOT NULL)"
                     " OR "
                     "(live_photo_group_id IS NOT NULL AND media_type != 1)"
-                    " OR "
-                    "(COALESCE(content_identifier, content_id) IS NOT NULL AND media_type = 0)"
                     ")"
                 )
 

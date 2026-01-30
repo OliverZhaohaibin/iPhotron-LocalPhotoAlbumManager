@@ -285,8 +285,7 @@ def build_asset_entry(
     abs_path = str(abs_path_obj)
 
     is_image, is_video = classify_media(row)
-    content_id = row.get("content_id")
-    if is_video and (row.get("live_partner_rel") or content_id):
+    if is_video and row.get("live_partner_rel"):
         return None
     if _is_thumbnail_candidate(rel, row, is_image):
         return None
@@ -303,8 +302,6 @@ def build_asset_entry(
         # Use robust 64-bit hash to prevent collisions in large libraries
         combined_key = f"{rel}|{live_partner_rel}".encode("utf-8")
         live_group_id = f"live_{xxhash.xxh64(combined_key).hexdigest()}"
-    elif isinstance(content_id, str) and content_id:
-        live_group_id = f"live_content_{xxhash.xxh64(content_id.encode('utf-8')).hexdigest()}"
 
     # Use cached location if available, otherwise resolve and optionally cache it
     location_name = row.get("location")
@@ -356,7 +353,7 @@ def build_asset_entry(
         "is_current": False,
         "is_image": is_image,
         "is_video": is_video,
-        "is_live": bool(live_motion) or (is_image and bool(content_id)),
+        "is_live": bool(live_motion),
         "is_pano": is_pano,
         "live_group_id": live_group_id,
         "live_motion": live_motion,

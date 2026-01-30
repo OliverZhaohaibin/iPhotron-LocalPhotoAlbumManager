@@ -49,6 +49,14 @@ class DialogController:
         if bound_root is not None:
             self._context.settings.set("basic_library_path", str(bound_root))
             self._status.showMessage(f"Basic Library bound to {bound_root}")
+            try:
+                self._context.facade.open_album(bound_root)
+            except Exception:
+                # Keep binding success even if the initial open fails.
+                pass
+            sidebar = getattr(getattr(self._parent, "ui", None), "sidebar", None)
+            if sidebar is not None:
+                sidebar.select_all_photos(emit_signal=True)
         return bound_root
 
     def show_error(self, message: str) -> None:

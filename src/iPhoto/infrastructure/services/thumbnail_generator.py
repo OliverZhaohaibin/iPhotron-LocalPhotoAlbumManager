@@ -17,6 +17,8 @@ class PillowThumbnailGenerator(IThumbnailGenerator):
 
     def generate_micro_thumbnail(self, path: Path) -> Optional[str]:
         # Reuse existing utility
+        if not path.exists():
+            return None
         return generate_micro_thumbnail(path)
 
     def generate(self, path: Path, size: Tuple[int, int]) -> Optional[Image.Image]:
@@ -25,6 +27,8 @@ class PillowThumbnailGenerator(IThumbnailGenerator):
         Returns a PIL Image object or None on failure.
         """
         try:
+            if not path.exists():
+                return None
             # Determine if video based on extension
             video_exts = {'.mp4', '.mov', '.avi', '.mkv', '.webm', '.m4v'}
             if path.suffix.lower() in video_exts:
@@ -55,6 +59,8 @@ class PillowThumbnailGenerator(IThumbnailGenerator):
 
     def _generate_video_thumbnail(self, path: Path, size: Tuple[int, int]) -> Optional[Image.Image]:
         try:
+            if not path.exists():
+                return None
             data = extract_video_frame(path, at=0.0, scale=size, format="jpeg")
             if data:
                 with io.BytesIO(data) as bio:

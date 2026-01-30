@@ -158,7 +158,12 @@ def run_benchmarks(args: argparse.Namespace) -> None:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("album_root", help="Album root to benchmark")
+    parser.add_argument(
+        "album_root",
+        nargs="?",
+        default=".",
+        help="Album root to benchmark (defaults to current directory)",
+    )
     parser.add_argument(
         "--library-root",
         help="Optional library root for global database access",

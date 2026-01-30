@@ -14,10 +14,10 @@ from src.iPhoto.application.dtos import AssetDTO
 from src.iPhoto.utils import image_loader
 from src.iPhoto.config import RECENTLY_DELETED_DIR_NAME, WORK_DIR_NAME
 
-THUMBNAIL_SUFFIX_RE = re.compile(r"_(\d{2,4})x(\d{2,4})(?=\.[^.]+$)")
+THUMBNAIL_SUFFIX_RE = re.compile(r"_(\d{2,4})x(\d{2,4})(?=\.[^.]+$)", re.IGNORECASE)
 THUMBNAIL_MAX_DIMENSION = 512
 THUMBNAIL_MAX_BYTES = 350_000
-LEGACY_THUMB_DIRS = {WORK_DIR_NAME, ".photo"}
+LEGACY_THUMB_DIRS = {WORK_DIR_NAME.lower(), ".photo", ".iphoto"}
 
 @dataclass(frozen=True)
 class _PendingMove:
@@ -89,6 +89,9 @@ class AssetDataSource(QObject):
         dtos: List[AssetDTO] = []
         for asset in assets:
             if self._is_thumbnail_asset(asset):
+                continue
+            abs_path = self._resolve_abs_path(asset.path)
+            if not self._path_exists(abs_path):
                 continue
             dtos.append(self._to_dto(asset))
         self._cached_dtos = dtos
@@ -242,6 +245,8 @@ class AssetDataSource(QObject):
             dto = self._scan_row_to_dto(view_root_resolved, view_rel, row)
             if dto is None:
                 continue
+            if not self._path_exists(dto.abs_path):
+                continue
 
             if not self._scan_row_matches_query(dto, row, self._current_query):
                 continue
@@ -386,16 +391,7 @@ class AssetDataSource(QObject):
             return None
 
         # Resolve absolute path
-        abs_path = asset.path # Default to path if already absolute
-        if not asset.path.is_absolute():
-            if self._library_root:
-                try:
-                    abs_path = (self._library_root / asset.path).resolve()
-                except OSError:
-                    abs_path = self._library_root / asset.path
-            else:
-                # Fallback if no library root (should be rare in valid app state)
-                abs_path = Path(asset.path).resolve()
+        abs_path = self._resolve_abs_path(asset.path)
 
         # Determine derived flags
         # Robust conversion: handle both str-Enum and IntEnum/integer cases
@@ -517,9 +513,31 @@ class AssetDataSource(QObject):
             resolved = path
         return os.path.normcase(str(resolved))
 
+    def _resolve_abs_path(self, rel_path: Path) -> Path:
+        if rel_path.is_absolute():
+            return rel_path
+        if self._library_root:
+            try:
+                return (self._library_root / rel_path).resolve()
+            except OSError:
+                return self._library_root / rel_path
+        return rel_path.resolve()
+
+    def _path_exists(self, path: Path) -> bool:
+        try:
+            return path.exists()
+        except OSError:
+            return False
+
+    def _is_legacy_thumb_path(self, rel_path: Path) -> bool:
+        for part in rel_path.parts:
+            if part.lower() in LEGACY_THUMB_DIRS:
+                return True
+        return False
+
     def _is_thumbnail_asset(self, asset: Asset) -> bool:
         rel_path = asset.path
-        if any(part in LEGACY_THUMB_DIRS for part in rel_path.parts):
+        if self._is_legacy_thumb_path(rel_path):
             return True
 
         match = THUMBNAIL_SUFFIX_RE.search(rel_path.name)
@@ -554,7 +572,7 @@ class AssetDataSource(QObject):
 
     def _scan_row_is_thumbnail(self, rel: str, row: dict) -> bool:
         rel_path = Path(rel)
-        if any(part in LEGACY_THUMB_DIRS for part in rel_path.parts):
+        if self._is_legacy_thumb_path(rel_path):
             return True
         match = THUMBNAIL_SUFFIX_RE.search(rel_path.name)
         if not match:

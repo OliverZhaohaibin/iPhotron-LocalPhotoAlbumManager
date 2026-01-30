@@ -178,12 +178,8 @@ class ScannerWorker(QRunnable):
             if scanner is not None:
                 scanner.close()
 
-            # Clean up the repository if it has a persistent connection
-            if store is not None:
-                try:
-                    store.close()
-                except Exception as e:
-                    LOGGER.warning("Failed to close AssetRepository connection: %s", e)
+            # NOTE: do not close the global repository here. The repository is a
+            # process-wide singleton and is closed during app shutdown.
 
             if not self._is_cancelled and not self._had_error:
                 # Consumers should use `chunkReady` for progressive UI updates.

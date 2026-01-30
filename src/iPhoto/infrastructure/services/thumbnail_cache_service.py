@@ -72,6 +72,14 @@ class ThumbnailCacheService(QObject):
         self._is_shutting_down = True
         self._pending_tasks.clear()
 
+    def set_disk_cache_path(self, disk_cache_path: Path) -> None:
+        if self._disk_cache_path == disk_cache_path:
+            return
+        self._disk_cache_path = disk_cache_path
+        self._disk_cache_path.mkdir(parents=True, exist_ok=True)
+        self._memory_cache.clear()
+        self._pending_tasks.clear()
+
     def get_thumbnail(self, path: Path, size: QSize) -> Optional[QPixmap]:
         if self._is_shutting_down:
             return None

@@ -324,6 +324,8 @@ class MainCoordinator(QObject):
     def _connect_signals(self) -> None:
         """Connect application signals."""
         ui = self._window.ui
+        self._context.library.treeUpdated.connect(self._on_library_tree_updated)
+        self._facade.scanChunkReady.connect(self._asset_data_source.handle_scan_chunk)
 
         # Grid interactions
         ui.grid_view.itemClicked.connect(self._on_asset_clicked)
@@ -421,6 +423,16 @@ class MainCoordinator(QObject):
         )
         self._exit_fullscreen_shortcut.setContext(Qt.ShortcutContext.ApplicationShortcut)
         self._exit_fullscreen_shortcut.activated.connect(self._window.exit_fullscreen)
+
+    def _on_library_tree_updated(self) -> None:
+        root = self._context.library.root()
+        self._asset_data_source.set_library_root(root)
+        if root is not None:
+            cache_root = root / ".iPhoto" / "cache" / "thumbs"
+        else:
+            cache_root = Path.home() / ".iPhoto" / "cache" / "thumbs"
+        self._thumbnail_service.set_disk_cache_path(cache_root)
+        self._asset_data_source.reload_current_query()
 
     def _on_asset_clicked(self, index: QModelIndex):
         if self._selection_controller and self._selection_controller.is_active():

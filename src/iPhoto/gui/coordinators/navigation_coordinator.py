@@ -95,6 +95,7 @@ class NavigationCoordinator(QObject):
         self._reset_playback()
         self._static_selection = None
         self._router.show_gallery()
+        self._asset_vm.set_active_root(path)
 
         # Application Service call to maintain domain/application state.
         try:
@@ -124,6 +125,7 @@ class NavigationCoordinator(QObject):
         self._reset_playback()
         self._router.show_gallery()
         self._static_selection = AlbumSidebar.ALL_PHOTOS_TITLE
+        self._asset_vm.set_active_root(self._context.library.root())
 
         query = AssetQuery()  # No filters = All Photos
         self._asset_vm.load_query(query)
@@ -165,6 +167,7 @@ class NavigationCoordinator(QObject):
         self._reset_playback()
         self._router.show_gallery()
         self._static_selection = "Recently Deleted"
+        self._asset_vm.set_active_root(deleted_root)
 
         # Application Service call to maintain domain/application state.
         try:
@@ -183,6 +186,7 @@ class NavigationCoordinator(QObject):
         self._reset_playback()
         self._router.show_gallery()
         self._static_selection = title
+        self._asset_vm.set_active_root(self._context.library.root())
 
         query = AssetQuery()
         if is_favorite:

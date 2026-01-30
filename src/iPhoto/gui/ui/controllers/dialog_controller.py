@@ -14,6 +14,7 @@ except ImportError:  # pragma: no cover - fallback for script execution
     from src.iPhoto.appctx import AppContext
 from typing import TYPE_CHECKING
 from ....errors import LibraryError
+from ....config import DEFAULT_EXCLUDE, DEFAULT_INCLUDE, WORK_DIR_NAME
 from ..widgets import dialogs
 
 if TYPE_CHECKING:
@@ -48,6 +49,7 @@ class DialogController:
         bound_root = self._context.library.root()
         if bound_root is not None:
             self._context.settings.set("basic_library_path", str(bound_root))
+            self._start_initial_scan_if_needed(bound_root)
             self._status.showMessage(f"Basic Library bound to {bound_root}")
             try:
                 self._context.facade.open_album(bound_root)
@@ -58,6 +60,18 @@ class DialogController:
             if sidebar is not None:
                 sidebar.select_all_photos(emit_signal=True)
         return bound_root
+
+    def _start_initial_scan_if_needed(self, bound_root: Path) -> None:
+        work_dir = bound_root / WORK_DIR_NAME
+        if work_dir.exists():
+            return
+        if self._context.library.is_scanning_path(bound_root):
+            return
+        self._context.library.start_scanning(
+            bound_root,
+            DEFAULT_INCLUDE,
+            DEFAULT_EXCLUDE,
+        )
 
     def show_error(self, message: str) -> None:
         dialogs.show_error(self._parent, message)

@@ -27,7 +27,7 @@ from ..media_classifier import classify_media
 from ..models.album import Album
 from ..utils.geocoding import resolve_location_name
 from ..utils.jsonio import read_json
-from ..cache.index_store import IndexStore
+from ..cache.index_store import get_global_repository
 from ..utils.logging import get_logger
 from .tree import AlbumNode
 
@@ -359,7 +359,7 @@ class LibraryManager(QObject):
 
         try:
             # Use single global database at library root
-            rows = IndexStore(root).read_geotagged()
+            rows = get_global_repository(root).read_geotagged()
         except Exception:
             return assets
 
@@ -511,7 +511,7 @@ class LibraryManager(QObject):
         except OSError:
             has_files = False
 
-        store = IndexStore(root)
+        store = get_global_repository(root)
         try:
             entry_count = store.count(
                 album_path=album_path,

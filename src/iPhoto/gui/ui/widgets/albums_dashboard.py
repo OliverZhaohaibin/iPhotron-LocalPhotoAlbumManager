@@ -36,7 +36,7 @@ from PySide6.QtWidgets import (
 )
 
 from ....utils.pathutils import ensure_work_dir
-from ....cache.index_store import IndexStore
+from ....cache.index_store import get_global_repository
 from ....config import WORK_DIR_NAME
 from ....media_classifier import get_media_type, MediaType
 from ....models.album import Album
@@ -275,7 +275,7 @@ class AlbumDataWorker(QRunnable):
         try:
             # Use library root for global database if available
             index_root = self._library_root if self._library_root else self.node.path
-            store = IndexStore(index_root)
+            store = get_global_repository(index_root)
             
             # Compute album path for filtering
             album_path: Optional[str] = None

@@ -13,7 +13,7 @@ from ..tasks.asset_loader_worker import (
     compute_album_path,
     compute_asset_rows,
 )
-from ....cache.index_store import IndexStore
+from ....cache.index_store import get_global_repository
 from ....config import WORK_DIR_NAME
 
 
@@ -95,7 +95,7 @@ class AssetDataLoader(QObject):
         try:
             # We use row count from SQLite instead of file size.
             # Include album_path filtering to count only assets in the current album
-            count = IndexStore(effective_index_root).count(
+            count = get_global_repository(effective_index_root).count(
                 filter_hidden=True,
                 filter_params=filter_params,
                 album_path=album_path,

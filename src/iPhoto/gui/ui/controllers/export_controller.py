@@ -13,7 +13,7 @@ from ....core.export import export_asset
 from ....config import EXPORT_DIR_NAME
 from ....library.manager import LibraryManager
 from ....io import sidecar
-from ....cache.index_store import IndexStore
+from ....cache.index_store import get_global_repository
 from ..widgets.notification_toast import NotificationToast
 from .status_bar_controller import StatusBarController
 from ...ui.widgets.dialogs import show_error
@@ -78,7 +78,7 @@ class LibraryExportWorker(QRunnable):
         to_export = []
         # Use single global database at library root
         try:
-            rows = IndexStore(root).read_all()
+            rows = get_global_repository(root).read_all()
             for row in rows:
                 if not isinstance(row, dict):
                     continue

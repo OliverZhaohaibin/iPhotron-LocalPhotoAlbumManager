@@ -18,7 +18,7 @@ from src.iPhoto.gui.viewmodels.asset_list_viewmodel import AssetListViewModel
 from src.iPhoto.config import RECENTLY_DELETED_DIR_NAME
 from src.iPhoto.domain.models.query import AssetQuery
 from src.iPhoto.domain.models.core import MediaType
-from src.iPhoto.errors import AlbumOperationError
+from src.iPhoto.errors import AlbumOperationError, IPhotoError
 
 # Use legacy imports for context/facade compatibility until full migration
 from src.iPhoto.appctx import AppContext
@@ -96,6 +96,12 @@ class NavigationCoordinator(QObject):
         self._static_selection = None
         self._router.show_gallery()
 
+        # Application Service call to maintain domain/application state.
+        try:
+            self._album_service.open_album(path)
+        except (AlbumOperationError, IPhotoError) as exc:
+            LOGGER.error("Failed to open album via application service: %s", exc)
+
         # Legacy Facade call to maintain backend state synchronization
         album = self._facade.open_album(path)
         if album:
@@ -160,7 +166,13 @@ class NavigationCoordinator(QObject):
         self._router.show_gallery()
         self._static_selection = "Recently Deleted"
 
-        # Legacy open
+        # Application Service call to maintain domain/application state.
+        try:
+            self._album_service.open_album(deleted_root)
+        except (AlbumOperationError, IPhotoError) as exc:
+            LOGGER.error("Failed to open trash via application service: %s", exc)
+
+        # Legacy open for GUI synchronization
         self._facade.open_album(deleted_root)
 
         # ViewModel Update

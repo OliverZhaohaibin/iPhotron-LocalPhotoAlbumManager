@@ -9,6 +9,7 @@ from typing import Callable, Dict, Iterable, List, Optional, Set, Tuple, TYPE_CH
 from PySide6.QtCore import QObject, Signal, Slot
 
 from .. import app as backend
+from ..cache.index_store import get_global_repository
 from ..config import DEFAULT_INCLUDE, DEFAULT_EXCLUDE, WORK_DIR_NAME
 from ..errors import AlbumOperationError, IPhotoError
 from ..models.album import Album
@@ -25,6 +26,7 @@ from .services import (
 if TYPE_CHECKING:
     from ..library.manager import LibraryManager
     from .ui.models.asset_list.model import AssetListModel
+    from ..cache.index_store.repository import AssetRepository
 
 import logging
 logger = logging.getLogger(__name__)
@@ -188,7 +190,7 @@ class AppFacade(QObject):
 
         return self._library_manager
 
-    def _sync_live_roles_from_links(self, library_root: Path, store: "backend.IndexStore") -> None:
+    def _sync_live_roles_from_links(self, library_root: Path, store: "AssetRepository") -> None:
         """Sync live photo roles from links.json to the database.
         
         This reads the live_groups from the links.json file and updates the
@@ -197,7 +199,7 @@ class AppFacade(QObject):
         
         Args:
             library_root: The library root directory.
-            store: The IndexStore instance to update.
+            store: The AssetRepository instance to update.
         """
         links_path = library_root / WORK_DIR_NAME / "links.json"
         if not links_path.exists():
@@ -292,7 +294,7 @@ class AppFacade(QObject):
         # would not find any items because the corresponding DB columns wouldn't be
         # set. The full backend.open_album() does this, but Album.open() alone does not.
         try:
-            store = backend.IndexStore(library_root)
+            store = get_global_repository(library_root)
             store.sync_favorites(album.manifest.get("featured", []))
             # Sync live roles from links.json to database
             self._sync_live_roles_from_links(library_root, store)
@@ -389,7 +391,7 @@ class AppFacade(QObject):
         index_root = library_root if library_root else album_root
         has_assets = False
         try:
-            store = backend.IndexStore(index_root)
+            store = get_global_repository(index_root)
             # Peek at the first item to see if there is any data.
             # read_all returns an iterator, so next() is sufficient.
             next(store.read_all())
@@ -715,7 +717,7 @@ class AppFacade(QObject):
             album_path = trash_resolved.relative_to(library_resolved).as_posix()
         except ValueError:
             album_path = None
-        store = backend.IndexStore(library_root)
+        store = get_global_repository(library_root)
         if album_path:
             index_rows = list(store.read_album_assets(album_path, include_subalbums=True))
         else:

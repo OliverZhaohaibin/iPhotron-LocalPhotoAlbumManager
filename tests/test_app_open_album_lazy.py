@@ -41,7 +41,7 @@ def test_open_album_skips_hydration_when_disabled(monkeypatch, tmp_path):
     def _fail_ensure_links(*_args, **_kwargs):
         raise AssertionError("_ensure_links should not be invoked without hydration")
 
-    monkeypatch.setattr(app, "IndexStore", DummyStore)
+    monkeypatch.setattr(app, "get_global_repository", lambda root: DummyStore(root))
     monkeypatch.setattr(app, "_ensure_links", _fail_ensure_links)
 
     album = app.open_album(album_dir, autoscan=False, hydrate_index=False)
@@ -95,7 +95,7 @@ def test_open_album_scans_when_empty_autoscan_enabled(monkeypatch, tmp_path):
         calls["ensure_links"] += 1
         captured_rows.append(rows)
 
-    monkeypatch.setattr(app, "IndexStore", DummyStore)
+    monkeypatch.setattr(app, "get_global_repository", lambda root: DummyStore(root))
     monkeypatch.setattr("iPhoto.io.scanner.scan_album", fake_scan_album)
     monkeypatch.setattr(app, "_ensure_links", record_ensure_links)
 
@@ -142,7 +142,7 @@ def test_open_album_sets_empty_rows_when_no_autoscan(monkeypatch, tmp_path):
         calls["ensure_links"] += 1
         captured_rows.append(rows)
 
-    monkeypatch.setattr(app, "IndexStore", DummyStore)
+    monkeypatch.setattr(app, "get_global_repository", lambda root: DummyStore(root))
     monkeypatch.setattr(app, "_ensure_links", record_ensure_links)
 
     album = app.open_album(album_dir, autoscan=False, hydrate_index=False)
@@ -176,7 +176,7 @@ def test_open_album_recovers_on_recoverable_errors(monkeypatch, tmp_path):
     def noop_ensure_links(_root, _rows, *_args, **_kwargs):
         return None
 
-    monkeypatch.setattr(app, "IndexStore", DummyStore)
+    monkeypatch.setattr(app, "get_global_repository", lambda root: DummyStore(root))
     monkeypatch.setattr(app, "_ensure_links", noop_ensure_links)
 
     album = app.open_album(album_dir, autoscan=False, hydrate_index=False)

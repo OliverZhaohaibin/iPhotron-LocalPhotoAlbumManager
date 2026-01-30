@@ -8,7 +8,7 @@ import os
 import sqlite3
 from typing import Callable, Dict, List, Optional, Tuple
 
-from .cache.index_store import IndexStore
+from .cache.index_store import get_global_repository
 from .cache.lock import FileLock
 from .config import (
     DEFAULT_EXCLUDE,
@@ -82,7 +82,7 @@ def open_album(
     
     # Use library_root for global database if provided, otherwise use album root
     db_root = library_root if library_root else root
-    store = IndexStore(db_root)
+    store = get_global_repository(db_root)
     
     # If using global DB, we need to filter by album path
     album_path = _compute_album_path(root, library_root)
@@ -221,7 +221,7 @@ def _write_links(root: Path, payload: Dict[str, object]) -> None:
 def _sync_live_roles_to_db(
     root: Path, groups: List[LiveGroup], library_root: Optional[Path] = None
 ) -> None:
-    """Propagate live photo roles from computed groups to the IndexStore.
+    """Propagate live photo roles from computed groups to the repository.
     
     Args:
         root: The album root directory.
@@ -250,7 +250,7 @@ def _sync_live_roles_to_db(
         updates.append((motion_rel, 1, still_rel))
 
     db_root = library_root if library_root else root
-    store = IndexStore(db_root)
+    store = get_global_repository(db_root)
     if album_prefix:
         store.apply_live_role_updates_for_prefix(album_prefix, updates)
     else:
@@ -291,7 +291,7 @@ def load_incremental_index_cache(
         library_root: If provided, use this as the database root (global database).
     """
     db_root = library_root if library_root else root
-    store = IndexStore(db_root)
+    store = get_global_repository(db_root)
     existing_index = {}
     
     # If using global DB, filter by album path
@@ -332,7 +332,7 @@ def _update_index_snapshot(
         library_root: If provided, use this as the database root (global database).
     """
     db_root = library_root if library_root else root
-    store = IndexStore(db_root)
+    store = get_global_repository(db_root)
 
     corrupted_during_read = False
     try:
@@ -379,7 +379,7 @@ def rescan(
         library_root: If provided, use this as the database root (global database).
     """
     db_root = library_root if library_root else root
-    store = IndexStore(db_root)
+    store = get_global_repository(db_root)
     
     # Compute album path for library-relative paths
     album_path = _compute_album_path(root, library_root)
@@ -518,7 +518,7 @@ def scan_specific_files(
                 row["rel"] = f"{album_path}/{row['rel']}"
 
     db_root = library_root if library_root else root
-    store = IndexStore(db_root)
+    store = get_global_repository(db_root)
     # We use append_rows which handles merging/updating based on 'rel' key
     # It also handles locking safely.
     store.append_rows(rows)
@@ -542,7 +542,7 @@ def pair(root: Path, library_root: Optional[Path] = None) -> List[LiveGroup]:
     # Read rows from the database
     if album_path:
         rows = list(
-            IndexStore(db_root).read_album_assets(
+            get_global_repository(db_root).read_album_assets(
                 album_path,
                 include_subalbums=True,
             )
@@ -560,7 +560,7 @@ def pair(root: Path, library_root: Optional[Path] = None) -> List[LiveGroup]:
                 album_rows.append(row)
         rows = album_rows
     else:
-        rows = list(IndexStore(db_root).read_all())
+        rows = list(get_global_repository(db_root).read_all())
     
     groups, payload = _compute_links_payload(rows)
     _write_links(root, payload)

@@ -23,7 +23,6 @@ from src.iPhoto.appctx import AppContext
 from src.iPhoto.config import DEFAULT_EXCLUDE, DEFAULT_INCLUDE
 from src.iPhoto.gui.ui.models.asset_model import Roles
 from src.iPhoto.gui.ui.models.spacer_proxy_model import SpacerProxyModel
-from src.iPhoto.gui.ui.controllers.data_manager import DataManager
 from src.iPhoto.gui.ui.controllers.dialog_controller import DialogController
 from src.iPhoto.gui.ui.controllers.header_controller import HeaderController
 from src.iPhoto.gui.ui.controllers.share_controller import ShareController
@@ -248,6 +247,39 @@ class MainCoordinator(QObject):
         """Start the coordinator."""
         self._logger.info("MainCoordinator started")
         self._view_router.show_gallery()
+
+    # ------------------------------------------------------------------
+    # Window manager integration (legacy interface)
+    # ------------------------------------------------------------------
+    def is_edit_view_active(self) -> bool:
+        """Return True when the edit view is currently active."""
+
+        return self._view_router.is_edit_view_active()
+
+    def edit_controller(self) -> EditCoordinator:
+        """Expose the edit coordinator for immersive mode hooks."""
+
+        return self._edit
+
+    def suspend_playback_for_transition(self) -> bool:
+        """Pause playback before a chrome transition."""
+
+        return self._playback.suspend_playback_for_transition()
+
+    def prepare_fullscreen_asset(self) -> bool:
+        """Ensure the current asset is ready for immersive mode."""
+
+        return self._playback.prepare_fullscreen_asset()
+
+    def show_placeholder_in_viewer(self) -> None:
+        """Display a placeholder while the detail view is preparing."""
+
+        self._playback.show_placeholder_in_viewer()
+
+    def resume_playback_after_transition(self) -> None:
+        """Restore playback after a chrome transition."""
+
+        self._playback.resume_playback_after_transition()
 
     def shutdown(self) -> None:
         """Stop worker threads and background jobs before the app exits."""

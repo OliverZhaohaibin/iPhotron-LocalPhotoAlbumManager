@@ -405,7 +405,7 @@ class MoveWorker(QRunnable):
         The helper discovers the concrete album root for each moved source path
         and expresses the original file location relative to that album.  The
         resulting mapping allows :meth:`_update_source_index` to prune the
-        correct ``index.jsonl`` files when the move originated from a
+        correct global index rows when the move originated from a
         library-wide virtual view.
         """
 

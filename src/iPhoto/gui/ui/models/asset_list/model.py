@@ -1,4 +1,4 @@
-"""List model combining ``index.jsonl`` and ``links.json`` data."""
+"""List model combining ``global_index.db`` and ``links.json`` data."""
 
 from __future__ import annotations
 

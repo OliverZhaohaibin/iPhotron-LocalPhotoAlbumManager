@@ -88,6 +88,7 @@ class PlaybackCoordinator(QObject):
         self._info_panel: Optional[InfoPanel] = None
         self._active_live_motion: Optional[Path] = None
         self._active_live_still: Optional[Path] = None
+        self._resume_after_transition = False
 
         self._connect_signals()
         self._connect_zoom_controls()
@@ -102,6 +103,37 @@ class PlaybackCoordinator(QObject):
     def current_row(self) -> int:
         """Expose current row index for external controllers (e.g. Share)."""
         return self._current_row
+
+    def suspend_playback_for_transition(self) -> bool:
+        """Pause active video/live playback before a window transition."""
+
+        resume_after = self._is_playing
+        self._resume_after_transition = resume_after
+        if resume_after:
+            self._player_view.video_area.pause()
+        return resume_after
+
+    def resume_playback_after_transition(self) -> None:
+        """Resume playback if it was active before the transition."""
+
+        if not self._resume_after_transition:
+            return
+        self._resume_after_transition = False
+        self._player_view.video_area.play()
+
+    def prepare_fullscreen_asset(self) -> bool:
+        """Ensure the current asset is displayed before entering immersive mode."""
+
+        if self._current_row < 0:
+            return False
+        if not self._router.is_detail_view_active():
+            self.play_asset(self._current_row)
+        return True
+
+    def show_placeholder_in_viewer(self) -> None:
+        """Display the placeholder surface in the detail viewer."""
+
+        self._player_view.show_placeholder()
 
     def _connect_signals(self):
         # Player Bar -> Coordinator

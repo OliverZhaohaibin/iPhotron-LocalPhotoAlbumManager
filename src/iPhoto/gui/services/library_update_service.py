@@ -403,7 +403,7 @@ class LibraryUpdateService(QObject):
             # Persist the freshly computed index snapshot immediately so future
             # reloads observe the new metadata rather than the stale cache that
             # existed before the rescan.  The worker keeps the result in memory,
-            # therefore we flush both ``index.jsonl`` and ``links.json`` here to
+            # therefore we flush the global index and ``links.json`` here to
             # mirror the historical facade behaviour before notifying listeners.
             backend._update_index_snapshot(root, materialised_rows, library_root=library_root)
             backend._ensure_links(root, materialised_rows, library_root=library_root)

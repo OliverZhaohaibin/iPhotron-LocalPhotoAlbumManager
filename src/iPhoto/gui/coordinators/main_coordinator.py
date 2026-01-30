@@ -415,6 +415,12 @@ class MainCoordinator(QObject):
         # Shortcuts
         self._favorite_shortcut = QShortcut(QKeySequence("."), self._window)
         self._favorite_shortcut.activated.connect(self._handle_toggle_favorite)
+        self._exit_fullscreen_shortcut = QShortcut(
+            QKeySequence(Qt.Key_Escape),
+            self._window,
+        )
+        self._exit_fullscreen_shortcut.setContext(Qt.ShortcutContext.ApplicationShortcut)
+        self._exit_fullscreen_shortcut.activated.connect(self._window.exit_fullscreen)
 
     def _on_asset_clicked(self, index: QModelIndex):
         if self._selection_controller and self._selection_controller.is_active():

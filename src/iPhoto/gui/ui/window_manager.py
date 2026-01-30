@@ -201,6 +201,7 @@ class FramelessWindowManager(QObject):
             edit_controller is not None
             and self._controller is not None
             and self._controller.is_edit_view_active()
+            and edit_controller.is_editing()
         ):
             if edit_controller.is_in_fullscreen():
                 edit_controller.exit_fullscreen_preview()
@@ -221,6 +222,7 @@ class FramelessWindowManager(QObject):
             edit_controller is not None
             and self._controller is not None
             and self._controller.is_edit_view_active()
+            and edit_controller.is_editing()
         ):
             edit_controller.enter_fullscreen_preview()
             return
@@ -262,7 +264,11 @@ class FramelessWindowManager(QObject):
         """Restore the normal window chrome and previously visible widgets."""
 
         edit_controller = self._edit_controller()
-        if edit_controller is not None and edit_controller.is_in_fullscreen():
+        if (
+            edit_controller is not None
+            and edit_controller.is_editing()
+            and edit_controller.is_in_fullscreen()
+        ):
             edit_controller.exit_fullscreen_preview()
             return
 

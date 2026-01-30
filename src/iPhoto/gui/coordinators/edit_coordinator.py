@@ -144,6 +144,11 @@ class EditCoordinator(QObject):
 
         return self._fullscreen_manager.is_in_fullscreen()
 
+    def is_editing(self) -> bool:
+        """Return ``True`` when an edit session is active."""
+
+        return self._session is not None
+
     def enter_fullscreen_preview(self) -> bool:
         """Enter immersive full screen preview for the current edit session."""
 

@@ -13,7 +13,7 @@ from PySide6.QtCore import QObject, QRunnable, Signal
 from .... import app as backend
 from ....app import LOGGER
 from ....errors import IPhotoError
-from ....cache.index_store import IndexStore
+from ....cache.index_store import get_global_repository
 from ....io.scanner_adapter import process_media_paths
 from ....media_classifier import IMAGE_EXTENSIONS, VIDEO_EXTENSIONS
 from ....config import WORK_DIR_NAME, RECENTLY_DELETED_DIR_NAME
@@ -187,7 +187,7 @@ class MoveWorker(QRunnable):
 
         # Use library root for global database
         index_root = self._library_root if self._library_root else self._source_root
-        store = IndexStore(index_root)
+        store = get_global_repository(index_root)
         rels: List[str] = []
         for original, _ in moved:
             try:
@@ -213,7 +213,7 @@ class MoveWorker(QRunnable):
 
         # Use library root for global database
         index_root = self._library_root if self._library_root else self._destination_root
-        store = IndexStore(index_root)
+        store = get_global_repository(index_root)
         
         image_paths: List[Path] = []
         video_paths: List[Path] = []
@@ -372,7 +372,7 @@ class MoveWorker(QRunnable):
         if not removals and not additions_images and not additions_videos:
             return
 
-        store = IndexStore(library_root)
+        store = get_global_repository(library_root)
         if removals:
             store.remove_rows(removals)
 

@@ -75,12 +75,11 @@ def test_scanner_worker_batch_failure_handling(temp_album, qapp):
     batch_failed_spy = QSignalSpy(signals.batchFailed)
     finished_spy = QSignalSpy(signals.finished)
     
-    # Mock IndexStore.append_rows to raise an exception
-    with patch('src.iPhoto.library.workers.scanner_worker.IndexStore') as MockIndexStore:
+    # Mock repository append_rows to raise an exception
+    with patch('src.iPhoto.library.workers.scanner_worker.get_global_repository') as mock_get_repo:
         mock_store = Mock()
         mock_store.append_rows.side_effect = Exception("Database write failed")
-        mock_store._conn = None  # No persistent connection
-        MockIndexStore.return_value = mock_store
+        mock_get_repo.return_value = mock_store
         
         # Run the worker
         worker.run()
@@ -110,7 +109,7 @@ def test_scanner_worker_scan_continues_after_partial_failures(temp_album, qapp):
     batch_failed_spy = QSignalSpy(signals.batchFailed)
     finished_spy = QSignalSpy(signals.finished)
     
-    # Mock IndexStore to fail on first chunk, succeed on subsequent chunks
+    # Mock repository to fail on first chunk, succeed on subsequent chunks
     call_count = 0
     def mock_append_rows(chunk):
         nonlocal call_count
@@ -119,11 +118,10 @@ def test_scanner_worker_scan_continues_after_partial_failures(temp_album, qapp):
             raise Exception("First chunk failed")
         # Subsequent chunks succeed
     
-    with patch('src.iPhoto.library.workers.scanner_worker.IndexStore') as MockIndexStore:
+    with patch('src.iPhoto.library.workers.scanner_worker.get_global_repository') as mock_get_repo:
         mock_store = Mock()
         mock_store.append_rows.side_effect = mock_append_rows
-        mock_store._conn = None
-        MockIndexStore.return_value = mock_store
+        mock_get_repo.return_value = mock_store
         
         # Run the worker
         worker.run()
@@ -152,12 +150,11 @@ def test_scanner_worker_failed_count_property(temp_album, qapp):
     # Initially failed_count should be 0
     assert worker.failed_count == 0
     
-    # Mock IndexStore to always fail
-    with patch('src.iPhoto.library.workers.scanner_worker.IndexStore') as MockIndexStore:
+    # Mock repository to always fail
+    with patch('src.iPhoto.library.workers.scanner_worker.get_global_repository') as mock_get_repo:
         mock_store = Mock()
         mock_store.append_rows.side_effect = Exception("All writes fail")
-        mock_store._conn = None
-        MockIndexStore.return_value = mock_store
+        mock_get_repo.return_value = mock_store
         
         # Run the worker
         worker.run()
@@ -191,17 +188,16 @@ def test_scanner_worker_cleanup_on_error(temp_album, qapp):
     mock_generator.close.assert_called_once()
 
 
-def test_scanner_worker_indexstore_cleanup(temp_album, qapp):
-    """Test that IndexStore connections are properly cleaned up."""
+def test_scanner_worker_repository_cleanup(temp_album, qapp):
+    """Test that repository connections are properly cleaned up."""
     signals = ScannerSignals()
     worker = ScannerWorker(temp_album, ["*.jpg"], [], signals)
     
-    with patch('src.iPhoto.library.workers.scanner_worker.IndexStore') as MockIndexStore:
+    with patch('src.iPhoto.library.workers.scanner_worker.get_global_repository') as mock_get_repo:
         mock_store = Mock()
-        mock_conn = Mock()
-        mock_store._conn = mock_conn
+        mock_store.close = Mock()
         mock_store.append_rows = Mock()  # Succeed normally
-        MockIndexStore.return_value = mock_store
+        mock_get_repo.return_value = mock_store
         
         # Run the worker
         worker.run()
@@ -210,4 +206,4 @@ def test_scanner_worker_indexstore_cleanup(temp_album, qapp):
     qapp.processEvents()
     
     # Verify that the connection was closed
-    mock_conn.close.assert_called_once()
+    mock_store.close.assert_called_once()

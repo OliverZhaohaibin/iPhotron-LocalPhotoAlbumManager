@@ -9,11 +9,11 @@ from datetime import datetime, timezone
 import copy
 import os
 from pathlib import Path
-from typing import Callable, Dict, Iterable, List, Optional, Set, Tuple
+from typing import Callable, Dict, Iterable, List, Optional, Set, Tuple, TYPE_CHECKING
 
 from PySide6.QtCore import QObject, QRunnable, Signal, QThread
 
-from ....cache.index_store import IndexStore
+from ....cache.index_store import get_global_repository
 from ....config import RECENTLY_DELETED_DIR_NAME, WORK_DIR_NAME
 from ....core.pairing import pair_live
 from ....media_classifier import classify_media
@@ -21,10 +21,12 @@ from ....utils.geocoding import resolve_location_name
 from ....utils.pathutils import ensure_work_dir
 from ....utils.image_loader import qimage_from_bytes
 
+if TYPE_CHECKING:
+    from ....cache.index_store.repository import AssetRepository
 
 LOGGER = logging.getLogger(__name__)
 
-# Media type constants (matching IndexStore schema and scanner.py)
+# Media type constants (matching repository schema and scanner.py)
 MEDIA_TYPE_IMAGE = 0
 MEDIA_TYPE_VIDEO = 1
 
@@ -44,7 +46,7 @@ def compute_album_path(
 
     Returns:
         A tuple of (effective_index_root, album_path) where:
-        - effective_index_root: The path to use for IndexStore initialization
+        - effective_index_root: The path to use for repository initialization
         - album_path: The relative path for filtering, or None for the library root
     """
     if not library_root:
@@ -237,7 +239,7 @@ def build_asset_entry(
     root: Path,
     row: Dict[str, object],
     featured: Set[str],
-    store: Optional[IndexStore] = None,
+    store: Optional["AssetRepository"] = None,
     path_exists: Optional[Callable[[Path], bool]] = None,
 ) -> Optional[Dict[str, object]]:
     rel = str(row.get("rel"))
@@ -399,7 +401,7 @@ def compute_asset_rows(
     if album_path is None and library_root is not None:
         params.setdefault("exclude_path_prefix", RECENTLY_DELETED_DIR_NAME)
 
-    store = IndexStore(effective_index_root)
+    store = get_global_repository(effective_index_root)
     dir_cache: Dict[Path, Optional[Set[str]]] = {}
 
     def _path_exists(path: Path) -> bool:
@@ -537,7 +539,7 @@ class AssetLoaderWorker(QRunnable):
             self._filter_params,
         )
 
-        store = IndexStore(effective_index_root)
+        store = get_global_repository(effective_index_root)
 
         # Emit indeterminate progress initially
         _safe_signal_emit(self._signals.progressUpdated.emit, self._root, 0, 0)
@@ -705,7 +707,7 @@ class LiveIngestWorker(QRunnable):
     def _should_include_row(self, row: Dict[str, object]) -> bool:
         """Check if a row should be included based on filter_params.
 
-        This applies the same filter semantics as IndexStore._build_filter_clauses
+        This applies the same filter semantics as AssetRepository._build_filter_clauses
         but operates on in-memory row dictionaries instead of SQL.
 
         Key differences from the database filter:

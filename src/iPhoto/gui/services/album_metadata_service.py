@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 
 from PySide6.QtCore import QObject, QTimer, Signal
 
-from ...cache.index_store import IndexStore
+from ...cache.index_store import get_global_repository
 from ...config import ALBUM_MANIFEST_NAMES
 from ...errors import IPhotoError
 from ...models.album import Album
@@ -122,11 +122,11 @@ class AlbumMetadataService(QObject):
                 if library_root:
                     try:
                         lib_rel = absolute_asset.relative_to(library_root).as_posix()
-                        IndexStore(index_root).set_favorite_status(lib_rel, desired_state)
+                        get_global_repository(index_root).set_favorite_status(lib_rel, desired_state)
                     except (ValueError, OSError):
-                        IndexStore(alb.root).set_favorite_status(r, desired_state)
+                        get_global_repository(alb.root).set_favorite_status(r, desired_state)
                 else:
-                    IndexStore(index_root).set_favorite_status(r, desired_state)
+                    get_global_repository(index_root).set_favorite_status(r, desired_state)
 
                 # Check if this was the primary album
                 if alb.root == album.root:

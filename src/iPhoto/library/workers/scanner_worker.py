@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Iterable, Iterator, List, Optional
+from typing import Iterable, Iterator, List, Optional, TYPE_CHECKING
 
 from PySide6.QtCore import QObject, QRunnable, Signal
 
 from ...app import load_incremental_index_cache
-from ...cache.index_store import IndexStore
+from ...cache.index_store import get_global_repository
 from ...config import WORK_DIR_NAME
 from ...io.scanner_adapter import scan_album
 from ...utils.pathutils import ensure_work_dir
@@ -16,6 +16,8 @@ from ...utils.logging import get_logger
 
 LOGGER = get_logger()
 
+if TYPE_CHECKING:
+    from ...cache.index_store.repository import AssetRepository
 
 class ScannerSignals(QObject):
     """Signals emitted by :class:`ScannerWorker` while scanning."""
@@ -100,7 +102,7 @@ class ScannerWorker(QRunnable):
 
         rows: List[dict] = []
         scanner: Optional[Iterator[dict]] = None
-        store: Optional[IndexStore] = None
+        store: Optional["AssetRepository"] = None
 
         try:
             ensure_work_dir(self._root, WORK_DIR_NAME)
@@ -108,11 +110,15 @@ class ScannerWorker(QRunnable):
             # Emit an initial indeterminate update
             self._signals.progressUpdated.emit(self._root, 0, -1)
 
-            # Initialize IndexStore at library root (single global database)
+            # Initialize repository at library root (single global database)
             try:
-                store = IndexStore(self._library_root)
+                store = get_global_repository(self._library_root)
             except Exception as e:
-                LOGGER.error(f"Failed to initialize IndexStore for {self._library_root}: {e}")
+                LOGGER.error(
+                    "Failed to initialize AssetRepository for %s: %s",
+                    self._library_root,
+                    e,
+                )
                 raise
 
             def progress_callback(processed: int, total: int) -> None:
@@ -172,13 +178,12 @@ class ScannerWorker(QRunnable):
             if scanner is not None:
                 scanner.close()
 
-            # Clean up the IndexStore if it has a persistent connection
-            if store is not None and store._conn is not None:
+            # Clean up the repository if it has a persistent connection
+            if store is not None:
                 try:
-                    store._conn.close()
-                    store._conn = None
+                    store.close()
                 except Exception as e:
-                    LOGGER.warning(f"Failed to close IndexStore connection: {e}")
+                    LOGGER.warning("Failed to close AssetRepository connection: %s", e)
 
             if not self._is_cancelled and not self._had_error:
                 # Consumers should use `chunkReady` for progressive UI updates.
@@ -188,11 +193,11 @@ class ScannerWorker(QRunnable):
             else:
                 self._signals.finished.emit(self._root, [])
 
-    def _process_chunk(self, store: IndexStore, chunk: List[dict]) -> None:
+    def _process_chunk(self, store: "AssetRepository", chunk: List[dict]) -> None:
         """
         Attempt to persist a chunk of items to the store and emit readiness signals.
 
-        This method tries to append the given chunk to the provided IndexStore. If
+        This method tries to append the given chunk to the provided AssetRepository. If
         persistence fails, it logs the error, increments the failed count, and emits
         the `batchFailed` signal with the number of items in the failed chunk.
 

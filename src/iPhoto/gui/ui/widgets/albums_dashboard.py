@@ -476,6 +476,7 @@ class AlbumsDashboard(QWidget):
 
         self._init_ui()
         self._library.treeUpdated.connect(self.refresh)
+        self._library.scanFinished.connect(self._on_scan_finished)
         self.refresh()
 
     def _init_ui(self) -> None:
@@ -569,3 +570,15 @@ class AlbumsDashboard(QWidget):
         card = self._cards.get(album_root)
         if card:
             card.set_cover_image(pixmap)
+
+    def _on_scan_finished(self, root: Path, success: bool) -> None:
+        if not success:
+            return
+        try:
+            library_root = self._library.root().resolve()
+            scan_root = root.resolve()
+        except OSError:
+            return
+
+        if scan_root == library_root or library_root in scan_root.parents:
+            self.refresh()

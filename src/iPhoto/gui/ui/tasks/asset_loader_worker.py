@@ -172,7 +172,7 @@ def _is_featured(rel: str, featured: Set[str]) -> bool:
 def _parse_timestamp(value: object) -> float:
     """Return a sortable timestamp for ``value``.
 
-    ``index.jsonl`` typically stores capture times as ISO-8601 strings with a trailing
+    ``global_index.db`` typically stores capture times as ISO-8601 strings with a trailing
     ``Z``, but this helper also accepts ISO-8601 strings without the trailing ``Z``.
     The helper normalises the representation and falls back to
     ``-inf`` for missing or unparsable values so assets without metadata sort

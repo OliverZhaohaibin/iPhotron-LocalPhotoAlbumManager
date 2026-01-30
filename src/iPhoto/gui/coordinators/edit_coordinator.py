@@ -87,6 +87,12 @@ class EditCoordinator(QObject):
 
         self._header_layout_manager = HeaderLayoutManager(self._ui, parent=self)
         self._preview_manager = EditPreviewManager(self._ui.edit_image_viewer, self)
+        self._fullscreen_manager = EditFullscreenManager(
+            self._ui,
+            window,
+            self._preview_manager,
+            parent=self,
+        )
 
         self._update_throttler = QTimer(self)
         self._update_throttler.setSingleShot(True)
@@ -132,6 +138,36 @@ class EditCoordinator(QObject):
         )
         self._ui.edit_image_viewer.cropInteractionStarted.connect(self.push_undo_state)
         self._ui.edit_image_viewer.cropChanged.connect(self._handle_crop_changed)
+
+    def is_in_fullscreen(self) -> bool:
+        """Return ``True`` if the edit view is in immersive full screen mode."""
+
+        return self._fullscreen_manager.is_in_fullscreen()
+
+    def is_editing(self) -> bool:
+        """Return ``True`` when an edit session is active."""
+
+        return self._session is not None
+
+    def enter_fullscreen_preview(self) -> bool:
+        """Enter immersive full screen preview for the current edit session."""
+
+        if not self._session or not self._current_source:
+            return False
+        adjustments = self._resolve_session_adjustments()
+        return self._fullscreen_manager.enter_fullscreen_preview(
+            self._current_source,
+            adjustments,
+        )
+
+    def exit_fullscreen_preview(self) -> None:
+        """Exit immersive full screen preview if active."""
+
+        source = self._current_source
+        adjustments = None
+        if self._session is not None:
+            adjustments = self._resolve_session_adjustments()
+        self._fullscreen_manager.exit_fullscreen_preview(source, adjustments)
 
     def enter_edit_mode(self, asset_path: Path):
         """Prepares the edit view for the given asset and switches view."""
@@ -223,6 +259,12 @@ class EditCoordinator(QObject):
 
     def leave_edit_mode(self):
         """Returns to detail view."""
+        if self._fullscreen_manager.is_in_fullscreen():
+            source = self._current_source
+            adjustments = None
+            if self._session is not None:
+                adjustments = self._resolve_session_adjustments()
+            self._fullscreen_manager.exit_fullscreen_preview(source, adjustments)
         if self._session is not None:
             self._ui.edit_image_viewer.setCropMode(False, self._session.values())
         self._current_source = None

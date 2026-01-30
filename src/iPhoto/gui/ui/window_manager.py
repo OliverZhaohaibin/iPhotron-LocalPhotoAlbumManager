@@ -32,8 +32,8 @@ if TYPE_CHECKING:  # pragma: no cover - used only for type checking
     from PySide6.QtGui import QResizeEvent
 
     from .ui_main_window import Ui_MainWindow
-    from .controllers.main_controller import MainController
-    from .controllers.edit_controller import EditController
+    from ..coordinators.main_coordinator import MainCoordinator
+    from ..coordinators.edit_coordinator import EditCoordinator
 
 
 # ``PLAYBACK_RESUME_DELAY_MS`` mirrors the behaviour found in the original
@@ -52,7 +52,7 @@ class FramelessWindowManager(QObject):
         super().__init__(window)
         self._window = window
         self._ui = ui
-        self._controller: MainController | None = None
+        self._controller: MainCoordinator | None = None
 
         # Frameless setup -------------------------------------------------
         self._window.setWindowFlag(Qt.WindowType.FramelessWindowHint, True)
@@ -93,8 +93,8 @@ class FramelessWindowManager(QObject):
 
     # ------------------------------------------------------------------
     # Lifecycle helpers
-    def set_controller(self, controller: MainController) -> None:
-        """Provide the ``MainController`` reference required for immersive mode."""
+    def set_controller(self, controller: MainCoordinator) -> None:
+        """Provide the coordinator reference required for immersive mode."""
 
         self._controller = controller
 
@@ -201,6 +201,7 @@ class FramelessWindowManager(QObject):
             edit_controller is not None
             and self._controller is not None
             and self._controller.is_edit_view_active()
+            and edit_controller.is_editing()
         ):
             if edit_controller.is_in_fullscreen():
                 edit_controller.exit_fullscreen_preview()
@@ -221,6 +222,7 @@ class FramelessWindowManager(QObject):
             edit_controller is not None
             and self._controller is not None
             and self._controller.is_edit_view_active()
+            and edit_controller.is_editing()
         ):
             edit_controller.enter_fullscreen_preview()
             return
@@ -262,7 +264,11 @@ class FramelessWindowManager(QObject):
         """Restore the normal window chrome and previously visible widgets."""
 
         edit_controller = self._edit_controller()
-        if edit_controller is not None and edit_controller.is_in_fullscreen():
+        if (
+            edit_controller is not None
+            and edit_controller.is_editing()
+            and edit_controller.is_in_fullscreen()
+        ):
             edit_controller.exit_fullscreen_preview()
             return
 
@@ -307,8 +313,8 @@ class FramelessWindowManager(QObject):
 
         return self._immersive_active
 
-    def _edit_controller(self) -> "EditController | None":
-        """Return the edit controller if the main controller exposes one."""
+    def _edit_controller(self) -> "EditCoordinator | None":
+        """Return the edit coordinator if the main coordinator exposes one."""
 
         if self._controller is None:
             return None
@@ -628,4 +634,3 @@ class FramelessWindowManager(QObject):
                 self._configure_popup_menu(menu, qmenu_style)
         finally:
             self._applying_menu_styles = False
-

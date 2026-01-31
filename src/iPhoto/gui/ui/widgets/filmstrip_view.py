@@ -44,6 +44,8 @@ class FilmstripView(AssetGrid):
         self.setGraphicsEffect(self._opacity_effect)
         self._updates_suspended = False
         self._user_scroll_active = False
+        self._pending_layout_refresh = False
+        self._pending_refresh_index: QModelIndex | None = None
         icon_size = QSize(self._base_height, self._base_height)
         self.setViewMode(QListView.ViewMode.IconMode)
         self.setSelectionMode(QListView.SelectionMode.SingleSelection)
@@ -106,6 +108,11 @@ class FilmstripView(AssetGrid):
         """Handle data changes to trigger layout updates if necessary."""
         # If no roles specified (all changed) or IS_CURRENT changed, we need to relayout
         if not roles or Roles.IS_CURRENT in roles:
+            if self._updates_suspended:
+                self._pending_layout_refresh = True
+                if top.isValid():
+                    self._pending_refresh_index = top
+                return
             # Re-calculating layout is expensive, so check if we need it.
             # QListView with uniformItemSizes=False might need a nudge.
             self.scheduleDelayedItemsLayout()
@@ -395,6 +402,8 @@ class FilmstripView(AssetGrid):
         self._updates_suspended = suspend
         self.setUpdatesEnabled(not suspend)
         if suspend:
+            self._center_timer.stop()
+            self._center_attempts = 0
             self._set_opacity(0.0)
         else:
             self._schedule_center_current(reveal=True)
@@ -407,8 +416,14 @@ class FilmstripView(AssetGrid):
         self.setUpdatesEnabled(True)
         selection_model = self.selectionModel()
         current = selection_model.currentIndex() if selection_model is not None else QModelIndex()
-        if current.isValid():
-            self.refresh_spacers(current)
+        pending = self._pending_refresh_index if self._pending_refresh_index is not None else QModelIndex()
+        refresh_index = pending if pending.isValid() else current
+        if self._pending_layout_refresh:
+            self.scheduleDelayedItemsLayout()
+        self._pending_layout_refresh = False
+        self._pending_refresh_index = None
+        if refresh_index.isValid():
+            self.refresh_spacers(refresh_index)
         else:
             self.refresh_spacers()
         self._schedule_center_current(reveal=True)

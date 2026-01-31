@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import QEvent, QModelIndex, QSize, Qt, Signal
+from PySide6.QtCore import QEvent, QModelIndex, QPersistentModelIndex, QSize, Qt, Signal, QTimer
 from PySide6.QtGui import QPalette, QResizeEvent, QWheelEvent
 from PySide6.QtWidgets import QListView, QSizePolicy, QStyleOptionViewItem
 
@@ -49,12 +49,24 @@ class FilmstripView(AssetGrid):
 
         self._updating_style = False
         self._apply_scrollbar_style()
+        self._pending_center_index: QPersistentModelIndex | None = None
+        self._pending_center_scheduled = False
 
     def changeEvent(self, event: QEvent) -> None:
         if event.type() == QEvent.Type.PaletteChange:
             if not self._updating_style:
                 self._apply_scrollbar_style()
         super().changeEvent(event)
+
+    def showEvent(self, event: QEvent) -> None:  # type: ignore[override]
+        super().showEvent(event)
+        self.refresh_spacers()
+        selection_model = self.selectionModel()
+        if selection_model is not None:
+            current = selection_model.currentIndex()
+            if current.isValid() and not bool(current.data(Roles.IS_SPACER)):
+                self._queue_center(current)
+        self._apply_pending_center()
 
     def _apply_scrollbar_style(self) -> None:
         text_color = self.palette().color(QPalette.ColorRole.WindowText)
@@ -94,6 +106,7 @@ class FilmstripView(AssetGrid):
     def resizeEvent(self, event: QResizeEvent) -> None:  # type: ignore[override]
         super().resizeEvent(event)
         self.refresh_spacers()
+        self._apply_pending_center()
 
     def refresh_spacers(self, current_proxy_index: QModelIndex | None = None) -> None:
         """Recalculate spacer padding and optionally use the provided index.
@@ -102,6 +115,9 @@ class FilmstripView(AssetGrid):
         compute spacing without walking the entire model, which keeps rapid
         navigation smooth when many items are present.
         """
+
+        if not self.isVisible():
+            return
 
         viewport = self.viewport()
         model = self.model()
@@ -262,16 +278,51 @@ class FilmstripView(AssetGrid):
         """Scroll the view so *index* is visually centred in the viewport."""
         if not index.isValid():
             return
+        if not self.isVisible():
+            self._queue_center(index)
+            return
 
+        if not self._center_on_index_now(index):
+            self._queue_center(index)
+
+    def _center_on_index_now(self, index: QModelIndex) -> bool:
         item_rect = self.visualRect(index)
         if not item_rect.isValid():
-            return
+            return False
 
-        viewport_width = self.viewport().width()
+        viewport = self.viewport()
+        if viewport is None:
+            return False
+
+        viewport_width = viewport.width()
         if viewport_width <= 0:
-            return
+            return False
 
         target_left = (viewport_width - item_rect.width()) / 2.0
         scroll_delta = item_rect.left() - target_left
         scrollbar = self.horizontalScrollBar()
         scrollbar.setValue(scrollbar.value() + int(scroll_delta))
+        return True
+
+    def _queue_center(self, index: QModelIndex) -> None:
+        self._pending_center_index = QPersistentModelIndex(index)
+        if not self._pending_center_scheduled:
+            self._pending_center_scheduled = True
+            QTimer.singleShot(0, self._apply_pending_center)
+
+    def _apply_pending_center(self) -> None:
+        self._pending_center_scheduled = False
+        if self._pending_center_index is None:
+            return
+        if not self.isVisible():
+            return
+        idx = QModelIndex(self._pending_center_index)
+        if not idx.isValid():
+            self._pending_center_index = None
+            return
+        if self._center_on_index_now(idx):
+            self._pending_center_index = None
+        else:
+            if not self._pending_center_scheduled:
+                self._pending_center_scheduled = True
+                QTimer.singleShot(0, self._apply_pending_center)

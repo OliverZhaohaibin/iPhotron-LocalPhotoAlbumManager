@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import QEvent, QModelIndex, QSize, Qt, Signal
-from PySide6.QtGui import QPalette, QResizeEvent, QWheelEvent
+from PySide6.QtCore import QEvent, QModelIndex, QSize, Qt, Signal, QTimer
+from PySide6.QtGui import QPalette, QResizeEvent, QWheelEvent, QShowEvent
 from PySide6.QtWidgets import QListView, QSizePolicy, QStyleOptionViewItem
 
 from .asset_grid import AssetGrid
@@ -91,9 +91,26 @@ class FilmstripView(AssetGrid):
             self.scheduleDelayedItemsLayout()
             self.refresh_spacers(top)
 
+    def showEvent(self, event: QShowEvent) -> None:
+        super().showEvent(event)
+        # Ensure we re-center when the view becomes visible (e.g. returning from edit)
+        self._ensure_centered()
+
     def resizeEvent(self, event: QResizeEvent) -> None:  # type: ignore[override]
         super().resizeEvent(event)
         self.refresh_spacers()
+        self._ensure_centered()
+
+    def _ensure_centered(self) -> None:
+        """Force the view to center on the currently selected index if valid."""
+        selection_model = self.selectionModel()
+        if selection_model is None:
+            return
+
+        current = selection_model.currentIndex()
+        if current.isValid():
+            # Defer slightly to allow layout to settle
+            QTimer.singleShot(0, lambda: self.center_on_index(current))
 
     def refresh_spacers(self, current_proxy_index: QModelIndex | None = None) -> None:
         """Recalculate spacer padding and optionally use the provided index.
@@ -123,6 +140,10 @@ class FilmstripView(AssetGrid):
 
         padding = max(0, (viewport_width - current_width) // 2)
         setter(padding)
+
+        # If we just adjusted spacers, we likely need to re-center
+        if current_proxy_index is not None and current_proxy_index.isValid():
+             self._ensure_centered()
 
     def _current_item_width(self, current_proxy_index: QModelIndex | None = None) -> int:
         """Return the width of the active tile, preferring the supplied index."""

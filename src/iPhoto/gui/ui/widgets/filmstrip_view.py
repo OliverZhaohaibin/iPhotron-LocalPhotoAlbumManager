@@ -399,6 +399,20 @@ class FilmstripView(AssetGrid):
         else:
             self._schedule_center_current(reveal=True)
 
+    def resume_updates_after_transition(self) -> None:
+        """Resume updates and center the current item after an edit transition."""
+        if not self._updates_suspended:
+            return
+        self._updates_suspended = False
+        self.setUpdatesEnabled(True)
+        selection_model = self.selectionModel()
+        current = selection_model.currentIndex() if selection_model is not None else QModelIndex()
+        if current.isValid():
+            self.refresh_spacers(current)
+        else:
+            self.refresh_spacers()
+        self._schedule_center_current(reveal=True)
+
     # ------------------------------------------------------------------
     # Event handling
     # ------------------------------------------------------------------

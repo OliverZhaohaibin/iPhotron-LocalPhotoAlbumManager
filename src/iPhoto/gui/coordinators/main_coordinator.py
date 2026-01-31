@@ -478,8 +478,8 @@ class MainCoordinator(QObject):
 
     def _on_edit_transition_finished(self, direction: str):
         if direction == "exit":
-            self._window.ui.filmstrip_view.suspend_updates(False)
             self._playback.sync_filmstrip_to_current()
+            self._window.ui.filmstrip_view.resume_updates_after_transition()
 
     def _sync_selection(self, row: int):
         """Syncs grid view selection when playback asset changes."""

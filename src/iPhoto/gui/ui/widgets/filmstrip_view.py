@@ -2,7 +2,15 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import QEvent, QModelIndex, QPersistentModelIndex, QSize, Qt, Signal, QTimer
+from PySide6.QtCore import (
+    QEvent,
+    QModelIndex,
+    QPersistentModelIndex,
+    QSize,
+    Qt,
+    Signal,
+    QTimer,
+)
 from PySide6.QtGui import QPalette, QResizeEvent, QWheelEvent
 from PySide6.QtWidgets import QListView, QSizePolicy, QStyleOptionViewItem
 
@@ -51,6 +59,8 @@ class FilmstripView(AssetGrid):
         self._apply_scrollbar_style()
         self._pending_center_index: QPersistentModelIndex | None = None
         self._pending_center_scheduled = False
+        self._last_scroll_value: int | None = None
+        self._last_center_index: QPersistentModelIndex | None = None
 
     def changeEvent(self, event: QEvent) -> None:
         if event.type() == QEvent.Type.PaletteChange:
@@ -61,12 +71,21 @@ class FilmstripView(AssetGrid):
     def showEvent(self, event: QEvent) -> None:  # type: ignore[override]
         super().showEvent(event)
         self.refresh_spacers()
-        selection_model = self.selectionModel()
-        if selection_model is not None:
-            current = selection_model.currentIndex()
-            if current.isValid() and not bool(current.data(Roles.IS_SPACER)):
-                self._queue_center(current)
+        current = self._current_index_for_center()
+        if current.isValid():
+            self._queue_center(current)
+        elif self._last_scroll_value is not None:
+            self.horizontalScrollBar().setValue(self._last_scroll_value)
         self._apply_pending_center()
+
+    def hideEvent(self, event: QEvent) -> None:  # type: ignore[override]
+        scrollbar = self.horizontalScrollBar()
+        if scrollbar is not None:
+            self._last_scroll_value = scrollbar.value()
+        current = self._current_index_for_center()
+        if current.isValid():
+            self._last_center_index = QPersistentModelIndex(current)
+        super().hideEvent(event)
 
     def _apply_scrollbar_style(self) -> None:
         text_color = self.palette().color(QPalette.ColorRole.WindowText)
@@ -233,6 +252,39 @@ class FilmstripView(AssetGrid):
         if isinstance(candidate, (int, float)) and candidate > 0:
             ratio = float(candidate)
         return ratio
+
+    def _current_index_for_center(self) -> QModelIndex:
+        selection_model = self.selectionModel()
+        if selection_model is not None:
+            current = selection_model.currentIndex()
+            if current.isValid() and not bool(current.data(Roles.IS_SPACER)):
+                return current
+
+        if self._last_center_index is not None:
+            cached = QModelIndex(self._last_center_index)
+            if cached.isValid() and not bool(cached.data(Roles.IS_SPACER)):
+                return cached
+
+        model = self.model()
+        if model is None or model.rowCount() == 0:
+            return QModelIndex()
+
+        match_index = model.index(0, 0)
+        if not match_index.isValid():
+            return QModelIndex()
+
+        matches = model.match(
+            match_index,
+            Roles.IS_CURRENT,
+            True,
+            1,
+            Qt.MatchExactly | Qt.MatchRecursive,
+        )
+        if matches:
+            candidate = matches[0]
+            if candidate.isValid() and not bool(candidate.data(Roles.IS_SPACER)):
+                return candidate
+        return QModelIndex()
 
     # ------------------------------------------------------------------
     # Event handling

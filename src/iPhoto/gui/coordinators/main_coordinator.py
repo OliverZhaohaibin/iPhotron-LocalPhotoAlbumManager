@@ -478,6 +478,11 @@ class MainCoordinator(QObject):
 
     def _on_edit_transition_finished(self, direction: str):
         if direction == "exit":
+            show_filmstrip = self._window.ui.toggle_filmstrip_action.isChecked()
+            if show_filmstrip:
+                self._window.ui.filmstrip_view.show()
+            else:
+                self._window.ui.filmstrip_view.hide()
             self._playback.sync_filmstrip_to_current()
             self._window.ui.filmstrip_view.resume_updates_after_transition()
 

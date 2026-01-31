@@ -132,12 +132,10 @@ class EditViewTransitionManager(QObject):
         self._ui.detail_chrome_container.show()
         self._ui.edit_header_container.show()
         if show_filmstrip:
-            # We must show the view so it can layout, but we keep it invisible (opacity 0)
-            # until the transition is finished to avoid the scroll-jump flicker.
+            # Keep the filmstrip hidden during the transition so it only lays out once
+            # after the sidebar animation completes.
             self._ui.filmstrip_view.suspend_updates(True)
-            self._ui.filmstrip_view.show()
-            # Note: We rely on the Coordinator to finalize things, but here we ensure
-            # it is part of the layout.
+            self._ui.filmstrip_view.hide()
         else:
             # Ensure the filmstrip stays hidden when the user's settings request
             # it.  Calling ``hide`` keeps the widget state consistent even if it

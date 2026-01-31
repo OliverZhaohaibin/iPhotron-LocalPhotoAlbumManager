@@ -34,7 +34,7 @@ class _PendingMove:
 
 
 class _AssetLoadSignals(QObject):
-    completed = Signal(int, list)
+    completed = Signal(int, list, int)
 
 
 class _AssetLoadWorker(QRunnable):
@@ -54,19 +54,21 @@ class _AssetLoadWorker(QRunnable):
 
     def run(self) -> None:
         dtos: List[AssetDTO] = []
+        raw_count = 0
         assets = self._data_source._repo.find_by_query(self._query)
         for asset in assets:
+            raw_count += 1
             if self._data_source._is_thumbnail_asset(asset):
                 continue
             abs_path = self._data_source._resolve_abs_path(asset.path)
             if self._validate_paths and not self._data_source._path_exists_cached(abs_path):
                 continue
             dtos.append(self._data_source._to_dto(asset))
-        self.signals.completed.emit(self._generation, dtos)
+        self.signals.completed.emit(self._generation, dtos, raw_count)
 
 
 class _AssetPageSignals(QObject):
-    completed = Signal(int, int, list)
+    completed = Signal(int, int, list, int)
 
 
 class _AssetPageWorker(QRunnable):
@@ -92,15 +94,17 @@ class _AssetPageWorker(QRunnable):
         query.limit = self._query.limit
 
         dtos: List[AssetDTO] = []
+        raw_count = 0
         assets = self._data_source._repo.find_by_query(query)
         for asset in assets:
+            raw_count += 1
             if self._data_source._is_thumbnail_asset(asset):
                 continue
             abs_path = self._data_source._resolve_abs_path(asset.path)
             if self._validate_paths and not self._data_source._path_exists_cached(abs_path):
                 continue
             dtos.append(self._data_source._to_dto(asset))
-        self.signals.completed.emit(self._generation, self._offset, dtos)
+        self.signals.completed.emit(self._generation, self._offset, dtos, raw_count)
 
 
 class AssetDataSource(QObject):
@@ -127,6 +131,7 @@ class AssetDataSource(QObject):
         self._load_generation = 0
         self._paging_inflight = False
         self._paging_offset = 0
+        self._paging_has_more = False
         self._path_exists_cache: OrderedDict[str, bool] = OrderedDict()
         self._path_cache_lock = threading.Lock()
 
@@ -170,6 +175,7 @@ class AssetDataSource(QObject):
         self._seen_abs_paths.clear()
         self._paging_inflight = False
         self._paging_offset = 0
+        self._paging_has_more = False
         self.dataChanged.emit()
 
         self._load_generation += 1
@@ -180,7 +186,7 @@ class AssetDataSource(QObject):
         worker.signals.completed.connect(self._on_load_completed)
         self._load_pool.start(worker)
 
-    def _on_load_completed(self, generation: int, dtos: list[AssetDTO]) -> None:
+    def _on_load_completed(self, generation: int, dtos: list[AssetDTO], raw_count: int) -> None:
         if generation != self._load_generation:
             return
         self._cached_dtos = dtos
@@ -190,6 +196,11 @@ class AssetDataSource(QObject):
         self._seen_abs_paths = {
             self._normalize_abs_key(dto.abs_path) for dto in self._cached_dtos
         }
+        if self._current_query and self._current_query.limit:
+            self._paging_has_more = raw_count >= self._current_query.limit
+        else:
+            self._paging_has_more = False
+        self._paging_offset = raw_count
         self.dataChanged.emit()
         if self._current_query and self._should_use_paging(self._current_query):
             self._maybe_schedule_next_page()
@@ -645,9 +656,8 @@ class AssetDataSource(QObject):
             return
         if not self._current_query.limit:
             return
-        if len(self._cached_dtos) < self._current_query.limit:
+        if not self._paging_has_more:
             return
-        self._paging_offset = len(self._cached_dtos)
         self._paging_inflight = True
         generation = self._load_generation
         validate_paths = self._should_validate_paths(self._current_query)
@@ -661,15 +671,27 @@ class AssetDataSource(QObject):
         worker.signals.completed.connect(self._on_page_loaded)
         self._load_pool.start(worker)
 
-    def _on_page_loaded(self, generation: int, offset: int, dtos: list[AssetDTO]) -> None:
+    def _on_page_loaded(
+        self,
+        generation: int,
+        offset: int,
+        dtos: list[AssetDTO],
+        raw_count: int,
+    ) -> None:
         if generation != self._load_generation:
             return
         self._paging_inflight = False
-        if not dtos:
+        if self._current_query and self._current_query.limit:
+            self._paging_has_more = raw_count >= self._current_query.limit
+        else:
+            self._paging_has_more = False
+        if raw_count == 0:
             return
-        self.append_dtos(dtos)
-        self.dataChanged.emit()
-        if self._current_query and self._current_query.limit and len(dtos) >= self._current_query.limit:
+        self._paging_offset = offset + raw_count
+        if dtos:
+            self.append_dtos(dtos)
+            self.dataChanged.emit()
+        if self._paging_has_more:
             self._maybe_schedule_next_page()
 
     def _should_validate_paths(self, query: AssetQuery) -> bool:

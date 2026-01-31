@@ -43,6 +43,7 @@ class FilmstripView(AssetGrid):
         self._opacity_effect.setOpacity(1.0)
         self.setGraphicsEffect(self._opacity_effect)
         self._updates_suspended = False
+        self._user_scroll_active = False
         icon_size = QSize(self._base_height, self._base_height)
         self.setViewMode(QListView.ViewMode.IconMode)
         self.setSelectionMode(QListView.SelectionMode.SingleSelection)
@@ -65,6 +66,9 @@ class FilmstripView(AssetGrid):
 
         self._updating_style = False
         self._apply_scrollbar_style()
+        scrollbar = self.horizontalScrollBar()
+        scrollbar.sliderPressed.connect(self._on_scrollbar_pressed)
+        scrollbar.sliderReleased.connect(self._on_scrollbar_released)
 
     def changeEvent(self, event: QEvent) -> None:
         if event.type() == QEvent.Type.PaletteChange:
@@ -124,6 +128,8 @@ class FilmstripView(AssetGrid):
         super().scrollContentsBy(dx, dy)
         if self._updates_suspended:
             return
+        if self._user_scroll_active:
+            return
         if self._recentering:
             return
         if dx != 0:
@@ -153,6 +159,8 @@ class FilmstripView(AssetGrid):
 
     def _schedule_center_current(self, *, reveal: bool = False) -> None:
         if self._updates_suspended:
+            return
+        if self._user_scroll_active:
             return
         if reveal:
             self._pending_center_reveal = True
@@ -359,6 +367,12 @@ class FilmstripView(AssetGrid):
         if isinstance(candidate, (int, float)) and candidate > 0:
             ratio = float(candidate)
         return ratio
+
+    def _on_scrollbar_pressed(self) -> None:
+        self._user_scroll_active = True
+
+    def _on_scrollbar_released(self) -> None:
+        self._user_scroll_active = False
 
     def sync_to_index(self, index: QModelIndex) -> None:
         """Update selection and schedule centering for the provided index."""

@@ -6,7 +6,7 @@ import logging
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional
 
-from PySide6.QtCore import QObject, Slot, QSize, QTimer
+from PySide6.QtCore import QObject, Slot, QSize, QTimer, Signal
 from PySide6.QtGui import QImage
 
 from src.iPhoto.gui.coordinators.view_router import ViewRouter
@@ -38,6 +38,8 @@ class EditCoordinator(QObject):
     Replaces EditController.
     """
 
+    transitionFinished = Signal(str)
+
     def __init__(
         self,
         edit_page: QObject, # The widget containing edit UI (Ui_MainWindow components)
@@ -61,6 +63,7 @@ class EditCoordinator(QObject):
             parent=self,
             theme_controller=theme_controller
         )
+        self._transition_manager.transition_finished.connect(self.transitionFinished)
 
         # State
         self._session: Optional[EditSession] = None

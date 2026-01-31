@@ -167,6 +167,7 @@ class MainCoordinator(QObject):
             window,
             self._theme_controller
         )
+        self._edit.transitionFinished.connect(self._on_edit_transition_finished)
 
         # --- Legacy Controllers ---
         self._dialog = DialogController(window, context, window.ui.status_bar)
@@ -474,6 +475,10 @@ class MainCoordinator(QObject):
         if path_str:
             new_state = self._asset_service.toggle_favorite_by_path(Path(path_str))
             self._asset_list_vm.update_favorite(index.row(), new_state)
+
+    def _on_edit_transition_finished(self, direction: str):
+        if direction == "exit":
+            self._playback.sync_filmstrip_to_current()
 
     def _sync_selection(self, row: int):
         """Syncs grid view selection when playback asset changes."""

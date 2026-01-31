@@ -266,7 +266,7 @@ class PlaybackCoordinator(QObject):
         self._favorite_button.setEnabled(True)
         self._info_button.setEnabled(True)
         self._share_button.setEnabled(True)
-        self._edit_button.setEnabled(True)
+        self._edit_button.setEnabled(not is_video)
         self._rotate_button.setEnabled(not is_video)  # Simple logic for now
 
         self._update_favorite_icon(bool(is_fav))
@@ -415,6 +415,11 @@ class PlaybackCoordinator(QObject):
         prev_row = self._current_row - 1
         if prev_row >= 0:
             self.play_asset(prev_row)
+
+    def sync_filmstrip_to_current(self):
+        """Force the filmstrip to scroll to the currently selected asset."""
+        if self._current_row >= 0:
+            self._sync_filmstrip_selection(self._current_row)
 
     def replay_live_photo(self):
         if self._current_row < 0:

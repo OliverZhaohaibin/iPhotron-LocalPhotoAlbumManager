@@ -4,7 +4,12 @@ from __future__ import annotations
 
 from PySide6.QtCore import QEvent, QModelIndex, QSize, Qt, Signal, QTimer
 from PySide6.QtGui import QPalette, QResizeEvent, QWheelEvent, QShowEvent
-from PySide6.QtWidgets import QListView, QSizePolicy, QStyleOptionViewItem
+from PySide6.QtWidgets import (
+    QGraphicsOpacityEffect,
+    QListView,
+    QSizePolicy,
+    QStyleOptionViewItem,
+)
 
 from .asset_grid import AssetGrid
 from ..models.roles import Roles
@@ -27,6 +32,16 @@ class FilmstripView(AssetGrid):
         self._base_height = 120
         self._spacing = 2
         self._default_ratio = 0.6
+        self._selection_model = None
+        self._center_timer = QTimer(self)
+        self._center_timer.setSingleShot(True)
+        self._center_timer.timeout.connect(self._apply_centering)
+        self._center_attempts = 0
+        self._pending_center_reveal = False
+        self._recentering = False
+        self._opacity_effect = QGraphicsOpacityEffect(self)
+        self._opacity_effect.setOpacity(1.0)
+        self.setGraphicsEffect(self._opacity_effect)
         icon_size = QSize(self._base_height, self._base_height)
         self.setViewMode(QListView.ViewMode.IconMode)
         self.setSelectionMode(QListView.SelectionMode.SingleSelection)
@@ -79,7 +94,7 @@ class FilmstripView(AssetGrid):
         super().setModel(model)
         if model is not None:
             model.dataChanged.connect(self._on_data_changed)
-
+        self._connect_selection_model()
         self.refresh_spacers()
 
     def _on_data_changed(self, top: QModelIndex, bottom: QModelIndex, roles: list[int] = []) -> None:
@@ -93,26 +108,95 @@ class FilmstripView(AssetGrid):
 
     def showEvent(self, event: QShowEvent) -> None:
         super().showEvent(event)
-        # Ensure we re-center when the view becomes visible (e.g. returning from edit)
-        self._ensure_centered()
+        # Keep the filmstrip invisible until we have re-centered on the current asset.
+        self._set_opacity(0.0)
+        self._schedule_center_current(reveal=True)
 
     def resizeEvent(self, event: QResizeEvent) -> None:  # type: ignore[override]
         super().resizeEvent(event)
         self.refresh_spacers()
-        self._ensure_centered()
+        self._schedule_center_current()
 
-    def _ensure_centered(self) -> None:
-        """Force the view to center on the currently selected index if valid."""
+    def scrollContentsBy(self, dx: int, dy: int) -> None:  # type: ignore[override]
+        super().scrollContentsBy(dx, dy)
+        if self._recentering:
+            return
+        if dx != 0:
+            self._schedule_center_current()
+
+    def _connect_selection_model(self) -> None:
+        selection_model = self.selectionModel()
+        if selection_model is self._selection_model:
+            return
+
+        if self._selection_model is not None:
+            try:
+                self._selection_model.currentChanged.disconnect(self._on_current_changed)
+            except (RuntimeError, TypeError):
+                pass
+
+        self._selection_model = selection_model
+        if selection_model is not None:
+            selection_model.currentChanged.connect(self._on_current_changed)
+
+    def _on_current_changed(self, current: QModelIndex, _previous: QModelIndex) -> None:
+        if current.isValid():
+            self.refresh_spacers(current)
+        self._schedule_center_current()
+
+    def _schedule_center_current(self, *, reveal: bool = False) -> None:
+        if reveal:
+            self._pending_center_reveal = True
+        if self._center_timer.isActive():
+            return
+        self._center_attempts = 0
+        self._center_timer.start(0)
+
+    def _apply_centering(self) -> None:
         selection_model = self.selectionModel()
         if selection_model is None:
+            self._finalize_centering()
             return
 
         current = selection_model.currentIndex()
-        if current.isValid():
-            # Defer slightly to allow layout to settle.
-            # 50ms is enough to let pending layout events (triggered by dataChanged) complete
-            # without introducing noticeable lag to the user.
-            QTimer.singleShot(50, lambda: self.center_on_index(current))
+        if not current.isValid():
+            self._finalize_centering()
+            return
+
+        if self._center_current_index(current):
+            self._finalize_centering()
+            return
+
+        self._center_attempts += 1
+        if self._center_attempts >= 5:
+            self._finalize_centering()
+            return
+
+        self._center_timer.start(16)
+
+    def _center_current_index(self, index: QModelIndex) -> bool:
+        item_rect = self.visualRect(index)
+        if not item_rect.isValid():
+            return False
+        if self.viewport().width() <= 0:
+            return False
+
+        self._recentering = True
+        try:
+            self.center_on_index(index)
+        finally:
+            self._recentering = False
+        return True
+
+    def _finalize_centering(self) -> None:
+        if self._pending_center_reveal:
+            self._set_opacity(1.0)
+            self._pending_center_reveal = False
+
+    def _set_opacity(self, value: float) -> None:
+        if self._opacity_effect.opacity() == value:
+            return
+        self._opacity_effect.setOpacity(value)
 
     def refresh_spacers(self, current_proxy_index: QModelIndex | None = None) -> None:
         """Recalculate spacer padding and optionally use the provided index.
@@ -145,7 +229,7 @@ class FilmstripView(AssetGrid):
 
         # If we just adjusted spacers, we likely need to re-center
         if current_proxy_index is not None and current_proxy_index.isValid():
-             self._ensure_centered()
+            self._schedule_center_current()
 
     def _current_item_width(self, current_proxy_index: QModelIndex | None = None) -> int:
         """Return the width of the active tile, preferring the supplied index."""

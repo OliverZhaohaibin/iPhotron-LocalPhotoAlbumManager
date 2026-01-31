@@ -478,6 +478,7 @@ class MainCoordinator(QObject):
 
     def _on_edit_transition_finished(self, direction: str):
         if direction == "exit":
+            self._window.ui.filmstrip_view.suspend_updates(False)
             self._playback.sync_filmstrip_to_current()
 
     def _sync_selection(self, row: int):

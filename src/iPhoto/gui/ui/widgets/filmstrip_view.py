@@ -42,6 +42,7 @@ class FilmstripView(AssetGrid):
         self._opacity_effect = QGraphicsOpacityEffect(self)
         self._opacity_effect.setOpacity(1.0)
         self.setGraphicsEffect(self._opacity_effect)
+        self._updates_suspended = False
         icon_size = QSize(self._base_height, self._base_height)
         self.setViewMode(QListView.ViewMode.IconMode)
         self.setSelectionMode(QListView.SelectionMode.SingleSelection)
@@ -114,11 +115,15 @@ class FilmstripView(AssetGrid):
 
     def resizeEvent(self, event: QResizeEvent) -> None:  # type: ignore[override]
         super().resizeEvent(event)
+        if self._updates_suspended:
+            return
         self.refresh_spacers()
         self._schedule_center_current()
 
     def scrollContentsBy(self, dx: int, dy: int) -> None:  # type: ignore[override]
         super().scrollContentsBy(dx, dy)
+        if self._updates_suspended:
+            return
         if self._recentering:
             return
         if dx != 0:
@@ -140,11 +145,15 @@ class FilmstripView(AssetGrid):
             selection_model.currentChanged.connect(self._on_current_changed)
 
     def _on_current_changed(self, current: QModelIndex, _previous: QModelIndex) -> None:
+        if self._updates_suspended:
+            return
         if current.isValid():
             self.refresh_spacers(current)
         self._schedule_center_current()
 
     def _schedule_center_current(self, *, reveal: bool = False) -> None:
+        if self._updates_suspended:
+            return
         if reveal:
             self._pending_center_reveal = True
         if self._center_timer.isActive():
@@ -197,6 +206,8 @@ class FilmstripView(AssetGrid):
         return QModelIndex()
 
     def _center_current_index(self, index: QModelIndex) -> bool:
+        if self._updates_suspended:
+            return False
         item_rect = self.visualRect(index)
         if not item_rect.isValid():
             return False
@@ -231,6 +242,8 @@ class FilmstripView(AssetGrid):
         viewport = self.viewport()
         model = self.model()
         if viewport is None or model is None:
+            return
+        if self._updates_suspended:
             return
 
         setter = getattr(model, "set_spacer_width", None)
@@ -346,6 +359,18 @@ class FilmstripView(AssetGrid):
         if isinstance(candidate, (int, float)) and candidate > 0:
             ratio = float(candidate)
         return ratio
+
+    def suspend_updates(self, suspend: bool) -> None:
+        """Suspend repaint/layout work during transitions to avoid flicker."""
+        suspend = bool(suspend)
+        if suspend == self._updates_suspended:
+            return
+        self._updates_suspended = suspend
+        self.setUpdatesEnabled(not suspend)
+        if suspend:
+            self._set_opacity(0.0)
+        else:
+            self._schedule_center_current(reveal=True)
 
     # ------------------------------------------------------------------
     # Event handling

@@ -134,6 +134,7 @@ class EditViewTransitionManager(QObject):
         if show_filmstrip:
             # We must show the view so it can layout, but we keep it invisible (opacity 0)
             # until the transition is finished to avoid the scroll-jump flicker.
+            self._ui.filmstrip_view.suspend_updates(True)
             self._ui.filmstrip_view.show()
             # Note: We rely on the Coordinator to finalize things, but here we ensure
             # it is part of the layout.

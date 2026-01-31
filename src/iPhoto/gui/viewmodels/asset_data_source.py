@@ -1,10 +1,12 @@
+from collections import OrderedDict
 from dataclasses import dataclass
 from datetime import datetime
 import os
 import re
+import threading
 from pathlib import Path
 from typing import List, Optional, cast
-from PySide6.QtCore import QObject, Signal
+from PySide6.QtCore import QObject, QRunnable, QThreadPool, Signal
 
 from src.iPhoto.domain.models import Asset
 from src.iPhoto.domain.models.core import MediaType
@@ -18,6 +20,7 @@ THUMBNAIL_SUFFIX_RE = re.compile(r"_(\d{2,4})x(\d{2,4})(?=\.[^.]+$)", re.IGNOREC
 THUMBNAIL_MAX_DIMENSION = 512
 THUMBNAIL_MAX_BYTES = 350_000
 LEGACY_THUMB_DIRS = {WORK_DIR_NAME.lower(), ".photo", ".iphoto"}
+PATH_EXISTS_CACHE_LIMIT = 20_000
 
 @dataclass(frozen=True)
 class _PendingMove:
@@ -28,6 +31,38 @@ class _PendingMove:
     destination_abs: Path
     destination_rel: Path
     is_delete: bool
+
+
+class _AssetLoadSignals(QObject):
+    completed = Signal(int, list)
+
+
+class _AssetLoadWorker(QRunnable):
+    def __init__(
+        self,
+        data_source: "AssetDataSource",
+        query: AssetQuery,
+        generation: int,
+        validate_paths: bool,
+    ) -> None:
+        super().__init__()
+        self._data_source = data_source
+        self._query = query
+        self._generation = generation
+        self._validate_paths = validate_paths
+        self.signals = _AssetLoadSignals()
+
+    def run(self) -> None:
+        dtos: List[AssetDTO] = []
+        assets = self._data_source._repo.find_by_query(self._query)
+        for asset in assets:
+            if self._data_source._is_thumbnail_asset(asset):
+                continue
+            abs_path = self._data_source._resolve_abs_path(asset.path)
+            if self._validate_paths and not self._data_source._path_exists_cached(abs_path):
+                continue
+            dtos.append(self._data_source._to_dto(asset))
+        self.signals.completed.emit(self._generation, dtos)
 
 
 class AssetDataSource(QObject):
@@ -50,6 +85,10 @@ class AssetDataSource(QObject):
         self._pending_paths: set[str] = set()
         self._active_root: Optional[Path] = None
         self._seen_abs_paths: set[str] = set()
+        self._load_pool = QThreadPool.globalInstance()
+        self._load_generation = 0
+        self._path_exists_cache: OrderedDict[str, bool] = OrderedDict()
+        self._path_cache_lock = threading.Lock()
 
     def set_library_root(self, root: Optional[Path]):
         if self._library_root == root:
@@ -58,6 +97,7 @@ class AssetDataSource(QObject):
         self._cached_dtos.clear()
         self._total_count = 0
         self._seen_abs_paths.clear()
+        self._path_exists_cache.clear()
         self.dataChanged.emit()
 
     def set_repository(self, repo: IAssetRepository) -> None:
@@ -67,6 +107,7 @@ class AssetDataSource(QObject):
         self._cached_dtos.clear()
         self._total_count = 0
         self._seen_abs_paths.clear()
+        self._path_exists_cache.clear()
         self.dataChanged.emit()
 
     def set_active_root(self, root: Optional[Path]) -> None:
@@ -85,22 +126,28 @@ class AssetDataSource(QObject):
         if not query.limit:
             query.limit = 5000
 
-        assets = self._repo.find_by_query(query)
-        dtos: List[AssetDTO] = []
-        for asset in assets:
-            if self._is_thumbnail_asset(asset):
-                continue
-            abs_path = self._resolve_abs_path(asset.path)
-            if not self._path_exists(abs_path):
-                continue
-            dtos.append(self._to_dto(asset))
+        self._total_count = 0
+        self._seen_abs_paths.clear()
+        self.dataChanged.emit()
+
+        self._load_generation += 1
+        generation = self._load_generation
+        validate_paths = self._should_validate_paths(query)
+
+        worker = _AssetLoadWorker(self, query, generation, validate_paths)
+        worker.signals.completed.connect(self._on_load_completed)
+        self._load_pool.start(worker)
+
+    def _on_load_completed(self, generation: int, dtos: list[AssetDTO]) -> None:
+        if generation != self._load_generation:
+            return
         self._cached_dtos = dtos
-        self._apply_pending_moves(query)
+        if self._current_query is not None:
+            self._apply_pending_moves(self._current_query)
         self._total_count = len(self._cached_dtos)
         self._seen_abs_paths = {
             self._normalize_abs_key(dto.abs_path) for dto in self._cached_dtos
         }
-
         self.dataChanged.emit()
 
     def reload_current_query(self) -> None:
@@ -528,6 +575,32 @@ class AssetDataSource(QObject):
             return path.exists()
         except OSError:
             return False
+
+    def _path_cache_key(self, path: Path) -> str:
+        return os.path.normcase(str(path))
+
+    def _path_exists_cached(self, path: Path) -> bool:
+        key = self._path_cache_key(path)
+        with self._path_cache_lock:
+            cached = self._path_exists_cache.get(key)
+            if cached is not None:
+                self._path_exists_cache.move_to_end(key)
+                return cached
+        exists = self._path_exists(path)
+        with self._path_cache_lock:
+            self._path_exists_cache[key] = exists
+            if len(self._path_exists_cache) > PATH_EXISTS_CACHE_LIMIT:
+                self._path_exists_cache.popitem(last=False)
+        return exists
+
+    def _should_validate_paths(self, query: AssetQuery) -> bool:
+        if self._library_root is None:
+            return True
+        if query.album_path or query.album_id:
+            return True
+        if query.is_deleted:
+            return True
+        return False
 
     def _is_legacy_thumb_path(self, rel_path: Path) -> bool:
         for part in rel_path.parts:

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import QEvent, QModelIndex, QSize, Qt, Signal, QTimer
+from PySide6.QtCore import QEvent, QModelIndex, QSize, Qt, Signal, QTimer, QItemSelectionModel
 from PySide6.QtGui import QPalette, QResizeEvent, QWheelEvent, QShowEvent
 from PySide6.QtWidgets import (
     QGraphicsOpacityEffect,
@@ -158,7 +158,7 @@ class FilmstripView(AssetGrid):
             self._finalize_centering()
             return
 
-        current = selection_model.currentIndex()
+        current = self._resolve_current_index(selection_model)
         if not current.isValid():
             self._finalize_centering()
             return
@@ -173,6 +173,28 @@ class FilmstripView(AssetGrid):
             return
 
         self._center_timer.start(16)
+
+    def _resolve_current_index(self, selection_model) -> QModelIndex:
+        current = selection_model.currentIndex()
+        if current.isValid():
+            return current
+
+        model = self.model()
+        if model is None or model.rowCount() <= 0:
+            return QModelIndex()
+
+        # Fall back to the view model's current row when the selection has been cleared.
+        # This lets the displayed asset drive the filmstrip position even after visibility
+        # toggles or model resets.
+        start = model.index(0, 0)
+        matches = model.match(start, Roles.IS_CURRENT, True, 1, Qt.MatchExactly)
+        if matches:
+            match = matches[0]
+            selection_model.setCurrentIndex(
+                match, QItemSelectionModel.ClearAndSelect
+            )
+            return match
+        return QModelIndex()
 
     def _center_current_index(self, index: QModelIndex) -> bool:
         item_rect = self.visualRect(index)

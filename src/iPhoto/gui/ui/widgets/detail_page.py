@@ -248,7 +248,8 @@ class DetailPageWidget(QWidget):
         bg_color = QColor(bg_hex)
         hover_hex = bg_color.darker(105).name(QColor.NameFormat.HexArgb)
         pressed_hex = bg_color.darker(110).name(QColor.NameFormat.HexArgb)
-        disabled_text = QColor(0, 0, 0, 90).name(QColor.NameFormat.HexArgb)  # Approximate disabled text
+        disabled_text = QColor(0, 0, 0, 90).name(QColor.NameFormat.HexArgb)
+        disabled_bg = bg_color.darker(110).name(QColor.NameFormat.HexArgb)
 
         self.edit_button.setStyleSheet(
             "QPushButton {"
@@ -262,7 +263,8 @@ class DetailPageWidget(QWidget):
             "}"
             f"QPushButton:hover {{ background-color: {hover_hex}; }}"
             f"QPushButton:pressed {{ background-color: {pressed_hex}; }}"
-            f"QPushButton:disabled {{ color: {disabled_text}; border-color: {border_hex}; }}"
+            f"QPushButton:disabled {{ color: {disabled_text}; border-color: {border_hex}; "
+            f"background-color: {disabled_bg}; }}"
         )
         actions_layout.addWidget(self.edit_button)
 

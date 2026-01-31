@@ -214,6 +214,11 @@ class WindowThemeController(QObject):
         edit_btn_pressed = colors.window_background.darker(110).name()
         edit_btn_border = QColor(fg_color)
         edit_btn_border.setAlpha(30)
+        disabled_bg = (
+            colors.window_background.lighter(120)
+            if colors.is_dark
+            else colors.window_background.darker(110)
+        )
 
         self._ui.edit_button.setStyleSheet(
             "QPushButton {"
@@ -227,7 +232,8 @@ class WindowThemeController(QObject):
             "}"
             f"QPushButton:hover {{ background-color: {edit_btn_hover}; }}"
             f"QPushButton:pressed {{ background-color: {edit_btn_pressed}; }}"
-            f"QPushButton:disabled {{ color: {disabled_fg}; border-color: {edit_btn_border.name(QColor.NameFormat.HexArgb)}; }}"
+            f"QPushButton:disabled {{ color: {disabled_fg}; border-color: {edit_btn_border.name(QColor.NameFormat.HexArgb)}; "
+            f"background-color: {disabled_bg.name(QColor.NameFormat.HexArgb)}; }}"
         )
 
         # 4. Refresh Menus

@@ -9,12 +9,14 @@ from PySide6.QtCore import (
     QEasingCurve,
     QParallelAnimationGroup,
     QPropertyAnimation,
+    QTimer,
     QVariantAnimation,
     Signal,
 )
 from PySide6.QtWidgets import QGraphicsOpacityEffect
 
 from .window_theme_controller import WindowThemeController
+from ..models.roles import Roles
 
 if TYPE_CHECKING:  # pragma: no cover - import for typing only
     from ..ui_main_window import Ui_MainWindow
@@ -133,6 +135,7 @@ class EditViewTransitionManager(QObject):
         self._ui.edit_header_container.show()
         if show_filmstrip:
             self._ui.filmstrip_view.show()
+            QTimer.singleShot(0, self._restore_filmstrip_focus)
         else:
             # Ensure the filmstrip stays hidden when the user's settings request
             # it.  Calling ``hide`` keeps the widget state consistent even if it
@@ -147,6 +150,26 @@ class EditViewTransitionManager(QObject):
             self._edit_header_opacity.setOpacity(0.0)
 
         self._start_transition_animation(entering=False, animate=animate)
+
+    def _restore_filmstrip_focus(self) -> None:
+        view = self._ui.filmstrip_view
+        if not view.isVisible():
+            return
+
+        selection_model = view.selectionModel()
+        if selection_model is None:
+            return
+
+        index = selection_model.currentIndex()
+        if not index.isValid():
+            selected = selection_model.selectedIndexes()
+            if selected:
+                index = selected[0]
+        if not index.isValid() or bool(index.data(Roles.IS_SPACER)):
+            return
+
+        view.refresh_spacers(index)
+        view.center_on_index(index)
 
     # ------------------------------------------------------------------
     # Transition helpers

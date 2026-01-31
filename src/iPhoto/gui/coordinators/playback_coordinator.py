@@ -266,7 +266,7 @@ class PlaybackCoordinator(QObject):
         self._favorite_button.setEnabled(True)
         self._info_button.setEnabled(True)
         self._share_button.setEnabled(True)
-        self._edit_button.setEnabled(True)
+        self._edit_button.setEnabled(not is_video)
         self._rotate_button.setEnabled(not is_video)  # Simple logic for now
 
         self._update_favorite_icon(bool(is_fav))

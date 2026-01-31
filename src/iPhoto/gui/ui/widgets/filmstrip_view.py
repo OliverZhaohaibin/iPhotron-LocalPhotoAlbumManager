@@ -109,8 +109,10 @@ class FilmstripView(AssetGrid):
 
         current = selection_model.currentIndex()
         if current.isValid():
-            # Defer slightly to allow layout to settle
-            QTimer.singleShot(0, lambda: self.center_on_index(current))
+            # Defer slightly to allow layout to settle.
+            # 50ms is enough to let pending layout events (triggered by dataChanged) complete
+            # without introducing noticeable lag to the user.
+            QTimer.singleShot(50, lambda: self.center_on_index(current))
 
     def refresh_spacers(self, current_proxy_index: QModelIndex | None = None) -> None:
         """Recalculate spacer padding and optionally use the provided index.

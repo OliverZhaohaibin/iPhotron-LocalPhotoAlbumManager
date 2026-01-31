@@ -147,6 +147,8 @@ class NavigationCoordinator(QObject):
             self._open_filtered_collection(name, media_types=[MediaType.VIDEO])
         elif normalized == "live photos":
             self._open_filtered_collection(name, media_types=[MediaType.LIVE_PHOTO])
+        elif normalized == "location":
+            self.open_location_view()
 
     def open_recently_deleted(self):
         """Open the trash collection."""
@@ -196,6 +198,27 @@ class NavigationCoordinator(QObject):
             query.media_types = media_types
 
         self._asset_vm.load_query(query)
+
+    def open_location_view(self) -> None:
+        """Display the map view populated with geotagged assets."""
+
+        root = self._context.library.root()
+        if root is None:
+            self._handle_bind_library()
+            return
+
+        self._reset_playback()
+        self._static_selection = "Location"
+        self._asset_vm.set_active_root(root)
+
+        assets = self._context.library.get_geotagged_assets()
+        map_view = self._router.map_view()
+        if map_view is not None:
+            map_view.set_assets(assets, root)
+        else:
+            LOGGER.warning("Map view is unavailable; cannot display location section.")
+
+        self._router.show_map()
 
     def _album_path_for_query(self, path: Path) -> Optional[str]:
         library_root = self._context.library.root()

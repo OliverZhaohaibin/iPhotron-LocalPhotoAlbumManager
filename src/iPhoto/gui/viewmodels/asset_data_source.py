@@ -65,6 +65,44 @@ class _AssetLoadWorker(QRunnable):
         self.signals.completed.emit(self._generation, dtos)
 
 
+class _AssetPageSignals(QObject):
+    completed = Signal(int, int, list)
+
+
+class _AssetPageWorker(QRunnable):
+    def __init__(
+        self,
+        data_source: "AssetDataSource",
+        query: AssetQuery,
+        generation: int,
+        offset: int,
+        validate_paths: bool,
+    ) -> None:
+        super().__init__()
+        self._data_source = data_source
+        self._query = query
+        self._generation = generation
+        self._offset = offset
+        self._validate_paths = validate_paths
+        self.signals = _AssetPageSignals()
+
+    def run(self) -> None:
+        query = AssetQuery(**self._query.__dict__)
+        query.offset = self._offset
+        query.limit = self._query.limit
+
+        dtos: List[AssetDTO] = []
+        assets = self._data_source._repo.find_by_query(query)
+        for asset in assets:
+            if self._data_source._is_thumbnail_asset(asset):
+                continue
+            abs_path = self._data_source._resolve_abs_path(asset.path)
+            if self._validate_paths and not self._data_source._path_exists_cached(abs_path):
+                continue
+            dtos.append(self._data_source._to_dto(asset))
+        self.signals.completed.emit(self._generation, self._offset, dtos)
+
+
 class AssetDataSource(QObject):
     """
     Intermediary between Repository and ViewModel.
@@ -87,6 +125,8 @@ class AssetDataSource(QObject):
         self._seen_abs_paths: set[str] = set()
         self._load_pool = QThreadPool.globalInstance()
         self._load_generation = 0
+        self._paging_inflight = False
+        self._paging_offset = 0
         self._path_exists_cache: OrderedDict[str, bool] = OrderedDict()
         self._path_cache_lock = threading.Lock()
 
@@ -124,10 +164,12 @@ class AssetDataSource(QObject):
 
         # Default limit if not set
         if not query.limit:
-            query.limit = 5000
+            query.limit = self._page_size if self._should_use_paging(query) else 5000
 
         self._total_count = 0
         self._seen_abs_paths.clear()
+        self._paging_inflight = False
+        self._paging_offset = 0
         self.dataChanged.emit()
 
         self._load_generation += 1
@@ -149,6 +191,8 @@ class AssetDataSource(QObject):
             self._normalize_abs_key(dto.abs_path) for dto in self._cached_dtos
         }
         self.dataChanged.emit()
+        if self._current_query and self._should_use_paging(self._current_query):
+            self._maybe_schedule_next_page()
 
     def reload_current_query(self) -> None:
         if self._current_query is None:
@@ -249,6 +293,7 @@ class AssetDataSource(QObject):
         self._cached_dtos.extend(dtos)
         for dto in dtos:
             self._seen_abs_paths.add(self._normalize_abs_key(dto.abs_path))
+        self._total_count = len(self._cached_dtos)
 
     def handle_scan_chunk(self, scan_root: Path, chunk: List[dict]) -> None:
         if not chunk or self._current_query is None:
@@ -593,6 +638,40 @@ class AssetDataSource(QObject):
                 self._path_exists_cache.popitem(last=False)
         return exists
 
+    def _maybe_schedule_next_page(self) -> None:
+        if self._paging_inflight:
+            return
+        if self._current_query is None:
+            return
+        if not self._current_query.limit:
+            return
+        if len(self._cached_dtos) < self._current_query.limit:
+            return
+        self._paging_offset = len(self._cached_dtos)
+        self._paging_inflight = True
+        generation = self._load_generation
+        validate_paths = self._should_validate_paths(self._current_query)
+        worker = _AssetPageWorker(
+            self,
+            self._current_query,
+            generation,
+            self._paging_offset,
+            validate_paths,
+        )
+        worker.signals.completed.connect(self._on_page_loaded)
+        self._load_pool.start(worker)
+
+    def _on_page_loaded(self, generation: int, offset: int, dtos: list[AssetDTO]) -> None:
+        if generation != self._load_generation:
+            return
+        self._paging_inflight = False
+        if not dtos:
+            return
+        self.append_dtos(dtos)
+        self.dataChanged.emit()
+        if self._current_query and self._current_query.limit and len(dtos) >= self._current_query.limit:
+            self._maybe_schedule_next_page()
+
     def _should_validate_paths(self, query: AssetQuery) -> bool:
         if self._library_root is None:
             return True
@@ -601,6 +680,13 @@ class AssetDataSource(QObject):
         if query.is_deleted:
             return True
         return False
+
+    def _should_use_paging(self, query: AssetQuery) -> bool:
+        if query.album_path or query.album_id:
+            return False
+        if query.is_deleted:
+            return False
+        return True
 
     def _is_legacy_thumb_path(self, rel_path: Path) -> bool:
         for part in rel_path.parts:

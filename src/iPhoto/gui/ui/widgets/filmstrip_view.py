@@ -48,7 +48,9 @@ class FilmstripView(AssetGrid):
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
 
         self._updating_style = False
+        self._recentering_scrollbar = False
         self._apply_scrollbar_style()
+        self._connect_scrollbar_signals()
 
     def changeEvent(self, event: QEvent) -> None:
         if event.type() == QEvent.Type.PaletteChange:
@@ -131,6 +133,20 @@ class FilmstripView(AssetGrid):
         if current_proxy_index is not None and current_proxy_index.isValid():
             if not bool(current_proxy_index.data(Roles.IS_SPACER)):
                 self.center_on_index(current_proxy_index)
+                self._schedule_center_on_current()
+
+    def _connect_scrollbar_signals(self) -> None:
+        scrollbar = self.horizontalScrollBar()
+        scrollbar.rangeChanged.connect(self._schedule_center_on_current)
+        scrollbar.valueChanged.connect(self._handle_scrollbar_changed)
+
+    def _handle_scrollbar_changed(self, _value: int) -> None:
+        if self._recentering_scrollbar:
+            return
+        scrollbar = self.horizontalScrollBar()
+        if scrollbar.isSliderDown():
+            return
+        self._schedule_center_on_current()
 
     def _schedule_center_on_current(self) -> None:
         if not self.isVisible():
@@ -150,7 +166,12 @@ class FilmstripView(AssetGrid):
                 index = selected[0]
         if not index.isValid() or bool(index.data(Roles.IS_SPACER)):
             return
-        self.refresh_spacers(index)
+        self._recentering_scrollbar = True
+        try:
+            self.refresh_spacers(index)
+            self.center_on_index(index)
+        finally:
+            self._recentering_scrollbar = False
 
     def _current_item_width(self, current_proxy_index: QModelIndex | None = None) -> int:
         """Return the width of the active tile, preferring the supplied index."""

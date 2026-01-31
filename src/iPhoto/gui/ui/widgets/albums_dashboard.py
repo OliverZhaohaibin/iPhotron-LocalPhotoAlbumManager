@@ -20,6 +20,7 @@ from PySide6.QtGui import (
     QColor,
     QFont,
     QFontMetrics,
+    QGuiApplication,
     QImage,
     QPainter,
     QPainterPath,
@@ -260,8 +261,13 @@ class AlbumCard(QFrame):
         """Update the cover image."""
         self.image_view.setPixmap(pixmap)
 
+    def apply_theme(self) -> None:
+        """Refresh colors from the active application palette."""
+        self._apply_theme()
+
     def _apply_theme(self) -> None:
-        palette = self.palette()
+        app = QGuiApplication.instance()
+        palette = app.palette() if app else self.palette()
         window_color = palette.color(QPalette.ColorRole.Window)
         text_primary = palette.color(QPalette.ColorRole.Text)
 
@@ -271,8 +277,8 @@ class AlbumCard(QFrame):
             hover_center = base_color.lighter(110)
             hover_outer = base_color
         else:
-            base_color = QColor("#F5F5F7")
-            hover_center = QColor("#FFFFFF")
+            base_color = palette.color(QPalette.ColorRole.Base)
+            hover_center = base_color.lighter(105)
             hover_outer = base_color
 
         text_secondary = QColor(text_primary)
@@ -647,7 +653,8 @@ class AlbumsDashboard(QWidget):
             self.refresh()
 
     def _apply_theme(self) -> None:
-        palette = self.palette()
+        app = QGuiApplication.instance()
+        palette = app.palette() if app else self.palette()
         text_primary = palette.color(QPalette.ColorRole.Text)
         text_secondary = QColor(text_primary)
         text_secondary.setAlpha(160)
@@ -662,3 +669,5 @@ class AlbumsDashboard(QWidget):
             f"{text_secondary.name(QColor.NameFormat.HexArgb)}; "
             "font-size: 16px;"
         )
+        for card in self._cards.values():
+            card.apply_theme()

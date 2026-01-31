@@ -6,7 +6,7 @@ from pathlib import Path
 import logging
 from typing import TYPE_CHECKING, Any, Optional
 
-from PySide6.QtCore import QObject, Slot, QTimer, Signal, QModelIndex, QItemSelectionModel
+from PySide6.QtCore import QObject, Slot, QTimer, Signal, QModelIndex
 from PySide6.QtGui import QAction, QColor, QPalette
 
 from src.iPhoto.gui.coordinators.view_router import ViewRouter
@@ -343,10 +343,7 @@ class PlaybackCoordinator(QObject):
             idx = model.mapFromSource(idx)
 
         if idx.isValid():
-             self._filmstrip_view.selectionModel().setCurrentIndex(
-                idx, QItemSelectionModel.ClearAndSelect
-             )
-             self._filmstrip_view.center_on_index(idx)
+            self._filmstrip_view.sync_to_index(idx)
 
     def _update_favorite_icon(self, is_favorite: bool):
         icon_name = "suit.heart.fill.svg" if is_favorite else "suit.heart.svg"

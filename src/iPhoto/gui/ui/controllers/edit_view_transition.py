@@ -65,6 +65,7 @@ class EditViewTransitionManager(QObject):
         self._splitter_sizes_before_edit: list[int] | None = None
         self._transition_group: QParallelAnimationGroup | None = None
         self._transition_direction: str | None = None
+        self._restore_filmstrip_on_exit = False
 
         self._edit_header_opacity = QGraphicsOpacityEffect(ui.edit_header_container)
         self._edit_header_opacity.setOpacity(1.0)
@@ -135,13 +136,14 @@ class EditViewTransitionManager(QObject):
         self._ui.edit_header_container.show()
         if show_filmstrip:
             self._ui.filmstrip_view.show()
-            QTimer.singleShot(0, self._restore_filmstrip_focus)
+            self._restore_filmstrip_on_exit = True
         else:
             # Ensure the filmstrip stays hidden when the user's settings request
             # it.  Calling ``hide`` keeps the widget state consistent even if it
             # was temporarily shown by other UI interactions while edit mode
             # was active.
             self._ui.filmstrip_view.hide()
+            self._restore_filmstrip_on_exit = False
         if animate:
             self._detail_header_opacity.setOpacity(0.0)
             self._edit_header_opacity.setOpacity(1.0)
@@ -410,6 +412,9 @@ class EditViewTransitionManager(QObject):
         self._edit_header_opacity.setOpacity(1.0)
 
         self._splitter_sizes_before_edit = None
+        if self._restore_filmstrip_on_exit:
+            QTimer.singleShot(0, self._restore_filmstrip_focus)
+            self._restore_filmstrip_on_exit = False
 
     def _sanitise_splitter_sizes(
         self,

@@ -360,6 +360,19 @@ class FilmstripView(AssetGrid):
             ratio = float(candidate)
         return ratio
 
+    def sync_to_index(self, index: QModelIndex) -> None:
+        """Update selection and schedule centering for the provided index."""
+        if not index.isValid():
+            return
+        selection_model = self.selectionModel()
+        if selection_model is None:
+            return
+        selection_model.setCurrentIndex(index, QItemSelectionModel.ClearAndSelect)
+        if self._updates_suspended:
+            return
+        self.refresh_spacers(index)
+        self._schedule_center_current()
+
     def suspend_updates(self, suspend: bool) -> None:
         """Suspend repaint/layout work during transitions to avoid flicker."""
         suspend = bool(suspend)

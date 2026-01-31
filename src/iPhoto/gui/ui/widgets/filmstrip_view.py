@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import QEvent, QModelIndex, QSize, Qt, Signal
+from PySide6.QtCore import QEvent, QModelIndex, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QPalette, QResizeEvent, QWheelEvent
 from PySide6.QtWidgets import QListView, QSizePolicy, QStyleOptionViewItem
 
@@ -94,6 +94,11 @@ class FilmstripView(AssetGrid):
     def resizeEvent(self, event: QResizeEvent) -> None:  # type: ignore[override]
         super().resizeEvent(event)
         self.refresh_spacers()
+        self._schedule_center_on_current()
+
+    def showEvent(self, event) -> None:  # type: ignore[override]
+        super().showEvent(event)
+        self._schedule_center_on_current()
 
     def refresh_spacers(self, current_proxy_index: QModelIndex | None = None) -> None:
         """Recalculate spacer padding and optionally use the provided index.
@@ -123,6 +128,29 @@ class FilmstripView(AssetGrid):
 
         padding = max(0, (viewport_width - current_width) // 2)
         setter(padding)
+        if current_proxy_index is not None and current_proxy_index.isValid():
+            if not bool(current_proxy_index.data(Roles.IS_SPACER)):
+                self.center_on_index(current_proxy_index)
+
+    def _schedule_center_on_current(self) -> None:
+        if not self.isVisible():
+            return
+        QTimer.singleShot(0, self._center_on_current)
+
+    def _center_on_current(self) -> None:
+        if not self.isVisible():
+            return
+        selection_model = self.selectionModel()
+        if selection_model is None:
+            return
+        index = selection_model.currentIndex()
+        if not index.isValid():
+            selected = selection_model.selectedIndexes()
+            if selected:
+                index = selected[0]
+        if not index.isValid() or bool(index.data(Roles.IS_SPACER)):
+            return
+        self.refresh_spacers(index)
 
     def _current_item_width(self, current_proxy_index: QModelIndex | None = None) -> int:
         """Return the width of the active tile, preferring the supplied index."""

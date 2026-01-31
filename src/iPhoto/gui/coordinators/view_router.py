@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
 from PySide6.QtCore import QObject, Signal
 
 if TYPE_CHECKING:
@@ -82,6 +82,16 @@ class ViewRouter(QObject):
         if self._map_idx != -1 and self._stack.currentIndex() != self._map_idx:
             self._stack.setCurrentIndex(self._map_idx)
             self.mapViewShown.emit()
+
+    def map_view(self) -> Optional["PhotoMapView"]:
+        """Return the map widget when available."""
+
+        from src.iPhoto.gui.ui.widgets.photo_map_view import PhotoMapView
+
+        map_view = getattr(self._ui, "map_view", None)
+        if isinstance(map_view, PhotoMapView):
+            return map_view
+        return None
 
     def show_albums_dashboard(self):
         """Switch to the Albums Dashboard."""

@@ -104,6 +104,7 @@ class PlaybackCoordinator(QObject):
         self._filmstrip_scroll_sync_pending = False
         self._filmstrip_model = None
         self._filmstrip_sync_attempts = 0
+        self._filmstrip_recheck_pending = False
         self._connect_signals()
         self._connect_zoom_controls()
         self._restore_filmstrip_preference()
@@ -426,6 +427,7 @@ class PlaybackCoordinator(QObject):
             self._filmstrip_sync_attempts = 0
             LOGGER.debug("Filmstrip sync applied for row %s.", self._current_row)
             _console_debug(f"sync applied row={self._current_row}")
+            self._schedule_filmstrip_recheck()
             return
         if self._filmstrip_sync_attempts < FILMSTRIP_SYNC_MAX_RETRIES:
             self._filmstrip_sync_attempts += 1
@@ -443,6 +445,25 @@ class PlaybackCoordinator(QObject):
         self._filmstrip_sync_attempts = 0
         LOGGER.debug("Filmstrip sync abandoned after max retries.")
         _console_debug("sync abandoned after max retries")
+
+    def _schedule_filmstrip_recheck(self) -> None:
+        if self._filmstrip_recheck_pending:
+            return
+        self._filmstrip_recheck_pending = True
+        LOGGER.debug("Filmstrip recheck scheduled for row %s.", self._current_row)
+        _console_debug(f"recheck scheduled row={self._current_row}")
+        QTimer.singleShot(FILMSTRIP_SYNC_RETRY_DELAY_MS, self._apply_filmstrip_recheck)
+
+    def _apply_filmstrip_recheck(self) -> None:
+        self._filmstrip_recheck_pending = False
+        if self._current_row < 0:
+            return
+        if self._sync_filmstrip_selection(self._current_row):
+            LOGGER.debug("Filmstrip recheck applied for row %s.", self._current_row)
+            _console_debug(f"recheck applied row={self._current_row}")
+        else:
+            LOGGER.debug("Filmstrip recheck skipped for row %s.", self._current_row)
+            _console_debug(f"recheck skipped row={self._current_row}")
 
     def _attach_filmstrip_model_signals(self) -> None:
         model = self._filmstrip_view.model()

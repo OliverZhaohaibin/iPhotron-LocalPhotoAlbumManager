@@ -20,7 +20,7 @@ def qapp():
     yield app
 
 
-def _bypass_row_resolution(row: int) -> int:
+def _passthrough_row_resolver(row: int) -> int:
     return row
 
 
@@ -62,7 +62,7 @@ def _make_playback() -> PlaybackCoordinator:
 
 def test_filmstrip_sync_retries(monkeypatch, qapp):
     playback = _make_playback()
-    playback._resolve_valid_row = _bypass_row_resolution
+    playback._resolve_valid_row = _passthrough_row_resolver
     scheduled = []
 
     def _fake_single_shot(delay, callback):
@@ -80,7 +80,7 @@ def test_filmstrip_sync_retries(monkeypatch, qapp):
 
 def test_filmstrip_sync_retry_limit(monkeypatch, qapp):
     playback = _make_playback()
-    playback._resolve_valid_row = _bypass_row_resolution
+    playback._resolve_valid_row = _passthrough_row_resolver
     playback._filmstrip_sync_attempts = FILMSTRIP_SYNC_MAX_RETRIES
     scheduled = []
 
@@ -118,7 +118,7 @@ def test_filmstrip_recheck_applies(monkeypatch, qapp):
     playback = _make_playback()
     playback._current_row = 4
     playback._filmstrip_recheck_pending = True
-    playback._resolve_valid_row = _bypass_row_resolution
+    playback._resolve_valid_row = _passthrough_row_resolver
     calls = []
 
     def _fake_sync(row):

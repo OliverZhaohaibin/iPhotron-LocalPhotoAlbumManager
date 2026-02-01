@@ -29,6 +29,7 @@ class FilmstripView(AssetGrid):
         self._default_ratio = 0.6
         self._pending_center_index: QPersistentModelIndex | None = None
         self._pending_center_scheduled = False
+        self._last_center_index: QPersistentModelIndex | None = None
         icon_size = QSize(self._base_height, self._base_height)
         self.setViewMode(QListView.ViewMode.IconMode)
         self.setSelectionMode(QListView.SelectionMode.SingleSelection)
@@ -288,6 +289,7 @@ class FilmstripView(AssetGrid):
         if not index.isValid():
             return
 
+        self._last_center_index = QPersistentModelIndex(index)
         if not self.isVisible():
             self._defer_center_on_index(index)
             return
@@ -311,6 +313,7 @@ class FilmstripView(AssetGrid):
         if not index.isValid():
             return
         self._pending_center_index = QPersistentModelIndex(index)
+        self._last_center_index = QPersistentModelIndex(index)
         if self.isVisible():
             self._schedule_pending_center_if_needed()
 
@@ -328,6 +331,8 @@ class FilmstripView(AssetGrid):
         self._pending_center_scheduled = False
         index = self._pending_center_index
         self._pending_center_index = None
+        if index is None or not index.isValid():
+            index = self._last_center_index
         if index is None or not index.isValid():
             selection_model = self.selectionModel()
             if selection_model is None:

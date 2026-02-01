@@ -344,7 +344,10 @@ class PlaybackCoordinator(QObject):
         self._is_playing = False
 
     def _sync_filmstrip_selection(self, row: int) -> bool:
-        """Update filmstrip selection and scroll to the item."""
+        """Update filmstrip selection and scroll to the item.
+
+        Returns ``True`` when the filmstrip was able to apply the selection.
+        """
         idx = self._asset_vm.index(row, 0)
         if not idx.isValid():
             return False
@@ -375,7 +378,7 @@ class PlaybackCoordinator(QObject):
     def schedule_filmstrip_sync(self) -> None:
         """Resync filmstrip selection after layout/transition changes.
 
-        Uses the retry mechanism to wait for the filmstrip layout to stabilise,
+        Uses the retry mechanism to wait for the filmstrip layout to stabilize,
         which is useful after edit transitions or model resets.
         """
         self._schedule_filmstrip_sync()

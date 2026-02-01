@@ -64,6 +64,7 @@ class EditCoordinator(QObject):
             theme_controller=theme_controller
         )
         if transition_finished_callback is not None:
+            # Callback receives direction strings: "enter" or "exit".
             self._transition_manager.transition_finished.connect(transition_finished_callback)
 
         # State

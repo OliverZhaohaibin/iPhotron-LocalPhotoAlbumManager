@@ -152,7 +152,15 @@ class FilmstripView(AssetGrid):
             and not bool(current_proxy_index.data(Roles.IS_SPACER))
         ):
             candidate = current_proxy_index
-        else:
+        if candidate is None:
+            last_index = self._last_center_index
+            if (
+                last_index is not None
+                and last_index.isValid()
+                and not bool(last_index.data(Roles.IS_SPACER))
+            ):
+                candidate = last_index
+        if candidate is None:
             selection_model = self.selectionModel()
             if selection_model is not None:
                 selected = selection_model.currentIndex()

@@ -95,7 +95,6 @@ class PlaybackCoordinator(QObject):
         self._filmstrip_scroll_sync_pending = False
         self._filmstrip_model = None
         self._filmstrip_sync_attempts = 0
-        self._filmstrip_sync_attempt_limit = _FILMSTRIP_SYNC_MAX_RETRIES
         self._connect_signals()
         self._connect_zoom_controls()
         self._restore_filmstrip_preference()
@@ -374,7 +373,11 @@ class PlaybackCoordinator(QObject):
         QTimer.singleShot(0, self._apply_filmstrip_sync)
 
     def schedule_filmstrip_sync(self) -> None:
-        """Public trigger to resync the filmstrip position."""
+        """Resync filmstrip selection after layout/transition changes.
+
+        Uses the retry mechanism to wait for the filmstrip layout to stabilise,
+        which is useful after edit transitions or model resets.
+        """
         self._schedule_filmstrip_sync()
 
     def _apply_filmstrip_sync(self) -> None:
@@ -385,7 +388,7 @@ class PlaybackCoordinator(QObject):
             self._filmstrip_scroll_sync_pending = False
             self._filmstrip_sync_attempts = 0
             return
-        if self._filmstrip_sync_attempts < self._filmstrip_sync_attempt_limit:
+        if self._filmstrip_sync_attempts < _FILMSTRIP_SYNC_MAX_RETRIES:
             self._filmstrip_sync_attempts += 1
             QTimer.singleShot(_FILMSTRIP_SYNC_RETRY_DELAY_MS, self._apply_filmstrip_sync)
             return

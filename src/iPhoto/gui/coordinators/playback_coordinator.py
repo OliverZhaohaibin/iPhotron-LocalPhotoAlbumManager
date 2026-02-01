@@ -530,11 +530,10 @@ class PlaybackCoordinator(QObject):
             model = self._filmstrip_view.model()
             if model is not None and 0 <= row < model.rowCount():
                 LOGGER.debug(
-                    "Resolved filmstrip row from model count: %s -> %s.",
-                    row,
+                    "Validated filmstrip row against model count: %s.",
                     row,
                 )
-                _console_debug(f"resolved row {row} -> {row} (model)")
+                _console_debug(f"validated row {row} against model count")
                 return row
         selection_model = self._filmstrip_view.selectionModel()
         if selection_model is None:

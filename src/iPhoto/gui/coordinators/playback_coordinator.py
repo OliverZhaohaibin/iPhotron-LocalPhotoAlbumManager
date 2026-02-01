@@ -90,6 +90,8 @@ class PlaybackCoordinator(QObject):
         self._active_live_still: Optional[Path] = None
         self._resume_after_transition = False
 
+        self._filmstrip_scroll_sync_pending = False
+        self._filmstrip_model = None
         self._connect_signals()
         self._connect_zoom_controls()
         self._restore_filmstrip_preference()
@@ -155,6 +157,7 @@ class PlaybackCoordinator(QObject):
         self._filmstrip_view.prevItemRequested.connect(self.select_previous)
         self._filmstrip_view.itemClicked.connect(self._on_filmstrip_clicked)
         self._toggle_filmstrip_action.toggled.connect(self._handle_filmstrip_toggled)
+        self._attach_filmstrip_model_signals()
 
     def _connect_zoom_controls(self):
         viewer = self._player_view.image_viewer
@@ -173,11 +176,15 @@ class PlaybackCoordinator(QObject):
 
         self._filmstrip_view.setVisible(show)
         self._toggle_filmstrip_action.setChecked(show)
+        if show:
+            self._schedule_filmstrip_sync()
 
     @Slot(bool)
     def _handle_filmstrip_toggled(self, checked: bool):
         self._filmstrip_view.setVisible(checked)
         self._settings.set("ui.show_filmstrip", checked)
+        if checked:
+            self._schedule_filmstrip_sync()
 
     @Slot(QModelIndex)
     def _on_filmstrip_clicked(self, index: QModelIndex):
@@ -343,10 +350,44 @@ class PlaybackCoordinator(QObject):
             idx = model.mapFromSource(idx)
 
         if idx.isValid():
-             self._filmstrip_view.selectionModel().setCurrentIndex(
-                idx, QItemSelectionModel.ClearAndSelect
-             )
-             self._filmstrip_view.center_on_index(idx)
+            selection_model = self._filmstrip_view.selectionModel()
+            if selection_model is None:
+                return
+            if selection_model.currentIndex() != idx:
+                selection_model.setCurrentIndex(idx, QItemSelectionModel.ClearAndSelect)
+            self._filmstrip_view.center_on_index(idx)
+
+    def _schedule_filmstrip_sync(self) -> None:
+        if self._filmstrip_scroll_sync_pending:
+            return
+        if self._current_row < 0:
+            return
+        self._filmstrip_scroll_sync_pending = True
+        QTimer.singleShot(0, self._apply_filmstrip_sync)
+
+    def _apply_filmstrip_sync(self) -> None:
+        self._filmstrip_scroll_sync_pending = False
+        if self._current_row < 0:
+            return
+        self._sync_filmstrip_selection(self._current_row)
+
+    def _attach_filmstrip_model_signals(self) -> None:
+        model = self._filmstrip_view.model()
+        if model is None or model is self._filmstrip_model:
+            return
+        if self._filmstrip_model is not None:
+            try:
+                self._filmstrip_model.modelReset.disconnect(self._schedule_filmstrip_sync)
+                self._filmstrip_model.rowsInserted.disconnect(self._schedule_filmstrip_sync)
+                self._filmstrip_model.rowsRemoved.disconnect(self._schedule_filmstrip_sync)
+                self._filmstrip_model.layoutChanged.disconnect(self._schedule_filmstrip_sync)
+            except (RuntimeError, TypeError):
+                pass
+        self._filmstrip_model = model
+        model.modelReset.connect(self._schedule_filmstrip_sync)
+        model.rowsInserted.connect(self._schedule_filmstrip_sync)
+        model.rowsRemoved.connect(self._schedule_filmstrip_sync)
+        model.layoutChanged.connect(self._schedule_filmstrip_sync)
 
     def _update_favorite_icon(self, is_favorite: bool):
         icon_name = "suit.heart.fill.svg" if is_favorite else "suit.heart.svg"

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import QEvent, QModelIndex, QSize, Qt, Signal
+from PySide6.QtCore import QEvent, QModelIndex, QSize, Qt, Signal, QTimer, QPersistentModelIndex
 from PySide6.QtGui import QPalette, QResizeEvent, QWheelEvent
 from PySide6.QtWidgets import QListView, QSizePolicy, QStyleOptionViewItem
 
@@ -27,6 +27,8 @@ class FilmstripView(AssetGrid):
         self._base_height = 120
         self._spacing = 2
         self._default_ratio = 0.6
+        self._pending_center_index: QPersistentModelIndex | None = None
+        self._pending_center_scheduled = False
         icon_size = QSize(self._base_height, self._base_height)
         self.setViewMode(QListView.ViewMode.IconMode)
         self.setSelectionMode(QListView.SelectionMode.SingleSelection)
@@ -94,6 +96,12 @@ class FilmstripView(AssetGrid):
     def resizeEvent(self, event: QResizeEvent) -> None:  # type: ignore[override]
         super().resizeEvent(event)
         self.refresh_spacers()
+        if self._pending_center_index is not None and not self._pending_center_scheduled:
+            self._schedule_pending_center()
+
+    def showEvent(self, event) -> None:  # type: ignore[override]
+        super().showEvent(event)
+        self._schedule_pending_center()
 
     def refresh_spacers(self, current_proxy_index: QModelIndex | None = None) -> None:
         """Recalculate spacer padding and optionally use the provided index.
@@ -263,15 +271,46 @@ class FilmstripView(AssetGrid):
         if not index.isValid():
             return
 
+        if not self.isVisible():
+            self._defer_center_on_index(index)
+            return
+
         item_rect = self.visualRect(index)
-        if not item_rect.isValid():
+        if not item_rect.isValid() or item_rect.width() <= 0 or item_rect.height() <= 0:
+            self._defer_center_on_index(index)
             return
 
         viewport_width = self.viewport().width()
         if viewport_width <= 0:
+            self._defer_center_on_index(index)
             return
 
         target_left = (viewport_width - item_rect.width()) / 2.0
         scroll_delta = item_rect.left() - target_left
         scrollbar = self.horizontalScrollBar()
         scrollbar.setValue(scrollbar.value() + int(scroll_delta))
+
+    def _defer_center_on_index(self, index: QModelIndex) -> None:
+        if not index.isValid():
+            return
+        self._pending_center_index = QPersistentModelIndex(index)
+        if self.isVisible() and not self._pending_center_scheduled:
+            self._schedule_pending_center()
+
+    def _schedule_pending_center(self) -> None:
+        if self._pending_center_scheduled:
+            return
+        self._pending_center_scheduled = True
+        QTimer.singleShot(0, self._apply_pending_center)
+
+    def _apply_pending_center(self) -> None:
+        self._pending_center_scheduled = False
+        index = self._pending_center_index
+        self._pending_center_index = None
+        if index is None or not index.isValid():
+            selection_model = self.selectionModel()
+            if selection_model is None:
+                return
+            index = selection_model.currentIndex()
+        if index is not None and index.isValid():
+            self.center_on_index(index)

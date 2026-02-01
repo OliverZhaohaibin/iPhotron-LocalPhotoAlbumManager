@@ -414,13 +414,27 @@ class PlaybackCoordinator(QObject):
         which is useful after edit transitions or model resets.
         """
         if not self._can_sync_filmstrip():
+            selection_model = self._filmstrip_view.selectionModel()
+            selection_index = (
+                selection_model.currentIndex() if selection_model is not None else None
+            )
+            model = self._filmstrip_view.model()
             LOGGER.debug(
                 "Filmstrip sync skipped (pending=%s, current_row=%s).",
                 self._filmstrip_scroll_sync_pending,
                 self._current_row,
             )
             _console_debug(
-                f"sync skipped pending={self._filmstrip_scroll_sync_pending} current_row={self._current_row}"
+                "sync skipped pending=%s current_row=%s last_row=%s selection=%s "
+                "asset_rows=%s model_rows=%s"
+                % (
+                    self._filmstrip_scroll_sync_pending,
+                    self._current_row,
+                    self._last_filmstrip_row,
+                    self._describe_index(selection_index),
+                    self._asset_vm.rowCount(),
+                    model.rowCount() if model is not None else None,
+                )
             )
             return
         self._filmstrip_sync_attempts = 0
@@ -539,6 +553,21 @@ class PlaybackCoordinator(QObject):
         if model is not None and hasattr(model, "mapToSource"):
             return model.mapToSource(index)
         return index
+
+    @staticmethod
+    def _describe_index(index) -> str:
+        if index is None:
+            return "none"
+        try:
+            valid = index.isValid()
+        except Exception:
+            return "unavailable"
+        if not valid:
+            return "invalid"
+        try:
+            return f"row={index.row()}"
+        except Exception:
+            return "valid"
 
     def _resolve_valid_row(self, row: int) -> int:
         """Resolve a valid source row from the current filmstrip selection.

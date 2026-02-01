@@ -168,8 +168,12 @@ class FilmstripView(AssetGrid):
                     candidate = selected
         if candidate is not None:
             _console_debug(
-                f"spacing center candidate row={candidate.row()} "
-                f"last_center={self._last_center_index} current={current_proxy_index}"
+                "spacing center candidate row=%s last_center=%s current=%s"
+                % (
+                    candidate.row(),
+                    self._describe_index(self._last_center_index),
+                    self._describe_index(current_proxy_index),
+                )
             )
             self._defer_center_on_index(candidate)
 
@@ -383,3 +387,11 @@ class FilmstripView(AssetGrid):
             return None
         index = selection_model.currentIndex()
         return index if index.isValid() else None
+
+    @staticmethod
+    def _describe_index(index) -> str:
+        if index is None:
+            return "none"
+        if not index.isValid():
+            return "invalid"
+        return f"row={index.row()}"

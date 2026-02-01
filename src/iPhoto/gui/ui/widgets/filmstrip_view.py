@@ -15,6 +15,10 @@ from ..styles import modern_scrollbar_style
 logger = logging.getLogger(__name__)
 
 
+def _console_debug(message: str) -> None:
+    print(f"[FilmstripView] {message}")
+
+
 class FilmstripView(AssetGrid):
     """Horizontal filmstrip configured for quick navigation."""
 
@@ -296,18 +300,21 @@ class FilmstripView(AssetGrid):
         self._last_center_index = QPersistentModelIndex(index)
         if not self.isVisible():
             logger.debug("Filmstrip defer center: view hidden (row=%s).", index.row())
+            _console_debug(f"defer center: hidden view (row={index.row()})")
             self._defer_center_on_index(index)
             return
 
         item_rect = self.visualRect(index)
         if not item_rect.isValid() or item_rect.width() <= 0 or item_rect.height() <= 0:
             logger.debug("Filmstrip defer center: invalid rect (row=%s, rect=%s).", index.row(), item_rect)
+            _console_debug(f"defer center: invalid rect (row={index.row()}, rect={item_rect})")
             self._defer_center_on_index(index)
             return
 
         viewport_width = self.viewport().width()
         if viewport_width <= 0:
             logger.debug("Filmstrip defer center: empty viewport (row=%s).", index.row())
+            _console_debug(f"defer center: empty viewport (row={index.row()})")
             self._defer_center_on_index(index)
             return
 
@@ -316,6 +323,7 @@ class FilmstripView(AssetGrid):
         scrollbar = self.horizontalScrollBar()
         scrollbar.setValue(scrollbar.value() + int(scroll_delta))
         logger.debug("Filmstrip centered row %s (scroll=%s).", index.row(), scrollbar.value())
+        _console_debug(f"centered row={index.row()} scroll={scrollbar.value()}")
 
     def _defer_center_on_index(self, index: QModelIndex) -> None:
         if not index.isValid():
@@ -341,6 +349,7 @@ class FilmstripView(AssetGrid):
         self._pending_center_index = None
         if index is not None:
             logger.debug("Applying pending filmstrip center (row=%s).", index.row())
+            _console_debug(f"apply pending center row={index.row()}")
             self.center_on_index(index)
 
     def _resolve_pending_center_index(self) -> QModelIndex | None:

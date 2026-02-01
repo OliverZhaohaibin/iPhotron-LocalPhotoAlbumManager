@@ -34,6 +34,10 @@ FILMSTRIP_SYNC_RETRY_DELAY_MS = 50
 # these can be tuned, but the defaults balance responsiveness and stability.
 
 
+def _console_debug(message: str) -> None:
+    print(f"[PlaybackCoordinator] {message}")
+
+
 class PlaybackCoordinator(QObject):
     """
     Manages playback state, the PlayerBar, and interactions within the Detail View.
@@ -266,6 +270,9 @@ class PlaybackCoordinator(QObject):
                 row,
                 self._filmstrip_view.isVisible(),
             )
+            _console_debug(
+                f"sync not applied row={row} view_visible={self._filmstrip_view.isVisible()}"
+            )
 
         idx = self._asset_vm.index(row, 0)
         abs_path = self._asset_vm.data(idx, Roles.ABS)
@@ -361,6 +368,7 @@ class PlaybackCoordinator(QObject):
         idx = self._asset_vm.index(row, 0)
         if not idx.isValid():
             LOGGER.debug("Filmstrip sync failed: invalid source index for row %s.", row)
+            _console_debug(f"sync failed: invalid source index row={row}")
             return False
 
         # Handle Proxy Model (if present)
@@ -370,11 +378,13 @@ class PlaybackCoordinator(QObject):
 
         if not idx.isValid():
             LOGGER.debug("Filmstrip sync failed: invalid proxy index for row %s.", row)
+            _console_debug(f"sync failed: invalid proxy index row={row}")
             return False
 
         selection_model = self._filmstrip_view.selectionModel()
         if selection_model is None:
             LOGGER.debug("Filmstrip sync failed: selection model unavailable (row %s).", row)
+            _console_debug(f"sync failed: no selection model row={row}")
             return False
         if selection_model.currentIndex() != idx:
             selection_model.setCurrentIndex(idx, QItemSelectionModel.ClearAndSelect)
@@ -393,21 +403,27 @@ class PlaybackCoordinator(QObject):
                 self._filmstrip_scroll_sync_pending,
                 self._current_row,
             )
+            _console_debug(
+                f"sync skipped pending={self._filmstrip_scroll_sync_pending} current_row={self._current_row}"
+            )
             return
         self._filmstrip_sync_attempts = 0
         self._filmstrip_scroll_sync_pending = True
         LOGGER.debug("Filmstrip sync scheduled for row %s.", self._current_row)
+        _console_debug(f"sync scheduled row={self._current_row}")
         QTimer.singleShot(0, self._apply_filmstrip_sync)
 
     def _apply_filmstrip_sync(self) -> None:
         if self._current_row < 0:
             self._filmstrip_scroll_sync_pending = False
             LOGGER.debug("Filmstrip sync aborted: no current row.")
+            _console_debug("sync aborted: no current row")
             return
         if self._sync_filmstrip_selection(self._current_row):
             self._filmstrip_scroll_sync_pending = False
             self._filmstrip_sync_attempts = 0
             LOGGER.debug("Filmstrip sync applied for row %s.", self._current_row)
+            _console_debug(f"sync applied row={self._current_row}")
             return
         if self._filmstrip_sync_attempts < FILMSTRIP_SYNC_MAX_RETRIES:
             self._filmstrip_sync_attempts += 1
@@ -416,11 +432,15 @@ class PlaybackCoordinator(QObject):
                 self._filmstrip_sync_attempts,
                 FILMSTRIP_SYNC_MAX_RETRIES,
             )
+            _console_debug(
+                f"sync retry {self._filmstrip_sync_attempts}/{FILMSTRIP_SYNC_MAX_RETRIES}"
+            )
             QTimer.singleShot(FILMSTRIP_SYNC_RETRY_DELAY_MS, self._apply_filmstrip_sync)
             return
         self._filmstrip_scroll_sync_pending = False
         self._filmstrip_sync_attempts = 0
         LOGGER.debug("Filmstrip sync abandoned after max retries.")
+        _console_debug("sync abandoned after max retries")
 
     def _attach_filmstrip_model_signals(self) -> None:
         model = self._filmstrip_view.model()

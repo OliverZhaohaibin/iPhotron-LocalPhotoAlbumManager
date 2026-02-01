@@ -155,26 +155,69 @@ def test_resolve_valid_row_from_selection(monkeypatch, qapp):
         def row(self):
             return self._row_value
 
-    class DummySelectionModel:
+    class MockSelectionModel:
         def currentIndex(self):
             return MockIndex(valid=True, row_value=0)
 
-    class DummyModel:
+    class MockProxyModel:
         def mapToSource(self, proxy_index):
             return MockIndex(valid=True, row_value=2)
 
-    class DummyFilmstrip:
+    class MockFilmstripView:
         def selectionModel(self):
-            return DummySelectionModel()
+            return MockSelectionModel()
 
         def model(self):
-            return DummyModel()
+            return MockProxyModel()
 
-    class DummyAssetVM:
+    class MockAssetViewModel:
         def rowCount(self):
             return 5
 
-    playback._filmstrip_view = DummyFilmstrip()
-    playback._asset_vm = DummyAssetVM()
+    playback._filmstrip_view = MockFilmstripView()
+    playback._asset_vm = MockAssetViewModel()
 
     assert playback._resolve_valid_row(-1) == 2
+
+
+def test_resolve_valid_row_keeps_valid(monkeypatch, qapp):
+    playback = _make_playback()
+
+    class MockAssetViewModel:
+        def rowCount(self):
+            return 3
+
+    playback._asset_vm = MockAssetViewModel()
+
+    assert playback._resolve_valid_row(1) == 1
+
+
+def test_resolve_valid_row_invalid_selection(monkeypatch, qapp):
+    playback = _make_playback()
+
+    class MockIndex:
+        def __init__(self, valid):
+            self._valid = valid
+
+        def isValid(self):
+            return self._valid
+
+    class MockSelectionModel:
+        def currentIndex(self):
+            return MockIndex(valid=False)
+
+    class MockFilmstripView:
+        def selectionModel(self):
+            return MockSelectionModel()
+
+        def model(self):
+            return None
+
+    class MockAssetViewModel:
+        def rowCount(self):
+            return 0
+
+    playback._filmstrip_view = MockFilmstripView()
+    playback._asset_vm = MockAssetViewModel()
+
+    assert playback._resolve_valid_row(-1) == -1

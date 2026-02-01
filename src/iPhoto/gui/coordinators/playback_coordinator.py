@@ -397,14 +397,6 @@ class PlaybackCoordinator(QObject):
         if selection_model.currentIndex() != idx:
             selection_model.setCurrentIndex(idx, QItemSelectionModel.ClearAndSelect)
         self._filmstrip_view.center_on_index(idx)
-        if resolved_row != self._current_row:
-            previous_row = self._current_row
-            LOGGER.debug(
-                "Filmstrip sync resolved row %s -> %s.",
-                previous_row,
-                resolved_row,
-            )
-            _console_debug(f"sync resolved row={previous_row}->{resolved_row}")
         return True
 
     def schedule_filmstrip_sync(self) -> None:

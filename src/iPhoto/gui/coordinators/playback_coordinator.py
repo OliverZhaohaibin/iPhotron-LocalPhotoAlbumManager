@@ -27,6 +27,8 @@ if TYPE_CHECKING:
     from PySide6.QtWidgets import QPushButton, QSlider, QToolButton, QWidget
 
 LOGGER = logging.getLogger(__name__)
+_FILMSTRIP_SYNC_MAX_RETRIES = 4
+_FILMSTRIP_SYNC_RETRY_DELAY_MS = 50
 
 
 class PlaybackCoordinator(QObject):
@@ -93,7 +95,7 @@ class PlaybackCoordinator(QObject):
         self._filmstrip_scroll_sync_pending = False
         self._filmstrip_model = None
         self._filmstrip_sync_attempts = 0
-        self._filmstrip_sync_attempt_limit = 4
+        self._filmstrip_sync_attempt_limit = _FILMSTRIP_SYNC_MAX_RETRIES
         self._connect_signals()
         self._connect_zoom_controls()
         self._restore_filmstrip_preference()
@@ -385,7 +387,7 @@ class PlaybackCoordinator(QObject):
             return
         if self._filmstrip_sync_attempts < self._filmstrip_sync_attempt_limit:
             self._filmstrip_sync_attempts += 1
-            QTimer.singleShot(50, self._apply_filmstrip_sync)
+            QTimer.singleShot(_FILMSTRIP_SYNC_RETRY_DELAY_MS, self._apply_filmstrip_sync)
             return
         self._filmstrip_scroll_sync_pending = False
         self._filmstrip_sync_attempts = 0

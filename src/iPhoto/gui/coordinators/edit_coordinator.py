@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional
+from collections.abc import Callable
 
 from PySide6.QtCore import QObject, Slot, QSize, QTimer
 from PySide6.QtGui import QImage
@@ -46,7 +47,7 @@ class EditCoordinator(QObject):
         asset_vm: AssetListViewModel,
         window: QObject | None = None,
         theme_controller: WindowThemeController | None = None,
-        transition_finished_callback: callable | None = None,
+        transition_finished_callback: Callable[[str], None] | None = None,
     ):
         super().__init__()
         # We need access to specific UI elements within edit_page (which is likely MainWindow.ui)

@@ -27,8 +27,8 @@ if TYPE_CHECKING:
     from PySide6.QtWidgets import QPushButton, QSlider, QToolButton, QWidget
 
 LOGGER = logging.getLogger(__name__)
-_FILMSTRIP_SYNC_MAX_RETRIES = 4
-_FILMSTRIP_SYNC_RETRY_DELAY_MS = 50
+FILMSTRIP_SYNC_MAX_RETRIES = 4
+FILMSTRIP_SYNC_RETRY_DELAY_MS = 50
 
 
 class PlaybackCoordinator(QObject):
@@ -180,14 +180,14 @@ class PlaybackCoordinator(QObject):
         self._filmstrip_view.setVisible(show)
         self._toggle_filmstrip_action.setChecked(show)
         if show:
-            self._schedule_filmstrip_sync()
+            self.schedule_filmstrip_sync()
 
     @Slot(bool)
     def _handle_filmstrip_toggled(self, checked: bool):
         self._filmstrip_view.setVisible(checked)
         self._settings.set("ui.show_filmstrip", checked)
         if checked:
-            self._schedule_filmstrip_sync()
+            self.schedule_filmstrip_sync()
 
     @Slot(QModelIndex)
     def _on_filmstrip_clicked(self, index: QModelIndex):
@@ -369,20 +369,17 @@ class PlaybackCoordinator(QObject):
         self._filmstrip_view.center_on_index(idx)
         return True
 
-    def _schedule_filmstrip_sync(self) -> None:
-        if not self._can_sync_filmstrip():
-            return
-        self._filmstrip_sync_attempts = 0
-        self._filmstrip_scroll_sync_pending = True
-        QTimer.singleShot(0, self._apply_filmstrip_sync)
-
     def schedule_filmstrip_sync(self) -> None:
         """Resync filmstrip selection after layout/transition changes.
 
         Uses the retry mechanism to wait for the filmstrip layout to stabilize,
         which is useful after edit transitions or model resets.
         """
-        self._schedule_filmstrip_sync()
+        if not self._can_sync_filmstrip():
+            return
+        self._filmstrip_sync_attempts = 0
+        self._filmstrip_scroll_sync_pending = True
+        QTimer.singleShot(0, self._apply_filmstrip_sync)
 
     def _apply_filmstrip_sync(self) -> None:
         if self._current_row < 0:
@@ -392,9 +389,9 @@ class PlaybackCoordinator(QObject):
             self._filmstrip_scroll_sync_pending = False
             self._filmstrip_sync_attempts = 0
             return
-        if self._filmstrip_sync_attempts < _FILMSTRIP_SYNC_MAX_RETRIES:
+        if self._filmstrip_sync_attempts < FILMSTRIP_SYNC_MAX_RETRIES:
             self._filmstrip_sync_attempts += 1
-            QTimer.singleShot(_FILMSTRIP_SYNC_RETRY_DELAY_MS, self._apply_filmstrip_sync)
+            QTimer.singleShot(FILMSTRIP_SYNC_RETRY_DELAY_MS, self._apply_filmstrip_sync)
             return
         self._filmstrip_scroll_sync_pending = False
         self._filmstrip_sync_attempts = 0
@@ -405,17 +402,17 @@ class PlaybackCoordinator(QObject):
             return
         if self._filmstrip_model is not None:
             try:
-                self._filmstrip_model.modelReset.disconnect(self._schedule_filmstrip_sync)
-                self._filmstrip_model.rowsInserted.disconnect(self._schedule_filmstrip_sync)
-                self._filmstrip_model.rowsRemoved.disconnect(self._schedule_filmstrip_sync)
-                self._filmstrip_model.layoutChanged.disconnect(self._schedule_filmstrip_sync)
+                self._filmstrip_model.modelReset.disconnect(self.schedule_filmstrip_sync)
+                self._filmstrip_model.rowsInserted.disconnect(self.schedule_filmstrip_sync)
+                self._filmstrip_model.rowsRemoved.disconnect(self.schedule_filmstrip_sync)
+                self._filmstrip_model.layoutChanged.disconnect(self.schedule_filmstrip_sync)
             except (RuntimeError, TypeError) as exc:
                 LOGGER.debug("Filmstrip model disconnect skipped: %s", exc)
         self._filmstrip_model = model
-        model.modelReset.connect(self._schedule_filmstrip_sync)
-        model.rowsInserted.connect(self._schedule_filmstrip_sync)
-        model.rowsRemoved.connect(self._schedule_filmstrip_sync)
-        model.layoutChanged.connect(self._schedule_filmstrip_sync)
+        model.modelReset.connect(self.schedule_filmstrip_sync)
+        model.rowsInserted.connect(self.schedule_filmstrip_sync)
+        model.rowsRemoved.connect(self.schedule_filmstrip_sync)
+        model.layoutChanged.connect(self.schedule_filmstrip_sync)
 
     def _can_sync_filmstrip(self) -> bool:
         if self._filmstrip_scroll_sync_pending:

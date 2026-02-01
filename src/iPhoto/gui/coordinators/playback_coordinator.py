@@ -33,6 +33,7 @@ FILMSTRIP_SYNC_MAX_RETRIES = 4
 FILMSTRIP_SYNC_RETRY_DELAY_MS = 50
 # Align recheck with edit transition duration (~250ms).
 FILMSTRIP_RECHECK_DELAY_MS = 300
+FILMSTRIP_RECHECK_MAX_RETRIES = 3
 # Retry values keep the filmstrip centered after edit transitions without
 # visibly delaying UI updates. If larger albums or slower machines regress,
 # these can be tuned, but the defaults balance responsiveness and stability.
@@ -107,6 +108,7 @@ class PlaybackCoordinator(QObject):
         self._filmstrip_model = None
         self._filmstrip_sync_attempts = 0
         self._filmstrip_recheck_pending = False
+        self._filmstrip_recheck_attempts = 0
         self._last_filmstrip_row: int | None = None
         self._connect_signals()
         self._connect_zoom_controls()
@@ -458,6 +460,7 @@ class PlaybackCoordinator(QObject):
     def _schedule_filmstrip_recheck(self) -> None:
         if self._filmstrip_recheck_pending:
             return
+        self._filmstrip_recheck_attempts = 0
         self._filmstrip_recheck_pending = True
         LOGGER.debug("Filmstrip recheck scheduled for row %s.", self._current_row)
         _console_debug(f"recheck scheduled row={self._current_row}")
@@ -467,14 +470,32 @@ class PlaybackCoordinator(QObject):
         self._filmstrip_recheck_pending = False
         resolved_row = self._resolve_valid_row(self._current_row)
         if resolved_row < 0:
+            if self._filmstrip_recheck_attempts < FILMSTRIP_RECHECK_MAX_RETRIES:
+                self._filmstrip_recheck_attempts += 1
+                self._filmstrip_recheck_pending = True
+                LOGGER.debug(
+                    "Filmstrip recheck retry %s/%s scheduled.",
+                    self._filmstrip_recheck_attempts,
+                    FILMSTRIP_RECHECK_MAX_RETRIES,
+                )
+                _console_debug(
+                    f"recheck retry {self._filmstrip_recheck_attempts}/{FILMSTRIP_RECHECK_MAX_RETRIES}"
+                )
+                QTimer.singleShot(
+                    FILMSTRIP_RECHECK_DELAY_MS,
+                    self._apply_filmstrip_recheck,
+                )
+                return
             return
         if self._sync_filmstrip_selection(resolved_row):
             self._update_current_row(resolved_row, sync_context="recheck")
             LOGGER.debug("Filmstrip recheck applied for row %s.", resolved_row)
             _console_debug(f"recheck applied row={resolved_row}")
+            self._filmstrip_recheck_attempts = 0
         else:
             LOGGER.debug("Filmstrip recheck skipped for row %s.", resolved_row)
             _console_debug(f"recheck skipped row={resolved_row}")
+            self._filmstrip_recheck_attempts = 0
 
     def _update_current_row(self, resolved_row: int, *, sync_context: str) -> None:
         """Update the stored current row for a sync/recheck operation."""

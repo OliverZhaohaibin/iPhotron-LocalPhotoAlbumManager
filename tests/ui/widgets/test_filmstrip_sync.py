@@ -4,6 +4,7 @@ from PySide6.QtWidgets import QApplication
 import pytest
 
 from src.iPhoto.gui.coordinators.playback_coordinator import (
+    FILMSTRIP_RECHECK_MAX_RETRIES,
     FILMSTRIP_RECHECK_DELAY_MS,
     FILMSTRIP_SYNC_MAX_RETRIES,
     FILMSTRIP_SYNC_RETRY_DELAY_MS,
@@ -186,16 +187,66 @@ def test_filmstrip_recheck_applies(monkeypatch, qapp):
     assert calls == [4]
 
 
-def test_filmstrip_recheck_ignored_when_no_row(monkeypatch, qapp):
+def test_filmstrip_recheck_retries_on_invalid_row(monkeypatch, qapp):
     playback = _make_playback()
     playback._current_row = -1
     playback._filmstrip_recheck_pending = True
-    playback._sync_filmstrip_selection = lambda row: True
+    playback._filmstrip_recheck_attempts = 0
     playback._resolve_valid_row = lambda row: -1
+    scheduled = []
+
+    def _fake_single_shot(delay, callback):
+        scheduled.append((delay, callback))
+
+    monkeypatch.setattr(QTimer, "singleShot", staticmethod(_fake_single_shot))
+
+    playback._apply_filmstrip_recheck()
+
+    assert playback._filmstrip_recheck_pending is True
+    assert playback._filmstrip_recheck_attempts == 1
+    assert scheduled[0][0] == FILMSTRIP_RECHECK_DELAY_MS
+
+
+def test_filmstrip_recheck_stops_after_max(monkeypatch, qapp):
+    playback = _make_playback()
+    playback._current_row = -1
+    playback._filmstrip_recheck_pending = True
+    playback._filmstrip_recheck_attempts = FILMSTRIP_RECHECK_MAX_RETRIES
+    playback._resolve_valid_row = lambda row: -1
+    scheduled = []
+
+    def _fake_single_shot(delay, callback):
+        scheduled.append((delay, callback))
+
+    monkeypatch.setattr(QTimer, "singleShot", staticmethod(_fake_single_shot))
 
     playback._apply_filmstrip_recheck()
 
     assert playback._filmstrip_recheck_pending is False
+    assert playback._filmstrip_recheck_attempts == FILMSTRIP_RECHECK_MAX_RETRIES
+    assert scheduled == []
+
+
+def test_filmstrip_recheck_retries_when_no_row(monkeypatch, qapp):
+    playback = _make_playback()
+    playback._current_row = -1
+    playback._filmstrip_recheck_pending = True
+    playback._filmstrip_recheck_attempts = 0
+    playback._sync_filmstrip_selection = lambda row: True
+    playback._resolve_valid_row = lambda row: -1
+
+    scheduled = []
+
+    def _fake_single_shot(delay, callback):
+        scheduled.append((delay, callback))
+
+    monkeypatch.setattr(QTimer, "singleShot", staticmethod(_fake_single_shot))
+
+    playback._apply_filmstrip_recheck()
+
+    assert playback._filmstrip_recheck_pending is True
+    assert playback._filmstrip_recheck_attempts == 1
+    assert scheduled[0][0] == FILMSTRIP_RECHECK_DELAY_MS
 
 
 def test_resolve_row_uses_selection_fallback(qapp):

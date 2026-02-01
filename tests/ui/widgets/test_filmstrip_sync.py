@@ -72,7 +72,7 @@ class MockAssetViewModel:
         return self._count
 
 
-class MockNoneSelectionModel:
+class MockInvalidSelectionModel:
     def currentIndex(self):
         return MockIndex(valid=False)
 
@@ -235,7 +235,7 @@ def test_resolve_row_falls_back_to_last_known(qapp):
     playback = _make_playback()
     playback._last_filmstrip_row = 1
     playback._filmstrip_view = MockFilmstripView(
-        MockNoneSelectionModel(),
+        MockInvalidSelectionModel(),
         None,
     )
     playback._asset_vm = MockAssetViewModel(3)

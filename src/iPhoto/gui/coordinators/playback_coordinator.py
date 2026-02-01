@@ -431,10 +431,7 @@ class PlaybackCoordinator(QObject):
         if self._sync_filmstrip_selection(resolved_row):
             self._filmstrip_scroll_sync_pending = False
             self._filmstrip_sync_attempts = 0
-            if resolved_row != self._current_row:
-                self._current_row = resolved_row
-                LOGGER.debug("Filmstrip sync updated current row to %s.", resolved_row)
-                _console_debug(f"sync updated current row={resolved_row}")
+            self._update_current_row(resolved_row, context="sync")
             LOGGER.debug("Filmstrip sync applied for row %s.", resolved_row)
             _console_debug(f"sync applied row={resolved_row}")
             self._schedule_filmstrip_recheck()
@@ -470,24 +467,36 @@ class PlaybackCoordinator(QObject):
         if resolved_row < 0:
             return
         if self._sync_filmstrip_selection(resolved_row):
-            if resolved_row != self._current_row:
-                self._current_row = resolved_row
-                LOGGER.debug("Filmstrip recheck updated current row to %s.", resolved_row)
-                _console_debug(f"recheck updated current row={resolved_row}")
+            self._update_current_row(resolved_row, context="recheck")
             LOGGER.debug("Filmstrip recheck applied for row %s.", resolved_row)
             _console_debug(f"recheck applied row={resolved_row}")
         else:
             LOGGER.debug("Filmstrip recheck skipped for row %s.", resolved_row)
             _console_debug(f"recheck skipped row={resolved_row}")
 
+    def _update_current_row(self, resolved_row: int, *, context: str) -> None:
+        if resolved_row == self._current_row:
+            return
+        self._current_row = resolved_row
+        LOGGER.debug(
+            "Filmstrip %s updated current row to %s.",
+            context,
+            resolved_row,
+        )
+        _console_debug(f"{context} updated current row={resolved_row}")
+
     def _resolve_valid_row(self, row: int) -> int:
         if 0 <= row < self._asset_vm.rowCount():
             return row
         selection_model = self._filmstrip_view.selectionModel()
         if selection_model is None:
+            LOGGER.debug("Failed to resolve filmstrip row: no selection model.")
+            _console_debug("resolve row failed: no selection model")
             return -1
         proxy_index = selection_model.currentIndex()
         if not proxy_index.isValid():
+            LOGGER.debug("Failed to resolve filmstrip row: invalid selection index.")
+            _console_debug("resolve row failed: invalid selection index")
             return -1
         model = self._filmstrip_view.model()
         if hasattr(model, "mapToSource"):
@@ -495,12 +504,19 @@ class PlaybackCoordinator(QObject):
         else:
             source_index = proxy_index
         if not source_index.isValid():
+            LOGGER.debug("Failed to resolve filmstrip row: invalid source index.")
+            _console_debug("resolve row failed: invalid source index")
             return -1
         resolved_row = source_index.row()
         if 0 <= resolved_row < self._asset_vm.rowCount():
             LOGGER.debug("Resolved filmstrip row from selection: %s -> %s.", row, resolved_row)
             _console_debug(f"resolved row {row} -> {resolved_row}")
             return resolved_row
+        LOGGER.debug(
+            "Failed to resolve filmstrip row: out of range (%s).",
+            resolved_row,
+        )
+        _console_debug(f"resolve row failed: out of range ({resolved_row})")
         return -1
 
     def _attach_filmstrip_model_signals(self) -> None:

@@ -20,6 +20,10 @@ def qapp():
     yield app
 
 
+def _identity_row(row: int) -> int:
+    return row
+
+
 def _build_filmstrip() -> tuple[FilmstripView, QStandardItemModel]:
     view = FilmstripView()
     model = QStandardItemModel()
@@ -58,7 +62,7 @@ def _make_playback() -> PlaybackCoordinator:
 
 def test_filmstrip_sync_retries(monkeypatch, qapp):
     playback = _make_playback()
-    playback._resolve_valid_row = lambda row: row
+    playback._resolve_valid_row = _identity_row
     scheduled = []
 
     def _fake_single_shot(delay, callback):
@@ -76,7 +80,7 @@ def test_filmstrip_sync_retries(monkeypatch, qapp):
 
 def test_filmstrip_sync_retry_limit(monkeypatch, qapp):
     playback = _make_playback()
-    playback._resolve_valid_row = lambda row: row
+    playback._resolve_valid_row = _identity_row
     playback._filmstrip_sync_attempts = FILMSTRIP_SYNC_MAX_RETRIES
     scheduled = []
 
@@ -114,7 +118,7 @@ def test_filmstrip_recheck_applies(monkeypatch, qapp):
     playback = _make_playback()
     playback._current_row = 4
     playback._filmstrip_recheck_pending = True
-    playback._resolve_valid_row = lambda row: row
+    playback._resolve_valid_row = _identity_row
     calls = []
 
     def _fake_sync(row):

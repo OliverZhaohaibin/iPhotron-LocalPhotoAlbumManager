@@ -41,6 +41,7 @@ class FilmstripView(AssetGrid):
         self._pending_center_index: QPersistentModelIndex | None = None
         self._pending_center_scheduled = False
         self._last_center_index: QPersistentModelIndex | None = None
+        self._last_center_row: int | None = None
         icon_size = QSize(self._base_height, self._base_height)
         self.setViewMode(QListView.ViewMode.IconMode)
         self.setSelectionMode(QListView.SelectionMode.SingleSelection)
@@ -160,6 +161,12 @@ class FilmstripView(AssetGrid):
                 and not bool(last_index.data(Roles.IS_SPACER))
             ):
                 candidate = last_index
+        if candidate is None and self._last_center_row is not None:
+            model = self.model()
+            if model is not None and 0 <= self._last_center_row < model.rowCount():
+                row_index = model.index(self._last_center_row, 0)
+                if row_index.isValid() and not bool(row_index.data(Roles.IS_SPACER)):
+                    candidate = row_index
         if candidate is None:
             selection_model = self.selectionModel()
             if selection_model is not None:
@@ -317,6 +324,7 @@ class FilmstripView(AssetGrid):
             return
 
         self._last_center_index = QPersistentModelIndex(index)
+        self._last_center_row = index.row()
         if not self.isVisible():
             logger.debug("Filmstrip defer center: view hidden (row=%s).", index.row())
             _console_debug(f"defer center: hidden view (row={index.row()})")
@@ -382,6 +390,12 @@ class FilmstripView(AssetGrid):
         for candidate in (self._pending_center_index, self._last_center_index):
             if candidate is not None and candidate.isValid():
                 return candidate
+        if self._last_center_row is not None:
+            model = self.model()
+            if model is not None and 0 <= self._last_center_row < model.rowCount():
+                row_index = model.index(self._last_center_row, 0)
+                if row_index.isValid():
+                    return row_index
         selection_model = self.selectionModel()
         if selection_model is None:
             return None

@@ -110,6 +110,7 @@ class PlaybackCoordinator(QObject):
         self._filmstrip_recheck_pending = False
         self._filmstrip_recheck_attempts = 0
         self._last_filmstrip_row: int | None = None
+        self._last_center_row: int | None = None
         self._connect_signals()
         self._connect_zoom_controls()
         self._restore_filmstrip_preference()
@@ -576,6 +577,12 @@ class PlaybackCoordinator(QObject):
         from the current filmstrip selection and returns -1 when that fails.
         """
         asset_count = self._asset_vm.rowCount()
+        if self._last_center_row is not None:
+            last_center = self._last_center_row
+            if 0 <= last_center < asset_count:
+                LOGGER.debug("Resolved filmstrip row from last center: %s -> %s.", row, last_center)
+                _console_debug(f"resolved row {row} -> {last_center} (last center)")
+                return last_center
         if 0 <= row < asset_count:
             return row
         model = self._filmstrip_view.model()

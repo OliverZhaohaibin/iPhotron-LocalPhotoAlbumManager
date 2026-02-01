@@ -399,13 +399,12 @@ class PlaybackCoordinator(QObject):
         self._filmstrip_view.center_on_index(idx)
         if resolved_row != self._current_row:
             previous_row = self._current_row
-            self._current_row = resolved_row
             LOGGER.debug(
-                "Filmstrip sync updated current row from %s to %s.",
+                "Filmstrip sync resolved row %s -> %s.",
                 previous_row,
                 resolved_row,
             )
-            _console_debug(f"sync updated current row={previous_row}->{resolved_row}")
+            _console_debug(f"sync resolved row={previous_row}->{resolved_row}")
         return True
 
     def schedule_filmstrip_sync(self) -> None:
@@ -440,8 +439,12 @@ class PlaybackCoordinator(QObject):
         if self._sync_filmstrip_selection(resolved_row):
             self._filmstrip_scroll_sync_pending = False
             self._filmstrip_sync_attempts = 0
-            LOGGER.debug("Filmstrip sync applied for row %s.", self._current_row)
-            _console_debug(f"sync applied row={self._current_row}")
+            if resolved_row != self._current_row:
+                self._current_row = resolved_row
+                LOGGER.debug("Filmstrip sync updated current row to %s.", resolved_row)
+                _console_debug(f"sync updated current row={resolved_row}")
+            LOGGER.debug("Filmstrip sync applied for row %s.", resolved_row)
+            _console_debug(f"sync applied row={resolved_row}")
             self._schedule_filmstrip_recheck()
             return
         if self._filmstrip_sync_attempts < FILMSTRIP_SYNC_MAX_RETRIES:
@@ -475,11 +478,15 @@ class PlaybackCoordinator(QObject):
         if resolved_row < 0:
             return
         if self._sync_filmstrip_selection(resolved_row):
-            LOGGER.debug("Filmstrip recheck applied for row %s.", self._current_row)
-            _console_debug(f"recheck applied row={self._current_row}")
+            if resolved_row != self._current_row:
+                self._current_row = resolved_row
+                LOGGER.debug("Filmstrip recheck updated current row to %s.", resolved_row)
+                _console_debug(f"recheck updated current row={resolved_row}")
+            LOGGER.debug("Filmstrip recheck applied for row %s.", resolved_row)
+            _console_debug(f"recheck applied row={resolved_row}")
         else:
-            LOGGER.debug("Filmstrip recheck skipped for row %s.", self._current_row)
-            _console_debug(f"recheck skipped row={self._current_row}")
+            LOGGER.debug("Filmstrip recheck skipped for row %s.", resolved_row)
+            _console_debug(f"recheck skipped row={resolved_row}")
 
     def _resolve_valid_row(self, row: int) -> int:
         if 0 <= row < self._asset_vm.rowCount():

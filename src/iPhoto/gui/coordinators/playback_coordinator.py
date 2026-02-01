@@ -347,6 +347,7 @@ class PlaybackCoordinator(QObject):
         """Update filmstrip selection and scroll to the item.
 
         Returns ``True`` when the filmstrip was able to apply the selection.
+        This is an internal helper used by the retry sync logic.
         """
         idx = self._asset_vm.index(row, 0)
         if not idx.isValid():

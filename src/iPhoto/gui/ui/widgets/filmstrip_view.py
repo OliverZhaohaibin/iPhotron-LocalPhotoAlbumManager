@@ -329,14 +329,17 @@ class FilmstripView(AssetGrid):
 
     def _apply_pending_center(self) -> None:
         self._pending_center_scheduled = False
-        index = self._pending_center_index
+        index = self._resolve_pending_center_index()
         self._pending_center_index = None
-        if index is None or not index.isValid():
-            index = self._last_center_index
-        if index is None or not index.isValid():
-            selection_model = self.selectionModel()
-            if selection_model is None:
-                return
-            index = selection_model.currentIndex()
-        if index is not None and index.isValid():
+        if index is not None:
             self.center_on_index(index)
+
+    def _resolve_pending_center_index(self) -> QModelIndex | None:
+        for candidate in (self._pending_center_index, self._last_center_index):
+            if candidate is not None and candidate.isValid():
+                return candidate
+        selection_model = self.selectionModel()
+        if selection_model is None:
+            return None
+        index = selection_model.currentIndex()
+        return index if index.isValid() else None

@@ -64,6 +64,15 @@ class FilmstripView(AssetGrid):
         self._updating_style = False
         self._apply_scrollbar_style()
 
+    def _is_center_candidate(self, index: QModelIndex, *, require_current: bool = False) -> bool:
+        if not index.isValid():
+            return False
+        if bool(index.data(Roles.IS_SPACER)):
+            return False
+        if require_current and not bool(index.data(Roles.IS_CURRENT)):
+            return False
+        return True
+
     def changeEvent(self, event: QEvent) -> None:
         if event.type() == QEvent.Type.PaletteChange:
             if not self._updating_style:
@@ -103,7 +112,22 @@ class FilmstripView(AssetGrid):
             # Re-calculating layout is expensive, so check if we need it.
             # QListView with uniformItemSizes=False might need a nudge.
             self.scheduleDelayedItemsLayout()
-            self.refresh_spacers(top)
+            current_proxy_index = None
+            selection_model = self.selectionModel()
+            if selection_model is not None:
+                candidate = selection_model.currentIndex()
+                if candidate.isValid() and top.row() <= candidate.row() <= bottom.row():
+                    current_proxy_index = candidate
+            if current_proxy_index is None:
+                logger.debug(
+                    "Filmstrip dataChanged outside current selection (range=%s-%s).",
+                    top.row(),
+                    bottom.row(),
+                )
+                _console_debug(
+                    f"dataChanged outside current selection range={top.row()}-{bottom.row()}"
+                )
+            self.refresh_spacers(current_proxy_index)
 
     def resizeEvent(self, event: QResizeEvent) -> None:  # type: ignore[override]
         super().resizeEvent(event)
@@ -148,24 +172,28 @@ class FilmstripView(AssetGrid):
         candidate = None
         if (
             current_proxy_index is not None
-            and current_proxy_index.isValid()
-            and not bool(current_proxy_index.data(Roles.IS_SPACER))
+            and self._is_center_candidate(current_proxy_index)
         ):
             candidate = current_proxy_index
         if candidate is None:
             last_index = self._last_center_index
             if (
                 last_index is not None
-                and last_index.isValid()
-                and not bool(last_index.data(Roles.IS_SPACER))
+                and self._is_center_candidate(last_index)
             ):
                 candidate = last_index
         if candidate is None:
             selection_model = self.selectionModel()
             if selection_model is not None:
                 selected = selection_model.currentIndex()
-                if selected.isValid() and not bool(selected.data(Roles.IS_SPACER)):
+                if self._is_center_candidate(selected, require_current=True):
                     candidate = selected
+                elif selected.isValid():
+                    logger.debug(
+                        "Filmstrip skip center: selection not current (row=%s).",
+                        selected.row(),
+                    )
+                    _console_debug(f"skip center: selection not current row={selected.row()}")
         if candidate is not None:
             self._defer_center_on_index(candidate)
 
@@ -364,14 +392,19 @@ class FilmstripView(AssetGrid):
             logger.debug("Applying pending filmstrip center (row=%s).", index.row())
             _console_debug(f"apply pending center row={index.row()}")
             self.center_on_index(index)
+        else:
+            logger.debug("Skipping pending filmstrip center: no valid candidate.")
+            _console_debug("apply pending center skipped: no valid candidate")
 
     def _resolve_pending_center_index(self) -> QModelIndex | None:
         """Resolve the best index to center from pending, last, or selection."""
         for candidate in (self._pending_center_index, self._last_center_index):
-            if candidate is not None and candidate.isValid():
+            if candidate is not None and self._is_center_candidate(candidate):
                 return candidate
         selection_model = self.selectionModel()
         if selection_model is None:
             return None
         index = selection_model.currentIndex()
-        return index if index.isValid() else None
+        if not self._is_center_candidate(index, require_current=True):
+            return None
+        return index

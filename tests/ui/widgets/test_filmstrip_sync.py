@@ -72,6 +72,11 @@ class MockAssetViewModel:
         return self._count
 
 
+class MockNoneSelectionModel:
+    def currentIndex(self):
+        return MockIndex(valid=False)
+
+
 def _build_filmstrip() -> tuple[FilmstripView, QStandardItemModel]:
     view = FilmstripView()
     model = QStandardItemModel()
@@ -213,6 +218,7 @@ def test_resolve_row_preserves_valid_index(qapp):
 
 def test_resolve_row_handles_invalid_selection(qapp):
     playback = _make_playback()
+    playback._last_filmstrip_row = None
     playback._filmstrip_view = MockFilmstripView(
         MockSelectionModel(MockIndex(valid=False)),
         None,
@@ -220,6 +226,18 @@ def test_resolve_row_handles_invalid_selection(qapp):
     playback._asset_vm = MockAssetViewModel(0)
 
     assert playback._resolve_valid_row(-1) == -1
+
+
+def test_resolve_row_falls_back_to_last_known(qapp):
+    playback = _make_playback()
+    playback._last_filmstrip_row = 1
+    playback._filmstrip_view = MockFilmstripView(
+        MockNoneSelectionModel(),
+        None,
+    )
+    playback._asset_vm = MockAssetViewModel(3)
+
+    assert playback._resolve_valid_row(-1) == 1
 
 
 def test_update_current_row_updates_when_needed(qapp):

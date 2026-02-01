@@ -131,7 +131,36 @@ def test_filmstrip_recheck_ignored_when_no_row(monkeypatch, qapp):
     playback._current_row = -1
     playback._filmstrip_recheck_pending = True
     playback._sync_filmstrip_selection = lambda row: True
+    playback._resolve_valid_row = lambda row: -1
 
     playback._apply_filmstrip_recheck()
 
     assert playback._filmstrip_recheck_pending is False
+
+
+def test_resolve_valid_row_from_selection(monkeypatch, qapp):
+    playback = _make_playback()
+
+    class DummySelectionModel:
+        def currentIndex(self):
+            return type("Index", (), {"isValid": lambda self: True})()
+
+    class DummyModel:
+        def mapToSource(self, proxy_index):
+            return type("Index", (), {"isValid": lambda self: True, "row": lambda self: 2})()
+
+    class DummyFilmstrip:
+        def selectionModel(self):
+            return DummySelectionModel()
+
+        def model(self):
+            return DummyModel()
+
+    class DummyAssetVM:
+        def rowCount(self):
+            return 5
+
+    playback._filmstrip_view = DummyFilmstrip()
+    playback._asset_vm = DummyAssetVM()
+
+    assert playback._resolve_valid_row(-1) == 2

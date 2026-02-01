@@ -370,6 +370,9 @@ class PlaybackCoordinator(QObject):
         Returns ``False`` when the index is invalid or the selection model
         is unavailable, which signals the retry logic to wait for layout.
         """
+        row = self._resolve_valid_row(row)
+        if row < 0:
+            return False
         idx = self._asset_vm.index(row, 0)
         if not idx.isValid():
             LOGGER.debug("Filmstrip sync failed: invalid source index for row %s.", row)
@@ -394,6 +397,10 @@ class PlaybackCoordinator(QObject):
         if selection_model.currentIndex() != idx:
             selection_model.setCurrentIndex(idx, QItemSelectionModel.ClearAndSelect)
         self._filmstrip_view.center_on_index(idx)
+        if row != self._current_row:
+            self._current_row = row
+            LOGGER.debug("Filmstrip sync updated current row to %s.", row)
+            _console_debug(f"sync updated current row={row}")
         return True
 
     def schedule_filmstrip_sync(self) -> None:
@@ -419,7 +426,7 @@ class PlaybackCoordinator(QObject):
         QTimer.singleShot(0, self._apply_filmstrip_sync)
 
     def _apply_filmstrip_sync(self) -> None:
-        if self._current_row < 0:
+        if self._current_row < 0 and self._resolve_valid_row(self._current_row) < 0:
             self._filmstrip_scroll_sync_pending = False
             LOGGER.debug("Filmstrip sync aborted: no current row.")
             _console_debug("sync aborted: no current row")
@@ -458,7 +465,7 @@ class PlaybackCoordinator(QObject):
 
     def _apply_filmstrip_recheck(self) -> None:
         self._filmstrip_recheck_pending = False
-        if self._current_row < 0:
+        if self._current_row < 0 and self._resolve_valid_row(self._current_row) < 0:
             return
         if self._sync_filmstrip_selection(self._current_row):
             LOGGER.debug("Filmstrip recheck applied for row %s.", self._current_row)
@@ -466,6 +473,29 @@ class PlaybackCoordinator(QObject):
         else:
             LOGGER.debug("Filmstrip recheck skipped for row %s.", self._current_row)
             _console_debug(f"recheck skipped row={self._current_row}")
+
+    def _resolve_valid_row(self, row: int) -> int:
+        if 0 <= row < self._asset_vm.rowCount():
+            return row
+        selection_model = self._filmstrip_view.selectionModel()
+        if selection_model is None:
+            return -1
+        proxy_index = selection_model.currentIndex()
+        if not proxy_index.isValid():
+            return -1
+        model = self._filmstrip_view.model()
+        if hasattr(model, "mapToSource"):
+            source_index = model.mapToSource(proxy_index)
+        else:
+            source_index = proxy_index
+        if not source_index.isValid():
+            return -1
+        resolved_row = source_index.row()
+        if 0 <= resolved_row < self._asset_vm.rowCount():
+            LOGGER.debug("Resolved filmstrip row from selection: %s -> %s.", row, resolved_row)
+            _console_debug(f"resolved row {row} -> {resolved_row}")
+            return resolved_row
+        return -1
 
     def _attach_filmstrip_model_signals(self) -> None:
         model = self._filmstrip_view.model()

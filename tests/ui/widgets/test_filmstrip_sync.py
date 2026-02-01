@@ -193,7 +193,7 @@ def test_filmstrip_recheck_ignored_when_no_row(monkeypatch, qapp):
     assert playback._filmstrip_recheck_pending is False
 
 
-def test_resolve_row_uses_selection_fallback(monkeypatch, qapp):
+def test_resolve_row_uses_selection_fallback(qapp):
     playback = _make_playback()
     playback._filmstrip_view = MockFilmstripView(
         MockSelectionModel(MockIndex(valid=True, row_value=0)),
@@ -204,14 +204,14 @@ def test_resolve_row_uses_selection_fallback(monkeypatch, qapp):
     assert playback._resolve_valid_row(-1) == 2
 
 
-def test_resolve_row_preserves_valid_index(monkeypatch, qapp):
+def test_resolve_row_preserves_valid_index(qapp):
     playback = _make_playback()
     playback._asset_vm = MockAssetViewModel(3)
 
     assert playback._resolve_valid_row(1) == 1
 
 
-def test_resolve_row_handles_invalid_selection(monkeypatch, qapp):
+def test_resolve_row_handles_invalid_selection(qapp):
     playback = _make_playback()
     playback._filmstrip_view = MockFilmstripView(
         MockSelectionModel(MockIndex(valid=False)),
@@ -222,7 +222,7 @@ def test_resolve_row_handles_invalid_selection(monkeypatch, qapp):
     assert playback._resolve_valid_row(-1) == -1
 
 
-def test_update_current_row_updates_when_needed(monkeypatch, qapp):
+def test_update_current_row_updates_when_needed(qapp):
     playback = _make_playback()
     playback._current_row = 1
 
@@ -231,7 +231,7 @@ def test_update_current_row_updates_when_needed(monkeypatch, qapp):
     assert playback._current_row == 2
 
 
-def test_update_current_row_noop_when_same(monkeypatch, qapp):
+def test_update_current_row_noop_when_same(qapp):
     playback = _make_playback()
     playback._current_row = 3
 

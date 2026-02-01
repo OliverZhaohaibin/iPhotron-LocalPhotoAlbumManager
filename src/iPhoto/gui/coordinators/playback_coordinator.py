@@ -379,9 +379,13 @@ class PlaybackCoordinator(QObject):
         asset_count = self._asset_vm.rowCount()
         model = self._filmstrip_view.model()
         if asset_count == 0:
-            if model is None or model.rowCount() <= resolved_row:
-                LOGGER.debug("Filmstrip sync failed: empty model for row %s.", resolved_row)
-                _console_debug(f"sync failed: empty model row={resolved_row}")
+            if model is None:
+                LOGGER.debug("Filmstrip sync failed: no model for row %s.", resolved_row)
+                _console_debug(f"sync failed: no model row={resolved_row}")
+                return False
+            if model.rowCount() <= resolved_row:
+                LOGGER.debug("Filmstrip sync failed: row out of bounds (%s).", resolved_row)
+                _console_debug(f"sync failed: out of bounds row={resolved_row}")
                 return False
             idx = model.index(resolved_row, 0)
         else:
@@ -468,7 +472,7 @@ class PlaybackCoordinator(QObject):
     def _schedule_filmstrip_recheck(self) -> None:
         if self._filmstrip_recheck_pending:
             return
-        self._filmstrip_recheck_attempts = 0
+        self._reset_filmstrip_recheck()
         self._filmstrip_recheck_pending = True
         LOGGER.debug("Filmstrip recheck scheduled for row %s.", self._current_row)
         _console_debug(f"recheck scheduled row={self._current_row}")
@@ -499,11 +503,11 @@ class PlaybackCoordinator(QObject):
             self._update_current_row(resolved_row, sync_context="recheck")
             LOGGER.debug("Filmstrip recheck applied for row %s.", resolved_row)
             _console_debug(f"recheck applied row={resolved_row}")
-            self._filmstrip_recheck_attempts = 0
+            self._reset_filmstrip_recheck()
         else:
             LOGGER.debug("Filmstrip recheck skipped for row %s.", resolved_row)
             _console_debug(f"recheck skipped row={resolved_row}")
-            self._filmstrip_recheck_attempts = 0
+            self._reset_filmstrip_recheck()
 
     def _update_current_row(self, resolved_row: int, *, sync_context: str) -> None:
         """Update the stored current row for a sync/recheck operation."""
@@ -516,6 +520,9 @@ class PlaybackCoordinator(QObject):
             resolved_row,
         )
         _console_debug(f"{sync_context} updated current row={resolved_row}")
+
+    def _reset_filmstrip_recheck(self) -> None:
+        self._filmstrip_recheck_attempts = 0
 
     def _resolve_valid_row(self, row: int) -> int:
         """Resolve a valid source row from the current filmstrip selection.
@@ -593,7 +600,7 @@ class PlaybackCoordinator(QObject):
             proxy_index = model.index(fallback_row, 0)
             if proxy_index.isValid():
                 source_index = model.mapToSource(proxy_index)
-                if source_index.isValid() and source_index.row() < asset_count:
+                if source_index.isValid():
                     resolved_row = source_index.row()
                     LOGGER.debug(
                         "Resolved filmstrip row from last known proxy: %s -> %s.",

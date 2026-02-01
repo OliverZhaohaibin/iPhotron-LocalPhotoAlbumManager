@@ -1,6 +1,5 @@
 import pytest
 from PySide6.QtCore import QAbstractListModel, Qt, QModelIndex, QItemSelectionModel
-from PySide6.QtGui import QShowEvent
 from PySide6.QtWidgets import QApplication
 from src.iPhoto.gui.ui.widgets.filmstrip_view import FilmstripView
 from src.iPhoto.gui.ui.models.roles import Roles
@@ -51,7 +50,7 @@ def test_filmstrip_performance_reproduction(qapp):
     assert model.data_calls < 50, f"Performance regression: {model.data_calls} calls to data()"
 
 
-def test_filmstrip_show_event_schedules_center_on_show(qapp):
+def test_filmstrip_show_event_schedules_centering(qapp):
     """Test that showEvent schedules centering on the current selection."""
     view = FilmstripView()
     model = MockAssetModel(count=10)

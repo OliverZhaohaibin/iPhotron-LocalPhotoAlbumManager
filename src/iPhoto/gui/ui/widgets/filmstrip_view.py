@@ -335,6 +335,7 @@ class FilmstripView(AssetGrid):
             self.center_on_index(index)
 
     def _resolve_pending_center_index(self) -> QModelIndex | None:
+        """Resolve the best index to center from pending, last, or selection."""
         for candidate in (self._pending_center_index, self._last_center_index):
             if candidate is not None and candidate.isValid():
                 return candidate

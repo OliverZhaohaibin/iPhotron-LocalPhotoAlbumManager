@@ -29,6 +29,9 @@ if TYPE_CHECKING:
 LOGGER = logging.getLogger(__name__)
 FILMSTRIP_SYNC_MAX_RETRIES = 4
 FILMSTRIP_SYNC_RETRY_DELAY_MS = 50
+# Retry values keep the filmstrip centered after edit transitions without
+# visibly delaying UI updates. If larger albums or slower machines regress,
+# these can be tuned, but the defaults balance responsiveness and stability.
 
 
 class PlaybackCoordinator(QObject):
@@ -347,7 +350,8 @@ class PlaybackCoordinator(QObject):
         """Update filmstrip selection and scroll to the item.
 
         Returns ``True`` when the filmstrip was able to apply the selection.
-        This is an internal helper used by the retry sync logic.
+        Returns ``False`` when the index is invalid or the selection model
+        is unavailable, which signals the retry logic to wait for layout.
         """
         idx = self._asset_vm.index(row, 0)
         if not idx.isValid():

@@ -1,0 +1,90 @@
+from PySide6.QtCore import QItemSelectionModel, QPersistentModelIndex, QTimer
+from PySide6.QtGui import QStandardItem, QStandardItemModel
+from PySide6.QtWidgets import QApplication
+import pytest
+
+from src.iPhoto.gui.coordinators.playback_coordinator import (
+    FILMSTRIP_SYNC_MAX_RETRIES,
+    FILMSTRIP_SYNC_RETRY_DELAY_MS,
+    PlaybackCoordinator,
+)
+from src.iPhoto.gui.ui.widgets.filmstrip_view import FilmstripView
+
+
+@pytest.fixture(scope="session")
+def qapp():
+    app = QApplication.instance()
+    if app is None:
+        app = QApplication([])
+    yield app
+
+
+def _build_filmstrip() -> tuple[FilmstripView, QStandardItemModel]:
+    view = FilmstripView()
+    model = QStandardItemModel()
+    for _ in range(3):
+        model.appendRow(QStandardItem("item"))
+    view.setModel(model)
+    return view, model
+
+
+def test_pending_center_resolution_priority(qapp):
+    view, model = _build_filmstrip()
+    selection_index = model.index(2, 0)
+    view.selectionModel().setCurrentIndex(
+        selection_index, QItemSelectionModel.ClearAndSelect
+    )
+
+    view._pending_center_index = QPersistentModelIndex(model.index(0, 0))
+    view._last_center_index = QPersistentModelIndex(model.index(1, 0))
+    assert view._resolve_pending_center_index().row() == 0
+
+    view._pending_center_index = QPersistentModelIndex()
+    assert view._resolve_pending_center_index().row() == 1
+
+    view._last_center_index = QPersistentModelIndex()
+    assert view._resolve_pending_center_index().row() == 2
+
+
+def _make_playback() -> PlaybackCoordinator:
+    playback = PlaybackCoordinator.__new__(PlaybackCoordinator)
+    super(PlaybackCoordinator, playback).__init__()
+    playback._current_row = 0
+    playback._filmstrip_scroll_sync_pending = True
+    playback._filmstrip_sync_attempts = 0
+    return playback
+
+
+def test_filmstrip_sync_retries(monkeypatch, qapp):
+    playback = _make_playback()
+    scheduled = []
+
+    def _fake_single_shot(delay, callback):
+        scheduled.append((delay, callback))
+
+    monkeypatch.setattr(QTimer, "singleShot", staticmethod(_fake_single_shot))
+    playback._sync_filmstrip_selection = lambda row: False
+
+    playback._apply_filmstrip_sync()
+
+    assert playback._filmstrip_sync_attempts == 1
+    assert playback._filmstrip_scroll_sync_pending is True
+    assert scheduled[0][0] == FILMSTRIP_SYNC_RETRY_DELAY_MS
+
+
+def test_filmstrip_sync_retry_limit(monkeypatch, qapp):
+    playback = _make_playback()
+    playback._filmstrip_sync_attempts = FILMSTRIP_SYNC_MAX_RETRIES
+    scheduled = []
+
+    def _fake_single_shot(delay, callback):
+        scheduled.append((delay, callback))
+
+    monkeypatch.setattr(QTimer, "singleShot", staticmethod(_fake_single_shot))
+    playback._sync_filmstrip_selection = lambda row: False
+
+    playback._apply_filmstrip_sync()
+
+    assert playback._filmstrip_scroll_sync_pending is False
+    assert playback._filmstrip_sync_attempts == 0
+    assert scheduled == []

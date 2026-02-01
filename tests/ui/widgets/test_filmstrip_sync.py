@@ -226,6 +226,7 @@ def test_resolve_row_handles_invalid_selection(qapp):
     playback._asset_vm = MockAssetViewModel(0)
 
     assert playback._resolve_valid_row(-1) == -1
+    assert playback._last_filmstrip_row is None
 
 
 def test_resolve_row_falls_back_to_last_known(qapp):

@@ -428,7 +428,7 @@ class PlaybackCoordinator(QObject):
             LOGGER.debug("Filmstrip sync aborted: no current row.")
             _console_debug("sync aborted: no current row")
             return
-        self._update_current_row(resolved_row, context="sync")
+        self._update_current_row(resolved_row, sync_context="sync")
         if self._sync_filmstrip_selection(resolved_row):
             self._filmstrip_scroll_sync_pending = False
             self._filmstrip_sync_attempts = 0
@@ -466,7 +466,7 @@ class PlaybackCoordinator(QObject):
         resolved_row = self._resolve_valid_row(self._current_row)
         if resolved_row < 0:
             return
-        self._update_current_row(resolved_row, context="recheck")
+        self._update_current_row(resolved_row, sync_context="recheck")
         if self._sync_filmstrip_selection(resolved_row):
             LOGGER.debug("Filmstrip recheck applied for row %s.", resolved_row)
             _console_debug(f"recheck applied row={resolved_row}")
@@ -474,16 +474,16 @@ class PlaybackCoordinator(QObject):
             LOGGER.debug("Filmstrip recheck skipped for row %s.", resolved_row)
             _console_debug(f"recheck skipped row={resolved_row}")
 
-    def _update_current_row(self, resolved_row: int, *, context: str) -> None:
+    def _update_current_row(self, resolved_row: int, *, sync_context: str) -> None:
         if resolved_row == self._current_row:
             return
         self._current_row = resolved_row
         LOGGER.debug(
             "Filmstrip %s updated current row to %s.",
-            context,
+            sync_context,
             resolved_row,
         )
-        _console_debug(f"{context} updated current row={resolved_row}")
+        _console_debug(f"{sync_context} updated current row={resolved_row}")
 
     def _resolve_valid_row(self, row: int) -> int:
         if 0 <= row < self._asset_vm.rowCount():

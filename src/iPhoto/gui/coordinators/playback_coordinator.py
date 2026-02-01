@@ -376,16 +376,24 @@ class PlaybackCoordinator(QObject):
         resolved_row = self._resolve_valid_row(row)
         if resolved_row < 0:
             return False
-        idx = self._asset_vm.index(resolved_row, 0)
-        if not idx.isValid():
-            LOGGER.debug("Filmstrip sync failed: invalid source index for row %s.", resolved_row)
-            _console_debug(f"sync failed: invalid source index row={resolved_row}")
-            return False
-
-        # Handle Proxy Model (if present)
+        asset_count = self._asset_vm.rowCount()
         model = self._filmstrip_view.model()
-        if hasattr(model, "mapFromSource"):
-            idx = model.mapFromSource(idx)
+        if asset_count == 0:
+            if model is None or model.rowCount() <= resolved_row:
+                LOGGER.debug("Filmstrip sync failed: empty model for row %s.", resolved_row)
+                _console_debug(f"sync failed: empty model row={resolved_row}")
+                return False
+            idx = model.index(resolved_row, 0)
+        else:
+            idx = self._asset_vm.index(resolved_row, 0)
+            if not idx.isValid():
+                LOGGER.debug("Filmstrip sync failed: invalid source index for row %s.", resolved_row)
+                _console_debug(f"sync failed: invalid source index row={resolved_row}")
+                return False
+
+            # Handle Proxy Model (if present)
+            if hasattr(model, "mapFromSource"):
+                idx = model.mapFromSource(idx)
 
         if not idx.isValid():
             LOGGER.debug("Filmstrip sync failed: invalid proxy index for row %s.", resolved_row)
@@ -515,8 +523,19 @@ class PlaybackCoordinator(QObject):
         If the provided row is invalid, this attempts to resolve a valid row
         from the current filmstrip selection and returns -1 when that fails.
         """
-        if 0 <= row < self._asset_vm.rowCount():
+        asset_count = self._asset_vm.rowCount()
+        if 0 <= row < asset_count:
             return row
+        if asset_count == 0:
+            model = self._filmstrip_view.model()
+            if model is not None and 0 <= row < model.rowCount():
+                LOGGER.debug(
+                    "Resolved filmstrip row from model count: %s -> %s.",
+                    row,
+                    row,
+                )
+                _console_debug(f"resolved row {row} -> {row} (model)")
+                return row
         selection_model = self._filmstrip_view.selectionModel()
         if selection_model is None:
             LOGGER.debug("Failed to resolve filmstrip row: no selection model.")
@@ -552,7 +571,18 @@ class PlaybackCoordinator(QObject):
         fallback_row = self._last_filmstrip_row
         if fallback_row is None:
             return -1
-        if 0 <= fallback_row < self._asset_vm.rowCount():
+        asset_count = self._asset_vm.rowCount()
+        if asset_count == 0:
+            model = self._filmstrip_view.model()
+            if model is not None and fallback_row < model.rowCount():
+                LOGGER.debug(
+                    "Resolved filmstrip row from last known: %s -> %s.",
+                    unresolved_row,
+                    fallback_row,
+                )
+                _console_debug(f"resolved row {unresolved_row} -> {fallback_row} (last known)")
+                return fallback_row
+        if 0 <= fallback_row < asset_count:
             LOGGER.debug(
                 "Resolved filmstrip row from last known: %s -> %s.",
                 unresolved_row,

@@ -327,6 +327,7 @@ class FilmstripView(AssetGrid):
         scrollbar.setValue(scrollbar.value() + int(scroll_delta))
         logger.debug("Filmstrip centered row %s (scroll=%s).", index.row(), scrollbar.value())
         _console_debug(f"centered row={index.row()} scroll={scrollbar.value()}")
+        self._pending_center_index = None
 
     def _defer_center_on_index(self, index: QModelIndex) -> None:
         if not index.isValid():

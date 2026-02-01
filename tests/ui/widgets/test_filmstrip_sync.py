@@ -216,17 +216,19 @@ def test_resolve_row_preserves_valid_index(qapp):
     assert playback._resolve_valid_row(1) == 1
 
 
-def test_resolve_row_handles_invalid_selection(qapp):
+def test_resolve_row_handles_invalid_selection(qapp, caplog):
     playback = _make_playback()
-    playback._last_filmstrip_row = None
+    playback._last_filmstrip_row = 5
     playback._filmstrip_view = MockFilmstripView(
         MockSelectionModel(MockIndex(valid=False)),
         None,
     )
     playback._asset_vm = MockAssetViewModel(0)
 
+    caplog.set_level("DEBUG")
     assert playback._resolve_valid_row(-1) == -1
-    assert playback._last_filmstrip_row is None
+    assert playback._last_filmstrip_row == 5
+    assert "resolve row failed" in caplog.text
 
 
 def test_resolve_row_falls_back_to_last_known(qapp):

@@ -4,6 +4,7 @@ from PySide6.QtWidgets import QApplication
 import pytest
 
 from src.iPhoto.gui.coordinators.playback_coordinator import (
+    FILMSTRIP_RECHECK_DELAY_MS,
     FILMSTRIP_SYNC_MAX_RETRIES,
     FILMSTRIP_SYNC_RETRY_DELAY_MS,
     PlaybackCoordinator,
@@ -104,7 +105,7 @@ def test_filmstrip_recheck_scheduled(monkeypatch, qapp):
     playback._schedule_filmstrip_recheck()
 
     assert playback._filmstrip_recheck_pending is True
-    assert scheduled[0][0] == FILMSTRIP_SYNC_RETRY_DELAY_MS
+    assert scheduled[0][0] == FILMSTRIP_RECHECK_DELAY_MS
 
 
 def test_filmstrip_recheck_applies(monkeypatch, qapp):

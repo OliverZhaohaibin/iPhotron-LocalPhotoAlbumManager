@@ -31,6 +31,8 @@ LOGGER = logging.getLogger(__name__)
 _CONSOLE_HANDLER_NAME = "playback_console"
 FILMSTRIP_SYNC_MAX_RETRIES = 4
 FILMSTRIP_SYNC_RETRY_DELAY_MS = 50
+# Align recheck with edit transition duration (~250ms).
+FILMSTRIP_RECHECK_DELAY_MS = 300
 # Retry values keep the filmstrip centered after edit transitions without
 # visibly delaying UI updates. If larger albums or slower machines regress,
 # these can be tuned, but the defaults balance responsiveness and stability.
@@ -452,7 +454,7 @@ class PlaybackCoordinator(QObject):
         self._filmstrip_recheck_pending = True
         LOGGER.debug("Filmstrip recheck scheduled for row %s.", self._current_row)
         _console_debug(f"recheck scheduled row={self._current_row}")
-        QTimer.singleShot(FILMSTRIP_SYNC_RETRY_DELAY_MS, self._apply_filmstrip_recheck)
+        QTimer.singleShot(FILMSTRIP_RECHECK_DELAY_MS, self._apply_filmstrip_recheck)
 
     def _apply_filmstrip_recheck(self) -> None:
         self._filmstrip_recheck_pending = False

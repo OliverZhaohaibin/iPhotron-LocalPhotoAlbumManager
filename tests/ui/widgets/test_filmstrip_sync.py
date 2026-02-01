@@ -88,3 +88,49 @@ def test_filmstrip_sync_retry_limit(monkeypatch, qapp):
     assert playback._filmstrip_scroll_sync_pending is False
     assert playback._filmstrip_sync_attempts == 0
     assert scheduled == []
+
+
+def test_filmstrip_recheck_scheduled(monkeypatch, qapp):
+    playback = _make_playback()
+    playback._filmstrip_recheck_pending = False
+    playback._current_row = 5
+    scheduled = []
+
+    def _fake_single_shot(delay, callback):
+        scheduled.append((delay, callback))
+
+    monkeypatch.setattr(QTimer, "singleShot", staticmethod(_fake_single_shot))
+
+    playback._schedule_filmstrip_recheck()
+
+    assert playback._filmstrip_recheck_pending is True
+    assert scheduled[0][0] == FILMSTRIP_SYNC_RETRY_DELAY_MS
+
+
+def test_filmstrip_recheck_applies(monkeypatch, qapp):
+    playback = _make_playback()
+    playback._current_row = 4
+    playback._filmstrip_recheck_pending = True
+    calls = []
+
+    def _fake_sync(row):
+        calls.append(row)
+        return True
+
+    playback._sync_filmstrip_selection = _fake_sync
+
+    playback._apply_filmstrip_recheck()
+
+    assert playback._filmstrip_recheck_pending is False
+    assert calls == [4]
+
+
+def test_filmstrip_recheck_ignored_when_no_row(monkeypatch, qapp):
+    playback = _make_playback()
+    playback._current_row = -1
+    playback._filmstrip_recheck_pending = True
+    playback._sync_filmstrip_selection = lambda row: True
+
+    playback._apply_filmstrip_recheck()
+
+    assert playback._filmstrip_recheck_pending is False

@@ -589,18 +589,39 @@ class PlaybackCoordinator(QObject):
         selection_model = self._filmstrip_view.selectionModel()
         if selection_model is None:
             LOGGER.debug("Failed to resolve filmstrip row: no selection model.")
-            _console_debug("resolve row failed: no selection model")
+            _console_debug(
+                "resolve row failed: no selection model asset_rows=%s model_rows=%s last_row=%s"
+                % (
+                    asset_count,
+                    model.rowCount() if model is not None else None,
+                    self._last_filmstrip_row,
+                )
+            )
             return self._fallback_last_filmstrip_row(row)
         proxy_index = selection_model.currentIndex()
         if not proxy_index.isValid():
             LOGGER.debug("Failed to resolve filmstrip row: invalid selection index.")
-            _console_debug("resolve row failed: invalid selection index")
+            _console_debug(
+                "resolve row failed: invalid selection index asset_rows=%s model_rows=%s last_row=%s"
+                % (
+                    asset_count,
+                    model.rowCount() if model is not None else None,
+                    self._last_filmstrip_row,
+                )
+            )
             return self._fallback_last_filmstrip_row(row)
         model = self._filmstrip_view.model()
         source_index = self._map_to_source_index(model, proxy_index)
         if not source_index.isValid():
             LOGGER.debug("Failed to resolve filmstrip row: invalid source index.")
-            _console_debug("resolve row failed: invalid source index")
+            _console_debug(
+                "resolve row failed: invalid source index asset_rows=%s model_rows=%s last_row=%s"
+                % (
+                    asset_count,
+                    model.rowCount() if model is not None else None,
+                    self._last_filmstrip_row,
+                )
+            )
             return self._fallback_last_filmstrip_row(row)
         resolved_row = source_index.row()
         if 0 <= resolved_row < self._asset_vm.rowCount():
@@ -611,12 +632,29 @@ class PlaybackCoordinator(QObject):
             "Failed to resolve filmstrip row: out of range (%s).",
             resolved_row,
         )
-        _console_debug(f"resolve row failed: out of range ({resolved_row})")
+        _console_debug(
+            "resolve row failed: out of range (%s) asset_rows=%s model_rows=%s last_row=%s"
+            % (
+                resolved_row,
+                asset_count,
+                model.rowCount() if model is not None else None,
+                self._last_filmstrip_row,
+            )
+        )
         return self._fallback_last_filmstrip_row(row)
 
     def _fallback_last_filmstrip_row(self, unresolved_row: int) -> int:
         fallback_row = self._last_filmstrip_row
         if fallback_row is None:
+            _console_debug(
+                "resolve row failed: last known missing asset_rows=%s model_rows=%s"
+                % (
+                    self._asset_vm.rowCount(),
+                    self._filmstrip_view.model().rowCount()
+                    if self._filmstrip_view.model() is not None
+                    else None,
+                )
+            )
             return -1
         asset_count = self._asset_vm.rowCount()
         model = self._filmstrip_view.model()

@@ -64,12 +64,31 @@ class FilmstripView(AssetGrid):
         self._updating_style = False
         self._apply_scrollbar_style()
 
-    def _is_center_candidate(self, index: QModelIndex, *, require_current: bool = False) -> bool:
+    def _is_center_candidate(
+        self,
+        index: QModelIndex,
+        *,
+        require_current: bool = False,
+        debug_label: str | None = None,
+    ) -> bool:
         if not index.isValid():
+            if debug_label:
+                logger.debug("Filmstrip skip center: %s invalid index.", debug_label)
+                _console_debug(f"skip center: {debug_label} invalid index")
             return False
         if bool(index.data(Roles.IS_SPACER)):
+            if debug_label:
+                logger.debug("Filmstrip skip center: %s spacer row=%s.", debug_label, index.row())
+                _console_debug(f"skip center: {debug_label} spacer row={index.row()}")
             return False
         if require_current and not bool(index.data(Roles.IS_CURRENT)):
+            if debug_label:
+                logger.debug(
+                    "Filmstrip skip center: %s not current row=%s.",
+                    debug_label,
+                    index.row(),
+                )
+                _console_debug(f"skip center: {debug_label} not current row={index.row()}")
             return False
         return True
 
@@ -172,28 +191,34 @@ class FilmstripView(AssetGrid):
         candidate = None
         if (
             current_proxy_index is not None
-            and self._is_center_candidate(current_proxy_index)
+            and self._is_center_candidate(
+                current_proxy_index,
+                require_current=True,
+                debug_label="current proxy",
+            )
         ):
             candidate = current_proxy_index
         if candidate is None:
             last_index = self._last_center_index
             if (
                 last_index is not None
-                and self._is_center_candidate(last_index)
+                and self._is_center_candidate(
+                    last_index,
+                    require_current=True,
+                    debug_label="last center",
+                )
             ):
                 candidate = last_index
         if candidate is None:
             selection_model = self.selectionModel()
             if selection_model is not None:
                 selected = selection_model.currentIndex()
-                if self._is_center_candidate(selected, require_current=True):
+                if self._is_center_candidate(
+                    selected,
+                    require_current=True,
+                    debug_label="selection",
+                ):
                     candidate = selected
-                elif selected.isValid():
-                    logger.debug(
-                        "Filmstrip skip center: selection not current (row=%s).",
-                        selected.row(),
-                    )
-                    _console_debug(f"skip center: selection not current row={selected.row()}")
         if candidate is not None:
             self._defer_center_on_index(candidate)
 
@@ -399,12 +424,16 @@ class FilmstripView(AssetGrid):
     def _resolve_pending_center_index(self) -> QModelIndex | None:
         """Resolve the best index to center from pending, last, or selection."""
         for candidate in (self._pending_center_index, self._last_center_index):
-            if candidate is not None and self._is_center_candidate(candidate):
+            if candidate is not None and self._is_center_candidate(
+                candidate,
+                require_current=True,
+                debug_label="pending/last",
+            ):
                 return candidate
         selection_model = self.selectionModel()
         if selection_model is None:
             return None
         index = selection_model.currentIndex()
-        if not self._is_center_candidate(index, require_current=True):
+        if not self._is_center_candidate(index, require_current=True, debug_label="selection"):
             return None
         return index

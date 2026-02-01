@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import logging
+import sys
 from typing import TYPE_CHECKING, Any, Optional
 
 from PySide6.QtCore import QObject, Slot, QTimer, Signal, QModelIndex, QItemSelectionModel
@@ -27,15 +28,25 @@ if TYPE_CHECKING:
     from PySide6.QtWidgets import QPushButton, QSlider, QToolButton, QWidget
 
 LOGGER = logging.getLogger(__name__)
+_CONSOLE_HANDLER_NAME = "playback_console"
 FILMSTRIP_SYNC_MAX_RETRIES = 4
 FILMSTRIP_SYNC_RETRY_DELAY_MS = 50
 # Retry values keep the filmstrip centered after edit transitions without
 # visibly delaying UI updates. If larger albums or slower machines regress,
 # these can be tuned, but the defaults balance responsiveness and stability.
 
-
 def _console_debug(message: str) -> None:
-    print(f"[PlaybackCoordinator] {message}")
+    for handler in LOGGER.handlers:
+        if getattr(handler, "name", None) == _CONSOLE_HANDLER_NAME:
+            LOGGER.info("[PlaybackCoordinator] %s", message)
+            return
+    handler = logging.StreamHandler(sys.stdout)
+    handler.setLevel(logging.INFO)
+    handler.name = _CONSOLE_HANDLER_NAME
+    handler.setFormatter(logging.Formatter("%(message)s"))
+    LOGGER.addHandler(handler)
+    LOGGER.setLevel(logging.INFO)
+    LOGGER.info("[PlaybackCoordinator] %s", message)
 
 
 class PlaybackCoordinator(QObject):

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import sys
 
 from PySide6.QtCore import QEvent, QModelIndex, QSize, Qt, Signal, QTimer, QPersistentModelIndex
 from PySide6.QtGui import QPalette, QResizeEvent, QShowEvent, QWheelEvent
@@ -13,10 +14,24 @@ from ..models.roles import Roles
 from ..styles import modern_scrollbar_style
 
 logger = logging.getLogger(__name__)
+_CONSOLE_HANDLER_NAME = "filmstrip_console"
+
+
+def _ensure_console_handler() -> None:
+    for handler in logger.handlers:
+        if getattr(handler, "name", None) == _CONSOLE_HANDLER_NAME:
+            return
+    handler = logging.StreamHandler(sys.stdout)
+    handler.setLevel(logging.INFO)
+    handler.name = _CONSOLE_HANDLER_NAME
+    handler.setFormatter(logging.Formatter("%(message)s"))
+    logger.addHandler(handler)
+    logger.setLevel(logging.INFO)
 
 
 def _console_debug(message: str) -> None:
-    print(f"[FilmstripView] {message}")
+    _ensure_console_handler()
+    logger.info("[FilmstripView] %s", message)
 
 
 class FilmstripView(AssetGrid):

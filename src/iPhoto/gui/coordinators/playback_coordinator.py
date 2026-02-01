@@ -378,7 +378,7 @@ class PlaybackCoordinator(QObject):
             return False
         asset_count = self._asset_vm.rowCount()
         model = self._filmstrip_view.model()
-        if asset_count == 0:
+        if asset_count == 0 or resolved_row >= asset_count:
             idx = self._index_from_model_only(model, resolved_row)
             if idx is None:
                 return False
@@ -549,15 +549,14 @@ class PlaybackCoordinator(QObject):
         asset_count = self._asset_vm.rowCount()
         if 0 <= row < asset_count:
             return row
-        if asset_count == 0:
-            model = self._filmstrip_view.model()
-            if model is not None and 0 <= row < model.rowCount():
-                LOGGER.debug(
-                    "Validated filmstrip row against model count: %s.",
-                    row,
-                )
-                _console_debug(f"validated row {row} against model count")
-                return row
+        model = self._filmstrip_view.model()
+        if model is not None and 0 <= row < model.rowCount():
+            LOGGER.debug(
+                "Validated filmstrip row against model count: %s.",
+                row,
+            )
+            _console_debug(f"validated row {row} against model count")
+            return row
         selection_model = self._filmstrip_view.selectionModel()
         if selection_model is None:
             LOGGER.debug("Failed to resolve filmstrip row: no selection model.")

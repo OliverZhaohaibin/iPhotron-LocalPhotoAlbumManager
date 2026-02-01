@@ -227,7 +227,7 @@ def test_filmstrip_recheck_stops_after_max(monkeypatch, qapp):
     assert scheduled == []
 
 
-def test_filmstrip_recheck_retries_when_no_row(monkeypatch, qapp):
+def test_filmstrip_recheck_no_retry_when_no_row(monkeypatch, qapp):
     playback = _make_playback()
     playback._current_row = -1
     playback._filmstrip_recheck_pending = True
@@ -244,9 +244,9 @@ def test_filmstrip_recheck_retries_when_no_row(monkeypatch, qapp):
 
     playback._apply_filmstrip_recheck()
 
-    assert playback._filmstrip_recheck_pending is True
-    assert playback._filmstrip_recheck_attempts == 1
-    assert scheduled[0][0] == FILMSTRIP_RECHECK_DELAY_MS
+    assert playback._filmstrip_recheck_pending is False
+    assert playback._filmstrip_recheck_attempts == 0
+    assert scheduled == []
 
 
 def test_resolve_row_uses_selection_fallback(qapp):

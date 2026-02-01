@@ -358,9 +358,7 @@ class PlaybackCoordinator(QObject):
             self._filmstrip_view.center_on_index(idx)
 
     def _schedule_filmstrip_sync(self) -> None:
-        if self._filmstrip_scroll_sync_pending:
-            return
-        if self._current_row < 0:
+        if not self._can_sync_filmstrip():
             return
         self._filmstrip_scroll_sync_pending = True
         QTimer.singleShot(0, self._apply_filmstrip_sync)
@@ -381,13 +379,18 @@ class PlaybackCoordinator(QObject):
                 self._filmstrip_model.rowsInserted.disconnect(self._schedule_filmstrip_sync)
                 self._filmstrip_model.rowsRemoved.disconnect(self._schedule_filmstrip_sync)
                 self._filmstrip_model.layoutChanged.disconnect(self._schedule_filmstrip_sync)
-            except (RuntimeError, TypeError):
-                pass
+            except (RuntimeError, TypeError) as exc:
+                LOGGER.debug("Filmstrip model disconnect skipped: %s", exc)
         self._filmstrip_model = model
         model.modelReset.connect(self._schedule_filmstrip_sync)
         model.rowsInserted.connect(self._schedule_filmstrip_sync)
         model.rowsRemoved.connect(self._schedule_filmstrip_sync)
         model.layoutChanged.connect(self._schedule_filmstrip_sync)
+
+    def _can_sync_filmstrip(self) -> bool:
+        if self._filmstrip_scroll_sync_pending:
+            return False
+        return self._current_row >= 0
 
     def _update_favorite_icon(self, is_favorite: bool):
         icon_name = "suit.heart.fill.svg" if is_favorite else "suit.heart.svg"

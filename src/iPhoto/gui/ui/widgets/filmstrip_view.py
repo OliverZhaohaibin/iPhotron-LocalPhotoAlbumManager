@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from PySide6.QtCore import QEvent, QModelIndex, QSize, Qt, Signal, QTimer, QPersistentModelIndex
-from PySide6.QtGui import QPalette, QResizeEvent, QWheelEvent
+from PySide6.QtGui import QPalette, QResizeEvent, QShowEvent, QWheelEvent
 from PySide6.QtWidgets import QListView, QSizePolicy, QStyleOptionViewItem
 
 from .asset_grid import AssetGrid
@@ -96,10 +96,9 @@ class FilmstripView(AssetGrid):
     def resizeEvent(self, event: QResizeEvent) -> None:  # type: ignore[override]
         super().resizeEvent(event)
         self.refresh_spacers()
-        if self._pending_center_index is not None and not self._pending_center_scheduled:
-            self._schedule_pending_center()
+        self._schedule_pending_center_if_needed()
 
-    def showEvent(self, event) -> None:  # type: ignore[override]
+    def showEvent(self, event: QShowEvent) -> None:  # type: ignore[override]
         super().showEvent(event)
         self._schedule_pending_center()
 
@@ -294,7 +293,11 @@ class FilmstripView(AssetGrid):
         if not index.isValid():
             return
         self._pending_center_index = QPersistentModelIndex(index)
-        if self.isVisible() and not self._pending_center_scheduled:
+        if self.isVisible():
+            self._schedule_pending_center_if_needed()
+
+    def _schedule_pending_center_if_needed(self) -> None:
+        if self._pending_center_index is not None and not self._pending_center_scheduled:
             self._schedule_pending_center()
 
     def _schedule_pending_center(self) -> None:

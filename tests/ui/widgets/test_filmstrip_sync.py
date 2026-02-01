@@ -220,3 +220,21 @@ def test_resolve_row_handles_invalid_selection(monkeypatch, qapp):
     playback._asset_vm = MockAssetViewModel(0)
 
     assert playback._resolve_valid_row(-1) == -1
+
+
+def test_update_current_row_updates_when_needed(monkeypatch, qapp):
+    playback = _make_playback()
+    playback._current_row = 1
+
+    playback._update_current_row(2, sync_context="sync")
+
+    assert playback._current_row == 2
+
+
+def test_update_current_row_noop_when_same(monkeypatch, qapp):
+    playback = _make_playback()
+    playback._current_row = 3
+
+    playback._update_current_row(3, sync_context="sync")
+
+    assert playback._current_row == 3

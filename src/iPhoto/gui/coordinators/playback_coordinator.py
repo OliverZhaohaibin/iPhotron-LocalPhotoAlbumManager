@@ -489,7 +489,8 @@ class PlaybackCoordinator(QObject):
     def _resolve_valid_row(self, row: int) -> int:
         """Resolve a valid source row from the current filmstrip selection.
 
-        Returns the resolved row or -1 when no valid selection is available.
+        If the provided row is invalid, this attempts to resolve a valid row
+        from the current filmstrip selection and returns -1 when that fails.
         """
         if 0 <= row < self._asset_vm.rowCount():
             return row

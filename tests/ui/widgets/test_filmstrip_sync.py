@@ -145,7 +145,7 @@ def test_filmstrip_recheck_ignored_when_no_row(monkeypatch, qapp):
     assert playback._filmstrip_recheck_pending is False
 
 
-def test_resolve_valid_row_from_selection(monkeypatch, qapp):
+def test_resolve_valid_row_uses_selection_when_row_invalid(monkeypatch, qapp):
     playback = _make_playback()
 
     class MockIndex:
@@ -184,7 +184,7 @@ def test_resolve_valid_row_from_selection(monkeypatch, qapp):
     assert playback._resolve_valid_row(-1) == 2
 
 
-def test_resolve_valid_row_keeps_valid(monkeypatch, qapp):
+def test_resolve_valid_row_returns_unchanged_when_row_in_range(monkeypatch, qapp):
     playback = _make_playback()
 
     class MockAssetViewModel:

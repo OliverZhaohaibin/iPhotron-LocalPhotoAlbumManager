@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import QEvent, QModelIndex, QSize, Qt, Signal
-from PySide6.QtGui import QPalette, QResizeEvent, QWheelEvent
+from PySide6.QtCore import QEvent, QModelIndex, QSize, Qt, QTimer, Signal
+from PySide6.QtGui import QPalette, QResizeEvent, QShowEvent, QWheelEvent
 from PySide6.QtWidgets import QListView, QSizePolicy, QStyleOptionViewItem
 
 from .asset_grid import AssetGrid
@@ -48,6 +48,7 @@ class FilmstripView(AssetGrid):
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
 
         self._updating_style = False
+        self._pending_center_on_show = False
         self._apply_scrollbar_style()
 
     def changeEvent(self, event: QEvent) -> None:
@@ -94,6 +95,30 @@ class FilmstripView(AssetGrid):
     def resizeEvent(self, event: QResizeEvent) -> None:  # type: ignore[override]
         super().resizeEvent(event)
         self.refresh_spacers()
+
+    def showEvent(self, event: QShowEvent) -> None:  # type: ignore[override]
+        """Restore scroll position to center on current selection when becoming visible."""
+        super().showEvent(event)
+        # Defer centering until after the layout is calculated to prevent scrollbar flicker
+        self._pending_center_on_show = True
+        QTimer.singleShot(0, self._restore_center_on_show)
+
+    def _restore_center_on_show(self) -> None:
+        """Center on the current selection after the widget becomes visible."""
+        if not self._pending_center_on_show:
+            return
+        self._pending_center_on_show = False
+
+        selection_model = self.selectionModel()
+        if selection_model is None:
+            return
+
+        current_index = selection_model.currentIndex()
+        if current_index.isValid():
+            # Refresh spacers first to ensure correct layout
+            self.refresh_spacers(current_index)
+            # Then center on the current index
+            self.center_on_index(current_index)
 
     def refresh_spacers(self, current_proxy_index: QModelIndex | None = None) -> None:
         """Recalculate spacer padding and optionally use the provided index.

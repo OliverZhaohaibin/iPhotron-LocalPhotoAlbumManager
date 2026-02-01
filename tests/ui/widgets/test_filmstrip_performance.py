@@ -1,5 +1,6 @@
 import pytest
-from PySide6.QtCore import QAbstractListModel, Qt, QModelIndex
+from PySide6.QtCore import QAbstractListModel, Qt, QModelIndex, QItemSelectionModel
+from PySide6.QtGui import QShowEvent
 from PySide6.QtWidgets import QApplication
 from src.iPhoto.gui.ui.widgets.filmstrip_view import FilmstripView
 from src.iPhoto.gui.ui.models.roles import Roles
@@ -48,3 +49,32 @@ def test_filmstrip_performance_reproduction(qapp):
     # Before the fix, this will fail because data_calls will be ~1000.
     # After the fix, it should be very small (e.g., 0 or 1 depending on selection logic).
     assert model.data_calls < 50, f"Performance regression: {model.data_calls} calls to data()"
+
+
+def test_filmstrip_show_event_schedules_center_on_show(qapp):
+    """Test that showEvent schedules centering on the current selection."""
+    view = FilmstripView()
+    model = MockAssetModel(count=10)
+    view.setModel(model)
+    view.resize(800, 132)
+
+    # Select an item
+    selection_model = view.selectionModel()
+    idx = model.index(5, 0)
+    selection_model.setCurrentIndex(idx, QItemSelectionModel.ClearAndSelect)
+
+    # Hide and show the view
+    view.hide()
+    assert view._pending_center_on_show is False
+
+    # Trigger showEvent
+    view.show()
+
+    # Verify that the pending flag is set
+    assert view._pending_center_on_show is True
+
+    # Process events to run the QTimer.singleShot
+    qapp.processEvents()
+
+    # The flag should be cleared after processing
+    assert view._pending_center_on_show is False

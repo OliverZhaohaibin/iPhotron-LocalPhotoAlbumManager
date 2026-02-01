@@ -167,6 +167,10 @@ class FilmstripView(AssetGrid):
                 if selected.isValid() and not bool(selected.data(Roles.IS_SPACER)):
                     candidate = selected
         if candidate is not None:
+            _console_debug(
+                f"spacing center candidate row={candidate.row()} "
+                f"last_center={self._last_center_index} current={current_proxy_index}"
+            )
             self._defer_center_on_index(candidate)
 
     def _current_item_width(self, current_proxy_index: QModelIndex | None = None) -> int:
@@ -332,6 +336,10 @@ class FilmstripView(AssetGrid):
         target_left = (viewport_width - item_rect.width()) / 2.0
         scroll_delta = item_rect.left() - target_left
         scrollbar = self.horizontalScrollBar()
+        _console_debug(
+            f"center calc row={index.row()} rect={item_rect} viewport={viewport_width} "
+            f"scroll_before={scrollbar.value()}"
+        )
         scrollbar.setValue(scrollbar.value() + int(scroll_delta))
         logger.debug("Filmstrip centered row %s (scroll=%s).", index.row(), scrollbar.value())
         _console_debug(f"centered row={index.row()} scroll={scrollbar.value()}")

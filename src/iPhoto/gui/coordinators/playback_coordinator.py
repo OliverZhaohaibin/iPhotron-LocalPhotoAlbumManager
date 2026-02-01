@@ -395,9 +395,7 @@ class PlaybackCoordinator(QObject):
                 _console_debug(f"sync failed: invalid source index row={resolved_row}")
                 return False
 
-            # Handle Proxy Model (if present)
-            if hasattr(model, "mapFromSource"):
-                idx = model.mapFromSource(idx)
+            idx = self._map_from_source_index(model, idx)
 
         if not idx.isValid():
             LOGGER.debug("Filmstrip sync failed: invalid proxy index for row %s.", resolved_row)
@@ -524,6 +522,18 @@ class PlaybackCoordinator(QObject):
     def _reset_filmstrip_recheck(self) -> None:
         self._filmstrip_recheck_attempts = 0
 
+    @staticmethod
+    def _map_from_source_index(model, index):
+        if model is not None and hasattr(model, "mapFromSource"):
+            return model.mapFromSource(index)
+        return index
+
+    @staticmethod
+    def _map_to_source_index(model, index):
+        if model is not None and hasattr(model, "mapToSource"):
+            return model.mapToSource(index)
+        return index
+
     def _resolve_valid_row(self, row: int) -> int:
         """Resolve a valid source row from the current filmstrip selection.
 
@@ -553,10 +563,7 @@ class PlaybackCoordinator(QObject):
             _console_debug("resolve row failed: invalid selection index")
             return self._fallback_last_filmstrip_row(row)
         model = self._filmstrip_view.model()
-        if hasattr(model, "mapToSource"):
-            source_index = model.mapToSource(proxy_index)
-        else:
-            source_index = proxy_index
+        source_index = self._map_to_source_index(model, proxy_index)
         if not source_index.isValid():
             LOGGER.debug("Failed to resolve filmstrip row: invalid source index.")
             _console_debug("resolve row failed: invalid source index")
@@ -596,10 +603,10 @@ class PlaybackCoordinator(QObject):
             )
             _console_debug(f"resolved row {unresolved_row} -> {fallback_row} (last known)")
             return fallback_row
-        if model is not None and hasattr(model, "mapToSource"):
+        if model is not None:
             proxy_index = model.index(fallback_row, 0)
             if proxy_index.isValid():
-                source_index = model.mapToSource(proxy_index)
+                source_index = self._map_to_source_index(model, proxy_index)
                 if source_index.isValid():
                     resolved_row = source_index.row()
                     LOGGER.debug(

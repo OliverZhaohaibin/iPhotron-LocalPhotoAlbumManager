@@ -475,6 +475,7 @@ class PlaybackCoordinator(QObject):
             _console_debug(f"recheck skipped row={resolved_row}")
 
     def _update_current_row(self, resolved_row: int, *, sync_context: str) -> None:
+        """Update the stored current row for a sync/recheck operation."""
         if resolved_row == self._current_row:
             return
         self._current_row = resolved_row
@@ -486,6 +487,10 @@ class PlaybackCoordinator(QObject):
         _console_debug(f"{sync_context} updated current row={resolved_row}")
 
     def _resolve_valid_row(self, row: int) -> int:
+        """Resolve a valid source row from the current filmstrip selection.
+
+        Returns the resolved row or -1 when no valid selection is available.
+        """
         if 0 <= row < self._asset_vm.rowCount():
             return row
         selection_model = self._filmstrip_view.selectionModel()

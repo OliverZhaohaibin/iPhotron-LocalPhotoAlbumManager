@@ -24,6 +24,54 @@ def _passthrough_row_resolver(row: int) -> int:
     return row
 
 
+class MockIndex:
+    def __init__(self, valid: bool = True, row_value: int = 0):
+        self._valid = valid
+        self._row_value = row_value
+
+    def isValid(self):
+        return self._valid
+
+    def row(self):
+        return self._row_value
+
+
+class MockSelectionModel:
+    def __init__(self, index: MockIndex):
+        self._index = index
+
+    def currentIndex(self):
+        return self._index
+
+
+class MockProxyModel:
+    def __init__(self, source_index: MockIndex):
+        self._source_index = source_index
+
+    def mapToSource(self, proxy_index):
+        return self._source_index
+
+
+class MockFilmstripView:
+    def __init__(self, selection_model: MockSelectionModel, model):
+        self._selection_model = selection_model
+        self._model = model
+
+    def selectionModel(self):
+        return self._selection_model
+
+    def model(self):
+        return self._model
+
+
+class MockAssetViewModel:
+    def __init__(self, count: int):
+        self._count = count
+
+    def rowCount(self):
+        return self._count
+
+
 def _build_filmstrip() -> tuple[FilmstripView, QStandardItemModel]:
     view = FilmstripView()
     model = QStandardItemModel()
@@ -147,81 +195,28 @@ def test_filmstrip_recheck_ignored_when_no_row(monkeypatch, qapp):
 
 def test_resolve_row_uses_selection_fallback(monkeypatch, qapp):
     playback = _make_playback()
-
-    class MockIndex:
-        def __init__(self, valid=True, row_value=0):
-            self._valid = valid
-            self._row_value = row_value
-
-        def isValid(self):
-            return self._valid
-
-        def row(self):
-            return self._row_value
-
-    class MockSelectionModel:
-        def currentIndex(self):
-            return MockIndex(valid=True, row_value=0)
-
-    class MockProxyModel:
-        def mapToSource(self, proxy_index):
-            return MockIndex(valid=True, row_value=2)
-
-    class MockFilmstripView:
-        def selectionModel(self):
-            return MockSelectionModel()
-
-        def model(self):
-            return MockProxyModel()
-
-    class MockAssetViewModel:
-        def rowCount(self):
-            return 5
-
-    playback._filmstrip_view = MockFilmstripView()
-    playback._asset_vm = MockAssetViewModel()
+    playback._filmstrip_view = MockFilmstripView(
+        MockSelectionModel(MockIndex(valid=True, row_value=0)),
+        MockProxyModel(MockIndex(valid=True, row_value=2)),
+    )
+    playback._asset_vm = MockAssetViewModel(5)
 
     assert playback._resolve_valid_row(-1) == 2
 
 
 def test_resolve_row_preserves_valid_index(monkeypatch, qapp):
     playback = _make_playback()
-
-    class MockAssetViewModel:
-        def rowCount(self):
-            return 3
-
-    playback._asset_vm = MockAssetViewModel()
+    playback._asset_vm = MockAssetViewModel(3)
 
     assert playback._resolve_valid_row(1) == 1
 
 
 def test_resolve_row_handles_invalid_selection(monkeypatch, qapp):
     playback = _make_playback()
-
-    class MockIndex:
-        def __init__(self, valid):
-            self._valid = valid
-
-        def isValid(self):
-            return self._valid
-
-    class MockSelectionModel:
-        def currentIndex(self):
-            return MockIndex(valid=False)
-
-    class MockFilmstripView:
-        def selectionModel(self):
-            return MockSelectionModel()
-
-        def model(self):
-            return None
-
-    class MockAssetViewModel:
-        def rowCount(self):
-            return 0
-
-    playback._filmstrip_view = MockFilmstripView()
-    playback._asset_vm = MockAssetViewModel()
+    playback._filmstrip_view = MockFilmstripView(
+        MockSelectionModel(MockIndex(valid=False)),
+        None,
+    )
+    playback._asset_vm = MockAssetViewModel(0)
 
     assert playback._resolve_valid_row(-1) == -1

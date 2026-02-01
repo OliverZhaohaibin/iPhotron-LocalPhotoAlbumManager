@@ -379,15 +379,9 @@ class PlaybackCoordinator(QObject):
         asset_count = self._asset_vm.rowCount()
         model = self._filmstrip_view.model()
         if asset_count == 0:
-            if model is None:
-                LOGGER.debug("Filmstrip sync failed: no model for row %s.", resolved_row)
-                _console_debug(f"sync failed: no model row={resolved_row}")
+            idx = self._index_from_model_only(model, resolved_row)
+            if idx is None:
                 return False
-            if model.rowCount() <= resolved_row:
-                LOGGER.debug("Filmstrip sync failed: row out of bounds (%s).", resolved_row)
-                _console_debug(f"sync failed: out of bounds row={resolved_row}")
-                return False
-            idx = model.index(resolved_row, 0)
         else:
             idx = self._asset_vm.index(resolved_row, 0)
             if not idx.isValid():
@@ -496,6 +490,7 @@ class PlaybackCoordinator(QObject):
                     self._apply_filmstrip_recheck,
                 )
                 return
+            self._reset_filmstrip_recheck()
             return
         if self._sync_filmstrip_selection(resolved_row):
             self._update_current_row(resolved_row, sync_context="recheck")
@@ -521,6 +516,17 @@ class PlaybackCoordinator(QObject):
 
     def _reset_filmstrip_recheck(self) -> None:
         self._filmstrip_recheck_attempts = 0
+
+    def _index_from_model_only(self, model, row: int):
+        if model is None:
+            LOGGER.debug("Filmstrip sync failed: no model for row %s.", row)
+            _console_debug(f"sync failed: no model row={row}")
+            return None
+        if model.rowCount() <= row:
+            LOGGER.debug("Filmstrip sync failed: row out of bounds (%s).", row)
+            _console_debug(f"sync failed: out of bounds row={row}")
+            return None
+        return model.index(row, 0)
 
     @staticmethod
     def _map_from_source_index(model, index):
@@ -603,27 +609,34 @@ class PlaybackCoordinator(QObject):
             )
             _console_debug(f"resolved row {unresolved_row} -> {fallback_row} (last known)")
             return fallback_row
-        if model is not None:
-            proxy_index = model.index(fallback_row, 0)
-            if proxy_index.isValid():
-                source_index = self._map_to_source_index(model, proxy_index)
-                if source_index.isValid():
-                    resolved_row = source_index.row()
-                    LOGGER.debug(
-                        "Resolved filmstrip row from last known proxy: %s -> %s.",
-                        unresolved_row,
-                        resolved_row,
-                    )
-                    _console_debug(
-                        f"resolved row {unresolved_row} -> {resolved_row} (last known proxy)"
-                    )
-                    return resolved_row
+        resolved_row = self._resolve_row_from_proxy_model(model, fallback_row)
+        if resolved_row is not None:
+            LOGGER.debug(
+                "Resolved filmstrip row from last known proxy: %s -> %s.",
+                unresolved_row,
+                resolved_row,
+            )
+            _console_debug(
+                f"resolved row {unresolved_row} -> {resolved_row} (last known proxy)"
+            )
+            return resolved_row
         LOGGER.debug(
             "Failed to resolve filmstrip row: last known out of range (%s).",
             fallback_row,
         )
         _console_debug(f"resolve row failed: last known out of range ({fallback_row})")
         return -1
+
+    def _resolve_row_from_proxy_model(self, model, proxy_row: int) -> int | None:
+        if model is None:
+            return None
+        proxy_index = model.index(proxy_row, 0)
+        if not proxy_index.isValid():
+            return None
+        source_index = self._map_to_source_index(model, proxy_index)
+        if not source_index.isValid():
+            return None
+        return source_index.row()
 
     def _attach_filmstrip_model_signals(self) -> None:
         model = self._filmstrip_view.model()

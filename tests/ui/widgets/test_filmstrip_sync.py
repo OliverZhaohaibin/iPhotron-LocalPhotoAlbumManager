@@ -223,7 +223,7 @@ def test_filmstrip_recheck_stops_after_max(monkeypatch, qapp):
     playback._apply_filmstrip_recheck()
 
     assert playback._filmstrip_recheck_pending is False
-    assert playback._filmstrip_recheck_attempts == FILMSTRIP_RECHECK_MAX_RETRIES
+    assert playback._filmstrip_recheck_attempts == 0
     assert scheduled == []
 
 

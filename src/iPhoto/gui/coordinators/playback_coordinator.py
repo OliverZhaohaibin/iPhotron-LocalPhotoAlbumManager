@@ -370,13 +370,13 @@ class PlaybackCoordinator(QObject):
         Returns ``False`` when the index is invalid or the selection model
         is unavailable, which signals the retry logic to wait for layout.
         """
-        row = self._resolve_valid_row(row)
-        if row < 0:
+        resolved_row = self._resolve_valid_row(row)
+        if resolved_row < 0:
             return False
-        idx = self._asset_vm.index(row, 0)
+        idx = self._asset_vm.index(resolved_row, 0)
         if not idx.isValid():
-            LOGGER.debug("Filmstrip sync failed: invalid source index for row %s.", row)
-            _console_debug(f"sync failed: invalid source index row={row}")
+            LOGGER.debug("Filmstrip sync failed: invalid source index for row %s.", resolved_row)
+            _console_debug(f"sync failed: invalid source index row={resolved_row}")
             return False
 
         # Handle Proxy Model (if present)
@@ -385,22 +385,27 @@ class PlaybackCoordinator(QObject):
             idx = model.mapFromSource(idx)
 
         if not idx.isValid():
-            LOGGER.debug("Filmstrip sync failed: invalid proxy index for row %s.", row)
-            _console_debug(f"sync failed: invalid proxy index row={row}")
+            LOGGER.debug("Filmstrip sync failed: invalid proxy index for row %s.", resolved_row)
+            _console_debug(f"sync failed: invalid proxy index row={resolved_row}")
             return False
 
         selection_model = self._filmstrip_view.selectionModel()
         if selection_model is None:
-            LOGGER.debug("Filmstrip sync failed: selection model unavailable (row %s).", row)
-            _console_debug(f"sync failed: no selection model row={row}")
+            LOGGER.debug("Filmstrip sync failed: selection model unavailable (row %s).", resolved_row)
+            _console_debug(f"sync failed: no selection model row={resolved_row}")
             return False
         if selection_model.currentIndex() != idx:
             selection_model.setCurrentIndex(idx, QItemSelectionModel.ClearAndSelect)
         self._filmstrip_view.center_on_index(idx)
-        if row != self._current_row:
-            self._current_row = row
-            LOGGER.debug("Filmstrip sync updated current row to %s.", row)
-            _console_debug(f"sync updated current row={row}")
+        if resolved_row != self._current_row:
+            previous_row = self._current_row
+            self._current_row = resolved_row
+            LOGGER.debug(
+                "Filmstrip sync updated current row from %s to %s.",
+                previous_row,
+                resolved_row,
+            )
+            _console_debug(f"sync updated current row={previous_row}->{resolved_row}")
         return True
 
     def schedule_filmstrip_sync(self) -> None:
@@ -426,12 +431,13 @@ class PlaybackCoordinator(QObject):
         QTimer.singleShot(0, self._apply_filmstrip_sync)
 
     def _apply_filmstrip_sync(self) -> None:
-        if self._current_row < 0 and self._resolve_valid_row(self._current_row) < 0:
+        resolved_row = self._resolve_valid_row(self._current_row)
+        if resolved_row < 0:
             self._filmstrip_scroll_sync_pending = False
             LOGGER.debug("Filmstrip sync aborted: no current row.")
             _console_debug("sync aborted: no current row")
             return
-        if self._sync_filmstrip_selection(self._current_row):
+        if self._sync_filmstrip_selection(resolved_row):
             self._filmstrip_scroll_sync_pending = False
             self._filmstrip_sync_attempts = 0
             LOGGER.debug("Filmstrip sync applied for row %s.", self._current_row)
@@ -465,9 +471,10 @@ class PlaybackCoordinator(QObject):
 
     def _apply_filmstrip_recheck(self) -> None:
         self._filmstrip_recheck_pending = False
-        if self._current_row < 0 and self._resolve_valid_row(self._current_row) < 0:
+        resolved_row = self._resolve_valid_row(self._current_row)
+        if resolved_row < 0:
             return
-        if self._sync_filmstrip_selection(self._current_row):
+        if self._sync_filmstrip_selection(resolved_row):
             LOGGER.debug("Filmstrip recheck applied for row %s.", self._current_row)
             _console_debug(f"recheck applied row={self._current_row}")
         else:

@@ -58,6 +58,7 @@ def _make_playback() -> PlaybackCoordinator:
 
 def test_filmstrip_sync_retries(monkeypatch, qapp):
     playback = _make_playback()
+    playback._resolve_valid_row = lambda row: row
     scheduled = []
 
     def _fake_single_shot(delay, callback):
@@ -75,6 +76,7 @@ def test_filmstrip_sync_retries(monkeypatch, qapp):
 
 def test_filmstrip_sync_retry_limit(monkeypatch, qapp):
     playback = _make_playback()
+    playback._resolve_valid_row = lambda row: row
     playback._filmstrip_sync_attempts = FILMSTRIP_SYNC_MAX_RETRIES
     scheduled = []
 
@@ -112,6 +114,7 @@ def test_filmstrip_recheck_applies(monkeypatch, qapp):
     playback = _make_playback()
     playback._current_row = 4
     playback._filmstrip_recheck_pending = True
+    playback._resolve_valid_row = lambda row: row
     calls = []
 
     def _fake_sync(row):
@@ -141,13 +144,24 @@ def test_filmstrip_recheck_ignored_when_no_row(monkeypatch, qapp):
 def test_resolve_valid_row_from_selection(monkeypatch, qapp):
     playback = _make_playback()
 
+    class MockIndex:
+        def __init__(self, valid=True, row_value=0):
+            self._valid = valid
+            self._row_value = row_value
+
+        def isValid(self):
+            return self._valid
+
+        def row(self):
+            return self._row_value
+
     class DummySelectionModel:
         def currentIndex(self):
-            return type("Index", (), {"isValid": lambda self: True})()
+            return MockIndex(valid=True, row_value=0)
 
     class DummyModel:
         def mapToSource(self, proxy_index):
-            return type("Index", (), {"isValid": lambda self: True, "row": lambda self: 2})()
+            return MockIndex(valid=True, row_value=2)
 
     class DummyFilmstrip:
         def selectionModel(self):

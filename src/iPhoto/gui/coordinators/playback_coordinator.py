@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from pathlib import Path
 import logging
-import sys
 from typing import TYPE_CHECKING, Any, Optional
 
 from PySide6.QtCore import QObject, Slot, QTimer, Signal, QModelIndex, QItemSelectionModel
@@ -15,6 +14,7 @@ from src.iPhoto.gui.ui.icons import load_icon
 from src.iPhoto.gui.ui.controllers.header_controller import HeaderController
 from src.iPhoto.gui.ui.models.roles import Roles
 from src.iPhoto.gui.ui.widgets.info_panel import InfoPanel
+from src.iPhoto.gui.utils.console_logger import ensure_console_logger
 from src.iPhoto.io.metadata import read_image_meta
 from src.iPhoto.io import sidecar
 
@@ -36,16 +36,7 @@ FILMSTRIP_SYNC_RETRY_DELAY_MS = 50
 # these can be tuned, but the defaults balance responsiveness and stability.
 
 def _console_debug(message: str) -> None:
-    for handler in LOGGER.handlers:
-        if getattr(handler, "name", None) == _CONSOLE_HANDLER_NAME:
-            LOGGER.info("[PlaybackCoordinator] %s", message)
-            return
-    handler = logging.StreamHandler(sys.stdout)
-    handler.setLevel(logging.INFO)
-    handler.name = _CONSOLE_HANDLER_NAME
-    handler.setFormatter(logging.Formatter("%(message)s"))
-    LOGGER.addHandler(handler)
-    LOGGER.setLevel(logging.INFO)
+    ensure_console_logger(LOGGER, _CONSOLE_HANDLER_NAME)
     LOGGER.info("[PlaybackCoordinator] %s", message)
 
 

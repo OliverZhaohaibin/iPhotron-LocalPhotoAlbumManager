@@ -165,7 +165,8 @@ class MainCoordinator(QObject):
             self._event_bus,
             self._asset_list_vm, # Injected for invalidation
             window,
-            self._theme_controller
+            self._theme_controller,
+            transition_finished_callback=self._handle_edit_transition_finished,
         )
 
         # --- Legacy Controllers ---
@@ -526,6 +527,11 @@ class MainCoordinator(QObject):
         """Returns to the gallery view."""
         self._playback.reset_for_gallery()
         self._view_router.show_gallery()
+
+    def _handle_edit_transition_finished(self, direction: str) -> None:
+        if direction != "exit":
+            return
+        self._playback.schedule_filmstrip_sync()
 
     def _handle_toggle_favorite(self):
         """Toggles favorite status for selected assets."""

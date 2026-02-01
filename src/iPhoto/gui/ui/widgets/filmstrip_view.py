@@ -130,6 +130,24 @@ class FilmstripView(AssetGrid):
 
         padding = max(0, (viewport_width - current_width) // 2)
         setter(padding)
+        self._schedule_center_after_spacing(current_proxy_index)
+
+    def _schedule_center_after_spacing(self, current_proxy_index: QModelIndex | None) -> None:
+        candidate = None
+        if (
+            current_proxy_index is not None
+            and current_proxy_index.isValid()
+            and not bool(current_proxy_index.data(Roles.IS_SPACER))
+        ):
+            candidate = current_proxy_index
+        else:
+            selection_model = self.selectionModel()
+            if selection_model is not None:
+                selected = selection_model.currentIndex()
+                if selected.isValid() and not bool(selected.data(Roles.IS_SPACER)):
+                    candidate = selected
+        if candidate is not None:
+            self._defer_center_on_index(candidate)
 
     def _current_item_width(self, current_proxy_index: QModelIndex | None = None) -> int:
         """Return the width of the active tile, preferring the supplied index."""

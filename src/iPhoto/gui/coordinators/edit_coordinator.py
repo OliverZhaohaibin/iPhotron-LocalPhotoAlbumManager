@@ -45,7 +45,8 @@ class EditCoordinator(QObject):
         event_bus: EventBus,
         asset_vm: AssetListViewModel,
         window: QObject | None = None,
-        theme_controller: WindowThemeController | None = None
+        theme_controller: WindowThemeController | None = None,
+        transition_finished_callback: callable | None = None,
     ):
         super().__init__()
         # We need access to specific UI elements within edit_page (which is likely MainWindow.ui)
@@ -61,6 +62,8 @@ class EditCoordinator(QObject):
             parent=self,
             theme_controller=theme_controller
         )
+        if transition_finished_callback is not None:
+            self._transition_manager.transition_finished.connect(transition_finished_callback)
 
         # State
         self._session: Optional[EditSession] = None

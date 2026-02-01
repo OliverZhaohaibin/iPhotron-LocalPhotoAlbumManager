@@ -92,6 +92,8 @@ class PlaybackCoordinator(QObject):
 
         self._filmstrip_scroll_sync_pending = False
         self._filmstrip_model = None
+        self._filmstrip_sync_attempts = 0
+        self._filmstrip_sync_attempt_limit = 4
         self._connect_signals()
         self._connect_zoom_controls()
         self._restore_filmstrip_preference()
@@ -340,34 +342,53 @@ class PlaybackCoordinator(QObject):
         self._player_view.set_live_replay_enabled(True)
         self._is_playing = False
 
-    def _sync_filmstrip_selection(self, row: int):
+    def _sync_filmstrip_selection(self, row: int) -> bool:
         """Update filmstrip selection and scroll to the item."""
         idx = self._asset_vm.index(row, 0)
+        if not idx.isValid():
+            return False
 
         # Handle Proxy Model (if present)
         model = self._filmstrip_view.model()
         if hasattr(model, "mapFromSource"):
             idx = model.mapFromSource(idx)
 
-        if idx.isValid():
-            selection_model = self._filmstrip_view.selectionModel()
-            if selection_model is None:
-                return
-            if selection_model.currentIndex() != idx:
-                selection_model.setCurrentIndex(idx, QItemSelectionModel.ClearAndSelect)
-            self._filmstrip_view.center_on_index(idx)
+        if not idx.isValid():
+            return False
+
+        selection_model = self._filmstrip_view.selectionModel()
+        if selection_model is None:
+            return False
+        if selection_model.currentIndex() != idx:
+            selection_model.setCurrentIndex(idx, QItemSelectionModel.ClearAndSelect)
+        self._filmstrip_view.center_on_index(idx)
+        return True
 
     def _schedule_filmstrip_sync(self) -> None:
         if not self._can_sync_filmstrip():
             return
+        self._filmstrip_sync_attempts = 0
         self._filmstrip_scroll_sync_pending = True
         QTimer.singleShot(0, self._apply_filmstrip_sync)
 
+    def schedule_filmstrip_sync(self) -> None:
+        """Public trigger to resync the filmstrip position."""
+        self._schedule_filmstrip_sync()
+
     def _apply_filmstrip_sync(self) -> None:
-        self._filmstrip_scroll_sync_pending = False
         if self._current_row < 0:
+            self._filmstrip_scroll_sync_pending = False
             return
-        self._sync_filmstrip_selection(self._current_row)
+        if self._sync_filmstrip_selection(self._current_row):
+            self._filmstrip_scroll_sync_pending = False
+            self._filmstrip_sync_attempts = 0
+            return
+        if self._filmstrip_sync_attempts < self._filmstrip_sync_attempt_limit:
+            self._filmstrip_sync_attempts += 1
+            QTimer.singleShot(50, self._apply_filmstrip_sync)
+            return
+        self._filmstrip_scroll_sync_pending = False
+        self._filmstrip_sync_attempts = 0
 
     def _attach_filmstrip_model_signals(self) -> None:
         model = self._filmstrip_view.model()

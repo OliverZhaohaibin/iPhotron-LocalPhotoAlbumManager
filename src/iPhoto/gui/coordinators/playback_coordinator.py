@@ -571,8 +571,8 @@ class PlaybackCoordinator(QObject):
         if fallback_row is None:
             return -1
         asset_count = self._asset_vm.rowCount()
+        model = self._filmstrip_view.model()
         if asset_count == 0:
-            model = self._filmstrip_view.model()
             if model is not None and fallback_row < model.rowCount():
                 LOGGER.debug(
                     "Resolved filmstrip row from last known: %s -> %s.",
@@ -589,6 +589,21 @@ class PlaybackCoordinator(QObject):
             )
             _console_debug(f"resolved row {unresolved_row} -> {fallback_row} (last known)")
             return fallback_row
+        if model is not None and hasattr(model, "mapToSource"):
+            proxy_index = model.index(fallback_row, 0)
+            if proxy_index.isValid():
+                source_index = model.mapToSource(proxy_index)
+                if source_index.isValid() and source_index.row() < asset_count:
+                    resolved_row = source_index.row()
+                    LOGGER.debug(
+                        "Resolved filmstrip row from last known proxy: %s -> %s.",
+                        unresolved_row,
+                        resolved_row,
+                    )
+                    _console_debug(
+                        f"resolved row {unresolved_row} -> {resolved_row} (last known proxy)"
+                    )
+                    return resolved_row
         LOGGER.debug(
             "Failed to resolve filmstrip row: last known out of range (%s).",
             fallback_row,

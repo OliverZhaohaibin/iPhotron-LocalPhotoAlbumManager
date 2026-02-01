@@ -292,6 +292,7 @@ def test_resolve_row_falls_back_to_last_known(qapp):
     playback._asset_vm = MockAssetViewModel(3)
 
     assert playback._resolve_valid_row(-1) == 1
+    assert playback._last_filmstrip_row == 1
 
 
 def test_update_current_row_updates_when_needed(qapp):

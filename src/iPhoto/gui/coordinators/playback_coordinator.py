@@ -548,17 +548,17 @@ class PlaybackCoordinator(QObject):
         _console_debug(f"resolve row failed: out of range ({resolved_row})")
         return self._fallback_last_filmstrip_row(row)
 
-    def _fallback_last_filmstrip_row(self, row: int) -> int:
+    def _fallback_last_filmstrip_row(self, requested_row: int) -> int:
         fallback_row = self._last_filmstrip_row
         if fallback_row is None:
             return -1
         if 0 <= fallback_row < self._asset_vm.rowCount():
             LOGGER.debug(
                 "Resolved filmstrip row from last known: %s -> %s.",
-                row,
+                requested_row,
                 fallback_row,
             )
-            _console_debug(f"resolved row {row} -> {fallback_row} (last known)")
+            _console_debug(f"resolved row {requested_row} -> {fallback_row} (last known)")
             return fallback_row
         LOGGER.debug(
             "Failed to resolve filmstrip row: last known out of range (%s).",

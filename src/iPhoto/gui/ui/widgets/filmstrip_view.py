@@ -49,6 +49,7 @@ class FilmstripView(AssetGrid):
 
         self._updating_style = False
         self._pending_center_on_show = False
+        self._center_timer: QTimer | None = None
         self._apply_scrollbar_style()
 
     def changeEvent(self, event: QEvent) -> None:
@@ -91,23 +92,68 @@ class FilmstripView(AssetGrid):
             # QListView with uniformItemSizes=False might need a nudge.
             self.scheduleDelayedItemsLayout()
             self.refresh_spacers(top)
+            # If we're in the process of restoring scroll position after becoming visible,
+            # schedule another centering attempt since data changes can affect scroll position
+            if self._pending_center_on_show:
+                self._schedule_center_on_show()
 
     def resizeEvent(self, event: QResizeEvent) -> None:  # type: ignore[override]
         super().resizeEvent(event)
         self.refresh_spacers()
+        # If we're in the process of restoring scroll position after becoming visible,
+        # schedule another centering attempt since resize can affect scroll position
+        if self._pending_center_on_show:
+            self._schedule_center_on_show()
 
     def showEvent(self, event: QShowEvent) -> None:  # type: ignore[override]
         """Restore scroll position to center on current selection when becoming visible."""
         super().showEvent(event)
-        # Defer centering until after the layout is calculated to prevent scrollbar flicker
+        # Mark that we need to restore centering - this stays true until layout stabilizes
         self._pending_center_on_show = True
+        # Schedule multiple centering attempts to handle layout changes during transition
+        # First attempt: immediate (after current event loop)
         QTimer.singleShot(0, self._restore_center_on_show)
+        # Second attempt: after a short delay to handle initial layout
+        QTimer.singleShot(50, self._restore_center_on_show)
+        # Third attempt: after transition animation typically completes (250ms + buffer)
+        QTimer.singleShot(300, self._final_center_on_show)
+
+    def _schedule_center_on_show(self) -> None:
+        """Schedule a centering attempt, debouncing rapid calls."""
+        # Reuse existing timer if available, otherwise create a new one
+        if self._center_timer is None:
+            self._center_timer = QTimer(self)
+            self._center_timer.setSingleShot(True)
+            self._center_timer.timeout.connect(self._restore_center_on_show)
+        else:
+            self._center_timer.stop()
+        self._center_timer.start(50)
 
     def _restore_center_on_show(self) -> None:
         """Center on the current selection after the widget becomes visible."""
         if not self._pending_center_on_show:
             return
+
+        selection_model = self.selectionModel()
+        if selection_model is None:
+            return
+
+        current_index = selection_model.currentIndex()
+        if current_index.isValid():
+            # Refresh spacers first to ensure correct layout
+            self.refresh_spacers(current_index)
+            # Then center on the current index
+            self.center_on_index(current_index)
+
+    def _final_center_on_show(self) -> None:
+        """Final centering attempt - clears the pending flag."""
+        if not self._pending_center_on_show:
+            return
         self._pending_center_on_show = False
+
+        # Stop any pending timer (but keep it for reuse)
+        if self._center_timer is not None:
+            self._center_timer.stop()
 
         selection_model = self.selectionModel()
         if selection_model is None:

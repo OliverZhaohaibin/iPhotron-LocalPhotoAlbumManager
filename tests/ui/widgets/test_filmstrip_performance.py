@@ -72,8 +72,16 @@ def test_filmstrip_show_event_schedules_centering(qapp):
     # Verify that the pending flag is set
     assert view._pending_center_on_show is True
 
-    # Process events to run the QTimer.singleShot
+    # Process events to run the QTimer.singleShot calls
+    # The implementation schedules multiple centering attempts at 0ms, 50ms, and 300ms
+    # The flag is cleared by the final attempt at 300ms
+    # Here we just verify that the initial behavior is correct
     qapp.processEvents()
 
-    # The flag should be cleared after processing
+    # The flag stays True until the final centering at 300ms completes
+    # This is expected behavior for the multi-attempt centering strategy
+    assert view._pending_center_on_show is True
+
+    # Manually trigger the final center to clear the flag
+    view._final_center_on_show()
     assert view._pending_center_on_show is False

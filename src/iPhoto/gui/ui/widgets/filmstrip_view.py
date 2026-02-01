@@ -12,7 +12,7 @@ from .asset_grid import AssetGrid
 from ..models.roles import Roles
 from ..styles import modern_scrollbar_style
 
-LOGGER = logging.getLogger(__name__)
+logger = logging.getLogger(__name__)
 
 
 class FilmstripView(AssetGrid):
@@ -295,19 +295,19 @@ class FilmstripView(AssetGrid):
 
         self._last_center_index = QPersistentModelIndex(index)
         if not self.isVisible():
-            LOGGER.debug("Filmstrip defer center: view hidden (row=%s).", index.row())
+            logger.debug("Filmstrip defer center: view hidden (row=%s).", index.row())
             self._defer_center_on_index(index)
             return
 
         item_rect = self.visualRect(index)
         if not item_rect.isValid() or item_rect.width() <= 0 or item_rect.height() <= 0:
-            LOGGER.debug("Filmstrip defer center: invalid rect (row=%s, rect=%s).", index.row(), item_rect)
+            logger.debug("Filmstrip defer center: invalid rect (row=%s, rect=%s).", index.row(), item_rect)
             self._defer_center_on_index(index)
             return
 
         viewport_width = self.viewport().width()
         if viewport_width <= 0:
-            LOGGER.debug("Filmstrip defer center: empty viewport (row=%s).", index.row())
+            logger.debug("Filmstrip defer center: empty viewport (row=%s).", index.row())
             self._defer_center_on_index(index)
             return
 
@@ -315,7 +315,7 @@ class FilmstripView(AssetGrid):
         scroll_delta = item_rect.left() - target_left
         scrollbar = self.horizontalScrollBar()
         scrollbar.setValue(scrollbar.value() + int(scroll_delta))
-        LOGGER.debug("Filmstrip centered row %s (scroll=%s).", index.row(), scrollbar.value())
+        logger.debug("Filmstrip centered row %s (scroll=%s).", index.row(), scrollbar.value())
 
     def _defer_center_on_index(self, index: QModelIndex) -> None:
         if not index.isValid():
@@ -340,7 +340,7 @@ class FilmstripView(AssetGrid):
         index = self._resolve_pending_center_index()
         self._pending_center_index = None
         if index is not None:
-            LOGGER.debug("Applying pending filmstrip center (row=%s).", index.row())
+            logger.debug("Applying pending filmstrip center (row=%s).", index.row())
             self.center_on_index(index)
 
     def _resolve_pending_center_index(self) -> QModelIndex | None:

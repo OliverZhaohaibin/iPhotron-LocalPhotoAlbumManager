@@ -262,7 +262,7 @@ class PlaybackCoordinator(QObject):
         # Sync Filmstrip
         if not self._sync_filmstrip_selection(row):
             LOGGER.debug(
-                "Filmstrip sync deferred for row %s (view visible=%s).",
+                "Filmstrip sync not applied for row %s (view visible=%s).",
                 row,
                 self._filmstrip_view.isVisible(),
             )

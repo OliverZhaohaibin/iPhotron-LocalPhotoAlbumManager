@@ -295,8 +295,12 @@ class FilmstripView(AssetGrid):
                 restored = True
 
         if not restored and scroll_value is not None:
-            scrollbar.setValue(scroll_value)
-            restored = True
+            # Only restore raw scroll value if we have a center_row reference point.
+            # Without a center_row, restoring scroll_value after a data reload can cause
+            # flickering as the view jumps to an arbitrary position.
+            if center_row is not None:
+                scrollbar.setValue(scroll_value)
+                restored = True
 
         print(
             "[FilmstripDebug] restore_scroll_state",

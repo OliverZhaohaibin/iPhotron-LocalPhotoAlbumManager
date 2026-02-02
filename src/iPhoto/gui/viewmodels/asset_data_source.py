@@ -132,7 +132,6 @@ class AssetDataSource(QObject):
         self._paging_inflight = False
         self._paging_offset = 0
         self._paging_has_more = False
-        self._is_loading = False
         self._path_exists_cache: OrderedDict[str, bool] = OrderedDict()
         self._path_cache_lock = threading.Lock()
 
@@ -144,7 +143,6 @@ class AssetDataSource(QObject):
         self._total_count = 0
         self._seen_abs_paths.clear()
         self._path_exists_cache.clear()
-        self._is_loading = False
         self.dataChanged.emit()
 
     def set_repository(self, repo: IAssetRepository) -> None:
@@ -155,7 +153,6 @@ class AssetDataSource(QObject):
         self._total_count = 0
         self._seen_abs_paths.clear()
         self._path_exists_cache.clear()
-        self._is_loading = False
         self.dataChanged.emit()
 
     def set_active_root(self, root: Optional[Path]) -> None:
@@ -168,18 +165,18 @@ class AssetDataSource(QObject):
     def load(self, query: AssetQuery):
         """Loads data for the given query."""
         self._current_query = query
-        self._cached_dtos.clear()
 
         # Default limit if not set
         if not query.limit:
             query.limit = self._page_size if self._should_use_paging(query) else 5000
 
-        self._total_count = 0
-        self._seen_abs_paths.clear()
+        self._total_count = len(self._cached_dtos)
+        self._seen_abs_paths = {
+            self._normalize_abs_key(dto.abs_path) for dto in self._cached_dtos
+        }
         self._paging_inflight = False
         self._paging_offset = 0
         self._paging_has_more = False
-        self._is_loading = True
         self.dataChanged.emit()
 
         self._load_generation += 1
@@ -208,7 +205,6 @@ class AssetDataSource(QObject):
         self.dataChanged.emit()
         if self._current_query and self._should_use_paging(self._current_query):
             self._maybe_schedule_next_page()
-        self._is_loading = False
 
     def reload_current_query(self) -> None:
         if self._current_query is None:
@@ -232,9 +228,6 @@ class AssetDataSource(QObject):
 
     def count(self) -> int:
         return len(self._cached_dtos)
-
-    def is_loading(self) -> bool:
-        return self._is_loading
 
     def update_favorite_status(self, row: int, is_favorite: bool):
         """Updates the favorite status of the cached DTO at the given row."""

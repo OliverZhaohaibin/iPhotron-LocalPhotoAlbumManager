@@ -31,6 +31,7 @@ class AssetListViewModel(QAbstractListModel):
         self._thumbnails = thumbnail_service
         self._thumb_size = QSize(512, 512)
         self._current_row = -1
+        self._last_count = 0
 
         # Connect signals
         self._data_source.dataChanged.connect(self._on_source_changed)
@@ -199,8 +200,16 @@ class AssetListViewModel(QAbstractListModel):
         return None, None
 
     def _on_source_changed(self):
+        count = self._data_source.count()
+        if self._data_source.is_loading() and count == 0 and self._last_count > 0:
+            print(
+                "[FilmstripDebug] asset_list_vm: skip reset during load",
+                {"previous_count": self._last_count},
+            )
+            return
         self.beginResetModel()
         self.endResetModel()
+        self._last_count = count
 
     def _on_thumbnail_ready(self, path: Path):
         # Find index for path and emit dataChanged

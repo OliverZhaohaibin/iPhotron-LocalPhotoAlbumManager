@@ -171,11 +171,36 @@ class PlaybackCoordinator(QObject):
         else:
             show = bool(stored)
 
+        scrollbar = self._filmstrip_view.horizontalScrollBar()
+        print(
+            "[FilmstripDebug] restore_filmstrip_preference",
+            {
+                "stored": stored,
+                "resolved_show": show,
+                "visible_before": self._filmstrip_view.isVisible(),
+                "scroll_value": scrollbar.value(),
+                "scroll_min": scrollbar.minimum(),
+                "scroll_max": scrollbar.maximum(),
+                "page_step": scrollbar.pageStep(),
+            },
+        )
         self._filmstrip_view.setVisible(show)
         self._toggle_filmstrip_action.setChecked(show)
 
     @Slot(bool)
     def _handle_filmstrip_toggled(self, checked: bool):
+        scrollbar = self._filmstrip_view.horizontalScrollBar()
+        print(
+            "[FilmstripDebug] handle_filmstrip_toggled",
+            {
+                "checked": checked,
+                "visible_before": self._filmstrip_view.isVisible(),
+                "scroll_value": scrollbar.value(),
+                "scroll_min": scrollbar.minimum(),
+                "scroll_max": scrollbar.maximum(),
+                "page_step": scrollbar.pageStep(),
+            },
+        )
         self._filmstrip_view.setVisible(checked)
         self._settings.set("ui.show_filmstrip", checked)
 
@@ -183,6 +208,15 @@ class PlaybackCoordinator(QObject):
     def _on_filmstrip_clicked(self, index: QModelIndex):
         # Handle Proxy Model (if present)
         model = self._filmstrip_view.model()
+        print(
+            "[FilmstripDebug] on_filmstrip_clicked",
+            {
+                "index_valid": index.isValid(),
+                "row": index.row(),
+                "column": index.column(),
+                "has_proxy": hasattr(model, "mapToSource"),
+            },
+        )
         if hasattr(model, "mapToSource"):
             source_idx = model.mapToSource(index)
             if source_idx.isValid():
@@ -342,11 +376,25 @@ class PlaybackCoordinator(QObject):
         if hasattr(model, "mapFromSource"):
             idx = model.mapFromSource(idx)
 
+        scrollbar = self._filmstrip_view.horizontalScrollBar()
+        print(
+            "[FilmstripDebug] sync_filmstrip_selection",
+            {
+                "row": row,
+                "index_valid": idx.isValid(),
+                "proxy_row": idx.row(),
+                "visible": self._filmstrip_view.isVisible(),
+                "scroll_value": scrollbar.value(),
+                "scroll_min": scrollbar.minimum(),
+                "scroll_max": scrollbar.maximum(),
+                "page_step": scrollbar.pageStep(),
+            },
+        )
         if idx.isValid():
-             self._filmstrip_view.selectionModel().setCurrentIndex(
+            self._filmstrip_view.selectionModel().setCurrentIndex(
                 idx, QItemSelectionModel.ClearAndSelect
-             )
-             self._filmstrip_view.center_on_index(idx)
+            )
+            self._filmstrip_view.center_on_index(idx)
 
     def _update_favorite_icon(self, is_favorite: bool):
         icon_name = "suit.heart.fill.svg" if is_favorite else "suit.heart.svg"

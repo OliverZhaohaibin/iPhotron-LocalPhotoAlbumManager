@@ -93,6 +93,21 @@ class EditViewTransitionManager(QObject):
         if self._transition_direction == "enter":
             return
 
+        filmstrip = self._ui.filmstrip_view
+        scrollbar = filmstrip.horizontalScrollBar()
+        print(
+            "[FilmstripDebug] enter_edit_mode: before hide filmstrip",
+            {
+                "animate": animate,
+                "visible": filmstrip.isVisible(),
+                "scroll_value": scrollbar.value(),
+                "scroll_min": scrollbar.minimum(),
+                "scroll_max": scrollbar.maximum(),
+                "page_step": scrollbar.pageStep(),
+                "viewport_width": filmstrip.viewport().width() if filmstrip.viewport() else None,
+            },
+        )
+
         self._detail_header_opacity.setOpacity(1.0)
         self._ui.detail_chrome_container.hide()
         self._ui.edit_header_container.show()
@@ -125,6 +140,22 @@ class EditViewTransitionManager(QObject):
 
         if self._transition_direction == "exit":
             return
+
+        filmstrip = self._ui.filmstrip_view
+        scrollbar = filmstrip.horizontalScrollBar()
+        print(
+            "[FilmstripDebug] leave_edit_mode: before show/hide filmstrip",
+            {
+                "animate": animate,
+                "show_filmstrip": show_filmstrip,
+                "visible": filmstrip.isVisible(),
+                "scroll_value": scrollbar.value(),
+                "scroll_min": scrollbar.minimum(),
+                "scroll_max": scrollbar.maximum(),
+                "page_step": scrollbar.pageStep(),
+                "viewport_width": filmstrip.viewport().width() if filmstrip.viewport() else None,
+            },
+        )
 
         self._prepare_navigation_sidebar_for_exit()
         self._prepare_edit_sidebar_for_exit()

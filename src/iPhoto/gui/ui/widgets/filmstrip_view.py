@@ -106,14 +106,23 @@ class FilmstripView(AssetGrid):
         viewport = self.viewport()
         model = self.model()
         if viewport is None or model is None:
+            print(
+                "[FilmstripDebug] refresh_spacers: skipped (missing viewport/model)",
+                {"has_viewport": viewport is not None, "has_model": model is not None},
+            )
             return
 
         setter = getattr(model, "set_spacer_width", None)
         if setter is None:
+            print("[FilmstripDebug] refresh_spacers: skipped (model has no set_spacer_width)")
             return
 
         viewport_width = viewport.width()
         if viewport_width <= 0:
+            print(
+                "[FilmstripDebug] refresh_spacers: viewport width <= 0",
+                {"viewport_width": viewport_width},
+            )
             setter(0)
             return
 
@@ -122,6 +131,17 @@ class FilmstripView(AssetGrid):
             current_width = self._narrow_item_width()
 
         padding = max(0, (viewport_width - current_width) // 2)
+        print(
+            "[FilmstripDebug] refresh_spacers: computed padding",
+            {
+                "viewport_width": viewport_width,
+                "current_width": current_width,
+                "padding": padding,
+                "current_proxy_index_valid": (
+                    current_proxy_index.isValid() if current_proxy_index is not None else None
+                ),
+            },
+        )
         setter(padding)
 
     def _current_item_width(self, current_proxy_index: QModelIndex | None = None) -> int:
@@ -261,17 +281,50 @@ class FilmstripView(AssetGrid):
     def center_on_index(self, index: QModelIndex) -> None:
         """Scroll the view so *index* is visually centred in the viewport."""
         if not index.isValid():
+            print("[FilmstripDebug] center_on_index: invalid index, abort")
             return
 
         item_rect = self.visualRect(index)
         if not item_rect.isValid():
+            print(
+                "[FilmstripDebug] center_on_index: invalid item rect, abort",
+                {"row": index.row(), "col": index.column()},
+            )
             return
 
         viewport_width = self.viewport().width()
         if viewport_width <= 0:
+            print(
+                "[FilmstripDebug] center_on_index: viewport width <= 0, abort",
+                {"viewport_width": viewport_width},
+            )
             return
 
         target_left = (viewport_width - item_rect.width()) / 2.0
         scroll_delta = item_rect.left() - target_left
         scrollbar = self.horizontalScrollBar()
+        print(
+            "[FilmstripDebug] center_on_index: applying scroll",
+            {
+                "row": index.row(),
+                "col": index.column(),
+                "item_rect": {
+                    "x": item_rect.x(),
+                    "y": item_rect.y(),
+                    "width": item_rect.width(),
+                    "height": item_rect.height(),
+                },
+                "viewport_width": viewport_width,
+                "target_left": target_left,
+                "scroll_delta": scroll_delta,
+                "scroll_before": scrollbar.value(),
+                "scroll_min": scrollbar.minimum(),
+                "scroll_max": scrollbar.maximum(),
+                "page_step": scrollbar.pageStep(),
+            },
+        )
         scrollbar.setValue(scrollbar.value() + int(scroll_delta))
+        print(
+            "[FilmstripDebug] center_on_index: scroll applied",
+            {"scroll_after": scrollbar.value()},
+        )

@@ -199,8 +199,17 @@ class AssetListViewModel(QAbstractListModel):
         return None, None
 
     def _on_source_changed(self):
+        count = self._data_source.count()
+        print(
+            "[FilmstripDebug] asset_list_vm:source_changed",
+            {
+                "count": count,
+                "previous_count": self._last_count,
+            },
+        )
         self.beginResetModel()
         self.endResetModel()
+        self._last_count = count
 
     def _on_thumbnail_ready(self, path: Path):
         # Find index for path and emit dataChanged

@@ -143,6 +143,10 @@ class AssetDataSource(QObject):
         self._total_count = 0
         self._seen_abs_paths.clear()
         self._path_exists_cache.clear()
+        print(
+            "[FilmstripDebug] data_source:set_library_root",
+            {"root": str(root) if root else None, "count": len(self._cached_dtos)},
+        )
         self.dataChanged.emit()
 
     def set_repository(self, repo: IAssetRepository) -> None:
@@ -153,6 +157,10 @@ class AssetDataSource(QObject):
         self._total_count = 0
         self._seen_abs_paths.clear()
         self._path_exists_cache.clear()
+        print(
+            "[FilmstripDebug] data_source:set_repository",
+            {"count": len(self._cached_dtos)},
+        )
         self.dataChanged.emit()
 
     def set_active_root(self, root: Optional[Path]) -> None:
@@ -177,6 +185,15 @@ class AssetDataSource(QObject):
         self._paging_inflight = False
         self._paging_offset = 0
         self._paging_has_more = False
+        print(
+            "[FilmstripDebug] data_source:load",
+            {
+                "count": len(self._cached_dtos),
+                "total_count": self._total_count,
+                "limit": query.limit,
+                "paging": self._should_use_paging(query),
+            },
+        )
         self.dataChanged.emit()
 
         self._load_generation += 1
@@ -202,6 +219,10 @@ class AssetDataSource(QObject):
         else:
             self._paging_has_more = False
         self._paging_offset = raw_count
+        print(
+            "[FilmstripDebug] data_source:load_completed",
+            {"count": len(self._cached_dtos), "raw_count": raw_count},
+        )
         self.dataChanged.emit()
         if self._current_query and self._should_use_paging(self._current_query):
             self._maybe_schedule_next_page()
@@ -209,6 +230,10 @@ class AssetDataSource(QObject):
     def reload_current_query(self) -> None:
         if self._current_query is None:
             return
+        print(
+            "[FilmstripDebug] data_source:reload_current_query",
+            {"count": len(self._cached_dtos)},
+        )
         self.load(self._current_query)
 
     def asset_at(self, index: int) -> Optional[AssetDTO]:
@@ -242,6 +267,10 @@ class AssetDataSource(QObject):
             if 0 <= row < len(self._cached_dtos):
                 self._cached_dtos.pop(row)
         if emit:
+            print(
+                "[FilmstripDebug] data_source:remove_rows",
+                {"count": len(self._cached_dtos), "removed": len(rows)},
+            )
             self.dataChanged.emit()
 
     def apply_optimistic_move(

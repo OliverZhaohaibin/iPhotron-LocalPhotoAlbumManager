@@ -80,6 +80,9 @@ class FilmstripView(AssetGrid):
         old_about_to_reset = getattr(old, "modelAboutToBeReset", None)
         old_reset = getattr(old, "modelReset", None)
         old_rows_inserted = getattr(old, "rowsInserted", None)
+        old_rows_removed = getattr(old, "rowsRemoved", None)
+        old_layout_about = getattr(old, "layoutAboutToBeChanged", None)
+        old_layout_changed = getattr(old, "layoutChanged", None)
         if old is not None:
             old.dataChanged.disconnect(self._on_data_changed)
             if old_about_to_reset is not None:
@@ -97,6 +100,21 @@ class FilmstripView(AssetGrid):
                     old_rows_inserted.disconnect(self._schedule_restore_scroll)
                 except (RuntimeError, TypeError):  # pragma: no cover - Qt signal glue
                     pass
+            if old_rows_removed is not None:
+                try:
+                    old_rows_removed.disconnect(self._on_rows_removed_debug)
+                except (RuntimeError, TypeError):  # pragma: no cover - Qt signal glue
+                    pass
+            if old_layout_about is not None:
+                try:
+                    old_layout_about.disconnect(self._on_layout_about_to_change_debug)
+                except (RuntimeError, TypeError):  # pragma: no cover - Qt signal glue
+                    pass
+            if old_layout_changed is not None:
+                try:
+                    old_layout_changed.disconnect(self._on_layout_changed_debug)
+                except (RuntimeError, TypeError):  # pragma: no cover - Qt signal glue
+                    pass
         if old_selection_model is not None:
             try:
                 old_selection_model.currentChanged.disconnect(self._on_current_changed_debug)
@@ -109,6 +127,9 @@ class FilmstripView(AssetGrid):
             model.modelAboutToBeReset.connect(self._capture_scroll_state)
             model.modelReset.connect(self._schedule_restore_scroll)
             model.rowsInserted.connect(self._schedule_restore_scroll)
+            model.rowsRemoved.connect(self._on_rows_removed_debug)
+            model.layoutAboutToBeChanged.connect(self._on_layout_about_to_change_debug)
+            model.layoutChanged.connect(self._on_layout_changed_debug)
         selection_model = self.selectionModel()
         if selection_model is not None:
             selection_model.currentChanged.connect(self._on_current_changed_debug)
@@ -146,11 +167,26 @@ class FilmstripView(AssetGrid):
 
     def showEvent(self, event) -> None:  # type: ignore[override]
         super().showEvent(event)
+        self._log_view_state("show_event")
         self._schedule_restore_scroll("show")
 
     def hideEvent(self, event) -> None:  # type: ignore[override]
         self._capture_scroll_state()
+        self._log_view_state("hide_event")
         super().hideEvent(event)
+
+    def viewportEvent(self, event: QEvent) -> bool:  # type: ignore[override]
+        if event.type() in {
+            QEvent.Type.Show,
+            QEvent.Type.Hide,
+            QEvent.Type.Resize,
+            QEvent.Type.LayoutRequest,
+            QEvent.Type.UpdateRequest,
+            QEvent.Type.Polish,
+            QEvent.Type.PolishRequest,
+        }:
+            self._log_view_state(f"viewport_event:{event.type().name}")
+        return super().viewportEvent(event)
 
     def _capture_scroll_state(self) -> None:
         """Remember scroll position and current selection before model/layout changes."""
@@ -179,6 +215,47 @@ class FilmstripView(AssetGrid):
                 "visible": self.isVisible(),
             },
         )
+
+    def _log_view_state(self, reason: str) -> None:
+        model = self.model()
+        scrollbar = self.horizontalScrollBar()
+        selection_model = self.selectionModel()
+        current = selection_model.currentIndex() if selection_model is not None else QModelIndex()
+        print(
+            "[FilmstripDebug] view_state",
+            {
+                "reason": reason,
+                "visible": self.isVisible(),
+                "row_count": model.rowCount() if model is not None else None,
+                "scroll_value": scrollbar.value(),
+                "scroll_min": scrollbar.minimum(),
+                "scroll_max": scrollbar.maximum(),
+                "page_step": scrollbar.pageStep(),
+                "viewport_size": {
+                    "width": self.viewport().width() if self.viewport() else None,
+                    "height": self.viewport().height() if self.viewport() else None,
+                },
+                "current_valid": current.isValid(),
+                "current_row": current.row(),
+            },
+        )
+
+    def _on_rows_removed_debug(self, parent: QModelIndex, start: int, end: int) -> None:
+        print(
+            "[FilmstripDebug] rows_removed",
+            {
+                "parent_valid": parent.isValid(),
+                "start": start,
+                "end": end,
+            },
+        )
+        self._schedule_restore_scroll("rows_removed")
+
+    def _on_layout_about_to_change_debug(self, *args, **kwargs) -> None:
+        self._log_view_state("layout_about_to_change")
+
+    def _on_layout_changed_debug(self, *args, **kwargs) -> None:
+        self._log_view_state("layout_changed")
 
     def _schedule_restore_scroll(self, reason: str | None = None) -> None:
         if self._restore_scheduled:

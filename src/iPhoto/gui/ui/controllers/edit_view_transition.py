@@ -170,6 +170,18 @@ class EditViewTransitionManager(QObject):
             # was temporarily shown by other UI interactions while edit mode
             # was active.
             self._ui.filmstrip_view.hide()
+        scrollbar = filmstrip.horizontalScrollBar()
+        print(
+            "[FilmstripDebug] leave_edit_mode: after show/hide filmstrip",
+            {
+                "visible": filmstrip.isVisible(),
+                "scroll_value": scrollbar.value(),
+                "scroll_min": scrollbar.minimum(),
+                "scroll_max": scrollbar.maximum(),
+                "page_step": scrollbar.pageStep(),
+                "viewport_width": filmstrip.viewport().width() if filmstrip.viewport() else None,
+            },
+        )
         if animate:
             self._detail_header_opacity.setOpacity(0.0)
             self._edit_header_opacity.setOpacity(1.0)

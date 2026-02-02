@@ -73,12 +73,21 @@ class FilmstripView(AssetGrid):
 
     def setModel(self, model) -> None:  # type: ignore[override]
         old = self.model()
+        old_selection_model = self.selectionModel()
         if old is not None:
             old.dataChanged.disconnect(self._on_data_changed)
+        if old_selection_model is not None:
+            try:
+                old_selection_model.currentChanged.disconnect(self._on_current_changed_debug)
+            except (RuntimeError, TypeError):  # pragma: no cover - Qt signal glue
+                pass
 
         super().setModel(model)
         if model is not None:
             model.dataChanged.connect(self._on_data_changed)
+        selection_model = self.selectionModel()
+        if selection_model is not None:
+            selection_model.currentChanged.connect(self._on_current_changed_debug)
 
         self.refresh_spacers()
 
@@ -93,6 +102,21 @@ class FilmstripView(AssetGrid):
 
     def resizeEvent(self, event: QResizeEvent) -> None:  # type: ignore[override]
         super().resizeEvent(event)
+        print(
+            "[FilmstripDebug] resize_event",
+            {
+                "old_size": {
+                    "width": event.oldSize().width(),
+                    "height": event.oldSize().height(),
+                },
+                "new_size": {
+                    "width": event.size().width(),
+                    "height": event.size().height(),
+                },
+                "viewport_width": self.viewport().width() if self.viewport() else None,
+                "scroll_value": self.horizontalScrollBar().value(),
+            },
+        )
         self.refresh_spacers()
 
     def refresh_spacers(self, current_proxy_index: QModelIndex | None = None) -> None:
@@ -118,6 +142,8 @@ class FilmstripView(AssetGrid):
             return
 
         viewport_width = viewport.width()
+        selection_model = self.selectionModel()
+        current_selection = selection_model.currentIndex() if selection_model is not None else None
         if viewport_width <= 0:
             print(
                 "[FilmstripDebug] refresh_spacers: viewport width <= 0",
@@ -137,8 +163,18 @@ class FilmstripView(AssetGrid):
                 "viewport_width": viewport_width,
                 "current_width": current_width,
                 "padding": padding,
+                "row_count": model.rowCount(),
                 "current_proxy_index_valid": (
                     current_proxy_index.isValid() if current_proxy_index is not None else None
+                ),
+                "selection_index_valid": (
+                    current_selection.isValid() if current_selection is not None else None
+                ),
+                "selection_row": current_selection.row() if current_selection is not None else None,
+                "selection_is_spacer": (
+                    bool(current_selection.data(Roles.IS_SPACER))
+                    if current_selection is not None and current_selection.isValid()
+                    else None
                 ),
             },
         )
@@ -149,6 +185,14 @@ class FilmstripView(AssetGrid):
         model = self.model()
         delegate = self.itemDelegate()
         if model is None or delegate is None or model.rowCount() == 0:
+            print(
+                "[FilmstripDebug] current_item_width: fallback (missing model/delegate)",
+                {
+                    "has_model": model is not None,
+                    "has_delegate": delegate is not None,
+                    "row_count": model.rowCount() if model is not None else None,
+                },
+            )
             return self._narrow_item_width()
 
         current_index = None
@@ -172,16 +216,25 @@ class FilmstripView(AssetGrid):
         # to prevent UI freezing on large datasets.
 
         if current_index is None or not current_index.isValid():
+            print("[FilmstripDebug] current_item_width: no valid current index")
             return self._narrow_item_width()
 
         option = QStyleOptionViewItem()
         option.initFrom(self)
         size = delegate.sizeHint(option, current_index)
         if size.width() > 0:
+            print(
+                "[FilmstripDebug] current_item_width: sizeHint",
+                {"row": current_index.row(), "width": size.width()},
+            )
             return size.width()
 
         width = self._visual_width(current_index)
         if width > 0:
+            print(
+                "[FilmstripDebug] current_item_width: visualRect width",
+                {"row": current_index.row(), "width": width},
+            )
             return width
         return self._narrow_item_width()
 
@@ -190,6 +243,14 @@ class FilmstripView(AssetGrid):
         model = self.model()
         if delegate is None or model is None or model.rowCount() == 0:
             ratio = self._delegate_ratio(delegate)
+            print(
+                "[FilmstripDebug] narrow_item_width: fallback ratio",
+                {
+                    "ratio": ratio,
+                    "has_delegate": delegate is not None,
+                    "row_count": model.rowCount() if model is not None else None,
+                },
+            )
             return max(1, int(round(self._base_height * ratio)))
 
         option = QStyleOptionViewItem()
@@ -220,10 +281,18 @@ class FilmstripView(AssetGrid):
                 size = delegate.sizeHint(option, index)
                 width = size.width()
             if width > 0:
+                print(
+                    "[FilmstripDebug] narrow_item_width: sampled width",
+                    {"row": index.row(), "width": width},
+                )
                 return width
 
         # Fall back to the delegate ratio if needed.
         ratio = self._delegate_ratio(delegate)
+        print(
+            "[FilmstripDebug] narrow_item_width: delegate ratio fallback",
+            {"ratio": ratio},
+        )
         return max(1, int(round(self._base_height * ratio)))
 
     def _visual_width(self, index) -> int:
@@ -237,6 +306,27 @@ class FilmstripView(AssetGrid):
         if isinstance(candidate, (int, float)) and candidate > 0:
             ratio = float(candidate)
         return ratio
+
+    def _on_current_changed_debug(
+        self, current: QModelIndex, previous: QModelIndex
+    ) -> None:  # pragma: no cover - debug logging
+        scrollbar = self.horizontalScrollBar()
+        print(
+            "[FilmstripDebug] current_changed",
+            {
+                "current_valid": current.isValid(),
+                "current_row": current.row(),
+                "current_is_spacer": bool(current.data(Roles.IS_SPACER))
+                if current.isValid()
+                else None,
+                "previous_valid": previous.isValid(),
+                "previous_row": previous.row(),
+                "scroll_value": scrollbar.value(),
+                "scroll_min": scrollbar.minimum(),
+                "scroll_max": scrollbar.maximum(),
+                "viewport_width": self.viewport().width() if self.viewport() else None,
+            },
+        )
 
     # ------------------------------------------------------------------
     # Event handling

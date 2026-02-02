@@ -210,6 +210,14 @@ class FilmstripView(AssetGrid):
         # to keep the previously captured center_row for proper restoration.
         if current_row is not None:
             self._pending_center_row = current_row
+        elif self._pending_center_row is not None:
+            print(
+                "[FilmstripDebug] capture_scroll_state: preserving existing center_row",
+                {
+                    "existing_center_row": self._pending_center_row,
+                    "current_row": current_row,
+                },
+            )
         self._pending_scroll_value = scroll_value
         print(
             "[FilmstripDebug] capture_scroll_state",
@@ -306,6 +314,14 @@ class FilmstripView(AssetGrid):
             if center_row is not None:
                 scrollbar.setValue(scroll_value)
                 restored = True
+            else:
+                print(
+                    "[FilmstripDebug] restore_scroll_state: skipped raw scroll (no center_row)",
+                    {
+                        "scroll_value": scroll_value,
+                        "reason": reason,
+                    },
+                )
 
         print(
             "[FilmstripDebug] restore_scroll_state",

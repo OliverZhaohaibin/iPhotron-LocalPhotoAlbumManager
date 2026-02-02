@@ -155,13 +155,21 @@ class FilmstripView(AssetGrid):
     def _capture_scroll_state(self) -> None:
         """Remember scroll position and current selection before model/layout changes."""
         scrollbar = self.horizontalScrollBar()
-        self._pending_scroll_value = scrollbar.value()
         current_row = None
         selection_model = self.selectionModel()
         if selection_model is not None:
             current = selection_model.currentIndex()
             if current.isValid() and not bool(current.data(Roles.IS_SPACER)):
                 current_row = current.row()
+        scroll_value = scrollbar.value()
+        if current_row is None and scroll_value == 0:
+            print(
+                "[FilmstripDebug] capture_scroll_state: skipped (no selection, scroll=0)",
+                {"visible": self.isVisible()},
+            )
+            return
+
+        self._pending_scroll_value = scroll_value
         self._pending_center_row = current_row
         print(
             "[FilmstripDebug] capture_scroll_state",
@@ -175,12 +183,20 @@ class FilmstripView(AssetGrid):
     def _schedule_restore_scroll(self, reason: str | None = None) -> None:
         if self._restore_scheduled:
             return
+        if self._pending_scroll_value is None and self._pending_center_row is None:
+            return
         self._restore_scheduled = True
         QTimer.singleShot(0, lambda: self._restore_scroll_state(reason or "unknown"))
 
     def _restore_scroll_state(self, reason: str) -> None:
         self._restore_scheduled = False
         model = self.model()
+        if self._pending_scroll_value is None and self._pending_center_row is None:
+            print(
+                "[FilmstripDebug] restore_scroll_state: skipped (no pending state)",
+                {"reason": reason},
+            )
+            return
         if model is None or model.rowCount() == 0:
             print(
                 "[FilmstripDebug] restore_scroll_state: skipped (no rows)",
@@ -216,6 +232,8 @@ class FilmstripView(AssetGrid):
                 "center_row": center_row,
             },
         )
+        self._pending_scroll_value = None
+        self._pending_center_row = None
 
     def refresh_spacers(self, current_proxy_index: QModelIndex | None = None) -> None:
         """Recalculate spacer padding and optionally use the provided index.

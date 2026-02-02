@@ -205,14 +205,19 @@ class FilmstripView(AssetGrid):
             )
             return
 
+        # Don't overwrite a valid center_row with None during model resets.
+        # When the repository changes, the selection is temporarily cleared, but we want
+        # to keep the previously captured center_row for proper restoration.
+        if current_row is not None:
+            self._pending_center_row = current_row
         self._pending_scroll_value = scroll_value
-        self._pending_center_row = current_row
         print(
             "[FilmstripDebug] capture_scroll_state",
             {
                 "scroll_value": self._pending_scroll_value,
                 "center_row": self._pending_center_row,
                 "visible": self.isVisible(),
+                "captured_current_row": current_row,
             },
         )
 

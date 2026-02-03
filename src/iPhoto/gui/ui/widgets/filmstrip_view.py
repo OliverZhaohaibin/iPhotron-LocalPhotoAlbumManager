@@ -50,6 +50,7 @@ class FilmstripView(AssetGrid):
         self._updating_style = False
         self._pending_scroll_value: int | None = None
         self._pending_center_row: int | None = None
+        self._last_known_center_row: int | None = None
         self._restore_scheduled = False
         self._apply_scrollbar_style()
 
@@ -198,15 +199,20 @@ class FilmstripView(AssetGrid):
             if current.isValid() and not bool(current.data(Roles.IS_SPACER)):
                 current_row = current.row()
         scroll_value = scrollbar.value()
+        if current_row is None and self._last_known_center_row is not None:
+            current_row = self._last_known_center_row
+
         if current_row is None and scroll_value == 0:
             print(
                 "[FilmstripDebug] capture_scroll_state: skipped (no selection, scroll=0)",
-                {"visible": self.isVisible()},
+                {"visible": self.isVisible(), "last_known_center_row": self._last_known_center_row},
             )
             return
 
         self._pending_scroll_value = scroll_value
         self._pending_center_row = current_row
+        if current_row is not None:
+            self._last_known_center_row = current_row
         print(
             "[FilmstripDebug] capture_scroll_state",
             {
@@ -289,8 +295,10 @@ class FilmstripView(AssetGrid):
             index = model.index(center_row, 0)
             if index.isValid() and not bool(index.data(Roles.IS_SPACER)):
                 selection_model = self.selectionModel()
-                if selection_model is not None and not selection_model.currentIndex().isValid():
-                    selection_model.setCurrentIndex(index, QItemSelectionModel.ClearAndSelect)
+                if selection_model is not None:
+                    current = selection_model.currentIndex()
+                    if not current.isValid() or current.row() != center_row:
+                        selection_model.setCurrentIndex(index, QItemSelectionModel.ClearAndSelect)
                 self.center_on_index(index)
                 restored = True
 
@@ -503,6 +511,8 @@ class FilmstripView(AssetGrid):
     def _on_current_changed_debug(
         self, current: QModelIndex, previous: QModelIndex
     ) -> None:  # pragma: no cover - debug logging
+        if current.isValid() and not bool(current.data(Roles.IS_SPACER)):
+            self._last_known_center_row = current.row()
         scrollbar = self.horizontalScrollBar()
         print(
             "[FilmstripDebug] current_changed",

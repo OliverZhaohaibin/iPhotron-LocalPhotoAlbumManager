@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import QEvent, QModelIndex, QSize, Qt, Signal
+from PySide6.QtCore import QEvent, QModelIndex, QSize, Qt, Signal, QTimer, QItemSelectionModel
 from PySide6.QtGui import QPalette, QResizeEvent, QWheelEvent
 from PySide6.QtWidgets import QListView, QSizePolicy, QStyleOptionViewItem
 
@@ -48,6 +48,10 @@ class FilmstripView(AssetGrid):
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
 
         self._updating_style = False
+        self._pending_scroll_value: int | None = None
+        self._pending_center_row: int | None = None
+        self._last_known_center_row: int | None = None
+        self._restore_scheduled = False
         self._apply_scrollbar_style()
 
     def changeEvent(self, event: QEvent) -> None:
@@ -73,12 +77,63 @@ class FilmstripView(AssetGrid):
 
     def setModel(self, model) -> None:  # type: ignore[override]
         old = self.model()
+        old_selection_model = self.selectionModel()
+        old_about_to_reset = getattr(old, "modelAboutToBeReset", None)
+        old_reset = getattr(old, "modelReset", None)
+        old_rows_inserted = getattr(old, "rowsInserted", None)
+        old_rows_removed = getattr(old, "rowsRemoved", None)
+        old_layout_about = getattr(old, "layoutAboutToBeChanged", None)
+        old_layout_changed = getattr(old, "layoutChanged", None)
         if old is not None:
             old.dataChanged.disconnect(self._on_data_changed)
+            if old_about_to_reset is not None:
+                try:
+                    old_about_to_reset.disconnect(self._capture_scroll_state)
+                except (RuntimeError, TypeError):  # pragma: no cover - Qt signal glue
+                    pass
+            if old_reset is not None:
+                try:
+                    old_reset.disconnect(self._schedule_restore_scroll)
+                except (RuntimeError, TypeError):  # pragma: no cover - Qt signal glue
+                    pass
+            if old_rows_inserted is not None:
+                try:
+                    old_rows_inserted.disconnect(self._schedule_restore_scroll)
+                except (RuntimeError, TypeError):  # pragma: no cover - Qt signal glue
+                    pass
+            if old_rows_removed is not None:
+                try:
+                    old_rows_removed.disconnect(self._on_rows_removed_debug)
+                except (RuntimeError, TypeError):  # pragma: no cover - Qt signal glue
+                    pass
+            if old_layout_about is not None:
+                try:
+                    old_layout_about.disconnect(self._on_layout_about_to_change_debug)
+                except (RuntimeError, TypeError):  # pragma: no cover - Qt signal glue
+                    pass
+            if old_layout_changed is not None:
+                try:
+                    old_layout_changed.disconnect(self._on_layout_changed_debug)
+                except (RuntimeError, TypeError):  # pragma: no cover - Qt signal glue
+                    pass
+        if old_selection_model is not None:
+            try:
+                old_selection_model.currentChanged.disconnect(self._on_current_changed_debug)
+            except (RuntimeError, TypeError):  # pragma: no cover - Qt signal glue
+                pass
 
         super().setModel(model)
         if model is not None:
             model.dataChanged.connect(self._on_data_changed)
+            model.modelAboutToBeReset.connect(self._capture_scroll_state)
+            model.modelReset.connect(self._schedule_restore_scroll)
+            model.rowsInserted.connect(self._schedule_restore_scroll)
+            model.rowsRemoved.connect(self._on_rows_removed_debug)
+            model.layoutAboutToBeChanged.connect(self._on_layout_about_to_change_debug)
+            model.layoutChanged.connect(self._on_layout_changed_debug)
+        selection_model = self.selectionModel()
+        if selection_model is not None:
+            selection_model.currentChanged.connect(self._on_current_changed_debug)
 
         self.refresh_spacers()
 
@@ -93,7 +148,177 @@ class FilmstripView(AssetGrid):
 
     def resizeEvent(self, event: QResizeEvent) -> None:  # type: ignore[override]
         super().resizeEvent(event)
+        print(
+            "[FilmstripDebug] resize_event",
+            {
+                "old_size": {
+                    "width": event.oldSize().width(),
+                    "height": event.oldSize().height(),
+                },
+                "new_size": {
+                    "width": event.size().width(),
+                    "height": event.size().height(),
+                },
+                "viewport_width": self.viewport().width() if self.viewport() else None,
+                "scroll_value": self.horizontalScrollBar().value(),
+            },
+        )
         self.refresh_spacers()
+        self._schedule_restore_scroll("resize")
+
+    def showEvent(self, event) -> None:  # type: ignore[override]
+        super().showEvent(event)
+        self._log_view_state("show_event")
+        self._schedule_restore_scroll("show")
+
+    def hideEvent(self, event) -> None:  # type: ignore[override]
+        self._capture_scroll_state()
+        self._log_view_state("hide_event")
+        super().hideEvent(event)
+
+    def viewportEvent(self, event: QEvent) -> bool:  # type: ignore[override]
+        if event.type() in {
+            QEvent.Type.Show,
+            QEvent.Type.Hide,
+            QEvent.Type.Resize,
+            QEvent.Type.LayoutRequest,
+            QEvent.Type.UpdateRequest,
+            QEvent.Type.Polish,
+            QEvent.Type.PolishRequest,
+        }:
+            self._log_view_state(f"viewport_event:{event.type().name}")
+        return super().viewportEvent(event)
+
+    def _capture_scroll_state(self) -> None:
+        """Remember scroll position and current selection before model/layout changes."""
+        scrollbar = self.horizontalScrollBar()
+        current_row = None
+        selection_model = self.selectionModel()
+        if selection_model is not None:
+            current = selection_model.currentIndex()
+            if current.isValid() and not bool(current.data(Roles.IS_SPACER)):
+                current_row = current.row()
+        scroll_value = scrollbar.value()
+        if current_row is None and self._last_known_center_row is not None:
+            current_row = self._last_known_center_row
+
+        if current_row is None and scroll_value == 0:
+            print(
+                "[FilmstripDebug] capture_scroll_state: skipped (no selection, scroll=0)",
+                {"visible": self.isVisible(), "last_known_center_row": self._last_known_center_row},
+            )
+            return
+
+        self._pending_scroll_value = scroll_value
+        self._pending_center_row = current_row
+        if current_row is not None:
+            self._last_known_center_row = current_row
+        print(
+            "[FilmstripDebug] capture_scroll_state",
+            {
+                "scroll_value": self._pending_scroll_value,
+                "center_row": self._pending_center_row,
+                "visible": self.isVisible(),
+            },
+        )
+
+    def _log_view_state(self, reason: str) -> None:
+        model = self.model()
+        scrollbar = self.horizontalScrollBar()
+        selection_model = self.selectionModel()
+        current = selection_model.currentIndex() if selection_model is not None else QModelIndex()
+        print(
+            "[FilmstripDebug] view_state",
+            {
+                "reason": reason,
+                "visible": self.isVisible(),
+                "row_count": model.rowCount() if model is not None else None,
+                "scroll_value": scrollbar.value(),
+                "scroll_min": scrollbar.minimum(),
+                "scroll_max": scrollbar.maximum(),
+                "page_step": scrollbar.pageStep(),
+                "viewport_size": {
+                    "width": self.viewport().width() if self.viewport() else None,
+                    "height": self.viewport().height() if self.viewport() else None,
+                },
+                "current_valid": current.isValid(),
+                "current_row": current.row(),
+            },
+        )
+
+    def _on_rows_removed_debug(self, parent: QModelIndex, start: int, end: int) -> None:
+        print(
+            "[FilmstripDebug] rows_removed",
+            {
+                "parent_valid": parent.isValid(),
+                "start": start,
+                "end": end,
+            },
+        )
+        self._schedule_restore_scroll("rows_removed")
+
+    def _on_layout_about_to_change_debug(self, *args, **kwargs) -> None:
+        self._log_view_state("layout_about_to_change")
+
+    def _on_layout_changed_debug(self, *args, **kwargs) -> None:
+        self._log_view_state("layout_changed")
+
+    def _schedule_restore_scroll(self, reason: str | None = None) -> None:
+        if self._restore_scheduled:
+            return
+        if self._pending_scroll_value is None and self._pending_center_row is None:
+            return
+        self._restore_scheduled = True
+        QTimer.singleShot(0, lambda: self._restore_scroll_state(reason or "unknown"))
+
+    def _restore_scroll_state(self, reason: str) -> None:
+        self._restore_scheduled = False
+        model = self.model()
+        if self._pending_scroll_value is None and self._pending_center_row is None:
+            print(
+                "[FilmstripDebug] restore_scroll_state: skipped (no pending state)",
+                {"reason": reason},
+            )
+            return
+        if model is None or model.rowCount() == 0:
+            print(
+                "[FilmstripDebug] restore_scroll_state: skipped (no rows)",
+                {"reason": reason, "row_count": model.rowCount() if model is not None else None},
+            )
+            return
+
+        scroll_value = self._pending_scroll_value
+        center_row = self._pending_center_row
+        scrollbar = self.horizontalScrollBar()
+        restored = False
+        if center_row is not None and 0 <= center_row < model.rowCount():
+            index = model.index(center_row, 0)
+            if index.isValid() and not bool(index.data(Roles.IS_SPACER)):
+                selection_model = self.selectionModel()
+                if selection_model is not None:
+                    current = selection_model.currentIndex()
+                    if not current.isValid() or current.row() != center_row:
+                        selection_model.setCurrentIndex(index, QItemSelectionModel.ClearAndSelect)
+                self.center_on_index(index)
+                restored = True
+
+        if not restored and scroll_value is not None:
+            scrollbar.setValue(scroll_value)
+            restored = True
+
+        print(
+            "[FilmstripDebug] restore_scroll_state",
+            {
+                "reason": reason,
+                "restored": restored,
+                "scroll_value": scrollbar.value(),
+                "scroll_min": scrollbar.minimum(),
+                "scroll_max": scrollbar.maximum(),
+                "center_row": center_row,
+            },
+        )
+        self._pending_scroll_value = None
+        self._pending_center_row = None
 
     def refresh_spacers(self, current_proxy_index: QModelIndex | None = None) -> None:
         """Recalculate spacer padding and optionally use the provided index.
@@ -282,6 +507,29 @@ class FilmstripView(AssetGrid):
         if isinstance(candidate, (int, float)) and candidate > 0:
             ratio = float(candidate)
         return ratio
+
+    def _on_current_changed_debug(
+        self, current: QModelIndex, previous: QModelIndex
+    ) -> None:  # pragma: no cover - debug logging
+        if current.isValid() and not bool(current.data(Roles.IS_SPACER)):
+            self._last_known_center_row = current.row()
+        scrollbar = self.horizontalScrollBar()
+        print(
+            "[FilmstripDebug] current_changed",
+            {
+                "current_valid": current.isValid(),
+                "current_row": current.row(),
+                "current_is_spacer": bool(current.data(Roles.IS_SPACER))
+                if current.isValid()
+                else None,
+                "previous_valid": previous.isValid(),
+                "previous_row": previous.row(),
+                "scroll_value": scrollbar.value(),
+                "scroll_min": scrollbar.minimum(),
+                "scroll_max": scrollbar.maximum(),
+                "viewport_width": self.viewport().width() if self.viewport() else None,
+            },
+        )
 
     # ------------------------------------------------------------------
     # Event handling

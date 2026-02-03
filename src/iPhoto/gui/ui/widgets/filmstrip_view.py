@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 from PySide6.QtCore import QEvent, QModelIndex, QSize, Qt, Signal
 from PySide6.QtGui import QPalette, QResizeEvent, QWheelEvent
 from PySide6.QtWidgets import QListView, QSizePolicy, QStyleOptionViewItem
@@ -10,9 +9,6 @@ from PySide6.QtWidgets import QListView, QSizePolicy, QStyleOptionViewItem
 from .asset_grid import AssetGrid
 from ..models.roles import Roles
 from ..styles import modern_scrollbar_style
-
-# Enable verbose debug logging for high-frequency events via environment variable
-_VERBOSE_DEBUG = os.environ.get("IPHOTON_FILMSTRIP_VERBOSE_DEBUG", "").lower() in ("1", "true", "yes")
 
 
 class FilmstripView(AssetGrid):
@@ -98,49 +94,6 @@ class FilmstripView(AssetGrid):
     def resizeEvent(self, event: QResizeEvent) -> None:  # type: ignore[override]
         super().resizeEvent(event)
         self.refresh_spacers()
-
-    def showEvent(self, event) -> None:  # type: ignore[override]
-        super().showEvent(event)
-
-    def hideEvent(self, event) -> None:  # type: ignore[override]
-        super().hideEvent(event)
-
-    def viewportEvent(self, event: QEvent) -> bool:  # type: ignore[override]
-        if _VERBOSE_DEBUG and event.type() in {
-            QEvent.Type.Show,
-            QEvent.Type.Hide,
-            QEvent.Type.Resize,
-            QEvent.Type.LayoutRequest,
-            QEvent.Type.UpdateRequest,
-            QEvent.Type.Polish,
-            QEvent.Type.PolishRequest,
-        }:
-            self._log_view_state(f"viewport_event:{event.type().name}")
-        return super().viewportEvent(event)
-
-    def _log_view_state(self, reason: str) -> None:
-        model = self.model()
-        scrollbar = self.horizontalScrollBar()
-        selection_model = self.selectionModel()
-        current = selection_model.currentIndex() if selection_model is not None else QModelIndex()
-        print(
-            "[FilmstripDebug] view_state",
-            {
-                "reason": reason,
-                "visible": self.isVisible(),
-                "row_count": model.rowCount() if model is not None else None,
-                "scroll_value": scrollbar.value(),
-                "scroll_min": scrollbar.minimum(),
-                "scroll_max": scrollbar.maximum(),
-                "page_step": scrollbar.pageStep(),
-                "viewport_size": {
-                    "width": self.viewport().width() if self.viewport() else None,
-                    "height": self.viewport().height() if self.viewport() else None,
-                },
-                "current_valid": current.isValid(),
-                "current_row": current.row(),
-            },
-        )
 
     def refresh_spacers(self, current_proxy_index: QModelIndex | None = None) -> None:
         """Recalculate spacer padding and optionally use the provided index.

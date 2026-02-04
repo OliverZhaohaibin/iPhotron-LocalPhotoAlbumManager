@@ -46,6 +46,7 @@ ICON_PATH_BLACK = os.path.join(ICON_BASE, "eyedropper.full.svg")
 ICON_PATH_GRAY = os.path.join(ICON_BASE, "eyedropper.halffull.svg")
 ICON_PATH_WHITE = os.path.join(ICON_BASE, "eyedropper.svg")
 ICON_PATH_ADD = os.path.join(ICON_BASE, "circle.cross.svg")
+ICON_PATH_CURVE = os.path.join(ICON_BASE, "curve.svg")
 
 
 # ==========================================
@@ -1013,6 +1014,12 @@ class CurvesDemo(QWidget):
         controls_layout.setContentsMargins(15, 15, 15, 15)
 
         top_bar = QHBoxLayout()
+        # Add curve icon before title
+        curve_icon = QLabel()
+        if os.path.exists(ICON_PATH_CURVE):
+            curve_icon.setPixmap(QIcon(ICON_PATH_CURVE).pixmap(QSize(16, 16)))
+        curve_icon.setStyleSheet("margin-right: 5px;")
+        top_bar.addWidget(curve_icon)
         title = QLabel("Curves")
         title.setStyleSheet("color: #ddd; font-weight: bold; font-size: 14px;")
         auto_btn = QPushButton("AUTO")

@@ -226,15 +226,6 @@ class AssetListViewModel(QAbstractListModel):
         """Forces a thumbnail refresh for the given path."""
         path = Path(path_str)
         self._thumbnails.invalidate(path, size=self._thumb_size)
-        # Notify views
-        count = self.rowCount()
-        for row in range(count):
-            asset = self._data_source.asset_at(row)
-            if asset:
-                if str(asset.abs_path) == path_str or str(asset.rel_path) == path_str:
-                    idx = self.index(row, 0)
-                    self.dataChanged.emit(idx, idx, [Qt.DecorationRole])
-                    break
 
     def thumbnail_loader(self):
         pass

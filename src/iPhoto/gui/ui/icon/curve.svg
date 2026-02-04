@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg"
+     width="110" height="110"
+     viewBox="0 0 48 48"
+     fill="none">
+  <!-- outer rounded square -->
+  <rect x="6" y="6" width="36" height="36" rx="4"
+        stroke="currentColor" stroke-width="2.4"/>
+
+  <!-- grid (3x3) -->
+  <path d="M18 10.4V37.6
+           M30 10.4V37.6
+           M10.4 18H37.6
+           M10.4 30H37.6"
+        stroke="currentColor"
+        stroke-width="2.4"
+        stroke-linecap="round"/>
+
+  <!-- curves adjustment line -->
+  <path d="M10.4 37.6
+           C 16.0 37.2, 18.8 34.8, 22.4 31.6
+           C 27.2 27.2, 30.4 22.4, 32.8 18.4
+           C 35.2 14.4, 37.2 12.4, 38.4 12"
+        stroke="currentColor"
+        stroke-width="2.4"
+        stroke-linecap="round"
+        stroke-linejoin="round"/>
+</svg>

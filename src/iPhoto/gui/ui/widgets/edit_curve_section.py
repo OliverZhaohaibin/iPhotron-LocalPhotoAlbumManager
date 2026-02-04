@@ -234,6 +234,8 @@ class CurveGraph(QWidget):
     curveChanged = Signal()
     startPointMoved = Signal(float)
     endPointMoved = Signal(float)
+    interactionStarted = Signal()
+    interactionFinished = Signal()
 
     HIT_DETECTION_RADIUS = 15
     MIN_DISTANCE_THRESHOLD = 0.01
@@ -460,6 +462,7 @@ class CurveGraph(QWidget):
         painter.drawPath(path)
 
     def mousePressEvent(self, event: QMouseEvent) -> None:
+        self.interactionStarted.emit()
         pos = event.position()
         w, h = self.width(), self.height()
 
@@ -546,6 +549,7 @@ class CurveGraph(QWidget):
 
     def mouseReleaseEvent(self, event: QMouseEvent) -> None:
         self.dragging = False
+        self.interactionFinished.emit()
 
     def add_point_smart(self) -> None:
         """Add a point at the largest gap in the curve."""
@@ -709,6 +713,8 @@ class EditCurveSection(QWidget):
         self.curve_graph.curveChanged.connect(self._on_curve_changed)
         self.curve_graph.startPointMoved.connect(self._on_start_point_moved)
         self.curve_graph.endPointMoved.connect(self._on_end_point_moved)
+        self.curve_graph.interactionStarted.connect(self.interactionStarted)
+        self.curve_graph.interactionFinished.connect(self._on_curve_interaction_finished)
         graph_sliders_layout.addWidget(self.curve_graph, alignment=Qt.AlignLeft)
 
         self.input_sliders = InputLevelSliders(size=self.CONTROL_CONTENT_WIDTH)
@@ -975,6 +981,12 @@ class EditCurveSection(QWidget):
         if self._updating_ui:
             return
         self._preview_curve_changes()
+
+    def _on_curve_interaction_finished(self) -> None:
+        if self._updating_ui:
+            return
+        self._commit_curve_changes()
+        self.interactionFinished.emit()
 
     def _on_start_point_moved(self, x: float) -> None:
         self.input_sliders.setBlackPoint(x)

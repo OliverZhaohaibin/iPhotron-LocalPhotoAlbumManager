@@ -537,9 +537,9 @@ class CurveGraph(QWidget):
     HIT_DETECTION_RADIUS = 15  # pixels
     MIN_DISTANCE_THRESHOLD = 0.01
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, size=250):
         super().__init__(parent)
-        self.setFixedSize(250, 250)
+        self.setFixedSize(size, size)
         self.setStyleSheet("background-color: #2b2b2b;")
 
         # 2.1 Independent Data Models
@@ -965,6 +965,7 @@ class CurvesDemo(QWidget):
     EYEDROPPER_BLACK = 1
     EYEDROPPER_GRAY = 2
     EYEDROPPER_WHITE = 3
+    CONTROL_CONTENT_WIDTH = 244
 
     def __init__(self):
         super().__init__()
@@ -1045,23 +1046,23 @@ class CurvesDemo(QWidget):
         combo = StyledComboBox()
         combo.addItems(["RGB", "Red", "Green", "Blue"])
         combo.currentTextChanged.connect(lambda text: self.curve.set_channel(text))
-        combo.setFixedWidth(250)
+        combo.setFixedWidth(self.CONTROL_CONTENT_WIDTH)
         controls_layout.addWidget(combo)
 
         tools_layout = QHBoxLayout()
         tools_layout.setContentsMargins(0, 0, 0, 0)
-        tools_layout.setSpacing(5)  # 5px spacing between eyedropper frame and add button
+        tools_layout.setSpacing(12)  # spacing between eyedropper frame and add button
         tools_frame = QFrame()
         tools_frame.setStyleSheet(".QFrame { background-color: #383838; border-radius: 5px; border: 1px solid #555; }")
-        tools_frame.setFixedWidth(180)  # 3 eyedropper buttons × 60px = 180px
+        tools_frame.setFixedWidth(174)  # 3 eyedropper buttons × 58px = 174px
         tf_layout = QHBoxLayout(tools_frame)
         tf_layout.setContentsMargins(0, 0, 0, 0)
         tf_layout.setSpacing(0)
 
         # Eyedropper buttons - store as instance variables for checkable state
-        # Width calculation: eyedropper frame (180px) + 5px spacing + add button (65px) = 250px total
-        eyedropper_btn_width = 60
-        eyedropper_btn_height = 30
+        # Width calculation: eyedropper frame (174px) + 12px spacing + add button (58px) = 244px total
+        eyedropper_btn_width = 58
+        eyedropper_btn_height = 36
         self.btn_black = IconButton(ICON_PATH_BLACK, "Set Black Point - Click to pick darkest point in image", width=eyedropper_btn_width, height=eyedropper_btn_height)
         self.btn_gray = IconButton(ICON_PATH_GRAY, "Set Gray Point - Click to pick mid-tone in image", width=eyedropper_btn_width, height=eyedropper_btn_height)
         self.btn_white = IconButton(ICON_PATH_WHITE, "Set White Point - Click to pick brightest point in image", width=eyedropper_btn_width, height=eyedropper_btn_height)
@@ -1104,9 +1105,9 @@ class CurvesDemo(QWidget):
         tools_layout.addWidget(tools_frame)
 
         # Add point button - width calculated to align with curve graph right edge
-        # 250px total = eyedropper frame (180px) + 5px spacing + add button (65px)
-        add_btn_width = 65
-        add_btn_height = 30
+        # 244px total = eyedropper frame (174px) + 12px spacing + add button (58px)
+        add_btn_width = 58
+        add_btn_height = 36
         self.btn_add_point = IconButton(ICON_PATH_ADD, "Add Point to Curve", width=add_btn_width, height=add_btn_height)
         self.btn_add_point.clicked.connect(lambda: self.curve.add_point_center())
         self.btn_add_point.setStyleSheet("""
@@ -1122,7 +1123,7 @@ class CurvesDemo(QWidget):
         graph_sliders_layout.setSpacing(0)
         graph_sliders_layout.setContentsMargins(0, 0, 0, 0)
 
-        self.curve = CurveGraph()
+        self.curve = CurveGraph(size=self.CONTROL_CONTENT_WIDTH)
         self.curve.lutChanged.connect(self.image_viewer.upload_lut)
         graph_sliders_layout.addWidget(self.curve)
 

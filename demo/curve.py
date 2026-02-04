@@ -14,12 +14,9 @@ except ImportError:
             return func
         return decorator
 
-try:
-    from demo.spline import MonotoneCubicSpline
-except ImportError:
-    # Try local import if running as script from root
-    sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    from demo.spline import MonotoneCubicSpline
+
+from demo.spline import MonotoneCubicSpline
+
 
 
 from PySide6.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout,

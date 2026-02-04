@@ -153,6 +153,8 @@ class FilmstripView(AssetGrid):
         }
         if not any(role in layout_roles for role in roles):
             return
+        if not self._layout_sensitive_change(top, bottom, roles):
+            return
 
         # Re-calculating layout is expensive, so check if we need it.
         # QListView with uniformItemSizes=False might need a nudge.
@@ -361,6 +363,40 @@ class FilmstripView(AssetGrid):
         """Track the last non-spacer current row for capture/restore centering logic."""
         if current.isValid() and not bool(current.data(Roles.IS_SPACER)):
             self._last_known_center_row = current.row()
+
+    def _layout_sensitive_change(
+        self,
+        top: QModelIndex,
+        bottom: QModelIndex,
+        roles: list[int],
+    ) -> bool:
+        """Return True when the change range can affect layout sizing."""
+        model = self.model()
+        if model is None:
+            return False
+        top_row = top.row()
+        bottom_row = bottom.row()
+        if top_row > bottom_row:
+            top_row, bottom_row = bottom_row, top_row
+
+        if Roles.IS_CURRENT in roles:
+            selection_model = self.selectionModel()
+            if selection_model is None:
+                return True
+            current = selection_model.currentIndex()
+            if current.isValid() and top_row <= current.row() <= bottom_row:
+                return True
+            return False
+
+        if Qt.ItemDataRole.SizeHintRole in roles or Qt.SizeHintRole in roles:
+            if top_row == 0:
+                return True
+            last_row = model.rowCount() - 1
+            if last_row >= 0 and bottom_row >= last_row:
+                return True
+            return False
+
+        return True
 
     # ------------------------------------------------------------------
     # Event handling

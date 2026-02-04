@@ -3,11 +3,18 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Dict, Mapping
+from typing import Any, Dict, List, Mapping, Tuple
 import xml.etree.ElementTree as ET
 
 from ..core.light_resolver import LIGHT_KEYS, resolve_light_vector
 from ..core.color_resolver import COLOR_KEYS, ColorResolver, ColorStats
+from ..core.curve_resolver import (
+    CURVE_KEYS,
+    DEFAULT_CURVE_POINTS,
+    CurveParams,
+    curve_params_from_session_values,
+    generate_curve_lut,
+)
 
 BW_KEYS = (
     "BW_Master",
@@ -26,6 +33,15 @@ BW_DEFAULTS = {
 }
 
 _BW_RANGE_KEYS = {"BW_Master", "BW_Intensity", "BW_Neutrals", "BW_Tone"}
+
+# Curve XML node names
+_CURVE_NODE = "Curve"
+_CURVE_ENABLED = "enabled"
+_CURVE_CHANNEL_RGB = "rgb"
+_CURVE_CHANNEL_RED = "red"
+_CURVE_CHANNEL_GREEN = "green"
+_CURVE_CHANNEL_BLUE = "blue"
+_CURVE_POINT = "point"
 
 
 def _normalise_bw_value(key: str, value: float) -> float:
@@ -229,13 +245,108 @@ def _write_crop_node(root: ET.Element, values: Mapping[str, float | bool]) -> No
     flip_child.text = "true" if bool(values.get("Crop_FlipH", False)) else "false"
 
 
+def _read_curve_channel_points(channel_node: ET.Element) -> List[Tuple[float, float]]:
+    """Read curve control points from a channel XML node."""
+    points: List[Tuple[float, float]] = []
+    for point_node in channel_node.findall(_CURVE_POINT):
+        x_attr = point_node.get("x")
+        y_attr = point_node.get("y")
+        if x_attr is not None and y_attr is not None:
+            try:
+                x = float(x_attr)
+                y = float(y_attr)
+                points.append((x, y))
+            except ValueError:
+                continue
+    # Sort by x and ensure we have at least identity points
+    if len(points) < 2:
+        return list(DEFAULT_CURVE_POINTS)
+    return sorted(points, key=lambda p: p[0])
+
+
+def _read_curve_from_node(node: ET.Element) -> Dict[str, Any]:
+    """Return curve adjustments described by the ``<Curve>`` *node*."""
+    result: Dict[str, Any] = {}
+
+    # Read enabled state
+    enabled_attr = node.get(_CURVE_ENABLED)
+    if enabled_attr is not None:
+        result["Curve_Enabled"] = enabled_attr.lower() in {"1", "true", "yes", "on"}
+    else:
+        result["Curve_Enabled"] = False
+
+    # Read each channel
+    for xml_tag, key in [
+        (_CURVE_CHANNEL_RGB, "Curve_RGB"),
+        (_CURVE_CHANNEL_RED, "Curve_Red"),
+        (_CURVE_CHANNEL_GREEN, "Curve_Green"),
+        (_CURVE_CHANNEL_BLUE, "Curve_Blue"),
+    ]:
+        channel_node = _find_child_case_insensitive(node, xml_tag)
+        if channel_node is not None:
+            result[key] = _read_curve_channel_points(channel_node)
+        else:
+            result[key] = list(DEFAULT_CURVE_POINTS)
+
+    return result
+
+
+def _write_curve_channel_points(parent: ET.Element, tag: str, points: List[Tuple[float, float]]) -> None:
+    """Write curve control points to a channel XML node."""
+    channel = ET.SubElement(parent, tag)
+    for x, y in points:
+        point = ET.SubElement(channel, _CURVE_POINT)
+        point.set("x", f"{float(x):.6f}")
+        point.set("y", f"{float(y):.6f}")
+
+
+def _write_curve_node(root: ET.Element, values: Mapping[str, Any]) -> None:
+    """Insert/replace the ``<Curve>`` section under *root* using *values*."""
+    _remove_children_case_insensitive(root, _CURVE_NODE)
+
+    # Only write curve node if there's curve data to save
+    curve_enabled = bool(values.get("Curve_Enabled", False))
+    curve_rgb = values.get("Curve_RGB", DEFAULT_CURVE_POINTS)
+    curve_red = values.get("Curve_Red", DEFAULT_CURVE_POINTS)
+    curve_green = values.get("Curve_Green", DEFAULT_CURVE_POINTS)
+    curve_blue = values.get("Curve_Blue", DEFAULT_CURVE_POINTS)
+
+    # Check if any curve is non-identity (worth saving)
+    def is_identity(pts):
+        if not isinstance(pts, list) or len(pts) != 2:
+            return False
+        return (
+            abs(pts[0][0]) < 1e-6 and abs(pts[0][1]) < 1e-6 and
+            abs(pts[1][0] - 1.0) < 1e-6 and abs(pts[1][1] - 1.0) < 1e-6
+        )
+
+    all_identity = (
+        is_identity(curve_rgb) and
+        is_identity(curve_red) and
+        is_identity(curve_green) and
+        is_identity(curve_blue)
+    )
+
+    # Skip writing if all curves are identity and not enabled
+    if not curve_enabled and all_identity:
+        return
+
+    curve = ET.SubElement(root, _CURVE_NODE)
+    curve.set(_CURVE_ENABLED, "true" if curve_enabled else "false")
+
+    _write_curve_channel_points(curve, _CURVE_CHANNEL_RGB, curve_rgb if isinstance(curve_rgb, list) else list(DEFAULT_CURVE_POINTS))
+    _write_curve_channel_points(curve, _CURVE_CHANNEL_RED, curve_red if isinstance(curve_red, list) else list(DEFAULT_CURVE_POINTS))
+    _write_curve_channel_points(curve, _CURVE_CHANNEL_GREEN, curve_green if isinstance(curve_green, list) else list(DEFAULT_CURVE_POINTS))
+    _write_curve_channel_points(curve, _CURVE_CHANNEL_BLUE, curve_blue if isinstance(curve_blue, list) else list(DEFAULT_CURVE_POINTS))
+
+
 def sidecar_path_for_asset(asset_path: Path) -> Path:
     """Return the expected sidecar path for *asset_path*."""
 
     return asset_path.with_suffix(".ipo")
 
 
-def load_adjustments(asset_path: Path) -> Dict[str, float | bool]:
+def load_adjustments(asset_path: Path) -> Dict[str, Any]:
     """Return light adjustments stored alongside *asset_path*.
 
     Missing files or parsing errors are treated as an empty adjustment set so the
@@ -256,7 +367,7 @@ def load_adjustments(asset_path: Path) -> Dict[str, float | bool]:
     if root.tag != _SIDE_CAR_ROOT:
         return {}
 
-    result: Dict[str, float | bool] = {}
+    result: Dict[str, Any] = {}
     light_node = root.find(_LIGHT_NODE)
     if light_node is not None:
         master_element = light_node.find("Light_Master")
@@ -324,10 +435,15 @@ def load_adjustments(asset_path: Path) -> Dict[str, float | bool]:
         else:
             result.update(_read_crop_from_legacy_attributes(crop_node))
 
+    # Load curve adjustments
+    curve_node = _find_child_case_insensitive(root, _CURVE_NODE)
+    if curve_node is not None:
+        result.update(_read_curve_from_node(curve_node))
+
     return result
 
 
-def save_adjustments(asset_path: Path, adjustments: Mapping[str, float | bool]) -> Path:
+def save_adjustments(asset_path: Path, adjustments: Mapping[str, Any]) -> Path:
     """Persist *adjustments* next to *asset_path* and return the sidecar path."""
 
     sidecar_path = sidecar_path_for_asset(asset_path)
@@ -382,6 +498,9 @@ def save_adjustments(asset_path: Path, adjustments: Mapping[str, float | bool]) 
 
     _write_crop_node(root, adjustments)
 
+    # Write curve adjustments
+    _write_curve_node(root, adjustments)
+
     tmp_path = sidecar_path.with_suffix(sidecar_path.suffix + ".tmp")
     tree = ET.ElementTree(root)
     tree.write(tmp_path, encoding="utf-8", xml_declaration=True)
@@ -395,10 +514,10 @@ def save_adjustments(asset_path: Path, adjustments: Mapping[str, float | bool]) 
 
 
 def resolve_render_adjustments(
-    adjustments: Mapping[str, float | bool] | None,
+    adjustments: Mapping[str, Any] | None,
     *,
     color_stats: ColorStats | None = None,
-) -> Dict[str, float]:
+) -> Dict[str, Any]:
     """Return Light adjustments suitable for rendering pipelines.
 
     ``load_adjustments`` exposes the raw session values, which now contain the master slider
@@ -418,7 +537,7 @@ def resolve_render_adjustments(
 
     light_enabled = bool(adjustments.get("Light_Enabled", True))
 
-    resolved: Dict[str, float] = {}
+    resolved: Dict[str, Any] = {}
     overrides: Dict[str, float] = {}
     color_overrides: Dict[str, float] = {}
     for key, value in adjustments.items():
@@ -483,5 +602,15 @@ def resolve_render_adjustments(
         resolved["BWNeutrals"] = 0.0
         resolved["BWTone"] = 0.0
         resolved["BWGrain"] = 0.0
+
+    # Curve adjustments - pass through to renderer as-is
+    curve_enabled = bool(adjustments.get("Curve_Enabled", False))
+    resolved["Curve_Enabled"] = curve_enabled
+    if curve_enabled:
+        # Pass curve data for LUT generation
+        for key in ("Curve_RGB", "Curve_Red", "Curve_Green", "Curve_Blue"):
+            curve_data = adjustments.get(key)
+            if curve_data and isinstance(curve_data, list):
+                resolved[key] = curve_data
 
     return resolved

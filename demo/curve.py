@@ -1014,12 +1014,12 @@ class CurvesDemo(QWidget):
         controls_layout.setContentsMargins(15, 15, 15, 15)
 
         top_bar = QHBoxLayout()
-        # Add curve icon before title
-        curve_icon = QLabel()
+        # Add curve icon before title (only if icon file exists)
         if os.path.exists(ICON_PATH_CURVE):
+            curve_icon = QLabel()
             curve_icon.setPixmap(QIcon(ICON_PATH_CURVE).pixmap(QSize(16, 16)))
-        curve_icon.setStyleSheet("margin-right: 5px;")
-        top_bar.addWidget(curve_icon)
+            curve_icon.setStyleSheet("margin-right: 5px;")
+            top_bar.addWidget(curve_icon)
         title = QLabel("Curves")
         title.setStyleSheet("color: #ddd; font-weight: bold; font-size: 14px;")
         auto_btn = QPushButton("AUTO")

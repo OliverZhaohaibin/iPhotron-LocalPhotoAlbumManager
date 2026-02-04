@@ -604,6 +604,7 @@ class EditCurveSection(QWidget):
     interactionFinished = Signal()
     eyedropperModeChanged = Signal(object)
 
+    EDGE_INSET = 8
     MIN_CONTENT_WIDTH = 240
     TOOL_GAP = 8
     TOOL_HEIGHT_RATIO = 0.6
@@ -615,7 +616,7 @@ class EditCurveSection(QWidget):
         self._eyedropper_mode: Optional[str] = None
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setContentsMargins(self.EDGE_INSET, 0, self.EDGE_INSET, 0)
         layout.setSpacing(8)
 
         # Channel selector
@@ -731,7 +732,10 @@ class EditCurveSection(QWidget):
         self._update_control_sizes(event.size().width())
 
     def _update_control_sizes(self, available_width: int) -> None:
-        content_width = max(self.MIN_CONTENT_WIDTH, int(available_width))
+        content_width = max(
+            self.MIN_CONTENT_WIDTH,
+            int(available_width - self.EDGE_INSET * 2),
+        )
         self.tools_container.setFixedWidth(content_width)
         self.channel_combo.setFixedWidth(content_width)
         self.curve_graph.setFixedSize(content_width, content_width)

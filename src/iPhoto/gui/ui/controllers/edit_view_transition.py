@@ -93,6 +93,9 @@ class EditViewTransitionManager(QObject):
         if self._transition_direction == "enter":
             return
 
+        filmstrip = self._ui.filmstrip_view
+        scrollbar = filmstrip.horizontalScrollBar()
+
         self._detail_header_opacity.setOpacity(1.0)
         self._ui.detail_chrome_container.hide()
         self._ui.edit_header_container.show()
@@ -126,6 +129,9 @@ class EditViewTransitionManager(QObject):
         if self._transition_direction == "exit":
             return
 
+        filmstrip = self._ui.filmstrip_view
+        scrollbar = filmstrip.horizontalScrollBar()
+
         self._prepare_navigation_sidebar_for_exit()
         self._prepare_edit_sidebar_for_exit()
 
@@ -139,6 +145,7 @@ class EditViewTransitionManager(QObject):
             # was temporarily shown by other UI interactions while edit mode
             # was active.
             self._ui.filmstrip_view.hide()
+        scrollbar = filmstrip.horizontalScrollBar()
         if animate:
             self._detail_header_opacity.setOpacity(0.0)
             self._edit_header_opacity.setOpacity(1.0)

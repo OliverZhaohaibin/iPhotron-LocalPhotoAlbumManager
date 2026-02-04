@@ -21,7 +21,6 @@ from PySide6.QtGui import (
     QWheelEvent,
 )
 from PySide6.QtOpenGL import (
-    QOpenGLDebugLogger,
     QOpenGLFunctions_3_3_Core,
 )
 from PySide6.QtOpenGLWidgets import QOpenGLWidget
@@ -78,7 +77,6 @@ class GLImageViewer(QOpenGLWidget):
         self.setFormat(fmt)
         self._gl_funcs: QOpenGLFunctions_3_3_Core | None = None
         self._renderer: GLRenderer | None = None
-        self._logger: QOpenGLDebugLogger | None = None
 
         # 状态
         self._image: QImage | None = None
@@ -420,19 +418,6 @@ class GLImageViewer(QOpenGLWidget):
         self._gl_funcs.initializeOpenGLFunctions()
         gf = self._gl_funcs
 
-        try:
-            self._logger = QOpenGLDebugLogger(self)
-            if self._logger.initialize():
-                self._logger.messageLogged.connect(
-                    lambda m: print(f"[GLDBG] {m.source().name}: {m.message()}")
-                )
-                self._logger.startLogging(QOpenGLDebugLogger.SynchronousLogging)
-                print("[GLDBG] DebugLogger initialized.")
-            else:
-                print("[GLDBG] DebugLogger not available.")
-        except Exception as exc:
-            print(f"[GLDBG] Logger init failed: {exc}")
-
         if self._renderer is not None:
             self._renderer.destroy_resources()
 
@@ -441,7 +426,6 @@ class GLImageViewer(QOpenGLWidget):
 
         dpr = self.devicePixelRatioF()
         gf.glViewport(0, 0, int(self.width() * dpr), int(self.height() * dpr))
-        print("[GL INIT] initializeGL completed.")
 
     def paintGL(self) -> None:
         gf = self._gl_funcs

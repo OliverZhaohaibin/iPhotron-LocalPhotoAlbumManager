@@ -31,6 +31,7 @@ class AssetListViewModel(QAbstractListModel):
         self._thumbnails = thumbnail_service
         self._thumb_size = QSize(512, 512)
         self._current_row = -1
+        self._last_count = self._data_source.count()
 
         # Connect signals
         self._data_source.dataChanged.connect(self._on_source_changed)
@@ -199,8 +200,10 @@ class AssetListViewModel(QAbstractListModel):
         return None, None
 
     def _on_source_changed(self):
+        count = self._data_source.count()
         self.beginResetModel()
         self.endResetModel()
+        self._last_count = count
 
     def _on_thumbnail_ready(self, path: Path):
         # Find index for path and emit dataChanged

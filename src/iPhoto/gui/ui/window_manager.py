@@ -303,6 +303,18 @@ class FramelessWindowManager(QObject):
             ):
                 self._ui.video_area.show_controls(animate=False)
 
+        edit_controller = self._edit_controller()
+        if (
+            self._ui.view_stack.currentWidget() is self._ui.detail_page
+            and (edit_controller is None or not edit_controller.is_editing())
+        ):
+            if self._ui.detail_chrome_container is not None:
+                self._ui.detail_chrome_container.show()
+            if self._ui.toggle_filmstrip_action is not None:
+                self._ui.filmstrip_view.setVisible(
+                    self._ui.toggle_filmstrip_action.isChecked()
+                )
+
         self._update_fullscreen_button_icon()
         self._schedule_playback_resume(
             expect_immersive=False, resume=resume_after_transition

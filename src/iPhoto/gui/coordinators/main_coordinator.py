@@ -22,7 +22,6 @@ from PySide6.QtGui import QShortcut, QKeySequence, QAction
 from src.iPhoto.appctx import AppContext
 from src.iPhoto.config import DEFAULT_EXCLUDE, DEFAULT_INCLUDE, WORK_DIR_NAME
 from src.iPhoto.gui.ui.models.roles import Roles
-from src.iPhoto.gui.ui.models.spacer_proxy_model import SpacerProxyModel
 from src.iPhoto.gui.ui.controllers.dialog_controller import DialogController
 from src.iPhoto.gui.ui.controllers.header_controller import HeaderController
 from src.iPhoto.gui.ui.controllers.share_controller import ShareController
@@ -214,10 +213,7 @@ class MainCoordinator(QObject):
 
         window.ui.grid_view.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
 
-        # Use SpacerProxyModel for Filmstrip to allow centering of first/last items
-        self._filmstrip_proxy = SpacerProxyModel(window.ui.filmstrip_view)
-        self._filmstrip_proxy.setSourceModel(self._asset_list_vm)
-        window.ui.filmstrip_view.setModel(self._filmstrip_proxy)
+        window.ui.filmstrip_view.setModel(self._asset_list_vm)
 
         # Assign Delegate for Filmstrip View
         self._filmstrip_delegate = AssetGridDelegate(window.ui.filmstrip_view, filmstrip_mode=True)

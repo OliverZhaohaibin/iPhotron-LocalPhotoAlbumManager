@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from PySide6.QtCore import QEvent, QModelIndex, QSize, Qt, Signal, QTimer, QItemSelectionModel
 from PySide6.QtGui import QPalette, QResizeEvent, QWheelEvent
-from PySide6.QtWidgets import QListView, QSizePolicy, QStyleOptionViewItem
+from PySide6.QtWidgets import QListView, QSizePolicy
 
 from .asset_grid import AssetGrid
 from ..models.roles import Roles
@@ -32,8 +32,8 @@ class FilmstripView(AssetGrid):
         self.setSelectionMode(QListView.SelectionMode.SingleSelection)
         self.setIconSize(icon_size)
         self.setSpacing(self._spacing)
-        self.setUniformItemSizes(False)
-        self.setResizeMode(QListView.ResizeMode.Adjust)
+        self.setUniformItemSizes(True)
+        self.setResizeMode(QListView.ResizeMode.Fixed)
         self.setMovement(QListView.Movement.Static)
         self.setFlow(QListView.Flow.LeftToRight)
         self.setWrapping(False)
@@ -52,6 +52,8 @@ class FilmstripView(AssetGrid):
         self._pending_center_row: int | None = None
         self._last_known_center_row: int | None = None
         self._restore_scheduled = False
+        self._apply_item_size()
+        self._update_viewport_margins()
         self._apply_scrollbar_style()
 
     def changeEvent(self, event: QEvent) -> None:
@@ -135,7 +137,8 @@ class FilmstripView(AssetGrid):
         if selection_model is not None:
             selection_model.currentChanged.connect(self._on_current_changed)
 
-        self.refresh_spacers()
+        self._apply_item_size()
+        self._update_viewport_margins()
 
     def _on_data_changed(
         self,
@@ -143,24 +146,17 @@ class FilmstripView(AssetGrid):
         bottom: QModelIndex,
         roles: list[int] | None = None,
     ) -> None:
-        """Handle data changes to trigger layout updates if necessary."""
-        if roles is None:
-            roles = []
-        if Qt.ItemDataRole.SizeHintRole not in roles and Qt.SizeHintRole not in roles:
-            return
-
-        # Re-calculating layout is expensive, so check if we need it.
-        # QListView with uniformItemSizes=False might need a nudge.
-        self.scheduleDelayedItemsLayout()
-        self.refresh_spacers(top)
+        """Handle data changes that should trigger layout updates."""
+        return
 
     def resizeEvent(self, event: QResizeEvent) -> None:  # type: ignore[override]
         super().resizeEvent(event)
-        self.refresh_spacers()
+        self._update_viewport_margins()
         self._schedule_restore_scroll("resize")
 
     def showEvent(self, event) -> None:  # type: ignore[override]
         super().showEvent(event)
+        self._update_viewport_margins()
         self._schedule_restore_scroll("show")
 
     def hideEvent(self, event) -> None:  # type: ignore[override]
@@ -227,36 +223,28 @@ class FilmstripView(AssetGrid):
         self._pending_scroll_value = None
         self._pending_center_row = None
 
-    def refresh_spacers(self, current_proxy_index: QModelIndex | None = None) -> None:
-        """Recalculate spacer padding and optionally use the provided index.
-
-        Passing the proxy index of the current asset allows the view to
-        compute spacing without walking the entire model, which keeps rapid
-        navigation smooth when many items are present.
-        """
-
+    def _update_viewport_margins(self) -> None:
         viewport = self.viewport()
-        model = self.model()
-        if viewport is None or model is None:
+        if viewport is None:
             return
-
-        setter = getattr(model, "set_spacer_width", None)
-        if setter is None:
-            return
-
         viewport_width = viewport.width()
         if viewport_width <= 0:
-            setter(0)
+            self.setViewportMargins(0, 0, 0, 0)
             return
+        item_width = self._filmstrip_item_width()
+        padding = max(0, (viewport_width - item_width) // 2)
+        self.setViewportMargins(padding, 0, padding, 0)
 
-        current_width = self._filmstrip_item_width()
+    def _apply_item_size(self) -> None:
+        size = self._filmstrip_item_size()
+        self.setGridSize(size)
 
-        padding = max(0, (viewport_width - current_width) // 2)
-        setter(padding)
+    def _filmstrip_item_size(self) -> QSize:
+        width = self._filmstrip_item_width()
+        return QSize(width, self._base_height)
 
     def _filmstrip_item_width(self) -> int:
-        delegate = self.itemDelegate()
-        ratio = self._delegate_ratio(delegate)
+        ratio = self._delegate_ratio(self.itemDelegate())
         return max(1, int(round(self._base_height * ratio)))
 
     def _delegate_ratio(self, delegate) -> float:

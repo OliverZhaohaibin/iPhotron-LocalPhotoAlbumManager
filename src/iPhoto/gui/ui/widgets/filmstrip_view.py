@@ -52,6 +52,7 @@ class FilmstripView(AssetGrid):
         self._pending_center_row: int | None = None
         self._last_known_center_row: int | None = None
         self._restore_scheduled = False
+        self._viewport_padding = 0
         self._apply_item_size()
         self._update_viewport_margins()
         self._apply_scrollbar_style()
@@ -227,12 +228,17 @@ class FilmstripView(AssetGrid):
         viewport = self.viewport()
         if viewport is None:
             return
-        viewport_width = viewport.width()
+        viewport_width = viewport.width() + (self._viewport_padding * 2)
         if viewport_width <= 0:
-            self.setViewportMargins(0, 0, 0, 0)
+            if self._viewport_padding != 0:
+                self._viewport_padding = 0
+                self.setViewportMargins(0, 0, 0, 0)
             return
         item_width = self._filmstrip_item_width()
         padding = max(0, (viewport_width - item_width) // 2)
+        if padding == self._viewport_padding:
+            return
+        self._viewport_padding = padding
         self.setViewportMargins(padding, 0, padding, 0)
 
     def _apply_item_size(self) -> None:

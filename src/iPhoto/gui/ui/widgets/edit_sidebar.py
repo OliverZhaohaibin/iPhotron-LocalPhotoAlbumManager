@@ -46,6 +46,9 @@ class EditSidebar(QWidget):
     curveParamsCommitted = Signal(object)
     """Emitted when curve adjustments should be written to the session."""
 
+    curveEyedropperModeChanged = Signal(object)
+    """Relay eyedropper mode toggles from the curve section."""
+
     perspectiveInteractionStarted = Signal()
     """Emitted when the user begins dragging a perspective slider."""
 
@@ -231,6 +234,7 @@ class EditSidebar(QWidget):
         self._curve_section.curveParamsCommitted.connect(self.curveParamsCommitted)
         self._curve_section.interactionStarted.connect(self.interactionStarted)
         self._curve_section.interactionFinished.connect(self.interactionFinished)
+        self._curve_section.eyedropperModeChanged.connect(self.curveEyedropperModeChanged)
 
         scroll_layout.addStretch(1)
         scroll_content.setLayout(scroll_layout)
@@ -409,6 +413,12 @@ class EditSidebar(QWidget):
         self._light_section.set_preview_image(image)
         self._color_section.set_preview_image(image, color_stats=color_stats)
         self._bw_section.set_preview_image(image)
+        self._curve_section.set_preview_image(image)
+
+    def handle_curve_color_picked(self, r: float, g: float, b: float) -> None:
+        """Forward a sampled color to the curve section."""
+
+        self._curve_section.handle_color_picked(r, g, b)
 
     def preview_thumbnail_height(self) -> int:
         """Return the vertical pixel span used by the master thumbnail strips."""
@@ -643,4 +653,3 @@ class EditSidebar(QWidget):
         self._sync_color_toggle_state()
         self._sync_bw_toggle_state()
         self._sync_curve_toggle_state()
-

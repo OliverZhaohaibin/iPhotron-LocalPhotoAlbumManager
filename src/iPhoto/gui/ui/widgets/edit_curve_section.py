@@ -18,6 +18,7 @@ from PySide6.QtGui import (
     QPainterPath,
     QPalette,
     QPen,
+    QImage,
 )
 from PySide6.QtWidgets import (
     QApplication,
@@ -597,13 +598,17 @@ class EditCurveSection(QWidget):
 
     interactionStarted = Signal()
     interactionFinished = Signal()
+    eyedropperModeChanged = Signal(object)
 
     CONTROL_CONTENT_WIDTH = 240
+    TOOL_GAP = 8
+    TOOL_HEIGHT_RATIO = 0.6
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
         self._session: Optional[EditSession] = None
         self._updating_ui = False
+        self._eyedropper_mode: Optional[str] = None
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -616,24 +621,82 @@ class EditCurveSection(QWidget):
         self.channel_combo.setFixedWidth(self.CONTROL_CONTENT_WIDTH)
         layout.addWidget(self.channel_combo, alignment=Qt.AlignLeft)
 
-        # Tools container (add point button)
+        # Tools container (eyedropper + add point)
         tools_container = QWidget()
         tools_container.setFixedWidth(self.CONTROL_CONTENT_WIDTH)
         tools_layout = QHBoxLayout(tools_container)
         tools_layout.setContentsMargins(0, 0, 0, 0)
-        tools_layout.setSpacing(8)
+        tools_layout.setSpacing(self.TOOL_GAP)
 
-        self.btn_add_point = QPushButton()
-        self.btn_add_point.setIcon(load_icon("plus.svg"))
+        eyedropper_btn_width = int((self.CONTROL_CONTENT_WIDTH - self.TOOL_GAP) / 4)
+        eyedropper_btn_height = int(eyedropper_btn_width * self.TOOL_HEIGHT_RATIO)
+
+        tools_frame = QFrame()
+        tools_frame.setFixedWidth(eyedropper_btn_width * 3)
+        tools_frame.setStyleSheet(
+            ".QFrame { background-color: #383838; border-radius: 5px; border: 1px solid #555; }"
+        )
+        eyedropper_layout = QHBoxLayout(tools_frame)
+        eyedropper_layout.setContentsMargins(0, 0, 0, 0)
+        eyedropper_layout.setSpacing(0)
+
+        self.btn_black = QToolButton()
+        self.btn_black.setIcon(load_icon("eyedropper.full.svg"))
+        self.btn_black.setToolTip("Set Black Point - Click to pick darkest point in image")
+        self.btn_black.setCheckable(True)
+        self.btn_black.setFixedSize(eyedropper_btn_width, eyedropper_btn_height)
+
+        self.btn_gray = QToolButton()
+        self.btn_gray.setIcon(load_icon("eyedropper.halffull.svg"))
+        self.btn_gray.setToolTip("Set Gray Point - Click to pick mid-tone in image")
+        self.btn_gray.setCheckable(True)
+        self.btn_gray.setFixedSize(eyedropper_btn_width, eyedropper_btn_height)
+
+        self.btn_white = QToolButton()
+        self.btn_white.setIcon(load_icon("eyedropper.svg"))
+        self.btn_white.setToolTip("Set White Point - Click to pick brightest point in image")
+        self.btn_white.setCheckable(True)
+        self.btn_white.setFixedSize(eyedropper_btn_width, eyedropper_btn_height)
+
+        eyedropper_style = """
+            QToolButton {
+                background-color: transparent;
+                border: none;
+                border-radius: 0px;
+            }
+            QToolButton:hover {
+                background-color: #444;
+            }
+            QToolButton:pressed {
+                background-color: #222;
+            }
+            QToolButton:checked {
+                background-color: #4a90e2;
+            }
+        """
+        self.btn_black.setStyleSheet(eyedropper_style + "border-right: 1px solid #555;")
+        self.btn_gray.setStyleSheet(eyedropper_style + "border-right: 1px solid #555;")
+        self.btn_white.setStyleSheet(eyedropper_style)
+
+        self.btn_black.clicked.connect(self._activate_black_eyedropper)
+        self.btn_gray.clicked.connect(self._activate_gray_eyedropper)
+        self.btn_white.clicked.connect(self._activate_white_eyedropper)
+
+        eyedropper_layout.addWidget(self.btn_black)
+        eyedropper_layout.addWidget(self.btn_gray)
+        eyedropper_layout.addWidget(self.btn_white)
+        tools_layout.addWidget(tools_frame)
+
+        self.btn_add_point = QToolButton()
+        self.btn_add_point.setIcon(load_icon("circle.cross.svg"))
         self.btn_add_point.setToolTip("Add Point to Curve")
-        self.btn_add_point.setFixedSize(60, 30)
+        self.btn_add_point.setFixedSize(eyedropper_btn_width, eyedropper_btn_height)
         self.btn_add_point.clicked.connect(self._on_add_point_clicked)
         self.btn_add_point.setStyleSheet("""
-            QPushButton { background-color: #383838; border: 1px solid #555; border-radius: 4px; }
-            QPushButton:hover { background-color: #444; }
+            QToolButton { background-color: #383838; border: 1px solid #555; border-radius: 4px; }
+            QToolButton:hover { background-color: #444; }
         """)
         tools_layout.addWidget(self.btn_add_point)
-        tools_layout.addStretch()
 
         layout.addWidget(tools_container, alignment=Qt.AlignLeft)
 
@@ -723,8 +786,51 @@ class EditCurveSection(QWidget):
 
     def set_preview_image(self, image) -> None:
         """Forward histogram data to the curve graph."""
-        # Could compute and set histogram here if needed
-        pass
+        if image is None:
+            self.curve_graph.set_histogram(None)
+            return
+        histogram = self._compute_histogram(image)
+        self.curve_graph.set_histogram(histogram)
+
+    def _compute_histogram(self, image) -> Optional[np.ndarray]:
+        """Return normalized histogram data for *image*."""
+
+        if image is None or image.isNull():
+            return None
+
+        try:
+            preview = image.convertToFormat(QImage.Format.Format_RGBA8888)
+        except Exception:
+            return None
+
+        width = preview.width()
+        height = preview.height()
+        if width <= 0 or height <= 0:
+            return None
+
+        bytes_per_line = preview.bytesPerLine()
+        buffer = preview.bits()
+        view = memoryview(buffer)
+        buffer_array = np.frombuffer(view, dtype=np.uint8, count=bytes_per_line * height)
+        try:
+            surface = buffer_array.reshape((height, bytes_per_line))
+        except ValueError:
+            return None
+
+        pixels = surface[:, : width * 4].reshape((height, width, 4))
+        rgb = pixels[:, :, :3].reshape(-1, 3)
+        if rgb.size == 0:
+            return None
+
+        hist = np.zeros((3, 256), dtype=np.float32)
+        for channel in range(3):
+            counts = np.bincount(rgb[:, channel], minlength=256).astype(np.float32)
+            hist[channel] = counts
+
+        max_val = float(hist.max())
+        if max_val > 0.0:
+            hist /= max_val
+        return hist
 
     @Slot(str, object)
     def _on_session_value_changed(self, key: str, _value: object) -> None:
@@ -743,6 +849,127 @@ class EditCurveSection(QWidget):
         self.curve_graph.add_point_smart()
         self._commit_curve_changes()
         self.interactionFinished.emit()
+
+    def _deactivate_all_eyedroppers(self) -> None:
+        self._eyedropper_mode = None
+        self.btn_black.setChecked(False)
+        self.btn_gray.setChecked(False)
+        self.btn_white.setChecked(False)
+        self.eyedropperModeChanged.emit(None)
+
+    def _activate_black_eyedropper(self) -> None:
+        if self.btn_black.isChecked():
+            self._eyedropper_mode = "black"
+            self.btn_gray.setChecked(False)
+            self.btn_white.setChecked(False)
+            self.eyedropperModeChanged.emit("black")
+        else:
+            self._deactivate_all_eyedroppers()
+
+    def _activate_gray_eyedropper(self) -> None:
+        if self.btn_gray.isChecked():
+            self._eyedropper_mode = "gray"
+            self.btn_black.setChecked(False)
+            self.btn_white.setChecked(False)
+            self.eyedropperModeChanged.emit("gray")
+        else:
+            self._deactivate_all_eyedroppers()
+
+    def _activate_white_eyedropper(self) -> None:
+        if self.btn_white.isChecked():
+            self._eyedropper_mode = "white"
+            self.btn_black.setChecked(False)
+            self.btn_gray.setChecked(False)
+            self.eyedropperModeChanged.emit("white")
+        else:
+            self._deactivate_all_eyedroppers()
+
+    def handle_color_picked(self, r: float, g: float, b: float) -> None:
+        """Handle the color picked by the eyedropper."""
+
+        if self._eyedropper_mode is None:
+            return
+
+        luminance = 0.2126 * r + 0.7152 * g + 0.0722 * b
+        luminance = max(0.0, min(1.0, luminance))
+
+        self.interactionStarted.emit()
+        if self._eyedropper_mode == "black":
+            self._apply_black_point(luminance)
+        elif self._eyedropper_mode == "gray":
+            self._apply_gray_point(luminance)
+        elif self._eyedropper_mode == "white":
+            self._apply_white_point(luminance)
+        self._commit_curve_changes()
+        self.interactionFinished.emit()
+        self._deactivate_all_eyedroppers()
+
+    def _apply_black_point(self, luminance: float) -> None:
+        channel = self.curve_graph.active_channel
+        points = self.curve_graph.channels[channel]
+        if not points:
+            return
+
+        new_x = luminance
+        if len(points) > 1:
+            new_x = min(new_x, points[1].x() - self.curve_graph.MIN_DISTANCE_THRESHOLD)
+        new_x = max(0.0, new_x)
+
+        points[0] = QPointF(new_x, 0.0)
+        self.input_sliders.setBlackPoint(new_x)
+        self.curve_graph._update_spline_and_emit()
+
+    def _apply_white_point(self, luminance: float) -> None:
+        channel = self.curve_graph.active_channel
+        points = self.curve_graph.channels[channel]
+        if not points:
+            return
+
+        new_x = luminance
+        if len(points) > 1:
+            new_x = max(new_x, points[-2].x() + self.curve_graph.MIN_DISTANCE_THRESHOLD)
+        new_x = min(1.0, new_x)
+
+        points[-1] = QPointF(new_x, 1.0)
+        self.input_sliders.setWhitePoint(new_x)
+        self.curve_graph._update_spline_and_emit()
+
+    def _apply_gray_point(self, luminance: float) -> None:
+        channel = self.curve_graph.active_channel
+        points = self.curve_graph.channels[channel]
+        if len(points) < 2:
+            return
+
+        start_x = points[0].x()
+        end_x = points[-1].x()
+        min_threshold = self.curve_graph.MIN_DISTANCE_THRESHOLD
+        if luminance <= start_x + min_threshold or luminance >= end_x - min_threshold:
+            return
+
+        target_y = 0.5
+        existing_idx = -1
+        for i in range(1, len(points) - 1):
+            if abs(points[i].x() - luminance) < min_threshold * 2:
+                existing_idx = i
+                break
+
+        if existing_idx != -1:
+            points[existing_idx] = QPointF(luminance, target_y)
+            self.curve_graph.selected_index = existing_idx
+        else:
+            insert_idx = len(points) - 1
+            for i in range(1, len(points)):
+                if points[i].x() > luminance:
+                    insert_idx = i
+                    break
+
+            prev_x = points[insert_idx - 1].x()
+            next_x = points[insert_idx].x()
+            if luminance > prev_x + min_threshold and luminance < next_x - min_threshold:
+                points.insert(insert_idx, QPointF(luminance, target_y))
+                self.curve_graph.selected_index = insert_idx
+
+        self.curve_graph._update_spline_and_emit()
 
     def _on_curve_changed(self) -> None:
         if self._updating_ui:

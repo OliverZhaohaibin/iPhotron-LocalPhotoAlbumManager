@@ -118,7 +118,7 @@ class FilmstripView(AssetGrid):
                     pass
         if old_selection_model is not None:
             try:
-                old_selection_model.currentChanged.disconnect(self._on_current_changed_debug)
+                old_selection_model.currentChanged.disconnect(self._on_current_changed)
             except (RuntimeError, TypeError):  # pragma: no cover - Qt signal glue
                 pass
 
@@ -133,7 +133,7 @@ class FilmstripView(AssetGrid):
             model.layoutChanged.connect(self._schedule_restore_scroll)
         selection_model = self.selectionModel()
         if selection_model is not None:
-            selection_model.currentChanged.connect(self._on_current_changed_debug)
+            selection_model.currentChanged.connect(self._on_current_changed)
 
         self.refresh_spacers()
 
@@ -158,9 +158,6 @@ class FilmstripView(AssetGrid):
     def hideEvent(self, event) -> None:  # type: ignore[override]
         self._capture_scroll_state()
         super().hideEvent(event)
-
-    def viewportEvent(self, event: QEvent) -> bool:  # type: ignore[override]
-        return super().viewportEvent(event)
 
     def _capture_scroll_state(self) -> None:
         """Remember scroll position and current selection before model/layout changes."""
@@ -215,11 +212,9 @@ class FilmstripView(AssetGrid):
                     if not current.isValid() or current.row() != center_row:
                         selection_model.setCurrentIndex(index, QItemSelectionModel.ClearAndSelect)
                 self.center_on_index(index)
-                restored = True
 
-        if not restored and scroll_value is not None:
+        elif scroll_value is not None:
             scrollbar.setValue(scroll_value)
-            restored = True
 
         self._pending_scroll_value = None
         self._pending_center_row = None
@@ -242,8 +237,6 @@ class FilmstripView(AssetGrid):
             return
 
         viewport_width = viewport.width()
-        selection_model = self.selectionModel()
-        current_selection = selection_model.currentIndex() if selection_model is not None else None
         if viewport_width <= 0:
             setter(0)
             return
@@ -349,9 +342,10 @@ class FilmstripView(AssetGrid):
             ratio = float(candidate)
         return ratio
 
-    def _on_current_changed_debug(
+    def _on_current_changed(
         self, current: QModelIndex, previous: QModelIndex
-    ) -> None:  # pragma: no cover - debug logging
+    ) -> None:
+        """Track the last non-spacer current row for capture/restore centering logic."""
         if current.isValid() and not bool(current.data(Roles.IS_SPACER)):
             self._last_known_center_row = current.row()
 

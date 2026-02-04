@@ -9,7 +9,9 @@ from __future__ import annotations
 import logging
 import time
 from collections.abc import Mapping
+from typing import Any
 
+import numpy as np
 from OpenGL import GL as gl
 from PySide6.QtCore import QPointF, QSize, Qt, Signal, QRectF
 from PySide6.QtGui import (
@@ -25,6 +27,13 @@ from PySide6.QtOpenGL import (
 )
 from PySide6.QtOpenGLWidgets import QOpenGLWidget
 
+from .....core.curve_resolver import (
+    CurveParams,
+    CurveChannel,
+    CurvePoint,
+    generate_curve_lut,
+    DEFAULT_CURVE_POINTS,
+)
 from ..gl_crop_controller import CropInteractionController
 from ..gl_renderer import GLRenderer
 from ..view_transform_controller import (
@@ -80,7 +89,8 @@ class GLImageViewer(QOpenGLWidget):
 
         # 状态
         self._image: QImage | None = None
-        self._adjustments: dict[str, float] = {}
+        self._adjustments: dict[str, Any] = {}
+        self._current_curve_lut: np.ndarray | None = None
         
         # Texture resource manager
         self._texture_manager = TextureResourceManager(
@@ -244,12 +254,16 @@ class GLImageViewer(QOpenGLWidget):
 
         self.set_image(None, {}, image_source=None)
 
-    def set_adjustments(self, adjustments: Mapping[str, float] | None = None) -> None:
+    def set_adjustments(self, adjustments: Mapping[str, Any] | None = None) -> None:
         """Update the active adjustment uniforms without replacing the texture."""
 
         mapped_adjustments = dict(adjustments or {})
         self._adjustments = mapped_adjustments
         self._update_crop_perspective_state()
+
+        # Handle curve LUT update if curve data changed
+        self._update_curve_lut_if_needed(mapped_adjustments)
+
         if self._crop_controller.is_active():
             # Refresh the crop overlay in logical space so it stays aligned when rotation
             # or perspective adjustments change while the interaction mode is active.
@@ -258,6 +272,44 @@ class GLImageViewer(QOpenGLWidget):
         if self._auto_crop_view_locked and not self._crop_controller.is_active():
             self._reapply_locked_crop_view()
         self.update()
+
+    def _update_curve_lut_if_needed(self, adjustments: dict[str, Any]) -> None:
+        """Update the curve LUT texture if curve parameters have changed."""
+        curve_enabled = bool(adjustments.get("Curve_Enabled", False))
+
+        if not curve_enabled:
+            # No need to update LUT if curves are disabled
+            return
+
+        # Build CurveParams from adjustment data
+        params = CurveParams(enabled=curve_enabled)
+
+        for key, attr in [
+            ("Curve_RGB", "rgb"),
+            ("Curve_Red", "red"),
+            ("Curve_Green", "green"),
+            ("Curve_Blue", "blue"),
+        ]:
+            raw = adjustments.get(key)
+            if raw and isinstance(raw, list):
+                points = [CurvePoint(x=pt[0], y=pt[1]) for pt in raw]
+                setattr(params, attr, CurveChannel(points=points))
+
+        # Generate LUT
+        try:
+            lut = generate_curve_lut(params)
+        except Exception as e:
+            _LOGGER.warning("Failed to generate curve LUT: %s", e)
+            return
+
+        # Upload to GPU
+        if self._renderer is not None:
+            self.makeCurrent()
+            try:
+                self._renderer.upload_curve_lut(lut)
+                self._current_curve_lut = lut
+            finally:
+                self.doneCurrent()
 
     def current_image_source(self) -> object | None:
         """Return the identifier describing the currently displayed image."""

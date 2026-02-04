@@ -8,10 +8,20 @@ back when needed.
 from __future__ import annotations
 
 from collections.abc import Mapping
+from typing import Any
 
+import numpy as np
 from PySide6.QtGui import QImage
 
 from ..color_resolver import ColorStats, compute_color_statistics
+from ..curve_resolver import (
+    CurveParams,
+    CurveChannel,
+    CurvePoint,
+    generate_curve_lut,
+    apply_curve_lut_to_image,
+    DEFAULT_CURVE_POINTS,
+)
 from .fallback_executor import apply_adjustments_fallback, apply_bw_using_qcolor
 from .jit_executor import (
     apply_adjustments_fast_qimage,
@@ -36,7 +46,7 @@ def _normalise_bw_param(value: float) -> float:
 
 def apply_adjustments(
     image: QImage,
-    adjustments: Mapping[str, float],
+    adjustments: Mapping[str, Any],
     color_stats: ColorStats | None = None,
 ) -> QImage:
     """Return a new :class:`QImage` with *adjustments* applied.
@@ -118,6 +128,12 @@ def apply_adjustments(
     )
     apply_bw = bw_enabled
 
+    # Extract curve parameters
+    curve_flag = adjustments.get("Curve_Enabled")
+    if curve_flag is None:
+        curve_flag = adjustments.get("CurveEnabled")
+    curve_enabled = bool(curve_flag)
+
     # Early exit if no adjustments are needed
     if all(
         abs(value) < 1e-6
@@ -131,7 +147,7 @@ def apply_adjustments(
             black_point,
         )
     ) and all(abs(value) < 1e-6 for value in (saturation, vibrance)) and cast < 1e-6:
-        if not apply_bw:
+        if not apply_bw and not curve_enabled:
             # Nothing to do - return a cheap copy so callers still get a detached
             # instance they are free to mutate independently.
             return QImage(result)
@@ -219,6 +235,11 @@ def apply_adjustments(
                     bw_tone,
                     bw_grain,
                 )
+
+        # Apply curve adjustment after color/B&W
+        if curve_enabled:
+            transformed = _apply_curve_to_qimage(transformed, adjustments)
+
         return transformed
 
     # Pillow path not available, use JIT or fallback path
@@ -291,4 +312,53 @@ def apply_adjustments(
             bw_grain,
         )
 
+    # Apply curve adjustment after all other processing
+    if curve_enabled:
+        result = _apply_curve_to_qimage(result, adjustments)
+
     return result
+
+
+def _apply_curve_to_qimage(image: QImage, adjustments: Mapping[str, Any]) -> QImage:
+    """Apply curve LUT to a QImage."""
+    # Build CurveParams from adjustment data
+    params = CurveParams(enabled=True)
+
+    for key, attr in [
+        ("Curve_RGB", "rgb"),
+        ("Curve_Red", "red"),
+        ("Curve_Green", "green"),
+        ("Curve_Blue", "blue"),
+    ]:
+        raw = adjustments.get(key)
+        if raw and isinstance(raw, list):
+            points = [CurvePoint(x=pt[0], y=pt[1]) for pt in raw]
+            setattr(params, attr, CurveChannel(points=points))
+
+    # Check if all curves are identity (no adjustment needed)
+    if params.is_identity():
+        return image
+
+    # Generate LUT
+    try:
+        lut = generate_curve_lut(params)
+    except Exception:
+        return image
+
+    # Convert QImage to numpy array
+    img = image.convertToFormat(QImage.Format.Format_RGBA8888)
+    width = img.width()
+    height = img.height()
+    ptr = img.bits()
+    byte_count = img.sizeInBytes()
+    if hasattr(ptr, "setsize"):
+        ptr.setsize(byte_count)
+
+    arr = np.frombuffer(ptr, dtype=np.uint8).reshape((height, width, 4)).copy()
+
+    # Apply curve LUT
+    arr = apply_curve_lut_to_image(arr, lut)
+
+    # Convert back to QImage
+    result = QImage(arr.data, width, height, arr.strides[0], QImage.Format.Format_RGBA8888).copy()
+    return result.convertToFormat(QImage.Format.Format_ARGB32)

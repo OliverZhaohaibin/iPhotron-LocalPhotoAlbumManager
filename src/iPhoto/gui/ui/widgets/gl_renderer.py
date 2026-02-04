@@ -80,6 +80,7 @@ class GLRenderer:
         self._texture_id: int = 0
         self._texture_width: int = 0
         self._texture_height: int = 0
+        self._curve_lut_texture_id: int = 0
         self._overlay_program: Optional[QOpenGLShaderProgram] = None
         self._overlay_vao: Optional[QOpenGLVertexArrayObject] = None
         self._overlay_vbo: int = 0
@@ -136,6 +137,8 @@ class GLRenderer:
                 "uGain",
                 "uBWParams",
                 "uBWEnabled",
+                "uCurveLUT",
+                "uCurveEnabled",
                 "uTime",
                 "uViewSize",
                 "uTexSize",
@@ -175,6 +178,7 @@ class GLRenderer:
         """Release the shader program, VAO and resident texture."""
 
         self.delete_texture()
+        self._delete_curve_lut_texture()
         if self._dummy_vao is not None:
             self._dummy_vao.destroy()
             self._dummy_vao = None
@@ -272,6 +276,61 @@ class GLRenderer:
         self._texture_width = 0
         self._texture_height = 0
 
+    def _delete_curve_lut_texture(self) -> None:
+        """Delete the curve LUT texture, if any."""
+
+        if not self._curve_lut_texture_id:
+            return
+        gl.glDeleteTextures(1, np.array([int(self._curve_lut_texture_id)], dtype=np.uint32))
+        self._curve_lut_texture_id = 0
+
+    def upload_curve_lut(self, lut_data: np.ndarray) -> None:
+        """Upload a 256x3 float32 LUT to the GPU as a 256x1 RGB texture.
+
+        Args:
+            lut_data: numpy array of shape (256, 3) with float32 values in [0, 1]
+        """
+        if lut_data is None or lut_data.shape != (256, 3):
+            return
+
+        # Ensure data is contiguous and float32
+        lut_data = np.ascontiguousarray(lut_data, dtype=np.float32)
+
+        # Delete existing texture if any
+        if self._curve_lut_texture_id:
+            gl.glDeleteTextures(1, np.array([int(self._curve_lut_texture_id)], dtype=np.uint32))
+            self._curve_lut_texture_id = 0
+
+        # Create new texture
+        tex_id = gl.glGenTextures(1)
+        if isinstance(tex_id, (tuple, list)):
+            tex_id = tex_id[0]
+        self._curve_lut_texture_id = int(tex_id)
+
+        gl.glBindTexture(gl.GL_TEXTURE_2D, self._curve_lut_texture_id)
+        gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MIN_FILTER, gl.GL_LINEAR)
+        gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MAG_FILTER, gl.GL_LINEAR)
+        gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_WRAP_S, gl.GL_CLAMP_TO_EDGE)
+        gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_WRAP_T, gl.GL_CLAMP_TO_EDGE)
+
+        # Upload as 256x1 RGB float texture
+        gl.glTexImage2D(
+            gl.GL_TEXTURE_2D,
+            0,
+            gl.GL_RGB32F,
+            256,
+            1,
+            0,
+            gl.GL_RGB,
+            gl.GL_FLOAT,
+            lut_data,
+        )
+        gl.glBindTexture(gl.GL_TEXTURE_2D, 0)
+
+        error = gl.glGetError()
+        if error != gl.GL_NO_ERROR:
+            _LOGGER.warning("OpenGL error after curve LUT upload: 0x%04X", int(error))
+
     # ------------------------------------------------------------------
     # Rendering
     # ------------------------------------------------------------------
@@ -343,6 +402,18 @@ class GLRenderer:
             # is used to communicate the toggle state without introducing another
             # helper that mirrors the existing ``_set_uniform1i`` wrapper.
             self._set_uniform1i("uBWEnabled", 1 if bool(bw_enabled_value) else 0)
+
+            # Curve LUT texture binding
+            curve_enabled_value = adjustments.get("Curve_Enabled", adjustments.get("CurveEnabled", False))
+            self._set_uniform1i("uCurveEnabled", 1 if bool(curve_enabled_value) else 0)
+            if self._curve_lut_texture_id:
+                gf.glActiveTexture(gl.GL_TEXTURE1)
+                gf.glBindTexture(gl.GL_TEXTURE_2D, int(self._curve_lut_texture_id))
+                self._set_uniform1i("uCurveLUT", 1)
+            else:
+                # Bind a default identity LUT if none uploaded
+                self._set_uniform1i("uCurveLUT", 1)
+
             if time_value is not None:
                 self._set_uniform1f("uTime", time_value)
 

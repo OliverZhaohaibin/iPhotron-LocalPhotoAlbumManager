@@ -11,6 +11,7 @@ from ..core.color_resolver import COLOR_KEYS, ColorResolver, ColorStats
 from ..core.curve_resolver import (
     CURVE_KEYS,
     DEFAULT_CURVE_POINTS,
+    CurveChannel,
     CurveParams,
     curve_params_from_session_values,
     generate_curve_lut,
@@ -312,19 +313,18 @@ def _write_curve_node(root: ET.Element, values: Mapping[str, Any]) -> None:
     curve_blue = values.get("Curve_Blue", DEFAULT_CURVE_POINTS)
 
     # Check if any curve is non-identity (worth saving)
-    def is_identity(pts):
-        if not isinstance(pts, list) or len(pts) != 2:
-            return False
-        return (
-            abs(pts[0][0]) < 1e-6 and abs(pts[0][1]) < 1e-6 and
-            abs(pts[1][0] - 1.0) < 1e-6 and abs(pts[1][1] - 1.0) < 1e-6
-        )
+    # Use CurveChannel to check identity consistently
+    def _check_identity(pts) -> bool:
+        if not isinstance(pts, list):
+            return True
+        channel = CurveChannel.from_list(pts)
+        return channel.is_identity()
 
     all_identity = (
-        is_identity(curve_rgb) and
-        is_identity(curve_red) and
-        is_identity(curve_green) and
-        is_identity(curve_blue)
+        _check_identity(curve_rgb) and
+        _check_identity(curve_red) and
+        _check_identity(curve_green) and
+        _check_identity(curve_blue)
     )
 
     # Skip writing if all curves are identity and not enabled

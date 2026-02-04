@@ -129,10 +129,7 @@ def apply_adjustments(
     apply_bw = bw_enabled
 
     # Extract curve parameters
-    curve_flag = adjustments.get("Curve_Enabled")
-    if curve_flag is None:
-        curve_flag = adjustments.get("CurveEnabled")
-    curve_enabled = bool(curve_flag)
+    curve_enabled = bool(adjustments.get("Curve_Enabled", False))
 
     # Early exit if no adjustments are needed
     if all(

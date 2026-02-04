@@ -410,6 +410,7 @@ class EditCoordinator(QObject):
 
     def _handle_curve_params_previewed(self, curve_data: dict) -> None:
         """Apply transient curve previews without mutating session state."""
+        from src.iPhoto.core.curve_resolver import DEFAULT_CURVE_POINTS
 
         if self._session is None or self._compare_active:
             return
@@ -418,10 +419,10 @@ class EditCoordinator(QObject):
             preview_values = self._session.values()
             preview_values.update({
                 "Curve_Enabled": True,
-                "Curve_RGB": curve_data.get("RGB", [(0.0, 0.0), (1.0, 1.0)]),
-                "Curve_Red": curve_data.get("Red", [(0.0, 0.0), (1.0, 1.0)]),
-                "Curve_Green": curve_data.get("Green", [(0.0, 0.0), (1.0, 1.0)]),
-                "Curve_Blue": curve_data.get("Blue", [(0.0, 0.0), (1.0, 1.0)]),
+                "Curve_RGB": curve_data.get("RGB", list(DEFAULT_CURVE_POINTS)),
+                "Curve_Red": curve_data.get("Red", list(DEFAULT_CURVE_POINTS)),
+                "Curve_Green": curve_data.get("Green", list(DEFAULT_CURVE_POINTS)),
+                "Curve_Blue": curve_data.get("Blue", list(DEFAULT_CURVE_POINTS)),
             })
             adjustments = self._preview_manager.resolve_adjustments(preview_values)
         except Exception:
@@ -432,16 +433,17 @@ class EditCoordinator(QObject):
 
     def _handle_curve_params_committed(self, curve_data: dict) -> None:
         """Persist curve adjustments into the active edit session."""
+        from src.iPhoto.core.curve_resolver import DEFAULT_CURVE_POINTS
 
         if self._session is None:
             return
 
         updates = {
             "Curve_Enabled": True,
-            "Curve_RGB": curve_data.get("RGB", [(0.0, 0.0), (1.0, 1.0)]),
-            "Curve_Red": curve_data.get("Red", [(0.0, 0.0), (1.0, 1.0)]),
-            "Curve_Green": curve_data.get("Green", [(0.0, 0.0), (1.0, 1.0)]),
-            "Curve_Blue": curve_data.get("Blue", [(0.0, 0.0), (1.0, 1.0)]),
+            "Curve_RGB": curve_data.get("RGB", list(DEFAULT_CURVE_POINTS)),
+            "Curve_Red": curve_data.get("Red", list(DEFAULT_CURVE_POINTS)),
+            "Curve_Green": curve_data.get("Green", list(DEFAULT_CURVE_POINTS)),
+            "Curve_Blue": curve_data.get("Blue", list(DEFAULT_CURVE_POINTS)),
         }
         self._session.set_values(updates)
 

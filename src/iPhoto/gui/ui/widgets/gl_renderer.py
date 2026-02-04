@@ -404,7 +404,7 @@ class GLRenderer:
             self._set_uniform1i("uBWEnabled", 1 if bool(bw_enabled_value) else 0)
 
             # Curve LUT texture binding
-            curve_enabled_value = adjustments.get("Curve_Enabled", adjustments.get("CurveEnabled", False))
+            curve_enabled_value = adjustments.get("Curve_Enabled", False)
             self._set_uniform1i("uCurveEnabled", 1 if bool(curve_enabled_value) else 0)
             if self._curve_lut_texture_id:
                 gf.glActiveTexture(gl.GL_TEXTURE1)

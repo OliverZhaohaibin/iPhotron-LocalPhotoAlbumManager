@@ -343,10 +343,10 @@ class PlaybackCoordinator(QObject):
             idx = model.mapFromSource(idx)
 
         if idx.isValid():
-             self._filmstrip_view.selectionModel().setCurrentIndex(
+            self._filmstrip_view.selectionModel().setCurrentIndex(
                 idx, QItemSelectionModel.ClearAndSelect
-             )
-             self._filmstrip_view.center_on_index(idx)
+            )
+            self._filmstrip_view.center_on_index(idx)
 
     def _update_favorite_icon(self, is_favorite: bool):
         icon_name = "suit.heart.fill.svg" if is_favorite else "suit.heart.svg"

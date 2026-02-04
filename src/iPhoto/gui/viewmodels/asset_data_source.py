@@ -165,14 +165,16 @@ class AssetDataSource(QObject):
     def load(self, query: AssetQuery):
         """Loads data for the given query."""
         self._current_query = query
-        self._cached_dtos.clear()
 
         # Default limit if not set
         if not query.limit:
             query.limit = self._page_size if self._should_use_paging(query) else 5000
 
+        # Reset cached data so the model does not expose stale assets
+        self._cached_dtos.clear()
         self._total_count = 0
         self._seen_abs_paths.clear()
+        self._path_exists_cache.clear()
         self._paging_inflight = False
         self._paging_offset = 0
         self._paging_has_more = False

@@ -25,7 +25,7 @@ except ImportError:
 from PySide6.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout,
                                QComboBox, QPushButton, QLabel, QFrame, QSizePolicy, QFileDialog)
 from PySide6.QtCore import Qt, QPointF, QSize, Signal
-from PySide6.QtGui import (QPainter, QColor, QPen, QPainterPath, QIcon, QSurfaceFormat)
+from PySide6.QtGui import (QPainter, QColor, QPen, QPainterPath, QIcon, QSurfaceFormat, QPixmap)
 from PySide6.QtOpenGLWidgets import QOpenGLWidget
 from OpenGL import GL as gl
 
@@ -1017,7 +1017,19 @@ class CurvesDemo(QWidget):
         # Add curve icon before title (only if icon file exists)
         if os.path.exists(ICON_PATH_CURVE):
             curve_icon = QLabel()
-            curve_icon.setPixmap(QIcon(ICON_PATH_CURVE).pixmap(QSize(16, 16)))
+            # Create a colored pixmap from the SVG icon (white/light color)
+            icon = QIcon(ICON_PATH_CURVE)
+            pixmap = icon.pixmap(QSize(16, 16))
+            # Create a white-tinted version by compositing
+            colored_pixmap = QPixmap(pixmap.size())
+            colored_pixmap.fill(Qt.transparent)
+            painter = QPainter(colored_pixmap)
+            painter.setCompositionMode(QPainter.CompositionMode_Source)
+            painter.drawPixmap(0, 0, pixmap)
+            painter.setCompositionMode(QPainter.CompositionMode_SourceIn)
+            painter.fillRect(colored_pixmap.rect(), QColor("#dddddd"))
+            painter.end()
+            curve_icon.setPixmap(colored_pixmap)
             curve_icon.setStyleSheet("margin-right: 5px;")
             top_bar.addWidget(curve_icon)
         title = QLabel("Curves")
@@ -1038,15 +1050,16 @@ class CurvesDemo(QWidget):
 
         tools_layout = QHBoxLayout()
         tools_layout.setContentsMargins(0, 0, 0, 0)
-        tools_layout.setSpacing(0)
+        tools_layout.setSpacing(5)  # 5px spacing between eyedropper frame and add button
         tools_frame = QFrame()
         tools_frame.setStyleSheet(".QFrame { background-color: #383838; border-radius: 5px; border: 1px solid #555; }")
+        tools_frame.setFixedWidth(180)  # 3 eyedropper buttons × 60px = 180px
         tf_layout = QHBoxLayout(tools_frame)
         tf_layout.setContentsMargins(0, 0, 0, 0)
         tf_layout.setSpacing(0)
 
         # Eyedropper buttons - store as instance variables for checkable state
-        # Width calculation: 3 eyedropper buttons (60px each) + 5px spacing + add button (65px) = 250px total
+        # Width calculation: eyedropper frame (180px) + 5px spacing + add button (65px) = 250px total
         eyedropper_btn_width = 60
         eyedropper_btn_height = 30
         self.btn_black = IconButton(ICON_PATH_BLACK, "Set Black Point - Click to pick darkest point in image", width=eyedropper_btn_width, height=eyedropper_btn_height)
@@ -1091,7 +1104,7 @@ class CurvesDemo(QWidget):
         tools_layout.addWidget(tools_frame)
 
         # Add point button - width calculated to align with curve graph right edge
-        # 250px total = 3 * 60px eyedropper + 5px spacing + 65px add button
+        # 250px total = eyedropper frame (180px) + 5px spacing + add button (65px)
         add_btn_width = 65
         add_btn_height = 30
         self.btn_add_point = IconButton(ICON_PATH_ADD, "Add Point to Curve", width=add_btn_width, height=add_btn_height)
@@ -1101,7 +1114,6 @@ class CurvesDemo(QWidget):
             QPushButton:hover { background-color: #444; }
         """)
 
-        tools_layout.addSpacing(5)
         tools_layout.addWidget(self.btn_add_point)
         controls_layout.addLayout(tools_layout)
 

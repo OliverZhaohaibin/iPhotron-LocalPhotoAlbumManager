@@ -1017,10 +1017,10 @@ class CurvesDemo(QWidget):
         # Add curve icon before title (only if icon file exists)
         if os.path.exists(ICON_PATH_CURVE):
             curve_icon = QLabel()
-            # Create a colored pixmap from the SVG icon (white/light color)
+            # Create a light gray colored pixmap from the SVG icon
             icon = QIcon(ICON_PATH_CURVE)
             pixmap = icon.pixmap(QSize(16, 16))
-            # Create a white-tinted version by compositing
+            # Create a light gray tinted version by compositing
             colored_pixmap = QPixmap(pixmap.size())
             colored_pixmap.fill(Qt.transparent)
             painter = QPainter(colored_pixmap)

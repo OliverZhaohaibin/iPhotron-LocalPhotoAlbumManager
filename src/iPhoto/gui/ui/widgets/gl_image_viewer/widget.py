@@ -74,6 +74,7 @@ class GLImageViewer(QOpenGLWidget):
     cropChanged = Signal(float, float, float, float)
     cropInteractionStarted = Signal()
     cropInteractionFinished = Signal()
+    colorPicked = Signal(float, float, float)
 
     def __init__(self, parent: QOpenGLWidget | None = None) -> None:
         super().__init__(parent)
@@ -91,6 +92,7 @@ class GLImageViewer(QOpenGLWidget):
         self._image: QImage | None = None
         self._adjustments: dict[str, Any] = {}
         self._current_curve_lut: np.ndarray | None = None
+        self._eyedropper_active = False
         
         # Texture resource manager
         self._texture_manager = TextureResourceManager(
@@ -203,6 +205,7 @@ class GLImageViewer(QOpenGLWidget):
         self._image = image
         self._adjustments = dict(adjustments or {})
         self._update_crop_perspective_state()
+        self._update_curve_lut_if_needed(self._adjustments)
         self._loading_overlay.hide()
         self._time_base = time.monotonic()
 
@@ -340,6 +343,15 @@ class GLImageViewer(QOpenGLWidget):
     def set_live_replay_enabled(self, enabled: bool) -> None:
         self._input_handler.set_live_replay_enabled(enabled)
 
+    def set_eyedropper_mode(self, active: bool) -> None:
+        """Enable or disable eyedropper picking mode."""
+
+        self._eyedropper_active = bool(active)
+        if self._eyedropper_active:
+            self.setCursor(Qt.CursorShape.CrossCursor)
+        else:
+            self.unsetCursor()
+
     def set_wheel_action(self, action: str) -> None:
         self._transform_controller.set_wheel_action(action)
 
@@ -475,6 +487,7 @@ class GLImageViewer(QOpenGLWidget):
 
         self._renderer = GLRenderer(gf, parent=self)
         self._renderer.initialize_resources()
+        self._update_curve_lut_if_needed(self._adjustments)
 
         dpr = self.devicePixelRatioF()
         gf.glViewport(0, 0, int(self.width() * dpr), int(self.height() * dpr))
@@ -720,9 +733,55 @@ class GLImageViewer(QOpenGLWidget):
     # --------------------------- Viewport helpers ---------------------------
 
     def mousePressEvent(self, event: QMouseEvent) -> None:
+        if self._eyedropper_active:
+            if self._handle_eyedropper_pick(event.position()):
+                event.accept()
+                return
         handled = self._input_handler.handle_mouse_press(event)
         if not handled:
             super().mousePressEvent(event)
+
+    def _handle_eyedropper_pick(self, position: QPointF) -> bool:
+        """Sample the image under *position* and emit a ``colorPicked`` signal."""
+
+        if self._image is None or self._image.isNull():
+            return False
+
+        logical_w, logical_h = self._display_texture_dimensions()
+        if logical_w <= 0 or logical_h <= 0:
+            return False
+
+        image_point = self._viewport_to_image(position)
+        if image_point.isNull():
+            return False
+
+        lx = max(0.0, min(1.0, image_point.x() / float(logical_w)))
+        ly = max(0.0, min(1.0, image_point.y() / float(logical_h)))
+
+        rotate_steps = geometry.get_rotate_steps(self._adjustments)
+        if rotate_steps == 1:
+            tx, ty = ly, 1.0 - lx
+        elif rotate_steps == 2:
+            tx, ty = 1.0 - lx, 1.0 - ly
+        elif rotate_steps == 3:
+            tx, ty = 1.0 - ly, lx
+        else:
+            tx, ty = lx, ly
+
+        tex_w = self._image.width()
+        tex_h = self._image.height()
+        if tex_w <= 0 or tex_h <= 0:
+            return False
+
+        px = int(round(tx * (tex_w - 1)))
+        py = int(round(ty * (tex_h - 1)))
+        px = max(0, min(tex_w - 1, px))
+        py = max(0, min(tex_h - 1, py))
+
+        color = self._image.pixelColor(px, py)
+        self.colorPicked.emit(color.redF(), color.greenF(), color.blueF())
+        self.set_eyedropper_mode(False)
+        return True
 
     def mouseMoveEvent(self, event: QMouseEvent) -> None:
         handled = self._input_handler.handle_mouse_move(event)

@@ -132,6 +132,9 @@ class EditCoordinator(QObject):
         self._ui.edit_sidebar.bwParamsCommitted.connect(self._handle_bw_params_committed)
         self._ui.edit_sidebar.curveParamsPreviewed.connect(self._handle_curve_params_previewed)
         self._ui.edit_sidebar.curveParamsCommitted.connect(self._handle_curve_params_committed)
+        self._ui.edit_sidebar.curveEyedropperModeChanged.connect(
+            self._handle_curve_eyedropper_mode_changed
+        )
         self._ui.edit_sidebar.perspectiveInteractionStarted.connect(
             self._ui.edit_image_viewer.start_perspective_interaction
         )
@@ -140,6 +143,7 @@ class EditCoordinator(QObject):
         )
         self._ui.edit_image_viewer.cropInteractionStarted.connect(self.push_undo_state)
         self._ui.edit_image_viewer.cropChanged.connect(self._handle_crop_changed)
+        self._ui.edit_image_viewer.colorPicked.connect(self._handle_curve_color_picked)
 
     def is_in_fullscreen(self) -> bool:
         """Return ``True`` if the edit view is in immersive full screen mode."""
@@ -269,6 +273,7 @@ class EditCoordinator(QObject):
             self._fullscreen_manager.exit_fullscreen_preview(source, adjustments)
         if self._session is not None:
             self._ui.edit_image_viewer.setCropMode(False, self._session.values())
+        self._ui.edit_image_viewer.set_eyedropper_mode(False)
         self._current_source = None
         self._session = None
         self._preview_manager.stop_session()
@@ -446,6 +451,17 @@ class EditCoordinator(QObject):
             "Curve_Blue": curve_data.get("Blue", list(DEFAULT_CURVE_POINTS)),
         }
         self._session.set_values(updates)
+
+    def _handle_curve_eyedropper_mode_changed(self, mode: object) -> None:
+        """Toggle eyedropper sampling on the GL image viewer."""
+
+        active = mode is not None
+        self._ui.edit_image_viewer.set_eyedropper_mode(active)
+
+    def _handle_curve_color_picked(self, r: float, g: float, b: float) -> None:
+        """Forward eyedropper color picks to the curve section."""
+
+        self._ui.edit_sidebar.handle_curve_color_picked(r, g, b)
 
     def _handle_mode_change(self, mode: str, checked: bool):
         if checked: self._set_mode(mode)

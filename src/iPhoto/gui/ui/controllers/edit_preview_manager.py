@@ -32,10 +32,10 @@ _LOGGER = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 def resolve_adjustment_mapping(
-    session_values: Mapping[str, float | bool],
+    session_values: Mapping[str, float | bool | list],
     *,
     stats: ColorStats | None = None,
-) -> dict[str, float]:
+) -> dict[str, float | bool | list]:
     """Return shader-friendly adjustments derived from *session_values*.
 
     The helper mirrors the Photos-compatible colour math used by the CPU preview
@@ -49,9 +49,10 @@ def resolve_adjustment_mapping(
     # Keys that contain list data (curve control points) - skip these
     _CURVE_LIST_KEYS = {"Curve_RGB", "Curve_Red", "Curve_Green", "Curve_Blue"}
 
-    resolved: dict[str, float] = {}
+    resolved: dict[str, float | bool | list] = {}
     overrides: dict[str, float] = {}
     color_overrides: dict[str, float] = {}
+    curve_lists: dict[str, list] = {}
 
     master_value = float(session_values.get("Light_Master", 0.0))
     light_enabled = bool(session_values.get("Light_Enabled", True))
@@ -63,8 +64,10 @@ def resolve_adjustment_mapping(
             continue
         if key == "BW_Master":
             continue
-        # Skip curve list keys - they contain control point lists, not floats
+        # Curve list keys are forwarded verbatim so the GL viewer can refresh the LUT.
         if key in _CURVE_LIST_KEYS:
+            if isinstance(value, list):
+                curve_lists[key] = value
             continue
         if key in LIGHT_KEYS:
             overrides[key] = float(value)
@@ -121,6 +124,7 @@ def resolve_adjustment_mapping(
         resolved["BWTone"] = 0.0
         resolved["BWGrain"] = 0.0
 
+    resolved.update(curve_lists)
     return resolved
 
 
@@ -284,7 +288,10 @@ class EditPreviewManager(QObject):
         self._preview_update_timer.start()
 
     # ------------------------------------------------------------------
-    def resolve_adjustments(self, session_values: Mapping[str, float | bool]) -> dict[str, float]:
+    def resolve_adjustments(
+        self,
+        session_values: Mapping[str, float | bool | list],
+    ) -> dict[str, float | bool | list]:
         """Return the shader-friendly adjustment mapping derived from *session_values*.
 
         The edit controller uses this helper to update the OpenGL viewer immediately after

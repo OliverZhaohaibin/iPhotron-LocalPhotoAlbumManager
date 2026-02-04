@@ -25,7 +25,7 @@ except ImportError:
 from PySide6.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout,
                                QComboBox, QPushButton, QLabel, QFrame, QSizePolicy, QFileDialog)
 from PySide6.QtCore import Qt, QPointF, QSize, Signal
-from PySide6.QtGui import (QPainter, QColor, QPen, QPainterPath, QIcon, QSurfaceFormat)
+from PySide6.QtGui import (QPainter, QColor, QPen, QPainterPath, QIcon, QSurfaceFormat, QPixmap)
 from PySide6.QtOpenGLWidgets import QOpenGLWidget
 from OpenGL import GL as gl
 
@@ -46,6 +46,7 @@ ICON_PATH_BLACK = os.path.join(ICON_BASE, "eyedropper.full.svg")
 ICON_PATH_GRAY = os.path.join(ICON_BASE, "eyedropper.halffull.svg")
 ICON_PATH_WHITE = os.path.join(ICON_BASE, "eyedropper.svg")
 ICON_PATH_ADD = os.path.join(ICON_BASE, "circle.cross.svg")
+ICON_PATH_CURVE = os.path.join(ICON_BASE, "curve.svg")
 
 
 # ==========================================
@@ -350,7 +351,7 @@ class InputLevelSliders(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setFixedHeight(24)
+        self.setFixedSize(250, 24)
         self.setStyleSheet("background-color: #222222;")
 
         self._black_val = 0.0
@@ -538,7 +539,7 @@ class CurveGraph(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setMinimumSize(300, 300)
+        self.setFixedSize(250, 250)
         self.setStyleSheet("background-color: #2b2b2b;")
 
         # 2.1 Independent Data Models
@@ -932,11 +933,11 @@ class CurveGraph(QWidget):
 
 
 class IconButton(QPushButton):
-    def __init__(self, icon_path, tooltip, parent=None):
+    def __init__(self, icon_path, tooltip, parent=None, width=60, height=30):
         super().__init__(parent)
         self.setToolTip(tooltip)
         self.setCursor(Qt.PointingHandCursor)
-        self.setFixedSize(40, 30)
+        self.setFixedSize(width, height)
         if os.path.exists(icon_path):
             self.setIcon(QIcon(icon_path))
             self.setIconSize(QSize(20, 20))
@@ -1013,6 +1014,24 @@ class CurvesDemo(QWidget):
         controls_layout.setContentsMargins(15, 15, 15, 15)
 
         top_bar = QHBoxLayout()
+        # Add curve icon before title (only if icon file exists)
+        if os.path.exists(ICON_PATH_CURVE):
+            curve_icon = QLabel()
+            # Create a light gray colored pixmap from the SVG icon
+            icon = QIcon(ICON_PATH_CURVE)
+            pixmap = icon.pixmap(QSize(16, 16))
+            # Create a light gray tinted version by compositing
+            colored_pixmap = QPixmap(pixmap.size())
+            colored_pixmap.fill(Qt.transparent)
+            painter = QPainter(colored_pixmap)
+            painter.setCompositionMode(QPainter.CompositionMode_Source)
+            painter.drawPixmap(0, 0, pixmap)
+            painter.setCompositionMode(QPainter.CompositionMode_SourceIn)
+            painter.fillRect(colored_pixmap.rect(), QColor("#dddddd"))
+            painter.end()
+            curve_icon.setPixmap(colored_pixmap)
+            curve_icon.setStyleSheet("margin-right: 5px;")
+            top_bar.addWidget(curve_icon)
         title = QLabel("Curves")
         title.setStyleSheet("color: #ddd; font-weight: bold; font-size: 14px;")
         auto_btn = QPushButton("AUTO")
@@ -1026,19 +1045,26 @@ class CurvesDemo(QWidget):
         combo = StyledComboBox()
         combo.addItems(["RGB", "Red", "Green", "Blue"])
         combo.currentTextChanged.connect(lambda text: self.curve.set_channel(text))
+        combo.setFixedWidth(250)
         controls_layout.addWidget(combo)
 
         tools_layout = QHBoxLayout()
+        tools_layout.setContentsMargins(0, 0, 0, 0)
+        tools_layout.setSpacing(5)  # 5px spacing between eyedropper frame and add button
         tools_frame = QFrame()
         tools_frame.setStyleSheet(".QFrame { background-color: #383838; border-radius: 5px; border: 1px solid #555; }")
+        tools_frame.setFixedWidth(180)  # 3 eyedropper buttons × 60px = 180px
         tf_layout = QHBoxLayout(tools_frame)
         tf_layout.setContentsMargins(0, 0, 0, 0)
         tf_layout.setSpacing(0)
 
         # Eyedropper buttons - store as instance variables for checkable state
-        self.btn_black = IconButton(ICON_PATH_BLACK, "Set Black Point - Click to pick darkest point in image")
-        self.btn_gray = IconButton(ICON_PATH_GRAY, "Set Gray Point - Click to pick mid-tone in image")
-        self.btn_white = IconButton(ICON_PATH_WHITE, "Set White Point - Click to pick brightest point in image")
+        # Width calculation: eyedropper frame (180px) + 5px spacing + add button (65px) = 250px total
+        eyedropper_btn_width = 60
+        eyedropper_btn_height = 30
+        self.btn_black = IconButton(ICON_PATH_BLACK, "Set Black Point - Click to pick darkest point in image", width=eyedropper_btn_width, height=eyedropper_btn_height)
+        self.btn_gray = IconButton(ICON_PATH_GRAY, "Set Gray Point - Click to pick mid-tone in image", width=eyedropper_btn_width, height=eyedropper_btn_height)
+        self.btn_white = IconButton(ICON_PATH_WHITE, "Set White Point - Click to pick brightest point in image", width=eyedropper_btn_width, height=eyedropper_btn_height)
         border_style = "border-right: 1px solid #555;"
         
         # Make buttons checkable for visual feedback
@@ -1077,17 +1103,18 @@ class CurvesDemo(QWidget):
         tf_layout.addWidget(self.btn_white)
         tools_layout.addWidget(tools_frame)
 
-        self.btn_add_point = IconButton(ICON_PATH_ADD, "Add Point to Curve")
+        # Add point button - width calculated to align with curve graph right edge
+        # 250px total = eyedropper frame (180px) + 5px spacing + add button (65px)
+        add_btn_width = 65
+        add_btn_height = 30
+        self.btn_add_point = IconButton(ICON_PATH_ADD, "Add Point to Curve", width=add_btn_width, height=add_btn_height)
         self.btn_add_point.clicked.connect(lambda: self.curve.add_point_center())
-        self.btn_add_point.setFixedSize(40, 32)
         self.btn_add_point.setStyleSheet("""
             QPushButton { background-color: #383838; border: 1px solid #555; border-radius: 4px; }
             QPushButton:hover { background-color: #444; }
         """)
 
-        tools_layout.addSpacing(5)
         tools_layout.addWidget(self.btn_add_point)
-        tools_layout.addStretch()
         controls_layout.addLayout(tools_layout)
 
         # -- Graph + Sliders Group (Spacing=0) --

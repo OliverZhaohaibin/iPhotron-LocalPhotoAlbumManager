@@ -28,11 +28,7 @@ from PySide6.QtCore import Qt, QPointF, QSize, Signal
 from PySide6.QtGui import (QPainter, QColor, QPen, QPainterPath, QIcon, QSurfaceFormat, QPixmap)
 from PySide6.QtOpenGLWidgets import QOpenGLWidget
 from OpenGL import GL as gl
-
-try:
-    from iPhoto.gui.ui.icons import load_icon
-except ImportError:
-    load_icon = None
+from iPhoto.gui.ui.icons import load_icon
 
 # ==========================================
 # 配置：图标路径
@@ -1025,10 +1021,7 @@ class CurvesDemo(QWidget):
         # Add curve icon before title (only if icon file exists)
         if os.path.exists(ICON_PATH_CURVE):
             curve_icon = QLabel()
-            if load_icon is not None:
-                icon = load_icon("curve.svg", color="#dddddd", size=(32, 32))
-            else:
-                icon = QIcon(ICON_PATH_CURVE)
+            icon = load_icon("curve.svg", color="#dddddd", size=(32, 32))
             pixmap = icon.pixmap(QSize(32, 32))
             pixmap.setDevicePixelRatio(2.0)
             curve_icon.setPixmap(pixmap)

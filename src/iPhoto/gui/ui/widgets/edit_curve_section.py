@@ -32,8 +32,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .....core.spline import MonotoneCubicSpline
-from .....core.curve_resolver import (
+from ....core.spline import MonotoneCubicSpline
+from ....core.curve_resolver import (
     DEFAULT_CURVE_POINTS,
     CurveChannel,
     CurveParams,

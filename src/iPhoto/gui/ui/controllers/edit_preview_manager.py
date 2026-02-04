@@ -46,6 +46,9 @@ def resolve_adjustment_mapping(
     that do not have statistics available yet.
     """
 
+    # Keys that contain list data (curve control points) - skip these
+    _CURVE_LIST_KEYS = {"Curve_RGB", "Curve_Red", "Curve_Green", "Curve_Blue"}
+
     resolved: dict[str, float] = {}
     overrides: dict[str, float] = {}
     color_overrides: dict[str, float] = {}
@@ -60,12 +63,20 @@ def resolve_adjustment_mapping(
             continue
         if key == "BW_Master":
             continue
+        # Skip curve list keys - they contain control point lists, not floats
+        if key in _CURVE_LIST_KEYS:
+            continue
         if key in LIGHT_KEYS:
             overrides[key] = float(value)
         elif key in COLOR_KEYS:
             color_overrides[key] = float(value)
         else:
-            resolved[key] = float(value)
+            # Handle boolean values that might be passed
+            if isinstance(value, bool):
+                resolved[key] = 1.0 if value else 0.0
+            elif isinstance(value, (int, float)):
+                resolved[key] = float(value)
+            # Skip any other non-numeric types (like lists)
 
     if light_enabled:
         resolved.update(resolve_light_vector(master_value, overrides, mode="delta"))

@@ -29,6 +29,11 @@ from PySide6.QtGui import (QPainter, QColor, QPen, QPainterPath, QIcon, QSurface
 from PySide6.QtOpenGLWidgets import QOpenGLWidget
 from OpenGL import GL as gl
 
+try:
+    from iPhoto.gui.ui.icons import load_icon
+except ImportError:
+    load_icon = None
+
 # ==========================================
 # 配置：图标路径
 # ==========================================
@@ -1020,19 +1025,13 @@ class CurvesDemo(QWidget):
         # Add curve icon before title (only if icon file exists)
         if os.path.exists(ICON_PATH_CURVE):
             curve_icon = QLabel()
-            # Create a light gray colored pixmap from the SVG icon
-            icon = QIcon(ICON_PATH_CURVE)
-            pixmap = icon.pixmap(QSize(16, 16))
-            # Create a light gray tinted version by compositing
-            colored_pixmap = QPixmap(pixmap.size())
-            colored_pixmap.fill(Qt.transparent)
-            painter = QPainter(colored_pixmap)
-            painter.setCompositionMode(QPainter.CompositionMode_Source)
-            painter.drawPixmap(0, 0, pixmap)
-            painter.setCompositionMode(QPainter.CompositionMode_SourceIn)
-            painter.fillRect(colored_pixmap.rect(), QColor("#dddddd"))
-            painter.end()
-            curve_icon.setPixmap(colored_pixmap)
+            if load_icon is not None:
+                icon = load_icon("curve.svg", color="#dddddd", size=(32, 32))
+            else:
+                icon = QIcon(ICON_PATH_CURVE)
+            pixmap = icon.pixmap(QSize(32, 32))
+            pixmap.setDevicePixelRatio(2.0)
+            curve_icon.setPixmap(pixmap)
             curve_icon.setStyleSheet("margin-right: 5px;")
             top_bar.addWidget(curve_icon)
         title = QLabel("Curves")

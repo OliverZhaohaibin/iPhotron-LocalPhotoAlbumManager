@@ -330,6 +330,10 @@ class GLRenderer:
         error = gl.glGetError()
         if error != gl.GL_NO_ERROR:
             _LOGGER.warning("OpenGL error after curve LUT upload: 0x%04X", int(error))
+            # Clean up the partially created texture and reset the ID to avoid using
+            # an invalid or incomplete texture later.
+            self._delete_curve_lut_texture()
+            return
 
     # ------------------------------------------------------------------
     # Rendering
@@ -405,14 +409,17 @@ class GLRenderer:
 
             # Curve LUT texture binding
             curve_enabled_value = adjustments.get("Curve_Enabled", False)
-            self._set_uniform1i("uCurveEnabled", 1 if bool(curve_enabled_value) else 0)
-            if self._curve_lut_texture_id:
+            has_curve_lut_texture = bool(self._curve_lut_texture_id)
+            effective_curve_enabled = bool(curve_enabled_value) and has_curve_lut_texture
+            self._set_uniform1i("uCurveEnabled", 1 if effective_curve_enabled else 0)
+            if has_curve_lut_texture:
                 gf.glActiveTexture(gl.GL_TEXTURE1)
                 gf.glBindTexture(gl.GL_TEXTURE_2D, int(self._curve_lut_texture_id))
                 self._set_uniform1i("uCurveLUT", 1)
             else:
-                # Bind a default identity LUT if none uploaded
-                self._set_uniform1i("uCurveLUT", 1)
+                # No curve LUT texture available: disable sampling by pointing to a safe unit.
+                # Since uCurveEnabled is 0 in this branch, the shader must ignore the LUT.
+                self._set_uniform1i("uCurveLUT", 0)
 
             if time_value is not None:
                 self._set_uniform1f("uTime", time_value)

@@ -21,7 +21,29 @@ class CurvePoint:
 
     @staticmethod
     def from_tuple(t: Tuple[float, float]) -> "CurvePoint":
-        return CurvePoint(x=t[0], y=t[1])
+        """
+        Create a CurvePoint from a 2-element tuple or list of numeric values.
+
+        This performs basic validation to avoid IndexError/TypeError when
+        malformed data is passed (e.g. wrong length, non-numeric values).
+        """
+        if not isinstance(t, (tuple, list)):
+            raise TypeError(
+                f"CurvePoint.from_tuple expected a tuple or list of two numeric "
+                f"values, got {type(t).__name__}"
+            )
+        if len(t) < 2:
+            raise ValueError(
+                f"CurvePoint.from_tuple expected at least 2 elements, got {len(t)}"
+            )
+        try:
+            x = float(t[0])
+            y = float(t[1])
+        except (TypeError, ValueError) as exc:
+            raise TypeError(
+                "CurvePoint.from_tuple expected a tuple or list of two numeric values"
+            ) from exc
+        return CurvePoint(x=x, y=y)
 
 
 @dataclass

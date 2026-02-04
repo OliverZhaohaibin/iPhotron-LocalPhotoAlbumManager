@@ -24,6 +24,7 @@ from src.iPhoto.gui.ui.tasks.edit_sidebar_preview_worker import EditSidebarPrevi
 from src.iPhoto.gui.ui.controllers.edit_preview_manager import resolve_adjustment_mapping
 from src.iPhoto.gui.ui.palette import viewer_surface_color
 from src.iPhoto.io import sidecar
+from src.iPhoto.core.curve_resolver import DEFAULT_CURVE_POINTS
 
 if TYPE_CHECKING:
     from src.iPhoto.gui.viewmodels.asset_list_viewmodel import AssetListViewModel
@@ -415,7 +416,6 @@ class EditCoordinator(QObject):
 
     def _handle_curve_params_previewed(self, curve_data: dict) -> None:
         """Apply transient curve previews without mutating session state."""
-        from src.iPhoto.core.curve_resolver import DEFAULT_CURVE_POINTS
 
         if self._session is None or self._compare_active:
             return
@@ -438,7 +438,6 @@ class EditCoordinator(QObject):
 
     def _handle_curve_params_committed(self, curve_data: dict) -> None:
         """Persist curve adjustments into the active edit session."""
-        from src.iPhoto.core.curve_resolver import DEFAULT_CURVE_POINTS
 
         if self._session is None:
             return

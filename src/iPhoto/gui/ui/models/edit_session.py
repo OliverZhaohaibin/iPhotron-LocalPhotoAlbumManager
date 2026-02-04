@@ -9,7 +9,7 @@ from PySide6.QtCore import QObject, Signal
 
 from ....core.light_resolver import LIGHT_KEYS
 from ....core.color_resolver import COLOR_KEYS, COLOR_RANGES, ColorStats
-from ....core.curve_resolver import CURVE_KEYS, DEFAULT_CURVE_POINTS
+from ....core.curve_resolver import DEFAULT_CURVE_POINTS
 
 _BW_RANGE_KEYS = {"BW_Master", "BW_Intensity", "BW_Neutrals", "BW_Tone"}
 

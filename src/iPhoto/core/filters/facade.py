@@ -20,7 +20,6 @@ from ..curve_resolver import (
     CurvePoint,
     generate_curve_lut,
     apply_curve_lut_to_image,
-    DEFAULT_CURVE_POINTS,
 )
 from .fallback_executor import apply_adjustments_fallback, apply_bw_using_qcolor
 from .jit_executor import (
@@ -329,8 +328,18 @@ def _apply_curve_to_qimage(image: QImage, adjustments: Mapping[str, Any]) -> QIm
     ]:
         raw = adjustments.get(key)
         if raw and isinstance(raw, list):
-            points = [CurvePoint(x=pt[0], y=pt[1]) for pt in raw]
-            setattr(params, attr, CurveChannel(points=points))
+            # Validate that each point is a 2-element numeric tuple/list before unpacking
+            points: list[CurvePoint] = []
+            for pt in raw:
+                if (
+                    isinstance(pt, (list, tuple))
+                    and len(pt) >= 2
+                    and isinstance(pt[0], (int, float))
+                    and isinstance(pt[1], (int, float))
+                ):
+                    points.append(CurvePoint(x=float(pt[0]), y=float(pt[1])))
+            if points:
+                setattr(params, attr, CurveChannel(points=points))
 
     # Check if all curves are identity (no adjustment needed)
     if params.is_identity():

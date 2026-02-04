@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Dict, List, Optional, Tuple
+from typing import Optional
 
 from PySide6.QtCore import Qt, Slot, Signal
 from PySide6.QtGui import QPalette, QColor
@@ -324,10 +324,12 @@ class EditSidebar(QWidget):
             try:
                 self.curve_reset_button.clicked.disconnect(self._on_curve_reset)
             except (TypeError, RuntimeError):
+                # Signal may already be disconnected or was never connected; safe to ignore.
                 pass
             try:
                 self.curve_toggle_button.toggled.disconnect(self._on_curve_toggled)
             except (TypeError, RuntimeError):
+                # Signal may already be disconnected or was never connected; safe to ignore.
                 pass
             self._curve_controls_connected = False
 

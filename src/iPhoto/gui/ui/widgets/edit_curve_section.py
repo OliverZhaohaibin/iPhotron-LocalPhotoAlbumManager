@@ -4,29 +4,21 @@ from __future__ import annotations
 
 import logging
 import math
-from dataclasses import dataclass
-from functools import partial
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 from PySide6.QtCore import QPointF, Qt, Signal, Slot
 from PySide6.QtGui import (
-    QBrush,
     QColor,
     QMouseEvent,
     QPainter,
     QPainterPath,
-    QPalette,
     QPen,
-    QImage,
 )
 from PySide6.QtWidgets import (
-    QApplication,
     QComboBox,
     QFrame,
-    QGraphicsOpacityEffect,
     QHBoxLayout,
-    QPushButton,
     QSizePolicy,
     QToolButton,
     QVBoxLayout,
@@ -34,15 +26,8 @@ from PySide6.QtWidgets import (
 )
 
 from ....core.spline import MonotoneCubicSpline
-from ....core.curve_resolver import (
-    DEFAULT_CURVE_POINTS,
-    CurveChannel,
-    CurveParams,
-    CurvePoint,
-    generate_curve_lut,
-)
+from ....core.curve_resolver import DEFAULT_CURVE_POINTS
 from ...models.edit_session import EditSession
-from ..collapsible_section import CollapsibleSubSection
 from ...icon import load_icon
 
 _LOGGER = logging.getLogger(__name__)
@@ -286,7 +271,42 @@ class CurveGraph(QWidget):
         """Set curve data from lists of (x, y) tuples."""
         for name, points in data.items():
             if name in self.channels:
-                self.channels[name] = [QPointF(x, y) for x, y in points]
+                valid_points: List[QPointF] = []
+                for idx, point in enumerate(points):
+                    try:
+                        x, y = point  # type: ignore[misc]
+                    except (TypeError, ValueError):
+                        _LOGGER.warning(
+                            "Invalid curve point for channel '%s' at index %d: %r "
+                            "- expected iterable of two values; skipping",
+                            name,
+                            idx,
+                            point,
+                        )
+                        continue
+                    if not (isinstance(x, (int, float)) and isinstance(y, (int, float))):
+                        _LOGGER.warning(
+                            "Non-numeric curve point for channel '%s' at index %d: %r "
+                            "- expected numeric x and y; skipping",
+                            name,
+                            idx,
+                            point,
+                        )
+                        continue
+                    try:
+                        valid_points.append(QPointF(float(x), float(y)))
+                    except (TypeError, ValueError):
+                        _LOGGER.warning(
+                            "Failed to create QPointF for channel '%s' at index %d "
+                            "from values (%r, %r); skipping",
+                            name,
+                            idx,
+                            x,
+                            y,
+                        )
+                        continue
+                if valid_points:
+                    self.channels[name] = valid_points
         self._recalculate_splines_all()
         self.update()
 
@@ -310,7 +330,13 @@ class CurveGraph(QWidget):
         try:
             self.splines[channel_name] = MonotoneCubicSpline(x, y)
         except ValueError:
-            pass
+            # Ignore invalid point configurations that cannot form a monotone spline,
+            # but log for debugging purposes.
+            _LOGGER.debug(
+                "Failed to recalculate spline for channel %s with points %s",
+                channel_name,
+                points,
+            )
 
     def paintEvent(self, event) -> None:
         painter = QPainter(self)
@@ -767,10 +793,12 @@ class EditCurveSection(QWidget):
             try:
                 self._session.valueChanged.disconnect(self._on_session_value_changed)
             except (TypeError, RuntimeError):
+                # Signal may already be disconnected or was never connected; safe to ignore.
                 pass
             try:
                 self._session.resetPerformed.disconnect(self._on_session_reset)
             except (TypeError, RuntimeError):
+                # Signal may already be disconnected or was never connected; safe to ignore.
                 pass
 
         self._session = session

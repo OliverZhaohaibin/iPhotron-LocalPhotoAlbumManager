@@ -32,7 +32,6 @@ from .....core.curve_resolver import (
     CurveChannel,
     CurvePoint,
     generate_curve_lut,
-    DEFAULT_CURVE_POINTS,
 )
 from ..gl_crop_controller import CropInteractionController
 from ..gl_renderer import GLRenderer
@@ -281,7 +280,24 @@ class GLImageViewer(QOpenGLWidget):
         curve_enabled = bool(adjustments.get("Curve_Enabled", False))
 
         if not curve_enabled:
-            # No need to update LUT if curves are disabled
+            # Curves are disabled: upload an identity LUT so any existing GPU texture
+            # does not affect rendering even if the shader samples it.
+            if self._renderer is None:
+                return
+
+            self.makeCurrent()
+            try:
+                try:
+                    identity_params = CurveParams(enabled=False)
+                    identity_lut = generate_curve_lut(identity_params)
+                except Exception as e:
+                    _LOGGER.warning("Failed to generate identity curve LUT: %s", e)
+                    return
+
+                self._renderer.upload_curve_lut(identity_lut)
+                self._current_curve_lut = identity_lut
+            finally:
+                self.doneCurrent()
             return
 
         # Build CurveParams from adjustment data
@@ -295,8 +311,18 @@ class GLImageViewer(QOpenGLWidget):
         ]:
             raw = adjustments.get(key)
             if raw and isinstance(raw, list):
-                points = [CurvePoint(x=pt[0], y=pt[1]) for pt in raw]
-                setattr(params, attr, CurveChannel(points=points))
+                # Validate that each point is a 2-element numeric tuple/list before unpacking
+                points: list[CurvePoint] = []
+                for pt in raw:
+                    if (
+                        isinstance(pt, (list, tuple))
+                        and len(pt) >= 2
+                        and isinstance(pt[0], (int, float))
+                        and isinstance(pt[1], (int, float))
+                    ):
+                        points.append(CurvePoint(x=float(pt[0]), y=float(pt[1])))
+                if points:
+                    setattr(params, attr, CurveChannel(points=points))
 
         # Generate LUT
         try:

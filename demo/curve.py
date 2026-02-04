@@ -143,6 +143,10 @@ void main() {
 # GL Image Viewer
 # ==========================================
 class GLImageViewer(QOpenGLWidget):
+    # Signal emitted when a color is picked via eyedropper
+    # Emits (r, g, b) values normalized to 0.0-1.0
+    colorPicked = Signal(float, float, float)
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.image_texture = None
@@ -152,6 +156,55 @@ class GLImageViewer(QOpenGLWidget):
         self.vbo = None
         self.has_image = False
         self._pending_lut = None
+        self._original_image = None  # Store original PIL image for color picking
+        self._eyedropper_active = False  # Track if eyedropper mode is active
+
+    def set_eyedropper_mode(self, active):
+        """Enable or disable eyedropper picking mode."""
+        self._eyedropper_active = active
+        if active:
+            self.setCursor(Qt.CrossCursor)
+        else:
+            self.unsetCursor()
+
+    def mousePressEvent(self, event):
+        """Handle mouse click for color picking."""
+        if not self._eyedropper_active or not self.has_image or self._original_image is None:
+            return
+
+        # Get the click position
+        pos = event.position()
+        widget_w = self.width()
+        widget_h = self.height()
+
+        # Convert widget coordinates to normalized coordinates (0-1)
+        norm_x = pos.x() / widget_w
+        norm_y = pos.y() / widget_h
+
+        # Get original image dimensions
+        img_w, img_h = self._original_image.size
+
+        # Convert to image pixel coordinates
+        img_x = int(norm_x * img_w)
+        img_y = int(norm_y * img_h)
+
+        # Clamp to image bounds
+        img_x = max(0, min(img_w - 1, img_x))
+        img_y = max(0, min(img_h - 1, img_y))
+
+        # Get pixel color from original image
+        pixel = self._original_image.getpixel((img_x, img_y))
+
+        # Normalize to 0.0-1.0 (handle RGBA or RGB)
+        r = pixel[0] / 255.0
+        g = pixel[1] / 255.0
+        b = pixel[2] / 255.0
+
+        # Emit the color picked signal
+        self.colorPicked.emit(r, g, b)
+
+        # Deactivate eyedropper mode after picking
+        self.set_eyedropper_mode(False)
 
     def initializeGL(self):
         gl.glClearColor(0.15, 0.15, 0.15, 1.0)
@@ -238,6 +291,7 @@ class GLImageViewer(QOpenGLWidget):
     def set_image(self, img_pil):
         self.makeCurrent()
         img = img_pil.convert("RGBA")
+        self._original_image = img  # Store original image for color picking
         data = np.array(img)
         w, h = img.size
 
@@ -905,11 +959,20 @@ class IconButton(QPushButton):
 
 
 class CurvesDemo(QWidget):
+    # Eyedropper mode constants
+    EYEDROPPER_NONE = 0
+    EYEDROPPER_BLACK = 1
+    EYEDROPPER_GRAY = 2
+    EYEDROPPER_WHITE = 3
+
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Curves Demo")
         self.setStyleSheet("background-color: #1e1e1e; font-family: 'Segoe UI', sans-serif;")
         self.setFixedSize(1000, 600)
+
+        # Track which eyedropper mode is active
+        self._eyedropper_mode = self.EYEDROPPER_NONE
 
         self.main_layout = QHBoxLayout(self)
         self.main_layout.setContentsMargins(0, 0, 0, 0)
@@ -918,6 +981,8 @@ class CurvesDemo(QWidget):
         # --- LEFT: Image Viewer ---
         self.image_viewer = GLImageViewer()
         self.image_viewer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        # Connect color picking signal
+        self.image_viewer.colorPicked.connect(self._on_color_picked)
 
         self.left_pane = QWidget()
         self.left_layout = QVBoxLayout(self.left_pane)
@@ -970,16 +1035,46 @@ class CurvesDemo(QWidget):
         tf_layout.setContentsMargins(0, 0, 0, 0)
         tf_layout.setSpacing(0)
 
-        btn_black = IconButton(ICON_PATH_BLACK, "Set Black Point")
-        btn_gray = IconButton(ICON_PATH_GRAY, "Set Gray Point")
-        btn_white = IconButton(ICON_PATH_WHITE, "Set White Point")
+        # Eyedropper buttons - store as instance variables for checkable state
+        self.btn_black = IconButton(ICON_PATH_BLACK, "Set Black Point - Click to pick darkest point in image")
+        self.btn_gray = IconButton(ICON_PATH_GRAY, "Set Gray Point - Click to pick mid-tone in image")
+        self.btn_white = IconButton(ICON_PATH_WHITE, "Set White Point - Click to pick brightest point in image")
         border_style = "border-right: 1px solid #555;"
-        btn_black.setStyleSheet(btn_black.styleSheet() + border_style)
-        btn_gray.setStyleSheet(btn_gray.styleSheet() + border_style)
+        
+        # Make buttons checkable for visual feedback
+        self.btn_black.setCheckable(True)
+        self.btn_gray.setCheckable(True)
+        self.btn_white.setCheckable(True)
+        
+        # Style for checkable state
+        eyedropper_style = """
+            QPushButton {
+                background-color: transparent;
+                border: none;
+                border-radius: 0px;
+            }
+            QPushButton:hover {
+                background-color: #444;
+            }
+            QPushButton:pressed {
+                background-color: #222;
+            }
+            QPushButton:checked {
+                background-color: #4a90e2;
+            }
+        """
+        self.btn_black.setStyleSheet(eyedropper_style + border_style)
+        self.btn_gray.setStyleSheet(eyedropper_style + border_style)
+        self.btn_white.setStyleSheet(eyedropper_style)
+        
+        # Connect eyedropper buttons
+        self.btn_black.clicked.connect(self._activate_black_eyedropper)
+        self.btn_gray.clicked.connect(self._activate_gray_eyedropper)
+        self.btn_white.clicked.connect(self._activate_white_eyedropper)
 
-        tf_layout.addWidget(btn_black)
-        tf_layout.addWidget(btn_gray)
-        tf_layout.addWidget(btn_white)
+        tf_layout.addWidget(self.btn_black)
+        tf_layout.addWidget(self.btn_gray)
+        tf_layout.addWidget(self.btn_white)
         tools_layout.addWidget(tools_frame)
 
         self.btn_add_point = IconButton(ICON_PATH_ADD, "Add Point to Curve")
@@ -1073,6 +1168,188 @@ class CurvesDemo(QWidget):
                 self.curve.update_lut()
             except Exception as e:
                 print(f"Error loading image: {e}")
+
+    def _deactivate_all_eyedroppers(self):
+        """Deactivate all eyedropper buttons and reset mode."""
+        self._eyedropper_mode = self.EYEDROPPER_NONE
+        self.btn_black.setChecked(False)
+        self.btn_gray.setChecked(False)
+        self.btn_white.setChecked(False)
+        self.image_viewer.set_eyedropper_mode(False)
+
+    def _activate_black_eyedropper(self):
+        """Activate black point eyedropper mode."""
+        if self.btn_black.isChecked():
+            self._eyedropper_mode = self.EYEDROPPER_BLACK
+            self.btn_gray.setChecked(False)
+            self.btn_white.setChecked(False)
+            self.image_viewer.set_eyedropper_mode(True)
+        else:
+            self._deactivate_all_eyedroppers()
+
+    def _activate_gray_eyedropper(self):
+        """Activate gray/mid-tone point eyedropper mode."""
+        if self.btn_gray.isChecked():
+            self._eyedropper_mode = self.EYEDROPPER_GRAY
+            self.btn_black.setChecked(False)
+            self.btn_white.setChecked(False)
+            self.image_viewer.set_eyedropper_mode(True)
+        else:
+            self._deactivate_all_eyedroppers()
+
+    def _activate_white_eyedropper(self):
+        """Activate white point eyedropper mode."""
+        if self.btn_white.isChecked():
+            self._eyedropper_mode = self.EYEDROPPER_WHITE
+            self.btn_black.setChecked(False)
+            self.btn_gray.setChecked(False)
+            self.image_viewer.set_eyedropper_mode(True)
+        else:
+            self._deactivate_all_eyedroppers()
+
+    def _on_color_picked(self, r, g, b):
+        """
+        Handle the color picked by the eyedropper.
+        
+        Black point: Sets the picked luminance as the new black point - 
+                     pixels darker than this will be clipped to black (0).
+        
+        Gray/Mid-tone: Adds a control point at the picked luminance and adjusts
+                       it to map to 50% gray (0.5 output).
+        
+        White point: Sets the picked luminance as the new white point -
+                     pixels brighter than this will be clipped to white (1).
+        """
+        # Calculate luminance using standard weights (Rec. 709)
+        luminance = 0.2126 * r + 0.7152 * g + 0.0722 * b
+        luminance = max(0.0, min(1.0, luminance))
+        
+        if self._eyedropper_mode == self.EYEDROPPER_BLACK:
+            self._apply_black_point(luminance)
+        elif self._eyedropper_mode == self.EYEDROPPER_GRAY:
+            self._apply_gray_point(luminance)
+        elif self._eyedropper_mode == self.EYEDROPPER_WHITE:
+            self._apply_white_point(luminance)
+        
+        # Reset eyedropper mode after picking
+        self._deactivate_all_eyedroppers()
+
+    def _apply_black_point(self, luminance):
+        """
+        Apply black point adjustment.
+        
+        The picked luminance value becomes the new black point (input level).
+        This means all pixels at or below this luminance will be mapped to black (0),
+        and the curve is adjusted so that the black point moves to this position.
+        """
+        channel = self.curve.active_channel
+        points = self.curve.channels[channel]
+        
+        if not points:
+            return
+        
+        # Clamp black point - can't go past next point
+        new_x = luminance
+        if len(points) > 1:
+            new_x = min(new_x, points[1].x() - self.curve.MIN_DISTANCE_THRESHOLD)
+        new_x = max(0.0, new_x)
+        
+        # Update the first point (black point) - Y stays at 0 (maps to black)
+        points[0] = QPointF(new_x, 0.0)
+        
+        # Update the slider
+        self.input_sliders.setBlackPoint(new_x)
+        
+        # Trigger update
+        self.curve.update_spline_and_lut()
+
+    def _apply_white_point(self, luminance):
+        """
+        Apply white point adjustment.
+        
+        The picked luminance value becomes the new white point (input level).
+        This means all pixels at or above this luminance will be mapped to white (1),
+        and the curve is adjusted so that the white point moves to this position.
+        """
+        channel = self.curve.active_channel
+        points = self.curve.channels[channel]
+        
+        if not points:
+            return
+        
+        # Clamp white point - can't go before previous point
+        new_x = luminance
+        if len(points) > 1:
+            new_x = max(new_x, points[-2].x() + self.curve.MIN_DISTANCE_THRESHOLD)
+        new_x = min(1.0, new_x)
+        
+        # Update the last point (white point) - Y stays at 1 (maps to white)
+        points[-1] = QPointF(new_x, 1.0)
+        
+        # Update the slider
+        self.input_sliders.setWhitePoint(new_x)
+        
+        # Trigger update
+        self.curve.update_spline_and_lut()
+
+    def _apply_gray_point(self, luminance):
+        """
+        Apply gray/mid-tone point adjustment.
+        
+        The picked color is used to adjust the mid-tones. This works by:
+        1. Finding or creating a control point at the picked luminance
+        2. Adjusting it so that this input value maps to 0.5 (middle gray)
+        
+        This effectively shifts the mid-tones to make the picked color neutral gray.
+        """
+        channel = self.curve.active_channel
+        points = self.curve.channels[channel]
+        
+        if len(points) < 2:
+            return
+        
+        # Get the current start and end points
+        start_x = points[0].x()
+        end_x = points[-1].x()
+        
+        # Ensure the picked point is within the valid range
+        min_threshold = self.curve.MIN_DISTANCE_THRESHOLD
+        if luminance <= start_x + min_threshold or luminance >= end_x - min_threshold:
+            # Can't add a mid-tone point outside the black/white point range
+            return
+        
+        # Calculate the target Y value (0.5 for neutral gray)
+        target_y = 0.5
+        
+        # Check if there's already a point close to this luminance
+        existing_idx = -1
+        for i in range(1, len(points) - 1):  # Skip start and end points
+            if abs(points[i].x() - luminance) < min_threshold * 2:
+                existing_idx = i
+                break
+        
+        if existing_idx != -1:
+            # Update existing point
+            points[existing_idx] = QPointF(luminance, target_y)
+            self.curve.selected_index = existing_idx
+        else:
+            # Find insertion point
+            insert_idx = len(points) - 1  # Before the last point
+            for i in range(1, len(points)):
+                if points[i].x() > luminance:
+                    insert_idx = i
+                    break
+            
+            # Verify we can insert here
+            prev_x = points[insert_idx - 1].x()
+            next_x = points[insert_idx].x()
+            if luminance > prev_x + min_threshold and luminance < next_x - min_threshold:
+                new_point = QPointF(luminance, target_y)
+                points.insert(insert_idx, new_point)
+                self.curve.selected_index = insert_idx
+        
+        # Trigger update
+        self.curve.update_spline_and_lut()
 
 
 if __name__ == "__main__":

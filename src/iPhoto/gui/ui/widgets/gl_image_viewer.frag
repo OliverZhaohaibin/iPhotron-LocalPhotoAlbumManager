@@ -17,6 +17,8 @@ uniform float uColorCast;
 uniform vec3  uGain;
 uniform vec4  uBWParams;
 uniform bool  uBWEnabled;
+uniform sampler2D uCurveLUT;  // 256x1 RGB LUT texture for curve adjustment
+uniform bool  uCurveEnabled;
 uniform float uTime;
 uniform vec2  uViewSize;
 uniform vec2  uTexSize;
@@ -175,6 +177,16 @@ vec3 apply_bw(vec3 color, vec2 uv) {
     return vec3(gray);
 }
 
+vec3 apply_curve(vec3 color) {
+    // Apply curve LUT lookup for each RGB channel
+    // The LUT is a 256x1 texture where x coordinate is the input value
+    // and the RGB values at that position are the output for each channel
+    float r = texture(uCurveLUT, vec2(color.r, 0.5)).r;
+    float g = texture(uCurveLUT, vec2(color.g, 0.5)).g;
+    float b = texture(uCurveLUT, vec2(color.b, 0.5)).b;
+    return vec3(r, g, b);
+}
+
 void main() {
     if (uScale <= 0.0) {
         discard;
@@ -240,6 +252,11 @@ void main() {
                         uHighlights, uShadows, contrast_factor, uBlackPoint);
 
     c = apply_color_transform(c, uSaturation, uVibrance, uColorCast, uGain);
+
+    // Apply curve adjustment after color but before B&W
+    if (uCurveEnabled) {
+        c = apply_curve(c);
+    }
 
     if (uBWEnabled) {
         c = apply_bw(c, uv_tex);

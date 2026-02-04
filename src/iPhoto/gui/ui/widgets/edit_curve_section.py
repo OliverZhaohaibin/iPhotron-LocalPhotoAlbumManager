@@ -13,7 +13,7 @@ from PySide6.QtGui import (
     QMouseEvent,
     QPainter,
     QPainterPath,
-    QPen,
+    QPen, QImage,
 )
 from PySide6.QtWidgets import (
     QComboBox,
@@ -27,8 +27,8 @@ from PySide6.QtWidgets import (
 
 from ....core.spline import MonotoneCubicSpline
 from ....core.curve_resolver import DEFAULT_CURVE_POINTS
-from ...models.edit_session import EditSession
-from ...icon import load_icon
+from ..models.edit_session import EditSession
+from ..icon import load_icon
 
 _LOGGER = logging.getLogger(__name__)
 

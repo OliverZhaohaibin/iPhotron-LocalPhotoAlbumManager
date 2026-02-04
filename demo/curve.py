@@ -349,9 +349,9 @@ class InputLevelSliders(QWidget):
     blackPointChanged = Signal(float)
     whitePointChanged = Signal(float)
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, size=250):
         super().__init__(parent)
-        self.setFixedSize(250, 24)
+        self.setFixedSize(size, 24)
         self.setStyleSheet("background-color: #222222;")
 
         self._black_val = 0.0
@@ -965,7 +965,9 @@ class CurvesDemo(QWidget):
     EYEDROPPER_BLACK = 1
     EYEDROPPER_GRAY = 2
     EYEDROPPER_WHITE = 3
-    CONTROL_CONTENT_WIDTH = 244
+    CONTROL_CONTENT_WIDTH = 240
+    TOOL_GAP = 8
+    TOOL_HEIGHT_RATIO = 0.6
 
     def __init__(self):
         super().__init__()
@@ -1047,22 +1049,24 @@ class CurvesDemo(QWidget):
         combo.addItems(["RGB", "Red", "Green", "Blue"])
         combo.currentTextChanged.connect(lambda text: self.curve.set_channel(text))
         combo.setFixedWidth(self.CONTROL_CONTENT_WIDTH)
-        controls_layout.addWidget(combo)
+        controls_layout.addWidget(combo, alignment=Qt.AlignLeft)
 
-        tools_layout = QHBoxLayout()
+        tools_container = QWidget()
+        tools_container.setFixedWidth(self.CONTROL_CONTENT_WIDTH)
+        tools_layout = QHBoxLayout(tools_container)
         tools_layout.setContentsMargins(0, 0, 0, 0)
-        tools_layout.setSpacing(12)  # spacing between eyedropper frame and add button
+        tools_layout.setSpacing(self.TOOL_GAP)  # spacing between eyedropper frame and add button
         tools_frame = QFrame()
         tools_frame.setStyleSheet(".QFrame { background-color: #383838; border-radius: 5px; border: 1px solid #555; }")
-        tools_frame.setFixedWidth(174)  # 3 eyedropper buttons × 58px = 174px
         tf_layout = QHBoxLayout(tools_frame)
         tf_layout.setContentsMargins(0, 0, 0, 0)
         tf_layout.setSpacing(0)
 
         # Eyedropper buttons - store as instance variables for checkable state
-        # Width calculation: eyedropper frame (174px) + 12px spacing + add button (58px) = 244px total
-        eyedropper_btn_width = 58
-        eyedropper_btn_height = 36
+        # Width calculation: eyedropper frame (3x) + gap + add button = CONTROL_CONTENT_WIDTH
+        eyedropper_btn_width = int((self.CONTROL_CONTENT_WIDTH - self.TOOL_GAP) / 4)
+        eyedropper_btn_height = int(eyedropper_btn_width * self.TOOL_HEIGHT_RATIO)
+        tools_frame.setFixedWidth(eyedropper_btn_width * 3)
         self.btn_black = IconButton(ICON_PATH_BLACK, "Set Black Point - Click to pick darkest point in image", width=eyedropper_btn_width, height=eyedropper_btn_height)
         self.btn_gray = IconButton(ICON_PATH_GRAY, "Set Gray Point - Click to pick mid-tone in image", width=eyedropper_btn_width, height=eyedropper_btn_height)
         self.btn_white = IconButton(ICON_PATH_WHITE, "Set White Point - Click to pick brightest point in image", width=eyedropper_btn_width, height=eyedropper_btn_height)
@@ -1105,9 +1109,8 @@ class CurvesDemo(QWidget):
         tools_layout.addWidget(tools_frame)
 
         # Add point button - width calculated to align with curve graph right edge
-        # 244px total = eyedropper frame (174px) + 12px spacing + add button (58px)
-        add_btn_width = 58
-        add_btn_height = 36
+        add_btn_width = eyedropper_btn_width
+        add_btn_height = eyedropper_btn_height
         self.btn_add_point = IconButton(ICON_PATH_ADD, "Add Point to Curve", width=add_btn_width, height=add_btn_height)
         self.btn_add_point.clicked.connect(lambda: self.curve.add_point_center())
         self.btn_add_point.setStyleSheet("""
@@ -1116,7 +1119,7 @@ class CurvesDemo(QWidget):
         """)
 
         tools_layout.addWidget(self.btn_add_point)
-        controls_layout.addLayout(tools_layout)
+        controls_layout.addWidget(tools_container, alignment=Qt.AlignLeft)
 
         # -- Graph + Sliders Group (Spacing=0) --
         graph_sliders_layout = QVBoxLayout()
@@ -1125,10 +1128,10 @@ class CurvesDemo(QWidget):
 
         self.curve = CurveGraph(size=self.CONTROL_CONTENT_WIDTH)
         self.curve.lutChanged.connect(self.image_viewer.upload_lut)
-        graph_sliders_layout.addWidget(self.curve)
+        graph_sliders_layout.addWidget(self.curve, alignment=Qt.AlignLeft)
 
         # 2.2 Replace Gradient Bar with Interactive Sliders
-        self.input_sliders = InputLevelSliders()
+        self.input_sliders = InputLevelSliders(size=self.CONTROL_CONTENT_WIDTH)
 
         # Connect Sliders <-> Graph
         # Sliders -> Graph
@@ -1139,7 +1142,7 @@ class CurvesDemo(QWidget):
         self.curve.startPointMoved.connect(self.input_sliders.setBlackPoint)
         self.curve.endPointMoved.connect(self.input_sliders.setWhitePoint)
 
-        graph_sliders_layout.addWidget(self.input_sliders)
+        graph_sliders_layout.addWidget(self.input_sliders, alignment=Qt.AlignLeft)
 
         controls_layout.addLayout(graph_sliders_layout)
 

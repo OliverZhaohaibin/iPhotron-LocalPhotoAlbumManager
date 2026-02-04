@@ -31,7 +31,6 @@ class AssetListViewModel(QAbstractListModel):
         self._thumbnails = thumbnail_service
         self._thumb_size = QSize(512, 512)
         self._current_row = -1
-        self._last_count = self._data_source.count()
 
         # Connect signals
         self._data_source.dataChanged.connect(self._on_source_changed)

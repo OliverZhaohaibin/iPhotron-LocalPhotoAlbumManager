@@ -130,6 +130,8 @@ class EditCoordinator(QObject):
         self._ui.edit_sidebar.interactionFinished.connect(self._handle_sidebar_interaction_finished)
         self._ui.edit_sidebar.bwParamsPreviewed.connect(self._handle_bw_params_previewed)
         self._ui.edit_sidebar.bwParamsCommitted.connect(self._handle_bw_params_committed)
+        self._ui.edit_sidebar.curveParamsPreviewed.connect(self._handle_curve_params_previewed)
+        self._ui.edit_sidebar.curveParamsCommitted.connect(self._handle_curve_params_committed)
         self._ui.edit_sidebar.perspectiveInteractionStarted.connect(
             self._ui.edit_image_viewer.start_perspective_interaction
         )
@@ -403,6 +405,43 @@ class EditCoordinator(QObject):
             "BW_Tone": float(params.tone),
             "BW_Grain": float(params.grain),
             "BW_Master": float(params.master),
+        }
+        self._session.set_values(updates)
+
+    def _handle_curve_params_previewed(self, curve_data: dict) -> None:
+        """Apply transient curve previews without mutating session state."""
+
+        if self._session is None or self._compare_active:
+            return
+
+        try:
+            preview_values = self._session.values()
+            preview_values.update({
+                "Curve_Enabled": True,
+                "Curve_RGB": curve_data.get("RGB", [(0.0, 0.0), (1.0, 1.0)]),
+                "Curve_Red": curve_data.get("Red", [(0.0, 0.0), (1.0, 1.0)]),
+                "Curve_Green": curve_data.get("Green", [(0.0, 0.0), (1.0, 1.0)]),
+                "Curve_Blue": curve_data.get("Blue", [(0.0, 0.0), (1.0, 1.0)]),
+            })
+            adjustments = self._preview_manager.resolve_adjustments(preview_values)
+        except Exception:
+            _LOGGER.exception("Failed to resolve curve preview adjustments")
+            return
+
+        self._ui.edit_image_viewer.set_adjustments(adjustments)
+
+    def _handle_curve_params_committed(self, curve_data: dict) -> None:
+        """Persist curve adjustments into the active edit session."""
+
+        if self._session is None:
+            return
+
+        updates = {
+            "Curve_Enabled": True,
+            "Curve_RGB": curve_data.get("RGB", [(0.0, 0.0), (1.0, 1.0)]),
+            "Curve_Red": curve_data.get("Red", [(0.0, 0.0), (1.0, 1.0)]),
+            "Curve_Green": curve_data.get("Green", [(0.0, 0.0), (1.0, 1.0)]),
+            "Curve_Blue": curve_data.get("Blue", [(0.0, 0.0), (1.0, 1.0)]),
         }
         self._session.set_values(updates)
 

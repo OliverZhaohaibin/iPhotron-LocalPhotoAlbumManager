@@ -156,6 +156,18 @@ class ThumbnailCacheService(QObject):
             except OSError:
                 pass
 
+    def refresh_thumbnail(self, path: Path, *, size: QSize | None = None) -> None:
+        """Regenerate a thumbnail while keeping any cached image until replacement is ready."""
+        if self._is_shutting_down:
+            return
+        if size is None:
+            size = QSize(512, 512)
+        key = self._cache_key(path, size)
+        if key in self._pending_tasks:
+            return
+        self._pending_tasks.add(key)
+        self._start_generation(path, size)
+
     def _cache_key(self, path: Path, size: QSize) -> str:
         # Simple hash of path + size
         import hashlib

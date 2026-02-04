@@ -225,7 +225,7 @@ class AssetListViewModel(QAbstractListModel):
     def invalidate_thumbnail(self, path_str: str):
         """Forces a thumbnail refresh for the given path."""
         path = Path(path_str)
-        self._thumbnails.invalidate(path, size=self._thumb_size)
+        self._thumbnails.refresh_thumbnail(path, size=self._thumb_size)
 
     def thumbnail_loader(self):
         pass

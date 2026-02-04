@@ -124,10 +124,11 @@ class PlaybackCoordinator(QObject):
     def prepare_fullscreen_asset(self) -> bool:
         """Ensure the current asset is displayed before entering immersive mode."""
 
-        if self._current_row < 0:
+        if self._asset_vm.rowCount() <= 0:
             return False
-        if not self._router.is_detail_view_active():
-            self.play_asset(self._current_row)
+        target_row = self._current_row if self._current_row >= 0 else 0
+        if self._current_row < 0 or not self._router.is_detail_view_active():
+            self.play_asset(target_row)
         return True
 
     def show_placeholder_in_viewer(self) -> None:

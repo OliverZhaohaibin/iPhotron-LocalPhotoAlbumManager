@@ -604,7 +604,7 @@ class EditCurveSection(QWidget):
     interactionFinished = Signal()
     eyedropperModeChanged = Signal(object)
 
-    CONTROL_CONTENT_WIDTH = 240
+    MIN_CONTENT_WIDTH = 240
     TOOL_GAP = 8
     TOOL_HEIGHT_RATIO = 0.6
 
@@ -622,17 +622,17 @@ class EditCurveSection(QWidget):
         self.channel_combo = _StyledComboBox(self)
         self.channel_combo.addItems(["RGB", "Red", "Green", "Blue"])
         self.channel_combo.currentTextChanged.connect(self._on_channel_changed)
-        self.channel_combo.setFixedWidth(self.CONTROL_CONTENT_WIDTH)
+        self.channel_combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         layout.addWidget(self.channel_combo, alignment=Qt.AlignLeft)
 
         # Tools container (eyedropper + add point)
-        tools_container = QWidget()
-        tools_container.setFixedWidth(self.CONTROL_CONTENT_WIDTH)
-        tools_layout = QHBoxLayout(tools_container)
+        self.tools_container = QWidget()
+        self.tools_container.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        tools_layout = QHBoxLayout(self.tools_container)
         tools_layout.setContentsMargins(0, 0, 0, 0)
         tools_layout.setSpacing(self.TOOL_GAP)
 
-        eyedropper_btn_width = int((self.CONTROL_CONTENT_WIDTH - self.TOOL_GAP) / 4)
+        eyedropper_btn_width = self.MIN_CONTENT_WIDTH // 4
         eyedropper_btn_height = int(eyedropper_btn_width * self.TOOL_HEIGHT_RATIO)
 
         tools_frame = QFrame()
@@ -702,14 +702,14 @@ class EditCurveSection(QWidget):
         """)
         tools_layout.addWidget(self.btn_add_point)
 
-        layout.addWidget(tools_container, alignment=Qt.AlignLeft)
+        layout.addWidget(self.tools_container, alignment=Qt.AlignLeft)
 
         # Graph + sliders container
         graph_sliders_layout = QVBoxLayout()
         graph_sliders_layout.setSpacing(0)
         graph_sliders_layout.setContentsMargins(0, 0, 0, 0)
 
-        self.curve_graph = CurveGraph(size=self.CONTROL_CONTENT_WIDTH)
+        self.curve_graph = CurveGraph(size=self.MIN_CONTENT_WIDTH)
         self.curve_graph.curveChanged.connect(self._on_curve_changed)
         self.curve_graph.startPointMoved.connect(self._on_start_point_moved)
         self.curve_graph.endPointMoved.connect(self._on_end_point_moved)
@@ -717,13 +717,42 @@ class EditCurveSection(QWidget):
         self.curve_graph.interactionFinished.connect(self._on_curve_interaction_finished)
         graph_sliders_layout.addWidget(self.curve_graph, alignment=Qt.AlignLeft)
 
-        self.input_sliders = InputLevelSliders(size=self.CONTROL_CONTENT_WIDTH)
+        self.input_sliders = InputLevelSliders(size=self.MIN_CONTENT_WIDTH)
         self.input_sliders.blackPointChanged.connect(self._on_black_point_changed)
         self.input_sliders.whitePointChanged.connect(self._on_white_point_changed)
         graph_sliders_layout.addWidget(self.input_sliders, alignment=Qt.AlignLeft)
 
         layout.addLayout(graph_sliders_layout)
         layout.addStretch(1)
+        self._update_control_sizes(self.width())
+
+    def resizeEvent(self, event) -> None:  # type: ignore[override]
+        super().resizeEvent(event)
+        self._update_control_sizes(event.size().width())
+
+    def _update_control_sizes(self, available_width: int) -> None:
+        content_width = max(self.MIN_CONTENT_WIDTH, int(available_width))
+        self.tools_container.setFixedWidth(content_width)
+        self.channel_combo.setFixedWidth(content_width)
+        self.curve_graph.setFixedSize(content_width, content_width)
+        self.input_sliders.setFixedWidth(content_width)
+
+        eyedropper_btn_width = max(44, int((content_width - self.TOOL_GAP) / 4))
+        eyedropper_btn_height = int(eyedropper_btn_width * self.TOOL_HEIGHT_RATIO)
+
+        self.btn_black.setFixedSize(eyedropper_btn_width, eyedropper_btn_height)
+        self.btn_gray.setFixedSize(eyedropper_btn_width, eyedropper_btn_height)
+        self.btn_white.setFixedSize(eyedropper_btn_width, eyedropper_btn_height)
+        icon_size = self.btn_black.size() * 0.65
+        self.btn_black.setIconSize(icon_size)
+        self.btn_gray.setIconSize(icon_size)
+        self.btn_white.setIconSize(icon_size)
+        self.btn_add_point.setFixedSize(eyedropper_btn_width, eyedropper_btn_height)
+        self.btn_add_point.setIconSize(self.btn_add_point.size() * 0.65)
+
+        tools_frame = self.btn_black.parentWidget()
+        if isinstance(tools_frame, QFrame):
+            tools_frame.setFixedWidth(eyedropper_btn_width * 3)
 
     def bind_session(self, session: Optional[EditSession]) -> None:
         """Attach *session* so curve updates are persisted and reflected."""

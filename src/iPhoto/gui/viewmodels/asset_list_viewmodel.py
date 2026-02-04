@@ -285,13 +285,13 @@ class AssetListViewModel(QAbstractListModel):
         if old_row >= 0:
             idx = self.index(old_row, 0)
             if idx.isValid():
-                self.dataChanged.emit(idx, idx, [Roles.IS_CURRENT, Qt.ItemDataRole.SizeHintRole])
+                self.dataChanged.emit(idx, idx, [Roles.IS_CURRENT])
 
         # Notify new row
         if row >= 0:
             idx = self.index(row, 0)
             if idx.isValid():
-                self.dataChanged.emit(idx, idx, [Roles.IS_CURRENT, Qt.ItemDataRole.SizeHintRole])
+                self.dataChanged.emit(idx, idx, [Roles.IS_CURRENT])
 
     def metadata_for_path(self, path: Path) -> Optional[Dict[str, Any]]:
         """Return metadata for the given path to support legacy Facade operations."""

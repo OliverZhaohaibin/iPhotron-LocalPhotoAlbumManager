@@ -146,14 +146,7 @@ class FilmstripView(AssetGrid):
         """Handle data changes to trigger layout updates if necessary."""
         if roles is None:
             roles = []
-        layout_roles = {
-            Roles.IS_CURRENT,
-            Qt.ItemDataRole.SizeHintRole,
-            Qt.SizeHintRole,
-        }
-        if not any(role in layout_roles for role in roles):
-            return
-        if not self._layout_sensitive_change(top, bottom, roles):
+        if Qt.ItemDataRole.SizeHintRole not in roles and Qt.SizeHintRole not in roles:
             return
 
         # Re-calculating layout is expensive, so check if we need it.
@@ -256,99 +249,15 @@ class FilmstripView(AssetGrid):
             setter(0)
             return
 
-        current_width = self._current_item_width(current_proxy_index)
-        if current_width <= 0:
-            current_width = self._narrow_item_width()
+        current_width = self._filmstrip_item_width()
 
         padding = max(0, (viewport_width - current_width) // 2)
         setter(padding)
 
-    def _current_item_width(self, current_proxy_index: QModelIndex | None = None) -> int:
-        """Return the width of the active tile, preferring the supplied index."""
-        model = self.model()
+    def _filmstrip_item_width(self) -> int:
         delegate = self.itemDelegate()
-        if model is None or delegate is None or model.rowCount() == 0:
-            return self._narrow_item_width()
-
-        current_index = None
-        if (
-            current_proxy_index is not None
-            and current_proxy_index.isValid()
-            and not bool(current_proxy_index.data(Roles.IS_SPACER))
-        ):
-            current_index = current_proxy_index
-
-        # Optimization: Check the Selection Model directly.
-        # This avoids iterating through thousands of rows.
-        if current_index is None:
-            selection_model = self.selectionModel()
-            if selection_model is not None:
-                candidate = selection_model.currentIndex()
-                if candidate.isValid() and not bool(candidate.data(Roles.IS_SPACER)):
-                    current_index = candidate
-
-        # NOTE: The original 'for row in range(model.rowCount())' loop has been removed
-        # to prevent UI freezing on large datasets.
-
-        if current_index is None or not current_index.isValid():
-            return self._narrow_item_width()
-
-        option = QStyleOptionViewItem()
-        option.initFrom(self)
-        size = delegate.sizeHint(option, current_index)
-        if size.width() > 0:
-            return size.width()
-
-        width = self._visual_width(current_index)
-        if width > 0:
-            return width
-        return self._narrow_item_width()
-
-    def _narrow_item_width(self) -> int:
-        delegate = self.itemDelegate()
-        model = self.model()
-        if delegate is None or model is None or model.rowCount() == 0:
-            ratio = self._delegate_ratio(delegate)
-            return max(1, int(round(self._base_height * ratio)))
-
-        option = QStyleOptionViewItem()
-        option.initFrom(self)
-
-        # Prefer any non-current item to approximate the narrow width.
-        # We limit the search to avoid linear scans on large datasets.
-        limit = min(model.rowCount(), 10)
-        for row in range(limit):
-            index = model.index(row, 0)
-            if not index.isValid():
-                continue
-            if bool(index.data(Roles.IS_SPACER)):
-                continue
-
-            # Use the selection model to skip the current item without O(N) search
-            selection_model = self.selectionModel()
-            if selection_model is not None:
-                current = selection_model.currentIndex()
-                if current.isValid() and current == index:
-                    continue
-            elif bool(index.data(Roles.IS_CURRENT)):
-                # Fallback to role check if selection model missing (unlikely but safe for small N)
-                continue
-
-            width = self._visual_width(index)
-            if width <= 0:
-                size = delegate.sizeHint(option, index)
-                width = size.width()
-            if width > 0:
-                return width
-
-        # Fall back to the delegate ratio if needed.
         ratio = self._delegate_ratio(delegate)
         return max(1, int(round(self._base_height * ratio)))
-
-    def _visual_width(self, index) -> int:
-        rect = self.visualRect(index)
-        width = rect.width()
-        return int(width)
 
     def _delegate_ratio(self, delegate) -> float:
         ratio = self._default_ratio
@@ -364,39 +273,6 @@ class FilmstripView(AssetGrid):
         if current.isValid() and not bool(current.data(Roles.IS_SPACER)):
             self._last_known_center_row = current.row()
 
-    def _layout_sensitive_change(
-        self,
-        top: QModelIndex,
-        bottom: QModelIndex,
-        roles: list[int],
-    ) -> bool:
-        """Return True when the change range can affect layout sizing."""
-        model = self.model()
-        if model is None:
-            return False
-        top_row = top.row()
-        bottom_row = bottom.row()
-        if top_row > bottom_row:
-            top_row, bottom_row = bottom_row, top_row
-
-        if Roles.IS_CURRENT in roles:
-            selection_model = self.selectionModel()
-            if selection_model is None:
-                return True
-            current = selection_model.currentIndex()
-            if current.isValid() and top_row <= current.row() <= bottom_row:
-                return True
-            return False
-
-        if Qt.ItemDataRole.SizeHintRole in roles or Qt.SizeHintRole in roles:
-            if top_row == 0:
-                return True
-            last_row = model.rowCount() - 1
-            if last_row >= 0 and bottom_row >= last_row:
-                return True
-            return False
-
-        return True
 
     # ------------------------------------------------------------------
     # Event handling

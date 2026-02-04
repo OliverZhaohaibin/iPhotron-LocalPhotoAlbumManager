@@ -55,10 +55,7 @@ class AssetGridDelegate(QStyledItemDelegate):
         if not self._filmstrip_mode:
             return QSize(self._base_size, self._base_size)
 
-        is_current = bool(index.data(Roles.IS_CURRENT))
         height = self._filmstrip_height
-        if is_current:
-            return QSize(height, height)
         width = int(height * self._FILMSTRIP_RATIO)
         return QSize(width, height)
 

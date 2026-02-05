@@ -231,8 +231,11 @@ class AssetListViewModel(QAbstractListModel):
             if asset is None:
                 parts.append(b"")
                 continue
-            abs_path = getattr(asset, "abs_path", None) or getattr(asset, "path", None)
-            parts.append(b"" if abs_path is None else str(abs_path).encode("utf-8"))
+            parts.append(
+                str(
+                    getattr(asset, "abs_path", None) or getattr(asset, "path", None) or ""
+                ).encode("utf-8")
+            )
         # Use a separator between entries so ordering changes alter the signature.
         digest.update(b"\x00".join(parts))
         return digest.digest()

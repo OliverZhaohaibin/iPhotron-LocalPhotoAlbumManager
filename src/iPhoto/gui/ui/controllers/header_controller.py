@@ -26,8 +26,12 @@ class HeaderController(QObject):
     """Unified controller for header label updates and layout management.
     
     This controller manages:
-    - Location and timestamp labels shown above the player
+    - Location and timestamp labels shown above the player (always available)
     - Widget reparenting between detail header and edit header during mode transitions
+      (requires ``ui`` parameter to be set)
+    
+    The layout management methods (``switch_to_edit_mode`` and ``restore_detail_mode``)
+    are no-ops if the ``ui`` parameter was not provided during initialization.
     """
 
     def __init__(

@@ -119,11 +119,15 @@ class TestServiceArchitectureIntegrity:
     
     These tests use source file inspection to avoid PySide6 import issues.
     """
+    
+    # Project root is 3 levels up from this test file (tests/application/test_*.py)
+    PROJECT_ROOT = Path(__file__).parents[2]
+    SRC_ROOT = PROJECT_ROOT / "src"
 
     def test_metadata_service_signature_no_model_provider(self):
         """Verify AlbumMetadataService source doesn't have legacy parameter."""
         import ast
-        source_path = Path(__file__).parent.parent.parent / "src/iPhoto/gui/services/album_metadata_service.py"
+        source_path = self.SRC_ROOT / "iPhoto/gui/services/album_metadata_service.py"
         
         with open(source_path, "r") as f:
             source = f.read()
@@ -154,7 +158,7 @@ class TestServiceArchitectureIntegrity:
     def test_move_service_signature_no_model_provider(self):
         """Verify AssetMoveService source doesn't have legacy parameter."""
         import ast
-        source_path = Path(__file__).parent.parent.parent / "src/iPhoto/gui/services/asset_move_service.py"
+        source_path = self.SRC_ROOT / "iPhoto/gui/services/asset_move_service.py"
         
         with open(source_path, "r") as f:
             source = f.read()
@@ -185,7 +189,7 @@ class TestServiceArchitectureIntegrity:
     def test_header_controller_has_layout_management_methods(self):
         """Verify HeaderController includes layout management methods from merge."""
         import ast
-        source_path = Path(__file__).parent.parent.parent / "src/iPhoto/gui/ui/controllers/header_controller.py"
+        source_path = self.SRC_ROOT / "iPhoto/gui/ui/controllers/header_controller.py"
         
         with open(source_path, "r") as f:
             source = f.read()
@@ -215,7 +219,7 @@ class TestServiceArchitectureIntegrity:
 
     def test_header_layout_manager_file_removed(self):
         """Verify the old HeaderLayoutManager file has been removed."""
-        old_file = Path(__file__).parent.parent.parent / "src/iPhoto/gui/ui/controllers/header_layout_manager.py"
+        old_file = self.SRC_ROOT / "iPhoto/gui/ui/controllers/header_layout_manager.py"
         
         assert not old_file.exists(), \
             "header_layout_manager.py should be removed after merge"

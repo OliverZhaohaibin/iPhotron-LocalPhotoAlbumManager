@@ -93,6 +93,16 @@ class ViewRouter(QObject):
             return map_view
         return None
 
+    def gallery_page(self):
+        """Return the gallery page widget when available."""
+
+        from src.iPhoto.gui.ui.widgets.gallery_page import GalleryPageWidget
+
+        gallery_page = getattr(self._ui, "gallery_page", None)
+        if isinstance(gallery_page, GalleryPageWidget):
+            return gallery_page
+        return None
+
     def show_albums_dashboard(self):
         """Switch to the Albums Dashboard."""
         if self._dashboard_idx != -1 and self._stack.currentIndex() != self._dashboard_idx:

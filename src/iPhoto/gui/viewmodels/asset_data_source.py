@@ -212,6 +212,89 @@ class AssetDataSource(QObject):
             return
         self.load(self._current_query)
 
+    def load_geotagged_assets(self, assets: list, library_root: Path) -> None:
+        """Load a pre-computed list of geotagged assets directly into the cache.
+
+        This method enables O(1) cluster gallery opening by accepting assets
+        that have already been aggregated during the map clustering phase,
+        avoiding additional database queries.
+
+        Args:
+            assets: List of GeotaggedAsset objects from the map cluster.
+            library_root: The library root path for resolving absolute paths.
+        """
+        from src.iPhoto.library.manager import GeotaggedAsset
+
+        self._current_query = None  # No query for direct asset loading
+        self._cached_dtos.clear()
+        self._total_count = 0
+        self._seen_abs_paths.clear()
+        self._path_exists_cache.clear()
+        self._paging_inflight = False
+        self._paging_offset = 0
+        self._paging_has_more = False
+
+        dtos: List[AssetDTO] = []
+        for asset in assets:
+            if not isinstance(asset, GeotaggedAsset):
+                continue
+            dto = self._geotagged_asset_to_dto(asset, library_root)
+            if dto is not None:
+                dtos.append(dto)
+
+        self._cached_dtos = dtos
+        self._total_count = len(self._cached_dtos)
+        self._seen_abs_paths = {
+            self._normalize_abs_key(dto.abs_path) for dto in self._cached_dtos
+        }
+        self.dataChanged.emit()
+
+    def _geotagged_asset_to_dto(self, asset, library_root: Path) -> Optional[AssetDTO]:
+        """Convert a GeotaggedAsset to an AssetDTO for display.
+
+        This is a lightweight conversion that uses the pre-computed data from
+        the geotagged asset without requiring database lookups.
+        """
+        from src.iPhoto.library.manager import GeotaggedAsset
+
+        if not isinstance(asset, GeotaggedAsset):
+            return None
+
+        abs_path = asset.absolute_path
+        rel_path = Path(asset.library_relative)
+
+        # Determine media type from the asset flags
+        is_video = asset.is_video
+        is_image = asset.is_image
+        media_type = "video" if is_video else "image"
+
+        # Build minimal metadata with GPS info
+        metadata: dict = {
+            "gps": {
+                "latitude": asset.latitude,
+                "longitude": asset.longitude,
+            },
+        }
+        if asset.location_name:
+            metadata["location"] = asset.location_name
+
+        return AssetDTO(
+            id=asset.asset_id,
+            abs_path=abs_path,
+            rel_path=rel_path,
+            media_type=media_type,
+            created_at=None,
+            width=0,
+            height=0,
+            duration=asset.duration or 0.0,
+            size_bytes=0,
+            metadata=metadata,
+            is_favorite=False,
+            is_live=False,
+            is_pano=False,
+            micro_thumbnail=None,
+        )
+
     def asset_at(self, index: int) -> Optional[AssetDTO]:
         if 0 <= index < len(self._cached_dtos):
             return self._cached_dtos[index]

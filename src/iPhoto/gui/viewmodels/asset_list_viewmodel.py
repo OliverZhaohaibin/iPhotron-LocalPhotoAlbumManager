@@ -48,6 +48,19 @@ class AssetListViewModel(QAbstractListModel):
         self._last_snapshot = None
         self._data_source.load(query)
 
+    def load_geotagged_assets(self, assets: list, library_root: Path) -> None:
+        """Load a pre-computed list of geotagged assets for cluster gallery view.
+
+        This enables O(1) cluster gallery opening by directly accepting assets
+        already aggregated during map clustering, avoiding database queries.
+
+        Args:
+            assets: List of GeotaggedAsset objects from the clicked map cluster.
+            library_root: The library root path for resolving absolute paths.
+        """
+        self._last_snapshot = None
+        self._data_source.load_geotagged_assets(assets, library_root)
+
     def set_active_root(self, root: Optional[Path]) -> None:
         """Update the active root so scan chunks map to the current view."""
         self._data_source.set_active_root(root)

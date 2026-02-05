@@ -257,6 +257,7 @@ class MarkerController(QObject):
     clustersUpdated = Signal(list)
     citiesUpdated = Signal(list)
     assetActivated = Signal(str)
+    clusterActivated = Signal(list)  # Emitted with list of GeotaggedAsset when a cluster is clicked
     thumbnailUpdated = Signal(str, QPixmap)
     thumbnailsInvalidated = Signal()
     _clustering_requested = Signal(int, object, int, int, float, float, float, float, int, int)
@@ -384,13 +385,22 @@ class MarkerController(QObject):
         self._schedule_cluster_update()
 
     def handle_marker_click(self, cluster: _MarkerCluster) -> None:
-        """Process a marker click by zooming or activating an asset."""
+        """Process a marker click by activating asset or cluster gallery.
+
+        Single-asset clusters emit :attr:`assetActivated` for detail view.
+        Multi-asset clusters emit :attr:`clusterActivated` to open a gallery
+        showing all assets in the cluster at the current zoom level. This
+        achieves O(1) opening because the cluster already contains pre-computed
+        asset references without requiring additional database queries.
+        """
 
         if len(cluster.assets) == 1:
             asset = cluster.representative
             self.assetActivated.emit(asset.library_relative)
         else:
-            self._map_widget.focus_on(cluster.longitude, cluster.latitude, zoom_delta=0.8)
+            # Emit the cluster assets for gallery view - O(1) operation as assets
+            # are already aggregated during the clustering phase.
+            self.clusterActivated.emit(list(cluster.assets))
 
     def handle_thumbnail_ready(self, root: Path, rel: str, pixmap: QPixmap) -> None:
         """Forward freshly rendered thumbnails to the UI layer."""

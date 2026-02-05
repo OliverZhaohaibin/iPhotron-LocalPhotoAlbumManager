@@ -89,14 +89,13 @@ class HeaderController(QObject):
     ) -> None:
         """Render formatted location and timestamp strings."""
 
-        if not timestamp:
-            self.clear()
-            return
-        timestamp = timestamp.strip()
-        if not timestamp:
-            self.clear()
-            return
         location = (location or "").strip() or None
+        timestamp = (timestamp or "").strip() or None
+
+        if not location and not timestamp:
+            self.clear()
+            return
+
         if location:
             self._location_label.setText(location)
             self._location_label.show()
@@ -107,9 +106,14 @@ class HeaderController(QObject):
             self._location_label.hide()
             if self._timestamp_single_line_font is not None:
                 self._timestamp_label.setFont(self._timestamp_single_line_font)
-        self._timestamp_label.setText(timestamp)
-        self._timestamp_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._timestamp_label.show()
+
+        if timestamp:
+            self._timestamp_label.setText(timestamp)
+            self._timestamp_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            self._timestamp_label.show()
+        else:
+            self._timestamp_label.clear()
+            self._timestamp_label.hide()
 
     def _format_timestamp(self, dt_value: object) -> Optional[str]:
         """Convert ISO-8601 strings into a friendly, localised label."""

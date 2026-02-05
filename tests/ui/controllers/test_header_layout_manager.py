@@ -48,3 +48,17 @@ def test_restore_detail_mode(qapp):
     ui.detail_actions_layout.insertWidget.assert_any_call(5, ui.info_button)
     ui.detail_actions_layout.insertWidget.assert_any_call(6, ui.favorite_button)
     ui.detail_header_layout.insertWidget.assert_any_call(2, ui.zoom_widget)
+
+
+def test_apply_header_text_keeps_location_when_timestamp_missing(qapp):
+    manager = HeaderController(ui=Mock())
+    manager._location_label = Mock()
+    manager._timestamp_label = Mock()
+    manager._timestamp_default_font = None
+    manager._timestamp_single_line_font = None
+
+    manager._apply_header_text("Shanghai", None)
+
+    manager._location_label.setText.assert_called_once_with("Shanghai")
+    manager._location_label.show.assert_called_once()
+    manager._timestamp_label.hide.assert_called_once()

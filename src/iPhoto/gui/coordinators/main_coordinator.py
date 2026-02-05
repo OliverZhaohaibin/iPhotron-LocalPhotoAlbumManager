@@ -165,7 +165,8 @@ class MainCoordinator(QObject):
             self._event_bus,
             self._asset_list_vm, # Injected for invalidation
             window,
-            self._theme_controller
+            self._theme_controller,
+            self._navigation,
         )
 
         # --- Legacy Controllers ---

@@ -442,6 +442,8 @@ class PlaybackCoordinator(QObject):
 
         # 2. Persist adjustments
         try:
+            if self._navigation:
+                self._navigation.suspend_library_watcher()
             current_adjustments = sidecar.load_adjustments(source)
             current_adjustments.update(updates)
             sidecar.save_adjustments(source, current_adjustments)

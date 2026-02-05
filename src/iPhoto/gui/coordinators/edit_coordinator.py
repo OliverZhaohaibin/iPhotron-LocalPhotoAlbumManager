@@ -29,6 +29,7 @@ from src.iPhoto.core.curve_resolver import DEFAULT_CURVE_POINTS
 if TYPE_CHECKING:
     from src.iPhoto.gui.viewmodels.asset_list_viewmodel import AssetListViewModel
     from src.iPhoto.gui.ui.controllers.window_theme_controller import WindowThemeController
+    from src.iPhoto.gui.coordinators.navigation_coordinator import NavigationCoordinator
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -46,7 +47,8 @@ class EditCoordinator(QObject):
         event_bus: EventBus,
         asset_vm: AssetListViewModel,
         window: QObject | None = None,
-        theme_controller: WindowThemeController | None = None
+        theme_controller: WindowThemeController | None = None,
+        navigation: "NavigationCoordinator | None" = None,
     ):
         super().__init__()
         # We need access to specific UI elements within edit_page (which is likely MainWindow.ui)
@@ -55,6 +57,7 @@ class EditCoordinator(QObject):
         self._bus = event_bus
         self._asset_vm = asset_vm
         self._theme_controller = theme_controller
+        self._navigation = navigation
 
         self._transition_manager = EditViewTransitionManager(
             self._ui,
@@ -301,6 +304,8 @@ class EditCoordinator(QObject):
 
         # Save
         source = self._current_source
+        if self._navigation:
+            self._navigation.suspend_library_watcher()
         self._session.set_values(self._ui.edit_image_viewer.crop_values(), emit_individual=False)
         sidecar.save_adjustments(source, self._session.values())
 

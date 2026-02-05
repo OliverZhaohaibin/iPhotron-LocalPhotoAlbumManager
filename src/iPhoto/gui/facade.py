@@ -77,7 +77,6 @@ class AppFacade(QObject):
         )
 
         self._metadata_service = AlbumMetadataService(
-            asset_list_model_provider=lambda: None, # Legacy model deprecated
             current_album_getter=lambda: self._current_album,
             library_manager_getter=self._get_library_manager,
             refresh_view=self._refresh_view,
@@ -114,7 +113,6 @@ class AppFacade(QObject):
 
         self._move_service = AssetMoveService(
             task_manager=self._task_manager,
-            asset_list_model_provider=lambda: None, # Legacy model deprecated
             current_album_getter=lambda: self._current_album,
             library_manager_getter=self._get_library_manager,
             parent=self,
@@ -336,7 +334,6 @@ class AppFacade(QObject):
     ) -> None:
         """Import *sources* asynchronously and refresh the destination album."""
 
-        # self._active_model.request_optimistic_refresh() # Removed
         self._import_service.import_files(
             sources,
             destination=destination,

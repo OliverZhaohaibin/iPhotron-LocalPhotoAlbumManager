@@ -16,7 +16,6 @@ from ...utils.pathutils import is_descendant_path
 
 if TYPE_CHECKING:
     from ...library.manager import LibraryManager
-    from ..ui.models.asset_list.model import AssetListModel
 
 
 class AlbumMetadataService(QObject):
@@ -27,14 +26,12 @@ class AlbumMetadataService(QObject):
     def __init__(
         self,
         *,
-        asset_list_model_provider: Callable[[], AssetListModel],
         current_album_getter: Callable[[], Album | None],
         library_manager_getter: Callable[[], LibraryManager | None],
         refresh_view: Callable[[Path], None],
         parent: QObject | None = None,
     ) -> None:
         super().__init__(parent)
-        self._asset_list_model_provider = asset_list_model_provider
         self._current_album_getter = current_album_getter
         self._library_manager_getter = library_manager_getter
         self._refresh_view = refresh_view
@@ -139,7 +136,6 @@ class AlbumMetadataService(QObject):
                     alb.add_featured(r)
 
         if primary_success:
-            self._asset_list_model_provider().update_featured_status(ref, desired_state)
             return desired_state
 
         return was_featured

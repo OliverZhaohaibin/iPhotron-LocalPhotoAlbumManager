@@ -31,11 +31,11 @@ class AssetListViewModel(QAbstractListModel):
         self._thumbnails = thumbnail_service
         self._thumb_size = QSize(512, 512)
         self._current_row = -1
-        self._last_count = self._data_source.count()
 
         # Connect signals
         self._data_source.dataChanged.connect(self._on_source_changed)
         self._thumbnails.thumbnailReady.connect(self._on_thumbnail_ready)
+        self._last_count = self._data_source.count()
 
     def load_query(self, query: AssetQuery):
         """Triggers data loading for a new query."""
@@ -207,9 +207,9 @@ class AssetListViewModel(QAbstractListModel):
                 bottom = self.index(count - 1, 0)
                 if top.isValid() and bottom.isValid():
                     roles = [
-                        Qt.ItemDataRole.DisplayRole,
-                        Qt.DecorationRole,
-                        Qt.ItemDataRole.ToolTipRole,
+                        int(Qt.ItemDataRole.DisplayRole),
+                        int(Qt.ItemDataRole.DecorationRole),
+                        int(Qt.ItemDataRole.ToolTipRole),
                     ]
                     roles.extend(
                         [

@@ -113,6 +113,8 @@ def test_invalid_index(view_model):
 def test_unchanged_count_emits_data_changed(view_model, mock_data_source):
     mock_data_source.count.return_value = 2
     view_model._last_count = 2
+    expected_top = view_model.index(0, 0)
+    expected_bottom = view_model.index(1, 0)
     with (
         patch.object(view_model, "beginResetModel") as begin_reset,
         patch.object(view_model, "endResetModel") as end_reset,
@@ -121,4 +123,8 @@ def test_unchanged_count_emits_data_changed(view_model, mock_data_source):
         view_model._on_source_changed()
     begin_reset.assert_not_called()
     end_reset.assert_not_called()
-    emit.assert_called_once()
+    emit.assert_called_once_with(
+        expected_top,
+        expected_bottom,
+        view_model._NON_LAYOUT_ROLES,
+    )

@@ -308,6 +308,14 @@ class NavigationCoordinator(QObject):
         manager.pause_watcher()
         QTimer.singleShot(duration, manager.resume_watcher)
 
+    def pause_library_watcher(self) -> None:
+        manager = self._context.library
+        manager.pause_watcher()
+
+    def resume_library_watcher(self) -> None:
+        manager = self._context.library
+        manager.resume_watcher()
+
     # --- Accessors ---
 
     def static_selection(self) -> Optional[str]:

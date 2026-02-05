@@ -304,13 +304,18 @@ class EditCoordinator(QObject):
 
         # Save
         source = self._current_source
-        if self._navigation:
-            self._navigation.suspend_library_watcher()
-        self._session.set_values(self._ui.edit_image_viewer.crop_values(), emit_individual=False)
-        sidecar.save_adjustments(source, self._session.values())
+        navigation = self._navigation
+        if navigation:
+            navigation.pause_library_watcher()
+        try:
+            self._session.set_values(self._ui.edit_image_viewer.crop_values(), emit_individual=False)
+            sidecar.save_adjustments(source, self._session.values())
 
-        # Update thumbnails via ViewModel
-        self._asset_vm.invalidate_thumbnail(str(source))
+            # Update thumbnails via ViewModel
+            self._asset_vm.invalidate_thumbnail(str(source))
+        finally:
+            if navigation:
+                navigation.resume_library_watcher()
 
         self.leave_edit_mode()
 

@@ -201,24 +201,23 @@ class AssetListViewModel(QAbstractListModel):
 
     def _on_source_changed(self):
         count = self._data_source.count()
-        if count == self._last_count:
-            if count > 0:
-                top = self.index(0, 0)
-                bottom = self.index(count - 1, 0)
-                if top.isValid() and bottom.isValid():
-                    roles = [
-                        int(Qt.ItemDataRole.DisplayRole),
-                        int(Qt.ItemDataRole.DecorationRole),
-                        int(Qt.ItemDataRole.ToolTipRole),
-                    ]
-                    roles.extend(
-                        [
-                            int(role)
-                            for role in Roles
-                            if role not in (Roles.IS_CURRENT, Roles.IS_SPACER)
-                        ]
-                    )
-                    self.dataChanged.emit(top, bottom, roles)
+        if count == self._last_count and count > 0:
+            top = self.index(0, 0)
+            bottom = self.index(count - 1, 0)
+            if top.isValid() and bottom.isValid():
+                roles = {
+                    int(Qt.ItemDataRole.DisplayRole),
+                    int(Qt.ItemDataRole.DecorationRole),
+                    int(Qt.ItemDataRole.ToolTipRole),
+                }
+                roles.update(
+                    {
+                        int(role)
+                        for role in Roles
+                        if role not in (Roles.IS_CURRENT, Roles.IS_SPACER)
+                    }
+                )
+                self.dataChanged.emit(top, bottom, sorted(roles))
             return
         self.beginResetModel()
         self.endResetModel()

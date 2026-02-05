@@ -54,6 +54,7 @@ class AssetListViewModel(QAbstractListModel):
 
     def load_query(self, query: AssetQuery):
         """Triggers data loading for a new query."""
+        self._last_count = self._UNINITIALIZED_COUNT
         self._data_source.load(query)
 
     def set_active_root(self, root: Optional[Path]) -> None:
@@ -216,7 +217,11 @@ class AssetListViewModel(QAbstractListModel):
 
     def _on_source_changed(self):
         count = self._data_source.count()
-        if count == self._last_count:
+        if (
+            count == self._last_count
+            and count > 0
+            and self._last_count != self._UNINITIALIZED_COUNT
+        ):
             bottom_row = max(count - 1, 0)
             top = self.index(0, 0)
             bottom = self.index(bottom_row, 0)

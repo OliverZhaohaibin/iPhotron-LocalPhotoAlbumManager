@@ -208,14 +208,13 @@ class AssetListViewModel(QAbstractListModel):
 
     def _on_source_changed(self):
         count = self._data_source.count()
+        current_hash = self._snapshot_hash(count)
+        current_snapshot = (count, current_hash)
         if self._last_snapshot is None:
             self.beginResetModel()
             self.endResetModel()
-            current_hash = self._snapshot_hash(count)
-            self._last_snapshot = (count, current_hash)
+            self._last_snapshot = current_snapshot
             return
-        current_hash = self._snapshot_hash(count)
-        current_snapshot = (count, current_hash)
         if self._last_snapshot == current_snapshot:
             # No changes detected; avoid unnecessary model reset to prevent full filmstrip refresh.
             return

@@ -31,6 +31,7 @@ class AssetListViewModel(QAbstractListModel):
         self._thumbnails = thumbnail_service
         self._thumb_size = QSize(512, 512)
         self._current_row = -1
+        self._last_count = self._data_source.count()
 
         # Connect signals
         self._data_source.dataChanged.connect(self._on_source_changed)
@@ -200,6 +201,25 @@ class AssetListViewModel(QAbstractListModel):
 
     def _on_source_changed(self):
         count = self._data_source.count()
+        if count == self._last_count:
+            if count > 0:
+                top = self.index(0, 0)
+                bottom = self.index(count - 1, 0)
+                if top.isValid() and bottom.isValid():
+                    roles = [
+                        Qt.ItemDataRole.DisplayRole,
+                        Qt.DecorationRole,
+                        Qt.ItemDataRole.ToolTipRole,
+                    ]
+                    roles.extend(
+                        [
+                            int(role)
+                            for role in Roles
+                            if role not in (Roles.IS_CURRENT, Roles.IS_SPACER)
+                        ]
+                    )
+                    self.dataChanged.emit(top, bottom, roles)
+            return
         self.beginResetModel()
         self.endResetModel()
         self._last_count = count

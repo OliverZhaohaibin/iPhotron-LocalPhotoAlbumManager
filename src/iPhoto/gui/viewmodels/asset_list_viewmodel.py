@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Any, Dict, Optional, cast
+import logging
 
 from PySide6.QtCore import (
     QAbstractListModel,
@@ -17,6 +18,9 @@ from src.iPhoto.gui.ui.models.roles import Roles
 from src.iPhoto.gui.viewmodels.asset_data_source import AssetDataSource
 from src.iPhoto.infrastructure.services.thumbnail_cache_service import ThumbnailCacheService
 from src.iPhoto.utils.geocoding import resolve_location_name
+
+
+_LOGGER = logging.getLogger(__name__)
 
 
 def _build_non_layout_roles() -> tuple[int, ...]:
@@ -217,15 +221,19 @@ class AssetListViewModel(QAbstractListModel):
 
     def _on_source_changed(self):
         count = self._data_source.count()
-        if self._last_count is not None and count == self._last_count:
-            if count == 0:
-                return
+        if self._last_count is not None and count == self._last_count and count > 0:
             bottom_row = count - 1
             top = self.index(0, 0)
             bottom = self.index(bottom_row, 0)
             # Defensive: QModelIndex validity can fail during Qt reset/layout churn.
             if top.isValid() and bottom.isValid():
                 self.dataChanged.emit(top, bottom, self._NON_LAYOUT_ROLES)
+            else:
+                _LOGGER.warning(
+                    "Skipped dataChanged emission due to invalid indices (top=%s, bottom=%s)",
+                    top.isValid(),
+                    bottom.isValid(),
+                )
             return
         self.beginResetModel()
         self.endResetModel()

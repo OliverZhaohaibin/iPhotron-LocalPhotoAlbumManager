@@ -218,7 +218,9 @@ class AssetListViewModel(QAbstractListModel):
     def _on_source_changed(self):
         count = self._data_source.count()
         if self._last_count is not None and count == self._last_count:
-            bottom_row = max(count - 1, 0)
+            if count == 0:
+                return
+            bottom_row = count - 1
             top = self.index(0, 0)
             bottom = self.index(bottom_row, 0)
             # Defensive: QModelIndex validity can fail during Qt reset/layout churn.

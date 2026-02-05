@@ -108,3 +108,17 @@ def test_get_qml_helper(view_model, mock_data_source):
 def test_invalid_index(view_model):
     result = view_model.data(QModelIndex(), Qt.DisplayRole)
     assert result is None
+
+
+def test_source_changed_unchanged_count_emits_data_changed(view_model, mock_data_source):
+    mock_data_source.count.return_value = 2
+    view_model._last_count = 2
+    with (
+        patch.object(view_model, "beginResetModel") as begin_reset,
+        patch.object(view_model, "endResetModel") as end_reset,
+        patch.object(view_model.dataChanged, "emit") as emit,
+    ):
+        view_model._on_source_changed()
+    begin_reset.assert_not_called()
+    end_reset.assert_not_called()
+    emit.assert_called_once()

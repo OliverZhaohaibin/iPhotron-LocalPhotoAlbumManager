@@ -106,6 +106,23 @@ def test_asset_repository_save_get(asset_repo, tmp_path):
     assert loaded.path == Path("photo.jpg")
     assert loaded.media_type == MediaType.PHOTO
 
+
+def test_asset_repository_maps_gps_column_into_metadata(asset_repo):
+    with asset_repo._pool.connection() as conn:
+        conn.execute(
+            """
+            INSERT INTO assets (
+                rel, id, album_id, media_type, bytes, gps
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            ("live/photo.heic", "asset-gps", "album-gps", 0, 123, '{"lat": 35.0, "lon": 139.0}'),
+        )
+
+    loaded = asset_repo.get("asset-gps")
+
+    assert loaded is not None
+    assert loaded.metadata.get("gps") == {"lat": 35.0, "lon": 139.0}
+
 # --- Use Case Tests ---
 
 def test_open_album_use_case(album_repo, asset_repo, event_bus, tmp_path):

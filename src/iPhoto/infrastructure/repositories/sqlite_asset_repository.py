@@ -337,6 +337,15 @@ class SQLiteAssetRepository(IAssetRepository):
         if micro_thumbnail is None and "thumb_16" in keys:
             micro_thumbnail = row["thumb_16"]
 
+        gps = row["gps"] if "gps" in keys else None
+        if isinstance(gps, str) and gps.strip():
+            try:
+                parsed_gps = json.loads(gps)
+                if isinstance(parsed_gps, dict):
+                    meta["gps"] = parsed_gps
+            except json.JSONDecodeError:
+                pass
+
         if location:
             meta["location"] = location
         if micro_thumbnail and "micro_thumbnail" not in meta:

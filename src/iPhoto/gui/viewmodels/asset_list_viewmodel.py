@@ -204,8 +204,13 @@ class AssetListViewModel(QAbstractListModel):
 
     def _on_source_changed(self):
         count = self._data_source.count()
+        if self._last_snapshot is None:
+            self.beginResetModel()
+            self.endResetModel()
+            self._last_snapshot = (count, self._snapshot_hash(count))
+            return
         current_snapshot = (count, self._snapshot_hash(count))
-        if self._last_snapshot is not None and self._last_snapshot == current_snapshot:
+        if self._last_snapshot == current_snapshot:
             # No changes detected; avoid unnecessary model reset to prevent full filmstrip refresh.
             return
         self.beginResetModel()
@@ -226,7 +231,7 @@ class AssetListViewModel(QAbstractListModel):
     def _snapshot_hash(self, count: int) -> bytes:
         digest = hashlib.blake2b(digest_size=16)
         for row in range(count):
-            if row:
+            if row > 0:
                 # Separate entries so ordering changes alter the signature.
                 digest.update(b"\x00")
             asset = self._data_source.asset_at(row)

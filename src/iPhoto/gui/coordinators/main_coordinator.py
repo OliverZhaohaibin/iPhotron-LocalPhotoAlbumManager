@@ -540,6 +540,12 @@ class MainCoordinator(QObject):
         #
         # Only the gallery header back should return to map. From detail/playback
         # we should always step back to the gallery first.
+        #
+        # Note: `is_in_cluster_gallery()` is conceptually tied to the cluster gallery
+        # state, but we also assert that the gallery view is currently active.
+        # This extra guard ensures we only navigate back to the map when the user
+        # is actually in the cluster gallery UI (header back), and not from a
+        # detail/playback context or any intermediate state during view transitions.
         if self._navigation.is_in_cluster_gallery() and self._view_router.is_gallery_view_active():
             self._navigation.return_to_map_from_cluster_gallery()
             return

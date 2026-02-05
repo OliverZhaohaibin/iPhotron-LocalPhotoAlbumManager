@@ -278,7 +278,7 @@ class NavigationCoordinator(QObject):
 
     def is_in_cluster_gallery(self) -> bool:
         """Return True if currently viewing a cluster gallery from the map."""
-        return getattr(self, "_in_cluster_gallery", False)
+        return self._in_cluster_gallery
 
     def _album_path_for_query(self, path: Path) -> Optional[str]:
         library_root = self._context.library.root()

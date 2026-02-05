@@ -9,6 +9,7 @@ if TYPE_CHECKING:
     from src.iPhoto.gui.ui.main_window import Ui_MainWindow
     from src.iPhoto.gui.ui.widgets.detail_page import DetailPage
     from src.iPhoto.gui.ui.widgets.edit_view import EditView
+    from src.iPhoto.gui.ui.widgets.gallery_page import GalleryPageWidget
     from src.iPhoto.gui.ui.widgets.photo_map_view import PhotoMapView
 
 
@@ -93,8 +94,12 @@ class ViewRouter(QObject):
             return map_view
         return None
 
-    def gallery_page(self):
-        """Return the gallery page widget when available."""
+    def gallery_page(self) -> Optional["GalleryPageWidget"]:
+        """Return the gallery page widget when available.
+
+        Returns:
+            The GalleryPageWidget instance if available, None otherwise.
+        """
 
         from src.iPhoto.gui.ui.widgets.gallery_page import GalleryPageWidget
 

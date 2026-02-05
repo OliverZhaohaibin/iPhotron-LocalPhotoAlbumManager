@@ -223,6 +223,7 @@ class AssetListViewModel(QAbstractListModel):
         count = self._data_source.count()
         if self._last_count is not None and count == self._last_count:
             if count == 0:
+                self._last_count = count
                 return
             bottom_row = count - 1
             top = self.index(0, 0)
@@ -232,7 +233,10 @@ class AssetListViewModel(QAbstractListModel):
                 self.dataChanged.emit(top, bottom, self._NON_LAYOUT_ROLES)
             else:
                 _LOGGER.warning(
-                    "Skipped dataChanged emission due to invalid indices (top_row=%s, bottom_row=%s, count=%s)",
+                    "Skipped dataChanged emission due to invalid indices "
+                    "(expected_top=%s, expected_bottom=%s, actual_top=%s, actual_bottom=%s, count=%s)",
+                    0,
+                    bottom_row,
                     top.row(),
                     bottom.row(),
                     count,

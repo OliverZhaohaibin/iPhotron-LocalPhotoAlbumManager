@@ -37,7 +37,6 @@ class AssetListViewModel(QAbstractListModel):
     Adapts AssetDTOs to Qt Roles expected by AssetGridDelegate.
     """
 
-    _UNINITIALIZED_COUNT = -1
     _NON_LAYOUT_ROLES = _build_non_layout_roles()
 
     def __init__(self, data_source: AssetDataSource, thumbnail_service: ThumbnailCacheService, parent=None):
@@ -50,11 +49,11 @@ class AssetListViewModel(QAbstractListModel):
         # Connect signals
         self._data_source.dataChanged.connect(self._on_source_changed)
         self._thumbnails.thumbnailReady.connect(self._on_thumbnail_ready)
-        self._last_count = self._UNINITIALIZED_COUNT
+        self._last_count: int | None = None
 
     def load_query(self, query: AssetQuery):
         """Triggers data loading for a new query."""
-        self._last_count = self._UNINITIALIZED_COUNT
+        self._last_count = None
         self._data_source.load(query)
 
     def set_active_root(self, root: Optional[Path]) -> None:
@@ -217,10 +216,11 @@ class AssetListViewModel(QAbstractListModel):
 
     def _on_source_changed(self):
         count = self._data_source.count()
-        if count == self._last_count and count > 0:
+        if self._last_count is not None and count == self._last_count and count > 0:
             bottom_row = count - 1
             top = self.index(0, 0)
             bottom = self.index(bottom_row, 0)
+            # Defensive: QModelIndex validity can fail during Qt reset/layout churn.
             if top.isValid() and bottom.isValid():
                 self.dataChanged.emit(top, bottom, self._NON_LAYOUT_ROLES)
             return

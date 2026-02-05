@@ -19,11 +19,25 @@ from src.iPhoto.infrastructure.services.thumbnail_cache_service import Thumbnail
 from src.iPhoto.utils.geocoding import resolve_location_name
 
 
+def _build_non_layout_roles() -> tuple[int, ...]:
+    roles = {
+        int(Qt.ItemDataRole.DisplayRole),
+        int(Qt.ItemDataRole.DecorationRole),
+        int(Qt.ItemDataRole.ToolTipRole),
+    }
+    roles.update(
+        int(role) for role in Roles if role not in (Roles.IS_CURRENT, Roles.IS_SPACER)
+    )
+    return tuple(sorted(roles))
+
+
 class AssetListViewModel(QAbstractListModel):
     """
     ViewModel backing the asset grid and filmstrip.
     Adapts AssetDTOs to Qt Roles expected by AssetGridDelegate.
     """
+
+    _NON_LAYOUT_ROLES = _build_non_layout_roles()
 
     def __init__(self, data_source: AssetDataSource, thumbnail_service: ThumbnailCacheService, parent=None):
         super().__init__(parent)
@@ -35,7 +49,7 @@ class AssetListViewModel(QAbstractListModel):
         # Connect signals
         self._data_source.dataChanged.connect(self._on_source_changed)
         self._thumbnails.thumbnailReady.connect(self._on_thumbnail_ready)
-        self._last_count = self._data_source.count()
+        self._last_count = -1
 
     def load_query(self, query: AssetQuery):
         """Triggers data loading for a new query."""
@@ -205,19 +219,7 @@ class AssetListViewModel(QAbstractListModel):
             top = self.index(0, 0)
             bottom = self.index(count - 1, 0)
             if top.isValid() and bottom.isValid():
-                roles = {
-                    int(Qt.ItemDataRole.DisplayRole),
-                    int(Qt.ItemDataRole.DecorationRole),
-                    int(Qt.ItemDataRole.ToolTipRole),
-                }
-                roles.update(
-                    {
-                        int(role)
-                        for role in Roles
-                        if role not in (Roles.IS_CURRENT, Roles.IS_SPACER)
-                    }
-                )
-                self.dataChanged.emit(top, bottom, sorted(roles))
+                self.dataChanged.emit(top, bottom, list(self._NON_LAYOUT_ROLES))
             return
         self.beginResetModel()
         self.endResetModel()

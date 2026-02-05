@@ -278,12 +278,18 @@ class AssetDataSource(QObject):
         if asset.location_name:
             metadata["location"] = asset.location_name
 
+        captured_at: Optional[datetime] = None
+        try:
+            captured_at = datetime.fromtimestamp(abs_path.stat().st_mtime)
+        except (FileNotFoundError, OSError, ValueError):
+            captured_at = None
+
         return AssetDTO(
             id=asset.asset_id,
             abs_path=abs_path,
             rel_path=rel_path,
             media_type=media_type,
-            created_at=None,
+            created_at=captured_at,
             width=0,
             height=0,
             duration=asset.duration or 0.0,

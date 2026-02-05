@@ -532,9 +532,15 @@ class MainCoordinator(QObject):
                 self._edit.enter_edit_mode(Path(path_str))
 
     def _handle_back_button(self):
-        """Returns to the gallery view, or map view if in cluster gallery mode."""
-        # If we're viewing a cluster gallery from the map, return to map view
-        if self._navigation.is_in_cluster_gallery():
+        """Handle back navigation for detail and cluster-gallery contexts."""
+
+        # In Location -> cluster flow, the same handler is used by both:
+        # 1) detail/playback back button, and
+        # 2) cluster gallery header back button.
+        #
+        # Only the gallery header back should return to map. From detail/playback
+        # we should always step back to the gallery first.
+        if self._navigation.is_in_cluster_gallery() and self._view_router.is_gallery_view_active():
             self._navigation.return_to_map_from_cluster_gallery()
             return
 

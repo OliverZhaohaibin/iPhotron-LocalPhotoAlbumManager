@@ -94,10 +94,6 @@ class MainCoordinator(QObject):
         self._thumbnail_service = ThumbnailCacheService(cache_root)
         self._asset_list_vm = AssetListViewModel(self._asset_data_source, self._thumbnail_service)
 
-        # Inject ViewModel provider into Facade for legacy operations (restore/delete)
-        if self._facade:
-            self._facade.set_model_provider(lambda: self._asset_list_vm)
-
         # --- Coordinators Setup ---
 
         # 1. View Router
@@ -126,6 +122,7 @@ class MainCoordinator(QObject):
         self._header_controller = HeaderController(
             window.ui.location_label,
             window.ui.timestamp_label,
+            ui=window.ui,
         )
 
         self._playback = PlaybackCoordinator(

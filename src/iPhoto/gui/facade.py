@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from pathlib import Path
-from typing import Callable, Dict, Iterable, List, Optional, Set, Tuple, TYPE_CHECKING, Any
+from typing import Callable, Dict, Iterable, List, Optional, Set, Tuple, TYPE_CHECKING
 
 from PySide6.QtCore import QObject, Signal, Slot
 
@@ -45,7 +45,6 @@ class AppFacade(QObject):
     loadStarted = Signal(Path)
     loadProgress = Signal(Path, int, int)
     loadFinished = Signal(Path, bool)
-    activeModelChanged = Signal(object)
 
     def __init__(self) -> None:
         super().__init__()
@@ -54,7 +53,6 @@ class AppFacade(QObject):
         self._pending_index_announcements: Set[Path] = set()
         self._library_manager: Optional["LibraryManager"] = None
         self._restore_prompt_handler: Optional[Callable[[str], bool]] = None
-        self._model_provider: Optional[Callable[[], Any]] = None
 
         def _pause_watcher() -> None:
             """Suspend the library watcher while background tasks mutate files."""
@@ -77,7 +75,7 @@ class AppFacade(QObject):
         )
 
         self._metadata_service = AlbumMetadataService(
-            asset_list_model_provider=lambda: None, # Legacy model deprecated
+            asset_list_model_provider=self._metadata_for_path,
             current_album_getter=lambda: self._current_album,
             library_manager_getter=self._get_library_manager,
             refresh_view=self._refresh_view,
@@ -114,7 +112,7 @@ class AppFacade(QObject):
 
         self._move_service = AssetMoveService(
             task_manager=self._task_manager,
-            asset_list_model_provider=lambda: None, # Legacy model deprecated
+            asset_list_model_provider=self._metadata_for_path,
             current_album_getter=lambda: self._current_album,
             library_manager_getter=self._get_library_manager,
             parent=self,
@@ -124,9 +122,6 @@ class AppFacade(QObject):
             self._library_update_service.handle_move_operation_completed
         )
 
-    def set_model_provider(self, provider: Callable[[], Any]):
-        """Inject the new ViewModel provider for legacy operations."""
-        self._model_provider = provider
 
     # ------------------------------------------------------------------
     # Album lifecycle
@@ -381,13 +376,8 @@ class AppFacade(QObject):
         if not normalized:
             return
 
-        # Use model provider to get live motion
-        model = self._model_provider() if self._model_provider else None
-
         for still_path in list(normalized):
-            metadata = None
-            if model and hasattr(model, "metadata_for_path"):
-                metadata = model.metadata_for_path(still_path)
+            metadata = self._metadata_for_path(still_path)
 
             if not metadata or not metadata.get("is_live"):
                 continue
@@ -449,12 +439,8 @@ class AppFacade(QObject):
         if not normalized:
             return False
 
-        model = self._model_provider() if self._model_provider else None
-
         for still_path in list(normalized):
-            metadata = None
-            if model and hasattr(model, "metadata_for_path"):
-                metadata = model.metadata_for_path(still_path)
+            metadata = self._metadata_for_path(still_path)
 
             if not metadata or not metadata.get("is_live"):
                 continue
@@ -633,6 +619,38 @@ class AppFacade(QObject):
     # ------------------------------------------------------------------
     # Internal utilities
     # ------------------------------------------------------------------
+
+    def _metadata_for_path(self, source: Path) -> Optional[dict]:
+        """Return index metadata for *source* from the library repository."""
+
+        library = self._get_library_manager()
+        if library is None:
+            return None
+
+        library_root = library.root()
+        if library_root is None:
+            return None
+
+        try:
+            resolved_source = source.resolve()
+        except OSError:
+            resolved_source = source
+
+        try:
+            rel_path = resolved_source.relative_to(library_root).as_posix()
+        except ValueError:
+            return None
+
+        try:
+            store = get_global_repository(library_root)
+        except IPhotoError:
+            return None
+
+        try:
+            return store.get(rel_path)
+        except IPhotoError:
+            return None
+
     def _require_album(self) -> Optional[Album]:
         if self._current_album is None:
             self.errorRaised.emit("No album is currently open.")
@@ -728,7 +746,6 @@ class AppFacade(QObject):
         announce_index: bool,
         force_reload: bool,
     ) -> None:
-        # Legacy reload hook
         self.loadStarted.emit(root)
         self.loadFinished.emit(root, True)
 

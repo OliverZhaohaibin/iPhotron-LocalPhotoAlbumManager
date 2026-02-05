@@ -17,7 +17,7 @@ from src.iPhoto.gui.ui.controllers.edit_pipeline_loader import EditPipelineLoade
 from src.iPhoto.gui.ui.controllers.edit_preview_manager import EditPreviewManager
 from src.iPhoto.gui.ui.controllers.edit_zoom_handler import EditZoomHandler
 from src.iPhoto.gui.ui.controllers.edit_modes import AdjustModeState, CropModeState
-from src.iPhoto.gui.ui.controllers.header_layout_manager import HeaderLayoutManager
+from src.iPhoto.gui.ui.controllers.header_controller import HeaderController
 from src.iPhoto.gui.ui.controllers.edit_fullscreen_manager import EditFullscreenManager
 from src.iPhoto.gui.ui.controllers.edit_view_transition import EditViewTransitionManager
 from src.iPhoto.gui.ui.tasks.edit_sidebar_preview_worker import EditSidebarPreviewResult
@@ -89,7 +89,7 @@ class EditCoordinator(QObject):
         self._crop_mode = CropModeState(self._ui, lambda: self._session, parent=self)
         self._current_mode = self._adjust_mode
 
-        self._header_layout_manager = HeaderLayoutManager(self._ui, parent=self)
+        self._header_layout_manager = HeaderController(ui=self._ui, parent=self)
         self._preview_manager = EditPreviewManager(self._ui.edit_image_viewer, self)
         self._fullscreen_manager = EditFullscreenManager(
             self._ui,

@@ -1,4 +1,4 @@
-"""Unit tests for HeaderLayoutManager."""
+"""Unit tests for HeaderController layout management helpers."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from unittest.mock import Mock
 import pytest
 from PySide6.QtWidgets import QApplication
 
-from src.iPhoto.gui.ui.controllers.header_layout_manager import HeaderLayoutManager
+from src.iPhoto.gui.ui.controllers.header_controller import HeaderController
 
 @pytest.fixture()
 def qapp() -> QApplication:
@@ -20,7 +20,7 @@ def qapp() -> QApplication:
 
 def test_switch_to_edit_mode(qapp):
     ui = Mock()
-    manager = HeaderLayoutManager(ui)
+    manager = HeaderController(ui=ui)
 
     # Setup mocks
     ui.edit_zoom_host_layout.indexOf.return_value = -1
@@ -37,7 +37,7 @@ def test_switch_to_edit_mode(qapp):
 
 def test_restore_detail_mode(qapp):
     ui = Mock()
-    manager = HeaderLayoutManager(ui)
+    manager = HeaderController(ui=ui)
 
     ui.detail_info_button_index = 5
     ui.detail_favorite_button_index = 6

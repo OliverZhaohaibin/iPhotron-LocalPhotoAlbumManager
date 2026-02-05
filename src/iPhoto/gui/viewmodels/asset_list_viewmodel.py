@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Any, Dict, Optional, cast
-import logging
 
 from PySide6.QtCore import (
     QAbstractListModel,
@@ -20,28 +19,11 @@ from src.iPhoto.infrastructure.services.thumbnail_cache_service import Thumbnail
 from src.iPhoto.utils.geocoding import resolve_location_name
 
 
-_LOGGER = logging.getLogger(__name__)
-
-
-def _build_non_layout_roles() -> tuple[int, ...]:
-    roles = {
-        int(Qt.ItemDataRole.DisplayRole),
-        int(Qt.ItemDataRole.DecorationRole),
-        int(Qt.ItemDataRole.ToolTipRole),
-    }
-    roles.update(
-        int(role) for role in Roles if role not in (Roles.IS_CURRENT, Roles.IS_SPACER)
-    )
-    return tuple(sorted(roles))
-
-
 class AssetListViewModel(QAbstractListModel):
     """
     ViewModel backing the asset grid and filmstrip.
     Adapts AssetDTOs to Qt Roles expected by AssetGridDelegate.
     """
-
-    _NON_LAYOUT_ROLES = _build_non_layout_roles()
 
     def __init__(self, data_source: AssetDataSource, thumbnail_service: ThumbnailCacheService, parent=None):
         super().__init__(parent)
@@ -55,10 +37,12 @@ class AssetListViewModel(QAbstractListModel):
         self._thumbnails.thumbnailReady.connect(self._on_thumbnail_ready)
         # Track the last observed asset count; None means no prior snapshot yet.
         self._last_count: Optional[int] = None
+        self._last_paths: list[str] = []
 
     def load_query(self, query: AssetQuery):
         """Triggers data loading for a new query."""
         self._last_count = None
+        self._last_paths = []
         self._data_source.load(query)
 
     def set_active_root(self, root: Optional[Path]) -> None:
@@ -221,30 +205,19 @@ class AssetListViewModel(QAbstractListModel):
 
     def _on_source_changed(self):
         count = self._data_source.count()
-        if self._last_count is not None and count == self._last_count:
-            if count == 0:
-                self._last_count = count
-                return
-            bottom_row = count - 1
-            top = self.index(0, 0)
-            bottom = self.index(bottom_row, 0)
-            # Defensive: QModelIndex validity can fail during Qt reset/layout churn.
-            if top.isValid() and bottom.isValid():
-                self.dataChanged.emit(top, bottom, self._NON_LAYOUT_ROLES)
-            else:
-                _LOGGER.warning(
-                    "Skipped dataChanged emission due to invalid indices "
-                    "(expected_top=%s, expected_bottom=%s, actual_top=%s, actual_bottom=%s, count=%s)",
-                    0,
-                    bottom_row,
-                    top.row(),
-                    bottom.row(),
-                    count,
-                )
+        current_paths = self._snapshot_paths(count)
+        if (
+            self._last_count is not None
+            and count == self._last_count
+            and current_paths == self._last_paths
+        ):
+            self._last_count = count
+            self._last_paths = current_paths
             return
         self.beginResetModel()
         self.endResetModel()
         self._last_count = count
+        self._last_paths = current_paths
 
     def _on_thumbnail_ready(self, path: Path):
         # Find index for path and emit dataChanged
@@ -256,6 +229,20 @@ class AssetListViewModel(QAbstractListModel):
                 idx = self.index(row, 0)
                 self.dataChanged.emit(idx, idx, [Qt.DecorationRole])
                 break
+
+    def _snapshot_paths(self, count: int) -> list[str]:
+        paths: list[str] = []
+        for row in range(count):
+            asset = self._data_source.asset_at(row)
+            if asset is None:
+                paths.append("")
+                continue
+            abs_path = getattr(asset, "abs_path", None) or getattr(asset, "path", None)
+            if abs_path is None:
+                paths.append("")
+            else:
+                paths.append(str(abs_path))
+        return paths
 
     # --- QML / Scriptable Helpers ---
 

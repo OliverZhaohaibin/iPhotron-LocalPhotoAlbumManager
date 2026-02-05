@@ -678,9 +678,9 @@ class LibraryManager(QObject):
             self._rebuild_watches()
             self.treeUpdated.emit()
             return
-        previous_albums = self._albums
-        previous_children = self._children
-        previous_nodes = self._nodes
+        previous_albums = list(self._albums)
+        previous_children = {parent: list(kids) for parent, kids in self._children.items()}
+        previous_nodes = dict(self._nodes)
         albums: list[AlbumNode] = []
         children: Dict[Path, list[AlbumNode]] = {}
         nodes: Dict[Path, AlbumNode] = {}

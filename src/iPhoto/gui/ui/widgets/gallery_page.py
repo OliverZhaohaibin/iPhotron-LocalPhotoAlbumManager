@@ -32,7 +32,6 @@ class GalleryPageWidget(QWidget):
 
         self.back_button = QToolButton()
         self.back_button.setObjectName("galleryBackButton")
-        self.back_button.setText("")
         self.back_button.setIcon(load_icon("chevron.left.svg"))
         self.back_button.setToolTip("Return to Map")
         self.back_button.setCursor(Qt.CursorShape.PointingHandCursor)

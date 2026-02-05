@@ -279,11 +279,21 @@ class AssetDataSource(QObject):
             metadata["location"] = asset.location_name
 
         captured_at: Optional[datetime] = None
-        try:
-            captured_at = datetime.fromtimestamp(abs_path.stat().st_mtime)
-        except (FileNotFoundError, OSError, ValueError):
-            captured_at = None
 
+        # Prefer a timestamp provided by the Asset model (if available) to avoid
+        # repeated filesystem stat calls when processing many assets.
+        asset_created_at = getattr(asset, "created_at", None)
+        asset_captured_at = getattr(asset, "captured_at", None)
+
+        if isinstance(asset_created_at, datetime):
+            captured_at = asset_created_at
+        elif isinstance(asset_captured_at, datetime):
+            captured_at = asset_captured_at
+        else:
+            try:
+                captured_at = datetime.fromtimestamp(abs_path.stat().st_mtime)
+            except (FileNotFoundError, OSError, ValueError):
+                captured_at = None
         return AssetDTO(
             id=asset.asset_id,
             abs_path=abs_path,

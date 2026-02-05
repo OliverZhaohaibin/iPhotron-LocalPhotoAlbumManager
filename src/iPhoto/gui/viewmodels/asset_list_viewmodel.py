@@ -221,14 +221,14 @@ class AssetListViewModel(QAbstractListModel):
 
     def _on_source_changed(self):
         count = self._data_source.count()
-        if self._last_count is not None and count == self._last_count and count > 0:
-            bottom_row = count - 1
+        if self._last_count is not None and count == self._last_count:
+            bottom_row = max(count - 1, 0)
             top = self.index(0, 0)
             bottom = self.index(bottom_row, 0)
             # Defensive: QModelIndex validity can fail during Qt reset/layout churn.
             if top.isValid() and bottom.isValid():
                 self.dataChanged.emit(top, bottom, self._NON_LAYOUT_ROLES)
-            else:
+            elif count != 0:
                 _LOGGER.warning(
                     "Skipped dataChanged emission due to invalid indices (top=%s, bottom=%s)",
                     top.isValid(),

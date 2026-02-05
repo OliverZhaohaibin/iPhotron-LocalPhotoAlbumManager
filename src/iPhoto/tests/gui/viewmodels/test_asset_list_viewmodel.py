@@ -110,7 +110,7 @@ def test_invalid_index(view_model):
     assert result is None
 
 
-def test_source_changed_unchanged_count_emits_data_changed(view_model, mock_data_source):
+def test_unchanged_count_emits_data_changed(view_model, mock_data_source):
     mock_data_source.count.return_value = 2
     view_model._last_count = 2
     with (

@@ -20,6 +20,10 @@ from src.iPhoto.infrastructure.services.thumbnail_cache_service import Thumbnail
 from src.iPhoto.utils.geocoding import resolve_location_name
 
 
+_SNAPSHOT_SEPARATOR = b"\x00"
+_SNAPSHOT_NULL_MARKER = b"\xff"
+
+
 class AssetListViewModel(QAbstractListModel):
     """
     ViewModel backing the asset grid and filmstrip.
@@ -235,10 +239,10 @@ class AssetListViewModel(QAbstractListModel):
         for row in range(count):
             if row > 0:
                 # Separate entries so ordering changes alter the signature.
-                digest.update(b"\x00")
+                digest.update(_SNAPSHOT_SEPARATOR)
             asset = self._data_source.asset_at(row)
             if asset is None:
-                digest.update(b"\xff")
+                digest.update(_SNAPSHOT_NULL_MARKER)
             else:
                 digest.update(
                     str(

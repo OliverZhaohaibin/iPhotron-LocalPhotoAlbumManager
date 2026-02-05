@@ -678,6 +678,9 @@ class LibraryManager(QObject):
             self._rebuild_watches()
             self.treeUpdated.emit()
             return
+        previous_albums = self._albums
+        previous_children = self._children
+        previous_nodes = self._nodes
         albums: list[AlbumNode] = []
         children: Dict[Path, list[AlbumNode]] = {}
         nodes: Dict[Path, AlbumNode] = {}
@@ -689,8 +692,19 @@ class LibraryManager(QObject):
             for child in child_nodes:
                 nodes[child.path] = child
             children[album_dir] = child_nodes
-        self._albums = sorted(albums, key=lambda item: item.title.casefold())
-        self._children = {parent: sorted(kids, key=lambda item: item.title.casefold()) for parent, kids in children.items()}
+        refreshed_albums = sorted(albums, key=lambda item: item.title.casefold())
+        refreshed_children = {
+            parent: sorted(kids, key=lambda item: item.title.casefold())
+            for parent, kids in children.items()
+        }
+        if (
+            refreshed_albums == previous_albums
+            and refreshed_children == previous_children
+            and nodes == previous_nodes
+        ):
+            return
+        self._albums = refreshed_albums
+        self._children = refreshed_children
         self._nodes = nodes
         self._rebuild_watches()
         self.treeUpdated.emit()

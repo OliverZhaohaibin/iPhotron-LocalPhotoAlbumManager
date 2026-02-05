@@ -259,7 +259,7 @@ class WindowThemeController(QObject):
         self._ui.zoom_in_button.setIcon(load_icon("plus.svg", color=icon_color))
 
         # Back button
-        self._ui.back_button.setIcon(load_icon("chevron.left.svg", color=icon_color))
+        self._ui.back_button.setIcon(load_icon("arrow.uturn.left.svg", color=icon_color))
 
         # Edit header buttons
         self._ui.edit_compare_button.setIcon(

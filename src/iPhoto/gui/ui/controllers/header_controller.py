@@ -98,25 +98,32 @@ class HeaderController(QObject):
     ) -> None:
         """Render formatted location and timestamp strings."""
 
-        if not timestamp:
-            self.clear()
-            return
-        timestamp = timestamp.strip()
-        if not timestamp:
-            self.clear()
-            return
+        timestamp = (timestamp or "").strip() or None
         location = (location or "").strip() or None
+
+        if not location and not timestamp:
+            self.clear()
+            return
+
         if location:
             self._location_label.setText(location)
             self._location_label.show()
-            self._timestamp_label.setFont(self._timestamp_default_font)
         else:
             self._location_label.clear()
             self._location_label.hide()
+
+        if timestamp:
+            if location:
+                self._timestamp_label.setFont(self._timestamp_default_font)
+            else:
+                self._timestamp_label.setFont(self._timestamp_single_line_font)
+            self._timestamp_label.setText(timestamp)
+            self._timestamp_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            self._timestamp_label.show()
+        else:
             self._timestamp_label.setFont(self._timestamp_single_line_font)
-        self._timestamp_label.setText(timestamp)
-        self._timestamp_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._timestamp_label.show()
+            self._timestamp_label.clear()
+            self._timestamp_label.hide()
 
     def _format_timestamp(self, dt_value: object) -> Optional[str]:
         """Convert ISO-8601 strings into a friendly, localised label."""
@@ -125,11 +132,26 @@ class HeaderController(QObject):
             return None
         if isinstance(dt_value, datetime):
             parsed = dt_value
-        elif isinstance(dt_value, str):
+        elif isinstance(dt_value, (int, float)):
             try:
-                parsed = isoparse(dt_value)
-            except (ValueError, TypeError):
+                parsed = datetime.fromtimestamp(float(dt_value), tz=timezone.utc)
+            except (OverflowError, OSError, ValueError):
                 return None
+        elif isinstance(dt_value, str):
+            dt_text = dt_value.strip()
+            if not dt_text:
+                return None
+            try:
+                parsed = isoparse(dt_text)
+            except (ValueError, TypeError):
+                for fmt in ("%Y:%m:%d %H:%M:%S", "%Y-%m-%d %H:%M:%S"):
+                    try:
+                        parsed = datetime.strptime(dt_text, fmt)
+                        break
+                    except ValueError:
+                        continue
+                else:
+                    return None
         else:
             return None
         if parsed.tzinfo is None:

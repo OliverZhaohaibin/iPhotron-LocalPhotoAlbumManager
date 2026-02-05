@@ -139,7 +139,7 @@ class DetailPageWidget(QWidget):
 
         self._configure_header_button(
             self.back_button,
-            "chevron.left.svg",
+            "arrow.uturn.left.svg",
             "Return to grid view",
         )
         header_layout.addWidget(self.back_button)

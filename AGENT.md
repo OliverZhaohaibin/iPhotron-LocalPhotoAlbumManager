@@ -57,13 +57,13 @@
 
 ## 4. 编码规则
 
-* **目录结构固定**（见 `src/iPhoto/…`，模块分为 `models/`, `io/`, `core/`, `cache/`, `utils/`）。
+* **目录结构固定**（见 `src/iPhoto/…`，模块分为 `domain/`, `application/`, `infrastructure/`, `models/`, `io/`, `core/`, `cache/`, `utils/`）。
 * **数据类**：统一用 `dataclass` 定义（见 `models/types.py`）。
 * **错误处理**：必须抛出自定义错误（见 `errors.py`），禁止裸 `Exception`。
 * **写文件**：必须原子操作（`*.tmp` → `replace()`），manifest 必须在写前备份到 `.iPhoto/manifest.bak/`。
 * **数据库操作**：
-  * 使用 `AssetRepository` 进行所有数据库 CRUD 操作
-  * 通过 `get_global_repository(library_root)` 获取单例实例
+  * 使用 `IAssetRepository` / `IAlbumRepository` 接口进行所有数据库 CRUD 操作
+  * 通过 `DependencyContainer` 注入 Repository 实例
   * 使用事务上下文管理器 `with repo.transaction():` 确保原子性
   * 写操作使用幂等 upsert（INSERT OR REPLACE）
 * **锁**：写 `manifest/links` 前必须检查 `.iPhoto/locks/`，避免并发冲突。数据库已通过 WAL 模式处理并发。
@@ -87,9 +87,58 @@
 
 ---
 
-## 6. 模块职责
+## 6. 架构概览（MVVM + DDD）
 
-* **models/**：数据类 + manifest/links 的加载与保存。
+本项目采用 **MVVM + DDD（领域驱动设计）** 分层架构：
+
+### 6.1 领域层 (`domain/`)
+* **`models/`**：领域实体（`Album`, `Asset`, `MediaType`, `LiveGroup`）
+* **`models/query.py`**：查询对象模式（过滤、排序、分页）
+* **`repositories.py`**：仓储接口（`IAlbumRepository`, `IAssetRepository`）
+
+### 6.2 应用层 (`application/`)
+* **`use_cases/`**：业务用例封装
+  * `open_album.py`：打开相册用例
+  * `scan_album.py`：扫描相册用例
+  * `pair_live_photos.py`：Live Photo 配对用例
+* **`services/`**：应用服务
+  * `album_service.py`：相册业务逻辑
+  * `asset_service.py`：资产业务逻辑
+* **`interfaces.py`**：抽象接口（`IMetadataProvider`, `IThumbnailGenerator`）
+* **`dtos.py`**：数据传输对象
+
+### 6.3 基础设施层 (`infrastructure/`)
+* **`repositories/`**：仓储实现
+  * `sqlite_asset_repository.py`：SQLite 资产仓储
+  * `sqlite_album_repository.py`：SQLite 相册仓储
+* **`db/pool.py`**：线程安全数据库连接池
+* **`services/`**：基础设施服务
+
+### 6.4 GUI 层 (`gui/`)
+* **`coordinators/`**：MVVM 协调器
+  * `main_coordinator.py`：主窗口协调
+  * `navigation_coordinator.py`：导航协调
+  * `playback_coordinator.py`：播放协调
+  * `edit_coordinator.py`：编辑协调
+  * `view_router.py`：视图路由
+* **`viewmodels/`**：视图模型
+  * `asset_list_viewmodel.py`：资产列表 ViewModel
+  * `album_viewmodel.py`：相册 ViewModel
+  * `asset_data_source.py`：数据源抽象
+
+### 6.5 核心基础设施
+* **`di/container.py`**：依赖注入容器
+* **`events/bus.py`**：事件总线（发布-订阅）
+* **`errors/handler.py`**：统一错误处理
+
+---
+
+## 7. 模块职责
+
+* **domain/**：纯领域模型和仓储接口，不依赖任何框架。
+* **application/**：业务用例和应用服务，协调领域逻辑。
+* **infrastructure/**：具体实现（SQLite、ExifTool 等）。
+* **models/**：旧有数据类 + manifest/links 的加载与保存。
 * **io/**：扫描文件系统、读取元数据、生成缩略图、写旁车。
 * **core/**：算法逻辑（配对、排序、精选管理、图像调整）。
   * `light_resolver.py`：Light 调整参数解析（Brilliance/Exposure/Highlights/Shadows/Brightness/Contrast/BlackPoint）
@@ -110,7 +159,7 @@
 
 ---
 
-## 7. 代码风格
+## 8. 代码风格
 
 * 遵循 **PEP8**，行宽 100。
 * 类型提示必须写全（`Optional[str]`、`list[Path]` 等）。
@@ -120,16 +169,16 @@
 
 ---
 
-## 8. 测试与健壮性
+## 9. 测试与健壮性
 
 * 所有模块必须有 `pytest` 单测。
 * 对输入文件缺失/损坏要能报错不崩。
-* `index.jsonl`、`links.json` 不存在时必须自动重建。
+* `global_index.db`、`links.json` 不存在时必须自动重建。
 * 多端同步冲突时按 manifest 的 `conflict.strategy` 处理。
 
 ---
 
-## 9. 安全开关
+## 10. 安全开关
 
 * 默认：
 
@@ -143,7 +192,7 @@
 
 ---
 
-## 10. 最小命令集
+## 11. 最小命令集
 
 * `iphoto init`：初始化相册
 * `iphoto scan`：生成/更新索引
@@ -154,7 +203,7 @@
 
 ---
 
-## 11. 编辑系统架构 (Edit System Architecture)
+## 12. 编辑系统架构 (Edit System Architecture)
 
 ### 1. 概述
 

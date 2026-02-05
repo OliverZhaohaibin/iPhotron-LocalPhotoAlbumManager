@@ -6,7 +6,6 @@ failures in headless CI environments without display capabilities.
 
 from pathlib import Path
 from unittest.mock import MagicMock, patch
-import sys
 
 import pytest
 

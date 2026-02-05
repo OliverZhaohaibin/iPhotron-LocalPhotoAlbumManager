@@ -63,6 +63,7 @@ class NavigationCoordinator(QObject):
 
         self._static_selection: Optional[str] = None
         self._playback_coordinator: Optional[PlaybackCoordinator] = None
+        self._in_cluster_gallery: bool = False  # Tracks if we're viewing a cluster gallery from map
 
         # Trash Cleanup State
         self._trash_cleanup_running = False
@@ -209,6 +210,7 @@ class NavigationCoordinator(QObject):
 
         self._reset_playback()
         self._static_selection = "Location"
+        self._in_cluster_gallery = False
         self._asset_vm.set_active_root(root)
 
         assets = self._context.library.get_geotagged_assets()
@@ -219,6 +221,64 @@ class NavigationCoordinator(QObject):
             LOGGER.warning("Map view is unavailable; cannot display location section.")
 
         self._router.show_map()
+
+    def open_cluster_gallery(self, assets: list) -> None:
+        """Open gallery view for a clicked map cluster.
+
+        This method displays a gallery containing all media in the provided
+        cluster. The sidebar remains on the Location section, and the gallery
+        shows a back button to return to the map view.
+
+        The operation achieves O(1) performance because the assets are already
+        aggregated during the clustering phase - no database queries required.
+
+        Args:
+            assets: List of GeotaggedAsset objects from the clicked cluster.
+        """
+        root = self._context.library.root()
+        if root is None:
+            self._handle_bind_library()
+            return
+
+        self._reset_playback()
+        # Keep the static selection as "Location" so the sidebar stays highlighted
+        # on the Location section even when showing the gallery
+        self._static_selection = "Location"
+        self._in_cluster_gallery = True
+        self._asset_vm.set_active_root(root)
+
+        # Load the cluster assets directly - O(1) operation
+        self._asset_vm.load_geotagged_assets(assets, root)
+
+        # Enable cluster gallery mode on gallery page (shows back button)
+        gallery_page = self._router.gallery_page()
+        if gallery_page is not None:
+            gallery_page.set_cluster_gallery_mode(True)
+
+        # Switch to gallery view
+        self._router.show_gallery()
+
+    def return_to_map_from_cluster_gallery(self) -> None:
+        """Return from cluster gallery view to the map view.
+
+        Called when the back button in the cluster gallery is clicked.
+        Restores the map view while keeping the Location section selected.
+        """
+        if not self._in_cluster_gallery:
+            return
+
+        self._in_cluster_gallery = False
+
+        # Disable cluster gallery mode on gallery page (hides back button)
+        gallery_page = self._router.gallery_page()
+        if gallery_page is not None:
+            gallery_page.set_cluster_gallery_mode(False)
+
+        self._router.show_map()
+
+    def is_in_cluster_gallery(self) -> bool:
+        """Return True if currently viewing a cluster gallery from the map."""
+        return self._in_cluster_gallery
 
     def _album_path_for_query(self, path: Path) -> Optional[str]:
         library_root = self._context.library.root()

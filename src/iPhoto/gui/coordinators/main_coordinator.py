@@ -353,6 +353,10 @@ class MainCoordinator(QObject):
         ui.video_area.nextItemRequested.connect(self._playback.select_next)
         ui.video_area.prevItemRequested.connect(self._playback.select_previous)
 
+        # Map view cluster interactions
+        if hasattr(ui, 'map_view') and ui.map_view is not None:
+            ui.map_view.clusterActivated.connect(self._on_cluster_activated)
+
         # Menus
         ui.open_album_action.triggered.connect(self._handle_open_album_dialog)
         ui.rescan_action.triggered.connect(self._handle_rescan_clicked)
@@ -365,9 +369,13 @@ class MainCoordinator(QObject):
         if hasattr(ui, 'info_button'):
             ui.info_button.clicked.connect(self._playback.toggle_info_panel)
 
-        # Back Button
+        # Back Button (detail page)
         if hasattr(ui, 'back_button'):
             ui.back_button.clicked.connect(self._handle_back_button)
+
+        # Gallery page back button for cluster gallery mode
+        if hasattr(ui, 'gallery_page') and hasattr(ui.gallery_page, 'backRequested'):
+            ui.gallery_page.backRequested.connect(self._handle_back_button)
 
         # Dashboard Click
         if hasattr(ui, 'albums_dashboard_page'):
@@ -524,9 +532,34 @@ class MainCoordinator(QObject):
                 self._edit.enter_edit_mode(Path(path_str))
 
     def _handle_back_button(self):
-        """Returns to the gallery view."""
+        """Handle back navigation for detail and cluster-gallery contexts."""
+
+        # In Location -> cluster flow, the same handler is used by both:
+        # 1) detail/playback back button, and
+        # 2) cluster gallery header back button.
+        #
+        # Only the gallery header back should return to map. From detail/playback
+        # we should always step back to the gallery first.
+        #
+        # Note: `is_in_cluster_gallery()` is conceptually tied to the cluster gallery
+        # state, but we also assert that the gallery view is currently active.
+        # This extra guard ensures we only navigate back to the map when the user
+        # is actually in the cluster gallery UI (header back), and not from a
+        # detail/playback context or any intermediate state during view transitions.
+        if self._navigation.is_in_cluster_gallery() and self._view_router.is_gallery_view_active():
+            self._navigation.return_to_map_from_cluster_gallery()
+            return
+
         self._playback.reset_for_gallery()
         self._view_router.show_gallery()
+
+    def _on_cluster_activated(self, assets: list):
+        """Handle cluster click from map view to open cluster gallery.
+
+        This is triggered when the user clicks a cluster with multiple assets
+        on the map. Opens a gallery showing all assets in the cluster.
+        """
+        self._navigation.open_cluster_gallery(assets)
 
     def _handle_toggle_favorite(self):
         """Toggles favorite status for selected assets."""

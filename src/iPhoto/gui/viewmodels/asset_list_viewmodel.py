@@ -49,6 +49,7 @@ class AssetListViewModel(QAbstractListModel):
         # Connect signals
         self._data_source.dataChanged.connect(self._on_source_changed)
         self._thumbnails.thumbnailReady.connect(self._on_thumbnail_ready)
+        # Track the last observed asset count; None means no prior snapshot yet.
         self._last_count: int | None = None
 
     def load_query(self, query: AssetQuery):
@@ -216,8 +217,8 @@ class AssetListViewModel(QAbstractListModel):
 
     def _on_source_changed(self):
         count = self._data_source.count()
-        if self._last_count is not None and count == self._last_count and count > 0:
-            bottom_row = count - 1
+        if self._last_count is not None and count == self._last_count:
+            bottom_row = max(count - 1, 0)
             top = self.index(0, 0)
             bottom = self.index(bottom_row, 0)
             # Defensive: QModelIndex validity can fail during Qt reset/layout churn.

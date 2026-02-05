@@ -207,9 +207,11 @@ class AssetListViewModel(QAbstractListModel):
         if self._last_snapshot is None:
             self.beginResetModel()
             self.endResetModel()
-            self._last_snapshot = (count, self._snapshot_hash(count))
+            current_hash = self._snapshot_hash(count)
+            self._last_snapshot = (count, current_hash)
             return
-        current_snapshot = (count, self._snapshot_hash(count))
+        current_hash = self._snapshot_hash(count)
+        current_snapshot = (count, current_hash)
         if self._last_snapshot == current_snapshot:
             # No changes detected; avoid unnecessary model reset to prevent full filmstrip refresh.
             return
@@ -231,18 +233,18 @@ class AssetListViewModel(QAbstractListModel):
     def _snapshot_hash(self, count: int) -> bytes:
         digest = hashlib.blake2b(digest_size=16)
         for row in range(count):
-            if row > 0:
-                # Separate entries so ordering changes alter the signature.
-                digest.update(b"\x00")
             asset = self._data_source.asset_at(row)
             if asset is None:
                 digest.update(b"\xff")
-                continue
-            digest.update(
-                str(
-                    getattr(asset, "abs_path", None) or getattr(asset, "path", None) or ""
-                ).encode("utf-8")
-            )
+            else:
+                digest.update(
+                    str(
+                        getattr(asset, "abs_path", None) or getattr(asset, "path", None) or ""
+                    ).encode("utf-8")
+                )
+            if row < count - 1:
+                # Separate entries so ordering changes alter the signature.
+                digest.update(b"\x00")
         return digest.digest()
 
     # --- QML / Scriptable Helpers ---

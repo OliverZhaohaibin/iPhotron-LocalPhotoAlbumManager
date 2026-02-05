@@ -237,19 +237,19 @@ class AssetListViewModel(QAbstractListModel):
     def _snapshot_hash(self, count: int) -> bytes:
         digest = hashlib.blake2b(digest_size=16)
         for row in range(count):
-            if row > 0:
-                # Separate entries so ordering changes alter the signature.
-                digest.update(_SNAPSHOT_SEPARATOR)
             asset = self._data_source.asset_at(row)
             if asset is None:
                 digest.update(_SNAPSHOT_NULL_MARKER)
             else:
-                digest.update(
-                    str(
-                        getattr(asset, "abs_path", None) or getattr(asset, "path", None) or ""
-                    ).encode("utf-8")
-                )
+                digest.update(self._get_asset_path(asset).encode("utf-8"))
+            # Separate entries so ordering changes alter the signature.
+            digest.update(_SNAPSHOT_SEPARATOR)
         return digest.digest()
+
+    @staticmethod
+    def _get_asset_path(asset: object) -> str:
+        abs_path = getattr(asset, "abs_path", None) or getattr(asset, "path", None)
+        return "" if abs_path is None else str(abs_path)
 
     # --- QML / Scriptable Helpers ---
 

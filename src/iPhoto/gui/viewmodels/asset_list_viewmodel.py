@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 from typing import Any, Dict, Optional, cast
 
@@ -35,14 +36,12 @@ class AssetListViewModel(QAbstractListModel):
         # Connect signals
         self._data_source.dataChanged.connect(self._on_source_changed)
         self._thumbnails.thumbnailReady.connect(self._on_thumbnail_ready)
-        # Track the last observed asset count; None means no prior snapshot yet.
-        self._last_count: Optional[int] = None
-        self._last_paths: list[str] = []
+        # Track the last observed asset signature; None means no prior snapshot yet.
+        self._last_snapshot: Optional[tuple[int, bytes]] = None
 
     def load_query(self, query: AssetQuery):
         """Triggers data loading for a new query."""
-        self._last_count = None
-        self._last_paths = []
+        self._last_snapshot = None
         self._data_source.load(query)
 
     def set_active_root(self, root: Optional[Path]) -> None:
@@ -205,19 +204,13 @@ class AssetListViewModel(QAbstractListModel):
 
     def _on_source_changed(self):
         count = self._data_source.count()
-        current_paths = self._snapshot_paths(count)
-        if (
-            self._last_count is not None
-            and count == self._last_count
-            and current_paths == self._last_paths
-        ):
-            self._last_count = count
-            self._last_paths = current_paths
+        current_snapshot = (count, self._snapshot_hash(count))
+        if self._last_snapshot == current_snapshot:
+            # No changes detected; avoid unnecessary model reset to prevent full filmstrip refresh.
             return
         self.beginResetModel()
         self.endResetModel()
-        self._last_count = count
-        self._last_paths = current_paths
+        self._last_snapshot = current_snapshot
 
     def _on_thumbnail_ready(self, path: Path):
         # Find index for path and emit dataChanged
@@ -230,19 +223,22 @@ class AssetListViewModel(QAbstractListModel):
                 self.dataChanged.emit(idx, idx, [Qt.DecorationRole])
                 break
 
-    def _snapshot_paths(self, count: int) -> list[str]:
-        paths: list[str] = []
+    def _snapshot_hash(self, count: int) -> bytes:
+        digest = hashlib.blake2b(digest_size=16)
         for row in range(count):
             asset = self._data_source.asset_at(row)
             if asset is None:
-                paths.append("")
+                digest.update(b"\x00")
                 continue
-            abs_path = getattr(asset, "abs_path", None) or getattr(asset, "path", None)
+            abs_path = getattr(asset, "abs_path", None)
             if abs_path is None:
-                paths.append("")
+                abs_path = getattr(asset, "path", None)
+            if abs_path is None:
+                digest.update(b"\x00")
             else:
-                paths.append(str(abs_path))
-        return paths
+                digest.update(str(abs_path).encode("utf-8"))
+            digest.update(b"\x00")
+        return digest.digest()
 
     # --- QML / Scriptable Helpers ---
 

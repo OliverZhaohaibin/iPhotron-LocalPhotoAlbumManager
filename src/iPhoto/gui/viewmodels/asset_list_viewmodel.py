@@ -54,7 +54,7 @@ class AssetListViewModel(QAbstractListModel):
         self._data_source.dataChanged.connect(self._on_source_changed)
         self._thumbnails.thumbnailReady.connect(self._on_thumbnail_ready)
         # Track the last observed asset count; None means no prior snapshot yet.
-        self._last_count: int | None = None
+        self._last_count: Optional[int] = None
 
     def load_query(self, query: AssetQuery):
         """Triggers data loading for a new query."""
@@ -232,9 +232,10 @@ class AssetListViewModel(QAbstractListModel):
                 self.dataChanged.emit(top, bottom, self._NON_LAYOUT_ROLES)
             else:
                 _LOGGER.warning(
-                    "Skipped dataChanged emission due to invalid indices (top=%s, bottom=%s)",
-                    top.isValid(),
-                    bottom.isValid(),
+                    "Skipped dataChanged emission due to invalid indices (top_row=%s, bottom_row=%s, count=%s)",
+                    top.row(),
+                    bottom.row(),
+                    count,
                 )
             return
         self.beginResetModel()

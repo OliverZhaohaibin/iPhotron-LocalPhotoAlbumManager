@@ -698,9 +698,9 @@ class LibraryManager(QObject):
             for parent, kids in children.items()
         }
         if (
-            refreshed_albums == previous_albums
+            new_nodes == previous_nodes
+            and refreshed_albums == previous_albums
             and refreshed_children == previous_children
-            and new_nodes == previous_nodes
         ):
             return
         self._albums = refreshed_albums

@@ -1,27 +1,60 @@
-"""Update helpers for the detail view header widgets."""
+"""Update helpers for the detail view header widgets.
+
+This module provides unified header management combining:
+- Label updates for location and timestamp display
+- Layout management for widget reparenting between detail and edit modes
+"""
 
 from __future__ import annotations
 
 from calendar import month_name
 from datetime import datetime, timezone
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 from dateutil.parser import isoparse
-from PySide6.QtCore import QAbstractItemModel, Qt
+from PySide6.QtCore import QAbstractItemModel, QObject, Qt
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import QLabel
 
 from ..models.roles import Roles
 
+if TYPE_CHECKING:
+    from ..ui_main_window import Ui_MainWindow
 
-class HeaderController:
-    """Drive the location and timestamp labels shown above the player."""
 
-    def __init__(self, location_label: QLabel, timestamp_label: QLabel) -> None:
-        """Capture label widgets and prepare convenience fonts."""
+class HeaderController(QObject):
+    """Unified controller for header label updates and layout management.
+    
+    This controller manages:
+    - Location and timestamp labels shown above the player (always available)
+    - Widget reparenting between detail header and edit header during mode transitions
+      (requires ``ui`` parameter to be set)
+    
+    The layout management methods (``switch_to_edit_mode`` and ``restore_detail_mode``)
+    are no-ops if the ``ui`` parameter was not provided during initialization.
+    """
 
+    def __init__(
+        self,
+        location_label: QLabel,
+        timestamp_label: QLabel,
+        ui: Optional["Ui_MainWindow"] = None,
+        parent: Optional[QObject] = None,
+    ) -> None:
+        """Initialize header controller with label widgets and optional UI reference.
+        
+        Args:
+            location_label: The label widget for displaying location information.
+            timestamp_label: The label widget for displaying timestamp information.
+            ui: Optional UI reference for layout management during mode transitions.
+            parent: Optional parent QObject for Qt object tree management.
+        """
+        super().__init__(parent)
+        
         self._location_label = location_label
         self._timestamp_label = timestamp_label
+        self._ui = ui
+        
         self._timestamp_default_font = QFont(self._timestamp_label.font())
         self._timestamp_single_line_font = QFont(self._timestamp_label.font())
         if self._timestamp_single_line_font.pointSize() > 0:
@@ -109,3 +142,50 @@ class HeaderController:
         if not month_label:
             month_label = f"{localized.month:02d}"
         return f"{localized.day}. {month_label}, {localized:%H:%M}"
+
+    # ------------------------------------------------------------------
+    # Layout Management (merged from HeaderLayoutManager)
+    # ------------------------------------------------------------------
+    
+    def switch_to_edit_mode(self) -> None:
+        """Reparent shared toolbar widgets into the edit header.
+        
+        Moves zoom widget, info button, and favorite button from the detail
+        header to the edit header layout. Requires UI reference to be set.
+        """
+        if self._ui is None:
+            return
+            
+        ui = self._ui
+
+        # Move Zoom Widget
+        if ui.edit_zoom_host_layout.indexOf(ui.zoom_widget) == -1:
+            ui.edit_zoom_host_layout.addWidget(ui.zoom_widget)
+        ui.zoom_widget.show()
+
+        # Move Info and Favorite buttons
+        right_layout = ui.edit_right_controls_layout
+        if right_layout.indexOf(ui.info_button) == -1:
+            # Insert at beginning to match desired order
+            right_layout.insertWidget(0, ui.info_button)
+        if right_layout.indexOf(ui.favorite_button) == -1:
+            right_layout.insertWidget(1, ui.favorite_button)
+
+    def restore_detail_mode(self) -> None:
+        """Return shared toolbar widgets to the detail header layout.
+        
+        Restores zoom widget, info button, and favorite button to their
+        original positions in the detail header. Requires UI reference to be set.
+        """
+        if self._ui is None:
+            return
+            
+        ui = self._ui
+
+        # Restore widgets to their original positions in detail_actions_layout
+        # We rely on indices captured/stored in UI setup or assume they are static
+        ui.detail_actions_layout.insertWidget(ui.detail_info_button_index, ui.info_button)
+        ui.detail_actions_layout.insertWidget(ui.detail_favorite_button_index, ui.favorite_button)
+
+        # Restore Zoom Widget
+        ui.detail_header_layout.insertWidget(ui.detail_zoom_widget_index, ui.zoom_widget)

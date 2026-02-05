@@ -7,6 +7,7 @@ import uuid
 from pathlib import Path
 from unittest.mock import Mock, MagicMock
 from datetime import datetime
+from typing import Any, Dict, List, Optional
 
 from src.iPhoto.domain.models import Album, Asset, MediaType
 from src.iPhoto.infrastructure.repositories.sqlite_album_repository import SQLiteAlbumRepository
@@ -17,6 +18,36 @@ from src.iPhoto.application.use_cases.open_album import OpenAlbumUseCase
 from src.iPhoto.application.use_cases.scan_album import ScanAlbumUseCase
 from src.iPhoto.application.use_cases.pair_live_photos import PairLivePhotosUseCase
 from src.iPhoto.application.dtos import OpenAlbumRequest, ScanAlbumRequest, PairLivePhotosRequest
+from src.iPhoto.application.interfaces import IMetadataProvider, IThumbnailGenerator
+
+
+class MockMetadataProvider(IMetadataProvider):
+    """Mock metadata provider for testing."""
+    
+    def get_metadata_batch(self, paths: List[Path]) -> List[Dict[str, Any]]:
+        return [{"SourceFile": str(p)} for p in paths]
+    
+    def normalize_metadata(self, root: Path, file_path: Path, raw_metadata: Dict[str, Any]) -> Dict[str, Any]:
+        rel_path = file_path.relative_to(root)
+        ext = file_path.suffix.lower()
+        is_video = ext in ('.mp4', '.mov', '.avi', '.mkv')
+        return {
+            'id': f"as_{hash(str(rel_path)) % 1000000:06d}",
+            'rel': str(rel_path),
+            'bytes': file_path.stat().st_size if file_path.exists() else 0,
+            'dt': None,
+            'ts': int(file_path.stat().st_mtime * 1_000_000) if file_path.exists() else 0,
+            'media_type': 1 if is_video else 0,
+            'w': 100,
+            'h': 100,
+        }
+
+
+class MockThumbnailGenerator(IThumbnailGenerator):
+    """Mock thumbnail generator for testing."""
+    
+    def generate_micro_thumbnail(self, path: Path) -> Optional[str]:
+        return None  # Skip thumbnail generation in tests
 
 @pytest.fixture
 def db_pool(tmp_path):
@@ -35,6 +66,17 @@ def asset_repo(db_pool):
 @pytest.fixture
 def event_bus():
     return EventBus()
+
+
+@pytest.fixture
+def metadata_provider():
+    return MockMetadataProvider()
+
+
+@pytest.fixture
+def thumbnail_generator():
+    return MockThumbnailGenerator()
+
 
 # --- Repository Tests ---
 
@@ -79,7 +121,7 @@ def test_open_album_use_case(album_repo, asset_repo, event_bus, tmp_path):
     saved_album = album_repo.get(response.album_id)
     assert saved_album is not None
 
-def test_scan_album_use_case(album_repo, asset_repo, event_bus, tmp_path):
+def test_scan_album_use_case(album_repo, asset_repo, event_bus, metadata_provider, thumbnail_generator, tmp_path):
     # Setup album
     album_path = tmp_path / "ScanTest"
     album_path.mkdir()
@@ -90,7 +132,7 @@ def test_scan_album_use_case(album_repo, asset_repo, event_bus, tmp_path):
     album_repo.save(album)
 
     # Execute scan
-    use_case = ScanAlbumUseCase(album_repo, asset_repo, event_bus)
+    use_case = ScanAlbumUseCase(album_repo, asset_repo, event_bus, metadata_provider, thumbnail_generator)
     response = use_case.execute(ScanAlbumRequest(album_id=album.id))
 
     assert response.added_count == 2

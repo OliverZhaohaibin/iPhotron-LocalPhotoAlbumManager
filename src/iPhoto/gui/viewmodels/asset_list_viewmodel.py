@@ -217,12 +217,11 @@ class AssetListViewModel(QAbstractListModel):
     def _on_source_changed(self):
         count = self._data_source.count()
         if count == self._last_count:
-            if count == 0:
-                return
+            bottom_row = max(count - 1, 0)
             top = self.index(0, 0)
-            bottom = self.index(count - 1, 0)
+            bottom = self.index(bottom_row, 0)
             if top.isValid() and bottom.isValid():
-                self.dataChanged.emit(top, bottom, list(self._NON_LAYOUT_ROLES))
+                self.dataChanged.emit(top, bottom, self._NON_LAYOUT_ROLES)
             return
         self.beginResetModel()
         self.endResetModel()

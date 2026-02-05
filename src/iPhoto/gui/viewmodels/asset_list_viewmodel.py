@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 from typing import Any, Dict, Optional, cast
 
@@ -19,6 +20,10 @@ from src.iPhoto.infrastructure.services.thumbnail_cache_service import Thumbnail
 from src.iPhoto.utils.geocoding import resolve_location_name
 
 
+_SNAPSHOT_SEPARATOR = b"\x00"
+_SNAPSHOT_NULL_MARKER = b"\xff"
+
+
 class AssetListViewModel(QAbstractListModel):
     """
     ViewModel backing the asset grid and filmstrip.
@@ -35,9 +40,12 @@ class AssetListViewModel(QAbstractListModel):
         # Connect signals
         self._data_source.dataChanged.connect(self._on_source_changed)
         self._thumbnails.thumbnailReady.connect(self._on_thumbnail_ready)
+        # Track the last observed asset signature; None means no prior snapshot yet.
+        self._last_snapshot: Optional[tuple[int, bytes]] = None
 
     def load_query(self, query: AssetQuery):
         """Triggers data loading for a new query."""
+        self._last_snapshot = None
         self._data_source.load(query)
 
     def set_active_root(self, root: Optional[Path]) -> None:
@@ -200,9 +208,14 @@ class AssetListViewModel(QAbstractListModel):
 
     def _on_source_changed(self):
         count = self._data_source.count()
+        current_hash = self._snapshot_hash(count)
+        current_snapshot = (count, current_hash)
+        if self._last_snapshot == current_snapshot:
+            # No changes detected; avoid unnecessary model reset to prevent full filmstrip refresh.
+            return
         self.beginResetModel()
         self.endResetModel()
-        self._last_count = count
+        self._last_snapshot = current_snapshot
 
     def _on_thumbnail_ready(self, path: Path):
         # Find index for path and emit dataChanged
@@ -214,6 +227,23 @@ class AssetListViewModel(QAbstractListModel):
                 idx = self.index(row, 0)
                 self.dataChanged.emit(idx, idx, [Qt.DecorationRole])
                 break
+
+    def _snapshot_hash(self, count: int) -> bytes:
+        digest = hashlib.blake2b(digest_size=16)
+        for row in range(count):
+            asset = self._data_source.asset_at(row)
+            if asset is None:
+                digest.update(_SNAPSHOT_NULL_MARKER)
+            else:
+                digest.update(self._get_asset_path_bytes(asset))
+            # Separate entries so ordering changes alter the signature.
+            digest.update(_SNAPSHOT_SEPARATOR)
+        return digest.digest()
+
+    @staticmethod
+    def _get_asset_path_bytes(asset: object) -> bytes:
+        abs_path = getattr(asset, "abs_path", None) or getattr(asset, "path", None)
+        return b"" if abs_path is None else str(abs_path).encode("utf-8")
 
     # --- QML / Scriptable Helpers ---
 

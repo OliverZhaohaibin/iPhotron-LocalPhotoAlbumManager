@@ -108,3 +108,44 @@ def test_get_qml_helper(view_model, mock_data_source):
 def test_invalid_index(view_model):
     result = view_model.data(QModelIndex(), Qt.DisplayRole)
     assert result is None
+
+
+def test_unchanged_count_skips_reset(view_model, mock_data_source):
+    mock_data_source.count.return_value = 2
+    view_model._last_snapshot = (2, b"sig")
+    with (
+        patch.object(view_model, "beginResetModel") as begin_reset,
+        patch.object(view_model, "endResetModel") as end_reset,
+        patch.object(view_model, "_snapshot_hash", return_value=b"sig"),
+        patch.object(view_model.dataChanged, "emit") as emit,
+    ):
+        view_model._on_source_changed()
+    begin_reset.assert_not_called()
+    end_reset.assert_not_called()
+    emit.assert_not_called()
+
+
+def test_changed_count_triggers_reset(view_model, mock_data_source):
+    mock_data_source.count.return_value = 1
+    view_model._last_snapshot = (0, b"sig")
+    with (
+        patch.object(view_model, "beginResetModel") as begin_reset,
+        patch.object(view_model, "endResetModel") as end_reset,
+        patch.object(view_model, "_snapshot_hash", return_value=b"new"),
+    ):
+        view_model._on_source_changed()
+    begin_reset.assert_called_once()
+    end_reset.assert_called_once()
+
+
+def test_changed_paths_triggers_reset(view_model, mock_data_source):
+    mock_data_source.count.return_value = 2
+    view_model._last_snapshot = (2, b"old")
+    with (
+        patch.object(view_model, "beginResetModel") as begin_reset,
+        patch.object(view_model, "endResetModel") as end_reset,
+        patch.object(view_model, "_snapshot_hash", return_value=b"new"),
+    ):
+        view_model._on_source_changed()
+    begin_reset.assert_called_once()
+    end_reset.assert_called_once()

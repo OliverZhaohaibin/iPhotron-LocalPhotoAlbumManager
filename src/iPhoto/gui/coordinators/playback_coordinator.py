@@ -442,12 +442,19 @@ class PlaybackCoordinator(QObject):
 
         # 2. Persist adjustments
         try:
-            current_adjustments = sidecar.load_adjustments(source)
-            current_adjustments.update(updates)
-            sidecar.save_adjustments(source, current_adjustments)
+            navigation = self._navigation
+            if navigation:
+                navigation.pause_library_watcher()
+            try:
+                current_adjustments = sidecar.load_adjustments(source)
+                current_adjustments.update(updates)
+                sidecar.save_adjustments(source, current_adjustments)
 
-            # 3. Invalidate thumbnails
-            self._asset_vm.invalidate_thumbnail(str(source))
+                # 3. Invalidate thumbnails
+                self._asset_vm.invalidate_thumbnail(str(source))
+            finally:
+                if navigation:
+                    navigation.resume_library_watcher()
 
         except Exception as e:
             LOGGER.error(f"Failed to rotate: {e}")

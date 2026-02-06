@@ -5,7 +5,7 @@ Fixes blue bias issue and integrates icons.
 """
 import sys, numpy as np
 from pathlib import Path
-from PySide6.QtCore import Qt, QPoint, QSize
+from PySide6.QtCore import Qt, QPoint, QSize, Signal
 from PySide6.QtGui import QImage, QSurfaceFormat, QCursor, QIcon, QPixmap, QPainter, QColor, QPen, QLinearGradient, QFont, QPainterPath, QPointF
 from PySide6.QtOpenGLWidgets import QOpenGLWidget
 from PySide6.QtOpenGL import (
@@ -182,7 +182,6 @@ class WarmthSlider(QWidget):
     """Custom slider with gradient background and tick marks"""
     
     # Signal emitted when value changes (during drag or on release)
-    from PySide6.QtCore import Signal
     valueChanged = Signal(float)
     
     def __init__(self, parent=None):
@@ -269,7 +268,6 @@ class WarmthSlider(QWidget):
 # ======================= OpenGL viewer =======================
 class GLWBViewer(QOpenGLWidget):
     # Signal emitted when eyedropper picks a color (so UI can update)
-    from PySide6.QtCore import Signal
     colorPicked = Signal()
     
     def __init__(self, parent=None):
@@ -399,7 +397,7 @@ class GLWBViewer(QOpenGLWidget):
 
         elif self.mode == "Skin Tone":
             # Improved skin tone target based on industry standards
-            # ITU-R BT.709 typical skin tone ratios for medium caucasian/asian skin in sRGB:
+            # ITU-R BT.709 typical skin tone ratios for medium Caucasian/Asian skin in sRGB:
             # R slightly warm (1.13), G neutral (1.00), B slightly cool (0.94)
             # These values align with professional color grading practices
             # Reference: ITU-R BT.709 color space and common skin tone detection algorithms

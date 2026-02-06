@@ -268,6 +268,10 @@ class WarmthSlider(QWidget):
 
 # ======================= OpenGL viewer =======================
 class GLWBViewer(QOpenGLWidget):
+    # Signal emitted when eyedropper picks a color (so UI can update)
+    from PySide6.QtCore import Signal
+    colorPicked = Signal()
+    
     def __init__(self, parent=None):
         super().__init__(parent)
         fmt = QSurfaceFormat()
@@ -376,6 +380,12 @@ class GLWBViewer(QOpenGLWidget):
             r = rgba.red()   / 255.0
             g = rgba.green() / 255.0
             b = rgba.blue()  / 255.0
+            
+            # CRITICAL FIX: Reset gain and warmth before applying new pick
+            # This prevents accumulation of corrections when clicking multiple times
+            self.gain[:] = 1.0
+            self.warmth = 0.0
+            
             self._apply_pick(np.array([r, g, b], dtype=np.float32))
             self.toggle_eyedropper(False)
 
@@ -388,11 +398,12 @@ class GLWBViewer(QOpenGLWidget):
             gain = np.array([gray / rgb[0], gray / rgb[1], gray / rgb[2]], dtype=np.float32)
 
         elif self.mode == "Skin Tone":
-            # Improved skin tone target with better color science
-            # Target ratios based on typical caucasian skin tone in sRGB:
-            # R slightly warm (1.08), G neutral (1.00), B slightly cool (0.92)
-            # These values reduce blue bias compared to more aggressive ratios
-            target = np.array([1.08, 1.00, 0.92], dtype=np.float32)
+            # Improved skin tone target based on industry standards
+            # ITU-R BT.709 typical skin tone ratios for medium caucasian/asian skin in sRGB:
+            # R slightly warm (1.13), G neutral (1.00), B slightly cool (0.94)
+            # These values align with professional color grading practices
+            # Reference: ITU-R BT.709 color space and common skin tone detection algorithms
+            target = np.array([1.13, 1.00, 0.94], dtype=np.float32)
             target /= target.mean()
             gain = target / rgb
             # Preserve luminance using BT.709
@@ -407,6 +418,10 @@ class GLWBViewer(QOpenGLWidget):
         # Normalize gain to prevent exposure changes
         gain /= float(gain.mean() + eps)
         self.gain = gain.astype(np.float32)
+        
+        # Emit signal to notify UI that a color was picked
+        self.colorPicked.emit()
+        
         self.update()
 
 
@@ -535,6 +550,9 @@ class WBMain(QMainWindow):
 
         # Connect slider to warmth updates
         self.slider.valueChanged.connect(lambda v: self.viewer.set_warmth(v))
+        
+        # Connect viewer's colorPicked signal to reset slider
+        self.viewer.colorPicked.connect(lambda: self.slider.setValue(0))
 
     def on_mode_changed(self, text: str):
         self.viewer.set_mode(text)

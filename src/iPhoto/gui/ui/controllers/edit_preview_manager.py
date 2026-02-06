@@ -124,6 +124,19 @@ def resolve_adjustment_mapping(
         resolved["BWTone"] = 0.0
         resolved["BWGrain"] = 0.0
 
+    # Preserve the dedicated White Balance parameters so the GPU and CPU
+    # pipelines share the updated shader-compatible values.
+    wb_enabled = bool(session_values.get("WB_Enabled", False))
+    resolved["WBEnabled"] = 1.0 if wb_enabled else 0.0
+    if wb_enabled:
+        resolved["WBWarmth"] = float(session_values.get("WB_Warmth", 0.0))
+        resolved["WBTemperature"] = float(session_values.get("WB_Temperature", 0.0))
+        resolved["WBTint"] = float(session_values.get("WB_Tint", 0.0))
+    else:
+        resolved["WBWarmth"] = 0.0
+        resolved["WBTemperature"] = 0.0
+        resolved["WBTint"] = 0.0
+
     resolved.update(curve_lists)
     return resolved
 

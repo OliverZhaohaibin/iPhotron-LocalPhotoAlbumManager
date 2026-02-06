@@ -19,6 +19,10 @@ uniform vec4  uBWParams;
 uniform bool  uBWEnabled;
 uniform sampler2D uCurveLUT;  // 256x1 RGB LUT texture for curve adjustment
 uniform bool  uCurveEnabled;
+uniform float uWBWarmth;      // [-1,1]
+uniform float uWBTemperature; // [-1,1]
+uniform float uWBTint;        // [-1,1]
+uniform bool  uWBEnabled;
 uniform float uTime;
 uniform vec2  uViewSize;
 uniform vec2  uTexSize;
@@ -145,6 +149,42 @@ vec2 apply_rotation_90(vec2 uv, int rotate_steps) {
     return uv;
 }
 
+vec3 wb_warmth_adjust(vec3 c, float w) {
+    if (w == 0.0) return c;
+    float scale = 0.15 * w;
+    vec3 temp_gain = vec3(1.0 + scale, 1.0, 1.0 - scale);
+    vec3 luma_coeff = vec3(0.2126, 0.7152, 0.0722);
+    float orig_luma = dot(c, luma_coeff);
+    c = c * temp_gain;
+    float new_luma = dot(c, luma_coeff);
+    if (new_luma > 0.001) {
+        c *= (orig_luma / new_luma);
+    }
+    return c;
+}
+
+vec3 wb_temp_tint_adjust(vec3 c, float temp, float tint) {
+    if (temp == 0.0 && tint == 0.0) return c;
+    vec3 luma_coeff = vec3(0.2126, 0.7152, 0.0722);
+    float orig_luma = dot(c, luma_coeff);
+    float temp_scale = 0.3 * temp;
+    vec3 temp_gain = vec3(1.0 + temp_scale * 0.8, 1.0, 1.0 - temp_scale);
+    float tint_scale = 0.2 * tint;
+    vec3 tint_gain = vec3(1.0 + tint_scale * 0.5, 1.0 - tint_scale * 0.5, 1.0 + tint_scale * 0.5);
+    c = c * temp_gain * tint_gain;
+    float new_luma = dot(c, luma_coeff);
+    if (new_luma > 0.001) {
+        c *= (orig_luma / new_luma);
+    }
+    return c;
+}
+
+vec3 apply_wb(vec3 c, float warmth, float temperature, float tint) {
+    c = wb_warmth_adjust(c, warmth);
+    c = wb_temp_tint_adjust(c, temperature, tint);
+    return c;
+}
+
 vec3 apply_bw(vec3 color, vec2 uv) {
     float intensity = clamp(uBWParams.x, -1.0, 1.0);
     float neutrals = clamp(uBWParams.y, -1.0, 1.0);
@@ -252,6 +292,11 @@ void main() {
                         uHighlights, uShadows, contrast_factor, uBlackPoint);
 
     c = apply_color_transform(c, uSaturation, uVibrance, uColorCast, uGain);
+
+    // Apply white balance adjustment after color but before curve
+    if (uWBEnabled) {
+        c = apply_wb(c, uWBWarmth, uWBTemperature, uWBTint);
+    }
 
     // Apply curve adjustment after color but before B&W
     if (uCurveEnabled) {

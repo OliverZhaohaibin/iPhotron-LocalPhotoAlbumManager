@@ -141,6 +141,8 @@ class EditCoordinator(QObject):
         self._ui.edit_sidebar.interactionFinished.connect(self._handle_sidebar_interaction_finished)
         self._ui.edit_sidebar.bwParamsPreviewed.connect(self._handle_bw_params_previewed)
         self._ui.edit_sidebar.bwParamsCommitted.connect(self._handle_bw_params_committed)
+        self._ui.edit_sidebar.wbParamsPreviewed.connect(self._handle_wb_params_previewed)
+        self._ui.edit_sidebar.wbParamsCommitted.connect(self._handle_wb_params_committed)
         self._ui.edit_sidebar.curveParamsPreviewed.connect(self._handle_curve_params_previewed)
         self._ui.edit_sidebar.curveParamsCommitted.connect(self._handle_curve_params_committed)
         self._ui.edit_sidebar.curveEyedropperModeChanged.connect(
@@ -428,6 +430,41 @@ class EditCoordinator(QObject):
             "BW_Tone": float(params.tone),
             "BW_Grain": float(params.grain),
             "BW_Master": float(params.master),
+        }
+        self._session.set_values(updates)
+
+    def _handle_wb_params_previewed(self, params) -> None:
+        """Apply transient White Balance previews without mutating session state."""
+
+        if self._session is None or self._compare_active:
+            return
+
+        try:
+            preview_values = self._session.values()
+            preview_values.update({
+                "WB_Enabled": True,
+                "WB_Warmth": float(params.warmth),
+                "WB_Temperature": float(params.temperature),
+                "WB_Tint": float(params.tint),
+            })
+            adjustments = self._preview_manager.resolve_adjustments(preview_values)
+        except Exception:
+            _LOGGER.exception("Failed to resolve WB preview adjustments")
+            return
+
+        self._ui.edit_image_viewer.set_adjustments(adjustments)
+
+    def _handle_wb_params_committed(self, params) -> None:
+        """Persist White Balance adjustments into the active edit session."""
+
+        if self._session is None:
+            return
+
+        updates = {
+            "WB_Enabled": True,
+            "WB_Warmth": float(params.warmth),
+            "WB_Temperature": float(params.temperature),
+            "WB_Tint": float(params.tint),
         }
         self._session.set_values(updates)
 

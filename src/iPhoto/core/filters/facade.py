@@ -21,6 +21,7 @@ from ..curve_resolver import (
     generate_curve_lut,
     apply_curve_lut_to_image,
 )
+from ..wb_resolver import WBParams, apply_wb
 from .fallback_executor import apply_adjustments_fallback, apply_bw_using_qcolor
 from .jit_executor import (
     apply_adjustments_fast_qimage,
@@ -130,6 +131,15 @@ def apply_adjustments(
     # Extract curve parameters
     curve_enabled = bool(adjustments.get("Curve_Enabled", False))
 
+    # Extract white balance parameters
+    wb_flag = adjustments.get("WB_Enabled")
+    if wb_flag is None:
+        wb_flag = adjustments.get("WBEnabled")
+    wb_enabled = bool(wb_flag)
+    wb_warmth = float(adjustments.get("WB_Warmth", adjustments.get("WBWarmth", 0.0)))
+    wb_temperature = float(adjustments.get("WB_Temperature", adjustments.get("WBTemperature", 0.0)))
+    wb_tint = float(adjustments.get("WB_Tint", adjustments.get("WBTint", 0.0)))
+
     # Early exit if no adjustments are needed
     if all(
         abs(value) < 1e-6
@@ -143,7 +153,7 @@ def apply_adjustments(
             black_point,
         )
     ) and all(abs(value) < 1e-6 for value in (saturation, vibrance)) and cast < 1e-6:
-        if not apply_bw and not curve_enabled:
+        if not apply_bw and not curve_enabled and not wb_enabled:
             # Nothing to do - return a cheap copy so callers still get a detached
             # instance they are free to mutate independently.
             return QImage(result)
@@ -232,6 +242,12 @@ def apply_adjustments(
                     bw_grain,
                 )
 
+        # Apply white balance after color/B&W
+        if wb_enabled:
+            wb_params = WBParams(warmth=wb_warmth, temperature=wb_temperature, tint=wb_tint)
+            if not wb_params.is_identity():
+                transformed = apply_wb(transformed, wb_params)
+
         # Apply curve adjustment after color/B&W
         if curve_enabled:
             transformed = _apply_curve_to_qimage(transformed, adjustments)
@@ -307,6 +323,12 @@ def apply_adjustments(
             bw_tone,
             bw_grain,
         )
+
+    # Apply white balance after all other processing (JIT/fallback path)
+    if wb_enabled:
+        wb_params = WBParams(warmth=wb_warmth, temperature=wb_temperature, tint=wb_tint)
+        if not wb_params.is_identity():
+            result = apply_wb(result, wb_params)
 
     # Apply curve adjustment after all other processing
     if curve_enabled:

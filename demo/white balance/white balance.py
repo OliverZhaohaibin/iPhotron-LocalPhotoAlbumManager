@@ -57,13 +57,15 @@ vec3 warmth_adjust(vec3 c, float w){
     float scale = 0.15 * w;  // Reduced scale to prevent overcorrection
     vec3 temp_gain = vec3(1.0 + scale, 1.0, 1.0 - scale);
     
+    // Calculate original luminance before applying warmth
+    vec3 luma_coeff = vec3(0.2126, 0.7152, 0.0722);
+    float orig_luma = dot(c, luma_coeff);
+    
     // Apply warmth adjustment
     c = c * temp_gain;
     
-    // Preserve luminance using BT.709 coefficients
-    vec3 luma_coeff = vec3(0.2126, 0.7152, 0.0722);
-    float orig_luma = dot(vec3(1.0), luma_coeff) / 3.0;  // normalized
-    float new_luma = dot(temp_gain, luma_coeff) / 3.0;
+    // Preserve luminance by scaling to match original
+    float new_luma = dot(c, luma_coeff);
     if (new_luma > 0.001) {
         c *= (orig_luma / new_luma);
     }
@@ -178,6 +180,11 @@ class PipetteButton(QPushButton):
 
 class WarmthSlider(QWidget):
     """Custom slider with gradient background and tick marks"""
+    
+    # Signal emitted when value changes (during drag or on release)
+    from PySide6.QtCore import Signal
+    valueChanged = Signal(float)
+    
     def __init__(self, parent=None):
         super().__init__(parent)
         self._min = -100.0
@@ -249,10 +256,13 @@ class WarmthSlider(QWidget):
     def mouseReleaseEvent(self, event):
         self._dragging = False
         self.setCursor(Qt.OpenHandCursor)
+        # Emit signal on release for final update
+        self.valueChanged.emit(self._value)
 
     def _update_from_pos(self, x):
         ratio = max(0, min(1, x / self.width()))
         self._value = self._min + ratio * (self._max - self._min)
+        self.valueChanged.emit(self._value)  # Emit during drag
         self.update()
 
 
@@ -379,6 +389,9 @@ class GLWBViewer(QOpenGLWidget):
 
         elif self.mode == "Skin Tone":
             # Improved skin tone target with better color science
+            # Target ratios based on typical caucasian skin tone in sRGB:
+            # R slightly warm (1.08), G neutral (1.00), B slightly cool (0.92)
+            # These values reduce blue bias compared to more aggressive ratios
             target = np.array([1.08, 1.00, 0.92], dtype=np.float32)
             target /= target.mean()
             gain = target / rgb
@@ -399,14 +412,32 @@ class GLWBViewer(QOpenGLWidget):
 
 # ======================= Main Window =======================
 class WBMain(QMainWindow):
+    @staticmethod
+    def _find_icon_directory():
+        """Find the icon directory, trying multiple possible locations"""
+        script_path = Path(__file__).resolve()
+        
+        # Try relative path from demo/white balance/
+        possible_paths = [
+            script_path.parent.parent.parent / "src" / "iPhoto" / "gui" / "ui" / "icon",
+            # Fallback for different directory structures
+            script_path.parent.parent.parent / "iPhoto" / "gui" / "ui" / "icon",
+        ]
+        
+        for icon_dir in possible_paths:
+            if icon_dir.exists() and icon_dir.is_dir():
+                return icon_dir
+        
+        return None
+    
     def __init__(self):
         super().__init__()
         self.setWindowTitle("White Balance")
         
-        # Set window icon
-        icon_dir = Path(__file__).parent.parent.parent / "src" / "iPhoto" / "gui" / "ui" / "icon"
-        wb_icon_path = icon_dir / "whitebalance.square.svg"
-        if wb_icon_path.exists():
+        # Set window icon - try multiple possible locations
+        icon_dir = self._find_icon_directory()
+        wb_icon_path = icon_dir / "whitebalance.square.svg" if icon_dir else None
+        if wb_icon_path and wb_icon_path.exists():
             self.setWindowIcon(QIcon(str(wb_icon_path)))
         
         self.resize(1100, 720)
@@ -430,7 +461,7 @@ class WBMain(QMainWindow):
         title_layout.setContentsMargins(0, 0, 0, 0)
         title_layout.setSpacing(8)
         
-        if wb_icon_path.exists():
+        if wb_icon_path and wb_icon_path.exists():
             icon_label = QLabel()
             icon_pixmap = QPixmap(str(wb_icon_path)).scaled(20, 20, Qt.KeepAspectRatio, Qt.SmoothTransformation)
             icon_label.setPixmap(icon_pixmap)
@@ -472,8 +503,8 @@ class WBMain(QMainWindow):
         # Tool row
         tool_row = QHBoxLayout()
         
-        eyedropper_icon_path = icon_dir / "eyedropper.svg"
-        self.pipette = PipetteButton(str(eyedropper_icon_path) if eyedropper_icon_path.exists() else None)
+        eyedropper_icon_path = icon_dir / "eyedropper.svg" if icon_dir else None
+        self.pipette = PipetteButton(str(eyedropper_icon_path) if eyedropper_icon_path and eyedropper_icon_path.exists() else None)
         self.pipette.toggled.connect(self.on_eyedropper_toggled)
         
         self.combo = StyledComboBox()
@@ -503,29 +534,7 @@ class WBMain(QMainWindow):
         self.setCentralWidget(central)
 
         # Connect slider to warmth updates
-        self.slider_timer = None
-        self._setup_slider_connection()
-
-    def _setup_slider_connection(self):
-        """Update viewer warmth when slider changes"""
-        def on_slider_update():
-            self.viewer.set_warmth(self.slider.value())
-        
-        # Use a simple timer to throttle updates
-        from PySide6.QtCore import QTimer
-        self.slider_timer = QTimer()
-        self.slider_timer.setInterval(16)  # ~60fps
-        self.slider_timer.timeout.connect(on_slider_update)
-        
-        self.slider.mousePressEvent = lambda e: (
-            QWidget.mousePressEvent(self.slider, e),
-            self.slider_timer.start() if self.slider._dragging else None
-        )
-        self.slider.mouseReleaseEvent = lambda e: (
-            QWidget.mouseReleaseEvent(self.slider, e),
-            self.slider_timer.stop(),
-            on_slider_update()
-        )
+        self.slider.valueChanged.connect(lambda v: self.viewer.set_warmth(v))
 
     def on_mode_changed(self, text: str):
         self.viewer.set_mode(text)

@@ -5,8 +5,8 @@ Fixes blue bias issue and integrates icons.
 """
 import sys, numpy as np
 from pathlib import Path
-from PySide6.QtCore import Qt, QPoint, QSize, Signal
-from PySide6.QtGui import QImage, QSurfaceFormat, QCursor, QIcon, QPixmap, QPainter, QColor, QPen, QLinearGradient, QFont, QPainterPath, QPointF
+from PySide6.QtCore import Qt, QPoint, QSize, Signal, QPointF
+from PySide6.QtGui import QImage, QSurfaceFormat, QCursor, QIcon, QPixmap, QPainter, QColor, QPen, QLinearGradient, QFont, QPainterPath
 from PySide6.QtOpenGLWidgets import QOpenGLWidget
 from PySide6.QtOpenGL import (
     QOpenGLFunctions_3_3_Core, QOpenGLShaderProgram, QOpenGLShader, QOpenGLVertexArrayObject

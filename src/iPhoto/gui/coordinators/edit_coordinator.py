@@ -112,6 +112,7 @@ class EditCoordinator(QObject):
         self._pending_session_values: Optional[dict] = None
         self._preview_updates_suspended = False
         self._interaction_depth = 0
+        self._eyedropper_target = "curve"
 
         self._connect_signals()
 
@@ -527,8 +528,7 @@ class EditCoordinator(QObject):
     def _handle_color_picked(self, r: float, g: float, b: float) -> None:
         """Forward eyedropper color picks to the appropriate section."""
 
-        target = getattr(self, "_eyedropper_target", "curve")
-        if target == "wb":
+        if self._eyedropper_target == "wb":
             self._ui.edit_sidebar.handle_wb_color_picked(r, g, b)
         else:
             self._ui.edit_sidebar.handle_curve_color_picked(r, g, b)

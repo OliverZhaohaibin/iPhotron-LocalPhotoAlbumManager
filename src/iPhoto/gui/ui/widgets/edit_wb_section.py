@@ -11,6 +11,7 @@ import logging
 from pathlib import Path
 from typing import Optional
 
+import numpy as np
 from PySide6.QtCore import QPointF, QRectF, Qt, Signal, Slot
 from PySide6.QtGui import (
     QColor,
@@ -438,8 +439,8 @@ class _TintSlider(QWidget):
         painter.setPen(QColor(220, 220, 220))
         painter.drawText(QRectF(rect).adjusted(12, 0, 0, 0), Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, "Tint")
         painter.setPen(QColor(200, 200, 200, 180))
-        val_str = f"{self._value:+.2f}" if self._value != 0 else "0.00"
-        painter.drawText(QRectF(rect).adjusted(0, 0, -12, 0), Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight, val_str.replace("+", ""))
+        val_str = f"{self._value:.2f}"
+        painter.drawText(QRectF(rect).adjusted(0, 0, -12, 0), Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight, val_str)
 
         handle_x = self._norm() * rect.width()
         painter.setPen(QPen(self.c_indicator, 2))
@@ -620,8 +621,6 @@ class EditWBSection(QWidget):
 
         Called by the coordinator when the GL viewer reports a picked colour.
         """
-
-        import numpy as np
 
         eps = 1e-6
         rgb = np.clip(np.array([r, g, b], dtype=np.float32), eps, 1.0)

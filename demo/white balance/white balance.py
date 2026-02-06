@@ -304,38 +304,34 @@ class WarmthSlider(QWidget):
 
 
 class TemperatureSlider(QWidget):
-    """Custom slider for temperature (Kelvin) with blue-orange gradient"""
-    
+    """Custom slider for temperature (Kelvin) with smooth blue-orange gradient"""
+
     valueChanged = Signal(float)
-    
-    # Temperature range in Kelvin
+
     KELVIN_MIN = 2000.0
     KELVIN_MAX = 10000.0
-    KELVIN_DEFAULT = 6500.0  # Daylight
-    
+    KELVIN_DEFAULT = 6500.0
+
     def __init__(self, parent=None):
         super().__init__(parent)
-        self._value = self.KELVIN_DEFAULT  # Kelvin temperature
+        self._value = self.KELVIN_DEFAULT
         self._dragging = False
         self.setFixedHeight(34)
         self.setCursor(Qt.OpenHandCursor)
 
-        # Blue (cool) to Orange (warm) gradient colors
-        self.c_blue = QColor(50, 100, 180)     # Cool blue
-        self.c_orange = QColor(255, 140, 50)   # Warm orange
-        self.c_indicator = QColor(255, 255, 255)
-        self.c_tick = QColor(255, 255, 255, 60)
+        # 保持截图中的深色调，但去掉中间的黑色过渡
+        self.c_blue = QColor(44, 62, 74)  # 左侧深蓝
+        self.c_orange = QColor(94, 72, 32)  # 右侧深琥珀
+        self.c_indicator = QColor(135, 206, 250)  # 高亮蓝指示线
+        self.c_tick = QColor(255, 255, 255, 40)
 
     def _normalised_value(self):
         return (self._value - self.KELVIN_MIN) / (self.KELVIN_MAX - self.KELVIN_MIN)
 
     def value(self):
         return self._value
-    
+
     def kelvinToNormalized(self):
-        """Convert Kelvin temperature to normalized value [-1, 1] for shader"""
-        # 6500K is neutral (0), lower = cooler (negative), higher = warmer (positive)
-        # Map 2000K-10000K to [-1, 1] with 6500K at 0
         range_half = (self.KELVIN_MAX - self.KELVIN_MIN) / 2.0
         center = (self.KELVIN_MAX + self.KELVIN_MIN) / 2.0
         return (self._value - center) / range_half
@@ -349,32 +345,33 @@ class TemperatureSlider(QWidget):
         painter.setRenderHint(QPainter.Antialiasing)
         rect = self.rect()
 
-        # Blue-Orange gradient background
+        # 线性渐变：直接从深蓝过渡到深橙
         gradient = QLinearGradient(rect.left(), 0, rect.right(), 0)
         gradient.setColorAt(0, self.c_blue)
-        gradient.setColorAt(0.5, QColor(180, 180, 180))  # Neutral gray in middle
         gradient.setColorAt(1, self.c_orange)
+
         path = QPainterPath()
         path.addRoundedRect(rect, 4, 4)
         painter.fillPath(path, gradient)
 
-        # Tick marks
+        # 绘制顶部刻度
         painter.setPen(QPen(self.c_tick, 1))
-        ticks = 50
-        for i in range(ticks):
-            x = (i / ticks) * rect.width()
+        for i in range(51):
+            x = (i / 50) * rect.width()
             h = 6 if i % 5 == 0 else 3
             painter.drawLine(QPointF(x, 0), QPointF(x, h))
 
-        # Label and value
+        # 绘制文本
         font = QFont("Inter", 12, QFont.Weight.Medium)
         painter.setFont(font)
-        painter.setPen(QColor(240, 240, 240))
+        painter.setPen(QColor(220, 220, 220))
         painter.drawText(rect.adjusted(12, 0, 0, 0), Qt.AlignVCenter | Qt.AlignLeft, "Temperature")
-        painter.setPen(QColor(255, 255, 255, 160))
-        painter.drawText(rect.adjusted(0, 0, -12, 0), Qt.AlignVCenter | Qt.AlignRight, f"{int(self._value)}K")
 
-        # Position indicator
+        # 格式化数值：使用千分位逗号（匹配截图 4,971）
+        painter.setPen(QColor(200, 200, 200, 180))
+        painter.drawText(rect.adjusted(0, 0, -12, 0), Qt.AlignVCenter | Qt.AlignRight, f"{int(self._value):,}")
+
+        # 绘制位置指示线
         handle_x = self._normalised_value() * rect.width()
         painter.setPen(QPen(self.c_indicator, 2))
         painter.drawLine(QPointF(handle_x, 0), QPointF(handle_x, rect.bottom()))
@@ -402,10 +399,10 @@ class TemperatureSlider(QWidget):
 
 
 class TintSlider(QWidget):
-    """Custom slider for tint with green-magenta gradient"""
-    
+    """Custom slider for tint with smooth green-magenta gradient"""
+
     valueChanged = Signal(float)
-    
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self._min = -100.0
@@ -415,20 +412,19 @@ class TintSlider(QWidget):
         self.setFixedHeight(34)
         self.setCursor(Qt.OpenHandCursor)
 
-        # Green to Magenta gradient colors
-        self.c_green = QColor(80, 180, 80)     # Green
-        self.c_magenta = QColor(200, 80, 180)  # Magenta
-        self.c_indicator = QColor(255, 255, 255)
-        self.c_tick = QColor(255, 255, 255, 60)
+        # 保持截图中的深色调，但去掉中间的黑色过渡
+        self.c_green = QColor(44, 74, 54)  # 左侧深绿
+        self.c_magenta = QColor(84, 44, 84)  # 右侧深紫/洋红
+        self.c_indicator = QColor(218, 112, 214)  # 高亮紫色指示线
+        self.c_tick = QColor(255, 255, 255, 40)
 
     def _normalised_value(self):
         return (self._value - self._min) / (self._max - self._min)
 
     def value(self):
         return self._value
-    
+
     def normalizedValue(self):
-        """Convert value to normalized [-1, 1] for shader"""
         return self._value / 100.0
 
     def setValue(self, v):
@@ -440,33 +436,34 @@ class TintSlider(QWidget):
         painter.setRenderHint(QPainter.Antialiasing)
         rect = self.rect()
 
-        # Green-Magenta gradient background
+        # 线性渐变：直接从深绿过渡到深洋红
         gradient = QLinearGradient(rect.left(), 0, rect.right(), 0)
         gradient.setColorAt(0, self.c_green)
-        gradient.setColorAt(0.5, QColor(180, 180, 180))  # Neutral gray in middle
         gradient.setColorAt(1, self.c_magenta)
+
         path = QPainterPath()
         path.addRoundedRect(rect, 4, 4)
         painter.fillPath(path, gradient)
 
-        # Tick marks
+        # 绘制刻度
         painter.setPen(QPen(self.c_tick, 1))
-        ticks = 50
-        for i in range(ticks):
-            x = (i / ticks) * rect.width()
+        for i in range(51):
+            x = (i / 50) * rect.width()
             h = 6 if i % 5 == 0 else 3
             painter.drawLine(QPointF(x, 0), QPointF(x, h))
 
-        # Label and value
+        # 绘制文本
         font = QFont("Inter", 12, QFont.Weight.Medium)
         painter.setFont(font)
-        painter.setPen(QColor(240, 240, 240))
+        painter.setPen(QColor(220, 220, 220))
         painter.drawText(rect.adjusted(12, 0, 0, 0), Qt.AlignVCenter | Qt.AlignLeft, "Tint")
-        painter.setPen(QColor(255, 255, 255, 160))
-        val_text = f"+{int(self._value)}" if self._value > 0 else str(int(self._value))
-        painter.drawText(rect.adjusted(0, 0, -12, 0), Qt.AlignVCenter | Qt.AlignRight, val_text)
 
-        # Position indicator
+        # 格式化数值：保留两位小数（匹配截图 4.57）
+        painter.setPen(QColor(200, 200, 200, 180))
+        val_str = f"{self._value:+.2f}" if self._value != 0 else "0.00"
+        painter.drawText(rect.adjusted(0, 0, -12, 0), Qt.AlignVCenter | Qt.AlignRight, val_str.replace("+", ""))
+
+        # 绘制位置指示线
         handle_x = self._normalised_value() * rect.width()
         painter.setPen(QPen(self.c_indicator, 2))
         painter.drawLine(QPointF(handle_x, 0), QPointF(handle_x, rect.bottom()))
@@ -491,7 +488,6 @@ class TintSlider(QWidget):
         self._value = self._min + ratio * (self._max - self._min)
         self.valueChanged.emit(self._value)
         self.update()
-
 
 # ======================= OpenGL viewer =======================
 class GLWBViewer(QOpenGLWidget):

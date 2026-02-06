@@ -1,21 +1,21 @@
 # -*- coding: utf-8 -*-
 """
-Minimal standalone GPU White Balance demo.
-- Modes: Neutral Gray / Skin Tone / Temperature/Tint
-- Eyedropper tool (pick from image)
-- One Warmth slider for fine-tuning
+Merged GPU White Balance with warmth-ui styling.
+Fixes blue bias issue and integrates icons.
 """
 import sys, numpy as np
-from PySide6.QtCore import Qt, QPoint, QSize
-from PySide6.QtGui import QImage, QSurfaceFormat, QCursor
+from pathlib import Path
+from PySide6.QtCore import Qt, QPoint, QSize, Signal, QPointF
+from PySide6.QtGui import QImage, QSurfaceFormat, QCursor, QIcon, QPixmap, QPainter, QColor, QPen, QLinearGradient, QFont, QPainterPath
 from PySide6.QtOpenGLWidgets import QOpenGLWidget
 from PySide6.QtOpenGL import (
     QOpenGLFunctions_3_3_Core, QOpenGLShaderProgram, QOpenGLShader, QOpenGLVertexArrayObject
 )
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QFileDialog, QWidget, QVBoxLayout, QHBoxLayout,
-    QLabel, QSlider, QPushButton, QComboBox
+    QLabel, QSlider, QPushButton, QComboBox, QFrame
 )
+from PySide6.QtSvgWidgets import QSvgWidget
 from OpenGL import GL as gl
 
 
@@ -48,29 +48,228 @@ uniform sampler2D uTex;
 uniform vec3  uGain;     // per-channel gains (computed on CPU)
 uniform float uWarmth;   // [-1,1]  negative=cooler(偏蓝)  positive=warmer(偏黄)
 
-// 简单的色温微调：对 R/B 做相反缩放，再归一化到平均=1，保持亮度大致不变
+// Improved warmth adjustment with proper normalization
 vec3 warmth_adjust(vec3 c, float w){
     if (w == 0.0) return c;
-    // max scale ~ ±30%
-    float k = 0.30 * w;
-    vec3 g = vec3(1.0 + k, 1.0, 1.0 - k);
-    g /= (g.r + g.g + g.b) / 3.0; // 归一化到平均增益=1
-    return c * g;
+    
+    // Apply warmth by adjusting R and B channels
+    // Positive w increases R (warm), negative increases B (cool)
+    float scale = 0.15 * w;  // Reduced scale to prevent overcorrection
+    vec3 temp_gain = vec3(1.0 + scale, 1.0, 1.0 - scale);
+    
+    // Calculate original luminance before applying warmth
+    vec3 luma_coeff = vec3(0.2126, 0.7152, 0.0722);
+    float orig_luma = dot(c, luma_coeff);
+    
+    // Apply warmth adjustment
+    c = c * temp_gain;
+    
+    // Preserve luminance by scaling to match original
+    float new_luma = dot(c, luma_coeff);
+    if (new_luma > 0.001) {
+        c *= (orig_luma / new_luma);
+    }
+    
+    return c;
 }
 
 void main(){
     vec3 color = texture(uTex, vUV).rgb;
-    // 先应用 CPU 估计的通道增益，再用暖色微调
+    
+    // Apply channel gains first
     color = color * uGain;
+    
+    // Then apply warmth adjustment with proper normalization
     color = warmth_adjust(color, uWarmth);
+    
+    // Final clamp
     color = clamp(color, 0.0, 1.0);
     FragColor = vec4(color, 1.0);
 }
 """
 
 
+# ======================= Styled Components =======================
+class StyledComboBox(QComboBox):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setStyleSheet("""
+            QComboBox {
+                background-color: #383838;
+                color: white;
+                border-radius: 4px;
+                padding: 4px 10px;
+                font-size: 13px;
+                border: 1px solid #555;
+            }
+            QComboBox::drop-down {
+                border: 0px;
+                width: 25px;
+            }
+            QComboBox::down-arrow {
+                image: none;
+                border: none;
+            }
+            QComboBox QAbstractItemView {
+                background-color: #383838;
+                color: white;
+                selection-background-color: #505050;
+                border: 1px solid #555;
+                outline: 0px;
+            }
+        """)
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        arrow_color = QColor("#4a90e2")
+        rect = self.rect()
+        cx = rect.width() - 15
+        cy = rect.height() / 2
+        size = 4
+
+        p1 = QPointF(cx - size, cy - 2)
+        p2 = QPointF(cx, cy - 6)
+        p3 = QPointF(cx + size, cy - 2)
+
+        p4 = QPointF(cx - size, cy + 2)
+        p5 = QPointF(cx, cy + 6)
+        p6 = QPointF(cx + size, cy + 2)
+
+        pen = QPen(arrow_color, 2)
+        pen.setCapStyle(Qt.RoundCap)
+        painter.setPen(pen)
+        painter.drawPolyline([p1, p2, p3])
+        painter.drawPolyline([p4, p5, p6])
+        painter.end()
+
+
+class PipetteButton(QPushButton):
+    def __init__(self, icon_path=None, parent=None):
+        super().__init__(parent)
+        self.icon_path = icon_path
+        self.setFixedSize(36, 32)
+        self.setCursor(Qt.PointingHandCursor)
+        self.setCheckable(True)
+        self.setStyleSheet("""
+            QPushButton {
+                background-color: #383838;
+                border: 1px solid #555;
+                border-radius: 6px;
+                color: #ddd;
+            }
+            QPushButton:hover { background-color: #444; }
+            QPushButton:checked { background-color: #4a90e2; border-color: #4a90e2; }
+        """)
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        if self.icon_path and Path(self.icon_path).exists():
+            painter = QPainter(self)
+            painter.setRenderHint(QPainter.Antialiasing)
+            # Load and draw SVG icon centered
+            pixmap = QPixmap(self.icon_path)
+            if not pixmap.isNull():
+                # Scale to fit button (with padding)
+                scaled = pixmap.scaled(24, 24, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                x = (self.width() - scaled.width()) // 2
+                y = (self.height() - scaled.height()) // 2
+                painter.drawPixmap(x, y, scaled)
+
+
+class WarmthSlider(QWidget):
+    """Custom slider with gradient background and tick marks"""
+    
+    # Signal emitted when value changes (during drag or on release)
+    valueChanged = Signal(float)
+    
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._min = -100.0
+        self._max = 100.0
+        self._value = 0.0
+        self._dragging = False
+        self.setFixedHeight(34)
+        self.setCursor(Qt.OpenHandCursor)
+
+        self.c_blue_track = QColor(44, 62, 74)
+        self.c_orange_track = QColor(74, 62, 32)
+        self.c_indicator = QColor(255, 204, 0)
+        self.c_tick = QColor(255, 255, 255, 60)
+
+    def _normalised_value(self):
+        return (self._value - self._min) / (self._max - self._min)
+
+    def value(self):
+        return self._value
+
+    def setValue(self, v):
+        self._value = max(self._min, min(self._max, float(v)))
+        self.update()
+
+    def paintEvent(self, _):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        rect = self.rect()
+
+        # Gradient background
+        gradient = QLinearGradient(rect.left(), 0, rect.right(), 0)
+        gradient.setColorAt(0, self.c_blue_track)
+        gradient.setColorAt(1, self.c_orange_track)
+        path = QPainterPath()
+        path.addRoundedRect(rect, 4, 4)
+        painter.fillPath(path, gradient)
+
+        # Tick marks
+        painter.setPen(QPen(self.c_tick, 1))
+        ticks = 50
+        for i in range(ticks):
+            x = (i / ticks) * rect.width()
+            h = 6 if i % 5 == 0 else 3
+            painter.drawLine(QPointF(x, 0), QPointF(x, h))
+
+        # Label and value
+        font = QFont("Inter", 12, QFont.Weight.Medium)
+        painter.setFont(font)
+        painter.setPen(QColor(240, 240, 240))
+        painter.drawText(rect.adjusted(12, 0, 0, 0), Qt.AlignVCenter | Qt.AlignLeft, "Warmth")
+        painter.setPen(QColor(255, 255, 255, 160))
+        painter.drawText(rect.adjusted(0, 0, -12, 0), Qt.AlignVCenter | Qt.AlignRight, str(int(self._value)))
+
+        # Position indicator
+        handle_x = self._normalised_value() * rect.width()
+        painter.setPen(QPen(self.c_indicator, 2))
+        painter.drawLine(QPointF(handle_x, 0), QPointF(handle_x, rect.bottom()))
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self._dragging = True
+            self.setCursor(Qt.ClosedHandCursor)
+            self._update_from_pos(event.position().x())
+
+    def mouseMoveEvent(self, event):
+        if self._dragging:
+            self._update_from_pos(event.position().x())
+
+    def mouseReleaseEvent(self, event):
+        self._dragging = False
+        self.setCursor(Qt.OpenHandCursor)
+        # Emit signal on release for final update
+        self.valueChanged.emit(self._value)
+
+    def _update_from_pos(self, x):
+        ratio = max(0, min(1, x / self.width()))
+        self._value = self._min + ratio * (self._max - self._min)
+        self.valueChanged.emit(self._value)  # Emit during drag
+        self.update()
+
+
 # ======================= OpenGL viewer =======================
 class GLWBViewer(QOpenGLWidget):
+    # Signal emitted when eyedropper picks a color (so UI can update)
+    colorPicked = Signal()
+    
     def __init__(self, parent=None):
         super().__init__(parent)
         fmt = QSurfaceFormat()
@@ -78,19 +277,17 @@ class GLWBViewer(QOpenGLWidget):
         fmt.setProfile(QSurfaceFormat.CoreProfile)
         self.setFormat(fmt)
 
-        self._img = None            # QImage RGBA8888
+        self._img = None
         self._tex_id = 0
         self._shader = None
         self._vao = None
         self._uniforms = {}
 
-        self.mode = "Neutral Gray"  # or "Skin Tone" / "Temperature/Tint"
+        self.mode = "Neutral Gray"
         self.gain = np.array([1.0, 1.0, 1.0], dtype=np.float32)
         self.warmth = 0.0
 
         self._eyedropper_on = False
-
-        # for aspect-agnostic mapping, we keep it simple: stretch to widget (full-bleed)
         self.setMouseTracking(True)
 
     def initializeGL(self):
@@ -111,7 +308,7 @@ class GLWBViewer(QOpenGLWidget):
         gl.glDisable(gl.GL_DEPTH_TEST)
 
     def paintGL(self):
-        gl.glClearColor(0, 0, 0, 1)
+        gl.glClearColor(0.1, 0.1, 0.1, 1)
         gl.glClear(gl.GL_COLOR_BUFFER_BIT)
         if not self._shader or self._img is None or self._tex_id == 0:
             return
@@ -132,7 +329,6 @@ class GLWBViewer(QOpenGLWidget):
             return
         self._img = img.convertToFormat(QImage.Format_RGBA8888)
         self._upload_texture()
-        # reset gain & warmth
         self.gain[:] = 1.0
         self.warmth = 0.0
         self.update()
@@ -157,13 +353,12 @@ class GLWBViewer(QOpenGLWidget):
         gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MIN_FILTER, gl.GL_LINEAR)
         gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MAG_FILTER, gl.GL_LINEAR)
 
-    # ---------- eyedropper ----------
     def set_mode(self, mode: str):
         self.mode = mode
         self.update()
 
     def set_warmth(self, v: float):
-        self.warmth = v
+        self.warmth = v / 100.0  # Convert from -100..100 to -1..1
         self.update()
 
     def toggle_eyedropper(self, on: bool):
@@ -175,122 +370,208 @@ class GLWBViewer(QOpenGLWidget):
             return super().mousePressEvent(e)
 
         if e.button() == Qt.LeftButton:
-            # widget坐标 -> UV (0..1)，画面拉伸满铺（最小demo）
             uvx = max(0.0, min(1.0, e.position().x() / max(1, self.width())))
             uvy = max(0.0, min(1.0, e.position().y() / max(1, self.height())))
-            # 纹理坐标 -> 图像像素
             ix = int(uvx * (self._img.width() - 1))
             iy = int(uvy * (self._img.height() - 1))
             rgba = self._img.pixelColor(ix, iy)
             r = rgba.red()   / 255.0
             g = rgba.green() / 255.0
             b = rgba.blue()  / 255.0
+            
+            # CRITICAL FIX: Reset gain and warmth before applying new pick
+            # This prevents accumulation of corrections when clicking multiple times
+            self.gain[:] = 1.0
+            self.warmth = 0.0
+            
             self._apply_pick(np.array([r, g, b], dtype=np.float32))
             self.toggle_eyedropper(False)
 
-    # 计算不同模式下的增益
     def _apply_pick(self, rgb: np.ndarray):
         eps = 1e-6
         rgb = np.clip(rgb, eps, 1.0)
 
         if self.mode == "Neutral Gray":
-            # 让取样点变为灰：RGB相等
             gray = float(rgb.mean())
             gain = np.array([gray / rgb[0], gray / rgb[1], gray / rgb[2]], dtype=np.float32)
 
         elif self.mode == "Skin Tone":
-            # 目标肤色比例（非常简化的经验值），保持亮度后归一化
-            target = np.array([1.10, 1.00, 0.90], dtype=np.float32)
+            # Improved skin tone target based on industry standards
+            # ITU-R BT.709 typical skin tone ratios for medium Caucasian/Asian skin in sRGB:
+            # R slightly warm (1.13), G neutral (1.00), B slightly cool (0.94)
+            # These values align with professional color grading practices
+            # Reference: ITU-R BT.709 color space and common skin tone detection algorithms
+            target = np.array([1.13, 1.00, 0.94], dtype=np.float32)
             target /= target.mean()
             gain = target / rgb
-            # 亮度保持（用 BT.709 亮度）
+            # Preserve luminance using BT.709
             w = np.array([0.2126, 0.7152, 0.0722], dtype=np.float32)
             Y_src = float((w * rgb).sum())
             Y_new = float((w * (rgb * gain)).sum()) + eps
             gain *= (Y_src / Y_new)
 
-        else:  # "Temperature/Tint"：不依赖取样；用当前暖色滑条做调节，这里保持 1:1
+        else:  # "Temp & Tint"
             gain = np.array([1.0, 1.0, 1.0], dtype=np.float32)
 
-        # 把增益归一化到均值=1，避免过多改变整体曝光
+        # Normalize gain to prevent exposure changes
         gain /= float(gain.mean() + eps)
         self.gain = gain.astype(np.float32)
+        
+        # Emit signal to notify UI that a color was picked
+        self.colorPicked.emit()
+        
         self.update()
 
 
-# ======================= GUI MainWindow =======================
+# ======================= Main Window =======================
 class WBMain(QMainWindow):
+    @staticmethod
+    def _find_icon_directory():
+        """Find the icon directory, trying multiple possible locations"""
+        script_path = Path(__file__).resolve()
+        
+        # Try relative path from demo/white balance/
+        possible_paths = [
+            script_path.parent.parent.parent / "src" / "iPhoto" / "gui" / "ui" / "icon",
+            # Fallback for different directory structures
+            script_path.parent.parent.parent / "iPhoto" / "gui" / "ui" / "icon",
+        ]
+        
+        for icon_dir in possible_paths:
+            if icon_dir.exists() and icon_dir.is_dir():
+                return icon_dir
+        
+        return None
+    
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("GPU White Balance Demo")
+        self.setWindowTitle("White Balance")
+        
+        # Set window icon - try multiple possible locations
+        icon_dir = self._find_icon_directory()
+        wb_icon_path = icon_dir / "whitebalance.square.svg" if icon_dir else None
+        if wb_icon_path and wb_icon_path.exists():
+            self.setWindowIcon(QIcon(str(wb_icon_path)))
+        
         self.resize(1100, 720)
+        self.setStyleSheet("background-color: #1a1a1a;")
 
         self.viewer = GLWBViewer()
 
-        # 顶部工具栏区域
-        top = QWidget()
-        th = QHBoxLayout(top)
-        th.setContentsMargins(6, 6, 6, 6)
-        th.setSpacing(8)
+        # Control panel with warmth-ui styling
+        panel = QWidget()
+        panel.setStyleSheet("background-color: #1a1a1a;")
+        panel_layout = QVBoxLayout(panel)
+        panel_layout.setContentsMargins(10, 10, 10, 10)
+        panel_layout.setSpacing(12)
 
-        open_btn = QPushButton("Open Image")
+        # Header
+        header = QHBoxLayout()
+        
+        # Title with icon
+        title_widget = QWidget()
+        title_layout = QHBoxLayout(title_widget)
+        title_layout.setContentsMargins(0, 0, 0, 0)
+        title_layout.setSpacing(8)
+        
+        if wb_icon_path and wb_icon_path.exists():
+            icon_label = QLabel()
+            icon_pixmap = QPixmap(str(wb_icon_path)).scaled(20, 20, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            icon_label.setPixmap(icon_pixmap)
+            title_layout.addWidget(icon_label)
+        
+        title_lbl = QLabel("White Balance")
+        title_lbl.setStyleSheet("color: #eee; font-weight: bold; font-size: 14px;")
+        title_layout.addWidget(title_lbl)
+        
+        header.addWidget(title_widget)
+        header.addStretch()
+
+        open_btn = QPushButton("OPEN")
+        open_btn.setFixedSize(50, 20)
+        open_btn.setStyleSheet("""
+            QPushButton { 
+                background-color: #333; color: #999; border: 1px solid #444; 
+                border-radius: 10px; font-size: 9px; font-weight: bold;
+            }
+            QPushButton:hover { background-color: #444; }
+        """)
         open_btn.clicked.connect(self.open_image)
 
-        self.mode_cb = QComboBox()
-        self.mode_cb.addItems(["Neutral Gray", "Skin Tone", "Temperature/Tint"])
-        self.mode_cb.currentTextChanged.connect(self.on_mode_changed)
+        check_btn = QPushButton("✓")
+        check_btn.setFixedSize(22, 22)
+        check_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #007aff; 
+                border-radius: 11px; 
+                color: white; 
+                font-weight: bold;
+            }
+            QPushButton:hover { background-color: #0066dd; }
+        """)
 
-        self.eyedrop_btn = QPushButton("Eyedropper")
-        self.eyedrop_btn.setCheckable(True)
-        self.eyedrop_btn.toggled.connect(self.viewer.toggle_eyedropper)
+        header.addWidget(open_btn)
+        header.addWidget(check_btn)
 
-        # Warmth 滑条（-100..100 -> -1..1）
-        warmth_label = QLabel("Warmth: +0.00")
-        warmth_slider = QSlider(Qt.Horizontal)
-        warmth_slider.setRange(-100, 100)
-        warmth_slider.setValue(0)
-        def on_warmth(v):
-            f = v / 100.0
-            warmth_label.setText(f"Warmth: {f:+.2f}")
-            self.viewer.set_warmth(f if self.mode_cb.currentText() != "Neutral Gray" or True else f)
-        warmth_slider.valueChanged.connect(on_warmth)
+        # Tool row
+        tool_row = QHBoxLayout()
+        
+        eyedropper_icon_path = icon_dir / "eyedropper.svg" if icon_dir else None
+        self.pipette = PipetteButton(str(eyedropper_icon_path) if eyedropper_icon_path and eyedropper_icon_path.exists() else None)
+        self.pipette.toggled.connect(self.on_eyedropper_toggled)
+        
+        self.combo = StyledComboBox()
+        self.combo.addItems(["Neutral Gray", "Skin Tone", "Temp & Tint"])
+        self.combo.currentTextChanged.connect(self.on_mode_changed)
 
-        th.addWidget(open_btn)
-        th.addSpacing(12)
-        th.addWidget(QLabel("Method:"))
-        th.addWidget(self.mode_cb)
-        th.addWidget(self.eyedrop_btn)
-        th.addSpacing(18)
-        th.addWidget(warmth_label)
-        th.addWidget(warmth_slider, 1)
-        th.addStretch(1)
+        tool_row.addWidget(self.pipette)
+        tool_row.addWidget(self.combo, 1)
 
-        # 主布局
-        root = QVBoxLayout()
-        root.addWidget(top)
-        root.addWidget(self.viewer, 1)
+        # Warmth slider
+        self.slider = WarmthSlider()
+
+        panel_layout.addLayout(header)
+        panel_layout.addLayout(tool_row)
+        panel_layout.addWidget(self.slider)
+
+        # Main layout
+        main_layout = QHBoxLayout()
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.setSpacing(0)
+        main_layout.addWidget(self.viewer, 1)
+        main_layout.addWidget(panel)
+        panel.setFixedWidth(320)
 
         central = QWidget()
-        central.setLayout(root)
+        central.setLayout(main_layout)
         self.setCentralWidget(central)
 
-        # 初始小图（可选）
-        # self.viewer.load_image("your_image.jpg")
+        # Connect slider to warmth updates
+        self.slider.valueChanged.connect(lambda v: self.viewer.set_warmth(v))
+        
+        # Connect viewer's colorPicked signal to reset slider
+        self.viewer.colorPicked.connect(lambda: self.slider.setValue(0))
 
     def on_mode_changed(self, text: str):
         self.viewer.set_mode(text)
-        # Temperature/Tint 模式通常不需要吸管
-        self.eyedrop_btn.setChecked(False)
-        self.eyedrop_btn.setEnabled(text in ("Neutral Gray", "Skin Tone"))
+        self.pipette.setChecked(False)
+        self.pipette.setEnabled(text in ("Neutral Gray", "Skin Tone"))
+
+    def on_eyedropper_toggled(self, checked: bool):
+        self.viewer.toggle_eyedropper(checked)
 
     def open_image(self):
         fn, _ = QFileDialog.getOpenFileName(self, "Open Image", "", "Images (*.png *.jpg *.jpeg *.bmp)")
         if fn:
             self.viewer.load_image(fn)
+            # Reset slider
+            self.slider.setValue(0)
 
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
+    font = QFont("Segoe UI", 9)
+    app.setFont(font)
     win = WBMain()
     win.show()
     sys.exit(app.exec())

@@ -5,7 +5,7 @@ Fixes blue bias issue and integrates icons.
 """
 import sys, numpy as np
 from pathlib import Path
-from PySide6.QtCore import Qt, QPoint, QSize, Signal, QPointF
+from PySide6.QtCore import Qt, QPoint, QSize, Signal, QPointF, QRectF
 from PySide6.QtGui import QImage, QSurfaceFormat, QCursor, QIcon, QPixmap, QPainter, QColor, QPen, QLinearGradient, QFont, QPainterPath
 from PySide6.QtOpenGLWidgets import QOpenGLWidget
 from PySide6.QtOpenGL import (
@@ -273,7 +273,6 @@ class WarmthSlider(QWidget):
         curr_x = self._value_to_x(self._value)
         
         fill_color = self.c_fill_blue if self._value < 0 else self.c_fill_warm
-        from PySide6.QtCore import QRectF
         fill_rect = QRectF(min(zero_x, curr_x), 0, abs(curr_x - zero_x), self.height())
         painter.setOpacity(0.8)
         painter.fillRect(fill_rect, fill_color)
@@ -395,7 +394,6 @@ class TemperatureSlider(QWidget):
         curr_x = curr_ratio * rect.width()
         
         # Create gradient fill from left to current position
-        from PySide6.QtCore import QRectF
         fill_rect = QRectF(0, 0, curr_x, self.height())
         
         # Use gradient for the fill to show color transition
@@ -512,7 +510,6 @@ class TintSlider(QWidget):
         curr_x = self._value_to_x(self._value)
         
         fill_color = self.c_fill_green if self._value < 0 else self.c_fill_magenta
-        from PySide6.QtCore import QRectF
         fill_rect = QRectF(min(zero_x, curr_x), 0, abs(curr_x - zero_x), self.height())
         painter.setOpacity(0.8)
         painter.fillRect(fill_rect, fill_color)

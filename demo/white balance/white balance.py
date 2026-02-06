@@ -335,7 +335,10 @@ class TemperatureSlider(QWidget):
     def kelvinToNormalized(self):
         """Convert Kelvin temperature to normalized value [-1, 1] for shader"""
         # 6500K is neutral (0), lower = cooler (negative), higher = warmer (positive)
-        return (self._value - self.KELVIN_DEFAULT) / (self.KELVIN_MAX - self.KELVIN_DEFAULT)
+        # Map 2000K-10000K to [-1, 1] with 6500K at 0
+        range_half = (self.KELVIN_MAX - self.KELVIN_MIN) / 2.0
+        center = (self.KELVIN_MAX + self.KELVIN_MIN) / 2.0
+        return (self._value - center) / range_half
 
     def setValue(self, v):
         self._value = max(self.KELVIN_MIN, min(self.KELVIN_MAX, float(v)))
@@ -597,10 +600,12 @@ class GLWBViewer(QOpenGLWidget):
     def set_temperature(self, v: float):
         """Set temperature from Kelvin value"""
         # Convert Kelvin to normalized value [-1, 1]
-        # 6500K is neutral (0), lower = cooler (negative), higher = warmer (positive)
-        KELVIN_DEFAULT = 6500.0
+        # Map 2000K-10000K to [-1, 1] with center (6000K) at 0
+        KELVIN_MIN = 2000.0
         KELVIN_MAX = 10000.0
-        self.temperature = (v - KELVIN_DEFAULT) / (KELVIN_MAX - KELVIN_DEFAULT)
+        range_half = (KELVIN_MAX - KELVIN_MIN) / 2.0
+        center = (KELVIN_MAX + KELVIN_MIN) / 2.0
+        self.temperature = (v - center) / range_half
         self.update()
 
     def set_tint(self, v: float):
@@ -683,12 +688,13 @@ class GLWBViewer(QOpenGLWidget):
                 # Source is cool, apply warming
                 temp_offset = np.clip((1.0 - temp_ratio) * 0.5, 0, 1)
             
-            # Convert to Kelvin: 6500K is neutral
+            # Convert to Kelvin: center (6000K) is neutral
             # temp_offset in [-1, 1] maps to [2000K, 10000K]
-            KELVIN_DEFAULT = 6500.0
             KELVIN_MIN = 2000.0
             KELVIN_MAX = 10000.0
-            kelvin_temp = KELVIN_DEFAULT + temp_offset * (KELVIN_MAX - KELVIN_DEFAULT)
+            center = (KELVIN_MAX + KELVIN_MIN) / 2.0
+            range_half = (KELVIN_MAX - KELVIN_MIN) / 2.0
+            kelvin_temp = center + temp_offset * range_half
             kelvin_temp = np.clip(kelvin_temp, KELVIN_MIN, KELVIN_MAX)
             
             # Tint calculation (green-magenta axis)
@@ -704,8 +710,8 @@ class GLWBViewer(QOpenGLWidget):
                 # Source is magenta, apply green (negative tint)
                 tint_offset = -np.clip((1.0 - tint_ratio) * 100, 0, 100)
             
-            # Set the calculated values
-            self.temperature = (kelvin_temp - KELVIN_DEFAULT) / (KELVIN_MAX - KELVIN_DEFAULT)
+            # Set the calculated values using the same normalization as the sliders
+            self.temperature = (kelvin_temp - center) / range_half
             self.tint = tint_offset / 100.0
             
             # Emit signal for UI update

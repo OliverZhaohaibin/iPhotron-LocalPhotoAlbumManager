@@ -217,7 +217,7 @@ class PipetteButton(QPushButton):
 
 
 class WarmthSlider(QWidget):
-    """Custom slider with gradient background and tick marks"""
+    """Custom slider with gradient background, tick marks, and highlight fill block"""
     
     # Signal emitted when value changes (during drag or on release)
     valueChanged = Signal(float)
@@ -233,11 +233,20 @@ class WarmthSlider(QWidget):
 
         self.c_blue_track = QColor(44, 62, 74)
         self.c_orange_track = QColor(74, 62, 32)
-        self.c_indicator = QColor(255, 204, 0)
+        self.c_indicator = QColor(255, 255, 255)  # White indicator line
         self.c_tick = QColor(255, 255, 255, 60)
+        
+        # Highlight fill colors (from warmth-ui.py)
+        self.c_fill_blue = QColor(74, 144, 180)   # Blue fill for negative values
+        self.c_fill_warm = QColor(180, 150, 60)   # Warm fill for positive values
 
     def _normalised_value(self):
         return (self._value - self._min) / (self._max - self._min)
+    
+    def _value_to_x(self, val):
+        """Convert a value to x position on the slider"""
+        ratio = (val - self._min) / (self._max - self._min)
+        return ratio * self.width()
 
     def value(self):
         return self._value
@@ -251,7 +260,7 @@ class WarmthSlider(QWidget):
         painter.setRenderHint(QPainter.Antialiasing)
         rect = self.rect()
 
-        # Gradient background
+        # 1. Gradient background
         gradient = QLinearGradient(rect.left(), 0, rect.right(), 0)
         gradient.setColorAt(0, self.c_blue_track)
         gradient.setColorAt(1, self.c_orange_track)
@@ -259,7 +268,18 @@ class WarmthSlider(QWidget):
         path.addRoundedRect(rect, 4, 4)
         painter.fillPath(path, gradient)
 
-        # Tick marks
+        # 2. Highlight fill block (from 0 to current value)
+        zero_x = self._value_to_x(0)
+        curr_x = self._value_to_x(self._value)
+        
+        fill_color = self.c_fill_blue if self._value < 0 else self.c_fill_warm
+        from PySide6.QtCore import QRectF
+        fill_rect = QRectF(min(zero_x, curr_x), 0, abs(curr_x - zero_x), self.height())
+        painter.setOpacity(0.8)
+        painter.fillRect(fill_rect, fill_color)
+        painter.setOpacity(1.0)
+
+        # 3. Tick marks
         painter.setPen(QPen(self.c_tick, 1))
         ticks = 50
         for i in range(ticks):
@@ -267,7 +287,11 @@ class WarmthSlider(QWidget):
             h = 6 if i % 5 == 0 else 3
             painter.drawLine(QPointF(x, 0), QPointF(x, h))
 
-        # Label and value
+        # 4. Center 0 line (to help alignment)
+        painter.setPen(QPen(QColor(255, 255, 255, 100), 1))
+        painter.drawLine(QPointF(zero_x, 0), QPointF(zero_x, rect.bottom()))
+
+        # 5. Label and value
         font = QFont("Inter", 12, QFont.Weight.Medium)
         painter.setFont(font)
         painter.setPen(QColor(240, 240, 240))
@@ -275,7 +299,7 @@ class WarmthSlider(QWidget):
         painter.setPen(QColor(255, 255, 255, 160))
         painter.drawText(rect.adjusted(0, 0, -12, 0), Qt.AlignVCenter | Qt.AlignRight, str(int(self._value)))
 
-        # Position indicator
+        # 6. Position indicator (white line)
         handle_x = self._normalised_value() * rect.width()
         painter.setPen(QPen(self.c_indicator, 2))
         painter.drawLine(QPointF(handle_x, 0), QPointF(handle_x, rect.bottom()))
@@ -304,7 +328,7 @@ class WarmthSlider(QWidget):
 
 
 class TemperatureSlider(QWidget):
-    """Custom slider for temperature (Kelvin) with smooth blue-orange gradient"""
+    """Custom slider for temperature (Kelvin) with smooth blue-orange gradient and highlight fill"""
 
     valueChanged = Signal(float)
 
@@ -319,11 +343,15 @@ class TemperatureSlider(QWidget):
         self.setFixedHeight(34)
         self.setCursor(Qt.OpenHandCursor)
 
-        # 保持截图中的深色调，但去掉中间的黑色过渡
-        self.c_blue = QColor(44, 62, 74)  # 左侧深蓝
-        self.c_orange = QColor(94, 72, 32)  # 右侧深琥珀
-        self.c_indicator = QColor(135, 206, 250)  # 高亮蓝指示线
+        # Background track colors
+        self.c_blue = QColor(44, 62, 74)  # Left side deep blue
+        self.c_orange = QColor(94, 72, 32)  # Right side deep amber
+        self.c_indicator = QColor(255, 255, 255)  # White indicator line
         self.c_tick = QColor(255, 255, 255, 40)
+        
+        # Bright highlight colors for fill (used for color interpolation)
+        self.c_fill_blue = QColor(74, 144, 180)   # Bright blue
+        self.c_fill_orange = QColor(220, 160, 50)  # Bright orange/amber
 
     def _normalised_value(self):
         return (self._value - self.KELVIN_MIN) / (self.KELVIN_MAX - self.KELVIN_MIN)
@@ -339,13 +367,20 @@ class TemperatureSlider(QWidget):
     def setValue(self, v):
         self._value = max(self.KELVIN_MIN, min(self.KELVIN_MAX, float(v)))
         self.update()
+    
+    def _interpolate_color(self, ratio):
+        """Interpolate fill color based on position (0=blue, 1=orange)"""
+        r = int(self.c_fill_blue.red() + (self.c_fill_orange.red() - self.c_fill_blue.red()) * ratio)
+        g = int(self.c_fill_blue.green() + (self.c_fill_orange.green() - self.c_fill_blue.green()) * ratio)
+        b = int(self.c_fill_blue.blue() + (self.c_fill_orange.blue() - self.c_fill_blue.blue()) * ratio)
+        return QColor(r, g, b)
 
     def paintEvent(self, _):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
         rect = self.rect()
 
-        # 线性渐变：直接从深蓝过渡到深橙
+        # 1. Linear gradient background: deep blue to deep orange
         gradient = QLinearGradient(rect.left(), 0, rect.right(), 0)
         gradient.setColorAt(0, self.c_blue)
         gradient.setColorAt(1, self.c_orange)
@@ -354,25 +389,43 @@ class TemperatureSlider(QWidget):
         path.addRoundedRect(rect, 4, 4)
         painter.fillPath(path, gradient)
 
-        # 绘制顶部刻度
+        # 2. Highlight fill block from 0 (leftmost) to current position
+        # Color changes based on position (interpolated from blue to orange)
+        curr_ratio = self._normalised_value()
+        curr_x = curr_ratio * rect.width()
+        
+        # Create gradient fill from left to current position
+        from PySide6.QtCore import QRectF
+        fill_rect = QRectF(0, 0, curr_x, self.height())
+        
+        # Use gradient for the fill to show color transition
+        fill_gradient = QLinearGradient(0, 0, curr_x, 0)
+        fill_gradient.setColorAt(0, self.c_fill_blue)
+        fill_gradient.setColorAt(1, self._interpolate_color(curr_ratio))
+        
+        painter.setOpacity(0.75)
+        painter.fillRect(fill_rect, fill_gradient)
+        painter.setOpacity(1.0)
+
+        # 3. Draw tick marks
         painter.setPen(QPen(self.c_tick, 1))
         for i in range(51):
             x = (i / 50) * rect.width()
             h = 6 if i % 5 == 0 else 3
             painter.drawLine(QPointF(x, 0), QPointF(x, h))
 
-        # 绘制文本
+        # 4. Draw text labels
         font = QFont("Inter", 12, QFont.Weight.Medium)
         painter.setFont(font)
         painter.setPen(QColor(220, 220, 220))
         painter.drawText(rect.adjusted(12, 0, 0, 0), Qt.AlignVCenter | Qt.AlignLeft, "Temperature")
 
-        # 格式化数值：使用千分位逗号（匹配截图 4,971）
+        # Format value with comma separator (matches screenshot: 4,971)
         painter.setPen(QColor(200, 200, 200, 180))
         painter.drawText(rect.adjusted(0, 0, -12, 0), Qt.AlignVCenter | Qt.AlignRight, f"{int(self._value):,}")
 
-        # 绘制位置指示线
-        handle_x = self._normalised_value() * rect.width()
+        # 5. Draw position indicator line (white)
+        handle_x = curr_ratio * rect.width()
         painter.setPen(QPen(self.c_indicator, 2))
         painter.drawLine(QPointF(handle_x, 0), QPointF(handle_x, rect.bottom()))
 
@@ -399,7 +452,7 @@ class TemperatureSlider(QWidget):
 
 
 class TintSlider(QWidget):
-    """Custom slider for tint with smooth green-magenta gradient"""
+    """Custom slider for tint with smooth green-magenta gradient and highlight fill"""
 
     valueChanged = Signal(float)
 
@@ -412,14 +465,23 @@ class TintSlider(QWidget):
         self.setFixedHeight(34)
         self.setCursor(Qt.OpenHandCursor)
 
-        # 保持截图中的深色调，但去掉中间的黑色过渡
-        self.c_green = QColor(44, 74, 54)  # 左侧深绿
-        self.c_magenta = QColor(84, 44, 84)  # 右侧深紫/洋红
-        self.c_indicator = QColor(218, 112, 214)  # 高亮紫色指示线
+        # Background track colors
+        self.c_green = QColor(44, 74, 54)  # Left side deep green
+        self.c_magenta = QColor(84, 44, 84)  # Right side deep magenta
+        self.c_indicator = QColor(255, 255, 255)  # White indicator line
         self.c_tick = QColor(255, 255, 255, 40)
+        
+        # Highlight fill colors
+        self.c_fill_green = QColor(80, 180, 80)    # Bright green for negative values
+        self.c_fill_magenta = QColor(200, 80, 180)  # Bright magenta for positive values
 
     def _normalised_value(self):
         return (self._value - self._min) / (self._max - self._min)
+    
+    def _value_to_x(self, val):
+        """Convert a value to x position on the slider"""
+        ratio = (val - self._min) / (self._max - self._min)
+        return ratio * self.width()
 
     def value(self):
         return self._value
@@ -436,7 +498,7 @@ class TintSlider(QWidget):
         painter.setRenderHint(QPainter.Antialiasing)
         rect = self.rect()
 
-        # 线性渐变：直接从深绿过渡到深洋红
+        # 1. Linear gradient background: deep green to deep magenta
         gradient = QLinearGradient(rect.left(), 0, rect.right(), 0)
         gradient.setColorAt(0, self.c_green)
         gradient.setColorAt(1, self.c_magenta)
@@ -445,25 +507,40 @@ class TintSlider(QWidget):
         path.addRoundedRect(rect, 4, 4)
         painter.fillPath(path, gradient)
 
-        # 绘制刻度
+        # 2. Highlight fill block from 0 (center) to current value
+        zero_x = self._value_to_x(0)
+        curr_x = self._value_to_x(self._value)
+        
+        fill_color = self.c_fill_green if self._value < 0 else self.c_fill_magenta
+        from PySide6.QtCore import QRectF
+        fill_rect = QRectF(min(zero_x, curr_x), 0, abs(curr_x - zero_x), self.height())
+        painter.setOpacity(0.8)
+        painter.fillRect(fill_rect, fill_color)
+        painter.setOpacity(1.0)
+
+        # 3. Draw tick marks
         painter.setPen(QPen(self.c_tick, 1))
         for i in range(51):
             x = (i / 50) * rect.width()
             h = 6 if i % 5 == 0 else 3
             painter.drawLine(QPointF(x, 0), QPointF(x, h))
 
-        # 绘制文本
+        # 4. Draw center 0 line (to help alignment)
+        painter.setPen(QPen(QColor(255, 255, 255, 100), 1))
+        painter.drawLine(QPointF(zero_x, 0), QPointF(zero_x, rect.bottom()))
+
+        # 5. Draw text labels
         font = QFont("Inter", 12, QFont.Weight.Medium)
         painter.setFont(font)
         painter.setPen(QColor(220, 220, 220))
         painter.drawText(rect.adjusted(12, 0, 0, 0), Qt.AlignVCenter | Qt.AlignLeft, "Tint")
 
-        # 格式化数值：保留两位小数（匹配截图 4.57）
+        # Format value: show two decimal places (matches screenshot: 4.57)
         painter.setPen(QColor(200, 200, 200, 180))
         val_str = f"{self._value:+.2f}" if self._value != 0 else "0.00"
         painter.drawText(rect.adjusted(0, 0, -12, 0), Qt.AlignVCenter | Qt.AlignRight, val_str.replace("+", ""))
 
-        # 绘制位置指示线
+        # 6. Draw position indicator line (white)
         handle_x = self._normalised_value() * rect.width()
         painter.setPen(QPen(self.c_indicator, 2))
         painter.drawLine(QPointF(handle_x, 0), QPointF(handle_x, rect.bottom()))

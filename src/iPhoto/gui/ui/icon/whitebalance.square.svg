@@ -1,32 +1,16 @@
 <svg width="55" height="55" viewBox="0 0 55 55" xmlns="http://www.w3.org/2000/svg">
   <defs>
-    <clipPath id="clip">
-      <rect x="0" y="0" width="55" height="55" rx="6" />
+    <clipPath id="wbClip">
+      <rect x="3" y="3" width="49" height="49" rx="7"/>
     </clipPath>
   </defs>
-
-  <!-- light base (lighter, closer to B tone) -->
-  <rect x="0" y="0" width="55" height="55" rx="6" fill="#cfcfcf"/>
-
-  <!-- dark half -->
-  <g clip-path="url(#clip)">
-    <path d="M0 55 L55 55 L55 0 Z" fill="#242424"/>
-  </g>
-
-  <!-- letters -->
-  <text x="13.2" y="23.5"
-        font-family="Arial, Helvetica, sans-serif"
-        font-size="18"
-        font-weight="700"
-        fill="#2f2f2f">W</text>
-
-  <text x="33.0" y="43.0"
-        font-family="Arial, Helvetica, sans-serif"
-        font-size="18"
-        font-weight="700"
-        fill="#d0d0d0">B</text>
-
-  <!-- outer stroke (also lighter) -->
-  <rect x="0.5" y="0.5" width="54" height="54" rx="5.5"
-        fill="none" stroke="#cfcfcf" stroke-width="1"/>
+  <!-- Rounded square outline -->
+  <rect x="3" y="3" width="49" height="49" rx="7"
+        fill="none" stroke="black" stroke-width="3"/>
+  <!-- Left half filled (white part of WB) -->
+  <rect x="3" y="3" width="24.5" height="49"
+        fill="black" clip-path="url(#wbClip)"/>
+  <!-- Centre divider line -->
+  <line x1="27.5" y1="5" x2="27.5" y2="50"
+        stroke="black" stroke-width="1.5" opacity="0.5"/>
 </svg>

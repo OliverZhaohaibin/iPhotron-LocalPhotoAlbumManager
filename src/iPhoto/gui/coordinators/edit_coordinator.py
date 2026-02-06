@@ -148,6 +148,9 @@ class EditCoordinator(QObject):
         self._ui.edit_sidebar.curveEyedropperModeChanged.connect(
             self._handle_curve_eyedropper_mode_changed
         )
+        self._ui.edit_sidebar.wbEyedropperModeChanged.connect(
+            self._handle_wb_eyedropper_mode_changed
+        )
         self._ui.edit_sidebar.perspectiveInteractionStarted.connect(
             self._ui.edit_image_viewer.start_perspective_interaction
         )
@@ -156,7 +159,7 @@ class EditCoordinator(QObject):
         )
         self._ui.edit_image_viewer.cropInteractionStarted.connect(self.push_undo_state)
         self._ui.edit_image_viewer.cropChanged.connect(self._handle_crop_changed)
-        self._ui.edit_image_viewer.colorPicked.connect(self._handle_curve_color_picked)
+        self._ui.edit_image_viewer.colorPicked.connect(self._handle_color_picked)
 
     def is_in_fullscreen(self) -> bool:
         """Return ``True`` if the edit view is in immersive full screen mode."""
@@ -509,12 +512,26 @@ class EditCoordinator(QObject):
         """Toggle eyedropper sampling on the GL image viewer."""
 
         active = mode is not None
+        if active:
+            self._eyedropper_target = "curve"
         self._ui.edit_image_viewer.set_eyedropper_mode(active)
 
-    def _handle_curve_color_picked(self, r: float, g: float, b: float) -> None:
-        """Forward eyedropper color picks to the curve section."""
+    def _handle_wb_eyedropper_mode_changed(self, mode: object) -> None:
+        """Toggle eyedropper sampling on the GL image viewer for WB."""
 
-        self._ui.edit_sidebar.handle_curve_color_picked(r, g, b)
+        active = mode is not None
+        if active:
+            self._eyedropper_target = "wb"
+        self._ui.edit_image_viewer.set_eyedropper_mode(active)
+
+    def _handle_color_picked(self, r: float, g: float, b: float) -> None:
+        """Forward eyedropper color picks to the appropriate section."""
+
+        target = getattr(self, "_eyedropper_target", "curve")
+        if target == "wb":
+            self._ui.edit_sidebar.handle_wb_color_picked(r, g, b)
+        else:
+            self._ui.edit_sidebar.handle_curve_color_picked(r, g, b)
 
     def _handle_mode_change(self, mode: str, checked: bool):
         if checked: self._set_mode(mode)

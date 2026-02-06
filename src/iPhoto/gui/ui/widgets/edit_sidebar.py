@@ -57,6 +57,9 @@ class EditSidebar(QWidget):
     curveEyedropperModeChanged = Signal(object)
     """Relay eyedropper mode toggles from the curve section."""
 
+    wbEyedropperModeChanged = Signal(object)
+    """Relay eyedropper mode toggles from the WB section."""
+
     perspectiveInteractionStarted = Signal()
     """Emitted when the user begins dragging a perspective slider."""
 
@@ -242,6 +245,7 @@ class EditSidebar(QWidget):
         self._wb_section.wbParamsCommitted.connect(self.wbParamsCommitted)
         self._wb_section.interactionStarted.connect(self.interactionStarted)
         self._wb_section.interactionFinished.connect(self.interactionFinished)
+        self._wb_section.eyedropperModeChanged.connect(self.wbEyedropperModeChanged)
 
         scroll_layout.addWidget(self._wb_section_container)
 
@@ -485,6 +489,11 @@ class EditSidebar(QWidget):
         """Forward a sampled color to the curve section."""
 
         self._curve_section.handle_color_picked(r, g, b)
+
+    def handle_wb_color_picked(self, r: float, g: float, b: float) -> None:
+        """Forward a sampled colour to the WB section's eyedropper handler."""
+
+        self._wb_section.handle_color_picked(r, g, b)
 
     def preview_thumbnail_height(self) -> int:
         """Return the vertical pixel span used by the master thumbnail strips."""

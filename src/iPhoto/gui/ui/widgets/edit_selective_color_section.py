@@ -489,18 +489,21 @@ class EditSelectiveColorSection(QWidget):
         ).name()
         lum_fill_pos = _mix_color(base_c, muted_anchor, 0.38).name()
 
-        # Hue slider – neighbours on the colour wheel
+        # Hue slider – blend picked/base color with neighbours on the colour wheel
         n = len(self._color_hexes)
         left_hue = self._color_hexes[(color_idx - 1) % n]
         right_hue = self._color_hexes[(color_idx + 1) % n]
-        c_left = QColor(left_hue)
-        c_left.setAlpha(100)
-        c_right = QColor(right_hue)
-        c_right.setAlpha(100)
+
+        # Background: blend the base color into left/right neighbours so the
+        # picked color is visible in the Hue slider gradient.
+        c_left_bg = _mix_color(QColor(left_hue), base_c, 0.35)
+        c_left_bg.setAlpha(100)
+        c_right_bg = _mix_color(QColor(right_hue), base_c, 0.35)
+        c_right_bg.setAlpha(100)
 
         self.slider_hue.set_colors(
-            c_left.name(QColor.NameFormat.HexArgb),
-            c_right.name(QColor.NameFormat.HexArgb),
+            c_left_bg.name(QColor.NameFormat.HexArgb),
+            c_right_bg.name(QColor.NameFormat.HexArgb),
             left_hue,
             right_hue,
         )

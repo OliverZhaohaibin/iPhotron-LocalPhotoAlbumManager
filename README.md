@@ -7,6 +7,9 @@
 ![License](https://img.shields.io/badge/license-MIT-green)
 [![GitHub Repo](https://img.shields.io/badge/github-iPhotos-181717?logo=github)](https://github.com/OliverZhaohaibin/iPhotos-LocalPhotoAlbumManager)
 
+**Languages / 语言 / Sprachen:**  
+[![English](https://img.shields.io/badge/English-Click-blue?style=flat)](README.md) | [![中文简体](https://img.shields.io/badge/中文简体-点击-red?style=flat)](docs/readme/README_zh-CN.md) | [![Deutsch](https://img.shields.io/badge/Deutsch-Klick-yellow?style=flat)](docs/readme/README_de.md)
+
 ---
 
 ## 🌟 Overview

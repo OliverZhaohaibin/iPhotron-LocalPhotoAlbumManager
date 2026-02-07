@@ -136,8 +136,16 @@ def apply_adjustments(
     # Extract curve parameters
     curve_enabled = bool(adjustments.get("Curve_Enabled", False))
 
-    # Extract levels parameters
-    levels_enabled = bool(adjustments.get("Levels_Enabled", False))
+    # Extract levels parameters – treat as disabled when handles are identity
+    # to avoid unnecessary full-image processing.
+    _levels_flag = bool(adjustments.get("Levels_Enabled", False))
+    _levels_handles = adjustments.get("Levels_Handles")
+    _levels_identity = (
+        not isinstance(_levels_handles, list)
+        or len(_levels_handles) != 5
+        or all(abs(h - d) < 1e-6 for h, d in zip(_levels_handles, DEFAULT_LEVELS_HANDLES))
+    )
+    levels_enabled = _levels_flag and not _levels_identity
 
     # Extract white balance parameters
     wb_flag = adjustments.get("WB_Enabled")
@@ -233,6 +241,20 @@ def apply_adjustments(
                 0.0,    # bw_grain
             )
 
+        # Apply white balance after color/B&W
+        if wb_enabled:
+            wb_params = WBParams(warmth=wb_warmth, temperature=wb_temperature, tint=wb_tint)
+            if not wb_params.is_identity():
+                transformed = apply_wb(transformed, wb_params)
+
+        # Apply curve adjustment after WB
+        if curve_enabled:
+            transformed = _apply_curve_to_qimage(transformed, adjustments)
+
+        # Apply levels adjustment after curve but before B&W (matching GL shader order)
+        if levels_enabled:
+            transformed = _apply_levels_to_qimage(transformed, adjustments)
+
         if apply_bw:
             if not apply_bw_only(
                 transformed,
@@ -249,20 +271,6 @@ def apply_adjustments(
                     bw_tone,
                     bw_grain,
                 )
-
-        # Apply white balance after color/B&W
-        if wb_enabled:
-            wb_params = WBParams(warmth=wb_warmth, temperature=wb_temperature, tint=wb_tint)
-            if not wb_params.is_identity():
-                transformed = apply_wb(transformed, wb_params)
-
-        # Apply curve adjustment after color/B&W
-        if curve_enabled:
-            transformed = _apply_curve_to_qimage(transformed, adjustments)
-
-        # Apply levels adjustment after curve
-        if levels_enabled:
-            transformed = _apply_levels_to_qimage(transformed, adjustments)
 
         return transformed
 
@@ -342,11 +350,14 @@ def apply_adjustments(
         if not wb_params.is_identity():
             result = apply_wb(result, wb_params)
 
-    # Apply curve adjustment after all other processing
+    # Apply curve adjustment after WB
     if curve_enabled:
         result = _apply_curve_to_qimage(result, adjustments)
 
-    # Apply levels adjustment after all other processing
+    # Apply levels adjustment after curve
+    # NOTE: In the JIT/fallback path, B&W is baked into the per-pixel kernel above,
+    # so levels is applied after B&W here. The GL shader and Pillow path apply levels
+    # before B&W for consistency.
     if levels_enabled:
         result = _apply_levels_to_qimage(result, adjustments)
 

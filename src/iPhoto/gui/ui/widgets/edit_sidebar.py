@@ -437,10 +437,12 @@ class EditSidebar(QWidget):
             try:
                 self.levels_reset_button.clicked.disconnect(self._on_levels_reset)
             except (TypeError, RuntimeError):
+                # Signal may already be disconnected or was never connected; safe to ignore.
                 pass
             try:
                 self.levels_toggle_button.toggled.disconnect(self._on_levels_toggled)
             except (TypeError, RuntimeError):
+                # Signal may already be disconnected or was never connected; safe to ignore.
                 pass
             self._levels_controls_connected = False
 

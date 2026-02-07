@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import math
-from typing import Dict, List, Optional
+from typing import List, Optional
 
 import numpy as np
 from PySide6.QtCore import QPointF, QRectF, Qt, Signal, Slot
@@ -431,10 +431,12 @@ class EditLevelsSection(QWidget):
             try:
                 self._session.valueChanged.disconnect(self._on_session_value_changed)
             except (TypeError, RuntimeError):
+                # Signal may already be disconnected or was never connected; safe to ignore.
                 pass
             try:
                 self._session.resetPerformed.disconnect(self._on_session_reset)
             except (TypeError, RuntimeError):
+                # Signal may already be disconnected or was never connected; safe to ignore.
                 pass
 
         self._session = session
@@ -472,8 +474,6 @@ class EditLevelsSection(QWidget):
 
     def set_preview_image(self, image) -> None:
         """Forward histogram data to the levels composite."""
-        from PySide6.QtGui import QImage
-
         if image is None:
             self.levels_comp.set_histogram(None)
             return
@@ -493,21 +493,36 @@ class EditLevelsSection(QWidget):
 
         width = preview.width()
         height = preview.height()
-        ptr = preview.bits()
-        byte_count = preview.sizeInBytes()
-        if hasattr(ptr, "setsize"):
-            ptr.setsize(byte_count)
+        if width <= 0 or height <= 0:
+            return None
 
+        bytes_per_line = preview.bytesPerLine()
+        buffer = preview.constBits()
+        byte_count = bytes_per_line * height
         try:
-            arr = np.frombuffer(ptr, dtype=np.uint8).reshape((height, width, 4))
+            buffer.setsize(byte_count)
+        except AttributeError:
+            pass
+        view = memoryview(buffer)
+        buffer_array = np.frombuffer(view, dtype=np.uint8, count=byte_count)
+        try:
+            surface = buffer_array.reshape((height, bytes_per_line))
         except ValueError:
+            return None
+
+        pixels = surface[:, : width * 4].reshape((height, width, 4))
+        rgb = pixels[:, :, :3].reshape(-1, 3)
+        if rgb.size == 0:
             return None
 
         hist = np.zeros((3, 256), dtype=np.float32)
         for ch in range(3):
-            h_data, _ = np.histogram(arr[:, :, ch], bins=256, range=(0, 256))
-            mx = h_data.max()
-            hist[ch] = (h_data / mx) if mx > 0 else h_data.astype(np.float32)
+            counts = np.bincount(rgb[:, ch], minlength=256).astype(np.float32)
+            hist[ch] = counts
+
+        max_val = float(hist.max())
+        if max_val > 0.0:
+            hist /= max_val
         return hist
 
     # ------------------------------------------------------------------

@@ -390,7 +390,7 @@ class EditSelectiveColorSection(QWidget):
         self._commit_to_session(ranges_data)
         self.interactionFinished.emit()
 
-    def _build_ranges_data(self):
+    def _build_ranges_data(self) -> list[list[float]]:
         """Return the current ranges in the normalised format expected by the resolver."""
         ranges = []
         for i in range(NUM_RANGES):

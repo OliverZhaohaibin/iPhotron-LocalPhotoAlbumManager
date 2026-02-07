@@ -633,7 +633,8 @@ class EditCurveSection(QWidget):
     EDGE_INSET = 8
     MIN_CONTENT_WIDTH = 240
     TOOL_GAP = 8
-    TOOL_HEIGHT_RATIO = 0.6
+    TOOL_HEIGHT_RATIO = 0.55
+    TOOL_HEIGHT = 32
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
@@ -660,7 +661,10 @@ class EditCurveSection(QWidget):
         tools_layout.setSpacing(self.TOOL_GAP)
 
         eyedropper_btn_width = self.MIN_CONTENT_WIDTH // 4
-        eyedropper_btn_height = int(eyedropper_btn_width * self.TOOL_HEIGHT_RATIO)
+        eyedropper_btn_height = min(
+            self.TOOL_HEIGHT,
+            int(eyedropper_btn_width * self.TOOL_HEIGHT_RATIO),
+        )
 
         tools_frame = QFrame()
         tools_frame.setFixedWidth(eyedropper_btn_width * 3)
@@ -768,7 +772,10 @@ class EditCurveSection(QWidget):
         self.input_sliders.setFixedWidth(content_width)
 
         eyedropper_btn_width = max(44, int((content_width - self.TOOL_GAP) / 4))
-        eyedropper_btn_height = int(eyedropper_btn_width * self.TOOL_HEIGHT_RATIO)
+        eyedropper_btn_height = min(
+            self.TOOL_HEIGHT,
+            int(eyedropper_btn_width * self.TOOL_HEIGHT_RATIO),
+        )
 
         self.btn_black.setFixedSize(eyedropper_btn_width, eyedropper_btn_height)
         self.btn_gray.setFixedSize(eyedropper_btn_width, eyedropper_btn_height)

@@ -488,10 +488,12 @@ class EditSidebar(QWidget):
             try:
                 self.selective_color_reset_button.clicked.disconnect(self._on_selective_color_reset)
             except (TypeError, RuntimeError):
+                # Signal may already be disconnected or was never connected; safe to ignore.
                 pass
             try:
                 self.selective_color_toggle_button.toggled.disconnect(self._on_selective_color_toggled)
             except (TypeError, RuntimeError):
+                # Signal may already be disconnected or was never connected; safe to ignore.
                 pass
             self._selective_color_controls_connected = False
 

@@ -14,7 +14,7 @@ the industry-standard approach used in the companion GLSL shader:
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Tuple
+from typing import List
 
 import numpy as np
 
@@ -158,7 +158,6 @@ def apply_selective_color(
     if is_identity(ranges):
         return arr
 
-    height, width = arr.shape[:2]
     rgb = arr[..., :3].astype(np.float32) / 255.0
     alpha = arr[..., 3:4]
 
@@ -179,16 +178,24 @@ def apply_selective_color(
         deg = 5.0 + (70.0 - 5.0) * range_slider
         width_hue = float(np.clip(deg / 360.0, 0.001, 0.5))
 
-        # Feathered hue mask
+        # Feathered hue mask (match GLSL smoothstep(width, width + feather, dist))
         dist = _hue_dist(hsl[..., 0], center)
         feather = max(0.001, width_hue * 0.50)
-        mask = 1.0 - np.clip((dist - width_hue) / feather, 0.0, 1.0)
-
-        # Saturation gate
-        sat_gate = np.clip(
-            (hsl[..., 1] - SAT_GATE_LO) / max(1e-6, SAT_GATE_HI - SAT_GATE_LO),
-            0.0, 1.0,
+        t_hue = np.clip(
+            (dist - width_hue) / max(1e-6, feather),
+            0.0,
+            1.0,
         )
+        t_hue = t_hue * t_hue * (3.0 - 2.0 * t_hue)
+        mask = 1.0 - t_hue
+
+        # Saturation gate (match GLSL smoothstep(SAT_GATE_LO, SAT_GATE_HI, sat))
+        t_sat = np.clip(
+            (hsl[..., 1] - SAT_GATE_LO) / max(1e-6, SAT_GATE_HI - SAT_GATE_LO),
+            0.0,
+            1.0,
+        )
+        sat_gate = t_sat * t_sat * (3.0 - 2.0 * t_sat)
         mask = mask * sat_gate
 
         significant = mask > 1e-5

@@ -29,6 +29,8 @@ from PySide6.QtOpenGL import (
 from OpenGL import GL as gl
 from shiboken6.Shiboken import VoidPtr
 
+from ....core.selective_color_resolver import NUM_RANGES, SAT_GATE_LO, SAT_GATE_HI
+
 from .perspective_math import build_perspective_matrix
 
 _LOGGER = logging.getLogger(__name__)
@@ -508,9 +510,9 @@ class GLRenderer:
             sc_enabled_value = adjustments.get("SelectiveColor_Enabled", False)
             self._set_uniform1i("uSCEnabled", 1 if bool(sc_enabled_value) else 0)
             sc_ranges = adjustments.get("SelectiveColor_Ranges")
-            if isinstance(sc_ranges, list) and len(sc_ranges) == 6:
-                u0 = np.zeros((6, 4), dtype=np.float32)
-                u1 = np.zeros((6, 4), dtype=np.float32)
+            if isinstance(sc_ranges, list) and len(sc_ranges) == NUM_RANGES:
+                u0 = np.zeros((NUM_RANGES, 4), dtype=np.float32)
+                u1 = np.zeros((NUM_RANGES, 4), dtype=np.float32)
                 for idx, rng in enumerate(sc_ranges):
                     if isinstance(rng, (list, tuple)) and len(rng) >= 5:
                         center = float(rng[0])
@@ -519,13 +521,13 @@ class GLRenderer:
                         deg = 5.0 + (70.0 - 5.0) * range_slider
                         width_hue = float(np.clip(deg / 360.0, 0.001, 0.5))
                         u0[idx] = [center, width_hue, float(rng[2]), float(rng[3])]
-                        u1[idx] = [float(rng[4]), 0.05, 0.20, 1.0]
+                        u1[idx] = [float(rng[4]), SAT_GATE_LO, SAT_GATE_HI, 1.0]
                 loc0 = self._uniform_locations.get("uSCRange0", -1)
                 loc1 = self._uniform_locations.get("uSCRange1", -1)
                 if loc0 != -1:
-                    gl.glUniform4fv(loc0, 6, u0)
+                    gl.glUniform4fv(loc0, NUM_RANGES, u0)
                 if loc1 != -1:
-                    gl.glUniform4fv(loc1, 6, u1)
+                    gl.glUniform4fv(loc1, NUM_RANGES, u1)
 
             if time_value is not None:
                 self._set_uniform1f("uTime", time_value)

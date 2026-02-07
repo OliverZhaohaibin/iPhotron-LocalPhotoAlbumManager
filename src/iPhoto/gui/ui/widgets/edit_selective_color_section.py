@@ -81,6 +81,8 @@ class _SelectiveSlider(QWidget):
     """Custom horizontal slider matching the demo's visual style."""
 
     valueChanged = Signal(float)
+    dragStarted = Signal()
+    dragFinished = Signal()
 
     def __init__(
         self,
@@ -183,6 +185,7 @@ class _SelectiveSlider(QWidget):
         if event.button() == Qt.MouseButton.LeftButton:
             self._dragging = True
             self.setCursor(Qt.CursorShape.ClosedHandCursor)
+            self.dragStarted.emit()
             self._update_from_pos(event.position().x())
 
     def mouseMoveEvent(self, event):  # noqa: N802
@@ -190,8 +193,10 @@ class _SelectiveSlider(QWidget):
             self._update_from_pos(event.position().x())
 
     def mouseReleaseEvent(self, event):  # noqa: N802
-        self._dragging = False
-        self.setCursor(Qt.CursorShape.OpenHandCursor)
+        if self._dragging:
+            self._dragging = False
+            self.setCursor(Qt.CursorShape.OpenHandCursor)
+            self.dragFinished.emit()
 
     def _update_from_pos(self, x: float) -> None:
         ratio = max(0.0, min(1.0, x / max(1, self.width())))
@@ -317,11 +322,16 @@ class EditSelectiveColorSection(QWidget):
         layout.addWidget(self.slider_lum)
         layout.addWidget(self.slider_range)
 
-        # Signal wiring
+        # Signal wiring — value changes emit previews; drag start/finish
+        # control interaction boundaries and session commits.
         self.slider_hue.valueChanged.connect(self._on_slider_changed)
         self.slider_sat.valueChanged.connect(self._on_slider_changed)
         self.slider_lum.valueChanged.connect(self._on_slider_changed)
         self.slider_range.valueChanged.connect(self._on_slider_changed)
+
+        for slider in (self.slider_hue, self.slider_sat, self.slider_lum, self.slider_range):
+            slider.dragStarted.connect(self._on_slider_drag_started)
+            slider.dragFinished.connect(self._on_slider_drag_finished)
 
         # Initialise first colour
         self.btn_group.button(0).setChecked(True)
@@ -338,10 +348,14 @@ class EditSelectiveColorSection(QWidget):
             try:
                 self._session.valueChanged.disconnect(self._on_session_value_changed)
             except (TypeError, RuntimeError):
+                # Signal may already be disconnected or the underlying QObject
+                # destroyed during teardown; safe to ignore.
                 pass
             try:
                 self._session.resetPerformed.disconnect(self._on_session_reset)
             except (TypeError, RuntimeError):
+                # Signal may already be disconnected or the underlying QObject
+                # destroyed during teardown; safe to ignore.
                 pass
         self._session = session
         if session is not None:
@@ -422,11 +436,18 @@ class EditSelectiveColorSection(QWidget):
         self._ui_store[idx, 2] = self.slider_lum.value()
         self._ui_store[idx, 3] = self.slider_range.value()
 
+        # During slider drags we only emit a preview; committing to the session
+        # and interaction boundary signalling is handled on drag start/finish.
         ranges_data = self._build_ranges_data()
-
-        self.interactionStarted.emit()
         self.selectiveColorParamsPreviewed.emit({"Ranges": ranges_data})
+
+    def _on_slider_drag_started(self) -> None:
+        self.interactionStarted.emit()
+
+    def _on_slider_drag_finished(self) -> None:
+        ranges_data = self._build_ranges_data()
         self._commit_to_session(ranges_data)
+        self.selectiveColorParamsCommitted.emit({"Ranges": ranges_data})
         self.interactionFinished.emit()
 
     def _build_ranges_data(self) -> list[list[float]]:
@@ -582,6 +603,7 @@ class EditSelectiveColorSection(QWidget):
         self.interactionStarted.emit()
         self.selectiveColorParamsPreviewed.emit({"Ranges": ranges_data})
         self._commit_to_session(ranges_data)
+        self.selectiveColorParamsCommitted.emit({"Ranges": ranges_data})
         self.interactionFinished.emit()
 
         # Deactivate the eyedropper after picking

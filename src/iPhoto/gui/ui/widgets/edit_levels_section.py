@@ -313,7 +313,8 @@ class LevelsComposite(QWidget):
         min_dist = min(d for _, d in candidates)
         # Keep only handles whose distance is within a tiny tolerance of the
         # closest so that overlapping handles are all considered equally close.
-        best = [idx for idx, d in candidates if d - min_dist < 1.0]
+        overlap_tolerance_px = 1.0
+        best = [idx for idx, d in candidates if d - min_dist < overlap_tolerance_px]
 
         if len(best) == 1:
             clicked_idx = best[0]

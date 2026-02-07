@@ -199,8 +199,9 @@ class GLImageViewer(QOpenGLWidget):
             if image is not None and not image.isNull():
                 # Skip texture re-upload, only update adjustments
                 self.set_adjustments(adjustments)
-                if reset_view:
-                    self.reset_zoom()
+                # Preserve the current zoom/pan when only adjustments change so
+                # users can preview edits (curves/levels/selective color) at
+                # the existing zoom level.
                 return
 
         # Update texture resource tracking
@@ -265,6 +266,22 @@ class GLImageViewer(QOpenGLWidget):
         """Update the active adjustment uniforms without replacing the texture."""
 
         mapped_adjustments = dict(adjustments or {})
+        crop_related_keys = {
+            "Crop_CX",
+            "Crop_CY",
+            "Crop_W",
+            "Crop_H",
+            "Crop_Rotate90",
+            "Crop_FlipH",
+            "Crop_Straighten",
+            "Perspective_Vertical",
+            "Perspective_Horizontal",
+        }
+        crop_related_changed = any(
+            key in mapped_adjustments
+            and mapped_adjustments.get(key) != self._adjustments.get(key)
+            for key in crop_related_keys
+        )
         self._adjustments = mapped_adjustments
         self._update_crop_perspective_state()
 
@@ -279,7 +296,11 @@ class GLImageViewer(QOpenGLWidget):
             # or perspective adjustments change while the interaction mode is active.
             logical_values = geometry.logical_crop_mapping_from_texture(mapped_adjustments)
             self._crop_controller.set_active(True, logical_values)
-        if self._auto_crop_view_locked and not self._crop_controller.is_active():
+        if (
+            self._auto_crop_view_locked
+            and not self._crop_controller.is_active()
+            and crop_related_changed
+        ):
             self._reapply_locked_crop_view()
         self.update()
 

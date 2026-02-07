@@ -429,7 +429,7 @@ class SelectiveColorWidget(QWidget):
         self.slider_hue = CustomSlider("Hue")
         self.slider_sat = CustomSlider("Saturation")
         self.slider_lum = CustomSlider("Luminance")
-        self.slider_range = CustomSlider("Range", minimum=0, maximum=1.0, initial=1.0,
+        self.slider_range = CustomSlider("Range", minimum=0, maximum=1.0, initial=0.5,
                                          bg_start="#353535", bg_end="#252525",
                                          fill_neg="#666", fill_pos="#808080")
 

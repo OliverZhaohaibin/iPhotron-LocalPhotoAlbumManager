@@ -263,8 +263,8 @@ class CustomSlider(QWidget):
     valueChanged = Signal(float)
 
     def __init__(self, name: str, parent=None, minimum=-100, maximum=100, initial=0,
-                 bg_start="#2c3e4a", bg_end="#4a3e20",
-                 fill_neg="#5f8797", fill_pos="#a88f4a"):
+                 bg_start="#263541", bg_end="#3b2e1c",
+                 fill_neg="#4f6c78", fill_pos="#7a6533"):
         super().__init__(parent)
         self._name = name
         self._min = float(minimum)
@@ -275,9 +275,8 @@ class CustomSlider(QWidget):
         self.setCursor(Qt.OpenHandCursor)
 
         self.set_colors(bg_start, bg_end, fill_neg, fill_pos)
-        self.c_indicator = QColor(235, 235, 235)
-        self.c_tick = QColor(255, 255, 255, 50)
-        self.c_zero = QColor(255, 255, 255, 90)
+        self.c_indicator = QColor(225, 225, 225)
+        self.c_zero = QColor(255, 255, 255, 70)
 
     def set_colors(self, bg_start, bg_end, fill_neg, fill_pos):
         self.c_bg_start = QColor(bg_start)
@@ -312,18 +311,11 @@ class CustomSlider(QWidget):
         else:
             fill_rect = QRectF(0, 0, curr_x, self.height())
 
-        painter.setOpacity(0.65)
+        painter.setOpacity(0.45)
         painter.setClipPath(path)
         painter.fillRect(fill_rect, current_fill_color)
         painter.setClipping(False)
         painter.setOpacity(1.0)
-
-        painter.setPen(QPen(self.c_tick, 1))
-        ticks = 50
-        for i in range(ticks + 1):
-            x = (i / ticks) * rect.width()
-            h = 6 if i % 5 == 0 else 3
-            painter.drawLine(QPointF(x, 0), QPointF(x, h))
 
         if self._min < 0 < self._max:
             painter.setPen(QPen(self.c_zero, 1))

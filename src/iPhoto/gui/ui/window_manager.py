@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
-from typing import Iterable, Iterator, TYPE_CHECKING, cast
+from typing import Iterable, Iterator, TYPE_CHECKING, Optional, cast
 
 from PySide6.QtCore import Property, QEvent, QObject, QPoint, Qt, QTimer
 from PySide6.QtGui import (
@@ -34,6 +34,7 @@ if TYPE_CHECKING:  # pragma: no cover - used only for type checking
     from .ui_main_window import Ui_MainWindow
     from ..coordinators.main_coordinator import MainCoordinator
     from ..coordinators.edit_coordinator import EditCoordinator
+    from .widgets.view_transform_controller import ViewTransformController
 
 
 # ``PLAYBACK_RESUME_DELAY_MS`` mirrors the behaviour found in the original
@@ -79,6 +80,8 @@ class FramelessWindowManager(QObject):
         self._player_stack_stylesheet = self._ui.player_stack.styleSheet()
         self._immersive_background_applied = False
         self._immersive_visibility_targets = self._build_immersive_targets()
+        self._detail_view_state: Optional[ViewTransformController.State] = None
+        self._fullscreen_view_state: Optional[ViewTransformController.State] = None
 
         self._qmenu_stylesheet: str = ""
         self._global_menu_stylesheet: str | None = None
@@ -236,6 +239,12 @@ class FramelessWindowManager(QObject):
         ready = self._controller.prepare_fullscreen_asset()
         if not ready:
             self._controller.show_placeholder_in_viewer()
+        else:
+            image_viewer = getattr(self._ui, "image_viewer", None)
+            if image_viewer is not None:
+                self._detail_view_state = image_viewer.view_transform_state()
+                if self._fullscreen_view_state is not None:
+                    image_viewer.restore_view_transform(self._fullscreen_view_state)
 
         self._previous_geometry = self._window.saveGeometry()
         self._previous_window_state = self._window.windowState()
@@ -281,6 +290,11 @@ class FramelessWindowManager(QObject):
         self._immersive_active = False
         self._restore_default_backdrop()
         self._window.showNormal()
+        image_viewer = getattr(self._ui, "image_viewer", None)
+        if image_viewer is not None:
+            self._fullscreen_view_state = image_viewer.view_transform_state()
+            if self._detail_view_state is not None:
+                image_viewer.restore_view_transform(self._detail_view_state)
 
         with self._suspend_layout_updates():
             if self._previous_geometry is not None:

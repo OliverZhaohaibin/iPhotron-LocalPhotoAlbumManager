@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import math
 from typing import Callable, Optional
+from dataclasses import dataclass
 
 from PySide6.QtCore import QPointF, QRectF, Qt
 from PySide6.QtGui import QMouseEvent, QWheelEvent
@@ -128,6 +129,14 @@ class ViewTransformController:
         self._wheel_action: str = "zoom"
         self._image_cover_scale: float = 1.0
 
+    @dataclass(frozen=True)
+    class State:
+        """Snapshot of zoom and pan state for later restoration."""
+
+        zoom_factor: float
+        pan_x: float
+        pan_y: float
+
     # ------------------------------------------------------------------
     # Helper methods for getting viewport info
     # ------------------------------------------------------------------
@@ -188,6 +197,21 @@ class ViewTransformController:
     def set_pan_pixels(self, pan: QPointF) -> None:
         self._pan_px = QPointF(pan)
         self._viewer.update()
+
+    def snapshot_state(self) -> State:
+        """Return a snapshot of the current zoom/pan state."""
+
+        return ViewTransformController.State(
+            zoom_factor=self._zoom_factor,
+            pan_x=self._pan_px.x(),
+            pan_y=self._pan_px.y(),
+        )
+
+    def apply_state(self, state: State) -> None:
+        """Restore a previously captured zoom/pan state."""
+
+        self.set_zoom_factor_direct(state.zoom_factor)
+        self.set_pan_pixels(QPointF(state.pan_x, state.pan_y))
 
     def minimum_zoom(self) -> float:
         return self._min_zoom

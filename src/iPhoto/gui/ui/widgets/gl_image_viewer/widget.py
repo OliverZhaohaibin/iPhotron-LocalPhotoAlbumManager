@@ -403,6 +403,16 @@ class GLImageViewer(QOpenGLWidget):
             return None
         return QImage(self._image)
 
+    def view_transform_state(self) -> ViewTransformController.State:
+        """Return the current zoom/pan snapshot for later restoration."""
+
+        return self._transform_controller.snapshot_state()
+
+    def restore_view_transform(self, state: ViewTransformController.State) -> None:
+        """Restore a previously captured zoom/pan snapshot."""
+
+        self._transform_controller.apply_state(state)
+
     def set_loading(self, loading: bool) -> None:
         """Toggle the translucent loading overlay."""
 

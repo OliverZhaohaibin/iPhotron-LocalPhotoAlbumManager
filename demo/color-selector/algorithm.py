@@ -489,17 +489,9 @@ class SelectiveColorWidget(QWidget):
         sat_fill_pos = mix_color(base_c, muted_anchor, 0.5).name()
 
         lum_bg_start = QColor.fromRgbF(base_r * 0.18, base_g * 0.18, base_b * 0.18).name()
-        lum_bg_end = QColor.fromRgbF(
-            base_r + (1.0 - base_r) * 0.2,
-            base_g + (1.0 - base_g) * 0.2,
-            base_b + (1.0 - base_b) * 0.2,
-        ).name()
+        lum_bg_end = mix_color(base_c, muted_anchor, 0.78).name()
         lum_fill_neg = QColor.fromRgbF(base_r * 0.35, base_g * 0.35, base_b * 0.35).name()
-        lum_fill_pos = QColor.fromRgbF(
-            base_r + (1.0 - base_r) * 0.22,
-            base_g + (1.0 - base_g) * 0.22,
-            base_b + (1.0 - base_b) * 0.22,
-        ).name()
+        lum_fill_pos = mix_color(base_c, muted_anchor, 0.7).name()
 
         n = len(self.color_hexes)
         left_hue = self.color_hexes[(color_idx - 1) % n]

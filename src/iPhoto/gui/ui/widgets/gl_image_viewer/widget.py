@@ -199,8 +199,9 @@ class GLImageViewer(QOpenGLWidget):
             if image is not None and not image.isNull():
                 # Skip texture re-upload, only update adjustments
                 self.set_adjustments(adjustments)
-                if reset_view:
-                    self.reset_zoom()
+                # Preserve the current zoom/pan when only adjustments change so
+                # users can preview edits (curves/levels/selective color) at
+                # the existing zoom level.
                 return
 
         # Update texture resource tracking

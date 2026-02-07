@@ -505,7 +505,7 @@ class EditSidebar(QWidget):
     def deactivate_curve_eyedropper(self) -> None:
         """Turn off the Curve eyedropper buttons."""
 
-        self._curve_section._deactivate_all_eyedroppers()
+        self._curve_section.deactivate_eyedropper()
 
     def preview_thumbnail_height(self) -> int:
         """Return the vertical pixel span used by the master thumbnail strips."""

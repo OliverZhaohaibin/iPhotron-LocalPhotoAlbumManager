@@ -19,6 +19,8 @@ uniform vec4  uBWParams;
 uniform bool  uBWEnabled;
 uniform sampler2D uCurveLUT;  // 256x1 RGB LUT texture for curve adjustment
 uniform bool  uCurveEnabled;
+uniform sampler2D uLevelsLUT; // 256x1 RGB LUT texture for levels adjustment
+uniform bool  uLevelsEnabled;
 uniform float uWBWarmth;      // [-1,1]
 uniform float uWBTemperature; // [-1,1]
 uniform float uWBTint;        // [-1,1]
@@ -227,6 +229,14 @@ vec3 apply_curve(vec3 color) {
     return vec3(r, g, b);
 }
 
+vec3 apply_levels(vec3 color) {
+    // Apply levels LUT lookup for each RGB channel (same format as curve LUT)
+    float r = texture(uLevelsLUT, vec2(color.r, 0.5)).r;
+    float g = texture(uLevelsLUT, vec2(color.g, 0.5)).g;
+    float b = texture(uLevelsLUT, vec2(color.b, 0.5)).b;
+    return vec3(r, g, b);
+}
+
 void main() {
     if (uScale <= 0.0) {
         discard;
@@ -301,6 +311,11 @@ void main() {
     // Apply curve adjustment after color but before B&W
     if (uCurveEnabled) {
         c = apply_curve(c);
+    }
+
+    // Apply levels adjustment after curve but before B&W
+    if (uLevelsEnabled) {
+        c = apply_levels(c);
     }
 
     if (uBWEnabled) {

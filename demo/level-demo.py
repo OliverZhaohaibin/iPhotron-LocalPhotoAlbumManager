@@ -627,8 +627,8 @@ class LevelsComposite(QWidget):
                     span = max(s[1] - s[0], 1e-9)
                     linear = s[1] + delta
                     t = clamp01((linear - s[0]) / span)  # 1 -> start, 0 -> bound
-                    eased_t = t * (2.0 - t)
-                    new1 = s[0] + span * eased_t
+                    scale = pow(t, 2.0)
+                    new1 = s[1] + delta * scale
                 else:
                     new1 = s[1] + delta
                 new1 = clamp01(new1)
@@ -641,8 +641,8 @@ class LevelsComposite(QWidget):
                     span = max(s[4] - s[3], 1e-9)
                     linear = s[3] + delta
                     t = clamp01((s[4] - linear) / span)  # 1 -> start, 0 -> bound
-                    eased_t = t * (2.0 - t)
-                    new3 = s[4] - span * eased_t
+                    scale = pow(t, 2.0)
+                    new3 = s[3] + delta * scale
                 else:
                     new3 = s[3] + delta
                 new3 = clamp01(new3)

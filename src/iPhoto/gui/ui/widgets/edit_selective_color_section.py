@@ -23,11 +23,13 @@ from PySide6.QtWidgets import (
     QPushButton,
     QFrame,
     QButtonGroup,
+    QToolButton,
 )
 
 from ..models.edit_session import EditSession
+from ..icon import load_icon
 from ....core.selective_color_resolver import (
-    DEFAULT_SELECTIVE_COLOR_RANGES,
+    DEFAULT_CENTERS,
     NUM_RANGES,
 )
 
@@ -37,33 +39,6 @@ _LOGGER = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Helper widgets (adapted from demo, stripped of placeholders)
 # ---------------------------------------------------------------------------
-
-
-class _PipetteButton(QPushButton):
-    """Eyedropper (pipette) button matching the demo's visual style."""
-
-    def __init__(self, parent: Optional[QWidget] = None) -> None:
-        super().__init__(parent)
-        self.setFixedSize(32, 32)
-        self.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.setCheckable(True)
-        self.setStyleSheet(
-            "QPushButton { background-color: #383838; border: 1px solid #555; border-radius: 6px; }"
-            "QPushButton:hover { background-color: #444; }"
-            "QPushButton:pressed { background-color: #222; }"
-            "QPushButton:checked { background-color: #555; border-color: #888; }"
-        )
-
-    def paintEvent(self, event):  # noqa: N802
-        super().paintEvent(event)
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        pen = QPen(QColor("#bbb"), 1.5)
-        painter.setPen(pen)
-        painter.drawLine(11, 21, 15, 17)
-        painter.drawRect(15, 11, 7, 7)
-        painter.drawLine(10, 22, 12, 22)
-        painter.drawLine(10, 20, 10, 22)
 
 
 class _ColorSelectButton(QPushButton):
@@ -265,6 +240,14 @@ class EditSelectiveColorSection(QWidget):
         self._ui_store = np.zeros((NUM_RANGES, 4), dtype=np.float32)
         self._ui_store[:, 3] = 0.5  # default range
 
+        # Per-range custom center hue [0,1) — set by the eyedropper.
+        self._custom_centers = list(DEFAULT_CENTERS)
+
+        # Mutable list of hex strings for the 6 colour swatches — updated by the
+        # eyedropper so that the button colour, slider theme, and hue slider
+        # neighbours all reflect the picked colour.
+        self._color_hexes: list[str] = list(self.COLOR_HEXES)
+
         layout = QVBoxLayout(self)
         layout.setContentsMargins(8, 0, 8, 0)
         layout.setSpacing(8)
@@ -278,7 +261,17 @@ class EditSelectiveColorSection(QWidget):
         p_layout = QHBoxLayout(pipette_container)
         p_layout.setContentsMargins(0, 0, 0, 0)
         p_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._pipette_btn = _PipetteButton()
+        self._pipette_btn = QToolButton()
+        self._pipette_btn.setFixedSize(32, 32)
+        self._pipette_btn.setCheckable(True)
+        self._pipette_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._pipette_btn.setIcon(load_icon("eyedropper.svg"))
+        self._pipette_btn.setStyleSheet(
+            "QToolButton { background-color: #383838; border: 1px solid #555; border-radius: 6px; }"
+            "QToolButton:hover { background-color: #444; }"
+            "QToolButton:pressed { background-color: #222; }"
+            "QToolButton:checked { background-color: #2d3b45; border: 1px solid #6aa2c8; }"
+        )
         self._pipette_btn.clicked.connect(self._on_pipette_clicked)
         p_layout.addWidget(self._pipette_btn)
 
@@ -295,7 +288,7 @@ class EditSelectiveColorSection(QWidget):
         self.btn_group.setExclusive(True)
         self.btn_group.idClicked.connect(self._on_color_clicked)
 
-        for i, c_hex in enumerate(self.COLOR_HEXES):
+        for i, c_hex in enumerate(self._color_hexes):
             btn = _ColorSelectButton(c_hex)
             self.btn_group.addButton(btn, i)
             c_layout.addWidget(btn)
@@ -365,6 +358,8 @@ class EditSelectiveColorSection(QWidget):
             if isinstance(ranges, list) and len(ranges) == NUM_RANGES:
                 for i, rng in enumerate(ranges):
                     if isinstance(rng, (list, tuple)) and len(rng) >= 5:
+                        # Restore per-range center hue from session data
+                        self._custom_centers[i] = float(rng[0])
                         # Convert normalised values back to UI slider values
                         self._ui_store[i, 0] = float(rng[2]) * 100.0  # hue_shift
                         self._ui_store[i, 1] = float(rng[3]) * 100.0  # sat_adj
@@ -391,6 +386,14 @@ class EditSelectiveColorSection(QWidget):
     def _on_session_reset(self) -> None:
         self._ui_store[:] = 0.0
         self._ui_store[:, 3] = 0.5
+        # Reset per-range custom centers and colour hexes to defaults
+        self._custom_centers = list(DEFAULT_CENTERS)
+        self._color_hexes = list(self.COLOR_HEXES)
+        for i, c_hex in enumerate(self.COLOR_HEXES):
+            btn = self.btn_group.button(i)
+            if btn is not None:
+                btn.color = QColor(c_hex)
+                btn.update()
         self.refresh_from_session()
 
     def _on_color_clicked(self, idx: int) -> None:
@@ -430,7 +433,7 @@ class EditSelectiveColorSection(QWidget):
         """Return the current ranges in the normalised format expected by the resolver."""
         ranges = []
         for i in range(NUM_RANGES):
-            center = DEFAULT_SELECTIVE_COLOR_RANGES[i][0]
+            center = self._custom_centers[i]
             range_slider = float(self._ui_store[i, 3])
             hue_shift = float(np.clip(self._ui_store[i, 0] / 100.0, -1.0, 1.0))
             sat_adj = float(np.clip(self._ui_store[i, 1] / 100.0, -1.0, 1.0))
@@ -447,7 +450,11 @@ class EditSelectiveColorSection(QWidget):
         })
 
     def _update_theme(self, color_idx: int) -> None:
-        """Update slider gradient colours based on the active colour range."""
+        """Update slider gradient colours based on the active colour range.
+
+        Uses the mutable ``_color_hexes`` list so that colours replaced by the
+        eyedropper are reflected in the slider backgrounds.
+        """
 
         def _mix_channel(channel: float, target: float, weight: float) -> float:
             return channel * (1.0 - weight) + target * weight
@@ -459,7 +466,7 @@ class EditSelectiveColorSection(QWidget):
                 _mix_channel(color.blueF(), target.blueF(), weight),
             )
 
-        base_c = QColor(self.COLOR_HEXES[color_idx])
+        base_c = QColor(self._color_hexes[color_idx])
         muted_anchor = QColor("#2a2a2a")
 
         # Saturation slider
@@ -483,9 +490,9 @@ class EditSelectiveColorSection(QWidget):
         lum_fill_pos = _mix_color(base_c, muted_anchor, 0.38).name()
 
         # Hue slider – neighbours on the colour wheel
-        n = len(self.COLOR_HEXES)
-        left_hue = self.COLOR_HEXES[(color_idx - 1) % n]
-        right_hue = self.COLOR_HEXES[(color_idx + 1) % n]
+        n = len(self._color_hexes)
+        left_hue = self._color_hexes[(color_idx - 1) % n]
+        right_hue = self._color_hexes[(color_idx + 1) % n]
         c_left = QColor(left_hue)
         c_left.setAlpha(100)
         c_right = QColor(right_hue)
@@ -525,43 +532,54 @@ class EditSelectiveColorSection(QWidget):
     def handle_color_picked(self, r: float, g: float, b: float) -> None:
         """Process a colour sampled by the viewer eyedropper.
 
-        Determines the closest hue range to the sampled colour and selects it.
+        Faithfully mirrors the demo algorithm:
+        1. Compute the hue of the picked colour and set it as the center hue of
+           the *active* range (not the closest default range).
+        2. Replace the active colour button's swatch with the picked colour.
+        3. Update the slider theme to reflect the new picked colour.
+        4. Push updated ranges to the session for real-time preview.
         """
         if not self._eyedropper_active:
             return
 
-        # Convert RGB [0,1] to hue [0,1]
-        max_c = max(r, g, b)
-        min_c = min(r, g, b)
-        d = max_c - min_c
-        if d < 1e-6:
-            h = 0.0
-        elif max_c == r:
-            h = ((g - b) / d) % 6.0
-        elif max_c == g:
-            h = (b - r) / d + 2.0
+        idx = self.btn_group.checkedId()
+        if idx < 0:
+            idx = 0
+
+        # Convert RGB [0,1] to hue [0,1]  (same formula as demo rgb_to_hue01)
+        mx = max(r, g, b)
+        mn = min(r, g, b)
+        d = mx - mn
+        if d < 1e-8:
+            hue01 = 0.0
+        elif mx == r:
+            hue01 = ((g - b) / d) % 6.0
+        elif mx == g:
+            hue01 = (b - r) / d + 2.0
         else:
-            h = (r - g) / d + 4.0
-        h /= 6.0
-        if h < 0.0:
-            h += 1.0
+            hue01 = (r - g) / d + 4.0
+        hue01 = (hue01 / 6.0) % 1.0
 
-        # Find closest colour range
-        from ....core.selective_color_resolver import DEFAULT_CENTERS
-        best_idx = 0
-        best_dist = 1.0
-        for i, center in enumerate(DEFAULT_CENTERS):
-            dist = abs(h - center)
-            dist = min(dist, 1.0 - dist)
-            if dist < best_dist:
-                best_dist = dist
-                best_idx = i
+        # 1. Set the picked hue as center hue for the active range
+        self._custom_centers[idx] = float(hue01)
 
-        # Select the matching colour button
-        btn = self.btn_group.button(best_idx)
+        # 2. Replace the button swatch colour with the picked colour
+        picked_hex = QColor.fromRgbF(r, g, b).name()
+        self._color_hexes[idx] = picked_hex
+        btn = self.btn_group.button(idx)
         if btn is not None:
-            btn.setChecked(True)
-            self._on_color_clicked(best_idx)
+            btn.color = QColor(picked_hex)
+            btn.update()
+
+        # 3. Update slider theme to reflect the new picked colour
+        self._update_theme(idx)
+
+        # 4. Push the updated ranges (with new center hue) to the session
+        ranges_data = self._build_ranges_data()
+        self.interactionStarted.emit()
+        self.selectiveColorParamsPreviewed.emit({"Ranges": ranges_data})
+        self._commit_to_session(ranges_data)
+        self.interactionFinished.emit()
 
         # Deactivate the eyedropper after picking
         self.deactivate_eyedropper()

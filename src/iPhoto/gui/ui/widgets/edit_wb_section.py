@@ -8,11 +8,10 @@ a mode-selection combo-box, and an eyedropper (pipette) button.
 from __future__ import annotations
 
 import logging
-from pathlib import Path
 from typing import Optional
 
 import numpy as np
-from PySide6.QtCore import QPointF, QRectF, Qt, Signal, Slot
+from PySide6.QtCore import QPointF, QRectF, QSize, Qt, Signal, Slot
 from PySide6.QtGui import (
     QColor,
     QFont,
@@ -20,7 +19,6 @@ from PySide6.QtGui import (
     QPainter,
     QPainterPath,
     QPen,
-    QPixmap,
 )
 from PySide6.QtWidgets import (
     QComboBox,
@@ -34,7 +32,7 @@ from PySide6.QtWidgets import (
 
 from ....core.wb_resolver import WBParams
 from ..models.edit_session import EditSession
-from ..icon import icon_path
+from ..icon import load_icon
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -107,10 +105,8 @@ class _PipetteButton(QPushButton):
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self._icon_path: str | None = None
-        eyedropper = icon_path("eyedropper.svg")
-        if eyedropper.exists():
-            self._icon_path = str(eyedropper)
+        self.setIcon(load_icon("eyedropper.svg"))
+        self.setIconSize(QSize(22, 22))
         self.setFixedSize(36, 32)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setCheckable(True)
@@ -126,20 +122,6 @@ class _PipetteButton(QPushButton):
             QPushButton:checked { background-color: #4a90e2; border-color: #4a90e2; }
             """
         )
-
-    def paintEvent(self, event):  # type: ignore[override]
-        super().paintEvent(event)
-        if self._icon_path and Path(self._icon_path).exists():
-            painter = QPainter(self)
-            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-            pixmap = QPixmap(self._icon_path)
-            if not pixmap.isNull():
-                scaled = pixmap.scaled(
-                    24, 24, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation
-                )
-                x = (self.width() - scaled.width()) // 2
-                y = (self.height() - scaled.height()) // 2
-                painter.drawPixmap(x, y, scaled)
 
 
 # ── Custom gradient sliders ──────────────────────────────────────────

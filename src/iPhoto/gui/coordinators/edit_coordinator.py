@@ -25,6 +25,7 @@ from src.iPhoto.gui.ui.controllers.edit_preview_manager import resolve_adjustmen
 from src.iPhoto.gui.ui.palette import viewer_surface_color
 from src.iPhoto.io import sidecar
 from src.iPhoto.core.curve_resolver import DEFAULT_CURVE_POINTS
+from src.iPhoto.core.levels_resolver import DEFAULT_LEVELS_HANDLES
 
 if TYPE_CHECKING:
     from src.iPhoto.gui.viewmodels.asset_list_viewmodel import AssetListViewModel
@@ -146,6 +147,8 @@ class EditCoordinator(QObject):
         self._ui.edit_sidebar.wbParamsCommitted.connect(self._handle_wb_params_committed)
         self._ui.edit_sidebar.curveParamsPreviewed.connect(self._handle_curve_params_previewed)
         self._ui.edit_sidebar.curveParamsCommitted.connect(self._handle_curve_params_committed)
+        self._ui.edit_sidebar.levelsParamsPreviewed.connect(self._handle_levels_params_previewed)
+        self._ui.edit_sidebar.levelsParamsCommitted.connect(self._handle_levels_params_committed)
         self._ui.edit_sidebar.curveEyedropperModeChanged.connect(
             self._handle_curve_eyedropper_mode_changed
         )
@@ -506,6 +509,37 @@ class EditCoordinator(QObject):
             "Curve_Red": curve_data.get("Red", list(DEFAULT_CURVE_POINTS)),
             "Curve_Green": curve_data.get("Green", list(DEFAULT_CURVE_POINTS)),
             "Curve_Blue": curve_data.get("Blue", list(DEFAULT_CURVE_POINTS)),
+        }
+        self._session.set_values(updates)
+
+    def _handle_levels_params_previewed(self, levels_data: dict) -> None:
+        """Apply transient levels previews without mutating session state."""
+
+        if self._session is None or self._compare_active:
+            return
+
+        try:
+            preview_values = self._session.values()
+            preview_values.update({
+                "Levels_Enabled": True,
+                "Levels_Handles": levels_data.get("Handles", list(DEFAULT_LEVELS_HANDLES)),
+            })
+            adjustments = self._preview_manager.resolve_adjustments(preview_values)
+        except Exception:
+            _LOGGER.exception("Failed to resolve levels preview adjustments")
+            return
+
+        self._ui.edit_image_viewer.set_adjustments(adjustments)
+
+    def _handle_levels_params_committed(self, levels_data: dict) -> None:
+        """Persist levels adjustments into the active edit session."""
+
+        if self._session is None:
+            return
+
+        updates = {
+            "Levels_Enabled": True,
+            "Levels_Handles": levels_data.get("Handles", list(DEFAULT_LEVELS_HANDLES)),
         }
         self._session.set_values(updates)
 

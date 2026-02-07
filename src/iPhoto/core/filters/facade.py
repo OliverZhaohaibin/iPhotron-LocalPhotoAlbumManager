@@ -21,6 +21,11 @@ from ..curve_resolver import (
     generate_curve_lut,
     apply_curve_lut_to_image,
 )
+from ..levels_resolver import (
+    DEFAULT_LEVELS_HANDLES,
+    build_levels_lut,
+    apply_levels_lut_to_image,
+)
 from ..wb_resolver import WBParams, apply_wb
 from .fallback_executor import apply_adjustments_fallback, apply_bw_using_qcolor
 from .jit_executor import (
@@ -131,6 +136,9 @@ def apply_adjustments(
     # Extract curve parameters
     curve_enabled = bool(adjustments.get("Curve_Enabled", False))
 
+    # Extract levels parameters
+    levels_enabled = bool(adjustments.get("Levels_Enabled", False))
+
     # Extract white balance parameters
     wb_flag = adjustments.get("WB_Enabled")
     if wb_flag is None:
@@ -153,7 +161,7 @@ def apply_adjustments(
             black_point,
         )
     ) and all(abs(value) < 1e-6 for value in (saturation, vibrance)) and cast < 1e-6:
-        if not apply_bw and not curve_enabled and not wb_enabled:
+        if not apply_bw and not curve_enabled and not levels_enabled and not wb_enabled:
             # Nothing to do - return a cheap copy so callers still get a detached
             # instance they are free to mutate independently.
             return QImage(result)
@@ -252,6 +260,10 @@ def apply_adjustments(
         if curve_enabled:
             transformed = _apply_curve_to_qimage(transformed, adjustments)
 
+        # Apply levels adjustment after curve
+        if levels_enabled:
+            transformed = _apply_levels_to_qimage(transformed, adjustments)
+
         return transformed
 
     # Pillow path not available, use JIT or fallback path
@@ -334,6 +346,10 @@ def apply_adjustments(
     if curve_enabled:
         result = _apply_curve_to_qimage(result, adjustments)
 
+    # Apply levels adjustment after all other processing
+    if levels_enabled:
+        result = _apply_levels_to_qimage(result, adjustments)
+
     return result
 
 
@@ -388,5 +404,35 @@ def _apply_curve_to_qimage(image: QImage, adjustments: Mapping[str, Any]) -> QIm
     arr = apply_curve_lut_to_image(arr, lut)
 
     # Convert back to QImage
+    result = QImage(arr.data, width, height, arr.strides[0], QImage.Format.Format_RGBA8888).copy()
+    return result.convertToFormat(QImage.Format.Format_ARGB32)
+
+
+def _apply_levels_to_qimage(image: QImage, adjustments: Mapping[str, Any]) -> QImage:
+    """Apply levels LUT to a QImage."""
+    handles = adjustments.get("Levels_Handles")
+    if not isinstance(handles, list) or len(handles) != 5:
+        return image
+
+    # Check if identity
+    if all(abs(h - d) < 1e-6 for h, d in zip(handles, DEFAULT_LEVELS_HANDLES)):
+        return image
+
+    try:
+        lut = build_levels_lut(handles)
+    except Exception:
+        return image
+
+    img = image.convertToFormat(QImage.Format.Format_RGBA8888)
+    width = img.width()
+    height = img.height()
+    ptr = img.bits()
+    byte_count = img.sizeInBytes()
+    if hasattr(ptr, "setsize"):
+        ptr.setsize(byte_count)
+
+    arr = np.frombuffer(ptr, dtype=np.uint8).reshape((height, width, 4)).copy()
+    arr = apply_levels_lut_to_image(arr, lut)
+
     result = QImage(arr.data, width, height, arr.strides[0], QImage.Format.Format_RGBA8888).copy()
     return result.convertToFormat(QImage.Format.Format_ARGB32)

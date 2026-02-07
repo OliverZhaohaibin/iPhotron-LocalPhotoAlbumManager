@@ -468,14 +468,15 @@ class SelectiveColorWidget(QWidget):
         dark_base = QColor(base_c)
         dark_base.setAlpha(80)
         bg_dark_hex = dark_base.name()
+        base_h, base_s, _, _ = base_c.getHslF()
 
         sat_bg_start = "#4a4a4a"
         sat_bg_end = bg_dark_hex
         sat_fill_neg = "#607080"
         sat_fill_pos = base_c.name()
 
-        lum_bg_start = "#1a1a1a"
-        lum_bg_end = bg_dark_hex
+        lum_bg_start = QColor.fromHslF(base_h, base_s, 0.15).name()
+        lum_bg_end = QColor.fromHslF(base_h, base_s, 0.85).name()
         lum_fill_neg = "#000000"
         lum_fill_pos = "#FFFFFF"
 

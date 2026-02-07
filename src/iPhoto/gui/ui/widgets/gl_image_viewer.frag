@@ -235,10 +235,16 @@ float sc_hue2rgb(float p, float q, float t){
 }
 
 vec3 sc_hsl2rgb(vec3 hsl){
-    float h=hsl.x, s=hsl.y, l=hsl.z;
-    float r,g,b;
+    float h = hsl.x;
+    float s = hsl.y;
+    float l = hsl.z;
+    float r;
+    float g;
+    float b;
     if (s < 1e-6){
-        r=g=b=l;
+        r = l;
+        g = l;
+        b = l;
     }else{
         float q = (l < 0.5) ? (l * (1.0 + s)) : (l + s - l*s);
         float p = 2.0*l - q;
@@ -249,10 +255,8 @@ vec3 sc_hsl2rgb(vec3 hsl){
     return vec3(r,g,b);
 }
 
-vec3 sc_apply_range(vec3 rgb, int i){
+vec3 sc_apply_one_range(vec3 rgb, vec4 p0, vec4 p1){
     vec3 hsl = sc_rgb2hsl(rgb);
-    vec4 p0 = uSCRange0[i];
-    vec4 p1 = uSCRange1[i];
     float enabled = p1.w;
     if (enabled < 0.5) return rgb;
 
@@ -285,9 +289,12 @@ vec3 sc_apply_range(vec3 rgb, int i){
 }
 
 vec3 apply_selective_color(vec3 c){
-    for (int i=0; i<6; i++){
-        c = sc_apply_range(c, i);
-    }
+    c = sc_apply_one_range(c, uSCRange0[0], uSCRange1[0]);
+    c = sc_apply_one_range(c, uSCRange0[1], uSCRange1[1]);
+    c = sc_apply_one_range(c, uSCRange0[2], uSCRange1[2]);
+    c = sc_apply_one_range(c, uSCRange0[3], uSCRange1[3]);
+    c = sc_apply_one_range(c, uSCRange0[4], uSCRange1[4]);
+    c = sc_apply_one_range(c, uSCRange0[5], uSCRange1[5]);
     return c;
 }
 

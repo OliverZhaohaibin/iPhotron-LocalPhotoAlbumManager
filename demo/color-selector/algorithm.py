@@ -264,18 +264,20 @@ class CustomSlider(QWidget):
 
     def __init__(self, name: str, parent=None, minimum=-100, maximum=100, initial=0,
                  bg_start="#2c3e4a", bg_end="#4a3e20",
-                 fill_neg="#4a90b4", fill_pos="#b4963c"):
+                 fill_neg="#5f8797", fill_pos="#a88f4a"):
         super().__init__(parent)
         self._name = name
         self._min = float(minimum)
         self._max = float(maximum)
         self._value = float(initial)
         self._dragging = False
-        self.setFixedHeight(30)
+        self.setFixedHeight(34)
         self.setCursor(Qt.OpenHandCursor)
 
         self.set_colors(bg_start, bg_end, fill_neg, fill_pos)
-        self.c_indicator = QColor(255, 255, 255)
+        self.c_indicator = QColor(235, 235, 235)
+        self.c_tick = QColor(255, 255, 255, 50)
+        self.c_zero = QColor(255, 255, 255, 90)
 
     def set_colors(self, bg_start, bg_end, fill_neg, fill_pos):
         self.c_bg_start = QColor(bg_start)
@@ -310,17 +312,24 @@ class CustomSlider(QWidget):
         else:
             fill_rect = QRectF(0, 0, curr_x, self.height())
 
-        painter.setOpacity(0.9)
+        painter.setOpacity(0.65)
         painter.setClipPath(path)
         painter.fillRect(fill_rect, current_fill_color)
         painter.setClipping(False)
         painter.setOpacity(1.0)
 
+        painter.setPen(QPen(self.c_tick, 1))
+        ticks = 50
+        for i in range(ticks + 1):
+            x = (i / ticks) * rect.width()
+            h = 6 if i % 5 == 0 else 3
+            painter.drawLine(QPointF(x, 0), QPointF(x, h))
+
         if self._min < 0 < self._max:
-            painter.setPen(QPen(QColor(255, 255, 255, 60), 1))
+            painter.setPen(QPen(self.c_zero, 1))
             painter.drawLine(QPointF(zero_x, 0), QPointF(zero_x, rect.bottom()))
 
-        font = QFont("Segoe UI", 10)
+        font = QFont("Inter", 11)
         painter.setFont(font)
         painter.setPen(QColor(230, 230, 230))
         painter.drawText(rect.adjusted(10, 0, 0, 0), Qt.AlignVCenter | Qt.AlignLeft, self._name)

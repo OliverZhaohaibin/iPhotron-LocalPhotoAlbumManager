@@ -624,7 +624,11 @@ class LevelsComposite(QWidget):
                 # Shadow (index 1): follows midtone, decelerates only when
                 # moving toward the black-point (handle 0).
                 if delta < 0:
-                    new1 = ease_shift(s[1], delta, s[0], exponent=3.0)
+                    span = max(s[1] - s[0], 1e-9)
+                    linear = s[1] + delta
+                    t = clamp01((linear - s[0]) / span)  # 1 -> start, 0 -> bound
+                    eased_t = pow(t, 0.5)
+                    new1 = s[0] + span * eased_t
                 else:
                     new1 = s[1] + delta
                 new1 = clamp01(new1)
@@ -634,7 +638,11 @@ class LevelsComposite(QWidget):
                 # Highlight (index 3): follows midtone, decelerates only when
                 # moving toward the white-point (handle 4).
                 if delta > 0:
-                    new3 = ease_shift(s[3], delta, s[4], exponent=3.0)
+                    span = max(s[4] - s[3], 1e-9)
+                    linear = s[3] + delta
+                    t = clamp01((s[4] - linear) / span)  # 1 -> start, 0 -> bound
+                    eased_t = pow(t, 0.5)
+                    new3 = s[4] - span * eased_t
                 else:
                     new3 = s[3] + delta
                 new3 = clamp01(new3)

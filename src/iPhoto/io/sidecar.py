@@ -630,9 +630,9 @@ def resolve_render_adjustments(
     wb_enabled = bool(adjustments.get("WB_Enabled", False))
     resolved["WB_Enabled"] = wb_enabled
     if wb_enabled:
-        resolved["WBWarmth"] = float(adjustments.get("WB_Warmth", 0.0))
-        resolved["WBTemperature"] = float(adjustments.get("WB_Temperature", 0.0))
-        resolved["WBTint"] = float(adjustments.get("WB_Tint", 0.0))
+        resolved["WBWarmth"] = max(-1.0, min(1.0, float(adjustments.get("WB_Warmth", 0.0))))
+        resolved["WBTemperature"] = max(-1.0, min(1.0, float(adjustments.get("WB_Temperature", 0.0))))
+        resolved["WBTint"] = max(-1.0, min(1.0, float(adjustments.get("WB_Tint", 0.0))))
     else:
         resolved["WBWarmth"] = 0.0
         resolved["WBTemperature"] = 0.0

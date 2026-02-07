@@ -20,7 +20,7 @@ from ....core.light_resolver import LIGHT_KEYS
 from ....core.color_resolver import COLOR_KEYS, ColorStats
 from ....core.bw_resolver import BWParams
 from ....core.curve_resolver import DEFAULT_CURVE_POINTS
-from ....core.wb_resolver import WBParams, WB_KEYS
+from ....core.wb_resolver import WBParams
 from ..models.edit_session import EditSession
 from .edit_light_section import EditLightSection
 from .edit_color_section import EditColorSection
@@ -370,10 +370,12 @@ class EditSidebar(QWidget):
             try:
                 self.wb_reset_button.clicked.disconnect(self._on_wb_reset)
             except (TypeError, RuntimeError):
+                # Signal may already be disconnected or was never connected; safe to ignore.
                 pass
             try:
                 self.wb_toggle_button.toggled.disconnect(self._on_wb_toggled)
             except (TypeError, RuntimeError):
+                # Signal may already be disconnected or was never connected; safe to ignore.
                 pass
             self._wb_controls_connected = False
 
@@ -494,6 +496,16 @@ class EditSidebar(QWidget):
         """Forward a sampled colour to the WB section's eyedropper handler."""
 
         self._wb_section.handle_color_picked(r, g, b)
+
+    def deactivate_wb_eyedropper(self) -> None:
+        """Turn off the WB pipette button without emitting a mode-changed signal loop."""
+
+        self._wb_section.deactivate_eyedropper()
+
+    def deactivate_curve_eyedropper(self) -> None:
+        """Turn off the Curve eyedropper buttons."""
+
+        self._curve_section._deactivate_all_eyedroppers()
 
     def preview_thumbnail_height(self) -> int:
         """Return the vertical pixel span used by the master thumbnail strips."""

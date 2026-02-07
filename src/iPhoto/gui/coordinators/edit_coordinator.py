@@ -515,6 +515,8 @@ class EditCoordinator(QObject):
         active = mode is not None
         if active:
             self._eyedropper_target = "curve"
+            # Deactivate the WB eyedropper to enforce mutual exclusion.
+            self._ui.edit_sidebar.deactivate_wb_eyedropper()
         self._ui.edit_image_viewer.set_eyedropper_mode(active)
 
     def _handle_wb_eyedropper_mode_changed(self, mode: object) -> None:
@@ -523,6 +525,8 @@ class EditCoordinator(QObject):
         active = mode is not None
         if active:
             self._eyedropper_target = "wb"
+            # Deactivate the Curve eyedropper to enforce mutual exclusion.
+            self._ui.edit_sidebar.deactivate_curve_eyedropper()
         self._ui.edit_image_viewer.set_eyedropper_mode(active)
 
     def _handle_color_picked(self, r: float, g: float, b: float) -> None:

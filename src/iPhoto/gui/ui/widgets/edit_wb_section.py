@@ -22,7 +22,6 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import (
     QComboBox,
-    QFrame,
     QGraphicsOpacityEffect,
     QHBoxLayout,
     QPushButton,
@@ -555,11 +554,13 @@ class EditWBSection(QWidget):
             try:
                 self._session.valueChanged.disconnect(self._on_session_value_changed)
             except (TypeError, RuntimeError):
-                pass
+                # Signal may already be disconnected or the session object may be gone.
+                _LOGGER.debug("Failed to disconnect 'valueChanged' signal", exc_info=True)
             try:
                 self._session.resetPerformed.disconnect(self._on_session_reset)
             except (TypeError, RuntimeError):
-                pass
+                # Signal may already be disconnected or the session object may be gone.
+                _LOGGER.debug("Failed to disconnect 'resetPerformed' signal", exc_info=True)
 
         self._session = session
 
@@ -663,6 +664,10 @@ class EditWBSection(QWidget):
         self._temp_slider.setEnabled(enabled)
         self._tint_slider.setEnabled(enabled)
         self._combo.setEnabled(enabled)
+        if not enabled and self._pipette.isChecked():
+            # Deactivate eyedropper mode when WB is disabled. setChecked(False)
+            # emits the toggled signal so connected handlers exit eyedropper mode.
+            self._pipette.setChecked(False)
         self._pipette.setEnabled(enabled)
 
     def _gather_params(self) -> WBParams:
@@ -739,6 +744,12 @@ class EditWBSection(QWidget):
 
     def _on_eyedropper_toggled(self, checked: bool) -> None:
         self.eyedropperModeChanged.emit(checked if checked else None)
+
+    def deactivate_eyedropper(self) -> None:
+        """Turn off the pipette button without triggering mode-change loops."""
+
+        if self._pipette.isChecked():
+            self._pipette.setChecked(False)
 
     # Allow click-to-enable when WB is disabled
     def mousePressEvent(self, event):  # type: ignore[override]

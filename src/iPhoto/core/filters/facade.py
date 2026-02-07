@@ -26,6 +26,10 @@ from ..levels_resolver import (
     build_levels_lut,
     apply_levels_lut_to_image,
 )
+from ..selective_color_resolver import (
+    apply_selective_color,
+    is_identity as sc_is_identity,
+)
 from ..wb_resolver import WBParams, apply_wb
 from .fallback_executor import apply_adjustments_fallback, apply_bw_using_qcolor
 from .jit_executor import (
@@ -147,6 +151,11 @@ def apply_adjustments(
     )
     levels_enabled = _levels_flag and not _levels_identity
 
+    # Extract Selective Color parameters
+    _sc_flag = bool(adjustments.get("SelectiveColor_Enabled", False))
+    _sc_ranges = adjustments.get("SelectiveColor_Ranges")
+    sc_enabled = _sc_flag and not sc_is_identity(_sc_ranges)
+
     # Extract white balance parameters
     wb_flag = adjustments.get("WB_Enabled")
     if wb_flag is None:
@@ -169,7 +178,7 @@ def apply_adjustments(
             black_point,
         )
     ) and all(abs(value) < 1e-6 for value in (saturation, vibrance)) and cast < 1e-6:
-        if not apply_bw and not curve_enabled and not levels_enabled and not wb_enabled:
+        if not apply_bw and not curve_enabled and not levels_enabled and not wb_enabled and not sc_enabled:
             # Nothing to do - return a cheap copy so callers still get a detached
             # instance they are free to mutate independently.
             return QImage(result)
@@ -254,6 +263,10 @@ def apply_adjustments(
         # Apply levels adjustment after curve but before B&W (matching GL shader order)
         if levels_enabled:
             transformed = _apply_levels_to_qimage(transformed, adjustments)
+
+        # Apply Selective Color after levels, before B&W
+        if sc_enabled:
+            transformed = _apply_selective_color_to_qimage(transformed, adjustments)
 
         if apply_bw:
             if not apply_bw_only(
@@ -361,6 +374,10 @@ def apply_adjustments(
     if levels_enabled:
         result = _apply_levels_to_qimage(result, adjustments)
 
+    # Apply Selective Color after levels
+    if sc_enabled:
+        result = _apply_selective_color_to_qimage(result, adjustments)
+
     return result
 
 
@@ -444,6 +461,30 @@ def _apply_levels_to_qimage(image: QImage, adjustments: Mapping[str, Any]) -> QI
 
     arr = np.frombuffer(ptr, dtype=np.uint8).reshape((height, width, 4)).copy()
     arr = apply_levels_lut_to_image(arr, lut)
+
+    result = QImage(arr.data, width, height, arr.strides[0], QImage.Format.Format_RGBA8888).copy()
+    return result.convertToFormat(QImage.Format.Format_ARGB32)
+
+
+def _apply_selective_color_to_qimage(image: QImage, adjustments: Mapping[str, Any]) -> QImage:
+    """Apply Selective Color adjustments to a QImage."""
+    ranges = adjustments.get("SelectiveColor_Ranges")
+    if not isinstance(ranges, list) or len(ranges) != 6:
+        return image
+
+    if sc_is_identity(ranges):
+        return image
+
+    img = image.convertToFormat(QImage.Format.Format_RGBA8888)
+    width = img.width()
+    height = img.height()
+    ptr = img.bits()
+    byte_count = img.sizeInBytes()
+    if hasattr(ptr, "setsize"):
+        ptr.setsize(byte_count)
+
+    arr = np.frombuffer(ptr, dtype=np.uint8).reshape((height, width, 4)).copy()
+    arr = apply_selective_color(arr, ranges)
 
     result = QImage(arr.data, width, height, arr.strides[0], QImage.Format.Format_RGBA8888).copy()
     return result.convertToFormat(QImage.Format.Format_ARGB32)

@@ -26,6 +26,7 @@ from src.iPhoto.gui.ui.palette import viewer_surface_color
 from src.iPhoto.io import sidecar
 from src.iPhoto.core.curve_resolver import DEFAULT_CURVE_POINTS
 from src.iPhoto.core.levels_resolver import DEFAULT_LEVELS_HANDLES
+from src.iPhoto.core.selective_color_resolver import DEFAULT_SELECTIVE_COLOR_RANGES
 
 if TYPE_CHECKING:
     from src.iPhoto.gui.viewmodels.asset_list_viewmodel import AssetListViewModel
@@ -149,6 +150,12 @@ class EditCoordinator(QObject):
         self._ui.edit_sidebar.curveParamsCommitted.connect(self._handle_curve_params_committed)
         self._ui.edit_sidebar.levelsParamsPreviewed.connect(self._handle_levels_params_previewed)
         self._ui.edit_sidebar.levelsParamsCommitted.connect(self._handle_levels_params_committed)
+        self._ui.edit_sidebar.selectiveColorParamsPreviewed.connect(
+            self._handle_selective_color_params_previewed
+        )
+        self._ui.edit_sidebar.selectiveColorParamsCommitted.connect(
+            self._handle_selective_color_params_committed
+        )
         self._ui.edit_sidebar.curveEyedropperModeChanged.connect(
             self._handle_curve_eyedropper_mode_changed
         )
@@ -540,6 +547,43 @@ class EditCoordinator(QObject):
         updates = {
             "Levels_Enabled": True,
             "Levels_Handles": levels_data.get("Handles", list(DEFAULT_LEVELS_HANDLES)),
+        }
+        self._session.set_values(updates)
+
+    def _handle_selective_color_params_previewed(self, sc_data: dict) -> None:
+        """Apply transient Selective Color previews without mutating session state."""
+
+        if self._session is None or self._compare_active:
+            return
+
+        try:
+            preview_values = self._session.values()
+            preview_values.update({
+                "SelectiveColor_Enabled": True,
+                "SelectiveColor_Ranges": sc_data.get(
+                    "Ranges",
+                    [list(r) for r in DEFAULT_SELECTIVE_COLOR_RANGES],
+                ),
+            })
+            adjustments = self._preview_manager.resolve_adjustments(preview_values)
+        except Exception:
+            _LOGGER.exception("Failed to resolve selective color preview adjustments")
+            return
+
+        self._ui.edit_image_viewer.set_adjustments(adjustments)
+
+    def _handle_selective_color_params_committed(self, sc_data: dict) -> None:
+        """Persist Selective Color adjustments into the active edit session."""
+
+        if self._session is None:
+            return
+
+        updates = {
+            "SelectiveColor_Enabled": True,
+            "SelectiveColor_Ranges": sc_data.get(
+                "Ranges",
+                [list(r) for r in DEFAULT_SELECTIVE_COLOR_RANGES],
+            ),
         }
         self._session.set_values(updates)
 

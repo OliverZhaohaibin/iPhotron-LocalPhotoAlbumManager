@@ -48,7 +48,7 @@ def resolve_adjustment_mapping(
 
     # Keys that contain list data (curve control points, levels handles) - skip these
     _CURVE_LIST_KEYS = {"Curve_RGB", "Curve_Red", "Curve_Green", "Curve_Blue"}
-    _LIST_KEYS = _CURVE_LIST_KEYS | {"Levels_Handles"}
+    _LIST_KEYS = _CURVE_LIST_KEYS | {"Levels_Handles", "SelectiveColor_Ranges"}
 
     resolved: dict[str, float | bool | list] = {}
     overrides: dict[str, float] = {}
@@ -141,6 +141,10 @@ def resolve_adjustment_mapping(
     # Preserve the dedicated Levels parameters.
     levels_enabled = bool(session_values.get("Levels_Enabled", False))
     resolved["Levels_Enabled"] = 1.0 if levels_enabled else 0.0
+
+    # Preserve the dedicated Selective Color parameters.
+    sc_enabled = bool(session_values.get("SelectiveColor_Enabled", False))
+    resolved["SelectiveColor_Enabled"] = 1.0 if sc_enabled else 0.0
 
     resolved.update(curve_lists)
     return resolved

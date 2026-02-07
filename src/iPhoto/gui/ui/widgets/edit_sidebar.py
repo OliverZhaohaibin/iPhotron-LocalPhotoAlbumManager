@@ -21,6 +21,7 @@ from ....core.color_resolver import COLOR_KEYS, ColorStats
 from ....core.bw_resolver import BWParams
 from ....core.curve_resolver import DEFAULT_CURVE_POINTS
 from ....core.levels_resolver import DEFAULT_LEVELS_HANDLES
+from ....core.selective_color_resolver import DEFAULT_SELECTIVE_COLOR_RANGES
 from ....core.wb_resolver import WBParams
 from ..models.edit_session import EditSession
 from .edit_light_section import EditLightSection
@@ -28,6 +29,7 @@ from .edit_color_section import EditColorSection
 from .edit_bw_section import EditBWSection
 from .edit_wb_section import EditWBSection
 from .edit_curve_section import EditCurveSection
+from .edit_selective_color_section import EditSelectiveColorSection
 from .edit_levels_section import EditLevelsSection
 from .edit_perspective_controls import PerspectiveControls
 from .collapsible_section import CollapsibleSection
@@ -58,6 +60,12 @@ class EditSidebar(QWidget):
 
     curveEyedropperModeChanged = Signal(object)
     """Relay eyedropper mode toggles from the curve section."""
+
+    selectiveColorParamsPreviewed = Signal(object)
+    """Relays live Selective Color adjustments to the controller."""
+
+    selectiveColorParamsCommitted = Signal(object)
+    """Emitted when Selective Color adjustments should be written to the session."""
 
     levelsParamsPreviewed = Signal(object)
     """Relays live levels adjustments to the controller."""
@@ -93,6 +101,7 @@ class EditSidebar(QWidget):
         self._bw_controls_connected = False
         self._wb_controls_connected = False
         self._curve_controls_connected = False
+        self._selective_color_controls_connected = False
         self._levels_controls_connected = False
 
         # Match the classic sidebar chrome so the edit tools retain the soft blue
@@ -293,7 +302,43 @@ class EditSidebar(QWidget):
 
         scroll_layout.addWidget(self._build_separator(scroll_content))
 
-        # Levels section (collapsed by default, after Curve)
+        # Selective Color section (collapsed by default, after Curve)
+        self._selective_color_section = EditSelectiveColorSection(scroll_content)
+        self._selective_color_section_container = CollapsibleSection(
+            "Selective Color",
+            "selectivecolor.svg",
+            self._selective_color_section,
+            scroll_content,
+            title_font=Edit_SIDEBAR_FONT,
+        )
+        self._selective_color_section_container.set_expanded(False)
+
+        self.selective_color_reset_button = QToolButton(self._selective_color_section_container)
+        self.selective_color_reset_button.setAutoRaise(True)
+        self.selective_color_reset_button.setIcon(load_icon("arrow.uturn.left.svg"))
+        self.selective_color_reset_button.setToolTip("Reset Selective Color adjustments")
+        self.selective_color_toggle_button = QToolButton(self._selective_color_section_container)
+        self.selective_color_toggle_button.setAutoRaise(True)
+        self.selective_color_toggle_button.setCheckable(True)
+        self.selective_color_toggle_button.setIcon(load_icon("circle.svg"))
+        self.selective_color_toggle_button.setToolTip("Toggle Selective Color adjustments")
+        self._selective_color_section_container.add_header_control(self.selective_color_reset_button)
+        self._selective_color_section_container.add_header_control(self.selective_color_toggle_button)
+
+        scroll_layout.addWidget(self._selective_color_section_container)
+
+        self._selective_color_section.selectiveColorParamsPreviewed.connect(
+            self.selectiveColorParamsPreviewed
+        )
+        self._selective_color_section.selectiveColorParamsCommitted.connect(
+            self.selectiveColorParamsCommitted
+        )
+        self._selective_color_section.interactionStarted.connect(self.interactionStarted)
+        self._selective_color_section.interactionFinished.connect(self.interactionFinished)
+
+        scroll_layout.addWidget(self._build_separator(scroll_content))
+
+        # Levels section (collapsed by default, after Selective Color)
         self._levels_section = EditLevelsSection(scroll_content)
         self._levels_section_container = CollapsibleSection(
             "Levels",
@@ -433,6 +478,17 @@ class EditSidebar(QWidget):
                 pass
             self._curve_controls_connected = False
 
+        if self._selective_color_controls_connected:
+            try:
+                self.selective_color_reset_button.clicked.disconnect(self._on_selective_color_reset)
+            except (TypeError, RuntimeError):
+                pass
+            try:
+                self.selective_color_toggle_button.toggled.disconnect(self._on_selective_color_toggled)
+            except (TypeError, RuntimeError):
+                pass
+            self._selective_color_controls_connected = False
+
         if self._levels_controls_connected:
             try:
                 self.levels_reset_button.clicked.disconnect(self._on_levels_reset)
@@ -452,6 +508,7 @@ class EditSidebar(QWidget):
         self._bw_section.bind_session(session)
         self._wb_section.bind_session(session)
         self._curve_section.bind_session(session)
+        self._selective_color_section.bind_session(session)
         self._levels_section.bind_session(session)
         self._perspective_controls.bind_session(session)
         if session is not None:
@@ -474,6 +531,10 @@ class EditSidebar(QWidget):
             self.curve_toggle_button.toggled.connect(self._on_curve_toggled)
             self._curve_controls_connected = True
             self.curve_reset_button.setEnabled(True)
+            self.selective_color_reset_button.clicked.connect(self._on_selective_color_reset)
+            self.selective_color_toggle_button.toggled.connect(self._on_selective_color_toggled)
+            self._selective_color_controls_connected = True
+            self.selective_color_reset_button.setEnabled(True)
             self.levels_reset_button.clicked.connect(self._on_levels_reset)
             self.levels_toggle_button.toggled.connect(self._on_levels_toggled)
             self._levels_controls_connected = True
@@ -483,6 +544,7 @@ class EditSidebar(QWidget):
             self._sync_bw_toggle_state()
             self._sync_wb_toggle_state()
             self._sync_curve_toggle_state()
+            self._sync_selective_color_toggle_state()
             self._sync_levels_toggle_state()
             if self._light_preview_image is not None:
                 self._light_section.set_preview_image(self._light_preview_image)
@@ -506,6 +568,9 @@ class EditSidebar(QWidget):
             self.curve_reset_button.setEnabled(False)
             self.curve_toggle_button.setChecked(False)
             self._update_curve_toggle_icon(False)
+            self.selective_color_reset_button.setEnabled(False)
+            self.selective_color_toggle_button.setChecked(False)
+            self._update_selective_color_toggle_icon(False)
             self.levels_reset_button.setEnabled(False)
             self.levels_toggle_button.setChecked(False)
             self._update_levels_toggle_icon(False)
@@ -528,6 +593,7 @@ class EditSidebar(QWidget):
         self._bw_section.refresh_from_session()
         self._wb_section.refresh_from_session()
         self._curve_section.refresh_from_session()
+        self._selective_color_section.refresh_from_session()
         self._levels_section.refresh_from_session()
         self._perspective_controls.refresh_from_session()
         self._sync_light_toggle_state()
@@ -535,6 +601,7 @@ class EditSidebar(QWidget):
         self._sync_bw_toggle_state()
         self._sync_wb_toggle_state()
         self._sync_curve_toggle_state()
+        self._sync_selective_color_toggle_state()
         self._sync_levels_toggle_state()
 
     def set_light_preview_image(
@@ -670,6 +737,8 @@ class EditSidebar(QWidget):
             self._sync_wb_toggle_state()
         if key == "Curve_Enabled":
             self._sync_curve_toggle_state()
+        if key == "SelectiveColor_Enabled":
+            self._sync_selective_color_toggle_state()
         if key == "Levels_Enabled":
             self._sync_levels_toggle_state()
 
@@ -836,6 +905,51 @@ class EditSidebar(QWidget):
             )
             self.curve_toggle_button.setIcon(load_icon("circle.svg", color=tint_name))
 
+    def _on_selective_color_reset(self) -> None:
+        if self._session is None:
+            return
+        self.interactionStarted.emit()
+        updates = {
+            "SelectiveColor_Enabled": False,
+            "SelectiveColor_Ranges": [list(r) for r in DEFAULT_SELECTIVE_COLOR_RANGES],
+        }
+        self._session.set_values(updates)
+        self._selective_color_section.refresh_from_session()
+        self._sync_selective_color_toggle_state()
+        self.interactionFinished.emit()
+
+    def _on_selective_color_toggled(self, checked: bool) -> None:
+        self._update_selective_color_toggle_icon(checked)
+        if self._session is None:
+            return
+        self.interactionStarted.emit()
+        self._session.set_value("SelectiveColor_Enabled", checked)
+        self.interactionFinished.emit()
+
+    def _sync_selective_color_toggle_state(self) -> None:
+        if self._session is None:
+            block = self.selective_color_toggle_button.blockSignals(True)
+            self.selective_color_toggle_button.setChecked(False)
+            self.selective_color_toggle_button.blockSignals(block)
+            self._update_selective_color_toggle_icon(False)
+            return
+        enabled = bool(self._session.value("SelectiveColor_Enabled"))
+        block = self.selective_color_toggle_button.blockSignals(True)
+        self.selective_color_toggle_button.setChecked(enabled)
+        self.selective_color_toggle_button.blockSignals(block)
+        self._update_selective_color_toggle_icon(enabled)
+
+    def _update_selective_color_toggle_icon(self, enabled: bool) -> None:
+        if enabled:
+            self.selective_color_toggle_button.setIcon(load_icon("checkmark.circle.svg"))
+        else:
+            tint_name = (
+                self._control_icon_tint.name(QColor.NameFormat.HexArgb)
+                if self._control_icon_tint
+                else None
+            )
+            self.selective_color_toggle_button.setIcon(load_icon("circle.svg", color=tint_name))
+
     def _on_levels_reset(self) -> None:
         if self._session is None:
             return
@@ -900,6 +1014,9 @@ class EditSidebar(QWidget):
         self.curve_reset_button.setIcon(
             load_icon("arrow.uturn.left.svg", color=tint_name)
         )
+        self.selective_color_reset_button.setIcon(
+            load_icon("arrow.uturn.left.svg", color=tint_name)
+        )
         self.levels_reset_button.setIcon(
             load_icon("arrow.uturn.left.svg", color=tint_name)
         )
@@ -908,4 +1025,5 @@ class EditSidebar(QWidget):
         self._sync_bw_toggle_state()
         self._sync_wb_toggle_state()
         self._sync_curve_toggle_state()
+        self._sync_selective_color_toggle_state()
         self._sync_levels_toggle_state()

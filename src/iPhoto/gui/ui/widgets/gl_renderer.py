@@ -159,6 +159,9 @@ class GLRenderer:
                 "uCropH",
                 "uPerspectiveMatrix",
                 "uRotate90",
+                "uSCRange0",
+                "uSCRange1",
+                "uSCEnabled",
             ):
                 self._uniform_locations[name] = program.uniformLocation(name)
         finally:
@@ -500,6 +503,29 @@ class GLRenderer:
                 self._set_uniform1i("uLevelsLUT", 2)
             else:
                 self._set_uniform1i("uLevelsLUT", 0)
+
+            # Selective Color uniforms
+            sc_enabled_value = adjustments.get("SelectiveColor_Enabled", False)
+            self._set_uniform1i("uSCEnabled", 1 if bool(sc_enabled_value) else 0)
+            sc_ranges = adjustments.get("SelectiveColor_Ranges")
+            if isinstance(sc_ranges, list) and len(sc_ranges) == 6:
+                u0 = np.zeros((6, 4), dtype=np.float32)
+                u1 = np.zeros((6, 4), dtype=np.float32)
+                for idx, rng in enumerate(sc_ranges):
+                    if isinstance(rng, (list, tuple)) and len(rng) >= 5:
+                        center = float(rng[0])
+                        range_slider = float(np.clip(rng[1], 0.0, 1.0))
+                        # Convert range slider to hue half-width
+                        deg = 5.0 + (70.0 - 5.0) * range_slider
+                        width_hue = float(np.clip(deg / 360.0, 0.001, 0.5))
+                        u0[idx] = [center, width_hue, float(rng[2]), float(rng[3])]
+                        u1[idx] = [float(rng[4]), 0.05, 0.20, 1.0]
+                loc0 = self._uniform_locations.get("uSCRange0", -1)
+                loc1 = self._uniform_locations.get("uSCRange1", -1)
+                if loc0 != -1:
+                    gl.glUniform4fv(loc0, 6, u0)
+                if loc1 != -1:
+                    gl.glUniform4fv(loc1, 6, u1)
 
             if time_value is not None:
                 self._set_uniform1f("uTime", time_value)

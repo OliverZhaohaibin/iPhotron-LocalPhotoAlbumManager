@@ -1,6 +1,5 @@
 import sys
 import os
-import math
 import numpy as np
 from PIL import Image
 
@@ -21,26 +20,6 @@ from OpenGL import GL as gl
 # ==========================================
 def clamp01(x: float) -> float:
     return max(0.0, min(1.0, x))
-
-
-def ease_shift(base: float, delta: float, bound: float) -> float:
-    """Nonlinear shift using exponential decay toward *bound*.
-
-    The follower's speed is proportional to its remaining distance from
-    *bound*, so it starts at 1:1 speed with the driver and progressively
-    decelerates as it approaches the boundary — matching macOS-style
-    levels behaviour.  Fully reversible (pure function of inputs).
-
-    *base*  – starting position of the follower handle.
-    *delta* – signed displacement (same sign convention as the midtone
-              delta).
-    *bound* – the hard limit the follower should approach but never
-              exceed (0.0 for shadow, 1.0 for highlight).
-    """
-    diff = base - bound          # signed distance from bound to base
-    if abs(diff) < 1e-9:
-        return base
-    return bound + diff * math.exp(0.75 * delta / diff)
 
 
 def build_levels_lut(handles):
@@ -610,31 +589,38 @@ class LevelsComposite(QWidget):
                 # --- Midtone handle: nonlinear coupled dragging ---
                 s = self._drag_start_handles
                 # Clamp midtone between black-point and white-point handles
-                min_val = self.handles[0]
-                max_val = self.handles[4]
-                val = max(min_val, min(max_val, val))
+                bound_lo = self.handles[0]
+                bound_hi = self.handles[4]
+                val = max(bound_lo, min(bound_hi, val))
                 self.handles[2] = val
 
                 delta = val - s[2]  # signed displacement of midtone
 
-                # Shadow (index 1): follows midtone, decelerates as it
-                # approaches the black-point (handle 0).
+                # Shadow (index 1): stays between bound_lo and midtone.
+                # Compute a ratio that preserves the follower's relative
+                # position within the midtone-to-bound span, shrinking
+                # nonlinearly so the two only fully meet at the bound.
                 if delta < 0:
-                    new1 = ease_shift(s[1], delta, s[0])
+                    orig_span = s[2] - s[0]
+                    orig_ratio = (s[1] - s[0]) / orig_span if orig_span > 1e-9 else 0.0
+                    cur_span = val - bound_lo
+                    new1 = bound_lo + orig_ratio * cur_span
                 else:
                     new1 = s[1] + delta
                 new1 = clamp01(new1)
-                new1 = max(self.handles[0], min(new1, self.handles[2]))
+                new1 = max(bound_lo, min(new1, val))
                 self.handles[1] = new1
 
-                # Highlight (index 3): follows midtone, decelerates as it
-                # approaches the white-point (handle 4).
+                # Highlight (index 3): stays between midtone and bound_hi.
                 if delta > 0:
-                    new3 = ease_shift(s[3], delta, s[4])
+                    orig_span = s[4] - s[2]
+                    orig_ratio = (s[4] - s[3]) / orig_span if orig_span > 1e-9 else 0.0
+                    cur_span = bound_hi - val
+                    new3 = bound_hi - orig_ratio * cur_span
                 else:
                     new3 = s[3] + delta
                 new3 = clamp01(new3)
-                new3 = max(self.handles[2], min(new3, self.handles[4]))
+                new3 = max(val, min(new3, bound_hi))
                 self.handles[3] = new3
             else:
                 # --- Other handles: original non-decreasing constraint ---

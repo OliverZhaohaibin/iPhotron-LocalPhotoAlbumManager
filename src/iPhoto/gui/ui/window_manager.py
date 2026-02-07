@@ -81,7 +81,6 @@ class FramelessWindowManager(QObject):
         self._immersive_background_applied = False
         self._immersive_visibility_targets = self._build_immersive_targets()
         self._detail_view_state: Optional[ViewTransformController.State] = None
-        self._fullscreen_view_state: Optional[ViewTransformController.State] = None
 
         self._qmenu_stylesheet: str = ""
         self._global_menu_stylesheet: str | None = None
@@ -243,8 +242,6 @@ class FramelessWindowManager(QObject):
             image_viewer = getattr(self._ui, "image_viewer", None)
             if image_viewer is not None:
                 self._detail_view_state = image_viewer.view_transform_state()
-                if self._fullscreen_view_state is not None:
-                    image_viewer.restore_view_transform(self._fullscreen_view_state)
 
         self._previous_geometry = self._window.saveGeometry()
         self._previous_window_state = self._window.windowState()
@@ -265,6 +262,8 @@ class FramelessWindowManager(QObject):
         self._immersive_active = True
         self._window.showFullScreen()
         self._update_fullscreen_button_icon()
+        if image_viewer is not None:
+            QTimer.singleShot(0, image_viewer.reset_zoom)
         self._schedule_playback_resume(
             expect_immersive=True, resume=resume_after_transition
         )
@@ -292,7 +291,6 @@ class FramelessWindowManager(QObject):
         self._window.showNormal()
         image_viewer = getattr(self._ui, "image_viewer", None)
         if image_viewer is not None:
-            self._fullscreen_view_state = image_viewer.view_transform_state()
             if self._detail_view_state is not None:
                 image_viewer.restore_view_transform(self._detail_view_state)
 

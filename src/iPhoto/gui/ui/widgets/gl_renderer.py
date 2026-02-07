@@ -139,6 +139,10 @@ class GLRenderer:
                 "uBWEnabled",
                 "uCurveLUT",
                 "uCurveEnabled",
+                "uWBWarmth",
+                "uWBTemperature",
+                "uWBTint",
+                "uWBEnabled",
                 "uTime",
                 "uViewSize",
                 "uTexSize",
@@ -406,6 +410,13 @@ class GLRenderer:
             # is used to communicate the toggle state without introducing another
             # helper that mirrors the existing ``_set_uniform1i`` wrapper.
             self._set_uniform1i("uBWEnabled", 1 if bool(bw_enabled_value) else 0)
+
+            # White Balance uniforms
+            wb_enabled_value = adjustments.get("WB_Enabled", adjustments.get("WBEnabled", 0.0))
+            self._set_uniform1i("uWBEnabled", 1 if bool(wb_enabled_value) else 0)
+            self._set_uniform1f("uWBWarmth", adjustment_value("WBWarmth"))
+            self._set_uniform1f("uWBTemperature", adjustment_value("WBTemperature"))
+            self._set_uniform1f("uWBTint", adjustment_value("WBTint"))
 
             # Curve LUT texture binding
             curve_enabled_value = adjustments.get("Curve_Enabled", False)

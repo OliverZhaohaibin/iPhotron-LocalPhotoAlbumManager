@@ -12,6 +12,7 @@ from ..core.curve_resolver import (
     DEFAULT_CURVE_POINTS,
     CurveChannel,
 )
+from ..core.wb_resolver import WB_KEYS, WB_DEFAULTS
 
 BW_KEYS = (
     "BW_Master",
@@ -422,6 +423,22 @@ def load_adjustments(asset_path: Path) -> Dict[str, Any]:
             except ValueError:
                 continue
 
+        wb_enabled = light_node.find("WB_Enabled")
+        if wb_enabled is not None and wb_enabled.text is not None:
+            text = wb_enabled.text.strip().lower()
+            result["WB_Enabled"] = text in {"1", "true", "yes", "on"}
+        else:
+            result["WB_Enabled"] = False
+
+        for key in WB_KEYS:
+            element = light_node.find(key)
+            if element is None or element.text is None:
+                continue
+            try:
+                result[key] = float(element.text.strip())
+            except ValueError:
+                continue
+
     crop_node = _find_child_case_insensitive(root, _CROP_NODE)
     if crop_node is None:
         crop_node = root.find(_LEGACY_CROP_NODE)
@@ -489,6 +506,16 @@ def save_adjustments(asset_path: Path, adjustments: Mapping[str, Any]) -> Path:
         else:
             # Neutrals and Tone: clamp to [-1, 1] for safety but don't normalize to [0, 1]
             value = max(-1.0, min(1.0, raw))
+        child = ET.SubElement(light, key)
+        child.text = f"{value:.2f}"
+
+    wb_enabled_el = ET.SubElement(light, "WB_Enabled")
+    wb_enabled_val = bool(adjustments.get("WB_Enabled", False))
+    wb_enabled_el.text = "true" if wb_enabled_val else "false"
+
+    for key in WB_KEYS:
+        raw = float(adjustments.get(key, WB_DEFAULTS.get(key, 0.0)))
+        value = max(-1.0, min(1.0, raw))
         child = ET.SubElement(light, key)
         child.text = f"{value:.2f}"
 
@@ -598,6 +625,18 @@ def resolve_render_adjustments(
         resolved["BWNeutrals"] = 0.0
         resolved["BWTone"] = 0.0
         resolved["BWGrain"] = 0.0
+
+    # White Balance adjustments
+    wb_enabled = bool(adjustments.get("WB_Enabled", False))
+    resolved["WB_Enabled"] = wb_enabled
+    if wb_enabled:
+        resolved["WBWarmth"] = max(-1.0, min(1.0, float(adjustments.get("WB_Warmth", 0.0))))
+        resolved["WBTemperature"] = max(-1.0, min(1.0, float(adjustments.get("WB_Temperature", 0.0))))
+        resolved["WBTint"] = max(-1.0, min(1.0, float(adjustments.get("WB_Tint", 0.0))))
+    else:
+        resolved["WBWarmth"] = 0.0
+        resolved["WBTemperature"] = 0.0
+        resolved["WBTint"] = 0.0
 
     # Curve adjustments - pass through to renderer as-is
     curve_enabled = bool(adjustments.get("Curve_Enabled", False))

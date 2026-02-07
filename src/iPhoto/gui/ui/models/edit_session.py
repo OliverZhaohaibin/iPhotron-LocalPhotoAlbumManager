@@ -108,6 +108,16 @@ class EditSession(QObject):
         self._values["Crop_FlipH"] = False
         self._ranges["Crop_FlipH"] = (-1.0, 1.0)
 
+        # White Balance parameters.
+        self._values["WB_Enabled"] = False
+        self._ranges["WB_Enabled"] = (0.0, 1.0)
+        self._values["WB_Warmth"] = 0.0
+        self._ranges["WB_Warmth"] = (-1.0, 1.0)
+        self._values["WB_Temperature"] = 0.0
+        self._ranges["WB_Temperature"] = (-1.0, 1.0)
+        self._values["WB_Tint"] = 0.0
+        self._ranges["WB_Tint"] = (-1.0, 1.0)
+
         # Curve adjustment parameters store control point lists for each channel.
         # ``Curve_Enabled`` toggles whether curve adjustments are applied.
         self._values["Curve_Enabled"] = False
@@ -227,6 +237,12 @@ class EditSession(QObject):
             "BW_Neutrals": 0.0,
             "BW_Tone": 0.0,
             "BW_Grain": 0.0,
+        })
+        defaults.update({
+            "WB_Enabled": False,
+            "WB_Warmth": 0.0,
+            "WB_Temperature": 0.0,
+            "WB_Tint": 0.0,
         })
         defaults.update(
             {

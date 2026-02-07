@@ -922,6 +922,11 @@ class EditCurveSection(QWidget):
         self._commit_curve_changes()
         self.interactionFinished.emit()
 
+    def deactivate_eyedropper(self) -> None:
+        """Public interface to turn off all eyedropper buttons."""
+
+        self._deactivate_all_eyedroppers()
+
     def _deactivate_all_eyedroppers(self) -> None:
         self._eyedropper_mode = None
         self.btn_black.setChecked(False)

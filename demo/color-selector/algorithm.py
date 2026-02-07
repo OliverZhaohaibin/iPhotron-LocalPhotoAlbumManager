@@ -429,7 +429,7 @@ class SelectiveColorWidget(QWidget):
         self.slider_hue = CustomSlider("Hue")
         self.slider_sat = CustomSlider("Saturation")
         self.slider_lum = CustomSlider("Luminance")
-        self.slider_range = CustomSlider("Range", minimum=0, maximum=1.0, initial=1.0,
+        self.slider_range = CustomSlider("Range", minimum=0, maximum=1.0, initial=0.5,
                                          bg_start="#353535", bg_end="#252525",
                                          fill_neg="#666", fill_pos="#808080")
 
@@ -468,16 +468,27 @@ class SelectiveColorWidget(QWidget):
         dark_base = QColor(base_c)
         dark_base.setAlpha(80)
         bg_dark_hex = dark_base.name()
+        base_r = base_c.redF()
+        base_g = base_c.greenF()
+        base_b = base_c.blueF()
 
         sat_bg_start = "#4a4a4a"
         sat_bg_end = bg_dark_hex
         sat_fill_neg = "#607080"
         sat_fill_pos = base_c.name()
 
-        lum_bg_start = "#1a1a1a"
-        lum_bg_end = bg_dark_hex
-        lum_fill_neg = "#000000"
-        lum_fill_pos = "#FFFFFF"
+        lum_bg_start = QColor.fromRgbF(base_r * 0.2, base_g * 0.2, base_b * 0.2).name()
+        lum_bg_end = QColor.fromRgbF(
+            base_r + (1.0 - base_r) * 0.8,
+            base_g + (1.0 - base_g) * 0.8,
+            base_b + (1.0 - base_b) * 0.8,
+        ).name()
+        lum_fill_neg = QColor.fromRgbF(base_r * 0.35, base_g * 0.35, base_b * 0.35).name()
+        lum_fill_pos = QColor.fromRgbF(
+            base_r + (1.0 - base_r) * 0.65,
+            base_g + (1.0 - base_g) * 0.65,
+            base_b + (1.0 - base_b) * 0.65,
+        ).name()
 
         n = len(self.color_hexes)
         left_hue = self.color_hexes[(color_idx - 1) % n]
@@ -737,7 +748,7 @@ class Main(QMainWindow):
         # per-color stored UI values (Hue/Sat/Lum/Range)
         # Hue/Sat/Lum sliders are [-100..100], Range is [0..1]
         self.ui_store = np.zeros((6, 4), dtype=np.float32)
-        self.ui_store[:, 3] = 1.0  # range default 1.0
+        self.ui_store[:, 3] = 0.5  # range default 0.5
 
         # connect signals
         self.panel.colorIndexChanged.connect(self.on_color_changed)

@@ -1,32 +1,27 @@
-<svg width="40" height="40" viewBox="0 0 55 55" xmlns="http://www.w3.org/2000/svg">
-  <defs>
-    <clipPath id="clip">
-      <rect x="0" y="0" width="55" height="55" rx="6" />
-    </clipPath>
-  </defs>
+<svg xmlns="http://www.w3.org/2000/svg"
+     width="40" height="40"
+     viewBox="0 0 48 48"
+     fill="none">
+  <rect x="6" y="6" width="36" height="36" rx="4"
+        stroke="currentColor" stroke-width="2.4"/>
 
-  <!-- light base (lighter, closer to B tone) -->
-  <rect x="0" y="0" width="55" height="55" rx="6" fill="#cfcfcf"/>
+  <path d="M13 16 L17 32 L23 20 L29 32 L33 16"
+        stroke="currentColor"
+        stroke-width="2.4"
+        stroke-linecap="round"
+        stroke-linejoin="round"/>
 
-  <!-- dark half -->
-  <g clip-path="url(#clip)">
-    <path d="M0 55 L55 55 L55 0 Z" fill="#242424"/>
-  </g>
-
-  <!-- letters -->
-  <text x="13.2" y="23.5"
-        font-family="Arial, Helvetica, sans-serif"
-        font-size="18"
-        font-weight="700"
-        fill="#2f2f2f">W</text>
-
-  <text x="33.0" y="43.0"
-        font-family="Arial, Helvetica, sans-serif"
-        font-size="18"
-        font-weight="700"
-        fill="#d0d0d0">B</text>
-
-  <!-- outer stroke (also lighter) -->
-  <rect x="0.5" y="0.5" width="54" height="54" rx="5.5"
-        fill="none" stroke="#cfcfcf" stroke-width="1"/>
+  <path d="M30 16 V32
+           M30 16 H35.5
+           C38 16 39.5 17.5 39.5 20
+           C39.5 22 38 23.5 35.5 23.5
+           H30
+           M30 23.5 H35.5
+           C38 23.5 39.5 25 39.5 27.5
+           C39.5 30 38 32 35.5 32
+           H30"
+        stroke="currentColor"
+        stroke-width="2.4"
+        stroke-linecap="round"
+        stroke-linejoin="round"/>
 </svg>

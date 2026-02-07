@@ -39,6 +39,33 @@ _LOGGER = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 
+class _PipetteButton(QPushButton):
+    """Eyedropper (pipette) button matching the demo's visual style."""
+
+    def __init__(self, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self.setFixedSize(32, 32)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setCheckable(True)
+        self.setStyleSheet(
+            "QPushButton { background-color: #383838; border: 1px solid #555; border-radius: 6px; }"
+            "QPushButton:hover { background-color: #444; }"
+            "QPushButton:pressed { background-color: #222; }"
+            "QPushButton:checked { background-color: #555; border-color: #888; }"
+        )
+
+    def paintEvent(self, event):  # noqa: N802
+        super().paintEvent(event)
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        pen = QPen(QColor("#bbb"), 1.5)
+        painter.setPen(pen)
+        painter.drawLine(11, 21, 15, 17)
+        painter.drawRect(15, 11, 7, 7)
+        painter.drawLine(10, 22, 12, 22)
+        painter.drawLine(10, 20, 10, 22)
+
+
 class _ColorSelectButton(QPushButton):
     """Small colour swatch button used to pick one of the six hue ranges."""
 
@@ -222,6 +249,7 @@ class EditSelectiveColorSection(QWidget):
 
     interactionStarted = Signal()
     interactionFinished = Signal()
+    eyedropperModeChanged = Signal(object)
 
     # Colour hex codes matching the demo's six-range palette.
     COLOR_HEXES = ["#FF3B30", "#FFCC00", "#28CD41", "#5AC8FA", "#007AFF", "#AF52DE"]
@@ -230,6 +258,7 @@ class EditSelectiveColorSection(QWidget):
         super().__init__(parent)
         self._session: Optional[EditSession] = None
         self._updating_ui = False
+        self._eyedropper_active = False
 
         # Per-colour stored UI values: [hue, sat, lum, range] for 6 ranges.
         # hue/sat/lum are in [-100, 100], range is in [0, 1].
@@ -240,10 +269,18 @@ class EditSelectiveColorSection(QWidget):
         layout.setContentsMargins(8, 0, 8, 0)
         layout.setSpacing(8)
 
-        # --- Tools: colour buttons ---
+        # --- Tools: pipette + colour buttons ---
         tools_layout = QHBoxLayout()
         tools_layout.setContentsMargins(0, 5, 0, 5)
         tools_layout.setSpacing(0)
+
+        pipette_container = QWidget()
+        p_layout = QHBoxLayout(pipette_container)
+        p_layout.setContentsMargins(0, 0, 0, 0)
+        p_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._pipette_btn = _PipetteButton()
+        self._pipette_btn.clicked.connect(self._on_pipette_clicked)
+        p_layout.addWidget(self._pipette_btn)
 
         colors_bg = QFrame()
         colors_bg.setStyleSheet(
@@ -263,9 +300,8 @@ class EditSelectiveColorSection(QWidget):
             self.btn_group.addButton(btn, i)
             c_layout.addWidget(btn)
 
-        tools_layout.addStretch(1)
+        tools_layout.addWidget(pipette_container, 1)
         tools_layout.addWidget(colors_bg, 0)
-        tools_layout.addStretch(1)
         layout.addLayout(tools_layout)
 
         # --- Sliders ---
@@ -467,3 +503,65 @@ class EditSelectiveColorSection(QWidget):
         self.slider_lum.set_colors(
             lum_bg_start, lum_bg_end, lum_fill_neg, lum_fill_pos, fill_opacity=0.55
         )
+
+    # ------------------------------------------------------------------
+    # Eyedropper (pipette) support
+    # ------------------------------------------------------------------
+
+    def _on_pipette_clicked(self) -> None:
+        if self._pipette_btn.isChecked():
+            self._eyedropper_active = True
+            self.eyedropperModeChanged.emit("selective_color")
+        else:
+            self._eyedropper_active = False
+            self.eyedropperModeChanged.emit(None)
+
+    def deactivate_eyedropper(self) -> None:
+        """Public interface to turn off the eyedropper button."""
+        self._eyedropper_active = False
+        self._pipette_btn.setChecked(False)
+        self.eyedropperModeChanged.emit(None)
+
+    def handle_color_picked(self, r: float, g: float, b: float) -> None:
+        """Process a colour sampled by the viewer eyedropper.
+
+        Determines the closest hue range to the sampled colour and selects it.
+        """
+        if not self._eyedropper_active:
+            return
+
+        # Convert RGB [0,1] to hue [0,1]
+        max_c = max(r, g, b)
+        min_c = min(r, g, b)
+        d = max_c - min_c
+        if d < 1e-6:
+            h = 0.0
+        elif max_c == r:
+            h = ((g - b) / d) % 6.0
+        elif max_c == g:
+            h = (b - r) / d + 2.0
+        else:
+            h = (r - g) / d + 4.0
+        h /= 6.0
+        if h < 0.0:
+            h += 1.0
+
+        # Find closest colour range
+        from ....core.selective_color_resolver import DEFAULT_CENTERS
+        best_idx = 0
+        best_dist = 1.0
+        for i, center in enumerate(DEFAULT_CENTERS):
+            dist = abs(h - center)
+            dist = min(dist, 1.0 - dist)
+            if dist < best_dist:
+                best_dist = dist
+                best_idx = i
+
+        # Select the matching colour button
+        btn = self.btn_group.button(best_idx)
+        if btn is not None:
+            btn.setChecked(True)
+            self._on_color_clicked(best_idx)
+
+        # Deactivate the eyedropper after picking
+        self.deactivate_eyedropper()

@@ -67,6 +67,9 @@ class EditSidebar(QWidget):
     selectiveColorParamsCommitted = Signal(object)
     """Emitted when Selective Color adjustments should be written to the session."""
 
+    selectiveColorEyedropperModeChanged = Signal(object)
+    """Relay eyedropper mode toggles from the Selective Color section."""
+
     levelsParamsPreviewed = Signal(object)
     """Relays live levels adjustments to the controller."""
 
@@ -302,7 +305,39 @@ class EditSidebar(QWidget):
 
         scroll_layout.addWidget(self._build_separator(scroll_content))
 
-        # Selective Color section (collapsed by default, after Curve)
+        # Levels section (collapsed by default, after Curve)
+        self._levels_section = EditLevelsSection(scroll_content)
+        self._levels_section_container = CollapsibleSection(
+            "Levels",
+            "level.square.svg",
+            self._levels_section,
+            scroll_content,
+            title_font=Edit_SIDEBAR_FONT,
+        )
+        self._levels_section_container.set_expanded(False)
+
+        self.levels_reset_button = QToolButton(self._levels_section_container)
+        self.levels_reset_button.setAutoRaise(True)
+        self.levels_reset_button.setIcon(load_icon("arrow.uturn.left.svg"))
+        self.levels_reset_button.setToolTip("Reset Levels adjustments")
+        self.levels_toggle_button = QToolButton(self._levels_section_container)
+        self.levels_toggle_button.setAutoRaise(True)
+        self.levels_toggle_button.setCheckable(True)
+        self.levels_toggle_button.setIcon(load_icon("circle.svg"))
+        self.levels_toggle_button.setToolTip("Toggle Levels adjustments")
+        self._levels_section_container.add_header_control(self.levels_reset_button)
+        self._levels_section_container.add_header_control(self.levels_toggle_button)
+
+        scroll_layout.addWidget(self._levels_section_container)
+
+        self._levels_section.levelsParamsPreviewed.connect(self.levelsParamsPreviewed)
+        self._levels_section.levelsParamsCommitted.connect(self.levelsParamsCommitted)
+        self._levels_section.interactionStarted.connect(self.interactionStarted)
+        self._levels_section.interactionFinished.connect(self.interactionFinished)
+
+        scroll_layout.addWidget(self._build_separator(scroll_content))
+
+        # Selective Color section (collapsed by default, after Levels)
         self._selective_color_section = EditSelectiveColorSection(scroll_content)
         self._selective_color_section_container = CollapsibleSection(
             "Selective Color",
@@ -335,38 +370,9 @@ class EditSidebar(QWidget):
         )
         self._selective_color_section.interactionStarted.connect(self.interactionStarted)
         self._selective_color_section.interactionFinished.connect(self.interactionFinished)
-
-        scroll_layout.addWidget(self._build_separator(scroll_content))
-
-        # Levels section (collapsed by default, after Selective Color)
-        self._levels_section = EditLevelsSection(scroll_content)
-        self._levels_section_container = CollapsibleSection(
-            "Levels",
-            "level.square.svg",
-            self._levels_section,
-            scroll_content,
-            title_font=Edit_SIDEBAR_FONT,
+        self._selective_color_section.eyedropperModeChanged.connect(
+            self.selectiveColorEyedropperModeChanged
         )
-        self._levels_section_container.set_expanded(False)
-
-        self.levels_reset_button = QToolButton(self._levels_section_container)
-        self.levels_reset_button.setAutoRaise(True)
-        self.levels_reset_button.setIcon(load_icon("arrow.uturn.left.svg"))
-        self.levels_reset_button.setToolTip("Reset Levels adjustments")
-        self.levels_toggle_button = QToolButton(self._levels_section_container)
-        self.levels_toggle_button.setAutoRaise(True)
-        self.levels_toggle_button.setCheckable(True)
-        self.levels_toggle_button.setIcon(load_icon("circle.svg"))
-        self.levels_toggle_button.setToolTip("Toggle Levels adjustments")
-        self._levels_section_container.add_header_control(self.levels_reset_button)
-        self._levels_section_container.add_header_control(self.levels_toggle_button)
-
-        scroll_layout.addWidget(self._levels_section_container)
-
-        self._levels_section.levelsParamsPreviewed.connect(self.levelsParamsPreviewed)
-        self._levels_section.levelsParamsCommitted.connect(self.levelsParamsCommitted)
-        self._levels_section.interactionStarted.connect(self.interactionStarted)
-        self._levels_section.interactionFinished.connect(self.interactionFinished)
 
         scroll_layout.addStretch(1)
         scroll_content.setLayout(scroll_layout)
@@ -639,6 +645,16 @@ class EditSidebar(QWidget):
         """Turn off the Curve eyedropper buttons."""
 
         self._curve_section.deactivate_eyedropper()
+
+    def handle_selective_color_color_picked(self, r: float, g: float, b: float) -> None:
+        """Forward a sampled colour to the Selective Color section's eyedropper handler."""
+
+        self._selective_color_section.handle_color_picked(r, g, b)
+
+    def deactivate_selective_color_eyedropper(self) -> None:
+        """Turn off the Selective Color pipette button."""
+
+        self._selective_color_section.deactivate_eyedropper()
 
     def preview_thumbnail_height(self) -> int:
         """Return the vertical pixel span used by the master thumbnail strips."""

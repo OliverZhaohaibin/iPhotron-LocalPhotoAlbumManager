@@ -162,6 +162,9 @@ class EditCoordinator(QObject):
         self._ui.edit_sidebar.wbEyedropperModeChanged.connect(
             self._handle_wb_eyedropper_mode_changed
         )
+        self._ui.edit_sidebar.selectiveColorEyedropperModeChanged.connect(
+            self._handle_selective_color_eyedropper_mode_changed
+        )
         self._ui.edit_sidebar.perspectiveInteractionStarted.connect(
             self._ui.edit_image_viewer.start_perspective_interaction
         )
@@ -593,8 +596,9 @@ class EditCoordinator(QObject):
         active = mode is not None
         if active:
             self._eyedropper_target = "curve"
-            # Deactivate the WB eyedropper to enforce mutual exclusion.
+            # Deactivate the WB and Selective Color eyedroppers to enforce mutual exclusion.
             self._ui.edit_sidebar.deactivate_wb_eyedropper()
+            self._ui.edit_sidebar.deactivate_selective_color_eyedropper()
         self._ui.edit_image_viewer.set_eyedropper_mode(active)
 
     def _handle_wb_eyedropper_mode_changed(self, mode: object) -> None:
@@ -605,6 +609,18 @@ class EditCoordinator(QObject):
             self._eyedropper_target = "wb"
             # Deactivate the Curve eyedropper to enforce mutual exclusion.
             self._ui.edit_sidebar.deactivate_curve_eyedropper()
+            self._ui.edit_sidebar.deactivate_selective_color_eyedropper()
+        self._ui.edit_image_viewer.set_eyedropper_mode(active)
+
+    def _handle_selective_color_eyedropper_mode_changed(self, mode: object) -> None:
+        """Toggle eyedropper sampling on the GL image viewer for Selective Color."""
+
+        active = mode is not None
+        if active:
+            self._eyedropper_target = "selective_color"
+            # Deactivate the other eyedroppers to enforce mutual exclusion.
+            self._ui.edit_sidebar.deactivate_curve_eyedropper()
+            self._ui.edit_sidebar.deactivate_wb_eyedropper()
         self._ui.edit_image_viewer.set_eyedropper_mode(active)
 
     def _handle_color_picked(self, r: float, g: float, b: float) -> None:
@@ -612,6 +628,8 @@ class EditCoordinator(QObject):
 
         if self._eyedropper_target == "wb":
             self._ui.edit_sidebar.handle_wb_color_picked(r, g, b)
+        elif self._eyedropper_target == "selective_color":
+            self._ui.edit_sidebar.handle_selective_color_color_picked(r, g, b)
         else:
             self._ui.edit_sidebar.handle_curve_color_picked(r, g, b)
 

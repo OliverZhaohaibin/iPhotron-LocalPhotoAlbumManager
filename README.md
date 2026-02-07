@@ -50,6 +50,9 @@ A comprehensive editing suite with **Adjust** and **Crop** modes:
 - **Light Adjustments:** Brilliance, Exposure, Highlights, Shadows, Brightness, Contrast, Black Point
 - **Color Adjustments:** Saturation, Vibrance, Cast (white balance correction)
 - **Black & White:** Intensity, Neutrals, Tone, Grain with artistic film presets
+- **Color Curves:** RGB and per-channel (R/G/B) curve editor with draggable control points for precise tonal adjustments
+- **Selective Color:** Target six hue ranges (Red/Yellow/Green/Cyan/Blue/Magenta) with independent Hue/Saturation/Luminance controls
+- **Levels:** 5-handle input-output tone mapping with histogram backdrop and per-channel control
 - **Master Sliders:** Each section features an intelligent master slider that distributes values across multiple fine-tuning controls
 - **Live Thumbnails:** Real-time preview strips showing the effect range for each adjustment
 <img width="1925" height="1086" alt="image" src="https://github.com/user-attachments/assets/9ac3095a-4be4-48fa-84cc-db0a3d58fe16" />
@@ -193,6 +196,9 @@ Pure Python logic that does not depend on any GUI framework (such as PySide6).
 | ├─ **`light_resolver.py`** | Resolves Light master slider to 7 fine-tuning parameters (Brilliance, Exposure, etc.). |
 | ├─ **`color_resolver.py`** | Resolves Color master slider to Saturation/Vibrance/Cast with image statistics. |
 | ├─ **`bw_resolver.py`** | Resolves B&W master slider using 3-anchor Gaussian interpolation. |
+| ├─ **`curve_resolver.py`** | Manages color curve adjustments with Bezier interpolation and LUT generation. |
+| ├─ **`selective_color_resolver.py`** | Implements selective color adjustments targeting six hue ranges with HSL processing. |
+| ├─ **`levels_resolver.py`** | Handles levels adjustments with 5-handle input-output tone mapping. |
 | └─ **`filters/`** | High-performance image processing (NumPy vectorized → Numba JIT → QColor fallback). |
 | **`cache/`** | Manages the global SQLite database (`index_store/`) with modular components: engine, migrations, recovery, queries, and repository. Includes `lock.py` for file-level locking. |
 | **`utils/`** | General utilities, especially wrappers for external tools (`exiftool.py`, `ffmpeg.py`). |
@@ -241,6 +247,9 @@ The edit system is composed of modular widgets and submodules for non-destructiv
 | **`edit_light_section.py`** | Light adjustment panel (Brilliance, Exposure, Highlights, Shadows, Brightness, Contrast, Black Point). |
 | **`edit_color_section.py`** | Color adjustment panel (Saturation, Vibrance, Cast) with image statistics analysis. |
 | **`edit_bw_section.py`** | Black & White panel (Intensity, Neutrals, Tone, Grain) with artistic presets. |
+| **`edit_curve_section.py`** | Color curves panel with RGB and per-channel curve editing with draggable control points. |
+| **`edit_selective_color_section.py`** | Selective color panel targeting six hue ranges (Red/Yellow/Green/Cyan/Blue/Magenta) with Hue/Saturation/Luminance controls. |
+| **`edit_levels_section.py`** | Levels panel with 5-handle tone mapping, histogram display, and per-channel control. |
 | **`edit_perspective_controls.py`** | Perspective correction sliders (Vertical, Horizontal, Straighten). |
 | **`edit_topbar.py`** | Edit mode toolbar with Adjust/Crop toggle and action buttons. |
 | **`edit_strip.py`** | Custom slider widgets (`BWSlider`) used throughout the edit panels. |

@@ -748,7 +748,7 @@ class Main(QMainWindow):
         # per-color stored UI values (Hue/Sat/Lum/Range)
         # Hue/Sat/Lum sliders are [-100..100], Range is [0..1]
         self.ui_store = np.zeros((6, 4), dtype=np.float32)
-        self.ui_store[:, 3] = 1.0  # range default 1.0
+        self.ui_store[:, 3] = 0.5  # range default 0.5
 
         # connect signals
         self.panel.colorIndexChanged.connect(self.on_color_changed)

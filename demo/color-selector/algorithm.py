@@ -183,7 +183,11 @@ vec3 apply_range(vec3 rgb, int i){
 }
 
 void main(){
-    vec3 c = texture(uTex, vUV).rgb;
+    // Flip V so the image displays right-side up
+    // (QImage row 0 = image top goes to texture v=0 = screen bottom;
+    //  flipping corrects this so pick coordinates match the display)
+    vec2 uv = vec2(vUV.x, 1.0 - vUV.y);
+    vec3 c = texture(uTex, uv).rgb;
 
     // Apply 6 ranges sequentially (allows overlaps like common editors)
     for (int i=0;i<6;i++){

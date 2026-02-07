@@ -26,6 +26,14 @@ uniform float uWBTemperature; // [-1,1]
 uniform float uWBTint;        // [-1,1]
 uniform bool  uWBEnabled;
 uniform float uTime;
+
+// Selective Color uniforms
+// uSCRange0[i] = (centerHue, widthHue, hueShift, satAdj)
+// uSCRange1[i] = (lumAdj, satGateLo, satGateHi, enabled)
+uniform vec4  uSCRange0[6];
+uniform vec4  uSCRange1[6];
+uniform bool  uSCEnabled;
+
 uniform vec2  uViewSize;
 uniform vec2  uTexSize;
 uniform float uScale;
@@ -187,6 +195,109 @@ vec3 apply_wb(vec3 c, float warmth, float temperature, float tint) {
     return c;
 }
 
+// --- Selective Color helpers (matching CPU pipeline) ---
+float sc_hue_dist(float h1, float h2){
+    float d = abs(h1 - h2);
+    return min(d, 1.0 - d);
+}
+
+vec3 sc_rgb2hsl(vec3 c){
+    float r=c.r, g=c.g, b=c.b;
+    float maxc = max(r, max(g,b));
+    float minc = min(r, min(g,b));
+    float l = (maxc + minc) * 0.5;
+    float s = 0.0;
+    float h = 0.0;
+    float d = maxc - minc;
+    if (d > 1e-6){
+        s = d / (1.0 - abs(2.0*l - 1.0));
+        if (maxc == r){
+            h = (g - b) / d;
+            h = mod(h, 6.0);
+        } else if (maxc == g){
+            h = (b - r) / d + 2.0;
+        } else {
+            h = (r - g) / d + 4.0;
+        }
+        h /= 6.0;
+        if (h < 0.0) h += 1.0;
+    }
+    return vec3(h, s, l);
+}
+
+float sc_hue2rgb(float p, float q, float t){
+    if (t < 0.0) t += 1.0;
+    if (t > 1.0) t -= 1.0;
+    if (t < 1.0/6.0) return p + (q - p) * 6.0 * t;
+    if (t < 1.0/2.0) return q;
+    if (t < 2.0/3.0) return p + (q - p) * (2.0/3.0 - t) * 6.0;
+    return p;
+}
+
+vec3 sc_hsl2rgb(vec3 hsl){
+    float h = hsl.x;
+    float s = hsl.y;
+    float l = hsl.z;
+    float r;
+    float g;
+    float b;
+    if (s < 1e-6){
+        r = l;
+        g = l;
+        b = l;
+    }else{
+        float q = (l < 0.5) ? (l * (1.0 + s)) : (l + s - l*s);
+        float p = 2.0*l - q;
+        r = sc_hue2rgb(p,q,h + 1.0/3.0);
+        g = sc_hue2rgb(p,q,h);
+        b = sc_hue2rgb(p,q,h - 1.0/3.0);
+    }
+    return vec3(r,g,b);
+}
+
+vec3 sc_apply_one_range(vec3 rgb, vec4 p0, vec4 p1){
+    vec3 hsl = sc_rgb2hsl(rgb);
+    float enabled = p1.w;
+    if (enabled < 0.5) return rgb;
+
+    float center = p0.x;
+    float width  = clamp(p0.y, 0.001, 0.5);
+    float hueShiftN = clamp(p0.z, -1.0, 1.0);
+    float satAdjN   = clamp(p0.w, -1.0, 1.0);
+    float lumAdjN   = clamp(p1.x, -1.0, 1.0);
+    float gateLo    = clamp(p1.y, 0.0, 1.0);
+    float gateHi    = clamp(p1.z, 0.0, 1.0);
+
+    float feather = max(0.001, width * 0.50);
+    float d = sc_hue_dist(hsl.x, center);
+    float m = 1.0 - smoothstep(width, width + feather, d);
+    m *= smoothstep(gateLo, gateHi, hsl.y);
+
+    if (m < 1e-5) return rgb;
+
+    float hueShift = hueShiftN * (30.0/360.0);
+    float satScale = 1.0 + satAdjN;
+    float lumLift  = lumAdjN * 0.25;
+
+    vec3 hsl2 = hsl;
+    hsl2.x = fract(hsl2.x + hueShift);
+    hsl2.y = clamp(hsl2.y * satScale, 0.0, 1.0);
+    hsl2.z = clamp(hsl2.z + lumLift, 0.0, 1.0);
+
+    vec3 rgb2 = sc_hsl2rgb(hsl2);
+    return mix(rgb, rgb2, clamp(m, 0.0, 1.0));
+}
+
+vec3 apply_selective_color(vec3 c){
+    c = sc_apply_one_range(c, uSCRange0[0], uSCRange1[0]);
+    c = sc_apply_one_range(c, uSCRange0[1], uSCRange1[1]);
+    c = sc_apply_one_range(c, uSCRange0[2], uSCRange1[2]);
+    c = sc_apply_one_range(c, uSCRange0[3], uSCRange1[3]);
+    c = sc_apply_one_range(c, uSCRange0[4], uSCRange1[4]);
+    c = sc_apply_one_range(c, uSCRange0[5], uSCRange1[5]);
+    return c;
+}
+
 vec3 apply_bw(vec3 color, vec2 uv) {
     float intensity = clamp(uBWParams.x, -1.0, 1.0);
     float neutrals = clamp(uBWParams.y, -1.0, 1.0);
@@ -316,6 +427,11 @@ void main() {
     // Apply levels adjustment after curve but before B&W
     if (uLevelsEnabled) {
         c = apply_levels(c);
+    }
+
+    // Apply selective color after levels, before B&W
+    if (uSCEnabled) {
+        c = apply_selective_color(c);
     }
 
     if (uBWEnabled) {

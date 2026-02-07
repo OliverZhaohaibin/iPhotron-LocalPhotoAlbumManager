@@ -11,12 +11,13 @@ from ....core.light_resolver import LIGHT_KEYS
 from ....core.color_resolver import COLOR_KEYS, COLOR_RANGES, ColorStats
 from ....core.curve_resolver import DEFAULT_CURVE_POINTS
 from ....core.levels_resolver import DEFAULT_LEVELS_HANDLES
+from ....core.selective_color_resolver import DEFAULT_SELECTIVE_COLOR_RANGES
 
 _BW_RANGE_KEYS = {"BW_Master", "BW_Intensity", "BW_Neutrals", "BW_Tone"}
 
 # Keys that store list data (curve control points, levels handles) instead of floats
 _CURVE_LIST_KEYS = {"Curve_RGB", "Curve_Red", "Curve_Green", "Curve_Blue"}
-_LIST_KEYS = _CURVE_LIST_KEYS | {"Levels_Handles"}
+_LIST_KEYS = _CURVE_LIST_KEYS | {"Levels_Handles", "SelectiveColor_Ranges"}
 
 
 def _coerce_bw_range(key: str, value: float) -> float:
@@ -137,6 +138,15 @@ class EditSession(QObject):
         self._ranges["Levels_Enabled"] = (0.0, 1.0)
         self._values["Levels_Handles"] = list(DEFAULT_LEVELS_HANDLES)
 
+        # Selective Color parameters store per-range adjustment data for 6 hue
+        # ranges.  Each range is a list [center_hue, range_slider, hue_shift,
+        # sat_adj, lum_adj].
+        self._values["SelectiveColor_Enabled"] = False
+        self._ranges["SelectiveColor_Enabled"] = (0.0, 1.0)
+        self._values["SelectiveColor_Ranges"] = [
+            list(r) for r in DEFAULT_SELECTIVE_COLOR_RANGES
+        ]
+
     # ------------------------------------------------------------------
     # Accessors
     def value(self, key: str) -> float | bool | List[Tuple[float, float]]:
@@ -146,6 +156,8 @@ class EditSession(QObject):
         if key in _LIST_KEYS:
             if key == "Levels_Handles":
                 default = list(DEFAULT_LEVELS_HANDLES)
+            elif key == "SelectiveColor_Ranges":
+                default = [list(r) for r in DEFAULT_SELECTIVE_COLOR_RANGES]
             else:
                 default = list(DEFAULT_CURVE_POINTS)
         return self._values.get(key, default)
@@ -286,6 +298,11 @@ class EditSession(QObject):
         defaults.update({
             "Levels_Enabled": False,
             "Levels_Handles": list(DEFAULT_LEVELS_HANDLES),
+        })
+        # Selective Color defaults
+        defaults.update({
+            "SelectiveColor_Enabled": False,
+            "SelectiveColor_Ranges": [list(r) for r in DEFAULT_SELECTIVE_COLOR_RANGES],
         })
         self.set_values(defaults, emit_individual=True)
         self.resetPerformed.emit()

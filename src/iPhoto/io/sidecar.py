@@ -13,6 +13,7 @@ from ..core.curve_resolver import (
     CurveChannel,
 )
 from ..core.levels_resolver import DEFAULT_LEVELS_HANDLES
+from ..core.selective_color_resolver import DEFAULT_SELECTIVE_COLOR_RANGES, NUM_RANGES
 from ..core.wb_resolver import WB_KEYS, WB_DEFAULTS
 
 BW_KEYS = (
@@ -46,6 +47,11 @@ _CURVE_POINT = "point"
 _LEVELS_NODE = "Levels"
 _LEVELS_ENABLED = "enabled"
 _LEVELS_HANDLE = "handle"
+
+# Selective Color XML node names
+_SELECTIVE_COLOR_NODE = "SelectiveColor"
+_SC_ENABLED = "enabled"
+_SC_RANGE = "range"
 
 
 def _normalise_bw_value(key: str, value: float) -> float:
@@ -391,6 +397,66 @@ def _write_levels_node(root: ET.Element, values: Mapping[str, Any]) -> None:
         h.set("value", f"{float(v):.6f}")
 
 
+def _read_selective_color_from_node(node: ET.Element) -> Dict[str, Any]:
+    """Return Selective Color adjustments described by the ``<SelectiveColor>`` *node*."""
+    result: Dict[str, Any] = {}
+
+    enabled_attr = node.get(_SC_ENABLED)
+    if enabled_attr is not None:
+        result["SelectiveColor_Enabled"] = enabled_attr.lower() in {"1", "true", "yes", "on"}
+    else:
+        result["SelectiveColor_Enabled"] = False
+
+    ranges: List[List[float]] = []
+    for range_node in node.findall(_SC_RANGE):
+        try:
+            center = float(range_node.get("center", "0"))
+            width = float(range_node.get("width", "0.5"))
+            hue_shift = float(range_node.get("hue_shift", "0"))
+            sat_adj = float(range_node.get("sat_adj", "0"))
+            lum_adj = float(range_node.get("lum_adj", "0"))
+            ranges.append([center, width, hue_shift, sat_adj, lum_adj])
+        except (ValueError, TypeError):
+            continue
+
+    if len(ranges) == NUM_RANGES:
+        result["SelectiveColor_Ranges"] = ranges
+    else:
+        result["SelectiveColor_Ranges"] = [list(r) for r in DEFAULT_SELECTIVE_COLOR_RANGES]
+
+    return result
+
+
+def _write_selective_color_node(root: ET.Element, values: Mapping[str, Any]) -> None:
+    """Insert/replace the ``<SelectiveColor>`` section under *root* using *values*."""
+    _remove_children_case_insensitive(root, _SELECTIVE_COLOR_NODE)
+
+    sc_enabled = bool(values.get("SelectiveColor_Enabled", False))
+    ranges = values.get("SelectiveColor_Ranges")
+    if not isinstance(ranges, list) or len(ranges) != NUM_RANGES:
+        ranges = [list(r) for r in DEFAULT_SELECTIVE_COLOR_RANGES]
+
+    # Check if identity (all shifts zero)
+    all_identity = all(
+        abs(r[2]) < 1e-6 and abs(r[3]) < 1e-6 and abs(r[4]) < 1e-6
+        for r in ranges
+        if isinstance(r, (list, tuple)) and len(r) >= 5
+    )
+    if not sc_enabled and all_identity:
+        return
+
+    sc_node = ET.SubElement(root, _SELECTIVE_COLOR_NODE)
+    sc_node.set(_SC_ENABLED, "true" if sc_enabled else "false")
+    for r in ranges:
+        if isinstance(r, (list, tuple)) and len(r) >= 5:
+            rn = ET.SubElement(sc_node, _SC_RANGE)
+            rn.set("center", f"{float(r[0]):.6f}")
+            rn.set("width", f"{float(r[1]):.6f}")
+            rn.set("hue_shift", f"{float(r[2]):.6f}")
+            rn.set("sat_adj", f"{float(r[3]):.6f}")
+            rn.set("lum_adj", f"{float(r[4]):.6f}")
+
+
 def sidecar_path_for_asset(asset_path: Path) -> Path:
     """Return the expected sidecar path for *asset_path*."""
 
@@ -512,6 +578,11 @@ def load_adjustments(asset_path: Path) -> Dict[str, Any]:
     if levels_node is not None:
         result.update(_read_levels_from_node(levels_node))
 
+    # Load Selective Color adjustments
+    sc_node = _find_child_case_insensitive(root, _SELECTIVE_COLOR_NODE)
+    if sc_node is not None:
+        result.update(_read_selective_color_from_node(sc_node))
+
     return result
 
 
@@ -585,6 +656,9 @@ def save_adjustments(asset_path: Path, adjustments: Mapping[str, Any]) -> Path:
 
     # Write levels adjustments
     _write_levels_node(root, adjustments)
+
+    # Write Selective Color adjustments
+    _write_selective_color_node(root, adjustments)
 
     tmp_path = sidecar_path.with_suffix(sidecar_path.suffix + ".tmp")
     tree = ET.ElementTree(root)
@@ -717,5 +791,13 @@ def resolve_render_adjustments(
         handles = adjustments.get("Levels_Handles")
         if isinstance(handles, list) and len(handles) == 5:
             resolved["Levels_Handles"] = handles
+
+    # Selective Color adjustments - pass through to renderer as-is
+    sc_enabled = bool(adjustments.get("SelectiveColor_Enabled", False))
+    resolved["SelectiveColor_Enabled"] = sc_enabled
+    if sc_enabled:
+        sc_ranges = adjustments.get("SelectiveColor_Ranges")
+        if isinstance(sc_ranges, list) and len(sc_ranges) == NUM_RANGES:
+            resolved["SelectiveColor_Ranges"] = sc_ranges
 
     return resolved

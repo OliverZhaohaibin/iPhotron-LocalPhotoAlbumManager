@@ -40,7 +40,7 @@ def ease_shift(base: float, delta: float, bound: float) -> float:
     diff = base - bound          # signed distance from bound to base
     if abs(diff) < 1e-9:
         return base
-    return bound + diff * math.exp(delta / diff)
+    return bound + diff * math.exp(0.75 * delta / diff)
 
 
 def build_levels_lut(handles):

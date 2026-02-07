@@ -183,7 +183,11 @@ vec3 apply_range(vec3 rgb, int i){
 }
 
 void main(){
-    vec3 c = texture(uTex, vUV).rgb;
+    // Flip V so the image displays right-side up
+    // (QImage row 0 = image top goes to texture v=0 = screen bottom;
+    //  flipping corrects this so pick coordinates match the display)
+    vec2 uv = vec2(vUV.x, 1.0 - vUV.y);
+    vec3 c = texture(uTex, uv).rgb;
 
     // Apply 6 ranges sequentially (allows overlaps like common editors)
     for (int i=0;i<6;i++){
@@ -475,15 +479,9 @@ class SelectiveColorWidget(QWidget):
         lum_fill_neg = "#000000"
         lum_fill_pos = "#FFFFFF"
 
-        hue_map = {
-            0: ("#AF52DE", "#FFCC00"),
-            1: ("#FF3B30", "#28CD41"),
-            2: ("#FFCC00", "#5AC8FA"),
-            3: ("#28CD41", "#007AFF"),
-            4: ("#5AC8FA", "#AF52DE"),
-            5: ("#007AFF", "#FF3B30")
-        }
-        left_hue, right_hue = hue_map.get(color_idx, ("#888", "#888"))
+        n = len(self.color_hexes)
+        left_hue = self.color_hexes[(color_idx - 1) % n]
+        right_hue = self.color_hexes[(color_idx + 1) % n]
 
         c_left = QColor(left_hue);  c_left.setAlpha(100)
         c_right = QColor(right_hue); c_right.setAlpha(100)
@@ -752,6 +750,17 @@ class Main(QMainWindow):
             r, g, b = c.redF(), c.greenF(), c.blueF()
             hue01 = rgb_to_hue01(r, g, b)
             self.viewer.set_center_hue(idx, hue01)
+
+            # Replace the selected color button with the picked color
+            picked_hex = c.name()  # e.g. "#ab1234"
+            self.panel.color_hexes[idx] = picked_hex
+            btn = self.panel.btn_group.button(idx)
+            if btn:
+                btn.color = QColor(picked_hex)
+                btn.update()
+
+            # Update slider theme to reflect the new picked color
+            self.panel.update_theme(idx)
 
             # turn off pipette button UI state
             self.panel.pipette.blockSignals(True)

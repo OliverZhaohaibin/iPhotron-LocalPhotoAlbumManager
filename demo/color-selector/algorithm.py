@@ -468,17 +468,27 @@ class SelectiveColorWidget(QWidget):
         dark_base = QColor(base_c)
         dark_base.setAlpha(80)
         bg_dark_hex = dark_base.name()
-        base_h, base_s, _, _ = base_c.getHslF()
+        base_r = base_c.redF()
+        base_g = base_c.greenF()
+        base_b = base_c.blueF()
 
         sat_bg_start = "#4a4a4a"
         sat_bg_end = bg_dark_hex
         sat_fill_neg = "#607080"
         sat_fill_pos = base_c.name()
 
-        lum_bg_start = QColor.fromHslF(base_h, base_s, 0.15).name()
-        lum_bg_end = QColor.fromHslF(base_h, base_s, 0.85).name()
-        lum_fill_neg = QColor.fromHslF(base_h, base_s, 0.2).name()
-        lum_fill_pos = QColor.fromHslF(base_h, base_s, 0.8).name()
+        lum_bg_start = QColor.fromRgbF(base_r * 0.2, base_g * 0.2, base_b * 0.2).name()
+        lum_bg_end = QColor.fromRgbF(
+            base_r + (1.0 - base_r) * 0.8,
+            base_g + (1.0 - base_g) * 0.8,
+            base_b + (1.0 - base_b) * 0.8,
+        ).name()
+        lum_fill_neg = QColor.fromRgbF(base_r * 0.35, base_g * 0.35, base_b * 0.35).name()
+        lum_fill_pos = QColor.fromRgbF(
+            base_r + (1.0 - base_r) * 0.65,
+            base_g + (1.0 - base_g) * 0.65,
+            base_b + (1.0 - base_b) * 0.65,
+        ).name()
 
         n = len(self.color_hexes)
         left_hue = self.color_hexes[(color_idx - 1) % n]

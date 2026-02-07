@@ -12,6 +12,7 @@ from ..core.curve_resolver import (
     DEFAULT_CURVE_POINTS,
     CurveChannel,
 )
+from ..core.levels_resolver import DEFAULT_LEVELS_HANDLES
 from ..core.wb_resolver import WB_KEYS, WB_DEFAULTS
 
 BW_KEYS = (
@@ -40,6 +41,11 @@ _CURVE_CHANNEL_RED = "red"
 _CURVE_CHANNEL_GREEN = "green"
 _CURVE_CHANNEL_BLUE = "blue"
 _CURVE_POINT = "point"
+
+# Levels XML node names
+_LEVELS_NODE = "Levels"
+_LEVELS_ENABLED = "enabled"
+_LEVELS_HANDLE = "handle"
 
 
 def _normalise_bw_value(key: str, value: float) -> float:
@@ -337,6 +343,54 @@ def _write_curve_node(root: ET.Element, values: Mapping[str, Any]) -> None:
     _write_curve_channel_points(curve, _CURVE_CHANNEL_BLUE, curve_blue if isinstance(curve_blue, list) else list(DEFAULT_CURVE_POINTS))
 
 
+def _read_levels_from_node(node: ET.Element) -> Dict[str, Any]:
+    """Return levels adjustments described by the ``<Levels>`` *node*."""
+    result: Dict[str, Any] = {}
+
+    enabled_attr = node.get(_LEVELS_ENABLED)
+    if enabled_attr is not None:
+        result["Levels_Enabled"] = enabled_attr.lower() in {"1", "true", "yes", "on"}
+    else:
+        result["Levels_Enabled"] = False
+
+    handles: List[float] = []
+    for handle_node in node.findall(_LEVELS_HANDLE):
+        val = handle_node.get("value")
+        if val is not None:
+            try:
+                handles.append(float(val))
+            except ValueError:
+                continue
+    if len(handles) == 5:
+        result["Levels_Handles"] = handles
+    else:
+        result["Levels_Handles"] = list(DEFAULT_LEVELS_HANDLES)
+
+    return result
+
+
+def _write_levels_node(root: ET.Element, values: Mapping[str, Any]) -> None:
+    """Insert/replace the ``<Levels>`` section under *root* using *values*."""
+    _remove_children_case_insensitive(root, _LEVELS_NODE)
+
+    levels_enabled = bool(values.get("Levels_Enabled", False))
+    handles = values.get("Levels_Handles", DEFAULT_LEVELS_HANDLES)
+    if not isinstance(handles, list) or len(handles) != 5:
+        handles = list(DEFAULT_LEVELS_HANDLES)
+
+    is_identity = all(
+        abs(h - d) < 1e-6 for h, d in zip(handles, DEFAULT_LEVELS_HANDLES)
+    )
+    if not levels_enabled and is_identity:
+        return
+
+    levels = ET.SubElement(root, _LEVELS_NODE)
+    levels.set(_LEVELS_ENABLED, "true" if levels_enabled else "false")
+    for v in handles:
+        h = ET.SubElement(levels, _LEVELS_HANDLE)
+        h.set("value", f"{float(v):.6f}")
+
+
 def sidecar_path_for_asset(asset_path: Path) -> Path:
     """Return the expected sidecar path for *asset_path*."""
 
@@ -453,6 +507,11 @@ def load_adjustments(asset_path: Path) -> Dict[str, Any]:
     if curve_node is not None:
         result.update(_read_curve_from_node(curve_node))
 
+    # Load levels adjustments
+    levels_node = _find_child_case_insensitive(root, _LEVELS_NODE)
+    if levels_node is not None:
+        result.update(_read_levels_from_node(levels_node))
+
     return result
 
 
@@ -523,6 +582,9 @@ def save_adjustments(asset_path: Path, adjustments: Mapping[str, Any]) -> Path:
 
     # Write curve adjustments
     _write_curve_node(root, adjustments)
+
+    # Write levels adjustments
+    _write_levels_node(root, adjustments)
 
     tmp_path = sidecar_path.with_suffix(sidecar_path.suffix + ".tmp")
     tree = ET.ElementTree(root)
@@ -647,5 +709,13 @@ def resolve_render_adjustments(
             curve_data = adjustments.get(key)
             if curve_data and isinstance(curve_data, list):
                 resolved[key] = curve_data
+
+    # Levels adjustments - pass through to renderer as-is
+    levels_enabled = bool(adjustments.get("Levels_Enabled", False))
+    resolved["Levels_Enabled"] = levels_enabled
+    if levels_enabled:
+        handles = adjustments.get("Levels_Handles")
+        if isinstance(handles, list) and len(handles) == 5:
+            resolved["Levels_Handles"] = handles
 
     return resolved

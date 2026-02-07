@@ -46,8 +46,9 @@ def resolve_adjustment_mapping(
     that do not have statistics available yet.
     """
 
-    # Keys that contain list data (curve control points) - skip these
+    # Keys that contain list data (curve control points, levels handles) - skip these
     _CURVE_LIST_KEYS = {"Curve_RGB", "Curve_Red", "Curve_Green", "Curve_Blue"}
+    _LIST_KEYS = _CURVE_LIST_KEYS | {"Levels_Handles"}
 
     resolved: dict[str, float | bool | list] = {}
     overrides: dict[str, float] = {}
@@ -64,8 +65,8 @@ def resolve_adjustment_mapping(
             continue
         if key == "BW_Master":
             continue
-        # Curve list keys are forwarded verbatim so the GL viewer can refresh the LUT.
-        if key in _CURVE_LIST_KEYS:
+        # List keys are forwarded verbatim so the GL viewer / CPU renderer can use them.
+        if key in _LIST_KEYS:
             if isinstance(value, list):
                 curve_lists[key] = value
             continue
@@ -136,6 +137,10 @@ def resolve_adjustment_mapping(
         resolved["WBWarmth"] = 0.0
         resolved["WBTemperature"] = 0.0
         resolved["WBTint"] = 0.0
+
+    # Preserve the dedicated Levels parameters.
+    levels_enabled = bool(session_values.get("Levels_Enabled", False))
+    resolved["Levels_Enabled"] = 1.0 if levels_enabled else 0.0
 
     resolved.update(curve_lists)
     return resolved

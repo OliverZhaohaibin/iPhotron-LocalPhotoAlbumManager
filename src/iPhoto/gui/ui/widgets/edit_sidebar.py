@@ -20,6 +20,7 @@ from ....core.light_resolver import LIGHT_KEYS
 from ....core.color_resolver import COLOR_KEYS, ColorStats
 from ....core.bw_resolver import BWParams
 from ....core.curve_resolver import DEFAULT_CURVE_POINTS
+from ....core.levels_resolver import DEFAULT_LEVELS_HANDLES
 from ....core.wb_resolver import WBParams
 from ..models.edit_session import EditSession
 from .edit_light_section import EditLightSection
@@ -27,6 +28,7 @@ from .edit_color_section import EditColorSection
 from .edit_bw_section import EditBWSection
 from .edit_wb_section import EditWBSection
 from .edit_curve_section import EditCurveSection
+from .edit_levels_section import EditLevelsSection
 from .edit_perspective_controls import PerspectiveControls
 from .collapsible_section import CollapsibleSection
 from ..palette import SIDEBAR_BACKGROUND_COLOR, Edit_SIDEBAR_FONT
@@ -57,6 +59,12 @@ class EditSidebar(QWidget):
     curveEyedropperModeChanged = Signal(object)
     """Relay eyedropper mode toggles from the curve section."""
 
+    levelsParamsPreviewed = Signal(object)
+    """Relays live levels adjustments to the controller."""
+
+    levelsParamsCommitted = Signal(object)
+    """Emitted when levels adjustments should be written to the session."""
+
     wbEyedropperModeChanged = Signal(object)
     """Relay eyedropper mode toggles from the WB section."""
 
@@ -85,6 +93,7 @@ class EditSidebar(QWidget):
         self._bw_controls_connected = False
         self._wb_controls_connected = False
         self._curve_controls_connected = False
+        self._levels_controls_connected = False
 
         # Match the classic sidebar chrome so the edit tools retain the soft blue
         # background the rest of the application uses for navigation panes.
@@ -282,6 +291,38 @@ class EditSidebar(QWidget):
         self._curve_section.interactionFinished.connect(self.interactionFinished)
         self._curve_section.eyedropperModeChanged.connect(self.curveEyedropperModeChanged)
 
+        scroll_layout.addWidget(self._build_separator(scroll_content))
+
+        # Levels section (collapsed by default, after Curve)
+        self._levels_section = EditLevelsSection(scroll_content)
+        self._levels_section_container = CollapsibleSection(
+            "Levels",
+            "level.square.svg",
+            self._levels_section,
+            scroll_content,
+            title_font=Edit_SIDEBAR_FONT,
+        )
+        self._levels_section_container.set_expanded(False)
+
+        self.levels_reset_button = QToolButton(self._levels_section_container)
+        self.levels_reset_button.setAutoRaise(True)
+        self.levels_reset_button.setIcon(load_icon("arrow.uturn.left.svg"))
+        self.levels_reset_button.setToolTip("Reset Levels adjustments")
+        self.levels_toggle_button = QToolButton(self._levels_section_container)
+        self.levels_toggle_button.setAutoRaise(True)
+        self.levels_toggle_button.setCheckable(True)
+        self.levels_toggle_button.setIcon(load_icon("circle.svg"))
+        self.levels_toggle_button.setToolTip("Toggle Levels adjustments")
+        self._levels_section_container.add_header_control(self.levels_reset_button)
+        self._levels_section_container.add_header_control(self.levels_toggle_button)
+
+        scroll_layout.addWidget(self._levels_section_container)
+
+        self._levels_section.levelsParamsPreviewed.connect(self.levelsParamsPreviewed)
+        self._levels_section.levelsParamsCommitted.connect(self.levelsParamsCommitted)
+        self._levels_section.interactionStarted.connect(self.interactionStarted)
+        self._levels_section.interactionFinished.connect(self.interactionFinished)
+
         scroll_layout.addStretch(1)
         scroll_content.setLayout(scroll_layout)
         scroll.setWidget(scroll_content)
@@ -392,12 +433,26 @@ class EditSidebar(QWidget):
                 pass
             self._curve_controls_connected = False
 
+        if self._levels_controls_connected:
+            try:
+                self.levels_reset_button.clicked.disconnect(self._on_levels_reset)
+            except (TypeError, RuntimeError):
+                # Signal may already be disconnected or was never connected; safe to ignore.
+                pass
+            try:
+                self.levels_toggle_button.toggled.disconnect(self._on_levels_toggled)
+            except (TypeError, RuntimeError):
+                # Signal may already be disconnected or was never connected; safe to ignore.
+                pass
+            self._levels_controls_connected = False
+
         self._session = session
         self._light_section.bind_session(session)
         self._color_section.bind_session(session)
         self._bw_section.bind_session(session)
         self._wb_section.bind_session(session)
         self._curve_section.bind_session(session)
+        self._levels_section.bind_session(session)
         self._perspective_controls.bind_session(session)
         if session is not None:
             self.light_reset_button.clicked.connect(self._on_light_reset)
@@ -419,11 +474,16 @@ class EditSidebar(QWidget):
             self.curve_toggle_button.toggled.connect(self._on_curve_toggled)
             self._curve_controls_connected = True
             self.curve_reset_button.setEnabled(True)
+            self.levels_reset_button.clicked.connect(self._on_levels_reset)
+            self.levels_toggle_button.toggled.connect(self._on_levels_toggled)
+            self._levels_controls_connected = True
+            self.levels_reset_button.setEnabled(True)
             self._sync_light_toggle_state()
             self._sync_color_toggle_state()
             self._sync_bw_toggle_state()
             self._sync_wb_toggle_state()
             self._sync_curve_toggle_state()
+            self._sync_levels_toggle_state()
             if self._light_preview_image is not None:
                 self._light_section.set_preview_image(self._light_preview_image)
                 self._color_section.set_preview_image(
@@ -446,6 +506,9 @@ class EditSidebar(QWidget):
             self.curve_reset_button.setEnabled(False)
             self.curve_toggle_button.setChecked(False)
             self._update_curve_toggle_icon(False)
+            self.levels_reset_button.setEnabled(False)
+            self.levels_toggle_button.setChecked(False)
+            self._update_levels_toggle_icon(False)
 
     def session(self) -> Optional[EditSession]:
         return self._session
@@ -465,12 +528,14 @@ class EditSidebar(QWidget):
         self._bw_section.refresh_from_session()
         self._wb_section.refresh_from_session()
         self._curve_section.refresh_from_session()
+        self._levels_section.refresh_from_session()
         self._perspective_controls.refresh_from_session()
         self._sync_light_toggle_state()
         self._sync_color_toggle_state()
         self._sync_bw_toggle_state()
         self._sync_wb_toggle_state()
         self._sync_curve_toggle_state()
+        self._sync_levels_toggle_state()
 
     def set_light_preview_image(
         self,
@@ -486,6 +551,7 @@ class EditSidebar(QWidget):
         self._color_section.set_preview_image(image, color_stats=color_stats)
         self._bw_section.set_preview_image(image)
         self._curve_section.set_preview_image(image)
+        self._levels_section.set_preview_image(image)
 
     def handle_curve_color_picked(self, r: float, g: float, b: float) -> None:
         """Forward a sampled color to the curve section."""
@@ -604,6 +670,8 @@ class EditSidebar(QWidget):
             self._sync_wb_toggle_state()
         if key == "Curve_Enabled":
             self._sync_curve_toggle_state()
+        if key == "Levels_Enabled":
+            self._sync_levels_toggle_state()
 
     def _sync_light_toggle_state(self) -> None:
         if self._session is None:
@@ -768,6 +836,50 @@ class EditSidebar(QWidget):
             )
             self.curve_toggle_button.setIcon(load_icon("circle.svg", color=tint_name))
 
+    def _on_levels_reset(self) -> None:
+        if self._session is None:
+            return
+        self.interactionStarted.emit()
+        updates = {
+            "Levels_Enabled": False,
+            "Levels_Handles": list(DEFAULT_LEVELS_HANDLES),
+        }
+        self._session.set_values(updates)
+        self._levels_section.refresh_from_session()
+        self._sync_levels_toggle_state()
+        self.interactionFinished.emit()
+
+    def _on_levels_toggled(self, checked: bool) -> None:
+        self._update_levels_toggle_icon(checked)
+        if self._session is None:
+            return
+        self.interactionStarted.emit()
+        self._session.set_value("Levels_Enabled", checked)
+        self.interactionFinished.emit()
+
+    def _sync_levels_toggle_state(self) -> None:
+        if self._session is None:
+            block = self.levels_toggle_button.blockSignals(True)
+            self.levels_toggle_button.setChecked(False)
+            self.levels_toggle_button.blockSignals(block)
+            self._update_levels_toggle_icon(False)
+            return
+        enabled = bool(self._session.value("Levels_Enabled"))
+        block = self.levels_toggle_button.blockSignals(True)
+        self.levels_toggle_button.setChecked(enabled)
+        self.levels_toggle_button.blockSignals(block)
+        self._update_levels_toggle_icon(enabled)
+
+    def _update_levels_toggle_icon(self, enabled: bool) -> None:
+        if enabled:
+            self.levels_toggle_button.setIcon(load_icon("checkmark.circle.svg"))
+        else:
+            tint_name = (
+                self._control_icon_tint.name(QColor.NameFormat.HexArgb)
+                if self._control_icon_tint
+                else None
+            )
+            self.levels_toggle_button.setIcon(load_icon("circle.svg", color=tint_name))
 
     def set_control_icon_tint(self, color: QColor | None) -> None:
         """Apply a color tint to all header control icons."""
@@ -788,8 +900,12 @@ class EditSidebar(QWidget):
         self.curve_reset_button.setIcon(
             load_icon("arrow.uturn.left.svg", color=tint_name)
         )
+        self.levels_reset_button.setIcon(
+            load_icon("arrow.uturn.left.svg", color=tint_name)
+        )
         self._sync_light_toggle_state()
         self._sync_color_toggle_state()
         self._sync_bw_toggle_state()
         self._sync_wb_toggle_state()
         self._sync_curve_toggle_state()
+        self._sync_levels_toggle_state()

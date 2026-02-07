@@ -81,6 +81,7 @@ class GLRenderer:
         self._texture_width: int = 0
         self._texture_height: int = 0
         self._curve_lut_texture_id: int = 0
+        self._levels_lut_texture_id: int = 0
         self._overlay_program: Optional[QOpenGLShaderProgram] = None
         self._overlay_vao: Optional[QOpenGLVertexArrayObject] = None
         self._overlay_vbo: int = 0
@@ -139,6 +140,8 @@ class GLRenderer:
                 "uBWEnabled",
                 "uCurveLUT",
                 "uCurveEnabled",
+                "uLevelsLUT",
+                "uLevelsEnabled",
                 "uWBWarmth",
                 "uWBTemperature",
                 "uWBTint",
@@ -183,6 +186,7 @@ class GLRenderer:
 
         self.delete_texture()
         self._delete_curve_lut_texture()
+        self._delete_levels_lut_texture()
         if self._dummy_vao is not None:
             self._dummy_vao.destroy()
             self._dummy_vao = None
@@ -339,6 +343,59 @@ class GLRenderer:
             self._delete_curve_lut_texture()
             return
 
+    def _delete_levels_lut_texture(self) -> None:
+        """Delete the levels LUT texture, if any."""
+
+        if not self._levels_lut_texture_id:
+            return
+        gl.glDeleteTextures(1, np.array([int(self._levels_lut_texture_id)], dtype=np.uint32))
+        self._levels_lut_texture_id = 0
+
+    def upload_levels_lut(self, lut_data: np.ndarray) -> None:
+        """Upload a 256x3 float32 levels LUT to the GPU as a 256x1 RGB texture.
+
+        Args:
+            lut_data: numpy array of shape (256, 3) with float32 values in [0, 1]
+        """
+        if lut_data is None or lut_data.shape != (256, 3):
+            return
+
+        lut_data = np.ascontiguousarray(lut_data, dtype=np.float32)
+
+        if self._levels_lut_texture_id:
+            gl.glDeleteTextures(1, np.array([int(self._levels_lut_texture_id)], dtype=np.uint32))
+            self._levels_lut_texture_id = 0
+
+        tex_id = gl.glGenTextures(1)
+        if isinstance(tex_id, (tuple, list)):
+            tex_id = tex_id[0]
+        self._levels_lut_texture_id = int(tex_id)
+
+        gl.glBindTexture(gl.GL_TEXTURE_2D, self._levels_lut_texture_id)
+        gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MIN_FILTER, gl.GL_LINEAR)
+        gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MAG_FILTER, gl.GL_LINEAR)
+        gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_WRAP_S, gl.GL_CLAMP_TO_EDGE)
+        gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_WRAP_T, gl.GL_CLAMP_TO_EDGE)
+
+        gl.glTexImage2D(
+            gl.GL_TEXTURE_2D,
+            0,
+            gl.GL_RGB32F,
+            256,
+            1,
+            0,
+            gl.GL_RGB,
+            gl.GL_FLOAT,
+            lut_data,
+        )
+        gl.glBindTexture(gl.GL_TEXTURE_2D, 0)
+
+        error = gl.glGetError()
+        if error != gl.GL_NO_ERROR:
+            _LOGGER.warning("OpenGL error after levels LUT upload: 0x%04X", int(error))
+            self._delete_levels_lut_texture()
+            return
+
     # ------------------------------------------------------------------
     # Rendering
     # ------------------------------------------------------------------
@@ -431,6 +488,18 @@ class GLRenderer:
                 # No curve LUT texture available: disable sampling by pointing to a safe unit.
                 # Since uCurveEnabled is 0 in this branch, the shader must ignore the LUT.
                 self._set_uniform1i("uCurveLUT", 0)
+
+            # Levels LUT texture binding
+            levels_enabled_value = adjustments.get("Levels_Enabled", False)
+            has_levels_lut_texture = bool(self._levels_lut_texture_id)
+            effective_levels_enabled = bool(levels_enabled_value) and has_levels_lut_texture
+            self._set_uniform1i("uLevelsEnabled", 1 if effective_levels_enabled else 0)
+            if has_levels_lut_texture:
+                gf.glActiveTexture(gl.GL_TEXTURE2)
+                gf.glBindTexture(gl.GL_TEXTURE_2D, int(self._levels_lut_texture_id))
+                self._set_uniform1i("uLevelsLUT", 2)
+            else:
+                self._set_uniform1i("uLevelsLUT", 0)
 
             if time_value is not None:
                 self._set_uniform1f("uTime", time_value)

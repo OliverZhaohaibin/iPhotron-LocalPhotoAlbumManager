@@ -33,6 +33,10 @@ from .....core.curve_resolver import (
     CurvePoint,
     generate_curve_lut,
 )
+from .....core.levels_resolver import (
+    DEFAULT_LEVELS_HANDLES,
+    build_levels_lut,
+)
 from ..gl_crop_controller import CropInteractionController
 from ..gl_renderer import GLRenderer
 from ..view_transform_controller import (
@@ -205,6 +209,7 @@ class GLImageViewer(QOpenGLWidget):
         self._adjustments = dict(adjustments or {})
         self._update_crop_perspective_state()
         self._update_curve_lut_if_needed(self._adjustments)
+        self._update_levels_lut_if_needed(self._adjustments)
         self._loading_overlay.hide()
         self._time_base = time.monotonic()
 
@@ -265,6 +270,9 @@ class GLImageViewer(QOpenGLWidget):
 
         # Handle curve LUT update if curve data changed
         self._update_curve_lut_if_needed(mapped_adjustments)
+
+        # Handle levels LUT update if levels data changed
+        self._update_levels_lut_if_needed(mapped_adjustments)
 
         if self._crop_controller.is_active():
             # Refresh the crop overlay in logical space so it stays aligned when rotation
@@ -337,6 +345,42 @@ class GLImageViewer(QOpenGLWidget):
             try:
                 self._renderer.upload_curve_lut(lut)
                 self._current_curve_lut = lut
+            finally:
+                self.doneCurrent()
+
+    def _update_levels_lut_if_needed(self, adjustments: dict[str, Any]) -> None:
+        """Update the levels LUT texture if levels parameters have changed."""
+        levels_enabled = bool(adjustments.get("Levels_Enabled", False))
+
+        if not levels_enabled:
+            if self._renderer is None:
+                return
+            self.makeCurrent()
+            try:
+                try:
+                    identity_lut = build_levels_lut(list(DEFAULT_LEVELS_HANDLES))
+                except Exception as e:
+                    _LOGGER.warning("Failed to generate identity levels LUT: %s", e)
+                    return
+                self._renderer.upload_levels_lut(identity_lut)
+            finally:
+                self.doneCurrent()
+            return
+
+        handles = adjustments.get("Levels_Handles")
+        if not isinstance(handles, list) or len(handles) != 5:
+            return
+
+        try:
+            lut = build_levels_lut(handles)
+        except Exception as e:
+            _LOGGER.warning("Failed to generate levels LUT: %s", e)
+            return
+
+        if self._renderer is not None:
+            self.makeCurrent()
+            try:
+                self._renderer.upload_levels_lut(lut)
             finally:
                 self.doneCurrent()
 
@@ -514,6 +558,7 @@ class GLImageViewer(QOpenGLWidget):
         self._renderer = GLRenderer(gf, parent=self)
         self._renderer.initialize_resources()
         self._update_curve_lut_if_needed(self._adjustments)
+        self._update_levels_lut_if_needed(self._adjustments)
 
         dpr = self.devicePixelRatioF()
         gf.glViewport(0, 0, int(self.width() * dpr), int(self.height() * dpr))

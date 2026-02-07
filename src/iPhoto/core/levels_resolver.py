@@ -81,7 +81,7 @@ def build_levels_lut(handles: List[float]) -> np.ndarray:
     out[t <= x0] = y0
     out[t >= x4] = y4
 
-    def _interp_segment(mask, xa, xb, ya, yb):
+    def _interp_segment(mask: np.ndarray, xa: float, xb: float, ya: float, yb: float) -> None:
         denom = xb - xa
         if denom <= 1e-8:
             out[mask] = yb

@@ -298,20 +298,44 @@ class LevelsComposite(QWidget):
         w = self.width()
         track_width = w - 2 * self.margin_side
 
-        closest_dist = float("inf")
-        clicked_idx = -1
+        threshold = self.base_handle_width * 1.5
+        candidates: list[tuple[int, float]] = []
         for i, val in enumerate(self.handles):
             cx = self.margin_side + val * track_width
             dist = abs(pos.x() - cx)
-            if dist < self.base_handle_width * 1.5 and dist < closest_dist:
-                closest_dist = dist
-                clicked_idx = i
+            if dist < threshold:
+                candidates.append((i, dist))
 
-        if clicked_idx != -1:
-            self.drag_index = clicked_idx
-            self._drag_start_handles = list(self.handles)
-            self.interactionStarted.emit()
-            self.update()
+        if not candidates:
+            return
+
+        # Find the minimum distance among candidates.
+        min_dist = min(d for _, d in candidates)
+        # Keep only handles whose distance is within a tiny tolerance of the
+        # closest so that overlapping handles are all considered equally close.
+        best = [idx for idx, d in candidates if d - min_dist < 1.0]
+
+        if len(best) == 1:
+            clicked_idx = best[0]
+        else:
+            # Multiple handles overlap at the same position.  Pick the one
+            # that the user can actually drag in the click direction so
+            # overlapping handles can always be separated.
+            click_x = pos.x()
+            cluster_x = self.margin_side + self.handles[best[0]] * track_width
+            if click_x >= cluster_x:
+                # Click is to the right (or on top): grab the highest-index
+                # handle so it can be dragged rightward.
+                clicked_idx = best[-1]
+            else:
+                # Click is to the left: grab the lowest-index handle so it
+                # can be dragged leftward.
+                clicked_idx = best[0]
+
+        self.drag_index = clicked_idx
+        self._drag_start_handles = list(self.handles)
+        self.interactionStarted.emit()
+        self.update()
 
     def mouseMoveEvent(self, event: QMouseEvent) -> None:  # noqa: N802
         pos = event.position()

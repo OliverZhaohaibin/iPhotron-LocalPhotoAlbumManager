@@ -10,11 +10,13 @@ from PySide6.QtCore import QObject, Signal
 from ....core.light_resolver import LIGHT_KEYS
 from ....core.color_resolver import COLOR_KEYS, COLOR_RANGES, ColorStats
 from ....core.curve_resolver import DEFAULT_CURVE_POINTS
+from ....core.levels_resolver import DEFAULT_LEVELS_HANDLES
 
 _BW_RANGE_KEYS = {"BW_Master", "BW_Intensity", "BW_Neutrals", "BW_Tone"}
 
-# Keys that store list data (curve control points) instead of floats
+# Keys that store list data (curve control points, levels handles) instead of floats
 _CURVE_LIST_KEYS = {"Curve_RGB", "Curve_Red", "Curve_Green", "Curve_Blue"}
+_LIST_KEYS = _CURVE_LIST_KEYS | {"Levels_Handles"}
 
 
 def _coerce_bw_range(key: str, value: float) -> float:
@@ -129,14 +131,23 @@ class EditSession(QObject):
         self._values["Curve_Green"] = list(DEFAULT_CURVE_POINTS)
         self._values["Curve_Blue"] = list(DEFAULT_CURVE_POINTS)
 
+        # Levels adjustment parameters store the 5 handle positions.
+        # ``Levels_Enabled`` toggles whether levels adjustments are applied.
+        self._values["Levels_Enabled"] = False
+        self._ranges["Levels_Enabled"] = (0.0, 1.0)
+        self._values["Levels_Handles"] = list(DEFAULT_LEVELS_HANDLES)
+
     # ------------------------------------------------------------------
     # Accessors
     def value(self, key: str) -> float | bool | List[Tuple[float, float]]:
         """Return the stored value for *key*, defaulting to ``0.0`` or ``False``."""
 
         default: Any = 0.0
-        if key in _CURVE_LIST_KEYS:
-            default = list(DEFAULT_CURVE_POINTS)
+        if key in _LIST_KEYS:
+            if key == "Levels_Handles":
+                default = list(DEFAULT_LEVELS_HANDLES)
+            else:
+                default = list(DEFAULT_CURVE_POINTS)
         return self._values.get(key, default)
 
     def values(self) -> Dict[str, float | bool | List[Tuple[float, float]]]:
@@ -153,12 +164,15 @@ class EditSession(QObject):
             return
         current = self._values[key]
 
-        # Handle curve list data (control points)
-        if key in _CURVE_LIST_KEYS:
+        # Handle list data (curve control points, levels handles)
+        if key in _LIST_KEYS:
             if not isinstance(value, list):
                 return
             # Deep copy the list to avoid reference issues
-            normalised = [tuple(pt) for pt in value]
+            if key in _CURVE_LIST_KEYS:
+                normalised = [tuple(pt) for pt in value]
+            else:
+                normalised = list(value)
             if normalised == current:
                 return
             self._values[key] = normalised
@@ -189,11 +203,14 @@ class EditSession(QObject):
                 continue
             current = self._values[key]
 
-            # Handle curve list data (control points)
-            if key in _CURVE_LIST_KEYS:
+            # Handle list data (curve control points, levels handles)
+            if key in _LIST_KEYS:
                 if not isinstance(value, list):
                     continue
-                normalised = [tuple(pt) for pt in value]
+                if key in _CURVE_LIST_KEYS:
+                    normalised = [tuple(pt) for pt in value]
+                else:
+                    normalised = list(value)
                 if normalised == current:
                     continue
                 self._values[key] = normalised
@@ -264,6 +281,11 @@ class EditSession(QObject):
             "Curve_Red": list(DEFAULT_CURVE_POINTS),
             "Curve_Green": list(DEFAULT_CURVE_POINTS),
             "Curve_Blue": list(DEFAULT_CURVE_POINTS),
+        })
+        # Levels defaults
+        defaults.update({
+            "Levels_Enabled": False,
+            "Levels_Handles": list(DEFAULT_LEVELS_HANDLES),
         })
         self.set_values(defaults, emit_individual=True)
         self.resetPerformed.emit()

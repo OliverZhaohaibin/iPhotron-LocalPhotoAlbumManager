@@ -22,6 +22,31 @@ def clamp01(x: float) -> float:
     return max(0.0, min(1.0, x))
 
 
+def ease_shift(base: float, delta: float, bound: float, exponent: float = 2.0) -> float:
+    """Nonlinear shift: full speed near base, decelerating toward bound.
+
+    *base*  – starting position of the follower handle.
+    *delta* – signed displacement requested (same sign convention as the
+              midtone delta).
+    *bound* – the hard limit the follower must never exceed (0.0 for shadow,
+              1.0 for highlight).
+    *exponent* – controls how aggressively the handle slows down near
+                 *bound*.  Higher = more damping near the edge.
+
+    Returns the new position for the follower handle, always between
+    *base* and *bound* (inclusive).
+    """
+    span = abs(bound - base)
+    if span < 1e-9:
+        return base
+    ratio = clamp01(abs(delta) / span)
+    effective = span * (1.0 - pow(1.0 - ratio, exponent))
+    if delta >= 0:
+        return base + effective if bound >= base else base - effective
+    else:
+        return base - effective if bound <= base else base + effective
+
+
 def build_levels_lut(handles):
     """
     ✅ 新算法：5 个固定输出锚点(0, .25, .5, .75, 1)，手柄控制输入 x 位置
@@ -348,6 +373,7 @@ class LevelsComposite(QWidget):
 
         self.hover_index = -1
         self.drag_index = -1
+        self._drag_start_handles = None
 
         self.margin_side = 8
         self.hist_height = 120
@@ -569,6 +595,7 @@ class LevelsComposite(QWidget):
 
         if clicked_idx != -1:
             self.drag_index = clicked_idx
+            self._drag_start_handles = list(self.handles)
             self.update()
 
     def mouseMoveEvent(self, event):
@@ -581,13 +608,45 @@ class LevelsComposite(QWidget):
         val = clamp01((pos.x() - self.margin_side) / track_width)
 
         if self.drag_index != -1:
-            # 允许相等：非递减约束
             idx = self.drag_index
-            min_val = self.handles[idx - 1] if idx > 0 else 0.0
-            max_val = self.handles[idx + 1] if idx < 4 else 1.0
-            val = max(min_val, min(max_val, val))
 
-            self.handles[idx] = val
+            if idx == 2 and self._drag_start_handles is not None:
+                # --- Midtone handle: nonlinear coupled dragging ---
+                s = self._drag_start_handles
+                # Clamp midtone between black-point and white-point handles
+                min_val = self.handles[0]
+                max_val = self.handles[4]
+                val = max(min_val, min(max_val, val))
+                self.handles[2] = val
+
+                delta = val - s[2]  # signed displacement of midtone
+
+                # Shadow (index 1): follows midtone, decelerates toward
+                # black-point (handle 0)
+                if delta < 0:
+                    new1 = ease_shift(s[1], delta, s[0], exponent=2.0)
+                else:
+                    new1 = ease_shift(s[1], delta, s[4], exponent=2.0)
+                new1 = clamp01(new1)
+                new1 = max(self.handles[0], min(new1, self.handles[2]))
+                self.handles[1] = new1
+
+                # Highlight (index 3): follows midtone, decelerates toward
+                # white-point (handle 4)
+                if delta > 0:
+                    new3 = ease_shift(s[3], delta, s[4], exponent=2.0)
+                else:
+                    new3 = ease_shift(s[3], delta, s[0], exponent=2.0)
+                new3 = clamp01(new3)
+                new3 = max(self.handles[2], min(new3, self.handles[4]))
+                self.handles[3] = new3
+            else:
+                # --- Other handles: original non-decreasing constraint ---
+                min_val = self.handles[idx - 1] if idx > 0 else 0.0
+                max_val = self.handles[idx + 1] if idx < 4 else 1.0
+                val = max(min_val, min(max_val, val))
+                self.handles[idx] = val
+
             self.valuesChanged.emit(self.handles)
             self.update()
         else:
@@ -604,6 +663,7 @@ class LevelsComposite(QWidget):
 
     def mouseReleaseEvent(self, event):
         self.drag_index = -1
+        self._drag_start_handles = None
         self.update()
 
 

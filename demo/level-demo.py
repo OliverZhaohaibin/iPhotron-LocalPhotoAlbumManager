@@ -1,5 +1,6 @@
 import sys
 import os
+import math
 import numpy as np
 from PIL import Image
 
@@ -22,29 +23,24 @@ def clamp01(x: float) -> float:
     return max(0.0, min(1.0, x))
 
 
-def ease_shift(base: float, delta: float, bound: float, exponent: float = 2.0) -> float:
-    """Nonlinear shift: full speed near base, decelerating toward bound.
+def ease_shift(base: float, delta: float, bound: float) -> float:
+    """Nonlinear shift using exponential decay toward *bound*.
+
+    The follower's speed is proportional to its remaining distance from
+    *bound*, so it starts at 1:1 speed with the driver and progressively
+    decelerates as it approaches the boundary — matching macOS-style
+    levels behaviour.  Fully reversible (pure function of inputs).
 
     *base*  – starting position of the follower handle.
-    *delta* – signed displacement requested (same sign convention as the
-              midtone delta).
-    *bound* – the hard limit the follower must never exceed (0.0 for shadow,
-              1.0 for highlight).
-    *exponent* – controls how aggressively the handle slows down near
-                 *bound*.  Higher = more damping near the edge.
-
-    Returns the new position for the follower handle, always between
-    *base* and *bound* (inclusive).
+    *delta* – signed displacement (same sign convention as the midtone
+              delta).
+    *bound* – the hard limit the follower should approach but never
+              exceed (0.0 for shadow, 1.0 for highlight).
     """
-    span = abs(bound - base)
-    if span < 1e-9:
+    diff = base - bound          # signed distance from bound to base
+    if abs(diff) < 1e-9:
         return base
-    ratio = clamp01(abs(delta) / span)
-    effective = span * (1.0 - pow(1.0 - ratio, exponent))
-    if delta >= 0:
-        return base + effective if bound >= base else base - effective
-    else:
-        return base - effective if bound <= base else base + effective
+    return bound + diff * math.exp(delta / diff)
 
 
 def build_levels_lut(handles):
@@ -621,20 +617,20 @@ class LevelsComposite(QWidget):
 
                 delta = val - s[2]  # signed displacement of midtone
 
-                # Shadow (index 1): follows midtone, decelerates only when
-                # moving toward the black-point (handle 0).
+                # Shadow (index 1): follows midtone, decelerates as it
+                # approaches the black-point (handle 0).
                 if delta < 0:
-                    new1 = ease_shift(s[1], delta, s[0], exponent=2.0)
+                    new1 = ease_shift(s[1], delta, s[0])
                 else:
                     new1 = s[1] + delta
                 new1 = clamp01(new1)
                 new1 = max(self.handles[0], min(new1, self.handles[2]))
                 self.handles[1] = new1
 
-                # Highlight (index 3): follows midtone, decelerates only when
-                # moving toward the white-point (handle 4).
+                # Highlight (index 3): follows midtone, decelerates as it
+                # approaches the white-point (handle 4).
                 if delta > 0:
-                    new3 = ease_shift(s[3], delta, s[4], exponent=2.0)
+                    new3 = ease_shift(s[3], delta, s[4])
                 else:
                     new3 = s[3] + delta
                 new3 = clamp01(new3)

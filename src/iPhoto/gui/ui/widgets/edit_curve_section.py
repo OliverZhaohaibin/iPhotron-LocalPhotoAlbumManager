@@ -672,19 +672,19 @@ class EditCurveSection(QWidget):
         eyedropper_layout.setSpacing(0)
 
         self.btn_black = QToolButton()
-        self.btn_black.setIcon(load_icon("eyedropper.full.svg", color="white"))
+        self.btn_black.setIcon(load_icon("eyedropper.full.svg"))
         self.btn_black.setToolTip("Set Black Point - Click to pick darkest point in image")
         self.btn_black.setCheckable(True)
         self.btn_black.setFixedSize(eyedropper_btn_width, eyedropper_btn_height)
 
         self.btn_gray = QToolButton()
-        self.btn_gray.setIcon(load_icon("eyedropper.halffull.svg", color="white"))
+        self.btn_gray.setIcon(load_icon("eyedropper.halffull.svg"))
         self.btn_gray.setToolTip("Set Gray Point - Click to pick mid-tone in image")
         self.btn_gray.setCheckable(True)
         self.btn_gray.setFixedSize(eyedropper_btn_width, eyedropper_btn_height)
 
         self.btn_white = QToolButton()
-        self.btn_white.setIcon(load_icon("eyedropper.svg", color="white"))
+        self.btn_white.setIcon(load_icon("eyedropper.svg"))
         self.btn_white.setToolTip("Set White Point - Click to pick brightest point in image")
         self.btn_white.setCheckable(True)
         self.btn_white.setFixedSize(eyedropper_btn_width, eyedropper_btn_height)

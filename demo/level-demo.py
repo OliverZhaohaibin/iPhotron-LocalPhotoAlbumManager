@@ -621,22 +621,22 @@ class LevelsComposite(QWidget):
 
                 delta = val - s[2]  # signed displacement of midtone
 
-                # Shadow (index 1): follows midtone, decelerates toward
-                # black-point (handle 0)
+                # Shadow (index 1): follows midtone, decelerates only when
+                # moving toward the black-point (handle 0).
                 if delta < 0:
-                    new1 = ease_shift(s[1], delta, s[0], exponent=2.0)
+                    new1 = ease_shift(s[1], delta, s[0], exponent=3.0)
                 else:
-                    new1 = ease_shift(s[1], delta, s[4], exponent=2.0)
+                    new1 = s[1] + delta
                 new1 = clamp01(new1)
                 new1 = max(self.handles[0], min(new1, self.handles[2]))
                 self.handles[1] = new1
 
-                # Highlight (index 3): follows midtone, decelerates toward
-                # white-point (handle 4)
+                # Highlight (index 3): follows midtone, decelerates only when
+                # moving toward the white-point (handle 4).
                 if delta > 0:
-                    new3 = ease_shift(s[3], delta, s[4], exponent=2.0)
+                    new3 = ease_shift(s[3], delta, s[4], exponent=3.0)
                 else:
-                    new3 = ease_shift(s[3], delta, s[0], exponent=2.0)
+                    new3 = s[3] + delta
                 new3 = clamp01(new3)
                 new3 = max(self.handles[2], min(new3, self.handles[4]))
                 self.handles[3] = new3

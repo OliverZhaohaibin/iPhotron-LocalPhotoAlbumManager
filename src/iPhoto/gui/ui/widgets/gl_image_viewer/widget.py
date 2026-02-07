@@ -197,10 +197,10 @@ class GLImageViewer(QOpenGLWidget):
         # Check if we can reuse the existing texture
         if self._texture_manager.should_reuse_texture(image_source):
             if image is not None and not image.isNull():
-                # Skip texture re-upload, only update adjustments
+                # Skip texture re-upload, only update adjustments. Preserve the
+                # current zoom/pan state so adjustment previews stay anchored
+                # to the user's active viewport.
                 self.set_adjustments(adjustments)
-                if reset_view:
-                    self.reset_zoom()
                 return
 
         # Update texture resource tracking

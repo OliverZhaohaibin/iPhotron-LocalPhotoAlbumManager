@@ -155,8 +155,9 @@ class CropInteractionController:
         # (e.g. during undo/redo or session updates while not dragging).
         should_sync = rotation_changed or (not self.is_active())
         if should_sync and new_crop_values is not None:
-            self._apply_crop_values(new_crop_values)
-            self._on_request_update()
+            if rotation_changed or not self._crop_values_match(new_crop_values):
+                self._apply_crop_values(new_crop_values)
+                self._on_request_update()
             return
 
         if not quad_changed:
@@ -385,6 +386,15 @@ class CropInteractionController:
         self._transform_controller.apply_image_center_pixels(clamped_center, scale)
         if changed:
             self._emit_crop_changed()
+
+    def _crop_values_match(self, values: Mapping[str, float]) -> bool:
+        """Return True if *values* matches the current crop state."""
+
+        current = self._model.get_crop_state().as_mapping()
+        for key in ("Crop_CX", "Crop_CY", "Crop_W", "Crop_H"):
+            if abs(float(values.get(key, current[key])) - current[key]) > 1e-6:
+                return False
+        return True
 
     def _crop_hit_test(self, point: QPointF) -> CropHandle:
         """Determine which crop handle (if any) is under the cursor."""

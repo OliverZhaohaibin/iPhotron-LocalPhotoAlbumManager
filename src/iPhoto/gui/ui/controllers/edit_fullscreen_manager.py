@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Mapping, Optional
 
 from PySide6.QtCore import QObject
+from PySide6.QtGui import QImage
 from PySide6.QtWidgets import QWidget
 
 from typing import TYPE_CHECKING
@@ -88,7 +89,16 @@ class EditFullscreenManager(QObject):
         if not isinstance(self._window, QWidget):
             return False
 
-        full_res_image = image_loader.load_qimage(source)
+        full_res_image: QImage | None = None
+        viewer = getattr(self._ui, "edit_image_viewer", None)
+        if viewer is not None and getattr(viewer, "current_image_source", None):
+            if viewer.current_image_source() == source:
+                cached = viewer.current_image()
+                if cached is not None and not cached.isNull():
+                    full_res_image = cached
+
+        if full_res_image is None or full_res_image.isNull():
+            full_res_image = image_loader.load_qimage(source)
         if full_res_image is None or full_res_image.isNull():
             _LOGGER.warning("Failed to load full resolution image for %s", source)
             return False
@@ -353,4 +363,3 @@ class EditFullscreenManager(QObject):
             scaled[-1] += delta
 
         return scaled
-

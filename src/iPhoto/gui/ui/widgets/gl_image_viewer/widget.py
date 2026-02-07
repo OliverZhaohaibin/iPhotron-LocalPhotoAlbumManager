@@ -396,6 +396,13 @@ class GLImageViewer(QOpenGLWidget):
             return None
         return QPixmap.fromImage(self._image)
 
+    def current_image(self) -> QImage | None:
+        """Return a detached copy of the currently displayed image."""
+
+        if self._image is None or self._image.isNull():
+            return None
+        return QImage(self._image)
+
     def set_loading(self, loading: bool) -> None:
         """Toggle the translucent loading overlay."""
 

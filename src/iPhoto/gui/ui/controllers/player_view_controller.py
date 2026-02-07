@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Optional, Set
+from collections import OrderedDict
 
 from PySide6.QtCore import QObject, QRunnable, QThreadPool, Signal
 from PySide6.QtGui import QImage, QPixmap
@@ -110,6 +111,8 @@ class PlayerViewController(QObject):
         self._loading_source: Optional[Path] = None
         self._defer_still_updates = False
         self._pending_still: Optional[tuple[Path, QImage, dict]] = None
+        self._image_cache: OrderedDict[tuple[str, int], tuple[QImage, dict]] = OrderedDict()
+        self._image_cache_limit = 4
 
     # ------------------------------------------------------------------
     # High-level surface selection helpers
@@ -175,6 +178,18 @@ class PlayerViewController(QObject):
     # ------------------------------------------------------------------
     def display_image(self, source: Path, *, placeholder: Optional[QPixmap] = None) -> bool:
         """Begin loading ``source`` asynchronously, returning scheduling success."""
+        cache_key = self._cache_key(source)
+        if cache_key is not None and cache_key in self._image_cache:
+            image, adjustments = self._image_cache[cache_key]
+            self._image_cache.move_to_end(cache_key)
+            self._loading_source = source
+            self.show_image_surface()
+            if placeholder is not None and not placeholder.isNull():
+                self._image_viewer.set_placeholder(placeholder)
+            self._apply_still_frame(source, QImage(image), dict(adjustments))
+            self._loading_source = None
+            return True
+
         self._loading_source = source
 
         # 1) 先切到 GL 视图，保证有有效的 GL 上下文
@@ -302,6 +317,8 @@ class PlayerViewController(QObject):
             self.imageLoadingFailed.emit(source, "Image decoder returned an empty frame")
             return
 
+        self._store_in_cache(source, image, adjustments)
+
         if self._defer_still_updates and self._player_stack.currentWidget() is self._video_area:
             self._pending_still = (source, image, adjustments)
         else:
@@ -338,3 +355,23 @@ class PlayerViewController(QObject):
         if worker in self._active_workers:
             self._active_workers.remove(worker)
         worker.setAutoDelete(True)
+
+    def _cache_key(self, source: Path) -> Optional[tuple[str, int]]:
+        """Return a cache key for *source* using its modification time."""
+
+        try:
+            stat = source.stat()
+        except OSError:
+            return None
+        return (str(source.resolve()), stat.st_mtime_ns)
+
+    def _store_in_cache(self, source: Path, image: QImage, adjustments: dict) -> None:
+        """Save the rendered image in a small LRU cache for quick reuse."""
+
+        key = self._cache_key(source)
+        if key is None:
+            return
+        self._image_cache[key] = (QImage(image), dict(adjustments))
+        self._image_cache.move_to_end(key)
+        while len(self._image_cache) > self._image_cache_limit:
+            self._image_cache.popitem(last=False)

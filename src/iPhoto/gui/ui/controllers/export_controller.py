@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Callable, Optional
+import os
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from PySide6.QtCore import QObject, QThreadPool, QRunnable, Signal
 from PySide6.QtGui import QAction, QActionGroup
@@ -37,17 +39,39 @@ class ExportWorker(QRunnable):
         self.signals = ExportSignals()
 
     def run(self) -> None:
-        total = len(self._paths)
+        export_paths = [path for path in self._paths if path.exists()]
+        total = len(export_paths)
         success = 0
         fail = 0
-        for i, path in enumerate(self._paths):
-            if not path.exists():
-                continue
-            if export_asset(path, self._export_root, self._library_root):
-                success += 1
-            else:
-                fail += 1
-            self.signals.progress.emit(i + 1, total)
+
+        if total == 0:
+            self.signals.finished.emit(success, fail)
+            return
+
+        max_workers = min(4, os.cpu_count() or 1)
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {
+                executor.submit(
+                    export_asset,
+                    path,
+                    self._export_root,
+                    self._library_root,
+                ): path
+                for path in export_paths
+            }
+
+            completed = 0
+            for future in as_completed(futures):
+                completed += 1
+                try:
+                    result = future.result()
+                except Exception:
+                    result = False
+                if result:
+                    success += 1
+                else:
+                    fail += 1
+                self.signals.progress.emit(completed, total)
         self.signals.finished.emit(success, fail)
 
 
@@ -93,7 +117,8 @@ class LibraryExportWorker(QRunnable):
             # permission issues), skip export silently.
             pass
 
-        total = len(to_export)
+        export_paths = [path for path in to_export if path.exists()]
+        total = len(export_paths)
         if total == 0:
             self.signals.finished.emit(0, 0)
             return
@@ -102,12 +127,24 @@ class LibraryExportWorker(QRunnable):
 
         success = 0
         fail = 0
-        for i, path in enumerate(to_export):
-            if export_asset(path, self._export_root, root):
-                success += 1
-            else:
-                fail += 1
-            self.signals.progress.emit(i + 1, total)
+        max_workers = min(4, os.cpu_count() or 1)
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {
+                executor.submit(export_asset, path, self._export_root, root): path
+                for path in export_paths
+            }
+            completed = 0
+            for future in as_completed(futures):
+                completed += 1
+                try:
+                    result = future.result()
+                except Exception:
+                    result = False
+                if result:
+                    success += 1
+                else:
+                    fail += 1
+                self.signals.progress.emit(completed, total)
 
         self.signals.finished.emit(success, fail)
 

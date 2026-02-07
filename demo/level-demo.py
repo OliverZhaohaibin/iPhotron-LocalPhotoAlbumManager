@@ -348,6 +348,7 @@ class LevelsComposite(QWidget):
 
         self.hover_index = -1
         self.drag_index = -1
+        self._drag_start_handles = None
 
         self.margin_side = 8
         self.hist_height = 120
@@ -569,6 +570,7 @@ class LevelsComposite(QWidget):
 
         if clicked_idx != -1:
             self.drag_index = clicked_idx
+            self._drag_start_handles = list(self.handles)
             self.update()
 
     def mouseMoveEvent(self, event):
@@ -581,13 +583,52 @@ class LevelsComposite(QWidget):
         val = clamp01((pos.x() - self.margin_side) / track_width)
 
         if self.drag_index != -1:
-            # 允许相等：非递减约束
             idx = self.drag_index
-            min_val = self.handles[idx - 1] if idx > 0 else 0.0
-            max_val = self.handles[idx + 1] if idx < 4 else 1.0
-            val = max(min_val, min(max_val, val))
 
-            self.handles[idx] = val
+            if idx == 2 and self._drag_start_handles is not None:
+                # --- Midtone handle: nonlinear coupled dragging ---
+                s = self._drag_start_handles
+                # Clamp midtone between black-point and white-point handles
+                bound_lo = self.handles[0]
+                bound_hi = self.handles[4]
+                val = max(bound_lo, min(bound_hi, val))
+                self.handles[2] = val
+
+                delta = val - s[2]  # signed displacement of midtone
+
+                # Shadow (index 1): stays between bound_lo and midtone.
+                # Compute a ratio that preserves the follower's relative
+                # position within the midtone-to-bound span, shrinking
+                # nonlinearly so the two only fully meet at the bound.
+                if delta < 0:
+                    orig_span = s[2] - s[0]
+                    orig_ratio = (s[1] - s[0]) / orig_span if orig_span > 1e-9 else 0.0
+                    cur_span = val - bound_lo
+                    new1 = bound_lo + orig_ratio * cur_span
+                else:
+                    new1 = s[1] + delta
+                new1 = clamp01(new1)
+                new1 = max(bound_lo, min(new1, val))
+                self.handles[1] = new1
+
+                # Highlight (index 3): stays between midtone and bound_hi.
+                if delta > 0:
+                    orig_span = s[4] - s[2]
+                    orig_ratio = (s[4] - s[3]) / orig_span if orig_span > 1e-9 else 0.0
+                    cur_span = bound_hi - val
+                    new3 = bound_hi - orig_ratio * cur_span
+                else:
+                    new3 = s[3] + delta
+                new3 = clamp01(new3)
+                new3 = max(val, min(new3, bound_hi))
+                self.handles[3] = new3
+            else:
+                # --- Other handles: original non-decreasing constraint ---
+                min_val = self.handles[idx - 1] if idx > 0 else 0.0
+                max_val = self.handles[idx + 1] if idx < 4 else 1.0
+                val = max(min_val, min(max_val, val))
+                self.handles[idx] = val
+
             self.valuesChanged.emit(self.handles)
             self.update()
         else:
@@ -604,6 +645,7 @@ class LevelsComposite(QWidget):
 
     def mouseReleaseEvent(self, event):
         self.drag_index = -1
+        self._drag_start_handles = None
         self.update()
 
 

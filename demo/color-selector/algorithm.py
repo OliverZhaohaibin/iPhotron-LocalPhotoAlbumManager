@@ -477,8 +477,8 @@ class SelectiveColorWidget(QWidget):
 
         lum_bg_start = QColor.fromHslF(base_h, base_s, 0.15).name()
         lum_bg_end = QColor.fromHslF(base_h, base_s, 0.85).name()
-        lum_fill_neg = "#000000"
-        lum_fill_pos = "#FFFFFF"
+        lum_fill_neg = QColor.fromHslF(base_h, base_s, 0.2).name()
+        lum_fill_pos = QColor.fromHslF(base_h, base_s, 0.8).name()
 
         n = len(self.color_hexes)
         left_hue = self.color_hexes[(color_idx - 1) % n]

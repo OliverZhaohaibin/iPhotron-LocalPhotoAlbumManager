@@ -209,6 +209,7 @@ class GLImageViewer(QOpenGLWidget):
         self._adjustments = dict(adjustments or {})
         self._update_crop_perspective_state()
         self._update_curve_lut_if_needed(self._adjustments)
+        self._update_levels_lut_if_needed(self._adjustments)
         self._loading_overlay.hide()
         self._time_base = time.monotonic()
 
@@ -557,6 +558,7 @@ class GLImageViewer(QOpenGLWidget):
         self._renderer = GLRenderer(gf, parent=self)
         self._renderer.initialize_resources()
         self._update_curve_lut_if_needed(self._adjustments)
+        self._update_levels_lut_if_needed(self._adjustments)
 
         dpr = self.devicePixelRatioF()
         gf.glViewport(0, 0, int(self.width() * dpr), int(self.height() * dpr))

@@ -264,7 +264,7 @@ class CustomSlider(QWidget):
 
     def __init__(self, name: str, parent=None, minimum=-100, maximum=100, initial=0,
                  bg_start="#2c3e4a", bg_end="#4a3e20",
-                 fill_neg="#4a90b4", fill_pos="#b4963c"):
+                 fill_neg="#4a90b4", fill_pos="#b4963c", fill_opacity=0.9):
         super().__init__(parent)
         self._name = name
         self._min = float(minimum)
@@ -273,15 +273,18 @@ class CustomSlider(QWidget):
         self._dragging = False
         self.setFixedHeight(30)
         self.setCursor(Qt.OpenHandCursor)
+        self._fill_opacity = float(fill_opacity)
 
         self.set_colors(bg_start, bg_end, fill_neg, fill_pos)
         self.c_indicator = QColor(255, 255, 255)
 
-    def set_colors(self, bg_start, bg_end, fill_neg, fill_pos):
+    def set_colors(self, bg_start, bg_end, fill_neg, fill_pos, fill_opacity=None):
         self.c_bg_start = QColor(bg_start)
         self.c_bg_end = QColor(bg_end)
         self.c_fill_neg = QColor(fill_neg)
         self.c_fill_pos = QColor(fill_pos)
+        if fill_opacity is not None:
+            self._fill_opacity = float(fill_opacity)
         self.update()
 
     def _value_to_x(self, val):
@@ -310,7 +313,7 @@ class CustomSlider(QWidget):
         else:
             fill_rect = QRectF(0, 0, curr_x, self.height())
 
-        painter.setOpacity(0.9)
+        painter.setOpacity(self._fill_opacity)
         painter.setClipPath(path)
         painter.fillRect(fill_rect, current_fill_color)
         painter.setClipping(False)
@@ -464,31 +467,31 @@ class SelectiveColorWidget(QWidget):
             self._on_color_clicked(idx)
 
     def update_theme(self, color_idx):
+        def mix_channel(channel: float, target: float, weight: float) -> float:
+            return channel * (1.0 - weight) + target * weight
+
+        def mix_color(color: QColor, target: QColor, weight: float) -> QColor:
+            return QColor.fromRgbF(
+                mix_channel(color.redF(), target.redF(), weight),
+                mix_channel(color.greenF(), target.greenF(), weight),
+                mix_channel(color.blueF(), target.blueF(), weight),
+            )
+
         base_c = QColor(self.color_hexes[color_idx])
-        dark_base = QColor(base_c)
-        dark_base.setAlpha(80)
-        bg_dark_hex = dark_base.name()
         base_r = base_c.redF()
         base_g = base_c.greenF()
         base_b = base_c.blueF()
 
-        sat_bg_start = "#4a4a4a"
-        sat_bg_end = bg_dark_hex
-        sat_fill_neg = "#607080"
-        sat_fill_pos = base_c.name()
+        muted_anchor = QColor("#2a2a2a")
+        sat_bg_start = "#3f3f3f"
+        sat_bg_end = mix_color(base_c, muted_anchor, 0.65).name()
+        sat_fill_neg = "#58636b"
+        sat_fill_pos = mix_color(base_c, muted_anchor, 0.5).name()
 
-        lum_bg_start = QColor.fromRgbF(base_r * 0.2, base_g * 0.2, base_b * 0.2).name()
-        lum_bg_end = QColor.fromRgbF(
-            base_r + (1.0 - base_r) * 0.8,
-            base_g + (1.0 - base_g) * 0.8,
-            base_b + (1.0 - base_b) * 0.8,
-        ).name()
+        lum_bg_start = QColor.fromRgbF(base_r * 0.18, base_g * 0.18, base_b * 0.18).name()
+        lum_bg_end = mix_color(base_c, muted_anchor, 0.45).name()
         lum_fill_neg = QColor.fromRgbF(base_r * 0.35, base_g * 0.35, base_b * 0.35).name()
-        lum_fill_pos = QColor.fromRgbF(
-            base_r + (1.0 - base_r) * 0.65,
-            base_g + (1.0 - base_g) * 0.65,
-            base_b + (1.0 - base_b) * 0.65,
-        ).name()
+        lum_fill_pos = mix_color(base_c, muted_anchor, 0.38).name()
 
         n = len(self.color_hexes)
         left_hue = self.color_hexes[(color_idx - 1) % n]
@@ -502,8 +505,8 @@ class SelectiveColorWidget(QWidget):
         hue_fill_pos = right_hue
 
         self.slider_hue.set_colors(hue_bg_start, hue_bg_end, hue_fill_neg, hue_fill_pos)
-        self.slider_sat.set_colors(sat_bg_start, sat_bg_end, sat_fill_neg, sat_fill_pos)
-        self.slider_lum.set_colors(lum_bg_start, lum_bg_end, lum_fill_neg, lum_fill_pos)
+        self.slider_sat.set_colors(sat_bg_start, sat_bg_end, sat_fill_neg, sat_fill_pos, fill_opacity=0.55)
+        self.slider_lum.set_colors(lum_bg_start, lum_bg_end, lum_fill_neg, lum_fill_pos, fill_opacity=0.55)
 
 
 # ======================= GL Viewer (Selective Color) =======================

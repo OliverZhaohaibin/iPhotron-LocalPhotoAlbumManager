@@ -33,6 +33,10 @@ BW_DEFAULTS = {
 }
 
 _BW_RANGE_KEYS = {"BW_Master", "BW_Intensity", "BW_Neutrals", "BW_Tone"}
+_ADJUSTMENT_EPSILON = 1e-6
+_ROTATION_STEPS = 4
+_LIGHT_ENABLED_DEFAULT = True
+_COLOR_ENABLED_DEFAULT = True
 
 # Curve XML node names
 _CURVE_NODE = "Curve"
@@ -94,6 +98,31 @@ def _float_or_default(value: object | None, default: float) -> float:
         return float(value) if value is not None else float(default)
     except (TypeError, ValueError):
         return float(default)
+
+
+def normalize_rotation_steps(value: float | int | str | None) -> int:
+    """Return the quarter-turn rotation steps for ``Crop_Rotate90`` values.
+
+    Parameters
+    ----------
+    value:
+        Raw ``Crop_Rotate90`` adjustment value.
+
+    Returns
+    -------
+    int
+        Normalised number of 90° steps (0-3).
+    """
+
+    steps = int(round(_float_or_default(value, 0.0)))
+    # Legacy sidecars may contain negative rotation values; modulo wraps them to 0-3.
+    return steps % _ROTATION_STEPS
+
+
+def _has_non_default_value(adjustments: Mapping[str, Any], key: str, default: float) -> bool:
+    """Return ``True`` when *key* differs from *default* beyond tolerance."""
+
+    return abs(_float_or_default(adjustments.get(key), default) - default) > _ADJUSTMENT_EPSILON
 
 
 def _new_sidecar_root() -> ET.Element:
@@ -592,42 +621,36 @@ def has_effective_adjustments(adjustments: Mapping[str, Any] | None) -> bool:
     if not adjustments:
         return False
 
-    epsilon = 1e-6
-
-    if abs(_float_or_default(adjustments.get("Crop_CX"), 0.5) - 0.5) > epsilon:
+    if _has_non_default_value(adjustments, "Crop_CX", 0.5):
         return True
-    if abs(_float_or_default(adjustments.get("Crop_CY"), 0.5) - 0.5) > epsilon:
+    if _has_non_default_value(adjustments, "Crop_CY", 0.5):
         return True
-    if abs(_float_or_default(adjustments.get("Crop_W"), 1.0) - 1.0) > epsilon:
+    if _has_non_default_value(adjustments, "Crop_W", 1.0):
         return True
-    if abs(_float_or_default(adjustments.get("Crop_H"), 1.0) - 1.0) > epsilon:
+    if _has_non_default_value(adjustments, "Crop_H", 1.0):
         return True
     if bool(adjustments.get("Crop_FlipH", False)):
         return True
-    rotate_steps = int(round(_float_or_default(adjustments.get("Crop_Rotate90"), 0.0))) % 4
+    rotate_steps = normalize_rotation_steps(adjustments.get("Crop_Rotate90", 0.0))
     if rotate_steps:
         return True
-    if abs(_float_or_default(adjustments.get("Crop_Straighten"), 0.0)) > epsilon:
+    if _has_non_default_value(adjustments, "Crop_Straighten", 0.0):
         return True
-    if abs(_float_or_default(adjustments.get("Perspective_Vertical"), 0.0)) > epsilon:
+    if _has_non_default_value(adjustments, "Perspective_Vertical", 0.0):
         return True
-    if abs(_float_or_default(adjustments.get("Perspective_Horizontal"), 0.0)) > epsilon:
+    if _has_non_default_value(adjustments, "Perspective_Horizontal", 0.0):
         return True
 
-    light_enabled = bool(adjustments.get("Light_Enabled", True))
+    light_enabled = adjustments.get("Light_Enabled", _LIGHT_ENABLED_DEFAULT)
     if light_enabled:
-        if abs(_float_or_default(adjustments.get("Light_Master"), 0.0)) > epsilon:
-            return True
-        for key in LIGHT_KEYS:
-            if abs(_float_or_default(adjustments.get(key), 0.0)) > epsilon:
+        for key in ("Light_Master", *LIGHT_KEYS):
+            if _has_non_default_value(adjustments, key, 0.0):
                 return True
 
-    color_enabled = bool(adjustments.get("Color_Enabled", True))
+    color_enabled = adjustments.get("Color_Enabled", _COLOR_ENABLED_DEFAULT)
     if color_enabled:
-        if abs(_float_or_default(adjustments.get("Color_Master"), 0.0)) > epsilon:
-            return True
-        for key in COLOR_KEYS:
-            if abs(_float_or_default(adjustments.get(key), 0.0)) > epsilon:
+        for key in ("Color_Master", *COLOR_KEYS):
+            if _has_non_default_value(adjustments, key, 0.0):
                 return True
 
     if bool(adjustments.get("BW_Enabled", False)):

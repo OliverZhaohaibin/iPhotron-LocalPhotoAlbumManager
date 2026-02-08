@@ -928,16 +928,24 @@ class GLImageViewer(QOpenGLWidget):
         return (tex_w, tex_h)
 
     def _prime_texture_upload(self) -> None:
+        """Upload the current image texture ahead of first interaction."""
         if self._renderer is None or self._image is None or self._image.isNull():
             return
-        if self._renderer.has_texture() or self.context() is None:
+        if self.context() is None:
+            return
+        if self._renderer.has_texture():
             return
         self.makeCurrent()
         try:
-            if not self._renderer.has_texture():
-                self._renderer.upload_texture(self._image)
-                straighten, rotate_steps, _ = self._rotation_parameters()
-                self._update_cover_scale(straighten, rotate_steps)
+            self._renderer.upload_texture(self._image)
+            straighten, rotate_steps, _ = self._rotation_parameters()
+            self._update_cover_scale(straighten, rotate_steps)
+        except (RuntimeError, ValueError) as exc:  # pragma: no cover - GL context or image errors
+            _LOGGER.warning(
+                "Failed to prime texture upload (%s): %s",
+                type(exc).__name__,
+                exc,
+            )
         finally:
             self.doneCurrent()
 

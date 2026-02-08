@@ -114,8 +114,9 @@ def test_export_asset(mock_sidecar, mock_shutil, mock_render, tmp_path: Path) ->
     mock_render.assert_not_called()
 
     # Case C: Image + Adjustments -> Render
-    raw_adjustments = {"Light_Master": 0.5}
-    mock_sidecar.load_adjustments.return_value = raw_adjustments
+    mock_sidecar.load_adjustments.reset_mock()
+    adjustments = {"Light_Master": 0.5}
+    mock_sidecar.load_adjustments.return_value = adjustments
     mock_sidecar.has_effective_adjustments.return_value = True
 
     # Mock render return
@@ -123,5 +124,6 @@ def test_export_asset(mock_sidecar, mock_shutil, mock_render, tmp_path: Path) ->
     mock_render.return_value = mock_qimage
 
     assert export_asset(source, export_root, library_root)
-    mock_render.assert_called_with(source, raw_adjustments)
+    mock_sidecar.load_adjustments.assert_called_with(source)
+    mock_render.assert_called_with(source, adjustments)
     mock_qimage.save.assert_called()

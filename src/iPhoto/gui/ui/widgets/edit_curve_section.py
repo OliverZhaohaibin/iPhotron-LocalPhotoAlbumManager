@@ -224,6 +224,7 @@ class CurveGraph(QWidget):
 
     HIT_DETECTION_RADIUS = 15
     MIN_DISTANCE_THRESHOLD = 0.01
+    PLOT_MARGIN = 8
 
     def __init__(self, parent: Optional[QWidget] = None, size: int = 240) -> None:
         super().__init__(parent)
@@ -341,9 +342,16 @@ class CurveGraph(QWidget):
     def paintEvent(self, event) -> None:
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
-        w, h = self.width(), self.height()
+        margin = self.PLOT_MARGIN
+        w = self.width() - margin * 2
+        h = self.height() - margin * 2
+        if w <= 0 or h <= 0:
+            return
 
         painter.fillRect(self.rect(), QColor("#222222"))
+
+        painter.save()
+        painter.translate(margin, margin)
 
         # Grid
         painter.setPen(QPen(QColor("#444444"), 1))
@@ -385,6 +393,7 @@ class CurveGraph(QWidget):
             painter.setBrush(pt_color)
             painter.setPen(QPen(QColor("#000000"), 1))
             painter.drawEllipse(QPointF(sx, sy), point_radius, point_radius)
+        painter.restore()
 
     def _draw_fake_histogram(self, painter: QPainter, w: int, h: int) -> None:
         if self.active_channel != "RGB":
@@ -490,7 +499,14 @@ class CurveGraph(QWidget):
     def mousePressEvent(self, event: QMouseEvent) -> None:
         self.interactionStarted.emit()
         pos = event.position()
-        w, h = self.width(), self.height()
+        margin = self.PLOT_MARGIN
+        w = self.width() - margin * 2
+        h = self.height() - margin * 2
+        if w <= 0 or h <= 0:
+            return
+
+        local_x = pos.x() - margin
+        local_y = pos.y() - margin
 
         points = self.channels[self.active_channel]
 
@@ -500,7 +516,7 @@ class CurveGraph(QWidget):
 
         for i, p in enumerate(points):
             sx, sy = p.x() * w, h - p.y() * h
-            dist_sq = (pos.x() - sx) ** 2 + (pos.y() - sy) ** 2
+            dist_sq = (local_x - sx) ** 2 + (local_y - sy) ** 2
             if dist_sq < hit_radius_sq:
                 if dist_sq < min_dist_sq:
                     min_dist_sq = dist_sq
@@ -514,14 +530,14 @@ class CurveGraph(QWidget):
                 self._update_spline_and_emit()
         else:
             # Add point
-            nx = max(0.0, min(1.0, pos.x() / w))
+            nx = max(0.0, min(1.0, local_x / w))
             insert_i = len(points)
             for i, p in enumerate(points):
                 if p.x() > nx:
                     insert_i = i
                     break
 
-            ny = max(0.0, min(1.0, (h - pos.y()) / h))
+            ny = max(0.0, min(1.0, (h - local_y) / h))
 
             prev_x = points[insert_i - 1].x() if insert_i > 0 else 0
             next_x = points[insert_i].x() if insert_i < len(points) else 1
@@ -537,10 +553,17 @@ class CurveGraph(QWidget):
         if self.dragging and self.selected_index != -1:
             points = self.channels[self.active_channel]
             pos = event.position()
-            w, h = self.width(), self.height()
+            margin = self.PLOT_MARGIN
+            w = self.width() - margin * 2
+            h = self.height() - margin * 2
+            if w <= 0 or h <= 0:
+                return
 
-            nx = max(0.0, min(1.0, pos.x() / w))
-            ny = max(0.0, min(1.0, (h - pos.y()) / h))
+            local_x = pos.x() - margin
+            local_y = pos.y() - margin
+
+            nx = max(0.0, min(1.0, local_x / w))
+            ny = max(0.0, min(1.0, (h - local_y) / h))
 
             if self.selected_index == 0:
                 if len(points) > 1:

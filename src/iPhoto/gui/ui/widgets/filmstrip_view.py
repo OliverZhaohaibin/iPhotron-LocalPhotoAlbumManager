@@ -149,13 +149,9 @@ class FilmstripView(AssetGrid):
             selection_model = self.selectionModel()
             if selection_model is not None:
                 selected_index = selection_model.currentIndex()
-                if self._is_current_thumbnail(selected_index):
-                    current_index = selected_index
+                current_index = self._find_current_index([selected_index])
             if current_index is None:
-                for changed_index in (top, bottom):
-                    if self._is_current_thumbnail(changed_index):
-                        current_index = changed_index
-                        break
+                current_index = self._find_current_index([top, bottom])
             if current_index is not None:
                 current_row = current_index.row()
                 self._pending_center_row = current_row
@@ -168,6 +164,12 @@ class FilmstripView(AssetGrid):
         if bool(index.data(Roles.IS_SPACER)):
             return False
         return bool(index.data(Roles.IS_CURRENT))
+
+    def _find_current_index(self, indices: list[QModelIndex]) -> QModelIndex | None:
+        for index in indices:
+            if self._is_current_thumbnail(index):
+                return index
+        return None
 
     def resizeEvent(self, event: QResizeEvent) -> None:  # type: ignore[override]
         super().resizeEvent(event)

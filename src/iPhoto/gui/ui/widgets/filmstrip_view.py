@@ -145,15 +145,11 @@ class FilmstripView(AssetGrid):
             # QListView with uniformItemSizes=False might need a nudge.
             self.scheduleDelayedItemsLayout()
             self.refresh_spacers(top)
-            current_index = None
             selection_model = self.selectionModel()
-            if selection_model is not None:
-                selected_index = selection_model.currentIndex()
-                current_from_selection = self._find_current_index([selected_index])
-                if current_from_selection is not None:
-                    current_index = current_from_selection
-            if current_index is None:
-                current_index = self._find_current_index([top, bottom])
+            selected_index = (
+                selection_model.currentIndex() if selection_model is not None else QModelIndex()
+            )
+            current_index = self._find_current_index([selected_index, top, bottom])
             if current_index is not None:
                 current_row = current_index.row()
                 self._pending_center_row = current_row

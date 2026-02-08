@@ -280,6 +280,7 @@ class EditSidebar(QWidget):
             self._curve_section,
             scroll_content,
             title_font=Edit_SIDEBAR_FONT,
+            icon_scale=1.2,
         )
         self._curve_section_container.set_expanded(False)
 
@@ -313,6 +314,7 @@ class EditSidebar(QWidget):
             self._levels_section,
             scroll_content,
             title_font=Edit_SIDEBAR_FONT,
+            icon_scale=1.2,
         )
         self._levels_section_container.set_expanded(False)
 
@@ -345,6 +347,7 @@ class EditSidebar(QWidget):
             self._selective_color_section,
             scroll_content,
             title_font=Edit_SIDEBAR_FONT,
+            icon_scale=1.3,
         )
         self._selective_color_section_container.set_expanded(False)
 

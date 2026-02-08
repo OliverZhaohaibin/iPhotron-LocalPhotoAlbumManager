@@ -24,6 +24,8 @@ from ..palette import Edit_SIDEBAR_SUB_FONT
 class CollapsibleSection(QFrame):
     """Display a titled header that can expand and collapse a content widget."""
 
+    _DEFAULT_ICON_SIZE = 20
+
     def __init__(
         self,
         title: str,
@@ -31,6 +33,7 @@ class CollapsibleSection(QFrame):
         content: QWidget,
         parent: Optional[QWidget] = None,
         title_font: Optional[QFont] = None,
+        icon_scale: float = 1.0,
     ) -> None:
         super().__init__(parent)
         self.setObjectName("collapsibleSection")
@@ -65,8 +68,9 @@ class CollapsibleSection(QFrame):
         header_layout.addWidget(self._toggle_button)
 
         icon = load_icon(icon_name)
+        icon_size = max(1, int(round(self._DEFAULT_ICON_SIZE * icon_scale)))
         icon_label = QLabel(self._header)
-        icon_label.setPixmap(icon.pixmap(20, 20))
+        icon_label.setPixmap(icon.pixmap(icon_size, icon_size))
         icon_label.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         header_layout.addWidget(icon_label)
         # ``_icon_label`` and ``_icon_name`` are retained so other components can recolour the

@@ -43,21 +43,21 @@ Wichtige Highlights:
 - 🧠 Intelligentes inkrementelles Scannen mit persistentem SQLite-Index.
 - 🎥 Vollständige **Live Photo**-Paarungs- und Wiedergabeunterstützung.
 - 🗺 Kartenansicht, die GPS-Metadaten über alle Fotos und Videos visualisiert.
-![Hauptoberfläche](../mainview.png)
-![Vorschau-Oberfläche](../preview.png)
+![Main interface](../mainview.png)
+![Preview interface](../preview.png)
 ---
 
 ## ✨ Funktionen
 
 ### 🗺 Standortansicht
 Zeigt Ihre Foto-Fußabdrücke auf einer interaktiven Karte und gruppiert nahe gelegene Fotos nach GPS-Metadaten.
-![Standort-Oberfläche](../map1.png)
-![Standort-Oberfläche](../map2.png)
+![Location interface](../map1.png)
+![Location interface](../map2.png)
 
 ### 🎞 Live Photo-Unterstützung
 Paart nahtlos HEIC/JPG- und MOV-Dateien mithilfe von Apples `ContentIdentifier`.  
 Ein "LIVE"-Badge erscheint auf Standbildern — klicken Sie, um das Bewegungsvideo inline abzuspielen.
-![Live-Oberfläche](../live.png)
+![Live interface](../live.png)
 
 ### 🧩 Intelligente Alben
 Die Seitenleiste bietet eine automatisch generierte **Grundbibliothek**, die Fotos in Gruppen einteilt:
@@ -92,7 +92,7 @@ Alle Bearbeitungen werden in `.ipo`-Sidecar-Dateien gespeichert und bewahren die
 
 ### ℹ️ Schwebendes Info-Panel
 Schalten Sie ein schwebendes Metadaten-Panel um, das EXIF, Kamera-/Objektivinformationen, Belichtung, Blende, Brennweite, Dateigröße und mehr anzeigt.
-![Info-Oberfläche](../info1.png)
+![Info interface](../info1.png)
 
 ### 💬 Umfangreiche Interaktionen
 - Ziehen und Ablegen von Dateien direkt aus dem Explorer/Finder in Alben.

@@ -43,21 +43,21 @@
 - 🧠 智能增量扫描，使用持久化 SQLite 索引。
 - 🎥 完整的**实况照片**配对和播放支持。
 - 🗺 地图视图，可视化所有照片和视频的 GPS 元数据。
-![主界面](../mainview.png)
-![预览界面](../preview.png)
+![Main interface](../mainview.png)
+![Preview interface](../preview.png)
 ---
 
 ## ✨ 功能特性
 
 ### 🗺 位置视图
 在交互式地图上显示您的照片足迹，根据 GPS 元数据聚类附近的照片。
-![位置界面](../map1.png)
-![位置界面](../map2.png)
+![Location interface](../map1.png)
+![Location interface](../map2.png)
 
 ### 🎞 实况照片支持
 使用 Apple 的 `ContentIdentifier` 无缝配对 HEIC/JPG 和 MOV 文件。  
 静态照片上会显示"实况"徽章 —— 点击即可内联播放动态视频。
-![实况界面](../live.png)
+![Live interface](../live.png)
 
 ### 🧩 智能相册
 侧边栏提供自动生成的**基础图库**，将照片分组为：
@@ -92,7 +92,7 @@
 
 ### ℹ️ 浮动信息面板
 切换浮动元数据面板，显示 EXIF、相机/镜头信息、曝光、光圈、焦距、文件大小等。
-![信息界面](../info1.png)
+![Info interface](../info1.png)
 
 ### 💬 丰富的交互
 - 从资源管理器/访达直接拖放文件到相册。

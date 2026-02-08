@@ -11,9 +11,9 @@ from typing import Any
 from PySide6.QtGui import QImage, QTransform
 
 from ..io import sidecar
-from .filters.facade import apply_adjustments
-from ..utils import image_loader
 from ..media_classifier import VIDEO_EXTENSIONS
+from ..utils import image_loader
+from .filters.facade import apply_adjustments
 
 _LOGGER = logging.getLogger(__name__)
 

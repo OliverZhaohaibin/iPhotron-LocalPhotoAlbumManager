@@ -337,11 +337,11 @@ CollapsibleSection {
 | `export_controller.py` | `export_controller_qml.py` | `@Slot` for `exportCurrent(format, quality)` | 低 |
 | `share_controller.py` | `share_controller_qml.py` | `@Slot` for `copyToClipboard()`, `revealInFinder()` | 低 |
 | `edit_history_manager.py` | `edit_history_manager_qml.py` | `@Slot` for `undo()`, `redo()`; `@Property` for `canUndo`, `canRedo` | 低 |
-| `edit_pipeline_loader.py` | 不需要副本（内部使用，无 QML 交互） | - | 无 |
+| `edit_pipeline_loader.py` | 无（共享，内部使用） | 无需 QML 适配 | 无 |
 | `edit_preview_manager.py` | `edit_preview_manager_qml.py` | `@Property` for `previewImage`; 或通过 ImageProvider | 中 |
 | `edit_zoom_handler.py` | `edit_zoom_handler_qml.py` | `@Slot` for `zoomIn()`, `zoomOut()`, `fitToView()` | 低 |
 | `edit_fullscreen_manager.py` | `edit_fullscreen_manager_qml.py` | `@Slot` for `enterFullscreen()`, `exitFullscreen()` | 低 |
-| `edit_view_transition.py` | 不需要副本（QML StackView 自带转场动画） | - | 无 |
+| `edit_view_transition.py` | 无（QML StackView 自带转场） | 无需 QML 适配 | 无 |
 | `window_theme_controller.py` | `window_theme_controller_qml.py` | 桥接到 QML `Theme` singleton | 低 |
 
 > **原文件零修改**：Widget 入口继续使用原 `header_controller.py` 等，QML 入口使用 `header_controller_qml.py` 副本。

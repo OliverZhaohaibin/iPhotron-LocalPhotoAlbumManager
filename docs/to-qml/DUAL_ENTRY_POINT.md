@@ -226,9 +226,10 @@ src/iPhoto/gui/
 Shared bootstrap logic — Infrastructure & Application layer only.
 
 This module creates the DI container with Infra/App registrations that
-both Widget and QML entry points share. GUI-layer objects (ViewModels,
-Coordinators, Facade) are NOT created here — each entry point uses its
-own version (original files for Widget, _qml.py copies for QML).
+the QML entry point uses. GUI-layer objects (ViewModels, Coordinators,
+Facade) are NOT created here — they are created in bootstrap_qml.py
+using _qml.py copies. The Widget entry (main.py) does NOT use this
+module; it retains its own inline initialization.
 """
 from __future__ import annotations
 
@@ -402,8 +403,8 @@ def create_qml_components(container: DependencyContainer) -> QmlComponents:
 **Widget 入口 `main.py` 完全不改动**。它继续使用原有的初始化逻辑，
 导入原 `facade.py`、`coordinators/*.py`、`viewmodels/*.py`。
 
-> 之前的方案建议重构 `main.py` 使用 `bootstrap.py`，但新隔离策略下**不需要**。
-> `main.py` 保持原样，`main_qml.py` 使用 `bootstrap.py` + `bootstrap_qml.py`。
+> `bootstrap.py` 仅供 `main_qml.py` 使用。`main.py` 保持原样，继续使用其内联的 DI 初始化逻辑。
+> `main_qml.py` 使用 `bootstrap.py`（Infra/App 层） + `bootstrap_qml.py`（GUI 层 `_qml` 副本）。
 
 ---
 

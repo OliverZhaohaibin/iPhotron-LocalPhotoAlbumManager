@@ -10,6 +10,7 @@ import numpy as np
 from PySide6.QtCore import Qt, QRectF, QPointF, Signal
 from PySide6.QtGui import (
     QColor,
+    QMouseEvent,
     QPainter,
     QPainterPath,
     QPen,
@@ -633,7 +634,7 @@ class EditSelectiveColorSection(QWidget):
         # Deactivate the eyedropper after picking
         self.deactivate_eyedropper()
 
-    def mousePressEvent(self, event):  # type: ignore[override]
+    def mousePressEvent(self, event: QMouseEvent) -> None:  # type: ignore[override]
         if event.button() == Qt.MouseButton.LeftButton:
             if self._session is not None and not self._session.value("SelectiveColor_Enabled"):
                 self._session.set_value("SelectiveColor_Enabled", True)

@@ -66,29 +66,29 @@
 | `edit_levels_section.py` | `components/edit/EditLevelsSection.qml` | 重写 | P3 |
 | `edit_selective_color_section.py` | `components/edit/EditSelectiveColor.qml` | 重写 | P3 |
 | `gl_crop/` → `GLCropWidget` | Canvas / ShaderEffect | 重写 | P3 |
-| **控制器（保留 Python）** | | | |
-| `header_controller.py` | 保留，添加 `@Property` | 适配 | P2 |
-| `player_view_controller.py` | 保留，添加 `@Property/@Slot` | 适配 | P2 |
-| `selection_controller.py` | 保留，添加 `@Slot` | 适配 | P2 |
-| `context_menu_controller.py` | 保留，简化（QML Menu 替代） | 适配 | P2 |
-| `dialog_controller.py` | 保留，简化（QML Dialog 替代） | 适配 | P3 |
-| `export_controller.py` | 保留，添加 `@Slot` | 适配 | P3 |
-| `share_controller.py` | 保留，添加 `@Slot` | 适配 | P3 |
-| `status_bar_controller.py` | 保留，添加 `@Property` | 适配 | P2 |
-| `edit_*.py` (6 controllers) | 保留，添加 `@Property/@Slot` | 适配 | P3 |
-| `window_theme_controller.py` | 保留 → QML Theme singleton | 适配 | P1 |
-| **协调器（保留 Python）** | | | |
-| `main_coordinator.py` | 保留，添加 QML 桥接方法 | 适配 | P1 |
-| `navigation_coordinator.py` | 保留，添加 `@Slot` | 适配 | P2 |
-| `playback_coordinator.py` | 保留，添加 `@Property/@Slot` | 适配 | P2 |
-| `edit_coordinator.py` | 保留，添加 `@Slot` | 适配 | P3 |
-| `view_router.py` | 保留，信号驱动 QML StackView | 适配 | P1 |
-| **数据模型（共享不变）** | | | |
-| `album_tree_model.py` | 共享 | 不变 | - |
+| **控制器（复制为 `_qml.py` 副本）** | | | |
+| `header_controller.py` | 复制为 `header_controller_qml.py`，添加 `@Property` | 副本隔离 | P2 |
+| `player_view_controller.py` | 复制为 `player_view_controller_qml.py`，添加 `@Property/@Slot` | 副本隔离 | P2 |
+| `selection_controller.py` | 复制为 `selection_controller_qml.py`，添加 `@Slot` | 副本隔离 | P2 |
+| `context_menu_controller.py` | 复制为 `context_menu_controller_qml.py`（QML Menu 替代） | 副本隔离 | P2 |
+| `dialog_controller.py` | 复制为 `dialog_controller_qml.py`（QML Dialog 替代） | 副本隔离 | P3 |
+| `export_controller.py` | 复制为 `export_controller_qml.py`，添加 `@Slot` | 副本隔离 | P3 |
+| `share_controller.py` | 复制为 `share_controller_qml.py`，添加 `@Slot` | 副本隔离 | P3 |
+| `status_bar_controller.py` | 复制为 `status_bar_controller_qml.py`，添加 `@Property` | 副本隔离 | P2 |
+| `edit_*.py` (6 controllers) | 各自复制为 `edit_*_qml.py`，添加 `@Property/@Slot` | 副本隔离 | P3 |
+| `window_theme_controller.py` | 复制为 `window_theme_controller_qml.py` → QML Theme | 副本隔离 | P1 |
+| **协调器（复制为 `_qml.py` 副本）** | | | |
+| `main_coordinator.py` | 复制为 `main_coordinator_qml.py`，添加 QML 桥接 | 副本隔离 | P1 |
+| `navigation_coordinator.py` | 复制为 `navigation_coordinator_qml.py`，添加 `@Slot` | 副本隔离 | P2 |
+| `playback_coordinator.py` | 复制为 `playback_coordinator_qml.py`，添加 `@Property/@Slot` | 副本隔离 | P2 |
+| `edit_coordinator.py` | 复制为 `edit_coordinator_qml.py`，添加 `@Slot` | 副本隔离 | P3 |
+| `view_router.py` | 复制为 `view_router_qml.py`，信号驱动 QML StackView | 副本隔离 | P1 |
+| **数据模型（需 QML 适配的复制为 `_qml.py` 副本）** | | | |
+| `album_tree_model.py` | 复制为 `album_tree_model_qml.py`，添加 `roleNames()` | 副本隔离 | P2 |
 | `asset_cache_manager.py` | 共享 | 不变 | - |
-| `edit_session.py` | 共享，添加 `@Property` | 适配 | P3 |
+| `edit_session.py` | 复制为 `edit_session_qml.py`，添加 `@Property` | 副本隔离 | P3 |
 | `proxy_filter.py` | 共享 | 不变 | - |
-| `roles.py` | 共享，确保 `roleNames()` 返回 QML 可用名 | 适配 | P1 |
+| `roles.py` | 复制为 `roles_qml.py`，添加 `roleNames()` 映射 | 副本隔离 | P1 |
 | **后台任务（共享不变）** | | | |
 | 所有 `tasks/*.py` Worker | 共享 | 不变 | - |
 | **委托（融入 QML）** | | | |
@@ -313,58 +313,65 @@ CollapsibleSection {
 
 ## 5. 控制器映射 / Controller Mapping
 
-### 5.1 迁移策略
+### 5.1 迁移策略（`_qml.py` 副本隔离）
 
-控制器保留在 Python 中，通过以下方式暴露给 QML：
+控制器**不修改原文件**，而是复制为 `_qml.py` 副本，在副本中添加 QML 适配：
 
-| 暴露方式 | 用途 | 示例 |
+| 暴露方式 | 用途 | 示例（在 `_qml.py` 副本中） |
 |---------|------|------|
-| `@Property(type, notify=signal)` | 只读状态绑定 | `headerController.locationText` |
-| `@Slot(type)` | QML 调用 Python 方法 | `navigationCoord.openAlbum(path)` |
-| `Signal(type)` | Python 通知 QML 更新 | `viewRouter.galleryViewShown` |
-| Context Property | 全局注入 | `ctx.setContextProperty("appFacade", facade)` |
+| `@Property(type, notify=signal)` | 只读状态绑定 | `header_controller_qml.py: locationText` |
+| `@Slot(type)` | QML 调用 Python 方法 | `navigation_coordinator_qml.py: openAlbum(path)` |
+| `Signal(type)` | Python 通知 QML 更新 | `view_router_qml.py: galleryViewShown` |
+| Context Property | 全局注入 | `ctx.setContextProperty("appFacade", facade_qml)` |
 
-### 5.2 控制器适配清单
+### 5.2 控制器 `_qml.py` 副本清单
 
-| 控制器 | 需添加的 QML 适配 | 复杂度 |
-|--------|------------------|-------|
-| `HeaderController` | `@Property` for `locationText`, `timestampText` | 低 |
-| `PlayerViewController` | `@Property` for `currentImageSource`, `isVideo`; `@Slot` for `play()`, `pause()` | 中 |
-| `SelectionController` | `@Slot` for `toggleSelection(int)`; `@Property` for `isActive`, `count` | 中 |
-| `ContextMenuController` | 简化：QML 端直接构建 `Menu`，调用 `@Slot` | 低 |
-| `DialogController` | 简化：QML 端使用 `FileDialog`，结果传给 `@Slot` | 低 |
-| `StatusBarController` | `@Property` for `message`, `progress` | 低 |
-| `ExportController` | `@Slot` for `exportCurrent(format, quality)` | 低 |
-| `ShareController` | `@Slot` for `copyToClipboard()`, `revealInFinder()` | 低 |
-| `EditHistoryManager` | `@Slot` for `undo()`, `redo()`; `@Property` for `canUndo`, `canRedo` | 低 |
-| `EditPipelineLoader` | 保持不变（内部使用） | 无 |
-| `EditPreviewManager` | `@Property` for `previewImage`; 或通过 ImageProvider | 中 |
-| `EditZoomHandler` | `@Slot` for `zoomIn()`, `zoomOut()`, `fitToView()` | 低 |
-| `EditFullscreenManager` | `@Slot` for `enterFullscreen()`, `exitFullscreen()` | 低 |
-| `EditViewTransitionManager` | 可能不需要（QML StackView 自带转场动画） | 低 |
-| `WindowThemeController` | 桥接到 QML `Theme` singleton | 低 |
+| 原文件 | QML 副本 | 需添加的 QML 适配 | 复杂度 |
+|--------|---------|------------------|-------|
+| `header_controller.py` | `header_controller_qml.py` | `@Property` for `locationText`, `timestampText` | 低 |
+| `player_view_controller.py` | `player_view_controller_qml.py` | `@Property` for `currentImageSource`, `isVideo`; `@Slot` for `play()`, `pause()` | 中 |
+| `selection_controller.py` | `selection_controller_qml.py` | `@Slot` for `toggleSelection(int)`; `@Property` for `isActive`, `count` | 中 |
+| `context_menu_controller.py` | `context_menu_controller_qml.py` | 简化：QML 端直接构建 `Menu`，调用 `@Slot` | 低 |
+| `dialog_controller.py` | `dialog_controller_qml.py` | 简化：QML 端使用 `FileDialog`，结果传给 `@Slot` | 低 |
+| `status_bar_controller.py` | `status_bar_controller_qml.py` | `@Property` for `message`, `progress` | 低 |
+| `export_controller.py` | `export_controller_qml.py` | `@Slot` for `exportCurrent(format, quality)` | 低 |
+| `share_controller.py` | `share_controller_qml.py` | `@Slot` for `copyToClipboard()`, `revealInFinder()` | 低 |
+| `edit_history_manager.py` | `edit_history_manager_qml.py` | `@Slot` for `undo()`, `redo()`; `@Property` for `canUndo`, `canRedo` | 低 |
+| `edit_pipeline_loader.py` | 不需要副本（内部使用，无 QML 交互） | - | 无 |
+| `edit_preview_manager.py` | `edit_preview_manager_qml.py` | `@Property` for `previewImage`; 或通过 ImageProvider | 中 |
+| `edit_zoom_handler.py` | `edit_zoom_handler_qml.py` | `@Slot` for `zoomIn()`, `zoomOut()`, `fitToView()` | 低 |
+| `edit_fullscreen_manager.py` | `edit_fullscreen_manager_qml.py` | `@Slot` for `enterFullscreen()`, `exitFullscreen()` | 低 |
+| `edit_view_transition.py` | 不需要副本（QML StackView 自带转场动画） | - | 无 |
+| `window_theme_controller.py` | `window_theme_controller_qml.py` | 桥接到 QML `Theme` singleton | 低 |
+
+> **原文件零修改**：Widget 入口继续使用原 `header_controller.py` 等，QML 入口使用 `header_controller_qml.py` 副本。
 
 ---
 
 ## 6. 数据模型映射 / Data Model Mapping
 
-### 6.1 共享模型（不变）
+### 6.1 模型 `_qml.py` 副本策略
 
-这些模型已继承 Qt Model 基类，QML 可直接使用：
+需要 QML 适配（`roleNames()`、`@Property`）的模型复制为 `_qml.py` 副本，其余共享不变：
 
-| 模型 | 基类 | QML 使用方式 | 需适配 |
-|------|------|-----------|-------|
-| `AssetListViewModel` | `QAbstractListModel` | `GridView.model` / `ListView.model` | 确保 `roleNames()` 返回 QML 友好的键名 |
-| `AlbumTreeModel` | `QAbstractItemModel` | `TreeView.model` | 确保 `roleNames()` |
-| `ProxyFilterModel` | `QSortFilterProxyModel` | 透传 | 不变 |
-| `SpacerProxyModel` | `QAbstractListModel` | `ListView.model` | 不变 |
+| 模型 | 基类 | QML 处理方式 | 副本文件 |
+|------|------|-----------|--------|
+| `AssetListViewModel` | `QAbstractListModel` | **复制副本** | `asset_list_viewmodel_qml.py` |
+| `AlbumTreeModel` | `QAbstractItemModel` | **复制副本** | `album_tree_model_qml.py` |
+| `EditSession` | `QObject` | **复制副本** | `edit_session_qml.py` |
+| `Roles` | `IntEnum` | **复制副本** | `roles_qml.py`（添加 roleNames 字典） |
+| `ProxyFilterModel` | `QSortFilterProxyModel` | 共享不变 | 无 |
+| `SpacerProxyModel` | `QAbstractListModel` | 共享不变 | 无 |
+| `AssetCacheManager` | - | 共享不变 | 无 |
 
-### 6.2 roleNames() 适配
+### 6.2 roleNames() 在 `_qml.py` 副本中实现
 
-QML 通过 `roleNames()` 将 C++ role enum 映射为 JS 属性名：
+QML 通过 `roleNames()` 将 C++ role enum 映射为 JS 属性名。
+**此方法仅在 `_qml.py` 副本中添加，原文件不修改：**
 
 ```python
-# 当前 roles.py
+# src/iPhoto/gui/ui/models/roles_qml.py  (复制自 roles.py)
+# 在副本中添加 roleNames 映射字典
 class Roles(IntEnum):
     REL = Qt.UserRole + 1
     ABS = Qt.UserRole + 2
@@ -374,31 +381,43 @@ class Roles(IntEnum):
     FEATURED = Qt.UserRole + 6
     # ...
 
-# AssetListViewModel 中需要实现:
-def roleNames(self) -> dict[int, bytes]:
-    return {
-        Qt.DisplayRole: b"display",
-        Qt.DecorationRole: b"decoration",
-        Roles.REL: b"rel",
-        Roles.ABS: b"abs",
-        Roles.IS_IMAGE: b"isImage",
-        Roles.IS_VIDEO: b"isVideo",
-        Roles.IS_LIVE: b"isLive",
-        Roles.FEATURED: b"featured",
-        Roles.LIVE_MOTION_REL: b"liveMotionRel",
-        Roles.LIVE_MOTION_ABS: b"liveMotionAbs",
-        Roles.SIZE: b"size",
-        Roles.DT: b"dt",
-        Roles.LOCATION: b"location",
-        Roles.INFO: b"info",
-        Roles.ASSET_ID: b"assetId",
-    }
+# 新增: QML 专用映射字典
+ROLE_NAMES: dict[int, bytes] = {
+    Qt.DisplayRole: b"display",
+    Qt.DecorationRole: b"decoration",
+    Roles.REL: b"rel",
+    Roles.ABS: b"abs",
+    Roles.IS_IMAGE: b"isImage",
+    Roles.IS_VIDEO: b"isVideo",
+    Roles.IS_LIVE: b"isLive",
+    Roles.FEATURED: b"featured",
+    Roles.LIVE_MOTION_REL: b"liveMotionRel",
+    Roles.LIVE_MOTION_ABS: b"liveMotionAbs",
+    Roles.SIZE: b"size",
+    Roles.DT: b"dt",
+    Roles.LOCATION: b"location",
+    Roles.INFO: b"info",
+    Roles.ASSET_ID: b"assetId",
+}
+```
+
+```python
+# src/iPhoto/gui/viewmodels/asset_list_viewmodel_qml.py  (复制自原文件)
+from iPhoto.gui.ui.models.roles_qml import ROLE_NAMES
+
+class AssetListViewModelQml(QAbstractListModel):
+    """QML-adapted copy with roleNames() and @Property."""
+
+    def roleNames(self) -> dict[int, bytes]:
+        names = super().roleNames()
+        names.update(ROLE_NAMES)
+        return names
 ```
 
 **QML 中使用：**
 ```qml
 delegate: Item {
-    // 这些属性名来自 roleNames()
+    // 这些属性名来自 _qml.py 副本的 roleNames()
     required property string abs
     required property bool isLive
     required property bool featured
@@ -406,12 +425,14 @@ delegate: Item {
 }
 ```
 
-### 6.3 EditSession 适配
+### 6.3 EditSession `_qml.py` 副本
 
-`EditSession` 已使用 Qt Signal，需添加 `@Property` 供 QML 绑定：
+`edit_session_qml.py` 在原文件基础上添加 `@Property` 供 QML 双向绑定：
 
 ```python
-class EditSession(QObject):
+# src/iPhoto/gui/ui/models/edit_session_qml.py  (复制自 edit_session.py)
+class EditSessionQml(QObject):
+    """QML-adapted copy with @Property for bidirectional binding."""
     exposureChanged = Signal()
 
     @Property(float, notify=exposureChanged)
@@ -425,26 +446,29 @@ class EditSession(QObject):
             self.exposureChanged.emit()
 ```
 
+> **原文件 `edit_session.py` 零修改**，Widget 入口继续使用它。
+
 ---
 
 ## 7. 后台任务映射 / Background Task Mapping
 
-### 7.1 策略：全部保留 Python
+### 7.1 策略：全部保留 Python，不创建副本
 
-所有后台 Worker 保留在 Python 中，不迁移。QML 通过 signal 接收结果。
+所有后台 Worker 保留在 Python 中，**不需要 `_qml.py` 副本**（Worker 不直接暴露给 QML）。
+QML 通过 `_qml.py` 副本的 ViewModel/Coordinator 的 signal 接收 Worker 结果。
 
 | Worker | 状态 | QML 交互方式 |
 |--------|------|-------------|
-| `AssetLoaderWorker` | 保留 | 结果通过 `AssetListViewModel` model 通知 |
-| `ThumbnailLoader` | 保留 / 替换为 `QQuickAsyncImageProvider` | `Image.source = "image://thumbnails/..."` |
-| `ImageLoadWorker` | 保留 | 结果通过 `playerViewController.currentImageSource` Property |
-| `PreviewRenderWorker` | 保留 | 结果通过 `editPreviewManager.previewImage` Property |
-| `VideoFrameGrabber` | 保留 | 结果通过 Signal → QML 更新 |
-| `ImportWorker` | 保留 | 进度通过 `appFacade.scanProgress` Signal |
-| `MoveWorker` | 保留 | 完成通知通过 Signal |
-| `IncrementalRefreshWorker` | 保留 | 结果通过 model 更新 |
-| `ThumbnailGeneratorWorker` | 保留 | 生成后通过 ImageProvider 可用 |
-| `EditSidebarPreviewWorker` | 保留 | 结果通过 Property 或 ImageProvider |
+| `AssetLoaderWorker` | 共享不变 | 结果通过 `AssetListViewModelQml` model 通知 |
+| `ThumbnailLoader` | 共享不变 / 替换为 `QQuickAsyncImageProvider` | `Image.source = "image://thumbnails/..."` |
+| `ImageLoadWorker` | 共享不变 | 结果通过 `player_view_controller_qml` Property |
+| `PreviewRenderWorker` | 共享不变 | 结果通过 `edit_preview_manager_qml` Property |
+| `VideoFrameGrabber` | 共享不变 | 结果通过 Signal → QML 更新 |
+| `ImportWorker` | 共享不变 | 进度通过 `facade_qml.scanProgress` Signal |
+| `MoveWorker` | 共享不变 | 完成通知通过 Signal |
+| `IncrementalRefreshWorker` | 共享不变 | 结果通过 model 更新 |
+| `ThumbnailGeneratorWorker` | 共享不变 | 生成后通过 ImageProvider 可用 |
+| `EditSidebarPreviewWorker` | 共享不变 | 结果通过 Property 或 ImageProvider |
 
 ### 7.2 ThumbnailProvider 桥接
 
@@ -548,13 +572,17 @@ Button {
 
 | 信号 | 来源 (Python) | Widget 接收 | QML 接收 |
 |------|-------------|-----------|---------|
-| `albumOpened(Path)` | `AppFacade` | `connect()` in coordinator | `Connections { target: appFacade }` |
-| `scanProgress(Path, int, int)` | `AppFacade` | `StatusBarController` | QML `ChromeStatusBar` |
-| `galleryViewShown` | `ViewRouter` | `connect()` in coordinator | QML `StackView` 切换 |
-| `detailViewShown` | `ViewRouter` | `connect()` in coordinator | QML `StackView.push` |
-| `assetChanged(int)` | `PlaybackCoordinator` | `connect()` in coordinator | QML `Connections` |
-| `dataChanged` | `AssetListViewModel` | `QListView` 自动 | `GridView` / `ListView` 自动 |
-| `valuesChanged` | `EditSession` | `connect()` in edit controller | QML property binding 自动 |
+| `albumOpened(Path)` | `AppFacade` / `AppFacadeQml` | `connect()` in coordinator | `Connections { target: appFacade }` |
+| `scanProgress(Path, int, int)` | `AppFacade` / `AppFacadeQml` | `StatusBarController` | QML `ChromeStatusBar` via `_qml` |
+| `galleryViewShown` | `ViewRouter` / `ViewRouterQml` | `connect()` in coordinator | QML `StackView` 切换 |
+| `detailViewShown` | `ViewRouter` / `ViewRouterQml` | `connect()` in coordinator | QML `StackView.push` |
+| `assetChanged(int)` | `PlaybackCoordinator` / `*Qml` | `connect()` in coordinator | QML `Connections` |
+| `dataChanged` | `AssetListViewModel` / `*Qml` | `QListView` 自动 | `GridView` / `ListView` 自动 |
+| `valuesChanged` | `EditSession` / `EditSessionQml` | `connect()` in edit controller | QML property binding 自动 |
+
+> **Widget** 使用原 Python 类（`AppFacade`, `ViewRouter` 等），
+> **QML** 使用 `_qml.py` 副本（`AppFacadeQml`, `ViewRouterQml` 等）。
+> 信号名称相同，但实例完全独立。
 
 ---
 
@@ -578,7 +606,7 @@ pragma Singleton
 import QtQuick
 
 QtObject {
-    property string mode: windowThemeController.currentTheme  // 绑定 Python
+    property string mode: windowThemeControllerQml.currentTheme  // 绑定 _qml 副本
 
     readonly property color bgPrimary: mode === "dark" ? "#1e1e1e" : "#ffffff"
     // ...

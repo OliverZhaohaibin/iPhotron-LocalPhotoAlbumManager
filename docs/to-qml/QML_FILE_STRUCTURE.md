@@ -629,14 +629,20 @@ ExportDialog       1.0 dialogs/ExportDialog.qml
 # src/iPhoto/gui/main_qml.py
 from PySide6.QtQml import qmlRegisterType, qmlRegisterSingletonType
 
-# 注册自定义 QObject 类型供 QML 使用
-qmlRegisterType(EditSession,       "iPhotron", 1, 0, "EditSession")
-qmlRegisterType(AssetListViewModel,"iPhotron", 1, 0, "AssetListModel")
+# 注册 QML 专用副本（_qml.py 文件）供 QML 使用
+from iPhoto.gui.ui.models.edit_session_qml import EditSessionQml
+from iPhoto.gui.viewmodels.asset_list_viewmodel_qml import AssetListViewModelQml
+from iPhoto.gui.facade_qml import AppFacadeQml
+
+qmlRegisterType(EditSessionQml,         "iPhotron", 1, 0, "EditSession")
+qmlRegisterType(AssetListViewModelQml,   "iPhotron", 1, 0, "AssetListModel")
 
 # 单例注册
-qmlRegisterSingletonType(AppFacade, "iPhotron", 1, 0, "AppFacade",
-                         lambda engine, script_engine: app_facade)
+qmlRegisterSingletonType(AppFacadeQml, "iPhotron", 1, 0, "AppFacade",
+                         lambda engine, script_engine: app_facade_qml)
 ```
+
+> **注意**: QML 入口仅导入 `_qml.py` 副本，原文件（如 `edit_session.py`、`asset_list_viewmodel.py`）不做任何修改，Widget 入口继续使用原文件。
 
 ---
 
@@ -718,10 +724,10 @@ src/iPhoto/gui/ui/                       src/iPhoto/gui/ui/qml/
 │   ├── edit_curve_section.py  →         │   ├── EditColorSection.qml
 │   └── ...                    →         │   └── ...
 │                                        │
-├── controllers/               →         │  (逻辑保留在 Python Coordinator 中)
+├── controllers/               →         │  (逻辑在 _qml.py 副本 Coordinator 中)
 ├── delegates/                 →         │  (融入 QML delegate Component)
-├── models/                    →         │  (共享, 不迁移)
-├── tasks/                     →         │  (共享, 不迁移)
+├── models/                    →         │  (需 QML 适配的复制为 _qml.py 副本)
+├── tasks/                     →         │  (共享, 不迁移, 不修改)
 ├── menus/                     →         ├── dialogs/         (对话框)
 └── icon/                      →         └── styles/          (样式)
 ```
@@ -733,7 +739,7 @@ src/iPhoto/gui/ui/                       src/iPhoto/gui/ui/qml/
 | 页面视图 | 5 (.py) | 5 (.qml) | 1:1 映射 |
 | 组件 | ~30 (.py) | ~20 (.qml) | QML 组件更内聚，部分合并 |
 | 编辑面板 | 8 (.py) | 7 (.qml) | 接近 1:1 |
-| 控制器 | 17 (.py) | 0 | 逻辑保留在 Python Coordinator |
+| 控制器 | 17 (.py) | 0 | 逻辑在 `_qml.py` 副本 Coordinator 中 |
 | 委托 | 1 (.py) | 0 | 融入 QML delegate |
 | 对话框 | 1 (.py) + 内嵌 | 5 (.qml) | 独立文件化 |
 | 样式 | 0 (QSS 内嵌) | 3 (.qml) | 独立样式模块 |
@@ -744,10 +750,13 @@ src/iPhoto/gui/ui/                       src/iPhoto/gui/ui/qml/
 | 层级 | Widget (Python) | QML 估算 | 变化 |
 |------|----------------|---------|------|
 | 视图层 UI | ~8,000 行 | ~4,000 行 | -50% (声明式更简洁) |
-| 控制器层 | ~3,500 行 | 0 行 (保留 Python) | 不变 |
-| ViewModel 适配 | 0 行 | ~300 行 (@Property/@Slot) | +300 行 |
-| 桥接/入口 | 0 行 | ~200 行 (main_qml + bootstrap) | +200 行 |
-| **净变化** | | | **UI 代码量减少 ~45%** |
+| 控制器层 | ~3,500 行 | 0 行 (保留在 `_qml.py` 副本 Coordinator 中) | 不变 |
+| `_qml.py` 副本 | 0 行 | ~4,000 行 (ViewModel/Coordinator/Facade 副本 + QML 适配) | +4,000 行 |
+| 桥接/入口 | 0 行 | ~200 行 (main_qml + bootstrap_qml) | +200 行 |
+| **净变化** | | | **新增 ~4,200 行 QML 专用代码** |
+
+> **注意**：`_qml.py` 副本的代码量看似增加，但这是为了完全隔离两套实现。
+> 原 Widget 文件**零修改**，两套入口互不干扰。
 
 ---
 

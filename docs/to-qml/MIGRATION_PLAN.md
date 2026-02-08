@@ -27,16 +27,23 @@
 
 iPhotron 当前使用 PySide6 传统 Widget（`QMainWindow` / `QWidget` / `QGraphicsView`）构建 GUI 层。本方案旨在将所有 UI 层迁移至 **纯 QML** 实现，同时：
 
-- **保留**现有 Widget 入口（`iphoto-gui` → `src/iPhoto/gui/main.py`）
+- **保留**现有 Widget 入口（`iphoto-gui` → `src/iPhoto/gui/main.py`）——**零修改**
 - **新增** QML 入口（`iphoto-qml` → `src/iPhoto/gui/main_qml.py`）
 - **共享**底层业务逻辑（Domain、Application、Infrastructure 层不变）
-- **共享** ViewModel 层（通过 `QObject` + Property/Signal 暴露给 QML）
+- **完全隔离** GUI 层：所有需要 QML 适配的 Python 文件均**复制为 `_qml.py` 副本**，QML 入口仅使用副本，原文件不做任何修改
 
 ```
 迁移范围: 仅 src/iPhoto/gui/ui/ 目录（视图层）
 不变范围: domain/, application/, infrastructure/, core/, di/, events/, library/
-适配范围: gui/viewmodels/, gui/coordinators/, gui/facade.py（添加 QML property 暴露）
+不变范围: gui/viewmodels/, gui/coordinators/, gui/facade.py（原文件零修改）
+新增范围: gui/*_qml.py 副本（QML 专用，添加 @Property/@Slot/roleNames）
 ```
+
+### ⚡ 隔离策略核心原则
+
+> **凡是需要为 QML 添加 `@Property`、`@Slot`、`roleNames()` 等适配的 Python 文件，
+> 一律复制为 `{原文件名}_qml.py`，QML 入口仅导入 `_qml` 副本。
+> Widget 入口继续使用原文件，两套实现完全隔离、互不影响。**
 
 ---
 
@@ -48,17 +55,18 @@ iPhotron 当前使用 PySide6 传统 Widget（`QMainWindow` / `QWidget` / `QGrap
 |---|------|------|
 | G1 | 纯 QML 界面 | 所有视觉元素用 QML 声明式语法实现 |
 | G2 | 双入口共存 | `main` (Widget) 和 `main-qml` (QML) 可独立启动 |
-| G3 | 共享业务逻辑 | ViewModel / Service / Repository 层零重复 |
+| G3 | 共享业务逻辑 | Service / Repository 层零重复；ViewModel / Coordinator / Facade 通过 `_qml.py` 副本隔离 |
 | G4 | 功能对等 | QML 版本实现与 Widget 版本完全相同的功能 |
 | G5 | 渐进式迁移 | 可按阶段独立交付，每阶段均可运行 |
 
 ### 📐 原则
 
 1. **QML-First UI**：所有布局、动画、主题均在 QML 中声明
-2. **Python Backend**：业务逻辑保留在 Python 中，通过 `QObject` 属性暴露
+2. **Python Backend**：业务逻辑保留在 Python 中，通过 `_qml.py` 副本中的 `QObject` 属性暴露
 3. **Signal/Slot 桥接**：Python ↔ QML 通过 Qt 的 signal/slot 和 property 系统通信
 4. **不修改 Domain/Infra**：迁移仅影响 GUI 层
-5. **可回退**：任何阶段均可切回 Widget 入口
+5. **不修改原 GUI 文件**：所有需要 QML 适配的 py 文件均复制为 `_qml.py` 副本
+6. **可回退**：任何阶段均可切回 Widget 入口，原文件完全不受影响
 
 ---
 
@@ -107,12 +115,14 @@ iPhotron 当前使用 PySide6 传统 Widget（`QMainWindow` / `QWidget` / `QGrap
 │        └──────────────┼───────────────┘          │
 │                       │ context properties       │
 │  ┌────────────────────┴──────────────────────┐   │
-│  │     Bridge / Exposed QObjects (Python)    │   │
-│  │  Coordinators + ViewModels + Facade       │   │
+│  │     QML Bridge (_qml.py 副本, Python)     │   │
+│  │  Coordinators_qml + ViewModels_qml       │   │
+│  │  + Facade_qml (添加 @Property/@Slot)     │   │
 │  └────────────────────┬──────────────────────┘   │
 │                       │                          │
 │  ┌────────────────────┴──────────────────────┐   │
-│  │        ViewModels (QAbstractListModel)    │   │
+│  │      ViewModels_qml (QAbstractListModel)  │   │
+│  │      (副本，添加 roleNames/@Property)      │   │
 │  └────────────────────┬──────────────────────┘   │
 │                       │                          │
 │  ┌────────────────────┴──────────────────────┐   │
@@ -271,33 +281,68 @@ src/iPhoto/gui/ui/qml/
     └── Dimensions.qml          # 尺寸常量
 ```
 
-### 5.4 ViewModel QML 适配
+### 5.4 ViewModel QML 副本（`_qml.py` 隔离）
 
-现有 ViewModel 已继承 `QAbstractListModel`，可直接被 QML `ListView` 消费。需要额外做的适配：
+现有 ViewModel 已继承 `QAbstractListModel`，但 QML 需要额外的 `roleNames()`、`@Property` 等适配。
+**不修改原文件**，而是复制为 `_qml.py` 副本，在副本中做 QML 适配：
 
-**1. 为 ViewModel 添加 `@Property` 装饰器**
+**需要创建的 `_qml.py` 副本清单：**
+
+| 原文件 | QML 副本 | 添加内容 |
+|--------|---------|---------|
+| `viewmodels/asset_list_viewmodel.py` | `viewmodels/asset_list_viewmodel_qml.py` | `roleNames()`, `@Property(count, isEmpty)` |
+| `viewmodels/asset_data_source.py` | `viewmodels/asset_data_source_qml.py` | `@Property` 暴露加载状态 |
+| `viewmodels/album_viewmodel.py` | `viewmodels/album_viewmodel_qml.py` | `@Slot` / `@Property` |
+| `facade.py` | `facade_qml.py` | `@Property` 暴露状态给 QML |
+| `coordinators/view_router.py` | `coordinators/view_router_qml.py` | `@Property(isGallery, isDetail, isEdit)` |
+| `coordinators/navigation_coordinator.py` | `coordinators/navigation_coordinator_qml.py` | `@Slot(openAlbum, openAllPhotos)` |
+| `coordinators/playback_coordinator.py` | `coordinators/playback_coordinator_qml.py` | `@Slot/@Property` |
+| `coordinators/edit_coordinator.py` | `coordinators/edit_coordinator_qml.py` | `@Slot/@Property` |
+| `coordinators/main_coordinator.py` | `coordinators/main_coordinator_qml.py` | QML 桥接方法 |
+| `ui/models/edit_session.py` | `ui/models/edit_session_qml.py` | `@Property` 双向绑定 |
+| `ui/models/roles.py` | `ui/models/roles_qml.py` | 添加 `roleNames()` 映射字典 |
+| `ui/models/album_tree_model.py` | `ui/models/album_tree_model_qml.py` | `roleNames()` |
+
+**1. `asset_list_viewmodel_qml.py` 副本示例**
 
 ```python
-# src/iPhoto/gui/viewmodels/asset_list_viewmodel.py 适配示例
+# src/iPhoto/gui/viewmodels/asset_list_viewmodel_qml.py
+# 复制自 asset_list_viewmodel.py，添加 QML 适配
 from PySide6.QtCore import Property, Signal
 
-class AssetListViewModel(QAbstractListModel):
+class AssetListViewModelQml(QAbstractListModel):
+    """QML-adapted copy of AssetListViewModel with roleNames and Properties."""
     countChanged = Signal()
 
     @Property(int, notify=countChanged)
     def count(self) -> int:
         return self.rowCount()
 
-    # roleNames() 已有，QML ListView 会自动映射
+    def roleNames(self) -> dict[int, bytes]:
+        """Map role enums to QML-accessible property names."""
+        names = super().roleNames()
+        names.update({
+            Roles.REL:             b"rel",
+            Roles.ABS:             b"abs",
+            Roles.IS_IMAGE:        b"isImage",
+            Roles.IS_VIDEO:        b"isVideo",
+            Roles.IS_LIVE:         b"isLive",
+            Roles.FEATURED:        b"featured",
+            # ... 其余 roles ...
+        })
+        return names
 ```
 
-**2. 为 Coordinator 添加可被 QML 调用的 `@Slot` 方法**
+**2. `navigation_coordinator_qml.py` 副本示例**
 
 ```python
-# src/iPhoto/gui/coordinators/navigation_coordinator.py 适配示例
+# src/iPhoto/gui/coordinators/navigation_coordinator_qml.py
+# 复制自 navigation_coordinator.py，添加 @Slot 供 QML 调用
 from PySide6.QtCore import Slot
 
-class NavigationCoordinator(QObject):
+class NavigationCoordinatorQml(QObject):
+    """QML-adapted copy of NavigationCoordinator with @Slot decorators."""
+
     @Slot(str)
     def openAlbum(self, path: str) -> None:
         self.open_album(Path(path))
@@ -306,6 +351,10 @@ class NavigationCoordinator(QObject):
     def openAllPhotos(self) -> None:
         self.open_all_photos()
 ```
+
+> **关键**: `main.py` (Widget) 继续 `from .viewmodels.asset_list_viewmodel import AssetListViewModel`，
+> `main_qml.py` (QML) 则 `from .viewmodels.asset_list_viewmodel_qml import AssetListViewModelQml`。
+> 两个入口完全隔离，互不影响。
 
 ### 5.5 QML 路由框架
 
@@ -704,29 +753,60 @@ QtObject {
 | **UI 层** | Python Widget 类 | `.qml` 文件 |
 | **pyproject.toml** | `iphoto-gui = "iPhoto.gui.main:main"` | `iphoto-qml = "iPhoto.gui.main_qml:main"` |
 | **DI 容器** | 共享 `DependencyContainer` | 共享 `DependencyContainer` |
-| **ViewModel** | 共享 | 共享 |
-| **Facade** | 共享 | 共享 |
+| **ViewModel** | 原文件 (`asset_list_viewmodel.py`) | QML 副本 (`asset_list_viewmodel_qml.py`) |
+| **Facade** | 原文件 (`facade.py`) | QML 副本 (`facade_qml.py`) |
+| **Coordinators** | 原文件 | QML 副本 (`*_qml.py`) |
 
-### 9.2 共享层提取
+### 9.2 共享层提取（`_qml.py` 隔离策略）
 
 ```
 src/iPhoto/gui/
-├── main.py              # Widget 入口 (保留不变)
-├── main_qml.py          # QML 入口 (新增)
-├── bootstrap.py         # 【新增】共享的 DI 初始化逻辑
-├── facade.py            # AppFacade (共享，添加 @Property 装饰)
-├── coordinators/        # 共享 (添加 @Slot 装饰)
-├── viewmodels/          # 共享 (添加 @Property 装饰)
-├── services/            # 共享
+├── main.py                    # Widget 入口 (零修改)
+├── main_qml.py                # QML 入口 (新增)
+├── bootstrap.py               # 【新增】共享 DI 初始化（仅 Infra/App 层）
+├── bootstrap_qml.py           # 【新增】QML 专用初始化（使用 _qml 副本）
+│
+├── facade.py                  # Widget 用 AppFacade (不修改)
+├── facade_qml.py              # QML 用 AppFacade 副本 (添加 @Property)
+│
+├── coordinators/
+│   ├── main_coordinator.py          # Widget 用 (不修改)
+│   ├── main_coordinator_qml.py      # QML 副本
+│   ├── navigation_coordinator.py    # Widget 用 (不修改)
+│   ├── navigation_coordinator_qml.py # QML 副本 (添加 @Slot)
+│   ├── playback_coordinator.py      # Widget 用 (不修改)
+│   ├── playback_coordinator_qml.py  # QML 副本 (添加 @Slot/@Property)
+│   ├── edit_coordinator.py          # Widget 用 (不修改)
+│   ├── edit_coordinator_qml.py      # QML 副本 (添加 @Slot)
+│   ├── view_router.py               # Widget 用 (不修改)
+│   └── view_router_qml.py           # QML 副本 (添加 @Property)
+│
+├── viewmodels/
+│   ├── asset_list_viewmodel.py      # Widget 用 (不修改)
+│   ├── asset_list_viewmodel_qml.py  # QML 副本 (添加 roleNames/@Property)
+│   ├── asset_data_source.py         # Widget 用 (不修改)
+│   ├── asset_data_source_qml.py     # QML 副本
+│   ├── album_viewmodel.py           # Widget 用 (不修改)
+│   └── album_viewmodel_qml.py       # QML 副本
+│
+├── services/              # 共享 (不修改)
+│
 └── ui/
-    ├── widgets/         # Widget 专用 (仅 main.py 使用)
-    ├── controllers/     # Widget 专用 (仅 main.py 使用)
-    ├── models/          # 共享 (Qt Models)
-    ├── delegates/       # Widget 专用 (仅 main.py 使用)
-    ├── tasks/           # 共享 (Worker 线程)
-    ├── menus/           # Widget 专用 (仅 main.py 使用)
-    ├── icon/            # 共享 (图标资源)
-    └── qml/             # QML 专用 (仅 main-qml 使用)
+    ├── widgets/           # Widget 专用 (不修改)
+    ├── controllers/       # Widget 专用 (不修改)
+    ├── models/
+    │   ├── edit_session.py          # Widget 用 (不修改)
+    │   ├── edit_session_qml.py      # QML 副本 (添加 @Property)
+    │   ├── roles.py                 # Widget 用 (不修改)
+    │   ├── roles_qml.py             # QML 副本 (添加 roleNames 映射)
+    │   ├── album_tree_model.py      # Widget 用 (不修改)
+    │   ├── album_tree_model_qml.py  # QML 副本 (添加 roleNames)
+    │   └── ...其余 (共享不变)
+    ├── delegates/         # Widget 专用 (不修改)
+    ├── tasks/             # 共享 (不修改)
+    ├── menus/             # Widget 专用 (不修改)
+    ├── icon/              # 共享 (不修改)
+    └── qml/               # QML 专用 (全部新增)
         ├── Main.qml
         ├── views/
         ├── components/
@@ -734,10 +814,11 @@ src/iPhoto/gui/
         └── styles/
 ```
 
-### 9.3 bootstrap.py 共享初始化
+### 9.3 bootstrap.py 共享初始化（仅 Infra/App 层）
 
 ```python
-"""Shared bootstrap logic for both Widget and QML entry points."""
+"""Shared bootstrap logic — only Infrastructure & Application layer.
+Widget and QML entry points share this, then diverge for GUI objects."""
 from iPhoto.di.container import DependencyContainer
 from iPhoto.events.bus import EventBus
 from iPhoto.infrastructure.db.pool import ConnectionPool
@@ -746,21 +827,35 @@ from iPhoto.infrastructure.db.pool import ConnectionPool
 def create_container() -> DependencyContainer:
     """Create and configure DI container (shared between Widget and QML)."""
     container = DependencyContainer()
-    # Phase 1: Infrastructure
     container.register_singleton(EventBus, EventBus())
     container.register_singleton(ConnectionPool, ConnectionPool(...))
-    # ... 完整注册逻辑 ...
+    # ... Infrastructure + Application 注册 ...
     return container
-
-def create_viewmodels(container: DependencyContainer):
-    """Create shared ViewModels."""
-    # ...
-    return asset_list_vm, album_vm
-
-def create_coordinators(container, window_or_engine):
-    """Create coordinators (adapter pattern for Widget vs QML window)."""
-    # ...
 ```
+
+### 9.4 bootstrap_qml.py QML 专用初始化
+
+```python
+"""QML-specific bootstrap — creates _qml.py variant objects."""
+from iPhoto.gui.bootstrap import create_container
+from iPhoto.gui.facade_qml import AppFacadeQml
+from iPhoto.gui.viewmodels.asset_list_viewmodel_qml import AssetListViewModelQml
+from iPhoto.gui.viewmodels.album_viewmodel_qml import AlbumViewModelQml
+from iPhoto.gui.coordinators.view_router_qml import ViewRouterQml
+from iPhoto.gui.coordinators.navigation_coordinator_qml import NavigationCoordinatorQml
+
+def create_qml_components(container):
+    """Create QML-adapted ViewModels, Facade, Coordinators."""
+    facade = AppFacadeQml()
+    asset_list_vm = AssetListViewModelQml(...)
+    album_vm = AlbumViewModelQml()
+    view_router = ViewRouterQml()
+    navigation_coord = NavigationCoordinatorQml(...)
+    return facade, asset_list_vm, album_vm, view_router, navigation_coord
+```
+
+> **main.py** (Widget) 不使用 `bootstrap_qml.py`，继续使用原有的初始化逻辑（零修改）。
+> **main_qml.py** (QML) 使用 `bootstrap.py` + `bootstrap_qml.py`。
 
 ---
 

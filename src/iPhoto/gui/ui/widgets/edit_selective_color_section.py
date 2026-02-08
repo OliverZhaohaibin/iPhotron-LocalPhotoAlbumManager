@@ -637,8 +637,6 @@ class EditSelectiveColorSection(QWidget):
     def mousePressEvent(self, event: QMouseEvent) -> None:
         """Enable the section on click when it is currently disabled."""
         if event.button() == Qt.MouseButton.LeftButton:
-            if self._session is not None:
-                enabled = bool(self._session.value("SelectiveColor_Enabled"))
-                if not enabled:
-                    self._session.set_value("SelectiveColor_Enabled", True)
+            if self._session is not None and not bool(self._session.value("SelectiveColor_Enabled")):
+                self._session.set_value("SelectiveColor_Enabled", True)
         super().mousePressEvent(event)

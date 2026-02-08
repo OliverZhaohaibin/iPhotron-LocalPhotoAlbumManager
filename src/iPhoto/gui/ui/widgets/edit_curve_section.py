@@ -517,11 +517,11 @@ class CurveGraph(QWidget):
         painter.drawPath(path)
 
     def mousePressEvent(self, event: QMouseEvent) -> None:
-        self.interactionStarted.emit()
         pos = event.position()
         w, h = self.width() - 2 * self.edge_padding, self.height() - 2 * self.edge_padding
         if w <= 0 or h <= 0:
             return
+        self.interactionStarted.emit()
         local_x = pos.x() - self.edge_padding
         local_y = pos.y() - self.edge_padding
 

@@ -131,6 +131,8 @@ class EditSidebar(QWidget):
         scroll = QScrollArea(adjust_container)
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
 
         # Ensure the scroll surface shares the same tint so the viewport and the
         # surrounding frame render as a single continuous panel.

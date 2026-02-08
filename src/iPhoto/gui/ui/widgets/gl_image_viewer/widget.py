@@ -145,6 +145,7 @@ class GLImageViewer(QOpenGLWidget):
         )
         self._auto_crop_view_locked: bool = False
         self._update_crop_perspective_state()
+        self._reset_zoom_on_resize: bool = False
         
         # Input event handler
         self._input_handler = InputEventHandler(
@@ -421,6 +422,11 @@ class GLImageViewer(QOpenGLWidget):
             self._loading_overlay.update_geometry(self.size())
         else:
             self._loading_overlay.hide()
+
+    def request_reset_zoom_on_resize(self) -> None:
+        """Reset zoom on the next resize event to avoid intermediate flicker."""
+
+        self._reset_zoom_on_resize = True
 
     def viewport_widget(self) -> GLImageViewer:
         """Expose the drawable widget for API parity with :class:`ImageViewer`."""
@@ -901,6 +907,9 @@ class GLImageViewer(QOpenGLWidget):
     def resizeEvent(self, event) -> None:  # type: ignore[override]
         super().resizeEvent(event)
         self._loading_overlay.update_geometry(self.size())
+        if self._reset_zoom_on_resize:
+            self._reset_zoom_on_resize = False
+            self.reset_zoom()
         if self._auto_crop_view_locked and not self._crop_controller.is_active():
             self._reapply_locked_crop_view()
         straighten, rotate_steps, _ = self._rotation_parameters()

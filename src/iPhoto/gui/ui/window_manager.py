@@ -242,6 +242,7 @@ class FramelessWindowManager(QObject):
             image_viewer = getattr(self._ui, "image_viewer", None)
             if image_viewer is not None:
                 self._detail_view_state = image_viewer.view_transform_state()
+                image_viewer.request_reset_zoom_on_resize()
 
         self._previous_geometry = self._window.saveGeometry()
         self._previous_window_state = self._window.windowState()
@@ -262,8 +263,6 @@ class FramelessWindowManager(QObject):
         self._immersive_active = True
         self._window.showFullScreen()
         self._update_fullscreen_button_icon()
-        if image_viewer is not None:
-            QTimer.singleShot(0, image_viewer.reset_zoom)
         self._schedule_playback_resume(
             expect_immersive=True, resume=resume_after_transition
         )

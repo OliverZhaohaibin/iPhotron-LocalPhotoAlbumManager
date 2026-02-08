@@ -586,6 +586,64 @@ def load_adjustments(asset_path: Path) -> Dict[str, Any]:
     return result
 
 
+def has_effective_adjustments(adjustments: Mapping[str, Any] | None) -> bool:
+    """Return ``True`` when *adjustments* would change the rendered output."""
+
+    if not adjustments:
+        return False
+
+    epsilon = 1e-6
+
+    if abs(_float_or_default(adjustments.get("Crop_CX"), 0.5) - 0.5) > epsilon:
+        return True
+    if abs(_float_or_default(adjustments.get("Crop_CY"), 0.5) - 0.5) > epsilon:
+        return True
+    if abs(_float_or_default(adjustments.get("Crop_W"), 1.0) - 1.0) > epsilon:
+        return True
+    if abs(_float_or_default(adjustments.get("Crop_H"), 1.0) - 1.0) > epsilon:
+        return True
+    if bool(adjustments.get("Crop_FlipH", False)):
+        return True
+    rotate_steps = int(round(_float_or_default(adjustments.get("Crop_Rotate90"), 0.0))) % 4
+    if rotate_steps:
+        return True
+    if abs(_float_or_default(adjustments.get("Crop_Straighten"), 0.0)) > epsilon:
+        return True
+    if abs(_float_or_default(adjustments.get("Perspective_Vertical"), 0.0)) > epsilon:
+        return True
+    if abs(_float_or_default(adjustments.get("Perspective_Horizontal"), 0.0)) > epsilon:
+        return True
+
+    light_enabled = bool(adjustments.get("Light_Enabled", True))
+    if light_enabled:
+        if abs(_float_or_default(adjustments.get("Light_Master"), 0.0)) > epsilon:
+            return True
+        for key in LIGHT_KEYS:
+            if abs(_float_or_default(adjustments.get(key), 0.0)) > epsilon:
+                return True
+
+    color_enabled = bool(adjustments.get("Color_Enabled", True))
+    if color_enabled:
+        if abs(_float_or_default(adjustments.get("Color_Master"), 0.0)) > epsilon:
+            return True
+        for key in COLOR_KEYS:
+            if abs(_float_or_default(adjustments.get(key), 0.0)) > epsilon:
+                return True
+
+    if bool(adjustments.get("BW_Enabled", False)):
+        return True
+    if bool(adjustments.get("WB_Enabled", False)):
+        return True
+    if bool(adjustments.get("Curve_Enabled", False)):
+        return True
+    if bool(adjustments.get("Levels_Enabled", False)):
+        return True
+    if bool(adjustments.get("SelectiveColor_Enabled", False)):
+        return True
+
+    return False
+
+
 def save_adjustments(asset_path: Path, adjustments: Mapping[str, Any]) -> Path:
     """Persist *adjustments* next to *asset_path* and return the sidecar path."""
 

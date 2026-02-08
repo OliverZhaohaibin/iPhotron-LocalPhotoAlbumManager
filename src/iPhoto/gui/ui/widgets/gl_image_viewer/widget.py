@@ -219,6 +219,8 @@ class GLImageViewer(QOpenGLWidget):
             self._auto_crop_view_locked = False
             self._transform_controller.set_image_cover_scale(1.0)
 
+        self._prime_texture_upload()
+
         if reset_view:
             # Reset the interactive transform so every new asset begins in the
             # same fit-to-window baseline that the QWidget-based viewer
@@ -559,6 +561,7 @@ class GLImageViewer(QOpenGLWidget):
         self._renderer.initialize_resources()
         self._update_curve_lut_if_needed(self._adjustments)
         self._update_levels_lut_if_needed(self._adjustments)
+        self._prime_texture_upload()
 
         dpr = self.devicePixelRatioF()
         gf.glViewport(0, 0, int(self.width() * dpr), int(self.height() * dpr))
@@ -923,6 +926,20 @@ class GLImageViewer(QOpenGLWidget):
             # previous aspect ratio.
             return (tex_h, tex_w)
         return (tex_w, tex_h)
+
+    def _prime_texture_upload(self) -> None:
+        if self._renderer is None or self._image is None or self._image.isNull():
+            return
+        if self._renderer.has_texture() or self.context() is None:
+            return
+        self.makeCurrent()
+        try:
+            if not self._renderer.has_texture():
+                self._renderer.upload_texture(self._image)
+                straighten, rotate_steps, _ = self._rotation_parameters()
+                self._update_cover_scale(straighten, rotate_steps)
+        finally:
+            self.doneCurrent()
 
     def _frame_crop_if_available(self) -> bool:
         """Frame the active crop rectangle if the adjustments define one."""

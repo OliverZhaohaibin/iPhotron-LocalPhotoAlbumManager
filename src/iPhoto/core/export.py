@@ -4,23 +4,26 @@ from __future__ import annotations
 
 import logging
 import shutil
+from collections.abc import Mapping
 from pathlib import Path
+from typing import Any
 
 from PySide6.QtGui import QImage, QTransform
 
 from ..io import sidecar
-from .filters.facade import apply_adjustments
-from ..utils import image_loader
 from ..media_classifier import VIDEO_EXTENSIONS
+from ..utils import image_loader
+from .filters.facade import apply_adjustments
 
 _LOGGER = logging.getLogger(__name__)
 
 
-def render_image(path: Path) -> QImage | None:
+def render_image(path: Path, raw_adjustments: Mapping[str, Any] | None = None) -> QImage | None:
     """Render the asset at *path* with adjustments applied."""
 
     # 1. Load adjustments
-    raw_adjustments = sidecar.load_adjustments(path)
+    if raw_adjustments is None:
+        raw_adjustments = sidecar.load_adjustments(path)
     if not raw_adjustments:
         # Prompt implies we only render if adjustments exist (Case A).
         # If this function is called, caller expects rendering.
@@ -119,13 +122,14 @@ def export_asset(source_path: Path, export_root: Path, library_root: Path) -> bo
         destination_dir.mkdir(parents=True, exist_ok=True)
 
         is_video = source_path.suffix.lower() in VIDEO_EXTENSIONS
-        has_sidecar = sidecar.sidecar_path_for_asset(source_path).exists()
-
-        # Determine handling strategy
-        should_render = not is_video and has_sidecar
+        raw_adjustments: Mapping[str, Any] | None = None
+        should_render = False
+        if not is_video:
+            raw_adjustments = sidecar.load_adjustments(source_path)
+            should_render = sidecar.has_effective_adjustments(raw_adjustments)
 
         if should_render:
-            image = render_image(source_path)
+            image = render_image(source_path, raw_adjustments)
             if image is not None:
                 final_dest = destination_path.with_suffix(".jpg")
                 final_dest = get_unique_destination(final_dest)

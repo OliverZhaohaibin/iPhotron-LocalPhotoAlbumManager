@@ -101,25 +101,27 @@ def test_export_asset(mock_sidecar, mock_shutil, mock_render, tmp_path: Path) ->
     mock_shutil.copy2.assert_called()
     mock_render.assert_not_called()
 
-    # Case B: Image + No Sidecar -> Copy
-    mock_ipo_missing = MagicMock()
-    mock_ipo_missing.exists.return_value = False
-    mock_sidecar.sidecar_path_for_asset.return_value = mock_ipo_missing
+    # Case B: Image + No Adjustments -> Copy
+    mock_sidecar.load_adjustments.return_value = {}
+    mock_sidecar.has_effective_adjustments.return_value = False
 
     mock_shutil.reset_mock()
+    mock_render.reset_mock()
     assert export_asset(source, export_root, library_root)
+    mock_sidecar.load_adjustments.assert_called_with(source)
+    mock_sidecar.has_effective_adjustments.assert_called_with({})
     mock_shutil.copy2.assert_called()
     mock_render.assert_not_called()
 
-    # Case C: Image + Sidecar -> Render
-    mock_ipo_exists = MagicMock()
-    mock_ipo_exists.exists.return_value = True
-    mock_sidecar.sidecar_path_for_asset.return_value = mock_ipo_exists
+    # Case C: Image + Adjustments -> Render
+    raw_adjustments = {"Light_Master": 0.5}
+    mock_sidecar.load_adjustments.return_value = raw_adjustments
+    mock_sidecar.has_effective_adjustments.return_value = True
 
     # Mock render return
     mock_qimage = MagicMock(spec=QImage)
     mock_render.return_value = mock_qimage
 
     assert export_asset(source, export_root, library_root)
-    mock_render.assert_called_with(source)
+    mock_render.assert_called_with(source, raw_adjustments)
     mock_qimage.save.assert_called()

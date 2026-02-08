@@ -1,4 +1,4 @@
-# 📸 iPhoto
+# 📸 iPhotron
 > 将 macOS *照片* 体验带到 Windows —— 文件夹原生、非破坏性的照片管理，支持实况照片、地图和智能相册。
 
 ![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS-lightgrey)
@@ -9,6 +9,24 @@
 
 **语言 / Languages:**  
 [![English](https://img.shields.io/badge/English-Click-blue?style=flat)](../../README.md) | [![中文简体](https://img.shields.io/badge/中文简体-点击-red?style=flat)](README_zh-CN.md) | [![Deutsch](https://img.shields.io/badge/Deutsch-Klick-yellow?style=flat)](README_de.md)
+
+---
+
+## ☕ 支持
+
+[![请我喝杯咖啡](https://img.shields.io/badge/Buy%20Me%20a%20Coffee-支持开发-yellow?style=for-the-badge&logo=buy-me-a-coffee&logoColor=white)](https://buymeacoffee.com/oliverzhao)
+
+## 📥 下载
+
+[![下载 iPhoto 最新版本](https://img.shields.io/badge/⬇️%20下载-iPhoto%20最新版本-blue?style=for-the-badge&logo=windows)](https://github.com/OliverZhaohaibin/iPhotron-LocalPhotoAlbumManager/releases/download/v3.1.5/v3.15.exe)
+
+**💡 快速安装：** 点击上方按钮直接下载最新的 Windows 安装程序（.exe）。
+
+---
+
+## 🌟 Star 历史
+
+[![Star History Chart](https://api.star-history.com/svg?repos=OliverZhaohaibin/iPhotron-LocalPhotoAlbumManager&type=date&legend=bottom-right)](https://www.star-history.com/#OliverZhaohaibin/iPhotron-LocalPhotoAlbumManager&type=date&legend=bottom-right)
 
 ---
 

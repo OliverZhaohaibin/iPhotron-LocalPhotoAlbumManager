@@ -1,4 +1,4 @@
-# 📸 iPhoto
+# 📸 iPhotron
 > Bringen Sie die *Fotos*-Erfahrung von macOS auf Windows — ordnerbasierte, nicht-destruktive Fotoverwaltung mit Live Photo, Karten und intelligenten Alben.
 
 ![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS-lightgrey)
@@ -9,6 +9,24 @@
 
 **Sprachen / Languages:**  
 [![English](https://img.shields.io/badge/English-Click-blue?style=flat)](../../README.md) | [![中文简体](https://img.shields.io/badge/中文简体-点击-red?style=flat)](README_zh-CN.md) | [![Deutsch](https://img.shields.io/badge/Deutsch-Klick-yellow?style=flat)](README_de.md)
+
+---
+
+## ☕ Unterstützung
+
+[![Buy Me a Coffee](https://img.shields.io/badge/Buy%20Me%20a%20Coffee-Entwicklung%20unterstützen-yellow?style=for-the-badge&logo=buy-me-a-coffee&logoColor=white)](https://buymeacoffee.com/oliverzhao)
+
+## 📥 Download
+
+[![Download iPhoto Latest Release](https://img.shields.io/badge/⬇️%20Download-iPhoto%20Neueste%20Version-blue?style=for-the-badge&logo=windows)](https://github.com/OliverZhaohaibin/iPhotron-LocalPhotoAlbumManager/releases/download/v3.1.5/v3.15.exe)
+
+**💡 Schnellinstallation:** Klicken Sie auf die Schaltfläche oben, um das neueste Windows-Installationsprogramm (.exe) direkt herunterzuladen.
+
+---
+
+## 🌟 Star-Verlauf
+
+[![Star History Chart](https://api.star-history.com/svg?repos=OliverZhaohaibin/iPhotron-LocalPhotoAlbumManager&type=date&legend=bottom-right)](https://www.star-history.com/#OliverZhaohaibin/iPhotron-LocalPhotoAlbumManager&type=date&legend=bottom-right)
 
 ---
 

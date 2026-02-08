@@ -146,11 +146,11 @@ class FilmstripView(AssetGrid):
             self.scheduleDelayedItemsLayout()
             self.refresh_spacers(top)
             selection_model = self.selectionModel()
-            selected_index = (
+            selected_current_index = (
                 selection_model.currentIndex() if selection_model else QModelIndex()
             )
             # Prefer the selection model's current index before considering the changed rows.
-            current_index = self._find_current_index([selected_index, top, bottom])
+            current_index = self._find_current_index([selected_current_index, top, bottom])
             if current_index is not None:
                 current_row = current_index.row()
                 self._pending_center_row = current_row

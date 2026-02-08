@@ -225,7 +225,8 @@ class CurveGraph(QWidget):
     HIT_DETECTION_RADIUS = 15
     MIN_DISTANCE_THRESHOLD = 0.01
     POINT_RADIUS = 5
-    GRAPH_INSET = POINT_RADIUS + 3
+    SELECTED_RING_RADIUS = POINT_RADIUS + 2
+    GRAPH_INSET = SELECTED_RING_RADIUS + 4
 
     def __init__(self, parent: Optional[QWidget] = None, size: int = 240) -> None:
         super().__init__(parent)
@@ -384,7 +385,7 @@ class CurveGraph(QWidget):
             if i == self.selected_index:
                 painter.setBrush(Qt.NoBrush)
                 painter.setPen(QPen(pt_color, 2))
-                painter.drawEllipse(QPointF(sx, sy), point_radius + 2, point_radius + 2)
+                painter.drawEllipse(QPointF(sx, sy), self.SELECTED_RING_RADIUS, self.SELECTED_RING_RADIUS)
 
             painter.setBrush(pt_color)
             painter.setPen(QPen(QColor("#000000"), 1))

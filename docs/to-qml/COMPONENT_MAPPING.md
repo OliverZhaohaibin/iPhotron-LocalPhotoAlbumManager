@@ -1,0 +1,611 @@
+# 🔄 组件映射对照表 / Component Mapping Reference
+
+> **版本 / Version:** 1.0  
+> **创建日期 / Created:** 2026-02-08  
+> **关联文档 / Related:** [MIGRATION_PLAN.md](./MIGRATION_PLAN.md) · [QML_FILE_STRUCTURE.md](./QML_FILE_STRUCTURE.md)
+
+---
+
+## 📑 目录 / Table of Contents
+
+1. [Widget → QML 组件映射总表 / Complete Mapping Table](#1-widget--qml-组件映射总表--complete-mapping-table)
+2. [页面视图映射 / View Mapping](#2-页面视图映射--view-mapping)
+3. [核心组件映射 / Core Component Mapping](#3-核心组件映射--core-component-mapping)
+4. [编辑器组件映射 / Editor Component Mapping](#4-编辑器组件映射--editor-component-mapping)
+5. [控制器映射 / Controller Mapping](#5-控制器映射--controller-mapping)
+6. [数据模型映射 / Data Model Mapping](#6-数据模型映射--data-model-mapping)
+7. [后台任务映射 / Background Task Mapping](#7-后台任务映射--background-task-mapping)
+8. [Qt 基类映射 / Qt Base Class Mapping](#8-qt-基类映射--qt-base-class-mapping)
+9. [信号/槽映射 / Signal-Slot Mapping](#9-信号槽映射--signal-slot-mapping)
+10. [样式与主题映射 / Style & Theme Mapping](#10-样式与主题映射--style--theme-mapping)
+
+---
+
+## 1. Widget → QML 组件映射总表 / Complete Mapping Table
+
+### 📊 快速索引
+
+| Widget 文件 (Python) | QML 文件 | 迁移策略 | 阶段 |
+|---------------------|----------|---------|------|
+| **页面视图** | | | |
+| `main_window.py` → `MainWindow` | `Main.qml` | 重写 | P1 |
+| `gallery_page.py` → `GalleryPage` | `views/GalleryView.qml` | 重写 | P2 |
+| `gallery_grid_view.py` → `GalleryGridView` | 融入 `GalleryView.qml` | 合并 | P2 |
+| `detail_page.py` → `DetailPage` | `views/DetailView.qml` | 重写 | P2 |
+| `photo_map_view.py` → `PhotoMapView` | `views/MapView.qml` | 重写 | P3 |
+| `albums_dashboard.py` → `AlbumsDashboard` | `views/DashboardView.qml` | 重写 | P3 |
+| **核心组件** | | | |
+| `asset_grid.py` → `AssetGrid` | `components/AssetGrid.qml` | 重写 | P2 |
+| `asset_delegate.py` → `AssetGridDelegate` | `components/AssetGridDelegate.qml` | 重写 | P2 |
+| `album_sidebar.py` → `AlbumSidebar` | `components/AlbumSidebar.qml` | 重写 | P2 |
+| `filmstrip_view.py` → `FilmstripView` | `components/FilmstripView.qml` | 重写 | P2 |
+| `player_bar.py` → `PlayerBar` | `components/PlayerBar.qml` | 重写 | P2 |
+| `gl_image_viewer/` → `GLImageViewer` | `components/ImageViewer.qml` | 重写 | P2 |
+| `video_area.py` → `VideoArea` | `components/VideoArea.qml` | 重写 | P2 |
+| `info_panel.py` → `InfoPanel` | `components/InfoPanel.qml` | 重写 | P2 |
+| `main_header.py` → `MainHeader` | `components/MainHeader.qml` | 重写 | P2 |
+| `notification_toast.py` → `NotificationToast` | `components/NotificationToast.qml` | 重写 | P2 |
+| `custom_title_bar.py` → `CustomTitleBar` | `components/CustomTitleBar.qml` | 重写 | P1 |
+| `chrome_status_bar.py` → `ChromeStatusBar` | `components/ChromeStatusBar.qml` | 重写 | P2 |
+| `live_badge.py` → `LiveBadge` | `components/LiveBadge.qml` | 重写 | P2 |
+| `sliding_segmented_control.py` | `components/SlidingSegmented.qml` | 重写 | P2 |
+| `collapsible_section.py` | `components/CollapsibleSection.qml` | 重写 | P2 |
+| `flow_layout.py` → `FlowLayout` | `components/FlowLayout.qml` | 重写 | P3 |
+| `custom_tooltip.py` → `CustomTooltip` | QML 内置 `ToolTip` | 替换 | P2 |
+| `preview_window.py` → `PreviewWindow` | 独立 `Window` QML | 重写 | P3 |
+| `dialogs.py` → 各种对话框 | `dialogs/*.qml` | 拆分重写 | P3 |
+| **编辑器组件** | | | |
+| `edit_sidebar.py` → `EditSidebar` | `components/EditSidebar.qml` | 重写 | P3 |
+| `edit_topbar.py` → `EditTopbar` | `components/EditTopbar.qml` | 重写 | P3 |
+| `edit_strip.py` → `EditStrip` | 融入 `EditView.qml` | 合并 | P3 |
+| `edit_light_section.py` | `components/edit/EditLightSection.qml` | 重写 | P3 |
+| `edit_color_section.py` | `components/edit/EditColorSection.qml` | 重写 | P3 |
+| `edit_bw_section.py` | `components/edit/EditBWSection.qml` | 重写 | P3 |
+| `edit_wb_section.py` | `components/edit/EditWBSection.qml` | 重写 | P3 |
+| `edit_curve_section.py` | `components/edit/EditCurveSection.qml` | 重写 | P3 |
+| `edit_levels_section.py` | `components/edit/EditLevelsSection.qml` | 重写 | P3 |
+| `edit_selective_color_section.py` | `components/edit/EditSelectiveColor.qml` | 重写 | P3 |
+| `gl_crop/` → `GLCropWidget` | Canvas / ShaderEffect | 重写 | P3 |
+| **控制器（保留 Python）** | | | |
+| `header_controller.py` | 保留，添加 `@Property` | 适配 | P2 |
+| `player_view_controller.py` | 保留，添加 `@Property/@Slot` | 适配 | P2 |
+| `selection_controller.py` | 保留，添加 `@Slot` | 适配 | P2 |
+| `context_menu_controller.py` | 保留，简化（QML Menu 替代） | 适配 | P2 |
+| `dialog_controller.py` | 保留，简化（QML Dialog 替代） | 适配 | P3 |
+| `export_controller.py` | 保留，添加 `@Slot` | 适配 | P3 |
+| `share_controller.py` | 保留，添加 `@Slot` | 适配 | P3 |
+| `status_bar_controller.py` | 保留，添加 `@Property` | 适配 | P2 |
+| `edit_*.py` (6 controllers) | 保留，添加 `@Property/@Slot` | 适配 | P3 |
+| `window_theme_controller.py` | 保留 → QML Theme singleton | 适配 | P1 |
+| **协调器（保留 Python）** | | | |
+| `main_coordinator.py` | 保留，添加 QML 桥接方法 | 适配 | P1 |
+| `navigation_coordinator.py` | 保留，添加 `@Slot` | 适配 | P2 |
+| `playback_coordinator.py` | 保留，添加 `@Property/@Slot` | 适配 | P2 |
+| `edit_coordinator.py` | 保留，添加 `@Slot` | 适配 | P3 |
+| `view_router.py` | 保留，信号驱动 QML StackView | 适配 | P1 |
+| **数据模型（共享不变）** | | | |
+| `album_tree_model.py` | 共享 | 不变 | - |
+| `asset_cache_manager.py` | 共享 | 不变 | - |
+| `edit_session.py` | 共享，添加 `@Property` | 适配 | P3 |
+| `proxy_filter.py` | 共享 | 不变 | - |
+| `roles.py` | 共享，确保 `roleNames()` 返回 QML 可用名 | 适配 | P1 |
+| **后台任务（共享不变）** | | | |
+| 所有 `tasks/*.py` Worker | 共享 | 不变 | - |
+| **委托（融入 QML）** | | | |
+| `album_sidebar_delegate.py` | 融入 `AlbumSidebar.qml` delegate | 合并 | P2 |
+
+---
+
+## 2. 页面视图映射 / View Mapping
+
+### 2.1 MainWindow → Main.qml
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│ Widget: MainWindow (QMainWindow)                            │
+│ ├── Ui_MainWindow.setupUi()                                 │
+│ ├── FramelessWindowManager                                  │
+│ ├── QStackedWidget (页面切换)                                 │
+│ │   ├── GalleryPage                                         │
+│ │   ├── DetailPage                                          │
+│ │   ├── PhotoMapView                                        │
+│ │   └── AlbumsDashboard                                     │
+│ ├── AlbumSidebar (QDockWidget)                              │
+│ └── ChromeStatusBar                                         │
+│                                                             │
+│ ════════════════════════ ⇓ 迁移为 ⇓ ════════════════════════ │
+│                                                             │
+│ QML: Main.qml (ApplicationWindow)                           │
+│ ├── header: CustomTitleBar {}                               │
+│ ├── RowLayout                                               │
+│ │   ├── AlbumSidebar {}                                     │
+│ │   └── StackView (页面路由)                                  │
+│ │       ├── GalleryView                                     │
+│ │       ├── DetailView                                      │
+│ │       ├── EditView                                        │
+│ │       ├── MapView                                         │
+│ │       └── DashboardView                                   │
+│ ├── footer: ChromeStatusBar {}                              │
+│ └── NotificationToast {}                                    │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### 2.2 GalleryPage → GalleryView.qml
+
+```
+Widget 结构:                          QML 结构:
+GalleryPage (QWidget)                 GalleryView.qml (Item)
+├── QVBoxLayout                       ├── ColumnLayout
+│   ├── MainHeader (QWidget)          │   ├── MainHeader {}
+│   └── GalleryGridView (QWidget)     │   └── AssetGrid {
+│       └── AssetGrid (QListView)     │       model: assetListVM
+│           └── AssetGridDelegate     │       delegate: AssetGridDelegate {}
+│              (QStyledItemDelegate)   │   }
+└── [SelectionController 信号连接]      └── SelectionToolbar { visible: ... }
+```
+
+### 2.3 DetailPage → DetailView.qml
+
+```
+Widget 结构:                          QML 结构:
+DetailPage (QWidget)                  DetailView.qml (Item)
+├── QVBoxLayout                       ├── ColumnLayout
+│   ├── 位置/时间标签                    │   ├── DetailHeader {}
+│   ├── QStackedWidget                │   ├── Loader {
+│   │   ├── GLImageViewer (OpenGL)    │   │   imageComponent: ImageViewer {}
+│   │   └── VideoArea (FFmpeg)        │   │   videoComponent: VideoArea {}
+│   ├── PlayerBar (QWidget)           │   │ }
+│   └── FilmstripView (QListView)     │   ├── PlayerBar {}
+└── InfoPanel (QDockWidget)           │   └── FilmstripView {}
+                                      └── InfoPanel {}
+```
+
+### 2.4 编辑器 → EditView.qml
+
+```
+Widget 结构:                          QML 结构:
+[分散在多个 Widget 中]                  EditView.qml (Item)
+├── EditTopbar (QWidget)              ├── ColumnLayout
+├── GLImageViewer (编辑模式)             │   ├── EditTopbar {}
+├── GLCropWidget (裁剪)                │   ├── RowLayout
+├── EditSidebar (QWidget)             │   │   ├── ImageViewer { editMode: true }
+│   ├── EditLightSection              │   │   └── EditSidebar {}
+│   ├── EditColorSection              │   │       ├── EditLightSection {}
+│   ├── EditBWSection                 │   │       ├── EditColorSection {}
+│   ├── EditWBSection                 │   │       ├── EditBWSection {}
+│   ├── EditCurveSection              │   │       ├── EditWBSection {}
+│   ├── EditLevelsSection             │   │       ├── EditCurveSection {}
+│   └── EditSelectiveColorSection     │   │       ├── EditLevelsSection {}
+└── EditStrip (QWidget)               │   │       └── EditSelectiveColor {}
+                                      │   └── EditStrip {} (可选)
+                                      └── [EditCoordinator 保留 Python]
+```
+
+---
+
+## 3. 核心组件映射 / Core Component Mapping
+
+### 3.1 AssetGrid (网格视图)
+
+| 特性 | Widget 实现 | QML 实现 |
+|------|-----------|---------|
+| **基类** | `QListView` (ViewMode.IconMode) | `GridView` |
+| **数据模型** | `AssetListViewModel` (QAbstractListModel) | 同（共享） |
+| **委托渲染** | `AssetGridDelegate` (QStyledItemDelegate + QPainter) | `AssetGridDelegate.qml` (声明式) |
+| **虚拟滚动** | `QListView` 内置 | `GridView` 内置 |
+| **多选** | `SelectionController` + `QItemSelectionModel` | `SelectionController` + QML selection state |
+| **右键菜单** | `ContextMenuController` → `QMenu` | `ContextMenuController` → QML `Menu` |
+| **缩略图加载** | `ThumbnailLoader` (QThread) | `QQuickAsyncImageProvider` 或复用 |
+| **拖拽** | `QDrag` | `DragHandler` + `DropArea` |
+
+### 3.2 AlbumSidebar (相册侧边栏)
+
+| 特性 | Widget 实现 | QML 实现 |
+|------|-----------|---------|
+| **基类** | `QTreeView` | `TreeView` (Qt 6.4+) |
+| **数据模型** | `AlbumTreeModel` (QAbstractItemModel) | 同（共享） |
+| **委托** | `AlbumSidebarDelegate` (QStyledItemDelegate) | 内嵌 `TreeViewDelegate` |
+| **展开指示器** | `BranchIndicator.qml` (已有!) | 复用 |
+| **右键菜单** | `AlbumSidebarMenu` (QMenu) | QML `Menu` + `MenuItem` |
+| **拖拽排序** | 未实现 | `DelegateModel` + `DragHandler` |
+
+### 3.3 ImageViewer (图片查看器)
+
+| 特性 | Widget 实现 | QML 实现 |
+|------|-----------|---------|
+| **基类** | `QOpenGLWidget` (GLImageViewer) | `Flickable` + `Image` |
+| **渲染** | OpenGL 3.3 Core Profile 着色器 | QML Scene Graph (GPU 加速) |
+| **缩放** | 自定义 `ViewTransformController` | `PinchArea` + `WheelHandler` |
+| **平移** | 鼠标事件 → 变换矩阵 | `Flickable` 内置 |
+| **旋转** | 变换矩阵 | `Image.rotation` + `Behavior` |
+| **编辑预览** | GLSL 片段着色器 | `ShaderEffect` + GLSL |
+| **裁剪叠层** | `GLCropWidget` (OpenGL) | Canvas overlay + `DragHandler` |
+| **高 DPI** | `devicePixelRatio` 处理 | QML 自动处理 |
+
+### 3.4 VideoArea (视频播放)
+
+| 特性 | Widget 实现 | QML 实现 |
+|------|-----------|---------|
+| **基类** | 自定义 QWidget + FFmpeg (PyAV) | `MediaPlayer` + `VideoOutput` |
+| **解码** | 手动 FFmpeg 帧解码 | Qt Multimedia 后端 |
+| **控制** | `PlayerBar` (自定义 QWidget) | `PlayerBar.qml` |
+| **音频** | PyAV 音频流 | `AudioOutput` |
+| **Live Photo** | 特殊处理（短视频循环） | `MediaPlayer` + `loops: MediaPlayer.Infinite` |
+
+> **注意**: 如果 `MediaPlayer` 不支持某些编码格式，可保留 Python FFmpeg 解码层，通过 `QQuickImageProvider` 逐帧提供给 QML `AnimatedImage` 或自定义 `VideoOutput`。
+
+### 3.5 FilmstripView (胶片条)
+
+| 特性 | Widget 实现 | QML 实现 |
+|------|-----------|---------|
+| **基类** | `QListView` (水平) | `ListView` (orientation: Horizontal) |
+| **委托** | `AssetGridDelegate` (缩小版) | QML delegate (内嵌) |
+| **当前项高亮** | `QItemSelectionModel` + delegate 绘制 | `ListView.highlight` Component |
+| **居中间距** | `SpacerProxyModel` | QML `header` / `footer` spacer |
+| **缩略图大小** | `ThumbnailStripSlider` | QML `Slider` 绑定 `cellWidth` |
+
+### 3.6 PlayerBar (播放控制条)
+
+| 特性 | Widget 实现 | QML 实现 |
+|------|-----------|---------|
+| **基类** | 自定义 `QWidget` | QML `Item` + `RowLayout` |
+| **进度条** | `QSlider` | `Slider` |
+| **播放/暂停** | `QPushButton` | `ToolButton` + 图标切换 |
+| **时间标签** | `QLabel` | `Text` 绑定 `position` / `duration` |
+| **音量** | `QSlider` | `Slider` |
+| **全屏** | `QPushButton` | `ToolButton` |
+
+---
+
+## 4. 编辑器组件映射 / Editor Component Mapping
+
+### 4.1 编辑面板通用模式
+
+**Widget 模式：**
+```python
+class EditLightSection(QWidget):
+    valueChanged = Signal(str, float)
+
+    def __init__(self):
+        self.exposure_slider = QSlider(Qt.Horizontal)
+        self.exposure_slider.valueChanged.connect(
+            lambda v: self.valueChanged.emit("exposure", v / 100)
+        )
+```
+
+**QML 模式：**
+```qml
+CollapsibleSection {
+    title: qsTr("Light")
+    Column {
+        Slider {
+            from: -3.0; to: 3.0
+            value: editSession.exposure
+            onMoved: editSession.exposure = value
+        }
+    }
+}
+```
+
+### 4.2 各编辑面板映射
+
+| 编辑面板 | Widget 控件 | QML 控件 | 数据绑定 |
+|---------|-----------|---------|---------|
+| **Light** | 6× `QSlider` | 6× `Slider` | `editSession.exposure` 等 |
+| **Color** | 4× `QSlider` | 4× `Slider` | `editSession.saturation` 等 |
+| **B&W** | 6× `QSlider` (通道) | 6× `Slider` | `editSession.bwRed` 等 |
+| **White Balance** | 2× `QSlider` + `QPushButton`(吸管) | 2× `Slider` + `ToolButton` | `editSession.wbTemp` 等 |
+| **Curves** | `QPainter` 绘制 + 鼠标拖拽 | `Canvas` + `MouseArea` | `editSession.curvePoints` |
+| **Levels** | `QPainter` 直方图 + 拖拽手柄 | `Canvas` + `DragHandler` | `editSession.levelBlack` 等 |
+| **Selective Color** | 颜色按钮 + 4× `QSlider` | `Button` 组 + 4× `Slider` | `editSession.selectiveColor` |
+
+### 4.3 裁剪工具映射
+
+| 特性 | Widget (`GLCropWidget`) | QML |
+|------|----------------------|-----|
+| 裁剪框绘制 | OpenGL overlay | `Canvas` 或 `Rectangle` overlay |
+| 手柄拖拽 | 鼠标事件 + Hit Test | `DragHandler` × 8 (角 + 边) |
+| 比例锁定 | 手动计算 | JS 约束逻辑 |
+| 网格线 | OpenGL 线段 | `Canvas` 或 `Repeater` + `Rectangle` |
+| 透视变换 | `perspective_math.py` | 保留 Python，结果传给 QML Transform |
+
+---
+
+## 5. 控制器映射 / Controller Mapping
+
+### 5.1 迁移策略
+
+控制器保留在 Python 中，通过以下方式暴露给 QML：
+
+| 暴露方式 | 用途 | 示例 |
+|---------|------|------|
+| `@Property(type, notify=signal)` | 只读状态绑定 | `headerController.locationText` |
+| `@Slot(type)` | QML 调用 Python 方法 | `navigationCoord.openAlbum(path)` |
+| `Signal(type)` | Python 通知 QML 更新 | `viewRouter.galleryViewShown` |
+| Context Property | 全局注入 | `ctx.setContextProperty("appFacade", facade)` |
+
+### 5.2 控制器适配清单
+
+| 控制器 | 需添加的 QML 适配 | 复杂度 |
+|--------|------------------|-------|
+| `HeaderController` | `@Property` for `locationText`, `timestampText` | 低 |
+| `PlayerViewController` | `@Property` for `currentImageSource`, `isVideo`; `@Slot` for `play()`, `pause()` | 中 |
+| `SelectionController` | `@Slot` for `toggleSelection(int)`; `@Property` for `isActive`, `count` | 中 |
+| `ContextMenuController` | 简化：QML 端直接构建 `Menu`，调用 `@Slot` | 低 |
+| `DialogController` | 简化：QML 端使用 `FileDialog`，结果传给 `@Slot` | 低 |
+| `StatusBarController` | `@Property` for `message`, `progress` | 低 |
+| `ExportController` | `@Slot` for `exportCurrent(format, quality)` | 低 |
+| `ShareController` | `@Slot` for `copyToClipboard()`, `revealInFinder()` | 低 |
+| `EditHistoryManager` | `@Slot` for `undo()`, `redo()`; `@Property` for `canUndo`, `canRedo` | 低 |
+| `EditPipelineLoader` | 保持不变（内部使用） | 无 |
+| `EditPreviewManager` | `@Property` for `previewImage`; 或通过 ImageProvider | 中 |
+| `EditZoomHandler` | `@Slot` for `zoomIn()`, `zoomOut()`, `fitToView()` | 低 |
+| `EditFullscreenManager` | `@Slot` for `enterFullscreen()`, `exitFullscreen()` | 低 |
+| `EditViewTransitionManager` | 可能不需要（QML StackView 自带转场动画） | 低 |
+| `WindowThemeController` | 桥接到 QML `Theme` singleton | 低 |
+
+---
+
+## 6. 数据模型映射 / Data Model Mapping
+
+### 6.1 共享模型（不变）
+
+这些模型已继承 Qt Model 基类，QML 可直接使用：
+
+| 模型 | 基类 | QML 使用方式 | 需适配 |
+|------|------|-----------|-------|
+| `AssetListViewModel` | `QAbstractListModel` | `GridView.model` / `ListView.model` | 确保 `roleNames()` 返回 QML 友好的键名 |
+| `AlbumTreeModel` | `QAbstractItemModel` | `TreeView.model` | 确保 `roleNames()` |
+| `ProxyFilterModel` | `QSortFilterProxyModel` | 透传 | 不变 |
+| `SpacerProxyModel` | `QAbstractListModel` | `ListView.model` | 不变 |
+
+### 6.2 roleNames() 适配
+
+QML 通过 `roleNames()` 将 C++ role enum 映射为 JS 属性名：
+
+```python
+# 当前 roles.py
+class Roles(IntEnum):
+    REL = Qt.UserRole + 1
+    ABS = Qt.UserRole + 2
+    IS_IMAGE = Qt.UserRole + 3
+    IS_VIDEO = Qt.UserRole + 4
+    IS_LIVE = Qt.UserRole + 5
+    FEATURED = Qt.UserRole + 6
+    # ...
+
+# AssetListViewModel 中需要实现:
+def roleNames(self) -> dict[int, bytes]:
+    return {
+        Qt.DisplayRole: b"display",
+        Qt.DecorationRole: b"decoration",
+        Roles.REL: b"rel",
+        Roles.ABS: b"abs",
+        Roles.IS_IMAGE: b"isImage",
+        Roles.IS_VIDEO: b"isVideo",
+        Roles.IS_LIVE: b"isLive",
+        Roles.FEATURED: b"featured",
+        Roles.LIVE_MOTION_REL: b"liveMotionRel",
+        Roles.LIVE_MOTION_ABS: b"liveMotionAbs",
+        Roles.SIZE: b"size",
+        Roles.DT: b"dt",
+        Roles.LOCATION: b"location",
+        Roles.INFO: b"info",
+        Roles.ASSET_ID: b"assetId",
+    }
+```
+
+**QML 中使用：**
+```qml
+delegate: Item {
+    // 这些属性名来自 roleNames()
+    required property string abs
+    required property bool isLive
+    required property bool featured
+    // ...
+}
+```
+
+### 6.3 EditSession 适配
+
+`EditSession` 已使用 Qt Signal，需添加 `@Property` 供 QML 绑定：
+
+```python
+class EditSession(QObject):
+    exposureChanged = Signal()
+
+    @Property(float, notify=exposureChanged)
+    def exposure(self) -> float:
+        return self._exposure
+
+    @exposure.setter
+    def exposure(self, value: float) -> None:
+        if self._exposure != value:
+            self._exposure = value
+            self.exposureChanged.emit()
+```
+
+---
+
+## 7. 后台任务映射 / Background Task Mapping
+
+### 7.1 策略：全部保留 Python
+
+所有后台 Worker 保留在 Python 中，不迁移。QML 通过 signal 接收结果。
+
+| Worker | 状态 | QML 交互方式 |
+|--------|------|-------------|
+| `AssetLoaderWorker` | 保留 | 结果通过 `AssetListViewModel` model 通知 |
+| `ThumbnailLoader` | 保留 / 替换为 `QQuickAsyncImageProvider` | `Image.source = "image://thumbnails/..."` |
+| `ImageLoadWorker` | 保留 | 结果通过 `playerViewController.currentImageSource` Property |
+| `PreviewRenderWorker` | 保留 | 结果通过 `editPreviewManager.previewImage` Property |
+| `VideoFrameGrabber` | 保留 | 结果通过 Signal → QML 更新 |
+| `ImportWorker` | 保留 | 进度通过 `appFacade.scanProgress` Signal |
+| `MoveWorker` | 保留 | 完成通知通过 Signal |
+| `IncrementalRefreshWorker` | 保留 | 结果通过 model 更新 |
+| `ThumbnailGeneratorWorker` | 保留 | 生成后通过 ImageProvider 可用 |
+| `EditSidebarPreviewWorker` | 保留 | 结果通过 Property 或 ImageProvider |
+
+### 7.2 ThumbnailProvider 桥接
+
+```
+Widget 模式:                              QML 模式:
+ThumbnailLoader (QThread)                 ThumbnailProvider (QQuickAsyncImageProvider)
+    │                                         │
+    ├── pixmapReady(path, QPixmap)           ├── requestImageResponse(id, size)
+    │       │                                 │       │
+    │       ▼                                 │       ▼
+    │   AssetGridDelegate.paint()            │   QML Image { source: "image://..." }
+    │   (QPainter 手动绘制)                    │   (QML Scene Graph 自动渲染)
+    │                                         │
+    └── 缓存: AssetCacheManager              └── 缓存: 可复用 AssetCacheManager
+```
+
+---
+
+## 8. Qt 基类映射 / Qt Base Class Mapping
+
+### 8.1 Widget → QML 元素对照
+
+| Widget 类 | QML 元素 | 说明 |
+|-----------|---------|------|
+| `QMainWindow` | `ApplicationWindow` | 主窗口 |
+| `QWidget` | `Item` / `Rectangle` | 通用容器 |
+| `QLabel` | `Text` / `Label` | 文本显示 |
+| `QPushButton` | `Button` / `ToolButton` | 按钮 |
+| `QSlider` | `Slider` | 滑块 |
+| `QScrollArea` | `ScrollView` / `Flickable` | 滚动区域 |
+| `QListView` | `ListView` | 列表视图 |
+| `QGridLayout` + `QListView` | `GridView` | 网格视图 |
+| `QTreeView` | `TreeView` (Qt 6.4+) | 树形视图 |
+| `QStackedWidget` | `StackView` / `SwipeView` | 页面栈 |
+| `QSplitter` | `SplitView` | 分割视图 |
+| `QTabWidget` | `TabBar` + `StackLayout` | 标签页 |
+| `QToolBar` | `ToolBar` | 工具栏 |
+| `QMenuBar` | `MenuBar` | 菜单栏 |
+| `QMenu` | `Menu` + `MenuItem` | 菜单 |
+| `QFileDialog` | `FileDialog` (Qt.labs / QtQuick.Dialogs) | 文件对话框 |
+| `QMessageBox` | `MessageDialog` / `Dialog` | 消息对话框 |
+| `QProgressBar` | `ProgressBar` | 进度条 |
+| `QCheckBox` | `CheckBox` | 复选框 |
+| `QComboBox` | `ComboBox` | 下拉框 |
+| `QLineEdit` | `TextField` | 输入框 |
+| `QTextEdit` | `TextArea` | 多行文本 |
+| `QDockWidget` | 自定义可拖拽 `Item` | 停靠面板 |
+| `QOpenGLWidget` | `ShaderEffect` / `Canvas` | OpenGL 渲染 |
+| `QGraphicsView` | `Flickable` + 子元素 | 图形视图 |
+
+### 8.2 布局映射
+
+| Widget 布局 | QML 布局 | 说明 |
+|------------|---------|------|
+| `QVBoxLayout` | `ColumnLayout` | 垂直布局 |
+| `QHBoxLayout` | `RowLayout` | 水平布局 |
+| `QGridLayout` | `GridLayout` | 网格布局 |
+| `QFormLayout` | `GridLayout` (2 列) | 表单布局 |
+| `QStackedLayout` | `StackLayout` | 层叠布局 |
+| `FlowLayout` (自定义) | `Flow` | 流式布局 |
+| `addStretch()` | `Item { Layout.fillWidth: true }` | 弹性间距 |
+| `setContentsMargins()` | `anchors.margins` | 内边距 |
+| `setSpacing()` | `spacing` 属性 | 间距 |
+
+---
+
+## 9. 信号/槽映射 / Signal-Slot Mapping
+
+### 9.1 Python → QML 信号连接
+
+**Widget 方式：**
+```python
+self.facade.scanProgress.connect(self._on_scan_progress)
+```
+
+**QML 方式：**
+```qml
+Connections {
+    target: appFacade
+    function onScanProgress(path, current, total) {
+        statusBar.progress = current / total
+    }
+}
+```
+
+### 9.2 QML → Python 调用
+
+**Widget 方式：**
+```python
+button.clicked.connect(lambda: self.coordinator.open_album(path))
+```
+
+**QML 方式：**
+```qml
+Button {
+    onClicked: navigationCoord.openAlbum(pathString)
+}
+```
+
+### 9.3 关键信号映射表
+
+| 信号 | 来源 (Python) | Widget 接收 | QML 接收 |
+|------|-------------|-----------|---------|
+| `albumOpened(Path)` | `AppFacade` | `connect()` in coordinator | `Connections { target: appFacade }` |
+| `scanProgress(Path, int, int)` | `AppFacade` | `StatusBarController` | QML `ChromeStatusBar` |
+| `galleryViewShown` | `ViewRouter` | `connect()` in coordinator | QML `StackView` 切换 |
+| `detailViewShown` | `ViewRouter` | `connect()` in coordinator | QML `StackView.push` |
+| `assetChanged(int)` | `PlaybackCoordinator` | `connect()` in coordinator | QML `Connections` |
+| `dataChanged` | `AssetListViewModel` | `QListView` 自动 | `GridView` / `ListView` 自动 |
+| `valuesChanged` | `EditSession` | `connect()` in edit controller | QML property binding 自动 |
+
+---
+
+## 10. 样式与主题映射 / Style & Theme Mapping
+
+### 10.1 当前样式实现
+
+```python
+# Widget 方式: QSS + QPalette
+app.setStyleSheet("""
+    QWidget { background-color: #1e1e1e; color: #e0e0e0; }
+    QPushButton { background-color: #3a3a3a; border-radius: 4px; }
+""")
+```
+
+### 10.2 QML 主题实现
+
+```qml
+// Theme.qml (Singleton)
+pragma Singleton
+import QtQuick
+
+QtObject {
+    property string mode: windowThemeController.currentTheme  // 绑定 Python
+
+    readonly property color bgPrimary: mode === "dark" ? "#1e1e1e" : "#ffffff"
+    // ...
+}
+
+// 使用方式:
+Rectangle {
+    color: Theme.bgPrimary
+    Text {
+        color: Theme.textColor
+        font.pixelSize: Theme.fontSizeNormal
+    }
+}
+```
+
+### 10.3 动画映射
+
+| Widget 动画 | QML 动画 |
+|------------|---------|
+| `QPropertyAnimation` | `PropertyAnimation` / `NumberAnimation` |
+| `QParallelAnimationGroup` | `ParallelAnimation` |
+| `QSequentialAnimationGroup` | `SequentialAnimation` |
+| `QTimeLine` | `Timer` + `NumberAnimation` |
+| 手写插值 | `Behavior on property { ... }` |
+| `QEasingCurve` | `easing.type: Easing.InOutQuad` |
+
+---
+
+> **维护者 / Maintainer:** iPhotron Team  
+> **最后更新 / Last Updated:** 2026-02-08

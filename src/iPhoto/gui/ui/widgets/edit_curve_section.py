@@ -7,7 +7,7 @@ import math
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
-from PySide6.QtCore import QPointF, Qt, Signal, Slot
+from PySide6.QtCore import QPointF, QRectF, Qt, Signal, Slot
 from PySide6.QtGui import (
     QColor,
     QMouseEvent,
@@ -224,6 +224,8 @@ class CurveGraph(QWidget):
 
     HIT_DETECTION_RADIUS = 15
     MIN_DISTANCE_THRESHOLD = 0.01
+    POINT_RADIUS = 5
+    GRAPH_INSET = POINT_RADIUS + 3
 
     def __init__(self, parent: Optional[QWidget] = None, size: int = 240) -> None:
         super().__init__(parent)
@@ -342,26 +344,29 @@ class CurveGraph(QWidget):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
         w, h = self.width(), self.height()
+        graph_rect = self._graph_rect(w, h)
 
         painter.fillRect(self.rect(), QColor("#222222"))
 
         # Grid
         painter.setPen(QPen(QColor("#444444"), 1))
         for i in range(1, 4):
-            painter.drawLine(i * w // 4, 0, i * w // 4, h)
-            painter.drawLine(0, i * h // 4, w, i * h // 4)
+            x_pos = graph_rect.left() + i * graph_rect.width() / 4
+            y_pos = graph_rect.top() + i * graph_rect.height() / 4
+            painter.drawLine(int(x_pos), int(graph_rect.top()), int(x_pos), int(graph_rect.bottom()))
+            painter.drawLine(int(graph_rect.left()), int(y_pos), int(graph_rect.right()), int(y_pos))
 
         # Histogram
         if self.histogram_data is not None:
-            self._draw_histogram(painter, w, h)
+            self._draw_histogram(painter, graph_rect)
         else:
-            self._draw_fake_histogram(painter, w, h)
+            self._draw_fake_histogram(painter, graph_rect)
 
         # Curve
-        self._draw_curve(painter, w, h)
+        self._draw_curve(painter, graph_rect)
 
         # Control points
-        point_radius = 5
+        point_radius = self.POINT_RADIUS
         current_points = self.channels[self.active_channel]
 
         if self.active_channel == "Red":
@@ -374,8 +379,7 @@ class CurveGraph(QWidget):
             pt_color = QColor("white")
 
         for i, p in enumerate(current_points):
-            sx = p.x() * w
-            sy = h - (p.y() * h)
+            sx, sy = self._point_to_screen(p, graph_rect)
 
             if i == self.selected_index:
                 painter.setBrush(Qt.NoBrush)
@@ -386,61 +390,69 @@ class CurveGraph(QWidget):
             painter.setPen(QPen(QColor("#000000"), 1))
             painter.drawEllipse(QPointF(sx, sy), point_radius, point_radius)
 
-    def _draw_fake_histogram(self, painter: QPainter, w: int, h: int) -> None:
+    def _draw_fake_histogram(self, painter: QPainter, rect: QRectF) -> None:
         if self.active_channel != "RGB":
             return
 
+        w = rect.width()
+        h = rect.height()
+        left = rect.left()
+        bottom = rect.bottom()
         path = QPainterPath()
-        path.moveTo(0, h)
+        path.moveTo(left, bottom)
         step = 4
-        for x in range(0, w + step, step):
-            nx = x / w
+        for x in range(0, int(w) + step, step):
+            nx = x / w if w else 0.0
             val = math.exp(-((nx - 0.35) ** 2) / 0.04) * 0.6 + math.exp(-((nx - 0.75) ** 2) / 0.08) * 0.4
             noise = math.sin(x * 0.1) * 0.05
             h_val = (val + abs(noise)) * h * 0.8
-            path.lineTo(x, h - h_val)
-        path.lineTo(w, h)
+            path.lineTo(left + x, bottom - h_val)
+        path.lineTo(left + w, bottom)
         painter.setPen(Qt.NoPen)
         painter.setBrush(QColor(120, 120, 120, 60))
         painter.drawPath(path)
 
-    def _draw_histogram(self, painter: QPainter, w: int, h: int) -> None:
+    def _draw_histogram(self, painter: QPainter, rect: QRectF) -> None:
         if self.histogram_data is None:
             return
 
         is_gray = len(self.histogram_data.shape) == 1
 
         if is_gray:
-            self._draw_hist_channel(painter, self.histogram_data, QColor(120, 120, 120, 128), w, h)
+            self._draw_hist_channel(painter, self.histogram_data, QColor(120, 120, 120, 128), rect)
             return
 
         if self.active_channel == "RGB":
-            self._draw_hist_channel(painter, self.histogram_data[0], QColor(255, 0, 0, 100), w, h)
-            self._draw_hist_channel(painter, self.histogram_data[1], QColor(0, 255, 0, 100), w, h)
-            self._draw_hist_channel(painter, self.histogram_data[2], QColor(0, 0, 255, 100), w, h)
+            self._draw_hist_channel(painter, self.histogram_data[0], QColor(255, 0, 0, 100), rect)
+            self._draw_hist_channel(painter, self.histogram_data[1], QColor(0, 255, 0, 100), rect)
+            self._draw_hist_channel(painter, self.histogram_data[2], QColor(0, 0, 255, 100), rect)
         elif self.active_channel == "Red":
-            self._draw_hist_channel(painter, self.histogram_data[0], QColor(255, 0, 0, 150), w, h)
+            self._draw_hist_channel(painter, self.histogram_data[0], QColor(255, 0, 0, 150), rect)
         elif self.active_channel == "Green":
-            self._draw_hist_channel(painter, self.histogram_data[1], QColor(0, 255, 0, 150), w, h)
+            self._draw_hist_channel(painter, self.histogram_data[1], QColor(0, 255, 0, 150), rect)
         elif self.active_channel == "Blue":
-            self._draw_hist_channel(painter, self.histogram_data[2], QColor(0, 0, 255, 150), w, h)
+            self._draw_hist_channel(painter, self.histogram_data[2], QColor(0, 0, 255, 150), rect)
 
-    def _draw_hist_channel(self, painter: QPainter, data: np.ndarray, color: QColor, w: int, h: int) -> None:
+    def _draw_hist_channel(self, painter: QPainter, data: np.ndarray, color: QColor, rect: QRectF) -> None:
+        w = rect.width()
+        h = rect.height()
+        left = rect.left()
+        bottom = rect.bottom()
         path = QPainterPath()
-        path.moveTo(0, h)
-        bin_width = w / 256.0
+        path.moveTo(left, bottom)
+        bin_width = w / 256.0 if w else 0.0
         for i, val in enumerate(data):
             x = i * bin_width
-            y = h - (val * h * 0.9)
+            y = bottom - (val * h * 0.9)
             if i == 0:
-                path.lineTo(x, y)
-            path.lineTo((i + 0.5) * bin_width, y)
-        path.lineTo(w, h)
+                path.lineTo(left + x, y)
+            path.lineTo(left + (i + 0.5) * bin_width, y)
+        path.lineTo(left + w, bottom)
         painter.setPen(Qt.NoPen)
         painter.setBrush(color)
         painter.drawPath(path)
 
-    def _draw_curve(self, painter: QPainter, w: int, h: int) -> None:
+    def _draw_curve(self, painter: QPainter, rect: QRectF) -> None:
         spline = self.splines.get(self.active_channel)
         if spline is None:
             return
@@ -457,7 +469,7 @@ class CurveGraph(QWidget):
         }
         pen_color = color_map.get(self.active_channel, QColor("white"))
 
-        steps = max(w // 2, 100)
+        steps = max(int(rect.width()) // 2, 100)
         xs = np.linspace(0, 1, steps)
         ys = spline.evaluate(xs)
 
@@ -474,8 +486,8 @@ class CurveGraph(QWidget):
             else:
                 y_val = ys[i]
 
-            cx = x_val * w
-            cy = h - y_val * h
+            cx = rect.left() + x_val * rect.width()
+            cy = rect.bottom() - y_val * rect.height()
 
             if first_pt:
                 path.moveTo(cx, cy)
@@ -490,7 +502,7 @@ class CurveGraph(QWidget):
     def mousePressEvent(self, event: QMouseEvent) -> None:
         self.interactionStarted.emit()
         pos = event.position()
-        w, h = self.width(), self.height()
+        graph_rect = self._graph_rect(self.width(), self.height())
 
         points = self.channels[self.active_channel]
 
@@ -499,7 +511,7 @@ class CurveGraph(QWidget):
         min_dist_sq = float("inf")
 
         for i, p in enumerate(points):
-            sx, sy = p.x() * w, h - p.y() * h
+            sx, sy = self._point_to_screen(p, graph_rect)
             dist_sq = (pos.x() - sx) ** 2 + (pos.y() - sy) ** 2
             if dist_sq < hit_radius_sq:
                 if dist_sq < min_dist_sq:
@@ -514,14 +526,12 @@ class CurveGraph(QWidget):
                 self._update_spline_and_emit()
         else:
             # Add point
-            nx = max(0.0, min(1.0, pos.x() / w))
+            nx, ny = self._screen_to_point(pos, graph_rect)
             insert_i = len(points)
             for i, p in enumerate(points):
                 if p.x() > nx:
                     insert_i = i
                     break
-
-            ny = max(0.0, min(1.0, (h - pos.y()) / h))
 
             prev_x = points[insert_i - 1].x() if insert_i > 0 else 0
             next_x = points[insert_i].x() if insert_i < len(points) else 1
@@ -537,10 +547,9 @@ class CurveGraph(QWidget):
         if self.dragging and self.selected_index != -1:
             points = self.channels[self.active_channel]
             pos = event.position()
-            w, h = self.width(), self.height()
+            graph_rect = self._graph_rect(self.width(), self.height())
 
-            nx = max(0.0, min(1.0, pos.x() / w))
-            ny = max(0.0, min(1.0, (h - pos.y()) / h))
+            nx, ny = self._screen_to_point(pos, graph_rect)
 
             if self.selected_index == 0:
                 if len(points) > 1:
@@ -615,6 +624,24 @@ class CurveGraph(QWidget):
         self._recalculate_spline(self.active_channel)
         self.curveChanged.emit()
         self.update()
+
+    def _graph_rect(self, width: int, height: int) -> QRectF:
+        inset = float(self.GRAPH_INSET)
+        rect_width = max(1.0, width - inset * 2)
+        rect_height = max(1.0, height - inset * 2)
+        return QRectF(inset, inset, rect_width, rect_height)
+
+    def _point_to_screen(self, point: QPointF, rect: QRectF) -> Tuple[float, float]:
+        sx = rect.left() + point.x() * rect.width()
+        sy = rect.bottom() - point.y() * rect.height()
+        return sx, sy
+
+    def _screen_to_point(self, pos: QPointF, rect: QRectF) -> Tuple[float, float]:
+        if rect.width() <= 0 or rect.height() <= 0:
+            return 0.0, 0.0
+        nx = (pos.x() - rect.left()) / rect.width()
+        ny = (rect.bottom() - pos.y()) / rect.height()
+        return max(0.0, min(1.0, nx)), max(0.0, min(1.0, ny))
 
 
 class EditCurveSection(QWidget):

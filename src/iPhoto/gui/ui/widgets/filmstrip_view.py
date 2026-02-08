@@ -149,6 +149,7 @@ class FilmstripView(AssetGrid):
             selected_index = (
                 selection_model.currentIndex() if selection_model is not None else QModelIndex()
             )
+            # Prefer the selection model's current index before considering the changed rows.
             current_index = self._find_current_index([selected_index, top, bottom])
             if current_index is not None:
                 current_row = current_index.row()

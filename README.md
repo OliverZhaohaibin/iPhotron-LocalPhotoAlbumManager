@@ -32,7 +32,7 @@
 
 ## 🌟 Overview
 
-**iPhoto** is a **folder-native photo manager** inspired by macOS *Photos*.  
+**iPhotron** is a **folder-native photo manager** inspired by macOS *Photos*.  
 It organizes your media using lightweight JSON manifests and cache files —  
 offering rich album functionality while **keeping all original files intact**.
 
@@ -415,5 +415,5 @@ pytest
 **MIT License © 2025**  
 Created by **Haibin Zhao (OliverZhaohaibin)**  
 
-> *iPhoto — A folder-native, human-readable, and fully rebuildable photo system.*  
+> *iPhotron — A folder-native, human-readable, and fully rebuildable photo system.*  
 > *No imports. No database. Just your photos, organized elegantly.*

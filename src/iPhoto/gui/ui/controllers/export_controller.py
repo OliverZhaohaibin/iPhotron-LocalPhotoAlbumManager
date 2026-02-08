@@ -223,7 +223,7 @@ class ExportController(QObject):
         self._status_bar.show_message(f"Exporting {current}/{total}...")
 
     def _on_finished(self, success: int, fail: int) -> None:
-        msg = f"Export complete. {success} exported"
+        msg = f"{success} media exported"
         if fail > 0:
             msg += f", {fail} failed"
         self._status_bar.show_message(msg, 5000)

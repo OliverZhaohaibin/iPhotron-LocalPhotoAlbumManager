@@ -405,7 +405,7 @@ class EditSelectiveColorSection(QWidget):
 
     def _on_session_value_changed(self, key: str, _value: object) -> None:
         if key == "SelectiveColor_Enabled":
-            self._apply_enabled_state(bool(self._session.value("SelectiveColor_Enabled")))  # type: ignore[union-attr]
+            self._apply_enabled_state(bool(_value))
             return
         if key == "SelectiveColor_Ranges":
             self.refresh_from_session()
@@ -634,7 +634,7 @@ class EditSelectiveColorSection(QWidget):
         # Deactivate the eyedropper after picking
         self.deactivate_eyedropper()
 
-    def mousePressEvent(self, event: QMouseEvent) -> None:  # type: ignore[override]
+    def mousePressEvent(self, event: QMouseEvent) -> None:
         """Enable the section on click when it is currently disabled."""
         if event.button() == Qt.MouseButton.LeftButton:
             if self._session is not None and not self._session.value("SelectiveColor_Enabled"):

@@ -149,7 +149,8 @@ class FilmstripView(AssetGrid):
             selected_current_index = (
                 selection_model.currentIndex() if selection_model else QModelIndex()
             )
-            # Search in priority order: selection model current index, then changed rows.
+            # Search in priority order: selection model current index, then top/bottom changed rows
+            # (top first to prefer the earliest changed row).
             current_index = self._find_current_index([selected_current_index, top, bottom])
             if current_index is not None:
                 current_row = current_index.row()
@@ -164,8 +165,12 @@ class FilmstripView(AssetGrid):
             return False
         return bool(index.data(Roles.IS_CURRENT))
 
-    def _find_current_index(self, indices: list[QModelIndex]) -> QModelIndex | None:
-        for index in indices:
+    def _find_current_index(
+        self,
+        candidate_indices: list[QModelIndex],
+    ) -> QModelIndex | None:
+        # Preserve the provided order so callers can control search priority.
+        for index in candidate_indices:
             if not index.isValid():
                 continue
             if self._is_current_thumbnail(index):

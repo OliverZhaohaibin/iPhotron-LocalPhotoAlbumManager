@@ -31,6 +31,7 @@ from ..models.edit_session import EditSession
 from ..icon import load_icon
 
 _LOGGER = logging.getLogger(__name__)
+_HANDLE_EDGE_PADDING = 8
 
 
 class _StyledComboBox(QComboBox):
@@ -107,7 +108,7 @@ class InputLevelSliders(QWidget):
         self.hit_padding_y = 5
         self.bezier_ctrl_y_factor = 0.4
         self.bezier_ctrl_x_factor = 0.5
-        self.margin_side = 8
+        self.margin_side = _HANDLE_EDGE_PADDING
 
     def setBlackPoint(self, val: float) -> None:
         self._black_val = max(0.0, min(val, self._white_val - self.limit_gap))
@@ -126,7 +127,9 @@ class InputLevelSliders(QWidget):
         painter.fillRect(self.rect(), QColor("#222222"))
 
         # Draw handles
-        track_width = max(1, w - 2 * self.margin_side)
+        track_width = w - 2 * self.margin_side
+        if track_width <= 0:
+            return
         self._draw_handle(
             painter,
             self.margin_side + self._black_val * track_width,
@@ -243,7 +246,7 @@ class CurveGraph(QWidget):
         super().__init__(parent)
         self.setFixedSize(size, size)
         self.setStyleSheet("background-color: #2b2b2b;")
-        self.edge_padding = 8
+        self.edge_padding = _HANDLE_EDGE_PADDING
 
         # Independent data models for each channel
         self.active_channel = "RGB"

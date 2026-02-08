@@ -160,7 +160,8 @@ class EditSidebar(QWidget):
             "sun.max.svg",
             self._light_section,
             scroll_content,
-            title_font=Edit_SIDEBAR_FONT
+            title_font=Edit_SIDEBAR_FONT,
+            icon_scale=1.2
         )
 
         self.light_reset_button = QToolButton(self._light_section_container)
@@ -347,7 +348,7 @@ class EditSidebar(QWidget):
             self._selective_color_section,
             scroll_content,
             title_font=Edit_SIDEBAR_FONT,
-            icon_scale=1.3,
+            icon_scale=1.5,
         )
         self._selective_color_section_container.set_expanded(False)
 

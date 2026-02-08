@@ -15,7 +15,7 @@ from ..palette import SIDEBAR_SELECTED_BACKGROUND, SIDEBAR_ICON_COLOR
 
 if TYPE_CHECKING:
     from ..ui_main_window import Ui_MainWindow
-    from .detail_ui_controller import DetailUIController
+
 
 
 class WindowThemeController(QObject):
@@ -138,8 +138,10 @@ class WindowThemeController(QObject):
             f"QWidget#windowTitleBar QLabel {{ color: {fg_color}; }}\n"
             f"QWidget#windowTitleBar QToolButton {{ color: {fg_color}; }}"
         )
+        separator_color = "#C0C0C0" if not colors.is_dark else outline_color
+        # Use light gray for the separator in light mode; otherwise use outline_color
         self._ui.title_separator.setStyleSheet(
-            f"QFrame#windowTitleSeparator {{ background-color: {outline_color}; border: none; }}"
+            f"QFrame#windowTitleSeparator {{ background-color: {separator_color}; border: none; }}"
         )
 
         # Menu Bar

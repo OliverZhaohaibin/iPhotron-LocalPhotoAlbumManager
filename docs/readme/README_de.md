@@ -78,8 +78,10 @@ Eine umfassende Bearbeitungssuite mit **Anpassen**- und **Zuschneiden**-Modi:
 - **Tonwerte:** 5-Punkt-Eingangs-Ausgangs-Tonzuordnung mit Histogramm-Hintergrund und kanalbasierter Steuerung
 - **Master-Schieberegler:** Jeder Abschnitt verfügt über einen intelligenten Master-Schieberegler, der Werte auf mehrere Feinabstimmungssteuerungen verteilt
 - **Live-Miniaturansichten:** Echtzeit-Vorschaustreifen, die den Effektbereich für jede Anpassung zeigen
-<img width="1925" height="1086" alt="image" src="https://github.com/user-attachments/assets/9ac3095a-4be4-48fa-84cc-db0a3d58fe16" />
 
+![edit interface](../editview.png)
+![edit interface](../professionaltools.png)
+- 
 #### Zuschneiden-Modus
 - **Perspektivkorrektur:** Vertikale und horizontale Trapezverzerrungsanpassungen
 - **Ausrichten-Werkzeug:** ±45° Drehung mit Sub-Grad-Präzision
@@ -87,7 +89,7 @@ Eine umfassende Bearbeitungssuite mit **Anpassen**- und **Zuschneiden**-Modi:
 - **Interaktives Zuschneiderechteck:** Ziehbare Griffe, Kantenfang und Seitenverhältnisbeschränkungen
 - **Schwarzrand-Prävention:** Automatische Validierung stellt sicher, dass nach Perspektivtransformationen keine schwarzen Kanten erscheinen
   
-<img width="1925" height="1086" alt="image" src="https://github.com/user-attachments/assets/6a5e927d-3403-4c22-9512-7564a0f24702" />
+![crop interface](../cropview.png)
 Alle Bearbeitungen werden in `.ipo`-Sidecar-Dateien gespeichert und bewahren die Originalfotos unberührt.
 
 ### ℹ️ Schwebendes Info-Panel

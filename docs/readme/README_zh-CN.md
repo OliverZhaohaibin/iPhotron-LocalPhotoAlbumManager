@@ -78,8 +78,8 @@
 - **色阶：** 5 点输入-输出色调映射，带有直方图背景和单通道控制
 - **主滑块：** 每个部分都有一个智能主滑块，可在多个微调控件之间分配值
 - **实时缩略图：** 实时预览条显示每个调整的效果范围
-<img width="1925" height="1086" alt="image" src="https://github.com/user-attachments/assets/9ac3095a-4be4-48fa-84cc-db0a3d58fe16" />
-
+![edit interface](../editview.png)
+![edit interface](../professionaltools.png)
 #### 裁剪模式
 - **透视校正：** 垂直和水平梯形失真调整
 - **拉直工具：** ±45° 旋转，亚度精度
@@ -87,7 +87,7 @@
 - **交互式裁剪框：** 拖动手柄、边缘吸附和宽高比约束
 - **黑边防止：** 自动验证确保透视变换后不出现黑边
   
-<img width="1925" height="1086" alt="image" src="https://github.com/user-attachments/assets/6a5e927d-3403-4c22-9512-7564a0f24702" />
+![crop interface](../cropview.png)
 所有编辑都存储在 `.ipo` 附属文件中，保持原始照片不被触动。
 
 ### ℹ️ 浮动信息面板

@@ -69,8 +69,10 @@ class CollapsibleSection(QFrame):
 
         icon = load_icon(icon_name)
         icon_size = max(1, int(round(self._DEFAULT_ICON_SIZE * icon_scale)))
+        self._icon_size = icon_size
         icon_label = QLabel(self._header)
         icon_label.setPixmap(icon.pixmap(icon_size, icon_size))
+        icon_label.setFixedSize(icon_size, icon_size)
         icon_label.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         header_layout.addWidget(icon_label)
         # ``_icon_label`` and ``_icon_name`` are retained so other components can recolour the

@@ -149,9 +149,9 @@ class TestWorkerYielding:
             mock_msleep.assert_has_calls([call(10), call(10)])
 
     @patch("iPhoto.gui.ui.tasks.asset_loader_worker.QThread")
-    @patch("iPhoto.gui.ui.tasks.asset_loader_worker.IndexStore")
+    @patch("iPhoto.gui.ui.tasks.asset_loader_worker.get_global_repository")
     @patch("iPhoto.gui.ui.tasks.asset_loader_worker.ensure_work_dir")
-    def test_asset_loader_worker_yielding(self, mock_ensure, MockIndexStore, MockQThread):
+    def test_asset_loader_worker_yielding(self, mock_ensure, mock_get_repo, MockQThread):
         """Test that AssetLoaderWorker sets low priority and sleeps periodically."""
 
         # Mock QThread.currentThread().setPriority
@@ -160,7 +160,7 @@ class TestWorkerYielding:
         MockQThread.LowPriority = QThread.LowPriority # Preserve constant
 
         # Mock Store and Generator
-        mock_store = MockIndexStore.return_value
+        mock_store = mock_get_repo.return_value
         # Mock the context manager __enter__ return value
         mock_store.transaction.return_value.__enter__.return_value = None
         # IMPORTANT: Mock count to return an integer, otherwise comparison fails!
@@ -195,7 +195,7 @@ class TestWorkerYielding:
                 pytest.fail(f"Worker emitted error: {signals.error.call_args}")
 
             if not generator_ran:
-                pytest.fail("Generator was not called! IndexStore logic skipped?")
+                pytest.fail("Generator was not called! AssetRepository logic skipped?")
 
             # Check priority set
             mock_thread_instance.setPriority.assert_called_with(QThread.LowPriority)

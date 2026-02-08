@@ -7,7 +7,7 @@ from pathlib import Path
 
 from PySide6.QtCore import QModelIndex, QObject, QRect
 
-from ..models.asset_model import Roles
+from ..models.roles import Roles
 from ..widgets.asset_grid import AssetGrid
 from ..widgets.preview_window import PreviewWindow
 

@@ -37,7 +37,7 @@ def test_init_accepts_callback(mock_dependencies):
     )
 
 
-@patch("iPhoto.gui.ui.controllers.context_menu_controller.QMenu")
+@patch("src.iPhoto.gui.ui.controllers.context_menu_controller.QMenu")
 def test_export_action_present_when_selected(mock_qmenu_cls, mock_dependencies):
     """Verify 'Export' action is added when items are selected."""
 
@@ -77,7 +77,7 @@ def test_export_action_present_when_selected(mock_qmenu_cls, mock_dependencies):
     mock_action.triggered.connect.assert_any_call(mock_dependencies["export_callback"])
 
 
-@patch("iPhoto.gui.ui.controllers.context_menu_controller.QMenu")
+@patch("src.iPhoto.gui.ui.controllers.context_menu_controller.QMenu")
 def test_export_action_absent_when_no_selection(mock_qmenu_cls, mock_dependencies):
     """Verify 'Export' action is NOT added when no items are selected."""
 

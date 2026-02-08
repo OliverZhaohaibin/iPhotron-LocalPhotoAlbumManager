@@ -3,14 +3,21 @@
 from __future__ import annotations
 
 from collections import OrderedDict
-from typing import Dict, Iterable, Mapping
+from typing import Any, Dict, Iterable, List, Mapping, Tuple
 
 from PySide6.QtCore import QObject, Signal
 
 from ....core.light_resolver import LIGHT_KEYS
 from ....core.color_resolver import COLOR_KEYS, COLOR_RANGES, ColorStats
+from ....core.curve_resolver import DEFAULT_CURVE_POINTS
+from ....core.levels_resolver import DEFAULT_LEVELS_HANDLES
+from ....core.selective_color_resolver import DEFAULT_SELECTIVE_COLOR_RANGES
 
 _BW_RANGE_KEYS = {"BW_Master", "BW_Intensity", "BW_Neutrals", "BW_Tone"}
+
+# Keys that store list data (curve control points, levels handles) instead of floats
+_CURVE_LIST_KEYS = {"Curve_RGB", "Curve_Red", "Curve_Green", "Curve_Blue"}
+_LIST_KEYS = _CURVE_LIST_KEYS | {"Levels_Handles", "SelectiveColor_Ranges"}
 
 
 def _coerce_bw_range(key: str, value: float) -> float:
@@ -35,7 +42,7 @@ class EditSession(QObject):
 
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
-        self._values: "OrderedDict[str, float | bool]" = OrderedDict()
+        self._values: "OrderedDict[str, float | bool | List[Tuple[float, float]]]" = OrderedDict()
         self._ranges: dict[str, tuple[float, float]] = {}
         self._color_stats: ColorStats | None = None
         # The master slider value feeds the resolver that generates the derived light adjustments.
@@ -104,14 +111,58 @@ class EditSession(QObject):
         self._values["Crop_FlipH"] = False
         self._ranges["Crop_FlipH"] = (-1.0, 1.0)
 
+        # White Balance parameters.
+        self._values["WB_Enabled"] = False
+        self._ranges["WB_Enabled"] = (0.0, 1.0)
+        self._values["WB_Warmth"] = 0.0
+        self._ranges["WB_Warmth"] = (-1.0, 1.0)
+        self._values["WB_Temperature"] = 0.0
+        self._ranges["WB_Temperature"] = (-1.0, 1.0)
+        self._values["WB_Tint"] = 0.0
+        self._ranges["WB_Tint"] = (-1.0, 1.0)
+
+        # Curve adjustment parameters store control point lists for each channel.
+        # ``Curve_Enabled`` toggles whether curve adjustments are applied.
+        self._values["Curve_Enabled"] = False
+        self._ranges["Curve_Enabled"] = (0.0, 1.0)
+        # Each curve channel stores a list of (x, y) control points.
+        # Default is identity: [(0.0, 0.0), (1.0, 1.0)]
+        self._values["Curve_RGB"] = list(DEFAULT_CURVE_POINTS)
+        self._values["Curve_Red"] = list(DEFAULT_CURVE_POINTS)
+        self._values["Curve_Green"] = list(DEFAULT_CURVE_POINTS)
+        self._values["Curve_Blue"] = list(DEFAULT_CURVE_POINTS)
+
+        # Levels adjustment parameters store the 5 handle positions.
+        # ``Levels_Enabled`` toggles whether levels adjustments are applied.
+        self._values["Levels_Enabled"] = False
+        self._ranges["Levels_Enabled"] = (0.0, 1.0)
+        self._values["Levels_Handles"] = list(DEFAULT_LEVELS_HANDLES)
+
+        # Selective Color parameters store per-range adjustment data for 6 hue
+        # ranges.  Each range is a list [center_hue, range_slider, hue_shift,
+        # sat_adj, lum_adj].
+        self._values["SelectiveColor_Enabled"] = False
+        self._ranges["SelectiveColor_Enabled"] = (0.0, 1.0)
+        self._values["SelectiveColor_Ranges"] = [
+            list(r) for r in DEFAULT_SELECTIVE_COLOR_RANGES
+        ]
+
     # ------------------------------------------------------------------
     # Accessors
-    def value(self, key: str) -> float | bool:
+    def value(self, key: str) -> float | bool | List[Tuple[float, float]]:
         """Return the stored value for *key*, defaulting to ``0.0`` or ``False``."""
 
-        return self._values.get(key, 0.0)
+        default: Any = 0.0
+        if key in _LIST_KEYS:
+            if key == "Levels_Handles":
+                default = list(DEFAULT_LEVELS_HANDLES)
+            elif key == "SelectiveColor_Ranges":
+                default = [list(r) for r in DEFAULT_SELECTIVE_COLOR_RANGES]
+            else:
+                default = list(DEFAULT_CURVE_POINTS)
+        return self._values.get(key, default)
 
-    def values(self) -> Dict[str, float | bool]:
+    def values(self) -> Dict[str, float | bool | List[Tuple[float, float]]]:
         """Return a shallow copy of every stored adjustment."""
 
         return dict(self._values)
@@ -124,6 +175,23 @@ class EditSession(QObject):
         if key not in self._values:
             return
         current = self._values[key]
+
+        # Handle list data (curve control points, levels handles)
+        if key in _LIST_KEYS:
+            if not isinstance(value, list):
+                return
+            # Deep copy the list to avoid reference issues
+            if key in _CURVE_LIST_KEYS:
+                normalised = [tuple(pt) for pt in value]
+            else:
+                normalised = list(value)
+            if normalised == current:
+                return
+            self._values[key] = normalised
+            self.valueChanged.emit(key, normalised)
+            self.valuesChanged.emit(self.values())
+            return
+
         if isinstance(current, bool):
             normalised = bool(value)
             if normalised is current:
@@ -138,14 +206,29 @@ class EditSession(QObject):
         self.valueChanged.emit(key, normalised)
         self.valuesChanged.emit(self.values())
 
-    def set_values(self, updates: Mapping[str, float | bool], *, emit_individual: bool = True) -> None:
+    def set_values(self, updates: Mapping[str, float | bool | List[Tuple[float, float]]], *, emit_individual: bool = True) -> None:
         """Update multiple *updates* at once."""
 
-        changed: list[tuple[str, float | bool]] = []
+        changed: list[tuple[str, float | bool | List[Tuple[float, float]]]] = []
         for key, value in updates.items():
             if key not in self._values:
                 continue
             current = self._values[key]
+
+            # Handle list data (curve control points, levels handles)
+            if key in _LIST_KEYS:
+                if not isinstance(value, list):
+                    continue
+                if key in _CURVE_LIST_KEYS:
+                    normalised = [tuple(pt) for pt in value]
+                else:
+                    normalised = list(value)
+                if normalised == current:
+                    continue
+                self._values[key] = normalised
+                changed.append((key, normalised))
+                continue
+
             if isinstance(current, bool):
                 normalised = bool(value)
                 if normalised is current:
@@ -168,7 +251,7 @@ class EditSession(QObject):
     def reset(self) -> None:
         """Restore the master and fine-tuning adjustments to their defaults."""
 
-        defaults: dict[str, float | bool] = {
+        defaults: dict[str, float | bool | List[Tuple[float, float]]] = {
             "Light_Master": 0.0,
             "Light_Enabled": True,
             "Color_Master": 0.0,
@@ -184,6 +267,12 @@ class EditSession(QObject):
             "BW_Tone": 0.0,
             "BW_Grain": 0.0,
         })
+        defaults.update({
+            "WB_Enabled": False,
+            "WB_Warmth": 0.0,
+            "WB_Temperature": 0.0,
+            "WB_Tint": 0.0,
+        })
         defaults.update(
             {
                 "Crop_CX": 0.5,
@@ -197,6 +286,24 @@ class EditSession(QObject):
                 "Crop_FlipH": False,
             }
         )
+        # Curve defaults
+        defaults.update({
+            "Curve_Enabled": False,
+            "Curve_RGB": list(DEFAULT_CURVE_POINTS),
+            "Curve_Red": list(DEFAULT_CURVE_POINTS),
+            "Curve_Green": list(DEFAULT_CURVE_POINTS),
+            "Curve_Blue": list(DEFAULT_CURVE_POINTS),
+        })
+        # Levels defaults
+        defaults.update({
+            "Levels_Enabled": False,
+            "Levels_Handles": list(DEFAULT_LEVELS_HANDLES),
+        })
+        # Selective Color defaults
+        defaults.update({
+            "SelectiveColor_Enabled": False,
+            "SelectiveColor_Ranges": [list(r) for r in DEFAULT_SELECTIVE_COLOR_RANGES],
+        })
         self.set_values(defaults, emit_individual=True)
         self.resetPerformed.emit()
 

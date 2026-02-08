@@ -1,0 +1,35 @@
+<svg xmlns="http://www.w3.org/2000/svg"
+     width="110" height="110"
+     viewBox="4.8 4.8 38.4 38.4"
+     fill="none">
+  <rect x="6" y="6" width="36" height="36" rx="4"
+        stroke="currentColor" stroke-width="2.4"/>
+
+  <path d="M18 10.4V37.6
+           M30 10.4V37.6
+           M10.4 18H37.6
+           M10.4 30H37.6"
+        stroke="currentColor"
+        stroke-width="2.4"
+        stroke-linecap="round"/>
+
+  <path d="M10.4 37.6
+           L10.4 25
+           L13 30
+           L15 16
+           L17 28
+           L18.5 20
+           L20 32
+           L22 26
+           L23.5 36
+           L25 22
+           L27 30
+           L29 18
+           L30.5 28
+           L32 24
+           L34 34
+           L37.6 27
+           L37.6 37.6
+           Z"
+        fill="currentColor"/>
+</svg>

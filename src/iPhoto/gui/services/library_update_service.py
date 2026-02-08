@@ -9,6 +9,7 @@ from typing import Callable, Dict, Iterable, List, Optional, Sequence, Set, Tupl
 from PySide6.QtCore import QObject, QTimer, Signal, Slot
 
 from ... import app as backend
+from ...cache.index_store import get_global_repository
 from ...config import RECENTLY_DELETED_DIR_NAME, WORK_DIR_NAME
 from ...errors import IPhotoError
 from ..background_task_manager import BackgroundTaskManager
@@ -366,7 +367,7 @@ class LibraryUpdateService(QObject):
                         # Resolution failed: do not attempt a global read_all().
                         album_path = None
                         allow_read_all = False
-                store = backend.IndexStore(db_root)
+                store = get_global_repository(db_root)
                 if album_path:
                     row_iter = store.read_album_assets(album_path, include_subalbums=True)
                 elif allow_read_all:
@@ -403,7 +404,7 @@ class LibraryUpdateService(QObject):
             # Persist the freshly computed index snapshot immediately so future
             # reloads observe the new metadata rather than the stale cache that
             # existed before the rescan.  The worker keeps the result in memory,
-            # therefore we flush both ``index.jsonl`` and ``links.json`` here to
+            # therefore we flush the global index and ``links.json`` here to
             # mirror the historical facade behaviour before notifying listeners.
             backend._update_index_snapshot(root, materialised_rows, library_root=library_root)
             backend._ensure_links(root, materialised_rows, library_root=library_root)

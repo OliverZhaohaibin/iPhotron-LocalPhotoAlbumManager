@@ -14,7 +14,6 @@ from ..ui.tasks.move_worker import MoveSignals, MoveWorker
 if TYPE_CHECKING:
     from ...library.manager import LibraryManager
     from ...models.album import Album
-    from ..ui.models.asset_list.model import AssetListModel
 
 
 class AssetMoveService(QObject):
@@ -36,14 +35,12 @@ class AssetMoveService(QObject):
         self,
         *,
         task_manager: BackgroundTaskManager,
-        asset_list_model_provider: Callable[[], "AssetListModel"],
         current_album_getter: Callable[[], Optional["Album"]],
         library_manager_getter: Callable[[], Optional["LibraryManager"]],
         parent: Optional[QObject] = None,
     ) -> None:
         super().__init__(parent)
         self._task_manager = task_manager
-        self._asset_list_model_provider = asset_list_model_provider
         self._current_album_getter = current_album_getter
         self._library_manager_getter = library_manager_getter
 
@@ -64,32 +61,34 @@ class AssetMoveService(QObject):
         """
 
         operation_normalized = operation.lower()
-        list_model = self._asset_list_model_provider()
 
         if operation_normalized not in {"move", "delete", "restore"}:
             self.errorRaised.emit(f"Unsupported move operation: {operation}")
-            list_model.rollback_pending_moves()
             return
 
         album = self._current_album_getter()
-        if album is None:
-            list_model.rollback_pending_moves()
-            self.errorRaised.emit("No album is currently open.")
-            return
-        source_root = album.root
+        library_manager = self._library_manager_getter()
+        library_root = library_manager.root() if library_manager is not None else None
+        if operation_normalized == "delete" and library_root is not None:
+            source_root = library_root
+        elif album is None:
+            if library_root is None:
+                self.errorRaised.emit("No album is currently open.")
+                return
+            source_root = library_root
+        else:
+            source_root = album.root
 
         try:
             destination_root = Path(destination).resolve()
         except OSError as exc:
             self.errorRaised.emit(f"Invalid destination: {exc}")
-            list_model.rollback_pending_moves()
             return
 
         if not destination_root.exists() or not destination_root.is_dir():
             self.errorRaised.emit(
                 f"Move destination is not a directory: {destination_root}"
             )
-            list_model.rollback_pending_moves()
             return
 
         if destination_root == source_root:
@@ -99,7 +98,6 @@ class AssetMoveService(QObject):
                 False,
                 "Files are already located in this album.",
             )
-            list_model.rollback_pending_moves()
             return
 
         normalized: List[Path] = []
@@ -138,7 +136,6 @@ class AssetMoveService(QObject):
                 False,
                 "No valid files were selected for moving.",
             )
-            list_model.rollback_pending_moves()
             return
 
         rel_paths: List[str] = []
@@ -152,11 +149,8 @@ class AssetMoveService(QObject):
         signals.started.connect(self._on_move_started)
         signals.progress.connect(self._on_move_progress)
 
-        library_root: Optional[Path] = None
         trash_root: Optional[Path] = None
-        library_manager = self._library_manager_getter()
         if library_manager is not None:
-            library_root = library_manager.root()
             trash_candidate = library_manager.deleted_directory()
             if trash_candidate is not None:
                 try:
@@ -174,14 +168,12 @@ class AssetMoveService(QObject):
         is_restore_operation = operation_normalized == "restore"
 
         if is_delete_operation and library_root is None:
-            list_model.rollback_pending_moves()
             self.errorRaised.emit(
                 "Basic Library root is unavailable; cannot delete items safely."
             )
             return
 
         if is_delete_operation and trash_root is None:
-            list_model.rollback_pending_moves()
             self.errorRaised.emit("Recently Deleted folder is unavailable.")
             return
 
@@ -189,7 +181,6 @@ class AssetMoveService(QObject):
             if trash_root is None:
                 trash_root = library_manager.deleted_directory() if library_manager else None
             if trash_root is None:
-                list_model.rollback_pending_moves()
                 self.errorRaised.emit("Recently Deleted folder is unavailable.")
                 return
             try:
@@ -201,7 +192,6 @@ class AssetMoveService(QObject):
             except OSError:
                 trash_resolved = trash_root
             if source_resolved != trash_resolved:
-                list_model.rollback_pending_moves()
                 self.errorRaised.emit(
                     "Restore operations must be triggered from Recently Deleted."
                 )
@@ -211,7 +201,6 @@ class AssetMoveService(QObject):
             except OSError:
                 destination_resolved = destination_root
             if destination_resolved == trash_resolved:
-                list_model.rollback_pending_moves()
                 self.errorRaised.emit("Cannot restore items back into Recently Deleted.")
                 return
 
@@ -221,13 +210,6 @@ class AssetMoveService(QObject):
                 is_source_main_view = library_root.resolve() == source_root.resolve()
             except OSError:
                 is_source_main_view = library_root == source_root
-
-        if operation_normalized == "move" and rel_paths:
-            list_model.update_rows_for_move(
-                rel_paths,
-                destination_root,
-                is_source_main_view=is_source_main_view,
-            )
 
         worker = MoveWorker(
             normalized,
@@ -273,13 +255,11 @@ class AssetMoveService(QObject):
         destination_ok: bool,
         worker: MoveWorker,
     ) -> None:
-        """Mirror worker completion back into the optimistic UI state."""
+        """Process worker completion and emit appropriate signals."""
 
-        list_model = self._asset_list_model_provider()
         moved_pairs = [(Path(src), Path(dst)) for src, dst in moved]
 
         if worker.cancelled:
-            list_model.rollback_pending_moves()
             self.moveFinished.emit(
                 source_root,
                 destination_root,
@@ -302,11 +282,6 @@ class AssetMoveService(QObject):
             worker.is_trash_destination,
             worker.is_restore_operation,
         )
-
-        if moved_pairs:
-            list_model.finalise_move_results(moved_pairs)
-        if list_model.has_pending_move_placeholders():
-            list_model.rollback_pending_moves()
 
         delete_operation = worker.is_trash_destination and not worker.is_restore_operation
         restore_operation = worker.is_restore_operation

@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Optional
 
 
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor, QPalette, QFont
 from PySide6.QtWidgets import (
     QFrame,
@@ -135,7 +135,7 @@ class CollapsibleSection(QFrame):
 
         self._update_header_icon()
 
-        QTimer.singleShot(0, self._update_content_geometry)
+        self._update_content_geometry()
 
     def is_expanded(self) -> bool:
         """Return ``True`` when the section currently displays its content."""

@@ -349,7 +349,7 @@ class EditSidebar(QWidget):
             self._selective_color_section,
             scroll_content,
             title_font=Edit_SIDEBAR_FONT,
-            icon_scale=0.98
+            icon_scale=0.95
         )
         self._selective_color_section_container.set_expanded(False)
 

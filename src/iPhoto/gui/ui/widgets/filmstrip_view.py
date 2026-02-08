@@ -148,13 +148,13 @@ class FilmstripView(AssetGrid):
             current_index = None
             selection_model = self.selectionModel()
             if selection_model is not None:
-                candidate = selection_model.currentIndex()
-                if self._is_current_thumbnail(candidate):
-                    current_index = candidate
+                selected_index = selection_model.currentIndex()
+                if self._is_current_thumbnail(selected_index):
+                    current_index = selected_index
             if current_index is None:
-                for candidate in (top, bottom):
-                    if self._is_current_thumbnail(candidate):
-                        current_index = candidate
+                for changed_index in (top, bottom):
+                    if self._is_current_thumbnail(changed_index):
+                        current_index = changed_index
                         break
             if current_index is not None:
                 current_row = current_index.row()

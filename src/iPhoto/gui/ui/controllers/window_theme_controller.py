@@ -244,12 +244,13 @@ class WindowThemeController(QObject):
             section.set_toggle_icon_tint(colors.text_primary)
             icon_label = getattr(section, "_icon_label", None)
             icon_name = getattr(section, "_icon_name", "")
+            icon_size = getattr(section, "_icon_size", 20)
             if icon_label and icon_name:
                 # Some icons have native colors
                 if icon_name in {"color.circle.svg", "checkmark.svg", "whitebalance.square.svg", "selectivecolor.svg"}:
-                    icon_label.setPixmap(load_icon(icon_name).pixmap(20, 20))
+                    icon_label.setPixmap(load_icon(icon_name).pixmap(icon_size, icon_size))
                 else:
-                    icon_label.setPixmap(load_icon(icon_name, color=icon_color).pixmap(20, 20))
+                    icon_label.setPixmap(load_icon(icon_name, color=icon_color).pixmap(icon_size, icon_size))
 
         self._ui.edit_sidebar.set_control_icon_tint(colors.text_primary)
 

@@ -131,6 +131,8 @@ class EditSidebar(QWidget):
         scroll = QScrollArea(adjust_container)
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
 
         # Ensure the scroll surface shares the same tint so the viewport and the
         # surrounding frame render as a single continuous panel.
@@ -160,7 +162,8 @@ class EditSidebar(QWidget):
             "sun.max.svg",
             self._light_section,
             scroll_content,
-            title_font=Edit_SIDEBAR_FONT
+            title_font=Edit_SIDEBAR_FONT,
+            icon_scale=1.25
         )
 
         self.light_reset_button = QToolButton(self._light_section_container)
@@ -221,6 +224,7 @@ class EditSidebar(QWidget):
             self._bw_section,
             scroll_content,
             title_font=Edit_SIDEBAR_FONT,
+            icon_scale=1.1
         )
 
         self.bw_reset_button = QToolButton(self._bw_section_container)
@@ -279,7 +283,7 @@ class EditSidebar(QWidget):
             "curve.svg",
             self._curve_section,
             scroll_content,
-            title_font=Edit_SIDEBAR_FONT,
+            title_font=Edit_SIDEBAR_FONT
         )
         self._curve_section_container.set_expanded(False)
 
@@ -312,7 +316,7 @@ class EditSidebar(QWidget):
             "level.square.svg",
             self._levels_section,
             scroll_content,
-            title_font=Edit_SIDEBAR_FONT,
+            title_font=Edit_SIDEBAR_FONT
         )
         self._levels_section_container.set_expanded(False)
 
@@ -345,6 +349,7 @@ class EditSidebar(QWidget):
             self._selective_color_section,
             scroll_content,
             title_font=Edit_SIDEBAR_FONT,
+            icon_scale=0.95
         )
         self._selective_color_section_container.set_expanded(False)
 

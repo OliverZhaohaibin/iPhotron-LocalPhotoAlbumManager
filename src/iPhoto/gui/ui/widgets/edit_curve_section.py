@@ -31,6 +31,7 @@ from ..models.edit_session import EditSession
 from ..icon import load_icon
 
 _LOGGER = logging.getLogger(__name__)
+_HANDLE_EDGE_PADDING = 8
 
 
 class _StyledComboBox(QComboBox):
@@ -107,6 +108,7 @@ class InputLevelSliders(QWidget):
         self.hit_padding_y = 5
         self.bezier_ctrl_y_factor = 0.4
         self.bezier_ctrl_x_factor = 0.5
+        self.margin_side = _HANDLE_EDGE_PADDING
 
     def setBlackPoint(self, val: float) -> None:
         self._black_val = max(0.0, min(val, self._white_val - self.limit_gap))
@@ -125,8 +127,19 @@ class InputLevelSliders(QWidget):
         painter.fillRect(self.rect(), QColor("#222222"))
 
         # Draw handles
-        self._draw_handle(painter, self._black_val * w, is_black=True)
-        self._draw_handle(painter, self._white_val * w, is_black=False)
+        track_width = w - 2 * self.margin_side
+        if track_width <= 0:
+            return
+        self._draw_handle(
+            painter,
+            self.margin_side + self._black_val * track_width,
+            is_black=True,
+        )
+        self._draw_handle(
+            painter,
+            self.margin_side + self._white_val * track_width,
+            is_black=False,
+        )
 
     def _draw_handle(self, painter: QPainter, x_pos: float, is_black: bool) -> None:
         y_top = 0
@@ -170,9 +183,12 @@ class InputLevelSliders(QWidget):
     def mousePressEvent(self, event: QMouseEvent) -> None:
         pos = event.position()
         w = self.width()
+        track_width = w - 2 * self.margin_side
+        if track_width <= 0:
+            return
 
-        bx = self._black_val * w
-        wx = self._white_val * w
+        bx = self.margin_side + self._black_val * track_width
+        wx = self.margin_side + self._white_val * track_width
 
         dist_b = abs(pos.x() - bx)
         dist_w = abs(pos.x() - wx)
@@ -188,10 +204,11 @@ class InputLevelSliders(QWidget):
             return
 
         w = self.width()
-        if w == 0:
+        track_width = w - 2 * self.margin_side
+        if track_width <= 0:
             return
 
-        val = event.position().x() / w
+        val = (event.position().x() - self.margin_side) / track_width
         val = max(0.0, min(1.0, val))
 
         if self._dragging == "black":
@@ -229,6 +246,7 @@ class CurveGraph(QWidget):
         super().__init__(parent)
         self.setFixedSize(size, size)
         self.setStyleSheet("background-color: #2b2b2b;")
+        self.edge_padding = _HANDLE_EDGE_PADDING
 
         # Independent data models for each channel
         self.active_channel = "RGB"
@@ -342,8 +360,17 @@ class CurveGraph(QWidget):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
         w, h = self.width(), self.height()
+        inner_w = w - 2 * self.edge_padding
+        inner_h = h - 2 * self.edge_padding
 
         painter.fillRect(self.rect(), QColor("#222222"))
+
+        if inner_w <= 0 or inner_h <= 0:
+            return
+
+        painter.save()
+        painter.translate(self.edge_padding, self.edge_padding)
+        w, h = inner_w, inner_h
 
         # Grid
         painter.setPen(QPen(QColor("#444444"), 1))
@@ -385,6 +412,8 @@ class CurveGraph(QWidget):
             painter.setBrush(pt_color)
             painter.setPen(QPen(QColor("#000000"), 1))
             painter.drawEllipse(QPointF(sx, sy), point_radius, point_radius)
+
+        painter.restore()
 
     def _draw_fake_histogram(self, painter: QPainter, w: int, h: int) -> None:
         if self.active_channel != "RGB":
@@ -488,9 +517,13 @@ class CurveGraph(QWidget):
         painter.drawPath(path)
 
     def mousePressEvent(self, event: QMouseEvent) -> None:
-        self.interactionStarted.emit()
         pos = event.position()
-        w, h = self.width(), self.height()
+        w, h = self.width() - 2 * self.edge_padding, self.height() - 2 * self.edge_padding
+        if w <= 0 or h <= 0:
+            return
+        self.interactionStarted.emit()
+        local_x = pos.x() - self.edge_padding
+        local_y = pos.y() - self.edge_padding
 
         points = self.channels[self.active_channel]
 
@@ -500,7 +533,7 @@ class CurveGraph(QWidget):
 
         for i, p in enumerate(points):
             sx, sy = p.x() * w, h - p.y() * h
-            dist_sq = (pos.x() - sx) ** 2 + (pos.y() - sy) ** 2
+            dist_sq = (local_x - sx) ** 2 + (local_y - sy) ** 2
             if dist_sq < hit_radius_sq:
                 if dist_sq < min_dist_sq:
                     min_dist_sq = dist_sq
@@ -514,14 +547,14 @@ class CurveGraph(QWidget):
                 self._update_spline_and_emit()
         else:
             # Add point
-            nx = max(0.0, min(1.0, pos.x() / w))
+            nx = max(0.0, min(1.0, local_x / w))
             insert_i = len(points)
             for i, p in enumerate(points):
                 if p.x() > nx:
                     insert_i = i
                     break
 
-            ny = max(0.0, min(1.0, (h - pos.y()) / h))
+            ny = max(0.0, min(1.0, (h - local_y) / h))
 
             prev_x = points[insert_i - 1].x() if insert_i > 0 else 0
             next_x = points[insert_i].x() if insert_i < len(points) else 1
@@ -537,10 +570,14 @@ class CurveGraph(QWidget):
         if self.dragging and self.selected_index != -1:
             points = self.channels[self.active_channel]
             pos = event.position()
-            w, h = self.width(), self.height()
+            w, h = self.width() - 2 * self.edge_padding, self.height() - 2 * self.edge_padding
+            if w <= 0 or h <= 0:
+                return
+            local_x = pos.x() - self.edge_padding
+            local_y = pos.y() - self.edge_padding
 
-            nx = max(0.0, min(1.0, pos.x() / w))
-            ny = max(0.0, min(1.0, (h - pos.y()) / h))
+            nx = max(0.0, min(1.0, local_x / w))
+            ny = max(0.0, min(1.0, (h - local_y) / h))
 
             if self.selected_index == 0:
                 if len(points) > 1:

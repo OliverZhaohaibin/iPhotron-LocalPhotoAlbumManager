@@ -10,6 +10,7 @@ import numpy as np
 from PySide6.QtCore import Qt, QRectF, QPointF, Signal
 from PySide6.QtGui import (
     QColor,
+    QMouseEvent,
     QPainter,
     QPainterPath,
     QPen,
@@ -24,6 +25,7 @@ from PySide6.QtWidgets import (
     QFrame,
     QButtonGroup,
     QToolButton,
+    QGraphicsOpacityEffect,
 )
 
 from ..models.edit_session import EditSession
@@ -163,15 +165,15 @@ class _SelectiveSlider(QWidget):
             painter.setPen(QPen(QColor(255, 255, 255, 60), 1))
             painter.drawLine(QPointF(zero_x, 0), QPointF(zero_x, rect.bottom()))
 
-        font = QFont("Segoe UI", 10)
+        font = QFont("Inter", 12, QFont.Weight.Medium)
         painter.setFont(font)
-        painter.setPen(QColor(230, 230, 230))
+        painter.setPen(QColor(240, 240, 240))
         painter.drawText(
             rect.adjusted(10, 0, 0, 0),
             Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
             self._name,
         )
-        painter.setPen(QColor(255, 255, 255, 200))
+        painter.setPen(QColor(255, 255, 255, 160))
         painter.drawText(
             rect.adjusted(0, 0, -10, 0),
             Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight,
@@ -256,6 +258,9 @@ class EditSelectiveColorSection(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(8, 0, 8, 0)
         layout.setSpacing(8)
+
+        self._opacity_effect = QGraphicsOpacityEffect(self)
+        self.setGraphicsEffect(self._opacity_effect)
 
         # --- Tools: pipette + colour buttons ---
         tools_layout = QHBoxLayout()
@@ -362,12 +367,16 @@ class EditSelectiveColorSection(QWidget):
             session.valueChanged.connect(self._on_session_value_changed)
             session.resetPerformed.connect(self._on_session_reset)
             self.refresh_from_session()
+        else:
+            self._apply_enabled_state(False)
 
     def refresh_from_session(self) -> None:
         if self._session is None:
             return
+        enabled = self._is_enabled()
         self._updating_ui = True
         try:
+            self._apply_enabled_state(enabled)
             ranges = self._session.value("SelectiveColor_Ranges")
             if isinstance(ranges, list) and len(ranges) == NUM_RANGES:
                 for i, rng in enumerate(ranges):
@@ -394,7 +403,10 @@ class EditSelectiveColorSection(QWidget):
     # ------------------------------------------------------------------
 
     def _on_session_value_changed(self, key: str, _value: object) -> None:
-        if key in ("SelectiveColor_Enabled", "SelectiveColor_Ranges"):
+        if key == "SelectiveColor_Enabled":
+            self._apply_enabled_state(self._is_enabled())
+            return
+        if key == "SelectiveColor_Ranges":
             self.refresh_from_session()
 
     def _on_session_reset(self) -> None:
@@ -469,6 +481,23 @@ class EditSelectiveColorSection(QWidget):
             "SelectiveColor_Enabled": True,
             "SelectiveColor_Ranges": ranges_data,
         })
+
+    def _apply_enabled_state(self, enabled: bool) -> None:
+        self._opacity_effect.setOpacity(1.0 if enabled else 0.5)
+        self.slider_hue.setEnabled(enabled)
+        self.slider_sat.setEnabled(enabled)
+        self.slider_lum.setEnabled(enabled)
+        self.slider_range.setEnabled(enabled)
+        self._pipette_btn.setEnabled(enabled)
+        for button in self.btn_group.buttons():
+            button.setEnabled(enabled)
+        if not enabled and self._pipette_btn.isChecked():
+            self.deactivate_eyedropper()
+
+    def _is_enabled(self) -> bool:
+        if self._session is None:
+            return False
+        return bool(self._session.value("SelectiveColor_Enabled"))
 
     def _update_theme(self, color_idx: int) -> None:
         """Update slider gradient colours based on the active colour range.
@@ -608,3 +637,10 @@ class EditSelectiveColorSection(QWidget):
 
         # Deactivate the eyedropper after picking
         self.deactivate_eyedropper()
+
+    def mousePressEvent(self, event: QMouseEvent) -> None:
+        """Enable the section on click when it is currently disabled."""
+        if event.button() == Qt.MouseButton.LeftButton:
+            if self._session is not None and not self._is_enabled():
+                self._session.set_value("SelectiveColor_Enabled", True)
+        super().mousePressEvent(event)

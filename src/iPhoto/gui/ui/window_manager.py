@@ -74,6 +74,7 @@ class FramelessWindowManager(QObject):
         self._drag_active = False
         self._drag_offset = QPoint()
         self._video_controls_enabled_before = self._ui.video_area.controls_enabled()
+        self._image_viewer_mouse_tracking_before: bool | None = None
         self._window_shell_stylesheet = self._ui.window_shell.styleSheet()
         self._player_container_stylesheet = self._ui.player_container.styleSheet()
         self._player_stack_stylesheet = self._ui.player_stack.styleSheet()
@@ -256,6 +257,7 @@ class FramelessWindowManager(QObject):
         self._immersive_active = True
         self._window.showFullScreen()
         self._prime_playback_viewer()
+        self._suspend_playback_mouse_tracking()
         self._update_fullscreen_button_icon()
         self._schedule_playback_resume(
             expect_immersive=True, resume=resume_after_transition
@@ -303,6 +305,7 @@ class FramelessWindowManager(QObject):
                 and self._ui.video_area.isVisible()
             ):
                 self._ui.video_area.show_controls(animate=False)
+            self._restore_playback_mouse_tracking()
 
         edit_controller = self._edit_controller()
         if (
@@ -513,6 +516,19 @@ class FramelessWindowManager(QObject):
             self._ui.filmstrip_view,
         )
         return tuple(widget for widget in candidates if widget is not None)
+
+    def _suspend_playback_mouse_tracking(self) -> None:
+        if self._ui.player_stack.currentWidget() is not self._ui.image_viewer:
+            self._image_viewer_mouse_tracking_before = None
+            return
+        self._image_viewer_mouse_tracking_before = self._ui.image_viewer.hasMouseTracking()
+        self._ui.image_viewer.setMouseTracking(False)
+
+    def _restore_playback_mouse_tracking(self) -> None:
+        if self._image_viewer_mouse_tracking_before is None:
+            return
+        self._ui.image_viewer.setMouseTracking(self._image_viewer_mouse_tracking_before)
+        self._image_viewer_mouse_tracking_before = None
 
     def _prime_playback_viewer(self) -> None:
         if self._ui.view_stack.currentWidget() is not self._ui.detail_page:

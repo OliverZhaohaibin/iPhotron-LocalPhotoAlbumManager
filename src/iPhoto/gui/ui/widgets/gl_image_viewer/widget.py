@@ -444,6 +444,8 @@ class GLImageViewer(QOpenGLWidget):
     def prepare_for_fullscreen(self) -> None:
         """Warm up the GL texture before the fullscreen transition."""
 
+        # Prime immediately for the current context and schedule a follow-up to
+        # catch the fullscreen transition's context resize.
         self._prime_texture_upload()
         self.update()
         QTimer.singleShot(0, self._prime_texture_upload)

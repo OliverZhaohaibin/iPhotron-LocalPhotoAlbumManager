@@ -83,7 +83,11 @@ class QueryBuilder:
                 if mode == "videos":
                     where_clauses.append("media_type = 1")
                 elif mode == "live":
-                    where_clauses.append("live_role = 0 AND live_partner_rel IS NOT NULL")
+                    where_clauses.append(
+                        "("
+                        "(live_role = 0 AND live_partner_rel IS NOT NULL)"
+                        ")"
+                    )
                 elif mode == "favorites":
                     where_clauses.append("is_favorite = 1")
             else:

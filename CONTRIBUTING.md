@@ -40,23 +40,31 @@ Our design philosophy is strict to ensure user trust and data safety:
 *   **Folder-Native Principle**: "Folder = Album". We do not import photos into a database. The filesystem is the source of truth.
 *   **Immutability of Originals**: We **never** modify source files (HEIC, JPG, MOV, etc.) directly. All edits must be non-destructive.
 *   **Manifest Files**: All user decisions (e.g., setting a cover, starring, reordering, cropping) are stored in sidecar files like `.iphoto.album.json` or `.ipo` XML files.
-*   **Disposable Cache**: The system must be robust enough to rebuild `index.jsonl`, `links.json`, and `thumbnails` folders at any time. Do not treat cache as persistent storage.
+*   **Disposable Cache**: The system must be robust enough to rebuild `global_index.db` (SQLite database), `links.json`, and `thumbnails` folders at any time. Do not treat cache as persistent storage. Since v3.00, we use a global SQLite database instead of distributed `index.jsonl` files for better performance.
 
 ## 4. Project Architecture
 
 The project follows a layered architecture to separate core logic from the GUI.
 
 ### Layered Architecture
-*   **Core Backend** (`src/iPhoto/`): Pure Python logic. It has **no** dependencies on PySide6 or any GUI libraries. It handles data models, file I/O, and business logic.
-*   **GUI Layer** (`src/iPhoto/gui/`): The frontend implementation using PySide6 (Qt6).
+*   **Domain Layer** (`src/iPhoto/domain/`): Pure domain models and repository interfaces, framework-independent.
+*   **Application Layer** (`src/iPhoto/application/`): Business use cases and application services coordinating domain logic.
+*   **Infrastructure Layer** (`src/iPhoto/infrastructure/`): Concrete implementations (SQLite repositories, metadata providers).
+*   **Core Backend** (`src/iPhoto/`): Pure Python logic including models, I/O, core algorithms, and cache management. Has **no** dependencies on PySide6 or any GUI libraries.
+*   **GUI Layer** (`src/iPhoto/gui/`): The frontend implementation using PySide6 (Qt6) following MVVM pattern with coordinators and view models.
 *   **Facade Pattern**: `app.py` acts as the backend facade, while `gui/facade.py` bridges the backend to the frontend using Qt signals/slots.
 
 ### Module Responsibilities
-*   `models/`: Data classes (dataclasses) and manifest I/O.
+*   `domain/`: Domain entities (`Album`, `Asset`) and repository interfaces (`IAlbumRepository`, `IAssetRepository`).
+*   `application/`: Business use cases (open album, scan album, pair Live Photos) and application services.
+*   `infrastructure/`: SQLite repository implementations, database connection pool, metadata services.
+*   `models/`: Legacy data classes (dataclasses) and manifest I/O.
 *   `io/`: Filesystem scanning, metadata reading, and sidecar writing.
-*   `core/`: Algorithms for pairing Live Photos, sorting, and filtering.
-*   `cache/`: Management of index files (`index.jsonl`) and concurrency locks.
+*   `core/`: Algorithms for pairing Live Photos, sorting, filtering, and image adjustment resolvers (light, color, B&W, curves, selective color, levels).
+*   `cache/`: Management of global SQLite database (`global_index.db`), migrations, recovery, and file-level locking.
 *   `utils/`: General utilities and wrappers for `ExifTool` and `FFmpeg`.
+*   `gui/coordinators/`: MVVM coordinators managing view navigation and business flow.
+*   `gui/viewmodels/`: View models for data binding and presentation logic.
 
 ## 5. Coding Standards
 
@@ -123,7 +131,7 @@ pytest
 
 ### Robustness
 *   Tests must simulate missing or corrupt files to ensure the application handles them gracefully without crashing.
-*   **Rebuildability**: Verify that deleting `index.jsonl` or `links.json` results in them being correctly rebuilt by the system.
+*   **Rebuildability**: Verify that deleting `global_index.db` or `links.json` results in them being correctly rebuilt by the system through re-scanning.
 
 ## 9. Submitting Issues
 

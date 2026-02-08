@@ -15,7 +15,7 @@ from ..palette import SIDEBAR_SELECTED_BACKGROUND, SIDEBAR_ICON_COLOR
 
 if TYPE_CHECKING:
     from ..ui_main_window import Ui_MainWindow
-    from .detail_ui_controller import DetailUIController
+
 
 
 class WindowThemeController(QObject):
@@ -138,8 +138,10 @@ class WindowThemeController(QObject):
             f"QWidget#windowTitleBar QLabel {{ color: {fg_color}; }}\n"
             f"QWidget#windowTitleBar QToolButton {{ color: {fg_color}; }}"
         )
+        separator_color = "#C0C0C0" if not colors.is_dark else outline_color
+        # Use light gray for the separator in light mode; otherwise use outline_color
         self._ui.title_separator.setStyleSheet(
-            f"QFrame#windowTitleSeparator {{ background-color: {outline_color}; border: none; }}"
+            f"QFrame#windowTitleSeparator {{ background-color: {separator_color}; border: none; }}"
         )
 
         # Menu Bar
@@ -244,12 +246,13 @@ class WindowThemeController(QObject):
             section.set_toggle_icon_tint(colors.text_primary)
             icon_label = getattr(section, "_icon_label", None)
             icon_name = getattr(section, "_icon_name", "")
+            icon_size = getattr(section, "_icon_size", 20)
             if icon_label and icon_name:
                 # Some icons have native colors
-                if icon_name in {"color.circle.svg", "checkmark.svg"}:
-                    icon_label.setPixmap(load_icon(icon_name).pixmap(20, 20))
+                if icon_name in {"color.circle.svg", "checkmark.svg", "whitebalance.square.svg", "selectivecolor.svg"}:
+                    icon_label.setPixmap(load_icon(icon_name).pixmap(icon_size, icon_size))
                 else:
-                    icon_label.setPixmap(load_icon(icon_name, color=icon_color).pixmap(20, 20))
+                    icon_label.setPixmap(load_icon(icon_name, color=icon_color).pixmap(icon_size, icon_size))
 
         self._ui.edit_sidebar.set_control_icon_tint(colors.text_primary)
 
@@ -258,8 +261,10 @@ class WindowThemeController(QObject):
         self._ui.zoom_out_button.setIcon(load_icon("minus.svg", color=icon_color))
         self._ui.zoom_in_button.setIcon(load_icon("plus.svg", color=icon_color))
 
-        # Back button
+        # Back buttons (detail and cluster gallery)
         self._ui.back_button.setIcon(load_icon("chevron.left.svg", color=icon_color))
+        if hasattr(self._ui, "gallery_page") and hasattr(self._ui.gallery_page, "back_button"):
+            self._ui.gallery_page.back_button.setIcon(load_icon("chevron.left.svg", color=icon_color))
 
         # Edit header buttons
         self._ui.edit_compare_button.setIcon(

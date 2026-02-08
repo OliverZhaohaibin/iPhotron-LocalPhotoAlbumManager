@@ -111,10 +111,10 @@ def test_toggle_featured_updates_current_and_library_album(
         lambda _delay, callback: callback(),
     )
     
-    # Mock IndexStore to avoid DB operations in tests
+    # Mock repository access to avoid DB operations in tests
     index_store_mock = mocker.MagicMock()
     monkeypatch.setattr(
-        "src.iPhoto.gui.services.album_metadata_service.IndexStore",
+        "src.iPhoto.gui.services.album_metadata_service.get_global_repository",
         lambda root: index_store_mock,
     )
 
@@ -229,10 +229,10 @@ def test_toggle_featured_from_library_root_updates_sub_album(
         lambda _delay, callback: callback(),
     )
     
-    # Mock IndexStore to avoid DB operations in tests
+    # Mock repository access to avoid DB operations in tests
     index_store_mock = mocker.MagicMock()
     monkeypatch.setattr(
-        "src.iPhoto.gui.services.album_metadata_service.IndexStore",
+        "src.iPhoto.gui.services.album_metadata_service.get_global_repository",
         lambda root: index_store_mock,
     )
 
@@ -260,7 +260,7 @@ def test_toggle_featured_from_library_root_updates_sub_album(
     assert sub_album.manifest["featured"] == ["photo.jpg"]
     assert sub_album.saved == 1
     
-    # IndexStore should be called twice (once for root, once for sub-album)
+    # Repository should be called twice (once for root, once for sub-album)
     assert index_store_mock.set_favorite_status.call_count == 2
     
     asset_model.update_featured_status.assert_called_once_with("Trip/photo.jpg", True)
@@ -304,10 +304,10 @@ def test_toggle_featured_from_library_root_for_root_asset(
         lambda _delay, callback: callback(),
     )
     
-    # Mock IndexStore to avoid DB operations in tests
+    # Mock repository access to avoid DB operations in tests
     index_store_mock = mocker.MagicMock()
     monkeypatch.setattr(
-        "src.iPhoto.gui.services.album_metadata_service.IndexStore",
+        "src.iPhoto.gui.services.album_metadata_service.get_global_repository",
         lambda root: index_store_mock,
     )
 
@@ -335,7 +335,7 @@ def test_toggle_featured_from_library_root_for_root_asset(
     # Album.open should not be called as we skip reopening the library root
     assert open_count == 0
     
-    # IndexStore should be called once (for root as primary)
+    # Repository should be called once (for root as primary)
     assert index_store_mock.set_favorite_status.call_count == 1
     
     asset_model.update_featured_status.assert_called_once_with("photo.jpg", True)
@@ -455,7 +455,7 @@ def test_toggle_featured_identifies_correct_physical_root_nested(
 
     index_store_mock = mocker.MagicMock()
     monkeypatch.setattr(
-        "src.iPhoto.gui.services.album_metadata_service.IndexStore",
+        "src.iPhoto.gui.services.album_metadata_service.get_global_repository",
         lambda root: index_store_mock,
     )
 

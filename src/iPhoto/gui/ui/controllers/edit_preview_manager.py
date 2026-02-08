@@ -32,10 +32,10 @@ _LOGGER = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 def resolve_adjustment_mapping(
-    session_values: Mapping[str, float | bool],
+    session_values: Mapping[str, float | bool | list],
     *,
     stats: ColorStats | None = None,
-) -> dict[str, float]:
+) -> dict[str, float | bool | list]:
     """Return shader-friendly adjustments derived from *session_values*.
 
     The helper mirrors the Photos-compatible colour math used by the CPU preview
@@ -46,9 +46,14 @@ def resolve_adjustment_mapping(
     that do not have statistics available yet.
     """
 
-    resolved: dict[str, float] = {}
+    # Keys that contain list data (curve control points, levels handles) - skip these
+    _CURVE_LIST_KEYS = {"Curve_RGB", "Curve_Red", "Curve_Green", "Curve_Blue"}
+    _LIST_KEYS = _CURVE_LIST_KEYS | {"Levels_Handles", "SelectiveColor_Ranges"}
+
+    resolved: dict[str, float | bool | list] = {}
     overrides: dict[str, float] = {}
     color_overrides: dict[str, float] = {}
+    curve_lists: dict[str, list] = {}
 
     master_value = float(session_values.get("Light_Master", 0.0))
     light_enabled = bool(session_values.get("Light_Enabled", True))
@@ -60,12 +65,22 @@ def resolve_adjustment_mapping(
             continue
         if key == "BW_Master":
             continue
+        # List keys are forwarded verbatim so the GL viewer / CPU renderer can use them.
+        if key in _LIST_KEYS:
+            if isinstance(value, list):
+                curve_lists[key] = value
+            continue
         if key in LIGHT_KEYS:
             overrides[key] = float(value)
         elif key in COLOR_KEYS:
             color_overrides[key] = float(value)
         else:
-            resolved[key] = float(value)
+            # Handle boolean values that might be passed
+            if isinstance(value, bool):
+                resolved[key] = 1.0 if value else 0.0
+            elif isinstance(value, (int, float)):
+                resolved[key] = float(value)
+            # Skip any other non-numeric types (like lists)
 
     if light_enabled:
         resolved.update(resolve_light_vector(master_value, overrides, mode="delta"))
@@ -110,6 +125,28 @@ def resolve_adjustment_mapping(
         resolved["BWTone"] = 0.0
         resolved["BWGrain"] = 0.0
 
+    # Preserve the dedicated White Balance parameters so the GPU and CPU
+    # pipelines share the updated shader-compatible values.
+    wb_enabled = bool(session_values.get("WB_Enabled", False))
+    resolved["WBEnabled"] = 1.0 if wb_enabled else 0.0
+    if wb_enabled:
+        resolved["WBWarmth"] = float(session_values.get("WB_Warmth", 0.0))
+        resolved["WBTemperature"] = float(session_values.get("WB_Temperature", 0.0))
+        resolved["WBTint"] = float(session_values.get("WB_Tint", 0.0))
+    else:
+        resolved["WBWarmth"] = 0.0
+        resolved["WBTemperature"] = 0.0
+        resolved["WBTint"] = 0.0
+
+    # Preserve the dedicated Levels parameters.
+    levels_enabled = bool(session_values.get("Levels_Enabled", False))
+    resolved["Levels_Enabled"] = 1.0 if levels_enabled else 0.0
+
+    # Preserve the dedicated Selective Color parameters.
+    sc_enabled = bool(session_values.get("SelectiveColor_Enabled", False))
+    resolved["SelectiveColor_Enabled"] = 1.0 if sc_enabled else 0.0
+
+    resolved.update(curve_lists)
     return resolved
 
 
@@ -273,7 +310,10 @@ class EditPreviewManager(QObject):
         self._preview_update_timer.start()
 
     # ------------------------------------------------------------------
-    def resolve_adjustments(self, session_values: Mapping[str, float | bool]) -> dict[str, float]:
+    def resolve_adjustments(
+        self,
+        session_values: Mapping[str, float | bool | list],
+    ) -> dict[str, float | bool | list]:
         """Return the shader-friendly adjustment mapping derived from *session_values*.
 
         The edit controller uses this helper to update the OpenGL viewer immediately after

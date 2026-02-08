@@ -3,11 +3,18 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Dict, Mapping
+from typing import Any, Dict, List, Mapping, Tuple
 import xml.etree.ElementTree as ET
 
 from ..core.light_resolver import LIGHT_KEYS, resolve_light_vector
 from ..core.color_resolver import COLOR_KEYS, ColorResolver, ColorStats
+from ..core.curve_resolver import (
+    DEFAULT_CURVE_POINTS,
+    CurveChannel,
+)
+from ..core.levels_resolver import DEFAULT_LEVELS_HANDLES
+from ..core.selective_color_resolver import DEFAULT_SELECTIVE_COLOR_RANGES, NUM_RANGES
+from ..core.wb_resolver import WB_KEYS, WB_DEFAULTS
 
 BW_KEYS = (
     "BW_Master",
@@ -26,6 +33,25 @@ BW_DEFAULTS = {
 }
 
 _BW_RANGE_KEYS = {"BW_Master", "BW_Intensity", "BW_Neutrals", "BW_Tone"}
+
+# Curve XML node names
+_CURVE_NODE = "Curve"
+_CURVE_ENABLED = "enabled"
+_CURVE_CHANNEL_RGB = "rgb"
+_CURVE_CHANNEL_RED = "red"
+_CURVE_CHANNEL_GREEN = "green"
+_CURVE_CHANNEL_BLUE = "blue"
+_CURVE_POINT = "point"
+
+# Levels XML node names
+_LEVELS_NODE = "Levels"
+_LEVELS_ENABLED = "enabled"
+_LEVELS_HANDLE = "handle"
+
+# Selective Color XML node names
+_SELECTIVE_COLOR_NODE = "SelectiveColor"
+_SC_ENABLED = "enabled"
+_SC_RANGE = "range"
 
 
 def _normalise_bw_value(key: str, value: float) -> float:
@@ -229,13 +255,215 @@ def _write_crop_node(root: ET.Element, values: Mapping[str, float | bool]) -> No
     flip_child.text = "true" if bool(values.get("Crop_FlipH", False)) else "false"
 
 
+def _read_curve_channel_points(channel_node: ET.Element) -> List[Tuple[float, float]]:
+    """Read curve control points from a channel XML node."""
+    points: List[Tuple[float, float]] = []
+    for point_node in channel_node.findall(_CURVE_POINT):
+        x_attr = point_node.get("x")
+        y_attr = point_node.get("y")
+        if x_attr is not None and y_attr is not None:
+            try:
+                x = float(x_attr)
+                y = float(y_attr)
+                points.append((x, y))
+            except ValueError:
+                continue
+    # Sort by x and ensure we have at least identity points
+    if len(points) < 2:
+        return list(DEFAULT_CURVE_POINTS)
+    return sorted(points, key=lambda p: p[0])
+
+
+def _read_curve_from_node(node: ET.Element) -> Dict[str, Any]:
+    """Return curve adjustments described by the ``<Curve>`` *node*."""
+    result: Dict[str, Any] = {}
+
+    # Read enabled state
+    enabled_attr = node.get(_CURVE_ENABLED)
+    if enabled_attr is not None:
+        result["Curve_Enabled"] = enabled_attr.lower() in {"1", "true", "yes", "on"}
+    else:
+        result["Curve_Enabled"] = False
+
+    # Read each channel
+    for xml_tag, key in [
+        (_CURVE_CHANNEL_RGB, "Curve_RGB"),
+        (_CURVE_CHANNEL_RED, "Curve_Red"),
+        (_CURVE_CHANNEL_GREEN, "Curve_Green"),
+        (_CURVE_CHANNEL_BLUE, "Curve_Blue"),
+    ]:
+        channel_node = _find_child_case_insensitive(node, xml_tag)
+        if channel_node is not None:
+            result[key] = _read_curve_channel_points(channel_node)
+        else:
+            result[key] = list(DEFAULT_CURVE_POINTS)
+
+    return result
+
+
+def _write_curve_channel_points(parent: ET.Element, tag: str, points: List[Tuple[float, float]]) -> None:
+    """Write curve control points to a channel XML node."""
+    channel = ET.SubElement(parent, tag)
+    for x, y in points:
+        point = ET.SubElement(channel, _CURVE_POINT)
+        point.set("x", f"{float(x):.6f}")
+        point.set("y", f"{float(y):.6f}")
+
+
+def _write_curve_node(root: ET.Element, values: Mapping[str, Any]) -> None:
+    """Insert/replace the ``<Curve>`` section under *root* using *values*."""
+    _remove_children_case_insensitive(root, _CURVE_NODE)
+
+    # Only write curve node if there's curve data to save
+    curve_enabled = bool(values.get("Curve_Enabled", False))
+    curve_rgb = values.get("Curve_RGB", DEFAULT_CURVE_POINTS)
+    curve_red = values.get("Curve_Red", DEFAULT_CURVE_POINTS)
+    curve_green = values.get("Curve_Green", DEFAULT_CURVE_POINTS)
+    curve_blue = values.get("Curve_Blue", DEFAULT_CURVE_POINTS)
+
+    # Check if any curve is non-identity (worth saving)
+    # Use CurveChannel to check identity consistently
+    def _check_identity(pts) -> bool:
+        if not isinstance(pts, list):
+            return True
+        channel = CurveChannel.from_list(pts)
+        return channel.is_identity()
+
+    all_identity = (
+        _check_identity(curve_rgb) and
+        _check_identity(curve_red) and
+        _check_identity(curve_green) and
+        _check_identity(curve_blue)
+    )
+
+    # Skip writing if all curves are identity and not enabled
+    if not curve_enabled and all_identity:
+        return
+
+    curve = ET.SubElement(root, _CURVE_NODE)
+    curve.set(_CURVE_ENABLED, "true" if curve_enabled else "false")
+
+    _write_curve_channel_points(curve, _CURVE_CHANNEL_RGB, curve_rgb if isinstance(curve_rgb, list) else list(DEFAULT_CURVE_POINTS))
+    _write_curve_channel_points(curve, _CURVE_CHANNEL_RED, curve_red if isinstance(curve_red, list) else list(DEFAULT_CURVE_POINTS))
+    _write_curve_channel_points(curve, _CURVE_CHANNEL_GREEN, curve_green if isinstance(curve_green, list) else list(DEFAULT_CURVE_POINTS))
+    _write_curve_channel_points(curve, _CURVE_CHANNEL_BLUE, curve_blue if isinstance(curve_blue, list) else list(DEFAULT_CURVE_POINTS))
+
+
+def _read_levels_from_node(node: ET.Element) -> Dict[str, Any]:
+    """Return levels adjustments described by the ``<Levels>`` *node*."""
+    result: Dict[str, Any] = {}
+
+    enabled_attr = node.get(_LEVELS_ENABLED)
+    if enabled_attr is not None:
+        result["Levels_Enabled"] = enabled_attr.lower() in {"1", "true", "yes", "on"}
+    else:
+        result["Levels_Enabled"] = False
+
+    handles: List[float] = []
+    for handle_node in node.findall(_LEVELS_HANDLE):
+        val = handle_node.get("value")
+        if val is not None:
+            try:
+                handles.append(float(val))
+            except ValueError:
+                continue
+    if len(handles) == 5:
+        result["Levels_Handles"] = handles
+    else:
+        result["Levels_Handles"] = list(DEFAULT_LEVELS_HANDLES)
+
+    return result
+
+
+def _write_levels_node(root: ET.Element, values: Mapping[str, Any]) -> None:
+    """Insert/replace the ``<Levels>`` section under *root* using *values*."""
+    _remove_children_case_insensitive(root, _LEVELS_NODE)
+
+    levels_enabled = bool(values.get("Levels_Enabled", False))
+    handles = values.get("Levels_Handles", DEFAULT_LEVELS_HANDLES)
+    if not isinstance(handles, list) or len(handles) != 5:
+        handles = list(DEFAULT_LEVELS_HANDLES)
+
+    is_identity = all(
+        abs(h - d) < 1e-6 for h, d in zip(handles, DEFAULT_LEVELS_HANDLES)
+    )
+    if not levels_enabled and is_identity:
+        return
+
+    levels = ET.SubElement(root, _LEVELS_NODE)
+    levels.set(_LEVELS_ENABLED, "true" if levels_enabled else "false")
+    for v in handles:
+        h = ET.SubElement(levels, _LEVELS_HANDLE)
+        h.set("value", f"{float(v):.6f}")
+
+
+def _read_selective_color_from_node(node: ET.Element) -> Dict[str, Any]:
+    """Return Selective Color adjustments described by the ``<SelectiveColor>`` *node*."""
+    result: Dict[str, Any] = {}
+
+    enabled_attr = node.get(_SC_ENABLED)
+    if enabled_attr is not None:
+        result["SelectiveColor_Enabled"] = enabled_attr.lower() in {"1", "true", "yes", "on"}
+    else:
+        result["SelectiveColor_Enabled"] = False
+
+    ranges: List[List[float]] = []
+    for range_node in node.findall(_SC_RANGE):
+        try:
+            center = float(range_node.get("center", "0"))
+            width = float(range_node.get("width", "0.5"))
+            hue_shift = float(range_node.get("hue_shift", "0"))
+            sat_adj = float(range_node.get("sat_adj", "0"))
+            lum_adj = float(range_node.get("lum_adj", "0"))
+            ranges.append([center, width, hue_shift, sat_adj, lum_adj])
+        except (ValueError, TypeError):
+            continue
+
+    if len(ranges) == NUM_RANGES:
+        result["SelectiveColor_Ranges"] = ranges
+    else:
+        result["SelectiveColor_Ranges"] = [list(r) for r in DEFAULT_SELECTIVE_COLOR_RANGES]
+
+    return result
+
+
+def _write_selective_color_node(root: ET.Element, values: Mapping[str, Any]) -> None:
+    """Insert/replace the ``<SelectiveColor>`` section under *root* using *values*."""
+    _remove_children_case_insensitive(root, _SELECTIVE_COLOR_NODE)
+
+    sc_enabled = bool(values.get("SelectiveColor_Enabled", False))
+    ranges = values.get("SelectiveColor_Ranges")
+    if not isinstance(ranges, list) or len(ranges) != NUM_RANGES:
+        ranges = [list(r) for r in DEFAULT_SELECTIVE_COLOR_RANGES]
+
+    # Check if identity (all shifts zero)
+    all_identity = all(
+        abs(r[2]) < 1e-6 and abs(r[3]) < 1e-6 and abs(r[4]) < 1e-6
+        for r in ranges
+        if isinstance(r, (list, tuple)) and len(r) >= 5
+    )
+    if not sc_enabled and all_identity:
+        return
+
+    sc_node = ET.SubElement(root, _SELECTIVE_COLOR_NODE)
+    sc_node.set(_SC_ENABLED, "true" if sc_enabled else "false")
+    for r in ranges:
+        if isinstance(r, (list, tuple)) and len(r) >= 5:
+            rn = ET.SubElement(sc_node, _SC_RANGE)
+            rn.set("center", f"{float(r[0]):.6f}")
+            rn.set("width", f"{float(r[1]):.6f}")
+            rn.set("hue_shift", f"{float(r[2]):.6f}")
+            rn.set("sat_adj", f"{float(r[3]):.6f}")
+            rn.set("lum_adj", f"{float(r[4]):.6f}")
+
+
 def sidecar_path_for_asset(asset_path: Path) -> Path:
     """Return the expected sidecar path for *asset_path*."""
 
     return asset_path.with_suffix(".ipo")
 
 
-def load_adjustments(asset_path: Path) -> Dict[str, float | bool]:
+def load_adjustments(asset_path: Path) -> Dict[str, Any]:
     """Return light adjustments stored alongside *asset_path*.
 
     Missing files or parsing errors are treated as an empty adjustment set so the
@@ -256,7 +484,7 @@ def load_adjustments(asset_path: Path) -> Dict[str, float | bool]:
     if root.tag != _SIDE_CAR_ROOT:
         return {}
 
-    result: Dict[str, float | bool] = {}
+    result: Dict[str, Any] = {}
     light_node = root.find(_LIGHT_NODE)
     if light_node is not None:
         master_element = light_node.find("Light_Master")
@@ -315,6 +543,22 @@ def load_adjustments(asset_path: Path) -> Dict[str, float | bool]:
             except ValueError:
                 continue
 
+        wb_enabled = light_node.find("WB_Enabled")
+        if wb_enabled is not None and wb_enabled.text is not None:
+            text = wb_enabled.text.strip().lower()
+            result["WB_Enabled"] = text in {"1", "true", "yes", "on"}
+        else:
+            result["WB_Enabled"] = False
+
+        for key in WB_KEYS:
+            element = light_node.find(key)
+            if element is None or element.text is None:
+                continue
+            try:
+                result[key] = float(element.text.strip())
+            except ValueError:
+                continue
+
     crop_node = _find_child_case_insensitive(root, _CROP_NODE)
     if crop_node is None:
         crop_node = root.find(_LEGACY_CROP_NODE)
@@ -324,10 +568,25 @@ def load_adjustments(asset_path: Path) -> Dict[str, float | bool]:
         else:
             result.update(_read_crop_from_legacy_attributes(crop_node))
 
+    # Load curve adjustments
+    curve_node = _find_child_case_insensitive(root, _CURVE_NODE)
+    if curve_node is not None:
+        result.update(_read_curve_from_node(curve_node))
+
+    # Load levels adjustments
+    levels_node = _find_child_case_insensitive(root, _LEVELS_NODE)
+    if levels_node is not None:
+        result.update(_read_levels_from_node(levels_node))
+
+    # Load Selective Color adjustments
+    sc_node = _find_child_case_insensitive(root, _SELECTIVE_COLOR_NODE)
+    if sc_node is not None:
+        result.update(_read_selective_color_from_node(sc_node))
+
     return result
 
 
-def save_adjustments(asset_path: Path, adjustments: Mapping[str, float | bool]) -> Path:
+def save_adjustments(asset_path: Path, adjustments: Mapping[str, Any]) -> Path:
     """Persist *adjustments* next to *asset_path* and return the sidecar path."""
 
     sidecar_path = sidecar_path_for_asset(asset_path)
@@ -380,7 +639,26 @@ def save_adjustments(asset_path: Path, adjustments: Mapping[str, float | bool]) 
         child = ET.SubElement(light, key)
         child.text = f"{value:.2f}"
 
+    wb_enabled_el = ET.SubElement(light, "WB_Enabled")
+    wb_enabled_val = bool(adjustments.get("WB_Enabled", False))
+    wb_enabled_el.text = "true" if wb_enabled_val else "false"
+
+    for key in WB_KEYS:
+        raw = float(adjustments.get(key, WB_DEFAULTS.get(key, 0.0)))
+        value = max(-1.0, min(1.0, raw))
+        child = ET.SubElement(light, key)
+        child.text = f"{value:.2f}"
+
     _write_crop_node(root, adjustments)
+
+    # Write curve adjustments
+    _write_curve_node(root, adjustments)
+
+    # Write levels adjustments
+    _write_levels_node(root, adjustments)
+
+    # Write Selective Color adjustments
+    _write_selective_color_node(root, adjustments)
 
     tmp_path = sidecar_path.with_suffix(sidecar_path.suffix + ".tmp")
     tree = ET.ElementTree(root)
@@ -395,10 +673,10 @@ def save_adjustments(asset_path: Path, adjustments: Mapping[str, float | bool]) 
 
 
 def resolve_render_adjustments(
-    adjustments: Mapping[str, float | bool] | None,
+    adjustments: Mapping[str, Any] | None,
     *,
     color_stats: ColorStats | None = None,
-) -> Dict[str, float]:
+) -> Dict[str, Any]:
     """Return Light adjustments suitable for rendering pipelines.
 
     ``load_adjustments`` exposes the raw session values, which now contain the master slider
@@ -418,7 +696,7 @@ def resolve_render_adjustments(
 
     light_enabled = bool(adjustments.get("Light_Enabled", True))
 
-    resolved: Dict[str, float] = {}
+    resolved: Dict[str, Any] = {}
     overrides: Dict[str, float] = {}
     color_overrides: Dict[str, float] = {}
     for key, value in adjustments.items():
@@ -483,5 +761,43 @@ def resolve_render_adjustments(
         resolved["BWNeutrals"] = 0.0
         resolved["BWTone"] = 0.0
         resolved["BWGrain"] = 0.0
+
+    # White Balance adjustments
+    wb_enabled = bool(adjustments.get("WB_Enabled", False))
+    resolved["WB_Enabled"] = wb_enabled
+    if wb_enabled:
+        resolved["WBWarmth"] = max(-1.0, min(1.0, float(adjustments.get("WB_Warmth", 0.0))))
+        resolved["WBTemperature"] = max(-1.0, min(1.0, float(adjustments.get("WB_Temperature", 0.0))))
+        resolved["WBTint"] = max(-1.0, min(1.0, float(adjustments.get("WB_Tint", 0.0))))
+    else:
+        resolved["WBWarmth"] = 0.0
+        resolved["WBTemperature"] = 0.0
+        resolved["WBTint"] = 0.0
+
+    # Curve adjustments - pass through to renderer as-is
+    curve_enabled = bool(adjustments.get("Curve_Enabled", False))
+    resolved["Curve_Enabled"] = curve_enabled
+    if curve_enabled:
+        # Pass curve data for LUT generation
+        for key in ("Curve_RGB", "Curve_Red", "Curve_Green", "Curve_Blue"):
+            curve_data = adjustments.get(key)
+            if curve_data and isinstance(curve_data, list):
+                resolved[key] = curve_data
+
+    # Levels adjustments - pass through to renderer as-is
+    levels_enabled = bool(adjustments.get("Levels_Enabled", False))
+    resolved["Levels_Enabled"] = levels_enabled
+    if levels_enabled:
+        handles = adjustments.get("Levels_Handles")
+        if isinstance(handles, list) and len(handles) == 5:
+            resolved["Levels_Handles"] = handles
+
+    # Selective Color adjustments - pass through to renderer as-is
+    sc_enabled = bool(adjustments.get("SelectiveColor_Enabled", False))
+    resolved["SelectiveColor_Enabled"] = sc_enabled
+    if sc_enabled:
+        sc_ranges = adjustments.get("SelectiveColor_Ranges")
+        if isinstance(sc_ranges, list) and len(sc_ranges) == NUM_RANGES:
+            resolved["SelectiveColor_Ranges"] = sc_ranges
 
     return resolved

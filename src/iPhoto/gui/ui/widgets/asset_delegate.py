@@ -21,7 +21,7 @@ from PySide6.QtWidgets import QStyle, QStyleOptionViewItem, QStyledItemDelegate
 
 from ..badge_renderer import BadgeRenderer
 from ..geometry_utils import calculate_center_crop
-from ..models.asset_model import Roles
+from ..models.roles import Roles
 
 
 class AssetGridDelegate(QStyledItemDelegate):

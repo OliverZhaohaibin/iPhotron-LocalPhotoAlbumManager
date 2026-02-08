@@ -9,7 +9,9 @@ from __future__ import annotations
 import logging
 import time
 from collections.abc import Mapping
+from typing import Any
 
+import numpy as np
 from OpenGL import GL as gl
 from PySide6.QtCore import QPointF, QSize, Qt, Signal, QRectF
 from PySide6.QtGui import (
@@ -21,11 +23,20 @@ from PySide6.QtGui import (
     QWheelEvent,
 )
 from PySide6.QtOpenGL import (
-    QOpenGLDebugLogger,
     QOpenGLFunctions_3_3_Core,
 )
 from PySide6.QtOpenGLWidgets import QOpenGLWidget
 
+from .....core.curve_resolver import (
+    CurveParams,
+    CurveChannel,
+    CurvePoint,
+    generate_curve_lut,
+)
+from .....core.levels_resolver import (
+    DEFAULT_LEVELS_HANDLES,
+    build_levels_lut,
+)
 from ..gl_crop_controller import CropInteractionController
 from ..gl_renderer import GLRenderer
 from ..view_transform_controller import (
@@ -66,6 +77,7 @@ class GLImageViewer(QOpenGLWidget):
     cropChanged = Signal(float, float, float, float)
     cropInteractionStarted = Signal()
     cropInteractionFinished = Signal()
+    colorPicked = Signal(float, float, float)
 
     def __init__(self, parent: QOpenGLWidget | None = None) -> None:
         super().__init__(parent)
@@ -78,11 +90,12 @@ class GLImageViewer(QOpenGLWidget):
         self.setFormat(fmt)
         self._gl_funcs: QOpenGLFunctions_3_3_Core | None = None
         self._renderer: GLRenderer | None = None
-        self._logger: QOpenGLDebugLogger | None = None
 
         # 状态
         self._image: QImage | None = None
-        self._adjustments: dict[str, float] = {}
+        self._adjustments: dict[str, Any] = {}
+        self._current_curve_lut: np.ndarray | None = None
+        self._eyedropper_active = False
         
         # Texture resource manager
         self._texture_manager = TextureResourceManager(
@@ -184,10 +197,10 @@ class GLImageViewer(QOpenGLWidget):
         # Check if we can reuse the existing texture
         if self._texture_manager.should_reuse_texture(image_source):
             if image is not None and not image.isNull():
-                # Skip texture re-upload, only update adjustments
+                # Skip texture re-upload, only update adjustments. Preserve the
+                # current zoom/pan state so adjustment previews stay anchored
+                # to the user's active viewport.
                 self.set_adjustments(adjustments)
-                if reset_view:
-                    self.reset_zoom()
                 return
 
         # Update texture resource tracking
@@ -195,6 +208,8 @@ class GLImageViewer(QOpenGLWidget):
         self._image = image
         self._adjustments = dict(adjustments or {})
         self._update_crop_perspective_state()
+        self._update_curve_lut_if_needed(self._adjustments)
+        self._update_levels_lut_if_needed(self._adjustments)
         self._loading_overlay.hide()
         self._time_base = time.monotonic()
 
@@ -246,12 +261,19 @@ class GLImageViewer(QOpenGLWidget):
 
         self.set_image(None, {}, image_source=None)
 
-    def set_adjustments(self, adjustments: Mapping[str, float] | None = None) -> None:
+    def set_adjustments(self, adjustments: Mapping[str, Any] | None = None) -> None:
         """Update the active adjustment uniforms without replacing the texture."""
 
         mapped_adjustments = dict(adjustments or {})
         self._adjustments = mapped_adjustments
         self._update_crop_perspective_state()
+
+        # Handle curve LUT update if curve data changed
+        self._update_curve_lut_if_needed(mapped_adjustments)
+
+        # Handle levels LUT update if levels data changed
+        self._update_levels_lut_if_needed(mapped_adjustments)
+
         if self._crop_controller.is_active():
             # Refresh the crop overlay in logical space so it stays aligned when rotation
             # or perspective adjustments change while the interaction mode is active.
@@ -260,6 +282,107 @@ class GLImageViewer(QOpenGLWidget):
         if self._auto_crop_view_locked and not self._crop_controller.is_active():
             self._reapply_locked_crop_view()
         self.update()
+
+    def _update_curve_lut_if_needed(self, adjustments: dict[str, Any]) -> None:
+        """Update the curve LUT texture if curve parameters have changed."""
+        curve_enabled = bool(adjustments.get("Curve_Enabled", False))
+
+        if not curve_enabled:
+            # Curves are disabled: upload an identity LUT so any existing GPU texture
+            # does not affect rendering even if the shader samples it.
+            if self._renderer is None:
+                return
+
+            self.makeCurrent()
+            try:
+                try:
+                    identity_params = CurveParams(enabled=False)
+                    identity_lut = generate_curve_lut(identity_params)
+                except Exception as e:
+                    _LOGGER.warning("Failed to generate identity curve LUT: %s", e)
+                    return
+
+                self._renderer.upload_curve_lut(identity_lut)
+                self._current_curve_lut = identity_lut
+            finally:
+                self.doneCurrent()
+            return
+
+        # Build CurveParams from adjustment data
+        params = CurveParams(enabled=curve_enabled)
+
+        for key, attr in [
+            ("Curve_RGB", "rgb"),
+            ("Curve_Red", "red"),
+            ("Curve_Green", "green"),
+            ("Curve_Blue", "blue"),
+        ]:
+            raw = adjustments.get(key)
+            if raw and isinstance(raw, list):
+                # Validate that each point is a 2-element numeric tuple/list before unpacking
+                points: list[CurvePoint] = []
+                for pt in raw:
+                    if (
+                        isinstance(pt, (list, tuple))
+                        and len(pt) >= 2
+                        and isinstance(pt[0], (int, float))
+                        and isinstance(pt[1], (int, float))
+                    ):
+                        points.append(CurvePoint(x=float(pt[0]), y=float(pt[1])))
+                if points:
+                    setattr(params, attr, CurveChannel(points=points))
+
+        # Generate LUT
+        try:
+            lut = generate_curve_lut(params)
+        except Exception as e:
+            _LOGGER.warning("Failed to generate curve LUT: %s", e)
+            return
+
+        # Upload to GPU
+        if self._renderer is not None:
+            self.makeCurrent()
+            try:
+                self._renderer.upload_curve_lut(lut)
+                self._current_curve_lut = lut
+            finally:
+                self.doneCurrent()
+
+    def _update_levels_lut_if_needed(self, adjustments: dict[str, Any]) -> None:
+        """Update the levels LUT texture if levels parameters have changed."""
+        levels_enabled = bool(adjustments.get("Levels_Enabled", False))
+
+        if not levels_enabled:
+            if self._renderer is None:
+                return
+            self.makeCurrent()
+            try:
+                try:
+                    identity_lut = build_levels_lut(list(DEFAULT_LEVELS_HANDLES))
+                except Exception as e:
+                    _LOGGER.warning("Failed to generate identity levels LUT: %s", e)
+                    return
+                self._renderer.upload_levels_lut(identity_lut)
+            finally:
+                self.doneCurrent()
+            return
+
+        handles = adjustments.get("Levels_Handles")
+        if not isinstance(handles, list) or len(handles) != 5:
+            return
+
+        try:
+            lut = build_levels_lut(handles)
+        except Exception as e:
+            _LOGGER.warning("Failed to generate levels LUT: %s", e)
+            return
+
+        if self._renderer is not None:
+            self.makeCurrent()
+            try:
+                self._renderer.upload_levels_lut(lut)
+            finally:
+                self.doneCurrent()
 
     def current_image_source(self) -> object | None:
         """Return the identifier describing the currently displayed image."""
@@ -289,6 +412,15 @@ class GLImageViewer(QOpenGLWidget):
 
     def set_live_replay_enabled(self, enabled: bool) -> None:
         self._input_handler.set_live_replay_enabled(enabled)
+
+    def set_eyedropper_mode(self, active: bool) -> None:
+        """Enable or disable eyedropper picking mode."""
+
+        self._eyedropper_active = bool(active)
+        if self._eyedropper_active:
+            self.setCursor(Qt.CursorShape.CrossCursor)
+        else:
+            self.unsetCursor()
 
     def set_wheel_action(self, action: str) -> None:
         self._transform_controller.set_wheel_action(action)
@@ -420,28 +552,16 @@ class GLImageViewer(QOpenGLWidget):
         self._gl_funcs.initializeOpenGLFunctions()
         gf = self._gl_funcs
 
-        try:
-            self._logger = QOpenGLDebugLogger(self)
-            if self._logger.initialize():
-                self._logger.messageLogged.connect(
-                    lambda m: print(f"[GLDBG] {m.source().name}: {m.message()}")
-                )
-                self._logger.startLogging(QOpenGLDebugLogger.SynchronousLogging)
-                print("[GLDBG] DebugLogger initialized.")
-            else:
-                print("[GLDBG] DebugLogger not available.")
-        except Exception as exc:
-            print(f"[GLDBG] Logger init failed: {exc}")
-
         if self._renderer is not None:
             self._renderer.destroy_resources()
 
         self._renderer = GLRenderer(gf, parent=self)
         self._renderer.initialize_resources()
+        self._update_curve_lut_if_needed(self._adjustments)
+        self._update_levels_lut_if_needed(self._adjustments)
 
         dpr = self.devicePixelRatioF()
         gf.glViewport(0, 0, int(self.width() * dpr), int(self.height() * dpr))
-        print("[GL INIT] initializeGL completed.")
 
     def paintGL(self) -> None:
         gf = self._gl_funcs
@@ -684,9 +804,55 @@ class GLImageViewer(QOpenGLWidget):
     # --------------------------- Viewport helpers ---------------------------
 
     def mousePressEvent(self, event: QMouseEvent) -> None:
+        if self._eyedropper_active:
+            if self._handle_eyedropper_pick(event.position()):
+                event.accept()
+                return
         handled = self._input_handler.handle_mouse_press(event)
         if not handled:
             super().mousePressEvent(event)
+
+    def _handle_eyedropper_pick(self, position: QPointF) -> bool:
+        """Sample the image under *position* and emit a ``colorPicked`` signal."""
+
+        if self._image is None or self._image.isNull():
+            return False
+
+        logical_w, logical_h = self._display_texture_dimensions()
+        if logical_w <= 0 or logical_h <= 0:
+            return False
+
+        image_point = self._viewport_to_image(position)
+        if image_point.isNull():
+            return False
+
+        lx = max(0.0, min(1.0, image_point.x() / float(logical_w)))
+        ly = max(0.0, min(1.0, image_point.y() / float(logical_h)))
+
+        rotate_steps = geometry.get_rotate_steps(self._adjustments)
+        if rotate_steps == 1:
+            tx, ty = ly, 1.0 - lx
+        elif rotate_steps == 2:
+            tx, ty = 1.0 - lx, 1.0 - ly
+        elif rotate_steps == 3:
+            tx, ty = 1.0 - ly, lx
+        else:
+            tx, ty = lx, ly
+
+        tex_w = self._image.width()
+        tex_h = self._image.height()
+        if tex_w <= 0 or tex_h <= 0:
+            return False
+
+        px = int(round(tx * (tex_w - 1)))
+        py = int(round(ty * (tex_h - 1)))
+        px = max(0, min(tex_w - 1, px))
+        py = max(0, min(tex_h - 1, py))
+
+        color = self._image.pixelColor(px, py)
+        self.colorPicked.emit(color.redF(), color.greenF(), color.blueF())
+        self.set_eyedropper_mode(False)
+        return True
 
     def mouseMoveEvent(self, event: QMouseEvent) -> None:
         handled = self._input_handler.handle_mouse_move(event)

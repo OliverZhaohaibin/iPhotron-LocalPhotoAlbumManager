@@ -17,21 +17,46 @@ def _geocoder() -> "reverse_geocoder.RGeocoder":
     return reverse_geocoder.RGeocoder(mode=1, verbose=False)
 
 
+def _coerce_coordinate(value: object) -> Optional[float]:
+    """Return *value* as decimal coordinates when possible."""
+
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        candidate = value.strip()
+        if not candidate:
+            return None
+        try:
+            return float(candidate)
+        except ValueError:
+            return None
+    return None
+
+
 def resolve_location_name(gps: Optional[Dict[str, float]]) -> Optional[str]:
     """Return a human readable place name for *gps* coordinates.
 
     Parameters
     ----------
     gps:
-        Mapping containing ``lat`` and ``lon`` keys. When either value is
-        missing or the lookup fails the function returns ``None``.
+        Mapping containing ``lat``/``lon`` keys (or ``latitude``/``longitude``
+        aliases). When either value is missing or the lookup fails the function
+        returns ``None``.
     """
 
     if not gps:
         return None
-    latitude = gps.get("lat")
-    longitude = gps.get("lon")
-    if not isinstance(latitude, (int, float)) or not isinstance(longitude, (int, float)):
+    latitude = _coerce_coordinate(gps.get("lat"))
+    if latitude is None:
+        latitude = _coerce_coordinate(gps.get("latitude"))
+
+    longitude = _coerce_coordinate(gps.get("lon"))
+    if longitude is None:
+        longitude = _coerce_coordinate(gps.get("longitude"))
+
+    if latitude is None or longitude is None:
         return None
 
     try:
@@ -72,4 +97,3 @@ def resolve_location_name(gps: Optional[Dict[str, float]]) -> Optional[str]:
 
 
 __all__ = ["resolve_location_name"]
-

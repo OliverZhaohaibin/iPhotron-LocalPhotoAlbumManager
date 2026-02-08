@@ -7,20 +7,28 @@
 ![License](https://img.shields.io/badge/license-MIT-green)
 [![GitHub Repo](https://img.shields.io/badge/github-iPhotos-181717?logo=github)](https://github.com/OliverZhaohaibin/iPhotos-LocalPhotoAlbumManager)
 
+**Languages / 语言 / Sprachen:**  
+[![English](https://img.shields.io/badge/English-Click-blue?style=flat)](README.md) | [![中文简体](https://img.shields.io/badge/中文简体-点击-red?style=flat)](docs/readme/README_zh-CN.md) | [![Deutsch](https://img.shields.io/badge/Deutsch-Klick-yellow?style=flat)](docs/readme/README_de.md)
+
+---
+
 ## ☕ Support
 
 [![Buy Me a Coffee](https://img.shields.io/badge/Buy%20Me%20a%20Coffee-Support%20Development-yellow?style=for-the-badge&logo=buy-me-a-coffee&logoColor=white)](https://buymeacoffee.com/oliverzhao)
 
 ## 📥 Download
 
-[![Download iPhoto](https://img.shields.io/badge/⬇️%20Download-iPhoto%20Latest%20Release-blue?style=for-the-badge&logo=windows)](https://github.com/OliverZhaohaibin/iPhotron-LocalPhotoAlbumManager/releases/download/v3.1.5/v3.15.exe)
+[![Download iPhoto Latest Release](https://img.shields.io/badge/⬇️%20Download-iPhoto%20Latest%20Release-blue?style=for-the-badge&logo=windows)](https://github.com/OliverZhaohaibin/iPhotron-LocalPhotoAlbumManager/releases/download/v3.1.5/v3.15.exe)
 
 **💡 Quick Install:** Click the button above to download the latest Windows installer (.exe) directly.
 
 ---
+
 ## 🌟 Star History
 
 [![Star History Chart](https://api.star-history.com/svg?repos=OliverZhaohaibin/iPhotron-LocalPhotoAlbumManager&type=date&legend=bottom-right)](https://www.star-history.com/#OliverZhaohaibin/iPhotron-LocalPhotoAlbumManager&type=date&legend=bottom-right)
+
+---
 
 ## 🌟 Overview
 
@@ -63,10 +71,13 @@ A comprehensive editing suite with **Adjust** and **Crop** modes:
 - **Light Adjustments:** Brilliance, Exposure, Highlights, Shadows, Brightness, Contrast, Black Point
 - **Color Adjustments:** Saturation, Vibrance, Cast (white balance correction)
 - **Black & White:** Intensity, Neutrals, Tone, Grain with artistic film presets
+- **Color Curves:** RGB and per-channel (R/G/B) curve editor with draggable control points for precise tonal adjustments
+- **Selective Color:** Target six hue ranges (Red/Yellow/Green/Cyan/Blue/Magenta) with independent Hue/Saturation/Luminance controls
+- **Levels:** 5-handle input-output tone mapping with histogram backdrop and per-channel control
 - **Master Sliders:** Each section features an intelligent master slider that distributes values across multiple fine-tuning controls
 - **Live Thumbnails:** Real-time preview strips showing the effect range for each adjustment
-<img width="1925" height="1086" alt="image" src="https://github.com/user-attachments/assets/9ac3095a-4be4-48fa-84cc-db0a3d58fe16" />
-
+![edit interface](docs/editview.png)
+![edit interface](docs/professionaltools.png)
 #### Crop Mode
 - **Perspective Correction:** Vertical and horizontal keystoning adjustments
 - **Straighten Tool:** ±45° rotation with sub-degree precision
@@ -74,7 +85,7 @@ A comprehensive editing suite with **Adjust** and **Crop** modes:
 - **Interactive Crop Box:** Drag handles, edge snapping, and aspect ratio constraints
 - **Black Border Prevention:** Automatic validation ensures no black edges appear after perspective transforms
   
-<img width="1925" height="1086" alt="image" src="https://github.com/user-attachments/assets/6a5e927d-3403-4c22-9512-7564a0f24702" />
+![crop interface](docs/cropview.png)
 All edits are stored in `.ipo` sidecar files, preserving original photos untouched.
 
 ### ℹ️ Floating Info Panel
@@ -147,49 +158,105 @@ iphoto-gui /photos/LondonTrip
 - **Context Menu:** Copy, Move, Delete, Restore.
 ## 🧱 Project Structure
 
-The source code resides under the `src/iPhoto/` directory and is divided into two main parts — **Core Backend** and **GUI**.
+The source code resides under the `src/iPhoto/` directory and follows a **layered architecture** based on **MVVM + DDD (Domain-Driven Design)** principles.
 
 ---
 
-### 1️⃣ Core Backend (`src/iPhoto/`)
+### 1️⃣ Domain Layer (`src/iPhoto/domain/`)
 
-This section is pure Python logic and **does not depend** on any GUI framework (such as PySide6).
+Pure business models and repository interfaces, independent of any framework.
+
+| File / Module | Description |
+|----------------|-------------|
+| **`models/`** | Domain entities: `Album`, `Asset`, `MediaType`, `LiveGroup`. |
+| **`models/query.py`** | Query object pattern for asset filtering, sorting, and pagination. |
+| **`repositories.py`** | Repository interfaces: `IAlbumRepository`, `IAssetRepository`. |
+
+---
+
+### 2️⃣ Application Layer (`src/iPhoto/application/`)
+
+Business logic encapsulated in Use Cases and Application Services.
+
+| File / Module | Description |
+|----------------|-------------|
+| **`use_cases/open_album.py`** | Use case for opening an album with event publishing. |
+| **`use_cases/scan_album.py`** | Use case for scanning album files and updating the index. |
+| **`use_cases/pair_live_photos.py`** | Use case for Live Photo pairing logic. |
+| **`services/album_service.py`** | Application service for album operations. |
+| **`services/asset_service.py`** | Application service for asset operations (favorites, queries). |
+| **`interfaces.py`** | Abstractions: `IMetadataProvider`, `IThumbnailGenerator`. |
+| **`dtos.py`** | Data Transfer Objects for Use Case requests/responses. |
+
+---
+
+### 3️⃣ Infrastructure Layer (`src/iPhoto/infrastructure/`)
+
+Concrete implementations of domain interfaces.
+
+| File / Module | Description |
+|----------------|-------------|
+| **`repositories/sqlite_asset_repository.py`** | SQLite implementation of `IAssetRepository`. |
+| **`repositories/sqlite_album_repository.py`** | SQLite implementation of `IAlbumRepository`. |
+| **`db/pool.py`** | Thread-safe database connection pool. |
+| **`services/`** | Infrastructure services (metadata extraction, thumbnails). |
+
+---
+
+### 4️⃣ Core Backend (`src/iPhoto/`)
+
+Pure Python logic that does not depend on any GUI framework (such as PySide6).
 
 | File / Module | Description |
 |----------------|-------------|
 | **`app.py`** | High-level backend **Facade** coordinating all core modules, used by both CLI and GUI. |
 | **`cli.py`** | Typer-based command-line entry point that parses user commands and invokes methods from `app.py`. |
-| **`models/`** | Defines the main data structures such as `Album` (manifest read/write) and `LiveGroup`. |
+| **`models/`** | Legacy data structures such as `Album` (manifest read/write) and `LiveGroup`. |
 | **`io/`** | Handles filesystem interaction, mainly `scanner.py` (file scanning) and `metadata.py` (metadata reading). |
 | **`core/`** | Core algorithmic logic including `pairing.py` (Live Photo pairing) and image adjustment resolvers. |
 | ├─ **`light_resolver.py`** | Resolves Light master slider to 7 fine-tuning parameters (Brilliance, Exposure, etc.). |
 | ├─ **`color_resolver.py`** | Resolves Color master slider to Saturation/Vibrance/Cast with image statistics. |
 | ├─ **`bw_resolver.py`** | Resolves B&W master slider using 3-anchor Gaussian interpolation. |
+| ├─ **`curve_resolver.py`** | Manages color curve adjustments with Bezier interpolation and LUT generation. |
+| ├─ **`selective_color_resolver.py`** | Implements selective color adjustments targeting six hue ranges with HSL processing. |
+| ├─ **`levels_resolver.py`** | Handles levels adjustments with 5-handle input-output tone mapping. |
 | └─ **`filters/`** | High-performance image processing (NumPy vectorized → Numba JIT → QColor fallback). |
 | **`cache/`** | Manages the global SQLite database (`index_store/`) with modular components: engine, migrations, recovery, queries, and repository. Includes `lock.py` for file-level locking. |
 | **`utils/`** | General utilities, especially wrappers for external tools (`exiftool.py`, `ffmpeg.py`). |
 | **`schemas/`** | JSON Schema definitions, e.g., `album.schema.json`. |
+| **`di/`** | Dependency Injection container for service registration and resolution. |
+| **`events/`** | Event bus for domain events (publish-subscribe pattern). |
+| **`errors/`** | Unified error handling with severity levels and event publishing. |
 
 ---
 
-### 2️⃣ GUI Layer (`src/iPhoto/gui/`)
+### 5️⃣ GUI Layer (`src/iPhoto/gui/`)
 
-This is the PySide6-based desktop application layer, which depends on the backend core.
+PySide6-based desktop application following the **MVVM (Model-View-ViewModel)** pattern.
 
 | File / Module | Description |
 |----------------|-------------|
 | **`main.py`** | Entry point for the GUI application (`iphoto-gui` command). |
 | **`appctx.py`** | Defines `AppContext`, a shared global state manager for settings, library manager, and the backend Facade instance. |
-| **`facade.py`** | Defines `AppFacade` (a `QObject`) — the bridge between the GUI and backend. It wraps the backend `app` module and uses Qt **signals/slots** to decouple backend operations (scan/import) from the GUI event loop. |
-| **`services/`** | Encapsulates complex, stateful background operations such as `AssetMoveService`, `AssetImportService`, and `LibraryUpdateService`. These are coordinated by `AppFacade`. |
-| **`background_task_manager.py`** | Manages the `QThreadPool`, runs tasks submitted by `services`, and handles pausing/resuming of file watchers. |
-| **`ui/`** | Contains all UI components: windows, controllers, models, and custom widgets. |
-| ├─ **`main_window.py`** |— Implementation of the main `QMainWindow`. |
-| ├─ **`ui_main_window.py`** |— Auto-generated from Qt Designer (`pyside6-uic`), defining all widgets. |
-| ├─ **`controllers/`** |— The “brain” of the GUI (MVC pattern). `main_controller.py` orchestrates all subcontrollers (e.g., `NavigationController`, `PlaybackController`, `EditController`) and connects all signals and slots. |
-| ├─ **`models/`** |— Qt **Model-View** data models such as `AssetListModel`, `AlbumTreeModel`, and `EditSession`. |
-| ├─ **`widgets/`** |— Reusable custom QWidget components such as `AlbumSidebar`, `PhotoMapView`, `PlayerBar`, and edit-related widgets (see below). |
-| └─ **`tasks/`**| — `QRunnable` implementations for background tasks, e.g., `ThumbnailLoader` and `ScannerWorker`. |
+| **`facade.py`** | Defines `AppFacade` (a `QObject`) — the **bridge** between the GUI and backend. Uses Qt **signals/slots** to decouple backend operations from the GUI event loop. |
+| **`coordinators/`** | **MVVM Coordinators** orchestrating view navigation and business flow. |
+| ├─ **`main_coordinator.py`** | Main window coordinator managing child coordinators. |
+| ├─ **`navigation_coordinator.py`** | Handles album/library navigation. |
+| ├─ **`playback_coordinator.py`** | Media playback coordination. |
+| ├─ **`edit_coordinator.py`** | Edit workflow coordination. |
+| └─ **`view_router.py`** | Centralized view routing logic. |
+| **`viewmodels/`** | **ViewModels** for MVVM data binding. |
+| ├─ **`asset_list_viewmodel.py`** | ViewModel for asset list presentation. |
+| ├─ **`album_viewmodel.py`** | ViewModel for album presentation. |
+| └─ **`asset_data_source.py`** | Data source abstraction for asset queries. |
+| **`services/`** | Background operation services (import, move, update). |
+| **`background_task_manager.py`** | Manages `QThreadPool` and task lifecycle. |
+| **`ui/`** | UI components: windows, controllers, models, and widgets. |
+| ├─ **`main_window.py`** | Main `QMainWindow` implementation. |
+| ├─ **`controllers/`** | Specialized UI controllers (context menu, dialog, export, player, etc.). |
+| ├─ **`models/`** | Qt Model-View data models (e.g., `AlbumTreeModel`, `EditSession`). |
+| ├─ **`widgets/`** | Reusable QWidget components (sidebar, map, player bar, edit widgets). |
+| └─ **`tasks/`** | `QRunnable` implementations for background tasks. |
 
 #### Edit Widgets & Modules (`src/iPhoto/gui/ui/widgets/`)
 
@@ -201,6 +268,9 @@ The edit system is composed of modular widgets and submodules for non-destructiv
 | **`edit_light_section.py`** | Light adjustment panel (Brilliance, Exposure, Highlights, Shadows, Brightness, Contrast, Black Point). |
 | **`edit_color_section.py`** | Color adjustment panel (Saturation, Vibrance, Cast) with image statistics analysis. |
 | **`edit_bw_section.py`** | Black & White panel (Intensity, Neutrals, Tone, Grain) with artistic presets. |
+| **`edit_curve_section.py`** | Color curves panel with RGB and per-channel curve editing with draggable control points. |
+| **`edit_selective_color_section.py`** | Selective color panel targeting six hue ranges (Red/Yellow/Green/Cyan/Blue/Magenta) with Hue/Saturation/Luminance controls. |
+| **`edit_levels_section.py`** | Levels panel with 5-handle tone mapping, histogram display, and per-channel control. |
 | **`edit_perspective_controls.py`** | Perspective correction sliders (Vertical, Horizontal, Straighten). |
 | **`edit_topbar.py`** | Edit mode toolbar with Adjust/Crop toggle and action buttons. |
 | **`edit_strip.py`** | Custom slider widgets (`BWSlider`) used throughout the edit panels. |
@@ -211,7 +281,7 @@ The edit system is composed of modular widgets and submodules for non-destructiv
 | **`perspective_math.py`** | Geometric utilities for perspective matrix calculation and black-border validation. |
 
 ---
-### 3️⃣ Map Component (`maps/`)
+### 6️⃣ Map Component (`maps/`)
 
 This directory contains a semi-independent **map rendering module** used by the `PhotoMapView` widget.
 
@@ -226,8 +296,10 @@ This directory contains a semi-independent **map rendering module** used by the 
 | **`tile_parser.py`** | Parses `.pbf` vector tile files and converts them into drawable map primitives. |
 ---
 This modular separation ensures:
-- ✅ **Backend logic** remains independent and easily testable.  
-- ✅ **GUI architecture** follows MVC principles (Controllers coordinate Models and Widgets).  
+- ✅ **Domain logic** remains pure and independent of frameworks.
+- ✅ **Application layer** encapsulates business rules in testable Use Cases.
+- ✅ **GUI architecture** follows MVVM principles (Coordinators manage ViewModels and Views).
+- ✅ **Dependency Injection** enables loose coupling and easy testing.
 - ✅ **Background tasks** are handled asynchronously for smooth user interaction.
 
 ---

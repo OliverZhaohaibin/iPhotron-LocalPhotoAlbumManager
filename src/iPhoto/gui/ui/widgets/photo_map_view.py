@@ -236,6 +236,14 @@ class PhotoMapView(QWidget):
     assetActivated = Signal(str)
     """Signal emitted when the user activates a single asset marker."""
 
+    clusterActivated = Signal(list)
+    """Signal emitted when the user clicks a cluster with multiple assets.
+
+    The payload is a list of :class:`GeotaggedAsset` objects representing the
+    assets aggregated within the clicked cluster at the current zoom level.
+    This enables O(1) gallery opening without additional database lookups.
+    """
+
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
         layout = QVBoxLayout(self)
@@ -279,6 +287,7 @@ class PhotoMapView(QWidget):
         self._marker_controller.clustersUpdated.connect(self._overlay.set_clusters)
         self._marker_controller.citiesUpdated.connect(self._handle_city_annotations)
         self._marker_controller.assetActivated.connect(self._on_marker_asset_activated)
+        self._marker_controller.clusterActivated.connect(self._on_cluster_activated)
         self._marker_controller.thumbnailUpdated.connect(self._overlay.set_thumbnail)
         self._marker_controller.thumbnailsInvalidated.connect(self._overlay.clear_pixmaps)
 
@@ -307,6 +316,12 @@ class PhotoMapView(QWidget):
         """Relay marker activation events through :attr:`assetActivated`."""
 
         self.assetActivated.emit(asset)
+
+    @Slot(list)
+    def _on_cluster_activated(self, assets: list) -> None:
+        """Relay cluster activation events through :attr:`clusterActivated`."""
+
+        self.clusterActivated.emit(assets)
 
     def map_widget(self) -> MapWidget | MapGLWidget:
         """Expose the underlying map widget for integration tests."""

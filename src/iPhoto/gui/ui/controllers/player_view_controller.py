@@ -108,6 +108,8 @@ class PlayerViewController(QObject):
         self._pool = QThreadPool.globalInstance()
         self._active_workers: Set[_AdjustedImageWorker] = set()
         self._loading_source: Optional[Path] = None
+        self._defer_still_updates = False
+        self._pending_still: Optional[tuple[Path, QImage, dict]] = None
 
     # ------------------------------------------------------------------
     # High-level surface selection helpers
@@ -211,6 +213,21 @@ class PlayerViewController(QObject):
             return False
         return True
 
+    def defer_still_updates(self, enabled: bool) -> None:
+        """Control whether still frames should be applied immediately."""
+        self._defer_still_updates = bool(enabled)
+        if not self._defer_still_updates:
+            self.apply_pending_still()
+
+    def apply_pending_still(self) -> bool:
+        """Apply any deferred still frame if available."""
+        if self._pending_still is None:
+            return False
+        source, image, adjustments = self._pending_still
+        self._pending_still = None
+        self._apply_still_frame(source, image, adjustments)
+        return True
+
     def clear_image(self) -> None:
         """Remove any pixmap currently shown in the image viewer."""
         # 清空而非传空图像，避免一帧“空绘制/空上传”
@@ -285,15 +302,10 @@ class PlayerViewController(QObject):
             self.imageLoadingFailed.emit(source, "Image decoder returned an empty frame")
             return
 
-        # 先确保 GL 视图当前可见（上下文已就绪），再喂像素并强制一帧
-        self.show_image_surface()
-        self._image_viewer.set_image(
-            image,
-            adjustments,
-            image_source=source,
-            reset_view=True,
-        )
-        self._image_viewer.update()
+        if self._defer_still_updates and self._player_stack.currentWidget() is self._video_area:
+            self._pending_still = (source, image, adjustments)
+        else:
+            self._apply_still_frame(source, image, adjustments)
 
         if self._loading_source == source:
             self._loading_source = None
@@ -308,6 +320,17 @@ class PlayerViewController(QObject):
             self._loading_source = None
         self._image_viewer.set_image(None)
         self.imageLoadingFailed.emit(source, message)
+
+    def _apply_still_frame(self, source: Path, image: QImage, adjustments: dict) -> None:
+        """Render the still image on the GL viewer."""
+        self.show_image_surface()
+        self._image_viewer.set_image(
+            image,
+            adjustments,
+            image_source=source,
+            reset_view=True,
+        )
+        self._image_viewer.update()
 
     def _release_worker(self, worker: _AdjustedImageWorker) -> None:
         """Drop completed workers so the thread pool can reclaim resources."""

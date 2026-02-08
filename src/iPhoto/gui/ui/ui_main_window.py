@@ -23,7 +23,9 @@ from .widgets import (
     CustomTitleBar,
     DetailPageWidget,
     GalleryPageWidget,
+    InfoPanel,
     MainHeaderWidget,
+    NotificationToast,
     PhotoMapView,
     PreviewWindow,
 )
@@ -98,6 +100,11 @@ class Ui_MainWindow(object):
         self.rebuild_links_action = self.main_header.rebuild_links_action
         self.bind_library_action = self.main_header.bind_library_action
         self.toggle_filmstrip_action = self.main_header.toggle_filmstrip_action
+        self.export_all_edited_action = self.main_header.export_all_edited_action
+        self.export_selected_action = self.main_header.export_selected_action
+        self.export_destination_group = self.main_header.export_destination_group
+        self.export_destination_library = self.main_header.export_destination_library
+        self.export_destination_ask = self.main_header.export_destination_ask
         self.share_action_group = self.main_header.share_action_group
         self.share_action_copy_file = self.main_header.share_action_copy_file
         self.share_action_copy_path = self.main_header.share_action_copy_path
@@ -206,6 +213,9 @@ class Ui_MainWindow(object):
         self.progress_bar = self.status_bar.progress_bar
 
         MainWindow.setCentralWidget(self.window_shell)
+
+        self.info_panel = InfoPanel(MainWindow)
+        self.notification_toast = NotificationToast(MainWindow)
 
         if self.player_container is not None:
             self.player_container.installEventFilter(MainWindow)

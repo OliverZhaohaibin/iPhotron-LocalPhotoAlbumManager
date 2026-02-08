@@ -33,6 +33,10 @@ _LOGGER = logging.getLogger(__name__)
 def load_qimage(source: Path, target: QSize | None = None) -> Optional[QImage]:
     """Return a :class:`QImage` for *source* with optional scaling."""
 
+    if not source.exists():
+        _LOGGER.debug("Skipping image load for missing path: %s", source)
+        return None
+
     # ``QImageReader`` is most efficient when it can stream directly from the
     # filename because many formats (JPEG, HEIC, etc.) expose fast-paths for
     # downscaling during decode.  Reading the bytes eagerly would defeat those
@@ -155,6 +159,9 @@ def generate_micro_thumbnail(source: Path) -> Optional[bytes]:
     such that the longest side is 16 pixels, and encodes it as a JPEG.
     """
     if _Image is None or _ImageOps is None:
+        return None
+
+    if not source.exists():
         return None
 
     try:

@@ -261,7 +261,6 @@ class EditSelectiveColorSection(QWidget):
 
         self._opacity_effect = QGraphicsOpacityEffect(self)
         self.setGraphicsEffect(self._opacity_effect)
-        self._opacity_effect.setOpacity(1.0)
 
         # --- Tools: pipette + colour buttons ---
         tools_layout = QHBoxLayout()
@@ -374,7 +373,7 @@ class EditSelectiveColorSection(QWidget):
     def refresh_from_session(self) -> None:
         if self._session is None:
             return
-        enabled = bool(self._session.value("SelectiveColor_Enabled"))
+        enabled = self._is_enabled()
         self._updating_ui = True
         try:
             self._apply_enabled_state(enabled)
@@ -405,7 +404,7 @@ class EditSelectiveColorSection(QWidget):
 
     def _on_session_value_changed(self, key: str, _value: object) -> None:
         if key == "SelectiveColor_Enabled":
-            self._apply_enabled_state(bool(_value))
+            self._apply_enabled_state(self._is_enabled())
             return
         if key == "SelectiveColor_Ranges":
             self.refresh_from_session()
@@ -494,6 +493,11 @@ class EditSelectiveColorSection(QWidget):
             button.setEnabled(enabled)
         if not enabled and self._pipette_btn.isChecked():
             self.deactivate_eyedropper()
+
+    def _is_enabled(self) -> bool:
+        if self._session is None:
+            return False
+        return bool(self._session.value("SelectiveColor_Enabled"))
 
     def _update_theme(self, color_idx: int) -> None:
         """Update slider gradient colours based on the active colour range.
@@ -637,6 +641,6 @@ class EditSelectiveColorSection(QWidget):
     def mousePressEvent(self, event: QMouseEvent) -> None:
         """Enable the section on click when it is currently disabled."""
         if event.button() == Qt.MouseButton.LeftButton:
-            if self._session is not None and not bool(self._session.value("SelectiveColor_Enabled")):
+            if self._session is not None and not self._is_enabled():
                 self._session.set_value("SelectiveColor_Enabled", True)
         super().mousePressEvent(event)

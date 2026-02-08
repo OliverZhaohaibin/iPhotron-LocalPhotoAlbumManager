@@ -149,25 +149,24 @@ class FilmstripView(AssetGrid):
             selection_model = self.selectionModel()
             if selection_model is not None:
                 candidate = selection_model.currentIndex()
-                if (
-                    candidate.isValid()
-                    and not bool(candidate.data(Roles.IS_SPACER))
-                    and bool(candidate.data(Roles.IS_CURRENT))
-                ):
+                if self._is_current_thumbnail(candidate):
                     current_index = candidate
             if current_index is None:
                 for candidate in (top, bottom):
-                    if (
-                        candidate.isValid()
-                        and not bool(candidate.data(Roles.IS_SPACER))
-                        and bool(candidate.data(Roles.IS_CURRENT))
-                    ):
+                    if self._is_current_thumbnail(candidate):
                         current_index = candidate
                         break
             if current_index is not None:
                 self._pending_center_row = current_index.row()
                 self._last_known_center_row = current_index.row()
                 self._schedule_restore_scroll("current_change")
+
+    def _is_current_thumbnail(self, index: QModelIndex) -> bool:
+        if not index.isValid():
+            return False
+        if bool(index.data(Roles.IS_SPACER)):
+            return False
+        return bool(index.data(Roles.IS_CURRENT))
 
     def resizeEvent(self, event: QResizeEvent) -> None:  # type: ignore[override]
         super().resizeEvent(event)

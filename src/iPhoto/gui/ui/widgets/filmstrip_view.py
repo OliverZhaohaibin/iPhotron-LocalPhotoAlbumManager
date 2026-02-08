@@ -157,8 +157,9 @@ class FilmstripView(AssetGrid):
                         current_index = candidate
                         break
             if current_index is not None:
-                self._pending_center_row = current_index.row()
-                self._last_known_center_row = current_index.row()
+                current_row = current_index.row()
+                self._pending_center_row = current_row
+                self._last_known_center_row = current_row
                 self._schedule_restore_scroll("current_change")
 
     def _is_current_thumbnail(self, index: QModelIndex) -> bool:

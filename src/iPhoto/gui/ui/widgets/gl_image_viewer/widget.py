@@ -13,7 +13,7 @@ from typing import Any
 
 import numpy as np
 from OpenGL import GL as gl
-from PySide6.QtCore import QPointF, QSize, Qt, Signal, QRectF
+from PySide6.QtCore import QPointF, QSize, Qt, Signal, QRectF, QTimer
 from PySide6.QtGui import (
     QColor,
     QImage,
@@ -440,6 +440,13 @@ class GLImageViewer(QOpenGLWidget):
         """Toggle the pure black immersive backdrop used in immersive mode."""
 
         self.set_surface_color_override("#000000" if immersive else None)
+
+    def prepare_for_fullscreen(self) -> None:
+        """Warm up the GL texture before the fullscreen transition."""
+
+        self._prime_texture_upload()
+        self.update()
+        QTimer.singleShot(0, self._prime_texture_upload)
 
     def rotate_image_ccw(self) -> dict[str, float]:
         """Rotate the photo 90° counter-clockwise without mutating crop geometry.

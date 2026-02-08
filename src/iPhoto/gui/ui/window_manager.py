@@ -255,6 +255,7 @@ class FramelessWindowManager(QObject):
 
         self._immersive_active = True
         self._window.showFullScreen()
+        self._prime_playback_viewer()
         self._update_fullscreen_button_icon()
         self._schedule_playback_resume(
             expect_immersive=True, resume=resume_after_transition
@@ -512,6 +513,12 @@ class FramelessWindowManager(QObject):
             self._ui.filmstrip_view,
         )
         return tuple(widget for widget in candidates if widget is not None)
+
+    def _prime_playback_viewer(self) -> None:
+        if self._ui.view_stack.currentWidget() is not self._ui.detail_page:
+            return
+        if self._ui.player_stack.currentWidget() is self._ui.image_viewer:
+            self._ui.image_viewer.prepare_for_fullscreen()
 
     def _build_menu_styles(self) -> tuple[str, str]:
         palette = self._rounded_shell.palette()

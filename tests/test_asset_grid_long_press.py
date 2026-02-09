@@ -10,8 +10,8 @@ from PySide6.QtGui import QStandardItem, QStandardItemModel
 from PySide6.QtTest import QSignalSpy, QTest
 from PySide6.QtWidgets import QApplication
 
-from src.iPhoto.config import LONG_PRESS_THRESHOLD_MS
-from src.iPhoto.gui.ui.widgets.asset_grid import AssetGrid
+from iPhoto.config import LONG_PRESS_THRESHOLD_MS
+from iPhoto.gui.ui.widgets.asset_grid import AssetGrid
 
 
 @pytest.fixture(scope="module")

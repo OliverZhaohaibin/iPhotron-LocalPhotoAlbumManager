@@ -7,11 +7,11 @@ from typing import Optional
 
 from PySide6.QtWidgets import QWidget
 
-# Allow both ``iPhoto.gui`` and legacy ``src.iPhoto.gui`` import paths.
+# Allow both ``iPhoto.gui`` and legacy ``iPhoto.gui`` import paths.
 try:  # pragma: no cover - depends on runtime packaging
     from ...appctx import AppContext
 except ImportError:  # pragma: no cover - fallback for script execution
-    from src.iPhoto.appctx import AppContext
+    from iPhoto.appctx import AppContext
 from typing import TYPE_CHECKING
 from ....errors import LibraryError
 from ....config import DEFAULT_EXCLUDE, DEFAULT_INCLUDE, WORK_DIR_NAME

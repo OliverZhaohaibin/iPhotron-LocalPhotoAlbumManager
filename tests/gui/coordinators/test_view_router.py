@@ -6,7 +6,7 @@ pytest.importorskip("PySide6.QtTest")
 
 from PySide6.QtTest import QSignalSpy
 
-from src.iPhoto.gui.coordinators.view_router import ViewRouter
+from iPhoto.gui.coordinators.view_router import ViewRouter
 
 
 class FakeStack:

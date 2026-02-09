@@ -8,13 +8,13 @@ from pathlib import Path
 from typing import List, Optional, cast
 from PySide6.QtCore import QObject, QRunnable, QThreadPool, Signal
 
-from src.iPhoto.domain.models import Asset
-from src.iPhoto.domain.models.core import MediaType
-from src.iPhoto.domain.models.query import AssetQuery
-from src.iPhoto.domain.repositories import IAssetRepository
-from src.iPhoto.application.dtos import AssetDTO
-from src.iPhoto.utils import image_loader
-from src.iPhoto.config import RECENTLY_DELETED_DIR_NAME, WORK_DIR_NAME
+from iPhoto.domain.models import Asset
+from iPhoto.domain.models.core import MediaType
+from iPhoto.domain.models.query import AssetQuery
+from iPhoto.domain.repositories import IAssetRepository
+from iPhoto.application.dtos import AssetDTO
+from iPhoto.utils import image_loader
+from iPhoto.config import RECENTLY_DELETED_DIR_NAME, WORK_DIR_NAME
 
 THUMBNAIL_SUFFIX_RE = re.compile(r"_(\d{2,4})x(\d{2,4})(?=\.[^.]+$)", re.IGNORECASE)
 THUMBNAIL_MAX_DIMENSION = 512
@@ -223,7 +223,7 @@ class AssetDataSource(QObject):
             assets: List of GeotaggedAsset objects from the map cluster.
             library_root: The library root path for resolving absolute paths.
         """
-        from src.iPhoto.library.manager import GeotaggedAsset
+        from iPhoto.library.manager import GeotaggedAsset
 
         self._current_query = None  # No query for direct asset loading
         self._cached_dtos.clear()
@@ -255,7 +255,7 @@ class AssetDataSource(QObject):
         This is a lightweight conversion that uses the pre-computed data from
         the geotagged asset without requiring database lookups.
         """
-        from src.iPhoto.library.manager import GeotaggedAsset
+        from iPhoto.library.manager import GeotaggedAsset
 
         if not isinstance(asset, GeotaggedAsset):
             return None

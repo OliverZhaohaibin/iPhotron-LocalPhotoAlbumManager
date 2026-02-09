@@ -12,12 +12,12 @@ from PySide6.QtCore import (
     Qt,
     Slot,
 )
-from src.iPhoto.application.dtos import AssetDTO
-from src.iPhoto.domain.models.query import AssetQuery
-from src.iPhoto.gui.ui.models.roles import Roles
-from src.iPhoto.gui.viewmodels.asset_data_source import AssetDataSource
-from src.iPhoto.infrastructure.services.thumbnail_cache_service import ThumbnailCacheService
-from src.iPhoto.utils.geocoding import resolve_location_name
+from iPhoto.application.dtos import AssetDTO
+from iPhoto.domain.models.query import AssetQuery
+from iPhoto.gui.ui.models.roles import Roles
+from iPhoto.gui.viewmodels.asset_data_source import AssetDataSource
+from iPhoto.infrastructure.services.thumbnail_cache_service import ThumbnailCacheService
+from iPhoto.utils.geocoding import resolve_location_name
 
 
 _SNAPSHOT_SEPARATOR = b"\x00"

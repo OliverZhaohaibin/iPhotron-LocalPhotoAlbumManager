@@ -11,7 +11,7 @@ pytest.importorskip("PySide6.QtWidgets", reason="Qt widgets not available", exc_
 
 from PySide6.QtWidgets import QApplication
 
-from src.iPhoto.gui.ui.widgets.info_panel import InfoPanel
+from iPhoto.gui.ui.widgets.info_panel import InfoPanel
 
 
 @pytest.fixture(scope="module")

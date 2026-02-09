@@ -4,8 +4,8 @@ import pytest
 from unittest.mock import patch
 
 # Ensure we can import the modules
-from src.iPhoto.utils.exiftool import get_metadata_batch
-from src.iPhoto.utils.ffmpeg import probe_media
+from iPhoto.utils.exiftool import get_metadata_batch
+from iPhoto.utils.ffmpeg import probe_media
 
 @pytest.fixture
 def mock_windows_environment(monkeypatch):

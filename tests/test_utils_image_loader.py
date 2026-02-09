@@ -5,7 +5,7 @@ from PIL import Image
 import pytest
 from io import BytesIO
 
-from src.iPhoto.utils import image_loader
+from iPhoto.utils import image_loader
 
 def test_qimage_from_pil_success():
     """Test successful conversion from PIL Image to QImage."""
@@ -46,7 +46,7 @@ def test_qimage_from_pil_converts_to_rgba():
     """Test that image is converted to RGBA before QImage creation."""
     pil_image = Image.new("L", (10, 10)) # Grayscale
 
-    with patch("src.iPhoto.utils.image_loader._ImageQt") as mock_qt:
+    with patch("iPhoto.utils.image_loader._ImageQt") as mock_qt:
         image_loader.qimage_from_pil(pil_image)
 
         # Check that the image passed to ImageQt was converted

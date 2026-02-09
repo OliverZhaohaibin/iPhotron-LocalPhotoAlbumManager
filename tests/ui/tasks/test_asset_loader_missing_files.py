@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from src.iPhoto.gui.ui.tasks.asset_loader_worker import compute_asset_rows
+from iPhoto.gui.ui.tasks.asset_loader_worker import compute_asset_rows
 
 
 def test_compute_asset_rows_skips_missing_files(monkeypatch, tmp_path: Path) -> None:
@@ -35,7 +35,7 @@ def test_compute_asset_rows_skips_missing_files(monkeypatch, tmp_path: Path) -> 
             return 2
 
     monkeypatch.setattr(
-        "src.iPhoto.gui.ui.tasks.asset_loader_worker.get_global_repository",
+        "iPhoto.gui.ui.tasks.asset_loader_worker.get_global_repository",
         lambda root: FakeStore(root),
     )
 

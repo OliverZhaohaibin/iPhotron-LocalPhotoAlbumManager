@@ -21,7 +21,7 @@ pytest.importorskip(
 
 from PySide6.QtWidgets import QApplication
 
-from src.iPhoto.gui.ui.tasks.import_worker import ImportWorker, ImportSignals
+from iPhoto.gui.ui.tasks.import_worker import ImportWorker, ImportSignals
 
 
 @pytest.fixture()
@@ -50,18 +50,18 @@ def test_import_worker_prefers_pair_over_rescan(qapp: QApplication, tmp_path: Pa
     )
 
     with patch(
-        "src.iPhoto.gui.ui.tasks.import_worker.backend.scan_specific_files"
+        "iPhoto.gui.ui.tasks.import_worker.backend.scan_specific_files"
     ) as scan_specific_files, patch(
-        "src.iPhoto.gui.ui.tasks.import_worker.backend.pair"
+        "iPhoto.gui.ui.tasks.import_worker.backend.pair"
     ) as pair, patch(
-        "src.iPhoto.gui.ui.tasks.import_worker.backend.rescan"
+        "iPhoto.gui.ui.tasks.import_worker.backend.rescan"
     ) as rescan:
         pair.return_value = None
         rescan.return_value = None
 
         def copier(src: Path, dst: Path) -> Path:
-            target = dst / src.name
-            target.write_bytes(src.read_bytes())
+            target = dst / name
+            target.write_bytes(read_bytes())
             return target
 
         worker = ImportWorker([source], destination, copier, signals)

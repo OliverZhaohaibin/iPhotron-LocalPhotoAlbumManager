@@ -1,7 +1,7 @@
 import logging
 from enum import Enum
 from typing import Callable, Optional
-from src.iPhoto.events.bus import Event, EventBus
+from iPhoto.events.bus import Event, EventBus
 from dataclasses import dataclass, field
 
 class ErrorSeverity(Enum):

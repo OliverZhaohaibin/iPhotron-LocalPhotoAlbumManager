@@ -6,7 +6,7 @@ stub_module = types.ModuleType("reverse_geocoder")
 stub_module.RGeocoder = object
 sys.modules.setdefault("reverse_geocoder", stub_module)
 
-from src.iPhoto.utils import geocoding
+from iPhoto.utils import geocoding
 
 
 def test_resolve_location_name_accepts_latitude_longitude_strings(monkeypatch):

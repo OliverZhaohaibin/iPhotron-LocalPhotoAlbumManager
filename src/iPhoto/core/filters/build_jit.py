@@ -9,7 +9,7 @@ os.environ["IPHOTO_BUILD_AOT"] = "1"
 
 from numba.pycc import CC
 
-# Ensure we can import from src.
+# Ensure we can import from 
 # Assuming build_jit.py is at src/iPhoto/core/filters/build_jit.py
 # We want to add 'src' to sys.path, which is 3 levels up.
 src_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../"))

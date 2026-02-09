@@ -6,7 +6,7 @@ from unittest.mock import patch
 import pytest
 from PySide6.QtWidgets import QApplication
 
-from src.iPhoto.library.manager import LibraryManager
+from iPhoto.library.manager import LibraryManager
 
 @pytest.fixture(scope="module")
 def qapp():

@@ -1,14 +1,14 @@
 from pathlib import Path
 from unittest.mock import MagicMock
 
-from src.iPhoto.application.dtos import (
+from iPhoto.application.dtos import (
     OpenAlbumResponse,
     ScanAlbumResponse,
     PairLivePhotosResponse,
 )
-from src.iPhoto.application.services.album_service import AlbumService
-from src.iPhoto.application.services.asset_service import AssetService
-from src.iPhoto.domain.models import Asset, MediaType
+from iPhoto.application.services.album_service import AlbumService
+from iPhoto.application.services.asset_service import AssetService
+from iPhoto.domain.models import Asset, MediaType
 
 
 def test_album_service_delegates_to_use_cases():

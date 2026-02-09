@@ -3,12 +3,12 @@ from __future__ import annotations
 
 from pathlib import Path
 import pytest
-from src.iPhoto.cache.index_store import (
+from iPhoto.cache.index_store import (
     get_global_repository,
     reset_global_repository,
     GLOBAL_INDEX_DB_NAME,
 )
-from src.iPhoto.config import WORK_DIR_NAME
+from iPhoto.config import WORK_DIR_NAME
 
 
 @pytest.fixture(autouse=True)

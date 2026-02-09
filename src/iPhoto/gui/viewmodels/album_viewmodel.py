@@ -1,9 +1,9 @@
 import logging
 from pathlib import Path
 from PySide6.QtCore import QObject, Signal
-from src.iPhoto.application.services.album_service import AlbumService
-from src.iPhoto.application.services.asset_service import AssetService
-from src.iPhoto.domain.models.query import AssetQuery
+from iPhoto.application.services.album_service import AlbumService
+from iPhoto.application.services.asset_service import AssetService
+from iPhoto.domain.models.query import AssetQuery
 
 class AlbumViewModel(QObject):
     albumLoaded = Signal(object) # Payload: Album DTO or similar

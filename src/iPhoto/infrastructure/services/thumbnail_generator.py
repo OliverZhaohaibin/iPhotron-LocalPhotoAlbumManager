@@ -4,9 +4,9 @@ from PIL import Image, ImageOps
 import logging
 import io
 
-from src.iPhoto.application.interfaces import IThumbnailGenerator
-from src.iPhoto.utils.image_loader import generate_micro_thumbnail
-from src.iPhoto.utils.ffmpeg import extract_video_frame
+from iPhoto.application.interfaces import IThumbnailGenerator
+from iPhoto.utils.image_loader import generate_micro_thumbnail
+from iPhoto.utils.ffmpeg import extract_video_frame
 
 LOGGER = logging.getLogger(__name__)
 

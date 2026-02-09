@@ -1,5 +1,5 @@
 
-from src.iPhoto.library.manager import LibraryManager
+from iPhoto.library.manager import LibraryManager
 
 def test_get_live_scan_results_scanning_child_viewing_parent(tmp_path):
     """

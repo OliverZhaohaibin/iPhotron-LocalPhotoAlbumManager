@@ -6,10 +6,10 @@ from pathlib import Path
 
 import pytest
 
-from src.iPhoto import app as backend
-from src.iPhoto.config import WORK_DIR_NAME
-from src.iPhoto.core.pairing import pair_live
-from src.iPhoto.utils.jsonio import read_json
+from iPhoto import app as backend
+from iPhoto.config import WORK_DIR_NAME
+from iPhoto.core.pairing import pair_live
+from iPhoto.utils.jsonio import read_json
 
 
 def iso(ts: datetime) -> str:

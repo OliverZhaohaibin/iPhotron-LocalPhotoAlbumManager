@@ -11,7 +11,7 @@ from PySide6.QtWidgets import QMainWindow, QMenuBar
 try:  # pragma: no cover - exercised in packaging scenarios
     from ...appctx import AppContext
 except ImportError:  # pragma: no cover - script execution fallback
-    from src.iPhoto.appctx import AppContext
+    from iPhoto.appctx import AppContext
 
 from .media import require_multimedia
 from .ui_main_window import ChromeStatusBar, Ui_MainWindow

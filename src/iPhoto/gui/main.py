@@ -10,25 +10,25 @@ from PySide6.QtGui import QColor, QPalette
 from PySide6.QtWidgets import QApplication
 
 
-from src.iPhoto.appctx import AppContext
-from src.iPhoto.gui.ui.main_window import MainWindow
+from iPhoto.appctx import AppContext
+from iPhoto.gui.ui.main_window import MainWindow
 
 # New Architecture Imports
-from src.iPhoto.di.container import DependencyContainer
-from src.iPhoto.events.bus import EventBus
-from src.iPhoto.infrastructure.db.pool import ConnectionPool
-from src.iPhoto.domain.repositories import IAlbumRepository, IAssetRepository
-from src.iPhoto.infrastructure.repositories.sqlite_album_repository import SQLiteAlbumRepository
-from src.iPhoto.infrastructure.repositories.sqlite_asset_repository import SQLiteAssetRepository
-from src.iPhoto.infrastructure.services.metadata_provider import ExifToolMetadataProvider
-from src.iPhoto.infrastructure.services.thumbnail_generator import PillowThumbnailGenerator
-from src.iPhoto.application.interfaces import IMetadataProvider, IThumbnailGenerator
-from src.iPhoto.application.use_cases.open_album import OpenAlbumUseCase
-from src.iPhoto.application.use_cases.scan_album import ScanAlbumUseCase
-from src.iPhoto.application.use_cases.pair_live_photos import PairLivePhotosUseCase
-from src.iPhoto.application.services.album_service import AlbumService
-from src.iPhoto.application.services.asset_service import AssetService
-from src.iPhoto.gui.coordinators.main_coordinator import MainCoordinator
+from iPhoto.di.container import DependencyContainer
+from iPhoto.events.bus import EventBus
+from iPhoto.infrastructure.db.pool import ConnectionPool
+from iPhoto.domain.repositories import IAlbumRepository, IAssetRepository
+from iPhoto.infrastructure.repositories.sqlite_album_repository import SQLiteAlbumRepository
+from iPhoto.infrastructure.repositories.sqlite_asset_repository import SQLiteAssetRepository
+from iPhoto.infrastructure.services.metadata_provider import ExifToolMetadataProvider
+from iPhoto.infrastructure.services.thumbnail_generator import PillowThumbnailGenerator
+from iPhoto.application.interfaces import IMetadataProvider, IThumbnailGenerator
+from iPhoto.application.use_cases.open_album import OpenAlbumUseCase
+from iPhoto.application.use_cases.scan_album import ScanAlbumUseCase
+from iPhoto.application.use_cases.pair_live_photos import PairLivePhotosUseCase
+from iPhoto.application.services.album_service import AlbumService
+from iPhoto.application.services.asset_service import AssetService
+from iPhoto.gui.coordinators.main_coordinator import MainCoordinator
 
 
 def main(argv: list[str] | None = None) -> int:

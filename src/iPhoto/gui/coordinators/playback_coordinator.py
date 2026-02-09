@@ -9,21 +9,21 @@ from typing import TYPE_CHECKING, Any, Optional
 from PySide6.QtCore import QObject, Slot, QTimer, Signal, QModelIndex, QItemSelectionModel
 from PySide6.QtGui import QAction, QColor, QPalette
 
-from src.iPhoto.gui.coordinators.view_router import ViewRouter
-from src.iPhoto.gui.ui.icons import load_icon
-from src.iPhoto.gui.ui.controllers.header_controller import HeaderController
-from src.iPhoto.gui.ui.models.roles import Roles
-from src.iPhoto.gui.ui.widgets.info_panel import InfoPanel
-from src.iPhoto.io.metadata import read_image_meta
-from src.iPhoto.io import sidecar
+from iPhoto.gui.coordinators.view_router import ViewRouter
+from iPhoto.gui.ui.icons import load_icon
+from iPhoto.gui.ui.controllers.header_controller import HeaderController
+from iPhoto.gui.ui.models.roles import Roles
+from iPhoto.gui.ui.widgets.info_panel import InfoPanel
+from iPhoto.io.metadata import read_image_meta
+from iPhoto.io import sidecar
 
 if TYPE_CHECKING:
-    from src.iPhoto.gui.ui.widgets.player_bar import PlayerBar
-    from src.iPhoto.gui.ui.controllers.player_view_controller import PlayerViewController
-    from src.iPhoto.gui.viewmodels.asset_list_viewmodel import AssetListViewModel
-    from src.iPhoto.gui.coordinators.navigation_coordinator import NavigationCoordinator
-    from src.iPhoto.gui.ui.widgets.filmstrip_view import FilmstripView
-    from src.iPhoto.utils.settings import Settings
+    from iPhoto.gui.ui.widgets.player_bar import PlayerBar
+    from iPhoto.gui.ui.controllers.player_view_controller import PlayerViewController
+    from iPhoto.gui.viewmodels.asset_list_viewmodel import AssetListViewModel
+    from iPhoto.gui.coordinators.navigation_coordinator import NavigationCoordinator
+    from iPhoto.gui.ui.widgets.filmstrip_view import FilmstripView
+    from iPhoto.utils.settings import Settings
     from PySide6.QtWidgets import QPushButton, QSlider, QToolButton, QWidget
 
 LOGGER = logging.getLogger(__name__)

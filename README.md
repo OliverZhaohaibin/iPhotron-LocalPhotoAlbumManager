@@ -281,7 +281,7 @@ The edit system is composed of modular widgets and submodules for non-destructiv
 | **`perspective_math.py`** | Geometric utilities for perspective matrix calculation and black-border validation. |
 
 ---
-### 6️⃣ Map Component (`maps/`)
+### 6️⃣ Map Component (`src/maps/`)
 
 This directory contains a semi-independent **map rendering module** used by the `PhotoMapView` widget.
 

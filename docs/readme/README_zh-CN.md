@@ -287,7 +287,7 @@ iphoto-gui /photos/LondonTrip
 
 ---
 
-### 6️⃣ 地图组件（`maps/`）
+### 6️⃣ 地图组件（`src/maps/`）
 
 该目录包含一个半独立的**地图渲染模块**，供 `PhotoMapView` 小部件使用。
 

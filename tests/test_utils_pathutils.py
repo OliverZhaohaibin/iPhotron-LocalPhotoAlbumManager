@@ -2,7 +2,7 @@
 
 import pytest
 from pathlib import Path
-from src.iPhoto.utils.pathutils import (
+from iPhoto.utils.pathutils import (
     _expand,
     is_excluded,
     normalise_for_compare,

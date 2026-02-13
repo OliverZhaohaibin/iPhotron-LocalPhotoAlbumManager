@@ -2,10 +2,10 @@
 import pytest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
-from src.iPhoto.app import _sync_live_roles_to_db
-from src.iPhoto.models.types import LiveGroup
-from src.iPhoto.cache.index_store import IndexStore
-from src.iPhoto.config import WORK_DIR_NAME
+from iPhoto.app import _sync_live_roles_to_db
+from iPhoto.models.types import LiveGroup
+from iPhoto.cache.index_store import IndexStore
+from iPhoto.config import WORK_DIR_NAME
 
 @pytest.fixture
 def temp_album(tmp_path):

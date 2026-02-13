@@ -1,8 +1,8 @@
 import pytest
 import logging
 from unittest.mock import Mock, MagicMock
-from src.iPhoto.errors.handler import ErrorHandler, ErrorSeverity, ErrorOccurredEvent
-from src.iPhoto.events.bus import EventBus
+from iPhoto.errors.handler import ErrorHandler, ErrorSeverity, ErrorOccurredEvent
+from iPhoto.events.bus import EventBus
 
 def test_handle_error_logs_and_publishes():
     logger = Mock(spec=logging.Logger)

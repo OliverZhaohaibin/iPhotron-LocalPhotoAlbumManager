@@ -13,8 +13,8 @@ pytest.importorskip("PySide6.QtTest", reason="Qt test helpers not available", ex
 from PySide6.QtTest import QSignalSpy
 from PySide6.QtWidgets import QApplication
 
-from src.iPhoto.errors import AlbumDepthError, LibraryUnavailableError
-from src.iPhoto.library.manager import LibraryManager
+from iPhoto.errors import AlbumDepthError, LibraryUnavailableError
+from iPhoto.library.manager import LibraryManager
 
 
 @pytest.fixture(scope="module")

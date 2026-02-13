@@ -10,7 +10,7 @@ from PySide6.QtCore import QEvent
 from PySide6.QtGui import QShowEvent
 from PySide6.QtWidgets import QApplication
 
-from src.iPhoto.gui.ui.widgets.video_area import VideoArea
+from iPhoto.gui.ui.widgets.video_area import VideoArea
 
 
 @pytest.fixture

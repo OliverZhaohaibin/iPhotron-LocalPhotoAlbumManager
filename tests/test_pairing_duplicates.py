@@ -1,5 +1,5 @@
 
-from src.iPhoto.core.pairing import pair_live
+from iPhoto.core.pairing import pair_live
 
 def test_duplicates_pair_one_to_one():
     """

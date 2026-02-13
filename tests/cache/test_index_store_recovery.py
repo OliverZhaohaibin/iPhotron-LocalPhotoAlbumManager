@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from src.iPhoto.cache.index_store import IndexStore
+from iPhoto.cache.index_store import IndexStore
 
 
 def test_corrupted_file_rebuilt(tmp_path: Path) -> None:

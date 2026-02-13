@@ -2,9 +2,9 @@ import logging
 from typing import List, Optional
 from pathlib import Path
 
-from src.iPhoto.domain.models import Asset
-from src.iPhoto.domain.models.query import AssetQuery
-from src.iPhoto.domain.repositories import IAssetRepository
+from iPhoto.domain.models import Asset
+from iPhoto.domain.models.query import AssetQuery
+from iPhoto.domain.repositories import IAssetRepository
 
 class AssetService:
     """

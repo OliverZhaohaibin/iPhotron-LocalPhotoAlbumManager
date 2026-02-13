@@ -1,5 +1,5 @@
 import pytest
-from src.iPhoto.di.container import DependencyContainer
+from iPhoto.di.container import DependencyContainer
 from abc import ABC, abstractmethod
 
 class IService(ABC):

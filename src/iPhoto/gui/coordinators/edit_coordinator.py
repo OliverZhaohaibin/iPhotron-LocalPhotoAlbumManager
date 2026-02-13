@@ -9,29 +9,29 @@ from typing import TYPE_CHECKING, Optional
 from PySide6.QtCore import QObject, Slot, QSize, QTimer
 from PySide6.QtGui import QImage
 
-from src.iPhoto.gui.coordinators.view_router import ViewRouter
-from src.iPhoto.events.bus import EventBus
-from src.iPhoto.gui.ui.models.edit_session import EditSession
-from src.iPhoto.gui.ui.controllers.edit_history_manager import EditHistoryManager
-from src.iPhoto.gui.ui.controllers.edit_pipeline_loader import EditPipelineLoader
-from src.iPhoto.gui.ui.controllers.edit_preview_manager import EditPreviewManager
-from src.iPhoto.gui.ui.controllers.edit_zoom_handler import EditZoomHandler
-from src.iPhoto.gui.ui.controllers.edit_modes import AdjustModeState, CropModeState
-from src.iPhoto.gui.ui.controllers.header_controller import HeaderController
-from src.iPhoto.gui.ui.controllers.edit_fullscreen_manager import EditFullscreenManager
-from src.iPhoto.gui.ui.controllers.edit_view_transition import EditViewTransitionManager
-from src.iPhoto.gui.ui.tasks.edit_sidebar_preview_worker import EditSidebarPreviewResult
-from src.iPhoto.gui.ui.controllers.edit_preview_manager import resolve_adjustment_mapping
-from src.iPhoto.gui.ui.palette import viewer_surface_color
-from src.iPhoto.io import sidecar
-from src.iPhoto.core.curve_resolver import DEFAULT_CURVE_POINTS
-from src.iPhoto.core.levels_resolver import DEFAULT_LEVELS_HANDLES
-from src.iPhoto.core.selective_color_resolver import DEFAULT_SELECTIVE_COLOR_RANGES
+from iPhoto.gui.coordinators.view_router import ViewRouter
+from iPhoto.events.bus import EventBus
+from iPhoto.gui.ui.models.edit_session import EditSession
+from iPhoto.gui.ui.controllers.edit_history_manager import EditHistoryManager
+from iPhoto.gui.ui.controllers.edit_pipeline_loader import EditPipelineLoader
+from iPhoto.gui.ui.controllers.edit_preview_manager import EditPreviewManager
+from iPhoto.gui.ui.controllers.edit_zoom_handler import EditZoomHandler
+from iPhoto.gui.ui.controllers.edit_modes import AdjustModeState, CropModeState
+from iPhoto.gui.ui.controllers.header_controller import HeaderController
+from iPhoto.gui.ui.controllers.edit_fullscreen_manager import EditFullscreenManager
+from iPhoto.gui.ui.controllers.edit_view_transition import EditViewTransitionManager
+from iPhoto.gui.ui.tasks.edit_sidebar_preview_worker import EditSidebarPreviewResult
+from iPhoto.gui.ui.controllers.edit_preview_manager import resolve_adjustment_mapping
+from iPhoto.gui.ui.palette import viewer_surface_color
+from iPhoto.io import sidecar
+from iPhoto.core.curve_resolver import DEFAULT_CURVE_POINTS
+from iPhoto.core.levels_resolver import DEFAULT_LEVELS_HANDLES
+from iPhoto.core.selective_color_resolver import DEFAULT_SELECTIVE_COLOR_RANGES
 
 if TYPE_CHECKING:
-    from src.iPhoto.gui.viewmodels.asset_list_viewmodel import AssetListViewModel
-    from src.iPhoto.gui.ui.controllers.window_theme_controller import WindowThemeController
-    from src.iPhoto.gui.coordinators.navigation_coordinator import NavigationCoordinator
+    from iPhoto.gui.viewmodels.asset_list_viewmodel import AssetListViewModel
+    from iPhoto.gui.ui.controllers.window_theme_controller import WindowThemeController
+    from iPhoto.gui.coordinators.navigation_coordinator import NavigationCoordinator
 
 _LOGGER = logging.getLogger(__name__)
 

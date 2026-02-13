@@ -9,16 +9,16 @@ from unittest.mock import Mock, MagicMock
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
-from src.iPhoto.domain.models import Album, Asset, MediaType
-from src.iPhoto.infrastructure.repositories.sqlite_album_repository import SQLiteAlbumRepository
-from src.iPhoto.infrastructure.repositories.sqlite_asset_repository import SQLiteAssetRepository
-from src.iPhoto.infrastructure.db.pool import ConnectionPool
-from src.iPhoto.events.bus import EventBus
-from src.iPhoto.application.use_cases.open_album import OpenAlbumUseCase
-from src.iPhoto.application.use_cases.scan_album import ScanAlbumUseCase
-from src.iPhoto.application.use_cases.pair_live_photos import PairLivePhotosUseCase
-from src.iPhoto.application.dtos import OpenAlbumRequest, ScanAlbumRequest, PairLivePhotosRequest
-from src.iPhoto.application.interfaces import IMetadataProvider, IThumbnailGenerator
+from iPhoto.domain.models import Album, Asset, MediaType
+from iPhoto.infrastructure.repositories.sqlite_album_repository import SQLiteAlbumRepository
+from iPhoto.infrastructure.repositories.sqlite_asset_repository import SQLiteAssetRepository
+from iPhoto.infrastructure.db.pool import ConnectionPool
+from iPhoto.events.bus import EventBus
+from iPhoto.application.use_cases.open_album import OpenAlbumUseCase
+from iPhoto.application.use_cases.scan_album import ScanAlbumUseCase
+from iPhoto.application.use_cases.pair_live_photos import PairLivePhotosUseCase
+from iPhoto.application.dtos import OpenAlbumRequest, ScanAlbumRequest, PairLivePhotosRequest
+from iPhoto.application.interfaces import IMetadataProvider, IThumbnailGenerator
 
 
 class MockMetadataProvider(IMetadataProvider):

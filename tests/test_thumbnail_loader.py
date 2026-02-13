@@ -16,9 +16,9 @@ from PySide6.QtCore import QSize
 from PySide6.QtTest import QSignalSpy
 from PySide6.QtWidgets import QApplication
 
-from src.iPhoto.config import WORK_DIR_NAME
-from src.iPhoto.gui.ui.tasks.thumbnail_loader import ThumbnailLoader, generate_cache_path, safe_unlink
-from src.iPhoto.io.sidecar import save_adjustments
+from iPhoto.config import WORK_DIR_NAME
+from iPhoto.gui.ui.tasks.thumbnail_loader import ThumbnailLoader, generate_cache_path, safe_unlink
+from iPhoto.io.sidecar import save_adjustments
 
 try:
     from PIL import Image

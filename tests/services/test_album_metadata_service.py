@@ -21,8 +21,8 @@ pytest.importorskip(
 
 from PySide6.QtWidgets import QApplication
 
-from src.iPhoto.errors import IPhotoError
-from src.iPhoto.gui.services.album_metadata_service import AlbumMetadataService
+from iPhoto.errors import IPhotoError
+from iPhoto.gui.services.album_metadata_service import AlbumMetadataService
 
 
 @pytest.fixture()
@@ -102,19 +102,19 @@ def test_toggle_featured_updates_current_and_library_album(
 
     # Patch ``Album.open`` to return the dummy root album when invoked.
     monkeypatch.setattr(
-        "src.iPhoto.gui.services.album_metadata_service.Album.open",
+        "iPhoto.gui.services.album_metadata_service.Album.open",
         lambda path: root_album if Path(path) == library_root else dummy_album,
     )
     # Avoid waiting for Qt timers in tests by executing callbacks immediately.
     monkeypatch.setattr(
-        "src.iPhoto.gui.services.album_metadata_service.QTimer.singleShot",
+        "iPhoto.gui.services.album_metadata_service.QTimer.singleShot",
         lambda _delay, callback: callback(),
     )
     
     # Mock repository access to avoid DB operations in tests
     index_store_mock = mocker.MagicMock()
     monkeypatch.setattr(
-        "src.iPhoto.gui.services.album_metadata_service.get_global_repository",
+        "iPhoto.gui.services.album_metadata_service.get_global_repository",
         lambda root: index_store_mock,
     )
 
@@ -163,7 +163,7 @@ def test_toggle_featured_rolls_back_on_failure(
     dummy_album.save = failing_save  # type: ignore[assignment]
 
     monkeypatch.setattr(
-        "src.iPhoto.gui.services.album_metadata_service.QTimer.singleShot",
+        "iPhoto.gui.services.album_metadata_service.QTimer.singleShot",
         lambda _delay, callback: callback(),
     )
 
@@ -221,18 +221,18 @@ def test_toggle_featured_from_library_root_updates_sub_album(
         return None
 
     monkeypatch.setattr(
-        "src.iPhoto.gui.services.album_metadata_service.Album.open",
+        "iPhoto.gui.services.album_metadata_service.Album.open",
         album_opener,
     )
     monkeypatch.setattr(
-        "src.iPhoto.gui.services.album_metadata_service.QTimer.singleShot",
+        "iPhoto.gui.services.album_metadata_service.QTimer.singleShot",
         lambda _delay, callback: callback(),
     )
     
     # Mock repository access to avoid DB operations in tests
     index_store_mock = mocker.MagicMock()
     monkeypatch.setattr(
-        "src.iPhoto.gui.services.album_metadata_service.get_global_repository",
+        "iPhoto.gui.services.album_metadata_service.get_global_repository",
         lambda root: index_store_mock,
     )
 
@@ -296,18 +296,18 @@ def test_toggle_featured_from_library_root_for_root_asset(
         return None
 
     monkeypatch.setattr(
-        "src.iPhoto.gui.services.album_metadata_service.Album.open",
+        "iPhoto.gui.services.album_metadata_service.Album.open",
         album_opener,
     )
     monkeypatch.setattr(
-        "src.iPhoto.gui.services.album_metadata_service.QTimer.singleShot",
+        "iPhoto.gui.services.album_metadata_service.QTimer.singleShot",
         lambda _delay, callback: callback(),
     )
     
     # Mock repository access to avoid DB operations in tests
     index_store_mock = mocker.MagicMock()
     monkeypatch.setattr(
-        "src.iPhoto.gui.services.album_metadata_service.get_global_repository",
+        "iPhoto.gui.services.album_metadata_service.get_global_repository",
         lambda root: index_store_mock,
     )
 
@@ -359,11 +359,11 @@ def test_ensure_featured_entries_updates_album(
     dummy_album = DummyAlbum(album_root)
 
     monkeypatch.setattr(
-        "src.iPhoto.gui.services.album_metadata_service.Album.open",
+        "iPhoto.gui.services.album_metadata_service.Album.open",
         lambda path: dummy_album if Path(path) == album_root else None,
     )
     monkeypatch.setattr(
-        "src.iPhoto.gui.services.album_metadata_service.QTimer.singleShot",
+        "iPhoto.gui.services.album_metadata_service.QTimer.singleShot",
         lambda _delay, callback: callback(),
     )
 
@@ -443,19 +443,19 @@ def test_toggle_featured_identifies_correct_physical_root_nested(
         return albums_by_path.get(Path(path))
 
     monkeypatch.setattr(
-        "src.iPhoto.gui.services.album_metadata_service.Album.open",
+        "iPhoto.gui.services.album_metadata_service.Album.open",
         album_opener,
     )
 
     # Mock other dependencies
     monkeypatch.setattr(
-        "src.iPhoto.gui.services.album_metadata_service.QTimer.singleShot",
+        "iPhoto.gui.services.album_metadata_service.QTimer.singleShot",
         lambda _delay, callback: callback(),
     )
 
     index_store_mock = mocker.MagicMock()
     monkeypatch.setattr(
-        "src.iPhoto.gui.services.album_metadata_service.get_global_repository",
+        "iPhoto.gui.services.album_metadata_service.get_global_repository",
         lambda root: index_store_mock,
     )
 

@@ -1,7 +1,7 @@
 import pytest
 import sqlite3
 from pathlib import Path
-from src.iPhoto.infrastructure.db.pool import ConnectionPool
+from iPhoto.infrastructure.db.pool import ConnectionPool
 
 @pytest.fixture
 def db_path(tmp_path):

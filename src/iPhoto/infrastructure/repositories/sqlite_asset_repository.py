@@ -4,11 +4,11 @@ from pathlib import Path
 from typing import List, Optional, Tuple, Any
 from datetime import datetime
 
-from src.iPhoto.domain.models import Asset, MediaType
-from src.iPhoto.domain.models.query import AssetQuery, SortOrder
-from src.iPhoto.domain.repositories import IAssetRepository
-from src.iPhoto.infrastructure.db.pool import ConnectionPool
-from src.iPhoto.config import RECENTLY_DELETED_DIR_NAME
+from iPhoto.domain.models import Asset, MediaType
+from iPhoto.domain.models.query import AssetQuery, SortOrder
+from iPhoto.domain.repositories import IAssetRepository
+from iPhoto.infrastructure.db.pool import ConnectionPool
+from iPhoto.config import RECENTLY_DELETED_DIR_NAME
 
 class SQLiteAssetRepository(IAssetRepository):
     def __init__(self, pool: ConnectionPool):

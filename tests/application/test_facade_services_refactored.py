@@ -21,7 +21,7 @@ class TestAlbumMetadataServiceRefactored:
 
     def test_metadata_service_initializes_without_model_provider(self):
         """Verify service can be initialized without asset_list_model_provider."""
-        from src.iPhoto.gui.services.album_metadata_service import AlbumMetadataService
+        from iPhoto.gui.services.album_metadata_service import AlbumMetadataService
         
         # Mocks for required dependencies
         mock_album = MagicMock()
@@ -39,7 +39,7 @@ class TestAlbumMetadataServiceRefactored:
 
     def test_set_album_cover_succeeds(self):
         """Verify set_album_cover works without legacy model provider."""
-        from src.iPhoto.gui.services.album_metadata_service import AlbumMetadataService
+        from iPhoto.gui.services.album_metadata_service import AlbumMetadataService
         
         mock_album = MagicMock()
         mock_album.root = Path("/test/album")
@@ -67,7 +67,7 @@ class TestAssetMoveServiceRefactored:
 
     def test_move_service_initializes_without_model_provider(self):
         """Verify service can be initialized without asset_list_model_provider."""
-        from src.iPhoto.gui.services.asset_move_service import AssetMoveService
+        from iPhoto.gui.services.asset_move_service import AssetMoveService
         
         mock_task_manager = MagicMock()
         mock_album = MagicMock()
@@ -84,7 +84,7 @@ class TestAssetMoveServiceRefactored:
 
     def test_move_service_emits_error_for_invalid_operation(self):
         """Verify service emits error for invalid operations without crashing."""
-        from src.iPhoto.gui.services.asset_move_service import AssetMoveService
+        from iPhoto.gui.services.asset_move_service import AssetMoveService
         
         mock_task_manager = MagicMock()
         mock_album = MagicMock()

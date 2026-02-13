@@ -8,7 +8,7 @@ from unittest.mock import Mock
 import pytest
 from PySide6.QtWidgets import QApplication
 
-from src.iPhoto.gui.ui.controllers.edit_modes import AdjustModeState, CropModeState
+from iPhoto.gui.ui.controllers.edit_modes import AdjustModeState, CropModeState
 
 @pytest.fixture()
 def qapp() -> QApplication:

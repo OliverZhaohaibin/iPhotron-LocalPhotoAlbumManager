@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from src.iPhoto.models.album import Album
+from iPhoto.models.album import Album
 
 
 def test_open_temp_album(tmp_path: Path) -> None:

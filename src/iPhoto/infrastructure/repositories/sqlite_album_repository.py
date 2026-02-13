@@ -4,9 +4,9 @@ from pathlib import Path
 from typing import List, Optional
 from datetime import datetime
 
-from src.iPhoto.domain.models import Album
-from src.iPhoto.domain.repositories import IAlbumRepository
-from src.iPhoto.infrastructure.db.pool import ConnectionPool
+from iPhoto.domain.models import Album
+from iPhoto.domain.repositories import IAlbumRepository
+from iPhoto.infrastructure.db.pool import ConnectionPool
 
 class SQLiteAlbumRepository(IAlbumRepository):
     def __init__(self, pool: ConnectionPool):

@@ -4,7 +4,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from PIL import Image
 
-from src.iPhoto.utils import ffmpeg
+from iPhoto.utils import ffmpeg
 
 def test_extract_frame_with_pyav_returns_none_when_av_missing(monkeypatch):
     """Ensure it returns None if av module is not present."""
@@ -12,7 +12,7 @@ def test_extract_frame_with_pyav_returns_none_when_av_missing(monkeypatch):
     result = ffmpeg.extract_frame_with_pyav(Path("video.mp4"))
     assert result is None
 
-@patch("src.iPhoto.utils.ffmpeg.av")
+@patch("iPhoto.utils.ffmpeg.av")
 def test_extract_frame_with_pyav_opens_container(mock_av, tmp_path):
     """Test that it opens the container and seeks."""
     video_path = tmp_path / "video.mp4"
@@ -41,7 +41,7 @@ def test_extract_frame_with_pyav_opens_container(mock_av, tmp_path):
     assert mock_container.seek.called
     assert result == mock_image
 
-@patch("src.iPhoto.utils.ffmpeg.av")
+@patch("iPhoto.utils.ffmpeg.av")
 def test_extract_frame_with_pyav_no_seek(mock_av, tmp_path):
     """Test extraction without seeking (first frame)."""
     video_path = tmp_path / "video.mp4"
@@ -66,7 +66,7 @@ def test_extract_frame_with_pyav_no_seek(mock_av, tmp_path):
     assert result == mock_image
     assert not mock_container.seek.called
 
-@patch("src.iPhoto.utils.ffmpeg.av")
+@patch("iPhoto.utils.ffmpeg.av")
 def test_extract_frame_with_pyav_handles_scaling(mock_av, tmp_path):
     """Test scaling logic."""
     video_path = tmp_path / "video.mp4"
@@ -96,7 +96,7 @@ def test_extract_frame_with_pyav_handles_scaling(mock_av, tmp_path):
     # New height = 1080 * 0.166 = 180
     assert result.size == (320, 180)
 
-@patch("src.iPhoto.utils.ffmpeg.av")
+@patch("iPhoto.utils.ffmpeg.av")
 def test_extract_frame_with_pyav_handles_scaling_odd_dimensions(mock_av, tmp_path):
     """Test scaling logic ensures even dimensions matching ffmpeg logic."""
     video_path = tmp_path / "video.mp4"
@@ -122,7 +122,7 @@ def test_extract_frame_with_pyav_handles_scaling_odd_dimensions(mock_av, tmp_pat
     assert result is not None
     assert result.size == (34, 34)
 
-@patch("src.iPhoto.utils.ffmpeg.av")
+@patch("iPhoto.utils.ffmpeg.av")
 def test_extract_frame_with_pyav_exception_returns_none(mock_av, tmp_path):
     """Test exception handling."""
     # Ensure av.FFmpegError is a real exception type so it can be caught

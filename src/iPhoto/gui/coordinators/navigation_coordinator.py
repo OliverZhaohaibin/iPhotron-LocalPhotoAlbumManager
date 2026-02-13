@@ -10,22 +10,22 @@ from typing import TYPE_CHECKING, Literal, Optional
 
 from PySide6.QtCore import QObject, QTimer, Signal
 
-from src.iPhoto.events.bus import EventBus
-from src.iPhoto.application.services.album_service import AlbumService
-from src.iPhoto.gui.coordinators.view_router import ViewRouter
-from src.iPhoto.gui.ui.widgets.album_sidebar import AlbumSidebar
-from src.iPhoto.gui.viewmodels.asset_list_viewmodel import AssetListViewModel
-from src.iPhoto.config import RECENTLY_DELETED_DIR_NAME
-from src.iPhoto.domain.models.query import AssetQuery
-from src.iPhoto.domain.models.core import MediaType
-from src.iPhoto.errors import AlbumOperationError, IPhotoError
+from iPhoto.events.bus import EventBus
+from iPhoto.application.services.album_service import AlbumService
+from iPhoto.gui.coordinators.view_router import ViewRouter
+from iPhoto.gui.ui.widgets.album_sidebar import AlbumSidebar
+from iPhoto.gui.viewmodels.asset_list_viewmodel import AssetListViewModel
+from iPhoto.config import RECENTLY_DELETED_DIR_NAME
+from iPhoto.domain.models.query import AssetQuery
+from iPhoto.domain.models.core import MediaType
+from iPhoto.errors import AlbumOperationError, IPhotoError
 
 # Use legacy imports for context/facade compatibility until full migration
-from src.iPhoto.appctx import AppContext
-from src.iPhoto.gui.facade import AppFacade
+from iPhoto.appctx import AppContext
+from iPhoto.gui.facade import AppFacade
 
 if TYPE_CHECKING:
-    from src.iPhoto.gui.coordinators.playback_coordinator import PlaybackCoordinator
+    from iPhoto.gui.coordinators.playback_coordinator import PlaybackCoordinator
 
 LOGGER = logging.getLogger(__name__)
 

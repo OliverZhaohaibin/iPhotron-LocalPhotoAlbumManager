@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from src.iPhoto.io.metadata import read_image_meta
+from iPhoto.io.metadata import read_image_meta
 
 
 def _make_exif_image(path: Path, dt: str, offset: str | None = None) -> None:
@@ -39,7 +39,7 @@ def test_read_image_meta_falls_back_to_local_time(tmp_path: Path, monkeypatch: p
     _make_exif_image(photo, "2024:06:10 09:30:00")
 
     fake_tz = timezone(timedelta(hours=2))
-    monkeypatch.setattr("src.iPhoto.io.metadata.gettz", lambda: fake_tz)
+    monkeypatch.setattr("iPhoto.io.metadata.gettz", lambda: fake_tz)
 
     info = read_image_meta(photo)
     assert info["dt"] == "2024-06-10T07:30:00Z"

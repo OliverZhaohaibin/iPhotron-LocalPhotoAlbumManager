@@ -27,8 +27,8 @@ pytest.importorskip(
 from PySide6.QtWidgets import QApplication, QPushButton
 from PySide6.QtGui import QAction, QActionGroup
 
-from src.iPhoto.gui.ui.controllers.share_controller import ShareController
-from src.iPhoto.gui.ui.models.roles import Roles
+from iPhoto.gui.ui.controllers.share_controller import ShareController
+from iPhoto.gui.ui.models.roles import Roles
 
 
 @pytest.fixture()

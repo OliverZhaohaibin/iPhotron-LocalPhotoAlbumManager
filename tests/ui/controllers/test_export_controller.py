@@ -6,8 +6,8 @@ from unittest.mock import MagicMock, patch
 import pytest
 from PySide6.QtGui import QAction, QActionGroup
 
-from src.iPhoto.gui.ui.controllers.export_controller import ExportController
-from src.iPhoto.library.manager import LibraryManager
+from iPhoto.gui.ui.controllers.export_controller import ExportController
+from iPhoto.library.manager import LibraryManager
 
 
 @pytest.fixture
@@ -45,7 +45,7 @@ def mock_actions():
     }
 
 
-@patch("src.iPhoto.gui.ui.controllers.export_controller.QThreadPool")
+@patch("iPhoto.gui.ui.controllers.export_controller.QThreadPool")
 def test_export_controller_init(
     mock_pool, mock_settings, mock_library, mock_status_bar, mock_toast, mock_actions
 ):
@@ -77,8 +77,8 @@ def test_export_controller_init(
     mock_actions["library"].setChecked.assert_called_with(True)
 
 
-@patch("src.iPhoto.gui.ui.controllers.export_controller.QThreadPool")
-@patch("src.iPhoto.gui.ui.controllers.export_controller.ExportWorker")
+@patch("iPhoto.gui.ui.controllers.export_controller.QThreadPool")
+@patch("iPhoto.gui.ui.controllers.export_controller.ExportWorker")
 def test_handle_export_selected(
     mock_worker_cls,
     mock_pool,
@@ -112,8 +112,8 @@ def test_handle_export_selected(
     mock_pool.globalInstance().start.assert_called()
 
 
-@patch("src.iPhoto.gui.ui.controllers.export_controller.QThreadPool")
-@patch("src.iPhoto.gui.ui.controllers.export_controller.LibraryExportWorker")
+@patch("iPhoto.gui.ui.controllers.export_controller.QThreadPool")
+@patch("iPhoto.gui.ui.controllers.export_controller.LibraryExportWorker")
 def test_handle_export_all_edited(
     mock_worker_cls,
     mock_pool,

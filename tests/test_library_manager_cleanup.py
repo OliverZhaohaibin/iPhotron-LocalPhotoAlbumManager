@@ -10,9 +10,9 @@ pytest.importorskip("PySide6.QtWidgets", reason="Qt widgets not available for te
 
 from PySide6.QtWidgets import QApplication
 
-from src.iPhoto.config import RECENTLY_DELETED_DIR_NAME
-from src.iPhoto.cache.index_store import IndexStore
-from src.iPhoto.library.manager import LibraryManager
+from iPhoto.config import RECENTLY_DELETED_DIR_NAME
+from iPhoto.cache.index_store import IndexStore
+from iPhoto.library.manager import LibraryManager
 
 
 @pytest.fixture()

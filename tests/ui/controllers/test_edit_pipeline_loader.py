@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 from PySide6.QtGui import QImage
 
-from src.iPhoto.gui.ui.controllers.edit_pipeline_loader import EditPipelineLoader
+from iPhoto.gui.ui.controllers.edit_pipeline_loader import EditPipelineLoader
 
 
 @pytest.fixture
@@ -16,7 +16,7 @@ def pipeline_loader():
     return EditPipelineLoader()
 
 
-@patch("src.iPhoto.gui.ui.controllers.edit_pipeline_loader.ImageLoadWorker")
+@patch("iPhoto.gui.ui.controllers.edit_pipeline_loader.ImageLoadWorker")
 def test_load_image_starts_worker(MockWorker, pipeline_loader):
     """Verify load_image creates and starts an ImageLoadWorker."""
     path = Path("/path/to/image.jpg")
@@ -71,7 +71,7 @@ def test_image_load_failed_signal_emission(pipeline_loader):
     assert pipeline_loader._active_image_worker is not None
 
 
-@patch("src.iPhoto.gui.ui.controllers.edit_pipeline_loader.EditSidebarPreviewWorker")
+@patch("iPhoto.gui.ui.controllers.edit_pipeline_loader.EditSidebarPreviewWorker")
 def test_prepare_sidebar_preview_starts_worker(MockWorker, pipeline_loader):
     """Verify prepare_sidebar_preview starts a worker with correct params."""
     image = QImage(100, 100, QImage.Format.Format_RGB32)

@@ -3,7 +3,7 @@ from pathlib import Path
 import pytest
 
 try:
-    from src.iPhoto.gui.ui.tasks.asset_loader_worker import compute_album_path
+    from iPhoto.gui.ui.tasks.asset_loader_worker import compute_album_path
 except Exception as exc:  # pragma: no cover - environment missing Qt deps
     pytest.skip(f"PySide6 not available: {exc}", allow_module_level=True)
 

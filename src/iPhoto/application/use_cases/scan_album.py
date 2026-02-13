@@ -8,13 +8,13 @@ from pathlib import Path
 from typing import List, Set, Dict, Optional, Any
 from dataclasses import dataclass
 
-from src.iPhoto.application.dtos import ScanAlbumRequest, ScanAlbumResponse
-from src.iPhoto.domain.models import Album, Asset, MediaType
-from src.iPhoto.domain.repositories import IAlbumRepository, IAssetRepository
-from src.iPhoto.events.bus import EventBus, Event
-from src.iPhoto.application.interfaces import IMetadataProvider, IThumbnailGenerator
-from src.iPhoto.config import WORK_DIR_NAME, EXPORT_DIR_NAME, DEFAULT_INCLUDE, DEFAULT_EXCLUDE
-from src.iPhoto.utils.pathutils import should_include
+from iPhoto.application.dtos import ScanAlbumRequest, ScanAlbumResponse
+from iPhoto.domain.models import Album, Asset, MediaType
+from iPhoto.domain.repositories import IAlbumRepository, IAssetRepository
+from iPhoto.events.bus import EventBus, Event
+from iPhoto.application.interfaces import IMetadataProvider, IThumbnailGenerator
+from iPhoto.config import WORK_DIR_NAME, EXPORT_DIR_NAME, DEFAULT_INCLUDE, DEFAULT_EXCLUDE
+from iPhoto.utils.pathutils import should_include
 
 @dataclass(kw_only=True)
 class AlbumScannedEvent(Event):

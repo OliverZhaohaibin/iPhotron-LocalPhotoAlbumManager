@@ -1,9 +1,9 @@
 import pytest
 from unittest.mock import Mock
 from pathlib import Path
-from src.iPhoto.domain.models import Asset, MediaType
-from src.iPhoto.domain.models.query import AssetQuery
-from src.iPhoto.gui.viewmodels.asset_data_source import AssetDataSource
+from iPhoto.domain.models import Asset, MediaType
+from iPhoto.domain.models.query import AssetQuery
+from iPhoto.gui.viewmodels.asset_data_source import AssetDataSource
 
 def test_to_dto_converts_media_type_correctly():
     # Arrange

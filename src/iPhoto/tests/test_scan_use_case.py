@@ -1,12 +1,12 @@
 import pytest
 from unittest.mock import MagicMock, Mock
 from pathlib import Path
-from src.iPhoto.application.use_cases.scan_album import ScanAlbumUseCase, AlbumScannedEvent
-from src.iPhoto.application.dtos import ScanAlbumRequest
-from src.iPhoto.domain.models import Album, Asset
-from src.iPhoto.domain.repositories import IAlbumRepository, IAssetRepository
-from src.iPhoto.events.bus import EventBus
-from src.iPhoto.application.interfaces import IMetadataProvider, IThumbnailGenerator
+from iPhoto.application.use_cases.scan_album import ScanAlbumUseCase, AlbumScannedEvent
+from iPhoto.application.dtos import ScanAlbumRequest
+from iPhoto.domain.models import Album, Asset
+from iPhoto.domain.repositories import IAlbumRepository, IAssetRepository
+from iPhoto.events.bus import EventBus
+from iPhoto.application.interfaces import IMetadataProvider, IThumbnailGenerator
 from datetime import datetime
 
 @pytest.fixture

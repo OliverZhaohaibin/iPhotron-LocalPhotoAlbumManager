@@ -5,7 +5,7 @@ from unittest.mock import MagicMock, patch
 
 from PySide6.QtGui import QImage
 
-from src.iPhoto.core.export import (
+from iPhoto.core.export import (
     export_asset,
     get_unique_destination,
     render_image,
@@ -54,9 +54,9 @@ def test_resolve_export_path() -> None:
     assert resolved == Path("/lib/exported/ExternalAlbum/image.jpg")
 
 
-@patch("src.iPhoto.core.export.sidecar")
-@patch("src.iPhoto.core.export.image_loader")
-@patch("src.iPhoto.core.export.apply_adjustments")
+@patch("iPhoto.core.export.sidecar")
+@patch("iPhoto.core.export.image_loader")
+@patch("iPhoto.core.export.apply_adjustments")
 def test_render_image(mock_apply, mock_loader, mock_sidecar) -> None:
     path = Path("/path/to/image.jpg")
 
@@ -81,9 +81,9 @@ def test_render_image(mock_apply, mock_loader, mock_sidecar) -> None:
     mock_apply.assert_called()
 
 
-@patch("src.iPhoto.core.export.render_image")
-@patch("src.iPhoto.core.export.shutil")
-@patch("src.iPhoto.core.export.sidecar")
+@patch("iPhoto.core.export.render_image")
+@patch("iPhoto.core.export.shutil")
+@patch("iPhoto.core.export.sidecar")
 def test_export_asset(mock_sidecar, mock_shutil, mock_render, tmp_path: Path) -> None:
     export_root = tmp_path / "exported"
     library_root = tmp_path

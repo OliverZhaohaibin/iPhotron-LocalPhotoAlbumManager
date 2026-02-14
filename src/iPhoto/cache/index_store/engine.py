@@ -41,7 +41,15 @@ class DatabaseManager:
         """
         if self._conn:
             return self._conn
-        return sqlite3.connect(self.db_path)
+        return self._create_connection()
+
+    def _create_connection(self) -> sqlite3.Connection:
+        """Create a new database connection with optimised PRAGMA settings."""
+        conn = sqlite3.connect(self.db_path, timeout=10.0)
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=NORMAL")
+        conn.execute("PRAGMA cache_size=-8000")  # 8 MB cache
+        return conn
 
     @contextmanager
     def transaction(self) -> Iterator[sqlite3.Connection]:
@@ -77,7 +85,7 @@ class DatabaseManager:
             yield self._conn
             return
 
-        self._conn = sqlite3.connect(self.db_path)
+        self._conn = self._create_connection()
         try:
             with self._conn:
                 yield self._conn

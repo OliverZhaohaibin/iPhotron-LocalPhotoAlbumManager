@@ -185,6 +185,37 @@ class AssetRepository:
         query = f"DELETE FROM assets WHERE rel IN ({placeholders})"
         self._db_manager.execute_in_transaction(query, removable)
 
+    def get_rows_by_rels(self, rels: Iterable[str]) -> Dict[str, Dict[str, Any]]:
+        """Return a mapping of ``rel`` → row dict for the given *rels*.
+
+        Missing keys are silently omitted.  This is used by :class:`MoveWorker`
+        to cache source rows before deletion so that the destination index can
+        reuse existing metadata instead of re-extracting it with ExifTool.
+        """
+        rels_list = list(rels)
+        if not rels_list:
+            return {}
+
+        conn = self._db_manager.get_connection()
+        should_close = conn != self._db_manager._conn
+
+        try:
+            conn.row_factory = sqlite3.Row
+            placeholders = ", ".join(["?"] * len(rels_list))
+            query = f"SELECT * FROM assets WHERE rel IN ({placeholders})"
+            cursor = conn.cursor()
+            cursor.execute(query, rels_list)
+            result: Dict[str, Dict[str, Any]] = {}
+            for row in cursor:
+                d = self._db_row_to_dict(row)
+                rel_value = d.get("rel")
+                if rel_value is not None:
+                    result[str(rel_value)] = d
+            return result
+        finally:
+            if should_close:
+                conn.close()
+
     def read_all(
         self,
         sort_by_date: bool = False,

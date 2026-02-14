@@ -123,7 +123,6 @@ class NavigationCoordinator(QObject):
 
     def open_all_photos(self):
         """Loads all photos."""
-        LOGGER.info("[NAV] open_all_photos called")
         self._reset_playback()
         self._router.show_gallery()
         self._static_selection = AlbumSidebar.ALL_PHOTOS_TITLE
@@ -134,7 +133,6 @@ class NavigationCoordinator(QObject):
 
     def _handle_static_node(self, name: str):
         normalized = name.casefold()
-        LOGGER.info("[NAV] _handle_static_node: %s", name)
 
         if normalized == "all photos":
             self.open_all_photos()
@@ -188,7 +186,6 @@ class NavigationCoordinator(QObject):
         self._asset_vm.load_query(query)
 
     def _open_filtered_collection(self, title: str, is_favorite=None, media_types=None):
-        LOGGER.info("[NAV] _open_filtered_collection: title=%s, is_favorite=%s, media_types=%s", title, is_favorite, media_types)
         self._reset_playback()
         self._router.show_gallery()
         self._static_selection = title

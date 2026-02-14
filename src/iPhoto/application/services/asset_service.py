@@ -48,27 +48,11 @@ class AssetService:
 
     def toggle_favorite_by_path(self, path: Path) -> bool:
         """Toggles the favorite status of an asset by path."""
-        self._logger.info("[FAV-TOGGLE] Looking up asset by path: %s", path)
         asset = self._repo.get_by_path(path)
         if asset:
-            old_state = asset.is_favorite
             asset.is_favorite = not asset.is_favorite
-            self._logger.info(
-                "[FAV-TOGGLE] Found asset id=%s rel=%s | is_favorite: %s -> %s",
-                asset.id, asset.path.as_posix(), old_state, asset.is_favorite,
-            )
             self._repo.save(asset)
-            # Verify the save by re-reading
-            verify = self._repo.get_by_path(path)
-            if verify:
-                self._logger.info(
-                    "[FAV-TOGGLE] Verify after save: id=%s is_favorite=%s",
-                    verify.id, verify.is_favorite,
-                )
-            else:
-                self._logger.warning("[FAV-TOGGLE] Verify failed: asset not found after save!")
             return asset.is_favorite
-        self._logger.warning("[FAV-TOGGLE] Asset not found for path: %s", path)
         return False
 
     def import_assets(self, paths: list[Path], album_id: str, copy: bool = True):

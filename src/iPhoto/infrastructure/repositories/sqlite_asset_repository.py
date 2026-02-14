@@ -1,6 +1,5 @@
 import sqlite3
 import json
-import logging
 from pathlib import Path
 from typing import List, Optional, Tuple, Any
 from datetime import datetime
@@ -11,13 +10,9 @@ from iPhoto.domain.repositories import IAssetRepository
 from iPhoto.infrastructure.db.pool import ConnectionPool
 from iPhoto.config import RECENTLY_DELETED_DIR_NAME
 
-_logger = logging.getLogger(__name__)
-
 class SQLiteAssetRepository(IAssetRepository):
     def __init__(self, pool: ConnectionPool):
         self._pool = pool
-        self._db_path = pool._db_path
-        _logger.info("[REPO-INIT] SQLiteAssetRepository created, db_path=%s, pool_id=%s", pool._db_path, id(pool))
         self._init_table()
         self._migrate_schema()
         self._ensure_indices()
@@ -119,13 +114,7 @@ class SQLiteAssetRepository(IAssetRepository):
                 row = conn.execute("SELECT * FROM assets WHERE rel = ?", (path.as_posix(),)).fetchone()
 
             if row:
-                asset = self._map_row_to_asset(row)
-                _logger.info(
-                    "[REPO-GET] get_by_path(%s) -> found: id=%s, is_favorite=%s (db=%s)",
-                    path_str, asset.id, asset.is_favorite, self._db_path,
-                )
-                return asset
-            _logger.warning("[REPO-GET] get_by_path(%s) -> NOT FOUND (db=%s)", path_str, self._db_path)
+                return self._map_row_to_asset(row)
             return None
 
     def get_by_album(self, album_id: str) -> List[Asset]:
@@ -135,19 +124,9 @@ class SQLiteAssetRepository(IAssetRepository):
 
     def find_by_query(self, query: AssetQuery) -> List[Asset]:
         sql, params = self._build_sql(query)
-        _logger.info(
-            "[REPO-QUERY] is_favorite=%s, album_path=%s, db=%s",
-            query.is_favorite, query.album_path, self._db_path,
-        )
         with self._pool.connection() as conn:
             rows = conn.execute(sql, params).fetchall()
-            assets = [self._map_row_to_asset(row) for row in rows]
-            fav_count = sum(1 for a in assets if a.is_favorite)
-            _logger.info(
-                "[REPO-QUERY] Returned %d assets (%d favorites) from db=%s",
-                len(assets), fav_count, self._db_path,
-            )
-            return assets
+            return [self._map_row_to_asset(row) for row in rows]
 
     def count(self, query: AssetQuery) -> int:
         sql, params = self._build_sql(query, count_only=True)
@@ -171,15 +150,8 @@ class SQLiteAssetRepository(IAssetRepository):
             if micro_thumbnail is None and asset.metadata:
                 micro_thumbnail = asset.metadata.get("micro_thumbnail")
 
-            rel_posix = asset.path.as_posix()
-            fav_int = 1 if asset.is_favorite else 0
-            _logger.info(
-                "[REPO-SAVE] rel=%s, id=%s, is_favorite=%s (int=%s), db=%s",
-                rel_posix, asset.id, asset.is_favorite, fav_int, self._db_path,
-            )
-
             data.append((
-                rel_posix,  # rel (PK) - always use forward slashes for DB consistency
+                asset.path.as_posix(),  # rel (PK) - always use forward slashes for DB consistency
                 asset.id,
                 asset.album_id,
                 mt_int,  # media_type as int
@@ -191,7 +163,7 @@ class SQLiteAssetRepository(IAssetRepository):
                 json.dumps(metadata),
                 asset.content_identifier,
                 asset.live_photo_group_id,
-                fav_int,
+                1 if asset.is_favorite else 0,
                 asset.parent_album_path,
                 micro_thumbnail,
             ))

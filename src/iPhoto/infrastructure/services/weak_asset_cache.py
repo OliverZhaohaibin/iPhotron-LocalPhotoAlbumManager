@@ -23,6 +23,10 @@ class WeakAssetCache:
     garbage-collected the entry is automatically purged via a weak-ref
     callback, keeping the internal dict tidy.
 
+    A :class:`threading.RLock` (reentrant) is used because the weak-ref
+    ``_remove`` callback may fire while another method already holds the
+    lock (e.g. the GC triggers during ``put``).
+
     Parameters
     ----------
     max_size:
@@ -33,7 +37,7 @@ class WeakAssetCache:
     def __init__(self, max_size: int = 0) -> None:
         self._max_size = max(0, max_size)
         self._data: dict[str, weakref.ref] = {}
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
 
     # ------------------------------------------------------------------
     # Public API

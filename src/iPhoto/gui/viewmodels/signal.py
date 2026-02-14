@@ -6,29 +6,48 @@ for data-binding in ViewModels.
 
 from __future__ import annotations
 
+import logging
+import threading
 from typing import Any, Callable
+
+_logger = logging.getLogger(__name__)
 
 
 class Signal:
-    """Pure Python signal — does not depend on Qt."""
+    """Pure Python signal — does not depend on Qt.
+
+    Thread-safe: all handler mutations and emissions are protected by a lock.
+    Exceptions raised by individual handlers are caught and logged so that one
+    failing handler does not prevent subsequent handlers from executing (same
+    semantics as ``EventBus``).
+    """
 
     def __init__(self) -> None:
         self._handlers: list[Callable] = []
+        self._lock = threading.Lock()
 
     def connect(self, handler: Callable) -> None:
-        if handler not in self._handlers:
-            self._handlers.append(handler)
+        with self._lock:
+            if handler not in self._handlers:
+                self._handlers.append(handler)
 
     def disconnect(self, handler: Callable) -> None:
-        self._handlers.remove(handler)
+        with self._lock:
+            self._handlers.remove(handler)
 
     def emit(self, *args: Any, **kwargs: Any) -> None:
-        for handler in list(self._handlers):
-            handler(*args, **kwargs)
+        with self._lock:
+            handlers = list(self._handlers)
+        for handler in handlers:
+            try:
+                handler(*args, **kwargs)
+            except Exception as exc:
+                _logger.error("Signal handler %r failed: %s", handler, exc)
 
     @property
     def handler_count(self) -> int:
-        return len(self._handlers)
+        with self._lock:
+            return len(self._handlers)
 
 
 class ObservableProperty:

@@ -87,8 +87,9 @@ class TestSignal:
         sig.connect(bad_handler)
         sig.connect(lambda v: received.append(v))
 
-        with pytest.raises(RuntimeError):
-            sig.emit(1)
+        sig.emit(1)  # exception is caught; second handler still runs
+
+        assert received == [1]
 
 
 # ---------------------------------------------------------------------------

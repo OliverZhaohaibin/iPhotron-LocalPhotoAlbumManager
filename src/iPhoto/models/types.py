@@ -2,6 +2,13 @@
 
 from __future__ import annotations
 
+import warnings
+warnings.warn(
+    "iPhoto.models.types is deprecated. Use iPhoto.domain.models.core instead.",
+    DeprecationWarning,
+    stacklevel=2
+)
+
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
 

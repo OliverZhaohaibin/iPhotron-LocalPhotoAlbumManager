@@ -151,7 +151,7 @@ class SQLiteAssetRepository(IAssetRepository):
                 micro_thumbnail = asset.metadata.get("micro_thumbnail")
 
             data.append((
-                str(asset.path),  # rel (PK)
+                asset.path.as_posix(),  # rel (PK) - always use forward slashes for DB consistency
                 asset.id,
                 asset.album_id,
                 mt_int,  # media_type as int

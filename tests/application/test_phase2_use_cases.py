@@ -123,6 +123,38 @@ def test_asset_repository_maps_gps_column_into_metadata(asset_repo):
     assert loaded is not None
     assert loaded.metadata.get("gps") == {"lat": 35.0, "lon": 139.0}
 
+
+def test_save_uses_posix_paths_preventing_duplicates(asset_repo):
+    """Regression test: save_batch must use POSIX paths (forward slashes) as PK
+    to avoid creating duplicate rows when the DB already stores POSIX paths
+    (e.g. from the legacy scanner)."""
+    # 1. Insert an asset using POSIX path directly (simulating legacy scanner)
+    with asset_repo._pool.connection() as conn:
+        conn.execute(
+            """
+            INSERT INTO assets (rel, id, album_id, media_type, bytes, is_favorite)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            ("subfolder/photo.jpg", "asset-posix", "album1", 0, 1024, 0),
+        )
+
+    # 2. Load the asset, toggle favorite, and re-save (simulating toggle_favorite flow)
+    loaded = asset_repo.get("asset-posix")
+    assert loaded is not None
+    loaded.is_favorite = True
+    asset_repo.save(loaded)
+
+    # 3. Verify: there should be exactly ONE row, not two
+    with asset_repo._pool.connection() as conn:
+        count = conn.execute(
+            "SELECT COUNT(*) FROM assets WHERE id = ?", ("asset-posix",)
+        ).fetchone()[0]
+        assert count == 1, f"Expected 1 row but found {count} — path separator caused duplicate"
+
+    # 4. Verify the favorite flag was updated
+    reloaded = asset_repo.get("asset-posix")
+    assert reloaded.is_favorite is True
+
 # --- Use Case Tests ---
 
 def test_open_album_use_case(album_repo, asset_repo, event_bus, tmp_path):

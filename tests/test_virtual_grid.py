@@ -7,7 +7,9 @@ import sys
 
 import pytest
 
-# Direct import to avoid pulling in the full iPhoto.gui chain (requires Qt)
+# Direct file-level import to bypass the iPhoto.gui package chain which
+# triggers PySide6/Qt imports that are unavailable in headless CI.
+# VirtualAssetGrid itself is pure Python with no Qt dependency.
 _spec = importlib.util.spec_from_file_location(
     "virtual_grid",
     str(__import__("pathlib").Path(__file__).resolve().parents[1]

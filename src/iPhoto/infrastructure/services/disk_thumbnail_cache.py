@@ -30,6 +30,7 @@ class DiskThumbnailCache:
             path.unlink(missing_ok=True)
 
     def _key_to_path(self, key: str) -> Path:
-        # Two-character prefix bucketing to avoid single-directory overload
+        # MD5 is used here solely for uniform hash distribution across
+        # bucket directories — NOT for cryptographic security.
         hash_hex = hashlib.md5(key.encode()).hexdigest()  # noqa: S324
         return self._cache_dir / hash_hex[:2] / f"{hash_hex}.jpg"

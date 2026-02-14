@@ -56,7 +56,10 @@ def _make_asset(name: str) -> Asset:
 
 
 def _make_finder(total: int, page_size: int = 5):
-    """Create a mock finder returning *total* assets page by page."""
+    """Create a mock finder returning *total* assets page by page.
+
+    *page_size* is used as a fallback limit when the query has no limit set.
+    """
     all_assets = [_make_asset(f"a{i}") for i in range(total)]
     finder = Mock()
     finder.count_assets = Mock(return_value=total)

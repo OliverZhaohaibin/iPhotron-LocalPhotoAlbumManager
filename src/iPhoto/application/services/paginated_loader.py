@@ -93,9 +93,9 @@ class PaginatedAssetLoader:
 
     @property
     def total_pages(self) -> int:
-        if self._page_size <= 0:
+        if self._page_size <= 0 or self._total_count <= 0:
             return 0
-        return max(1, (self._total_count + self._page_size - 1) // self._page_size) if self._total_count > 0 else 0
+        return (self._total_count + self._page_size - 1) // self._page_size
 
     # -- public API --------------------------------------------------------
 

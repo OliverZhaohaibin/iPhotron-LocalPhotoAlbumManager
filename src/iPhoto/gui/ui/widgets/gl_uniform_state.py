@@ -63,6 +63,6 @@ class UniformState:
         self._gl_funcs.glUniformMatrix3fv(
             location,
             1,  # count = 1 matrix
-            1,  # transpose = True (OpenGL expects column-major, numpy is row-major)
+            1,  # transpose = GL_TRUE (row-major numpy → column-major OpenGL)
             matrix_list,
         )

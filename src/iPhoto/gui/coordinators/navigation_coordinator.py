@@ -302,7 +302,12 @@ class NavigationCoordinator(QObject):
     # --- Logic Ported from NavigationController ---
 
     def _should_treat_as_refresh(self, path: Path) -> bool:
-        # Check if re-opening same album to avoid UI flicker
+        # Check if re-opening same album to avoid UI flicker.
+        # When _static_selection is set we are viewing a non-album section
+        # (e.g. "All Photos", "Favorites"), so navigating to an album is never
+        # a refresh even if the facade still references the same path.
+        if self._static_selection is not None:
+            return False
         if self._facade.current_album and self._facade.current_album.root.resolve() == path.resolve():
             return self._router.is_gallery_view_active()
         return False

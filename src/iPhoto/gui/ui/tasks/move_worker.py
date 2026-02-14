@@ -166,7 +166,7 @@ class MoveWorker(QRunnable):
                 else:
                     backend.pair(self._source_root)
             except IPhotoError as exc:
-                self._signals.error.emit(str(exc))
+                self._signals.error.emit(f"Failed to pair Live Photos: {exc}")
 
         self._signals.finished.emit(
             self._source_root,

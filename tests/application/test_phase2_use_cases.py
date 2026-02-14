@@ -246,12 +246,12 @@ def test_open_album_with_library_root_preserves_favorites(tmp_path):
     # Open the album through the legacy backend WITH library_root
     try:
         open_album(album_root, autoscan=False, library_root=library_root, hydrate_index=False)
-    except Exception:
-        pass  # Album.open may fail for various reasons; we only care about DB state
+    except (FileNotFoundError, KeyError, ValueError, OSError):
+        pass  # Album.open may fail on minimal test fixtures; we only care about DB state
 
-    # Verify the favorite is STILL in the DB
+    # Verify the favorite is STILL in the DB (exactly 1 favorite seeded)
     fav_after = [r for r in store.read_all() if r.get("is_favorite")]
-    assert len(fav_after) >= 1, (
+    assert len(fav_after) == 1, (
         "Favorite was wiped by sync_favorites during open_album with library_root!"
     )
 

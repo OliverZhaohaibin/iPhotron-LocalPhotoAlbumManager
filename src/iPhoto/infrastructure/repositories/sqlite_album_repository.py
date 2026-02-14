@@ -56,6 +56,10 @@ class SQLiteAlbumRepository(IAlbumRepository):
                 album.cover_asset_id
             ))
 
+    def delete(self, id: str) -> None:
+        with self._pool.connection() as conn:
+            conn.execute("DELETE FROM albums WHERE id = ?", (id,))
+
     def _map_row_to_album(self, row) -> Album:
         created_at = datetime.fromisoformat(row["created_at"]) if row["created_at"] else None
         return Album(

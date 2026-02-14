@@ -394,6 +394,11 @@ class FilmstripView(AssetGrid):
         if not index.isValid():
             return
 
+        # Programmatic centering (e.g. entering playback from gallery) should
+        # win over any delayed restore from a previous detail session.
+        self._pending_scroll_value = None
+        self._pending_center_row = None
+
         item_rect = self.visualRect(index)
         if not item_rect.isValid():
             return

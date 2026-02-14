@@ -2,6 +2,13 @@
 
 from __future__ import annotations
 
+import warnings
+warnings.warn(
+    "iPhoto.models.album is deprecated. Use iPhoto.domain.models.core instead.",
+    DeprecationWarning,
+    stacklevel=2
+)
+
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone

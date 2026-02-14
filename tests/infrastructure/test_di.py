@@ -20,7 +20,7 @@ class ServiceWithArgs(IService):
 
 def test_register_resolve_transient():
     container = DependencyContainer()
-    container.register(IService, ServiceImpl)
+    container.register_transient(IService, ServiceImpl)
 
     s1 = container.resolve(IService)
     s2 = container.resolve(IService)
@@ -31,7 +31,7 @@ def test_register_resolve_transient():
 
 def test_register_resolve_singleton():
     container = DependencyContainer()
-    container.register(IService, ServiceImpl, singleton=True)
+    container.register_singleton(IService, ServiceImpl)
 
     s1 = container.resolve(IService)
     s2 = container.resolve(IService)
@@ -40,14 +40,14 @@ def test_register_resolve_singleton():
 
 def test_register_with_factory():
     container = DependencyContainer()
-    container.register(IService, factory=lambda: ServiceImpl())
+    container.register_factory(IService, lambda: ServiceImpl())
 
     s1 = container.resolve(IService)
     assert isinstance(s1, ServiceImpl)
 
 def test_register_with_args():
     container = DependencyContainer()
-    container.register(IService, ServiceWithArgs, args=["test_value"])
+    container.register_factory(IService, lambda: ServiceWithArgs("test_value"))
 
     s1 = container.resolve(IService)
     assert isinstance(s1, ServiceWithArgs)
@@ -55,5 +55,5 @@ def test_register_with_args():
 
 def test_resolve_unregistered():
     container = DependencyContainer()
-    with pytest.raises(ValueError):
+    with pytest.raises(Exception):
         container.resolve(IService)

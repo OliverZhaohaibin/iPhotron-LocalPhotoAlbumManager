@@ -12,8 +12,17 @@ class AssetService:
     Directly uses Repository for queries (CQRS Query side) or simple operations.
     For complex write operations, it should delegate to Use Cases.
     """
-    def __init__(self, asset_repo: IAssetRepository):
+    def __init__(
+        self,
+        asset_repo: IAssetRepository,
+        import_uc=None,
+        move_uc=None,
+        metadata_uc=None,
+    ):
         self._repo = asset_repo
+        self._import_uc = import_uc
+        self._move_uc = move_uc
+        self._metadata_uc = metadata_uc
         self._logger = logging.getLogger(__name__)
 
     def set_repository(self, repo: IAssetRepository) -> None:
@@ -45,3 +54,34 @@ class AssetService:
             self._repo.save(asset)
             return asset.is_favorite
         return False
+
+    def import_assets(self, paths: list[Path], album_id: str, copy: bool = True):
+        """Delegate to ImportAssetsUseCase"""
+        if self._import_uc:
+            from iPhoto.application.use_cases.import_assets import ImportAssetsRequest
+            return self._import_uc.execute(ImportAssetsRequest(
+                source_paths=paths,
+                target_album_id=album_id,
+                copy_files=copy,
+            ))
+        raise NotImplementedError("ImportAssetsUseCase not configured")
+
+    def move_assets(self, asset_ids: list[str], target_album_id: str):
+        """Delegate to MoveAssetsUseCase"""
+        if self._move_uc:
+            from iPhoto.application.use_cases.move_assets import MoveAssetsRequest
+            return self._move_uc.execute(MoveAssetsRequest(
+                asset_ids=asset_ids,
+                target_album_id=target_album_id,
+            ))
+        raise NotImplementedError("MoveAssetsUseCase not configured")
+
+    def update_metadata(self, asset_id: str, metadata: dict):
+        """Delegate to UpdateMetadataUseCase"""
+        if self._metadata_uc:
+            from iPhoto.application.use_cases.update_metadata import UpdateMetadataRequest
+            return self._metadata_uc.execute(UpdateMetadataRequest(
+                asset_id=asset_id,
+                metadata=metadata,
+            ))
+        raise NotImplementedError("UpdateMetadataUseCase not configured")

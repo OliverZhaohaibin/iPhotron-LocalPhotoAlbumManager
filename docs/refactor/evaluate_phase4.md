@@ -17,8 +17,8 @@ virtualized rendering, and `batch_insert` with SQLite WAL mode for high-throughp
 writes.
 
 **Key Metrics:**
-- 64 Phase 4 tests passing, 0 failures
-- 330 total tests passing (including phases 1–3), 0 regressions introduced
+- 100 Phase 4 tests passing, 0 failures
+- 366 total tests passing (including phases 1–3), 0 regressions introduced
 - All new modules are pure Python — testable without QApplication or display
 - Full backward compatibility: existing `ThumbnailCacheService` and `SQLiteAssetRepository` preserved
 

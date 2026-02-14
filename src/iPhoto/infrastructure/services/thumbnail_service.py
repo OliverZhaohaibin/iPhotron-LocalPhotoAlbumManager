@@ -31,7 +31,17 @@ class ThumbnailService:
         self._l1 = memory_cache
         self._l2 = disk_cache
         self._generator = generator
+        self._owns_executor = executor is None
         self._executor = executor or ThreadPoolExecutor(max_workers=2)
+
+    def shutdown(self) -> None:
+        """Shut down the internal executor if it was created by this service.
+
+        Callers that supply their own executor are responsible for its
+        lifecycle; calling ``shutdown()`` on those instances is a no-op.
+        """
+        if self._owns_executor:
+            self._executor.shutdown(wait=False)
 
     @staticmethod
     def _make_key(asset_id: str, size: tuple[int, int]) -> str:

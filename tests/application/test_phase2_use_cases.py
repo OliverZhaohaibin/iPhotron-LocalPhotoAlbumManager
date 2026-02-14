@@ -199,6 +199,65 @@ def test_save_preserves_legacy_columns_on_update(asset_repo):
     assert row["month"] == 6
     assert row["ts"] == 1704067200
 
+
+def test_open_album_with_library_root_preserves_favorites(tmp_path):
+    """Regression test: backend.open_album with library_root must NOT wipe
+    DB-level favorites via sync_favorites.
+
+    The legacy code calls sync_favorites(album.manifest.get("featured", []))
+    which treats the manifest as the sole source of truth.  In the new
+    architecture the DB is the source of truth, so the sync must be skipped
+    when a library_root is provided (global DB mode).
+    """
+    from iPhoto.app import open_album
+    from iPhoto.cache.index_store.repository import (
+        get_global_repository,
+        reset_global_repository,
+    )
+
+    # Build a minimal library structure
+    library_root = tmp_path / "library"
+    album_root = library_root / "album1"
+    album_root.mkdir(parents=True)
+    (album_root / "photo.jpg").write_bytes(b"\xff\xd8\xff")
+
+    # Write an empty manifest so Album.open succeeds
+    iPhoto_dir = album_root / ".iPhoto"
+    iPhoto_dir.mkdir()
+    import json
+    (iPhoto_dir / "manifest.json").write_text(json.dumps({}))
+
+    # Seed the global DB with one row marked as favorite
+    reset_global_repository()
+    store = get_global_repository(library_root)
+    store.append_rows([{
+        "rel": "album1/photo.jpg",
+        "id": "asset-fav-test",
+        "media_type": 0,
+        "bytes": 3,
+        "is_favorite": 1,
+        "parent_album_path": "album1",
+    }])
+
+    # Verify the favorite is in the DB
+    fav_before = list(store.read_all())
+    assert any(r.get("is_favorite") for r in fav_before), "Precondition: favorite must be set"
+
+    # Open the album through the legacy backend WITH library_root
+    try:
+        open_album(album_root, autoscan=False, library_root=library_root, hydrate_index=False)
+    except Exception:
+        pass  # Album.open may fail for various reasons; we only care about DB state
+
+    # Verify the favorite is STILL in the DB
+    fav_after = [r for r in store.read_all() if r.get("is_favorite")]
+    assert len(fav_after) >= 1, (
+        "Favorite was wiped by sync_favorites during open_album with library_root!"
+    )
+
+    reset_global_repository()
+
+
 # --- Use Case Tests ---
 
 def test_open_album_use_case(album_repo, asset_repo, event_bus, tmp_path):

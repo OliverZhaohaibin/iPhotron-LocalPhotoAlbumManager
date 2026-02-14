@@ -152,17 +152,23 @@ def open_album(
             _ensure_links(root, rows, library_root=library_root)
     
     # Keep favorites aligned with the manifest even when we skip hydration.
-    try:
-        store.sync_favorites(album.manifest.get("featured", []))
-    except Exception as exc:
-        if not _is_index_recoverable_error(exc):
-            raise
-        LOGGER.warning(
-            "sync_favorites failed for %s [%s]: %s",
-            root,
-            type(exc).__name__,
-            exc,
-        )
+    # Skip sync when using a global (library-level) database: the new
+    # architecture treats the DB as the single source of truth for favorites
+    # and `toggle_favorite_by_path` writes directly to the DB without
+    # touching the per-album manifest.  Calling sync_favorites with the
+    # (inevitably empty) manifest would wipe all DB-level favorites.
+    if not library_root:
+        try:
+            store.sync_favorites(album.manifest.get("featured", []))
+        except Exception as exc:
+            if not _is_index_recoverable_error(exc):
+                raise
+            LOGGER.warning(
+                "sync_favorites failed for %s [%s]: %s",
+                root,
+                type(exc).__name__,
+                exc,
+            )
     
     return album
 
@@ -463,7 +469,10 @@ def rescan(
     else:
         _ensure_links(root, rows, library_root=library_root)
     
-    store.sync_favorites(album.manifest.get("featured", []))
+    # See comment in open_album(): skip manifest-based sync when using
+    # a library-level global DB to avoid wiping DB-managed favorites.
+    if not library_root:
+        store.sync_favorites(album.manifest.get("featured", []))
     return rows
 
 

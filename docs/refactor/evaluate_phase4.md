@@ -296,10 +296,10 @@ get_thumbnail(asset_id, size)
 | `src/iPhoto/infrastructure/services/thumbnail_service.py` | 103 | Unified 3-tier thumbnail service with stats |
 | `src/iPhoto/gui/ui/widgets/virtual_grid.py` | 82 | Virtualized grid model (headless) |
 | `src/iPhoto/application/services/paginated_loader.py` | 151 | Paginated asset loader (200/page) |
-| `src/iPhoto/infrastructure/services/weak_asset_cache.py` | 96 | Weak-reference cache for inactive objects |
-| `src/iPhoto/infrastructure/services/memory_monitor.py` | 153 | Memory usage monitor with thresholds |
-| `src/iPhoto/infrastructure/services/cache_stats.py` | 89 | Cache hit-rate statistics collector |
-| `src/iPhoto/infrastructure/services/gpu_pipeline.py` | 289 | GPU optimization: shader precompiler, texture streaming, FBO pool |
+| `src/iPhoto/infrastructure/services/weak_asset_cache.py` | 102 | Weak-reference cache for inactive objects |
+| `src/iPhoto/infrastructure/services/memory_monitor.py` | 174 | Memory usage monitor with thresholds |
+| `src/iPhoto/infrastructure/services/cache_stats.py` | 88 | Cache hit-rate statistics collector |
+| `src/iPhoto/infrastructure/services/gpu_pipeline.py` | 299 | GPU optimization: shader precompiler, texture streaming, FBO pool |
 
 ### Modified Files
 

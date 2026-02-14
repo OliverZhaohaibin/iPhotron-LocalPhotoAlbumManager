@@ -208,13 +208,13 @@ def test_di_container_lifecycle():
         pass
 
     # Transient
-    container.register(Service, factory=lambda: Service())
+    container.register_factory(Service, lambda: Service())
     s1 = container.resolve(Service)
     s2 = container.resolve(Service)
     assert s1 is not s2
 
     # Singleton
-    container.register(Service, factory=lambda: Service(), singleton=True)
+    container.register_factory(Service, lambda: Service(), singleton=True)
     s3 = container.resolve(Service)
     s4 = container.resolve(Service)
     assert s3 is s4

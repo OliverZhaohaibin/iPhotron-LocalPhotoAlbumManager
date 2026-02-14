@@ -63,61 +63,58 @@ def _create_di_container() -> DependencyContainer:
 
     # Register Connection Pool (Singleton)
     pool = ConnectionPool(db_path)
-
-    # Use just one registration
-    container.register(ConnectionPool, implementation=pool, singleton=True)
+    container.register_instance(ConnectionPool, pool)
 
     # Event Bus
-    # Need a logger
     logger = logging.getLogger("EventBus")
-    container.register(EventBus, factory=lambda: EventBus(logger), singleton=True)
+    container.register_factory(EventBus, lambda: EventBus(logger), singleton=True)
 
     # Infrastructure Services
-    container.register(IMetadataProvider, ExifToolMetadataProvider, singleton=True)
-    container.register(IThumbnailGenerator, PillowThumbnailGenerator, singleton=True)
+    container.register_singleton(IMetadataProvider, ExifToolMetadataProvider)
+    container.register_singleton(IThumbnailGenerator, PillowThumbnailGenerator)
 
     # Repositories
-    container.register(IAlbumRepository, SQLiteAlbumRepository,
-                       factory=lambda: SQLiteAlbumRepository(container.resolve(ConnectionPool)),
-                       singleton=True)
+    container.register_factory(IAlbumRepository,
+                               lambda: SQLiteAlbumRepository(container.resolve(ConnectionPool)),
+                               singleton=True)
 
-    container.register(IAssetRepository, SQLiteAssetRepository,
-                       factory=lambda: SQLiteAssetRepository(container.resolve(ConnectionPool)),
-                       singleton=True)
+    container.register_factory(IAssetRepository,
+                               lambda: SQLiteAssetRepository(container.resolve(ConnectionPool)),
+                               singleton=True)
 
     # Use Cases
-    container.register(OpenAlbumUseCase,
-                       factory=lambda: OpenAlbumUseCase(
-                           album_repo=container.resolve(IAlbumRepository),
-                           asset_repo=container.resolve(IAssetRepository),
-                           event_bus=container.resolve(EventBus)
-                       ))
-    container.register(ScanAlbumUseCase,
-                       factory=lambda: ScanAlbumUseCase(
-                           album_repo=container.resolve(IAlbumRepository),
-                           asset_repo=container.resolve(IAssetRepository),
-                           event_bus=container.resolve(EventBus),
-                           metadata_provider=container.resolve(IMetadataProvider),
-                           thumbnail_generator=container.resolve(IThumbnailGenerator)
-                       ))
-    container.register(PairLivePhotosUseCase,
-                       factory=lambda: PairLivePhotosUseCase(
-                           asset_repo=container.resolve(IAssetRepository),
-                           event_bus=container.resolve(EventBus)
-                       ))
+    container.register_factory(OpenAlbumUseCase,
+                               lambda: OpenAlbumUseCase(
+                                   album_repo=container.resolve(IAlbumRepository),
+                                   asset_repo=container.resolve(IAssetRepository),
+                                   event_bus=container.resolve(EventBus)
+                               ))
+    container.register_factory(ScanAlbumUseCase,
+                               lambda: ScanAlbumUseCase(
+                                   album_repo=container.resolve(IAlbumRepository),
+                                   asset_repo=container.resolve(IAssetRepository),
+                                   event_bus=container.resolve(EventBus),
+                                   metadata_provider=container.resolve(IMetadataProvider),
+                                   thumbnail_generator=container.resolve(IThumbnailGenerator)
+                               ))
+    container.register_factory(PairLivePhotosUseCase,
+                               lambda: PairLivePhotosUseCase(
+                                   asset_repo=container.resolve(IAssetRepository),
+                                   event_bus=container.resolve(EventBus)
+                               ))
 
     # Services
-    container.register(AlbumService,
-                       factory=lambda: AlbumService(
-                           open_album_use_case=container.resolve(OpenAlbumUseCase),
-                           scan_album_use_case=container.resolve(ScanAlbumUseCase),
-                           pair_live_photos_use_case=container.resolve(PairLivePhotosUseCase)
-                       ), singleton=True)
+    container.register_factory(AlbumService,
+                               lambda: AlbumService(
+                                   open_album_use_case=container.resolve(OpenAlbumUseCase),
+                                   scan_album_use_case=container.resolve(ScanAlbumUseCase),
+                                   pair_live_photos_use_case=container.resolve(PairLivePhotosUseCase)
+                               ), singleton=True)
 
-    container.register(AssetService,
-                       factory=lambda: AssetService(
-                           asset_repo=container.resolve(IAssetRepository)
-                       ), singleton=True)
+    container.register_factory(AssetService,
+                               lambda: AssetService(
+                                   asset_repo=container.resolve(IAssetRepository)
+                               ), singleton=True)
 
     return container
 

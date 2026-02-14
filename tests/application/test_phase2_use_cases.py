@@ -123,6 +123,141 @@ def test_asset_repository_maps_gps_column_into_metadata(asset_repo):
     assert loaded is not None
     assert loaded.metadata.get("gps") == {"lat": 35.0, "lon": 139.0}
 
+
+def test_save_uses_posix_paths_preventing_duplicates(asset_repo):
+    """Regression test: save_batch must use POSIX paths (forward slashes) as PK
+    to avoid creating duplicate rows when the DB already stores POSIX paths
+    (e.g. from the legacy scanner)."""
+    # 1. Insert an asset using POSIX path directly (simulating legacy scanner)
+    with asset_repo._pool.connection() as conn:
+        conn.execute(
+            """
+            INSERT INTO assets (rel, id, album_id, media_type, bytes, is_favorite)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            ("subfolder/photo.jpg", "asset-posix", "album1", 0, 1024, 0),
+        )
+
+    # 2. Load the asset, toggle favorite, and re-save (simulating toggle_favorite flow)
+    loaded = asset_repo.get("asset-posix")
+    assert loaded is not None
+    loaded.is_favorite = True
+    asset_repo.save(loaded)
+
+    # 3. Verify: there should be exactly ONE row, not two
+    with asset_repo._pool.connection() as conn:
+        count = conn.execute(
+            "SELECT COUNT(*) FROM assets WHERE id = ?", ("asset-posix",)
+        ).fetchone()[0]
+        assert count == 1, f"Expected 1 row but found {count} — path separator caused duplicate"
+
+    # 4. Verify the favorite flag was updated
+    reloaded = asset_repo.get("asset-posix")
+    assert reloaded.is_favorite is True
+
+
+def test_save_preserves_legacy_columns_on_update(asset_repo):
+    """Regression test: save_batch must preserve columns managed by the legacy
+    scanner (gps, mime, make, model, live_role, live_partner_rel, year, month,
+    etc.) when updating an existing row."""
+    # 1. Insert a fully populated row simulating legacy scanner
+    with asset_repo._pool.connection() as conn:
+        conn.execute(
+            """
+            INSERT INTO assets (
+                rel, id, album_id, media_type, bytes, is_favorite,
+                gps, mime, make, model, live_role, live_partner_rel, year, month, ts
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "folder/img.jpg", "legacy-asset", "album1", 0, 2048, 0,
+                '{"lat": 35.0, "lon": 139.0}', "image/jpeg", "Canon", "EOS R5",
+                0, "folder/img.mov", 2024, 6, 1704067200,
+            ),
+        )
+
+    # 2. Load the asset and re-save (e.g. via toggle_favorite)
+    loaded = asset_repo.get("legacy-asset")
+    assert loaded is not None
+    loaded.is_favorite = True
+    asset_repo.save(loaded)
+
+    # 3. Verify legacy columns are preserved
+    with asset_repo._pool.connection() as conn:
+        row = conn.execute(
+            "SELECT * FROM assets WHERE rel = ?", ("folder/img.jpg",)
+        ).fetchone()
+
+    assert row["is_favorite"] == 1
+    assert row["gps"] == '{"lat": 35.0, "lon": 139.0}'
+    assert row["mime"] == "image/jpeg"
+    assert row["make"] == "Canon"
+    assert row["model"] == "EOS R5"
+    assert row["live_role"] == 0
+    assert row["live_partner_rel"] == "folder/img.mov"
+    assert row["year"] == 2024
+    assert row["month"] == 6
+    assert row["ts"] == 1704067200
+
+
+def test_open_album_with_library_root_preserves_favorites(tmp_path):
+    """Regression test: backend.open_album with library_root must NOT wipe
+    DB-level favorites via sync_favorites.
+
+    The legacy code calls sync_favorites(album.manifest.get("featured", []))
+    which treats the manifest as the sole source of truth.  In the new
+    architecture the DB is the source of truth, so the sync must be skipped
+    when a library_root is provided (global DB mode).
+    """
+    from iPhoto.app import open_album
+    from iPhoto.cache.index_store.repository import (
+        get_global_repository,
+        reset_global_repository,
+    )
+
+    # Build a minimal library structure
+    library_root = tmp_path / "library"
+    album_root = library_root / "album1"
+    album_root.mkdir(parents=True)
+    (album_root / "photo.jpg").write_bytes(b"\xff\xd8\xff")
+
+    # Write an empty manifest so Album.open succeeds
+    iPhoto_dir = album_root / ".iPhoto"
+    iPhoto_dir.mkdir()
+    import json
+    (iPhoto_dir / "manifest.json").write_text(json.dumps({}))
+
+    # Seed the global DB with one row marked as favorite
+    reset_global_repository()
+    store = get_global_repository(library_root)
+    store.append_rows([{
+        "rel": "album1/photo.jpg",
+        "id": "asset-fav-test",
+        "media_type": 0,
+        "bytes": 3,
+        "is_favorite": 1,
+        "parent_album_path": "album1",
+    }])
+
+    # Verify the favorite is in the DB
+    fav_before = list(store.read_all())
+    assert any(r.get("is_favorite") for r in fav_before), "Precondition: favorite must be set"
+
+    # Open the album through the legacy backend WITH library_root
+    try:
+        open_album(album_root, autoscan=False, library_root=library_root, hydrate_index=False)
+    except (FileNotFoundError, KeyError, ValueError, OSError):
+        pass  # Album.open may fail on minimal test fixtures; we only care about DB state
+
+    # Verify the favorite is STILL in the DB (exactly 1 favorite seeded)
+    fav_after = [r for r in store.read_all() if r.get("is_favorite")]
+    assert len(fav_after) == 1, (
+        "Favorite was wiped by sync_favorites during open_album with library_root!"
+    )
+
+    reset_global_repository()
+
+
 # --- Use Case Tests ---
 
 def test_open_album_use_case(album_repo, asset_repo, event_bus, tmp_path):

@@ -83,7 +83,7 @@ def main(argv: list[str] | None = None) -> int:
     container = DependencyContainer()
 
     # 1. Event Bus
-    container.register(EventBus, singleton=True)
+    container.register_singleton(EventBus)
 
     # 2. Database Connection Pool
     # We need a path for the global DB. Assuming context.library.root holds it or using default.
@@ -99,16 +99,15 @@ def main(argv: list[str] | None = None) -> int:
     db_path.parent.mkdir(parents=True, exist_ok=True)
 
     pool = ConnectionPool(db_path)
-    # Fix: Register instance using factory lambda
-    container.register(ConnectionPool, factory=lambda: pool, singleton=True)
+    container.register_instance(ConnectionPool, pool)
 
     # 3. Repositories
-    container.register(IAlbumRepository, SQLiteAlbumRepository, args=[pool], singleton=True)
-    container.register(IAssetRepository, SQLiteAssetRepository, args=[pool], singleton=True)
+    container.register_factory(IAlbumRepository, lambda: SQLiteAlbumRepository(pool), singleton=True)
+    container.register_factory(IAssetRepository, lambda: SQLiteAssetRepository(pool), singleton=True)
 
     # 4. Infrastructure Services
-    container.register(IMetadataProvider, ExifToolMetadataProvider, singleton=True)
-    container.register(IThumbnailGenerator, PillowThumbnailGenerator, singleton=True)
+    container.register_singleton(IMetadataProvider, ExifToolMetadataProvider)
+    container.register_singleton(IThumbnailGenerator, PillowThumbnailGenerator)
 
     # 5. Services & Use Cases
     # Resolving dependencies for Use Cases
@@ -123,8 +122,8 @@ def main(argv: list[str] | None = None) -> int:
     scan_uc = ScanAlbumUseCase(album_repo, asset_repo, event_bus, metadata_provider, thumbnail_generator)
     pair_uc = PairLivePhotosUseCase(asset_repo, event_bus)
 
-    container.register(AlbumService, args=[open_uc, scan_uc, pair_uc], singleton=True)
-    container.register(AssetService, args=[asset_repo], singleton=True)
+    container.register_factory(AlbumService, lambda: AlbumService(open_uc, scan_uc, pair_uc), singleton=True)
+    container.register_factory(AssetService, lambda: AssetService(asset_repo), singleton=True)
 
     # --- Phase 4: Coordinator Wiring ---
     window = MainWindow(context)

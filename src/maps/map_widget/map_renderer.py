@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import math
 from collections.abc import Sequence
-from dataclasses import dataclass
 from typing import Dict, Iterable, Optional, Tuple
 
 from PySide6.QtCore import QPointF, QRectF, Qt
@@ -12,48 +11,17 @@ from PySide6.QtGui import QColor, QFont, QFontMetricsF, QPainter, QPainterPath, 
 
 from maps.style_resolver import StyleResolver
 
+from .city_label_layout import CityAnnotation, RenderedCityLabel, render_cities  # noqa: F401 – re-export
 from .geometry import extract_geometry, normalize_lines, normalize_points, normalize_polygons
 from .layer import LayerPlan
+from .tile_collector import collect_tiles, request_tiles
 from .tile_manager import TileManager
+from .viewport import ViewState, compute_view_state
 
-
-# ``MAX_TILE_ZOOM_LEVEL`` reflects the highest tile zoom level available from the
-# bundled map source. When the view zoom exceeds this value we keep rendering the
-# level-6 tiles and upscale them so that the user never sees empty space.
-MAX_TILE_ZOOM_LEVEL = 6
-MERCATOR_LAT_BOUND = 85.05112878
-
-
-@dataclass(frozen=True)
-class _ViewState:
-    """Describe the camera parameters used for the current paint pass."""
-
-    zoom: float
-    fetch_zoom: int
-    width: int
-    height: int
-    view_top_left_x: float
-    view_top_left_y: float
-    scaled_tile_size: float
-    tiles_across: int
-
-
-@dataclass(frozen=True)
-class CityAnnotation:
-    """Descriptor describing a lightweight label drawn directly on the map."""
-
-    longitude: float
-    latitude: float
-    display_name: str
-    full_name: str
-
-
-@dataclass
-class _RenderedCityLabel:
-    """Runtime data cached for hit-testing rendered city annotations."""
-
-    bounds: QRectF
-    full_name: str
+# Backward-compatible re-exports so that ``from .map_renderer import
+# CityAnnotation`` continues to work for all existing importers.
+# The ``CityAnnotation`` import above already makes the name available in
+# this module's namespace; the comment is kept for clarity.
 
 
 class MapRenderer:
@@ -80,7 +48,7 @@ class MapRenderer:
         # answer hover tooltips without re-running the projection math on every
         # mouse move event.
         self._cities: list[CityAnnotation] = []
-        self._city_labels: list[_RenderedCityLabel] = []
+        self._city_labels: list[RenderedCityLabel] = []
         # ``_label_collision_boxes`` tracks the rectangles of text labels that
         # were successfully drawn in the current frame.  Keeping the rectangles
         # grouped by layer enables lightweight collision detection so that we can
@@ -115,14 +83,20 @@ class MapRenderer:
         # background used across the application.
         painter.fillRect(0, 0, width, height, QColor("#88a8c2"))
 
-        view_state = self._compute_view_state(center_x, center_y, zoom, width, height)
+        view_state = compute_view_state(center_x, center_y, zoom, width, height, self._tile_size)
         # Collision tracking must start fresh for every paint pass because the
         # widget rerenders the entire viewport each time.
         self._label_collision_boxes.clear()
-        tiles_to_draw, tiles_to_request = self._collect_tiles(view_state)
-        self._request_tiles(tiles_to_request)
+        tiles_to_draw, tiles_to_request = collect_tiles(view_state, self._tile_manager)
+        request_tiles(tiles_to_request, self._tile_manager)
         self._render_tiles(painter, tiles_to_draw, view_state)
-        self._render_cities(painter, view_state)
+        self._city_labels = render_cities(
+            painter,
+            view_state,
+            self._cities,
+            self._tile_size,
+            self.CITY_LABEL_MIN_FETCH_LEVEL,
+        )
 
     # ------------------------------------------------------------------
     def invalidate_tile(self, tile_key: tuple[int, int, int]) -> None:
@@ -140,106 +114,11 @@ class MapRenderer:
         return None
 
     # ------------------------------------------------------------------
-    def _compute_view_state(
-        self,
-        center_x: float,
-        center_y: float,
-        zoom: float,
-        width: int,
-        height: int,
-    ) -> _ViewState:
-        """Translate widget geometry into the parameters used during rendering."""
-
-        world_size = self._tile_size * (2 ** zoom)
-        center_px = center_x * world_size
-        center_py = center_y * world_size
-        view_top_left_x = center_px - width / 2.0
-        view_top_left_y = center_py - height / 2.0
-
-        # Clamp the requested tile zoom level to the available range so that
-        # the renderer keeps drawing level-6 tiles when the interactive zoom is
-        # higher than the tile set supports. The resulting ``scale_factor``
-        # ensures that those tiles are magnified to match the desired view.
-        fetch_zoom = min(MAX_TILE_ZOOM_LEVEL, max(0, math.floor(zoom)))
-        tiles_across = 1 << fetch_zoom if fetch_zoom >= 0 else 1
-        scale_factor = 2 ** (zoom - fetch_zoom)
-        scaled_tile_size = self._tile_size * scale_factor
-
-        return _ViewState(
-            zoom=zoom,
-            fetch_zoom=fetch_zoom,
-            width=width,
-            height=height,
-            view_top_left_x=view_top_left_x,
-            view_top_left_y=view_top_left_y,
-            scaled_tile_size=scaled_tile_size,
-            tiles_across=tiles_across,
-        )
-
-    # ------------------------------------------------------------------
-    def _collect_tiles(
-        self, view_state: _ViewState
-    ) -> tuple[list[tuple[tuple[int, int, int], dict, float, float, int, int]], list[tuple[float, tuple[int, int, int]]]]:
-        """Gather tiles that intersect the viewport and schedule missing ones."""
-
-        start_tile_x = math.floor(view_state.view_top_left_x / view_state.scaled_tile_size)
-        start_tile_y = math.floor(view_state.view_top_left_y / view_state.scaled_tile_size)
-        end_tile_x = math.ceil(
-            (view_state.view_top_left_x + view_state.width) / view_state.scaled_tile_size
-        )
-        end_tile_y = math.ceil(
-            (view_state.view_top_left_y + view_state.height) / view_state.scaled_tile_size
-        )
-
-        tiles_to_draw: list[tuple[tuple[int, int, int], dict, float, float, int, int]] = []
-        tiles_to_request: list[tuple[float, tuple[int, int, int]]] = []
-
-        for tile_y in range(start_tile_y, end_tile_y):
-            if tile_y < 0 or tile_y >= view_state.tiles_across:
-                continue
-            for tile_x in range(start_tile_x, end_tile_x):
-                wrapped_x = tile_x % view_state.tiles_across
-                flipped_y = (view_state.tiles_across - 1) - tile_y
-                tile_key = (view_state.fetch_zoom, wrapped_x, flipped_y)
-
-                tile_origin_x = tile_x * view_state.scaled_tile_size - view_state.view_top_left_x
-                tile_origin_y = tile_y * view_state.scaled_tile_size - view_state.view_top_left_y
-
-                tile_data = self._tile_manager.get_tile(tile_key)
-                if tile_data is None:
-                    if not self._tile_manager.is_tile_missing(tile_key):
-                        tile_center_x = tile_origin_x + view_state.scaled_tile_size / 2.0
-                        tile_center_y = tile_origin_y + view_state.scaled_tile_size / 2.0
-                        dist_sq = (
-                            (tile_center_x - view_state.width / 2.0) ** 2
-                            + (tile_center_y - view_state.height / 2.0) ** 2
-                        )
-                        tiles_to_request.append((dist_sq, tile_key))
-                    continue
-
-                tiles_to_draw.append(
-                    (tile_key, tile_data, tile_origin_x, tile_origin_y, wrapped_x, tile_y)
-                )
-
-        return tiles_to_draw, tiles_to_request
-
-    # ------------------------------------------------------------------
-    def _request_tiles(self, tiles_to_request: list[tuple[float, tuple[int, int, int]]]) -> None:
-        """Submit background load requests for tiles sorted by distance."""
-
-        if not tiles_to_request:
-            return
-
-        tiles_to_request.sort(key=lambda item: item[0])
-        for _, tile_key in tiles_to_request:
-            self._tile_manager.ensure_tile(tile_key)
-
-    # ------------------------------------------------------------------
     def _render_tiles(
         self,
         painter: QPainter,
         tiles_to_draw: list[tuple[tuple[int, int, int], dict, float, float, int, int]],
-        view_state: _ViewState,
+        view_state: ViewState,
     ) -> None:
         """Iterate over the visible tiles and draw each requested layer."""
 
@@ -306,115 +185,6 @@ class MapRenderer:
                         view_state.zoom,
                         view_state.fetch_zoom,
                     )
-
-    # ------------------------------------------------------------------
-    def _render_cities(self, painter: QPainter, view_state: _ViewState) -> None:
-        """Render lightweight city labels supplied by the surrounding UI."""
-
-        self._city_labels.clear()
-        if not self._cities:
-            return
-        if view_state.fetch_zoom < self.CITY_LABEL_MIN_FETCH_LEVEL:
-            return
-
-        world_size = float(self._tile_size * (2 ** view_state.zoom))
-        if world_size <= 0.0:
-            return
-
-        center_px = view_state.view_top_left_x + view_state.width / 2.0
-        half_world = world_size / 2.0
-
-        font = QFont("Open Sans", pointSize=11)
-        font.setBold(True)
-        metrics = QFontMetricsF(font)
-
-        dot_radius = 4.0
-        text_gap = 6.0
-        halo_pen = QPen(QColor(255, 255, 255, 220))
-        halo_pen.setWidthF(3.0)
-        halo_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
-        halo_pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
-        halo_pen.setCosmetic(True)
-        outline_pen = QPen(QColor(255, 255, 255, 220))
-        outline_pen.setWidthF(2.0)
-        outline_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
-        outline_pen.setCosmetic(True)
-        label_pen = QPen(QColor("#2b2b2b"))
-        label_pen.setCosmetic(True)
-
-        painter.save()
-        painter.setFont(font)
-        painter.setBrush(Qt.BrushStyle.NoBrush)
-
-        rendered_label_boxes: list[QRectF] = []
-        for city in self._cities:
-            if not city.display_name:
-                continue
-
-            world_position = self._lonlat_to_world(city.longitude, city.latitude, world_size)
-            if world_position is None:
-                continue
-            world_x, world_y = world_position
-
-            delta_x = world_x - center_px
-            if delta_x > half_world:
-                world_x -= world_size
-            elif delta_x < -half_world:
-                world_x += world_size
-
-            screen_x = world_x - view_state.view_top_left_x
-            screen_y = world_y - view_state.view_top_left_y
-
-            margin = 32.0
-            if (
-                screen_x < -margin
-                or screen_y < -margin
-                or screen_x > view_state.width + margin
-                or screen_y > view_state.height + margin
-            ):
-                continue
-
-            text_rect = metrics.boundingRect(city.display_name)
-            text_width = float(text_rect.width())
-            text_height = float(text_rect.height())
-            baseline_y = screen_y + text_height / 2.0 - metrics.descent()
-            text_top = baseline_y - metrics.ascent()
-            text_left = screen_x + dot_radius + text_gap
-
-            text_path = QPainterPath()
-            text_path.addText(QPointF(text_left, baseline_y), font, city.display_name)
-
-            painter.setPen(halo_pen)
-            painter.drawPath(text_path)
-
-            painter.setPen(outline_pen)
-            painter.setBrush(QColor("#1e73ff"))
-            painter.drawEllipse(QPointF(screen_x, screen_y), dot_radius, dot_radius)
-
-            painter.setPen(label_pen)
-            painter.setBrush(Qt.BrushStyle.NoBrush)
-            painter.drawText(QPointF(text_left, baseline_y), city.display_name)
-
-            bounds_left = min(screen_x - dot_radius, text_left)
-            bounds_top = min(screen_y - dot_radius, text_top)
-            bounds_right = max(screen_x + dot_radius, text_left + text_width)
-            bounds_bottom = max(screen_y + dot_radius, text_top + text_height)
-            bounds = QRectF(
-                bounds_left - 2.0,
-                bounds_top - 2.0,
-                (bounds_right - bounds_left) + 4.0,
-                (bounds_bottom - bounds_top) + 4.0,
-            )
-            # Skip labels whose padded bounding box would overlap an annotation
-            # that has already been drawn. The conservative buffer keeps the map
-            # readable when multiple cities are clustered together.
-            if any(bounds.intersects(existing_box) for existing_box in rendered_label_boxes):
-                continue
-            rendered_label_boxes.append(bounds)
-            full_name = city.full_name or city.display_name
-            self._city_labels.append(_RenderedCityLabel(bounds=bounds, full_name=full_name))
-
-        painter.restore()
 
     # ------------------------------------------------------------------
     def _make_path_cache_key(
@@ -853,26 +623,6 @@ class MapRenderer:
         path.moveTo(start[0], extent - start[1])
         for point in line[1:]:
             path.lineTo(point[0], extent - point[1])
-
-    # ------------------------------------------------------------------
-    def _lonlat_to_world(
-        self, lon: float, lat: float, world_size: float
-    ) -> Optional[tuple[float, float]]:
-        """Convert geographic coordinates to Mercator world coordinates."""
-
-        try:
-            lon_value = float(lon)
-            lat_value = float(lat)
-        except (TypeError, ValueError):
-            return None
-
-        lat_value = max(min(lat_value, MERCATOR_LAT_BOUND), -MERCATOR_LAT_BOUND)
-        x = (lon_value + 180.0) / 360.0 * world_size
-        sin_lat = math.sin(math.radians(lat_value))
-        y = (
-            0.5 - math.log((1 + sin_lat) / (1 - sin_lat)) / (4 * math.pi)
-        ) * world_size
-        return x, y
 
 
 __all__ = ["MapRenderer", "CityAnnotation"]

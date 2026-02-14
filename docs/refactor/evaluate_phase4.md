@@ -157,7 +157,7 @@ and GPU pipeline optimization modules (`ShaderPrecompiler`, `StreamingTextureUpl
 | `get()` / `put()` / `invalidate()` / `clear()` | ✅ Done | Full CRUD interface |
 | `size` — live entry count | ✅ Done | Only counts non-collected entries |
 | `raw_size` — total including stale | ✅ Done | Includes not-yet-cleaned entries |
-| Configurable `max_size` with LRU eviction | ✅ Done | `max_size=0` for unlimited |
+| Configurable `max_size` with insertion-order (FIFO) eviction | ✅ Done | `max_size=0` for unlimited |
 | TypeError on non-weakrefable types | ✅ Done | `int`, `str`, `bytes` raise `TypeError` |
 | Tests | ✅ 12 tests | Put/get, GC collection, eviction, invalidation, clear |
 

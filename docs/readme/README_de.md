@@ -289,7 +289,7 @@ Das Bearbeitungssystem besteht aus modularen Widgets und Submodulen für nicht-d
 
 ---
 
-### 6️⃣ Kartenkomponente (`maps/`)
+### 6️⃣ Kartenkomponente (`src/maps/`)
 
 Dieses Verzeichnis enthält ein halb-unabhängiges **Karten-Rendering-Modul**, das vom `PhotoMapView`-Widget verwendet wird.
 

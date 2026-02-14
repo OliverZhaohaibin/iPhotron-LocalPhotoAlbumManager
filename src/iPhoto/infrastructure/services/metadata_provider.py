@@ -5,11 +5,11 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 import logging
 
-from src.iPhoto.application.interfaces import IMetadataProvider
-from src.iPhoto.utils.exiftool import get_metadata_batch
-from src.iPhoto.io.metadata import read_image_meta_with_exiftool, read_video_meta
-from src.iPhoto.utils.hashutils import compute_file_id
-from src.iPhoto.domain.models import MediaType
+from iPhoto.application.interfaces import IMetadataProvider
+from iPhoto.utils.exiftool import get_metadata_batch
+from iPhoto.io.metadata import read_image_meta_with_exiftool, read_video_meta
+from iPhoto.utils.hashutils import compute_file_id
+from iPhoto.domain.models import MediaType
 
 logger = logging.getLogger(__name__)
 

@@ -10,7 +10,7 @@ from PySide6.QtGui import QImage, QColor
 from PySide6.QtTest import QSignalSpy
 from PySide6.QtWidgets import QApplication
 
-from src.iPhoto.gui.ui.tasks.edit_sidebar_preview_worker import EditSidebarPreviewWorker
+from iPhoto.gui.ui.tasks.edit_sidebar_preview_worker import EditSidebarPreviewWorker
 
 
 @pytest.fixture(scope="module")

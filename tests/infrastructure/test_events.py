@@ -1,7 +1,7 @@
 import pytest
 import time
 from dataclasses import dataclass
-from src.iPhoto.events.bus import Event, EventBus
+from iPhoto.events.bus import Event, EventBus
 
 @dataclass(kw_only=True)
 class SimpleEvent(Event):

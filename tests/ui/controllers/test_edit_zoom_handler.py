@@ -9,7 +9,7 @@ import pytest
 from PySide6.QtCore import QObject, Signal
 from PySide6.QtWidgets import QApplication
 
-from src.iPhoto.gui.ui.controllers.edit_zoom_handler import EditZoomHandler
+from iPhoto.gui.ui.controllers.edit_zoom_handler import EditZoomHandler
 
 @pytest.fixture()
 def qapp() -> QApplication:

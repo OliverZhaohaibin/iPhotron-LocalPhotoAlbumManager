@@ -12,7 +12,7 @@ pytest.importorskip("PySide6.QtCore", reason="Qt core not available", exc_type=I
 from PySide6.QtCore import QCoreApplication
 from PySide6.QtTest import QSignalSpy
 
-from src.iPhoto.library.workers.scanner_worker import ScannerWorker, ScannerSignals
+from iPhoto.library.workers.scanner_worker import ScannerWorker, ScannerSignals
 
 
 @pytest.fixture(scope="module")
@@ -76,7 +76,7 @@ def test_scanner_worker_batch_failure_handling(temp_album, qapp):
     finished_spy = QSignalSpy(signals.finished)
     
     # Mock repository append_rows to raise an exception
-    with patch('src.iPhoto.library.workers.scanner_worker.get_global_repository') as mock_get_repo:
+    with patch('iPhoto.library.workers.scanner_worker.get_global_repository') as mock_get_repo:
         mock_store = Mock()
         mock_store.append_rows.side_effect = Exception("Database write failed")
         mock_get_repo.return_value = mock_store
@@ -118,7 +118,7 @@ def test_scanner_worker_scan_continues_after_partial_failures(temp_album, qapp):
             raise Exception("First chunk failed")
         # Subsequent chunks succeed
     
-    with patch('src.iPhoto.library.workers.scanner_worker.get_global_repository') as mock_get_repo:
+    with patch('iPhoto.library.workers.scanner_worker.get_global_repository') as mock_get_repo:
         mock_store = Mock()
         mock_store.append_rows.side_effect = mock_append_rows
         mock_get_repo.return_value = mock_store
@@ -151,7 +151,7 @@ def test_scanner_worker_failed_count_property(temp_album, qapp):
     assert worker.failed_count == 0
     
     # Mock repository to always fail
-    with patch('src.iPhoto.library.workers.scanner_worker.get_global_repository') as mock_get_repo:
+    with patch('iPhoto.library.workers.scanner_worker.get_global_repository') as mock_get_repo:
         mock_store = Mock()
         mock_store.append_rows.side_effect = Exception("All writes fail")
         mock_get_repo.return_value = mock_store
@@ -173,7 +173,7 @@ def test_scanner_worker_cleanup_on_error(temp_album, qapp):
     worker = ScannerWorker(temp_album, ["*.jpg"], [], signals)
     
     # Mock scan_album to raise an exception
-    with patch('src.iPhoto.library.workers.scanner_worker.scan_album') as mock_scan:
+    with patch('iPhoto.library.workers.scanner_worker.scan_album') as mock_scan:
         mock_generator = Mock()
         mock_generator.close = Mock()
         mock_scan.return_value = mock_generator
@@ -193,7 +193,7 @@ def test_scanner_worker_repository_cleanup(temp_album, qapp):
     signals = ScannerSignals()
     worker = ScannerWorker(temp_album, ["*.jpg"], [], signals)
     
-    with patch('src.iPhoto.library.workers.scanner_worker.get_global_repository') as mock_get_repo:
+    with patch('iPhoto.library.workers.scanner_worker.get_global_repository') as mock_get_repo:
         mock_store = Mock()
         mock_store.close = Mock()
         mock_store.append_rows = Mock()  # Succeed normally

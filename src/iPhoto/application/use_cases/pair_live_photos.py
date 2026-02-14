@@ -3,11 +3,11 @@ import logging
 from dataclasses import dataclass
 from typing import List, Dict, Optional
 
-from src.iPhoto.application.dtos import PairLivePhotosRequest, PairLivePhotosResponse
-from src.iPhoto.domain.models import Asset, MediaType
-from src.iPhoto.domain.models.query import AssetQuery
-from src.iPhoto.domain.repositories import IAssetRepository
-from src.iPhoto.events.bus import EventBus, Event
+from iPhoto.application.dtos import PairLivePhotosRequest, PairLivePhotosResponse
+from iPhoto.domain.models import Asset, MediaType
+from iPhoto.domain.models.query import AssetQuery
+from iPhoto.domain.repositories import IAssetRepository
+from iPhoto.events.bus import EventBus, Event
 
 @dataclass(kw_only=True)
 class LivePhotosPairedEvent(Event):

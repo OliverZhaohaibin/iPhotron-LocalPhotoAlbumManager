@@ -3,11 +3,11 @@ from unittest.mock import MagicMock
 from pathlib import Path
 from PySide6.QtTest import QSignalSpy
 
-from src.iPhoto.gui.viewmodels.album_viewmodel import AlbumViewModel
-from src.iPhoto.application.services.album_service import AlbumService
-from src.iPhoto.application.services.asset_service import AssetService
-from src.iPhoto.domain.models import Album, Asset
-from src.iPhoto.application.dtos import AlbumDTO
+from iPhoto.gui.viewmodels.album_viewmodel import AlbumViewModel
+from iPhoto.application.services.album_service import AlbumService
+from iPhoto.application.services.asset_service import AssetService
+from iPhoto.domain.models import Album, Asset
+from iPhoto.application.dtos import AlbumDTO
 
 @pytest.fixture
 def mock_album_service():

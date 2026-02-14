@@ -1,110 +1,47 @@
-from collections import OrderedDict
-from dataclasses import dataclass
-from datetime import datetime
 import os
-import re
-import threading
 from pathlib import Path
-from typing import List, Optional, cast
-from PySide6.QtCore import QObject, QRunnable, QThreadPool, Signal
+from typing import List, Optional
 
-from src.iPhoto.domain.models import Asset
-from src.iPhoto.domain.models.core import MediaType
-from src.iPhoto.domain.models.query import AssetQuery
-from src.iPhoto.domain.repositories import IAssetRepository
-from src.iPhoto.application.dtos import AssetDTO
-from src.iPhoto.utils import image_loader
-from src.iPhoto.config import RECENTLY_DELETED_DIR_NAME, WORK_DIR_NAME
+from PySide6.QtCore import QObject, QThreadPool, Signal
 
-THUMBNAIL_SUFFIX_RE = re.compile(r"_(\d{2,4})x(\d{2,4})(?=\.[^.]+$)", re.IGNORECASE)
-THUMBNAIL_MAX_DIMENSION = 512
-THUMBNAIL_MAX_BYTES = 350_000
-LEGACY_THUMB_DIRS = {WORK_DIR_NAME.lower(), ".photo", ".iphoto"}
-PATH_EXISTS_CACHE_LIMIT = 20_000
+from iPhoto.domain.models import Asset
+from iPhoto.domain.models.query import AssetQuery
+from iPhoto.domain.repositories import IAssetRepository
+from iPhoto.application.dtos import AssetDTO
 
-@dataclass(frozen=True)
-class _PendingMove:
-    dto: AssetDTO
-    source_abs: Path
-    destination_root: Path
-    destination_album_path: str
-    destination_abs: Path
-    destination_rel: Path
-    is_delete: bool
-
-
-class _AssetLoadSignals(QObject):
-    completed = Signal(int, list, int)
-
-
-class _AssetLoadWorker(QRunnable):
-    def __init__(
-        self,
-        data_source: "AssetDataSource",
-        query: AssetQuery,
-        generation: int,
-        validate_paths: bool,
-    ) -> None:
-        super().__init__()
-        self._data_source = data_source
-        self._query = query
-        self._generation = generation
-        self._validate_paths = validate_paths
-        self.signals = _AssetLoadSignals()
-
-    def run(self) -> None:
-        dtos: List[AssetDTO] = []
-        raw_count = 0
-        assets = self._data_source._repo.find_by_query(self._query)
-        for asset in assets:
-            raw_count += 1
-            if self._data_source._is_thumbnail_asset(asset):
-                continue
-            abs_path = self._data_source._resolve_abs_path(asset.path)
-            if self._validate_paths and not self._data_source._path_exists_cached(abs_path):
-                continue
-            dtos.append(self._data_source._to_dto(asset))
-        self.signals.completed.emit(self._generation, dtos, raw_count)
-
-
-class _AssetPageSignals(QObject):
-    completed = Signal(int, int, list, int)
-
-
-class _AssetPageWorker(QRunnable):
-    def __init__(
-        self,
-        data_source: "AssetDataSource",
-        query: AssetQuery,
-        generation: int,
-        offset: int,
-        validate_paths: bool,
-    ) -> None:
-        super().__init__()
-        self._data_source = data_source
-        self._query = query
-        self._generation = generation
-        self._offset = offset
-        self._validate_paths = validate_paths
-        self.signals = _AssetPageSignals()
-
-    def run(self) -> None:
-        query = AssetQuery(**self._query.__dict__)
-        query.offset = self._offset
-        query.limit = self._query.limit
-
-        dtos: List[AssetDTO] = []
-        raw_count = 0
-        assets = self._data_source._repo.find_by_query(query)
-        for asset in assets:
-            raw_count += 1
-            if self._data_source._is_thumbnail_asset(asset):
-                continue
-            abs_path = self._data_source._resolve_abs_path(asset.path)
-            if self._validate_paths and not self._data_source._path_exists_cached(abs_path):
-                continue
-            dtos.append(self._data_source._to_dto(asset))
-        self.signals.completed.emit(self._generation, self._offset, dtos, raw_count)
+# ── Re-exports from extracted modules (backward compatibility) ───────────────
+from iPhoto.gui.viewmodels.path_cache import (  # noqa: F401
+    PATH_EXISTS_CACHE_LIMIT,
+    PathExistsCache,
+)
+from iPhoto.gui.viewmodels.pending_move_buffer import (  # noqa: F401
+    _PendingMove,
+    should_include_pending as _should_include_pending_fn,
+)
+from iPhoto.gui.viewmodels.asset_dto_converter import (  # noqa: F401
+    THUMBNAIL_SUFFIX_RE,
+    THUMBNAIL_MAX_DIMENSION,
+    THUMBNAIL_MAX_BYTES,
+    LEGACY_THUMB_DIRS,
+    resolve_abs_path as _resolve_abs_path_fn,
+    to_dto as _to_dto_fn,
+    geotagged_asset_to_dto as _geotagged_asset_to_dto_fn,
+    scan_row_to_dto as _scan_row_to_dto_fn,
+    scan_row_matches_query as _scan_row_matches_query_fn,
+    is_thumbnail_asset as _is_thumbnail_asset_fn,
+    scan_row_is_thumbnail as _scan_row_is_thumbnail_fn,
+    is_legacy_thumb_path as _is_legacy_thumb_path_fn,
+)
+from iPhoto.gui.viewmodels.asset_workers import (  # noqa: F401
+    _AssetLoadSignals,
+    _AssetLoadWorker,
+    _AssetPageSignals,
+    _AssetPageWorker,
+)
+from iPhoto.gui.viewmodels.asset_paging import (  # noqa: F401
+    should_use_paging as _should_use_paging_fn,
+    should_validate_paths as _should_validate_paths_fn,
+)
 
 
 class AssetDataSource(QObject):
@@ -132,8 +69,7 @@ class AssetDataSource(QObject):
         self._paging_inflight = False
         self._paging_offset = 0
         self._paging_has_more = False
-        self._path_exists_cache: OrderedDict[str, bool] = OrderedDict()
-        self._path_cache_lock = threading.Lock()
+        self._path_cache = PathExistsCache()
 
     def set_library_root(self, root: Optional[Path]):
         if self._library_root == root:
@@ -142,7 +78,7 @@ class AssetDataSource(QObject):
         self._cached_dtos.clear()
         self._total_count = 0
         self._seen_abs_paths.clear()
-        self._path_exists_cache.clear()
+        self._path_cache.clear()
         self.dataChanged.emit()
 
     def set_repository(self, repo: IAssetRepository) -> None:
@@ -152,7 +88,7 @@ class AssetDataSource(QObject):
         self._cached_dtos.clear()
         self._total_count = 0
         self._seen_abs_paths.clear()
-        self._path_exists_cache.clear()
+        self._path_cache.clear()
         self.dataChanged.emit()
 
     def set_active_root(self, root: Optional[Path]) -> None:
@@ -174,7 +110,7 @@ class AssetDataSource(QObject):
         self._cached_dtos.clear()
         self._total_count = 0
         self._seen_abs_paths.clear()
-        self._path_exists_cache.clear()
+        self._path_cache.clear()
         self._paging_inflight = False
         self._paging_offset = 0
         self._paging_has_more = False
@@ -223,13 +159,13 @@ class AssetDataSource(QObject):
             assets: List of GeotaggedAsset objects from the map cluster.
             library_root: The library root path for resolving absolute paths.
         """
-        from src.iPhoto.library.manager import GeotaggedAsset
+        from iPhoto.library.manager import GeotaggedAsset
 
         self._current_query = None  # No query for direct asset loading
         self._cached_dtos.clear()
         self._total_count = 0
         self._seen_abs_paths.clear()
-        self._path_exists_cache.clear()
+        self._path_cache.clear()
         self._paging_inflight = False
         self._paging_offset = 0
         self._paging_has_more = False
@@ -250,66 +186,8 @@ class AssetDataSource(QObject):
         self.dataChanged.emit()
 
     def _geotagged_asset_to_dto(self, asset, library_root: Path) -> Optional[AssetDTO]:
-        """Convert a GeotaggedAsset to an AssetDTO for display.
-
-        This is a lightweight conversion that uses the pre-computed data from
-        the geotagged asset without requiring database lookups.
-        """
-        from src.iPhoto.library.manager import GeotaggedAsset
-
-        if not isinstance(asset, GeotaggedAsset):
-            return None
-
-        abs_path = asset.absolute_path
-        rel_path = Path(asset.library_relative)
-
-        # Determine media type from the asset flags
-        is_video = asset.is_video
-        is_image = asset.is_image
-        media_type = "video" if is_video else "image"
-
-        # Build minimal metadata with GPS info
-        metadata: dict = {
-            "gps": {
-                "latitude": asset.latitude,
-                "longitude": asset.longitude,
-            },
-        }
-        if asset.location_name:
-            metadata["location"] = asset.location_name
-
-        captured_at: Optional[datetime] = None
-
-        # Prefer a timestamp provided by the Asset model (if available) to avoid
-        # repeated filesystem stat calls when processing many assets.
-        asset_created_at = getattr(asset, "created_at", None)
-        asset_captured_at = getattr(asset, "captured_at", None)
-
-        if isinstance(asset_created_at, datetime):
-            captured_at = asset_created_at
-        elif isinstance(asset_captured_at, datetime):
-            captured_at = asset_captured_at
-        else:
-            try:
-                captured_at = datetime.fromtimestamp(abs_path.stat().st_mtime)
-            except (FileNotFoundError, OSError, ValueError):
-                captured_at = None
-        return AssetDTO(
-            id=asset.asset_id,
-            abs_path=abs_path,
-            rel_path=rel_path,
-            media_type=media_type,
-            created_at=captured_at,
-            width=0,
-            height=0,
-            duration=asset.duration or 0.0,
-            size_bytes=0,
-            metadata=metadata,
-            is_favorite=False,
-            is_live=False,
-            is_pano=False,
-            micro_thumbnail=None,
-        )
+        """Convert a GeotaggedAsset to an AssetDTO for display."""
+        return _geotagged_asset_to_dto_fn(asset, library_root)
 
     def asset_at(self, index: int) -> Optional[AssetDTO]:
         if 0 <= index < len(self._cached_dtos):
@@ -505,62 +383,7 @@ class AssetDataSource(QObject):
         view_rel: str,
         row: dict,
     ) -> Optional[AssetDTO]:
-        abs_path = view_root / view_rel
-        rel_path = Path(view_rel)
-
-        media_type_value = row.get("media_type")
-        is_video = False
-        if isinstance(media_type_value, str):
-            is_video = media_type_value.lower() in {"1", "video"}
-        elif isinstance(media_type_value, int):
-            is_video = media_type_value == 1
-
-        if not is_video and row.get("is_video"):
-            is_video = True
-
-        is_live = bool(
-            row.get("is_live")
-            or row.get("live_photo_group_id")
-            or row.get("live_partner_rel")
-        )
-        if is_video:
-            is_live = False
-
-        media_type = MediaType.VIDEO.value if is_video else MediaType.IMAGE.value
-        if is_live:
-            media_type = MediaType.LIVE_PHOTO.value
-
-        created_at = None
-        dt_raw = row.get("dt")
-        if isinstance(dt_raw, str):
-            try:
-                created_at = datetime.fromisoformat(dt_raw.replace("Z", "+00:00"))
-            except ValueError:
-                created_at = None
-
-        width = row.get("w") or row.get("width") or 0
-        height = row.get("h") or row.get("height") or 0
-        duration = row.get("dur") or row.get("duration") or 0.0
-        size_bytes = row.get("bytes") or 0
-        is_favorite = bool(row.get("featured") or row.get("favorite") or row.get("is_favorite"))
-        is_pano = bool(row.get("is_pano"))
-
-        return AssetDTO(
-            id=str(row.get("id") or abs_path),
-            abs_path=abs_path,
-            rel_path=rel_path,
-            media_type=media_type,
-            created_at=created_at,
-            width=int(width or 0),
-            height=int(height or 0),
-            duration=float(duration or 0.0),
-            size_bytes=int(size_bytes or 0),
-            metadata=dict(row),
-            is_favorite=is_favorite,
-            is_live=is_live,
-            is_pano=is_pano,
-            micro_thumbnail=row.get("micro_thumbnail"),
-        )
+        return _scan_row_to_dto_fn(view_root, view_rel, row)
 
     def _scan_row_matches_query(
         self,
@@ -568,126 +391,10 @@ class AssetDataSource(QObject):
         row: dict,
         query: AssetQuery,
     ) -> bool:
-        if query.media_types:
-            allowed = {media_type.value for media_type in query.media_types}
-            if dto.media_type not in allowed:
-                return False
-
-        if query.is_favorite:
-            is_favorite = bool(row.get("featured") or row.get("favorite") or row.get("is_favorite"))
-            if not is_favorite:
-                return False
-
-        return True
+        return _scan_row_matches_query_fn(dto, row, query)
 
     def _to_dto(self, asset: Asset) -> AssetDTO:
-        def _coerce_positive_number(value: object) -> Optional[float]:
-            if isinstance(value, bool):
-                return None
-            if isinstance(value, (int, float)):
-                return float(value) if value > 0 else None
-            if isinstance(value, str):
-                try:
-                    parsed = float(value)
-                except ValueError:
-                    return None
-                return parsed if parsed > 0 else None
-            return None
-
-        # Resolve absolute path
-        abs_path = self._resolve_abs_path(asset.path)
-
-        # Determine derived flags
-        # Robust conversion: handle both str-Enum and IntEnum/integer cases
-        mt_raw = asset.media_type
-        if hasattr(mt_raw, "value"):
-            mt = str(mt_raw.value)
-        else:
-            mt = str(mt_raw)
-
-        # Map integer/legacy values to DTO expectations
-        if mt in ("1", "2", "MediaType.VIDEO"):
-            mt = "video"
-        elif mt in ("0", "MediaType.IMAGE"):
-            mt = "image"
-
-        is_video = (mt == "video")
-        is_image_type = mt in {"image", "photo"}
-        # Live photo check: if asset has live_photo_group_id or explicit type
-        is_live = (mt == "live") or (asset.live_photo_group_id is not None)
-        if is_video and asset.live_photo_group_id is not None:
-            is_live = False
-        if not is_live and asset.metadata:
-            live_partner = asset.metadata.get("live_partner_rel")
-            live_role = asset.metadata.get("live_role")
-            if live_partner and live_role != 1 and not is_video:
-                is_live = True
-
-        if asset.live_photo_group_id and asset.metadata is not None:
-            asset.metadata.setdefault("live_photo_group_id", asset.live_photo_group_id)
-
-        # Pano check: usually in metadata, otherwise infer from dimensions.
-        is_pano = False
-        metadata = asset.metadata or {}
-        if metadata.get("is_pano"):
-            is_pano = True
-        else:
-            width = _coerce_positive_number(asset.width) or _coerce_positive_number(metadata.get("w"))
-            if width is None:
-                width = _coerce_positive_number(metadata.get("width"))
-            height = _coerce_positive_number(asset.height) or _coerce_positive_number(metadata.get("h"))
-            if height is None:
-                height = _coerce_positive_number(metadata.get("height"))
-            aspect_ratio = _coerce_positive_number(metadata.get("aspect_ratio"))
-            size_bytes = _coerce_positive_number(asset.size_bytes)
-            if size_bytes is None:
-                size_bytes = _coerce_positive_number(metadata.get("bytes"))
-
-            if is_image_type and width > 0 and height > 0:
-                aspect_ratio = width / height
-                if aspect_ratio >= 2.0:
-                    if size_bytes is not None and size_bytes > 1 * 1024 * 1024:
-                        is_pano = True
-                    elif size_bytes is None and width * height >= 1_000_000:
-                        is_pano = True
-            elif is_image_type and aspect_ratio is not None and aspect_ratio >= 2.0:
-                if size_bytes is None or size_bytes > 1 * 1024 * 1024:
-                    is_pano = True
-
-        micro_thumbnail = metadata.get("micro_thumbnail")
-        micro_thumbnail_image = None
-        if isinstance(micro_thumbnail, (bytes, bytearray, memoryview)):
-            micro_thumbnail_image = image_loader.qimage_from_bytes(bytes(micro_thumbnail))
-
-        width_value = (
-            _coerce_positive_number(asset.width)
-            or _coerce_positive_number(metadata.get("w"))
-            or _coerce_positive_number(metadata.get("width"))
-            or 0
-        )
-        height_value = (
-            _coerce_positive_number(asset.height)
-            or _coerce_positive_number(metadata.get("h"))
-            or _coerce_positive_number(metadata.get("height"))
-            or 0
-        )
-
-        return AssetDTO(
-            id=asset.id,
-            abs_path=abs_path,
-            rel_path=asset.path,
-            media_type=mt,
-            created_at=asset.created_at,
-            width=int(width_value),
-            height=int(height_value),
-            duration=asset.duration or 0.0,
-            size_bytes=asset.size_bytes,
-            metadata=metadata,
-            is_favorite=asset.is_favorite,
-            is_live=is_live,
-            is_pano=is_pano,
-            micro_thumbnail=micro_thumbnail_image,
-        )
+        return _to_dto_fn(asset, self._library_root)
 
     def _apply_pending_moves(self, query: AssetQuery) -> None:
         if not self._pending_moves:
@@ -718,37 +425,16 @@ class AssetDataSource(QObject):
         return os.path.normcase(str(resolved))
 
     def _resolve_abs_path(self, rel_path: Path) -> Path:
-        if rel_path.is_absolute():
-            return rel_path
-        if self._library_root:
-            try:
-                return (self._library_root / rel_path).resolve()
-            except OSError:
-                return self._library_root / rel_path
-        return rel_path.resolve()
+        return _resolve_abs_path_fn(rel_path, self._library_root)
 
     def _path_exists(self, path: Path) -> bool:
-        try:
-            return path.exists()
-        except OSError:
-            return False
+        return PathExistsCache.path_exists(path)
 
     def _path_cache_key(self, path: Path) -> str:
-        return os.path.normcase(str(path))
+        return PathExistsCache.cache_key(path)
 
     def _path_exists_cached(self, path: Path) -> bool:
-        key = self._path_cache_key(path)
-        with self._path_cache_lock:
-            cached = self._path_exists_cache.get(key)
-            if cached is not None:
-                self._path_exists_cache.move_to_end(key)
-                return cached
-        exists = self._path_exists(path)
-        with self._path_cache_lock:
-            self._path_exists_cache[key] = exists
-            if len(self._path_exists_cache) > PATH_EXISTS_CACHE_LIMIT:
-                self._path_exists_cache.popitem(last=False)
-        return exists
+        return self._path_cache.exists_cached(path)
 
     def _maybe_schedule_next_page(self) -> None:
         if self._paging_inflight:
@@ -796,117 +482,22 @@ class AssetDataSource(QObject):
             self._maybe_schedule_next_page()
 
     def _should_validate_paths(self, query: AssetQuery) -> bool:
-        if self._library_root is None:
-            return True
-        if query.album_path or query.album_id:
-            return True
-        if query.is_deleted:
-            return True
-        return False
+        return _should_validate_paths_fn(query, self._library_root)
 
     def _should_use_paging(self, query: AssetQuery) -> bool:
-        if query.album_path or query.album_id:
-            return False
-        if query.is_deleted:
-            return False
-        return True
+        return _should_use_paging_fn(query)
 
     def _is_legacy_thumb_path(self, rel_path: Path) -> bool:
-        for part in rel_path.parts:
-            if part.lower() in LEGACY_THUMB_DIRS:
-                return True
-        return False
+        return _is_legacy_thumb_path_fn(rel_path)
 
     def _is_thumbnail_asset(self, asset: Asset) -> bool:
-        rel_path = asset.path
-        if self._is_legacy_thumb_path(rel_path):
-            return True
-
-        match = THUMBNAIL_SUFFIX_RE.search(rel_path.name)
-        if not match:
-            return False
-        try:
-            width = int(match.group(1))
-            height = int(match.group(2))
-        except ValueError:
-            return False
-        if max(width, height) > THUMBNAIL_MAX_DIMENSION:
-            return False
-
-        meta = asset.metadata or {}
-        row_w = asset.width or meta.get("w") or meta.get("width")
-        row_h = asset.height or meta.get("h") or meta.get("height")
-        try:
-            if row_w is not None and row_h is not None:
-                if int(row_w) != width or int(row_h) != height:
-                    return False
-        except (TypeError, ValueError):
-            return False
-
-        size_bytes = asset.size_bytes or meta.get("bytes")
-        try:
-            if size_bytes is not None and int(size_bytes) > THUMBNAIL_MAX_BYTES:
-                return False
-        except (TypeError, ValueError):
-            return False
-
-        return True
+        return _is_thumbnail_asset_fn(asset)
 
     def _scan_row_is_thumbnail(self, rel: str, row: dict) -> bool:
-        rel_path = Path(rel)
-        if self._is_legacy_thumb_path(rel_path):
-            return True
-        match = THUMBNAIL_SUFFIX_RE.search(rel_path.name)
-        if not match:
-            return False
-        try:
-            width = int(match.group(1))
-            height = int(match.group(2))
-        except ValueError:
-            return False
-        if max(width, height) > THUMBNAIL_MAX_DIMENSION:
-            return False
-        row_w = row.get("w") or row.get("width")
-        row_h = row.get("h") or row.get("height")
-        try:
-            if row_w is not None and row_h is not None:
-                if int(row_w) != width or int(row_h) != height:
-                    return False
-        except (TypeError, ValueError):
-            return False
-        size_bytes = row.get("bytes")
-        try:
-            if size_bytes is not None and int(size_bytes) > THUMBNAIL_MAX_BYTES:
-                return False
-        except (TypeError, ValueError):
-            return False
-        return True
+        return _scan_row_is_thumbnail_fn(rel, row)
 
     def _should_include_pending(self, pending: _PendingMove, query: AssetQuery) -> bool:
-        if query.is_favorite is True and not pending.dto.is_favorite:
-            return False
-        if query.media_types:
-            is_video = pending.dto.is_video
-            allowed = False
-            for media_type in query.media_types:
-                if media_type == MediaType.VIDEO and is_video:
-                    allowed = True
-                    break
-                if media_type == MediaType.IMAGE and not is_video:
-                    allowed = True
-                    break
-            if not allowed:
-                return False
-        if pending.is_delete:
-            return query.album_path == RECENTLY_DELETED_DIR_NAME
-        if query.album_path is None:
-            return True
-        dest_path = pending.destination_album_path
-        if query.include_subalbums and dest_path.startswith(f"{query.album_path}/"):
-            return True
-        if dest_path == query.album_path:
-            return True
-        return False
+        return _should_include_pending_fn(pending, query)
 
     def _find_cached_dto(self, path: Path) -> Optional[AssetDTO]:
         for dto in self._cached_dtos:

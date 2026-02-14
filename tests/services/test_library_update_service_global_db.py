@@ -1,6 +1,6 @@
 from pathlib import Path
 
-import src.iPhoto.gui.services.library_update_service as lus
+import iPhoto.gui.services.library_update_service as lus
 
 
 class DummyAlbum:

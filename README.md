@@ -18,7 +18,7 @@
 
 ## 📥 Download
 
-[![Download iPhoto Latest Release](https://img.shields.io/badge/⬇️%20Download-iPhoto%20Latest%20Release-blue?style=for-the-badge&logo=windows)](https://github.com/OliverZhaohaibin/iPhotron-LocalPhotoAlbumManager/releases/download/v3.1.5/v3.15.exe)
+[![Download iPhoto Latest Release](https://img.shields.io/badge/⬇️%20Download-iPhoto%20Latest%20Release-blue?style=for-the-badge&logo=windows)](https://github.com/OliverZhaohaibin/iPhotron-LocalPhotoAlbumManager/releases/download/v4.0.1/v4.01.exe)
 
 **💡 Quick Install:** Click the button above to download the latest Windows installer (.exe) directly.
 
@@ -281,7 +281,7 @@ The edit system is composed of modular widgets and submodules for non-destructiv
 | **`perspective_math.py`** | Geometric utilities for perspective matrix calculation and black-border validation. |
 
 ---
-### 6️⃣ Map Component (`maps/`)
+### 6️⃣ Map Component (`src/maps/`)
 
 This directory contains a semi-independent **map rendering module** used by the `PhotoMapView` widget.
 

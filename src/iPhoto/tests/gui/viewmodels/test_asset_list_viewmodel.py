@@ -3,11 +3,11 @@ from unittest.mock import MagicMock, patch
 from pathlib import Path
 from PySide6.QtCore import Qt, QModelIndex, QSize
 
-from src.iPhoto.gui.viewmodels.asset_list_viewmodel import AssetListViewModel
-from src.iPhoto.gui.viewmodels.asset_data_source import AssetDataSource
-from src.iPhoto.infrastructure.services.thumbnail_cache_service import ThumbnailCacheService
-from src.iPhoto.domain.models import Asset, MediaType
-from src.iPhoto.domain.models.query import AssetQuery
+from iPhoto.gui.viewmodels.asset_list_viewmodel import AssetListViewModel
+from iPhoto.gui.viewmodels.asset_data_source import AssetDataSource
+from iPhoto.infrastructure.services.thumbnail_cache_service import ThumbnailCacheService
+from iPhoto.domain.models import Asset, MediaType
+from iPhoto.domain.models.query import AssetQuery
 
 @pytest.fixture
 def mock_data_source():

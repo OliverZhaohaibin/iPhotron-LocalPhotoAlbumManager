@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import pytest
-from src.iPhoto.cache.index_store import IndexStore
+from iPhoto.cache.index_store import IndexStore
 
 @pytest.fixture
 def store(tmp_path: Path) -> IndexStore:

@@ -10,8 +10,8 @@ pytest.importorskip("PySide6.QtWidgets", reason="Qt widgets not available", exc_
 from PySide6.QtCore import QModelIndex
 from PySide6.QtWidgets import QApplication
 
-from src.iPhoto.gui.ui.models.album_tree_model import AlbumTreeModel, AlbumTreeRole, NodeType
-from src.iPhoto.library.manager import LibraryManager
+from iPhoto.gui.ui.models.album_tree_model import AlbumTreeModel, AlbumTreeRole, NodeType
+from iPhoto.library.manager import LibraryManager
 
 
 @pytest.fixture(scope="module")

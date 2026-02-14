@@ -13,7 +13,7 @@ pytest.importorskip("PySide6.QtTest", reason="Qt test helpers not available", ex
 from PySide6.QtTest import QSignalSpy
 from PySide6.QtWidgets import QApplication
 
-from src.iPhoto.settings.manager import SettingsManager
+from iPhoto.settings.manager import SettingsManager
 
 
 @pytest.fixture(scope="module")

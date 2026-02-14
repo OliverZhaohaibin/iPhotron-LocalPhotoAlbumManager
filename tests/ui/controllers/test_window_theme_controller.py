@@ -7,19 +7,19 @@ from PySide6.QtCore import QObject
 from PySide6.QtGui import QPalette
 from PySide6.QtWidgets import QWidget, QToolButton, QLabel, QPushButton
 
-from src.iPhoto.gui.ui.controllers.window_theme_controller import WindowThemeController
-from src.iPhoto.gui.ui.theme_manager import ThemeManager, LIGHT_THEME, DARK_THEME
-from src.iPhoto.gui.ui.widgets.collapsible_section import CollapsibleSection
-from src.iPhoto.gui.ui.window_manager import RoundedWindowShell
+from iPhoto.gui.ui.controllers.window_theme_controller import WindowThemeController
+from iPhoto.gui.ui.theme_manager import ThemeManager, LIGHT_THEME, DARK_THEME
+from iPhoto.gui.ui.widgets.collapsible_section import CollapsibleSection
+from iPhoto.gui.ui.window_manager import RoundedWindowShell
 
 # Mock load_icon globally to avoid disk/resource access and crashes during tests
 import sys
-sys.modules["src.iPhoto.gui.ui.icon"] = MagicMock()
-sys.modules["src.iPhoto.gui.ui.icon"].load_icon = MagicMock()
-sys.modules["src.iPhoto.gui.ui.icons"] = MagicMock()
-sys.modules["src.iPhoto.gui.ui.icons"].load_icon = MagicMock()
+sys.modules["iPhoto.gui.ui.icon"] = MagicMock()
+sys.modules["iPhoto.gui.ui.icon"].load_icon = MagicMock()
+sys.modules["iPhoto.gui.ui.icons"] = MagicMock()
+sys.modules["iPhoto.gui.ui.icons"].load_icon = MagicMock()
 # Also mock the relative import inside window_theme_controller
-from src.iPhoto.gui.ui.controllers import window_theme_controller as wtc_module
+from iPhoto.gui.ui.controllers import window_theme_controller as wtc_module
 wtc_module.load_icon = MagicMock()
 
 
@@ -311,7 +311,7 @@ def test_sidebar_palette_application(window_theme_controller, mock_theme_manager
     # So the controller modified that specific QPalette instance.
 
     # Let's verify the Highlight color was set to the constant
-    from src.iPhoto.gui.ui.palette import SIDEBAR_SELECTED_BACKGROUND, SIDEBAR_ICON_COLOR
+    from iPhoto.gui.ui.palette import SIDEBAR_SELECTED_BACKGROUND, SIDEBAR_ICON_COLOR
 
     # We need to capture the palette that was set
     assert palette.color(QPalette.ColorRole.Highlight) == SIDEBAR_SELECTED_BACKGROUND

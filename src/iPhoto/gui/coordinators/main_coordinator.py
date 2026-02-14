@@ -19,42 +19,42 @@ from PySide6.QtCore import (
 )
 from PySide6.QtGui import QShortcut, QKeySequence, QAction
 
-from src.iPhoto.appctx import AppContext
-from src.iPhoto.config import DEFAULT_EXCLUDE, DEFAULT_INCLUDE, WORK_DIR_NAME
-from src.iPhoto.gui.ui.models.roles import Roles
-from src.iPhoto.gui.ui.models.spacer_proxy_model import SpacerProxyModel
-from src.iPhoto.gui.ui.controllers.dialog_controller import DialogController
-from src.iPhoto.gui.ui.controllers.header_controller import HeaderController
-from src.iPhoto.gui.ui.controllers.share_controller import ShareController
-from src.iPhoto.gui.ui.controllers.status_bar_controller import StatusBarController
-from src.iPhoto.gui.ui.controllers.window_theme_controller import WindowThemeController
-from src.iPhoto.gui.ui.controllers.preview_controller import PreviewController
-from src.iPhoto.gui.ui.controllers.context_menu_controller import ContextMenuController
-from src.iPhoto.gui.ui.controllers.selection_controller import SelectionController
-from src.iPhoto.gui.ui.controllers.export_controller import ExportController
-from src.iPhoto.gui.ui.widgets.asset_delegate import AssetGridDelegate
+from iPhoto.appctx import AppContext
+from iPhoto.config import DEFAULT_EXCLUDE, DEFAULT_INCLUDE, WORK_DIR_NAME
+from iPhoto.gui.ui.models.roles import Roles
+from iPhoto.gui.ui.models.spacer_proxy_model import SpacerProxyModel
+from iPhoto.gui.ui.controllers.dialog_controller import DialogController
+from iPhoto.gui.ui.controllers.header_controller import HeaderController
+from iPhoto.gui.ui.controllers.share_controller import ShareController
+from iPhoto.gui.ui.controllers.status_bar_controller import StatusBarController
+from iPhoto.gui.ui.controllers.window_theme_controller import WindowThemeController
+from iPhoto.gui.ui.controllers.preview_controller import PreviewController
+from iPhoto.gui.ui.controllers.context_menu_controller import ContextMenuController
+from iPhoto.gui.ui.controllers.selection_controller import SelectionController
+from iPhoto.gui.ui.controllers.export_controller import ExportController
+from iPhoto.gui.ui.widgets.asset_delegate import AssetGridDelegate
 
 # New Architecture Imports
-from src.iPhoto.gui.viewmodels.album_viewmodel import AlbumViewModel
-from src.iPhoto.gui.viewmodels.asset_list_viewmodel import AssetListViewModel
-from src.iPhoto.gui.viewmodels.asset_data_source import AssetDataSource
-from src.iPhoto.application.services.album_service import AlbumService
-from src.iPhoto.application.services.asset_service import AssetService
-from src.iPhoto.di.container import DependencyContainer
-from src.iPhoto.events.bus import EventBus
-from src.iPhoto.domain.repositories import IAssetRepository
-from src.iPhoto.infrastructure.db.pool import ConnectionPool
-from src.iPhoto.infrastructure.repositories.sqlite_asset_repository import SQLiteAssetRepository
-from src.iPhoto.infrastructure.services.thumbnail_cache_service import ThumbnailCacheService
+from iPhoto.gui.viewmodels.album_viewmodel import AlbumViewModel
+from iPhoto.gui.viewmodels.asset_list_viewmodel import AssetListViewModel
+from iPhoto.gui.viewmodels.asset_data_source import AssetDataSource
+from iPhoto.application.services.album_service import AlbumService
+from iPhoto.application.services.asset_service import AssetService
+from iPhoto.di.container import DependencyContainer
+from iPhoto.events.bus import EventBus
+from iPhoto.domain.repositories import IAssetRepository
+from iPhoto.infrastructure.db.pool import ConnectionPool
+from iPhoto.infrastructure.repositories.sqlite_asset_repository import SQLiteAssetRepository
+from iPhoto.infrastructure.services.thumbnail_cache_service import ThumbnailCacheService
 
 # New Coordinators
-from src.iPhoto.gui.coordinators.view_router import ViewRouter
-from src.iPhoto.gui.coordinators.navigation_coordinator import NavigationCoordinator
-from src.iPhoto.gui.coordinators.playback_coordinator import PlaybackCoordinator
-from src.iPhoto.gui.coordinators.edit_coordinator import EditCoordinator
+from iPhoto.gui.coordinators.view_router import ViewRouter
+from iPhoto.gui.coordinators.navigation_coordinator import NavigationCoordinator
+from iPhoto.gui.coordinators.playback_coordinator import PlaybackCoordinator
+from iPhoto.gui.coordinators.edit_coordinator import EditCoordinator
 
 if TYPE_CHECKING:
-    from src.iPhoto.gui.ui.main_window import MainWindow
+    from iPhoto.gui.ui.main_window import MainWindow
 
 
 class MainCoordinator(QObject):
@@ -115,7 +115,7 @@ class MainCoordinator(QObject):
         )
 
         # 3. Playback Coordinator
-        from src.iPhoto.gui.ui.controllers.player_view_controller import PlayerViewController
+        from iPhoto.gui.ui.controllers.player_view_controller import PlayerViewController
         self._player_view_controller = PlayerViewController(
             window.ui.player_stack,
             window.ui.image_viewer,

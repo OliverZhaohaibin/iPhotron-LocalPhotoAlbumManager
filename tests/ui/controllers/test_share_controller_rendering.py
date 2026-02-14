@@ -10,8 +10,8 @@ import pytest
 from PySide6.QtGui import QImage, QAction, QActionGroup, QGuiApplication
 from PySide6.QtWidgets import QApplication, QPushButton
 
-from src.iPhoto.gui.ui.controllers.share_controller import ShareController, RenderClipboardWorker
-from src.iPhoto.gui.ui.models.roles import Roles
+from iPhoto.gui.ui.controllers.share_controller import ShareController, RenderClipboardWorker
+from iPhoto.gui.ui.models.roles import Roles
 
 @pytest.fixture()
 def qapp() -> QApplication:
@@ -95,7 +95,7 @@ def test_copy_file_no_sidecar(controller_factory, mocker, tmp_path):
     path = tmp_path / "photo.jpg"
     path.touch()
 
-    mocker.patch("src.iPhoto.io.sidecar.sidecar_path_for_asset", return_value=path.with_suffix(".ipo"))
+    mocker.patch("iPhoto.io.sidecar.sidecar_path_for_asset", return_value=path.with_suffix(".ipo"))
     # Ensure sidecar does not exist
 
     settings = StubSettings("copy_file")
@@ -119,7 +119,7 @@ def test_copy_file_with_sidecar_success(controller_factory, mocker, tmp_path, qa
     sidecar_path = path.with_suffix(".ipo")
     sidecar_path.touch()
 
-    mocker.patch("src.iPhoto.io.sidecar.sidecar_path_for_asset", return_value=sidecar_path)
+    mocker.patch("iPhoto.io.sidecar.sidecar_path_for_asset", return_value=sidecar_path)
 
     settings = StubSettings("copy_file")
     playlist = StubPlaylist(0)
@@ -142,10 +142,10 @@ def test_copy_file_with_sidecar_success(controller_factory, mocker, tmp_path, qa
     # We can patch the class in the module
 
     # Instead of patching class, let's patch _do_work or dependencies to make it succeed.
-    mocker.patch("src.iPhoto.io.sidecar.load_adjustments", return_value={"Crop_W": 1.0})
-    mocker.patch("src.iPhoto.utils.image_loader.load_qimage", return_value=QImage(100, 100, QImage.Format_ARGB32))
-    mocker.patch("src.iPhoto.io.sidecar.resolve_render_adjustments", return_value={})
-    mocker.patch("src.iPhoto.gui.ui.controllers.share_controller.apply_adjustments", return_value=QImage(100, 100, QImage.Format_ARGB32))
+    mocker.patch("iPhoto.io.sidecar.load_adjustments", return_value={"Crop_W": 1.0})
+    mocker.patch("iPhoto.utils.image_loader.load_qimage", return_value=QImage(100, 100, QImage.Format_ARGB32))
+    mocker.patch("iPhoto.io.sidecar.resolve_render_adjustments", return_value={})
+    mocker.patch("iPhoto.gui.ui.controllers.share_controller.apply_adjustments", return_value=QImage(100, 100, QImage.Format_ARGB32))
 
     controller._copy_file_to_clipboard(path)
 
@@ -160,7 +160,7 @@ def test_copy_file_with_sidecar_failure(controller_factory, mocker, tmp_path, qa
     sidecar_path = path.with_suffix(".ipo")
     sidecar_path.touch()
 
-    mocker.patch("src.iPhoto.io.sidecar.sidecar_path_for_asset", return_value=sidecar_path)
+    mocker.patch("iPhoto.io.sidecar.sidecar_path_for_asset", return_value=sidecar_path)
 
     settings = StubSettings("copy_file")
     playlist = StubPlaylist(0)
@@ -176,7 +176,7 @@ def test_copy_file_with_sidecar_failure(controller_factory, mocker, tmp_path, qa
     mocker.patch("PySide6.QtCore.QThreadPool.globalInstance").return_value.start.side_effect = mock_start
 
     # Force failure by making load_adjustments return empty
-    mocker.patch("src.iPhoto.io.sidecar.load_adjustments", return_value={})
+    mocker.patch("iPhoto.io.sidecar.load_adjustments", return_value={})
 
     controller._copy_file_to_clipboard(path)
 
@@ -192,16 +192,16 @@ def test_worker_logic(mocker, tmp_path):
     worker = RenderClipboardWorker(path)
 
     # Mock dependencies
-    mocker.patch("src.iPhoto.io.sidecar.load_adjustments", return_value={
+    mocker.patch("iPhoto.io.sidecar.load_adjustments", return_value={
         "Crop_CX": 0.5, "Crop_CY": 0.5, "Crop_W": 0.5, "Crop_H": 0.5, "Crop_Rotate90": 1.0, "Crop_FlipH": True
     })
 
     original_image = QImage(100, 100, QImage.Format.Format_ARGB32)
     original_image.fill(0xFF000000) # Black
 
-    mocker.patch("src.iPhoto.utils.image_loader.load_qimage", return_value=original_image)
-    mocker.patch("src.iPhoto.io.sidecar.resolve_render_adjustments", return_value={})
-    mocker.patch("src.iPhoto.gui.ui.controllers.share_controller.apply_adjustments", side_effect=lambda img, adj: img)
+    mocker.patch("iPhoto.utils.image_loader.load_qimage", return_value=original_image)
+    mocker.patch("iPhoto.io.sidecar.resolve_render_adjustments", return_value={})
+    mocker.patch("iPhoto.gui.ui.controllers.share_controller.apply_adjustments", side_effect=lambda img, adj: img)
 
     success_spy = mocker.Mock()
     fail_spy = mocker.Mock()

@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 from pathlib import Path
 
-from src.iPhoto.io.sidecar import (
+from iPhoto.io.sidecar import (
     load_adjustments,
     save_adjustments,
     resolve_render_adjustments,

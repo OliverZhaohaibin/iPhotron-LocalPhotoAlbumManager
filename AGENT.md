@@ -313,7 +313,7 @@ Files currently involved with direct OpenGL calls or GL context management:
 
 * **Map Component (GL-accelerated)**
 
-  * `maps/map_widget/map_gl_widget.py` (GL-based map tile rendering)
+  * `src/maps/map_widget/map_gl_widget.py` (GL-based map tile rendering)
 
 * **Edit Preview Renderer**
 

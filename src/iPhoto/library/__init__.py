@@ -1,6 +1,6 @@
 """Basic Library management helpers."""
 
-from .manager import LibraryManager
+from .manager import GeotaggedAsset, LibraryManager
 from .tree import AlbumNode
 
-__all__ = ["AlbumNode", "LibraryManager"]
+__all__ = ["AlbumNode", "GeotaggedAsset", "LibraryManager"]

@@ -3,8 +3,8 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 import pytest
-from src.iPhoto.cache.index_store import IndexStore, GLOBAL_INDEX_DB_NAME
-from src.iPhoto.config import WORK_DIR_NAME
+from iPhoto.cache.index_store import IndexStore, GLOBAL_INDEX_DB_NAME
+from iPhoto.config import WORK_DIR_NAME
 
 @pytest.fixture
 def store(tmp_path: Path) -> IndexStore:

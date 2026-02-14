@@ -5,12 +5,12 @@ import numpy as np
 from PySide6.QtCore import QObject, QSize, Signal, QThreadPool, QRunnable, Qt
 from PySide6.QtGui import QImage, QPainter, QPixmap, QTransform
 
-from src.iPhoto.infrastructure.services.thumbnail_generator import PillowThumbnailGenerator
-from src.iPhoto.core.color_resolver import compute_color_statistics
-from src.iPhoto.core.image_filters import apply_adjustments
-from src.iPhoto.gui.ui.tasks import geo_utils
-from src.iPhoto.io import sidecar
-from src.iPhoto.utils import image_loader
+from iPhoto.infrastructure.services.thumbnail_generator import PillowThumbnailGenerator
+from iPhoto.core.color_resolver import compute_color_statistics
+from iPhoto.core.image_filters import apply_adjustments
+from iPhoto.gui.ui.tasks import geo_utils
+from iPhoto.io import sidecar
+from iPhoto.utils import image_loader
 
 class ThumbnailWorkerSignals(QObject):
     """Signals emitted by thumbnail generation workers."""

@@ -8,7 +8,7 @@ from unittest.mock import Mock
 import pytest
 from PySide6.QtWidgets import QApplication
 
-from src.iPhoto.gui.ui.controllers.header_layout_manager import HeaderLayoutManager
+from iPhoto.gui.ui.controllers.header_layout_manager import HeaderLayoutManager
 
 @pytest.fixture()
 def qapp() -> QApplication:

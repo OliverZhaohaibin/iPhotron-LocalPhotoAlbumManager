@@ -4,11 +4,11 @@ from datetime import datetime
 from pathlib import Path
 from dataclasses import dataclass
 
-from src.iPhoto.application.dtos import OpenAlbumRequest, OpenAlbumResponse
-from src.iPhoto.domain.models import Album
-from src.iPhoto.domain.models.query import AssetQuery
-from src.iPhoto.domain.repositories import IAlbumRepository, IAssetRepository
-from src.iPhoto.events.bus import EventBus, Event
+from iPhoto.application.dtos import OpenAlbumRequest, OpenAlbumResponse
+from iPhoto.domain.models import Album
+from iPhoto.domain.models.query import AssetQuery
+from iPhoto.domain.repositories import IAlbumRepository, IAssetRepository
+from iPhoto.events.bus import EventBus, Event
 
 @dataclass(kw_only=True)
 class AlbumOpenedEvent(Event):

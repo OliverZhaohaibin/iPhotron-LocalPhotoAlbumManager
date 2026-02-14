@@ -5,10 +5,10 @@ import time
 from pathlib import Path
 from unittest.mock import Mock, MagicMock
 
-from src.iPhoto.di.container import DependencyContainer
-from src.iPhoto.events.bus import EventBus, Event
-from src.iPhoto.infrastructure.db.pool import ConnectionPool
-from src.iPhoto.errors.handler import ErrorHandler, ErrorSeverity, ErrorOccurredEvent
+from iPhoto.di.container import DependencyContainer
+from iPhoto.events.bus import EventBus, Event
+from iPhoto.infrastructure.db.pool import ConnectionPool
+from iPhoto.errors.handler import ErrorHandler, ErrorSeverity, ErrorOccurredEvent
 
 # --- DependencyContainer Tests ---
 

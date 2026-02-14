@@ -15,7 +15,7 @@ project_root = Path(__file__).parent.parent
 if str(project_root) not in sys.path:
     sys.path.insert(0, str(project_root))
 
-from src.iPhoto.gui.ui.widgets.gl_image_viewer.input_handler import InputEventHandler
+from iPhoto.gui.ui.widgets.gl_image_viewer.input_handler import InputEventHandler
 
 
 class TestInputEventHandler:

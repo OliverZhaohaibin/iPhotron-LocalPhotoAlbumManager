@@ -2,10 +2,10 @@ import logging
 from pathlib import Path
 from typing import List, Optional
 
-from src.iPhoto.application.use_cases.open_album import OpenAlbumUseCase
-from src.iPhoto.application.use_cases.scan_album import ScanAlbumUseCase
-from src.iPhoto.application.use_cases.pair_live_photos import PairLivePhotosUseCase
-from src.iPhoto.application.dtos import (
+from iPhoto.application.use_cases.open_album import OpenAlbumUseCase
+from iPhoto.application.use_cases.scan_album import ScanAlbumUseCase
+from iPhoto.application.use_cases.pair_live_photos import PairLivePhotosUseCase
+from iPhoto.application.dtos import (
     OpenAlbumRequest, OpenAlbumResponse,
     ScanAlbumRequest, ScanAlbumResponse,
     PairLivePhotosRequest, PairLivePhotosResponse

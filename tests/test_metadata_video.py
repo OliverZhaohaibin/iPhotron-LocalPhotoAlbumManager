@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from src.iPhoto.io import metadata
+from iPhoto.io import metadata
 
 
 def test_read_video_meta_enriches_quicktime_payload(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

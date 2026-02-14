@@ -13,6 +13,7 @@ import importlib.util
 def setup_dummy_packages():
     packages = [
         'iPhoto',
+        'iPhoto.core',
         'iPhoto.gui',
         'iPhoto.gui.ui',
         'iPhoto.gui.ui.widgets',
@@ -39,19 +40,28 @@ setup_dummy_packages()
 
 this_dir = os.path.dirname(os.path.abspath(__file__))
 project_root = os.path.dirname(this_dir)
-
-perspective_math_path = os.path.join(
-    project_root, 'src', 'iPhoto', 'gui', 'ui', 'widgets', 'perspective_math.py'
+widgets_dir = os.path.join(
+    project_root, 'src', 'iPhoto', 'gui', 'ui', 'widgets',
 )
-perspective_math_path = os.path.abspath(perspective_math_path)
-
-gl_renderer_path = os.path.join(
-    project_root, 'src', 'iPhoto', 'gui', 'ui', 'widgets', 'gl_renderer.py'
+core_dir = os.path.join(
+    project_root, 'src', 'iPhoto', 'core',
 )
-gl_renderer_path = os.path.abspath(gl_renderer_path)
 
-# Load perspective_math first as it is imported by gl_renderer
+selective_color_path = os.path.abspath(os.path.join(core_dir, 'selective_color_resolver.py'))
+perspective_math_path = os.path.abspath(os.path.join(widgets_dir, 'perspective_math.py'))
+gl_shader_manager_path = os.path.abspath(os.path.join(widgets_dir, 'gl_shader_manager.py'))
+gl_texture_manager_path = os.path.abspath(os.path.join(widgets_dir, 'gl_texture_manager.py'))
+gl_uniform_state_path = os.path.abspath(os.path.join(widgets_dir, 'gl_uniform_state.py'))
+gl_offscreen_path = os.path.abspath(os.path.join(widgets_dir, 'gl_offscreen.py'))
+gl_renderer_path = os.path.abspath(os.path.join(widgets_dir, 'gl_renderer.py'))
+
+# Load helper modules before gl_renderer (which imports them via relative imports)
+load_module_from_file('iPhoto.core.selective_color_resolver', selective_color_path)
 load_module_from_file('iPhoto.gui.ui.widgets.perspective_math', perspective_math_path)
+load_module_from_file('iPhoto.gui.ui.widgets.gl_shader_manager', gl_shader_manager_path)
+load_module_from_file('iPhoto.gui.ui.widgets.gl_texture_manager', gl_texture_manager_path)
+load_module_from_file('iPhoto.gui.ui.widgets.gl_uniform_state', gl_uniform_state_path)
+load_module_from_file('iPhoto.gui.ui.widgets.gl_offscreen', gl_offscreen_path)
 
 # Load gl_renderer
 gl_renderer_mod = load_module_from_file('iPhoto.gui.ui.widgets.gl_renderer', gl_renderer_path)
@@ -66,10 +76,10 @@ def mock_gl_funcs():
 @pytest.fixture
 def renderer(mock_gl_funcs):
     # Patch QOpenGLShaderProgram to avoid needing a real GL context
-    with patch('iPhoto.gui.ui.widgets.gl_renderer.QOpenGLShaderProgram') as MockProgram, \
-         patch('iPhoto.gui.ui.widgets.gl_renderer.QOpenGLVertexArrayObject') as MockVAO, \
-         patch('iPhoto.gui.ui.widgets.gl_renderer.gl') as MockGL, \
-         patch('iPhoto.gui.ui.widgets.gl_renderer._load_shader_source', return_value="void main() {}"):
+    with patch('iPhoto.gui.ui.widgets.gl_shader_manager.QOpenGLShaderProgram') as MockProgram, \
+         patch('iPhoto.gui.ui.widgets.gl_shader_manager.QOpenGLVertexArrayObject') as MockVAO, \
+         patch('iPhoto.gui.ui.widgets.gl_shader_manager.gl') as MockGL, \
+         patch('iPhoto.gui.ui.widgets.gl_shader_manager._load_shader_source', return_value="void main() {}"):
 
         MockProgram.return_value.addShaderFromSourceCode.return_value = True
         MockProgram.return_value.link.return_value = True

@@ -4,7 +4,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 import pytest
 
-from src.iPhoto.utils.exiftool import get_metadata_batch
+from iPhoto.utils.exiftool import get_metadata_batch
 
 def test_get_metadata_batch_uses_posix_paths():
     """Verify that paths are written to the argument file using POSIX style (forward slashes)."""

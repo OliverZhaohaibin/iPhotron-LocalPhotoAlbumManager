@@ -6,11 +6,11 @@ from typing import TYPE_CHECKING, Optional
 from PySide6.QtCore import QObject, Signal
 
 if TYPE_CHECKING:
-    from src.iPhoto.gui.ui.main_window import Ui_MainWindow
-    from src.iPhoto.gui.ui.widgets.detail_page import DetailPage
-    from src.iPhoto.gui.ui.widgets.edit_view import EditView
-    from src.iPhoto.gui.ui.widgets.gallery_page import GalleryPageWidget
-    from src.iPhoto.gui.ui.widgets.photo_map_view import PhotoMapView
+    from iPhoto.gui.ui.main_window import Ui_MainWindow
+    from iPhoto.gui.ui.widgets.detail_page import DetailPage
+    from iPhoto.gui.ui.widgets.edit_view import EditView
+    from iPhoto.gui.ui.widgets.gallery_page import GalleryPageWidget
+    from iPhoto.gui.ui.widgets.photo_map_view import PhotoMapView
 
 
 class ViewRouter(QObject):
@@ -87,7 +87,7 @@ class ViewRouter(QObject):
     def map_view(self) -> Optional["PhotoMapView"]:
         """Return the map widget when available."""
 
-        from src.iPhoto.gui.ui.widgets.photo_map_view import PhotoMapView
+        from iPhoto.gui.ui.widgets.photo_map_view import PhotoMapView
 
         map_view = getattr(self._ui, "map_view", None)
         if isinstance(map_view, PhotoMapView):
@@ -101,7 +101,7 @@ class ViewRouter(QObject):
             The GalleryPageWidget instance if available, None otherwise.
         """
 
-        from src.iPhoto.gui.ui.widgets.gallery_page import GalleryPageWidget
+        from iPhoto.gui.ui.widgets.gallery_page import GalleryPageWidget
 
         gallery_page = getattr(self._ui, "gallery_page", None)
         if isinstance(gallery_page, GalleryPageWidget):

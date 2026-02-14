@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Dict, Iterable, List, Optional, Sequence, Set, Tuple, TYPE_CHECKING
 
@@ -22,6 +23,25 @@ if TYPE_CHECKING:
     from ...models.album import Album
 
 
+@dataclass
+class MoveOperationResult:
+    """Consolidated result of a move / delete / restore operation.
+
+    Emitted via :pyattr:`LibraryUpdateService.moveOperationCompleted` so that
+    listeners can perform incremental updates instead of a full reload.
+    """
+
+    source_root: Path
+    destination_root: Path
+    moved_pairs: List[Tuple[Path, Path]] = field(default_factory=list)
+    removed_rels: List[str] = field(default_factory=list)
+    added_rels: List[str] = field(default_factory=list)
+    is_delete: bool = False
+    is_restore: bool = False
+    source_ok: bool = True
+    destination_ok: bool = True
+
+
 class LibraryUpdateService(QObject):
     """Coordinate rescans, Live Photo pairing, and move aftermath bookkeeping."""
 
@@ -32,6 +52,9 @@ class LibraryUpdateService(QObject):
     linksUpdated = Signal(Path)
     assetReloadRequested = Signal(Path, bool, bool)
     errorRaised = Signal(str)
+    # Unified signal carrying a :class:`MoveOperationResult` so listeners can
+    # perform incremental / diff-based updates (Plan 1 §5.2).
+    moveOperationCompleted = Signal(object)
 
     def __init__(
         self,
@@ -202,6 +225,36 @@ class LibraryUpdateService(QObject):
 
         library = self._library_manager()
         library_root = library.root() if library is not None else None
+
+        # --- Emit unified result signal (Plan 1 §5.2) ---
+        removed_rels: List[str] = []
+        added_rels: List[str] = []
+        base = library_root if library_root else source_root
+        for original, target in moved_pairs:
+            try:
+                removed_rels.append(original.resolve().relative_to(base.resolve()).as_posix())
+            except (OSError, ValueError):
+                pass
+            dest_base = library_root if library_root else destination_root
+            try:
+                added_rels.append(target.resolve().relative_to(dest_base.resolve()).as_posix())
+            except (OSError, ValueError):
+                pass
+
+        result = MoveOperationResult(
+            source_root=source_root,
+            destination_root=destination_root,
+            moved_pairs=moved_pairs,
+            removed_rels=removed_rels,
+            added_rels=added_rels,
+            is_delete=bool(_is_trash_destination and not is_restore_operation),
+            is_restore=is_restore_operation,
+            source_ok=source_ok,
+            destination_ok=destination_ok,
+        )
+        self.moveOperationCompleted.emit(result)
+
+        # --- Legacy signal cascade (kept for backward compatibility) ---
         current_album = self._current_album_getter()
         current_root = current_album.root if current_album is not None else None
 
@@ -617,4 +670,4 @@ class LibraryUpdateService(QObject):
         return True
 
 
-__all__ = ["LibraryUpdateService"]
+__all__ = ["LibraryUpdateService", "MoveOperationResult"]

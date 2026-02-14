@@ -161,12 +161,13 @@ class MemoryMonitor:
         except OSError:
             try:
                 import resource
-                # ru_maxrss is in KB on Linux, bytes on macOS
+                # ru_maxrss is in KB on Linux, bytes on macOS (and some BSDs)
                 usage = resource.getrusage(resource.RUSAGE_SELF)
                 rss = usage.ru_maxrss
-                if os.uname().sysname == "Darwin":
+                sysname = os.uname().sysname
+                if sysname == "Darwin":
                     pass  # already bytes
-                else:
+                elif sysname == "Linux":
                     rss *= 1024  # KB → bytes
             except Exception:
                 pass

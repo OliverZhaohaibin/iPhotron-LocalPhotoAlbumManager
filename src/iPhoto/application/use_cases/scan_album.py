@@ -83,7 +83,7 @@ class ScanAlbumUseCase:
 
         # 1. Load existing assets
         existing_assets = self._asset_repo.get_by_album(album.id)
-        existing_map: Dict[str, Asset] = {str(a.path): a for a in existing_assets}
+        existing_map: Dict[str, Asset] = {a.path.as_posix(): a for a in existing_assets}
 
         # 2. Start Discovery
         # We could potentially load include/exclude rules from Album manifest if available
@@ -118,7 +118,7 @@ class ScanAlbumUseCase:
 
             for path in paths:
                 rel_path = path.relative_to(album.path)
-                str_rel_path = str(rel_path)
+                str_rel_path = rel_path.as_posix()
                 found_paths.add(str_rel_path)
 
                 # Check cache (incremental scan)

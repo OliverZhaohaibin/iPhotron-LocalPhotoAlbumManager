@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections import OrderedDict
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Set
 
 from PySide6.QtCore import QObject, QSize, Signal, Qt, QRectF
 from PySide6.QtGui import QColor, QFont, QFontMetrics, QPainter, QPixmap, QImage
@@ -156,6 +156,23 @@ class AssetCacheManager(QObject):
 
         self._thumb_cache.clear()
         self._composite_cache.clear()
+
+    def incremental_cache_update(
+        self,
+        removed_rels: Set[str],
+        added_rels: Set[str],
+    ) -> None:
+        """Incrementally update caches after a move/delete operation.
+
+        Only the entries in *removed_rels* are evicted; all other cached
+        thumbnails, composites and placeholders are preserved.  Entries in
+        *added_rels* will be lazily loaded when they first become visible
+        (Plan 3 §7.2.2).
+        """
+        for rel in removed_rels:
+            self._thumb_cache.pop(rel, None)
+            self._composite_cache.pop(rel, None)
+            self._placeholder_cache.pop(rel, None)
 
     def move_placeholder(self, old_rel: str, new_rel: str) -> None:
         """Move the cached placeholder entry from *old_rel* to *new_rel*."""

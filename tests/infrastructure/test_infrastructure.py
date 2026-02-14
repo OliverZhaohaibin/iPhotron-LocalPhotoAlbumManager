@@ -21,7 +21,7 @@ class ServiceImpl(IService):
 
 def test_container_register_resolve_singleton():
     container = DependencyContainer()
-    container.register(IService, ServiceImpl, singleton=True)
+    container.register_singleton(IService, ServiceImpl)
 
     instance1 = container.resolve(IService)
     instance2 = container.resolve(IService)
@@ -31,7 +31,7 @@ def test_container_register_resolve_singleton():
 
 def test_container_register_resolve_transient():
     container = DependencyContainer()
-    container.register(IService, ServiceImpl, singleton=False)
+    container.register_transient(IService, ServiceImpl)
 
     instance1 = container.resolve(IService)
     instance2 = container.resolve(IService)
@@ -41,7 +41,7 @@ def test_container_register_resolve_transient():
 
 def test_container_factory():
     container = DependencyContainer()
-    container.register(IService, factory=lambda: ServiceImpl(value="test"))
+    container.register_factory(IService, lambda: ServiceImpl(value="test"))
 
     instance = container.resolve(IService)
     assert instance.value == "test"

@@ -1,3 +1,4 @@
+from PySide6.QtCore import QItemSelectionModel, QStringListModel
 from PySide6.QtGui import QPalette, QColor
 from PySide6.QtWidgets import QApplication
 from iPhoto.gui.ui.widgets.filmstrip_view import FilmstripView
@@ -37,3 +38,24 @@ def test_filmstrip_view_updates_style_on_palette_change(qapp):
     expected_hex = expected_track_color.name(QColor.NameFormat.HexArgb)
 
     assert expected_hex in new_style, f"Stylesheet should contain the updated track color {expected_hex}"
+
+
+def test_center_on_index_overrides_pending_restore(qapp):
+    view = FilmstripView()
+    model = QStringListModel([str(i) for i in range(20)])
+    view.setModel(model)
+    view.resize(800, 132)
+    view.show()
+    qapp.processEvents()
+
+    selected = model.index(5, 0)
+    stale = model.index(12, 0)
+    view.selectionModel().setCurrentIndex(selected, QItemSelectionModel.ClearAndSelect)
+
+    view._pending_scroll_value = 0
+    view._pending_center_row = stale.row()
+    view._schedule_restore_scroll("test")
+    view.center_on_index(selected)
+    qapp.processEvents()
+
+    assert view.selectionModel().currentIndex().row() == selected.row()

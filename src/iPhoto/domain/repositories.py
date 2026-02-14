@@ -17,6 +17,10 @@ class IAlbumRepository(ABC):
     def save(self, album: Album) -> None:
         pass
 
+    @abstractmethod
+    def delete(self, id: str) -> None:
+        pass
+
 class IAssetRepository(ABC):
     @abstractmethod
     def get(self, id: str) -> Optional[Asset]:

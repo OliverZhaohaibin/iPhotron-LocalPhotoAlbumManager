@@ -145,16 +145,28 @@ class MoveWorker(QRunnable):
         source_index_ok = True
         destination_index_ok = True
         if moved and not self._cancel_requested:
+            cached_source_rows: Dict[str, Dict] = {}
             try:
-                self._update_source_index(moved)
+                cached_source_rows = self._update_source_index(moved)
             except IPhotoError as exc:
                 source_index_ok = False
                 self._signals.error.emit(str(exc))
             try:
-                self._update_destination_index(moved)
+                self._update_destination_index(moved, cached_source_rows)
             except IPhotoError as exc:
                 destination_index_ok = False
                 self._signals.error.emit(str(exc))
+
+            # Consolidated pair() call: execute once at the library-root level
+            # instead of separately in _update_source_index and
+            # _update_destination_index (Plan 2 §6.2.2).
+            try:
+                if self._library_root:
+                    backend.pair(self._library_root, library_root=self._library_root)
+                else:
+                    backend.pair(self._source_root)
+            except IPhotoError as exc:
+                self._signals.error.emit(f"Failed to pair Live Photos: {exc}")
 
         self._signals.finished.emit(
             self._source_root,
@@ -182,13 +194,19 @@ class MoveWorker(QRunnable):
         moved_path = shutil.move(str(source), str(target))
         return Path(moved_path).resolve()
 
-    def _update_source_index(self, moved: List[Tuple[Path, Path]]) -> None:
-        """Remove moved assets from the global index and update links."""
+    def _update_source_index(self, moved: List[Tuple[Path, Path]]) -> Dict[str, Dict]:
+        """Remove moved assets from the global index, returning cached rows.
+
+        The returned mapping (keyed by the *original* absolute path string)
+        allows :meth:`_update_destination_index` to reuse existing metadata
+        instead of re-extracting it with ExifTool (Plan 2 §6.2.1).
+        """
 
         # Use library root for global database
         index_root = self._library_root if self._library_root else self._source_root
         store = get_global_repository(index_root)
         rels: List[str] = []
+        rel_to_original: Dict[str, str] = {}
         for original, _ in moved:
             try:
                 # Compute library-relative path for global database
@@ -199,35 +217,44 @@ class MoveWorker(QRunnable):
             except (OSError, ValueError):
                 continue
             rels.append(rel)
+            rel_to_original[rel] = str(original)
+
+        # Cache source rows before deletion so the destination index can reuse
+        # the metadata (avoids redundant ExifTool calls).
+        cached_source_rows: Dict[str, Dict] = {}
+        if rels:
+            rows_by_rel = store.get_rows_by_rels(rels)
+            for rel, row_data in rows_by_rel.items():
+                original_str = rel_to_original.get(rel)
+                if original_str:
+                    cached_source_rows[original_str] = row_data
+
         if rels:
             store.remove_rows(rels)
-        
-        # Update pairing at the library root level
-        if self._library_root:
-            backend.pair(self._library_root, library_root=self._library_root)
-        else:
-            backend.pair(self._source_root)
 
-    def _update_destination_index(self, moved: List[Tuple[Path, Path]]) -> None:
-        """Append moved assets to the global index and links."""
+        # pair() is no longer called here; it is consolidated in run().
+        return cached_source_rows
+
+    def _update_destination_index(
+        self,
+        moved: List[Tuple[Path, Path]],
+        cached_source_rows: Optional[Dict[str, Dict]] = None,
+    ) -> None:
+        """Append moved assets to the global index and links.
+
+        When *cached_source_rows* is provided (keyed by the original absolute
+        path string), the method reuses existing metadata and only updates the
+        ``rel`` / ``parent_album_path`` fields.  ExifTool is invoked only for
+        files that have no cached row (Plan 2 §6.2.1).
+        """
 
         # Use library root for global database
         index_root = self._library_root if self._library_root else self._destination_root
         store = get_global_repository(index_root)
-        
-        image_paths: List[Path] = []
-        video_paths: List[Path] = []
-        for _, target in moved:
-            suffix = target.suffix.lower()
-            if suffix in IMAGE_EXTENSIONS:
-                image_paths.append(target)
-            elif suffix in VIDEO_EXTENSIONS:
-                video_paths.append(target)
-            else:
-                image_paths.append(target)
-        
+
         # Process media relative to the library root for global database
         process_root = self._library_root if self._library_root else self._destination_root
+
         if self._is_trash_destination:
             try:
                 existing_trash_rows = list(
@@ -249,9 +276,48 @@ class MoveWorker(QRunnable):
                 # Best-effort cleanup; continue with insertion even if pruning fails.
                 LOGGER.debug("Trash cleanup during move skipped: %s", exc)
 
-        new_rows = list(
-            process_media_paths(process_root, image_paths, video_paths)
-        )
+        # --- Build destination rows, reusing cached metadata when available ---
+        reused_rows: List[Dict[str, object]] = []
+        uncached_images: List[Path] = []
+        uncached_videos: List[Path] = []
+
+        for original, target in moved:
+            cached = (
+                cached_source_rows.get(str(original))
+                if cached_source_rows
+                else None
+            )
+            if cached:
+                row = dict(cached)
+                try:
+                    new_rel = target.relative_to(process_root).as_posix()
+                except (OSError, ValueError):
+                    new_rel = target.name
+                row["rel"] = new_rel
+                row["parent_album_path"] = (
+                    Path(new_rel).parent.as_posix()
+                    if Path(new_rel).parent != Path(".")
+                    else ""
+                )
+                reused_rows.append(row)
+            else:
+                suffix = target.suffix.lower()
+                if suffix in IMAGE_EXTENSIONS:
+                    uncached_images.append(target)
+                elif suffix in VIDEO_EXTENSIONS:
+                    uncached_videos.append(target)
+                else:
+                    uncached_images.append(target)
+
+        # Only invoke ExifTool for files that had no cached metadata.
+        freshly_scanned: List[Dict[str, object]] = []
+        if uncached_images or uncached_videos:
+            freshly_scanned = list(
+                process_media_paths(process_root, uncached_images, uncached_videos)
+            )
+
+        new_rows = reused_rows + freshly_scanned
+
         if self._is_trash_destination and not self._is_restore:
             if self._library_root is None:
                 raise IPhotoError(
@@ -326,15 +392,8 @@ class MoveWorker(QRunnable):
                 annotated_rows.append(enriched)
             new_rows = annotated_rows
         store.append_rows(new_rows)
-        
-        # Update pairing at the library root level
-        if self._library_root:
-            backend.pair(self._library_root, library_root=self._library_root)
-        else:
-            backend.pair(self._destination_root)
 
-        # No longer need to sync separate library index since we use single global DB
-        # self._synchronise_library_index(moved, image_paths, video_paths)
+        # pair() is no longer called here; it is consolidated in run().
 
     def _synchronise_library_index(
         self,

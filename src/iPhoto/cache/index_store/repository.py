@@ -159,14 +159,24 @@ class AssetRepository:
 
     def write_rows(self, rows: Iterable[Dict[str, Any]]) -> None:
         """Rewrite the entire index with *rows*."""
+        logger.info("[LEGACY-WRITE] write_rows called — DELETING ALL existing assets and rewriting")
         with self.transaction() as conn:
             conn.execute("DELETE FROM assets")
             self._insert_rows(conn, rows)
 
     def append_rows(self, rows: Iterable[Dict[str, Any]]) -> None:
         """Merge *rows* into the index, replacing duplicates by ``rel`` key."""
+        row_list = list(rows)
+        # Log any rows being written with is_favorite info
+        for r in row_list[:5]:  # Log first 5 rows
+            logger.info(
+                "[LEGACY-APPEND] rel=%s, is_favorite=%s",
+                r.get("rel", "?"), r.get("is_favorite", "NOT SET"),
+            )
+        if len(row_list) > 5:
+            logger.info("[LEGACY-APPEND] ... and %d more rows", len(row_list) - 5)
         with self.transaction() as conn:
-            self._insert_rows(conn, rows)
+            self._insert_rows(conn, row_list)
 
     def upsert_row(self, rel: str, row: Dict[str, Any]) -> None:
         """Insert or update a single row identified by *rel*."""
@@ -469,6 +479,7 @@ class AssetRepository:
     def set_favorite_status(self, rel: str, is_favorite: bool) -> None:
         """Toggle the favorite status for a single asset efficiently."""
         val = 1 if is_favorite else 0
+        logger.info("[LEGACY-FAV] set_favorite_status: rel=%s, is_favorite=%s", rel, is_favorite)
         self._db_manager.execute_in_transaction(
             "UPDATE assets SET is_favorite = ? WHERE rel = ?",
             (val, rel),

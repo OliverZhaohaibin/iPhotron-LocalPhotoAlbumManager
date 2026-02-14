@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING, List
 
 from PySide6.QtCore import QObject, QRunnable, Signal
@@ -11,6 +12,8 @@ from iPhoto.domain.models.query import AssetQuery
 
 if TYPE_CHECKING:
     from iPhoto.gui.viewmodels.asset_data_source import AssetDataSource
+
+_logger = logging.getLogger(__name__)
 
 
 class _AssetLoadSignals(QObject):
@@ -33,6 +36,10 @@ class _AssetLoadWorker(QRunnable):
         self.signals = _AssetLoadSignals()
 
     def run(self) -> None:
+        _logger.info(
+            "[LOAD-WORKER] Starting load: is_favorite=%s, album_path=%s, repo_id=%s",
+            self._query.is_favorite, self._query.album_path, id(self._data_source._repo),
+        )
         dtos: List[AssetDTO] = []
         raw_count = 0
         assets = self._data_source._repo.find_by_query(self._query)
@@ -44,6 +51,11 @@ class _AssetLoadWorker(QRunnable):
             if self._validate_paths and not self._data_source._path_exists_cached(abs_path):
                 continue
             dtos.append(self._data_source._to_dto(asset))
+        fav_count = sum(1 for d in dtos if d.is_favorite)
+        _logger.info(
+            "[LOAD-WORKER] Loaded %d DTOs from %d raw rows (%d favorites)",
+            len(dtos), raw_count, fav_count,
+        )
         self.signals.completed.emit(self._generation, dtos, raw_count)
 
 

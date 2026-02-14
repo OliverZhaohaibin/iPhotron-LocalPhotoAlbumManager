@@ -464,6 +464,10 @@ class MainCoordinator(QObject):
     def _replace_asset_repository(
         self, repo: SQLiteAssetRepository, pool: ConnectionPool
     ) -> None:
+        self._logger.info(
+            "[REPO-SWAP] Replacing asset repo: new_db=%s, repo_id=%s, pool_id=%s",
+            getattr(repo, '_db_path', '?'), id(repo), id(pool),
+        )
         previous_pool = self._asset_pool
         self._asset_pool = pool
         self._asset_repo = repo
@@ -481,7 +485,9 @@ class MainCoordinator(QObject):
         """Handle favorite badge click from grid view."""
         path_str = self._asset_list_vm.data(index, Roles.REL) or self._asset_list_vm.data(index, Roles.ABS)
         if path_str:
+            self._logger.info("[FAV-UI] _on_favorite_clicked row=%d, path=%s", index.row(), path_str)
             new_state = self._asset_service.toggle_favorite_by_path(Path(path_str))
+            self._logger.info("[FAV-UI] Badge click: new_state=%s for row=%d", new_state, index.row())
             self._asset_list_vm.update_favorite(index.row(), new_state)
 
     def _sync_selection(self, row: int):
@@ -577,10 +583,13 @@ class MainCoordinator(QObject):
             # Try filmstrip if grid has no selection
             indexes = self._window.ui.filmstrip_view.selectionModel().selectedIndexes()
 
+        self._logger.info("[FAV-UI] _handle_toggle_favorite called, %d indexes selected", len(indexes))
         for idx in indexes:
             path_str = self._asset_list_vm.data(idx, Roles.REL) or self._asset_list_vm.data(idx, Roles.ABS)
             if path_str:
+                self._logger.info("[FAV-UI] Toggling favorite for row=%d, path=%s", idx.row(), path_str)
                 new_state = self._asset_service.toggle_favorite_by_path(Path(path_str))
+                self._logger.info("[FAV-UI] Service returned new_state=%s, updating VM row=%d", new_state, idx.row())
                 self._asset_list_vm.update_favorite(idx.row(), new_state)
 
     def open_album_from_path(self, path: Path):

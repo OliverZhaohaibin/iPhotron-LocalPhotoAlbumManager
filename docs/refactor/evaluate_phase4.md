@@ -174,14 +174,16 @@ get_thumbnail(asset_id, size)
 | ThumbnailService (3-tier) | 7 | `tests/test_thumbnail_service.py` |
 | VirtualAssetGrid | 13 | `tests/test_virtual_grid.py` |
 | SQLite batch_insert + WAL | 6 | `tests/test_batch_insert.py` |
-| **Total Phase 4** | **64** | |
+| PaginatedAssetLoader | 21 | `tests/test_paginated_loader.py` |
+| PureAssetListViewModel (paginated) | 15 | `tests/test_paginated_viewmodel.py` |
+| **Total Phase 4** | **100** | |
 
 **All tests are pure Python — no QApplication or display required.**
 
 Combined with previous phases:
 - Phase 1+2 existing: 266 passed
-- Phase 4 new: 64 passed
-- **Grand total: 330 tests, 0 failures**
+- Phase 4 new: 100 passed
+- **Grand total: 366 tests, 0 failures**
 
 ---
 
@@ -196,13 +198,15 @@ Combined with previous phases:
 | `src/iPhoto/infrastructure/services/disk_thumbnail_cache.py` | 37 | L2: Disk thumbnail cache with hash bucketing |
 | `src/iPhoto/infrastructure/services/thumbnail_service.py` | 85 | Unified 3-tier thumbnail service |
 | `src/iPhoto/gui/ui/widgets/virtual_grid.py` | 82 | Virtualized grid model (headless) |
-| **Total new source** | **359** | |
+| `src/iPhoto/application/services/paginated_loader.py` | 131 | Paginated asset loader (200/page) |
+| **Total new source** | **490** | |
 
 ### Modified Files
 
 | File | Change | Purpose |
 |------|--------|---------|
 | `src/iPhoto/infrastructure/repositories/sqlite_asset_repository.py` | +9 lines | Added `batch_insert()` with WAL mode |
+| `src/iPhoto/gui/viewmodels/pure_asset_list_viewmodel.py` | +55 lines | Added paginated loading path (`load_next_page`, pagination state) |
 
 ### New Test Files
 
@@ -214,7 +218,9 @@ Combined with previous phases:
 | `tests/test_thumbnail_service.py` | 7 | 3-tier lookup, backfill, async |
 | `tests/test_virtual_grid.py` | 13 | Virtual grid calculations |
 | `tests/test_batch_insert.py` | 6 | Batch DB insert, WAL mode |
-| **Total tests** | **64** | |
+| `tests/test_paginated_loader.py` | 21 | Paginated loader, PageResult, offsets |
+| `tests/test_paginated_viewmodel.py` | 15 | Paginated ViewModel, events, errors |
+| **Total tests** | **100** | |
 
 ---
 
@@ -272,7 +278,7 @@ Combined with previous phases:
   - [ ] 缓存命中率监控 *(deferred — monitoring infrastructure)*
 - [x] **内存治理**
   - [x] 虚拟化列表 `VirtualAssetGrid`
-  - [ ] 分页加载 (200条/页) *(deferred — requires integration with ViewModel)*
+  - [x] 分页加载 (200条/页) — `PaginatedAssetLoader` + `PureAssetListViewModel.load_next_page()`
   - [x] 缩略图缓存上限 (LRU 500 ≈ bounded memory)
   - [ ] 弱引用非活跃对象 *(deferred — requires profiling to identify targets)*
   - [ ] 内存使用监控 (≤2GB @100K) *(deferred — requires profiling infrastructure)*

@@ -139,6 +139,16 @@ class SQLiteAssetRepository(IAssetRepository):
     def save_all(self, assets: List[Asset]) -> None:
         self.save_batch(assets)
 
+    def batch_insert(self, assets: List[Asset], wal_mode: bool = True) -> int:
+        """Batch insert with optional WAL mode for improved concurrent write performance."""
+        if not assets:
+            return 0
+        with self._pool.connection() as conn:
+            if wal_mode:
+                conn.execute("PRAGMA journal_mode=WAL")
+            self.save_batch(assets)
+        return len(assets)
+
     def save_batch(self, assets: List[Asset]) -> None:
         data = []
         for asset in assets:

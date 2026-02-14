@@ -1,6 +1,7 @@
 import logging
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Optional
 
 from .base import UseCase, UseCaseRequest, UseCaseResponse
 from iPhoto.domain.repositories import IAlbumRepository, IAssetRepository
@@ -14,7 +15,7 @@ class GenerateThumbnailRequest(UseCaseRequest):
 
 @dataclass(frozen=True)
 class GenerateThumbnailResponse(UseCaseResponse):
-    thumbnail_data: str | None = None
+    thumbnail_data: Optional[str] = None
 
 class GenerateThumbnailUseCase(UseCase):
     def __init__(

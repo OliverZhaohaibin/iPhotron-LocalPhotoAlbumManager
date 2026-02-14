@@ -9,18 +9,20 @@
 
 ## Executive Summary
 
-Phase 3 GUI MVVM refactoring has been completed successfully. The GUI layer now features a
-pure Python signal system (`Signal`, `ObservableProperty`), a `BaseViewModel` base class
-with automatic EventBus subscription lifecycle management, three pure Python ViewModels
-(`PureAssetListViewModel`, `AlbumTreeViewModel`, `DetailViewModel`), a centralized
-`ViewModelFactory`, a `NavigationService` for page navigation, and a `QtEventBridge` for
-transitional Qt Signal compatibility.
+Phase 3 GUI MVVM refactoring has been completed successfully, including Phase C (complete
+migration). The GUI layer now features a pure Python signal system (`Signal`,
+`ObservableProperty`), a `BaseViewModel` base class with automatic EventBus subscription
+lifecycle management, three pure Python ViewModels (`PureAssetListViewModel`,
+`AlbumTreeViewModel`, `DetailViewModel`), a centralized `ViewModelFactory`, and a
+`NavigationService` for page navigation. The transitional `QtEventBridge` has been fully
+removed — all ViewModels now subscribe directly to the `EventBus`.
 
 **Key Metrics:**
-- 78 new Phase 3 tests passing, 0 failures
+- 74 Phase 3 tests passing (71 MVVM + 3 Phase C verification), 0 failures
 - 99 existing tests still passing (0 regressions), 4 skipped (Qt/display dependent)
 - All new ViewModels are pure Python — no Qt dependency, testable without QApplication
 - Full backward compatibility: existing Qt-based ViewModels preserved
+- QtEventBridge fully removed (Phase C complete)
 
 ---
 
@@ -131,29 +133,28 @@ transitional Qt Signal compatibility.
 
 ## 3. Qt Signal → EventBus Migration ✅
 
-### 3.1 QtEventBridge ✅
+### 3.1 QtEventBridge — Removed (Phase C) ✅
 
-| Requirement | Status | Notes |
-|-------------|--------|-------|
-| Bridge EventBus → pure Python Signals | ✅ Done | `src/iPhoto/gui/services/qt_event_bridge.py` |
-| `register(event_type, handler)` | ✅ Done | Creates per-type bridge signals |
-| `unregister(event_type, handler)` | ✅ Done | Safe removal |
-| `dispose()` | ✅ Done | Cancels all subscriptions, idempotent |
-| Multiple handlers per event type | ✅ Done | Via shared bridge Signal |
-| Multiple event types | ✅ Done | Independent bridge per type |
-| Tests | ✅ 7 tests | Register, unregister, dispose, multi-type |
+The `QtEventBridge` was a transitional adapter introduced in Phase A/B to forward
+`EventBus` events into pure Python `Signal` instances so existing Qt-based views could
+consume them. With Phase C now complete:
 
-**File**: `src/iPhoto/gui/services/qt_event_bridge.py` (66 lines)
+- **Source removed**: `src/iPhoto/gui/services/qt_event_bridge.py` deleted
+- **Tests removed**: `tests/gui/viewmodels/test_qt_event_bridge.py` deleted
+- **Verification tests added**: `tests/gui/viewmodels/test_phase_c_bridge_removed.py` (3 tests)
+  - Import of removed module raises `ImportError`
+  - ViewModels subscribe directly to `EventBus` without bridge
+  - Pure Python `Signal` works independently
 
-### 3.2 Migration Strategy
+### 3.2 Migration Strategy — Complete ✅
 
 The migration follows a phased approach as outlined in the design document:
 
 | Phase | Description | Status |
 |-------|-------------|--------|
-| **Phase A**: Dual-track | QtEventBridge forwards EventBus → Qt Signal | ✅ Bridge implemented |
+| **Phase A**: Dual-track | QtEventBridge forwards EventBus → Qt Signal | ✅ Complete (bridge removed) |
 | **Phase B**: ViewModel switch | New VMs subscribe to EventBus directly | ✅ All pure VMs use EventBus |
-| **Phase C**: Complete migration | Remove QtEventBridge, Qt Signals for UI only | 🔄 Ready (bridge is disposable) |
+| **Phase C**: Complete migration | Remove QtEventBridge, Qt Signals for UI only | ✅ Bridge removed, verified by tests |
 
 ---
 
@@ -184,7 +185,6 @@ View (QWidget) → ViewModel (pure Python, ObservableProperty)
   → UseCase → EventBus → ViewModel (auto-notified)
 
 Coordinator (NavigationService + ViewModelFactory) — navigation only
-QtEventBridge — transitional compatibility layer
 ```
 
 **MVVM Rules Enforced:**
@@ -206,15 +206,15 @@ QtEventBridge — transitional compatibility layer
 | DetailViewModel | 11 | `test_detail_viewmodel.py` |
 | ViewModelFactory | 5 | `test_viewmodel_factory.py` |
 | NavigationService | 10 | `test_navigation_service.py` |
-| QtEventBridge | 7 | `test_qt_event_bridge.py` |
-| **Total Phase 3** | **78** | |
+| Phase C Bridge Removed | 3 | `test_phase_c_bridge_removed.py` |
+| **Total Phase 3** | **74** | |
 
 **All tests are pure Python — no QApplication or display required.**
 
 Combined with existing tests:
 - Phase 1+2 existing: 99 passed, 4 skipped
-- Phase 3 new: 78 passed
-- **Grand total: 177 tests, 0 failures**
+- Phase 3 new: 74 passed
+- **Grand total: 173 tests, 0 failures**
 
 ---
 
@@ -233,8 +233,7 @@ Combined with existing tests:
 | `src/iPhoto/gui/factories/__init__.py` | 3 | Package exports |
 | `src/iPhoto/gui/factories/viewmodel_factory.py` | 82 | Centralized ViewModel factory |
 | `src/iPhoto/gui/services/navigation_service.py` | 60 | Page navigation management |
-| `src/iPhoto/gui/services/qt_event_bridge.py` | 66 | EventBus → Signal bridge |
-| **Total source** | **622** | |
+| **Total source** | **556** | |
 
 ### New Test Files
 
@@ -247,8 +246,8 @@ Combined with existing tests:
 | `tests/gui/viewmodels/test_detail_viewmodel.py` | 11 | DetailViewModel |
 | `tests/gui/viewmodels/test_viewmodel_factory.py` | 5 | ViewModelFactory |
 | `tests/gui/viewmodels/test_navigation_service.py` | 10 | NavigationService |
-| `tests/gui/viewmodels/test_qt_event_bridge.py` | 7 | QtEventBridge |
-| **Total tests** | **78** | |
+| `tests/gui/viewmodels/test_phase_c_bridge_removed.py` | 3 | Phase C verification |
+| **Total tests** | **74** | |
 
 ---
 
@@ -272,5 +271,5 @@ Combined with existing tests:
 - [ ] Migrate existing Qt `AlbumViewModel` callers to `AlbumTreeViewModel`
 - [ ] Migrate existing Qt `AssetListViewModel` callers to use `PureAssetListViewModel` + Qt adapter
 - [ ] Large file splits: `edit_sidebar.py`, `edit_curve_section.py`, `asset_data_source.py`
-- [ ] Remove `QtEventBridge` after all views switch to pure Python Signals
+- [x] ~~Remove `QtEventBridge` after all views switch to pure Python Signals~~ (Phase C complete)
 - [ ] MainCoordinator refactor to ≤200 lines (extract DI Bootstrap, use ViewModelFactory)

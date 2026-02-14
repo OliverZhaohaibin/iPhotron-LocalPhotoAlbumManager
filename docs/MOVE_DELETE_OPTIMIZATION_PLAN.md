@@ -352,7 +352,9 @@ def _update_source_index(self, moved):
     for original, target in moved:
         rel = self._compute_rel(original, index_root)
         if rel:
-            row_data = store.get_row_by_rel(rel)  # 新增 API
+            # 新增 API: get_row_by_rel(rel) -> Optional[Dict]
+            # 若 rel 不存在则返回 None
+            row_data = store.get_row_by_rel(rel)
             if row_data:
                 cached_rows[str(original)] = row_data
 
@@ -553,10 +555,13 @@ def _update_indexes_atomically(self, moved):
         # 1. 批量读取源行（用于复用）
         source_rows = self._batch_read_source_rows(conn, moved)
 
-        # 2. 批量删除源行
+        # 1. 批量删除源行
         rels_to_remove = [...]
-        conn.executemany("DELETE FROM assets WHERE rel = ?",
-                        [(r,) for r in rels_to_remove])
+        placeholders = ", ".join(["?"] * len(rels_to_remove))
+        conn.execute(
+            f"DELETE FROM assets WHERE rel IN ({placeholders})",
+            rels_to_remove,
+        )
 
         # 3. 批量插入目标行
         new_rows = self._build_destination_rows(moved, source_rows)
@@ -623,7 +628,8 @@ struct MoveResult {
 
 /**
  * 批量移动文件，释放 GIL 以避免阻塞 Python 主线程。
- * 使用 std::filesystem::rename 实现零拷贝移动（同分区）。
+ * 使用 std::filesystem::rename 实现零拷贝移动。
+ * 注意：rename 仅在同分区内为零拷贝；跨分区时自动回退到拷贝+删除。
  */
 std::vector<MoveResult> batch_move(
     const std::vector<std::string>& sources,
@@ -655,15 +661,26 @@ std::vector<MoveResult> batch_move(
                 }
             }
 
-            fs::rename(src, target);  // 零拷贝移动（同分区内）
+            fs::rename(src, target);  // 同分区内为零拷贝；跨分区抛出异常
             r.target = target.string();
             r.success = true;
         } catch (const fs::filesystem_error& e) {
-            // rename 失败时回退到拷贝+删除
+            // rename 失败（通常是跨分区），回退到拷贝+删除
             try {
                 fs::path src(src_str);
                 fs::path target = dest / src.filename();
-                fs::copy(src, target, fs::copy_options::overwrite_existing);
+
+                // 确保不覆盖已有文件，防止数据丢失
+                if (handle_collisions) {
+                    int counter = 1;
+                    auto stem = target.stem().string();
+                    auto ext = target.extension().string();
+                    while (fs::exists(target)) {
+                        target = dest / (stem + " (" + std::to_string(counter++) + ")" + ext);
+                    }
+                }
+
+                fs::copy(src, target, fs::copy_options::none);  // none = 不覆盖
                 fs::remove(src);
                 r.target = target.string();
                 r.success = true;
@@ -799,8 +816,13 @@ except ImportError:
 requires = ["setuptools", "pybind11>=2.12"]
 
 [tool.setuptools.ext-modules]
+# file_ops 仅需 C++17 标准库，无外部依赖
 iphoto_native_file_ops = {sources = ["src/iPhoto/native/file_ops.cpp"]}
-iphoto_native_metadata = {sources = ["src/iPhoto/native/metadata.cpp"]}
+# metadata 模块需要链接 libexiv2
+iphoto_native_metadata = {
+    sources = ["src/iPhoto/native/metadata.cpp"],
+    libraries = ["exiv2"],
+}
 ```
 
 ### 9.5 预期收益

@@ -280,8 +280,6 @@ class MoveWorker(QRunnable):
         reused_rows: List[Dict[str, object]] = []
         uncached_images: List[Path] = []
         uncached_videos: List[Path] = []
-        # Map from target path string → original path, for trash annotation later
-        uncached_target_to_original: Dict[str, Path] = {}
 
         for original, target in moved:
             cached = (
@@ -310,7 +308,6 @@ class MoveWorker(QRunnable):
                     uncached_videos.append(target)
                 else:
                     uncached_images.append(target)
-                uncached_target_to_original[str(target)] = original
 
         # Only invoke ExifTool for files that had no cached metadata.
         freshly_scanned: List[Dict[str, object]] = []

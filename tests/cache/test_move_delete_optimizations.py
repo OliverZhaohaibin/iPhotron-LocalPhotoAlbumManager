@@ -152,3 +152,71 @@ class TestMoveOperationResult:
         assert result.is_restore is False
         assert result.source_ok is True
         assert result.destination_ok is True
+
+
+# ------------------------------------------------------------------
+# Plan 3 §7.2.2: incremental_cache_update()
+# ------------------------------------------------------------------
+class TestIncrementalCacheUpdate:
+    """Verify AssetCacheManager.incremental_cache_update()."""
+
+    @pytest.fixture(autouse=True)
+    def _require_qt(self):
+        """Skip when a display-capable Qt environment is unavailable."""
+        pytest.importorskip("PySide6.QtWidgets")
+        import os
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        from PySide6.QtWidgets import QApplication
+        if QApplication.instance() is None:
+            QApplication([])
+
+    @pytest.fixture()
+    def cache_manager(self):
+        from PySide6.QtCore import QSize
+        from PySide6.QtGui import QPixmap
+        from iPhoto.gui.ui.models.asset_cache_manager import AssetCacheManager
+
+        mgr = AssetCacheManager(QSize(120, 120))
+        # Populate all three caches with test data
+        for rel in ("a.jpg", "b.jpg", "c.jpg"):
+            mgr._thumb_cache[rel] = QPixmap(1, 1)
+            mgr._composite_cache[rel] = QPixmap(1, 1)
+            mgr._placeholder_cache[rel] = QPixmap(1, 1)
+        return mgr
+
+    def test_removes_entries_in_removed_rels(self, cache_manager) -> None:
+        cache_manager.incremental_cache_update(removed_rels={"a.jpg", "b.jpg"}, added_rels=set())
+
+        assert "a.jpg" not in cache_manager._thumb_cache
+        assert "b.jpg" not in cache_manager._thumb_cache
+        assert "a.jpg" not in cache_manager._composite_cache
+        assert "b.jpg" not in cache_manager._composite_cache
+        assert "a.jpg" not in cache_manager._placeholder_cache
+        assert "b.jpg" not in cache_manager._placeholder_cache
+
+    def test_preserves_entries_not_in_removed_rels(self, cache_manager) -> None:
+        cache_manager.incremental_cache_update(removed_rels={"a.jpg"}, added_rels=set())
+
+        assert "b.jpg" in cache_manager._thumb_cache
+        assert "c.jpg" in cache_manager._thumb_cache
+        assert "b.jpg" in cache_manager._composite_cache
+        assert "c.jpg" in cache_manager._composite_cache
+        assert "b.jpg" in cache_manager._placeholder_cache
+        assert "c.jpg" in cache_manager._placeholder_cache
+
+    def test_empty_inputs(self, cache_manager) -> None:
+        cache_manager.incremental_cache_update(removed_rels=set(), added_rels=set())
+
+        # All entries should remain intact
+        assert len(cache_manager._thumb_cache) == 3
+        assert len(cache_manager._composite_cache) == 3
+        assert len(cache_manager._placeholder_cache) == 3
+
+    def test_all_three_caches_updated(self, cache_manager) -> None:
+        cache_manager.incremental_cache_update(removed_rels={"c.jpg"}, added_rels={"d.jpg"})
+
+        assert "c.jpg" not in cache_manager._thumb_cache
+        assert "c.jpg" not in cache_manager._composite_cache
+        assert "c.jpg" not in cache_manager._placeholder_cache
+        # added_rels are lazily loaded, so d.jpg should NOT be present yet
+        assert "d.jpg" not in cache_manager._thumb_cache

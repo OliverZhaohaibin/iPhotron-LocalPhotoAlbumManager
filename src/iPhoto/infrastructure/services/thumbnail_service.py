@@ -8,6 +8,7 @@ from typing import Callable, Protocol
 
 from iPhoto.infrastructure.services.thumbnail_cache import MemoryThumbnailCache
 from iPhoto.infrastructure.services.disk_thumbnail_cache import DiskThumbnailCache
+from iPhoto.infrastructure.services.cache_stats import CacheStatsCollector
 
 LOGGER = logging.getLogger(__name__)
 
@@ -27,12 +28,14 @@ class ThumbnailService:
         disk_cache: DiskThumbnailCache,
         generator: ThumbnailGenerator,
         executor: ThreadPoolExecutor | None = None,
+        stats: CacheStatsCollector | None = None,
     ):
         self._l1 = memory_cache
         self._l2 = disk_cache
         self._generator = generator
         self._owns_executor = executor is None
         self._executor = executor or ThreadPoolExecutor(max_workers=2)
+        self._stats = stats
 
     def shutdown(self) -> None:
         """Shut down the internal executor if it was created by this service.
@@ -58,14 +61,22 @@ class ThumbnailService:
         # L1: memory
         data = self._l1.get(key)
         if data is not None:
+            if self._stats:
+                self._stats.record_hit("L1")
             return data
 
         # L2: disk
         data = self._l2.get(key)
         if data is not None:
+            if self._stats:
+                self._stats.record_miss("L1")
+                self._stats.record_hit("L2")
             self._l1.put(key, data)  # backfill L1
             return data
 
+        if self._stats:
+            self._stats.record_miss("L1")
+            self._stats.record_miss("L2")
         return None  # caller should use request_thumbnail for async L3
 
     def request_thumbnail(

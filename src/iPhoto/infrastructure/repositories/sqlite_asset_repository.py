@@ -168,12 +168,30 @@ class SQLiteAssetRepository(IAssetRepository):
                 micro_thumbnail,
             ))
 
-        # Note: Writing to 'rel' as PK
+        # Use UPSERT to preserve columns not managed by this repository
+        # (e.g. live_role, live_partner_rel, gps, mime, make, model, etc.)
+        # that are written by the legacy scanner.
         with self._pool.connection() as conn:
             conn.executemany("""
-                INSERT OR REPLACE INTO assets
-                (rel, id, album_id, media_type, bytes, dt, w, h, dur, metadata, content_identifier, live_photo_group_id, is_favorite, parent_album_path, micro_thumbnail)
+                INSERT INTO assets
+                (rel, id, album_id, media_type, bytes, dt, w, h, dur, metadata,
+                 content_identifier, live_photo_group_id, is_favorite, parent_album_path, micro_thumbnail)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(rel) DO UPDATE SET
+                    id = excluded.id,
+                    album_id = excluded.album_id,
+                    media_type = excluded.media_type,
+                    bytes = excluded.bytes,
+                    dt = excluded.dt,
+                    w = excluded.w,
+                    h = excluded.h,
+                    dur = excluded.dur,
+                    metadata = excluded.metadata,
+                    content_identifier = excluded.content_identifier,
+                    live_photo_group_id = excluded.live_photo_group_id,
+                    is_favorite = excluded.is_favorite,
+                    parent_album_path = excluded.parent_album_path,
+                    micro_thumbnail = excluded.micro_thumbnail
             """, data)
 
     def _sanitize_metadata(self, metadata: Optional[dict]) -> dict:

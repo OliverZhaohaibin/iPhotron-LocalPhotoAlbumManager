@@ -155,6 +155,50 @@ def test_save_uses_posix_paths_preventing_duplicates(asset_repo):
     reloaded = asset_repo.get("asset-posix")
     assert reloaded.is_favorite is True
 
+
+def test_save_preserves_legacy_columns_on_update(asset_repo):
+    """Regression test: save_batch must preserve columns managed by the legacy
+    scanner (gps, mime, make, model, live_role, live_partner_rel, year, month,
+    etc.) when updating an existing row."""
+    # 1. Insert a fully populated row simulating legacy scanner
+    with asset_repo._pool.connection() as conn:
+        conn.execute(
+            """
+            INSERT INTO assets (
+                rel, id, album_id, media_type, bytes, is_favorite,
+                gps, mime, make, model, live_role, live_partner_rel, year, month, ts
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "folder/img.jpg", "legacy-asset", "album1", 0, 2048, 0,
+                '{"lat": 35.0, "lon": 139.0}', "image/jpeg", "Canon", "EOS R5",
+                0, "folder/img.mov", 2024, 6, 1704067200,
+            ),
+        )
+
+    # 2. Load the asset and re-save (e.g. via toggle_favorite)
+    loaded = asset_repo.get("legacy-asset")
+    assert loaded is not None
+    loaded.is_favorite = True
+    asset_repo.save(loaded)
+
+    # 3. Verify legacy columns are preserved
+    with asset_repo._pool.connection() as conn:
+        row = conn.execute(
+            "SELECT * FROM assets WHERE rel = ?", ("folder/img.jpg",)
+        ).fetchone()
+
+    assert row["is_favorite"] == 1
+    assert row["gps"] == '{"lat": 35.0, "lon": 139.0}'
+    assert row["mime"] == "image/jpeg"
+    assert row["make"] == "Canon"
+    assert row["model"] == "EOS R5"
+    assert row["live_role"] == 0
+    assert row["live_partner_rel"] == "folder/img.mov"
+    assert row["year"] == 2024
+    assert row["month"] == 6
+    assert row["ts"] == 1704067200
+
 # --- Use Case Tests ---
 
 def test_open_album_use_case(album_repo, asset_repo, event_bus, tmp_path):

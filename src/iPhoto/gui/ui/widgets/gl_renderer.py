@@ -5,24 +5,26 @@ This module isolates all raw OpenGL calls so the widget itself can focus on
 state orchestration and Qt event handling.  The renderer loads the GLSL shader
 pair, owns the GPU resources (VAO, shader program, texture) and exposes a small
 API tailored to the viewer.
+
+Implementation is split across helper modules:
+
+* :mod:`gl_shader_manager` – shader compilation and program lifecycle
+* :mod:`gl_texture_manager` – GPU texture upload / deletion
+* :mod:`gl_uniform_state` – uniform setter convenience wrappers
+* :mod:`gl_offscreen` – off-screen FBO rendering
 """
 
 from __future__ import annotations
 
 import logging
 import math
-import time
-from pathlib import Path
 from typing import Mapping, Optional
 
 import numpy as np
 from PySide6.QtCore import QObject, QPointF, QSize
 from PySide6.QtGui import QImage
 from PySide6.QtOpenGL import (
-    QOpenGLFramebufferObject,
-    QOpenGLFramebufferObjectFormat,
     QOpenGLFunctions_3_3_Core,
-    QOpenGLShader,
     QOpenGLShaderProgram,
     QOpenGLVertexArrayObject,
 )
@@ -32,37 +34,17 @@ from shiboken6.Shiboken import VoidPtr
 from ....core.selective_color_resolver import NUM_RANGES, SAT_GATE_LO, SAT_GATE_HI
 
 from .perspective_math import build_perspective_matrix
+from .gl_shader_manager import (
+    ShaderManager,
+    _load_shader_source,
+    _OVERLAY_VERTEX_SHADER,
+    _OVERLAY_FRAGMENT_SHADER,
+)
+from .gl_texture_manager import TextureManager
+from .gl_uniform_state import UniformState
+from .gl_offscreen import render_offscreen_image as _render_offscreen_image
 
 _LOGGER = logging.getLogger(__name__)
-
-
-_OVERLAY_VERTEX_SHADER = """
-#version 330 core
-layout(location = 0) in vec2 aPos;
-void main() {
-    gl_Position = vec4(aPos, 0.0, 1.0);
-}
-"""
-
-
-_OVERLAY_FRAGMENT_SHADER = """
-#version 330 core
-out vec4 FragColor;
-uniform vec4 uColor;
-void main() {
-    FragColor = uColor;
-}
-"""
-
-
-def _load_shader_source(filename: str) -> str:
-    """Return the GLSL source stored alongside this module."""
-
-    shader_path = Path(__file__).resolve().with_name(filename)
-    try:
-        return shader_path.read_text(encoding="utf-8")
-    except OSError as exc:
-        raise RuntimeError(f"Failed to load shader '{filename}': {exc}") from exc
 
 
 class GLRenderer:
@@ -76,17 +58,74 @@ class GLRenderer:
     ) -> None:
         self._gl_funcs = gl_funcs
         self._parent = parent
-        self._program: Optional[QOpenGLShaderProgram] = None
-        self._dummy_vao: Optional[QOpenGLVertexArrayObject] = None
-        self._uniform_locations: dict[str, int] = {}
-        self._texture_id: int = 0
-        self._texture_width: int = 0
-        self._texture_height: int = 0
-        self._curve_lut_texture_id: int = 0
-        self._levels_lut_texture_id: int = 0
-        self._overlay_program: Optional[QOpenGLShaderProgram] = None
-        self._overlay_vao: Optional[QOpenGLVertexArrayObject] = None
-        self._overlay_vbo: int = 0
+
+        self._shader_mgr = ShaderManager(gl_funcs, parent=parent)
+        self._tex_mgr = TextureManager()
+        # UniformState shares the same dict instance populated by ShaderManager
+        self._uniform = UniformState(gl_funcs, self._shader_mgr.uniform_locations)
+
+    # ------------------------------------------------------------------
+    # Backward-compatible attribute access  (used by tests & internals)
+    # ------------------------------------------------------------------
+    @property
+    def _program(self):
+        return self._shader_mgr.program
+
+    @_program.setter
+    def _program(self, value):
+        self._shader_mgr.program = value
+
+    @property
+    def _dummy_vao(self):
+        return self._shader_mgr.dummy_vao
+
+    @property
+    def _uniform_locations(self):
+        return self._shader_mgr.uniform_locations
+
+    @property
+    def _overlay_program(self):
+        return self._shader_mgr.overlay_program
+
+    @property
+    def _overlay_vao(self):
+        return self._shader_mgr.overlay_vao
+
+    @property
+    def _overlay_vbo(self):
+        return self._shader_mgr.overlay_vbo
+
+    @property
+    def _texture_id(self):
+        return self._tex_mgr._texture_id
+
+    @_texture_id.setter
+    def _texture_id(self, value):
+        self._tex_mgr._texture_id = value
+
+    @property
+    def _texture_width(self):
+        return self._tex_mgr._texture_width
+
+    @_texture_width.setter
+    def _texture_width(self, value):
+        self._tex_mgr._texture_width = value
+
+    @property
+    def _texture_height(self):
+        return self._tex_mgr._texture_height
+
+    @_texture_height.setter
+    def _texture_height(self, value):
+        self._tex_mgr._texture_height = value
+
+    @property
+    def _curve_lut_texture_id(self):
+        return self._tex_mgr._curve_lut_texture_id
+
+    @property
+    def _levels_lut_texture_id(self):
+        return self._tex_mgr._levels_lut_texture_id
 
     # ------------------------------------------------------------------
     # Resource management
@@ -95,311 +134,67 @@ class GLRenderer:
         """Compile the shader program and set up immutable GL state."""
 
         self.destroy_resources()
-
-        program = QOpenGLShaderProgram(self._parent)
-        vert_source = _load_shader_source("gl_image_viewer.vert")
-        frag_source = _load_shader_source("gl_image_viewer.frag")
-        if not program.addShaderFromSourceCode(QOpenGLShader.Vertex, vert_source):
-            message = program.log()
-            _LOGGER.error("Vertex shader compilation failed: %s", message)
-            raise RuntimeError("Unable to compile vertex shader")
-        if not program.addShaderFromSourceCode(QOpenGLShader.Fragment, frag_source):
-            message = program.log()
-            _LOGGER.error("Fragment shader compilation failed: %s", message)
-            raise RuntimeError("Unable to compile fragment shader")
-        if not program.link():
-            message = program.log()
-            _LOGGER.error("Shader program link failed: %s", message)
-            raise RuntimeError("Unable to link shader program")
-
-        self._program = program
-
-        vao = QOpenGLVertexArrayObject(self._parent)
-        vao.create()
-        self._dummy_vao = vao if vao.isCreated() else None
-
-        gf = self._gl_funcs
-        gf.glDisable(gl.GL_DEPTH_TEST)
-        gf.glDisable(gl.GL_CULL_FACE)
-        gf.glDisable(gl.GL_BLEND)
-
-        program.bind()
-        try:
-            for name in (
-                "uTex",
-                "uBrilliance",
-                "uExposure",
-                "uHighlights",
-                "uShadows",
-                "uBrightness",
-                "uContrast",
-                "uBlackPoint",
-                "uSaturation",
-                "uVibrance",
-                "uColorCast",
-                "uGain",
-                "uBWParams",
-                "uBWEnabled",
-                "uCurveLUT",
-                "uCurveEnabled",
-                "uLevelsLUT",
-                "uLevelsEnabled",
-                "uWBWarmth",
-                "uWBTemperature",
-                "uWBTint",
-                "uWBEnabled",
-                "uTime",
-                "uViewSize",
-                "uTexSize",
-                "uScale",
-                "uPan",
-                "uImgScale",
-                "uImgOffset",
-                "uCropCX",
-                "uCropCY",
-                "uCropW",
-                "uCropH",
-                "uPerspectiveMatrix",
-                "uRotate90",
-                "uSCRange0",
-                "uSCRange1",
-                "uSCEnabled",
-            ):
-                self._uniform_locations[name] = program.uniformLocation(name)
-        finally:
-            program.release()
-
-        overlay_prog = QOpenGLShaderProgram(self._parent)
-        if not overlay_prog.addShaderFromSourceCode(QOpenGLShader.Vertex, _OVERLAY_VERTEX_SHADER):
-            raise RuntimeError("Unable to compile overlay vertex shader")
-        if not overlay_prog.addShaderFromSourceCode(QOpenGLShader.Fragment, _OVERLAY_FRAGMENT_SHADER):
-            raise RuntimeError("Unable to compile overlay fragment shader")
-        if not overlay_prog.link():
-            raise RuntimeError("Unable to link overlay shader program")
-        self._overlay_program = overlay_prog
-
-        overlay_vao = QOpenGLVertexArrayObject(self._parent)
-        overlay_vao.create()
-        self._overlay_vao = overlay_vao if overlay_vao.isCreated() else None
-        buffer_id = gl.glGenBuffers(1)
-        if isinstance(buffer_id, (tuple, list)):
-            buffer_id = buffer_id[0]
-        self._overlay_vbo = int(buffer_id)
+        self._shader_mgr.initialize()
 
     def destroy_resources(self) -> None:
         """Release the shader program, VAO and resident texture."""
 
-        self.delete_texture()
-        self._delete_curve_lut_texture()
-        self._delete_levels_lut_texture()
-        if self._dummy_vao is not None:
-            self._dummy_vao.destroy()
-            self._dummy_vao = None
-        if self._program is not None:
-            self._program.removeAllShaders()
-            self._program = None
-        self._uniform_locations.clear()
-        if self._overlay_vao is not None:
-            self._overlay_vao.destroy()
-            self._overlay_vao = None
-        if self._overlay_program is not None:
-            self._overlay_program.removeAllShaders()
-            self._overlay_program = None
-        if self._overlay_vbo:
-            gl.glDeleteBuffers(1, np.array([int(self._overlay_vbo)], dtype=np.uint32))
-            self._overlay_vbo = 0
+        self._tex_mgr.destroy()
+        self._shader_mgr.destroy()
 
     # ------------------------------------------------------------------
-    # Texture management
+    # Texture management  (delegates to TextureManager)
     # ------------------------------------------------------------------
     def upload_texture(self, image: QImage) -> tuple[int, int, int]:
         """Upload *image* to the GPU and return ``(id, width, height)``."""
-
-        if image.isNull():
-            raise ValueError("Cannot upload a null QImage")
-
-        # Convert to a tightly packed RGBA8888 surface, which matches the shader
-        # expectations and keeps the upload logic uniform for all callers.
-        qimage = image.convertToFormat(QImage.Format.Format_RGBA8888)
-        width, height = qimage.width(), qimage.height()
-        buffer = qimage.constBits()
-        byte_count = qimage.sizeInBytes()
-        if hasattr(buffer, "setsize"):
-            buffer.setsize(byte_count)
-        else:
-            buffer = buffer[:byte_count]
-
-        if self._texture_id:
-            gl.glDeleteTextures([int(self._texture_id)])
-            self._texture_id = 0
-
-        tex_id = gl.glGenTextures(1)
-        if isinstance(tex_id, (tuple, list)):
-            tex_id = tex_id[0]
-        self._texture_id = int(tex_id)
-        self._texture_width = int(width)
-        self._texture_height = int(height)
-
-        gl.glBindTexture(gl.GL_TEXTURE_2D, self._texture_id)
-        gl.glTexImage2D(
-            gl.GL_TEXTURE_2D,
-            0,
-            gl.GL_RGBA8,
-            width,
-            height,
-            0,
-            gl.GL_RGBA,
-            gl.GL_UNSIGNED_BYTE,
-            None,
-        )
-        gl.glPixelStorei(gl.GL_UNPACK_ALIGNMENT, 1)
-        row_length = qimage.bytesPerLine() // 4
-        gl.glPixelStorei(gl.GL_UNPACK_ROW_LENGTH, row_length)
-        gl.glTexSubImage2D(
-            gl.GL_TEXTURE_2D,
-            0,
-            0,
-            0,
-            width,
-            height,
-            gl.GL_RGBA,
-            gl.GL_UNSIGNED_BYTE,
-            buffer,
-        )
-        gl.glPixelStorei(gl.GL_UNPACK_ROW_LENGTH, 0)
-        gl.glPixelStorei(gl.GL_UNPACK_ALIGNMENT, 4)
-        gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MIN_FILTER, gl.GL_LINEAR)
-        gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MAG_FILTER, gl.GL_LINEAR)
-        gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_WRAP_S, gl.GL_CLAMP_TO_EDGE)
-        gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_WRAP_T, gl.GL_CLAMP_TO_EDGE)
-
-        error = gl.glGetError()
-        if error != gl.GL_NO_ERROR:
-            _LOGGER.warning("OpenGL error after texture upload: 0x%04X", int(error))
-
-        return self._texture_id, self._texture_width, self._texture_height
+        return self._tex_mgr.upload_texture(image)
 
     def delete_texture(self) -> None:
         """Delete the currently bound texture, if any."""
-
-        if not self._texture_id:
-            return
-        gl.glDeleteTextures(1, np.array([int(self._texture_id)], dtype=np.uint32))
-        self._texture_id = 0
-        self._texture_width = 0
-        self._texture_height = 0
+        self._tex_mgr.delete_texture()
 
     def _delete_curve_lut_texture(self) -> None:
-        """Delete the curve LUT texture, if any."""
-
-        if not self._curve_lut_texture_id:
-            return
-        gl.glDeleteTextures(1, np.array([int(self._curve_lut_texture_id)], dtype=np.uint32))
-        self._curve_lut_texture_id = 0
+        self._tex_mgr._delete_curve_lut_texture()
 
     def upload_curve_lut(self, lut_data: np.ndarray) -> None:
-        """Upload a 256x3 float32 LUT to the GPU as a 256x1 RGB texture.
-
-        Args:
-            lut_data: numpy array of shape (256, 3) with float32 values in [0, 1]
-        """
-        if lut_data is None or lut_data.shape != (256, 3):
-            return
-
-        # Ensure data is contiguous and float32
-        lut_data = np.ascontiguousarray(lut_data, dtype=np.float32)
-
-        # Delete existing texture if any
-        if self._curve_lut_texture_id:
-            gl.glDeleteTextures(1, np.array([int(self._curve_lut_texture_id)], dtype=np.uint32))
-            self._curve_lut_texture_id = 0
-
-        # Create new texture
-        tex_id = gl.glGenTextures(1)
-        if isinstance(tex_id, (tuple, list)):
-            tex_id = tex_id[0]
-        self._curve_lut_texture_id = int(tex_id)
-
-        gl.glBindTexture(gl.GL_TEXTURE_2D, self._curve_lut_texture_id)
-        gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MIN_FILTER, gl.GL_LINEAR)
-        gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MAG_FILTER, gl.GL_LINEAR)
-        gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_WRAP_S, gl.GL_CLAMP_TO_EDGE)
-        gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_WRAP_T, gl.GL_CLAMP_TO_EDGE)
-
-        # Upload as 256x1 RGB float texture
-        gl.glTexImage2D(
-            gl.GL_TEXTURE_2D,
-            0,
-            gl.GL_RGB32F,
-            256,
-            1,
-            0,
-            gl.GL_RGB,
-            gl.GL_FLOAT,
-            lut_data,
-        )
-        gl.glBindTexture(gl.GL_TEXTURE_2D, 0)
-
-        error = gl.glGetError()
-        if error != gl.GL_NO_ERROR:
-            _LOGGER.warning("OpenGL error after curve LUT upload: 0x%04X", int(error))
-            # Clean up the partially created texture and reset the ID to avoid using
-            # an invalid or incomplete texture later.
-            self._delete_curve_lut_texture()
-            return
+        """Upload a 256×3 float32 curve LUT to the GPU."""
+        self._tex_mgr.upload_curve_lut(lut_data)
 
     def _delete_levels_lut_texture(self) -> None:
-        """Delete the levels LUT texture, if any."""
-
-        if not self._levels_lut_texture_id:
-            return
-        gl.glDeleteTextures(1, np.array([int(self._levels_lut_texture_id)], dtype=np.uint32))
-        self._levels_lut_texture_id = 0
+        self._tex_mgr._delete_levels_lut_texture()
 
     def upload_levels_lut(self, lut_data: np.ndarray) -> None:
-        """Upload a 256x3 float32 levels LUT to the GPU as a 256x1 RGB texture.
+        """Upload a 256×3 float32 levels LUT to the GPU."""
+        self._tex_mgr.upload_levels_lut(lut_data)
 
-        Args:
-            lut_data: numpy array of shape (256, 3) with float32 values in [0, 1]
-        """
-        if lut_data is None or lut_data.shape != (256, 3):
-            return
+    def has_texture(self) -> bool:
+        """Return ``True`` if a GPU texture is currently resident."""
+        return self._tex_mgr.has_texture()
 
-        lut_data = np.ascontiguousarray(lut_data, dtype=np.float32)
+    def texture_size(self) -> tuple[int, int]:
+        """Return the uploaded texture dimensions as ``(width, height)``."""
+        return self._tex_mgr.texture_size()
 
-        if self._levels_lut_texture_id:
-            gl.glDeleteTextures(1, np.array([int(self._levels_lut_texture_id)], dtype=np.uint32))
-            self._levels_lut_texture_id = 0
+    # ------------------------------------------------------------------
+    # Uniform helpers  (delegates to UniformState)
+    # ------------------------------------------------------------------
+    def _set_uniform1i(self, name: str, value: int) -> None:
+        self._uniform._set_uniform1i(name, value)
 
-        tex_id = gl.glGenTextures(1)
-        if isinstance(tex_id, (tuple, list)):
-            tex_id = tex_id[0]
-        self._levels_lut_texture_id = int(tex_id)
+    def _set_uniform1f(self, name: str, value: float) -> None:
+        self._uniform._set_uniform1f(name, value)
 
-        gl.glBindTexture(gl.GL_TEXTURE_2D, self._levels_lut_texture_id)
-        gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MIN_FILTER, gl.GL_LINEAR)
-        gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MAG_FILTER, gl.GL_LINEAR)
-        gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_WRAP_S, gl.GL_CLAMP_TO_EDGE)
-        gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_WRAP_T, gl.GL_CLAMP_TO_EDGE)
+    def _set_uniform2f(self, name: str, x: float, y: float) -> None:
+        self._uniform._set_uniform2f(name, x, y)
 
-        gl.glTexImage2D(
-            gl.GL_TEXTURE_2D,
-            0,
-            gl.GL_RGB32F,
-            256,
-            1,
-            0,
-            gl.GL_RGB,
-            gl.GL_FLOAT,
-            lut_data,
-        )
-        gl.glBindTexture(gl.GL_TEXTURE_2D, 0)
+    def _set_uniform3f(self, name: str, x: float, y: float, z: float) -> None:
+        self._uniform._set_uniform3f(name, x, y, z)
 
-        error = gl.glGetError()
-        if error != gl.GL_NO_ERROR:
-            _LOGGER.warning("OpenGL error after levels LUT upload: 0x%04X", int(error))
-            self._delete_levels_lut_texture()
-            return
+    def _set_uniform4f(self, name: str, x: float, y: float, z: float, w: float) -> None:
+        self._uniform._set_uniform4f(name, x, y, z, w)
+
+    def _set_uniform_matrix3(self, name: str, matrix: np.ndarray) -> None:
+        self._uniform._set_uniform_matrix3(name, matrix)
 
     # ------------------------------------------------------------------
     # Rendering
@@ -468,9 +263,6 @@ class GLRenderer:
                 adjustment_value("BWGrain"),
             )
             bw_enabled_value = adjustments.get("BW_Enabled", adjustments.get("BWEnabled", 0.0))
-            # GLSL represents boolean uniforms as integers, therefore ``glUniform1i``
-            # is used to communicate the toggle state without introducing another
-            # helper that mirrors the existing ``_set_uniform1i`` wrapper.
             self._set_uniform1i("uBWEnabled", 1 if bool(bw_enabled_value) else 0)
 
             # White Balance uniforms
@@ -490,8 +282,6 @@ class GLRenderer:
                 gf.glBindTexture(gl.GL_TEXTURE_2D, int(self._curve_lut_texture_id))
                 self._set_uniform1i("uCurveLUT", 1)
             else:
-                # No curve LUT texture available: disable sampling by pointing to a safe unit.
-                # Since uCurveEnabled is 0 in this branch, the shader must ignore the LUT.
                 self._set_uniform1i("uCurveLUT", 0)
 
             # Levels LUT texture binding
@@ -517,7 +307,6 @@ class GLRenderer:
                     if isinstance(rng, (list, tuple)) and len(rng) >= 5:
                         center = float(rng[0])
                         range_slider = float(np.clip(rng[1], 0.0, 1.0))
-                        # Convert range slider to hue half-width
                         deg = 5.0 + (70.0 - 5.0) * range_slider
                         width_hue = float(np.clip(deg / 360.0, 0.001, 0.5))
                         u0[idx] = [center, width_hue, float(rng[2]), float(rng[3])]
@@ -536,11 +325,8 @@ class GLRenderer:
             safe_img_scale = max(img_scale, 1e-6)
             self._set_uniform1f("uScale", safe_scale)
             self._set_uniform2f("uViewSize", max(view_width, 1.0), max(view_height, 1.0))
-            
+
             # CRITICAL: uTexSize must match ViewTransformController's coordinate space.
-            # ViewTransformController calculates scale using logical (rotation-aware) dimensions,
-            # so uTexSize must also use logical dimensions for correct viewport→texture mapping.
-            # The shader's apply_rotation_90() then rotates UVs to sample from physical texture.
             logical_w: float
             logical_h: float
             if logical_tex_size is None:
@@ -553,11 +339,11 @@ class GLRenderer:
                     logical_h = float(self._texture_height)
             else:
                 logical_w, logical_h = logical_tex_size
-            
+
             safe_logical_w = float(max(1.0, logical_w))
             safe_logical_h = float(max(1.0, logical_h))
             self._set_uniform2f("uTexSize", safe_logical_w, safe_logical_h)
-            
+
             self._set_uniform2f("uPan", float(pan.x()), float(pan.y()))
             self._set_uniform1f("uImgScale", safe_img_scale)
             self._set_uniform2f(
@@ -574,17 +360,9 @@ class GLRenderer:
             straighten_value = adjustment_value("Crop_Straighten", 0.0)
             rotate_steps = int(float(adjustments.get("Crop_Rotate90", 0.0)))
             flip_enabled = bool(adjustments.get("Crop_FlipH", False))
-            
-            # Pass rotation to shader as uniform
+
             self._set_uniform1i("uRotate90", rotate_steps % 4)
-            
-            # Get physical dimensions for perspective matrix aspect ratio
-            # Perspective matrix must operate in the logical orientation so that the
-            # "vertical" and "horizontal" sliders always align with on-screen axes even
-            # after the user rotates the image by 90° steps.  Using the logical aspect
-            # ratio (width/height after the quarter-turn swap) keeps the warp and
-            # straighten rotation in a matching aspect space and avoids the shear-like
-            # artefacts seen when mixing rotation and perspective.
+
             logical_aspect_ratio = logical_w / logical_h
             if not math.isfinite(logical_aspect_ratio) or logical_aspect_ratio <= 1e-6:
                 logical_aspect_ratio = 1.0
@@ -594,10 +372,6 @@ class GLRenderer:
                 adjustment_value("Perspective_Horizontal", 0.0),
                 image_aspect_ratio=logical_aspect_ratio,
                 straighten_degrees=straighten_value,
-                # Rotation is handled in the shader via uRotate90; keeping rotate_steps
-                # at zero ensures straighten is applied as a rigid rotation around the
-                # logical view centre instead of compounding rotations in physical
-                # texture space.
                 rotate_steps=0,
                 flip_horizontal=flip_enabled,
             )
@@ -681,8 +455,6 @@ class GLRenderer:
 
         gf.glEnable(gl.GL_BLEND)
         gf.glBlendFunc(gl.GL_SRC_ALPHA, gl.GL_ONE_MINUS_SRC_ALPHA)
-        # Disable alpha write to prevent the overlay from reducing the framebuffer's alpha,
-        # which can cause the window to become transparent in some compositing managers.
         gf.glColorMask(True, True, True, False)
 
         if not program.bind():
@@ -693,29 +465,20 @@ class GLRenderer:
         try:
             vao.bind()
 
-            # 1) Mask everything outside the crop rectangle using four quads that
-            # stitch together seamlessly.  This approach mirrors the reference
-            # demo and avoids precision issues around the crop borders.
             quads = [
-                (0.0, 0.0, vw, top),  # top band
-                (0.0, bottom, vw, vh),  # bottom band
-                (0.0, top, left, bottom),  # left band
-                (right, top, vw, bottom),  # right band
+                (0.0, 0.0, vw, top),
+                (0.0, bottom, vw, vh),
+                (0.0, top, left, bottom),
+                (right, top, vw, bottom),
             ]
             for quad in quads:
                 vertices = _viewport_rect_to_clip(quad)
                 _draw(vertices, gl.GL_TRIANGLE_FAN, overlay_colour)
 
             if not faded:
-                # 2) Highlight the crop perimeter.
                 border_vertices = _viewport_rect_to_clip((left, top, right, bottom))
-                # ``GL_LINE_LOOP`` implicitly closes the strip, preventing gaps
-                # when the widget is resized rapidly.
                 _draw(border_vertices, gl.GL_LINE_LOOP, border_colour)
 
-                # 3) Render corner and edge handles so the user can clearly see
-                # where drags will latch.  Corners use small squares while edge
-                # handles use elongated rectangles centred on each edge.
                 handle_size = 7.0
                 corner_positions = [
                     (left, top),
@@ -768,79 +531,8 @@ class GLRenderer:
             gf.glDisable(gl.GL_BLEND)
 
     # ------------------------------------------------------------------
-    # State helpers
+    # Off-screen rendering  (delegates to gl_offscreen module)
     # ------------------------------------------------------------------
-    def has_texture(self) -> bool:
-        """Return ``True`` if a GPU texture is currently resident."""
-
-        return self._texture_id != 0
-
-    def texture_size(self) -> tuple[int, int]:
-        """Return the uploaded texture dimensions as ``(width, height)``."""
-
-        return self._texture_width, self._texture_height
-
-    # ------------------------------------------------------------------
-    # Uniform helpers
-    # ------------------------------------------------------------------
-    def _set_uniform1i(self, name: str, value: int) -> None:
-        location = self._uniform_locations.get(name, -1)
-        if location != -1:
-            self._gl_funcs.glUniform1i(location, int(value))
-
-    def _set_uniform1f(self, name: str, value: float) -> None:
-        location = self._uniform_locations.get(name, -1)
-        if location != -1:
-            self._gl_funcs.glUniform1f(location, float(value))
-
-    def _set_uniform2f(self, name: str, x: float, y: float) -> None:
-        location = self._uniform_locations.get(name, -1)
-        if location != -1:
-            self._gl_funcs.glUniform2f(location, float(x), float(y))
-
-    def _set_uniform3f(self, name: str, x: float, y: float, z: float) -> None:
-        location = self._uniform_locations.get(name, -1)
-        if location != -1:
-            self._gl_funcs.glUniform3f(location, float(x), float(y), float(z))
-
-    def _set_uniform4f(self, name: str, x: float, y: float, z: float, w: float) -> None:
-        location = self._uniform_locations.get(name, -1)
-        if location != -1:
-            self._gl_funcs.glUniform4f(location, float(x), float(y), float(z), float(w))
-
-    def _set_uniform_matrix3(self, name: str, matrix: np.ndarray) -> None:
-        """
-        Set a 3x3 uniform matrix in the currently bound shader program.
-
-        Parameters
-        ----------
-        name : str
-            The name of the uniform variable in the shader.
-        matrix : np.ndarray
-            A 3x3 matrix to upload to the GPU (can be numpy array, will be converted to Python list).
-
-        Notes
-        -----
-        PySide6's glUniformMatrix3fv expects a Python sequence of floats, not a numpy array.
-        The matrix is flattened in row-major order and converted to a Python list.
-        The 'transpose' parameter is set to False (0) as OpenGL expects column-major order by default.
-        """
-        location = self._uniform_locations.get(name, -1)
-        if location == -1:
-            # Uniform not found in the shader program
-            return
-
-        # Ensure the matrix is float32, flatten it, and convert to Python list
-        matrix_list = np.asarray(matrix, dtype=np.float32).ravel().tolist()
-
-        # Upload the matrix to the GPU
-        self._gl_funcs.glUniformMatrix3fv(
-            location,
-            1,  # count = 1 matrix
-            1,  # transpose = True (OpenGL expects column-major, numpy is row-major)
-            matrix_list  # Python list of floats
-        )
-
     def render_offscreen_image(
         self,
         image: QImage,
@@ -867,74 +559,4 @@ class GLRenderer:
         QImage
             CPU-side image containing the rendered frame, converted to Format_ARGB32.
         """
-        if target_size.isEmpty():
-            _LOGGER.warning("render_offscreen_image: target size was empty")
-            return QImage()
-
-        if self._gl_funcs is None:
-            _LOGGER.error("render_offscreen_image: renderer not initialized")
-            return QImage()
-
-        # Ensure texture is uploaded
-        if not self.has_texture():
-            self.upload_texture(image)
-        if not self.has_texture():
-            _LOGGER.error("render_offscreen_image: texture upload failed")
-            return QImage()
-
-        gf = self._gl_funcs
-        width = max(1, int(target_size.width()))
-        height = max(1, int(target_size.height()))
-
-        previous_fbo = gl.glGetIntegerv(gl.GL_FRAMEBUFFER_BINDING)
-        previous_viewport = gl.glGetIntegerv(gl.GL_VIEWPORT)
-
-        fbo_format = QOpenGLFramebufferObjectFormat()
-        fbo_format.setAttachment(QOpenGLFramebufferObject.CombinedDepthStencil)
-        fbo_format.setTextureTarget(gl.GL_TEXTURE_2D)
-        fbo = QOpenGLFramebufferObject(width, height, fbo_format)
-        if not fbo.isValid():
-            _LOGGER.error("render_offscreen_image: failed to allocate framebuffer object")
-            return QImage()
-
-        try:
-            fbo.bind()
-            gf.glViewport(0, 0, width, height)
-            gf.glClearColor(0.0, 0.0, 0.0, 0.0)
-            gf.glClear(gl.GL_COLOR_BUFFER_BIT)
-
-            # Import here to avoid circular dependency
-            from .view_transform_controller import compute_fit_to_view_scale
-
-            texture_size = self.texture_size()
-            tex_w, tex_h = texture_size
-            rotate_steps = int(float(adjustments.get("Crop_Rotate90", 0.0)))
-            if rotate_steps % 2 and tex_w > 0 and tex_h > 0:
-                logical_tex_size = (tex_h, tex_w)
-            else:
-                logical_tex_size = texture_size
-
-            base_scale = compute_fit_to_view_scale(logical_tex_size, float(width), float(height))
-            effective_scale = max(base_scale, 1e-6)
-            time_value = time.monotonic() - time_base
-
-            self.render(
-                view_width=float(width),
-                view_height=float(height),
-                scale=effective_scale,
-                pan=QPointF(0.0, 0.0),
-                adjustments=dict(adjustments),
-                time_value=time_value,
-                logical_tex_size=(float(logical_tex_size[0]), float(logical_tex_size[1])),
-            )
-
-            return fbo.toImage().convertToFormat(QImage.Format.Format_ARGB32)
-        finally:
-            fbo.release()
-            gl.glBindFramebuffer(gl.GL_FRAMEBUFFER, previous_fbo)
-            try:
-                x, y, w, h = [int(v) for v in previous_viewport]
-                gf.glViewport(x, y, w, h)
-            except Exception:
-                pass
-
+        return _render_offscreen_image(self, image, adjustments, target_size, time_base)

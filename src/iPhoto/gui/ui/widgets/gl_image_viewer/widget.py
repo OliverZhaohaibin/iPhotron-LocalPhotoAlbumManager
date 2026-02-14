@@ -11,7 +11,6 @@ import time
 from collections.abc import Mapping
 from typing import Any
 
-import numpy as np
 from OpenGL import GL as gl
 from PySide6.QtCore import QPointF, QSize, Qt, Signal, QRectF
 from PySide6.QtGui import (
@@ -27,16 +26,6 @@ from PySide6.QtOpenGL import (
 )
 from PySide6.QtOpenGLWidgets import QOpenGLWidget
 
-from .....core.curve_resolver import (
-    CurveParams,
-    CurveChannel,
-    CurvePoint,
-    generate_curve_lut,
-)
-from .....core.levels_resolver import (
-    DEFAULT_LEVELS_HANDLES,
-    build_levels_lut,
-)
 from ..gl_crop_controller import CropInteractionController
 from ..gl_renderer import GLRenderer
 from ..view_transform_controller import (
@@ -47,12 +36,14 @@ from ..view_transform_controller import (
 
 from . import crop_logic
 from . import geometry
+from .adjustment_applicator import AdjustmentApplicator
 from .components import LoadingOverlay
+from .fullscreen_handler import FullscreenHandler
 from .input_handler import InputEventHandler
 from .offscreen import OffscreenRenderer
 from .resources import TextureResourceManager
 from .utils import normalise_colour
-from .view_helpers import clamp_center_to_texture_bounds
+from .zoom_controller import ZoomController
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -94,9 +85,8 @@ class GLImageViewer(QOpenGLWidget):
         # 状态
         self._image: QImage | None = None
         self._adjustments: dict[str, Any] = {}
-        self._current_curve_lut: np.ndarray | None = None
         self._eyedropper_active = False
-        
+
         # Texture resource manager
         self._texture_manager = TextureResourceManager(
             renderer_provider=lambda: self._renderer,
@@ -105,18 +95,22 @@ class GLImageViewer(QOpenGLWidget):
             done_current=self.doneCurrent,
         )
 
-        # Track the viewer surface colour so immersive mode can temporarily
-        # switch to a pure black canvas.  ``viewer_surface_color`` returns a
-        # palette-derived colour string, which we normalise to ``QColor`` for
-        # reliable comparisons and GL clear colour conversion.
-        self._default_surface_color = normalise_colour(viewer_surface_color(self))
-        self._surface_override: QColor | None = None
-        self._backdrop_color: QColor = QColor(self._default_surface_color)
-        self._apply_surface_color()
+        # Adjustment LUT applicator
+        self._adjustment_applicator = AdjustmentApplicator(
+            renderer_provider=lambda: self._renderer,
+            make_current=self.makeCurrent,
+            done_current=self.doneCurrent,
+        )
 
-        # ``_time_base`` anchors the monotonic clock used by the shader grain generator.  Resetting
-        # the start time keeps the uniform values numerically small even after long application
-        # sessions.
+        # Surface colour / fullscreen handler
+        self._fullscreen_handler = FullscreenHandler(
+            default_color=normalise_colour(viewer_surface_color(self)),
+            set_stylesheet=self.setStyleSheet,
+            request_update=self.update,
+        )
+        self._fullscreen_handler._apply()
+
+        # ``_time_base`` anchors the monotonic clock used by the shader grain generator.
         self._time_base = time.monotonic()
 
         # Loading overlay component
@@ -131,10 +125,17 @@ class GLImageViewer(QOpenGLWidget):
         )
         self._transform_controller.reset_zoom()
 
+        # Coordinate-transform helper
+        self._zoom_ctrl = ZoomController(
+            transform_controller=self._transform_controller,
+            renderer_provider=lambda: self._renderer,
+            display_texture_dimensions=self._display_texture_dimensions,
+        )
+
         # Crop interaction controller
         self._crop_controller = CropInteractionController(
             texture_size_provider=self._display_texture_dimensions,
-            clamp_image_center_to_crop=self._create_clamp_function(),
+            clamp_image_center_to_crop=self._zoom_ctrl.create_clamp_function(),
             transform_controller=self._transform_controller,
             on_crop_changed=self._handle_crop_interaction_changed,
             on_cursor_change=self._handle_cursor_change,
@@ -145,7 +146,7 @@ class GLImageViewer(QOpenGLWidget):
         )
         self._auto_crop_view_locked: bool = False
         self._update_crop_perspective_state()
-        
+
         # Input event handler
         self._input_handler = InputEventHandler(
             crop_controller=self._crop_controller,
@@ -208,8 +209,8 @@ class GLImageViewer(QOpenGLWidget):
         self._image = image
         self._adjustments = dict(adjustments or {})
         self._update_crop_perspective_state()
-        self._update_curve_lut_if_needed(self._adjustments)
-        self._update_levels_lut_if_needed(self._adjustments)
+        self._adjustment_applicator.update_curve_lut_if_needed(self._adjustments)
+        self._adjustment_applicator.update_levels_lut_if_needed(self._adjustments)
         self._loading_overlay.hide()
         self._time_base = time.monotonic()
 
@@ -269,10 +270,10 @@ class GLImageViewer(QOpenGLWidget):
         self._update_crop_perspective_state()
 
         # Handle curve LUT update if curve data changed
-        self._update_curve_lut_if_needed(mapped_adjustments)
+        self._adjustment_applicator.update_curve_lut_if_needed(mapped_adjustments)
 
         # Handle levels LUT update if levels data changed
-        self._update_levels_lut_if_needed(mapped_adjustments)
+        self._adjustment_applicator.update_levels_lut_if_needed(mapped_adjustments)
 
         if self._crop_controller.is_active():
             # Refresh the crop overlay in logical space so it stays aligned when rotation
@@ -282,107 +283,6 @@ class GLImageViewer(QOpenGLWidget):
         if self._auto_crop_view_locked and not self._crop_controller.is_active():
             self._reapply_locked_crop_view()
         self.update()
-
-    def _update_curve_lut_if_needed(self, adjustments: dict[str, Any]) -> None:
-        """Update the curve LUT texture if curve parameters have changed."""
-        curve_enabled = bool(adjustments.get("Curve_Enabled", False))
-
-        if not curve_enabled:
-            # Curves are disabled: upload an identity LUT so any existing GPU texture
-            # does not affect rendering even if the shader samples it.
-            if self._renderer is None:
-                return
-
-            self.makeCurrent()
-            try:
-                try:
-                    identity_params = CurveParams(enabled=False)
-                    identity_lut = generate_curve_lut(identity_params)
-                except Exception as e:
-                    _LOGGER.warning("Failed to generate identity curve LUT: %s", e)
-                    return
-
-                self._renderer.upload_curve_lut(identity_lut)
-                self._current_curve_lut = identity_lut
-            finally:
-                self.doneCurrent()
-            return
-
-        # Build CurveParams from adjustment data
-        params = CurveParams(enabled=curve_enabled)
-
-        for key, attr in [
-            ("Curve_RGB", "rgb"),
-            ("Curve_Red", "red"),
-            ("Curve_Green", "green"),
-            ("Curve_Blue", "blue"),
-        ]:
-            raw = adjustments.get(key)
-            if raw and isinstance(raw, list):
-                # Validate that each point is a 2-element numeric tuple/list before unpacking
-                points: list[CurvePoint] = []
-                for pt in raw:
-                    if (
-                        isinstance(pt, (list, tuple))
-                        and len(pt) >= 2
-                        and isinstance(pt[0], (int, float))
-                        and isinstance(pt[1], (int, float))
-                    ):
-                        points.append(CurvePoint(x=float(pt[0]), y=float(pt[1])))
-                if points:
-                    setattr(params, attr, CurveChannel(points=points))
-
-        # Generate LUT
-        try:
-            lut = generate_curve_lut(params)
-        except Exception as e:
-            _LOGGER.warning("Failed to generate curve LUT: %s", e)
-            return
-
-        # Upload to GPU
-        if self._renderer is not None:
-            self.makeCurrent()
-            try:
-                self._renderer.upload_curve_lut(lut)
-                self._current_curve_lut = lut
-            finally:
-                self.doneCurrent()
-
-    def _update_levels_lut_if_needed(self, adjustments: dict[str, Any]) -> None:
-        """Update the levels LUT texture if levels parameters have changed."""
-        levels_enabled = bool(adjustments.get("Levels_Enabled", False))
-
-        if not levels_enabled:
-            if self._renderer is None:
-                return
-            self.makeCurrent()
-            try:
-                try:
-                    identity_lut = build_levels_lut(list(DEFAULT_LEVELS_HANDLES))
-                except Exception as e:
-                    _LOGGER.warning("Failed to generate identity levels LUT: %s", e)
-                    return
-                self._renderer.upload_levels_lut(identity_lut)
-            finally:
-                self.doneCurrent()
-            return
-
-        handles = adjustments.get("Levels_Handles")
-        if not isinstance(handles, list) or len(handles) != 5:
-            return
-
-        try:
-            lut = build_levels_lut(handles)
-        except Exception as e:
-            _LOGGER.warning("Failed to generate levels LUT: %s", e)
-            return
-
-        if self._renderer is not None:
-            self.makeCurrent()
-            try:
-                self._renderer.upload_levels_lut(lut)
-            finally:
-                self.doneCurrent()
 
     def current_image_source(self) -> object | None:
         """Return the identifier describing the currently displayed image."""
@@ -427,17 +327,11 @@ class GLImageViewer(QOpenGLWidget):
 
     def set_surface_color_override(self, colour: str | None) -> None:
         """Override the viewer backdrop with *colour* or restore the default."""
-
-        if colour is None:
-            self._surface_override = None
-        else:
-            self._surface_override = normalise_colour(colour)
-        self._apply_surface_color()
+        self._fullscreen_handler.set_surface_color_override(colour)
 
     def set_immersive_background(self, immersive: bool) -> None:
         """Toggle the pure black immersive backdrop used in immersive mode."""
-
-        self.set_surface_color_override("#000000" if immersive else None)
+        self._fullscreen_handler.set_immersive_background(immersive)
 
     def rotate_image_ccw(self) -> dict[str, float]:
         """Rotate the photo 90° counter-clockwise without mutating crop geometry.
@@ -557,8 +451,8 @@ class GLImageViewer(QOpenGLWidget):
 
         self._renderer = GLRenderer(gf, parent=self)
         self._renderer.initialize_resources()
-        self._update_curve_lut_if_needed(self._adjustments)
-        self._update_levels_lut_if_needed(self._adjustments)
+        self._adjustment_applicator.update_curve_lut_if_needed(self._adjustments)
+        self._adjustment_applicator.update_levels_lut_if_needed(self._adjustments)
 
         dpr = self.devicePixelRatioF()
         gf.glViewport(0, 0, int(self.width() * dpr), int(self.height() * dpr))
@@ -572,7 +466,7 @@ class GLImageViewer(QOpenGLWidget):
         vw = max(1, int(round(self.width() * dpr)))
         vh = max(1, int(round(self.height() * dpr)))
         gf.glViewport(0, 0, vw, vh)
-        bg = self._backdrop_color
+        bg = self._fullscreen_handler.backdrop_color
         gf.glClearColor(bg.redF(), bg.greenF(), bg.blueF(), 1.0)
         gf.glClear(gl.GL_COLOR_BUFFER_BIT)
 
@@ -730,7 +624,7 @@ class GLImageViewer(QOpenGLWidget):
             return
             
         display_w, display_h = self._display_texture_dimensions()
-        view_width, view_height = self._view_dimensions_device_px()
+        view_width, view_height = self._zoom_ctrl.view_dimensions_device_px()
         
         base_scale = compute_fit_to_view_scale(
             (display_w, display_h), float(view_width), float(view_height)
@@ -750,56 +644,6 @@ class GLImageViewer(QOpenGLWidget):
 
 
 
-
-    # --------------------------- Coordinate transformations ---------------------------
-
-    def _view_dimensions_device_px(self) -> tuple[float, float]:
-        return self._transform_controller._get_view_dimensions_device_px()
-
-    def _screen_to_world(self, screen_pt: QPointF) -> QPointF:
-        """Map a Qt screen coordinate to the GL view's centre-origin space."""
-        return self._transform_controller.convert_screen_to_world(screen_pt)
-
-    def _world_to_screen(self, world_vec: QPointF) -> QPointF:
-        """Convert a GL centre-origin vector into a Qt screen coordinate."""
-        return self._transform_controller.convert_world_to_screen(world_vec)
-
-    def _effective_scale(self) -> float:
-        if not self._renderer or not self._renderer.has_texture():
-            return 1.0
-        return self._transform_controller.get_effective_scale()
-
-    def _image_center_pixels(self) -> QPointF:
-        if not self._renderer or not self._renderer.has_texture():
-            return QPointF(0.0, 0.0)
-        return self._transform_controller.get_image_center_pixels()
-
-    def _set_image_center_pixels(self, center: QPointF, *, scale: float | None = None) -> None:
-        if not self._renderer or not self._renderer.has_texture():
-            return
-        self._transform_controller.apply_image_center_pixels(center, scale)
-
-    def _image_to_viewport(self, x: float, y: float) -> QPointF:
-        if not self._renderer or not self._renderer.has_texture():
-            return QPointF()
-        return self._transform_controller.convert_image_to_viewport(x, y)
-
-    def _viewport_to_image(self, point: QPointF) -> QPointF:
-        if not self._renderer or not self._renderer.has_texture():
-            return QPointF()
-        return self._transform_controller.convert_viewport_to_image(point)
-
-    def _create_clamp_function(self):
-        """Create a clamp function with access to viewer state."""
-        def clamp_fn(center: QPointF, scale: float) -> QPointF:
-            return clamp_center_to_texture_bounds(
-                center=center,
-                scale=scale,
-                texture_dimensions=self._display_texture_dimensions(),
-                view_dimensions=self._view_dimensions_device_px(),
-                has_texture=bool(self._renderer and self._renderer.has_texture()),
-            )
-        return clamp_fn
 
     # --------------------------- Viewport helpers ---------------------------
 
@@ -822,7 +666,7 @@ class GLImageViewer(QOpenGLWidget):
         if logical_w <= 0 or logical_h <= 0:
             return False
 
-        image_point = self._viewport_to_image(position)
+        image_point = self._zoom_ctrl.viewport_to_image(position)
         if image_point.isNull():
             return False
 
@@ -981,17 +825,3 @@ class GLImageViewer(QOpenGLWidget):
             rotate_steps,
         )
         self.cropChanged.emit(tex_cx, tex_cy, tex_w, tex_h)
-
-    def _fit_to_view_scale(self, view_width: float, view_height: float) -> float:
-        """Return the baseline scale that fits the texture within the viewport."""
-
-        texture_size = self._display_texture_dimensions()
-        return compute_fit_to_view_scale(texture_size, view_width, view_height)
-
-    def _apply_surface_color(self) -> None:
-        """Synchronise the widget stylesheet and GL clear colour backdrop."""
-
-        target = self._surface_override or self._default_surface_color
-        self.setStyleSheet(f"background-color: {target.name()}; border: none;")
-        self._backdrop_color = QColor(target)
-        self.update()

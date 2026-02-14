@@ -32,13 +32,14 @@ deprecation of legacy models.
 | `Registration` dataclass | ✅ Done | Holds interface, implementation, lifetime, factory, kwargs |
 | Circular dependency detection | ✅ Done | Uses `_resolving` set, raises `CircularDependencyError` |
 | `create_scope()` with scoped lifetime | ✅ Done | `Scope` class caches SCOPED registrations per scope |
-| Backward-compatible `register()` | ✅ Done | Emits `DeprecationWarning`, delegates to legacy stores |
+| Backward-compatible `register()` | ✅ Removed | Legacy method fully removed; all callers migrated to new API |
 | `DependencyContainer` alias | ✅ Done | `DependencyContainer = Container` |
 | Tests (≥6) | ✅ 10 tests | Singleton, transient, scoped, factory, circular deps, kwargs, alias |
 
 **Architecture Impact:**
 - New code should use `register_singleton()` / `register_transient()` / `register_factory()`
-- Old `register()` API still works but emits deprecation warnings
+- Old `register()` API has been fully removed; all callers use new methods
+- `register_instance()` added for pre-existing singleton objects
 - `CircularDependencyError` and `ResolutionError` provide clear error messages
 
 ### 1.2 EventBus Rebuild ✅

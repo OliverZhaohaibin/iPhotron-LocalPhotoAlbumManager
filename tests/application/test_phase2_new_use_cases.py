@@ -109,20 +109,28 @@ class TestImportAssetsUseCase:
     def test_import_assets_success(self, mock_shutil):
         asset_repo = Mock(spec=IAssetRepository)
         asset_repo.get_by_path.return_value = None
+        album = _make_album()
         album_repo = Mock(spec=IAlbumRepository)
-        album_repo.get.return_value = _make_album()
+        album_repo.get.return_value = album
         event_bus = Mock(spec=EventBus)
 
-        uc = ImportAssetsUseCase(asset_repo, album_repo, event_bus)
-        response = uc.execute(ImportAssetsRequest(
-            source_paths=[Path("/photos/a.jpg"), Path("/photos/b.jpg")],
-            target_album_id="a1",
-            copy_files=True,
-        ))
+        # Mock Path.exists and Path.stat so the asset creation works
+        mock_stat = Mock()
+        mock_stat.st_size = 1024
+        with patch.object(Path, "exists", return_value=True), \
+             patch.object(Path, "stat", return_value=mock_stat):
+            uc = ImportAssetsUseCase(asset_repo, album_repo, event_bus)
+            response = uc.execute(ImportAssetsRequest(
+                source_paths=[Path("/photos/a.jpg"), Path("/photos/b.jpg")],
+                target_album_id="a1",
+                copy_files=True,
+            ))
 
         assert response.success is True
         assert response.imported_count == 2
         assert mock_shutil.copy2.call_count == 2
+        assert asset_repo.save.call_count == 2
+        event_bus.publish.assert_called_once()
 
     def test_import_assets_album_not_found(self):
         asset_repo = Mock(spec=IAssetRepository)
@@ -160,8 +168,14 @@ class TestMoveAssetsUseCase:
         }.get(aid)
         event_bus = Mock(spec=EventBus)
 
-        # Mock Path.exists to return True so shutil.move is called
-        with patch.object(Path, "exists", return_value=True):
+        src = source_album.path / asset.path
+        dst = target_album.path / asset.path.name
+
+        # Source exists, destination does not
+        def mock_exists(self_path):
+            return str(self_path) == str(src)
+
+        with patch.object(Path, "exists", mock_exists):
             uc = MoveAssetsUseCase(asset_repo, album_repo, event_bus)
             response = uc.execute(MoveAssetsRequest(
                 asset_ids=["x1"],

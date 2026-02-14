@@ -47,8 +47,15 @@ class MoveAssetsUseCase(UseCase):
             dst_path = target_album.path / asset.path.name
             
             try:
-                if src_path.exists():
-                    shutil.move(str(src_path), str(dst_path))
+                if not src_path.exists():
+                    self._logger.error(f"Source file does not exist for asset {asset_id}: {src_path}")
+                    continue
+
+                if dst_path.exists():
+                    self._logger.error(f"Destination file already exists for asset {asset_id}: {dst_path}")
+                    continue
+
+                shutil.move(str(src_path), str(dst_path))
                 asset.album_id = target_album.id
                 asset.path = Path(asset.path.name)
                 self._asset_repo.save(asset)

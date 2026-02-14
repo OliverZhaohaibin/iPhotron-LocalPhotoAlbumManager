@@ -1,13 +1,18 @@
 import logging
 import shutil
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
 from .base import UseCase, UseCaseRequest, UseCaseResponse
+from iPhoto.domain.models import Asset, MediaType
 from iPhoto.domain.repositories import IAlbumRepository, IAssetRepository
 from iPhoto.events.bus import EventBus
 from iPhoto.events.album_events import AssetImportedEvent
+
+_IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".heic", ".heif", ".tiff", ".tif", ".bmp", ".webp"}
+_VIDEO_EXTS = {".mp4", ".mov", ".avi", ".mkv", ".m4v"}
 
 @dataclass(frozen=True)
 class ImportAssetsRequest(UseCaseRequest):
@@ -49,11 +54,28 @@ class ImportAssetsUseCase(UseCase):
                 if existing is not None:
                     skipped += 1
                     continue
-                
+
+                target = album.path / path.name
                 if request.copy_files:
-                    target = album.path / path.name
                     shutil.copy2(str(path), str(target))
-                
+
+                ext = path.suffix.lower()
+                if ext in _VIDEO_EXTS:
+                    media_type = MediaType.VIDEO
+                else:
+                    media_type = MediaType.IMAGE
+
+                size = target.stat().st_size if target.exists() else 0
+
+                asset = Asset(
+                    id=str(uuid.uuid4()),
+                    album_id=album.id,
+                    path=Path(path.name),
+                    media_type=media_type,
+                    size_bytes=size,
+                )
+                self._asset_repo.save(asset)
+                imported_ids.append(asset.id)
                 imported += 1
             except Exception as e:
                 failed.append(str(path))

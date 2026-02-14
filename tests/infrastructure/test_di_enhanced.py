@@ -114,3 +114,13 @@ def test_register_with_kwargs():
     instance = container.resolve(_DummyWithKwargs)
     assert instance.name == "test"
     assert instance.value == 42
+
+
+def test_register_instance_returns_same_object():
+    container = Container()
+    obj = _Dummy()
+    container.register_instance(_Dummy, obj)
+    first = container.resolve(_Dummy)
+    second = container.resolve(_Dummy)
+    assert first is obj
+    assert second is obj

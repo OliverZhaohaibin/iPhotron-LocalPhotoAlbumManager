@@ -153,7 +153,7 @@ and GPU pipeline optimization modules (`ShaderPrecompiler`, `StreamingTextureUpl
 | `WeakAssetCache` class | ✅ Done | `src/iPhoto/infrastructure/services/weak_asset_cache.py` |
 | `weakref.ref` based storage | ✅ Done | Objects auto-released when no strong refs exist |
 | Auto-purge via weak-ref callback | ✅ Done | Stale entries removed automatically by GC |
-| Thread-safe with `threading.Lock` | ✅ Done | All public methods guarded |
+| Thread-safe with `threading.RLock` | ✅ Done | All public methods guarded |
 | `get()` / `put()` / `invalidate()` / `clear()` | ✅ Done | Full CRUD interface |
 | `size` — live entry count | ✅ Done | Only counts non-collected entries |
 | `raw_size` — total including stale | ✅ Done | Includes not-yet-cleaned entries |

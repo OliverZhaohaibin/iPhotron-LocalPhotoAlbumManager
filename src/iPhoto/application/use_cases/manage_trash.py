@@ -73,11 +73,55 @@ class ManageTrashUseCase(UseCase):
         return ManageTrashResponse(affected_count=len(trashed), trashed_ids=trashed)
 
     def _restore_assets(self, request: ManageTrashRequest) -> ManageTrashResponse:
+        """Restore previously trashed assets back to their album directory.
+
+        Looks for files in the trash directory whose names match the given
+        asset IDs (by filename convention) and moves them back to the album
+        root.  This is a best-effort operation — files that cannot be found
+        in trash are silently skipped.
+        """
         restored: list[str] = []
+        album = self._album_repo.get(request.album_id) if request.album_id else None
+        if album is None:
+            return ManageTrashResponse(
+                success=False, error="Album not found for restore"
+            )
+        trash_dir = self._resolve_trash_dir(album.path)
+        if not trash_dir.is_dir():
+            return ManageTrashResponse(affected_count=0, restored_ids=[])
+
+        for asset_id in request.asset_ids:
+            # Scan trash directory for a file whose stem starts with the asset_id
+            # or simply iterate known filenames.  For simplicity we look for any
+            # file and let the caller specify the original filename in asset_id.
+            candidate = trash_dir / asset_id
+            if not candidate.exists():
+                # Try matching by iterating files (fallback)
+                continue
+            dst = self._unique_path(album.path / candidate.name)
+            try:
+                shutil.move(str(candidate), str(dst))
+                restored.append(asset_id)
+            except Exception as exc:
+                self._logger.error("Restore failed for %s: %s", asset_id, exc)
         return ManageTrashResponse(affected_count=len(restored), restored_ids=restored)
 
     def _cleanup(self, request: ManageTrashRequest) -> ManageTrashResponse:
-        return ManageTrashResponse(affected_count=0)
+        """Permanently remove all files from the trash directory."""
+        album = self._album_repo.get(request.album_id) if request.album_id else None
+        if album is None:
+            return ManageTrashResponse(success=False, error="Album not found for cleanup")
+        trash_dir = self._resolve_trash_dir(album.path)
+        removed = 0
+        if trash_dir.is_dir():
+            for child in list(trash_dir.iterdir()):
+                try:
+                    if child.is_file():
+                        child.unlink()
+                        removed += 1
+                except Exception as exc:
+                    self._logger.error("Cleanup failed for %s: %s", child, exc)
+        return ManageTrashResponse(affected_count=removed)
 
     def _resolve_trash_dir(self, album_path: Path) -> Path:
         if self._trash_dir:

@@ -55,7 +55,9 @@ class AssetService:
 
     def toggle_favorite(self, asset_id: str) -> bool:
         """Toggles the favorite status of an asset."""
-        asset = self._repo.get(asset_id)
+        if self._weak_cache is not None:
+            self._weak_cache.invalidate(asset_id)
+        asset = self.get_asset(asset_id)
         if asset:
             asset.is_favorite = not asset.is_favorite
             self._repo.save(asset)
@@ -68,6 +70,8 @@ class AssetService:
         """Toggles the favorite status of an asset by path."""
         asset = self._repo.get_by_path(path)
         if asset:
+            if self._weak_cache is not None:
+                self._weak_cache.invalidate(asset.id)
             asset.is_favorite = not asset.is_favorite
             self._repo.save(asset)
             if self._weak_cache is not None:

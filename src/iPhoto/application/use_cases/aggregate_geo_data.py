@@ -1,7 +1,6 @@
 # aggregate_geo_data.py
 import logging
 from dataclasses import dataclass, field
-from pathlib import Path
 
 from .base import UseCase, UseCaseRequest, UseCaseResponse
 from iPhoto.domain.repositories import IAssetRepository

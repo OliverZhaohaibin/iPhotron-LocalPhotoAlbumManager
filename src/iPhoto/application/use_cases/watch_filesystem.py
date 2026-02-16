@@ -1,13 +1,11 @@
 # watch_filesystem.py
 import logging
-import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Optional
 
 from .base import UseCase, UseCaseRequest, UseCaseResponse
 from iPhoto.events.bus import EventBus
-from iPhoto.events.album_events import ScanCompletedEvent
 
 
 @dataclass(frozen=True)
@@ -24,7 +22,17 @@ class WatchFilesystemResponse(UseCaseResponse):
 
 
 class WatchFilesystemUseCase(UseCase):
-    """Manages filesystem watching for album directories."""
+    """Manages filesystem watching state for album directories.
+
+    .. note::
+
+       This is a **state-management** use case that tracks which paths
+       are watched and whether watching is paused.  Actual OS-level
+       filesystem monitoring (e.g. via ``QFileSystemWatcher``) is handled
+       by :class:`~iPhoto.library.filesystem_watcher.FileSystemWatcherMixin`
+       in the library layer.  The ``on_change_callback`` is invoked by the
+       library-layer watcher when a directory change is detected.
+    """
 
     def __init__(
         self,

@@ -59,6 +59,14 @@ class ScanResult:
 class ParallelScanner:
     """Parallel file scanner — uses a thread pool to process files concurrently.
 
+    .. note::
+
+       A single :class:`ParallelScanner` instance is **not safe** for
+       concurrent use from multiple threads.  The internal ``_cancelled``
+       flag is shared, so calling :meth:`cancel` would affect all in-flight
+       scans and each scan's initial ``clear()`` could race with other
+       scans.  Create separate instances if you need concurrent scans.
+
     Parameters
     ----------
     max_workers:

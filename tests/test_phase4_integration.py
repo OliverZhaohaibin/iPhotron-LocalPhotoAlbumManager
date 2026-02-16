@@ -198,7 +198,8 @@ class TestAssetServiceWeakCache:
         cache = MagicMock()
         svc = AssetService(asset_repo=repo, weak_cache=cache)
         svc.toggle_favorite("a1")
-        cache.invalidate.assert_called_once_with("a1")
+        cache.invalidate.assert_called_with("a1")
+        assert cache.invalidate.call_count == 2  # before fetch + after save
 
     def test_works_without_cache(self):
         repo = MagicMock()

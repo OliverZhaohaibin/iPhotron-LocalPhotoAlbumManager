@@ -103,6 +103,71 @@ class TestManageTrashUseCase:
         resp = uc.execute(ManageTrashRequest(action="trash", asset_ids=["asset-1"]))
         assert resp.affected_count == 0
 
+    def test_trash_handles_duplicate_filenames(self, tmp_path):
+        asset_repo, album_repo = _mock_repos()
+        event_bus = EventBus()
+        trash_dir = tmp_path / "trash"
+
+        album = _make_album(path=tmp_path)
+        album_repo.get.return_value = album
+
+        # Create two files with the same name (simulating sequential trash ops)
+        photo = tmp_path / "photo.jpg"
+        photo.write_bytes(b"first")
+
+        asset = _make_asset(path=Path("photo.jpg"))
+        asset_repo.get.return_value = asset
+
+        uc = ManageTrashUseCase(asset_repo, album_repo, event_bus, trash_dir=trash_dir)
+
+        # Trash first file
+        resp = uc.execute(ManageTrashRequest(action="trash", asset_ids=["asset-1"]))
+        assert resp.affected_count == 1
+
+        # Create another file with the same name and trash it
+        photo.write_bytes(b"second")
+        resp = uc.execute(ManageTrashRequest(action="trash", asset_ids=["asset-1"]))
+        assert resp.affected_count == 1
+
+        # Both files should exist in trash with unique names
+        trash_files = list(trash_dir.glob("photo*.jpg"))
+        assert len(trash_files) == 2
+
+    def test_cleanup_removes_trash_files(self, tmp_path):
+        asset_repo, album_repo = _mock_repos()
+        event_bus = EventBus()
+        trash_dir = tmp_path / ".deleted"
+        trash_dir.mkdir()
+
+        # Put some files in the trash dir
+        (trash_dir / "a.jpg").write_bytes(b"a")
+        (trash_dir / "b.jpg").write_bytes(b"b")
+
+        album = _make_album(id="album-1", path=tmp_path)
+        album_repo.get.return_value = album
+
+        uc = ManageTrashUseCase(asset_repo, album_repo, event_bus)
+        resp = uc.execute(ManageTrashRequest(action="cleanup", album_id="album-1"))
+        assert resp.affected_count == 2
+        assert list(trash_dir.iterdir()) == []
+
+    def test_restore_moves_file_back(self, tmp_path):
+        asset_repo, album_repo = _mock_repos()
+        event_bus = EventBus()
+        trash_dir = tmp_path / ".deleted"
+        trash_dir.mkdir()
+        (trash_dir / "photo.jpg").write_bytes(b"restored data")
+
+        album = _make_album(id="album-1", path=tmp_path)
+        album_repo.get.return_value = album
+
+        uc = ManageTrashUseCase(asset_repo, album_repo, event_bus)
+        resp = uc.execute(ManageTrashRequest(
+            action="restore", asset_ids=["photo.jpg"], album_id="album-1"
+        ))
+        assert resp.affected_count == 1
+        assert (tmp_path / "photo.jpg").exists()
+
 
 # ============= AggregateGeoDataUseCase Tests =============
 
@@ -233,6 +298,73 @@ class TestExportAssetsUseCase:
         ))
         assert resp.exported_count == 1
         assert export_dir.is_dir()
+
+    def test_export_handles_name_collisions(self, tmp_path):
+        asset_repo, album_repo = _mock_repos()
+        event_bus = EventBus()
+
+        album_dir = tmp_path / "album"
+        album_dir.mkdir()
+        src_photo = album_dir / "photo.jpg"
+        src_content = b"new image data"
+        src_photo.write_bytes(src_content)
+
+        album = _make_album(path=album_dir)
+        album_repo.get.return_value = album
+        asset = _make_asset(path=Path("photo.jpg"))
+        asset_repo.get.return_value = asset
+
+        export_dir = tmp_path / "export"
+        export_dir.mkdir()
+        existing = export_dir / "photo.jpg"
+        existing_content = b"existing file"
+        existing.write_bytes(existing_content)
+
+        uc = ExportAssetsUseCase(asset_repo, album_repo, event_bus)
+        resp = uc.execute(ExportAssetsRequest(
+            asset_ids=["asset-1"],
+            export_dir=str(export_dir),
+        ))
+
+        assert resp.exported_count == 1
+        assert resp.failed_count == 0
+        assert existing.read_bytes() == existing_content
+
+        exported_files = list(export_dir.glob("photo*.jpg"))
+        assert len(exported_files) == 2
+        new_files = [p for p in exported_files if p.name != "photo.jpg"]
+        assert len(new_files) == 1
+        assert new_files[0].read_bytes() == src_content
+
+    def test_export_uses_render_fn_when_provided(self, tmp_path):
+        asset_repo, album_repo = _mock_repos()
+        event_bus = EventBus()
+
+        album_dir = tmp_path / "album"
+        album_dir.mkdir()
+        src_photo = album_dir / "photo.png"
+        src_photo.write_bytes(b"original png")
+
+        album = _make_album(path=album_dir)
+        album_repo.get.return_value = album
+        asset = _make_asset(path=Path("photo.png"))
+        asset_repo.get.return_value = asset
+
+        rendered_bytes = b"rendered jpeg data"
+        render_fn = MagicMock(return_value=rendered_bytes)
+
+        export_dir = tmp_path / "export"
+        uc = ExportAssetsUseCase(asset_repo, album_repo, event_bus, render_fn=render_fn)
+        resp = uc.execute(ExportAssetsRequest(
+            asset_ids=["asset-1"],
+            export_dir=str(export_dir),
+        ))
+
+        assert resp.exported_count == 1
+        render_fn.assert_called_once()
+        exported = Path(resp.exported_paths[0])
+        assert exported.suffix == ".jpg"
+        assert exported.read_bytes() == rendered_bytes
 
 
 # ============= ApplyEditUseCase Tests =============

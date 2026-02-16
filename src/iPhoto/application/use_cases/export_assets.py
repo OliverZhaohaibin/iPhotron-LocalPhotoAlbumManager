@@ -25,7 +25,13 @@ class ExportAssetsResponse(UseCaseResponse):
 
 
 class ExportAssetsUseCase(UseCase):
-    """Exports assets to a target directory, rendering edited images."""
+    """Exports assets to a target directory with collision-safe naming.
+
+    When a ``render_fn`` is provided, edited images are rendered through
+    it before being written to the export directory.  If ``render_fn`` is
+    *None* or returns *None* for a given source path, the original file
+    is copied as-is via :func:`shutil.copy2`.
+    """
 
     def __init__(
         self,
@@ -70,9 +76,17 @@ class ExportAssetsUseCase(UseCase):
                 failed.append(str(src))
                 continue
 
-            dst = self._unique_dest(export_dir / src.name)
             try:
-                shutil.copy2(str(src), str(dst))
+                rendered = None
+                if self._render_fn is not None:
+                    rendered = self._render_fn(src)
+
+                if rendered is not None:
+                    dst = self._unique_dest(export_dir / (src.stem + ".jpg"))
+                    dst.write_bytes(rendered)
+                else:
+                    dst = self._unique_dest(export_dir / src.name)
+                    shutil.copy2(str(src), str(dst))
                 exported.append(str(dst))
             except Exception as exc:
                 self._logger.error("Export failed for %s: %s", src, exc)

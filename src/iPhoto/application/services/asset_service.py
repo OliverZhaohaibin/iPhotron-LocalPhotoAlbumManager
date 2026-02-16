@@ -57,7 +57,7 @@ class AssetService:
         """Toggles the favorite status of an asset."""
         if self._weak_cache is not None:
             self._weak_cache.invalidate(asset_id)
-        asset = self.get_asset(asset_id)
+        asset = self._repo.get(asset_id)
         if asset:
             asset.is_favorite = not asset.is_favorite
             self._repo.save(asset)

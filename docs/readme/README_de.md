@@ -32,8 +32,6 @@ pip install -e .
 
 ## 🚀 Schnellstart
 
-### GUI
-
 ```bash
 iphoto-gui
 ```
@@ -42,22 +40,6 @@ Oder direkt ein bestimmtes Album öffnen:
 
 ```bash
 iphoto-gui /fotos/LondonReise
-```
-
-### CLI
-
-```bash
-# Album initialisieren (erstellt .iphoto.album.json)
-iphoto init /pfad/zum/album
-
-# Dateien scannen und Index erstellen
-iphoto scan /pfad/zum/album
-
-# Live Photos paaren (HEIC/JPG + MOV)
-iphoto pair /pfad/zum/album
-
-# Album-Bericht generieren
-iphoto report /pfad/zum/album
 ```
 
 ---

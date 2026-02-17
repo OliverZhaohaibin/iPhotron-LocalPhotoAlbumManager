@@ -51,8 +51,6 @@ Managed in `pyproject.toml`:
 
 | Package | Purpose |
 |---------|---------|
-| `typer` | CLI framework |
-| `rich` | Terminal formatting |
 | `jsonschema` | JSON Schema validation |
 | `PySide6` | Qt6 GUI framework |
 | `Pillow` / `pillow-heif` | Image loading (HEIC support) |
@@ -82,9 +80,6 @@ Includes: `pytest`, `pytest-mock`, `pytest-qt`, `ruff`, `black`, `mypy`, `types-
 ```bash
 # Launch the GUI
 iphoto-gui
-
-# Or use the CLI
-iphoto --help
 ```
 
 ### Building the Executable
@@ -136,13 +131,6 @@ Test configuration is in `pyproject.toml` under `[tool.pytest.ini_options]`:
 ---
 
 ## Debugging
-
-### CLI Debugging
-
-```bash
-# Run CLI commands with Python debugger
-python -m pdb -m iPhoto.cli scan /path/to/album
-```
 
 ### GUI Debugging
 
@@ -241,5 +229,4 @@ test(core): add unit tests for curve resolver
 
 | Command | Entry Point | Description |
 |---------|-------------|-------------|
-| `iphoto` | `iPhoto.cli:app` | CLI interface |
 | `iphoto-gui` | `iPhoto.gui.main:main` | GUI application |

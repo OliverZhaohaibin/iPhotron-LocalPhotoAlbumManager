@@ -45,7 +45,7 @@ graph TB
 ## Module Boundary Overview
 
 ```mermaid
-graph LR
+graph TB
     subgraph DomainLayer["1. Domain Layer"]
         Models["models/ — Album, Asset, MediaType, LiveGroup"]
         RepoInterfaces["repositories.py — IAlbumRepository, IAssetRepository"]
@@ -68,7 +68,6 @@ graph LR
 
     subgraph CoreBackend["4. Core Backend"]
         App["app.py — Facade"]
-        CLI["cli.py — Typer CLI"]
         IO["io/ — scanner, metadata"]
         Core["core/ — pairing, resolvers, filters"]
         Cache["cache/ — SQLite index_store"]
@@ -121,7 +120,6 @@ src/
 │   │   ├── db/              # Connection pool
 │   │   └── services/        # Metadata extraction, thumbnails
 │   ├── app.py               # Backend Facade
-│   ├── cli.py               # Typer-based CLI entry point
 │   ├── models/              # Legacy data structures (Album, LiveGroup)
 │   ├── io/                  # File scanning (scanner.py), metadata reading
 │   ├── core/                # Algorithms: pairing, resolvers, filters
@@ -208,18 +206,18 @@ sequenceDiagram
 ```mermaid
 sequenceDiagram
     participant User
-    participant CLI as CLI / GUI
+    participant GUI as GUI
     participant Scanner as io/scanner.py
     participant Meta as io/metadata.py
     participant DB as SQLite (global_index.db)
 
-    User->>CLI: iphoto scan /path
-    CLI->>Scanner: scan(path)
+    User->>GUI: Trigger scan
+    GUI->>Scanner: scan(path)
     Scanner->>Scanner: Walk directory tree
     Scanner->>Meta: Extract metadata (ExifTool)
     Meta-->>Scanner: EXIF, GPS, timestamps
     Scanner->>DB: Upsert assets (idempotent)
-    DB-->>CLI: Scan complete
+    DB-->>GUI: Scan complete
 ```
 
 ---

@@ -32,8 +32,6 @@ pip install -e .
 
 ## 🚀 快速开始
 
-### GUI
-
 ```bash
 iphoto-gui
 ```
@@ -42,22 +40,6 @@ iphoto-gui
 
 ```bash
 iphoto-gui /photos/LondonTrip
-```
-
-### CLI
-
-```bash
-# 初始化相册（创建 .iphoto.album.json）
-iphoto init /path/to/album
-
-# 扫描文件并构建索引
-iphoto scan /path/to/album
-
-# 配对实况照片（HEIC/JPG + MOV）
-iphoto pair /path/to/album
-
-# 生成相册报告
-iphoto report /path/to/album
 ```
 
 ---

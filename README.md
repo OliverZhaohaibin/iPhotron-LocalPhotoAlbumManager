@@ -18,7 +18,7 @@
 
 ## 📥 Download
 
-[![Download iPhoto Latest Release](https://img.shields.io/badge/⬇️%20Download-iPhoto%20Latest%20Release-blue?style=for-the-badge&logo=windows)](https://github.com/OliverZhaohaibin/iPhotron-LocalPhotoAlbumManager/releases/download/v4.1.0/v4.10.exe)
+[![Download iPhoto Latest Release](https://img.shields.io/badge/⬇️%20Download-iPhoto%20Latest%20Release-blue?style=for-the-badge&logo=windows)](https://github.com/OliverZhaohaibin/iPhotron-LocalPhotoAlbumManager/releases/download/v4.2.0/v4.20.exe)
 
 **💡 Quick Install:** Click the button above to download the latest Windows installer (.exe) directly.
 

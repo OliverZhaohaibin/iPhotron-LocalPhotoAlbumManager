@@ -8,7 +8,14 @@ from typing import Any, Mapping, MutableMapping
 import math
 
 import numpy as np
-from numba import jit
+try:
+    from numba import jit
+except ImportError:
+    def jit(*args, **kwargs):
+        def decorator(func):
+            return func
+
+        return decorator
 
 from PySide6.QtCore import Qt
 

@@ -8,3 +8,8 @@ from .delete_album import DeleteAlbumUseCase, DeleteAlbumRequest, DeleteAlbumRes
 from .move_assets import MoveAssetsUseCase, MoveAssetsRequest, MoveAssetsResponse
 from .update_metadata import UpdateMetadataUseCase, UpdateMetadataRequest, UpdateMetadataResponse
 from .generate_thumbnail import GenerateThumbnailUseCase, GenerateThumbnailRequest, GenerateThumbnailResponse
+from .manage_trash import ManageTrashUseCase, ManageTrashRequest, ManageTrashResponse
+from .aggregate_geo_data import AggregateGeoDataUseCase, AggregateGeoDataRequest, AggregateGeoDataResponse
+from .watch_filesystem import WatchFilesystemUseCase, WatchFilesystemRequest, WatchFilesystemResponse
+from .export_assets import ExportAssetsUseCase, ExportAssetsRequest, ExportAssetsResponse
+from .apply_edit import ApplyEditUseCase, ApplyEditRequest, ApplyEditResponse

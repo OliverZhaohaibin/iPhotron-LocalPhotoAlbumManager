@@ -11,6 +11,9 @@ class AssetService:
     Application Service Facade for Asset operations.
     Directly uses Repository for queries (CQRS Query side) or simple operations.
     For complex write operations, it should delegate to Use Cases.
+
+    Optionally wraps a :class:`WeakAssetCache` to avoid redundant DB lookups
+    for recently accessed assets.
     """
     def __init__(
         self,
@@ -18,11 +21,13 @@ class AssetService:
         import_uc=None,
         move_uc=None,
         metadata_uc=None,
+        weak_cache=None,
     ):
         self._repo = asset_repo
         self._import_uc = import_uc
         self._move_uc = move_uc
         self._metadata_uc = metadata_uc
+        self._weak_cache = weak_cache
         self._logger = logging.getLogger(__name__)
 
     def set_repository(self, repo: IAssetRepository) -> None:
@@ -35,14 +40,29 @@ class AssetService:
         return self._repo.count(query)
 
     def get_asset(self, asset_id: str) -> Optional[Asset]:
-        return self._repo.get(asset_id)
+        # Check weak cache first
+        if self._weak_cache is not None:
+            cached = self._weak_cache.get(asset_id)
+            if cached is not None:
+                return cached
+        asset = self._repo.get(asset_id)
+        if asset is not None and self._weak_cache is not None:
+            try:
+                self._weak_cache.put(asset_id, asset)
+            except TypeError:
+                pass  # object does not support weak references
+        return asset
 
     def toggle_favorite(self, asset_id: str) -> bool:
         """Toggles the favorite status of an asset."""
+        if self._weak_cache is not None:
+            self._weak_cache.invalidate(asset_id)
         asset = self._repo.get(asset_id)
         if asset:
             asset.is_favorite = not asset.is_favorite
             self._repo.save(asset)
+            if self._weak_cache is not None:
+                self._weak_cache.invalidate(asset_id)
             return asset.is_favorite
         return False
 
@@ -50,8 +70,12 @@ class AssetService:
         """Toggles the favorite status of an asset by path."""
         asset = self._repo.get_by_path(path)
         if asset:
+            if self._weak_cache is not None:
+                self._weak_cache.invalidate(asset.id)
             asset.is_favorite = not asset.is_favorite
             self._repo.save(asset)
+            if self._weak_cache is not None:
+                self._weak_cache.invalidate(asset.id)
             return asset.is_favorite
         return False
 

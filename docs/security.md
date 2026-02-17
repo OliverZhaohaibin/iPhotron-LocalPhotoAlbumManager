@@ -30,12 +30,14 @@ iPhotron is a **local-first, offline photo manager**. It does not upload data to
 
 ### Network Access
 
+iPhotron requires **no network access**. All features, including map rendering and reverse geocoding, work fully offline.
+
 | Feature | Access | Purpose |
 |---------|--------|---------|
-| **Map tile loading** | Outbound HTTP(S) | Fetch map tiles for the location view |
+| **Map rendering** | Offline (bundled vector tiles) | Render map tiles for the location view |
 | **Reverse geocoding** | Local database lookup | Convert GPS coordinates to place names (offline, via `reverse-geocoder` library) |
 
-> **Note:** Map tile loading is the only network-dependent feature. All other functionality works fully offline.
+> **Note:** iPhotron is a fully offline application. No network connection is required for any feature.
 
 ---
 
@@ -56,8 +58,7 @@ iPhotron does **not** encrypt data at rest. The following files are stored in pl
 
 ### In Transit
 
-- Map tile requests use HTTPS when supported by the tile server.
-- No other network communication occurs.
+- No network communication occurs. All data remains on the local filesystem.
 
 ---
 
@@ -127,13 +128,13 @@ User settings (theme preference, export destination) are stored via Qt's `QSetti
 | **Impact** | Potential code execution via Pillow, FFmpeg, or ExifTool |
 | **Mitigation** | Keep dependencies updated; use `pillow-heif` and `opencv-python-headless` (no GUI attack surface) |
 
-#### T4: Map Tile Server Compromise
+#### T4: Malicious Map Tile Data
 
 | | |
 |---|---|
-| **Threat** | A compromised tile server serves malicious content |
-| **Impact** | Incorrect map display; potential XSS if tiles were rendered in a web context |
-| **Mitigation** | Tiles are rendered via OpenGL (not a web view); no script execution possible |
+| **Threat** | Crafted or corrupted bundled vector tile data |
+| **Impact** | Incorrect map display; potential parsing vulnerability |
+| **Mitigation** | Tiles are rendered via OpenGL (not a web view); no script execution possible; tile data is bundled and not fetched from external sources |
 
 #### T5: Supply Chain Attack via Dependencies
 

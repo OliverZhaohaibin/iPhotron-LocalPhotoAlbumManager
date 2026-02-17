@@ -71,6 +71,8 @@ Example Nuitka command (adjust paths for your platform):
 nuitka --standalone \
     --nofollow-import-to=numba \
     --nofollow-import-to=llvmlite \
+    --nofollow-import-to=pytest \
+    --nofollow-import-to=iPhoto.tests \
     --include-package=iPhoto \
     --output-dir=dist \
     src/iPhoto/gui/main.py
@@ -82,6 +84,8 @@ nuitka --standalone \
 |---|---|
 | `--nofollow-import-to=numba` | Prevents Nuitka from bundling the `numba` package |
 | `--nofollow-import-to=llvmlite` | Prevents Nuitka from bundling the `llvmlite` package (dependency of `numba`) |
+| `--nofollow-import-to=pytest` | Prevents Nuitka from bundling `pytest` (only needed for development) |
+| `--nofollow-import-to=iPhoto.tests` | Excludes the in-tree test sub-package from the build |
 | `--include-package=iPhoto` | Ensures all iPhoto sub-packages (including the AOT `.so`/`.pyd`) are included |
 
 ## Step 3: Verify the Distribution
@@ -115,3 +119,4 @@ After building, confirm that:
 | `AOT compiled module not found` in logs | `_jit_compiled` extension missing from distribution | Re-run Step 1 and rebuild; verify the `.so`/`.pyd` file is in `iPhoto/core/filters/` |
 | `ImportError` referencing `numba` at runtime | A code path still has an unconditional numba import | All numba imports must use `try/except ImportError` guards |
 | Image adjustments produce no visible effect | Kernel not loaded — check logs for error messages | Ensure the AOT module matches the current Python version and platform |
+| `Undesirable import of 'pytest'` warning from Nuitka | `iPhoto.tests` sub-package is being compiled into the build | Add `--nofollow-import-to=pytest` and `--nofollow-import-to=iPhoto.tests` to the Nuitka command |

@@ -28,13 +28,9 @@ from PySide6.QtOpenGLWidgets import QOpenGLWidget
 
 from ..gl_crop_controller import CropInteractionController
 from ..gl_renderer import GLRenderer
-from ..view_transform_controller import (
-    ViewTransformController,
-    compute_fit_to_view_scale,
-    compute_rotation_cover_scale,
-)
+from ..view_transform_controller import ViewTransformController
 
-from . import crop_logic
+from . import crop_viewport
 from . import geometry
 from .adjustment_applicator import AdjustmentApplicator
 from .components import LoadingOverlay
@@ -566,83 +562,20 @@ class GLImageViewer(QOpenGLWidget):
 
     def start_perspective_interaction(self) -> None:
         """Snapshot the crop before a perspective slider drag begins."""
-
         self._crop_controller.start_perspective_interaction()
 
     def end_perspective_interaction(self) -> None:
         """Clear the cached baseline crop captured for perspective drags."""
-
         self._crop_controller.end_perspective_interaction()
 
     def _update_crop_perspective_state(self) -> None:
-        """Forward the latest perspective sliders to the crop controller."""
-
-        if not hasattr(self, "_crop_controller") or self._crop_controller is None:
-            return
-        vertical = float(self._adjustments.get("Perspective_Vertical", 0.0))
-        horizontal = float(self._adjustments.get("Perspective_Horizontal", 0.0))
-        straighten, rotate_steps, flip = self._rotation_parameters()
-        logical_values = geometry.logical_crop_mapping_from_texture(self._adjustments)
-        self._crop_controller.update_perspective(
-            vertical,
-            horizontal,
-            straighten,
-            rotate_steps,
-            flip,
-            new_crop_values=logical_values,
-        )
-        self._update_cover_scale(straighten, rotate_steps)
+        crop_viewport.update_crop_perspective_state(self)
 
     def _rotation_parameters(self) -> tuple[float, int, bool]:
-        """Return the straighten angle, rotate steps, and flip toggle."""
-
-        straighten = float(self._adjustments.get("Crop_Straighten", 0.0))
-        rotate_steps = int(float(self._adjustments.get("Crop_Rotate90", 0.0)))
-        flip = bool(self._adjustments.get("Crop_FlipH", False))
-        return straighten, rotate_steps, flip
+        return crop_viewport.rotation_parameters(self)
 
     def _update_cover_scale(self, straighten_deg: float, rotate_steps: int) -> None:
-        """Compute the rotation cover scale and forward it to the transform controller."""
-
-        if not self._renderer or not self._renderer.has_texture():
-            self._transform_controller.set_image_cover_scale(1.0)
-            return
-        
-        # When rotation is handled in the shader (current implementation), cover_scale
-        # only needs to account for straighten angle, not the 90° discrete rotations.
-        # Since logical dimensions are already used in ViewTransformController, and
-        # shader rotation maps logical→physical, we can simplify:
-        if abs(straighten_deg) <= 1e-5:
-            # No straighten angle: no cover scale needed
-            self._transform_controller.set_image_cover_scale(1.0)
-            return
-            
-        # If there's a straighten angle, we still need cover scale calculation
-        tex_w, tex_h = self._texture_dimensions()
-        if tex_w <= 0 or tex_h <= 0:
-            self._transform_controller.set_image_cover_scale(1.0)
-            return
-            
-        display_w, display_h = self._display_texture_dimensions()
-        view_width, view_height = self._zoom_ctrl.view_dimensions_device_px()
-        
-        base_scale = compute_fit_to_view_scale(
-            (display_w, display_h), float(view_width), float(view_height)
-        )
-        
-        # For straighten, use logical dims with physical bounds checking
-        cover_scale = compute_rotation_cover_scale(
-            (display_w, display_h),
-            base_scale,
-            straighten_deg,
-            rotate_steps,
-            physical_texture_size=(tex_w, tex_h),
-        )
-        
-        self._transform_controller.set_image_cover_scale(cover_scale)
-
-
-
+        crop_viewport.update_cover_scale(self, straighten_deg, rotate_steps)
 
 
     # --------------------------- Viewport helpers ---------------------------
@@ -657,46 +590,7 @@ class GLImageViewer(QOpenGLWidget):
             super().mousePressEvent(event)
 
     def _handle_eyedropper_pick(self, position: QPointF) -> bool:
-        """Sample the image under *position* and emit a ``colorPicked`` signal."""
-
-        if self._image is None or self._image.isNull():
-            return False
-
-        logical_w, logical_h = self._display_texture_dimensions()
-        if logical_w <= 0 or logical_h <= 0:
-            return False
-
-        image_point = self._zoom_ctrl.viewport_to_image(position)
-        if image_point.isNull():
-            return False
-
-        lx = max(0.0, min(1.0, image_point.x() / float(logical_w)))
-        ly = max(0.0, min(1.0, image_point.y() / float(logical_h)))
-
-        rotate_steps = geometry.get_rotate_steps(self._adjustments)
-        if rotate_steps == 1:
-            tx, ty = ly, 1.0 - lx
-        elif rotate_steps == 2:
-            tx, ty = 1.0 - lx, 1.0 - ly
-        elif rotate_steps == 3:
-            tx, ty = 1.0 - ly, lx
-        else:
-            tx, ty = lx, ly
-
-        tex_w = self._image.width()
-        tex_h = self._image.height()
-        if tex_w <= 0 or tex_h <= 0:
-            return False
-
-        px = int(round(tx * (tex_w - 1)))
-        py = int(round(ty * (tex_h - 1)))
-        px = max(0, min(tex_w - 1, px))
-        py = max(0, min(tex_h - 1, py))
-
-        color = self._image.pixelColor(px, py)
-        self.colorPicked.emit(color.redF(), color.greenF(), color.blueF())
-        self.set_eyedropper_mode(False)
-        return True
+        return crop_viewport.handle_eyedropper_pick(self, position)
 
     def mouseMoveEvent(self, event: QMouseEvent) -> None:
         handled = self._input_handler.handle_mouse_move(event)
@@ -736,92 +630,27 @@ class GLImageViewer(QOpenGLWidget):
     # --------------------------- Cursor management and helpers ---------------------------
 
     def _handle_cursor_change(self, cursor: Qt.CursorShape | None) -> None:
-        """Handle cursor change request from controllers."""
-        if cursor is None:
-            self.unsetCursor()
-        else:
-            self.setCursor(cursor)
+        crop_viewport.handle_cursor_change(self, cursor)
 
     def _texture_dimensions(self) -> tuple[int, int]:
-        """Return the current texture size or ``(0, 0)`` when unavailable."""
-
-        if self._renderer is not None and self._renderer.has_texture():
-            return self._renderer.texture_size()
-        if self._image is not None and not self._image.isNull():
-            return (self._image.width(), self._image.height())
-        return (0, 0)
+        return crop_viewport.texture_dimensions(self)
 
     def _display_texture_dimensions(self) -> tuple[int, int]:
-        """Return the logical texture dimensions used for fit-to-view math."""
-
-        tex_w, tex_h = self._texture_dimensions()
-        if tex_w <= 0 or tex_h <= 0:
-            return (tex_w, tex_h)
-        rotate_steps = int(float(self._adjustments.get("Crop_Rotate90", 0.0)))
-        if rotate_steps % 2:
-            # When the user rotates the photo by 90° or 270° the shader renders a
-            # portrait-aligned frame even though the underlying texture upload
-            # remains landscape.  Swapping the logical dimensions keeps the
-            # transform controller's fit-to-view baseline consistent with the
-            # rendered orientation so we no longer squish the frame into the
-            # previous aspect ratio.
-            return (tex_h, tex_w)
-        return (tex_w, tex_h)
+        return crop_viewport.display_texture_dimensions(self)
 
     def _frame_crop_if_available(self) -> bool:
-        """Frame the active crop rectangle if the adjustments define one."""
-
-        if self._crop_controller.is_active():
-            return False
-        crop_rect = self._compute_crop_rect_pixels()
-        if crop_rect is None:
-            self._auto_crop_view_locked = False
-            return False
-        if self._transform_controller.frame_texture_rect(crop_rect):
-            self._auto_crop_view_locked = True
-            return True
-        return False
+        return crop_viewport.frame_crop_if_available(self)
 
     def _reapply_locked_crop_view(self) -> None:
-        """Re-apply the stored crop framing after resizes or adjustment edits."""
-
-        if not self._auto_crop_view_locked:
-            return
-        crop_rect = self._compute_crop_rect_pixels()
-        if crop_rect is None:
-            self._auto_crop_view_locked = False
-            return
-        if not self._transform_controller.frame_texture_rect(crop_rect):
-            self._auto_crop_view_locked = False
-            return
+        crop_viewport.reapply_locked_crop_view(self)
 
     def _cancel_auto_crop_lock(self) -> None:
-        """Disable auto-crop framing so manual gestures stay respected."""
-
-        self._auto_crop_view_locked = False
+        crop_viewport.cancel_auto_crop_lock(self)
 
     def _compute_crop_rect_pixels(self) -> QRectF | None:
-        """Return the crop rectangle expressed in texture pixels."""
-
-        texture_size = self._display_texture_dimensions()
-        tex_w, tex_h = texture_size
-
-        # Convert the session's texture-space crop tuple into the logical/display space so the
-        # overlay and auto-framing routines mirror the visual orientation on screen.  The
-        # conversion swaps axes when the photo is rotated by 90°/270° while keeping the stored
-        # crop coordinates anchored to the unrotated texture, matching the "data stays still,
-        # view moves" policy from the demo reference.
-        crop_cx, crop_cy, crop_w, crop_h = geometry.logical_crop_from_texture(self._adjustments)
-        return crop_logic.compute_crop_rect_pixels(crop_cx, crop_cy, crop_w, crop_h, tex_w, tex_h)
+        return crop_viewport.compute_crop_rect_pixels(self)
 
     def _handle_crop_interaction_changed(
         self, cx: float, cy: float, width: float, height: float
     ) -> None:
-        """Convert logical crop updates back to texture space before emitting."""
-
-        rotate_steps = geometry.get_rotate_steps(self._adjustments)
-        tex_cx, tex_cy, tex_w, tex_h = geometry.logical_crop_to_texture(
-            (float(cx), float(cy), float(width), float(height)),
-            rotate_steps,
-        )
-        self.cropChanged.emit(tex_cx, tex_cy, tex_w, tex_h)
+        crop_viewport.handle_crop_interaction_changed(self, cx, cy, width, height)

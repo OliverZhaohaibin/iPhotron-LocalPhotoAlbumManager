@@ -15,10 +15,11 @@
 ## ☕ 支持
 
 [![请我喝杯咖啡](https://img.shields.io/badge/Buy%20Me%20a%20Coffee-支持开发-yellow?style=for-the-badge&logo=buy-me-a-coffee&logoColor=white)](https://buymeacoffee.com/oliverzhao)
+[![PayPal](https://img.shields.io/badge/PayPal-支持开发-blue?style=for-the-badge&logo=paypal&logoColor=white)](https://www.paypal.com/donate/?hosted_button_id=AJKMJMQA8YHPN)
 
 ## 📥 下载与安装
 
-[![下载 iPhoto 最新版本](https://img.shields.io/badge/⬇️%20下载-iPhoto%20最新版本-blue?style=for-the-badge&logo=windows)](https://github.com/OliverZhaohaibin/iPhotron-LocalPhotoAlbumManager/releases/download/v4.2.0/v4.20.exe)
+[![下载 iPhoto 最新版本](https://img.shields.io/badge/⬇️%20下载-iPhotron%20最新版本-blue?style=for-the-badge&logo=windows)](https://github.com/OliverZhaohaibin/iPhotron-LocalPhotoAlbumManager/releases/download/v4.2.0/v4.20.exe)
 
 **💡 快速安装：** 点击上方按钮直接下载最新的 Windows 安装程序（.exe）。
 

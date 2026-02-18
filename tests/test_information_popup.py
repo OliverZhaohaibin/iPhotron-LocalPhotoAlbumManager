@@ -104,3 +104,23 @@ def test_close_button_icon_size_matches_main_window(qapp: QApplication) -> None:
     assert btn.iconSize() == WINDOW_CONTROL_GLYPH_SIZE
     assert btn.size() == WINDOW_CONTROL_BUTTON_SIZE
     popup.close()
+
+
+def test_show_information_uses_information_popup(qapp: QApplication) -> None:
+    """``dialogs.show_information`` should create an ``InformationPopup``."""
+
+    from PySide6.QtWidgets import QWidget
+
+    from iPhoto.gui.ui.widgets import dialogs
+
+    parent = QWidget()
+    dialogs.show_information(parent, "Test message", title="Test Title")
+
+    children = parent.findChildren(InformationPopup)
+    assert len(children) == 1
+    popup = children[0]
+    assert popup.title() == "Test Title"
+    assert popup.message() == "Test message"
+    assert popup.isVisible()
+    popup.close()
+    parent.close()

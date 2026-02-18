@@ -49,11 +49,16 @@ def show_error(parent: QWidget, message: str, *, title: str = "iPhoto") -> None:
 
 
 def show_information(parent: QWidget, message: str, *, title: str = "iPhoto") -> None:
-    """Display an informational popup using the custom :class:`InformationPopup`.
+    """Display a blocking informational popup using :class:`InformationPopup`.
 
     The popup is centred over *parent* and reuses the main window's close
-    button for a consistent look and feel.
+    button for a consistent look and feel.  A local event loop keeps the
+    call blocking so that existing callers (e.g.
+    ``DialogController.prompt_for_basic_library()``) continue to work as
+    expected.
     """
+
+    from PySide6.QtCore import QEventLoop
 
     from .information_popup import InformationPopup
 
@@ -67,9 +72,12 @@ def show_information(parent: QWidget, message: str, *, title: str = "iPhoto") ->
             center.y() - popup.sizeHint().height() // 2,
         )
 
+    loop = QEventLoop()
+    popup.destroyed.connect(loop.quit)
     popup.show()
     popup.raise_()
     popup.activateWindow()
+    loop.exec()
 
 
 def show_warning(parent: QWidget, message: str, *, title: str = "iPhoto") -> None:

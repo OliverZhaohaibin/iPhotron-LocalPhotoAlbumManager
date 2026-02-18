@@ -107,20 +107,32 @@ def test_close_button_icon_size_matches_main_window(qapp: QApplication) -> None:
 
 
 def test_show_information_uses_information_popup(qapp: QApplication) -> None:
-    """``dialogs.show_information`` should create an ``InformationPopup``."""
+    """``dialogs.show_information`` should create an ``InformationPopup``.
 
+    Because ``show_information`` blocks via a local event loop, we schedule
+    a check-and-close via a single-shot timer.  The popup's properties are
+    captured before it is closed (``WA_DeleteOnClose`` destroys the C++
+    object on close).
+    """
+
+    from PySide6.QtCore import QTimer
     from PySide6.QtWidgets import QWidget
 
     from iPhoto.gui.ui.widgets import dialogs
 
     parent = QWidget()
+    captured: list[dict[str, str]] = []
+
+    def _check_and_close() -> None:
+        children = parent.findChildren(InformationPopup)
+        for child in children:
+            captured.append({"title": child.title(), "message": child.message()})
+            child.close()
+
+    QTimer.singleShot(50, _check_and_close)
     dialogs.show_information(parent, "Test message", title="Test Title")
 
-    children = parent.findChildren(InformationPopup)
-    assert len(children) == 1
-    popup = children[0]
-    assert popup.title() == "Test Title"
-    assert popup.message() == "Test message"
-    assert popup.isVisible()
-    popup.close()
+    assert len(captured) == 1
+    assert captured[0]["title"] == "Test Title"
+    assert captured[0]["message"] == "Test message"
     parent.close()

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from PySide6.QtCore import QRectF, Qt
-from PySide6.QtGui import QColor, QMouseEvent, QPainter, QPainterPath, QPalette
+from PySide6.QtGui import QMouseEvent, QPainter, QPainterPath, QPalette
 from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
@@ -14,7 +14,7 @@ from PySide6.QtWidgets import (
 )
 
 from ..icons import load_icon
-from .main_window_metrics import WINDOW_CONTROL_BUTTON_SIZE, WINDOW_CONTROL_GLYPH_SIZE
+from .main_window_metrics import TITLE_BAR_HEIGHT, WINDOW_CONTROL_BUTTON_SIZE, WINDOW_CONTROL_GLYPH_SIZE
 
 
 class InformationPopup(QWidget):
@@ -61,9 +61,7 @@ class InformationPopup(QWidget):
 
         # -- title bar -----------------------------------------------------
         self._title_bar = QWidget(self)
-        self._title_bar.setFixedHeight(
-            WINDOW_CONTROL_BUTTON_SIZE.height() + 16,
-        )
+        self._title_bar.setFixedHeight(TITLE_BAR_HEIGHT)
         title_layout = QHBoxLayout(self._title_bar)
         title_layout.setContentsMargins(16, 10, 12, 6)
         title_layout.setSpacing(8)
@@ -187,10 +185,16 @@ class InformationPopup(QWidget):
     def mouseMoveEvent(self, event: QMouseEvent) -> None:  # type: ignore[override]
         """Move the popup when dragging the title bar."""
 
-        if self._drag_active and self._drag_offset is not None:
-            new_pos = event.globalPosition().toPoint() - self._drag_offset
-            self.move(new_pos)
-            return
+        if self._drag_active:
+            if not (event.buttons() & Qt.MouseButton.LeftButton):
+                self._drag_active = False
+                self._drag_offset = None
+                return
+
+            if self._drag_offset is not None:
+                new_pos = event.globalPosition().toPoint() - self._drag_offset
+                self.move(new_pos)
+                return
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event: QMouseEvent) -> None:  # type: ignore[override]

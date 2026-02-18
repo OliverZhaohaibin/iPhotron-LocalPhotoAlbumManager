@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Optional
 
+from PySide6.QtCore import Qt
 from PySide6.QtGui import QPalette
 from PySide6.QtWidgets import QApplication, QFileDialog, QMessageBox, QWidget
 
@@ -48,11 +49,35 @@ def show_error(parent: QWidget, message: str, *, title: str = "iPhoto") -> None:
 
 
 def show_information(parent: QWidget, message: str, *, title: str = "iPhoto") -> None:
-    """Display an informational message box."""
+    """Display a blocking informational popup using :class:`InformationPopup`.
 
-    box = QMessageBox(QMessageBox.Icon.Information, title, message, QMessageBox.StandardButton.Ok, parent)
-    _apply_theme(box, parent)
-    box.exec()
+    The popup is centred over *parent* and reuses the main window's close
+    button for a consistent look and feel.  A local event loop keeps the
+    call blocking so that existing callers (e.g.
+    ``DialogController.prompt_for_basic_library()``) continue to work as
+    expected.
+    """
+
+    from PySide6.QtCore import QEventLoop
+
+    from .information_popup import InformationPopup
+
+    popup = InformationPopup(parent, title=title, message=message)
+    popup.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
+
+    if parent is not None:
+        center = parent.geometry().center()
+        popup.move(
+            center.x() - popup.sizeHint().width() // 2,
+            center.y() - popup.sizeHint().height() // 2,
+        )
+
+    loop = QEventLoop()
+    popup.destroyed.connect(loop.quit)
+    popup.show()
+    popup.raise_()
+    popup.activateWindow()
+    loop.exec()
 
 
 def show_warning(parent: QWidget, message: str, *, title: str = "iPhoto") -> None:

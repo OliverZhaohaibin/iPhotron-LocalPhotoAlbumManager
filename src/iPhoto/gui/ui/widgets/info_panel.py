@@ -8,8 +8,20 @@ from fractions import Fraction
 from pathlib import Path
 from typing import Any, Mapping, Optional
 
-from PySide6.QtCore import QDateTime, QLocale, Qt
-from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QVBoxLayout, QWidget
+from PySide6.QtCore import QDateTime, QLocale, QRectF, Qt
+from PySide6.QtGui import QMouseEvent, QPainter, QPainterPath, QPalette
+from PySide6.QtWidgets import (
+    QFrame,
+    QHBoxLayout,
+    QLabel,
+    QSizePolicy,
+    QToolButton,
+    QVBoxLayout,
+    QWidget,
+)
+
+from ..icons import load_icon
+from .main_window_metrics import WINDOW_CONTROL_BUTTON_SIZE, WINDOW_CONTROL_GLYPH_SIZE
 
 
 @dataclass
@@ -26,17 +38,67 @@ class _FormattedMetadata:
 
 
 class InfoPanel(QWidget):
-    """Small helper window that mirrors macOS Photos' info popover."""
+    """Small helper window that mirrors macOS Photos' info popover.
+
+    The panel uses a frameless rounded window with a custom title bar
+    whose close button reuses the main window's ``red.close.circle.svg``
+    glyph for visual consistency.
+    """
+
+    _CORNER_RADIUS = 12.0
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
-        super().__init__(parent, Qt.Window | Qt.Tool | Qt.WindowStaysOnTopHint)
-        self.setWindowTitle("Info")
+        super().__init__(
+            parent,
+            Qt.WindowType.Window
+            | Qt.WindowType.FramelessWindowHint
+            | Qt.WindowType.Tool
+            | Qt.WindowType.WindowStaysOnTopHint,
+        )
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, False)
         self.setMinimumWidth(320)
 
         self._metadata: Optional[dict[str, Any]] = None
         self._current_rel: Optional[str] = None
+        self._drag_active = False
+        self._drag_offset = None
 
+        # -- title bar -----------------------------------------------------
+        self._title_bar = QWidget(self)
+        self._title_bar.setFixedHeight(
+            WINDOW_CONTROL_BUTTON_SIZE.height() + 16,
+        )
+        title_layout = QHBoxLayout(self._title_bar)
+        title_layout.setContentsMargins(16, 10, 12, 6)
+        title_layout.setSpacing(8)
+
+        self._title_label = QLabel("Info", self._title_bar)
+        self._title_label.setObjectName("infoPanelTitleLabel")
+        self._title_label.setAlignment(
+            Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
+        )
+        self._title_label.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Preferred,
+        )
+        self._title_label.setStyleSheet("font-weight: bold; font-size: 14px;")
+        title_layout.addWidget(self._title_label, 1)
+
+        self._close_button = QToolButton(self._title_bar)
+        self._close_button.setIcon(load_icon("red.close.circle.svg"))
+        self._close_button.setIconSize(WINDOW_CONTROL_GLYPH_SIZE)
+        self._close_button.setFixedSize(WINDOW_CONTROL_BUTTON_SIZE)
+        self._close_button.setAutoRaise(True)
+        self._close_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._close_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
+        self._close_button.setToolTip("Close")
+        self._close_button.clicked.connect(self.close)
+        title_layout.addWidget(
+            self._close_button, 0, Qt.AlignmentFlag.AlignRight,
+        )
+
+        # -- content labels ------------------------------------------------
         self._filename_label = QLabel()
         self._filename_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
         self._filename_label.setWordWrap(True)
@@ -61,11 +123,18 @@ class InfoPanel(QWidget):
         self._exposure_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
         self._exposure_label.setWordWrap(True)
 
+        # -- root layout ---------------------------------------------------
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(16, 16, 16, 16)
-        layout.setSpacing(12)
-        layout.addWidget(self._filename_label)
-        layout.addWidget(self._timestamp_label)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        layout.addWidget(self._title_bar)
+
+        content = QWidget(self)
+        content_layout = QVBoxLayout(content)
+        content_layout.setContentsMargins(16, 8, 16, 16)
+        content_layout.setSpacing(12)
+        content_layout.addWidget(self._filename_label)
+        content_layout.addWidget(self._timestamp_label)
 
         metadata_frame = QWidget(self)
         metadata_layout = QVBoxLayout(metadata_frame)
@@ -74,20 +143,21 @@ class InfoPanel(QWidget):
         metadata_layout.addWidget(self._camera_label)
         metadata_layout.addWidget(self._lens_label)
         metadata_layout.addWidget(self._summary_label)
-        layout.addWidget(metadata_frame)
+        content_layout.addWidget(metadata_frame)
 
         separator = QFrame(self)
         separator.setFrameShape(QFrame.HLine)
         separator.setFrameShadow(QFrame.Sunken)
-        layout.addWidget(separator)
+        content_layout.addWidget(separator)
 
         exposure_container = QWidget(self)
         exposure_layout = QHBoxLayout(exposure_container)
         exposure_layout.setContentsMargins(0, 0, 0, 0)
         exposure_layout.addWidget(self._exposure_label)
-        layout.addWidget(exposure_container)
+        content_layout.addWidget(exposure_container)
 
-        layout.addStretch(1)
+        content_layout.addStretch(1)
+        layout.addWidget(content, 1)
 
     # ------------------------------------------------------------------
     # Public API
@@ -137,6 +207,72 @@ class InfoPanel(QWidget):
         """Return the relative path associated with the displayed asset."""
 
         return self._current_rel
+
+    @property
+    def close_button(self) -> QToolButton:
+        """Expose the close button for external signal wiring."""
+
+        return self._close_button
+
+    # ------------------------------------------------------------------
+    # QWidget overrides
+    # ------------------------------------------------------------------
+    def paintEvent(self, event) -> None:  # type: ignore[override]
+        """Draw an anti-aliased rounded rectangle matching the window palette."""
+
+        del event
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+
+        rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        radius = min(
+            self._CORNER_RADIUS,
+            min(rect.width(), rect.height()) / 2.0,
+        )
+
+        path = QPainterPath()
+        path.addRoundedRect(rect, radius, radius)
+
+        bg_color = self.palette().color(QPalette.ColorRole.Window)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.fillPath(path, bg_color)
+
+        border_color = self.palette().color(QPalette.ColorRole.Mid)
+        border_color.setAlpha(80)
+        painter.setPen(border_color)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawPath(path)
+
+    def mousePressEvent(self, event: QMouseEvent) -> None:  # type: ignore[override]
+        """Begin a drag when clicking on the title bar area."""
+
+        if event.button() == Qt.MouseButton.LeftButton:
+            local_pos = event.position().toPoint()
+            if self._title_bar.geometry().contains(local_pos):
+                self._drag_active = True
+                self._drag_offset = (
+                    event.globalPosition().toPoint() - self.frameGeometry().topLeft()
+                )
+                return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event: QMouseEvent) -> None:  # type: ignore[override]
+        """Move the panel when dragging the title bar."""
+
+        if self._drag_active and self._drag_offset is not None:
+            new_pos = event.globalPosition().toPoint() - self._drag_offset
+            self.move(new_pos)
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event: QMouseEvent) -> None:  # type: ignore[override]
+        """End a title-bar drag."""
+
+        if self._drag_active:
+            self._drag_active = False
+            self._drag_offset = None
+            return
+        super().mouseReleaseEvent(event)
 
     # ------------------------------------------------------------------
     # Internal helpers

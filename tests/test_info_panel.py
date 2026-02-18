@@ -74,3 +74,41 @@ def test_info_panel_video_missing_details_shows_fallback(qapp: QApplication) -> 
     assert panel._exposure_label.text() == "Detailed video information is unavailable."
     assert not panel._summary_label.isVisible()
     panel.close()
+
+
+def test_info_panel_frameless_window_flags(qapp: QApplication) -> None:
+    """The info panel should use a frameless window hint."""
+
+    from PySide6.QtCore import Qt
+
+    panel = InfoPanel()
+    flags = panel.windowFlags()
+    assert flags & Qt.WindowType.FramelessWindowHint
+    panel.close()
+
+
+def test_info_panel_close_button_matches_main_window(qapp: QApplication) -> None:
+    """The close button dimensions should match the main window's controls."""
+
+    from iPhoto.gui.ui.widgets.main_window_metrics import (
+        WINDOW_CONTROL_BUTTON_SIZE,
+        WINDOW_CONTROL_GLYPH_SIZE,
+    )
+
+    panel = InfoPanel()
+    btn = panel.close_button
+    assert btn is not None
+    assert btn.toolTip() == "Close"
+    assert btn.iconSize() == WINDOW_CONTROL_GLYPH_SIZE
+    assert btn.size() == WINDOW_CONTROL_BUTTON_SIZE
+    panel.close()
+
+
+def test_info_panel_close_button_closes(qapp: QApplication) -> None:
+    """Clicking the close button should hide the panel."""
+
+    panel = InfoPanel()
+    panel.show()
+    assert panel.isVisible()
+    panel.close_button.click()
+    assert not panel.isVisible()

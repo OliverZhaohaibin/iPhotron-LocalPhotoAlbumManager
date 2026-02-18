@@ -12,6 +12,7 @@ from .image_viewer import ImageViewer
 from .edit_sidebar import EditSidebar
 from .gallery_page import GalleryPageWidget
 from .info_panel import InfoPanel
+from .information_popup import InformationPopup
 from .main_header import MainHeaderWidget
 from .player_bar import PlayerBar
 from .video_area import VideoArea
@@ -34,6 +35,7 @@ __all__ = [
     "DetailPageWidget",
     "MainHeaderWidget",
     "InfoPanel",
+    "InformationPopup",
     "PlayerBar",
     "VideoArea",
     "PreviewWindow",

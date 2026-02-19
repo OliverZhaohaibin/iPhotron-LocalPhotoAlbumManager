@@ -64,31 +64,65 @@ QScrollArea {{
 """
 
 
-def _extract_segment(args):
-    """
-    Worker function for parallel thumbnail extraction.
-    Each call extracts thumbnails for one time segment of the video.
-    Runs in a subprocess with lowered priority to avoid starving the UI.
-    """
-    video_path, start_time, segment_duration, fps_rate, target_height, out_dir, seg_index = args
-
-    # Lower this worker process priority so UI stays responsive
+def _get_video_info(video_path):
+    """Probe video width, height, duration via ffprobe (thread-safe)."""
     try:
-        os.nice(10)
-    except (OSError, AttributeError):
-        pass  # nice() not available on all platforms
+        cmd = [
+            'ffprobe',
+            '-v', 'error',
+            '-select_streams', 'v:0',
+            '-show_entries', 'stream=width,height,duration',
+            '-of', 'json',
+            video_path,
+        ]
+        startupinfo = None
+        if os.name == 'nt':
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, startupinfo=startupinfo,
+        )
+        data = json.loads(result.stdout)
+        stream = data['streams'][0]
+        width = int(stream['width'])
+        height = int(stream['height'])
+        duration = float(stream.get('duration', 0))
+        if duration == 0:
+            cmd_fmt = [
+                'ffprobe', '-v', 'error',
+                '-show_entries', 'format=duration',
+                '-of', 'json', video_path,
+            ]
+            res = subprocess.run(
+                cmd_fmt, capture_output=True, text=True,
+                startupinfo=startupinfo,
+            )
+            data_fmt = json.loads(res.stdout)
+            duration = float(data_fmt['format']['duration'])
+        return width, height, duration
+    except Exception as e:
+        print(f"Error getting video info: {e}")
+        return 0, 0, 0
 
-    output_pattern = os.path.join(out_dir, f"seg{seg_index:03d}_%04d.jpg")
+
+def _extract_single_frame(args):
+    """
+    Extract exactly one frame at a specific timestamp using fast-seek.
+    Each ffmpeg call decodes only 1 frame (~50-100ms) instead of a whole segment.
+    Priority is lowered on the ffmpeg child process, not the Python process,
+    so the UI thread is never affected.
+    """
+    video_path, timestamp, target_height, out_path = args
 
     cmd = [
         'ffmpeg',
-        '-ss', f'{start_time:.4f}',
-        '-t', f'{segment_duration:.4f}',
+        '-ss', f'{timestamp:.4f}',
         '-i', video_path,
-        '-vf', f'fps={fps_rate:.4f},scale=-1:{target_height}',
-        '-q:v', '2',
+        '-vf', f'scale=-1:{target_height}',
+        '-frames:v', '1',
+        '-q:v', '3',
         '-y',
-        output_pattern,
+        out_path,
     ]
 
     try:
@@ -99,6 +133,9 @@ def _extract_segment(args):
             startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
             # BELOW_NORMAL_PRIORITY_CLASS on Windows
             popen_kwargs['creationflags'] = 0x00004000
+        else:
+            # Lower priority on the ffmpeg child process only (not the Python/UI process)
+            popen_kwargs['preexec_fn'] = lambda: os.nice(10)
         proc = subprocess.Popen(
             cmd,
             stdout=subprocess.DEVNULL,
@@ -107,69 +144,70 @@ def _extract_segment(args):
             **popen_kwargs,
         )
         proc.wait()
+        if os.path.exists(out_path) and os.path.getsize(out_path) > 0:
+            return out_path
     except Exception as e:
-        print(f"FFmpeg segment {seg_index} error: {e}")
-        return []
-
-    # Collect generated files sorted by name
-    files = sorted(
-        f for f in os.listdir(out_dir)
-        if f.startswith(f"seg{seg_index:03d}_") and f.endswith('.jpg')
-    )
-    return [os.path.join(out_dir, f) for f in files]
+        print(f"FFmpeg frame extraction error: {e}")
+    return None
 
 
 class ThumbnailWorker(QThread):
     """
-    Background thread that orchestrates parallel ffmpeg processes via
-    ProcessPoolExecutor to generate thumbnails without blocking the UI.
+    Background thread that probes the video and orchestrates parallel ffmpeg
+    single-frame extractions via ThreadPoolExecutor.
+
+    Key optimisations vs. the previous ProcessPoolExecutor + FPS approach:
+    - ffprobe runs in this thread, not on the UI thread.
+    - ThreadPoolExecutor (near-zero spawn cost) instead of ProcessPoolExecutor.
+    - Each ffmpeg extracts exactly 1 frame with -frames:v 1 + fast-seek (-ss before -i).
+    - Priority is set per ffmpeg child process via preexec_fn / creationflags.
     """
     thumbnails_ready = Signal(list)   # emits a sorted list of file paths
     error_occurred = Signal(str)
 
-    def __init__(self, video_path, target_height, fps_rate, duration, temp_dir,
+    def __init__(self, video_path, target_height, visible_width, temp_dir,
                  num_workers=None, parent=None):
         super().__init__(parent)
         self.video_path = video_path
         self.target_height = target_height
-        self.fps_rate = fps_rate
-        self.duration = duration
+        self.visible_width = visible_width
         self.temp_dir = temp_dir
-        # Default: use half of available CPUs (at least 2) to leave headroom for UI
+        # Use all CPUs — ffmpeg children are niced, so UI stays responsive
         if num_workers is None:
-            num_workers = max(2, (os.cpu_count() or 4) // 2)
+            num_workers = max(4, os.cpu_count() or 4)
         self.num_workers = num_workers
 
     def run(self):
         try:
-            num_segments = self.num_workers
-            seg_len = self.duration / num_segments
+            v_w, v_h, duration = _get_video_info(self.video_path)
+            if v_w <= 0 or v_h <= 0 or duration <= 0:
+                self.error_occurred.emit("Failed to probe video")
+                return
+
+            scaled_width = v_w * (self.target_height / v_h)
+            count_needed = int(self.visible_width / scaled_width) + 2
+            count_needed = max(count_needed, 5)
+            count_needed = min(count_needed, 60)
+
+            print(f"Video: {v_w}x{v_h}, Duration: {duration:.1f}s, "
+                  f"Extracting {count_needed} frames with {self.num_workers} threads")
+
+            # Evenly-spaced timestamps across the video
+            timestamps = [i * duration / count_needed for i in range(count_needed)]
 
             tasks = []
-            for i in range(num_segments):
-                start = i * seg_len
-                tasks.append((
-                    self.video_path,
-                    start,
-                    seg_len,
-                    self.fps_rate,
-                    self.target_height,
-                    self.temp_dir,
-                    i,
-                ))
+            for i, ts in enumerate(timestamps):
+                out_path = os.path.join(self.temp_dir, f"thumb_{i:04d}.jpg")
+                tasks.append((self.video_path, ts, self.target_height, out_path))
 
-            all_paths = []
-            with concurrent.futures.ProcessPoolExecutor(max_workers=self.num_workers) as pool:
-                futures = {pool.submit(_extract_segment, t): t[-1] for t in tasks}
-                results = {}
-                for future in concurrent.futures.as_completed(futures):
-                    seg_idx = futures[future]
-                    results[seg_idx] = future.result()
+            # ThreadPoolExecutor: threads are lightweight; ffmpeg subprocesses
+            # do the actual CPU work and are niced independently.
+            with concurrent.futures.ThreadPoolExecutor(
+                max_workers=self.num_workers,
+            ) as pool:
+                results = list(pool.map(_extract_single_frame, tasks))
 
-            # Reassemble in segment order
-            for idx in sorted(results.keys()):
-                all_paths.extend(results[idx])
-
+            all_paths = [p for p in results if p is not None]
             self.thumbnails_ready.emit(all_paths)
         except Exception as e:
             self.error_occurred.emit(str(e))
@@ -416,45 +454,8 @@ class VideoEditor(QMainWindow):
                 self.play_btn.setText("▶")
 
     def get_video_info(self, video_path):
-        """使用 ffprobe 获取视频时长和分辨率"""
-        try:
-            cmd = [
-                'ffprobe',
-                '-v', 'error',
-                '-select_streams', 'v:0',
-                '-show_entries', 'stream=width,height,duration',
-                '-of', 'json',
-                video_path
-            ]
-
-            startupinfo = None
-            if os.name == 'nt':
-                startupinfo = subprocess.STARTUPINFO()
-                startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-
-            result = subprocess.run(cmd, capture_output=True, text=True, startupinfo=startupinfo)
-            data = json.loads(result.stdout)
-
-            stream = data['streams'][0]
-            width = int(stream['width'])
-            height = int(stream['height'])
-
-            # duration 可能在 stream 中，也可能在 format 中
-            duration = float(stream.get('duration', 0))
-
-            # 如果 stream 里没有 duration，尝试从 format 里取
-            if duration == 0:
-                cmd_format = [
-                    'ffprobe', '-v', 'error', '-show_entries', 'format=duration', '-of', 'json', video_path
-                ]
-                res_fmt = subprocess.run(cmd_format, capture_output=True, text=True, startupinfo=startupinfo)
-                data_fmt = json.loads(res_fmt.stdout)
-                duration = float(data_fmt['format']['duration'])
-
-            return width, height, duration
-        except Exception as e:
-            print(f"Error getting video info: {e}")
-            return 0, 0, 0
+        """使用 ffprobe 获取视频时长和分辨率 (kept for API compat, delegates to module fn)"""
+        return _get_video_info(video_path)
 
     def generate_thumbnails(self, video_path):
         self.thumb_strip.clear()
@@ -463,34 +464,15 @@ class VideoEditor(QMainWindow):
             shutil.rmtree(self.temp_dir)
         self.temp_dir = tempfile.mkdtemp()
 
-        # 1. 目标高度
         target_height = BAR_HEIGHT - (2 * BORDER_THICKNESS)
 
-        # 2. 获取视频元数据
-        v_w, v_h, duration = self.get_video_info(video_path)
+        visible_width = self.thumb_strip.scroll_area.width()
+        if visible_width < 100:
+            visible_width = 1000
 
-        fps_rate = 1.0  # default
-
-        if v_w > 0 and v_h > 0 and duration > 0:
-            scaled_width = v_w * (target_height / v_h)
-
-            visible_width = self.thumb_strip.scroll_area.width()
-            if visible_width < 100:
-                visible_width = 1000
-
-            count_needed = int(visible_width / scaled_width) + 5
-            fps_rate = max(0.2, count_needed / duration)
-            fps_rate = min(fps_rate, 30.0)
-
-            print(f"Vertical Video Check: {v_w}x{v_h}, Duration: {duration}s")
-            print(f"Calculated: Need ~{count_needed} imgs, FPS set to: {fps_rate:.2f}")
-        else:
-            # ffprobe failed — use fallback
-            duration = 10.0
-
-        # 3. Launch parallel thumbnail generation in background thread
+        # Launch worker — ffprobe + parallel extraction all happen off-thread
         self._thumb_worker = ThumbnailWorker(
-            video_path, target_height, fps_rate, duration, self.temp_dir,
+            video_path, target_height, visible_width, self.temp_dir,
         )
         self._thumb_worker.thumbnails_ready.connect(self._on_thumbnails_ready)
         self._thumb_worker.error_occurred.connect(self._on_thumbnail_error)

@@ -71,6 +71,7 @@ def _get_video_info(video_path):
         cmd = [
             'ffprobe',
             '-v', 'error',
+            '-probesize', '32768', '-analyzeduration', '0',
             '-select_streams', 'v:0',
             '-show_entries', 'stream=width,height,duration',
             '-of', 'json',
@@ -91,6 +92,7 @@ def _get_video_info(video_path):
         if duration == 0:
             cmd_fmt = [
                 'ffprobe', '-v', 'error',
+                '-probesize', '32768', '-analyzeduration', '0',
                 '-show_entries', 'format=duration',
                 '-of', 'json', video_path,
             ]
@@ -298,6 +300,9 @@ def _try_extract_pipe_hwaccel(video_path, timestamp, thumb_w, thumb_h, hw):
 
     cmd = [
         'ffmpeg', '-hide_banner', '-loglevel', 'error',
+        '-nostdin',
+        '-probesize', '32768', '-analyzeduration', '0',
+        '-fflags', '+nobuffer',
         '-hwaccel', hwaccel,
         '-hwaccel_output_format', hw_out_fmt,
         '-ss', f'{timestamp:.4f}',
@@ -318,6 +323,9 @@ def _try_extract_pipe_sw(video_path, timestamp, thumb_w, thumb_h):
     """
     cmd = [
         'ffmpeg', '-hide_banner', '-loglevel', 'error',
+        '-nostdin',
+        '-probesize', '32768', '-analyzeduration', '0',
+        '-fflags', '+nobuffer',
         '-ss', f'{timestamp:.4f}',
         '-i', video_path,
         '-frames:v', '1',
@@ -343,6 +351,9 @@ def _try_extract_pipe_auto(video_path, timestamp, thumb_w, thumb_h):
     """
     cmd = [
         'ffmpeg', '-hide_banner', '-loglevel', 'error',
+        '-nostdin',
+        '-probesize', '32768', '-analyzeduration', '0',
+        '-fflags', '+nobuffer',
         '-hwaccel', 'auto',
         '-ss', f'{timestamp:.4f}',
         '-i', video_path,
@@ -424,7 +435,9 @@ def _extract_single_frame(args):
 
     # --- Fallback: file-based extraction (original approach) ---
     cmd = [
-        'ffmpeg',
+        'ffmpeg', '-nostdin',
+        '-probesize', '32768', '-analyzeduration', '0',
+        '-fflags', '+nobuffer',
         '-ss', f'{timestamp:.4f}',
         '-i', video_path,
         '-vf', f'scale=-1:{target_height}',
@@ -468,7 +481,10 @@ def _build_single_pass_cmd(video_path, thumb_w, thumb_h, fps_rate,
     - fps filter subsamples to the desired thumbnail rate
     - Continuous pipe output for progressive display
     """
-    cmd = ['ffmpeg', '-hide_banner', '-loglevel', 'error']
+    cmd = ['ffmpeg', '-hide_banner', '-loglevel', 'error',
+           '-nostdin',
+           '-probesize', '32768', '-analyzeduration', '0',
+           '-fflags', '+nobuffer']
     if hwaccel:
         cmd.extend(['-hwaccel', 'auto'])
     if keyframe_only:
@@ -732,13 +748,18 @@ class HandleButton(QPushButton):
 
 
 class ThumbnailBar(QWidget):
+    """
+    Thumbnail strip that draws all pixmaps directly via QPainter in
+    paintEvent, avoiding N child QLabel widgets and layout relayout.
+    """
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setFixedHeight(BAR_HEIGHT)
+        self._pixmaps = []  # list[QPixmap] — drawn in paintEvent
 
-        self.layout = QHBoxLayout(self)
-        self.layout.setContentsMargins(0, 0, 0, 0)
-        self.layout.setSpacing(0)
+        self._main_layout = QHBoxLayout(self)
+        self._main_layout.setContentsMargins(0, 0, 0, 0)
+        self._main_layout.setSpacing(0)
 
         # 1. 左手柄
         self.btn_left = HandleButton(arrow_type="left")
@@ -752,22 +773,8 @@ class ThumbnailBar(QWidget):
             QPushButton:hover {{ background-color: {HOVER_COLOR}; }}
         """)
 
-        # 2. 滚动区域
-        self.scroll_area = QScrollArea()
-        self.scroll_area.setWidgetResizable(True)
-        self.scroll_area.setFrameShape(QFrame.NoFrame)
-        self.scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self.scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-
-        self.strip_widget = QWidget()
-        self.strip_widget.setObjectName("StripContainer")
-
-        self.strip_layout = QHBoxLayout(self.strip_widget)
-        self.strip_layout.setSpacing(0)
-        self.strip_layout.setContentsMargins(0, BORDER_THICKNESS, 0, BORDER_THICKNESS)
-        self.strip_layout.addStretch()
-
-        self.scroll_area.setWidget(self.strip_widget)
+        # 2. 缩略图画布 (custom painted, no child widgets)
+        self._canvas = _ThumbnailCanvas(self)
 
         # 3. 右手柄
         self.btn_right = HandleButton(arrow_type="right")
@@ -784,45 +791,64 @@ class ThumbnailBar(QWidget):
             QPushButton:hover {{ background-color: {HOVER_COLOR}; }}
         """)
 
-        self.layout.addWidget(self.btn_left)
-        self.layout.addWidget(self.scroll_area)
-        self.layout.addWidget(self.btn_right)
+        self._main_layout.addWidget(self.btn_left)
+        self._main_layout.addWidget(self._canvas, stretch=1)
+        self._main_layout.addWidget(self.btn_right)
+
+    @property
+    def scroll_area(self):
+        """Compatibility: ThumbnailWorker uses .scroll_area.width() to
+        compute how many thumbnails to generate."""
+        return self._canvas
 
     def add_thumbnail(self, pixmap):
-        """
-        核心修改逻辑：
-        按高度缩放图片，保持原始宽高比，不强制拉伸宽度。
-        """
-        # 移除末尾的弹簧，以便添加新图
-        if self.strip_layout.count() > 0:
-            item = self.strip_layout.itemAt(self.strip_layout.count() - 1)
-            if item.spacerItem():
-                self.strip_layout.removeItem(item)
-
-        lbl = QLabel()
-
-        # 计算目标高度 (总高度 - 上下边距)
+        """Append a pixmap and trigger a repaint — no layout relayout."""
         target_height = BAR_HEIGHT - (2 * BORDER_THICKNESS)
-
-        # 1. 核心：使用 SmoothTransformation 保持比例缩放到目标高度
-        scaled_pixmap = pixmap.scaledToHeight(target_height, Qt.SmoothTransformation)
-
-        lbl.setPixmap(scaled_pixmap)
-
-        # 2. 核心：不要设置 scaledContents(True)，因为这会允许拉伸。
-        lbl.setScaledContents(False)
-
-        # 3. 设置固定大小为图片实际大小 (宽度自适应，高度固定)
-        lbl.setFixedSize(scaled_pixmap.width(), target_height)
-
-        self.strip_layout.addWidget(lbl)
-        self.strip_layout.addStretch()  # 重新添加弹簧保持左对齐
+        scaled = pixmap.scaledToHeight(
+            target_height, Qt.SmoothTransformation,
+        )
+        self._pixmaps.append(scaled)
+        self._canvas.set_pixmaps(self._pixmaps)
 
     def clear(self):
-        while self.strip_layout.count():
-            item = self.strip_layout.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
+        self._pixmaps.clear()
+        self._canvas.set_pixmaps(self._pixmaps)
+
+
+class _ThumbnailCanvas(QWidget):
+    """
+    Lightweight widget that paints a list of QPixmaps side by side
+    using QPainter.drawPixmap in paintEvent — zero child widgets,
+    zero layout overhead.
+    """
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._pixmaps = []
+        self.setObjectName("StripContainer")
+        self.setAttribute(Qt.WA_OpaquePaintEvent)
+
+    def set_pixmaps(self, pixmaps):
+        self._pixmaps = pixmaps
+        self.update()
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        h = self.height()
+        y_offset = BORDER_THICKNESS
+        draw_h = h - 2 * BORDER_THICKNESS
+
+        # Fill background using the widget's palette Window color
+        bg = self.palette().color(QPalette.Window)
+        painter.fillRect(self.rect(), bg)
+
+        x = 0
+        for pm in self._pixmaps:
+            # Stop drawing beyond visible width (no scrolling)
+            if x >= self.width():
+                break
+            painter.drawPixmap(x, y_offset, pm.width(), draw_h, pm)
+            x += pm.width()
+        painter.end()
 
 
 class VideoEditor(QMainWindow):

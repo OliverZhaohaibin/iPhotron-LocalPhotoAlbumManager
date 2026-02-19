@@ -316,6 +316,8 @@ class TestTryExtractPipeHwaccel:
         assert 'd3d11va' in cmd
         assert '-hwaccel_output_format' in cmd
         assert 'd3d11' in cmd
+        assert '-nostdin' in cmd
+        assert '-probesize' in cmd
         # Check the -vf filter chain
         vf_idx = cmd.index('-vf')
         vf = cmd[vf_idx + 1]
@@ -374,6 +376,7 @@ class TestTryExtractPipeSw:
         assert f'scale={w}:{h}' in vf
         assert 'format=bgra' in vf
         assert '-hwaccel' not in cmd  # no hwaccel in SW path
+        assert '-nostdin' in cmd  # stdin blocking prevention
 
 
 class TestTryExtractPipeAuto:
@@ -398,6 +401,8 @@ class TestTryExtractPipeAuto:
         assert cmd[hwaccel_idx + 1] == 'auto'
         # Should NOT have -hwaccel_output_format (auto doesn't need it)
         assert '-hwaccel_output_format' not in cmd
+        assert '-nostdin' in cmd
+        assert '-probesize' in cmd
         vf_idx = cmd.index('-vf')
         vf = cmd[vf_idx + 1]
         assert f'scale={w}:{h}' in vf
@@ -481,7 +486,7 @@ class TestExtractSingleFrame:
         assert result is None
 
     def test_file_fallback_ffmpeg_uses_ss(self, tmp_path: Path) -> None:
-        """File fallback still uses -ss and -frames:v 1."""
+        """File fallback still uses -ss and -frames:v 1 with perf flags."""
         out_path = str(tmp_path / "thumb_0001.jpg")
 
         with patch.object(video_demo, "_extract_frame_pipe", return_value=None), \
@@ -497,6 +502,8 @@ class TestExtractSingleFrame:
 
         assert "-ss" in captured_cmd
         assert "-frames:v" in captured_cmd
+        assert "-nostdin" in captured_cmd
+        assert "-probesize" in captured_cmd
 
     def test_unix_preexec_fn_sets_nice(self, tmp_path: Path) -> None:
         """On Unix, file fallback preexec_fn is set to nice the ffmpeg child."""
@@ -604,6 +611,9 @@ class TestBuildSinglePassCmd:
         assert '-f' in cmd
         assert 'rawvideo' in cmd
         assert 'pipe:1' in cmd
+        assert '-nostdin' in cmd
+        assert '-probesize' in cmd
+        assert '-fflags' in cmd
         vf_idx = cmd.index('-vf')
         vf = cmd[vf_idx + 1]
         assert 'fps=' in vf
@@ -619,6 +629,7 @@ class TestBuildSinglePassCmd:
         assert '-hwaccel' not in cmd
         assert '-skip_frame' in cmd
         assert 'nokey' in cmd
+        assert '-nostdin' in cmd
 
     def test_cpu_full_decode_command(self) -> None:
         """CPU without keyframe skip: no -hwaccel, no -skip_frame."""
@@ -628,6 +639,7 @@ class TestBuildSinglePassCmd:
         )
         assert '-hwaccel' not in cmd
         assert '-skip_frame' not in cmd
+        assert '-nostdin' in cmd
 
     def test_fps_rate_in_vf(self) -> None:
         """fps rate is correctly embedded in the -vf filter chain."""

@@ -212,3 +212,4 @@ __marimo__/
 /tmp/
 \\tmp\\
 **/pytest-of-*/
+**/thumb_*.jpg

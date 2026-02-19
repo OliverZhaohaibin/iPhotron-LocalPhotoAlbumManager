@@ -116,10 +116,10 @@ def _detect_hwaccel():
     Detect the best available ffmpeg hardware acceleration and GPU scale filter.
 
     Returns a dict with keys:
-      - 'hwaccel': str or None  (e.g. 'd3d11va', 'videotoolbox', 'vaapi', None)
-      - 'scale_filter': str     (e.g. 'scale_d3d11', 'scale_vt', 'scale_vaapi', 'scale')
+      - 'hwaccel': str or None  (e.g. 'd3d11va', 'cuda', 'videotoolbox', None)
+      - 'scale_filter': str     (e.g. 'scale_d3d11', 'scale_cuda', 'scale')
       - 'download_filter': str  (e.g. 'hwdownload,format=bgra' or '')
-      - 'pix_fmt': str          (output pixel format, e.g. 'bgra' or 'bgra')
+      - 'pix_fmt': str          (output pixel format, always 'bgra')
     """
     global _hwaccel_cache
     if _hwaccel_cache is not None:
@@ -142,44 +142,58 @@ def _detect_hwaccel():
             ['ffmpeg', '-hide_banner', '-hwaccels'],
             capture_output=True, text=True, startupinfo=startupinfo,
         )
-        hwaccels_text = result.stdout.lower()
+        # Check both stdout AND stderr — ffmpeg versions vary in output routing
+        hwaccels_text = (result.stdout + '\n' + result.stderr).lower()
 
         # Also check available filters for GPU scaling
         filter_result = subprocess.run(
             ['ffmpeg', '-hide_banner', '-filters'],
             capture_output=True, text=True, startupinfo=startupinfo,
         )
-        filters_text = filter_result.stdout.lower()
+        filters_text = (filter_result.stdout + '\n' + filter_result.stderr).lower()
 
-        # Preference order: d3d11va (Windows) > videotoolbox (macOS) > vaapi (Linux)
-        if 'd3d11va' in hwaccels_text:
-            _hwaccel_cache['hwaccel'] = 'd3d11va'
-            if 'scale_d3d11' in filters_text:
-                _hwaccel_cache['scale_filter'] = 'scale_d3d11'
+        skip_words = ('hardware', 'acceleration', 'methods:')
+        avail = [x for x in hwaccels_text.split() if x not in skip_words]
+        print(f"[hwaccel] Available accelerators: {avail}")
+
+        # Platform-dependent preference order:
+        #   Windows: cuda (NVIDIA) > d3d11va (all GPUs) > qsv (Intel)
+        #   macOS:   videotoolbox
+        #   Linux:   cuda > vaapi
+        # Each entry: (hwaccel_name, gpu_scale_filter_name)
+        if os.name == 'nt':
+            candidates = [
+                ('cuda', 'scale_cuda'),
+                ('d3d11va', 'scale_d3d11'),
+                ('qsv', 'scale_qsv'),
+            ]
+        elif sys.platform == 'darwin':
+            candidates = [
+                ('videotoolbox', 'scale_vt'),
+            ]
+        else:
+            candidates = [
+                ('cuda', 'scale_cuda'),
+                ('vaapi', 'scale_vaapi'),
+            ]
+
+        for hwaccel_name, gpu_scale in candidates:
+            if hwaccel_name in hwaccels_text:
+                _hwaccel_cache['hwaccel'] = hwaccel_name
+                if gpu_scale in filters_text:
+                    _hwaccel_cache['scale_filter'] = gpu_scale
+                else:
+                    _hwaccel_cache['scale_filter'] = 'scale'
                 _hwaccel_cache['download_filter'] = 'hwdownload,format=bgra'
-            else:
-                # d3d11va decode but CPU scale
-                _hwaccel_cache['download_filter'] = 'hwdownload,format=bgra'
-                _hwaccel_cache['scale_filter'] = 'scale'
-        elif 'videotoolbox' in hwaccels_text:
-            _hwaccel_cache['hwaccel'] = 'videotoolbox'
-            if 'scale_vt' in filters_text:
-                _hwaccel_cache['scale_filter'] = 'scale_vt'
-                _hwaccel_cache['download_filter'] = 'hwdownload,format=bgra'
-            else:
-                _hwaccel_cache['download_filter'] = 'hwdownload,format=bgra'
-                _hwaccel_cache['scale_filter'] = 'scale'
-        elif 'vaapi' in hwaccels_text:
-            _hwaccel_cache['hwaccel'] = 'vaapi'
-            if 'scale_vaapi' in filters_text:
-                _hwaccel_cache['scale_filter'] = 'scale_vaapi'
-                _hwaccel_cache['download_filter'] = 'hwdownload,format=bgra'
-            else:
-                _hwaccel_cache['download_filter'] = 'hwdownload,format=bgra'
-                _hwaccel_cache['scale_filter'] = 'scale'
+                print(f"[hwaccel] Selected: {hwaccel_name}, "
+                      f"GPU scale: {gpu_scale if gpu_scale in filters_text else 'N/A (CPU scale)'}")
+                break
+
+        if _hwaccel_cache['hwaccel'] is None:
+            print("[hwaccel] No hardware acceleration detected, will use software decode")
 
     except Exception as e:
-        print(f"hwaccel detection failed: {e}")
+        print(f"[hwaccel] Detection failed: {e}")
 
     return _hwaccel_cache
 
@@ -187,9 +201,11 @@ def _detect_hwaccel():
 def _build_hwaccel_output_format(hwaccel):
     """Return the -hwaccel_output_format value for a given hwaccel."""
     mapping = {
+        'cuda': 'cuda',
         'd3d11va': 'd3d11',
         'videotoolbox': 'videotoolbox_vld',
         'vaapi': 'vaapi',
+        'qsv': 'qsv',
     }
     return mapping.get(hwaccel, hwaccel)
 
@@ -216,14 +232,16 @@ def _extract_frame_pipe(video_path, timestamp, thumb_w, thumb_h):
     """
     Extract a single frame as raw BGRA pixels via pipe.
 
-    Tries GPU-accelerated path first (d3d11va / videotoolbox / vaapi),
-    then falls back to software decode + pipe, then file-based extraction.
+    Fallback order:
+      1. Specific GPU decode + GPU scale (d3d11va/cuda/videotoolbox/vaapi)
+      2. Auto GPU decode + CPU scale (-hwaccel auto)
+      3. Software decode + CPU scale
 
     Returns (width, height, bytes) on success, or None on failure.
     """
     hw = _detect_hwaccel()
 
-    # --- Attempt 1: GPU-accelerated pipe ---
+    # --- Attempt 1: Specific GPU decode + GPU/CPU scale ---
     if hw['hwaccel'] is not None:
         result = _try_extract_pipe_hwaccel(
             video_path, timestamp, thumb_w, thumb_h, hw,
@@ -231,7 +249,15 @@ def _extract_frame_pipe(video_path, timestamp, thumb_w, thumb_h):
         if result is not None:
             return result
 
-    # --- Attempt 2: Software decode + pipe ---
+    # --- Attempt 2: Auto GPU decode + CPU scale ---
+    # Uses -hwaccel auto which lets ffmpeg pick the best GPU decoder.
+    # This catches cases where specific hwaccel detection fails but
+    # the GPU is still available.
+    result = _try_extract_pipe_auto(video_path, timestamp, thumb_w, thumb_h)
+    if result is not None:
+        return result
+
+    # --- Attempt 3: Software decode + pipe ---
     result = _try_extract_pipe_sw(video_path, timestamp, thumb_w, thumb_h)
     if result is not None:
         return result
@@ -260,11 +286,11 @@ def _try_extract_pipe_hwaccel(video_path, timestamp, thumb_w, thumb_h, hw):
 
     # Build the -vf filter chain
     if scale_filter.startswith('scale_') and download:
-        # GPU scale + hwdownload
+        # GPU scale + hwdownload — ensures format=bgra at the end
         vf = f"{scale_filter}={thumb_w}:{thumb_h},{download}"
     elif download:
-        # hwdownload first, then CPU scale
-        vf = f"{download},scale={thumb_w}:{thumb_h}"
+        # hwdownload first, then CPU scale, then ensure bgra output
+        vf = f"{download},scale={thumb_w}:{thumb_h},format=bgra"
     else:
         vf = f"scale={thumb_w}:{thumb_h},format=bgra"
 
@@ -301,6 +327,32 @@ def _try_extract_pipe_sw(video_path, timestamp, thumb_w, thumb_h):
     return _run_pipe_cmd(cmd, thumb_w, thumb_h)
 
 
+def _try_extract_pipe_auto(video_path, timestamp, thumb_w, thumb_h):
+    """
+    GPU auto-detect decode + CPU scale via rawvideo pipe.
+
+    Uses '-hwaccel auto' which lets ffmpeg pick the best available hardware
+    decoder (NVDEC, D3D11VA, DXVA2, VideoToolbox, VAAPI, etc.) without
+    requiring specific output format or GPU scale filters.
+
+    This is the most robust GPU path — it works on any system where ffmpeg
+    has GPU support, even if the specific hwaccel detection in _detect_hwaccel()
+    fails.
+    """
+    cmd = [
+        'ffmpeg', '-hide_banner', '-loglevel', 'error',
+        '-hwaccel', 'auto',
+        '-ss', f'{timestamp:.4f}',
+        '-i', video_path,
+        '-frames:v', '1',
+        '-vf', f'scale={thumb_w}:{thumb_h},format=bgra',
+        '-f', 'rawvideo',
+        'pipe:1',
+    ]
+
+    return _run_pipe_cmd(cmd, thumb_w, thumb_h)
+
+
 def _run_pipe_cmd(cmd, expected_w, expected_h):
     """
     Run an ffmpeg command that outputs rawvideo BGRA to stdout pipe.
@@ -318,12 +370,24 @@ def _run_pipe_cmd(cmd, expected_w, expected_h):
             **popen_kwargs,
         )
 
-        if proc.returncode != 0 or len(proc.stdout) != expected_size:
+        if proc.returncode != 0:
+            stderr_msg = proc.stderr[:300] if proc.stderr else b''
+            if isinstance(stderr_msg, bytes):
+                stderr_msg = stderr_msg.decode('utf-8', errors='replace')
+            # Only log at debug level for expected fallback scenarios
+            hwaccel_in_cmd = any(x in cmd for x in ['-hwaccel'])
+            label = "GPU" if hwaccel_in_cmd else "SW"
+            print(f"[ffmpeg {label}] exit={proc.returncode}: {stderr_msg.strip()}")
+            return None
+
+        if len(proc.stdout) != expected_size:
+            print(f"[ffmpeg] Unexpected frame size: got {len(proc.stdout)}, "
+                  f"expected {expected_size} ({expected_w}x{expected_h}x4)")
             return None
 
         return (expected_w, expected_h, proc.stdout)
     except Exception as e:
-        print(f"Pipe extraction error: {e}")
+        print(f"[ffmpeg] Pipe extraction error: {e}")
         return None
 
 

@@ -35,6 +35,7 @@ _build_hwaccel_output_format = video_demo._build_hwaccel_output_format
 _run_pipe_cmd = video_demo._run_pipe_cmd
 _try_extract_pipe_hwaccel = video_demo._try_extract_pipe_hwaccel
 _try_extract_pipe_sw = video_demo._try_extract_pipe_sw
+_try_extract_pipe_auto = video_demo._try_extract_pipe_auto
 _extract_frame_pipe = video_demo._extract_frame_pipe
 _build_popen_priority_kwargs = video_demo._build_popen_priority_kwargs
 
@@ -52,9 +53,37 @@ class TestDetectHwaccel:
 
     def test_detects_d3d11va_with_scale_d3d11(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """When ffmpeg reports d3d11va + scale_d3d11 filter."""
+        monkeypatch.setattr(os, "name", "nt")
+        mock_si = MagicMock()
+        mock_si.dwFlags = 0
+        monkeypatch.setattr(subprocess, "STARTUPINFO", lambda: mock_si, raising=False)
+        monkeypatch.setattr(subprocess, "STARTF_USESHOWWINDOW", 1, raising=False)
+
         def fake_run(cmd, **kw):
             if '-hwaccels' in cmd:
                 return subprocess.CompletedProcess(cmd, 0, stdout="d3d11va\ncuda\n", stderr="")
+            if '-filters' in cmd:
+                return subprocess.CompletedProcess(cmd, 0, stdout="scale_d3d11\nscale_cuda\n", stderr="")
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        hw = _detect_hwaccel()
+        # On Windows, cuda is preferred over d3d11va
+        assert hw['hwaccel'] == 'cuda'
+        assert hw['scale_filter'] == 'scale_cuda'
+        assert 'hwdownload' in hw['download_filter']
+
+    def test_detects_d3d11va_when_no_cuda(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """d3d11va is selected when CUDA is not available (AMD/Intel GPU)."""
+        monkeypatch.setattr(os, "name", "nt")
+        mock_si = MagicMock()
+        mock_si.dwFlags = 0
+        monkeypatch.setattr(subprocess, "STARTUPINFO", lambda: mock_si, raising=False)
+        monkeypatch.setattr(subprocess, "STARTF_USESHOWWINDOW", 1, raising=False)
+
+        def fake_run(cmd, **kw):
+            if '-hwaccels' in cmd:
+                return subprocess.CompletedProcess(cmd, 0, stdout="d3d11va\n", stderr="")
             if '-filters' in cmd:
                 return subprocess.CompletedProcess(cmd, 0, stdout="scale_d3d11\n", stderr="")
             return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
@@ -67,6 +96,12 @@ class TestDetectHwaccel:
 
     def test_detects_d3d11va_without_gpu_scale(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """d3d11va decode but no GPU scale filter → CPU scale after hwdownload."""
+        monkeypatch.setattr(os, "name", "nt")
+        mock_si = MagicMock()
+        mock_si.dwFlags = 0
+        monkeypatch.setattr(subprocess, "STARTUPINFO", lambda: mock_si, raising=False)
+        monkeypatch.setattr(subprocess, "STARTF_USESHOWWINDOW", 1, raising=False)
+
         def fake_run(cmd, **kw):
             if '-hwaccels' in cmd:
                 return subprocess.CompletedProcess(cmd, 0, stdout="d3d11va\n", stderr="")
@@ -80,8 +115,28 @@ class TestDetectHwaccel:
         assert hw['scale_filter'] == 'scale'
         assert 'hwdownload' in hw['download_filter']
 
+    def test_detects_cuda_on_linux(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """CUDA detection on Linux (NVIDIA GPU)."""
+        monkeypatch.setattr(os, "name", "posix")
+        monkeypatch.setattr(sys, "platform", "linux")
+
+        def fake_run(cmd, **kw):
+            if '-hwaccels' in cmd:
+                return subprocess.CompletedProcess(cmd, 0, stdout="cuda\nvaapi\n", stderr="")
+            if '-filters' in cmd:
+                return subprocess.CompletedProcess(cmd, 0, stdout="scale_cuda\nscale_vaapi\n", stderr="")
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        hw = _detect_hwaccel()
+        assert hw['hwaccel'] == 'cuda'
+        assert hw['scale_filter'] == 'scale_cuda'
+
     def test_detects_videotoolbox(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """macOS videotoolbox detection."""
+        monkeypatch.setattr(os, "name", "posix")
+        monkeypatch.setattr(sys, "platform", "darwin")
+
         def fake_run(cmd, **kw):
             if '-hwaccels' in cmd:
                 return subprocess.CompletedProcess(cmd, 0, stdout="videotoolbox\n", stderr="")
@@ -96,6 +151,9 @@ class TestDetectHwaccel:
 
     def test_detects_vaapi(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Linux VAAPI detection."""
+        monkeypatch.setattr(os, "name", "posix")
+        monkeypatch.setattr(sys, "platform", "linux")
+
         def fake_run(cmd, **kw):
             if '-hwaccels' in cmd:
                 return subprocess.CompletedProcess(cmd, 0, stdout="vaapi\n", stderr="")
@@ -107,6 +165,26 @@ class TestDetectHwaccel:
         hw = _detect_hwaccel()
         assert hw['hwaccel'] == 'vaapi'
         assert hw['scale_filter'] == 'scale_vaapi'
+
+    def test_detects_hwaccel_from_stderr(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Some ffmpeg versions output hwaccel info to stderr."""
+        monkeypatch.setattr(os, "name", "nt")
+        mock_si = MagicMock()
+        mock_si.dwFlags = 0
+        monkeypatch.setattr(subprocess, "STARTUPINFO", lambda: mock_si, raising=False)
+        monkeypatch.setattr(subprocess, "STARTF_USESHOWWINDOW", 1, raising=False)
+
+        def fake_run(cmd, **kw):
+            if '-hwaccels' in cmd:
+                return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="d3d11va\n")
+            if '-filters' in cmd:
+                return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="scale_d3d11\n")
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        hw = _detect_hwaccel()
+        assert hw['hwaccel'] == 'd3d11va'
+        assert hw['scale_filter'] == 'scale_d3d11'
 
     def test_no_hwaccel_available(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """When no hardware acceleration is available, returns None hwaccel."""
@@ -148,14 +226,20 @@ class TestBuildHwaccelOutputFormat:
     def test_d3d11va_maps_to_d3d11(self) -> None:
         assert _build_hwaccel_output_format('d3d11va') == 'd3d11'
 
+    def test_cuda_maps_to_cuda(self) -> None:
+        assert _build_hwaccel_output_format('cuda') == 'cuda'
+
     def test_videotoolbox_maps_to_vld(self) -> None:
         assert _build_hwaccel_output_format('videotoolbox') == 'videotoolbox_vld'
 
     def test_vaapi_maps_to_vaapi(self) -> None:
         assert _build_hwaccel_output_format('vaapi') == 'vaapi'
 
+    def test_qsv_maps_to_qsv(self) -> None:
+        assert _build_hwaccel_output_format('qsv') == 'qsv'
+
     def test_unknown_returns_itself(self) -> None:
-        assert _build_hwaccel_output_format('cuda') == 'cuda'
+        assert _build_hwaccel_output_format('dxva2') == 'dxva2'
 
 
 class TestRunPipeCmd:
@@ -189,9 +273,9 @@ class TestRunPipeCmd:
         """When ffmpeg exits with error, returns None."""
         with patch.object(subprocess, "run") as mock_run:
             mock_run.return_value = subprocess.CompletedProcess(
-                [], 1, stdout=b"", stderr=b"error",
+                [], 1, stdout=b"", stderr=b"error message",
             )
-            result = _run_pipe_cmd(['ffmpeg', 'test'], 4, 2)
+            result = _run_pipe_cmd(['-hwaccel', 'auto', 'test'], 4, 2)
 
         assert result is None
 
@@ -241,7 +325,7 @@ class TestTryExtractPipeHwaccel:
         assert 'pipe:1' in cmd
 
     def test_hwdownload_then_cpu_scale(self) -> None:
-        """When no GPU scale filter, hwdownload first then CPU scale."""
+        """When no GPU scale filter, hwdownload first then CPU scale with format=bgra."""
         hw = {
             'hwaccel': 'd3d11va',
             'scale_filter': 'scale',
@@ -263,6 +347,8 @@ class TestTryExtractPipeHwaccel:
         vf = cmd[vf_idx + 1]
         assert 'hwdownload,format=bgra' in vf
         assert 'scale=160:90' in vf
+        # Ensure format=bgra appears at the end for proper output
+        assert vf.endswith('format=bgra')
 
 
 class TestTryExtractPipeSw:
@@ -287,6 +373,44 @@ class TestTryExtractPipeSw:
         assert f'scale={w}:{h}' in vf
         assert 'format=bgra' in vf
         assert '-hwaccel' not in cmd  # no hwaccel in SW path
+
+
+class TestTryExtractPipeAuto:
+    """Tests for _try_extract_pipe_auto()."""
+
+    def test_auto_gpu_pipe_uses_hwaccel_auto(self) -> None:
+        """Auto GPU pipe uses -hwaccel auto for robust GPU detection."""
+        w, h = 80, 42
+        expected_buf = b'\x00' * (w * h * 4)
+
+        with patch.object(subprocess, "run") as mock_run:
+            mock_run.return_value = subprocess.CompletedProcess(
+                [], 0, stdout=expected_buf, stderr=b"",
+            )
+            result = _try_extract_pipe_auto("video.mp4", 5.0, w, h)
+            cmd = mock_run.call_args[0][0]
+
+        assert result is not None
+        assert result == (w, h, expected_buf)
+        assert '-hwaccel' in cmd
+        hwaccel_idx = cmd.index('-hwaccel')
+        assert cmd[hwaccel_idx + 1] == 'auto'
+        # Should NOT have -hwaccel_output_format (auto doesn't need it)
+        assert '-hwaccel_output_format' not in cmd
+        vf_idx = cmd.index('-vf')
+        vf = cmd[vf_idx + 1]
+        assert f'scale={w}:{h}' in vf
+        assert 'format=bgra' in vf
+
+    def test_auto_gpu_returns_none_on_failure(self) -> None:
+        """When auto GPU fails, returns None."""
+        with patch.object(subprocess, "run") as mock_run:
+            mock_run.return_value = subprocess.CompletedProcess(
+                [], 1, stdout=b"", stderr=b"hwaccel error",
+            )
+            result = _try_extract_pipe_auto("video.mp4", 5.0, 80, 42)
+
+        assert result is None
 
 
 class TestExtractSingleFrame:

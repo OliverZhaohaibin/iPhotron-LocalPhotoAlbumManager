@@ -211,3 +211,4 @@ __marimo__/
 # Test artifacts
 /tmp/
 \\tmp\\
+**/pytest-of-*/

@@ -437,8 +437,6 @@ class ThumbnailWorker(QThread):
             count_needed = min(count_needed, 60)
 
             # Warm up hwaccel detection (cached globally)
-            _detect_hwaccel()
-
             hw = _detect_hwaccel()
             print(f"Video: {v_w}x{v_h}, Duration: {duration:.1f}s, "
                   f"Extracting {count_needed} frames @ {thumb_w}x{target_h}, "
@@ -741,7 +739,9 @@ class VideoEditor(QMainWindow):
         for r in results:
             if r[0] == 'pipe':
                 _, w, h, buf = r
-                # QImage from raw BGRA buffer — .copy() ensures QImage owns the data
+                # Note: ffmpeg outputs BGRA byte order. On little-endian systems
+                # (Windows/Linux x86), QImage.Format_ARGB32 stores pixels as
+                # B-G-R-A in memory, which matches ffmpeg's BGRA output exactly.
                 img = QImage(buf, w, h, w * 4, QImage.Format.Format_ARGB32).copy()
                 pix = QPixmap.fromImage(img)
             else:

@@ -3,11 +3,12 @@ import os
 import subprocess
 import tempfile
 import shutil
-import json  # 新增：用于解析视频信息
+import json
+import concurrent.futures
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                                QHBoxLayout, QPushButton, QLabel, QFileDialog,
                                QScrollArea, QFrame, QSizePolicy)
-from PySide6.QtCore import Qt, QUrl, QSize
+from PySide6.QtCore import Qt, QUrl, QSize, QThread, Signal
 from PySide6.QtGui import QIcon, QPixmap, QPalette, QPainter, QPen
 from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
 from PySide6.QtMultimediaWidgets import QVideoWidget
@@ -61,6 +62,117 @@ QScrollArea {{
     border: none;
 }}
 """
+
+
+def _extract_segment(args):
+    """
+    Worker function for parallel thumbnail extraction.
+    Each call extracts thumbnails for one time segment of the video.
+    Runs in a subprocess with lowered priority to avoid starving the UI.
+    """
+    video_path, start_time, segment_duration, fps_rate, target_height, out_dir, seg_index = args
+
+    # Lower this worker process priority so UI stays responsive
+    try:
+        os.nice(10)
+    except (OSError, AttributeError):
+        pass  # nice() not available on all platforms
+
+    output_pattern = os.path.join(out_dir, f"seg{seg_index:03d}_%04d.jpg")
+
+    cmd = [
+        'ffmpeg',
+        '-ss', f'{start_time:.4f}',
+        '-t', f'{segment_duration:.4f}',
+        '-i', video_path,
+        '-vf', f'fps={fps_rate:.4f},scale=-1:{target_height}',
+        '-q:v', '2',
+        '-y',
+        output_pattern,
+    ]
+
+    try:
+        startupinfo = None
+        popen_kwargs = {}
+        if os.name == 'nt':
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            # BELOW_NORMAL_PRIORITY_CLASS on Windows
+            popen_kwargs['creationflags'] = 0x00004000
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            startupinfo=startupinfo,
+            **popen_kwargs,
+        )
+        proc.wait()
+    except Exception as e:
+        print(f"FFmpeg segment {seg_index} error: {e}")
+        return []
+
+    # Collect generated files sorted by name
+    files = sorted(
+        f for f in os.listdir(out_dir)
+        if f.startswith(f"seg{seg_index:03d}_") and f.endswith('.jpg')
+    )
+    return [os.path.join(out_dir, f) for f in files]
+
+
+class ThumbnailWorker(QThread):
+    """
+    Background thread that orchestrates parallel ffmpeg processes via
+    ProcessPoolExecutor to generate thumbnails without blocking the UI.
+    """
+    thumbnails_ready = Signal(list)   # emits a sorted list of file paths
+    error_occurred = Signal(str)
+
+    def __init__(self, video_path, target_height, fps_rate, duration, temp_dir,
+                 num_workers=None, parent=None):
+        super().__init__(parent)
+        self.video_path = video_path
+        self.target_height = target_height
+        self.fps_rate = fps_rate
+        self.duration = duration
+        self.temp_dir = temp_dir
+        # Default: use half of available CPUs (at least 2) to leave headroom for UI
+        if num_workers is None:
+            num_workers = max(2, (os.cpu_count() or 4) // 2)
+        self.num_workers = num_workers
+
+    def run(self):
+        try:
+            num_segments = self.num_workers
+            seg_len = self.duration / num_segments
+
+            tasks = []
+            for i in range(num_segments):
+                start = i * seg_len
+                tasks.append((
+                    self.video_path,
+                    start,
+                    seg_len,
+                    self.fps_rate,
+                    self.target_height,
+                    self.temp_dir,
+                    i,
+                ))
+
+            all_paths = []
+            with concurrent.futures.ProcessPoolExecutor(max_workers=self.num_workers) as pool:
+                futures = {pool.submit(_extract_segment, t): t[-1] for t in tasks}
+                results = {}
+                for future in concurrent.futures.as_completed(futures):
+                    seg_idx = futures[future]
+                    results[seg_idx] = future.result()
+
+            # Reassemble in segment order
+            for idx in sorted(results.keys()):
+                all_paths.extend(results[idx])
+
+            self.thumbnails_ready.emit(all_paths)
+        except Exception as e:
+            self.error_occurred.emit(str(e))
 
 
 class HandleButton(QPushButton):
@@ -208,6 +320,7 @@ class VideoEditor(QMainWindow):
         self.setStyleSheet(STYLESHEET)
 
         self.temp_dir = None
+        self._thumb_worker = None
 
         # --- 主布局 ---
         central_widget = QWidget()
@@ -350,79 +463,61 @@ class VideoEditor(QMainWindow):
             shutil.rmtree(self.temp_dir)
         self.temp_dir = tempfile.mkdtemp()
 
-        output_pattern = os.path.join(self.temp_dir, "thumb_%03d.jpg")
-
         # 1. 目标高度
         target_height = BAR_HEIGHT - (2 * BORDER_THICKNESS)
 
         # 2. 获取视频元数据
         v_w, v_h, duration = self.get_video_info(video_path)
 
-        # 默认 filter (如果ffprobe失败)
-        filter_str = f'fps=1,scale=-1:{target_height}'
+        fps_rate = 1.0  # default
 
         if v_w > 0 and v_h > 0 and duration > 0:
-            # 3. 计算缩放后的单张图片宽度
-            # Aspect Ratio = v_w / v_h
             scaled_width = v_w * (target_height / v_h)
 
-            # 4. 获取显示区域的总宽度
-            # (如果窗口刚启动还未 fully layout，取一个较大的默认值以保证填满)
             visible_width = self.thumb_strip.scroll_area.width()
             if visible_width < 100:
-                visible_width = 1000  # 默认假定屏幕宽度
+                visible_width = 1000
 
-            # 5. 计算填满屏幕所需的图片数量 (加一点冗余)
             count_needed = int(visible_width / scaled_width) + 5
-
-            # 6. 计算所需的 FPS (帧率 = 需要的总张数 / 视频总秒数)
-            # 限制最小 FPS 为 0.2 (防止超长视频生成太少)
             fps_rate = max(0.2, count_needed / duration)
-
-            # 限制最大 FPS (可选，防止极短视频生成几百张图卡死)
-            # 比如限制最多每秒 30 张
             fps_rate = min(fps_rate, 30.0)
 
             print(f"Vertical Video Check: {v_w}x{v_h}, Duration: {duration}s")
             print(f"Calculated: Need ~{count_needed} imgs, FPS set to: {fps_rate:.2f}")
+        else:
+            # ffprobe failed — use fallback
+            duration = 10.0
 
-            filter_str = f'fps={fps_rate:.4f},scale=-1:{target_height}'
+        # 3. Launch parallel thumbnail generation in background thread
+        self._thumb_worker = ThumbnailWorker(
+            video_path, target_height, fps_rate, duration, self.temp_dir,
+        )
+        self._thumb_worker.thumbnails_ready.connect(self._on_thumbnails_ready)
+        self._thumb_worker.error_occurred.connect(self._on_thumbnail_error)
+        self._thumb_worker.start()
 
-        cmd = [
-            'ffmpeg',
-            '-i', video_path,
-            '-vf', filter_str,
-            '-q:v', '2',
-            '-y',
-            output_pattern
-        ]
+    def _on_thumbnails_ready(self, paths):
+        """Slot: called on the main/UI thread when all thumbnails are done."""
+        if not paths:
+            self._on_thumbnail_error("No thumbnails generated")
+            return
+        for p in paths:
+            pix = QPixmap(p)
+            if not pix.isNull():
+                self.thumb_strip.add_thumbnail(pix)
 
-        try:
-            startupinfo = None
-            if os.name == 'nt':
-                startupinfo = subprocess.STARTUPINFO()
-                startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-
-            subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                           startupinfo=startupinfo)
-
-            files = sorted(os.listdir(self.temp_dir))
-            for f in files:
-                if f.endswith('.jpg'):
-                    full_path = os.path.join(self.temp_dir, f)
-                    pix = QPixmap(full_path)
-                    if not pix.isNull():
-                        self.thumb_strip.add_thumbnail(pix)
-
-        except Exception as e:
-            print(f"FFmpeg Error: {e}")
-            # Fallback：灰色方块
-            fallback = QPixmap(THUMB_WIDTH, target_height)
-            fallback.fill(Qt.darkGray)
-            for _ in range(10):
-                self.thumb_strip.add_thumbnail(fallback)
+    def _on_thumbnail_error(self, msg):
+        """Slot: fallback grey rectangles when generation fails."""
+        print(f"Thumbnail generation error: {msg}")
+        target_height = BAR_HEIGHT - (2 * BORDER_THICKNESS)
+        fallback = QPixmap(THUMB_WIDTH, target_height)
+        fallback.fill(Qt.darkGray)
+        for _ in range(10):
+            self.thumb_strip.add_thumbnail(fallback)
 
     def closeEvent(self, event):
+        if self._thumb_worker and self._thumb_worker.isRunning():
+            self._thumb_worker.wait(3000)
         if self.temp_dir and os.path.exists(self.temp_dir):
             shutil.rmtree(self.temp_dir)
         event.accept()

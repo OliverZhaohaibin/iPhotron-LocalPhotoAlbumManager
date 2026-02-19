@@ -118,7 +118,7 @@ def _detect_hwaccel():
     Returns a dict with keys:
       - 'hwaccel': str or None  (e.g. 'd3d11va', 'cuda', 'videotoolbox', None)
       - 'scale_filter': str     (e.g. 'scale_d3d11', 'scale_cuda', 'scale')
-      - 'download_filter': str  (e.g. 'hwdownload,format=bgra' or '')
+      - 'download_filter': str  (e.g. 'hwdownload' or '')
       - 'pix_fmt': str          (output pixel format, always 'bgra')
     """
     global _hwaccel_cache
@@ -184,7 +184,7 @@ def _detect_hwaccel():
                     _hwaccel_cache['scale_filter'] = gpu_scale
                 else:
                     _hwaccel_cache['scale_filter'] = 'scale'
-                _hwaccel_cache['download_filter'] = 'hwdownload,format=bgra'
+                _hwaccel_cache['download_filter'] = 'hwdownload'
                 print(f"[hwaccel] Selected: {hwaccel_name}, "
                       f"GPU scale: {gpu_scale if gpu_scale in filters_text else 'N/A (CPU scale)'}")
                 break
@@ -276,8 +276,9 @@ def _try_extract_pipe_hwaccel(video_path, timestamp, thumb_w, thumb_h, hw):
              -vf "<gpu_scale>=<W>:<H>,hwdownload,format=bgra"
              -f rawvideo pipe:1
 
-    Decoding and scaling happen on the GPU; only the tiny thumbnail is
-    downloaded to CPU memory, avoiding the JPEG encode/decode round-trip.
+    Note: hwdownload outputs the native GPU pixel format (e.g. nv12 for
+    CUDA). The format=bgra filter converts it after download. These must
+    be separate filters — hwdownload cannot output bgra directly.
     """
     hwaccel = hw['hwaccel']
     hw_out_fmt = _build_hwaccel_output_format(hwaccel)
@@ -286,10 +287,10 @@ def _try_extract_pipe_hwaccel(video_path, timestamp, thumb_w, thumb_h, hw):
 
     # Build the -vf filter chain
     if scale_filter.startswith('scale_') and download:
-        # GPU scale + hwdownload — ensures format=bgra at the end
-        vf = f"{scale_filter}={thumb_w}:{thumb_h},{download}"
+        # GPU scale + hwdownload (native fmt) + convert to bgra
+        vf = f"{scale_filter}={thumb_w}:{thumb_h},{download},format=bgra"
     elif download:
-        # hwdownload first, then CPU scale, then ensure bgra output
+        # hwdownload (native fmt) + CPU scale + convert to bgra
         vf = f"{download},scale={thumb_w}:{thumb_h},format=bgra"
     else:
         vf = f"scale={thumb_w}:{thumb_h},format=bgra"

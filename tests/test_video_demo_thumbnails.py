@@ -295,7 +295,7 @@ class TestTryExtractPipeHwaccel:
         hw = {
             'hwaccel': 'd3d11va',
             'scale_filter': 'scale_d3d11',
-            'download_filter': 'hwdownload,format=bgra',
+            'download_filter': 'hwdownload',
             'pix_fmt': 'bgra',
         }
         w, h = 160, 90
@@ -320,16 +320,18 @@ class TestTryExtractPipeHwaccel:
         vf = cmd[vf_idx + 1]
         assert 'scale_d3d11=160:90' in vf
         assert 'hwdownload' in vf
+        # format=bgra must be a separate filter AFTER hwdownload
+        assert vf.endswith('format=bgra')
         assert '-f' in cmd
         assert 'rawvideo' in cmd
         assert 'pipe:1' in cmd
 
     def test_hwdownload_then_cpu_scale(self) -> None:
-        """When no GPU scale filter, hwdownload first then CPU scale with format=bgra."""
+        """When no GPU scale filter, hwdownload first then CPU scale."""
         hw = {
             'hwaccel': 'd3d11va',
             'scale_filter': 'scale',
-            'download_filter': 'hwdownload,format=bgra',
+            'download_filter': 'hwdownload',
             'pix_fmt': 'bgra',
         }
         w, h = 160, 90
@@ -345,10 +347,8 @@ class TestTryExtractPipeHwaccel:
         assert result is not None
         vf_idx = cmd.index('-vf')
         vf = cmd[vf_idx + 1]
-        assert 'hwdownload,format=bgra' in vf
-        assert 'scale=160:90' in vf
-        # Ensure format=bgra appears at the end for proper output
-        assert vf.endswith('format=bgra')
+        # Order: hwdownload → scale → format=bgra
+        assert vf == 'hwdownload,scale=160:90,format=bgra'
 
 
 class TestTryExtractPipeSw:

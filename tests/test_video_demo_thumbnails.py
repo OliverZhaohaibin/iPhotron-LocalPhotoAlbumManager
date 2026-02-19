@@ -1088,7 +1088,6 @@ class TestDetectRotationPyav:
     def test_no_rotation_metadata(self) -> None:
         stream = MagicMock()
         stream.metadata = {}
-        stream.side_data = {}
         rot, vflip = _detect_rotation_pyav(stream)
         assert rot == 0
         assert vflip is False
@@ -1096,14 +1095,12 @@ class TestDetectRotationPyav:
     def test_rotate_tag_90(self) -> None:
         stream = MagicMock()
         stream.metadata = {'rotate': '90'}
-        stream.side_data = {}
         rot, vflip = _detect_rotation_pyav(stream)
         assert rot == 90
 
     def test_rotate_tag_270(self) -> None:
         stream = MagicMock()
         stream.metadata = {'rotate': '270'}
-        stream.side_data = {}
         rot, vflip = _detect_rotation_pyav(stream)
         assert rot == 270
 
@@ -1113,3 +1110,57 @@ class TestDetectRotationPyav:
         stream.metadata = {'rotate': '180'}
         rot, vflip = _detect_rotation_pyav(stream)
         assert rot == 180
+
+    def test_frame_rotation_90(self) -> None:
+        """Detects 90° CW from frame.rotation (CCW=-90)."""
+        stream = MagicMock()
+        stream.metadata = {}
+        frame = MagicMock()
+        frame.rotation = -90  # CCW → 90° CW
+        frame.side_data = {}
+        container = MagicMock()
+        container.decode.return_value = iter([frame])
+        rot, vflip = _detect_rotation_pyav(stream, container)
+        assert rot == 90
+
+    def test_frame_rotation_270(self) -> None:
+        """Detects 270° CW from frame.rotation (CCW=90)."""
+        stream = MagicMock()
+        stream.metadata = {}
+        frame = MagicMock()
+        frame.rotation = 90  # CCW → 270° CW
+        frame.side_data = {}
+        container = MagicMock()
+        container.decode.return_value = iter([frame])
+        rot, vflip = _detect_rotation_pyav(stream, container)
+        assert rot == 270
+
+    def test_frame_rotation_180(self) -> None:
+        """Detects 180° from frame.rotation."""
+        stream = MagicMock()
+        stream.metadata = {}
+        frame = MagicMock()
+        frame.rotation = -180
+        frame.side_data = {}
+        container = MagicMock()
+        container.decode.return_value = iter([frame])
+        rot, vflip = _detect_rotation_pyav(stream, container)
+        assert rot == 180
+
+    def test_rotate_tag_takes_priority_over_frame(self) -> None:
+        """When rotate tag exists, frame.rotation is not checked."""
+        stream = MagicMock()
+        stream.metadata = {'rotate': '90'}
+        frame = MagicMock()
+        frame.rotation = -180  # would give 180 if checked
+        container = MagicMock()
+        container.decode.return_value = iter([frame])
+        rot, vflip = _detect_rotation_pyav(stream, container)
+        assert rot == 90
+
+    def test_no_container_no_frame_check(self) -> None:
+        """Without container, only metadata tag is checked."""
+        stream = MagicMock()
+        stream.metadata = {}
+        rot, vflip = _detect_rotation_pyav(stream, container=None)
+        assert rot == 0

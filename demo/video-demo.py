@@ -232,8 +232,8 @@ def _get_video_info_pyav(video_path):
         if duration <= 0 and container.duration:
             duration = container.duration / _av_module.time_base
 
-        # Detect rotation from stream metadata or side_data
-        rotation, vflip = _detect_rotation_pyav(stream)
+        # Detect rotation from stream metadata or frame display-matrix
+        rotation, vflip = _detect_rotation_pyav(stream, container)
         container.close()
 
         # Swap to display dimensions for 90°/270° rotation
@@ -246,18 +246,22 @@ def _get_video_info_pyav(video_path):
         return 0, 0, 0, 0, False
 
 
-def _detect_rotation_pyav(stream):
+def _detect_rotation_pyav(stream, container=None):
     """Detect rotation and vflip from a PyAV video stream.
 
-    Checks ``stream.metadata['rotate']`` (older containers) and
-    ``stream.side_data`` display matrix (modern containers).
+    Checks two sources in order:
+    1. ``stream.metadata['rotate']`` — older MP4/MOV with rotation tag.
+    2. First decoded frame — modern containers using display-matrix side
+       data (most modern phones).  Requires *container* so we can decode
+       one frame.  Checks ``frame.rotation`` first, then falls back to
+       ``frame.side_data['DISPLAYMATRIX']`` dict access.
 
     Returns (rotation_degrees, vflip) normalised to 0/90/180/270.
     """
     rotation = 0
     vflip = False
 
-    # Method 1: metadata tag (common in MP4/MOV from phones)
+    # Method 1: metadata tag (common in MP4/MOV from older phones)
     try:
         rotate_val = stream.metadata.get('rotate', '')
         if rotate_val:
@@ -265,19 +269,29 @@ def _detect_rotation_pyav(stream):
     except (ValueError, TypeError, AttributeError):
         pass
 
-    # Method 2: side_data display matrix (modern containers)
-    if rotation == 0:
+    # Method 2: decode one frame and read rotation from frame-level data.
+    # PyAV exposes the display-matrix rotation on *frames*, not streams.
+    # frame.rotation returns CCW degrees in [-180, 180].
+    if rotation == 0 and container is not None:
         try:
-            sd = getattr(stream, 'side_data', {})
-            if sd and hasattr(sd, 'get'):
-                dm = sd.get('DISPLAYMATRIX')
-                if dm is not None:
-                    # dm may be a dict with 'rotation' key or raw matrix
-                    if isinstance(dm, dict):
-                        r = float(dm.get('rotation', 0))
-                        rotation = int(-r) % 360
-                    elif isinstance(dm, (int, float)):
-                        rotation = int(-dm) % 360
+            container.seek(0, stream=stream)
+            for frame in container.decode(stream):
+                # Try frame.rotation (direct attribute, PyAV >= 12)
+                fr = getattr(frame, 'rotation', None)
+                if fr is not None and fr != 0:
+                    rotation = int(-fr) % 360  # CCW → CW
+                else:
+                    # Fallback: frame.side_data dict
+                    fsd = getattr(frame, 'side_data', None)
+                    if fsd and hasattr(fsd, 'get'):
+                        dm = fsd.get('DISPLAYMATRIX')
+                        if dm is not None:
+                            if isinstance(dm, dict):
+                                r = float(dm.get('rotation', 0))
+                                rotation = int(-r) % 360
+                            elif isinstance(dm, (int, float)):
+                                rotation = int(-dm) % 360
+                break  # only need the first frame
         except Exception:
             pass
 

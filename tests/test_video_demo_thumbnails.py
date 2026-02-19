@@ -42,6 +42,9 @@ _try_extract_pipe_auto = video_demo._try_extract_pipe_auto
 _extract_frame_pipe = video_demo._extract_frame_pipe
 _build_popen_priority_kwargs = video_demo._build_popen_priority_kwargs
 _build_single_pass_cmd = video_demo._build_single_pass_cmd
+_detect_rotation_pyav = video_demo._detect_rotation_pyav
+_parse_rotation_from_ffprobe = video_demo._parse_rotation_from_ffprobe
+_displaymatrix_has_vflip = video_demo._displaymatrix_has_vflip
 
 
 @pytest.fixture(autouse=True)
@@ -578,23 +581,53 @@ class TestGetVideoInfo:
     """Unit tests for _get_video_info."""
 
     def test_returns_width_height_duration(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Successful probe returns (width, height, duration)."""
+        """Successful probe returns (width, height, duration, rotation, vflip)."""
         fake_output = '{"streams":[{"width":1920,"height":1080,"duration":"30.0"}]}'
         fake_result = subprocess.CompletedProcess([], 0, stdout=fake_output, stderr="")
         monkeypatch.setattr(subprocess, "run", lambda *a, **kw: fake_result)
 
-        w, h, d = _get_video_info("test.mp4")
-        assert (w, h, d) == (1920, 1080, 30.0)
+        w, h, d, rot, vf = _get_video_info("test.mp4")
+        assert (w, h, d, rot, vf) == (1920, 1080, 30.0, 0, False)
 
     def test_returns_zeros_on_failure(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """On probe failure, returns (0, 0, 0)."""
+        """On probe failure, returns (0, 0, 0, 0, False)."""
         monkeypatch.setattr(
             subprocess, "run",
             lambda *a, **kw: subprocess.CompletedProcess([], 1, stdout="", stderr="error"),
         )
 
-        w, h, d = _get_video_info("nonexistent.mp4")
-        assert (w, h, d) == (0, 0, 0)
+        w, h, d, rot, vf = _get_video_info("nonexistent.mp4")
+        assert (w, h, d, rot, vf) == (0, 0, 0, 0, False)
+
+    def test_rotation_90_swaps_dimensions(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """When rotate=90 tag is present, width and height are swapped."""
+        fake_output = '{"streams":[{"width":1920,"height":1080,"duration":"30.0","tags":{"rotate":"90"}}]}'
+        fake_result = subprocess.CompletedProcess([], 0, stdout=fake_output, stderr="")
+        monkeypatch.setattr(subprocess, "run", lambda *a, **kw: fake_result)
+
+        w, h, d, rot, vf = _get_video_info("portrait.mp4")
+        assert (w, h) == (1080, 1920)
+        assert rot == 90
+
+    def test_rotation_270_swaps_dimensions(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """When rotate=270 tag is present, width and height are swapped."""
+        fake_output = '{"streams":[{"width":1920,"height":1080,"duration":"30.0","tags":{"rotate":"270"}}]}'
+        fake_result = subprocess.CompletedProcess([], 0, stdout=fake_output, stderr="")
+        monkeypatch.setattr(subprocess, "run", lambda *a, **kw: fake_result)
+
+        w, h, d, rot, vf = _get_video_info("portrait.mp4")
+        assert (w, h) == (1080, 1920)
+        assert rot == 270
+
+    def test_rotation_180_keeps_dimensions(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """When rotate=180 tag is present, dimensions stay the same."""
+        fake_output = '{"streams":[{"width":1920,"height":1080,"duration":"30.0","tags":{"rotate":"180"}}]}'
+        fake_result = subprocess.CompletedProcess([], 0, stdout=fake_output, stderr="")
+        monkeypatch.setattr(subprocess, "run", lambda *a, **kw: fake_result)
+
+        w, h, d, rot, vf = _get_video_info("flipped.mp4")
+        assert (w, h) == (1920, 1080)
+        assert rot == 180
 
 
 class TestBuildSinglePassCmd:
@@ -664,7 +697,7 @@ class TestGetVideoInfoPyav:
     """Tests for _get_video_info_pyav()."""
 
     def test_returns_width_height_duration(self) -> None:
-        """Successful probe returns (width, height, duration)."""
+        """Successful probe returns (width, height, duration, rotation, vflip)."""
         mock_stream = MagicMock()
         mock_stream.codec_context.width = 1920
         mock_stream.codec_context.height = 1080
@@ -673,6 +706,8 @@ class TestGetVideoInfoPyav:
         mock_stream.time_base.__float__ = lambda self: 1 / 30000.0
         mock_stream.time_base.__mul__ = lambda self, other: other * (1 / 30000.0)
         mock_stream.time_base.__rmul__ = lambda self, other: other * (1 / 30000.0)
+        mock_stream.metadata = {}
+        mock_stream.side_data = {}
 
         mock_container = MagicMock()
         mock_container.streams.video = [mock_stream]
@@ -680,11 +715,13 @@ class TestGetVideoInfoPyav:
 
         with patch.object(video_demo, '_av_module') as mock_av:
             mock_av.open.return_value = mock_container
-            w, h, d = _get_video_info_pyav("test.mp4")
+            w, h, d, rot, vf = _get_video_info_pyav("test.mp4")
 
         assert w == 1920
         assert h == 1080
         assert d == pytest.approx(30.0, abs=0.1)
+        assert rot == 0
+        assert vf is False
 
     def test_falls_back_to_container_duration(self) -> None:
         """When stream.duration is None, uses container.duration."""
@@ -693,6 +730,8 @@ class TestGetVideoInfoPyav:
         mock_stream.codec_context.height = 2160
         mock_stream.duration = None
         mock_stream.time_base = None
+        mock_stream.metadata = {}
+        mock_stream.side_data = {}
 
         mock_container = MagicMock()
         mock_container.streams.video = [mock_stream]
@@ -701,19 +740,43 @@ class TestGetVideoInfoPyav:
         with patch.object(video_demo, '_av_module') as mock_av:
             mock_av.time_base = 1_000_000
             mock_av.open.return_value = mock_container
-            w, h, d = _get_video_info_pyav("test.mp4")
+            w, h, d, rot, vf = _get_video_info_pyav("test.mp4")
 
         assert w == 3840
         assert h == 2160
         assert d == pytest.approx(60.0, abs=0.1)
 
     def test_returns_zeros_on_failure(self) -> None:
-        """On probe failure, returns (0, 0, 0)."""
+        """On probe failure, returns (0, 0, 0, 0, False)."""
         with patch.object(video_demo, '_av_module') as mock_av:
             mock_av.open.side_effect = Exception("file not found")
-            w, h, d = _get_video_info_pyav("nonexistent.mp4")
+            w, h, d, rot, vf = _get_video_info_pyav("nonexistent.mp4")
 
-        assert (w, h, d) == (0, 0, 0)
+        assert (w, h, d, rot, vf) == (0, 0, 0, 0, False)
+
+    def test_rotation_90_swaps_dimensions(self) -> None:
+        """When rotate=90 metadata tag, dimensions are swapped."""
+        mock_stream = MagicMock()
+        mock_stream.codec_context.width = 1920
+        mock_stream.codec_context.height = 1080
+        mock_stream.duration = 300000
+        mock_stream.time_base = MagicMock()
+        mock_stream.time_base.__float__ = lambda self: 1 / 30000.0
+        mock_stream.time_base.__mul__ = lambda self, o: o * (1 / 30000.0)
+        mock_stream.time_base.__rmul__ = lambda self, o: o * (1 / 30000.0)
+        mock_stream.metadata = {'rotate': '90'}
+        mock_stream.side_data = {}
+
+        mock_container = MagicMock()
+        mock_container.streams.video = [mock_stream]
+        mock_container.duration = None
+
+        with patch.object(video_demo, '_av_module') as mock_av:
+            mock_av.open.return_value = mock_container
+            w, h, d, rot, vf = _get_video_info_pyav("portrait.mp4")
+
+        assert (w, h) == (1080, 1920)
+        assert rot == 90
 
 
 class TestPyavExtractSegment:
@@ -767,6 +830,68 @@ class TestPyavExtractSegment:
             _pyav_extract_segment("t.mp4", indices, 80, 42)
         mock_frame.to_image.assert_called_with(
             width=80, height=42, interpolation='FAST_BILINEAR',
+        )
+
+    def test_rotation_90_swaps_extract_dims(self) -> None:
+        """For 90° rotation, extract at swapped dims then rotate."""
+        mc, mock_frame = self._make_mock_container()
+        # For 90°: raw extract at (42, 80), then rotate to (80, 42)
+        mock_img = MagicMock()
+        mock_img.tobytes.return_value = b'\x00' * (80 * 42 * 3)
+        mock_img.transpose.return_value = mock_img
+        mock_frame.to_image.return_value = mock_img
+        indices = [(0, 0.0)]
+        with patch.object(video_demo, '_av_module') as mock_av:
+            mock_av.open.return_value = mc
+            results = _pyav_extract_segment(
+                "t.mp4", indices, 80, 42, rotation=90,
+            )
+        # Should extract at swapped dims (h, w) = (42, 80)
+        mock_frame.to_image.assert_called_with(
+            width=42, height=80, interpolation='FAST_BILINEAR',
+        )
+        # Should call transpose for rotation
+        from PIL import Image
+        mock_img.transpose.assert_called_with(Image.Transpose.ROTATE_270)
+        assert len(results) == 1
+        assert results[0][1] == 80  # display width
+        assert results[0][2] == 42  # display height
+
+    def test_rotation_180_keeps_dims(self) -> None:
+        """For 180° rotation, extract at same dims then rotate."""
+        mc, mock_frame = self._make_mock_container()
+        mock_img = MagicMock()
+        mock_img.tobytes.return_value = b'\x00' * (80 * 42 * 3)
+        mock_img.transpose.return_value = mock_img
+        mock_frame.to_image.return_value = mock_img
+        indices = [(0, 0.0)]
+        with patch.object(video_demo, '_av_module') as mock_av:
+            mock_av.open.return_value = mc
+            results = _pyav_extract_segment(
+                "t.mp4", indices, 80, 42, rotation=180,
+            )
+        mock_frame.to_image.assert_called_with(
+            width=80, height=42, interpolation='FAST_BILINEAR',
+        )
+        from PIL import Image
+        mock_img.transpose.assert_called_with(Image.Transpose.ROTATE_180)
+
+    def test_vflip_applied(self) -> None:
+        """Vertical flip is applied when vflip=True."""
+        mc, mock_frame = self._make_mock_container()
+        mock_img = MagicMock()
+        mock_img.tobytes.return_value = b'\x00' * (80 * 42 * 3)
+        mock_img.transpose.return_value = mock_img
+        mock_frame.to_image.return_value = mock_img
+        indices = [(0, 0.0)]
+        with patch.object(video_demo, '_av_module') as mock_av:
+            mock_av.open.return_value = mc
+            _pyav_extract_segment(
+                "t.mp4", indices, 80, 42, vflip=True,
+            )
+        from PIL import Image
+        mock_img.transpose.assert_called_with(
+            Image.Transpose.FLIP_TOP_BOTTOM,
         )
 
     def test_closes_container_on_error(self) -> None:
@@ -863,3 +988,128 @@ class TestExtractThumbnailsPyav:
                 results = _extract_thumbnails_pyav("test.mp4", 10, 80, 42)
         # Should be 10 results, and all tuples (w, h, data)
         assert len(results) == 10
+
+
+# ---------------------------------------------------------------------------
+# Rotation / flip detection tests
+# ---------------------------------------------------------------------------
+
+class TestParseRotationFromFfprobe:
+    """Tests for _parse_rotation_from_ffprobe()."""
+
+    def test_no_rotation(self) -> None:
+        rot, vflip = _parse_rotation_from_ffprobe({})
+        assert rot == 0
+        assert vflip is False
+
+    def test_rotate_tag_90(self) -> None:
+        rot, vflip = _parse_rotation_from_ffprobe(
+            {'tags': {'rotate': '90'}},
+        )
+        assert rot == 90
+
+    def test_rotate_tag_270(self) -> None:
+        rot, vflip = _parse_rotation_from_ffprobe(
+            {'tags': {'rotate': '270'}},
+        )
+        assert rot == 270
+
+    def test_rotate_tag_180(self) -> None:
+        rot, vflip = _parse_rotation_from_ffprobe(
+            {'tags': {'rotate': '180'}},
+        )
+        assert rot == 180
+
+    def test_display_matrix_rotation(self) -> None:
+        """side_data_list with Display Matrix rotation=-90 → 90° CW."""
+        sd = {
+            'side_data_list': [{
+                'side_data_type': 'Display Matrix',
+                'rotation': -90,
+            }],
+        }
+        rot, vflip = _parse_rotation_from_ffprobe(sd)
+        assert rot == 90
+
+    def test_display_matrix_rotation_negative_270(self) -> None:
+        """rotation=-270 → 270° CW."""
+        sd = {
+            'side_data_list': [{
+                'side_data_type': 'Display Matrix',
+                'rotation': -270,
+            }],
+        }
+        rot, vflip = _parse_rotation_from_ffprobe(sd)
+        assert rot == 270
+
+    def test_snaps_to_nearest_90(self) -> None:
+        """Non-standard rotation (e.g. 89°) snaps to nearest 90°."""
+        rot, _ = _parse_rotation_from_ffprobe({'tags': {'rotate': '89'}})
+        assert rot == 90
+        rot, _ = _parse_rotation_from_ffprobe({'tags': {'rotate': '91'}})
+        assert rot == 90
+
+    def test_rotate_tag_takes_priority_over_side_data(self) -> None:
+        """When both rotate tag and side_data exist, rotate tag wins."""
+        sd = {
+            'tags': {'rotate': '180'},
+            'side_data_list': [{
+                'side_data_type': 'Display Matrix',
+                'rotation': -90,
+            }],
+        }
+        rot, _ = _parse_rotation_from_ffprobe(sd)
+        assert rot == 180
+
+
+class TestDisplaymatrixHasVflip:
+    """Tests for _displaymatrix_has_vflip()."""
+
+    def test_normal_matrix(self) -> None:
+        # Identity-like: positive [1][1] → no vflip
+        dm = "00010000 00000000 00000000\n00000000 00010000 00000000\n00000000 00000000 40000000"
+        assert _displaymatrix_has_vflip(dm) is False
+
+    def test_vflip_matrix(self) -> None:
+        # Negative [1][0] in second row → vflip
+        dm = "00010000 00000000 00000000\nFFFF0000 00000000 00000000\n00000000 00000000 40000000"
+        assert _displaymatrix_has_vflip(dm) is True
+
+    def test_empty_string(self) -> None:
+        assert _displaymatrix_has_vflip("") is False
+
+    def test_invalid_string(self) -> None:
+        assert _displaymatrix_has_vflip("not a matrix") is False
+
+
+class TestDetectRotationPyav:
+    """Tests for _detect_rotation_pyav()."""
+
+    def test_no_rotation_metadata(self) -> None:
+        stream = MagicMock()
+        stream.metadata = {}
+        stream.side_data = {}
+        rot, vflip = _detect_rotation_pyav(stream)
+        assert rot == 0
+        assert vflip is False
+
+    def test_rotate_tag_90(self) -> None:
+        stream = MagicMock()
+        stream.metadata = {'rotate': '90'}
+        stream.side_data = {}
+        rot, vflip = _detect_rotation_pyav(stream)
+        assert rot == 90
+
+    def test_rotate_tag_270(self) -> None:
+        stream = MagicMock()
+        stream.metadata = {'rotate': '270'}
+        stream.side_data = {}
+        rot, vflip = _detect_rotation_pyav(stream)
+        assert rot == 270
+
+    def test_no_side_data_attr(self) -> None:
+        """Gracefully handles missing side_data attribute."""
+        stream = MagicMock(spec=[])
+        stream.metadata = {'rotate': '180'}
+        rot, vflip = _detect_rotation_pyav(stream)
+        assert rot == 180

@@ -14,6 +14,11 @@ except ImportError:
     _av_module = None
     HAS_PYAV = False
 
+try:
+    from PIL import Image as _PILImage
+except ImportError:
+    _PILImage = None
+
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                                QHBoxLayout, QPushButton, QLabel, QFileDialog,
                                QScrollArea, QFrame, QSizePolicy)
@@ -83,14 +88,21 @@ QScrollArea {{
 
 
 def _get_video_info(video_path):
-    """Probe video width, height, duration via ffprobe (thread-safe)."""
+    """Probe video display dimensions, duration, rotation and vflip via ffprobe.
+
+    Returns (display_w, display_h, duration, rotation, vflip) where
+    display_w/display_h are the dimensions after applying rotation metadata,
+    rotation is 0/90/180/270 degrees, and vflip indicates vertical flip.
+    """
     try:
         cmd = [
             'ffprobe',
             '-v', 'error',
             '-probesize', '32768', '-analyzeduration', '0',
             '-select_streams', 'v:0',
-            '-show_entries', 'stream=width,height,duration',
+            '-show_entries',
+            'stream=width,height,duration:stream_tags=rotate'
+            ':stream_side_data=rotation',
             '-of', 'json',
             video_path,
         ]
@@ -119,10 +131,85 @@ def _get_video_info(video_path):
             )
             data_fmt = json.loads(res.stdout)
             duration = float(data_fmt['format']['duration'])
-        return width, height, duration
+
+        # --- Detect rotation / flip ---
+        rotation, vflip = _parse_rotation_from_ffprobe(stream)
+
+        # Swap dimensions for 90°/270° rotation
+        if rotation in (90, 270):
+            width, height = height, width
+
+        return width, height, duration, rotation, vflip
     except Exception as e:
         print(f"Error getting video info: {e}")
-        return 0, 0, 0
+        return 0, 0, 0, 0, False
+
+
+def _parse_rotation_from_ffprobe(stream_dict):
+    """Extract rotation and vflip from ffprobe stream dict.
+
+    Checks both ``tags.rotate`` (older containers) and
+    ``side_data_list[].rotation`` (modern display-matrix).
+
+    Returns (rotation_degrees, vflip) where rotation is normalised
+    to 0/90/180/270.
+    """
+    rotation = 0
+    vflip = False
+
+    # Method 1: stream_tags.rotate (MP4/MOV with older muxers)
+    tags = stream_dict.get('tags', {})
+    if 'rotate' in tags:
+        try:
+            rotation = int(tags['rotate'])
+        except (ValueError, TypeError):
+            pass
+
+    # Method 2: side_data_list[].rotation (display-matrix, ffprobe >= 4.x)
+    if rotation == 0:
+        for sd in stream_dict.get('side_data_list', []):
+            if sd.get('side_data_type') == 'Display Matrix':
+                try:
+                    r = float(sd.get('rotation', 0))
+                    # ffprobe reports CW rotation as negative
+                    rotation = int(-r) % 360
+                except (ValueError, TypeError):
+                    pass
+                # Detect vflip from display matrix string
+                dm = sd.get('displaymatrix', '')
+                if dm:
+                    vflip = _displaymatrix_has_vflip(dm)
+                break
+
+    # Normalise to [0, 360)
+    rotation = rotation % 360
+    # Snap to nearest 90° (some encoders write e.g. 89 or 91)
+    if rotation not in (0, 90, 180, 270):
+        rotation = min((0, 90, 180, 270), key=lambda x: abs(x - rotation))
+
+    return rotation, vflip
+
+
+def _displaymatrix_has_vflip(dm_string):
+    """Heuristic: detect vertical flip from ffprobe displaymatrix string.
+
+    The display matrix is printed as 3 rows of hex values. A pure vflip
+    has a negative [1][1] element (second row, second value).
+    """
+    try:
+        lines = [l.strip() for l in dm_string.strip().split('\n') if l.strip()]
+        if len(lines) >= 2:
+            # Each line has 3 hex values like "00010000 00000000 00000000"
+            parts = lines[1].split()
+            if len(parts) >= 1:
+                val = int(parts[0], 16)
+                # Sign-extend 32-bit value
+                if val >= 0x80000000:
+                    val -= 0x100000000
+                return val < 0
+    except Exception:
+        pass
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -130,7 +217,10 @@ def _get_video_info(video_path):
 # ---------------------------------------------------------------------------
 
 def _get_video_info_pyav(video_path):
-    """Probe video width, height, duration via PyAV (no subprocess)."""
+    """Probe video display dimensions, duration, rotation and vflip via PyAV.
+
+    Returns (display_w, display_h, duration, rotation, vflip).
+    """
     try:
         container = _av_module.open(video_path)
         stream = container.streams.video[0]
@@ -141,25 +231,82 @@ def _get_video_info_pyav(video_path):
             duration = float(stream.duration * stream.time_base)
         if duration <= 0 and container.duration:
             duration = container.duration / _av_module.time_base
+
+        # Detect rotation from stream metadata or side_data
+        rotation, vflip = _detect_rotation_pyav(stream)
         container.close()
-        return width, height, duration
+
+        # Swap to display dimensions for 90°/270° rotation
+        if rotation in (90, 270):
+            width, height = height, width
+
+        return width, height, duration, rotation, vflip
     except Exception as e:
         print(f"[pyav] Probe failed: {e}")
-        return 0, 0, 0
+        return 0, 0, 0, 0, False
 
 
-def _pyav_extract_segment(video_path, indices, thumb_w, thumb_h):
+def _detect_rotation_pyav(stream):
+    """Detect rotation and vflip from a PyAV video stream.
+
+    Checks ``stream.metadata['rotate']`` (older containers) and
+    ``stream.side_data`` display matrix (modern containers).
+
+    Returns (rotation_degrees, vflip) normalised to 0/90/180/270.
+    """
+    rotation = 0
+    vflip = False
+
+    # Method 1: metadata tag (common in MP4/MOV from phones)
+    try:
+        rotate_val = stream.metadata.get('rotate', '')
+        if rotate_val:
+            rotation = int(rotate_val)
+    except (ValueError, TypeError, AttributeError):
+        pass
+
+    # Method 2: side_data display matrix (modern containers)
+    if rotation == 0:
+        try:
+            sd = getattr(stream, 'side_data', {})
+            if sd and hasattr(sd, 'get'):
+                dm = sd.get('DISPLAYMATRIX')
+                if dm is not None:
+                    # dm may be a dict with 'rotation' key or raw matrix
+                    if isinstance(dm, dict):
+                        r = float(dm.get('rotation', 0))
+                        rotation = int(-r) % 360
+                    elif isinstance(dm, (int, float)):
+                        rotation = int(-dm) % 360
+        except Exception:
+            pass
+
+    # Normalise
+    rotation = rotation % 360
+    if rotation not in (0, 90, 180, 270):
+        rotation = min((0, 90, 180, 270), key=lambda x: abs(x - rotation))
+
+    return rotation, vflip
+
+
+def _pyav_extract_segment(video_path, indices, thumb_w, thumb_h,
+                          rotation=0, vflip=False):
     """
     Extract a subset of frames from a video using a dedicated PyAV container.
 
     Each segment opens its own av container so multiple threads can decode
     concurrently without contending for a single demuxer lock.
 
+    For videos with rotation/flip metadata, frames are transformed to
+    match the correct playback orientation (PyAV does NOT auto-rotate).
+
     Args:
         video_path: Path to video file.
         indices: List of (global_index, target_time) pairs for this segment.
-        thumb_w: Target thumbnail width.
-        thumb_h: Target thumbnail height.
+        thumb_w: Target thumbnail display width (post-rotation).
+        thumb_h: Target thumbnail display height (post-rotation).
+        rotation: Rotation in degrees (0, 90, 180, 270).
+        vflip: Whether to apply vertical flip.
 
     Returns:
         List of (global_index, width, height, rgb_bytes) tuples.
@@ -172,16 +319,35 @@ def _pyav_extract_segment(video_path, indices, thumb_w, thumb_h):
         stream.thread_type = 'AUTO'
         time_base = stream.time_base
 
+        # PyAV gives raw (unrotated) frames → extract at raw dimensions
+        if rotation in (90, 270):
+            raw_w, raw_h = thumb_h, thumb_w
+        else:
+            raw_w, raw_h = thumb_w, thumb_h
+
         for global_idx, target_time in indices:
             pts = int(target_time / float(time_base))
             container.seek(pts, stream=stream)
             for frame in container.decode(stream):
                 img = frame.to_image(
-                    width=thumb_w, height=thumb_h,
+                    width=raw_w, height=raw_h,
                     interpolation='FAST_BILINEAR',
                 )
+
+                # Apply orientation transforms (PyAV does NOT auto-rotate)
+                if rotation == 90:
+                    img = img.transpose(_PILImage.Transpose.ROTATE_270)
+                elif rotation == 180:
+                    img = img.transpose(_PILImage.Transpose.ROTATE_180)
+                elif rotation == 270:
+                    img = img.transpose(_PILImage.Transpose.ROTATE_90)
+                if vflip:
+                    img = img.transpose(_PILImage.Transpose.FLIP_TOP_BOTTOM)
+
                 rgb_data = img.tobytes("raw", "RGB")
-                results.append((global_idx, thumb_w, thumb_h, rgb_data))
+                results.append((
+                    global_idx, thumb_w, thumb_h, rgb_data,
+                ))
                 break
     except Exception as e:
         print(f"[pyav-segment] Error: {e}")
@@ -195,7 +361,7 @@ def _pyav_extract_segment(video_path, indices, thumb_w, thumb_h):
 
 
 def _extract_thumbnails_pyav(video_path, num_frames, thumb_w, thumb_h,
-                             callback=None):
+                             callback=None, rotation=0, vflip=False):
     """
     Extract thumbnails using multi-threaded PyAV — zero subprocess overhead.
 
@@ -206,10 +372,12 @@ def _extract_thumbnails_pyav(video_path, num_frames, thumb_w, thumb_h,
     Args:
         video_path: Path to video file.
         num_frames: Number of thumbnails to extract.
-        thumb_w: Target thumbnail width.
-        thumb_h: Target thumbnail height.
+        thumb_w: Target thumbnail display width (post-rotation).
+        thumb_h: Target thumbnail display height (post-rotation).
         callback: Optional callable(index, rgb_bytes, w, h) called for
                   each frame as it's extracted (progressive display).
+        rotation: Rotation in degrees (0, 90, 180, 270) for PyAV frames.
+        vflip: Whether to apply vertical flip.
 
     Returns:
         List of (width, height, bytes) tuples in RGB888 format, or empty
@@ -244,6 +412,7 @@ def _extract_thumbnails_pyav(video_path, num_frames, thumb_w, thumb_h,
             # Single-threaded path (avoids thread overhead for few frames)
             segment_results = _pyav_extract_segment(
                 video_path, all_indices, thumb_w, thumb_h,
+                rotation=rotation, vflip=vflip,
             )
             all_results = segment_results
         else:
@@ -259,6 +428,7 @@ def _extract_thumbnails_pyav(video_path, num_frames, thumb_w, thumb_h,
                     pool.submit(
                         _pyav_extract_segment,
                         video_path, seg, thumb_w, thumb_h,
+                        rotation, vflip,
                     )
                     for seg in segments
                     if seg  # skip empty segments
@@ -725,12 +895,18 @@ class ThumbnailWorker(QThread):
             t0 = time.perf_counter()
 
             # --- Probe video info (prefer PyAV, fallback to ffprobe) ---
+            # Both probes now return (display_w, display_h, duration,
+            # rotation, vflip) where display dimensions are post-rotation.
+            rotation = 0
+            vflip = False
             if HAS_PYAV:
-                v_w, v_h, duration = _get_video_info_pyav(self.video_path)
+                v_w, v_h, duration, rotation, vflip = \
+                    _get_video_info_pyav(self.video_path)
             else:
                 v_w, v_h, duration = 0, 0, 0
             if v_w <= 0 or v_h <= 0 or duration <= 0:
-                v_w, v_h, duration = _get_video_info(self.video_path)
+                v_w, v_h, duration, rotation, vflip = \
+                    _get_video_info(self.video_path)
             if v_w <= 0 or v_h <= 0 or duration <= 0:
                 self.error_occurred.emit("Failed to probe video")
                 return
@@ -752,11 +928,13 @@ class ThumbnailWorker(QThread):
 
             print(f"Video: {v_w}x{v_h}, Duration: {duration:.1f}s, "
                   f"Thumbnails: {count_needed} @ {thumb_w}x{target_h}, "
+                  f"rotation={rotation}, vflip={vflip}, "
                   f"PyAV={'yes' if HAS_PYAV else 'no'}")
 
             # --- Strategy 0: PyAV in-process extraction (fastest) ---
             if HAS_PYAV and not self._abort:
-                if self._try_pyav(thumb_w, target_h, count_needed):
+                if self._try_pyav(thumb_w, target_h, count_needed,
+                                  rotation, vflip):
                     elapsed = time.perf_counter() - t0
                     print(f"[thumbnail] Done in {elapsed:.2f}s (PyAV)")
                     return
@@ -813,7 +991,8 @@ class ThumbnailWorker(QThread):
         except Exception as e:
             self.error_occurred.emit(str(e))
 
-    def _try_pyav(self, thumb_w, thumb_h, count_needed):
+    def _try_pyav(self, thumb_w, thumb_h, count_needed,
+                  rotation=0, vflip=False):
         """
         Extract thumbnails using PyAV — zero subprocess overhead.
 
@@ -821,6 +1000,9 @@ class ThumbnailWorker(QThread):
           - Process startup overhead
           - Pipe I/O serialization
           - JPEG encode/decode overhead
+
+        Rotation and vflip are applied manually since PyAV does NOT
+        auto-rotate frames like the ffmpeg CLI does.
 
         Frames are emitted progressively via thumbnail_ready signal
         using RGB888 format for direct QImage construction.
@@ -832,6 +1014,7 @@ class ThumbnailWorker(QThread):
         results = _extract_thumbnails_pyav(
             self.video_path, count_needed, thumb_w, thumb_h,
             callback=on_frame,
+            rotation=rotation, vflip=vflip,
         )
         return len(results) > 0
 

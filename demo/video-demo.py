@@ -33,6 +33,7 @@ BAR_HEIGHT = 50
 THUMB_WIDTH = 70  # 仅作为 fallback 默认宽度
 CORNER_RADIUS = 6
 BORDER_THICKNESS = 4
+THUMB_LOGICAL_HEIGHT = BAR_HEIGHT - 2 * BORDER_THICKNESS
 ARROW_THICKNESS = 3
 THEME_COLOR = "#3a3a3a"
 HOVER_COLOR = "#505050"
@@ -697,12 +698,13 @@ class ThumbnailWorker(QThread):
     error_occurred = Signal(str)
 
     def __init__(self, video_path, target_height, visible_width, temp_dir,
-                 num_workers=None, parent=None):
+                 num_workers=None, dpr=1.0, parent=None):
         super().__init__(parent)
         self.video_path = video_path
         self.target_height = target_height
         self.visible_width = visible_width
         self.temp_dir = temp_dir
+        self.dpr = dpr
         self._abort = False
         self._proc = None
         if num_workers is None:
@@ -741,7 +743,10 @@ class ThumbnailWorker(QThread):
             scaled_width = v_w * (self.target_height / v_h)
             if scaled_width <= 0:
                 scaled_width = THUMB_WIDTH
-            count_needed = int(self.visible_width / scaled_width) + 2
+            # scaled_width is in physical pixels; convert to logical for
+            # count_needed (visible_width is in logical pixels)
+            logical_thumb_w = scaled_width / max(self.dpr, 1.0)
+            count_needed = int(self.visible_width / logical_thumb_w) + 2
             count_needed = max(count_needed, 5)
             count_needed = min(count_needed, 60)
 
@@ -1142,11 +1147,18 @@ class ThumbnailBar(QWidget):
         return self._canvas
 
     def add_thumbnail(self, pixmap):
-        """Append a pixmap and trigger a repaint — no layout relayout."""
-        target_height = BAR_HEIGHT - (2 * BORDER_THICKNESS)
+        """Append a pixmap and trigger a repaint — no layout relayout.
+
+        Scales to physical pixel height (logical * DPR) for crisp HiDPI
+        rendering, then sets devicePixelRatio on the pixmap so QPainter
+        draws it at the correct logical size.
+        """
+        dpr = self.devicePixelRatioF()
+        target_height_phys = int(THUMB_LOGICAL_HEIGHT * dpr)
         scaled = pixmap.scaledToHeight(
-            target_height, Qt.SmoothTransformation,
+            target_height_phys, Qt.SmoothTransformation,
         )
+        scaled.setDevicePixelRatio(dpr)
         self._pixmaps.append(scaled)
         self._canvas.set_pixmaps(self._pixmaps)
 
@@ -1186,8 +1198,11 @@ class _ThumbnailCanvas(QWidget):
             # Stop drawing beyond visible width (no scrolling)
             if x >= self.width():
                 break
-            painter.drawPixmap(x, y_offset, pm.width(), draw_h, pm)
-            x += pm.width()
+            # Use logical width/height — QPainter handles DPR scaling
+            dpr = pm.devicePixelRatio() or 1.0
+            logical_w = round(pm.width() / dpr)
+            painter.drawPixmap(x, y_offset, logical_w, draw_h, pm)
+            x += logical_w
         painter.end()
 
 
@@ -1305,7 +1320,9 @@ class VideoEditor(QMainWindow):
             shutil.rmtree(self.temp_dir)
         self.temp_dir = tempfile.mkdtemp()
 
-        target_height = BAR_HEIGHT - (2 * BORDER_THICKNESS)
+        # Generate at physical pixel resolution for crisp HiDPI display
+        dpr = self.devicePixelRatioF()
+        target_height = int(THUMB_LOGICAL_HEIGHT * dpr)
 
         visible_width = self.thumb_strip.scroll_area.width()
         if visible_width < 100:
@@ -1314,6 +1331,7 @@ class VideoEditor(QMainWindow):
         # Launch worker — uses single-pass approach (NLE-style)
         self._thumb_worker = ThumbnailWorker(
             video_path, target_height, visible_width, self.temp_dir,
+            dpr=dpr,
         )
         # Progressive display (single-pass path — each thumb as it arrives)
         self._thumb_worker.thumbnail_ready.connect(
@@ -1376,8 +1394,11 @@ class VideoEditor(QMainWindow):
     def _on_thumbnail_error(self, msg):
         """Slot: fallback grey rectangles when generation fails."""
         print(f"Thumbnail generation error: {msg}")
-        target_height = BAR_HEIGHT - (2 * BORDER_THICKNESS)
-        fallback = QPixmap(THUMB_WIDTH, target_height)
+        dpr = self.devicePixelRatioF()
+        phys_h = int(THUMB_LOGICAL_HEIGHT * dpr)
+        phys_w = int(THUMB_WIDTH * dpr)
+        fallback = QPixmap(phys_w, phys_h)
+        fallback.setDevicePixelRatio(dpr)
         fallback.fill(Qt.darkGray)
         for _ in range(10):
             self.thumb_strip.add_thumbnail(fallback)

@@ -6,6 +6,14 @@ import shutil
 import json
 import concurrent.futures
 import time
+
+try:
+    import av as _av_module
+    HAS_PYAV = True
+except ImportError:
+    _av_module = None
+    HAS_PYAV = False
+
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                                QHBoxLayout, QPushButton, QLabel, QFileDialog,
                                QScrollArea, QFrame, QSizePolicy)
@@ -106,6 +114,104 @@ def _get_video_info(video_path):
     except Exception as e:
         print(f"Error getting video info: {e}")
         return 0, 0, 0
+
+
+# ---------------------------------------------------------------------------
+# PyAV-based extraction (no subprocess, direct C API via libav)
+# ---------------------------------------------------------------------------
+
+def _get_video_info_pyav(video_path):
+    """Probe video width, height, duration via PyAV (no subprocess)."""
+    try:
+        container = _av_module.open(video_path)
+        stream = container.streams.video[0]
+        width = stream.codec_context.width
+        height = stream.codec_context.height
+        duration = 0.0
+        if stream.duration and stream.time_base:
+            duration = float(stream.duration * stream.time_base)
+        if duration <= 0 and container.duration:
+            duration = container.duration / _av_module.time_base
+        container.close()
+        return width, height, duration
+    except Exception as e:
+        print(f"[pyav] Probe failed: {e}")
+        return 0, 0, 0
+
+
+def _extract_thumbnails_pyav(video_path, num_frames, thumb_w, thumb_h,
+                              callback=None):
+    """
+    Extract thumbnails using PyAV — zero subprocess overhead.
+
+    PyAV is a Pythonic binding for FFmpeg's libav* libraries via Cython.
+    It calls C API directly in-process, avoiding:
+      - Process startup overhead (fork/exec/CreateProcess)
+      - Pipe I/O overhead (stdout serialization)
+      - JPEG encode/decode overhead
+
+    Each frame is decoded, scaled at C level via frame.to_ndarray() or
+    frame.to_image(), then converted to QImage in memory.
+
+    Args:
+        video_path: Path to video file.
+        num_frames: Number of thumbnails to extract.
+        thumb_w: Target thumbnail width.
+        thumb_h: Target thumbnail height.
+        callback: Optional callable(index, rgb_bytes, w, h) called for
+                  each frame as it's extracted (progressive display).
+
+    Returns:
+        List of (width, height, bytes) tuples in RGB888 format, or empty
+        list on failure.
+    """
+    thumbnails = []
+    container = None
+    try:
+        container = _av_module.open(video_path)
+        stream = container.streams.video[0]
+        # Allow seeking to non-keyframes for faster navigation
+        stream.thread_type = 'AUTO'
+
+        duration = 0.0
+        if stream.duration and stream.time_base:
+            duration = float(stream.duration * stream.time_base)
+        if duration <= 0 and container.duration:
+            duration = container.duration / _av_module.time_base
+        if duration <= 0:
+            return []
+
+        step = duration / num_frames
+        time_base = stream.time_base
+
+        for i in range(num_frames):
+            target_time = i * step
+            # Seek to the nearest keyframe before target_time
+            pts = int(target_time / float(time_base))
+            container.seek(pts, stream=stream)
+
+            for frame in container.decode(stream):
+                # Scale and convert to RGB at C level (very fast)
+                img = frame.to_image(
+                    width=thumb_w, height=thumb_h,
+                    interpolation='FAST_BILINEAR',
+                )
+                rgb_data = img.tobytes("raw", "RGB")
+                thumbnails.append((thumb_w, thumb_h, rgb_data))
+                if callback:
+                    callback(i, rgb_data, thumb_w, thumb_h)
+                break  # Only need one frame per seek position
+
+    except Exception as e:
+        print(f"[pyav] Extraction error: {e}")
+    finally:
+        if container:
+            try:
+                container.close()
+            except Exception:
+                pass
+
+    return thumbnails
 
 
 # ---------------------------------------------------------------------------
@@ -544,7 +650,14 @@ class ThumbnailWorker(QThread):
     def run(self):
         try:
             t0 = time.perf_counter()
-            v_w, v_h, duration = _get_video_info(self.video_path)
+
+            # --- Probe video info (prefer PyAV, fallback to ffprobe) ---
+            if HAS_PYAV:
+                v_w, v_h, duration = _get_video_info_pyav(self.video_path)
+            else:
+                v_w, v_h, duration = 0, 0, 0
+            if v_w <= 0 or v_h <= 0 or duration <= 0:
+                v_w, v_h, duration = _get_video_info(self.video_path)
             if v_w <= 0 or v_h <= 0 or duration <= 0:
                 self.error_occurred.emit("Failed to probe video")
                 return
@@ -561,12 +674,19 @@ class ThumbnailWorker(QThread):
             count_needed = max(count_needed, 5)
             count_needed = min(count_needed, 60)
 
-            fps_rate = count_needed / max(duration, 0.01)
-            frame_size = thumb_w * target_h * 4
-            hw = _detect_hwaccel()
             print(f"Video: {v_w}x{v_h}, Duration: {duration:.1f}s, "
                   f"Thumbnails: {count_needed} @ {thumb_w}x{target_h}, "
-                  f"hwaccel={hw['hwaccel']}")
+                  f"PyAV={'yes' if HAS_PYAV else 'no'}")
+
+            # --- Strategy 0: PyAV in-process extraction (fastest) ---
+            if HAS_PYAV and not self._abort:
+                if self._try_pyav(thumb_w, target_h, count_needed):
+                    elapsed = time.perf_counter() - t0
+                    print(f"[thumbnail] Done in {elapsed:.2f}s (PyAV)")
+                    return
+
+            fps_rate = count_needed / max(duration, 0.01)
+            frame_size = thumb_w * target_h * 4
 
             # Strategy 1: Single-pass with GPU + keyframe-only (fastest)
             if self._try_single_pass(
@@ -606,6 +726,28 @@ class ThumbnailWorker(QThread):
             print(f"[thumbnail] Done in {elapsed:.2f}s (parallel fallback)")
         except Exception as e:
             self.error_occurred.emit(str(e))
+
+    def _try_pyav(self, thumb_w, thumb_h, count_needed):
+        """
+        Extract thumbnails using PyAV — zero subprocess overhead.
+
+        PyAV calls FFmpeg's C API directly in-process, eliminating:
+          - Process startup overhead
+          - Pipe I/O serialization
+          - JPEG encode/decode overhead
+
+        Frames are emitted progressively via thumbnail_ready signal
+        using RGB888 format for direct QImage construction.
+        """
+        def on_frame(index, rgb_data, w, h):
+            if not self._abort:
+                self.thumbnail_ready.emit(('pyav', w, h, rgb_data))
+
+        results = _extract_thumbnails_pyav(
+            self.video_path, count_needed, thumb_w, thumb_h,
+            callback=on_frame,
+        )
+        return len(results) > 0
 
     def _try_single_pass(self, thumb_w, thumb_h, count_needed, fps_rate,
                          frame_size, hwaccel=True, keyframe_only=True):
@@ -990,7 +1132,15 @@ class VideoEditor(QMainWindow):
 
     def _on_single_thumbnail(self, result):
         """Slot: add one thumbnail as soon as it arrives from the pipe."""
-        if result[0] == 'pipe':
+        if result[0] == 'pyav':
+            # PyAV path: RGB888 format
+            _, w, h, buf = result
+            img = QImage(
+                buf, w, h, w * 3, QImage.Format.Format_RGB888,
+            ).copy()
+            pix = QPixmap.fromImage(img)
+        elif result[0] == 'pipe':
+            # ffmpeg subprocess path: BGRA format
             _, w, h, buf = result
             img = QImage(
                 buf, w, h, w * 4, QImage.Format.Format_ARGB32,

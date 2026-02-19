@@ -9,7 +9,7 @@ from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                                QHBoxLayout, QPushButton, QLabel, QFileDialog,
                                QScrollArea, QFrame, QSizePolicy)
 from PySide6.QtCore import Qt, QUrl, QSize, QThread, Signal
-from PySide6.QtGui import QIcon, QPixmap, QPalette, QPainter, QPen
+from PySide6.QtGui import QIcon, QPixmap, QImage, QPalette, QPainter, QPen
 from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
 from PySide6.QtMultimediaWidgets import QVideoWidget
 
@@ -105,15 +105,258 @@ def _get_video_info(video_path):
         return 0, 0, 0
 
 
+# ---------------------------------------------------------------------------
+# Hardware-acceleration detection (cached per process)
+# ---------------------------------------------------------------------------
+_hwaccel_cache = None
+
+
+def _detect_hwaccel():
+    """
+    Detect the best available ffmpeg hardware acceleration and GPU scale filter.
+
+    Returns a dict with keys:
+      - 'hwaccel': str or None  (e.g. 'd3d11va', 'videotoolbox', 'vaapi', None)
+      - 'scale_filter': str     (e.g. 'scale_d3d11', 'scale_vt', 'scale_vaapi', 'scale')
+      - 'download_filter': str  (e.g. 'hwdownload,format=bgra' or '')
+      - 'pix_fmt': str          (output pixel format, e.g. 'bgra' or 'bgra')
+    """
+    global _hwaccel_cache
+    if _hwaccel_cache is not None:
+        return _hwaccel_cache
+
+    _hwaccel_cache = {
+        'hwaccel': None,
+        'scale_filter': 'scale',
+        'download_filter': '',
+        'pix_fmt': 'bgra',
+    }
+
+    try:
+        startupinfo = None
+        if os.name == 'nt':
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+
+        result = subprocess.run(
+            ['ffmpeg', '-hide_banner', '-hwaccels'],
+            capture_output=True, text=True, startupinfo=startupinfo,
+        )
+        hwaccels_text = result.stdout.lower()
+
+        # Also check available filters for GPU scaling
+        filter_result = subprocess.run(
+            ['ffmpeg', '-hide_banner', '-filters'],
+            capture_output=True, text=True, startupinfo=startupinfo,
+        )
+        filters_text = filter_result.stdout.lower()
+
+        # Preference order: d3d11va (Windows) > videotoolbox (macOS) > vaapi (Linux)
+        if 'd3d11va' in hwaccels_text:
+            _hwaccel_cache['hwaccel'] = 'd3d11va'
+            if 'scale_d3d11' in filters_text:
+                _hwaccel_cache['scale_filter'] = 'scale_d3d11'
+                _hwaccel_cache['download_filter'] = 'hwdownload,format=bgra'
+            else:
+                # d3d11va decode but CPU scale
+                _hwaccel_cache['download_filter'] = 'hwdownload,format=bgra'
+                _hwaccel_cache['scale_filter'] = 'scale'
+        elif 'videotoolbox' in hwaccels_text:
+            _hwaccel_cache['hwaccel'] = 'videotoolbox'
+            if 'scale_vt' in filters_text:
+                _hwaccel_cache['scale_filter'] = 'scale_vt'
+                _hwaccel_cache['download_filter'] = 'hwdownload,format=bgra'
+            else:
+                _hwaccel_cache['download_filter'] = 'hwdownload,format=bgra'
+                _hwaccel_cache['scale_filter'] = 'scale'
+        elif 'vaapi' in hwaccels_text:
+            _hwaccel_cache['hwaccel'] = 'vaapi'
+            if 'scale_vaapi' in filters_text:
+                _hwaccel_cache['scale_filter'] = 'scale_vaapi'
+                _hwaccel_cache['download_filter'] = 'hwdownload,format=bgra'
+            else:
+                _hwaccel_cache['download_filter'] = 'hwdownload,format=bgra'
+                _hwaccel_cache['scale_filter'] = 'scale'
+
+    except Exception as e:
+        print(f"hwaccel detection failed: {e}")
+
+    return _hwaccel_cache
+
+
+def _build_hwaccel_output_format(hwaccel):
+    """Return the -hwaccel_output_format value for a given hwaccel."""
+    mapping = {
+        'd3d11va': 'd3d11',
+        'videotoolbox': 'videotoolbox_vld',
+        'vaapi': 'vaapi',
+    }
+    return mapping.get(hwaccel, hwaccel)
+
+
+# ---------------------------------------------------------------------------
+# Pipe-based frame extraction (GPU-accelerated or software fallback)
+# ---------------------------------------------------------------------------
+
+def _build_popen_priority_kwargs():
+    """Build OS-specific kwargs to lower the priority of ffmpeg child processes."""
+    popen_kwargs = {}
+    startupinfo = None
+    if os.name == 'nt':
+        startupinfo = subprocess.STARTUPINFO()
+        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        # BELOW_NORMAL_PRIORITY_CLASS on Windows
+        popen_kwargs['creationflags'] = 0x00004000
+    else:
+        popen_kwargs['preexec_fn'] = lambda: os.nice(10)
+    return startupinfo, popen_kwargs
+
+
+def _extract_frame_pipe(video_path, timestamp, thumb_w, thumb_h):
+    """
+    Extract a single frame as raw BGRA pixels via pipe.
+
+    Tries GPU-accelerated path first (d3d11va / videotoolbox / vaapi),
+    then falls back to software decode + pipe, then file-based extraction.
+
+    Returns (width, height, bytes) on success, or None on failure.
+    """
+    hw = _detect_hwaccel()
+
+    # --- Attempt 1: GPU-accelerated pipe ---
+    if hw['hwaccel'] is not None:
+        result = _try_extract_pipe_hwaccel(
+            video_path, timestamp, thumb_w, thumb_h, hw,
+        )
+        if result is not None:
+            return result
+
+    # --- Attempt 2: Software decode + pipe ---
+    result = _try_extract_pipe_sw(video_path, timestamp, thumb_w, thumb_h)
+    if result is not None:
+        return result
+
+    return None
+
+
+def _try_extract_pipe_hwaccel(video_path, timestamp, thumb_w, thumb_h, hw):
+    """
+    GPU-accelerated single-frame extraction via rawvideo pipe.
+
+    The pipeline:
+      ffmpeg -hwaccel <X> -hwaccel_output_format <X>
+             -ss <T> -i <video>
+             -frames:v 1
+             -vf "<gpu_scale>=<W>:<H>,hwdownload,format=bgra"
+             -f rawvideo pipe:1
+
+    Decoding and scaling happen on the GPU; only the tiny thumbnail is
+    downloaded to CPU memory, avoiding the JPEG encode/decode round-trip.
+    """
+    hwaccel = hw['hwaccel']
+    hw_out_fmt = _build_hwaccel_output_format(hwaccel)
+    scale_filter = hw['scale_filter']
+    download = hw['download_filter']
+
+    # Build the -vf filter chain
+    if scale_filter.startswith('scale_') and download:
+        # GPU scale + hwdownload
+        vf = f"{scale_filter}={thumb_w}:{thumb_h},{download}"
+    elif download:
+        # hwdownload first, then CPU scale
+        vf = f"{download},scale={thumb_w}:{thumb_h}"
+    else:
+        vf = f"scale={thumb_w}:{thumb_h},format=bgra"
+
+    cmd = [
+        'ffmpeg', '-hide_banner', '-loglevel', 'error',
+        '-hwaccel', hwaccel,
+        '-hwaccel_output_format', hw_out_fmt,
+        '-ss', f'{timestamp:.4f}',
+        '-i', video_path,
+        '-frames:v', '1',
+        '-vf', vf,
+        '-f', 'rawvideo',
+        'pipe:1',
+    ]
+
+    return _run_pipe_cmd(cmd, thumb_w, thumb_h)
+
+
+def _try_extract_pipe_sw(video_path, timestamp, thumb_w, thumb_h):
+    """
+    Software-only single-frame extraction via rawvideo pipe.
+    No temp files — pixels are piped directly to Python.
+    """
+    cmd = [
+        'ffmpeg', '-hide_banner', '-loglevel', 'error',
+        '-ss', f'{timestamp:.4f}',
+        '-i', video_path,
+        '-frames:v', '1',
+        '-vf', f'scale={thumb_w}:{thumb_h},format=bgra',
+        '-f', 'rawvideo',
+        'pipe:1',
+    ]
+
+    return _run_pipe_cmd(cmd, thumb_w, thumb_h)
+
+
+def _run_pipe_cmd(cmd, expected_w, expected_h):
+    """
+    Run an ffmpeg command that outputs rawvideo BGRA to stdout pipe.
+    Returns (width, height, bytes) or None on failure.
+    """
+    expected_size = expected_w * expected_h * 4
+
+    try:
+        startupinfo, popen_kwargs = _build_popen_priority_kwargs()
+        proc = subprocess.run(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            startupinfo=startupinfo,
+            **popen_kwargs,
+        )
+
+        if proc.returncode != 0 or len(proc.stdout) != expected_size:
+            return None
+
+        return (expected_w, expected_h, proc.stdout)
+    except Exception as e:
+        print(f"Pipe extraction error: {e}")
+        return None
+
+
 def _extract_single_frame(args):
     """
-    Extract exactly one frame at a specific timestamp using fast-seek.
-    Each ffmpeg call decodes only 1 frame (~50-100ms) instead of a whole segment.
-    Priority is lowered on the ffmpeg child process, not the Python process,
-    so the UI thread is never affected.
-    """
-    video_path, timestamp, target_height, out_path = args
+    Extract exactly one frame at a specific timestamp.
 
+    First tries the fast pipe-based path (GPU-accel → SW pipe → file fallback).
+    The pipe path avoids temp files and JPEG encode/decode overhead entirely.
+
+    Returns either:
+      - ('pipe', width, height, bytes)  for pipe-based extraction, or
+      - ('file', path)                  for file-based fallback, or
+      - None                            on total failure.
+    """
+    video_path = args[0]
+    timestamp = args[1]
+    target_height = args[2]
+    out_path = args[3]
+
+    # Extended args format: (video_path, timestamp, target_height, out_path, thumb_w)
+    if len(args) == 5:
+        thumb_w = args[4]
+    else:
+        thumb_w = None
+
+    if thumb_w is not None and thumb_w > 0:
+        result = _extract_frame_pipe(video_path, timestamp, thumb_w, target_height)
+        if result is not None:
+            w, h, buf = result
+            return ('pipe', w, h, buf)
+
+    # --- Fallback: file-based extraction (original approach) ---
     cmd = [
         'ffmpeg',
         '-ss', f'{timestamp:.4f}',
@@ -126,16 +369,7 @@ def _extract_single_frame(args):
     ]
 
     try:
-        startupinfo = None
-        popen_kwargs = {}
-        if os.name == 'nt':
-            startupinfo = subprocess.STARTUPINFO()
-            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-            # BELOW_NORMAL_PRIORITY_CLASS on Windows
-            popen_kwargs['creationflags'] = 0x00004000
-        else:
-            # Lower priority on the ffmpeg child process only (not the Python/UI process)
-            popen_kwargs['preexec_fn'] = lambda: os.nice(10)
+        startupinfo, popen_kwargs = _build_popen_priority_kwargs()
         proc = subprocess.Popen(
             cmd,
             stdout=subprocess.DEVNULL,
@@ -145,7 +379,7 @@ def _extract_single_frame(args):
         )
         proc.wait()
         if os.path.exists(out_path) and os.path.getsize(out_path) > 0:
-            return out_path
+            return ('file', out_path)
     except Exception as e:
         print(f"FFmpeg frame extraction error: {e}")
     return None
@@ -156,13 +390,18 @@ class ThumbnailWorker(QThread):
     Background thread that probes the video and orchestrates parallel ffmpeg
     single-frame extractions via ThreadPoolExecutor.
 
-    Key optimisations vs. the previous ProcessPoolExecutor + FPS approach:
+    Key optimisations:
     - ffprobe runs in this thread, not on the UI thread.
     - ThreadPoolExecutor (near-zero spawn cost) instead of ProcessPoolExecutor.
     - Each ffmpeg extracts exactly 1 frame with -frames:v 1 + fast-seek (-ss before -i).
+    - GPU-accelerated decode + scale when available (d3d11va / videotoolbox / vaapi).
+    - Raw BGRA pixels piped directly to Python — no temp files or JPEG round-trip.
+    - Falls back to file-based extraction when pipe path is unavailable.
     - Priority is set per ffmpeg child process via preexec_fn / creationflags.
     """
-    thumbnails_ready = Signal(list)   # emits a sorted list of file paths
+    # Emits a list of results, each being either:
+    #   ('pipe', width, height, bytes) or ('file', path)
+    thumbnails_ready = Signal(list)
     error_occurred = Signal(str)
 
     def __init__(self, video_path, target_height, visible_width, temp_dir,
@@ -172,7 +411,6 @@ class ThumbnailWorker(QThread):
         self.target_height = target_height
         self.visible_width = visible_width
         self.temp_dir = temp_dir
-        # Use all CPUs — ffmpeg children are niced, so UI stays responsive
         if num_workers is None:
             num_workers = os.cpu_count() or 4
         self.num_workers = num_workers
@@ -184,6 +422,13 @@ class ThumbnailWorker(QThread):
                 self.error_occurred.emit("Failed to probe video")
                 return
 
+            # Pre-compute thumbnail width from video aspect ratio
+            thumb_w = int(v_w * (self.target_height / v_h))
+            # Ensure even dimensions for compatibility
+            thumb_w = max(2, thumb_w + (thumb_w % 2))
+            target_h = self.target_height
+            target_h = max(2, target_h + (target_h % 2))
+
             scaled_width = v_w * (self.target_height / v_h)
             if scaled_width <= 0:
                 scaled_width = THUMB_WIDTH
@@ -191,26 +436,29 @@ class ThumbnailWorker(QThread):
             count_needed = max(count_needed, 5)
             count_needed = min(count_needed, 60)
 
-            print(f"Video: {v_w}x{v_h}, Duration: {duration:.1f}s, "
-                  f"Extracting {count_needed} frames with {self.num_workers} threads")
+            # Warm up hwaccel detection (cached globally)
+            _detect_hwaccel()
 
-            # Evenly-spaced timestamps across the video
+            hw = _detect_hwaccel()
+            print(f"Video: {v_w}x{v_h}, Duration: {duration:.1f}s, "
+                  f"Extracting {count_needed} frames @ {thumb_w}x{target_h}, "
+                  f"hwaccel={hw['hwaccel']}, workers={self.num_workers}")
+
             timestamps = [i * duration / count_needed for i in range(count_needed)]
 
             tasks = []
             for i, ts in enumerate(timestamps):
                 out_path = os.path.join(self.temp_dir, f"thumb_{i:04d}.jpg")
-                tasks.append((self.video_path, ts, self.target_height, out_path))
+                # Extended 5-tuple: (video_path, timestamp, target_height, out_path, thumb_w)
+                tasks.append((self.video_path, ts, target_h, out_path, thumb_w))
 
-            # ThreadPoolExecutor: threads are lightweight; ffmpeg subprocesses
-            # do the actual CPU work and are niced independently.
             with concurrent.futures.ThreadPoolExecutor(
                 max_workers=self.num_workers,
             ) as pool:
                 results = list(pool.map(_extract_single_frame, tasks))
 
-            all_paths = [p for p in results if p is not None]
-            self.thumbnails_ready.emit(all_paths)
+            valid = [r for r in results if r is not None]
+            self.thumbnails_ready.emit(valid)
         except Exception as e:
             self.error_occurred.emit(str(e))
 
@@ -480,13 +728,25 @@ class VideoEditor(QMainWindow):
         self._thumb_worker.error_occurred.connect(self._on_thumbnail_error)
         self._thumb_worker.start()
 
-    def _on_thumbnails_ready(self, paths):
-        """Slot: called on the main/UI thread when all thumbnails are done."""
-        if not paths:
+    def _on_thumbnails_ready(self, results):
+        """Slot: called on the main/UI thread when all thumbnails are done.
+
+        Each result is either:
+          ('pipe', width, height, bytes) — raw BGRA pixels from pipe
+          ('file', path)                — JPEG file on disk
+        """
+        if not results:
             self._on_thumbnail_error("No thumbnails generated")
             return
-        for p in paths:
-            pix = QPixmap(p)
+        for r in results:
+            if r[0] == 'pipe':
+                _, w, h, buf = r
+                # QImage from raw BGRA buffer — .copy() ensures QImage owns the data
+                img = QImage(buf, w, h, w * 4, QImage.Format.Format_ARGB32).copy()
+                pix = QPixmap.fromImage(img)
+            else:
+                # File-based fallback
+                pix = QPixmap(r[1])
             if not pix.isNull():
                 self.thumb_strip.add_thumbnail(pix)
 

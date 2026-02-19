@@ -174,7 +174,7 @@ class ThumbnailWorker(QThread):
         self.temp_dir = temp_dir
         # Use all CPUs — ffmpeg children are niced, so UI stays responsive
         if num_workers is None:
-            num_workers = max(4, os.cpu_count() or 4)
+            num_workers = os.cpu_count() or 4
         self.num_workers = num_workers
 
     def run(self):
@@ -185,6 +185,8 @@ class ThumbnailWorker(QThread):
                 return
 
             scaled_width = v_w * (self.target_height / v_h)
+            if scaled_width <= 0:
+                scaled_width = THUMB_WIDTH
             count_needed = int(self.visible_width / scaled_width) + 2
             count_needed = max(count_needed, 5)
             count_needed = min(count_needed, 60)

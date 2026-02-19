@@ -37,6 +37,14 @@ ARROW_THICKNESS = 3
 THEME_COLOR = "#3a3a3a"
 HOVER_COLOR = "#505050"
 
+# --- Parallelism tuning ---
+# Max PyAV worker threads (each opens its own container, so memory scales)
+PYAV_MAX_WORKERS = 4
+# Max concurrent ffmpeg slices for the sliced subprocess strategy
+MAX_FFMPEG_SLICES = 3
+# Extra frames to read beyond expected count (fps filter rounding tolerance)
+FRAME_READ_BUFFER = 3
+
 # --- 3. 样式表 (QSS) ---
 STYLESHEET = f"""
 QMainWindow {{
@@ -139,19 +147,60 @@ def _get_video_info_pyav(video_path):
         return 0, 0, 0
 
 
-def _extract_thumbnails_pyav(video_path, num_frames, thumb_w, thumb_h,
-                              callback=None):
+def _pyav_extract_segment(video_path, indices, thumb_w, thumb_h):
     """
-    Extract thumbnails using PyAV — zero subprocess overhead.
+    Extract a subset of frames from a video using a dedicated PyAV container.
 
-    PyAV is a Pythonic binding for FFmpeg's libav* libraries via Cython.
-    It calls C API directly in-process, avoiding:
-      - Process startup overhead (fork/exec/CreateProcess)
-      - Pipe I/O overhead (stdout serialization)
-      - JPEG encode/decode overhead
+    Each segment opens its own av container so multiple threads can decode
+    concurrently without contending for a single demuxer lock.
 
-    Each frame is decoded, scaled at C level via frame.to_ndarray() or
-    frame.to_image(), then converted to QImage in memory.
+    Args:
+        video_path: Path to video file.
+        indices: List of (global_index, target_time) pairs for this segment.
+        thumb_w: Target thumbnail width.
+        thumb_h: Target thumbnail height.
+
+    Returns:
+        List of (global_index, width, height, rgb_bytes) tuples.
+    """
+    results = []
+    container = None
+    try:
+        container = _av_module.open(video_path)
+        stream = container.streams.video[0]
+        stream.thread_type = 'AUTO'
+        time_base = stream.time_base
+
+        for global_idx, target_time in indices:
+            pts = int(target_time / float(time_base))
+            container.seek(pts, stream=stream)
+            for frame in container.decode(stream):
+                img = frame.to_image(
+                    width=thumb_w, height=thumb_h,
+                    interpolation='FAST_BILINEAR',
+                )
+                rgb_data = img.tobytes("raw", "RGB")
+                results.append((global_idx, thumb_w, thumb_h, rgb_data))
+                break
+    except Exception as e:
+        print(f"[pyav-segment] Error: {e}")
+    finally:
+        if container:
+            try:
+                container.close()
+            except Exception:
+                pass
+    return results
+
+
+def _extract_thumbnails_pyav(video_path, num_frames, thumb_w, thumb_h,
+                             callback=None):
+    """
+    Extract thumbnails using multi-threaded PyAV — zero subprocess overhead.
+
+    Splits frame extraction across multiple threads, each with its own
+    av.open() container. This avoids the sequential seek bottleneck of
+    a single container and leverages multi-core CPU for parallel decoding.
 
     Args:
         video_path: Path to video file.
@@ -165,53 +214,75 @@ def _extract_thumbnails_pyav(video_path, num_frames, thumb_w, thumb_h,
         List of (width, height, bytes) tuples in RGB888 format, or empty
         list on failure.
     """
-    thumbnails = []
-    container = None
     try:
         container = _av_module.open(video_path)
         stream = container.streams.video[0]
-        # Allow seeking to non-keyframes for faster navigation
-        stream.thread_type = 'AUTO'
 
         duration = 0.0
         if stream.duration and stream.time_base:
             duration = float(stream.duration * stream.time_base)
         if duration <= 0 and container.duration:
             duration = container.duration / _av_module.time_base
+        container.close()
+
         if duration <= 0:
             return []
 
         step = duration / num_frames
-        time_base = stream.time_base
 
-        for i in range(num_frames):
-            target_time = i * step
-            # Seek to the nearest keyframe before target_time
-            pts = int(target_time / float(time_base))
-            container.seek(pts, stream=stream)
+        # Build (global_index, target_time) pairs
+        all_indices = [(i, i * step) for i in range(num_frames)]
 
-            for frame in container.decode(stream):
-                # Scale and convert to RGB at C level (very fast)
-                img = frame.to_image(
-                    width=thumb_w, height=thumb_h,
-                    interpolation='FAST_BILINEAR',
-                )
-                rgb_data = img.tobytes("raw", "RGB")
-                thumbnails.append((thumb_w, thumb_h, rgb_data))
-                if callback:
-                    callback(i, rgb_data, thumb_w, thumb_h)
-                break  # Only need one frame per seek position
+        # Determine number of worker threads (cap at 4 to avoid
+        # excessive file handle / memory usage)
+        num_workers = min(PYAV_MAX_WORKERS, max(1, (os.cpu_count() or 4) // 2))
+        # For small frame counts, use fewer workers
+        num_workers = min(num_workers, num_frames)
+
+        if num_workers <= 1:
+            # Single-threaded path (avoids thread overhead for few frames)
+            segment_results = _pyav_extract_segment(
+                video_path, all_indices, thumb_w, thumb_h,
+            )
+            all_results = segment_results
+        else:
+            # Split indices into roughly equal segments
+            segments = [[] for _ in range(num_workers)]
+            for idx, item in enumerate(all_indices):
+                segments[idx % num_workers].append(item)
+
+            with concurrent.futures.ThreadPoolExecutor(
+                max_workers=num_workers,
+            ) as pool:
+                futures = [
+                    pool.submit(
+                        _pyav_extract_segment,
+                        video_path, seg, thumb_w, thumb_h,
+                    )
+                    for seg in segments
+                    if seg  # skip empty segments
+                ]
+                all_results = []
+                for f in concurrent.futures.as_completed(futures):
+                    try:
+                        all_results.extend(f.result())
+                    except Exception as e:
+                        print(f"[pyav-mt] Segment error: {e}")
+
+        # Sort by global index to restore frame order
+        all_results.sort(key=lambda x: x[0])
+
+        thumbnails = []
+        for global_idx, w, h, rgb_data in all_results:
+            thumbnails.append((w, h, rgb_data))
+            if callback:
+                callback(global_idx, rgb_data, w, h)
+
+        return thumbnails
 
     except Exception as e:
         print(f"[pyav] Extraction error: {e}")
-    finally:
-        if container:
-            try:
-                container.close()
-            except Exception:
-                pass
-
-    return thumbnails
+        return []
 
 
 # ---------------------------------------------------------------------------
@@ -718,7 +789,17 @@ class ThumbnailWorker(QThread):
                       f"(single-pass full)")
                 return
 
-            # Strategy 4: Parallel individual extraction (slowest fallback)
+            # Strategy 4: Sliced multi-process extraction
+            if self._try_sliced_single_pass(
+                thumb_w, target_h, count_needed, duration,
+                keyframe_only=True,
+            ):
+                elapsed = time.perf_counter() - t0
+                print(f"[thumbnail] Done in {elapsed:.2f}s "
+                      f"(sliced keyframe)")
+                return
+
+            # Strategy 5: Parallel individual extraction (slowest fallback)
             self._fallback_parallel(
                 thumb_w, target_h, count_needed, duration,
             )
@@ -844,6 +925,123 @@ class ThumbnailWorker(QThread):
 
         valid = [r for r in results if r is not None]
         self.thumbnails_ready.emit(valid)
+
+    def _try_sliced_single_pass(self, thumb_w, thumb_h, count_needed,
+                                duration, keyframe_only=True):
+        """
+        Distribute thumbnail extraction across 2-3 concurrent ffmpeg
+        processes, each handling a time segment of the video.
+
+        On multi-core CPUs this achieves near-linear speedup because
+        each process decodes only its portion of the timeline.
+        """
+        num_slices = min(MAX_FFMPEG_SLICES, max(1, (os.cpu_count() or 2) // 2))
+        num_slices = min(num_slices, count_needed)
+        if num_slices <= 1:
+            return False
+
+        # Distribute frames across slices
+        frames_per_slice = count_needed // num_slices
+        remainder = count_needed % num_slices
+        slices = []  # (start_time, segment_duration, n_frames)
+        step = duration / count_needed
+        offset = 0
+        for s in range(num_slices):
+            n = frames_per_slice + (1 if s < remainder else 0)
+            start_time = offset * step
+            seg_duration = n * step
+            slices.append((start_time, seg_duration, n))
+            offset += n
+
+        frame_size = thumb_w * thumb_h * 4
+        mode = "sliced"
+        if keyframe_only:
+            mode += "+keyframe"
+        print(f"[thumbnail] Trying {mode} ({num_slices} slices)")
+
+        def run_slice(slice_args):
+            """Run one ffmpeg slice and return list of (index, data)."""
+            s_idx, (start_t, seg_dur, n_frames) = slice_args
+            fps_rate = n_frames / max(seg_dur, 0.01)
+            cmd = ['ffmpeg', '-hide_banner', '-loglevel', 'error',
+                   '-nostdin',
+                   '-probesize', '32768', '-analyzeduration', '0',
+                   '-fflags', '+nobuffer']
+            if keyframe_only:
+                cmd.extend(['-skip_frame', 'nokey'])
+            cmd.extend(['-ss', f'{start_t:.4f}',
+                        '-t', f'{seg_dur:.4f}',
+                        '-i', self.video_path])
+            vf = (f"fps={fps_rate:.6f},"
+                  f"scale={thumb_w}:{thumb_h},format=bgra")
+            cmd.extend(['-vf', vf, '-an', '-f', 'rawvideo', 'pipe:1'])
+
+            try:
+                startupinfo, popen_kwargs = _build_popen_priority_kwargs()
+                proc = subprocess.Popen(
+                    cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    bufsize=frame_size,
+                    startupinfo=startupinfo,
+                    **popen_kwargs,
+                )
+                frames = []
+                max_read = n_frames + FRAME_READ_BUFFER
+                for _ in range(max_read):
+                    data = proc.stdout.read(frame_size)
+                    if len(data) < frame_size:
+                        break
+                    frames.append(bytes(data))
+                proc.stdout.close()
+                try:
+                    proc.stderr.close()
+                except Exception:
+                    pass
+                try:
+                    proc.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait()
+                return s_idx, frames
+            except Exception as e:
+                print(f"[sliced] Slice {s_idx} error: {e}")
+                return s_idx, []
+
+        try:
+            with concurrent.futures.ThreadPoolExecutor(
+                max_workers=num_slices,
+            ) as pool:
+                futures = [
+                    pool.submit(run_slice, (i, s))
+                    for i, s in enumerate(slices)
+                ]
+                slice_results = {}
+                for f in concurrent.futures.as_completed(futures):
+                    if self._abort:
+                        break
+                    s_idx, frames = f.result()
+                    slice_results[s_idx] = frames
+
+            # Merge slices in order and emit
+            total = 0
+            for s_idx in range(num_slices):
+                for data in slice_results.get(s_idx, []):
+                    if self._abort:
+                        break
+                    self.thumbnail_ready.emit(
+                        ('pipe', thumb_w, thumb_h, data),
+                    )
+                    total += 1
+
+            if total > 0:
+                print(f"[thumbnail] Sliced ({mode}): got {total} frames")
+                return True
+            return False
+
+        except Exception as e:
+            print(f"[thumbnail] Sliced ({mode}) error: {e}")
+            return False
 
 
 class HandleButton(QPushButton):

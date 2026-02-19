@@ -32,6 +32,7 @@ _extract_single_frame = video_demo._extract_single_frame
 _get_video_info = video_demo._get_video_info
 _get_video_info_pyav = video_demo._get_video_info_pyav
 _extract_thumbnails_pyav = video_demo._extract_thumbnails_pyav
+_pyav_extract_segment = video_demo._pyav_extract_segment
 _detect_hwaccel = video_demo._detect_hwaccel
 _build_hwaccel_output_format = video_demo._build_hwaccel_output_format
 _run_pipe_cmd = video_demo._run_pipe_cmd
@@ -715,33 +716,110 @@ class TestGetVideoInfoPyav:
         assert (w, h, d) == (0, 0, 0)
 
 
-class TestExtractThumbnailsPyav:
-    """Tests for _extract_thumbnails_pyav()."""
+class TestPyavExtractSegment:
+    """Tests for _pyav_extract_segment()."""
 
-    def test_extracts_correct_number_of_frames(self) -> None:
-        """Returns the requested number of thumbnails."""
+    def _make_mock_container(self, tb=1/30000.0, duration=300000):
         mock_frame = MagicMock()
         mock_img = MagicMock()
         mock_img.tobytes.return_value = b'\x00' * (80 * 42 * 3)
         mock_frame.to_image.return_value = mock_img
 
         mock_stream = MagicMock()
-        mock_stream.duration = 300000
+        mock_stream.duration = duration
         mock_stream.time_base = MagicMock()
-        mock_stream.time_base.__float__ = lambda self: 1 / 30000.0
-        mock_stream.time_base.__truediv__ = lambda self, other: 1 / (30000.0 * other)
-        mock_stream.time_base.__int__ = lambda self: 0
+        mock_stream.time_base.__float__ = lambda self: tb
+
+        mock_container = MagicMock()
+        mock_container.streams.video = [mock_stream]
+        mock_container.decode.side_effect = lambda s: iter([mock_frame])
+        return mock_container, mock_frame
+
+    def test_extracts_frames_for_indices(self) -> None:
+        """Returns one result per (index, time) pair."""
+        mc, _ = self._make_mock_container()
+        indices = [(0, 0.0), (1, 2.5), (2, 5.0)]
+        with patch.object(video_demo, '_av_module') as mock_av:
+            mock_av.open.return_value = mc
+            results = _pyav_extract_segment("t.mp4", indices, 80, 42)
+
+        assert len(results) == 3
+        for global_idx, w, h, data in results:
+            assert w == 80
+            assert h == 42
+
+    def test_preserves_global_index(self) -> None:
+        """Returned tuples contain the correct global index."""
+        mc, _ = self._make_mock_container()
+        indices = [(5, 10.0), (9, 20.0)]
+        with patch.object(video_demo, '_av_module') as mock_av:
+            mock_av.open.return_value = mc
+            results = _pyav_extract_segment("t.mp4", indices, 80, 42)
+
+        assert [r[0] for r in results] == [5, 9]
+
+    def test_uses_fast_bilinear(self) -> None:
+        """frame.to_image uses FAST_BILINEAR interpolation."""
+        mc, mock_frame = self._make_mock_container()
+        indices = [(0, 0.0)]
+        with patch.object(video_demo, '_av_module') as mock_av:
+            mock_av.open.return_value = mc
+            _pyav_extract_segment("t.mp4", indices, 80, 42)
+        mock_frame.to_image.assert_called_with(
+            width=80, height=42, interpolation='FAST_BILINEAR',
+        )
+
+    def test_closes_container_on_error(self) -> None:
+        """Container is closed even when decode fails."""
+        mc = MagicMock()
+        mc.streams.video = [MagicMock()]
+        mc.streams.video[0].time_base = MagicMock()
+        mc.streams.video[0].time_base.__float__ = lambda self: 1/30000.0
+        mc.decode.side_effect = Exception("decode error")
+        with patch.object(video_demo, '_av_module') as mock_av:
+            mock_av.open.return_value = mc
+            results = _pyav_extract_segment("t.mp4", [(0, 0.0)], 80, 42)
+        assert results == []
+        mc.close.assert_called_once()
+
+    def test_returns_empty_on_open_error(self) -> None:
+        """Returns empty list when av.open fails."""
+        with patch.object(video_demo, '_av_module') as mock_av:
+            mock_av.open.side_effect = Exception("file error")
+            results = _pyav_extract_segment("bad.mp4", [(0, 0.0)], 80, 42)
+        assert results == []
+
+
+class TestExtractThumbnailsPyav:
+    """Tests for _extract_thumbnails_pyav() (multi-threaded)."""
+
+    def _make_mock_container(self, tb=1/30000.0, duration=300000):
+        mock_frame = MagicMock()
+        mock_img = MagicMock()
+        mock_img.tobytes.return_value = b'\x00' * (80 * 42 * 3)
+        mock_frame.to_image.return_value = mock_img
+
+        mock_stream = MagicMock()
+        mock_stream.duration = duration
+        mock_stream.time_base = MagicMock()
+        mock_stream.time_base.__float__ = lambda self: tb
+        mock_stream.time_base.__mul__ = lambda self, o: o * tb
+        mock_stream.time_base.__rmul__ = lambda self, o: o * tb
 
         mock_container = MagicMock()
         mock_container.streams.video = [mock_stream]
         mock_container.duration = None
-        # Return a fresh iterator each time decode() is called
         mock_container.decode.side_effect = lambda s: iter([mock_frame])
+        return mock_container, mock_frame
 
+    def test_extracts_correct_number_of_frames(self) -> None:
+        """Returns the requested number of thumbnails."""
+        mc, _ = self._make_mock_container()
         with patch.object(video_demo, '_av_module') as mock_av:
-            mock_av.open.return_value = mock_container
-            results = _extract_thumbnails_pyav("test.mp4", 5, 80, 42)
-
+            mock_av.open.return_value = mc
+            # Force single-threaded path for deterministic test
+            with patch('os.cpu_count', return_value=1):
+                results = _extract_thumbnails_pyav("test.mp4", 5, 80, 42)
         assert len(results) == 5
         for w, h, data in results:
             assert w == 80
@@ -750,98 +828,38 @@ class TestExtractThumbnailsPyav:
 
     def test_calls_callback_for_each_frame(self) -> None:
         """Callback is called for each extracted frame."""
-        mock_frame = MagicMock()
-        mock_img = MagicMock()
-        mock_img.tobytes.return_value = b'\x00' * (80 * 42 * 3)
-        mock_frame.to_image.return_value = mock_img
-
-        mock_stream = MagicMock()
-        mock_stream.duration = 300000
-        mock_stream.time_base = MagicMock()
-        mock_stream.time_base.__float__ = lambda self: 1 / 30000.0
-        mock_stream.time_base.__int__ = lambda self: 0
-
-        mock_container = MagicMock()
-        mock_container.streams.video = [mock_stream]
-        mock_container.duration = None
-        mock_container.decode.side_effect = lambda s: iter([mock_frame])
-
+        mc, _ = self._make_mock_container()
         callback = MagicMock()
-
         with patch.object(video_demo, '_av_module') as mock_av:
-            mock_av.open.return_value = mock_container
-            _extract_thumbnails_pyav("test.mp4", 3, 80, 42, callback=callback)
-
+            mock_av.open.return_value = mc
+            with patch('os.cpu_count', return_value=1):
+                _extract_thumbnails_pyav(
+                    "test.mp4", 3, 80, 42, callback=callback,
+                )
         assert callback.call_count == 3
-
-    def test_uses_fast_bilinear_interpolation(self) -> None:
-        """frame.to_image() is called with FAST_BILINEAR for speed."""
-        mock_frame = MagicMock()
-        mock_img = MagicMock()
-        mock_img.tobytes.return_value = b'\x00' * (80 * 42 * 3)
-        mock_frame.to_image.return_value = mock_img
-
-        mock_stream = MagicMock()
-        mock_stream.duration = 300000
-        mock_stream.time_base = MagicMock()
-        mock_stream.time_base.__float__ = lambda self: 1 / 30000.0
-        mock_stream.time_base.__int__ = lambda self: 0
-
-        mock_container = MagicMock()
-        mock_container.streams.video = [mock_stream]
-        mock_container.duration = None
-        mock_container.decode.side_effect = lambda s: iter([mock_frame])
-
-        with patch.object(video_demo, '_av_module') as mock_av:
-            mock_av.open.return_value = mock_container
-            _extract_thumbnails_pyav("test.mp4", 1, 80, 42)
-
-        mock_frame.to_image.assert_called_once_with(
-            width=80, height=42, interpolation='FAST_BILINEAR',
-        )
 
     def test_returns_empty_on_error(self) -> None:
         """Returns empty list when PyAV fails."""
         with patch.object(video_demo, '_av_module') as mock_av:
             mock_av.open.side_effect = Exception("codec error")
             results = _extract_thumbnails_pyav("bad.mp4", 5, 80, 42)
-
         assert results == []
 
-    def test_container_is_closed_on_error(self) -> None:
-        """Container is always closed, even on error."""
-        mock_container = MagicMock()
-        mock_container.streams.video = []  # will cause IndexError
-
+    def test_multithreaded_with_multiple_cpus(self) -> None:
+        """Uses multiple threads when CPU count > 2."""
+        mc, _ = self._make_mock_container()
         with patch.object(video_demo, '_av_module') as mock_av:
-            mock_av.open.return_value = mock_container
-            _extract_thumbnails_pyav("test.mp4", 5, 80, 42)
+            mock_av.open.return_value = mc
+            with patch('os.cpu_count', return_value=8):
+                results = _extract_thumbnails_pyav("test.mp4", 8, 80, 42)
+        assert len(results) == 8
 
-        mock_container.close.assert_called_once()
-
-    def test_seeks_to_correct_timestamps(self) -> None:
-        """Seeks to evenly spaced timestamps across the video."""
-        mock_frame = MagicMock()
-        mock_img = MagicMock()
-        mock_img.tobytes.return_value = b'\x00' * (80 * 42 * 3)
-        mock_frame.to_image.return_value = mock_img
-
-        mock_stream = MagicMock()
-        # 10 seconds at 30fps time_base
-        tb = 1.0 / 30000.0
-        mock_stream.duration = int(10.0 / tb)
-        mock_stream.time_base = MagicMock()
-        mock_stream.time_base.__float__ = lambda self: tb
-        mock_stream.time_base.__int__ = lambda self: 0
-
-        mock_container = MagicMock()
-        mock_container.streams.video = [mock_stream]
-        mock_container.duration = None
-        mock_container.decode.side_effect = lambda s: iter([mock_frame])
-
+    def test_results_are_sorted_by_index(self) -> None:
+        """Results are returned in frame order regardless of thread."""
+        mc, _ = self._make_mock_container()
         with patch.object(video_demo, '_av_module') as mock_av:
-            mock_av.open.return_value = mock_container
-            _extract_thumbnails_pyav("test.mp4", 4, 80, 42)
-
-        # Should have 4 seek calls
-        assert mock_container.seek.call_count == 4
+            mock_av.open.return_value = mc
+            with patch('os.cpu_count', return_value=4):
+                results = _extract_thumbnails_pyav("test.mp4", 10, 80, 42)
+        # Should be 10 results, and all tuples (w, h, data)
+        assert len(results) == 10

@@ -38,6 +38,7 @@ _try_extract_pipe_sw = video_demo._try_extract_pipe_sw
 _try_extract_pipe_auto = video_demo._try_extract_pipe_auto
 _extract_frame_pipe = video_demo._extract_frame_pipe
 _build_popen_priority_kwargs = video_demo._build_popen_priority_kwargs
+_build_single_pass_cmd = video_demo._build_single_pass_cmd
 
 
 @pytest.fixture(autouse=True)
@@ -584,3 +585,57 @@ class TestGetVideoInfo:
 
         w, h, d = _get_video_info("nonexistent.mp4")
         assert (w, h, d) == (0, 0, 0)
+
+
+class TestBuildSinglePassCmd:
+    """Tests for _build_single_pass_cmd()."""
+
+    def test_gpu_keyframe_command(self) -> None:
+        """GPU + keyframe-only produces correct flags."""
+        cmd = _build_single_pass_cmd(
+            "video.mp4", 80, 42, 0.5,
+            hwaccel=True, keyframe_only=True,
+        )
+        assert '-hwaccel' in cmd
+        assert 'auto' in cmd
+        assert '-skip_frame' in cmd
+        assert 'nokey' in cmd
+        assert '-an' in cmd
+        assert '-f' in cmd
+        assert 'rawvideo' in cmd
+        assert 'pipe:1' in cmd
+        vf_idx = cmd.index('-vf')
+        vf = cmd[vf_idx + 1]
+        assert 'fps=' in vf
+        assert 'scale=80:42' in vf
+        assert 'format=bgra' in vf
+
+    def test_cpu_keyframe_command(self) -> None:
+        """CPU + keyframe-only: no -hwaccel, has -skip_frame."""
+        cmd = _build_single_pass_cmd(
+            "video.mp4", 80, 42, 0.5,
+            hwaccel=False, keyframe_only=True,
+        )
+        assert '-hwaccel' not in cmd
+        assert '-skip_frame' in cmd
+        assert 'nokey' in cmd
+
+    def test_cpu_full_decode_command(self) -> None:
+        """CPU without keyframe skip: no -hwaccel, no -skip_frame."""
+        cmd = _build_single_pass_cmd(
+            "video.mp4", 80, 42, 0.5,
+            hwaccel=False, keyframe_only=False,
+        )
+        assert '-hwaccel' not in cmd
+        assert '-skip_frame' not in cmd
+
+    def test_fps_rate_in_vf(self) -> None:
+        """fps rate is correctly embedded in the -vf filter chain."""
+        cmd = _build_single_pass_cmd(
+            "video.mp4", 160, 90, 0.123456,
+            hwaccel=False, keyframe_only=False,
+        )
+        vf_idx = cmd.index('-vf')
+        vf = cmd[vf_idx + 1]
+        assert 'fps=0.123456' in vf
+        assert 'scale=160:90' in vf

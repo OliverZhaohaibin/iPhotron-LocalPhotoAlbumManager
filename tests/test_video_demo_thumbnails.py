@@ -789,10 +789,14 @@ class TestGetVideoInfoPyav:
 
 
 class TestPyavExtractSegment:
-    """Tests for _pyav_extract_segment() (single-seek continuous decode)."""
+    """Tests for _pyav_extract_segment() (individual seeks per frame)."""
 
     def _make_mock_container(self, tb=1/30000.0, frame_pts_list=None):
-        """Build a mock container whose decode() yields frames with PTS."""
+        """Build a mock container whose decode() yields frames with PTS.
+
+        Each call to decode() returns the next single-frame iterator
+        (matching the per-seek pattern used by _pyav_extract_segment).
+        """
         if frame_pts_list is None:
             frame_pts_list = [0, 75000, 150000]  # 0s, 2.5s, 5s at tb
 
@@ -815,7 +819,10 @@ class TestPyavExtractSegment:
 
         mock_container = MagicMock()
         mock_container.streams.video = [mock_stream]
-        mock_container.decode.return_value = iter(frames)
+        # Each call to decode() returns a fresh single-frame iterator
+        mock_container.decode.side_effect = [
+            iter([f]) for f in frames
+        ]
         return mock_container, frames, mock_img
 
     def test_extracts_frames_for_indices(self) -> None:
@@ -835,7 +842,6 @@ class TestPyavExtractSegment:
 
     def test_preserves_global_index(self) -> None:
         """Returned tuples contain the correct global index in order."""
-        # PTS: 300000/30000=10.0, 600000/30000=20.0
         mc, _, _ = self._make_mock_container(
             frame_pts_list=[300000, 600000],
         )
@@ -860,18 +866,18 @@ class TestPyavExtractSegment:
             width=80, height=42, interpolation='FAST_BILINEAR',
         )
 
-    def test_sets_skip_frame_nonkey(self) -> None:
-        """Codec context skip_frame is set to NONKEY for I-frame only."""
+    def test_sets_thread_count(self) -> None:
+        """Codec context thread_count is set to 2 to reduce contention."""
         mc, _, _ = self._make_mock_container(frame_pts_list=[0])
         indices = [(0, 0.0)]
         with patch.object(video_demo, '_av_module') as mock_av:
             mock_av.open.return_value = mc
             _pyav_extract_segment("t.mp4", indices, 80, 42)
         stream = mc.streams.video[0]
-        assert stream.codec_context.skip_frame == 'NONKEY'
+        assert stream.codec_context.thread_count == 2
 
-    def test_seeks_once_to_first_target(self) -> None:
-        """Container.seek() is called only once (to earliest target)."""
+    def test_seeks_per_frame(self) -> None:
+        """Container.seek() is called once per target frame."""
         mc, _, _ = self._make_mock_container(
             frame_pts_list=[0, 75000, 150000],
         )
@@ -879,8 +885,8 @@ class TestPyavExtractSegment:
         with patch.object(video_demo, '_av_module') as mock_av:
             mock_av.open.return_value = mc
             _pyav_extract_segment("t.mp4", indices, 80, 42)
-        # seek should be called once (to earliest target time)
-        assert mc.seek.call_count == 1
+        # Individual seeks: one seek per target
+        assert mc.seek.call_count == 3
 
     def test_rotation_90_swaps_extract_dims(self) -> None:
         """For 90° rotation, extract at swapped dims then rotate."""
@@ -1264,45 +1270,54 @@ class TestDetectRotationPyav:
 # ---------------------------------------------------------------------------
 
 class TestGetKeyframeTimestampsPyav:
-    """Tests for _get_keyframe_timestamps_pyav()."""
+    """Tests for _get_keyframe_timestamps_pyav() (packet-level demux)."""
 
     def test_returns_keyframe_timestamps(self) -> None:
-        """Extracts timestamps from frames with PTS."""
+        """Extracts timestamps from keyframe packets (no decoding)."""
         from fractions import Fraction
         tb = Fraction(1, 30000)
-        mock_frames = []
-        for pts in [0, 90000, 180000]:  # 0s, 3s, 6s
-            f = MagicMock()
-            f.pts = pts
-            mock_frames.append(f)
+        mock_packets = []
+        for pts, is_kf in [(0, True), (15000, False), (90000, True),
+                           (105000, False), (180000, True)]:
+            p = MagicMock()
+            p.pts = pts
+            p.is_keyframe = is_kf
+            mock_packets.append(p)
+        # Flush packet at end (pts=None)
+        flush = MagicMock()
+        flush.pts = None
+        flush.is_keyframe = False
+        mock_packets.append(flush)
 
         mock_stream = MagicMock()
         mock_stream.time_base = tb
 
         mc = MagicMock()
         mc.streams.video = [mock_stream]
-        mc.decode.return_value = iter(mock_frames)
+        mc.demux.return_value = iter(mock_packets)
 
         with patch.object(video_demo, '_av_module') as mock_av:
             mock_av.open.return_value = mc
             kf = _get_keyframe_timestamps_pyav("test.mp4")
 
+        # Only keyframe packets (3 of 5 + flush)
         assert len(kf) == 3
         assert abs(kf[0] - 0.0) < 0.01
         assert abs(kf[1] - 3.0) < 0.01
         assert abs(kf[2] - 6.0) < 0.01
 
-    def test_sets_skip_frame_nonkey(self) -> None:
-        """Codec context skip_frame is set to NONKEY."""
+    def test_uses_demux_not_decode(self) -> None:
+        """Uses container.demux() (packet-level) not decode (no decoding)."""
         mc = MagicMock()
         mc.streams.video = [MagicMock()]
         mc.streams.video[0].time_base = MagicMock()
         mc.streams.video[0].time_base.__float__ = lambda self: 1/30000.0
-        mc.decode.return_value = iter([])
+        mc.demux.return_value = iter([])
         with patch.object(video_demo, '_av_module') as mock_av:
             mock_av.open.return_value = mc
             _get_keyframe_timestamps_pyav("test.mp4")
-        assert mc.streams.video[0].codec_context.skip_frame == 'NONKEY'
+        mc.demux.assert_called_once()
+        mc.decode.assert_not_called()
 
     def test_returns_empty_on_error(self) -> None:
         """Returns empty list on failure."""
@@ -1317,7 +1332,7 @@ class TestGetKeyframeTimestampsPyav:
         mc.streams.video = [MagicMock()]
         mc.streams.video[0].time_base = MagicMock()
         mc.streams.video[0].time_base.__float__ = lambda self: 1/30000.0
-        mc.decode.return_value = iter([])
+        mc.demux.return_value = iter([])
         with patch.object(video_demo, '_av_module') as mock_av:
             mock_av.open.return_value = mc
             _get_keyframe_timestamps_pyav("test.mp4")

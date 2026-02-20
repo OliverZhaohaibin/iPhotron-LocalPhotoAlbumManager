@@ -304,10 +304,12 @@ def _detect_rotation_pyav(stream, container=None):
 
 
 def _get_keyframe_timestamps_pyav(video_path):
-    """Extract all keyframe timestamps using PyAV with NONKEY skip.
+    """Extract all keyframe timestamps using PyAV packet-level demux.
 
-    Uses ``skip_frame = 'NONKEY'`` so the decoder only delivers I-frames,
-    making the scan extremely fast (~milliseconds even for long videos).
+    Iterates over demuxed packets (no decoding!) to read PTS and keyframe
+    flag.  This is orders of magnitude faster than decoding frames —
+    typically <100 ms even for long 4K videos, vs 15+ s when decoding
+    every I-frame at full resolution.
 
     Returns a sorted list of float timestamps in seconds.
     """
@@ -316,11 +318,13 @@ def _get_keyframe_timestamps_pyav(video_path):
     try:
         container = _av_module.open(video_path)
         stream = container.streams.video[0]
-        stream.codec_context.skip_frame = 'NONKEY'
-        stream.thread_type = 'AUTO'
-        for frame in container.decode(stream):
-            t = float(frame.pts * stream.time_base)
-            keyframes.append(t)
+        time_base = stream.time_base
+        for packet in container.demux(stream):
+            if packet.pts is None:
+                continue  # flush packet at end of stream
+            if packet.is_keyframe:
+                t = float(packet.pts * time_base)
+                keyframes.append(t)
     except Exception as e:
         print(f"[pyav-keyframes] Error: {e}")
     finally:
@@ -364,17 +368,16 @@ def _snap_to_keyframes(target_times, keyframes):
 def _pyav_extract_segment(video_path, indices, thumb_w, thumb_h,
                           rotation=0, vflip=False):
     """
-    Extract a subset of frames using single-seek + continuous decode.
+    Extract a subset of frames using individual seeks.
 
-    Instead of seeking for each frame (expensive), this function:
-    1. Sorts target timestamps for this segment.
-    2. Seeks once to the earliest target timestamp.
-    3. Decodes forward continuously with ``skip_frame = 'NONKEY'`` (I-frames
-       only), capturing frames as their PTS passes each target time.
+    For sparse sampling (e.g. 38 thumbnails from 195 keyframes), seeking
+    directly to each target is faster than continuous decode through all
+    intervening keyframes:
+    - Seek + decode 1 frame: ~100 ms per thumbnail
+    - Continuous decode of all keyframes: ~80 ms × (all keyframes in range)
 
-    This reduces seek overhead by ~30-60% compared to per-frame seeking,
-    and the NONKEY skip ensures only keyframes are decoded (~100x fewer
-    frames for H.264/H.265).
+    Each worker limits ``thread_count = 2`` to avoid CPU contention when
+    multiple workers run in parallel.
 
     Args:
         video_path: Path to video file.
@@ -396,7 +399,8 @@ def _pyav_extract_segment(video_path, indices, thumb_w, thumb_h,
         container = _av_module.open(video_path)
         stream = container.streams.video[0]
         stream.thread_type = 'AUTO'
-        stream.codec_context.skip_frame = 'NONKEY'
+        # Limit threads per worker to avoid contention across workers
+        stream.codec_context.thread_count = 2
         time_base = stream.time_base
 
         # PyAV gives raw (unrotated) frames → extract at raw dimensions
@@ -405,21 +409,12 @@ def _pyav_extract_segment(video_path, indices, thumb_w, thumb_h,
         else:
             raw_w, raw_h = thumb_w, thumb_h
 
-        # Sort targets by time for forward-only continuous decode
-        sorted_targets = sorted(indices, key=lambda x: x[1])
-        # Seek once to just before the first target
-        first_pts = int(sorted_targets[0][1] / float(time_base))
-        container.seek(max(0, first_pts), stream=stream)
+        for global_idx, target_time in indices:
+            # Seek directly to target timestamp (finds nearest prior keyframe)
+            target_pts = int(target_time / float(time_base))
+            container.seek(max(0, target_pts), stream=stream)
 
-        target_idx = 0
-        for frame in container.decode(stream):
-            if target_idx >= len(sorted_targets):
-                break
-            frame_time = float(frame.pts * time_base)
-            # Capture frame if it's at or past the current target time
-            while (target_idx < len(sorted_targets)
-                   and frame_time >= sorted_targets[target_idx][1]):
-                global_idx = sorted_targets[target_idx][0]
+            for frame in container.decode(stream):
                 img = frame.to_image(
                     width=raw_w, height=raw_h,
                     interpolation='FAST_BILINEAR',
@@ -439,7 +434,7 @@ def _pyav_extract_segment(video_path, indices, thumb_w, thumb_h,
                 results.append((
                     global_idx, thumb_w, thumb_h, rgb_data,
                 ))
-                target_idx += 1
+                break  # Only need first frame after seek
 
     except Exception as e:
         print(f"[pyav-segment] Error: {e}")

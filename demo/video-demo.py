@@ -102,7 +102,7 @@ def _get_video_info(video_path):
             '-select_streams', 'v:0',
             '-show_entries',
             'stream=width,height,duration:stream_tags=rotate'
-            ':stream_side_data=rotation',
+            ':stream_side_data=rotation,displaymatrix',
             '-of', 'json',
             video_path,
         ]
@@ -201,8 +201,8 @@ def _displaymatrix_has_vflip(dm_string):
         if len(lines) >= 2:
             # Each line has 3 hex values like "00010000 00000000 00000000"
             parts = lines[1].split()
-            if len(parts) >= 1:
-                val = int(parts[0], 16)
+            if len(parts) >= 2:
+                val = int(parts[1], 16)
                 # Sign-extend 32-bit value
                 if val >= 0x80000000:
                     val -= 0x100000000
@@ -289,6 +289,14 @@ def _detect_rotation_pyav(stream, container=None):
                             if isinstance(dm, dict):
                                 r = float(dm.get('rotation', 0))
                                 rotation = int(-r) % 360
+                                # Detect vflip from matrix values
+                                sy = dm.get('sy') or dm.get('d')
+                                if sy is not None:
+                                    try:
+                                        if float(sy) < 0:
+                                            vflip = True
+                                    except (ValueError, TypeError):
+                                        pass
                             elif isinstance(dm, (int, float)):
                                 rotation = int(-dm) % 360
                 break  # only need the first frame
@@ -333,7 +341,10 @@ def _get_keyframe_timestamps_pyav(video_path):
                 container.close()
             except Exception:
                 pass
-    return keyframes
+    # Ensure timestamps are sorted (and deduplicated) as promised.
+    if not keyframes:
+        return keyframes
+    return sorted(set(keyframes))
 
 
 def _snap_to_keyframes(target_times, keyframes):
@@ -453,14 +464,14 @@ def _extract_thumbnails_pyav(video_path, num_frames, thumb_w, thumb_h,
     Extract thumbnails using keyframe-aware multi-threaded PyAV.
 
     Pipeline:
-    1. Pre-scan all keyframe timestamps (fast — only demuxes, skips non-key).
-    2. Snap uniform target times to nearest keyframes for even coverage.
-    3. Split snapped indices across worker threads, each doing single-seek
-       + continuous forward decode with ``skip_frame = 'NONKEY'``.
+    1. Optionally pre-scan keyframe timestamps to get a rough index.
+    2. Compute uniform target times and map them to seek positions.
+    3. Split target indices across worker threads; each thumbnail is
+       obtained via a dedicated seek/decode operation.
 
-    This yields ~2-8x speedup over per-frame seeking because:
-    - Only I-frames are decoded (~0.4% of frames for H.264 long-GOP).
-    - Each segment seeks once then scans forward, minimising seek overhead.
+    This improves performance over naive linear decode of every frame by:
+    - Using keyframe information to choose efficient seek positions.
+    - Parallelising independent seeks/decodes across multiple threads.
 
     Args:
         video_path: Path to video file.

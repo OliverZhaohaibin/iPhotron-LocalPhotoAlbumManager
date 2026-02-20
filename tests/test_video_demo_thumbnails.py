@@ -1170,8 +1170,8 @@ class TestDisplaymatrixHasVflip:
         assert _displaymatrix_has_vflip(dm) is False
 
     def test_vflip_matrix(self) -> None:
-        # Negative [1][0] in second row → vflip
-        dm = "00010000 00000000 00000000\nFFFF0000 00000000 00000000\n00000000 00000000 40000000"
+        # Negative [1][1] in second row → vflip
+        dm = "00010000 00000000 00000000\n00000000 FFFF0000 00000000\n00000000 00000000 40000000"
         assert _displaymatrix_has_vflip(dm) is True
 
     def test_empty_string(self) -> None:

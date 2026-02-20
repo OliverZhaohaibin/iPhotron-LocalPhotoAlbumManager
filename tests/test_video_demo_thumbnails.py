@@ -45,6 +45,8 @@ _build_single_pass_cmd = video_demo._build_single_pass_cmd
 _detect_rotation_pyav = video_demo._detect_rotation_pyav
 _parse_rotation_from_ffprobe = video_demo._parse_rotation_from_ffprobe
 _displaymatrix_has_vflip = video_demo._displaymatrix_has_vflip
+_get_keyframe_timestamps_pyav = video_demo._get_keyframe_timestamps_pyav
+_snap_to_keyframes = video_demo._snap_to_keyframes
 
 
 @pytest.fixture(autouse=True)
@@ -650,11 +652,15 @@ class TestBuildSinglePassCmd:
         assert '-nostdin' in cmd
         assert '-probesize' in cmd
         assert '-fflags' in cmd
+        assert '-vsync' in cmd
+        assert 'vfr' in cmd
         vf_idx = cmd.index('-vf')
         vf = cmd[vf_idx + 1]
         assert 'fps=' in vf
         assert 'scale=80:42' in vf
         assert 'format=bgra' in vf
+        assert "select=" in vf
+        assert "pict_type" in vf
 
     def test_cpu_keyframe_command(self) -> None:
         """CPU + keyframe-only: no -hwaccel, has -skip_frame."""
@@ -668,7 +674,7 @@ class TestBuildSinglePassCmd:
         assert '-nostdin' in cmd
 
     def test_cpu_full_decode_command(self) -> None:
-        """CPU without keyframe skip: no -hwaccel, no -skip_frame."""
+        """CPU without keyframe skip: no -hwaccel, no -skip_frame, no select."""
         cmd = _build_single_pass_cmd(
             "video.mp4", 80, 42, 0.5,
             hwaccel=False, keyframe_only=False,
@@ -676,6 +682,9 @@ class TestBuildSinglePassCmd:
         assert '-hwaccel' not in cmd
         assert '-skip_frame' not in cmd
         assert '-nostdin' in cmd
+        vf_idx = cmd.index('-vf')
+        vf = cmd[vf_idx + 1]
+        assert "select=" not in vf
 
     def test_fps_rate_in_vf(self) -> None:
         """fps rate is correctly embedded in the -vf filter chain."""
@@ -780,27 +789,40 @@ class TestGetVideoInfoPyav:
 
 
 class TestPyavExtractSegment:
-    """Tests for _pyav_extract_segment()."""
+    """Tests for _pyav_extract_segment() (single-seek continuous decode)."""
 
-    def _make_mock_container(self, tb=1/30000.0, duration=300000):
-        mock_frame = MagicMock()
+    def _make_mock_container(self, tb=1/30000.0, frame_pts_list=None):
+        """Build a mock container whose decode() yields frames with PTS."""
+        if frame_pts_list is None:
+            frame_pts_list = [0, 75000, 150000]  # 0s, 2.5s, 5s at tb
+
         mock_img = MagicMock()
         mock_img.tobytes.return_value = b'\x00' * (80 * 42 * 3)
-        mock_frame.to_image.return_value = mock_img
+        mock_img.transpose.return_value = mock_img
+
+        from fractions import Fraction
+        time_base = Fraction(1, 30000)
+
+        frames = []
+        for pts in frame_pts_list:
+            f = MagicMock()
+            f.pts = pts
+            f.to_image.return_value = mock_img
+            frames.append(f)
 
         mock_stream = MagicMock()
-        mock_stream.duration = duration
-        mock_stream.time_base = MagicMock()
-        mock_stream.time_base.__float__ = lambda self: tb
+        mock_stream.time_base = time_base
 
         mock_container = MagicMock()
         mock_container.streams.video = [mock_stream]
-        mock_container.decode.side_effect = lambda s: iter([mock_frame])
-        return mock_container, mock_frame
+        mock_container.decode.return_value = iter(frames)
+        return mock_container, frames, mock_img
 
     def test_extracts_frames_for_indices(self) -> None:
         """Returns one result per (index, time) pair."""
-        mc, _ = self._make_mock_container()
+        mc, _, _ = self._make_mock_container(
+            frame_pts_list=[0, 75000, 150000],
+        )
         indices = [(0, 0.0), (1, 2.5), (2, 5.0)]
         with patch.object(video_demo, '_av_module') as mock_av:
             mock_av.open.return_value = mc
@@ -812,34 +834,59 @@ class TestPyavExtractSegment:
             assert h == 42
 
     def test_preserves_global_index(self) -> None:
-        """Returned tuples contain the correct global index."""
-        mc, _ = self._make_mock_container()
+        """Returned tuples contain the correct global index in order."""
+        # PTS: 300000/30000=10.0, 600000/30000=20.0
+        mc, _, _ = self._make_mock_container(
+            frame_pts_list=[300000, 600000],
+        )
         indices = [(5, 10.0), (9, 20.0)]
         with patch.object(video_demo, '_av_module') as mock_av:
             mock_av.open.return_value = mc
             results = _pyav_extract_segment("t.mp4", indices, 80, 42)
 
-        assert [r[0] for r in results] == [5, 9]
+        idx_list = [r[0] for r in results]
+        assert idx_list == [5, 9]
 
     def test_uses_fast_bilinear(self) -> None:
         """frame.to_image uses FAST_BILINEAR interpolation."""
-        mc, mock_frame = self._make_mock_container()
+        mc, frames, _ = self._make_mock_container(
+            frame_pts_list=[0],
+        )
         indices = [(0, 0.0)]
         with patch.object(video_demo, '_av_module') as mock_av:
             mock_av.open.return_value = mc
             _pyav_extract_segment("t.mp4", indices, 80, 42)
-        mock_frame.to_image.assert_called_with(
+        frames[0].to_image.assert_called_with(
             width=80, height=42, interpolation='FAST_BILINEAR',
         )
 
+    def test_sets_skip_frame_nonkey(self) -> None:
+        """Codec context skip_frame is set to NONKEY for I-frame only."""
+        mc, _, _ = self._make_mock_container(frame_pts_list=[0])
+        indices = [(0, 0.0)]
+        with patch.object(video_demo, '_av_module') as mock_av:
+            mock_av.open.return_value = mc
+            _pyav_extract_segment("t.mp4", indices, 80, 42)
+        stream = mc.streams.video[0]
+        assert stream.codec_context.skip_frame == 'NONKEY'
+
+    def test_seeks_once_to_first_target(self) -> None:
+        """Container.seek() is called only once (to earliest target)."""
+        mc, _, _ = self._make_mock_container(
+            frame_pts_list=[0, 75000, 150000],
+        )
+        indices = [(0, 0.0), (1, 2.5), (2, 5.0)]
+        with patch.object(video_demo, '_av_module') as mock_av:
+            mock_av.open.return_value = mc
+            _pyav_extract_segment("t.mp4", indices, 80, 42)
+        # seek should be called once (to earliest target time)
+        assert mc.seek.call_count == 1
+
     def test_rotation_90_swaps_extract_dims(self) -> None:
         """For 90° rotation, extract at swapped dims then rotate."""
-        mc, mock_frame = self._make_mock_container()
-        # For 90°: raw extract at (42, 80), then rotate to (80, 42)
-        mock_img = MagicMock()
-        mock_img.tobytes.return_value = b'\x00' * (80 * 42 * 3)
-        mock_img.transpose.return_value = mock_img
-        mock_frame.to_image.return_value = mock_img
+        mc, frames, mock_img = self._make_mock_container(
+            frame_pts_list=[0],
+        )
         indices = [(0, 0.0)]
         with patch.object(video_demo, '_av_module') as mock_av:
             mock_av.open.return_value = mc
@@ -847,7 +894,7 @@ class TestPyavExtractSegment:
                 "t.mp4", indices, 80, 42, rotation=90,
             )
         # Should extract at swapped dims (h, w) = (42, 80)
-        mock_frame.to_image.assert_called_with(
+        frames[0].to_image.assert_called_with(
             width=42, height=80, interpolation='FAST_BILINEAR',
         )
         # Should call transpose for rotation
@@ -859,18 +906,16 @@ class TestPyavExtractSegment:
 
     def test_rotation_180_keeps_dims(self) -> None:
         """For 180° rotation, extract at same dims then rotate."""
-        mc, mock_frame = self._make_mock_container()
-        mock_img = MagicMock()
-        mock_img.tobytes.return_value = b'\x00' * (80 * 42 * 3)
-        mock_img.transpose.return_value = mock_img
-        mock_frame.to_image.return_value = mock_img
+        mc, frames, mock_img = self._make_mock_container(
+            frame_pts_list=[0],
+        )
         indices = [(0, 0.0)]
         with patch.object(video_demo, '_av_module') as mock_av:
             mock_av.open.return_value = mc
             results = _pyav_extract_segment(
                 "t.mp4", indices, 80, 42, rotation=180,
             )
-        mock_frame.to_image.assert_called_with(
+        frames[0].to_image.assert_called_with(
             width=80, height=42, interpolation='FAST_BILINEAR',
         )
         from PIL import Image
@@ -878,11 +923,9 @@ class TestPyavExtractSegment:
 
     def test_vflip_applied(self) -> None:
         """Vertical flip is applied when vflip=True."""
-        mc, mock_frame = self._make_mock_container()
-        mock_img = MagicMock()
-        mock_img.tobytes.return_value = b'\x00' * (80 * 42 * 3)
-        mock_img.transpose.return_value = mock_img
-        mock_frame.to_image.return_value = mock_img
+        mc, _, mock_img = self._make_mock_container(
+            frame_pts_list=[0],
+        )
         indices = [(0, 0.0)]
         with patch.object(video_demo, '_av_module') as mock_av:
             mock_av.open.return_value = mc
@@ -914,37 +957,56 @@ class TestPyavExtractSegment:
             results = _pyav_extract_segment("bad.mp4", [(0, 0.0)], 80, 42)
         assert results == []
 
+    def test_returns_empty_on_empty_indices(self) -> None:
+        """Returns empty list when indices list is empty."""
+        results = _pyav_extract_segment("t.mp4", [], 80, 42)
+        assert results == []
+
 
 class TestExtractThumbnailsPyav:
-    """Tests for _extract_thumbnails_pyav() (multi-threaded)."""
+    """Tests for _extract_thumbnails_pyav() (keyframe-aware multi-threaded)."""
 
     def _make_mock_container(self, tb=1/30000.0, duration=300000):
-        mock_frame = MagicMock()
         mock_img = MagicMock()
         mock_img.tobytes.return_value = b'\x00' * (80 * 42 * 3)
-        mock_frame.to_image.return_value = mock_img
+        mock_img.transpose.return_value = mock_img
+
+        from fractions import Fraction
+        time_base = Fraction(1, 30000)
 
         mock_stream = MagicMock()
         mock_stream.duration = duration
-        mock_stream.time_base = MagicMock()
-        mock_stream.time_base.__float__ = lambda self: tb
-        mock_stream.time_base.__mul__ = lambda self, o: o * tb
-        mock_stream.time_base.__rmul__ = lambda self, o: o * tb
+        mock_stream.time_base = time_base
 
         mock_container = MagicMock()
         mock_container.streams.video = [mock_stream]
         mock_container.duration = None
-        mock_container.decode.side_effect = lambda s: iter([mock_frame])
-        return mock_container, mock_frame
+
+        # For continuous decode, return frames with PTS values
+        def make_frames(s):
+            frames = []
+            for i in range(10):
+                f = MagicMock()
+                f.pts = int(i * 2.0 / float(time_base))
+                f.to_image.return_value = mock_img
+                frames.append(f)
+            return iter(frames)
+        mock_container.decode.side_effect = make_frames
+        return mock_container, mock_img
 
     def test_extracts_correct_number_of_frames(self) -> None:
         """Returns the requested number of thumbnails."""
         mc, _ = self._make_mock_container()
         with patch.object(video_demo, '_av_module') as mock_av:
             mock_av.open.return_value = mc
-            # Force single-threaded path for deterministic test
             with patch('os.cpu_count', return_value=1):
-                results = _extract_thumbnails_pyav("test.mp4", 5, 80, 42)
+                with patch.object(
+                    video_demo, '_get_keyframe_timestamps_pyav',
+                    return_value=[],
+                ):
+                    results = _extract_thumbnails_pyav(
+                        "test.mp4", 5, 80, 42,
+                    )
         assert len(results) == 5
         for w, h, data in results:
             assert w == 80
@@ -958,9 +1020,13 @@ class TestExtractThumbnailsPyav:
         with patch.object(video_demo, '_av_module') as mock_av:
             mock_av.open.return_value = mc
             with patch('os.cpu_count', return_value=1):
-                _extract_thumbnails_pyav(
-                    "test.mp4", 3, 80, 42, callback=callback,
-                )
+                with patch.object(
+                    video_demo, '_get_keyframe_timestamps_pyav',
+                    return_value=[],
+                ):
+                    _extract_thumbnails_pyav(
+                        "test.mp4", 3, 80, 42, callback=callback,
+                    )
         assert callback.call_count == 3
 
     def test_returns_empty_on_error(self) -> None:
@@ -976,7 +1042,13 @@ class TestExtractThumbnailsPyav:
         with patch.object(video_demo, '_av_module') as mock_av:
             mock_av.open.return_value = mc
             with patch('os.cpu_count', return_value=8):
-                results = _extract_thumbnails_pyav("test.mp4", 8, 80, 42)
+                with patch.object(
+                    video_demo, '_get_keyframe_timestamps_pyav',
+                    return_value=[],
+                ):
+                    results = _extract_thumbnails_pyav(
+                        "test.mp4", 8, 80, 42,
+                    )
         assert len(results) == 8
 
     def test_results_are_sorted_by_index(self) -> None:
@@ -985,9 +1057,30 @@ class TestExtractThumbnailsPyav:
         with patch.object(video_demo, '_av_module') as mock_av:
             mock_av.open.return_value = mc
             with patch('os.cpu_count', return_value=4):
-                results = _extract_thumbnails_pyav("test.mp4", 10, 80, 42)
-        # Should be 10 results, and all tuples (w, h, data)
+                with patch.object(
+                    video_demo, '_get_keyframe_timestamps_pyav',
+                    return_value=[],
+                ):
+                    results = _extract_thumbnails_pyav(
+                        "test.mp4", 10, 80, 42,
+                    )
         assert len(results) == 10
+
+    def test_uses_keyframe_snapping(self) -> None:
+        """When keyframes available, snaps targets to nearest keyframe."""
+        mc, _ = self._make_mock_container()
+        kf_times = [0.0, 2.0, 4.0, 6.0, 8.0]
+        with patch.object(video_demo, '_av_module') as mock_av:
+            mock_av.open.return_value = mc
+            with patch('os.cpu_count', return_value=1):
+                with patch.object(
+                    video_demo, '_get_keyframe_timestamps_pyav',
+                    return_value=kf_times,
+                ):
+                    results = _extract_thumbnails_pyav(
+                        "test.mp4", 3, 80, 42,
+                    )
+        assert len(results) == 3
 
 
 # ---------------------------------------------------------------------------
@@ -1164,3 +1257,106 @@ class TestDetectRotationPyav:
         stream.metadata = {}
         rot, vflip = _detect_rotation_pyav(stream, container=None)
         assert rot == 0
+
+
+# ---------------------------------------------------------------------------
+# Keyframe-aware sampling tests
+# ---------------------------------------------------------------------------
+
+class TestGetKeyframeTimestampsPyav:
+    """Tests for _get_keyframe_timestamps_pyav()."""
+
+    def test_returns_keyframe_timestamps(self) -> None:
+        """Extracts timestamps from frames with PTS."""
+        from fractions import Fraction
+        tb = Fraction(1, 30000)
+        mock_frames = []
+        for pts in [0, 90000, 180000]:  # 0s, 3s, 6s
+            f = MagicMock()
+            f.pts = pts
+            mock_frames.append(f)
+
+        mock_stream = MagicMock()
+        mock_stream.time_base = tb
+
+        mc = MagicMock()
+        mc.streams.video = [mock_stream]
+        mc.decode.return_value = iter(mock_frames)
+
+        with patch.object(video_demo, '_av_module') as mock_av:
+            mock_av.open.return_value = mc
+            kf = _get_keyframe_timestamps_pyav("test.mp4")
+
+        assert len(kf) == 3
+        assert abs(kf[0] - 0.0) < 0.01
+        assert abs(kf[1] - 3.0) < 0.01
+        assert abs(kf[2] - 6.0) < 0.01
+
+    def test_sets_skip_frame_nonkey(self) -> None:
+        """Codec context skip_frame is set to NONKEY."""
+        mc = MagicMock()
+        mc.streams.video = [MagicMock()]
+        mc.streams.video[0].time_base = MagicMock()
+        mc.streams.video[0].time_base.__float__ = lambda self: 1/30000.0
+        mc.decode.return_value = iter([])
+        with patch.object(video_demo, '_av_module') as mock_av:
+            mock_av.open.return_value = mc
+            _get_keyframe_timestamps_pyav("test.mp4")
+        assert mc.streams.video[0].codec_context.skip_frame == 'NONKEY'
+
+    def test_returns_empty_on_error(self) -> None:
+        """Returns empty list on failure."""
+        with patch.object(video_demo, '_av_module') as mock_av:
+            mock_av.open.side_effect = Exception("bad file")
+            kf = _get_keyframe_timestamps_pyav("bad.mp4")
+        assert kf == []
+
+    def test_closes_container(self) -> None:
+        """Container is closed after scanning."""
+        mc = MagicMock()
+        mc.streams.video = [MagicMock()]
+        mc.streams.video[0].time_base = MagicMock()
+        mc.streams.video[0].time_base.__float__ = lambda self: 1/30000.0
+        mc.decode.return_value = iter([])
+        with patch.object(video_demo, '_av_module') as mock_av:
+            mock_av.open.return_value = mc
+            _get_keyframe_timestamps_pyav("test.mp4")
+        mc.close.assert_called_once()
+
+
+class TestSnapToKeyframes:
+    """Tests for _snap_to_keyframes()."""
+
+    def test_snaps_to_nearest(self) -> None:
+        """Each target maps to its nearest keyframe."""
+        keyframes = [0.0, 2.0, 4.0, 6.0, 8.0, 10.0]
+        targets = [0.9, 3.1, 7.9]
+        result = _snap_to_keyframes(targets, keyframes)
+        assert len(result) == 3
+        assert result[0] == (0, 0.0)   # 0.9 → nearest 0.0
+        assert result[1] == (1, 4.0)   # 3.1 → nearest 4.0
+        assert result[2] == (2, 8.0)   # 7.9 → nearest 8.0
+
+    def test_empty_keyframes_returns_original(self) -> None:
+        """With no keyframes, returns original targets."""
+        targets = [1.0, 2.0, 3.0]
+        result = _snap_to_keyframes(targets, [])
+        assert result == [(0, 1.0), (1, 2.0), (2, 3.0)]
+
+    def test_single_keyframe(self) -> None:
+        """All targets snap to the single available keyframe."""
+        result = _snap_to_keyframes([0.5, 2.0, 5.0], [1.0])
+        assert all(t == 1.0 for _, t in result)
+
+    def test_preserves_index(self) -> None:
+        """Original index is preserved in output."""
+        result = _snap_to_keyframes([0.0, 5.0], [0.0, 10.0])
+        assert result[0][0] == 0
+        assert result[1][0] == 1
+
+    def test_exact_match(self) -> None:
+        """Exact keyframe timestamps are matched directly."""
+        keyframes = [0.0, 2.0, 4.0]
+        result = _snap_to_keyframes([2.0, 4.0], keyframes)
+        assert result[0] == (0, 2.0)
+        assert result[1] == (1, 4.0)

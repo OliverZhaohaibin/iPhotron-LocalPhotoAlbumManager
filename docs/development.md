@@ -97,14 +97,12 @@ This generates a compiled C-extension (`.so` / `.pyd`) in `src/iPhoto/core/filte
 #### Step 2: Build with Nuitka
 
 ```bash
-nuitka --standalone \
-       --nofollow-import-to=numba \
-       --include-package=iPhoto \
-       --output-dir=dist \
-       src/iPhoto/gui/main.py
+bash scripts/build_nuitka_fast.sh
 ```
 
-See [docs/misc/BUILD_EXE.md](misc/BUILD_EXE.md) for detailed troubleshooting.
+The script uses a startup-optimized Nuitka profile (`--standalone`, `--python-flag=no_site`, `--lto=yes`, `--clang`) and excludes heavy dev/runtime-only packages from the final bundle.
+
+See [docs/misc/BUILD_EXE.md](misc/BUILD_EXE.md) for detailed troubleshooting and manual flags.
 
 ---
 

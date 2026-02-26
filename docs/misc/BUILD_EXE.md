@@ -78,6 +78,34 @@ nuitka --standalone \
     src/iPhoto/gui/main.py
 ```
 
+### Startup-speed optimized build profile (recommended)
+
+If launch latency is the top priority, prefer a **directory-based standalone build**
+instead of onefile packaging. Onefile executables must unpack at process start,
+which can dominate cold-start time on slower disks.
+
+```bash
+nuitka --standalone \
+    --python-flag=no_site \
+    --lto=yes \
+    --clang \
+    --follow-imports \
+    --nofollow-import-to=numba \
+    --nofollow-import-to=llvmlite \
+    --nofollow-import-to=pytest \
+    --nofollow-import-to=iPhoto.tests \
+    --include-package=iPhoto \
+    --assume-yes-for-downloads \
+    --output-dir=dist \
+    src/iPhoto/gui/main.py
+```
+
+Notes:
+
+- `--python-flag=no_site` skips importing `site` at startup, reducing process init overhead.
+- `--lto=yes` + `--clang` can improve generated binary performance (build time increases).
+- For fastest startup, **do not add `--onefile`**.
+
 ### Key flags explained
 
 | Flag | Purpose |

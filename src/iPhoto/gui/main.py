@@ -5,30 +5,9 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QTimer, Qt
 from PySide6.QtGui import QColor, QPalette
 from PySide6.QtWidgets import QApplication
-
-
-from iPhoto.appctx import AppContext
-from iPhoto.gui.ui.main_window import MainWindow
-
-# New Architecture Imports
-from iPhoto.di.container import DependencyContainer
-from iPhoto.events.bus import EventBus
-from iPhoto.infrastructure.db.pool import ConnectionPool
-from iPhoto.domain.repositories import IAlbumRepository, IAssetRepository
-from iPhoto.infrastructure.repositories.sqlite_album_repository import SQLiteAlbumRepository
-from iPhoto.infrastructure.repositories.sqlite_asset_repository import SQLiteAssetRepository
-from iPhoto.infrastructure.services.metadata_provider import ExifToolMetadataProvider
-from iPhoto.infrastructure.services.thumbnail_generator import PillowThumbnailGenerator
-from iPhoto.application.interfaces import IMetadataProvider, IThumbnailGenerator
-from iPhoto.application.use_cases.open_album import OpenAlbumUseCase
-from iPhoto.application.use_cases.scan_album import ScanAlbumUseCase
-from iPhoto.application.use_cases.pair_live_photos import PairLivePhotosUseCase
-from iPhoto.application.services.album_service import AlbumService
-from iPhoto.application.services.asset_service import AssetService
-from iPhoto.gui.coordinators.main_coordinator import MainCoordinator
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -79,70 +58,32 @@ def main(argv: list[str] | None = None) -> int:
     tooltip_palette.setColor(QPalette.ColorRole.ToolTipText, text_colour)
     app.setPalette(tooltip_palette, "QToolTip")
 
-    # --- Phase 1: Infrastructure Modernization Setup ---
-    container = DependencyContainer()
+    from iPhoto.appctx import AppContext
+    from iPhoto.gui.coordinators.main_coordinator import MainCoordinator
+    from iPhoto.gui.ui.main_window import MainWindow
 
-    # 1. Event Bus
-    container.register_singleton(EventBus)
-
-    # 2. Database Connection Pool
-    # We need a path for the global DB. Assuming context.library.root holds it or using default.
-    context = AppContext()
-
-    # Use the library root from the legacy context for the new DB pool
-    # If not bound, it might be None.
-    db_path = Path.home() / ".iPhoto" / "global_index.db"
-    if context.library.root():
-        db_path = context.library.root() / ".iPhoto" / "global_index.db"
-
-    # Ensure directory exists
-    db_path.parent.mkdir(parents=True, exist_ok=True)
-
-    pool = ConnectionPool(db_path)
-    container.register_instance(ConnectionPool, pool)
-
-    # 3. Repositories
-    container.register_factory(IAlbumRepository, lambda: SQLiteAlbumRepository(pool), singleton=True)
-    container.register_factory(IAssetRepository, lambda: SQLiteAssetRepository(pool), singleton=True)
-
-    # 4. Infrastructure Services
-    container.register_singleton(IMetadataProvider, ExifToolMetadataProvider)
-    container.register_singleton(IThumbnailGenerator, PillowThumbnailGenerator)
-
-    # 5. Services & Use Cases
-    # Resolving dependencies for Use Cases
-    album_repo = container.resolve(IAlbumRepository)
-    asset_repo = container.resolve(IAssetRepository)
-    event_bus = container.resolve(EventBus)
-    metadata_provider = container.resolve(IMetadataProvider)
-    thumbnail_generator = container.resolve(IThumbnailGenerator)
-
-    # Instantiate Use Cases manually
-    open_uc = OpenAlbumUseCase(album_repo, asset_repo, event_bus)
-    scan_uc = ScanAlbumUseCase(album_repo, asset_repo, event_bus, metadata_provider, thumbnail_generator)
-    pair_uc = PairLivePhotosUseCase(asset_repo, event_bus)
-
-    container.register_factory(AlbumService, lambda: AlbumService(open_uc, scan_uc, pair_uc), singleton=True)
-    container.register_factory(AssetService, lambda: AssetService(asset_repo), singleton=True)
+    # Defer heavy library binding + initial scan until the event loop is running.
+    context = AppContext(defer_startup_tasks=True)
+    container = context.container
 
     # --- Phase 4: Coordinator Wiring ---
     window = MainWindow(context)
 
     # Coordinator needs Window, Context, and Container
-    coordinator = MainCoordinator(window, context, container)
-
-    # Injection into Window
-    window.set_coordinator(coordinator)
-
-    coordinator.start()
     window.show()
 
-    # Allow opening an album directly via argv[1].
-    if len(arguments) > 1:
-        # Use new coordinator method
-        coordinator.open_album_from_path(Path(arguments[1]))
-    else:
+    def _initialize_after_show() -> None:
+        coordinator = MainCoordinator(window, context, container)
+        window.set_coordinator(coordinator)
+        coordinator.start()
+        context.resume_startup_tasks()
+
+        if len(arguments) > 1:
+            coordinator.open_album_from_path(Path(arguments[1]))
+            return
         window.ui.sidebar.select_all_photos(emit_signal=True)
+
+    QTimer.singleShot(0, _initialize_after_show)
 
     return app.exec()
 

@@ -81,6 +81,7 @@ class FramelessWindowManager(QObject):
         self._previous_window_state = self._window.windowState()
         self._drag_active = False
         self._system_move_armed = False
+        self._drag_trace_id = 0
         self._drag_offset = QPoint()
         self._geometry_fix_in_progress = False
         self._tracked_window_handle: QObject | None = None
@@ -546,6 +547,16 @@ class FramelessWindowManager(QObject):
         details = ", ".join(f"{key}={value}" for key, value in payload.items())
         _LOGGER.debug("Frameless snap diagnostic: %s", details)
 
+
+    def _log_windows_snap_trace(self, stage: str, **extra: object) -> None:
+        """Emit info-level drag trace logs to diagnose Windows snapping attempts."""
+
+        if sys.platform != "win32":
+            return
+        payload = {"stage": stage, "trace": self._drag_trace_id, **extra}
+        details = ", ".join(f"{key}={value}" for key, value in payload.items())
+        _LOGGER.info("Frameless snap trace: %s", details)
+
     def _handle_title_bar_drag(self, event: QEvent) -> bool:
         if self._immersive_active:
             return False
@@ -554,6 +565,8 @@ class FramelessWindowManager(QObject):
             mouse_event = cast(QMouseEvent, event)
             if mouse_event.button() == Qt.MouseButton.LeftButton:
                 self._drag_active = True
+                self._drag_trace_id += 1
+                self._log_windows_snap_trace("title_press", global_pos=mouse_event.globalPosition().toPoint())
                 self._log_windows_snap_diagnostics("title_press", button="left")
                 self._system_move_armed = sys.platform == "win32"
                 self._drag_offset = (
@@ -561,10 +574,12 @@ class FramelessWindowManager(QObject):
                     - self._window.frameGeometry().topLeft()
                 )
                 if self._system_move_armed and self._start_system_move():
+                    self._log_windows_snap_trace("title_press_system_move_started")
                     self._log_windows_snap_diagnostics("title_press_system_move_started")
                     self._drag_active = False
                     self._system_move_armed = False
                     return True
+                self._log_windows_snap_trace("title_press_system_move_unavailable", armed=self._system_move_armed)
                 self._log_windows_snap_diagnostics("title_press_system_move_unavailable")
                 if self._system_move_armed:
                     _LOGGER.warning(
@@ -575,11 +590,13 @@ class FramelessWindowManager(QObject):
             mouse_event = cast(QMouseEvent, event)
             if mouse_event.buttons() & Qt.MouseButton.LeftButton:
                 if self._system_move_armed and self._start_system_move():
+                    self._log_windows_snap_trace("title_move_system_move_started")
                     self._log_windows_snap_diagnostics("title_move_system_move_started")
                     self._drag_active = False
                     self._system_move_armed = False
                     return True
                 self._system_move_armed = False
+                self._log_windows_snap_trace("title_move_manual_fallback", global_pos=mouse_event.globalPosition().toPoint())
                 self._log_windows_snap_diagnostics("title_move_manual_fallback")
                 if sys.platform == "win32":
                     _LOGGER.warning(
@@ -589,6 +606,7 @@ class FramelessWindowManager(QObject):
                 self._window.move(new_pos)
             return True
         if event.type() == QEvent.Type.MouseButtonRelease and self._drag_active:
+            self._log_windows_snap_trace("title_release")
             self._drag_active = False
             self._system_move_armed = False
             return True
@@ -604,7 +622,9 @@ class FramelessWindowManager(QObject):
         if mouse_event.button() != Qt.MouseButton.LeftButton:
             return False
 
+        self._log_windows_snap_trace("resize_press")
         started = self._start_system_resize(Qt.Edge.BottomEdge | Qt.Edge.RightEdge)
+        self._log_windows_snap_trace("resize_press_result", started=started)
         self._log_windows_snap_diagnostics("resize_press", started=started)
         if sys.platform == "win32" and not started:
             _LOGGER.warning(
@@ -621,6 +641,7 @@ class FramelessWindowManager(QObject):
             self._log_windows_snap_diagnostics("start_system_move_missing_api")
             return False
         started = bool(handle.startSystemMove())
+        self._log_windows_snap_trace("start_system_move_result", started=started)
         self._log_windows_snap_diagnostics("start_system_move_result", started=started)
         return started
 
@@ -633,6 +654,7 @@ class FramelessWindowManager(QObject):
             self._log_windows_snap_diagnostics("start_system_resize_missing_api")
             return False
         started = bool(handle.startSystemResize(edges))
+        self._log_windows_snap_trace("start_system_resize_result", started=started, edges=repr(edges))
         self._log_windows_snap_diagnostics(
             "start_system_resize_result", started=started, edges=repr(edges)
         )

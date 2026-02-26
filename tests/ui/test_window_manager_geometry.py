@@ -225,3 +225,31 @@ def test_start_system_resize_logs_edge_repr_without_typeerror(monkeypatch) -> No
         call.args and call.args[0] == "start_system_resize_result"
         for call in diag_mock.call_args_list
     )
+
+
+def test_title_drag_emits_info_trace_logs_on_windows(monkeypatch) -> None:
+    """Windows title drag should emit info-level trace logs for troubleshooting."""
+
+    manager = FramelessWindowManager.__new__(FramelessWindowManager)
+    manager._immersive_active = False
+    manager._drag_active = False
+    manager._system_move_armed = False
+    manager._drag_trace_id = 0
+
+    window = MagicMock()
+    window.frameGeometry.return_value.topLeft.return_value = QPoint(0, 0)
+    manager._window = window
+
+    monkeypatch.setattr("iPhoto.gui.ui.window_manager.sys.platform", "win32")
+    manager._start_system_move = lambda: False  # type: ignore[method-assign]
+
+    info_mock = MagicMock()
+    monkeypatch.setattr("iPhoto.gui.ui.window_manager._LOGGER.info", info_mock)
+
+    press = MagicMock()
+    press.type.return_value = QEvent.Type.MouseButtonPress
+    press.button.return_value = Qt.MouseButton.LeftButton
+    press.globalPosition.return_value.toPoint.return_value = QPoint(20, 30)
+
+    assert manager._handle_title_bar_drag(press) is True
+    assert info_mock.call_count >= 1

@@ -500,6 +500,11 @@ class FramelessWindowManager(QObject):
     def _clamp_window_to_current_screen(self) -> None:
         if self._geometry_fix_in_progress:
             return
+        if self._window.isMaximized() or self._window.isMinimized():
+            return
+        if sys.platform == "win32" and (time.monotonic() - self._last_system_move_started_at) < 1.2:
+            self._log_windows_snap_trace("skip_clamp_during_system_move")
+            return
         handle = self._window.windowHandle()
         screen = handle.screen() if handle is not None else None
         self._clamp_window_to_screen(screen)
@@ -510,7 +515,8 @@ class FramelessWindowManager(QObject):
             return
 
         clamped = self._clamp_size_to_available(
-            self._window.size(), available.width(), available.height()
+            self._window.size(), available.width(), available.height(),
+            margin=0 if sys.platform == "win32" else _SCREEN_CLAMP_MARGIN,
         )
         if clamped == self._window.size():
             return
@@ -535,9 +541,11 @@ class FramelessWindowManager(QObject):
         return raw if raw > 0.0 else 1.0
 
     @staticmethod
-    def _clamp_size_to_available(size: QSize, avail_w: int, avail_h: int) -> QSize:
-        max_w = max(_MIN_WINDOW_WIDTH, avail_w - _SCREEN_CLAMP_MARGIN)
-        max_h = max(_MIN_WINDOW_HEIGHT, avail_h - _SCREEN_CLAMP_MARGIN)
+    def _clamp_size_to_available(
+        size: QSize, avail_w: int, avail_h: int, *, margin: int = _SCREEN_CLAMP_MARGIN
+    ) -> QSize:
+        max_w = max(_MIN_WINDOW_WIDTH, avail_w - max(0, margin))
+        max_h = max(_MIN_WINDOW_HEIGHT, avail_h - max(0, margin))
         width = max(_MIN_WINDOW_WIDTH, min(size.width(), max_w))
         height = max(_MIN_WINDOW_HEIGHT, min(size.height(), max_h))
         return QSize(width, height)

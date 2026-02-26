@@ -301,3 +301,44 @@ def test_trace_windows_snap_progress_logs_edge_contact(monkeypatch) -> None:
 
     assert manager._edge_snap_observed is True
     assert any("snap_edge_contact" in str(call.args[1]) for call in info_mock.call_args_list if len(call.args) > 1)
+
+
+def test_clamp_size_to_available_without_margin_for_windows_snap() -> None:
+    """Windows snap paths should allow full available geometry (no artificial margin)."""
+
+    current = QSize(6000, 4000)
+    clamped = FramelessWindowManager._clamp_size_to_available(
+        current, 1920, 1080, margin=0
+    )
+
+    assert clamped.width() == 1920
+    assert clamped.height() == 1080
+
+
+def test_clamp_window_to_current_screen_skips_after_system_move(monkeypatch) -> None:
+    """Recent system-move on Windows should skip manual clamp to avoid breaking snap."""
+
+    manager = FramelessWindowManager.__new__(FramelessWindowManager)
+    manager._geometry_fix_in_progress = False
+    manager._last_system_move_started_at = 1000.0
+
+    window = MagicMock()
+    window.isMaximized.return_value = False
+    window.isMinimized.return_value = False
+    window.windowHandle.return_value = None
+    manager._window = window
+
+    called = {"count": 0}
+
+    def _fake_clamp(_screen):
+        called["count"] += 1
+
+    manager._clamp_window_to_screen = _fake_clamp  # type: ignore[method-assign]
+    manager._log_windows_snap_trace = lambda *args, **kwargs: None  # type: ignore[method-assign]
+
+    monkeypatch.setattr("iPhoto.gui.ui.window_manager.sys.platform", "win32")
+    monkeypatch.setattr("iPhoto.gui.ui.window_manager.time.monotonic", lambda: 1000.5)
+
+    manager._clamp_window_to_current_screen()
+
+    assert called["count"] == 0

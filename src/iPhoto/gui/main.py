@@ -34,6 +34,11 @@ from iPhoto.gui.coordinators.main_coordinator import MainCoordinator
 def main(argv: list[str] | None = None) -> int:
     """Launch the Qt application and return the exit code."""
 
+    if hasattr(Qt, "HighDpiScaleFactorRoundingPolicy"):
+        QApplication.setHighDpiScaleFactorRoundingPolicy(
+            Qt.HighDpiScaleFactorRoundingPolicy.PassThrough
+        )
+
     arguments = list(sys.argv if argv is None else argv)
     app = QApplication(arguments)
 

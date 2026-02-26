@@ -19,7 +19,7 @@
 
 ## 📥 下载与安装
 
-[![下载 iPhoto 最新版本](https://img.shields.io/badge/⬇️%20下载-iPhotron%20最新版本-blue?style=for-the-badge&logo=windows)](https://github.com/OliverZhaohaibin/iPhotron-LocalPhotoAlbumManager/releases/download/v4.2.0/v4.20.exe)
+[![下载 iPhoto 最新版本](https://img.shields.io/badge/⬇️%20下载-iPhotron%20最新版本-blue?style=for-the-badge&logo=windows)](https://github.com/OliverZhaohaibin/iPhotron-LocalPhotoAlbumManager/releases/download/v4.2.1/v4.21.exe)
 
 **💡 快速安装：** 点击上方按钮直接下载最新的 Windows 安装程序（.exe）。
 

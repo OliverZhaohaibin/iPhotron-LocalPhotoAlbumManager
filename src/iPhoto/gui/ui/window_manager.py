@@ -77,6 +77,7 @@ class FramelessWindowManager(QObject):
         self._previous_geometry = self._window.saveGeometry()
         self._previous_window_state = self._window.windowState()
         self._drag_active = False
+        self._system_move_armed = False
         self._drag_offset = QPoint()
         self._geometry_fix_in_progress = False
         self._tracked_window_handle: QObject | None = None
@@ -530,22 +531,31 @@ class FramelessWindowManager(QObject):
         if event.type() == QEvent.Type.MouseButtonPress:
             mouse_event = cast(QMouseEvent, event)
             if mouse_event.button() == Qt.MouseButton.LeftButton:
-                if self._start_system_move():
-                    return True
                 self._drag_active = True
+                self._system_move_armed = sys.platform == "win32"
                 self._drag_offset = (
                     mouse_event.globalPosition().toPoint()
                     - self._window.frameGeometry().topLeft()
                 )
+                if self._system_move_armed and self._start_system_move():
+                    self._drag_active = False
+                    self._system_move_armed = False
+                    return True
                 return True
         if event.type() == QEvent.Type.MouseMove and self._drag_active:
             mouse_event = cast(QMouseEvent, event)
             if mouse_event.buttons() & Qt.MouseButton.LeftButton:
+                if self._system_move_armed and self._start_system_move():
+                    self._drag_active = False
+                    self._system_move_armed = False
+                    return True
+                self._system_move_armed = False
                 new_pos = mouse_event.globalPosition().toPoint() - self._drag_offset
                 self._window.move(new_pos)
             return True
         if event.type() == QEvent.Type.MouseButtonRelease and self._drag_active:
             self._drag_active = False
+            self._system_move_armed = False
             return True
         return False
 

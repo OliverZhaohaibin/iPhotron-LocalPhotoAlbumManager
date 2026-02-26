@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock
 
-from PySide6.QtCore import QPoint, QRect, QSize, Qt
+from PySide6.QtCore import QEvent, QPoint, QRect, QSize, Qt
 
 from iPhoto.gui.ui.window_manager import FramelessWindowManager
 
@@ -92,3 +92,76 @@ def test_start_system_resize_uses_qwindow_api_on_windows(monkeypatch) -> None:
     edges = Qt.Edge.BottomEdge | Qt.Edge.RightEdge
     assert manager._start_system_resize(edges) is True
     handle.startSystemResize.assert_called_once_with(edges)
+
+
+def test_title_drag_retries_system_move_on_mouse_move(monkeypatch) -> None:
+    """Windows drag should retry system move on mouse-move before fallback."""
+
+    manager = FramelessWindowManager.__new__(FramelessWindowManager)
+    manager._immersive_active = False
+    manager._drag_active = False
+    manager._system_move_armed = False
+
+    window = MagicMock()
+    window.frameGeometry.return_value.topLeft.return_value = QPoint(0, 0)
+    manager._window = window
+
+    monkeypatch.setattr("iPhoto.gui.ui.window_manager.sys.platform", "win32")
+
+    move_attempts = {"count": 0}
+
+    def _fake_start_system_move() -> bool:
+        move_attempts["count"] += 1
+        return move_attempts["count"] == 2
+
+    manager._start_system_move = _fake_start_system_move  # type: ignore[method-assign]
+
+    press = MagicMock()
+    press.type.return_value = QEvent.Type.MouseButtonPress
+    press.button.return_value = Qt.MouseButton.LeftButton
+    press.globalPosition.return_value.toPoint.return_value = QPoint(10, 10)
+
+    move = MagicMock()
+    move.type.return_value = QEvent.Type.MouseMove
+    move.buttons.return_value = Qt.MouseButton.LeftButton
+    move.globalPosition.return_value.toPoint.return_value = QPoint(20, 20)
+
+    assert manager._handle_title_bar_drag(press) is True
+    assert manager._drag_active is True
+    assert manager._system_move_armed is True
+
+    assert manager._handle_title_bar_drag(move) is True
+    assert manager._drag_active is False
+    assert manager._system_move_armed is False
+    window.move.assert_not_called()
+
+
+def test_title_drag_falls_back_to_manual_move_when_system_move_fails(monkeypatch) -> None:
+    """If system move stays unavailable, frameless dragging keeps working manually."""
+
+    manager = FramelessWindowManager.__new__(FramelessWindowManager)
+    manager._immersive_active = False
+    manager._drag_active = False
+    manager._system_move_armed = False
+
+    window = MagicMock()
+    window.frameGeometry.return_value.topLeft.return_value = QPoint(5, 5)
+    manager._window = window
+
+    monkeypatch.setattr("iPhoto.gui.ui.window_manager.sys.platform", "win32")
+    manager._start_system_move = lambda: False  # type: ignore[method-assign]
+
+    press = MagicMock()
+    press.type.return_value = QEvent.Type.MouseButtonPress
+    press.button.return_value = Qt.MouseButton.LeftButton
+    press.globalPosition.return_value.toPoint.return_value = QPoint(15, 15)
+
+    move = MagicMock()
+    move.type.return_value = QEvent.Type.MouseMove
+    move.buttons.return_value = Qt.MouseButton.LeftButton
+    move.globalPosition.return_value.toPoint.return_value = QPoint(25, 30)
+
+    assert manager._handle_title_bar_drag(press) is True
+    assert manager._handle_title_bar_drag(move) is True
+
+    window.move.assert_called_once_with(QPoint(15, 20))

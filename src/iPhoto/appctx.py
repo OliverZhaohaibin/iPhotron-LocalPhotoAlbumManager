@@ -130,6 +130,8 @@ class AppContext:
 
     # DI Container integration
     container: DependencyContainer = field(default_factory=_create_di_container)
+    defer_startup_tasks: bool = False
+    _pending_basic_library_path: Path | None = field(init=False, default=None, repr=False)
 
     def __post_init__(self) -> None:
         from .errors import LibraryError
@@ -147,17 +149,11 @@ class AppContext:
 
         basic_path = self.settings.get("basic_library_path")
         if isinstance(basic_path, str) and basic_path:
-            candidate = Path(basic_path).expanduser()
-            if candidate.exists():
-                try:
-                    self.library.bind_path(candidate)
-                    self._start_initial_scan_if_needed(candidate)
-                except LibraryError as exc:
-                    self.library.errorRaised.emit(str(exc))
-            else:
-                self.library.errorRaised.emit(
-                    f"Basic Library path is unavailable: {candidate}"
-                )
+            self._pending_basic_library_path = Path(basic_path).expanduser()
+
+        if not self.defer_startup_tasks:
+            self.resume_startup_tasks()
+
         stored = self.settings.get("last_open_albums", []) or []
         resolved: list[Path] = []
         for entry in stored:
@@ -167,6 +163,26 @@ class AppContext:
                 continue
         if resolved:
             self.recent_albums = resolved[:10]
+
+    def resume_startup_tasks(self) -> None:
+        """Run deferred startup work such as binding the default library path."""
+
+        from .errors import LibraryError
+
+        candidate = self._pending_basic_library_path
+        self._pending_basic_library_path = None
+        if candidate is None:
+            return
+        if candidate.exists():
+            try:
+                self.library.bind_path(candidate)
+                self._start_initial_scan_if_needed(candidate)
+            except LibraryError as exc:
+                self.library.errorRaised.emit(str(exc))
+        else:
+            self.library.errorRaised.emit(
+                f"Basic Library path is unavailable: {candidate}"
+            )
 
     def _start_initial_scan_if_needed(self, library_root: Path) -> None:
         work_dir = library_root / WORK_DIR_NAME

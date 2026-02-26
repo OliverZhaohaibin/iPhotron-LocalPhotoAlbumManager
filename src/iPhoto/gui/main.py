@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -34,10 +35,22 @@ from iPhoto.gui.coordinators.main_coordinator import MainCoordinator
 def main(argv: list[str] | None = None) -> int:
     """Launch the Qt application and return the exit code."""
 
+    # Provide a strict override for High DPI rounding behaviour via the environment.
+    # This acts as a fallback for scenarios where the runtime configuration might
+    # be applied too late or overridden by platform plugins.
+    os.environ["QT_SCALE_FACTOR_ROUNDING_POLICY"] = "PassThrough"
+
+    # Explicitly configure the application instance to respect the fractional
+    # scale factor provided by the operating system.  This prevents the UI from
+    # exploding in size on Windows displays with 150% scaling, where Qt defaults
+    # to rounding up to 200%.
     if hasattr(Qt, "HighDpiScaleFactorRoundingPolicy"):
         QApplication.setHighDpiScaleFactorRoundingPolicy(
             Qt.HighDpiScaleFactorRoundingPolicy.PassThrough
         )
+
+    if hasattr(Qt.ApplicationAttribute, "AA_UseHighDpiPixmaps"):
+        QApplication.setAttribute(Qt.ApplicationAttribute.AA_UseHighDpiPixmaps)
 
     arguments = list(sys.argv if argv is None else argv)
     app = QApplication(arguments)

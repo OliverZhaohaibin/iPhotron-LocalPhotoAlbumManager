@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 from contextlib import contextmanager
 from typing import Iterable, Iterator, TYPE_CHECKING, cast
 
@@ -68,6 +69,7 @@ class FramelessWindowManager(QObject):
         self._window_tooltip = FloatingToolTip(self._window)
         self._tooltip_filter: ToolTipEventFilter | None = None
         self._drag_sources: set[QWidget] = set()
+        self._resize_sources: set[QWidget] = set()
 
         self._immersive_active = False
         self._hidden_widget_states: list[tuple[QWidget, bool]] = []
@@ -348,6 +350,10 @@ class FramelessWindowManager(QObject):
     def eventFilter(self, watched: QObject, event: QEvent) -> bool:  # type: ignore[override]
         """Handle title-bar dragging and badge positioning."""
 
+        if watched in self._resize_sources:
+            if self._handle_resize_source_event(event):
+                return True
+
         if watched in self._drag_sources:
             if self._handle_title_bar_drag(event):
                 return True
@@ -404,6 +410,14 @@ class FramelessWindowManager(QObject):
     def _configure_drag_sources(self) -> None:
         self._drag_sources = {self._ui.title_bar, self._ui.window_title_label}
         for source in self._drag_sources:
+            source.installEventFilter(self)
+
+        size_grip = getattr(self, "_size_grip", None)
+        resize_indicator = getattr(self._ui, "resize_indicator", None)
+        self._resize_sources = {
+            source for source in (size_grip, resize_indicator) if source is not None
+        }
+        for source in self._resize_sources:
             source.installEventFilter(self)
 
         self._ui.badge_host.installEventFilter(self)
@@ -516,6 +530,8 @@ class FramelessWindowManager(QObject):
         if event.type() == QEvent.Type.MouseButtonPress:
             mouse_event = cast(QMouseEvent, event)
             if mouse_event.button() == Qt.MouseButton.LeftButton:
+                if self._start_system_move():
+                    return True
                 self._drag_active = True
                 self._drag_offset = (
                     mouse_event.globalPosition().toPoint()
@@ -532,6 +548,34 @@ class FramelessWindowManager(QObject):
             self._drag_active = False
             return True
         return False
+
+    def _handle_resize_source_event(self, event: QEvent) -> bool:
+        if self._immersive_active:
+            return False
+        if event.type() != QEvent.Type.MouseButtonPress:
+            return False
+
+        mouse_event = cast(QMouseEvent, event)
+        if mouse_event.button() != Qt.MouseButton.LeftButton:
+            return False
+
+        return self._start_system_resize(Qt.Edge.BottomEdge | Qt.Edge.RightEdge)
+
+    def _start_system_move(self) -> bool:
+        if sys.platform != "win32":
+            return False
+        handle = self._window.windowHandle()
+        if handle is None or not hasattr(handle, "startSystemMove"):
+            return False
+        return bool(handle.startSystemMove())
+
+    def _start_system_resize(self, edges: Qt.Edge) -> bool:
+        if sys.platform != "win32":
+            return False
+        handle = self._window.windowHandle()
+        if handle is None or not hasattr(handle, "startSystemResize"):
+            return False
+        return bool(handle.startSystemResize(edges))
 
     def _update_fullscreen_button_icon(self) -> None:
         if self._immersive_active:

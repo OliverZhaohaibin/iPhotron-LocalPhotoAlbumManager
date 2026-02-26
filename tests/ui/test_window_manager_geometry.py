@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock
 
-from PySide6.QtCore import QPoint, QRect, QSize
+from PySide6.QtCore import QPoint, QRect, QSize, Qt
 
 from iPhoto.gui.ui.window_manager import FramelessWindowManager
 
@@ -57,3 +57,38 @@ def test_apply_screen_change_fix_rescales_and_repositions() -> None:
     args, _ = window.move.call_args
     assert args in ((QPoint(20, 20),), (20, 20))
     assert manager._last_screen_dpr == 2.0
+
+
+def test_start_system_move_uses_qwindow_api_on_windows(monkeypatch) -> None:
+    """Windows frameless windows should delegate dragging to the OS move loop."""
+
+    manager = FramelessWindowManager.__new__(FramelessWindowManager)
+    handle = MagicMock()
+    handle.startSystemMove.return_value = True
+
+    window = MagicMock()
+    window.windowHandle.return_value = handle
+    manager._window = window
+
+    monkeypatch.setattr("iPhoto.gui.ui.window_manager.sys.platform", "win32")
+
+    assert manager._start_system_move() is True
+    handle.startSystemMove.assert_called_once_with()
+
+
+def test_start_system_resize_uses_qwindow_api_on_windows(monkeypatch) -> None:
+    """Windows frameless resize grips should delegate to the system resize loop."""
+
+    manager = FramelessWindowManager.__new__(FramelessWindowManager)
+    handle = MagicMock()
+    handle.startSystemResize.return_value = True
+
+    window = MagicMock()
+    window.windowHandle.return_value = handle
+    manager._window = window
+
+    monkeypatch.setattr("iPhoto.gui.ui.window_manager.sys.platform", "win32")
+
+    edges = Qt.Edge.BottomEdge | Qt.Edge.RightEdge
+    assert manager._start_system_resize(edges) is True
+    handle.startSystemResize.assert_called_once_with(edges)

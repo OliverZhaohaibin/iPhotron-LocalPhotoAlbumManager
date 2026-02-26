@@ -71,6 +71,7 @@ def test_start_system_move_uses_qwindow_api_on_windows(monkeypatch) -> None:
     manager._window = window
 
     monkeypatch.setattr("iPhoto.gui.ui.window_manager.sys.platform", "win32")
+    monkeypatch.setattr("iPhoto.gui.ui.window_manager._PREFER_NATIVE_WINDOWS_NONCLIENT", False)
 
     assert manager._start_system_move() is True
     handle.startSystemMove.assert_called_once_with()
@@ -88,6 +89,7 @@ def test_start_system_resize_uses_qwindow_api_on_windows(monkeypatch) -> None:
     manager._window = window
 
     monkeypatch.setattr("iPhoto.gui.ui.window_manager.sys.platform", "win32")
+    monkeypatch.setattr("iPhoto.gui.ui.window_manager._PREFER_NATIVE_WINDOWS_NONCLIENT", False)
 
     edges = Qt.Edge.BottomEdge | Qt.Edge.RightEdge
     assert manager._start_system_resize(edges) is True
@@ -386,3 +388,27 @@ def test_start_system_resize_uses_native_fallback_when_qwindow_returns_false(mon
     edges = Qt.Edge.BottomEdge | Qt.Edge.RightEdge
     assert manager._start_system_resize(edges) is True
     native_mock.assert_called_once()
+
+
+def test_start_system_move_prefers_native_nonclient_on_windows(monkeypatch) -> None:
+    """Native non-client path should be preferred when enabled on Windows."""
+
+    manager = FramelessWindowManager.__new__(FramelessWindowManager)
+    handle = MagicMock()
+
+    window = MagicMock()
+    window.windowHandle.return_value = handle
+    window.isMaximized.return_value = False
+    manager._window = window
+
+    monkeypatch.setattr("iPhoto.gui.ui.window_manager.sys.platform", "win32")
+    monkeypatch.setattr("iPhoto.gui.ui.window_manager._PREFER_NATIVE_WINDOWS_NONCLIENT", True)
+
+    native_mock = MagicMock(return_value=True)
+    manager._start_native_windows_move = native_mock  # type: ignore[method-assign]
+    manager._log_windows_snap_trace = lambda *args, **kwargs: None  # type: ignore[method-assign]
+    manager._log_windows_snap_diagnostics = lambda *args, **kwargs: None  # type: ignore[method-assign]
+
+    assert manager._start_system_move() is True
+    native_mock.assert_called_once_with()
+    handle.startSystemMove.assert_not_called()

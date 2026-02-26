@@ -55,6 +55,7 @@ _SCREEN_CLAMP_MARGIN = 40
 _WM_NCLBUTTONDOWN = 0x00A1
 _HTCAPTION = 2
 _HTBOTTOMRIGHT = 17
+_PREFER_NATIVE_WINDOWS_NONCLIENT = True
 
 
 class FramelessWindowManager(QObject):
@@ -758,6 +759,13 @@ class FramelessWindowManager(QObject):
         if sys.platform != "win32":
             self._log_windows_snap_diagnostics("start_system_move_skipped_non_windows")
             return False
+
+        if _PREFER_NATIVE_WINDOWS_NONCLIENT:
+            native_started = self._start_native_windows_move()
+            self._log_windows_snap_trace("native_move_preferred_result", started=native_started)
+            if native_started:
+                return True
+
         handle = self._window.windowHandle()
         if handle is None or not hasattr(handle, "startSystemMove"):
             self._log_windows_snap_diagnostics("start_system_move_missing_api")
@@ -765,7 +773,9 @@ class FramelessWindowManager(QObject):
             self._log_windows_snap_trace("native_move_fallback_result", started=native_started)
             return native_started
         started = bool(handle.startSystemMove())
-        self._log_windows_snap_trace("start_system_move_result", started=started, maximized=self._window.isMaximized())
+        self._log_windows_snap_trace(
+            "start_system_move_result", started=started, maximized=self._window.isMaximized()
+        )
         self._log_windows_snap_diagnostics("start_system_move_result", started=started)
         if started:
             return True
@@ -777,6 +787,13 @@ class FramelessWindowManager(QObject):
         if sys.platform != "win32":
             self._log_windows_snap_diagnostics("start_system_resize_skipped_non_windows")
             return False
+
+        if _PREFER_NATIVE_WINDOWS_NONCLIENT:
+            native_started = self._start_native_windows_resize(_HTBOTTOMRIGHT)
+            self._log_windows_snap_trace("native_resize_preferred_result", started=native_started)
+            if native_started:
+                return True
+
         handle = self._window.windowHandle()
         if handle is None or not hasattr(handle, "startSystemResize"):
             self._log_windows_snap_diagnostics("start_system_resize_missing_api")
@@ -784,7 +801,9 @@ class FramelessWindowManager(QObject):
             self._log_windows_snap_trace("native_resize_fallback_result", started=native_started)
             return native_started
         started = bool(handle.startSystemResize(edges))
-        self._log_windows_snap_trace("start_system_resize_result", started=started, edges=repr(edges))
+        self._log_windows_snap_trace(
+            "start_system_resize_result", started=started, edges=repr(edges)
+        )
         self._log_windows_snap_diagnostics(
             "start_system_resize_result", started=started, edges=repr(edges)
         )

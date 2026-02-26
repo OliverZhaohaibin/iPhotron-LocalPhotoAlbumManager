@@ -633,7 +633,9 @@ class FramelessWindowManager(QObject):
             self._log_windows_snap_diagnostics("start_system_resize_missing_api")
             return False
         started = bool(handle.startSystemResize(edges))
-        self._log_windows_snap_diagnostics("start_system_resize_result", started=started, edges=int(edges))
+        self._log_windows_snap_diagnostics(
+            "start_system_resize_result", started=started, edges=repr(edges)
+        )
         return started
 
     def _update_fullscreen_button_icon(self) -> None:

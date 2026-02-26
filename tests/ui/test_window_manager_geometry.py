@@ -198,3 +198,30 @@ def test_title_drag_logs_warning_when_windows_fallback_happens(monkeypatch) -> N
     assert manager._handle_title_bar_drag(press) is True
     assert manager._handle_title_bar_drag(move) is True
     assert warning_mock.call_count >= 1
+
+
+def test_start_system_resize_logs_edge_repr_without_typeerror(monkeypatch) -> None:
+    """Diagnostic logging should handle Qt.Edge values without int() casting errors."""
+
+    manager = FramelessWindowManager.__new__(FramelessWindowManager)
+    handle = MagicMock()
+    handle.startSystemResize.return_value = True
+
+    window = MagicMock()
+    window.windowHandle.return_value = handle
+    manager._window = window
+
+    monkeypatch.setattr("iPhoto.gui.ui.window_manager.sys.platform", "win32")
+
+    diag_mock = MagicMock()
+    monkeypatch.setattr(
+        "iPhoto.gui.ui.window_manager.FramelessWindowManager._log_windows_snap_diagnostics",
+        diag_mock,
+    )
+
+    edges = Qt.Edge.BottomEdge | Qt.Edge.RightEdge
+    assert manager._start_system_resize(edges) is True
+    assert any(
+        call.args and call.args[0] == "start_system_resize_result"
+        for call in diag_mock.call_args_list
+    )

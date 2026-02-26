@@ -5,7 +5,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 from typing import Iterable, Iterator, TYPE_CHECKING, cast
 
-from PySide6.QtCore import Property, QEvent, QObject, QPoint, Qt, QTimer
+from PySide6.QtCore import Property, QEvent, QObject, QPoint, QSize, Qt, QTimer
 from PySide6.QtGui import (
     QColor,
     QMouseEvent,
@@ -43,6 +43,9 @@ if TYPE_CHECKING:  # pragma: no cover - used only for type checking
 # visibly on macOS and Windows when the compositor is still applying the size
 # changes.
 PLAYBACK_RESUME_DELAY_MS = 120
+_MIN_WINDOW_WIDTH = 900
+_MIN_WINDOW_HEIGHT = 640
+_SCREEN_CLAMP_MARGIN = 40
 
 
 class FramelessWindowManager(QObject):
@@ -73,6 +76,9 @@ class FramelessWindowManager(QObject):
         self._previous_window_state = self._window.windowState()
         self._drag_active = False
         self._drag_offset = QPoint()
+        self._geometry_fix_in_progress = False
+        self._tracked_window_handle: QObject | None = None
+        self._last_screen_dpr = 1.0
         self._video_controls_enabled_before = self._ui.video_area.controls_enabled()
         self._window_shell_stylesheet = self._ui.window_shell.styleSheet()
         self._player_container_stylesheet = self._ui.player_container.styleSheet()
@@ -90,6 +96,7 @@ class FramelessWindowManager(QObject):
         self._apply_menu_styles()
         self.position_live_badge()
         self.position_resize_widgets()
+        QTimer.singleShot(0, self._init_screen_tracking)
 
     # ------------------------------------------------------------------
     # Lifecycle helpers
@@ -140,6 +147,7 @@ class FramelessWindowManager(QObject):
         _ = event  # ``QResizeEvent`` is unused but kept for signature clarity.
         self.position_live_badge()
         self.position_resize_widgets()
+        self._clamp_window_to_current_screen()
 
     def handle_change_event(self, event: QEvent) -> None:
         """Update palette-dependent chrome when Qt notifies about state changes."""
@@ -399,6 +407,107 @@ class FramelessWindowManager(QObject):
             source.installEventFilter(self)
 
         self._ui.badge_host.installEventFilter(self)
+
+    def _init_screen_tracking(self) -> None:
+        handle = self._window.windowHandle()
+        if handle is None:
+            QTimer.singleShot(0, self._init_screen_tracking)
+            return
+        if self._tracked_window_handle is handle:
+            return
+
+        if self._tracked_window_handle is not None:
+            try:
+                self._tracked_window_handle.screenChanged.disconnect(self._on_screen_changed)
+            except (RuntimeError, TypeError):
+                pass
+
+        self._tracked_window_handle = handle
+        handle.screenChanged.connect(self._on_screen_changed)
+        screen = handle.screen()
+        self._last_screen_dpr = self._screen_dpr(screen)
+        self._clamp_window_to_screen(screen)
+
+    def _on_screen_changed(self, new_screen: object) -> None:
+        if self._geometry_fix_in_progress:
+            return
+
+        old_dpr = self._last_screen_dpr or 1.0
+        QTimer.singleShot(0, lambda: self._apply_screen_change_fix(old_dpr, new_screen))
+
+    def _apply_screen_change_fix(self, old_dpr: float, new_screen: object) -> None:
+        if self._geometry_fix_in_progress:
+            return
+
+        available = self._available_rect(new_screen)
+        if available is None:
+            self._last_screen_dpr = 1.0
+            return
+
+        new_dpr = self._screen_dpr(new_screen)
+        current = self._window.size()
+        scaled = QSize(
+            int(current.width() * old_dpr / new_dpr),
+            int(current.height() * old_dpr / new_dpr),
+        )
+        target = self._clamp_size_to_available(scaled, available.width(), available.height())
+
+        self._geometry_fix_in_progress = True
+        try:
+            if target != current:
+                self._window.resize(target)
+
+            if not available.intersects(self._window.frameGeometry()):
+                self._window.move(available.x() + 20, available.y() + 20)
+        finally:
+            self._geometry_fix_in_progress = False
+
+        self._last_screen_dpr = new_dpr
+
+    def _clamp_window_to_current_screen(self) -> None:
+        if self._geometry_fix_in_progress:
+            return
+        handle = self._window.windowHandle()
+        screen = handle.screen() if handle is not None else None
+        self._clamp_window_to_screen(screen)
+
+    def _clamp_window_to_screen(self, screen: object) -> None:
+        available = self._available_rect(screen)
+        if available is None:
+            return
+
+        clamped = self._clamp_size_to_available(
+            self._window.size(), available.width(), available.height()
+        )
+        if clamped == self._window.size():
+            return
+
+        self._geometry_fix_in_progress = True
+        try:
+            self._window.resize(clamped)
+        finally:
+            self._geometry_fix_in_progress = False
+
+    @staticmethod
+    def _available_rect(screen: object):
+        if screen is None or not hasattr(screen, "availableGeometry"):
+            return None
+        return screen.availableGeometry()
+
+    @staticmethod
+    def _screen_dpr(screen: object) -> float:
+        if screen is None or not hasattr(screen, "devicePixelRatio"):
+            return 1.0
+        raw = float(screen.devicePixelRatio())
+        return raw if raw > 0.0 else 1.0
+
+    @staticmethod
+    def _clamp_size_to_available(size: QSize, avail_w: int, avail_h: int) -> QSize:
+        max_w = max(_MIN_WINDOW_WIDTH, avail_w - _SCREEN_CLAMP_MARGIN)
+        max_h = max(_MIN_WINDOW_HEIGHT, avail_h - _SCREEN_CLAMP_MARGIN)
+        width = max(_MIN_WINDOW_WIDTH, min(size.width(), max_w))
+        height = max(_MIN_WINDOW_HEIGHT, min(size.height(), max_h))
+        return QSize(width, height)
 
     def _handle_title_bar_drag(self, event: QEvent) -> bool:
         if self._immersive_active:

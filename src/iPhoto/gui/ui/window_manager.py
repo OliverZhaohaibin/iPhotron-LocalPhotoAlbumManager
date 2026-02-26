@@ -52,6 +52,10 @@ _MIN_WINDOW_WIDTH = 900
 _MIN_WINDOW_HEIGHT = 640
 _SCREEN_CLAMP_MARGIN = 40
 
+_WM_NCLBUTTONDOWN = 0x00A1
+_HTCAPTION = 2
+_HTBOTTOMRIGHT = 17
+
 
 class FramelessWindowManager(QObject):
     """Encapsulate the custom chrome applied to the main application window."""
@@ -713,6 +717,43 @@ class FramelessWindowManager(QObject):
             )
         return started
 
+
+    def _start_native_windows_move(self) -> bool:
+        """Use Win32 non-client move message as a fallback for Snap compatibility."""
+
+        if sys.platform != "win32":
+            return False
+        try:
+            import ctypes
+
+            hwnd = int(self._window.winId())
+            user32 = ctypes.windll.user32
+            user32.ReleaseCapture()
+            user32.SendMessageW(hwnd, _WM_NCLBUTTONDOWN, _HTCAPTION, 0)
+            self._log_windows_snap_trace("native_move_message_sent")
+            return True
+        except Exception as exc:  # pragma: no cover - defensive windows fallback
+            _LOGGER.warning("Failed to start native Win32 move fallback: %s", exc)
+            return False
+
+    def _start_native_windows_resize(self, hit_test: int) -> bool:
+        """Use Win32 non-client resize message as a fallback for Snap compatibility."""
+
+        if sys.platform != "win32":
+            return False
+        try:
+            import ctypes
+
+            hwnd = int(self._window.winId())
+            user32 = ctypes.windll.user32
+            user32.ReleaseCapture()
+            user32.SendMessageW(hwnd, _WM_NCLBUTTONDOWN, hit_test, 0)
+            self._log_windows_snap_trace("native_resize_message_sent", hit_test=hit_test)
+            return True
+        except Exception as exc:  # pragma: no cover - defensive windows fallback
+            _LOGGER.warning("Failed to start native Win32 resize fallback: %s", exc)
+            return False
+
     def _start_system_move(self) -> bool:
         if sys.platform != "win32":
             self._log_windows_snap_diagnostics("start_system_move_skipped_non_windows")
@@ -720,11 +761,17 @@ class FramelessWindowManager(QObject):
         handle = self._window.windowHandle()
         if handle is None or not hasattr(handle, "startSystemMove"):
             self._log_windows_snap_diagnostics("start_system_move_missing_api")
-            return False
+            native_started = self._start_native_windows_move()
+            self._log_windows_snap_trace("native_move_fallback_result", started=native_started)
+            return native_started
         started = bool(handle.startSystemMove())
         self._log_windows_snap_trace("start_system_move_result", started=started, maximized=self._window.isMaximized())
         self._log_windows_snap_diagnostics("start_system_move_result", started=started)
-        return started
+        if started:
+            return True
+        native_started = self._start_native_windows_move()
+        self._log_windows_snap_trace("native_move_fallback_result", started=native_started)
+        return native_started
 
     def _start_system_resize(self, edges: Qt.Edge) -> bool:
         if sys.platform != "win32":
@@ -733,13 +780,19 @@ class FramelessWindowManager(QObject):
         handle = self._window.windowHandle()
         if handle is None or not hasattr(handle, "startSystemResize"):
             self._log_windows_snap_diagnostics("start_system_resize_missing_api")
-            return False
+            native_started = self._start_native_windows_resize(_HTBOTTOMRIGHT)
+            self._log_windows_snap_trace("native_resize_fallback_result", started=native_started)
+            return native_started
         started = bool(handle.startSystemResize(edges))
         self._log_windows_snap_trace("start_system_resize_result", started=started, edges=repr(edges))
         self._log_windows_snap_diagnostics(
             "start_system_resize_result", started=started, edges=repr(edges)
         )
-        return started
+        if started:
+            return True
+        native_started = self._start_native_windows_resize(_HTBOTTOMRIGHT)
+        self._log_windows_snap_trace("native_resize_fallback_result", started=native_started)
+        return native_started
 
     def _update_fullscreen_button_icon(self) -> None:
         if self._immersive_active:

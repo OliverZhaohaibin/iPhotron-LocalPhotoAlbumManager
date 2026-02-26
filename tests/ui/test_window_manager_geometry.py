@@ -342,3 +342,47 @@ def test_clamp_window_to_current_screen_skips_after_system_move(monkeypatch) -> 
     manager._clamp_window_to_current_screen()
 
     assert called["count"] == 0
+
+
+def test_start_system_move_uses_native_fallback_when_qwindow_returns_false(monkeypatch) -> None:
+    """If QWindow system move fails, Win32 non-client fallback should be attempted."""
+
+    manager = FramelessWindowManager.__new__(FramelessWindowManager)
+    handle = MagicMock()
+    handle.startSystemMove.return_value = False
+
+    window = MagicMock()
+    window.windowHandle.return_value = handle
+    window.isMaximized.return_value = False
+    manager._window = window
+
+    monkeypatch.setattr("iPhoto.gui.ui.window_manager.sys.platform", "win32")
+    native_mock = MagicMock(return_value=True)
+    manager._start_native_windows_move = native_mock  # type: ignore[method-assign]
+    manager._log_windows_snap_trace = lambda *args, **kwargs: None  # type: ignore[method-assign]
+    manager._log_windows_snap_diagnostics = lambda *args, **kwargs: None  # type: ignore[method-assign]
+
+    assert manager._start_system_move() is True
+    native_mock.assert_called_once_with()
+
+
+def test_start_system_resize_uses_native_fallback_when_qwindow_returns_false(monkeypatch) -> None:
+    """If QWindow system resize fails, Win32 non-client fallback should be attempted."""
+
+    manager = FramelessWindowManager.__new__(FramelessWindowManager)
+    handle = MagicMock()
+    handle.startSystemResize.return_value = False
+
+    window = MagicMock()
+    window.windowHandle.return_value = handle
+    manager._window = window
+
+    monkeypatch.setattr("iPhoto.gui.ui.window_manager.sys.platform", "win32")
+    native_mock = MagicMock(return_value=True)
+    manager._start_native_windows_resize = native_mock  # type: ignore[method-assign]
+    manager._log_windows_snap_trace = lambda *args, **kwargs: None  # type: ignore[method-assign]
+    manager._log_windows_snap_diagnostics = lambda *args, **kwargs: None  # type: ignore[method-assign]
+
+    edges = Qt.Edge.BottomEdge | Qt.Edge.RightEdge
+    assert manager._start_system_resize(edges) is True
+    native_mock.assert_called_once()

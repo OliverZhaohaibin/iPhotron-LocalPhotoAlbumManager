@@ -49,5 +49,11 @@ def test_apply_screen_change_fix_rescales_and_repositions() -> None:
     manager._apply_screen_change_fix(1.0, target_screen)
 
     window.resize.assert_called_once_with(QSize(1100, 800))
-    window.move.assert_called_once_with(QPoint(20, 20))
+
+    # ``QWidget.move`` is overloaded in Qt and may be invoked either as
+    # ``move(QPoint)`` or ``move(x, y)`` depending on binding/runtime details.
+    # Accept both call signatures to keep the regression test platform-stable.
+    window.move.assert_called_once()
+    args, _ = window.move.call_args
+    assert args in ((QPoint(20, 20),), (20, 20))
     assert manager._last_screen_dpr == 2.0

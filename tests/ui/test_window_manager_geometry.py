@@ -165,3 +165,36 @@ def test_title_drag_falls_back_to_manual_move_when_system_move_fails(monkeypatch
     assert manager._handle_title_bar_drag(move) is True
 
     window.move.assert_called_once_with(QPoint(15, 20))
+
+
+def test_title_drag_logs_warning_when_windows_fallback_happens(monkeypatch) -> None:
+    """Fallback to manual move should emit a warning to aid troubleshooting."""
+
+    manager = FramelessWindowManager.__new__(FramelessWindowManager)
+    manager._immersive_active = False
+    manager._drag_active = False
+    manager._system_move_armed = False
+
+    window = MagicMock()
+    window.frameGeometry.return_value.topLeft.return_value = QPoint(0, 0)
+    manager._window = window
+
+    monkeypatch.setattr("iPhoto.gui.ui.window_manager.sys.platform", "win32")
+    manager._start_system_move = lambda: False  # type: ignore[method-assign]
+
+    warning_mock = MagicMock()
+    monkeypatch.setattr("iPhoto.gui.ui.window_manager._LOGGER.warning", warning_mock)
+
+    press = MagicMock()
+    press.type.return_value = QEvent.Type.MouseButtonPress
+    press.button.return_value = Qt.MouseButton.LeftButton
+    press.globalPosition.return_value.toPoint.return_value = QPoint(10, 10)
+
+    move = MagicMock()
+    move.type.return_value = QEvent.Type.MouseMove
+    move.buttons.return_value = Qt.MouseButton.LeftButton
+    move.globalPosition.return_value.toPoint.return_value = QPoint(15, 15)
+
+    assert manager._handle_title_bar_drag(press) is True
+    assert manager._handle_title_bar_drag(move) is True
+    assert warning_mock.call_count >= 1

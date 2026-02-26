@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import sys
 from contextlib import contextmanager
 from typing import Iterable, Iterator, TYPE_CHECKING, cast
@@ -43,6 +44,8 @@ if TYPE_CHECKING:  # pragma: no cover - used only for type checking
 # multimedia playback resumes.  Skipping the delay causes videos to stutter
 # visibly on macOS and Windows when the compositor is still applying the size
 # changes.
+_LOGGER = logging.getLogger(__name__)
+
 PLAYBACK_RESUME_DELAY_MS = 120
 _MIN_WINDOW_WIDTH = 900
 _MIN_WINDOW_HEIGHT = 640
@@ -524,6 +527,25 @@ class FramelessWindowManager(QObject):
         height = max(_MIN_WINDOW_HEIGHT, min(size.height(), max_h))
         return QSize(width, height)
 
+
+    def _log_windows_snap_diagnostics(self, stage: str, **extra: object) -> None:
+        """Emit debug details for Windows frameless move/resize troubleshooting."""
+
+        if not _LOGGER.isEnabledFor(logging.DEBUG):
+            return
+
+        handle = self._window.windowHandle()
+        payload = {
+            "stage": stage,
+            "platform": sys.platform,
+            "has_handle": handle is not None,
+            "can_system_move": bool(handle and hasattr(handle, "startSystemMove")),
+            "can_system_resize": bool(handle and hasattr(handle, "startSystemResize")),
+            **extra,
+        }
+        details = ", ".join(f"{key}={value}" for key, value in payload.items())
+        _LOGGER.debug("Frameless snap diagnostic: %s", details)
+
     def _handle_title_bar_drag(self, event: QEvent) -> bool:
         if self._immersive_active:
             return False
@@ -532,24 +554,37 @@ class FramelessWindowManager(QObject):
             mouse_event = cast(QMouseEvent, event)
             if mouse_event.button() == Qt.MouseButton.LeftButton:
                 self._drag_active = True
+                self._log_windows_snap_diagnostics("title_press", button="left")
                 self._system_move_armed = sys.platform == "win32"
                 self._drag_offset = (
                     mouse_event.globalPosition().toPoint()
                     - self._window.frameGeometry().topLeft()
                 )
                 if self._system_move_armed and self._start_system_move():
+                    self._log_windows_snap_diagnostics("title_press_system_move_started")
                     self._drag_active = False
                     self._system_move_armed = False
                     return True
+                self._log_windows_snap_diagnostics("title_press_system_move_unavailable")
+                if self._system_move_armed:
+                    _LOGGER.warning(
+                        "Frameless drag could not start Windows system move on press; will retry on move."
+                    )
                 return True
         if event.type() == QEvent.Type.MouseMove and self._drag_active:
             mouse_event = cast(QMouseEvent, event)
             if mouse_event.buttons() & Qt.MouseButton.LeftButton:
                 if self._system_move_armed and self._start_system_move():
+                    self._log_windows_snap_diagnostics("title_move_system_move_started")
                     self._drag_active = False
                     self._system_move_armed = False
                     return True
                 self._system_move_armed = False
+                self._log_windows_snap_diagnostics("title_move_manual_fallback")
+                if sys.platform == "win32":
+                    _LOGGER.warning(
+                        "Frameless drag fell back to manual move on Windows; Snap may not trigger."
+                    )
                 new_pos = mouse_event.globalPosition().toPoint() - self._drag_offset
                 self._window.move(new_pos)
             return True
@@ -569,23 +604,37 @@ class FramelessWindowManager(QObject):
         if mouse_event.button() != Qt.MouseButton.LeftButton:
             return False
 
-        return self._start_system_resize(Qt.Edge.BottomEdge | Qt.Edge.RightEdge)
+        started = self._start_system_resize(Qt.Edge.BottomEdge | Qt.Edge.RightEdge)
+        self._log_windows_snap_diagnostics("resize_press", started=started)
+        if sys.platform == "win32" and not started:
+            _LOGGER.warning(
+                "Frameless resize could not start Windows system resize from grip."
+            )
+        return started
 
     def _start_system_move(self) -> bool:
         if sys.platform != "win32":
+            self._log_windows_snap_diagnostics("start_system_move_skipped_non_windows")
             return False
         handle = self._window.windowHandle()
         if handle is None or not hasattr(handle, "startSystemMove"):
+            self._log_windows_snap_diagnostics("start_system_move_missing_api")
             return False
-        return bool(handle.startSystemMove())
+        started = bool(handle.startSystemMove())
+        self._log_windows_snap_diagnostics("start_system_move_result", started=started)
+        return started
 
     def _start_system_resize(self, edges: Qt.Edge) -> bool:
         if sys.platform != "win32":
+            self._log_windows_snap_diagnostics("start_system_resize_skipped_non_windows")
             return False
         handle = self._window.windowHandle()
         if handle is None or not hasattr(handle, "startSystemResize"):
+            self._log_windows_snap_diagnostics("start_system_resize_missing_api")
             return False
-        return bool(handle.startSystemResize(edges))
+        started = bool(handle.startSystemResize(edges))
+        self._log_windows_snap_diagnostics("start_system_resize_result", started=started, edges=int(edges))
+        return started
 
     def _update_fullscreen_button_icon(self) -> None:
         if self._immersive_active:

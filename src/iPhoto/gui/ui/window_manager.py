@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import sys
+import time
 from contextlib import contextmanager
 from typing import Iterable, Iterator, TYPE_CHECKING, cast
 
@@ -63,6 +64,9 @@ class FramelessWindowManager(QObject):
 
         # Frameless setup -------------------------------------------------
         self._window.setWindowFlag(Qt.WindowType.FramelessWindowHint, True)
+        self._window.setWindowFlag(Qt.WindowType.WindowSystemMenuHint, True)
+        self._window.setWindowFlag(Qt.WindowType.WindowMinimizeButtonHint, True)
+        self._window.setWindowFlag(Qt.WindowType.WindowMaximizeButtonHint, True)
         self._window.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self._window.setAutoFillBackground(False)
 
@@ -82,6 +86,8 @@ class FramelessWindowManager(QObject):
         self._drag_active = False
         self._system_move_armed = False
         self._drag_trace_id = 0
+        self._last_system_move_started_at = 0.0
+        self._edge_snap_observed = False
         self._drag_offset = QPoint()
         self._geometry_fix_in_progress = False
         self._tracked_window_handle: QObject | None = None
@@ -370,6 +376,13 @@ class FramelessWindowManager(QObject):
         }:
             self.position_live_badge()
 
+        if watched is self._window and event.type() in {
+            QEvent.Type.Move,
+            QEvent.Type.Resize,
+            QEvent.Type.WindowStateChange,
+        }:
+            self._trace_windows_snap_progress(event.type())
+
         return super().eventFilter(watched, event)
 
     # ------------------------------------------------------------------
@@ -426,6 +439,7 @@ class FramelessWindowManager(QObject):
             source.installEventFilter(self)
 
         self._ui.badge_host.installEventFilter(self)
+        self._window.installEventFilter(self)
 
     def _init_screen_tracking(self) -> None:
         handle = self._window.windowHandle()
@@ -557,6 +571,59 @@ class FramelessWindowManager(QObject):
         details = ", ".join(f"{key}={value}" for key, value in payload.items())
         _LOGGER.info("Frameless snap trace: %s", details)
 
+
+    def _trace_windows_snap_progress(self, event_type: QEvent.Type) -> None:
+        """Log whether post-startSystemMove transitions reach edge-snap conditions."""
+
+        if sys.platform != "win32":
+            return
+        if self._last_system_move_started_at <= 0.0:
+            return
+        if (time.monotonic() - self._last_system_move_started_at) > 3.0:
+            return
+
+        frame = self._window.frameGeometry()
+        screen = self._window.screen()
+        available = self._available_rect(screen)
+        if available is None:
+            self._log_windows_snap_trace("snap_progress_no_available_rect")
+            return
+
+        edges = self._detect_touching_edges(frame, available)
+        if edges:
+            self._edge_snap_observed = True
+            self._log_windows_snap_trace(
+                "snap_edge_contact",
+                event_type=event_type.name,
+                edges="|".join(edges),
+                frame=frame,
+                available=available,
+            )
+
+        if self._window.isMaximized():
+            self._edge_snap_observed = True
+            self._log_windows_snap_trace(
+                "snap_window_maximized",
+                event_type=event_type.name,
+                frame=frame,
+                available=available,
+            )
+
+    @staticmethod
+    def _detect_touching_edges(frame, available, tolerance: int = 12) -> tuple[str, ...]:
+        """Return screen edges touched by the window frame within tolerance."""
+
+        edges: list[str] = []
+        if abs(frame.left() - available.left()) <= tolerance:
+            edges.append("left")
+        if abs(frame.top() - available.top()) <= tolerance:
+            edges.append("top")
+        if abs(frame.right() - available.right()) <= tolerance:
+            edges.append("right")
+        if abs(frame.bottom() - available.bottom()) <= tolerance:
+            edges.append("bottom")
+        return tuple(edges)
+
     def _handle_title_bar_drag(self, event: QEvent) -> bool:
         if self._immersive_active:
             return False
@@ -574,6 +641,8 @@ class FramelessWindowManager(QObject):
                     - self._window.frameGeometry().topLeft()
                 )
                 if self._system_move_armed and self._start_system_move():
+                    self._last_system_move_started_at = time.monotonic()
+                    self._edge_snap_observed = False
                     self._log_windows_snap_trace("title_press_system_move_started")
                     self._log_windows_snap_diagnostics("title_press_system_move_started")
                     self._drag_active = False
@@ -590,6 +659,8 @@ class FramelessWindowManager(QObject):
             mouse_event = cast(QMouseEvent, event)
             if mouse_event.buttons() & Qt.MouseButton.LeftButton:
                 if self._system_move_armed and self._start_system_move():
+                    self._last_system_move_started_at = time.monotonic()
+                    self._edge_snap_observed = False
                     self._log_windows_snap_trace("title_move_system_move_started")
                     self._log_windows_snap_diagnostics("title_move_system_move_started")
                     self._drag_active = False
@@ -606,6 +677,8 @@ class FramelessWindowManager(QObject):
                 self._window.move(new_pos)
             return True
         if event.type() == QEvent.Type.MouseButtonRelease and self._drag_active:
+            if self._last_system_move_started_at > 0.0 and not self._edge_snap_observed:
+                self._log_windows_snap_trace("title_release_without_edge_snap")
             self._log_windows_snap_trace("title_release")
             self._drag_active = False
             self._system_move_armed = False
@@ -641,7 +714,7 @@ class FramelessWindowManager(QObject):
             self._log_windows_snap_diagnostics("start_system_move_missing_api")
             return False
         started = bool(handle.startSystemMove())
-        self._log_windows_snap_trace("start_system_move_result", started=started)
+        self._log_windows_snap_trace("start_system_move_result", started=started, maximized=self._window.isMaximized())
         self._log_windows_snap_diagnostics("start_system_move_result", started=started)
         return started
 

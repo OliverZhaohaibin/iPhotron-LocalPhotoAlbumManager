@@ -253,3 +253,51 @@ def test_title_drag_emits_info_trace_logs_on_windows(monkeypatch) -> None:
 
     assert manager._handle_title_bar_drag(press) is True
     assert info_mock.call_count >= 1
+
+
+def test_detect_touching_edges_reports_expected_edges() -> None:
+    """Edge detection helper should report contacts near available-geometry bounds."""
+
+    frame = QRect(0, 0, 1920, 1080)
+    available = QRect(0, 0, 1920, 1080)
+
+    edges = FramelessWindowManager._detect_touching_edges(frame, available)
+
+    assert set(edges) == {"left", "top", "right", "bottom"}
+
+
+def test_detect_touching_edges_respects_tolerance() -> None:
+    """Small offsets outside tolerance should not be classified as edge contact."""
+
+    frame = QRect(20, 20, 1200, 800)
+    available = QRect(0, 0, 1920, 1080)
+
+    edges = FramelessWindowManager._detect_touching_edges(frame, available, tolerance=8)
+
+    assert edges == ()
+
+
+def test_trace_windows_snap_progress_logs_edge_contact(monkeypatch) -> None:
+    """During active system move window edge contact should emit trace logs."""
+
+    manager = FramelessWindowManager.__new__(FramelessWindowManager)
+    manager._last_system_move_started_at = 999999.0
+    manager._edge_snap_observed = False
+    manager._drag_trace_id = 42
+
+    window = MagicMock()
+    window.frameGeometry.return_value = QRect(0, 0, 1920, 1080)
+    window.screen.return_value = _FakeScreen(QRect(0, 0, 1920, 1080), dpr=1.0)
+    window.isMaximized.return_value = False
+    manager._window = window
+
+    monkeypatch.setattr("iPhoto.gui.ui.window_manager.sys.platform", "win32")
+    monkeypatch.setattr("iPhoto.gui.ui.window_manager.time.monotonic", lambda: 1000000.0)
+
+    info_mock = MagicMock()
+    monkeypatch.setattr("iPhoto.gui.ui.window_manager._LOGGER.info", info_mock)
+
+    manager._trace_windows_snap_progress(QEvent.Type.Move)
+
+    assert manager._edge_snap_observed is True
+    assert any("snap_edge_contact" in str(call.args[1]) for call in info_mock.call_args_list if len(call.args) > 1)

@@ -47,7 +47,24 @@ iphoto-gui /fotos/LondonReise
 
 ## 🌟 Star-Verlauf
 
-[![Star History Chart](https://api.star-history.com/svg?repos=OliverZhaohaibin/iPhotron-LocalPhotoAlbumManager&type=date&legend=bottom-right)](https://www.star-history.com/#OliverZhaohaibin/iPhotron-LocalPhotoAlbumManager&type=date&legend=bottom-right)
+<p align="center">
+  <a href="https://www.star-history.com/#OliverZhaohaibin/iPhotron-LocalPhotoAlbumManager&type=date&legend=bottom-right">
+    <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=OliverZhaohaibin/iPhotron-LocalPhotoAlbumManager&type=date&legend=bottom-right" />
+  </a>
+</p>
+
+## 🚀 Product Hunt
+<p align="center">
+  <a href="https://www.producthunt.com/products/iphotron/launches/iphotron?embed=true&amp;utm_source=badge-featured&amp;utm_medium=badge&amp;utm_campaign=badge-iphotron" target="_blank" rel="noopener noreferrer">
+    <img alt="iPhotron - A macOS Photos–style photo manager for Windows | Product Hunt" width="250" height="54" src="https://api.producthunt.com/widgets/embed-image/v1/featured.svg?post_id=1067965&amp;theme=light&amp;t=1772225909629">
+  </a>
+</p>
+
+<p align="center">
+  <span style="color:#FF6154;"><strong>Bitte unterstütze uns mit einem Upvote</strong></span> •
+  <span style="color:#FF6154;"><strong>Folgen</strong></span> •
+  <span style="color:#FF6154;"><strong>Im Forum diskutieren</strong></span>
+</p>
 
 ---
 

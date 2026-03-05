@@ -88,12 +88,21 @@ class NavigationCoordinator(QObject):
         # Watcher integration
         self._context.library.treeUpdated.connect(self.handle_tree_updated)
 
+    def _reset_cluster_gallery_state(self) -> None:
+        """Helper to ensure we exit cluster gallery mode correctly."""
+        if self._in_cluster_gallery:
+            self._in_cluster_gallery = False
+            gallery_page = self._router.gallery_page()
+            if gallery_page is not None:
+                gallery_page.set_cluster_gallery_mode(False)
+
     def open_album(self, path: Path):
         """Loads an album and switches to gallery view."""
         if self._should_treat_as_refresh(path):
             return
 
         self._reset_playback()
+        self._reset_cluster_gallery_state()
         self._static_selection = None
         self._router.show_gallery()
         self._asset_vm.set_active_root(path)
@@ -124,6 +133,7 @@ class NavigationCoordinator(QObject):
     def open_all_photos(self):
         """Loads all photos."""
         self._reset_playback()
+        self._reset_cluster_gallery_state()
         self._router.show_gallery()
         self._static_selection = AlbumSidebar.ALL_PHOTOS_TITLE
         self._asset_vm.set_active_root(self._context.library.root())
@@ -168,6 +178,7 @@ class NavigationCoordinator(QObject):
             return
 
         self._reset_playback()
+        self._reset_cluster_gallery_state()
         self._router.show_gallery()
         self._static_selection = "Recently Deleted"
         self._asset_vm.set_active_root(deleted_root)
@@ -187,6 +198,7 @@ class NavigationCoordinator(QObject):
 
     def _open_filtered_collection(self, title: str, is_favorite=None, media_types=None):
         self._reset_playback()
+        self._reset_cluster_gallery_state()
         self._router.show_gallery()
         self._static_selection = title
         self._asset_vm.set_active_root(self._context.library.root())
@@ -209,8 +221,8 @@ class NavigationCoordinator(QObject):
             return
 
         self._reset_playback()
+        self._reset_cluster_gallery_state()
         self._static_selection = "Location"
-        self._in_cluster_gallery = False
         self._asset_vm.set_active_root(root)
 
         assets = self._context.library.get_geotagged_assets()
@@ -267,13 +279,7 @@ class NavigationCoordinator(QObject):
         if not self._in_cluster_gallery:
             return
 
-        self._in_cluster_gallery = False
-
-        # Disable cluster gallery mode on gallery page (hides back button)
-        gallery_page = self._router.gallery_page()
-        if gallery_page is not None:
-            gallery_page.set_cluster_gallery_mode(False)
-
+        self._reset_cluster_gallery_state()
         self._router.show_map()
 
     def is_in_cluster_gallery(self) -> bool:

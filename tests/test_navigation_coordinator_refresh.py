@@ -85,3 +85,24 @@ class TestShouldTreatAsRefresh:
         coord._static_selection = None
 
         assert coord._should_treat_as_refresh(album) is False
+
+
+def test_open_cluster_then_open_all_photos_hides_cluster_back_button(tmp_path: Path) -> None:
+    coord = _make_coordinator(current_album_root=None, gallery_active=True)
+    root = tmp_path / "library"
+    root.mkdir()
+    coord._context.library.root.return_value = root
+
+    gallery_page = MagicMock()
+    coord._router.gallery_page.return_value = gallery_page
+
+    coord.open_cluster_gallery([])
+
+    assert coord.is_in_cluster_gallery() is True
+    gallery_page.set_cluster_gallery_mode.assert_called_with(True)
+
+    gallery_page.set_cluster_gallery_mode.reset_mock()
+    coord.open_all_photos()
+
+    assert coord.is_in_cluster_gallery() is False
+    gallery_page.set_cluster_gallery_mode.assert_called_once_with(False)

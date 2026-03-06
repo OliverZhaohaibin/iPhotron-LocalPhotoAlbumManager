@@ -13,7 +13,14 @@ from iPhoto.library.manager import LibraryManager
 @pytest.fixture
 def mock_settings():
     settings = MagicMock()
-    settings.get.return_value = "library"
+
+    def _get(key, default=None):
+        return {
+            "ui.export_destination": "library",
+            "ui.export_format": "jpg",
+        }.get(key, default)
+
+    settings.get.side_effect = _get
     return settings
 
 
@@ -163,7 +170,7 @@ def test_handle_export_all_edited(
     mock_worker_cls.assert_called_with(
         mock_library,
         mock_library.root.return_value / "exported",
-        mock_settings.get.return_value,
+        "jpg",
     )
     mock_pool.globalInstance().start.assert_called()
 

@@ -11,7 +11,8 @@ from PySide6.QtGui import QImage, QTransform
 from ..io import sidecar
 from .filters.facade import apply_adjustments
 from ..utils import image_loader
-from ..media_classifier import VIDEO_EXTENSIONS, RAW_EXTENSIONS
+from ..media_classifier import VIDEO_EXTENSIONS
+from .raw_processor import RAW_EXTENSIONS
 
 _LOGGER = logging.getLogger(__name__)
 

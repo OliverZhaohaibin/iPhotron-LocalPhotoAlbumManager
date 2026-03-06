@@ -54,7 +54,8 @@ def _import_rawpy():  # type: ignore[return]
     try:
         import rawpy  # type: ignore[import-untyped]
         return rawpy
-    except ImportError:
+    except Exception as exc:
+        _LOGGER.debug("rawpy import failed; disabling RAW processing: %s", exc, exc_info=True)
         return None
 
 

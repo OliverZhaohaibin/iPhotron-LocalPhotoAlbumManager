@@ -16,27 +16,9 @@ IMAGE_EXTENSIONS: frozenset[str] = frozenset({
     ".heicf",
 })
 
-# RAW camera formats supported via rawpy.  Kept as a separate set so that
-# callers can distinguish raster images from RAW files when the processing
-# path differs (e.g. thumbnail generation, export).
-RAW_EXTENSIONS: frozenset[str] = frozenset({
-    ".cr2", ".cr3",
-    ".nef", ".nrw",
-    ".arw", ".srf", ".sr2",
-    ".orf",
-    ".rw2",
-    ".raf",
-    ".pef",
-    ".dng",
-    ".raw",
-    ".3fr",
-    ".iiq",
-    ".rwl",
-    ".srw",
-    ".x3f",
-    ".kdc", ".dcr",
-    ".erf",
-})
+# RAW camera formats — re-exported from the canonical definition in
+# ``core.raw_processor`` so every consumer shares a single set.
+from .core.raw_processor import RAW_EXTENSIONS  # noqa: E402
 
 # Union of standard raster + RAW image extensions for unified lookup.
 ALL_IMAGE_EXTENSIONS: frozenset[str] = IMAGE_EXTENSIONS | RAW_EXTENSIONS

@@ -122,5 +122,5 @@ class TestFormatPassedToWorker:
         ctrl, _, _, lib = _build_controller(settings=settings, tmp_path=tmp_path)
         ctrl._handle_export_all_edited()
         mock_worker_cls.assert_called_with(
-            lib, tmp_path / "exported", "png",
+            lib, tmp_path / "exported", "png"
         )

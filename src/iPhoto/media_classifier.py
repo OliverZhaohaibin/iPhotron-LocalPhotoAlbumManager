@@ -6,6 +6,10 @@ from enum import IntEnum
 from pathlib import Path
 from typing import Mapping, Tuple
 
+# RAW camera formats — re-exported from the canonical definition in
+# ``core.raw_processor`` so every consumer shares a single set.
+from .core.raw_processor import RAW_EXTENSIONS
+
 IMAGE_EXTENSIONS: frozenset[str] = frozenset({
     ".jpg",
     ".jpeg",
@@ -15,10 +19,6 @@ IMAGE_EXTENSIONS: frozenset[str] = frozenset({
     ".heifs",
     ".heicf",
 })
-
-# RAW camera formats — re-exported from the canonical definition in
-# ``core.raw_processor`` so every consumer shares a single set.
-from .core.raw_processor import RAW_EXTENSIONS  # noqa: E402
 
 # Union of standard raster + RAW image extensions for unified lookup.
 ALL_IMAGE_EXTENSIONS: frozenset[str] = IMAGE_EXTENSIONS | RAW_EXTENSIONS

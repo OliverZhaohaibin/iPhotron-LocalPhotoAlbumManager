@@ -5,8 +5,8 @@ from __future__ import annotations
 
 from typing import Optional
 
-from PySide6.QtCore import QRectF, QSize, Qt, Signal
-from PySide6.QtGui import QColor, QPainter, QPen, QPixmap
+from PySide6.QtCore import QRect, QRectF, QSize, Qt, Signal
+from PySide6.QtGui import QColor, QIcon, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
     QButtonGroup,
     QFrame,
@@ -344,14 +344,14 @@ class _AspectRatioSection(QWidget):
         sep.setFixedHeight(1)
         layout.addWidget(sep)
 
-        # Title row — icon in a 32px container; spacing = 14 so the first
-        # letter of "Aspect" aligns with the left edge of the Straighten
-        # slider bar (the BWSlider track begins at h_padding = 14 from the
-        # slider widget's left edge, which itself starts right after the
-        # 32px icon container).
+        # Title row — icon in a 32px container; spacing = 24 so the first
+        # letter of "Aspect" aligns with the "Straighten" label text inside
+        # the BWSlider track.  The text is drawn at track_rect.left() + 10
+        # = h_padding(14) + 10 = 24 from BWSlider's left edge, which itself
+        # starts right after the 32px icon container → x = 32 + 24 = 56.
         title_layout = QHBoxLayout()
         title_layout.setContentsMargins(0, 8, 0, 4)
-        title_layout.setSpacing(14)
+        title_layout.setSpacing(24)
         icon_label = QLabel(self)
         icon_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         icon_label.setPixmap(load_icon("aspect.svg").pixmap(22, 22))
@@ -363,10 +363,13 @@ class _AspectRatioSection(QWidget):
         title_layout.addStretch()
         layout.addLayout(title_layout)
 
-        # Radio buttons
+        # Radio buttons — left margin chosen so that the radio button text
+        # labels align with the "Straighten" label text at x = 56.  With the
+        # stylesheet padding-left (2) + indicator (14) + spacing (10) = 26 px
+        # offset from the layout edge, a left margin of 30 puts text at 56.
         options_layout = QVBoxLayout()
         options_layout.setSpacing(0)
-        options_layout.setContentsMargins(6, 2, 0, 0)
+        options_layout.setContentsMargins(30, 2, 0, 0)
 
         # Build check-indicator path for the stylesheet
         check_path = str(_icon_path("checkmark.svg")).replace("\\", "/")
@@ -451,9 +454,18 @@ class _AspectRatioSection(QWidget):
     def _make_orientation_pixmap(
         self, *, landscape: bool, checked: bool
     ) -> QPixmap:
-        """Render a small pixmap showing a landscape or portrait rectangle."""
+        """Render a small pixmap showing a landscape or portrait rectangle.
+
+        The pixmap is created at the application's device-pixel-ratio so
+        that it stays crisp on HiDPI / Retina screens.
+        """
+        from PySide6.QtWidgets import QApplication
+
         size = 44
-        pix = QPixmap(size, size)
+        dpr = QApplication.instance().devicePixelRatio() if QApplication.instance() else 1.0
+        real = int(size * dpr)
+        pix = QPixmap(real, real)
+        pix.setDevicePixelRatio(dpr)
         pix.fill(QColor(0, 0, 0, 0))
 
         painter = QPainter(pix)
@@ -476,21 +488,21 @@ class _AspectRatioSection(QWidget):
         ry = (size - rh) / 2
         painter.drawRoundedRect(QRectF(rx, ry, rw, rh), 2, 2)
 
-        # Draw checkmark indicator when checked
+        # Draw checkmark indicator when checked – use QIcon.paint() so it
+        # renders at the full resolution of the DPR-aware pixmap, avoiding
+        # the blurry result that icon.pixmap(small_size) would produce.
         if checked:
             check_icon = load_icon("checkmark.svg", color=(200, 200, 200))
-            check_pix = check_icon.pixmap(12, 12)
-            cx = (size - 12) / 2
-            cy = (size - 12) / 2
-            painter.drawPixmap(int(cx), int(cy), check_pix)
+            check_size = 14
+            cx = int((size - check_size) / 2)
+            cy = int((size - check_size) / 2)
+            check_icon.paint(painter, QRect(cx, cy, check_size, check_size))
 
         painter.end()
         return pix
 
     def _update_orientation_icons(self) -> None:
         """Refresh the landscape/portrait button icons to reflect state."""
-        from PySide6.QtGui import QIcon
-
         is_land = self._is_landscape
         land_pix = self._make_orientation_pixmap(landscape=True, checked=is_land)
         port_pix = self._make_orientation_pixmap(landscape=False, checked=not is_land)

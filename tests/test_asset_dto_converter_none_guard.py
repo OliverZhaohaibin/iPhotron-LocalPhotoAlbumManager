@@ -52,3 +52,4 @@ def test_to_dto_valid_width_height():
     dto = to_dto(asset, library_root=None)
     assert dto.width == 800
     assert dto.height == 600
+    assert dto.is_pano is False

@@ -202,6 +202,11 @@ class MainCoordinator(QObject):
             destination_group=window.ui.export_destination_group,
             destination_library=window.ui.export_destination_library,
             destination_ask=window.ui.export_destination_ask,
+            export_format_group=window.ui.export_format_group,
+            export_format_jpg=window.ui.export_format_jpg,
+            export_format_heic=window.ui.export_format_heic,
+            export_format_tiff=window.ui.export_format_tiff,
+            export_format_png=window.ui.export_format_png,
             main_window=window,
             selection_callback=window.current_selection,
         )

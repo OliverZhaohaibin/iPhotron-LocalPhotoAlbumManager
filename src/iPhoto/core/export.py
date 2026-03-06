@@ -21,7 +21,12 @@ def render_image(path: Path) -> QImage | None:
 
     # 1. Load adjustments
     raw_adjustments = sidecar.load_adjustments(path)
-    if not raw_adjustments:
+
+    # Check if RAW format to ensure we always try to render it even without adjustments
+    raw_extensions = {".cr2", ".cr3", ".nef", ".arw", ".dng", ".raf", ".orf", ".rw2"}
+    is_raw = path.suffix.lower() in raw_extensions
+
+    if not raw_adjustments and not is_raw:
         # Prompt implies we only render if adjustments exist (Case A).
         # If this function is called, caller expects rendering.
         return None
@@ -30,6 +35,10 @@ def render_image(path: Path) -> QImage | None:
     image = image_loader.load_qimage(path)
     if image is None or image.isNull():
         return None
+
+    if not raw_adjustments:
+        # If no adjustments but it is a RAW image, we just return the loaded QImage.
+        return image
 
     # 3. Apply Filters
     resolved_adjustments = sidecar.resolve_render_adjustments(raw_adjustments)
@@ -108,7 +117,7 @@ def resolve_export_path(source_path: Path, export_root: Path, library_root: Path
     return export_root / relative / source_path.name
 
 
-def export_asset(source_path: Path, export_root: Path, library_root: Path) -> bool:
+def export_asset(source_path: Path, export_root: Path, library_root: Path, export_format: str = "jpg") -> bool:
     """Export the asset at *source_path* to *export_root* mirroring directory structure.
 
     Returns True if successful.
@@ -121,21 +130,62 @@ def export_asset(source_path: Path, export_root: Path, library_root: Path) -> bo
         is_video = source_path.suffix.lower() in VIDEO_EXTENSIONS
         has_sidecar = sidecar.sidecar_path_for_asset(source_path).exists()
 
+        raw_extensions = {".cr2", ".cr3", ".nef", ".arw", ".dng", ".raf", ".orf", ".rw2"}
+        is_raw = source_path.suffix.lower() in raw_extensions
+
         # Determine handling strategy
-        should_render = not is_video and has_sidecar
+        # We always render RAW images to the export format
+        should_render = (not is_video and has_sidecar) or is_raw
 
         if should_render:
             image = render_image(source_path)
             if image is not None:
-                final_dest = destination_path.with_suffix(".jpg")
+                fmt = export_format.upper()
+                if fmt == "JPG":
+                    fmt = "JPEG"
+                suffix = f".{export_format.lower()}"
+                if export_format.lower() == "jpeg":
+                    suffix = ".jpg"
+
+                final_dest = destination_path.with_suffix(suffix)
                 final_dest = get_unique_destination(final_dest)
-                image.save(str(final_dest), "JPG", 100)
+
+                # QImage save format requires string format name like "JPEG", "PNG", "HEIC", "TIFF"
+                quality = 100 if fmt == "JPEG" else -1
+
+                # heic might not be supported natively by Qt unless plugin is installed
+                # But QImage.save uses string identifiers
+                saved = image.save(str(final_dest), fmt, quality)
+                if not saved:
+                    _LOGGER.error(f"Failed to save image in format {fmt} to {final_dest}")
+                    return False
                 return True
             else:
                 _LOGGER.error("Failed to render image with adjustments for %s; skipping export", source_path)
                 return False
 
         # Case B: Unedited or Video -> Copy
+        # But wait, if they requested a specific format and it's not a video,
+        # maybe we should always convert it? Let's just convert all non-videos to the requested format.
+        if not is_video and export_format.lower() != source_path.suffix.lower().lstrip('.'):
+            image = render_image(source_path)
+            if image is not None:
+                fmt = export_format.upper()
+                if fmt == "JPG":
+                    fmt = "JPEG"
+                suffix = f".{export_format.lower()}"
+                if export_format.lower() == "jpeg":
+                    suffix = ".jpg"
+
+                final_dest = destination_path.with_suffix(suffix)
+                final_dest = get_unique_destination(final_dest)
+                quality = 100 if fmt == "JPEG" else -1
+                saved = image.save(str(final_dest), fmt, quality)
+                if not saved:
+                    _LOGGER.error(f"Failed to save image in format {fmt} to {final_dest}")
+                    return False
+                return True
+
         final_dest = get_unique_destination(destination_path)
         shutil.copy2(source_path, final_dest)
         return True

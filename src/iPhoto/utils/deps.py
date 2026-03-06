@@ -63,6 +63,15 @@ def load_pillow() -> Optional[PillowSupport]:
         UnidentifiedImageError=UnidentifiedImageError,
     )
 
+@lru_cache(maxsize=1)
+def load_rawpy() -> Optional[Any]:
+    """Return rawpy module when available."""
+    try:
+        import rawpy
+        return rawpy
+    except ImportError:
+        return None
+
 
 @dataclass(frozen=True)
 class DebuggerPrerequisites:

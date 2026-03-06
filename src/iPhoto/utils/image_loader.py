@@ -10,9 +10,10 @@ import logging
 from PySide6.QtCore import QSize, Qt
 from PySide6.QtGui import QImage, QImageReader, QPixmap
 
-from .deps import load_pillow
+from .deps import load_pillow, load_rawpy
 
 _PILLOW = load_pillow()
+_RAWPY = load_rawpy()
 if _PILLOW is not None:  # pragma: no branch - import guard
     _Image = _PILLOW.Image
     _ImageOps = _PILLOW.ImageOps
@@ -84,7 +85,23 @@ def load_qimage(source: Path, target: QSize | None = None) -> Optional[QImage]:
     image = reader.read()
     if not image.isNull():
         return image
-    return _load_with_pillow(source, target)
+
+    # Check if this is a RAW file extension to try rawpy directly if Pillow is likely to fail
+    raw_extensions = {".cr2", ".cr3", ".nef", ".arw", ".dng", ".raf", ".orf", ".rw2"}
+    if source.suffix.lower() in raw_extensions:
+        raw_img = _load_with_rawpy(source, target)
+        if raw_img is not None:
+            return raw_img
+
+    pillow_img = _load_with_pillow(source, target)
+    if pillow_img is not None:
+        return pillow_img
+
+    # Fallback to rawpy if Pillow failed and we haven't tried rawpy yet
+    if source.suffix.lower() not in raw_extensions:
+        return _load_with_rawpy(source, target)
+
+    return None
 
 
 def load_qpixmap(source: Path, target: QSize | None = None) -> Optional[QPixmap]:
@@ -122,6 +139,43 @@ def qimage_from_bytes(data: bytes) -> Optional[QImage]:
         return None
     return QImage(qt_image)
 
+
+def _load_with_rawpy(source: Path, target: QSize | None = None) -> Optional[QImage]:
+    """Return a :class:`QImage` decoding RAW file using rawpy."""
+    if _RAWPY is None:
+        return None
+
+    try:
+        with _RAWPY.imread(str(source)) as raw:
+            # For thumbnails or preview images, extracting from raw can be faster
+            # But here we just use postprocess. We could optimize this by looking
+            # at target size and maybe using half_size or use_camera_wb
+            kwargs = {
+                "use_camera_wb": True,
+            }
+            if target is not None and target.isValid() and not target.isEmpty():
+                # Get raw dimensions (rough estimate)
+                w, h = raw.sizes.raw_width, raw.sizes.raw_height
+                if w > target.width() * 2 and h > target.height() * 2:
+                    kwargs["half_size"] = True
+
+            rgb = raw.postprocess(**kwargs)
+
+            # Postprocess returns a numpy array. We convert this to a QImage.
+            height, width, channels = rgb.shape
+            bytes_per_line = channels * width
+            qimg = QImage(rgb.data, width, height, bytes_per_line, QImage.Format.Format_RGB888)
+            # Make a copy so the memory is owned by QImage, not the local numpy array
+            qimg = qimg.copy()
+
+            if target is not None and target.isValid() and not target.isEmpty():
+                if qimg.width() > target.width() or qimg.height() > target.height():
+                    qimg = qimg.scaled(target, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+
+            return qimg
+    except Exception:
+        _LOGGER.debug("rawpy failed to load image from %s", source)
+        return None
 
 def qimage_from_pil(image: "Image.Image") -> Optional[QImage]:
     """Return a :class:`QImage` from a PIL Image."""
@@ -202,4 +256,47 @@ def generate_micro_thumbnail(source: Path) -> Optional[bytes]:
             return output.getvalue()
     except Exception:
         _LOGGER.debug("Failed to generate micro thumbnail for %s", source, exc_info=True)
+        # Try rawpy fallback
+        return _generate_micro_thumbnail_rawpy(source)
+
+def _generate_micro_thumbnail_rawpy(source: Path) -> Optional[bytes]:
+    """Fallback micro-thumbnail generation using rawpy."""
+    if _RAWPY is None:
+        return None
+    if _Image is None:
+        return None
+
+    try:
+        with _RAWPY.imread(str(source)) as raw:
+            try:
+                # Try to extract embedded thumbnail for speed
+                thumb = raw.extract_thumb()
+                if thumb.format in (_RAWPY.ThumbFormat.JPEG, _RAWPY.ThumbFormat.BITMAP):
+                    if thumb.format == _RAWPY.ThumbFormat.JPEG:
+                        img = _Image.open(BytesIO(thumb.data))
+                    else:
+                        img = _Image.fromarray(thumb.data)
+
+                    img.thumbnail((16, 16), getattr(_Image, "Resampling", _Image).BICUBIC)
+                    if img.mode != "RGB":
+                        img = img.convert("RGB")
+                    output = BytesIO()
+                    img.save(output, format="JPEG", quality=75)
+                    return output.getvalue()
+            except _RAWPY.LibRawNoThumbnailError:
+                pass
+            except Exception:
+                pass
+
+            # Fallback to full rendering (slow)
+            rgb = raw.postprocess(use_camera_wb=True, half_size=True)
+            img = _Image.fromarray(rgb)
+            img.thumbnail((16, 16), getattr(_Image, "Resampling", _Image).BICUBIC)
+            if img.mode != "RGB":
+                img = img.convert("RGB")
+            output = BytesIO()
+            img.save(output, format="JPEG", quality=75)
+            return output.getvalue()
+    except Exception:
+        _LOGGER.debug("rawpy failed to generate micro thumbnail for %s", source)
         return None

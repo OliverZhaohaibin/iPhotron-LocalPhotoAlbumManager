@@ -29,11 +29,12 @@ class ExportSignals(QObject):
 class ExportWorker(QRunnable):
     """Background worker for exporting a specific list of assets."""
 
-    def __init__(self, paths: list[Path], export_root: Path, library_root: Path):
+    def __init__(self, paths: list[Path], export_root: Path, library_root: Path, export_format: str = "jpg"):
         super().__init__()
         self._paths = paths
         self._export_root = export_root
         self._library_root = library_root
+        self._export_format = export_format
         self.signals = ExportSignals()
 
     def run(self) -> None:
@@ -43,7 +44,7 @@ class ExportWorker(QRunnable):
         for i, path in enumerate(self._paths):
             if not path.exists():
                 continue
-            if export_asset(path, self._export_root, self._library_root):
+            if export_asset(path, self._export_root, self._library_root, self._export_format):
                 success += 1
             else:
                 fail += 1
@@ -54,10 +55,11 @@ class ExportWorker(QRunnable):
 class LibraryExportWorker(QRunnable):
     """Background worker for scanning the library and exporting edited assets."""
 
-    def __init__(self, library: LibraryManager, export_root: Path):
+    def __init__(self, library: LibraryManager, export_root: Path, export_format: str = "jpg"):
         super().__init__()
         self._library = library
         self._export_root = export_root
+        self._export_format = export_format
         self.signals = ExportSignals()
 
     def run(self) -> None:
@@ -103,7 +105,7 @@ class LibraryExportWorker(QRunnable):
         success = 0
         fail = 0
         for i, path in enumerate(to_export):
-            if export_asset(path, self._export_root, root):
+            if export_asset(path, self._export_root, root, self._export_format):
                 success += 1
             else:
                 fail += 1
@@ -127,6 +129,11 @@ class ExportController(QObject):
         destination_group: QActionGroup,
         destination_library: QAction,
         destination_ask: QAction,
+        export_format_group: QActionGroup,
+        export_format_jpg: QAction,
+        export_format_heic: QAction,
+        export_format_tiff: QAction,
+        export_format_png: QAction,
         main_window: QWidget,
         selection_callback: Callable[[], list[Path]],
         parent: Optional[QObject] = None,
@@ -141,12 +148,18 @@ class ExportController(QObject):
         self._destination_group = destination_group
         self._destination_library = destination_library
         self._destination_ask = destination_ask
+        self._export_format_group = export_format_group
+        self._export_format_jpg = export_format_jpg
+        self._export_format_heic = export_format_heic
+        self._export_format_tiff = export_format_tiff
+        self._export_format_png = export_format_png
         self._main_window = main_window
         self._get_selection = selection_callback
 
         self._export_all_action.triggered.connect(self._handle_export_all_edited)
         self._export_selected_action.triggered.connect(self._handle_export_selected)
         self._destination_group.triggered.connect(self._handle_destination_changed)
+        self._export_format_group.triggered.connect(self._handle_export_format_changed)
 
         self.restore_preference()
 
@@ -158,11 +171,31 @@ class ExportController(QObject):
         else:
             self._destination_library.setChecked(True)
 
+        fmt = self._settings.get("ui.export_format", "jpg")
+        if fmt == "heic":
+            self._export_format_heic.setChecked(True)
+        elif fmt == "tiff":
+            self._export_format_tiff.setChecked(True)
+        elif fmt == "png":
+            self._export_format_png.setChecked(True)
+        else:
+            self._export_format_jpg.setChecked(True)
+
     def _handle_destination_changed(self, action: QAction) -> None:
         if action is self._destination_ask:
             self._settings.set("ui.export_destination", "ask")
         else:
             self._settings.set("ui.export_destination", "library")
+
+    def _handle_export_format_changed(self, action: QAction) -> None:
+        if action is self._export_format_heic:
+            self._settings.set("ui.export_format", "heic")
+        elif action is self._export_format_tiff:
+            self._settings.set("ui.export_format", "tiff")
+        elif action is self._export_format_png:
+            self._settings.set("ui.export_format", "png")
+        else:
+            self._settings.set("ui.export_format", "jpg")
 
     def _resolve_export_root(self) -> Optional[Path]:
         dest = self._settings.get("ui.export_destination", "library")
@@ -200,7 +233,8 @@ class ExportController(QObject):
             show_error(self._main_window, "Library not bound.")
             return
 
-        worker = ExportWorker(paths, export_root, library_root)
+        export_format = self._settings.get("ui.export_format", "jpg")
+        worker = ExportWorker(paths, export_root, library_root, export_format)
         self._start_worker(worker)
 
     def _handle_export_all_edited(self) -> None:
@@ -208,7 +242,8 @@ class ExportController(QObject):
         if not export_root:
             return
 
-        worker = LibraryExportWorker(self._library, export_root)
+        export_format = self._settings.get("ui.export_format", "jpg")
+        worker = LibraryExportWorker(self._library, export_root, export_format)
         self._start_worker(worker)
 
     def _start_worker(self, worker: QRunnable) -> None:

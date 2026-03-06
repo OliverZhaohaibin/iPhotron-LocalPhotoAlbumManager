@@ -37,6 +37,10 @@ SETTINGS_SCHEMA: dict[str, Any] = {
                     "type": "string",
                     "enum": ["library", "ask"],
                 },
+                "export_format": {
+                    "type": "string",
+                    "enum": ["jpg", "heic", "tiff", "png"],
+                },
                 "show_filmstrip": {"type": "boolean"},
                 "wheel_action": {
                     "type": "string",
@@ -63,6 +67,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         "is_muted": False,
         "share_action": "reveal_file",
         "export_destination": "library",
+        "export_format": "jpg",
         "show_filmstrip": True,
         "wheel_action": "navigate",
     },

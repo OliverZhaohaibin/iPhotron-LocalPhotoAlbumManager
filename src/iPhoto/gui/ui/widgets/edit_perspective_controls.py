@@ -8,6 +8,7 @@ from typing import Optional
 from PySide6.QtCore import QRect, QRectF, QSize, Qt, Signal
 from PySide6.QtGui import QColor, QIcon, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
+    QApplication,
     QButtonGroup,
     QFrame,
     QHBoxLayout,
@@ -459,10 +460,9 @@ class _AspectRatioSection(QWidget):
         The pixmap is created at the application's device-pixel-ratio so
         that it stays crisp on HiDPI / Retina screens.
         """
-        from PySide6.QtWidgets import QApplication
-
         size = 44
-        dpr = QApplication.instance().devicePixelRatio() if QApplication.instance() else 1.0
+        app = QApplication.instance()
+        dpr = app.devicePixelRatio() if app else 1.0
         real = int(size * dpr)
         pix = QPixmap(real, real)
         pix.setDevicePixelRatio(dpr)

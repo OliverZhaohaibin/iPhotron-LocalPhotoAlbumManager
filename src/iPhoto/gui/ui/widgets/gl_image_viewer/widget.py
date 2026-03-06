@@ -396,6 +396,11 @@ class GLImageViewer(QOpenGLWidget):
     def viewport_center(self) -> QPointF:
         return QPointF(self.width() / 2, self.height() / 2)
 
+    def set_immersive_cover_mode(self, enabled: bool) -> None:
+        """Switch fullscreen fitting between contain and cover baselines."""
+
+        self._transform_controller.set_immersive_cover_mode(enabled)
+
     # --------------------------- Off-screen rendering ---------------------------
 
     def render_offscreen_image(

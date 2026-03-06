@@ -175,6 +175,7 @@ class EditFullscreenManager(QObject):
             total = max(1, splitter.width())
         splitter.setSizes([0, total])
 
+        self._ui.edit_image_viewer.set_immersive_cover_mode(True)
         self._window.showFullScreen()
 
         self._fullscreen_active = True
@@ -220,6 +221,7 @@ class EditFullscreenManager(QObject):
             return False
 
         self._preview_manager.cancel_pending_updates()
+        self._ui.edit_image_viewer.set_immersive_cover_mode(False)
         self._window.showNormal()
 
         for widget, was_visible in self._fullscreen_hidden_widgets:
@@ -353,4 +355,3 @@ class EditFullscreenManager(QObject):
             scaled[-1] += delta
 
         return scaled
-

@@ -29,6 +29,24 @@ def compute_fit_to_view_scale(
     return 1.0 if scale <= 0.0 else scale
 
 
+def compute_cover_to_view_scale(
+    texture_size: tuple[int, int],
+    view_width: float,
+    view_height: float,
+) -> float:
+    """Return the scale that fully covers the viewport with *texture_size*."""
+
+    tex_w, tex_h = texture_size
+    if tex_w <= 0 or tex_h <= 0:
+        return 1.0
+    if view_width <= 0.0 or view_height <= 0.0:
+        return 1.0
+    width_ratio = view_width / float(tex_w)
+    height_ratio = view_height / float(tex_h)
+    scale = max(width_ratio, height_ratio)
+    return 1.0 if scale <= 0.0 else scale
+
+
 def compute_rotation_cover_scale(
     texture_size: tuple[int, int],
     base_scale: float,
@@ -127,6 +145,15 @@ class ViewTransformController:
         self._pan_start_pos: QPointF = QPointF()
         self._wheel_action: str = "zoom"
         self._image_cover_scale: float = 1.0
+        self._immersive_cover_mode: bool = False
+
+    def _base_fit_scale(self, view_width: float, view_height: float) -> float:
+        """Return the baseline scale according to the active fit mode."""
+
+        fit_w, fit_h = self._get_fit_texture_size()
+        if self._immersive_cover_mode:
+            return compute_cover_to_view_scale((fit_w, fit_h), view_width, view_height)
+        return compute_fit_to_view_scale((fit_w, fit_h), view_width, view_height)
 
     # ------------------------------------------------------------------
     # Helper methods for getting viewport info
@@ -236,8 +263,7 @@ class ViewTransformController:
             dpr = self._viewer.devicePixelRatioF()
             view_width = float(self._viewer.width()) * dpr
             view_height = float(self._viewer.height()) * dpr
-            fit_w, fit_h = self._get_fit_texture_size()
-            base_scale = compute_fit_to_view_scale((fit_w, fit_h), view_width, view_height)
+            base_scale = self._base_fit_scale(view_width, view_height)
             cover_scale = self._image_cover_scale
             old_scale = base_scale * cover_scale * self._zoom_factor
             new_scale = base_scale * cover_scale * clamped
@@ -351,8 +377,7 @@ class ViewTransformController:
     ) -> float:
         """Calculate the effective rendering scale (base scale × zoom factor)."""
         del texture_size  # The fit-to-view dimensions may differ during rotation.
-        fit_w, fit_h = self._get_fit_texture_size()
-        base_scale = compute_fit_to_view_scale((fit_w, fit_h), view_width, view_height)
+        base_scale = self._base_fit_scale(view_width, view_height)
         return max(base_scale * self._image_cover_scale * self._zoom_factor, 1e-6)
 
     def image_center_pixels(
@@ -446,8 +471,7 @@ class ViewTransformController:
         if view_width <= 0.0 or view_height <= 0.0:
             return False
 
-        fit_w, fit_h = self._get_fit_texture_size()
-        base_scale = compute_fit_to_view_scale((fit_w, fit_h), view_width, view_height)
+        base_scale = self._base_fit_scale(view_width, view_height)
         if base_scale <= 0.0:
             return False
 
@@ -497,6 +521,15 @@ class ViewTransformController:
         """Return the scale multiplier currently applied to cover rotations."""
 
         return self._image_cover_scale
+
+    def set_immersive_cover_mode(self, enabled: bool) -> None:
+        """Switch baseline fit from contain to cover for immersive fullscreen."""
+
+        value = bool(enabled)
+        if value == self._immersive_cover_mode:
+            return
+        self._immersive_cover_mode = value
+        self._viewer.update()
     
     def convert_screen_to_world(self, screen_pt: QPointF) -> QPointF:
         """Map a Qt screen coordinate to GL view's centre-origin space."""

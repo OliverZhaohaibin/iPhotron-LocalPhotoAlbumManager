@@ -260,6 +260,7 @@ class FramelessWindowManager(QObject):
             self._ui.splitter.setSizes([0, sum(self._splitter_sizes or [self._window.width()])])
 
         self._apply_immersive_backdrop()
+        self._ui.image_viewer.set_immersive_cover_mode(True)
 
         self._immersive_active = True
         self._window.showFullScreen()
@@ -287,6 +288,7 @@ class FramelessWindowManager(QObject):
 
         resume_after_transition = self._controller.suspend_playback_for_transition()
         self._immersive_active = False
+        self._ui.image_viewer.set_immersive_cover_mode(False)
         self._restore_default_backdrop()
         self._window.showNormal()
 

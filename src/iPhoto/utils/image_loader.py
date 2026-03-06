@@ -43,52 +43,62 @@ def load_qimage(source: Path, target: QSize | None = None) -> Optional[QImage]:
     # downscaling during decode.  Reading the bytes eagerly would defeat those
     # optimisations, so we prefer to hand the path to Qt and only fall back to
     # Pillow if decoding fails entirely.
-    reader = QImageReader(str(source))
-    # Qt maintains a process-wide image cache that is enabled by default.
-    # Large libraries can end up decoding hundreds of images during a single
-    # browsing session which would otherwise accumulate in that cache.  The
-    # additional allocations not only increase peak memory usage but can also
-    # hold operating system file handles open.  Older PySide6 builds do not
-    # expose ``setCacheEnabled`` though, so we guard the call to keep the code
-    # compatible with those runtimes while still disabling the cache whenever
-    # the API is available.
-    disable_cache = getattr(reader, "setCacheEnabled", None)
-    if callable(disable_cache):
-        disable_cache(False)
-    reader.setAutoTransform(True)
-    if target is not None and target.isValid() and not target.isEmpty():
-        original_size = reader.size()
-        if original_size.isValid() and not original_size.isEmpty():
-            # ``QImageReader.setScaledSize`` always interprets the requested
-            # dimensions literally, even when that would distort the image.  We
-            # pre-compute a size that preserves the source aspect ratio so the
-            # decoder performs a proportional downscale rather than stretching to
-            # fill the viewport bounds supplied by the caller.
-            scaled_target = original_size.scaled(
-                target,
-                Qt.AspectRatioMode.KeepAspectRatio,
-            )
-            # Only request scaling when the destination is genuinely smaller; this
-            # avoids unnecessary interpolation for thumbnails that are already
-            # below the desired output resolution.
-            if (
-                scaled_target.width() < original_size.width()
-                or scaled_target.height() < original_size.height()
-            ):
-                reader.setScaledSize(scaled_target)
-        else:
-            # Some formats only disclose their intrinsic size during ``read``. In
-            # those cases we skip ``setScaledSize`` entirely to avoid guessing an
-            # aspect ratio that might be wildly incorrect.  The caller will still
-            # downscale the resulting pixmap once Qt reports the true dimensions.
-            pass
-    image = reader.read()
-    if not image.isNull():
-        return image
-
-    # Check if this is a RAW file extension to try rawpy directly if Pillow is likely to fail
     raw_extensions = {".cr2", ".cr3", ".nef", ".arw", ".dng", ".raf", ".orf", ".rw2"}
-    if source.suffix.lower() in raw_extensions:
+    is_raw = source.suffix.lower() in raw_extensions
+
+    if not is_raw:
+        # ``QImageReader`` is most efficient when it can stream directly from the
+        # filename because many formats (JPEG, HEIC, etc.) expose fast-paths for
+        # downscaling during decode.  Reading the bytes eagerly would defeat those
+        # optimisations, so we prefer to hand the path to Qt and only fall back to
+        # Pillow if decoding fails entirely.
+        reader = QImageReader(str(source))
+        # Qt maintains a process-wide image cache that is enabled by default.
+        # Large libraries can end up decoding hundreds of images during a single
+        # browsing session which would otherwise accumulate in that cache.  The
+        # additional allocations not only increase peak memory usage but can also
+        # hold operating system file handles open.  Older PySide6 builds do not
+        # expose ``setCacheEnabled`` though, so we guard the call to keep the code
+        # compatible with those runtimes while still disabling the cache whenever
+        # the API is available.
+        disable_cache = getattr(reader, "setCacheEnabled", None)
+        if callable(disable_cache):
+            disable_cache(False)
+        reader.setAutoTransform(True)
+        if target is not None and target.isValid() and not target.isEmpty():
+            original_size = reader.size()
+            if original_size.isValid() and not original_size.isEmpty():
+                # ``QImageReader.setScaledSize`` always interprets the requested
+                # dimensions literally, even when that would distort the image.  We
+                # pre-compute a size that preserves the source aspect ratio so the
+                # decoder performs a proportional downscale rather than stretching to
+                # fill the viewport bounds supplied by the caller.
+                scaled_target = original_size.scaled(
+                    target,
+                    Qt.AspectRatioMode.KeepAspectRatio,
+                )
+                # Only request scaling when the destination is genuinely smaller; this
+                # avoids unnecessary interpolation for thumbnails that are already
+                # below the desired output resolution.
+                if (
+                    scaled_target.width() < original_size.width()
+                    or scaled_target.height() < original_size.height()
+                ):
+                    reader.setScaledSize(scaled_target)
+            else:
+                # Some formats only disclose their intrinsic size during ``read``. In
+                # those cases we skip ``setScaledSize`` entirely to avoid guessing an
+                # aspect ratio that might be wildly incorrect.  The caller will still
+                # downscale the resulting pixmap once Qt reports the true dimensions.
+                pass
+        image = reader.read()
+        if not image.isNull():
+            return image
+
+    # If it is a RAW file, skip Qt/Pillow and go straight to rawpy.
+    # We do this because Qt might try to load embedded previews incorrectly,
+    # or fail completely, but still waste time reading the file.
+    if is_raw:
         raw_img = _load_with_rawpy(source, target)
         if raw_img is not None:
             return raw_img
@@ -98,7 +108,7 @@ def load_qimage(source: Path, target: QSize | None = None) -> Optional[QImage]:
         return pillow_img
 
     # Fallback to rawpy if Pillow failed and we haven't tried rawpy yet
-    if source.suffix.lower() not in raw_extensions:
+    if not is_raw:
         return _load_with_rawpy(source, target)
 
     return None

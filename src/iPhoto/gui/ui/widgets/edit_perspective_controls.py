@@ -5,7 +5,7 @@ from __future__ import annotations
 
 from typing import Optional
 
-from PySide6.QtCore import QSize, Qt, Signal
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QButtonGroup,
     QFrame,
@@ -267,16 +267,13 @@ class _FlipToggleRow(QWidget):
         icon_label.setPixmap(load_icon(icon_name, color=(180, 180, 180)).pixmap(28, 28))
         icon_label.setFixedSize(32, 32)
         icon_label.setCursor(Qt.CursorShape.PointingHandCursor)
-        icon_label.mousePressEvent = lambda _ev: self._toggle()
+        icon_label.mouseReleaseEvent = lambda _ev: self._toggle()
         layout.addWidget(icon_label)
         self._icon_label = icon_label
 
+        # Hidden checkable button used only for checked-state tracking.
         self._button = QToolButton(self)
-        self._button.setAutoRaise(True)
         self._button.setCheckable(True)
-        self._button.setIcon(load_icon(icon_name, color=(180, 180, 180)))
-        self._button.setIconSize(QSize(22, 22))
-        self._button.clicked.connect(self._handle_clicked)
         self._button.setVisible(False)
 
         self._label_button = QPushButton(label, self)
@@ -299,12 +296,6 @@ class _FlipToggleRow(QWidget):
         self.interactionStarted.emit()
         self._label_button.setDown(new_state)
         self.toggled.emit(new_state)
-        self.interactionFinished.emit()
-
-    def _handle_clicked(self, checked: bool) -> None:
-        self.interactionStarted.emit()
-        self._label_button.setDown(checked)
-        self.toggled.emit(checked)
         self.interactionFinished.emit()
 
 

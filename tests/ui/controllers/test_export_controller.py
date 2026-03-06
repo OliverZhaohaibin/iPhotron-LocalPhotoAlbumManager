@@ -193,13 +193,16 @@ def test_handle_format_changed(
     )
 
     # Trigger PNG selection
+    mock_settings.set.reset_mock()
     controller._handle_format_changed(mock_actions["format_png"])
-    mock_settings.set.assert_called_with("ui.export_format", "png")
+    mock_settings.set.assert_called_once_with("ui.export_format", "png")
 
     # Trigger TIFF selection
+    mock_settings.set.reset_mock()
     controller._handle_format_changed(mock_actions["format_tiff"])
-    mock_settings.set.assert_called_with("ui.export_format", "tiff")
+    mock_settings.set.assert_called_once_with("ui.export_format", "tiff")
 
     # Trigger JPG selection (fallback)
+    mock_settings.set.reset_mock()
     controller._handle_format_changed(mock_actions["format_jpg"])
-    mock_settings.set.assert_called_with("ui.export_format", "jpg")
+    mock_settings.set.assert_called_once_with("ui.export_format", "jpg")

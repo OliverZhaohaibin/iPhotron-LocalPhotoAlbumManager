@@ -11,9 +11,20 @@ from PySide6.QtGui import QImage, QTransform
 from ..io import sidecar
 from .filters.facade import apply_adjustments
 from ..utils import image_loader
-from ..media_classifier import VIDEO_EXTENSIONS
+from ..media_classifier import VIDEO_EXTENSIONS, RAW_EXTENSIONS
 
 _LOGGER = logging.getLogger(__name__)
+
+# Mapping of user-facing export format names to the Qt format string and file
+# suffix used when saving rendered images.  This is the single source of truth
+# for supported export formats referenced by the settings schema.
+EXPORT_FORMATS: dict[str, tuple[str, str]] = {
+    "jpg":  ("JPEG", ".jpg"),
+    "png":  ("PNG",  ".png"),
+    "tiff": ("TIFF", ".tiff"),
+}
+
+DEFAULT_EXPORT_FORMAT = "jpg"
 
 
 def render_image(path: Path) -> QImage | None:
@@ -108,8 +119,20 @@ def resolve_export_path(source_path: Path, export_root: Path, library_root: Path
     return export_root / relative / source_path.name
 
 
-def export_asset(source_path: Path, export_root: Path, library_root: Path) -> bool:
+def export_asset(
+    source_path: Path,
+    export_root: Path,
+    library_root: Path,
+    export_format: str = DEFAULT_EXPORT_FORMAT,
+) -> bool:
     """Export the asset at *source_path* to *export_root* mirroring directory structure.
+
+    Parameters
+    ----------
+    export_format:
+        One of ``"jpg"``, ``"png"``, ``"tiff"``.  Controls the output format for
+        rendered images (edited or RAW).  Ignored when copying unedited raster
+        or video files.
 
     Returns True if successful.
     """
@@ -119,23 +142,34 @@ def export_asset(source_path: Path, export_root: Path, library_root: Path) -> bo
         destination_dir.mkdir(parents=True, exist_ok=True)
 
         is_video = source_path.suffix.lower() in VIDEO_EXTENSIONS
+        is_raw = source_path.suffix.lower() in RAW_EXTENSIONS
         has_sidecar = sidecar.sidecar_path_for_asset(source_path).exists()
 
-        # Determine handling strategy
-        should_render = not is_video and has_sidecar
+        qt_fmt, suffix = EXPORT_FORMATS.get(export_format, EXPORT_FORMATS[DEFAULT_EXPORT_FORMAT])
+
+        # RAW files always need rendering because they cannot be opened by
+        # standard image viewers.  Edited raster images are also rendered.
+        should_render = (not is_video) and (has_sidecar or is_raw)
 
         if should_render:
             image = render_image(source_path)
+            if image is None and is_raw:
+                # render_image returns None when there are no sidecar adjustments;
+                # for RAW we still need to produce a viewable file.
+                image = image_loader.load_qimage(source_path)
             if image is not None:
-                final_dest = destination_path.with_suffix(".jpg")
+                final_dest = destination_path.with_suffix(suffix)
                 final_dest = get_unique_destination(final_dest)
-                image.save(str(final_dest), "JPG", 100)
+                image.save(str(final_dest), qt_fmt, 100)
                 return True
             else:
-                _LOGGER.error("Failed to render image with adjustments for %s; skipping export", source_path)
+                _LOGGER.error(
+                    "Failed to render image for %s; skipping export",
+                    source_path,
+                )
                 return False
 
-        # Case B: Unedited or Video -> Copy
+        # Case B: Unedited raster or Video -> Copy
         final_dest = get_unique_destination(destination_path)
         shutil.copy2(source_path, final_dest)
         return True

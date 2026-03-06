@@ -7,6 +7,7 @@ import io
 from iPhoto.application.interfaces import IThumbnailGenerator
 from iPhoto.utils.image_loader import generate_micro_thumbnail
 from iPhoto.utils.ffmpeg import extract_video_frame
+from iPhoto.core.raw_processor import is_raw_extension, load_raw_to_pil
 
 LOGGER = logging.getLogger(__name__)
 
@@ -34,6 +35,10 @@ class PillowThumbnailGenerator(IThumbnailGenerator):
             if path.suffix.lower() in video_exts:
                 return self._generate_video_thumbnail(path, size)
 
+            # RAW camera files require rawpy for decoding.
+            if is_raw_extension(path.suffix):
+                return self._generate_raw_thumbnail(path, size)
+
             # Default to Image
             return self._generate_image_thumbnail(path, size)
 
@@ -55,6 +60,18 @@ class PillowThumbnailGenerator(IThumbnailGenerator):
                 return img.copy()
         except Exception as e:
             LOGGER.warning(f"Pillow failed to open {path}: {e}")
+            return None
+
+    def _generate_raw_thumbnail(self, path: Path, size: Tuple[int, int]) -> Optional[Image.Image]:
+        """Generate a thumbnail from a RAW camera file using rawpy."""
+        try:
+            pil_img = load_raw_to_pil(path, half_size=True, target_size=size)
+            if pil_img is None:
+                return None
+            pil_img.thumbnail(size, Image.Resampling.LANCZOS)
+            return pil_img
+        except Exception as e:
+            LOGGER.warning(f"rawpy failed to generate thumbnail for {path}: {e}")
             return None
 
     def _generate_video_thumbnail(self, path: Path, size: Tuple[int, int]) -> Optional[Image.Image]:

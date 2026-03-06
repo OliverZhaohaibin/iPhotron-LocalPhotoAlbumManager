@@ -16,6 +16,31 @@ IMAGE_EXTENSIONS: frozenset[str] = frozenset({
     ".heicf",
 })
 
+# RAW camera formats supported via rawpy.  Kept as a separate set so that
+# callers can distinguish raster images from RAW files when the processing
+# path differs (e.g. thumbnail generation, export).
+RAW_EXTENSIONS: frozenset[str] = frozenset({
+    ".cr2", ".cr3",
+    ".nef", ".nrw",
+    ".arw", ".srf", ".sr2",
+    ".orf",
+    ".rw2",
+    ".raf",
+    ".pef",
+    ".dng",
+    ".raw",
+    ".3fr",
+    ".iiq",
+    ".rwl",
+    ".srw",
+    ".x3f",
+    ".kdc", ".dcr",
+    ".erf",
+})
+
+# Union of standard raster + RAW image extensions for unified lookup.
+ALL_IMAGE_EXTENSIONS: frozenset[str] = IMAGE_EXTENSIONS | RAW_EXTENSIONS
+
 VIDEO_EXTENSIONS: frozenset[str] = frozenset({
     ".mov",
     ".mp4",
@@ -76,7 +101,7 @@ def classify_media(row: Mapping[str, object]) -> Tuple[bool, bool]:
         if kind == "video":
             return False, True
 
-    if suffix in IMAGE_EXTENSIONS:
+    if suffix in ALL_IMAGE_EXTENSIONS:
         return True, False
     if suffix in VIDEO_EXTENSIONS:
         return False, True
@@ -91,11 +116,19 @@ class MediaType(IntEnum):
 
 def get_media_type(path: Path) -> MediaType:
     suffix = path.suffix.lower()
-    if suffix in IMAGE_EXTENSIONS:
+    if suffix in ALL_IMAGE_EXTENSIONS:
         return MediaType.IMAGE
     if suffix in VIDEO_EXTENSIONS:
         return MediaType.VIDEO
     return MediaType.UNKNOWN
 
 
-__all__ = ["classify_media", "get_media_type", "MediaType", "IMAGE_EXTENSIONS", "VIDEO_EXTENSIONS"]
+__all__ = [
+    "classify_media",
+    "get_media_type",
+    "MediaType",
+    "IMAGE_EXTENSIONS",
+    "RAW_EXTENSIONS",
+    "ALL_IMAGE_EXTENSIONS",
+    "VIDEO_EXTENSIONS",
+]

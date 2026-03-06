@@ -12,7 +12,7 @@ from typing import Final
 RECENTLY_DELETED_DIR_NAME: Final[str] = ".Trash"
 
 DEFAULT_INCLUDE: Final[list[str]] = [
-    "**/*.{HEIC,heic,HEIF,heif,HEIFS,heifs,HEICF,heicf,JPG,jpg,JPEG,jpeg,PNG,png,MOV,mov,MP4,mp4,M4V,m4v,QT,qt}"
+    "**/*.{HEIC,heic,HEIF,heif,HEIFS,heifs,HEICF,heicf,JPG,jpg,JPEG,jpeg,PNG,png,MOV,mov,MP4,mp4,M4V,m4v,QT,qt,CR2,cr2,CR3,cr3,NEF,nef,NRW,nrw,ARW,arw,SRF,srf,SR2,sr2,ORF,orf,RW2,rw2,RAF,raf,PEF,pef,DNG,dng,RAW,raw,3FR,3fr,IIQ,iiq,RWL,rwl,SRW,srw,X3F,x3f,KDC,kdc,DCR,dcr,ERF,erf}"
 ]
 DEFAULT_EXCLUDE: Final[list[str]] = [
     "**/.iPhoto/**",

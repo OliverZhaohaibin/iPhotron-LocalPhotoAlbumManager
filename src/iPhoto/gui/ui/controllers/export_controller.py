@@ -9,7 +9,7 @@ from PySide6.QtCore import QObject, QThreadPool, QRunnable, Signal
 from PySide6.QtGui import QAction, QActionGroup
 from PySide6.QtWidgets import QWidget, QFileDialog
 
-from ....core.export import export_asset
+from ....core.export import export_asset, DEFAULT_EXPORT_FORMAT
 from ....config import EXPORT_DIR_NAME
 from ....library.manager import LibraryManager
 from ....io import sidecar
@@ -29,11 +29,18 @@ class ExportSignals(QObject):
 class ExportWorker(QRunnable):
     """Background worker for exporting a specific list of assets."""
 
-    def __init__(self, paths: list[Path], export_root: Path, library_root: Path):
+    def __init__(
+        self,
+        paths: list[Path],
+        export_root: Path,
+        library_root: Path,
+        export_format: str = DEFAULT_EXPORT_FORMAT,
+    ):
         super().__init__()
         self._paths = paths
         self._export_root = export_root
         self._library_root = library_root
+        self._export_format = export_format
         self.signals = ExportSignals()
 
     def run(self) -> None:
@@ -43,7 +50,7 @@ class ExportWorker(QRunnable):
         for i, path in enumerate(self._paths):
             if not path.exists():
                 continue
-            if export_asset(path, self._export_root, self._library_root):
+            if export_asset(path, self._export_root, self._library_root, self._export_format):
                 success += 1
             else:
                 fail += 1
@@ -54,10 +61,16 @@ class ExportWorker(QRunnable):
 class LibraryExportWorker(QRunnable):
     """Background worker for scanning the library and exporting edited assets."""
 
-    def __init__(self, library: LibraryManager, export_root: Path):
+    def __init__(
+        self,
+        library: LibraryManager,
+        export_root: Path,
+        export_format: str = DEFAULT_EXPORT_FORMAT,
+    ):
         super().__init__()
         self._library = library
         self._export_root = export_root
+        self._export_format = export_format
         self.signals = ExportSignals()
 
     def run(self) -> None:
@@ -103,7 +116,7 @@ class LibraryExportWorker(QRunnable):
         success = 0
         fail = 0
         for i, path in enumerate(to_export):
-            if export_asset(path, self._export_root, root):
+            if export_asset(path, self._export_root, root, self._export_format):
                 success += 1
             else:
                 fail += 1
@@ -200,7 +213,8 @@ class ExportController(QObject):
             show_error(self._main_window, "Library not bound.")
             return
 
-        worker = ExportWorker(paths, export_root, library_root)
+        fmt = self._settings.get("ui.export_format", DEFAULT_EXPORT_FORMAT)
+        worker = ExportWorker(paths, export_root, library_root, fmt)
         self._start_worker(worker)
 
     def _handle_export_all_edited(self) -> None:
@@ -208,7 +222,8 @@ class ExportController(QObject):
         if not export_root:
             return
 
-        worker = LibraryExportWorker(self._library, export_root)
+        fmt = self._settings.get("ui.export_format", DEFAULT_EXPORT_FORMAT)
+        worker = LibraryExportWorker(self._library, export_root, fmt)
         self._start_worker(worker)
 
     def _start_worker(self, worker: QRunnable) -> None:

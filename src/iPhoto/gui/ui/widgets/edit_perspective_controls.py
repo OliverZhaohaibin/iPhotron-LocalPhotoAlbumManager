@@ -261,10 +261,12 @@ class _FlipToggleRow(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
 
-        # Icon inside a 32×32 container to align with _PerspectiveSliderRow icons
+        # Icon inside a 32×32 container to align with _PerspectiveSliderRow icons.
+        # The flip SVG fills its canvas with no viewBox padding, so render at a
+        # smaller pixmap size to match the visual weight of the slider-row icons.
         icon_label = QLabel(self)
         icon_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        icon_label.setPixmap(load_icon(icon_name, color=(180, 180, 180)).pixmap(28, 28))
+        icon_label.setPixmap(load_icon(icon_name, color=(180, 180, 180)).pixmap(20, 20))
         icon_label.setFixedSize(32, 32)
         icon_label.setCursor(Qt.CursorShape.PointingHandCursor)
         icon_label.mouseReleaseEvent = lambda _ev: self._toggle()
@@ -341,13 +343,15 @@ class _AspectRatioSection(QWidget):
         sep.setFixedHeight(1)
         layout.addWidget(sep)
 
-        # Title row — icon in a 32px container to align with slider row icons
+        # Title row — icon in a 32px container to align with slider row icons.
+        # The aspect SVG has a dense viewBox, so render at a smaller pixmap
+        # size to match the visual weight of the slider-row icons.
         title_layout = QHBoxLayout()
         title_layout.setContentsMargins(0, 8, 0, 4)
         title_layout.setSpacing(0)
         icon_label = QLabel(self)
         icon_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        icon_label.setPixmap(load_icon("aspect.svg").pixmap(28, 28))
+        icon_label.setPixmap(load_icon("aspect.svg").pixmap(22, 22))
         icon_label.setFixedSize(32, 32)
         title_layout.addWidget(icon_label)
         title_text = QLabel("Aspect", self)

@@ -77,6 +77,39 @@ class TestFitCropAspect:
         # Area should be at least as large as before
         assert area_16_9_again >= area_16_9 - 1e-6
 
+    def test_square_on_landscape_image(self):
+        """A square crop on a 4000×3000 image should produce equal pixel dimensions."""
+        state = CropBoxState()
+        state.cx, state.cy, state.width, state.height = 0.5, 0.5, 0.8, 0.8
+        _fit_crop_aspect(state, 1.0, 4000, 3000)
+        # In pixel space: pw = width * 4000, ph = height * 3000
+        pixel_aspect = (state.width * 4000) / (state.height * 3000)
+        assert abs(pixel_aspect - 1.0) < 1e-5
+
+    def test_16_9_on_landscape_image(self):
+        """A 16:9 crop on a 4000×3000 image should produce the correct pixel ratio."""
+        state = CropBoxState()
+        state.cx, state.cy, state.width, state.height = 0.5, 0.5, 0.8, 0.8
+        _fit_crop_aspect(state, 16 / 9, 4000, 3000)
+        pixel_aspect = (state.width * 4000) / (state.height * 3000)
+        assert abs(pixel_aspect - 16 / 9) < 1e-5
+
+    def test_switching_ratios_with_image_dims_does_not_shrink(self):
+        """Switching ratios with image dimensions should not shrink the box."""
+        state = CropBoxState()
+        state.cx, state.cy, state.width, state.height = 0.5, 0.5, 0.8, 0.8
+
+        _fit_crop_aspect(state, 16 / 9, 4000, 3000)
+        area_16_9 = state.width * state.height
+
+        _fit_crop_aspect(state, 1.0, 4000, 3000)
+        area_1_1 = state.width * state.height
+        assert area_1_1 >= area_16_9 - 1e-6
+
+        _fit_crop_aspect(state, 16 / 9, 4000, 3000)
+        area_16_9_again = state.width * state.height
+        assert area_16_9_again >= area_16_9 - 1e-6
+
 
 # ---------------------------------------------------------------------------
 # CropInteractionController.set_locked_aspect_ratio
@@ -112,7 +145,13 @@ class TestControllerLockedAspect:
 
     def test_set_locked_aspect_ratio_immediately_applies_when_active(self):
         """When crop mode is active, setting a positive aspect ratio should
-        immediately adjust the crop box and emit a change callback."""
+        immediately adjust the crop box and emit a change callback.
+
+        The controller uses a texture of 300×200.  A square crop (aspect 1.0)
+        in normalised coordinates should satisfy:
+            (norm_w * 300) / (norm_h * 200) == 1.0
+        i.e.  norm_w / norm_h == 200 / 300 == 2/3.
+        """
         ctrl = _make_controller()
         # Activate crop mode with a non-square crop (width=0.8, height=0.4 → ratio 2.0)
         ctrl.set_active(True, {"Crop_CX": 0.5, "Crop_CY": 0.5, "Crop_W": 0.8, "Crop_H": 0.4})
@@ -124,7 +163,9 @@ class TestControllerLockedAspect:
         # Now set aspect ratio to 1.0 (square) — should immediately adjust
         ctrl.set_locked_aspect_ratio(1.0)
         state = ctrl.get_crop_state()
-        assert abs(state.width / state.height - 1.0) < 1e-4
+        # Verify the *pixel* aspect ratio is correct (300×200 texture)
+        pixel_aspect = (state.width * 300) / (state.height * 200)
+        assert abs(pixel_aspect - 1.0) < 1e-4
         # The on_crop_changed callback should have been called
         ctrl._on_crop_changed_callback.assert_called()
 

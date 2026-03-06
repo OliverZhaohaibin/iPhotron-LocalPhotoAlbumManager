@@ -568,6 +568,24 @@ class GLImageViewer(QOpenGLWidget):
         """Clear the cached baseline crop captured for perspective drags."""
         self._crop_controller.end_perspective_interaction()
 
+    def set_crop_aspect_ratio(self, ratio: float) -> None:
+        """Forward the selected crop aspect-ratio constraint to the controller.
+
+        Parameters
+        ----------
+        ratio:
+            ``0.0`` for freeform, ``-1.0`` for *original* (uses the current
+            image's native ratio), or a positive ``w/h`` value.
+        """
+        if ratio < 0:
+            # "Original" – compute from the loaded texture
+            tex_w, tex_h = self._crop_controller._texture_size_provider()
+            if tex_w > 0 and tex_h > 0:
+                ratio = float(tex_w) / float(tex_h)
+            else:
+                ratio = 0.0
+        self._crop_controller.set_locked_aspect_ratio(ratio)
+
     def _update_crop_perspective_state(self) -> None:
         crop_viewport.update_crop_perspective_state(self)
 

@@ -26,6 +26,7 @@ class ResizeStrategy(InteractionStrategy):
         get_dpr: Callable[[], float],
         on_crop_changed: Callable[[], None],
         apply_edge_push_zoom: Callable[[QPointF], None],
+        locked_aspect: float = 0.0,
     ) -> None:
         """Initialize resize strategy.
 
@@ -45,6 +46,8 @@ class ResizeStrategy(InteractionStrategy):
             Callback when crop values change.
         apply_edge_push_zoom:
             Callback to apply edge-push auto-zoom.
+        locked_aspect:
+            Width/height ratio to enforce.  ``0.0`` means no constraint.
         """
         self._handle = handle
         self._model = model
@@ -53,6 +56,7 @@ class ResizeStrategy(InteractionStrategy):
         self._get_dpr = get_dpr
         self._on_crop_changed = on_crop_changed
         self._apply_edge_push_zoom = apply_edge_push_zoom
+        self._locked_aspect = float(locked_aspect)
 
     def on_drag(self, delta_view: QPointF) -> None:
         """Handle resize drag movement."""
@@ -122,6 +126,13 @@ class ResizeStrategy(InteractionStrategy):
             new_top = max(new_top, crop_world["bottom"] + min_height_px)
             crop_world["top"] = new_top
 
+        # ---- Aspect-ratio enforcement ----
+        if self._locked_aspect > 0:
+            self._enforce_aspect(
+                crop_world, texture_handle, img_bounds_world,
+                min_width_px, min_height_px,
+            )
+
         # Convert back to normalised coordinates
         new_px_left = crop_world["left"] + half_width_orig
         new_px_right = crop_world["right"] + half_width_orig
@@ -144,3 +155,82 @@ class ResizeStrategy(InteractionStrategy):
     def on_end(self) -> None:
         """Handle end of resize interaction."""
         # No special cleanup needed
+
+    # ------------------------------------------------------------------
+    # Aspect-ratio helpers
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _clamp_edge(value: float, lo: float, hi: float) -> float:
+        return max(lo, min(hi, value))
+
+    def _enforce_aspect(
+        self,
+        crop: dict[str, float],
+        handle: CropHandle,
+        bounds: dict[str, float],
+        min_w: float,
+        min_h: float,
+    ) -> None:
+        """Adjust *crop* edges in-place so that width/height matches ``_locked_aspect``.
+
+        The strategy keeps the *anchor* edge(s) (the side opposite to the
+        dragged handle) fixed and adjusts the secondary dimension to satisfy the
+        ratio, then clamps to image bounds.  For pure edge handles only the
+        perpendicular dimension changes; for corner handles the width is treated
+        as the primary and height is derived.
+        """
+
+        ar = self._locked_aspect
+        cur_w = crop["right"] - crop["left"]
+        cur_h = crop["top"] - crop["bottom"]
+
+        if handle in (CropHandle.LEFT, CropHandle.RIGHT):
+            # Width changed → adjust height symmetrically around vertical centre
+            desired_h = cur_w / ar
+            desired_h = max(min_h, desired_h)
+            mid_y = (crop["top"] + crop["bottom"]) * 0.5
+            half = desired_h * 0.5
+            crop["top"] = self._clamp_edge(mid_y + half, crop["bottom"] + min_h, bounds["top"])
+            crop["bottom"] = self._clamp_edge(mid_y - half, bounds["bottom"], crop["top"] - min_h)
+            # Re-derive width from clamped height
+            actual_h = crop["top"] - crop["bottom"]
+            desired_w = actual_h * ar
+            if handle == CropHandle.LEFT:
+                crop["left"] = self._clamp_edge(crop["right"] - desired_w, bounds["left"], crop["right"] - min_w)
+            else:
+                crop["right"] = self._clamp_edge(crop["left"] + desired_w, crop["left"] + min_w, bounds["right"])
+
+        elif handle in (CropHandle.TOP, CropHandle.BOTTOM):
+            # Height changed → adjust width symmetrically around horizontal centre
+            desired_w = cur_h * ar
+            desired_w = max(min_w, desired_w)
+            mid_x = (crop["left"] + crop["right"]) * 0.5
+            half = desired_w * 0.5
+            crop["right"] = self._clamp_edge(mid_x + half, crop["left"] + min_w, bounds["right"])
+            crop["left"] = self._clamp_edge(mid_x - half, bounds["left"], crop["right"] - min_w)
+            # Re-derive height from clamped width
+            actual_w = crop["right"] - crop["left"]
+            desired_h = actual_w / ar
+            if handle == CropHandle.TOP:
+                crop["top"] = self._clamp_edge(crop["bottom"] + desired_h, crop["bottom"] + min_h, bounds["top"])
+            else:
+                crop["bottom"] = self._clamp_edge(crop["top"] - desired_h, bounds["bottom"], crop["top"] - min_h)
+
+        else:
+            # Corner handles: width is primary, derive height.
+            # Anchor is the diagonally opposite corner.
+            desired_h = cur_w / ar
+            desired_h = max(min_h, desired_h)
+
+            if handle in (CropHandle.TOP_LEFT, CropHandle.TOP_RIGHT):
+                crop["top"] = self._clamp_edge(crop["bottom"] + desired_h, crop["bottom"] + min_h, bounds["top"])
+            else:  # BOTTOM_LEFT, BOTTOM_RIGHT
+                crop["bottom"] = self._clamp_edge(crop["top"] - desired_h, bounds["bottom"], crop["top"] - min_h)
+
+            # Re-derive width from clamped height to keep ratio exact
+            actual_h = crop["top"] - crop["bottom"]
+            desired_w = actual_h * ar
+            if handle in (CropHandle.TOP_LEFT, CropHandle.BOTTOM_LEFT):
+                crop["left"] = self._clamp_edge(crop["right"] - desired_w, bounds["left"], crop["right"] - min_w)
+            else:
+                crop["right"] = self._clamp_edge(crop["left"] + desired_w, crop["left"] + min_w, bounds["right"])

@@ -171,6 +171,9 @@ class EditCoordinator(QObject):
         self._ui.edit_sidebar.perspectiveInteractionFinished.connect(
             self._ui.edit_image_viewer.end_perspective_interaction
         )
+        self._ui.edit_sidebar.aspectRatioChanged.connect(
+            self._ui.edit_image_viewer.set_crop_aspect_ratio
+        )
         self._ui.edit_image_viewer.cropInteractionStarted.connect(self.push_undo_state)
         self._ui.edit_image_viewer.cropChanged.connect(self._handle_crop_changed)
         self._ui.edit_image_viewer.colorPicked.connect(self._handle_color_picked)

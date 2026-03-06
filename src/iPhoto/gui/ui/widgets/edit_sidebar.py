@@ -72,6 +72,9 @@ class EditSidebar(QWidget):
     perspectiveInteractionFinished = Signal()
     """Emitted once the user releases a perspective slider."""
 
+    aspectRatioChanged = Signal(float)
+    """Emitted when the user selects a different crop aspect-ratio preset."""
+
     interactionStarted = Signal()
     """Emitted when any edit interaction (slider drag, toggle, reset) begins."""
 

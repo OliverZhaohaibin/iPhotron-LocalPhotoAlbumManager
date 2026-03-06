@@ -24,6 +24,23 @@ from .utils import CropBoxState, CropHandle, cursor_for_handle, ease_in_quad
 _LOGGER = logging.getLogger(__name__)
 
 
+def _fit_crop_aspect(crop_state: CropBoxState, aspect: float) -> None:
+    """Adjust *crop_state* in-place so that ``width / height == aspect``.
+
+    The larger dimension is shrunk to match the smaller one, keeping the
+    centre fixed.  This is used after a zoom-about-point so that the ratio
+    remains exact even though the zoom changes both dimensions uniformly.
+    """
+    cur = crop_state.width / max(1e-9, crop_state.height)
+    if abs(cur - aspect) < 1e-6:
+        return
+    if cur > aspect:
+        crop_state.width = crop_state.height * aspect
+    else:
+        crop_state.height = crop_state.width / aspect
+    crop_state.clamp()
+
+
 class CropInteractionController:
     """Manages all crop mode interactions, animations, and state (as coordinator)."""
 
@@ -90,6 +107,7 @@ class CropInteractionController:
         self._crop_edge_threshold: float = 48.0
         self._crop_faded_out: bool = False
         self._current_strategy: InteractionStrategy | None = None
+        self._locked_aspect: float = 0.0  # 0 = freeform
 
     # ------------------------------------------------------------------
     # Public API
@@ -97,6 +115,17 @@ class CropInteractionController:
     def is_active(self) -> bool:
         """Return True if crop mode is currently active."""
         return self._active
+
+    def set_locked_aspect_ratio(self, ratio: float) -> None:
+        """Set the aspect ratio constraint for crop resizing.
+
+        Parameters
+        ----------
+        ratio:
+            Width / height ratio to lock to.  ``0.0`` means freeform
+            (no constraint).
+        """
+        self._locked_aspect = float(ratio)
 
     def get_crop_values(self) -> dict[str, float]:
         """Return the current crop state as a mapping."""
@@ -276,6 +305,7 @@ class CropInteractionController:
                 get_dpr=self._transform_controller._get_dpr,
                 on_crop_changed=self._emit_crop_changed,
                 apply_edge_push_zoom=self._apply_edge_push_auto_zoom,
+                locked_aspect=self._locked_aspect,
             )
             self._on_cursor_change(cursor_for_handle(handle))
 
@@ -350,6 +380,9 @@ class CropInteractionController:
         snapshot = self._model.create_snapshot()
         crop_state = self._model.get_crop_state()
         crop_state.zoom_about_point(anchor_norm_x, anchor_norm_y, factor)
+        # Preserve locked aspect ratio after the uniform zoom
+        if self._locked_aspect > 0:
+            _fit_crop_aspect(crop_state, self._locked_aspect)
         if not self._model.ensure_valid_or_revert(snapshot, allow_shrink=False):
             self._on_request_update()
             self._animator.restart_idle()

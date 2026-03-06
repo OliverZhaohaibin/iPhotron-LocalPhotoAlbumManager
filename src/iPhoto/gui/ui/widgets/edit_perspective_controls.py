@@ -7,9 +7,12 @@ from typing import Optional
 
 from PySide6.QtCore import QSize, Qt, Signal
 from PySide6.QtWidgets import (
+    QButtonGroup,
+    QFrame,
     QHBoxLayout,
     QLabel,
     QPushButton,
+    QRadioButton,
     QToolButton,
     QVBoxLayout,
     QWidget,
@@ -24,6 +27,20 @@ _PERSPECTIVE_VERTICAL_KEY = "Perspective_Vertical"
 _PERSPECTIVE_HORIZONTAL_KEY = "Perspective_Horizontal"
 _STRAIGHTEN_KEY = "Crop_Straighten"
 _FLIP_KEY = "Crop_FlipH"
+
+
+# Aspect ratio presets: label → (w, h) or None for freeform.
+_ASPECT_OPTIONS: list[tuple[str, Optional[tuple[int, int]]]] = [
+    ("Freeform", None),
+    ("Original", None),  # handled specially: uses image aspect ratio
+    ("Square", (1, 1)),
+    ("16:9", (16, 9)),
+    ("4:5", (4, 5)),
+    ("5:7", (5, 7)),
+    ("4:3", (4, 3)),
+    ("3:5", (3, 5)),
+    ("3:2", (3, 2)),
+]
 
 
 class _PerspectiveSliderRow(QWidget):
@@ -81,6 +98,14 @@ class PerspectiveControls(QWidget):
     interactionFinished = Signal()
     """Emitted once the current slider interaction concludes."""
 
+    aspectRatioChanged = Signal(float)
+    """Emitted when the user selects a new aspect ratio constraint.
+
+    The value is the locked width/height ratio, or ``0.0`` for freeform.
+    A negative value (``-1.0``) means *original* (caller should supply the
+    image's native ratio).
+    """
+
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._session: Optional[EditSession] = None
@@ -112,12 +137,18 @@ class PerspectiveControls(QWidget):
         layout.addWidget(self._horizontal_row)
         self._flip_row = _FlipToggleRow("Flip", "flip.horizontal.fill.svg", self)
         layout.addWidget(self._flip_row)
+
+        # -- Aspect ratio section (below flip) --
+        self._aspect_section = _AspectRatioSection(self)
+        layout.addWidget(self._aspect_section)
+
         layout.addStretch(1)
 
         self._straighten_row.valueChanged.connect(self._on_straighten_changed)
         self._vertical_row.valueChanged.connect(self._on_vertical_value_changed)
         self._horizontal_row.valueChanged.connect(self._on_horizontal_value_changed)
         self._flip_row.toggled.connect(self._on_flip_toggled)
+        self._aspect_section.ratioSelected.connect(self.aspectRatioChanged)
         self._straighten_row.interactionStarted.connect(self.interactionStarted)
         self._vertical_row.interactionStarted.connect(self.interactionStarted)
         self._horizontal_row.interactionStarted.connect(self.interactionStarted)
@@ -261,4 +292,101 @@ class _FlipToggleRow(QWidget):
         self._label_button.setDown(checked)
         self.toggled.emit(checked)
         self.interactionFinished.emit()
+
+
+class _AspectRatioSection(QWidget):
+    """Radio-button list for selecting a crop aspect-ratio constraint.
+
+    Emits ``ratioSelected(float)`` where the value is:
+    *  ``0.0``  → freeform (no lock)
+    * ``-1.0``  → original (caller resolves to image aspect ratio)
+    *  ``> 0``  → explicit width / height ratio
+    """
+
+    ratioSelected = Signal(float)
+
+    _STYLESHEET = """
+    QRadioButton {
+        padding: 4px 2px;
+        spacing: 10px;
+        background-color: transparent;
+        border: none;
+        outline: none;
+        color: #a0a0a0;
+        font-size: 12px;
+    }
+    QRadioButton:hover { color: #ffffff; }
+    QRadioButton:checked { color: #dcdcdc; }
+    QRadioButton::indicator { width: 14px; height: 14px; }
+    QRadioButton::indicator:unchecked { image: none; }
+    QRadioButton::indicator:checked { image: url(CHECKMARK_PATH); }
+    """
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 12, 0, 0)
+        layout.setSpacing(0)
+
+        # Separator line
+        sep = QFrame(self)
+        sep.setFrameShape(QFrame.Shape.HLine)
+        sep.setStyleSheet("QFrame { color: #3a3a3c; }")
+        sep.setFixedHeight(1)
+        layout.addWidget(sep)
+
+        # Title row
+        title_layout = QHBoxLayout()
+        title_layout.setContentsMargins(3, 8, 0, 4)
+        title_layout.setSpacing(6)
+        icon_label = QLabel(self)
+        icon_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        icon_label.setPixmap(load_icon("aspect.svg").pixmap(16, 16))
+        icon_label.setFixedSize(20, 20)
+        title_layout.addWidget(icon_label)
+        title_text = QLabel("Aspect", self)
+        title_text.setStyleSheet("color: #dcdcdc; font-weight: bold; font-size: 13px;")
+        title_layout.addWidget(title_text)
+        title_layout.addStretch()
+        layout.addLayout(title_layout)
+
+        # Radio buttons
+        options_layout = QVBoxLayout()
+        options_layout.setSpacing(0)
+        options_layout.setContentsMargins(6, 2, 0, 0)
+
+        # Build check-indicator path for the stylesheet
+        from ..icon import icon_path as _icon_path
+        check_path = str(_icon_path("checkmark.svg")).replace("\\", "/")
+        stylesheet = self._STYLESHEET.replace("CHECKMARK_PATH", check_path)
+        self.setStyleSheet(stylesheet)
+
+        self._button_group = QButtonGroup(self)
+        self._ratio_map: dict[int, float] = {}
+
+        for idx, (label, dims) in enumerate(_ASPECT_OPTIONS):
+            btn = QRadioButton(label, self)
+            self._button_group.addButton(btn, idx)
+            options_layout.addWidget(btn)
+
+            if dims is None:
+                # Freeform → 0.0, Original → -1.0
+                self._ratio_map[idx] = 0.0 if label == "Freeform" else -1.0
+            else:
+                self._ratio_map[idx] = float(dims[0]) / float(dims[1])
+
+            # Default selection: Freeform
+            if label == "Freeform":
+                btn.setChecked(True)
+
+        layout.addLayout(options_layout)
+
+        self._button_group.idToggled.connect(self._on_button_toggled)
+
+    # ------------------------------------------------------------------
+    def _on_button_toggled(self, button_id: int, checked: bool) -> None:
+        if not checked:
+            return
+        self.ratioSelected.emit(self._ratio_map.get(button_id, 0.0))
 

@@ -8,7 +8,6 @@ from typing import Optional
 from PySide6.QtCore import QRect, QRectF, QSize, Qt, Signal
 from PySide6.QtGui import QColor, QIcon, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
-    QApplication,
     QButtonGroup,
     QFrame,
     QHBoxLayout,
@@ -261,7 +260,9 @@ class _FlipToggleRow(QWidget):
         super().__init__(parent)
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(0)
+        # spacing = 24 so the first letter of "Flip" sits at 32 + 24 = 56,
+        # matching the "Straighten" / "Aspect" label x position.
+        layout.setSpacing(24)
 
         # Icon inside a 32×32 container to align with _PerspectiveSliderRow icons.
         # The flip SVG fills its canvas with no viewBox padding, so render at a
@@ -284,6 +285,7 @@ class _FlipToggleRow(QWidget):
         self._label_button.setFlat(True)
         self._label_button.setCursor(Qt.CursorShape.PointingHandCursor)
         self._label_button.setFont(Edit_SIDEBAR_FONT)
+        self._label_button.setStyleSheet("QPushButton { text-align: left; padding: 0; }")
         self._label_button.clicked.connect(self._toggle)
         layout.addWidget(self._label_button, 1)
 
@@ -322,7 +324,7 @@ class _AspectRatioSection(QWidget):
         border: none;
         outline: none;
         color: #a0a0a0;
-        font-size: 12px;
+        font-size: 13px;
     }
     QRadioButton:hover { color: #ffffff; }
     QRadioButton:checked { color: #dcdcdc; }
@@ -461,8 +463,10 @@ class _AspectRatioSection(QWidget):
         that it stays crisp on HiDPI / Retina screens.
         """
         size = 44
-        app = QApplication.instance()
-        dpr = app.devicePixelRatio() if app else 1.0
+        # Use the widget's own DPR so pixmaps stay crisp on per-monitor
+        # DPI setups where the application-level DPR may differ.
+        btn = self._landscape_btn if landscape else self._portrait_btn
+        dpr = btn.devicePixelRatioF()
         real = int(size * dpr)
         pix = QPixmap(real, real)
         pix.setDevicePixelRatio(dpr)
@@ -545,12 +549,16 @@ class _AspectRatioSection(QWidget):
         self._orientation_widget.setVisible(show_orient)
 
         if show_orient:
-            # Set default orientation based on preset dimensions
+            # Set default orientation based on preset dimensions.
+            # Block orient-group signals while syncing to avoid a second
+            # ratioSelected emission from _on_orientation_toggled.
             dims = self._dims_map.get(button_id)
             if dims is not None:
                 self._is_landscape = dims[0] >= dims[1]
+                self._orient_group.blockSignals(True)
                 self._landscape_btn.setChecked(self._is_landscape)
                 self._portrait_btn.setChecked(not self._is_landscape)
+                self._orient_group.blockSignals(False)
                 self._update_orientation_icons()
 
         self.ratioSelected.emit(self._effective_ratio(button_id))

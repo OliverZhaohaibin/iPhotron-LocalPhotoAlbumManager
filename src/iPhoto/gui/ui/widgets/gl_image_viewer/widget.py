@@ -579,7 +579,7 @@ class GLImageViewer(QOpenGLWidget):
         """
         if ratio < 0:
             # "Original" – compute from the loaded texture
-            tex_w, tex_h = self._crop_controller._texture_size_provider()
+            tex_w, tex_h = self._display_texture_dimensions()
             if tex_w > 0 and tex_h > 0:
                 ratio = float(tex_w) / float(tex_h)
             else:

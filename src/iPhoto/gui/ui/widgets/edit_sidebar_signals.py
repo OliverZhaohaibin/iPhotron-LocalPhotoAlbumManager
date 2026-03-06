@@ -61,3 +61,4 @@ class EditSignalRouter:
         perspective_controls.interactionFinished.connect(sidebar.perspectiveInteractionFinished)
         perspective_controls.interactionStarted.connect(sidebar.interactionStarted)
         perspective_controls.interactionFinished.connect(sidebar.interactionFinished)
+        perspective_controls.aspectRatioChanged.connect(sidebar.aspectRatioChanged)

@@ -23,6 +23,74 @@ from .utils import CropBoxState, CropHandle, cursor_for_handle, ease_in_quad
 
 _LOGGER = logging.getLogger(__name__)
 
+# Guard against division by zero when computing current aspect ratio.
+_MIN_DIMENSION_EPSILON = 1e-9
+# Tolerance for floating-point aspect-ratio comparison.
+_ASPECT_RATIO_TOLERANCE = 1e-6
+
+
+def _fit_crop_aspect(
+    crop_state: CropBoxState,
+    aspect: float,
+    image_width: int = 0,
+    image_height: int = 0,
+) -> None:
+    """Adjust *crop_state* in-place so the crop has the requested pixel aspect.
+
+    Parameters
+    ----------
+    crop_state:
+        The normalised crop rectangle to adjust.
+    aspect:
+        Desired pixel-space width/height ratio.
+    image_width, image_height:
+        Pixel dimensions of the source image.  When both are positive the
+        function converts *aspect* into normalised-coordinate space so that the
+        resulting crop rectangle produces the correct pixel ratio.  If the
+        dimensions are not supplied the function falls back to treating
+        normalised ``width / height`` as the ratio (correct only for square
+        images).
+
+    The smaller dimension is expanded to match the larger one whenever the
+    result still fits within the normalised [0, 1] bounds.  If expanding
+    would exceed the bounds the larger dimension is shrunk instead.  This
+    prevents the crop box from monotonically shrinking when the user
+    switches between aspect ratios repeatedly.
+    """
+    # Convert the pixel-space aspect ratio into normalised-coordinate space.
+    # In normalised coords: pixel_w = norm_w * img_w, pixel_h = norm_h * img_h
+    # So pixel_aspect = (norm_w * img_w) / (norm_h * img_h)
+    # => norm_w / norm_h = pixel_aspect * img_h / img_w
+    if image_width > 0 and image_height > 0:
+        norm_aspect = aspect * float(image_height) / float(image_width)
+    else:
+        norm_aspect = aspect
+
+    cur = crop_state.width / max(_MIN_DIMENSION_EPSILON, crop_state.height)
+    if abs(cur - norm_aspect) < _ASPECT_RATIO_TOLERANCE:
+        return
+
+    # Try to expand the smaller dimension first.
+    if cur > norm_aspect:
+        # Width is proportionally too large → try expanding height.
+        desired_height = crop_state.width / norm_aspect
+        if desired_height <= 1.0:
+            crop_state.height = desired_height
+        else:
+            # Can't expand height enough; shrink width instead.
+            crop_state.height = min(1.0, desired_height)
+            crop_state.width = crop_state.height * norm_aspect
+    else:
+        # Height is proportionally too large → try expanding width.
+        desired_width = crop_state.height * norm_aspect
+        if desired_width <= 1.0:
+            crop_state.width = desired_width
+        else:
+            # Can't expand width enough; shrink height instead.
+            crop_state.width = min(1.0, desired_width)
+            crop_state.height = crop_state.width / norm_aspect
+    crop_state.clamp()
+
 
 class CropInteractionController:
     """Manages all crop mode interactions, animations, and state (as coordinator)."""
@@ -90,6 +158,7 @@ class CropInteractionController:
         self._crop_edge_threshold: float = 48.0
         self._crop_faded_out: bool = False
         self._current_strategy: InteractionStrategy | None = None
+        self._locked_aspect: float = 0.0  # 0 = freeform
 
     # ------------------------------------------------------------------
     # Public API
@@ -97,6 +166,31 @@ class CropInteractionController:
     def is_active(self) -> bool:
         """Return True if crop mode is currently active."""
         return self._active
+
+    def set_locked_aspect_ratio(self, ratio: float) -> None:
+        """Set the aspect ratio constraint for crop resizing.
+
+        When a positive ratio is supplied and crop mode is active, the current
+        crop rectangle is immediately adjusted to match the new ratio so the
+        user sees instant feedback.
+
+        Parameters
+        ----------
+        ratio:
+            Width / height ratio to lock to.  ``0.0`` means freeform
+            (no constraint).
+        """
+        self._locked_aspect = float(ratio)
+        if self._active and ratio > 0:
+            snapshot = self._model.create_snapshot()
+            crop_state = self._model.get_crop_state()
+            tex_w, tex_h = self._texture_size_provider()
+            _fit_crop_aspect(crop_state, ratio, tex_w, tex_h)
+            if self._model.has_changed(snapshot):
+                self._crop_faded_out = False
+                self._emit_crop_changed()
+                self._on_request_update()
+                self._animator.restart_idle()
 
     def get_crop_values(self) -> dict[str, float]:
         """Return the current crop state as a mapping."""
@@ -276,6 +370,7 @@ class CropInteractionController:
                 get_dpr=self._transform_controller._get_dpr,
                 on_crop_changed=self._emit_crop_changed,
                 apply_edge_push_zoom=self._apply_edge_push_auto_zoom,
+                locked_aspect=self._locked_aspect,
             )
             self._on_cursor_change(cursor_for_handle(handle))
 
@@ -350,6 +445,9 @@ class CropInteractionController:
         snapshot = self._model.create_snapshot()
         crop_state = self._model.get_crop_state()
         crop_state.zoom_about_point(anchor_norm_x, anchor_norm_y, factor)
+        # Preserve locked aspect ratio after the uniform zoom
+        if self._locked_aspect > 0:
+            _fit_crop_aspect(crop_state, self._locked_aspect, tex_w, tex_h)
         if not self._model.ensure_valid_or_revert(snapshot, allow_shrink=False):
             self._on_request_update()
             self._animator.restart_idle()

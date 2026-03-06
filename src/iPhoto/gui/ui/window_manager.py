@@ -435,8 +435,18 @@ class FramelessWindowManager(QObject):
         old_dpr = self._last_screen_dpr or 1.0
         QTimer.singleShot(0, lambda: self._apply_screen_change_fix(old_dpr, new_screen))
 
+    def _is_fullscreen_or_maximized(self) -> bool:
+        # Never apply size clamping while the window fills the screen – the
+        # clamp margin is only meaningful for normal windowed mode and would
+        # otherwise shrink a fullscreen/maximized window, exposing desktop or
+        # app content along the right/bottom edges.
+        return self._window.isFullScreen() or self._window.isMaximized()
+
     def _apply_screen_change_fix(self, old_dpr: float, new_screen: object) -> None:
         if self._geometry_fix_in_progress:
+            return
+        if self._is_fullscreen_or_maximized():
+            self._last_screen_dpr = self._screen_dpr(new_screen)
             return
 
         available = self._available_rect(new_screen)
@@ -465,10 +475,7 @@ class FramelessWindowManager(QObject):
         self._last_screen_dpr = new_dpr
 
     def _clamp_window_to_current_screen(self) -> None:
-        # Never clamp while fullscreen/maximized. The clamp margin is only for
-        # normal windowed mode and would otherwise shrink a fullscreen window,
-        # exposing desktop/app content along the right/bottom edges.
-        if self._window.isFullScreen() or self._window.isMaximized():
+        if self._is_fullscreen_or_maximized():
             return
         if self._geometry_fix_in_progress:
             return
@@ -477,7 +484,7 @@ class FramelessWindowManager(QObject):
         self._clamp_window_to_screen(screen)
 
     def _clamp_window_to_screen(self, screen: object) -> None:
-        if self._window.isFullScreen() or self._window.isMaximized():
+        if self._is_fullscreen_or_maximized():
             return
         available = self._available_rect(screen)
         if available is None:

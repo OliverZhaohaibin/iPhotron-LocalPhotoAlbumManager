@@ -252,3 +252,75 @@ class TestEnforceAspect:
         assert crop["left"] >= bounds["left"]
         assert crop["top"] <= bounds["top"]
         assert crop["bottom"] >= bounds["bottom"]
+
+
+# ---------------------------------------------------------------------------
+# _AspectRatioSection orientation toggle
+# ---------------------------------------------------------------------------
+
+from iPhoto.gui.ui.widgets.edit_perspective_controls import _AspectRatioSection
+
+
+class TestAspectOrientationToggle:
+    """Verify the landscape/portrait orientation buttons in _AspectRatioSection."""
+
+    @pytest.fixture(autouse=True)
+    def section(self, qtbot):
+        self.widget = _AspectRatioSection()
+        qtbot.addWidget(self.widget)
+        self.widget.show()
+        self.emitted: list[float] = []
+        self.widget.ratioSelected.connect(lambda r: self.emitted.append(r))
+
+    def _select_preset(self, label: str) -> None:
+        for btn in self.widget._button_group.buttons():
+            if btn.text() == label:
+                btn.setChecked(True)
+                return
+        raise ValueError(f"Preset '{label}' not found")
+
+    def test_orientation_hidden_for_freeform(self):
+        assert not self.widget._orientation_widget.isVisible()
+
+    def test_orientation_hidden_for_original(self):
+        self._select_preset("Original")
+        assert not self.widget._orientation_widget.isVisible()
+
+    def test_orientation_hidden_for_square(self):
+        self._select_preset("Square")
+        assert not self.widget._orientation_widget.isVisible()
+
+    def test_orientation_shown_for_16_9(self):
+        self._select_preset("16:9")
+        assert self.widget._orientation_widget.isVisible()
+
+    def test_16_9_default_landscape(self):
+        self._select_preset("16:9")
+        assert self.widget._is_landscape
+        assert abs(self.emitted[-1] - 16 / 9) < 1e-6
+
+    def test_16_9_portrait_toggle(self):
+        self._select_preset("16:9")
+        self.emitted.clear()
+        self.widget._portrait_btn.setChecked(True)
+        assert not self.widget._is_landscape
+        assert abs(self.emitted[-1] - 9 / 16) < 1e-6
+
+    def test_4_5_default_portrait(self):
+        """4:5 has w < h, so default orientation is portrait."""
+        self._select_preset("4:5")
+        assert not self.widget._is_landscape
+        assert abs(self.emitted[-1] - 4 / 5) < 1e-6
+
+    def test_4_5_landscape_toggle(self):
+        self._select_preset("4:5")
+        self.emitted.clear()
+        self.widget._landscape_btn.setChecked(True)
+        assert self.widget._is_landscape
+        assert abs(self.emitted[-1] - 5 / 4) < 1e-6
+
+    def test_switching_preset_hides_orientation(self):
+        self._select_preset("16:9")
+        assert self.widget._orientation_widget.isVisible()
+        self._select_preset("Freeform")
+        assert not self.widget._orientation_widget.isVisible()

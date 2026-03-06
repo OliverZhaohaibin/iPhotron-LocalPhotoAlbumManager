@@ -5,7 +5,8 @@ from __future__ import annotations
 
 from typing import Optional
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import QRectF, QSize, Qt, Signal
+from PySide6.QtGui import QColor, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
     QButtonGroup,
     QFrame,
@@ -343,12 +344,14 @@ class _AspectRatioSection(QWidget):
         sep.setFixedHeight(1)
         layout.addWidget(sep)
 
-        # Title row — icon in a 32px container to align with slider row icons.
-        # The aspect SVG has a dense viewBox, so render at a smaller pixmap
-        # size to match the visual weight of the slider-row icons.
+        # Title row — icon in a 32px container; spacing = 14 so the first
+        # letter of "Aspect" aligns with the left edge of the Straighten
+        # slider bar (the BWSlider track begins at h_padding = 14 from the
+        # slider widget's left edge, which itself starts right after the
+        # 32px icon container).
         title_layout = QHBoxLayout()
         title_layout.setContentsMargins(0, 8, 0, 4)
-        title_layout.setSpacing(0)
+        title_layout.setSpacing(14)
         icon_label = QLabel(self)
         icon_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         icon_label.setPixmap(load_icon("aspect.svg").pixmap(22, 22))
@@ -371,12 +374,18 @@ class _AspectRatioSection(QWidget):
         self.setStyleSheet(stylesheet)
 
         self._button_group = QButtonGroup(self)
+        # Store the canonical ratio (always ≥ 1 for non-square presets) and
+        # the default orientation so that the orientation buttons start in the
+        # correct state for each preset.
         self._ratio_map: dict[int, float] = {}
+        self._dims_map: dict[int, Optional[tuple[int, int]]] = {}
+        self._is_landscape: bool = True  # orientation state
 
         for idx, (label, dims) in enumerate(_ASPECT_OPTIONS):
             btn = QRadioButton(label, self)
             self._button_group.addButton(btn, idx)
             options_layout.addWidget(btn)
+            self._dims_map[idx] = dims
 
             if dims is None:
                 # Freeform → 0.0, Original → -1.0
@@ -390,11 +399,155 @@ class _AspectRatioSection(QWidget):
 
         layout.addLayout(options_layout)
 
+        # ---- Orientation toggle section (landscape / portrait) ----
+        self._orientation_widget = QWidget(self)
+        orient_layout = QVBoxLayout(self._orientation_widget)
+        orient_layout.setContentsMargins(6, 8, 6, 4)
+        orient_layout.setSpacing(6)
+
+        orient_sep = QFrame(self._orientation_widget)
+        orient_sep.setFrameShape(QFrame.Shape.HLine)
+        orient_sep.setStyleSheet("QFrame { color: #3a3a3c; }")
+        orient_sep.setFixedHeight(1)
+        orient_layout.addWidget(orient_sep)
+
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(12)
+        btn_row.addStretch()
+
+        self._landscape_btn = QToolButton(self._orientation_widget)
+        self._portrait_btn = QToolButton(self._orientation_widget)
+        for btn in (self._landscape_btn, self._portrait_btn):
+            btn.setCheckable(True)
+            btn.setAutoRaise(True)
+            btn.setFixedSize(QSize(48, 48))
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.setStyleSheet(
+                "QToolButton { border: 1px solid #555; border-radius: 4px; background: transparent; }"
+                "QToolButton:checked { border: 1px solid #aaa; }"
+            )
+
+        self._update_orientation_icons()
+
+        self._landscape_btn.setChecked(True)
+
+        self._orient_group = QButtonGroup(self._orientation_widget)
+        self._orient_group.setExclusive(True)
+        self._orient_group.addButton(self._landscape_btn, 0)
+        self._orient_group.addButton(self._portrait_btn, 1)
+
+        btn_row.addWidget(self._landscape_btn)
+        btn_row.addWidget(self._portrait_btn)
+        btn_row.addStretch()
+        orient_layout.addLayout(btn_row)
+
+        layout.addWidget(self._orientation_widget)
+        self._orientation_widget.setVisible(False)
+
         self._button_group.idToggled.connect(self._on_button_toggled)
+        self._orient_group.idToggled.connect(self._on_orientation_toggled)
 
     # ------------------------------------------------------------------
+    def _make_orientation_pixmap(
+        self, *, landscape: bool, checked: bool
+    ) -> QPixmap:
+        """Render a small pixmap showing a landscape or portrait rectangle."""
+        size = 44
+        pix = QPixmap(size, size)
+        pix.fill(QColor(0, 0, 0, 0))
+
+        painter = QPainter(pix)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        # Draw orientation rectangle
+        rect_color = QColor("#c0c0c0") if not checked else QColor("#e0e0e0")
+        pen = QPen(rect_color, 1.5)
+        painter.setPen(pen)
+        painter.setBrush(QColor(0, 0, 0, 0))
+
+        margin = 8
+        if landscape:
+            # Wider than tall
+            rw, rh = size - 2 * margin, int((size - 2 * margin) * 0.65)
+        else:
+            # Taller than wide
+            rw, rh = int((size - 2 * margin) * 0.65), size - 2 * margin
+        rx = (size - rw) / 2
+        ry = (size - rh) / 2
+        painter.drawRoundedRect(QRectF(rx, ry, rw, rh), 2, 2)
+
+        # Draw checkmark indicator when checked
+        if checked:
+            check_icon = load_icon("checkmark.svg", color=(200, 200, 200))
+            check_pix = check_icon.pixmap(12, 12)
+            cx = (size - 12) / 2
+            cy = (size - 12) / 2
+            painter.drawPixmap(int(cx), int(cy), check_pix)
+
+        painter.end()
+        return pix
+
+    def _update_orientation_icons(self) -> None:
+        """Refresh the landscape/portrait button icons to reflect state."""
+        from PySide6.QtGui import QIcon
+
+        is_land = self._is_landscape
+        land_pix = self._make_orientation_pixmap(landscape=True, checked=is_land)
+        port_pix = self._make_orientation_pixmap(landscape=False, checked=not is_land)
+
+        self._landscape_btn.setIcon(QIcon(land_pix))
+        self._landscape_btn.setIconSize(QSize(44, 44))
+        self._portrait_btn.setIcon(QIcon(port_pix))
+        self._portrait_btn.setIconSize(QSize(44, 44))
+
+    # ------------------------------------------------------------------
+    def _current_button_id(self) -> int:
+        return self._button_group.checkedId()
+
+    def _is_nonsquare_preset(self, button_id: int) -> bool:
+        """Return True when the selected preset supports orientation choice."""
+        dims = self._dims_map.get(button_id)
+        if dims is None:
+            return False  # Freeform or Original
+        return dims[0] != dims[1]  # not Square
+
+    def _effective_ratio(self, button_id: int) -> float:
+        """Return the emitted ratio for *button_id* considering orientation."""
+        base_ratio = self._ratio_map.get(button_id, 0.0)
+        if base_ratio <= 0:
+            return base_ratio  # freeform / original – pass through
+
+        dims = self._dims_map.get(button_id)
+        if dims is not None and dims[0] == dims[1]:
+            return base_ratio  # square – no orientation
+
+        if self._is_landscape:
+            return max(base_ratio, 1.0 / base_ratio)
+        else:
+            return min(base_ratio, 1.0 / base_ratio)
+
     def _on_button_toggled(self, button_id: int, checked: bool) -> None:
         if not checked:
             return
-        self.ratioSelected.emit(self._ratio_map.get(button_id, 0.0))
+        show_orient = self._is_nonsquare_preset(button_id)
+        self._orientation_widget.setVisible(show_orient)
+
+        if show_orient:
+            # Set default orientation based on preset dimensions
+            dims = self._dims_map.get(button_id)
+            if dims is not None:
+                self._is_landscape = dims[0] >= dims[1]
+                self._landscape_btn.setChecked(self._is_landscape)
+                self._portrait_btn.setChecked(not self._is_landscape)
+                self._update_orientation_icons()
+
+        self.ratioSelected.emit(self._effective_ratio(button_id))
+
+    def _on_orientation_toggled(self, orient_id: int, checked: bool) -> None:
+        if not checked:
+            return
+        self._is_landscape = orient_id == 0
+        self._update_orientation_icons()
+        btn_id = self._current_button_id()
+        self.ratioSelected.emit(self._effective_ratio(btn_id))
 

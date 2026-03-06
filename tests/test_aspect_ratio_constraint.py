@@ -75,7 +75,7 @@ class TestControllerLockedAspect:
         """When crop mode is active, setting a positive aspect ratio should
         immediately adjust the crop box and emit a change callback."""
         ctrl = _make_controller()
-        # Activate crop mode with a non-square crop (width=1.0, height=1.0 → square default)
+        # Activate crop mode with a non-square crop (width=0.8, height=0.4 → ratio 2.0)
         ctrl.set_active(True, {"Crop_CX": 0.5, "Crop_CY": 0.5, "Crop_W": 0.8, "Crop_H": 0.4})
         state = ctrl.get_crop_state()
         # Verify crop is 0.8 x 0.4 (ratio 2.0)

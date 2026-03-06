@@ -32,17 +32,35 @@ _ASPECT_RATIO_TOLERANCE = 1e-6
 def _fit_crop_aspect(crop_state: CropBoxState, aspect: float) -> None:
     """Adjust *crop_state* in-place so that ``width / height == aspect``.
 
-    The larger dimension is shrunk to match the smaller one, keeping the
-    centre fixed.  This is used after a zoom-about-point so that the ratio
-    remains exact even though the zoom changes both dimensions uniformly.
+    The smaller dimension is expanded to match the larger one whenever the
+    result still fits within the normalised [0, 1] bounds.  If expanding
+    would exceed the bounds the larger dimension is shrunk instead.  This
+    prevents the crop box from monotonically shrinking when the user
+    switches between aspect ratios repeatedly.
     """
     cur = crop_state.width / max(_MIN_DIMENSION_EPSILON, crop_state.height)
     if abs(cur - aspect) < _ASPECT_RATIO_TOLERANCE:
         return
+
+    # Try to expand the smaller dimension first.
     if cur > aspect:
-        crop_state.width = crop_state.height * aspect
+        # Width is proportionally too large → try expanding height.
+        desired_height = crop_state.width / aspect
+        if desired_height <= 1.0:
+            crop_state.height = desired_height
+        else:
+            # Can't expand height enough; shrink width instead.
+            crop_state.height = min(1.0, desired_height)
+            crop_state.width = crop_state.height * aspect
     else:
-        crop_state.height = crop_state.width / aspect
+        # Height is proportionally too large → try expanding width.
+        desired_width = crop_state.height * aspect
+        if desired_width <= 1.0:
+            crop_state.width = desired_width
+        else:
+            # Can't expand width enough; shrink height instead.
+            crop_state.width = min(1.0, desired_width)
+            crop_state.height = crop_state.width / aspect
     crop_state.clamp()
 
 

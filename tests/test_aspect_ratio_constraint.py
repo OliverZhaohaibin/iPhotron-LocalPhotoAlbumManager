@@ -17,19 +17,25 @@ from iPhoto.gui.ui.widgets.gl_crop.model import CropSessionModel
 # ---------------------------------------------------------------------------
 
 class TestFitCropAspect:
-    def test_wider_than_target_shrinks_width(self):
+    def test_wider_than_target_expands_height(self):
         state = CropBoxState()
         state.cx, state.cy, state.width, state.height = 0.5, 0.5, 0.8, 0.4
-        # current aspect = 2.0, target = 1.0 → shrink width
+        # current aspect = 2.0, target = 1.0 → expand height to match width
         _fit_crop_aspect(state, 1.0)
         assert abs(state.width / state.height - 1.0) < 1e-5
+        # height should have expanded (0.4 → 0.8), width stays
+        assert abs(state.width - 0.8) < 1e-5
+        assert abs(state.height - 0.8) < 1e-5
 
-    def test_taller_than_target_shrinks_height(self):
+    def test_taller_than_target_expands_width(self):
         state = CropBoxState()
         state.cx, state.cy, state.width, state.height = 0.5, 0.5, 0.4, 0.8
-        # current aspect = 0.5, target = 1.0 → shrink height
+        # current aspect = 0.5, target = 1.0 → expand width to match height
         _fit_crop_aspect(state, 1.0)
         assert abs(state.width / state.height - 1.0) < 1e-5
+        # width should have expanded (0.4 → 0.8), height stays
+        assert abs(state.width - 0.8) < 1e-5
+        assert abs(state.height - 0.8) < 1e-5
 
     def test_already_correct_ratio_unchanged(self):
         state = CropBoxState()
@@ -37,6 +43,39 @@ class TestFitCropAspect:
         _fit_crop_aspect(state, 1.5)
         assert abs(state.width - 0.6) < 1e-5
         assert abs(state.height - 0.4) < 1e-5
+
+    def test_expand_clamped_to_bounds(self):
+        """When expanding would exceed [0,1] bounds, fall back to shrinking."""
+        state = CropBoxState()
+        state.cx, state.cy, state.width, state.height = 0.5, 0.5, 0.9, 0.3
+        # current aspect = 3.0, target = 1.0
+        # Expanding height to 0.9 is within bounds
+        _fit_crop_aspect(state, 1.0)
+        assert abs(state.width / state.height - 1.0) < 1e-5
+        assert abs(state.width - 0.9) < 1e-5
+
+    def test_switching_ratios_does_not_shrink(self):
+        """Switching between ratios repeatedly must not monotonically shrink."""
+        state = CropBoxState()
+        state.cx, state.cy, state.width, state.height = 0.5, 0.5, 0.8, 0.8
+
+        # Apply 16:9
+        _fit_crop_aspect(state, 16 / 9)
+        area_16_9 = state.width * state.height
+
+        # Switch back to 1:1
+        _fit_crop_aspect(state, 1.0)
+        area_1_1 = state.width * state.height
+
+        # The area should not be smaller than the 16:9 area
+        assert area_1_1 >= area_16_9 - 1e-6
+
+        # Switch back to 16:9 again
+        _fit_crop_aspect(state, 16 / 9)
+        area_16_9_again = state.width * state.height
+
+        # Area should be at least as large as before
+        assert area_16_9_again >= area_16_9 - 1e-6
 
 
 # ---------------------------------------------------------------------------

@@ -258,19 +258,31 @@ class _FlipToggleRow(QWidget):
     def __init__(self, label: str, icon_name: str, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(3, 0, 0, 0)
+        layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
+
+        # Icon inside a 32×32 container to align with _PerspectiveSliderRow icons
+        icon_label = QLabel(self)
+        icon_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        icon_label.setPixmap(load_icon(icon_name, color=(180, 180, 180)).pixmap(28, 28))
+        icon_label.setFixedSize(32, 32)
+        icon_label.setCursor(Qt.CursorShape.PointingHandCursor)
+        icon_label.mousePressEvent = lambda _ev: self._toggle()
+        layout.addWidget(icon_label)
+        self._icon_label = icon_label
+
         self._button = QToolButton(self)
         self._button.setAutoRaise(True)
         self._button.setCheckable(True)
         self._button.setIcon(load_icon(icon_name, color=(180, 180, 180)))
         self._button.setIconSize(QSize(22, 22))
         self._button.clicked.connect(self._handle_clicked)
-        layout.addWidget(self._button)
+        self._button.setVisible(False)
 
         self._label_button = QPushButton(label, self)
         self._label_button.setFlat(True)
         self._label_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._label_button.setFont(Edit_SIDEBAR_FONT)
         self._label_button.clicked.connect(self._toggle)
         layout.addWidget(self._label_button, 1)
 
@@ -338,14 +350,14 @@ class _AspectRatioSection(QWidget):
         sep.setFixedHeight(1)
         layout.addWidget(sep)
 
-        # Title row — left-aligned icon + prominent label matching adjust section headers
+        # Title row — icon in a 32px container to align with slider row icons
         title_layout = QHBoxLayout()
         title_layout.setContentsMargins(0, 8, 0, 4)
-        title_layout.setSpacing(8)
+        title_layout.setSpacing(0)
         icon_label = QLabel(self)
         icon_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        icon_label.setPixmap(load_icon("aspect.svg").pixmap(20, 20))
-        icon_label.setFixedSize(20, 20)
+        icon_label.setPixmap(load_icon("aspect.svg").pixmap(28, 28))
+        icon_label.setFixedSize(32, 32)
         title_layout.addWidget(icon_label)
         title_text = QLabel("Aspect", self)
         title_text.setFont(Edit_SIDEBAR_FONT)

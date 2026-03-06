@@ -53,6 +53,23 @@ def test_to_dto_handles_int_media_type():
     dto2 = source._to_dto(asset_video_str)
     assert dto2.media_type == "video"
 
+def test_to_dto_handles_none_width_height():
+    """Regression test: to_dto must not raise when width/height are None."""
+    repo = Mock()
+    source = AssetDataSource(repo)
+
+    asset = Asset(
+        id="3", album_id="a", path=Path("image.jpg"),
+        media_type=MediaType.IMAGE, size_bytes=0,
+        width=None, height=None,
+    )
+
+    # Should not raise TypeError
+    dto = source._to_dto(asset)
+    assert dto.width == 0
+    assert dto.height == 0
+    assert dto.is_pano is False
+
 def test_update_favorite_status():
     repo = Mock()
     # Mock find_by_query to return a list

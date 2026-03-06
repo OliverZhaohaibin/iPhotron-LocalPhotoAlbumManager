@@ -6,6 +6,10 @@ from enum import IntEnum
 from pathlib import Path
 from typing import Mapping, Tuple
 
+# RAW camera formats — re-exported from the canonical definition in
+# ``core.raw_processor`` so every consumer shares a single set.
+from .core.raw_processor import RAW_EXTENSIONS
+
 IMAGE_EXTENSIONS: frozenset[str] = frozenset({
     ".jpg",
     ".jpeg",
@@ -15,6 +19,9 @@ IMAGE_EXTENSIONS: frozenset[str] = frozenset({
     ".heifs",
     ".heicf",
 })
+
+# Union of standard raster + RAW image extensions for unified lookup.
+ALL_IMAGE_EXTENSIONS: frozenset[str] = IMAGE_EXTENSIONS | RAW_EXTENSIONS
 
 VIDEO_EXTENSIONS: frozenset[str] = frozenset({
     ".mov",
@@ -76,7 +83,7 @@ def classify_media(row: Mapping[str, object]) -> Tuple[bool, bool]:
         if kind == "video":
             return False, True
 
-    if suffix in IMAGE_EXTENSIONS:
+    if suffix in ALL_IMAGE_EXTENSIONS:
         return True, False
     if suffix in VIDEO_EXTENSIONS:
         return False, True
@@ -91,11 +98,19 @@ class MediaType(IntEnum):
 
 def get_media_type(path: Path) -> MediaType:
     suffix = path.suffix.lower()
-    if suffix in IMAGE_EXTENSIONS:
+    if suffix in ALL_IMAGE_EXTENSIONS:
         return MediaType.IMAGE
     if suffix in VIDEO_EXTENSIONS:
         return MediaType.VIDEO
     return MediaType.UNKNOWN
 
 
-__all__ = ["classify_media", "get_media_type", "MediaType", "IMAGE_EXTENSIONS", "VIDEO_EXTENSIONS"]
+__all__ = [
+    "classify_media",
+    "get_media_type",
+    "MediaType",
+    "IMAGE_EXTENSIONS",
+    "RAW_EXTENSIONS",
+    "ALL_IMAGE_EXTENSIONS",
+    "VIDEO_EXTENSIONS",
+]

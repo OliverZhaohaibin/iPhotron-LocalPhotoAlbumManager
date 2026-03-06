@@ -123,6 +123,15 @@ class MainHeaderWidget(QWidget):
         self.export_destination_group.addAction(self.export_destination_ask)
         self.export_destination_library.setChecked(True)
 
+        self.export_format_group = QActionGroup(main_window)
+        self.export_format_jpg = QAction("JPG", main_window, checkable=True)
+        self.export_format_png = QAction("PNG", main_window, checkable=True)
+        self.export_format_tiff = QAction("TIFF", main_window, checkable=True)
+        self.export_format_group.addAction(self.export_format_jpg)
+        self.export_format_group.addAction(self.export_format_png)
+        self.export_format_group.addAction(self.export_format_tiff)
+        self.export_format_jpg.setChecked(True)
+
         self.theme_group = QActionGroup(main_window)
         self.theme_system = QAction("System Default", main_window, checkable=True)
         self.theme_light = QAction("Light Mode", main_window, checkable=True)
@@ -164,9 +173,14 @@ class MainHeaderWidget(QWidget):
         appearance_menu.addAction(self.theme_light)
         appearance_menu.addAction(self.theme_dark)
 
-        export_menu = settings_menu.addMenu("Export Destination")
-        export_menu.addAction(self.export_destination_library)
-        export_menu.addAction(self.export_destination_ask)
+        export_dest_menu = settings_menu.addMenu("Export Destination")
+        export_dest_menu.addAction(self.export_destination_library)
+        export_dest_menu.addAction(self.export_destination_ask)
+
+        export_fmt_menu = settings_menu.addMenu("Export Format")
+        export_fmt_menu.addAction(self.export_format_jpg)
+        export_fmt_menu.addAction(self.export_format_png)
+        export_fmt_menu.addAction(self.export_format_tiff)
 
         wheel_menu = settings_menu.addMenu("Wheel Action")
         wheel_menu.addAction(self.wheel_action_navigate)

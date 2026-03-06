@@ -285,8 +285,9 @@ def scan_specific_files(
     video_paths: List[Path] = []
 
     # Minimal set of extensions matching scanner.py
-    _IMAGE_EXTENSIONS = {".heic", ".heif", ".heifs", ".heicf", ".jpg", ".jpeg", ".png"}
-    _VIDEO_EXTENSIONS = {".mov", ".mp4", ".m4v", ".qt"}
+    from iPhoto.media_classifier import IMAGE_EXTENSIONS, VIDEO_EXTENSIONS
+    _IMAGE_EXTENSIONS = IMAGE_EXTENSIONS
+    _VIDEO_EXTENSIONS = VIDEO_EXTENSIONS
 
     for f in files:
         if f.suffix.lower() in _IMAGE_EXTENSIONS:

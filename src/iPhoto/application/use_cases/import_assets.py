@@ -10,9 +10,10 @@ from iPhoto.domain.models import Asset, MediaType
 from iPhoto.domain.repositories import IAlbumRepository, IAssetRepository
 from iPhoto.events.bus import EventBus
 from iPhoto.events.album_events import AssetImportedEvent
+from iPhoto.media_classifier import IMAGE_EXTENSIONS, VIDEO_EXTENSIONS
 
-_IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".heic", ".heif", ".tiff", ".tif", ".bmp", ".webp"}
-_VIDEO_EXTS = {".mp4", ".mov", ".avi", ".mkv", ".m4v"}
+_IMAGE_EXTS = IMAGE_EXTENSIONS
+_VIDEO_EXTS = VIDEO_EXTENSIONS
 
 @dataclass(frozen=True)
 class ImportAssetsRequest(UseCaseRequest):

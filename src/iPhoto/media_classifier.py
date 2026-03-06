@@ -14,6 +14,17 @@ IMAGE_EXTENSIONS: frozenset[str] = frozenset({
     ".heif",
     ".heifs",
     ".heicf",
+    ".cr2",
+    ".cr3",
+    ".nef",
+    ".arw",
+    ".dng",
+    ".raf",
+    ".orf",
+    ".rw2",
+    ".tiff",
+    ".tif",
+    ".webp",
 })
 
 VIDEO_EXTENSIONS: frozenset[str] = frozenset({

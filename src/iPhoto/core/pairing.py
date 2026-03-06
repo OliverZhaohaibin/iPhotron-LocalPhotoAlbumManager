@@ -22,15 +22,9 @@ def _parse_dt(value: str | None) -> datetime | None:
         return None
 
 
-_IMAGE_EXTENSIONS = {
-    ".jpg",
-    ".jpeg",
-    ".png",
-    ".heic",
-    ".heif",
-    ".heifs",
-    ".heicf",
-}
+from iPhoto.media_classifier import IMAGE_EXTENSIONS
+
+_IMAGE_EXTENSIONS = IMAGE_EXTENSIONS
 
 def _is_photo(row: Dict[str, object]) -> bool:
     mime = row.get("mime")

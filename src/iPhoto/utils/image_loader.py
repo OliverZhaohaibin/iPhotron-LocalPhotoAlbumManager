@@ -11,6 +11,7 @@ from PySide6.QtCore import QSize, Qt
 from PySide6.QtGui import QImage, QImageReader, QPixmap
 
 from .deps import load_pillow
+from ..core.raw_processor import is_raw_extension, load_raw_to_pil
 
 _PILLOW = load_pillow()
 if _PILLOW is not None:  # pragma: no branch - import guard
@@ -36,6 +37,13 @@ def load_qimage(source: Path, target: QSize | None = None) -> Optional[QImage]:
     if not source.exists():
         _LOGGER.debug("Skipping image load for missing path: %s", source)
         return None
+
+    # ── RAW fast-path ────────────────────────────────────────────────────
+    # Qt cannot decode RAW camera files so we delegate to rawpy immediately
+    # instead of letting QImageReader silently fail and falling through to
+    # the slower Pillow path.
+    if is_raw_extension(source.suffix):
+        return _load_raw_qimage(source, target)
 
     # ``QImageReader`` is most efficient when it can stream directly from the
     # filename because many formats (JPEG, HEIC, etc.) expose fast-paths for
@@ -152,6 +160,38 @@ def _load_with_pillow(source: Path, target: QSize | None = None) -> Optional[QIm
     return QImage(qt_image)
 
 
+def _load_raw_qimage(source: Path, target: QSize | None = None) -> Optional[QImage]:
+    """Decode a RAW file via rawpy and return as :class:`QImage`."""
+
+    if _ImageQt is None:
+        return None
+
+    target_size = None
+    half_size = False
+    if target is not None and target.isValid() and not target.isEmpty():
+        target_size = (target.width(), target.height())
+        # For small targets (thumbnails) always request half-size decoding for speed.
+        if target.width() <= 1024 and target.height() <= 1024:
+            half_size = True
+
+    pil_img = load_raw_to_pil(source, half_size=half_size, target_size=target_size)
+    if pil_img is None:
+        return None
+
+    # Downscale to the requested bounding box after decode.
+    if target_size is not None:
+        resample = getattr(_Image, "Resampling", _Image)
+        resample_filter = getattr(resample, "LANCZOS", _Image.BICUBIC)
+        pil_img.thumbnail(target_size, resample_filter)
+
+    try:
+        qt_image = _ImageQt(pil_img.convert("RGBA"))
+    except Exception:
+        _LOGGER.exception("Failed to convert RAW PIL image to QImage for %s", source)
+        return None
+    return QImage(qt_image)
+
+
 def generate_micro_thumbnail(source: Path) -> Optional[bytes]:
     """Generate a 16x16 (max dimension) JPEG thumbnail bytes for the given image.
 
@@ -163,6 +203,10 @@ def generate_micro_thumbnail(source: Path) -> Optional[bytes]:
 
     if not source.exists():
         return None
+
+    # ── RAW fast-path ────────────────────────────────────────────────────
+    if is_raw_extension(source.suffix):
+        return _generate_raw_micro_thumbnail(source)
 
     try:
         with _Image.open(source) as img:  # type: ignore[attr-defined]
@@ -202,4 +246,28 @@ def generate_micro_thumbnail(source: Path) -> Optional[bytes]:
             return output.getvalue()
     except Exception:
         _LOGGER.debug("Failed to generate micro thumbnail for %s", source, exc_info=True)
+        return None
+
+
+def _generate_raw_micro_thumbnail(source: Path) -> Optional[bytes]:
+    """Generate a micro thumbnail for a RAW camera file."""
+
+    pil_img = load_raw_to_pil(source, half_size=True)
+    if pil_img is None:
+        return None
+
+    try:
+        target_size = (16, 16)
+        resample = getattr(_Image, "Resampling", _Image)
+        resample_filter = getattr(resample, "BICUBIC", _Image.BICUBIC)
+        pil_img.thumbnail(target_size, resample_filter)
+
+        if pil_img.mode != "RGB":
+            pil_img = pil_img.convert("RGB")
+
+        output = BytesIO()
+        pil_img.save(output, format="JPEG", quality=75)
+        return output.getvalue()
+    except Exception:
+        _LOGGER.debug("Failed to generate RAW micro thumbnail for %s", source, exc_info=True)
         return None

@@ -105,6 +105,10 @@ class Ui_MainWindow(object):
         self.export_destination_group = self.main_header.export_destination_group
         self.export_destination_library = self.main_header.export_destination_library
         self.export_destination_ask = self.main_header.export_destination_ask
+        self.export_format_group = self.main_header.export_format_group
+        self.export_format_jpg = self.main_header.export_format_jpg
+        self.export_format_png = self.main_header.export_format_png
+        self.export_format_tiff = self.main_header.export_format_tiff
         self.share_action_group = self.main_header.share_action_group
         self.share_action_copy_file = self.main_header.share_action_copy_file
         self.share_action_copy_path = self.main_header.share_action_copy_path

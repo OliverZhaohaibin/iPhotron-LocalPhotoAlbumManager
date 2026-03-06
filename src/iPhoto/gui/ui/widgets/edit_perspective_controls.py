@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
 )
 
 from ..icon import load_icon
+from ..icon import icon_path as _icon_path
 from ..models.edit_session import EditSession
 from .edit_strip import BWSlider
 
@@ -357,7 +358,6 @@ class _AspectRatioSection(QWidget):
         options_layout.setContentsMargins(6, 2, 0, 0)
 
         # Build check-indicator path for the stylesheet
-        from ..icon import icon_path as _icon_path
         check_path = str(_icon_path("checkmark.svg")).replace("\\", "/")
         stylesheet = self._STYLESHEET.replace("CHECKMARK_PATH", check_path)
         self.setStyleSheet(stylesheet)

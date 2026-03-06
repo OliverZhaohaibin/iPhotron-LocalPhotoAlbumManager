@@ -23,6 +23,11 @@ from .utils import CropBoxState, CropHandle, cursor_for_handle, ease_in_quad
 
 _LOGGER = logging.getLogger(__name__)
 
+# Guard against division by zero when computing current aspect ratio.
+_MIN_DIMENSION_EPSILON = 1e-9
+# Tolerance for floating-point aspect-ratio comparison.
+_ASPECT_RATIO_TOLERANCE = 1e-6
+
 
 def _fit_crop_aspect(crop_state: CropBoxState, aspect: float) -> None:
     """Adjust *crop_state* in-place so that ``width / height == aspect``.
@@ -31,8 +36,8 @@ def _fit_crop_aspect(crop_state: CropBoxState, aspect: float) -> None:
     centre fixed.  This is used after a zoom-about-point so that the ratio
     remains exact even though the zoom changes both dimensions uniformly.
     """
-    cur = crop_state.width / max(1e-9, crop_state.height)
-    if abs(cur - aspect) < 1e-6:
+    cur = crop_state.width / max(_MIN_DIMENSION_EPSILON, crop_state.height)
+    if abs(cur - aspect) < _ASPECT_RATIO_TOLERANCE:
         return
     if cur > aspect:
         crop_state.width = crop_state.height * aspect

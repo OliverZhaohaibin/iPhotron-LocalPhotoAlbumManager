@@ -71,6 +71,31 @@ class TestControllerLockedAspect:
         ctrl.set_locked_aspect_ratio(16 / 9)
         assert abs(ctrl._locked_aspect - 16 / 9) < 1e-6
 
+    def test_set_locked_aspect_ratio_immediately_applies_when_active(self):
+        """When crop mode is active, setting a positive aspect ratio should
+        immediately adjust the crop box and emit a change callback."""
+        ctrl = _make_controller()
+        # Activate crop mode with a non-square crop (width=1.0, height=1.0 → square default)
+        ctrl.set_active(True, {"Crop_CX": 0.5, "Crop_CY": 0.5, "Crop_W": 0.8, "Crop_H": 0.4})
+        state = ctrl.get_crop_state()
+        # Verify crop is 0.8 x 0.4 (ratio 2.0)
+        assert abs(state.width - 0.8) < 1e-5
+        assert abs(state.height - 0.4) < 1e-5
+
+        # Now set aspect ratio to 1.0 (square) — should immediately adjust
+        ctrl.set_locked_aspect_ratio(1.0)
+        state = ctrl.get_crop_state()
+        assert abs(state.width / state.height - 1.0) < 1e-4
+        # The on_crop_changed callback should have been called
+        ctrl._on_crop_changed_callback.assert_called()
+
+    def test_set_locked_aspect_ratio_no_change_when_inactive(self):
+        """When crop mode is not active, setting a ratio should only store it."""
+        ctrl = _make_controller()
+        ctrl.set_locked_aspect_ratio(1.0)
+        # Should not trigger any crop changed callback
+        ctrl._on_crop_changed_callback.assert_not_called()
+
 
 # ---------------------------------------------------------------------------
 # ResizeStrategy._enforce_aspect

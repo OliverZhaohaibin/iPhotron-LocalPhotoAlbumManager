@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
 from ..icon import load_icon
 from ..icon import icon_path as _icon_path
 from ..models.edit_session import EditSession
+from ..palette import Edit_SIDEBAR_FONT
 from .edit_strip import BWSlider
 
 
@@ -337,17 +338,17 @@ class _AspectRatioSection(QWidget):
         sep.setFixedHeight(1)
         layout.addWidget(sep)
 
-        # Title row
+        # Title row — left-aligned icon + prominent label matching adjust section headers
         title_layout = QHBoxLayout()
-        title_layout.setContentsMargins(3, 8, 0, 4)
-        title_layout.setSpacing(6)
+        title_layout.setContentsMargins(0, 8, 0, 4)
+        title_layout.setSpacing(8)
         icon_label = QLabel(self)
         icon_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        icon_label.setPixmap(load_icon("aspect.svg").pixmap(16, 16))
+        icon_label.setPixmap(load_icon("aspect.svg").pixmap(20, 20))
         icon_label.setFixedSize(20, 20)
         title_layout.addWidget(icon_label)
         title_text = QLabel("Aspect", self)
-        title_text.setStyleSheet("color: #dcdcdc; font-weight: bold; font-size: 13px;")
+        title_text.setFont(Edit_SIDEBAR_FONT)
         title_layout.addWidget(title_text)
         title_layout.addStretch()
         layout.addLayout(title_layout)

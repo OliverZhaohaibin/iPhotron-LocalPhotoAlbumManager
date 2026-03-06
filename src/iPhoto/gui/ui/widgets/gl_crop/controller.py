@@ -124,6 +124,10 @@ class CropInteractionController:
     def set_locked_aspect_ratio(self, ratio: float) -> None:
         """Set the aspect ratio constraint for crop resizing.
 
+        When a positive ratio is supplied and crop mode is active, the current
+        crop rectangle is immediately adjusted to match the new ratio so the
+        user sees instant feedback.
+
         Parameters
         ----------
         ratio:
@@ -131,6 +135,15 @@ class CropInteractionController:
             (no constraint).
         """
         self._locked_aspect = float(ratio)
+        if self._active and ratio > 0:
+            snapshot = self._model.create_snapshot()
+            crop_state = self._model.get_crop_state()
+            _fit_crop_aspect(crop_state, ratio)
+            if self._model.has_changed(snapshot):
+                self._crop_faded_out = False
+                self._emit_crop_changed()
+                self._on_request_update()
+                self._animator.restart_idle()
 
     def get_crop_values(self) -> dict[str, float]:
         """Return the current crop state as a mapping."""

@@ -400,6 +400,17 @@ def read_video_meta(path: Path, metadata: Optional[Dict[str, Any]] = None) -> Di
                 if frame_rate is not None and frame_rate > 0:
                     info["frame_rate"] = frame_rate
 
+                if info.get("dur") is None:
+                    # Fall back to stream-level duration when format.duration is
+                    # absent (e.g. MKV/WebM containers on Linux).  Only the first
+                    # video stream is considered; subsequent ones are ignored.
+                    stream_duration = stream.get("duration")
+                    if isinstance(stream_duration, str):
+                        try:
+                            info["dur"] = float(stream_duration)
+                        except ValueError:
+                            pass
+
                 if tags:
                     still_time = tags.get("com.apple.quicktime.still-image-time")
                     if isinstance(still_time, str):

@@ -67,6 +67,17 @@ def _is_video(row: Dict[str, object]) -> bool:
     return False
 
 
+def _normalise_content_id(value: object) -> str | None:
+    """Return a stable comparison key for Live Photo content identifiers."""
+
+    if not isinstance(value, str):
+        return None
+    trimmed = value.strip()
+    if not trimmed:
+        return None
+    return trimmed.casefold()
+
+
 def pair_live(index_rows: List[Dict[str, object]]) -> List[LiveGroup]:
     """Pair still and motion assets into :class:`LiveGroup` objects."""
 
@@ -84,21 +95,22 @@ def pair_live(index_rows: List[Dict[str, object]]) -> List[LiveGroup]:
     # 1) strong match by content_id
     video_by_cid: Dict[str, List[Dict[str, object]]] = defaultdict(list)
     for video in videos.values():
-        cid = video.get("content_id")
+        cid = _normalise_content_id(video.get("content_id"))
         if cid:
             video_by_cid[cid].append(video)
     for photo in photos.values():
-        cid = photo.get("content_id")
+        cid = _normalise_content_id(photo.get("content_id"))
         if not cid or cid not in video_by_cid:
             continue
         candidates = [v for v in video_by_cid[cid] if v["rel"] not in used_videos]
         chosen = _select_best_video(candidates)
         if chosen:
+            content_id = chosen.get("content_id") or photo.get("content_id")
             matched[photo["rel"]] = LiveGroup(
                 id=f"live_{hash((photo['rel'], chosen['rel'])) & 0xFFFFFF:x}",
                 still=photo["rel"],
                 motion=chosen["rel"],
-                content_id=cid,
+                content_id=content_id if isinstance(content_id, str) else None,
                 still_image_time=chosen.get("still_image_time"),
                 confidence=1.0,
             )

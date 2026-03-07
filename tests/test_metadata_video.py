@@ -315,3 +315,125 @@ def test_read_video_meta_ffprobe_overrides_exiftool_duration(
 
     # ffprobe value (15.5) should win over ExifTool (15.48)
     assert info["dur"] == pytest.approx(15.5, rel=1e-6)
+
+
+def test_stream_duration_overrides_exiftool_when_format_duration_absent(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """ffprobe stream.duration overrides ExifTool when format.duration is absent."""
+
+    sample_path = tmp_path / "clip.mkv"
+
+    def fake_probe_media(_: Path) -> dict[str, object]:
+        return {
+            "format": {
+                "size": "5000000",
+                # no "duration" key
+            },
+            "streams": [
+                {
+                    "codec_type": "video",
+                    "codec_name": "h264",
+                    "width": 1920,
+                    "height": 1080,
+                    "avg_frame_rate": "24/1",
+                    "duration": "90.5",
+                },
+            ],
+        }
+
+    monkeypatch.setattr(metadata, "probe_media", fake_probe_media)
+
+    exif_payload = {
+        "QuickTime": {
+            "Duration": "89.0 s",
+        }
+    }
+
+    info = metadata.read_video_meta(sample_path, exif_payload)
+
+    # ffprobe stream.duration (90.5) should override ExifTool (89.0)
+    assert info["dur"] == pytest.approx(90.5, rel=1e-6)
+
+
+def test_format_tags_duration_overrides_exiftool_when_format_duration_absent(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """ffprobe format.tags.DURATION overrides ExifTool when format.duration is absent."""
+
+    sample_path = tmp_path / "clip.webm"
+
+    def fake_probe_media(_: Path) -> dict[str, object]:
+        return {
+            "format": {
+                "size": "2000000",
+                # no "duration" key
+                "tags": {
+                    "DURATION": "00:01:30.000000000",
+                },
+            },
+            "streams": [
+                {
+                    "codec_type": "video",
+                    "codec_name": "vp9",
+                    "width": 640,
+                    "height": 480,
+                    "avg_frame_rate": "30/1",
+                },
+            ],
+        }
+
+    monkeypatch.setattr(metadata, "probe_media", fake_probe_media)
+
+    exif_payload = {
+        "Composite": {
+            "Duration": "88.0 s",
+        }
+    }
+
+    info = metadata.read_video_meta(sample_path, exif_payload)
+
+    # ffprobe format.tags.DURATION (90.0) should override ExifTool (88.0)
+    assert info["dur"] == pytest.approx(90.0, rel=1e-3)
+
+
+def test_stream_tags_duration_overrides_exiftool_when_no_other_ffprobe_duration(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """ffprobe stream.tags.DURATION overrides ExifTool when no other ffprobe duration."""
+
+    sample_path = tmp_path / "clip.mkv"
+
+    def fake_probe_media(_: Path) -> dict[str, object]:
+        return {
+            "format": {
+                "size": "5000000",
+                # no "duration" key, no format tags
+            },
+            "streams": [
+                {
+                    "codec_type": "video",
+                    "codec_name": "h264",
+                    "width": 1920,
+                    "height": 1080,
+                    "avg_frame_rate": "24/1",
+                    # no "duration" key
+                    "tags": {
+                        "DURATION": "00:02:00.000000000",
+                    },
+                },
+            ],
+        }
+
+    monkeypatch.setattr(metadata, "probe_media", fake_probe_media)
+
+    exif_payload = {
+        "QuickTime": {
+            "Duration": "118.0 s",
+        }
+    }
+
+    info = metadata.read_video_meta(sample_path, exif_payload)
+
+    # ffprobe stream.tags.DURATION (120.0) should override ExifTool (118.0)
+    assert info["dur"] == pytest.approx(120.0, rel=1e-3)

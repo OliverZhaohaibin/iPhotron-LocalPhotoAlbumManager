@@ -94,9 +94,12 @@ class AssetGridDelegate(QStyledItemDelegate):
             painter.setRenderHint(QPainter.Antialiasing, True)
             painter.setRenderHint(QPainter.SmoothPixmapTransform, True)
 
-            source_rect = calculate_center_crop(pixmap.size(), thumb_rect.size())
+            source_rect = self._to_safe_source_rect(
+                calculate_center_crop(pixmap.size(), thumb_rect.size()),
+                pixmap.size(),
+            )
             if not source_rect.isEmpty():
-                painter.drawPixmap(QRectF(thumb_rect), pixmap, source_rect)
+                painter.drawPixmap(thumb_rect, pixmap, source_rect)
             else:
                 painter.fillRect(thumb_rect, QColor("#1b1b1b"))
         elif isinstance(micro_thumb, QImage) and not micro_thumb.isNull():
@@ -105,11 +108,14 @@ class AssetGridDelegate(QStyledItemDelegate):
             painter.setRenderHint(QPainter.SmoothPixmapTransform, True)
 
             # Simple scaling to fill the thumb_rect, using center crop logic
-            source_rect = calculate_center_crop(micro_thumb.size(), thumb_rect.size())
+            source_rect = self._to_safe_source_rect(
+                calculate_center_crop(micro_thumb.size(), thumb_rect.size()),
+                micro_thumb.size(),
+            )
             if not source_rect.isEmpty():
                 # We can draw QImage directly. QPainter handles scaling.
                 # Since it's a tiny image, SmoothPixmapTransform (bilinear) is important.
-                painter.drawImage(QRectF(thumb_rect), micro_thumb, QRectF(source_rect))
+                painter.drawImage(thumb_rect, micro_thumb, source_rect)
             else:
                 painter.fillRect(thumb_rect, QColor("#1b1b1b"))
         else:
@@ -170,6 +176,25 @@ class AssetGridDelegate(QStyledItemDelegate):
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
+    @staticmethod
+    def _to_safe_source_rect(source_rect: QRectF, bounds: QSize) -> QRect:
+        """Convert floating crop rects into a bounded integer source rect.
+
+        Some Qt/Linux paint engines are sensitive to fractional source
+        coordinates during fast scroll repaints, occasionally producing blank
+        draws for the leading visible tile. Normalising to a clamped integer
+        rectangle avoids that path.
+        """
+
+        if source_rect.isEmpty() or bounds.isEmpty():
+            return QRect()
+
+        rect = source_rect.toAlignedRect()
+        bounded = rect.intersected(QRect(0, 0, bounds.width(), bounds.height()))
+        if bounded.width() <= 0 or bounded.height() <= 0:
+            return QRect()
+        return bounded
+
     @staticmethod
     def _extract_duration(index) -> float:
         """Safely extract the duration from the size role data."""

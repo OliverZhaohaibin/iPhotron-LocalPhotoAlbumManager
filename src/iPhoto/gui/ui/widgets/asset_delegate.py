@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+import sys
 from typing import Optional
 
 from PySide6.QtCore import QRect, QRectF, QSize, Qt
@@ -23,6 +25,8 @@ from ..badge_renderer import BadgeRenderer
 from ..geometry_utils import calculate_center_crop
 from ..models.roles import Roles
 
+_log = logging.getLogger(__name__)
+
 
 class AssetGridDelegate(QStyledItemDelegate):
     """Render thumbnails in a tight, borderless grid."""
@@ -37,6 +41,7 @@ class AssetGridDelegate(QStyledItemDelegate):
         self._filmstrip_border_width = 2
         self._selection_mode_active = False
         self._badge_renderer = BadgeRenderer()
+        self._diag_paint_call = 0
 
     def set_base_size(self, size: int) -> None:
         """Update the target rendering size for standard grid tiles."""
@@ -66,6 +71,7 @@ class AssetGridDelegate(QStyledItemDelegate):
         if bool(index.data(Roles.IS_SPACER)):
             return
 
+        self._diag_paint_call += 1
         painter.save()
         cell_rect = option.rect
         is_current = self._filmstrip_mode and bool(index.data(Roles.IS_CURRENT))
@@ -78,6 +84,34 @@ class AssetGridDelegate(QStyledItemDelegate):
         if not (isinstance(pixmap, QPixmap) and not pixmap.isNull()):
             # Fallback to micro thumbnail
             micro_thumb = index.data(Roles.MICRO_THUMBNAIL)
+
+        # ---- Diagnostic logging for first 20 paint calls ----
+        if self._diag_paint_call <= 20:
+            has_pixmap = isinstance(pixmap, QPixmap) and not pixmap.isNull()
+            has_micro = (
+                micro_thumb is not None
+                and isinstance(micro_thumb, QImage)
+                and not micro_thumb.isNull()
+            )
+            pixmap_size = pixmap.size() if has_pixmap else None
+            micro_size = micro_thumb.size() if has_micro else None
+            painter_active = painter.isActive()
+            paint_device = type(painter.device()).__name__ if painter.device() else "None"
+            _log.warning(
+                "[AssetGridDelegate.paint #%d] row=%d "
+                "has_pixmap=%s pixmap_size=%s "
+                "has_micro=%s micro_size=%s "
+                "painter_active=%s paint_device=%s "
+                "cell_rect=%s filmstrip=%s platform=%s",
+                self._diag_paint_call,
+                index.row(),
+                has_pixmap, pixmap_size,
+                has_micro, micro_size,
+                painter_active, paint_device,
+                cell_rect,
+                self._filmstrip_mode,
+                sys.platform,
+            )
 
         clip_path: QPainterPath | None = None
         if self._filmstrip_mode and corner_radius > 0.0:
@@ -96,8 +130,20 @@ class AssetGridDelegate(QStyledItemDelegate):
 
             source_rect = calculate_center_crop(pixmap.size(), thumb_rect.size())
             if not source_rect.isEmpty():
+                if self._diag_paint_call <= 20:
+                    _log.warning(
+                        "[AssetGridDelegate.paint #%d] DRAW_PIXMAP row=%d "
+                        "source_rect=%s thumb_rect=%s pixmap_size=%s",
+                        self._diag_paint_call, index.row(),
+                        source_rect, thumb_rect, pixmap.size(),
+                    )
                 painter.drawPixmap(QRectF(thumb_rect), pixmap, source_rect)
             else:
+                if self._diag_paint_call <= 20:
+                    _log.warning(
+                        "[AssetGridDelegate.paint #%d] FILL_DARK(empty_source) row=%d",
+                        self._diag_paint_call, index.row(),
+                    )
                 painter.fillRect(thumb_rect, QColor("#1b1b1b"))
         elif isinstance(micro_thumb, QImage) and not micro_thumb.isNull():
             # Draw micro thumbnail scaled
@@ -107,12 +153,29 @@ class AssetGridDelegate(QStyledItemDelegate):
             # Simple scaling to fill the thumb_rect, using center crop logic
             source_rect = calculate_center_crop(micro_thumb.size(), thumb_rect.size())
             if not source_rect.isEmpty():
+                if self._diag_paint_call <= 20:
+                    _log.warning(
+                        "[AssetGridDelegate.paint #%d] DRAW_MICRO row=%d "
+                        "source_rect=%s thumb_rect=%s micro_size=%s",
+                        self._diag_paint_call, index.row(),
+                        source_rect, thumb_rect, micro_thumb.size(),
+                    )
                 # We can draw QImage directly. QPainter handles scaling.
                 # Since it's a tiny image, SmoothPixmapTransform (bilinear) is important.
                 painter.drawImage(QRectF(thumb_rect), micro_thumb, QRectF(source_rect))
             else:
+                if self._diag_paint_call <= 20:
+                    _log.warning(
+                        "[AssetGridDelegate.paint #%d] FILL_DARK(empty_micro_source) row=%d",
+                        self._diag_paint_call, index.row(),
+                    )
                 painter.fillRect(thumb_rect, QColor("#1b1b1b"))
         else:
+            if self._diag_paint_call <= 20:
+                _log.warning(
+                    "[AssetGridDelegate.paint #%d] FILL_DARK(no_thumb) row=%d",
+                    self._diag_paint_call, index.row(),
+                )
             painter.fillRect(thumb_rect, QColor("#1b1b1b"))
 
         if option.state & QStyle.State_Selected:

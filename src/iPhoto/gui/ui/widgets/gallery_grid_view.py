@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import logging
+import sys
+
 from OpenGL import GL as gl
 from PySide6.QtCore import QEvent, QRect, QSize, Qt, Signal, QPoint
 from PySide6.QtGui import QMouseEvent, QPaintEvent, QPalette, QSurfaceFormat, QColor, QGuiApplication
@@ -11,6 +14,8 @@ from PySide6.QtWidgets import QAbstractItemView, QListView, QLabel
 from ..styles import modern_scrollbar_style
 from .asset_grid import AssetGrid
 from ..models.roles import Roles
+
+_log = logging.getLogger(__name__)
 
 
 class GalleryViewport(QOpenGLWidget):
@@ -65,6 +70,7 @@ class GalleryGridView(AssetGrid):
 
     def __init__(self, parent=None) -> None:  # type: ignore[override]
         super().__init__(parent)
+        self._paint_count = 0
         self._selection_mode_enabled = False
         self._empty_label = None
         self.setSelectionMode(QListView.SelectionMode.SingleSelection)
@@ -111,10 +117,31 @@ class GalleryGridView(AssetGrid):
         Linux GL drivers leave stale state that causes QPainter's first draw
         call to silently produce a blank tile.
         """
+        self._paint_count += 1
         viewport = self.viewport()
         if isinstance(viewport, GalleryViewport):
+            ctx_before = viewport.context()
+            ctx_is_valid_before = (
+                ctx_before.isValid() if ctx_before else False
+            )
             viewport.clear_background()
             viewport.doneCurrent()
+            ctx_after = viewport.context()
+            ctx_is_valid_after = (
+                ctx_after.isValid() if ctx_after else False
+            )
+            if self._paint_count <= 5:
+                _log.warning(
+                    "[GalleryGridView.paintEvent #%d] "
+                    "ctx_valid_before=%s ctx_valid_after=%s "
+                    "platform=%s event_rect=%s viewport_size=%s",
+                    self._paint_count,
+                    ctx_is_valid_before,
+                    ctx_is_valid_after,
+                    sys.platform,
+                    event.rect(),
+                    viewport.size(),
+                )
         super().paintEvent(event)
 
     def resizeEvent(self, event) -> None:  # type: ignore[override]

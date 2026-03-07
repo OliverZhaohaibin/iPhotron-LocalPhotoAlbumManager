@@ -16,6 +16,7 @@ class ThumbnailWorkerSignals(QObject):
     """Signals emitted by thumbnail generation workers."""
 
     result = Signal(Path, QSize, QImage)
+    failed = Signal(Path, QSize)
 
 
 class ThumbnailGenerationTask(QRunnable):
@@ -41,9 +42,11 @@ class ThumbnailGenerationTask(QRunnable):
             if qimg is not None and not qimg.isNull():
                 # Emit result back to main thread
                 self._signals.result.emit(self._path, self._size, qimg)
+                return
         except Exception:
             # Silently fail or log in generator
             pass
+        self._signals.failed.emit(self._path, self._size)
 
 class ThumbnailCacheService(QObject):
     """
@@ -64,6 +67,8 @@ class ThumbnailCacheService(QObject):
         self._max_memory_items = 1000  # Rough approximation
 
         self._pending_tasks: Set[str] = set()
+        self._active_workers: Dict[str, ThumbnailGenerationTask] = {}
+        self._active_signals: Dict[str, ThumbnailWorkerSignals] = {}
         self._thread_pool = QThreadPool.globalInstance()
         self._is_shutting_down = False
 
@@ -71,6 +76,8 @@ class ThumbnailCacheService(QObject):
         """Prevents new tasks from being submitted and clears pending logic."""
         self._is_shutting_down = True
         self._pending_tasks.clear()
+        self._active_workers.clear()
+        self._active_signals.clear()
 
     def set_disk_cache_path(self, disk_cache_path: Path) -> None:
         if self._disk_cache_path == disk_cache_path:
@@ -79,6 +86,8 @@ class ThumbnailCacheService(QObject):
         self._disk_cache_path.mkdir(parents=True, exist_ok=True)
         self._memory_cache.clear()
         self._pending_tasks.clear()
+        self._active_workers.clear()
+        self._active_signals.clear()
 
     def get_thumbnail(self, path: Path, size: QSize) -> Optional[QPixmap]:
         if self._is_shutting_down:
@@ -117,12 +126,19 @@ class ThumbnailCacheService(QObject):
         # We instantiate signals here. The worker holds a reference to it.
         worker_signals = ThumbnailWorkerSignals()
         worker_signals.result.connect(self._handle_generation_result)
+        worker_signals.failed.connect(self._handle_generation_failed)
 
         # We need to ensure worker_signals isn't garbage collected before run() finishes?
         # QThreadPool takes ownership of QRunnable. The QRunnable holds 'signals'.
         # Python ref counting should keep 'signals' alive as long as 'worker' is alive.
 
         worker = ThumbnailGenerationTask(self._render_thumbnail, path, size, worker_signals)
+        key = self._cache_key(path, size)
+        # Keep worker/signal wrappers alive until we receive completion callbacks.
+        # Without this, PySide may garbage collect wrappers too aggressively on
+        # some Linux builds, causing queued results to get dropped.
+        self._active_workers[key] = worker
+        self._active_signals[key] = worker_signals
         self._thread_pool.start(worker)
 
     def _handle_generation_result(self, path: Path, size: QSize, image: QImage):
@@ -137,8 +153,16 @@ class ThumbnailCacheService(QObject):
 
             self._add_to_memory(key, pixmap)
             self._pending_tasks.discard(key)
+            self._active_workers.pop(key, None)
+            self._active_signals.pop(key, None)
 
             self.thumbnailReady.emit(path)
+
+    def _handle_generation_failed(self, path: Path, size: QSize):
+        key = self._cache_key(path, size)
+        self._pending_tasks.discard(key)
+        self._active_workers.pop(key, None)
+        self._active_signals.pop(key, None)
 
     def invalidate(self, path: Path, *, size: QSize | None = None):
         """Removes the thumbnail from cache to force regeneration."""

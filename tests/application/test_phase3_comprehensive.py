@@ -307,3 +307,58 @@ def test_scan_preserves_metadata_on_update(album_repo, asset_repo, event_bus, me
     assert final.height == 1080
     # Check that 'iso' key persisted (other metadata keys may be present)
     assert final.metadata.get("iso") == 100
+
+
+class _DurMetadataProvider(MockMetadataProvider):
+    """Returns ``dur`` for .mp4 files so the scan stores a real duration."""
+
+    def normalize_metadata(self, root, file_path, raw_metadata):
+        row = super().normalize_metadata(root, file_path, raw_metadata)
+        if file_path.suffix.lower() == ".mp4":
+            row["dur"] = 10.29
+        return row
+
+
+def test_scan_reprocesses_video_with_missing_duration(
+    album_repo, asset_repo, event_bus, thumbnail_generator, tmp_path
+):
+    """A video cached without duration must be re-processed on the next scan.
+
+    Prior to the 'dur' key fix, ``scan_album`` wrote ``duration=None`` for
+    every video.  The incremental-scan cache then kept returning the stale
+    record because the file hadn't changed.  This test verifies that the
+    cache is bypassed for videos missing their duration so that a corrected
+    scan can populate it.
+    """
+    album_path = tmp_path / "DurFix"
+    album_path.mkdir()
+    video = album_path / "undefined - Imgur.mp4"
+    video.write_bytes(b"\x00" * 128)
+
+    album = Album.create(path=album_path)
+    album_repo.save(album)
+
+    # 1. First scan — use the default provider which does NOT populate 'dur'.
+    uc = ScanAlbumUseCase(
+        album_repo, asset_repo, event_bus,
+        MockMetadataProvider(), thumbnail_generator,
+    )
+    uc.execute(ScanAlbumRequest(album_id=album.id))
+
+    assets = asset_repo.get_by_album(album.id)
+    assert len(assets) == 1
+    assert assets[0].duration is None  # no duration yet
+    assert assets[0].media_type == MediaType.VIDEO
+
+    # 2. Second scan — same file, but now the provider returns a duration.
+    #    Without the cache-invalidation fix the cache hit would keep
+    #    duration=None forever.
+    uc2 = ScanAlbumUseCase(
+        album_repo, asset_repo, event_bus,
+        _DurMetadataProvider(), thumbnail_generator,
+    )
+    uc2.execute(ScanAlbumRequest(album_id=album.id))
+
+    assets = asset_repo.get_by_album(album.id)
+    assert len(assets) == 1
+    assert assets[0].duration == pytest.approx(10.29, rel=1e-3)

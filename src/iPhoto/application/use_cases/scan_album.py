@@ -132,11 +132,16 @@ class ScanAlbumUseCase:
                     current_ts = int(stat.st_mtime * 1_000_000)
 
                     if existing.size_bytes == stat.st_size and abs(existing_ts - current_ts) <= 1_000_000:
-                        # Cache hit
-                        # Check for missing micro-thumbnail
-                        # (Not implementing backfill here for simplicity, but could be added)
-                        processed_ids.add(existing.id)
-                        continue
+                        # Force re-processing when a video asset is missing
+                        # duration.  Earlier code stored duration under the wrong
+                        # key, so cached assets may have ``duration=None`` even
+                        # though ffprobe would return a valid value.
+                        if existing.media_type == MediaType.VIDEO and existing.duration is None:
+                            pass  # fall through to re-process
+                        else:
+                            # Cache hit
+                            processed_ids.add(existing.id)
+                            continue
 
                 # Process new/changed
                 raw_meta = meta_lookup.get(path.as_posix())

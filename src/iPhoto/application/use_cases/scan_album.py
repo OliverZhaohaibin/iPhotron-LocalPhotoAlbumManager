@@ -136,9 +136,7 @@ class ScanAlbumUseCase:
                         # duration.  Earlier code stored duration under the wrong
                         # key, so cached assets may have ``duration=None`` even
                         # though ffprobe would return a valid value.
-                        if existing.media_type == MediaType.VIDEO and existing.duration is None:
-                            pass  # fall through to re-process
-                        else:
+                        if not (existing.media_type == MediaType.VIDEO and existing.duration is None):
                             # Cache hit
                             processed_ids.add(existing.id)
                             continue

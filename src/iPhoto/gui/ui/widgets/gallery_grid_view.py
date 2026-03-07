@@ -2,51 +2,13 @@
 
 from __future__ import annotations
 
-from OpenGL import GL as gl
 from PySide6.QtCore import QEvent, QRect, QSize, Qt, Signal, QPoint
-from PySide6.QtGui import QMouseEvent, QPainter, QPaintEvent, QPalette, QSurfaceFormat, QColor, QGuiApplication
-from PySide6.QtOpenGLWidgets import QOpenGLWidget
+from PySide6.QtGui import QMouseEvent, QPalette, QColor, QGuiApplication
 from PySide6.QtWidgets import QAbstractItemView, QListView, QLabel
 
 from ..styles import modern_scrollbar_style
 from .asset_grid import AssetGrid
 from ..models.roles import Roles
-
-
-class GalleryViewport(QOpenGLWidget):
-    """OpenGL viewport that ensures an opaque background."""
-
-    def __init__(self, parent=None) -> None:
-        super().__init__(parent)
-        self._bg_color: QColor | None = None
-
-        # Disable the alpha buffer to prevent transparency issues with the DWM
-        # when using a frameless window configuration.
-        gl_format = QSurfaceFormat()
-        gl_format.setAlphaBufferSize(0)
-        if hasattr(self, "setFormat"):
-            self.setFormat(gl_format)
-
-    def set_background_color(self, color: QColor) -> None:
-        """Set the background color for the viewport."""
-        self._bg_color = color
-        self.update()
-
-    def paintGL(self) -> None:
-        """Clear the background to the theme's base color with full opacity."""
-        self.clear_background()
-
-    def clear_background(self) -> None:
-        """Explicitly clear the viewport background."""
-        if self._bg_color:
-            base_color = self._bg_color
-        else:
-            base_color = self.palette().color(QPalette.ColorRole.Base)
-
-        # Ensure we have a context before issuing GL commands
-        self.makeCurrent()
-        gl.glClearColor(base_color.redF(), base_color.greenF(), base_color.blueF(), 1.0)
-        gl.glClear(gl.GL_COLOR_BUFFER_BIT)
 
 
 class GalleryGridView(AssetGrid):
@@ -84,9 +46,6 @@ class GalleryGridView(AssetGrid):
         self.setWordWrap(False)
         self.setSelectionRectVisible(False)
 
-        # Enable hardware acceleration for the viewport to improve scrolling performance
-        gl_viewport = GalleryViewport()
-        self.setViewport(gl_viewport)
         self._empty_label = QLabel(
             "No media found. Click Rescan to scan this library.",
             self.viewport(),
@@ -99,41 +58,6 @@ class GalleryGridView(AssetGrid):
         self._updating_style = False
         self._apply_scrollbar_style()
         self._update_empty_state()
-
-    def paintEvent(self, event: QPaintEvent) -> None:  # type: ignore[override]
-        """Fill the viewport background before item painting.
-
-        ``GalleryViewport.paintGL()`` is never invoked by Qt when the widget
-        is used as a ``QListView`` viewport because the list intercepts paint
-        events.  Without an explicit fill the GL framebuffer retains stale
-        content, producing ghost trails on scroll and a transparent background.
-
-        We use ``QPainter`` (not raw GL commands) to fill the background so
-        that we don't corrupt the GL context state that ``QPainter`` relies on
-        inside ``super().paintEvent()``.  Raw ``makeCurrent`` + ``glClear``
-        before QPainter-based painting causes the first draw operation to
-        silently fail on Linux GL drivers, producing a white tile.
-        """
-        viewport = self.viewport()
-        if isinstance(viewport, GalleryViewport):
-            bg = viewport._bg_color or viewport.palette().color(
-                QPalette.ColorRole.Base
-            )
-            painter = QPainter(viewport)
-            painter.fillRect(event.rect(), bg)
-            painter.end()
-        super().paintEvent(event)
-
-    def scrollContentsBy(self, dx: int, dy: int) -> None:
-        """Force a full viewport repaint on scroll.
-
-        The default implementation tries to blit-scroll the viewport surface,
-        which does not work reliably for ``QOpenGLWidget``-backed viewports
-        and results in ghost trails.  Requesting a full update ensures the
-        entire visible area is repainted correctly.
-        """
-        super().scrollContentsBy(dx, dy)
-        self.viewport().update()
 
     def resizeEvent(self, event) -> None:  # type: ignore[override]
         super().resizeEvent(event)
@@ -188,14 +112,8 @@ class GalleryGridView(AssetGrid):
         text_color = palette.color(QPalette.ColorRole.WindowText)
         base_color = palette.color(QPalette.ColorRole.Base)
 
-        # Propagate background color to the viewport
-        viewport = self.viewport()
-        if isinstance(viewport, GalleryViewport):
-            viewport.set_background_color(base_color)
-
-        # We need to enforce the background color on the GalleryGridView (and its viewport)
-        # because QOpenGLWidget in a translucent window context defaults to transparent.
-        # By adding a background-color rule to the stylesheet, we ensure it's painted opaque.
+        # Enforce the background color on the QListView so it is painted opaque
+        # in translucent/frameless window configurations.
         style = modern_scrollbar_style(text_color)
         bg_style = f"QListView {{ background-color: {base_color.name()}; }}"
 

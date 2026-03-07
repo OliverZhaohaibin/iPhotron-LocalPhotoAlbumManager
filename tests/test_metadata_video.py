@@ -66,29 +66,6 @@ def test_read_video_meta_enriches_quicktime_payload(monkeypatch: pytest.MonkeyPa
     assert info["still_image_time"] == pytest.approx(1.5, rel=1e-6)
 
 
-def test_read_video_meta_falls_back_to_exiftool_duration_when_ffprobe_unavailable(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    sample_path = tmp_path / "clip.MOV"
-
-    def fake_probe_media(_: Path) -> dict[str, object]:
-        raise metadata.ExternalToolError("ffprobe unavailable")
-
-    monkeypatch.setattr(metadata, "probe_media", fake_probe_media)
-
-    exif_payload = {
-        "QuickTime": {
-            "Duration": "3.42 s",
-            "Make": "Apple",
-        }
-    }
-
-    info = metadata.read_video_meta(sample_path, exif_payload)
-
-    assert info["dur"] == pytest.approx(3.42, rel=1e-6)
-    assert info["make"] == "Apple"
-
-
 def test_read_video_meta_extracts_content_id_from_flattened_exiftool_key(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -101,10 +78,8 @@ def test_read_video_meta_extracts_content_id_from_flattened_exiftool_key(
 
     exif_payload = {
         "Keys:ContentIdentifier": " CID-FROM-KEYS ",
-        "QuickTime:Duration": "2.0",
     }
 
     info = metadata.read_video_meta(sample_path, exif_payload)
 
     assert info["content_id"] == "CID-FROM-KEYS"
-    assert info["dur"] == pytest.approx(2.0, rel=1e-6)

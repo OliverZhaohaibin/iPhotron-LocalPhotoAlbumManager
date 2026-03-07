@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import QSize, Qt, Signal
 from PySide6.QtWidgets import QHBoxLayout, QToolButton, QVBoxLayout, QWidget
 
 from ..icon import load_icon
@@ -33,6 +33,9 @@ class GalleryPageWidget(QWidget):
         self.back_button = QToolButton()
         self.back_button.setObjectName("galleryBackButton")
         self.back_button.setIcon(load_icon("chevron.left.svg"))
+        self.back_button.setIconSize(QSize(24, 24))
+        self.back_button.setFixedSize(QSize(36, 36))
+        self.back_button.setAutoRaise(True)
         self.back_button.setToolTip("Return to Map")
         self.back_button.setCursor(Qt.CursorShape.PointingHandCursor)
         self.back_button.clicked.connect(self.backRequested.emit)

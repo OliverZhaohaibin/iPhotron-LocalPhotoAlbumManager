@@ -12,8 +12,6 @@ python -m nuitka \
   --follow-imports \
   --nofollow-import-to=numba \
   --nofollow-import-to=llvmlite \
-  --nofollow-import-to=pytest \
-  --nofollow-import-to=iPhoto.tests \
   --include-package=iPhoto \
   --assume-yes-for-downloads \
   --output-dir=dist \

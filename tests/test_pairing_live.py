@@ -135,3 +135,30 @@ def test_pairing_prefers_better_duration_score() -> None:
 
     # We expect 'good.MOV' to be selected.
     assert group.motion == "good.MOV", f"Expected good.MOV but got {group.motion}"
+
+
+def test_pairing_content_id_is_case_insensitive_and_trimmed() -> None:
+    dt = iso(datetime(2024, 1, 1, 12, 0, 0))
+    rows = [
+        {
+            "rel": "IMG_1001.HEIC",
+            "mime": "image/heic",
+            "dt": dt,
+            "content_id": "  ABcD-1234  ",
+        },
+        {
+            "rel": "IMG_1001.MOV",
+            "mime": "video/quicktime",
+            "dt": dt,
+            "content_id": "abcd-1234",
+            "dur": 1.5,
+        },
+    ]
+
+    groups = pair_live(rows)
+    assert len(groups) == 1
+    group = groups[0]
+    assert group.still == "IMG_1001.HEIC"
+    assert group.motion == "IMG_1001.MOV"
+    # Keep original content id (un-normalized) in output payload for display/debug.
+    assert group.content_id == "abcd-1234"

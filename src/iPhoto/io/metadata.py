@@ -16,9 +16,11 @@ from .metadata_extractors import (
     _empty_media_info,
     _extract_content_id_from_exiftool,
     _extract_datetime_from_exiftool,
+    _extract_duration_from_exiftool,
     _extract_gps_from_exiftool,
     _extract_group,
     _normalise_exif_datetime,
+    _parse_duration_value,
     _pick_string,
 )
 
@@ -308,6 +310,13 @@ def read_video_meta(path: Path, metadata: Optional[Dict[str, Any]] = None) -> Di
         if lens_value is not None:
             info["lens"] = lens_value
 
+        # Extract duration from ExifTool as an initial estimate.  ffprobe
+        # values (parsed below) are generally more precise and will overwrite
+        # this if available.
+        exiftool_dur = _extract_duration_from_exiftool(metadata)
+        if exiftool_dur is not None:
+            info["dur"] = exiftool_dur
+
     try:
         ffprobe_meta = probe_media(path)
     except ExternalToolError:
@@ -315,11 +324,27 @@ def read_video_meta(path: Path, metadata: Optional[Dict[str, Any]] = None) -> Di
 
     fmt = ffprobe_meta.get("format", {}) if isinstance(ffprobe_meta, dict) else {}
     duration = fmt.get("duration") if isinstance(fmt, dict) else None
-    if isinstance(duration, str):
-        try:
-            info["dur"] = float(duration)
-        except ValueError:
-            info["dur"] = None
+    # Accept both string and numeric duration values from ffprobe.
+    parsed_dur = _parse_duration_value(duration)
+    # Track whether `format.duration` provided a value.  When it did, that is
+    # the most reliable container-level source and subsequent tag/stream
+    # fallbacks are unnecessary.  When it did *not*, any ffprobe-derived
+    # tag or stream duration should override an earlier ExifTool estimate
+    # because ffprobe values are generally more precise.
+    got_format_duration = parsed_dur is not None
+    if got_format_duration:
+        info["dur"] = parsed_dur
+
+    # Matroska containers on Linux often omit ``format.duration`` but populate
+    # the ``DURATION`` tag inside ``format.tags`` in HH:MM:SS format.
+    # When ``format.duration`` was not available, prefer this ffprobe-derived
+    # tag over any earlier estimate (e.g. from ExifTool).
+    if not got_format_duration and isinstance(fmt, dict):
+        fmt_tags = fmt.get("tags")
+        if isinstance(fmt_tags, dict):
+            tag_dur = _parse_duration_value(fmt_tags.get("DURATION"))
+            if tag_dur is not None:
+                info["dur"] = tag_dur
 
     if isinstance(fmt, dict):
         size_value = fmt.get("size")
@@ -400,16 +425,26 @@ def read_video_meta(path: Path, metadata: Optional[Dict[str, Any]] = None) -> Di
                 if frame_rate is not None and frame_rate > 0:
                     info["frame_rate"] = frame_rate
 
-                if info.get("dur") is None:
+                if not got_format_duration:
                     # Fall back to stream-level duration when format.duration is
                     # absent (e.g. MKV/WebM containers on Linux).  Only the first
                     # video stream is considered; subsequent ones are ignored.
-                    stream_duration = stream.get("duration")
-                    if isinstance(stream_duration, str):
-                        try:
-                            info["dur"] = float(stream_duration)
-                        except ValueError:
-                            pass
+                    # When present, prefer this ffprobe-derived value over any
+                    # earlier ExifTool estimate.
+                    stream_dur = _parse_duration_value(stream.get("duration"))
+                    if stream_dur is not None:
+                        info["dur"] = stream_dur
+
+                    if stream_dur is None and tags:
+                        # Matroska containers on Linux frequently populate a
+                        # ``DURATION`` tag (``HH:MM:SS.microseconds``) in stream
+                        # tags when neither ``format.duration`` nor
+                        # ``stream.duration`` are present.  If present, prefer
+                        # this ffprobe-derived duration over any earlier estimate
+                        # (e.g. from ExifTool).
+                        tag_dur = _parse_duration_value(tags.get("DURATION"))
+                        if tag_dur is not None:
+                            info["dur"] = tag_dur
 
                 if tags:
                     still_time = tags.get("com.apple.quicktime.still-image-time")

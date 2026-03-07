@@ -2,51 +2,13 @@
 
 from __future__ import annotations
 
-from OpenGL import GL as gl
 from PySide6.QtCore import QEvent, QRect, QSize, Qt, Signal, QPoint
-from PySide6.QtGui import QMouseEvent, QPaintEvent, QPalette, QSurfaceFormat, QColor, QGuiApplication
-from PySide6.QtOpenGLWidgets import QOpenGLWidget
-from PySide6.QtWidgets import QAbstractItemView, QListView, QLabel
+from PySide6.QtGui import QMouseEvent, QPainter, QPaintEvent, QPalette, QColor, QGuiApplication
+from PySide6.QtWidgets import QAbstractItemView, QListView, QLabel, QStyleOptionViewItem
 
 from ..styles import modern_scrollbar_style
 from .asset_grid import AssetGrid
 from ..models.roles import Roles
-
-
-class GalleryViewport(QOpenGLWidget):
-    """OpenGL viewport that ensures an opaque background."""
-
-    def __init__(self, parent=None) -> None:
-        super().__init__(parent)
-        self._bg_color: QColor | None = None
-
-        # Disable the alpha buffer to prevent transparency issues with the DWM
-        # when using a frameless window configuration.
-        gl_format = QSurfaceFormat()
-        gl_format.setAlphaBufferSize(0)
-        if hasattr(self, "setFormat"):
-            self.setFormat(gl_format)
-
-    def set_background_color(self, color: QColor) -> None:
-        """Set the background color for the viewport."""
-        self._bg_color = color
-        self.update()
-
-    def paintGL(self) -> None:
-        """Clear the background to the theme's base color with full opacity."""
-        self.clear_background()
-
-    def clear_background(self) -> None:
-        """Explicitly clear the viewport background."""
-        if self._bg_color:
-            base_color = self._bg_color
-        else:
-            base_color = self.palette().color(QPalette.ColorRole.Base)
-
-        # Ensure we have a context before issuing GL commands
-        self.makeCurrent()
-        gl.glClearColor(base_color.redF(), base_color.greenF(), base_color.blueF(), 1.0)
-        gl.glClear(gl.GL_COLOR_BUFFER_BIT)
 
 
 class GalleryGridView(AssetGrid):
@@ -84,12 +46,15 @@ class GalleryGridView(AssetGrid):
         self.setWordWrap(False)
         self.setSelectionRectVisible(False)
 
-        # Enable hardware acceleration for the viewport to improve scrolling performance
-        gl_viewport = GalleryViewport()
-        self.setViewport(gl_viewport)
+        # Ensure the viewport paints an opaque background so the gallery is not
+        # transparent when the main window uses WA_TranslucentBackground for
+        # frameless chrome.
+        vp = self.viewport()
+        vp.setAutoFillBackground(True)
+
         self._empty_label = QLabel(
             "No media found. Click Rescan to scan this library.",
-            self.viewport(),
+            vp,
         )
         self._empty_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._empty_label.setWordWrap(True)
@@ -100,12 +65,97 @@ class GalleryGridView(AssetGrid):
         self._apply_scrollbar_style()
         self._update_empty_state()
 
+    # ------------------------------------------------------------------
+    # Painting
+    # ------------------------------------------------------------------
     def paintEvent(self, event: QPaintEvent) -> None:  # type: ignore[override]
-        """Override paintEvent to force a GL clear before items are drawn."""
-        viewport = self.viewport()
-        if isinstance(viewport, GalleryViewport):
-            viewport.clear_background()
+        """Paint visible items and one extra row above/below the viewport.
+
+        By pre-rendering items just outside the visible area we prevent the
+        blank-flash that occurs when Qt recycles off-screen item widgets and
+        the user scrolls them back into view.  The extra row is painted into
+        the viewport surface but lies outside the visible region, so it is
+        invisible to the user yet ready for immediate display on scroll.
+        """
+        # Let the base class handle the standard visible items first.
         super().paintEvent(event)
+
+        cell_h = self.gridSize().height()
+        cell_w = self.gridSize().width()
+        if cell_h <= 0 or cell_w <= 0:
+            return
+
+        model = self.model()
+        if model is None:
+            return
+        row_count = model.rowCount()
+        if row_count == 0:
+            return
+
+        delegate = self.itemDelegate()
+        if delegate is None:
+            return
+
+        vp = self.viewport()
+        vp_rect = vp.rect()
+
+        # Probe *inside* the viewport to find boundary items, then compute
+        # adjacent rows via the column count.  Probing outside the viewport
+        # (e.g. ``top()-1``) returns invalid indices in QAbstractItemView,
+        # so we determine the row above/below arithmetically instead.
+        cols = max(1, vp_rect.width() // cell_w)
+
+        first_visible = self.indexAt(QPoint(vp_rect.left(), vp_rect.top()))
+        bottom_visible = self.indexAt(QPoint(vp_rect.left(), vp_rect.bottom()))
+        if not bottom_visible.isValid():
+            # Last row may be partial; try the right edge.
+            bottom_visible = self.indexAt(QPoint(vp_rect.right(), vp_rect.bottom()))
+
+        # Determine the range of model rows for each extra band.
+        extra_indices = []
+
+        # --- Extra row ABOVE the viewport ---
+        if first_visible.isValid():
+            vis_row = first_visible.row() // cols
+            if vis_row > 0:
+                above_start = (vis_row - 1) * cols
+                first_above = model.index(above_start, 0)
+                above_rect = self.visualRect(first_above)
+                if above_rect.isValid():
+                    target_y = above_rect.top()
+                    for r in range(above_start, min(above_start + cols, row_count)):
+                        idx = model.index(r, 0)
+                        r_rect = self.visualRect(idx)
+                        if r_rect.isValid() and r_rect.top() == target_y:
+                            extra_indices.append((idx, r_rect))
+
+        # --- Extra row BELOW the viewport ---
+        if bottom_visible.isValid():
+            vis_row = bottom_visible.row() // cols
+            below_start = (vis_row + 1) * cols
+            if below_start < row_count:
+                first_below = model.index(below_start, 0)
+                below_rect = self.visualRect(first_below)
+                if below_rect.isValid():
+                    target_y = below_rect.top()
+                    for r in range(below_start, min(below_start + cols, row_count)):
+                        idx = model.index(r, 0)
+                        r_rect = self.visualRect(idx)
+                        if r_rect.isValid() and r_rect.top() == target_y:
+                            extra_indices.append((idx, r_rect))
+
+        if not extra_indices:
+            return
+
+        painter = QPainter(vp)
+        try:
+            for idx, item_rect in extra_indices:
+                opt = QStyleOptionViewItem()
+                self.initViewItemOption(opt)
+                opt.rect = item_rect
+                delegate.paint(painter, opt, idx)
+        finally:
+            painter.end()
 
     def resizeEvent(self, event) -> None:  # type: ignore[override]
         super().resizeEvent(event)
@@ -160,14 +210,17 @@ class GalleryGridView(AssetGrid):
         text_color = palette.color(QPalette.ColorRole.WindowText)
         base_color = palette.color(QPalette.ColorRole.Base)
 
-        # Propagate background color to the viewport
-        viewport = self.viewport()
-        if isinstance(viewport, GalleryViewport):
-            viewport.set_background_color(base_color)
+        # Propagate the base colour to the viewport palette so that
+        # autoFillBackground paints an opaque surface even when the parent
+        # window uses WA_TranslucentBackground.
+        vp = self.viewport()
+        vp_palette = vp.palette()
+        vp_palette.setColor(QPalette.ColorRole.Window, base_color)
+        vp_palette.setColor(QPalette.ColorRole.Base, base_color)
+        vp.setPalette(vp_palette)
 
-        # We need to enforce the background color on the GalleryGridView (and its viewport)
-        # because QOpenGLWidget in a translucent window context defaults to transparent.
-        # By adding a background-color rule to the stylesheet, we ensure it's painted opaque.
+        # Enforce the background color on the QListView so it is painted opaque
+        # in translucent/frameless window configurations.
         style = modern_scrollbar_style(text_color)
         bg_style = f"QListView {{ background-color: {base_color.name()}; }}"
 

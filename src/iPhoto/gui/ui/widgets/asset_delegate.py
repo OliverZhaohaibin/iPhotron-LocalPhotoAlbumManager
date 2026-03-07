@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from typing import Optional
+import logging
+import os
 
 from PySide6.QtCore import QRect, QRectF, QSize, Qt
 from PySide6.QtGui import (
@@ -22,6 +24,9 @@ from PySide6.QtWidgets import QStyle, QStyleOptionViewItem, QStyledItemDelegate
 from ..badge_renderer import BadgeRenderer
 from ..geometry_utils import calculate_center_crop
 from ..models.roles import Roles
+
+_LOGGER = logging.getLogger(__name__)
+_DEBUG_GALLERY = os.getenv("IPHOTO_DEBUG_GALLERY", "").lower() in {"1", "true", "yes", "on"}
 
 
 class AssetGridDelegate(QStyledItemDelegate):
@@ -89,6 +94,15 @@ class AssetGridDelegate(QStyledItemDelegate):
             painter.setClipPath(clip_path)
         elif self._filmstrip_mode:
             painter.fillRect(thumb_rect, base_color)
+
+        if _DEBUG_GALLERY and index.row() < 3:
+            _LOGGER.warning(
+                "delegate paint row=%d rect=%s has_pixmap=%s has_micro=%s",
+                index.row(),
+                thumb_rect,
+                isinstance(pixmap, QPixmap) and not pixmap.isNull(),
+                isinstance(micro_thumb, QImage) and not micro_thumb.isNull(),
+            )
 
         if isinstance(pixmap, QPixmap) and not pixmap.isNull():
             painter.setRenderHint(QPainter.Antialiasing, True)

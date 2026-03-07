@@ -1,4 +1,6 @@
 from pathlib import Path
+import logging
+import os
 from typing import Dict, Optional, Set
 
 import numpy as np
@@ -11,6 +13,9 @@ from iPhoto.core.image_filters import apply_adjustments
 from iPhoto.gui.ui.tasks import geo_utils
 from iPhoto.io import sidecar
 from iPhoto.utils import image_loader
+
+_LOGGER = logging.getLogger(__name__)
+_DEBUG_GALLERY = os.getenv("IPHOTO_DEBUG_GALLERY", "").lower() in {"1", "true", "yes", "on"}
 
 class ThumbnailWorkerSignals(QObject):
     """Signals emitted by thumbnail generation workers."""
@@ -97,6 +102,8 @@ class ThumbnailCacheService(QObject):
 
         # 1. Memory Check
         if key in self._memory_cache:
+            if _DEBUG_GALLERY:
+                _LOGGER.warning("thumb hit memory key=%s path=%s", key[:8], path)
             return self._memory_cache[key]
 
         # 2. Disk Check
@@ -104,12 +111,16 @@ class ThumbnailCacheService(QObject):
         if disk_file.exists():
             pixmap = QPixmap(str(disk_file))
             if not pixmap.isNull():
+                if _DEBUG_GALLERY:
+                    _LOGGER.warning("thumb hit disk key=%s path=%s", key[:8], path)
                 self._add_to_memory(key, pixmap)
                 return pixmap
 
         # 3. Trigger Async Generation if not pending
         if key not in self._pending_tasks:
             self._pending_tasks.add(key)
+            if _DEBUG_GALLERY:
+                _LOGGER.warning("thumb schedule key=%s path=%s pending=%d", key[:8], path, len(self._pending_tasks))
             self._start_generation(path, size)
 
         # Return placeholder or None while loading
@@ -166,6 +177,16 @@ class ThumbnailCacheService(QObject):
             self._active_workers.pop(key, None)
             self._active_signals.pop(key, None)
 
+            if _DEBUG_GALLERY:
+                _LOGGER.warning(
+                    "thumb ready key=%s path=%s image=%dx%d pending=%d active=%d",
+                    key[:8],
+                    path,
+                    image.width(),
+                    image.height(),
+                    len(self._pending_tasks),
+                    len(self._active_workers),
+                )
             self.thumbnailReady.emit(path)
 
     def _handle_generation_failed(self, path: Path, size: QSize):
@@ -173,6 +194,8 @@ class ThumbnailCacheService(QObject):
         self._pending_tasks.discard(key)
         self._active_workers.pop(key, None)
         self._active_signals.pop(key, None)
+        if _DEBUG_GALLERY:
+            _LOGGER.warning("thumb failed key=%s path=%s pending=%d active=%d", key[:8], path, len(self._pending_tasks), len(self._active_workers))
 
     def invalidate(self, path: Path, *, size: QSize | None = None):
         """Removes the thumbnail from cache to force regeneration."""

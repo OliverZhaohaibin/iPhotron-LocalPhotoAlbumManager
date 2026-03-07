@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from OpenGL import GL as gl
 from PySide6.QtCore import QEvent, QRect, QSize, Qt, Signal, QPoint
-from PySide6.QtGui import QMouseEvent, QPalette, QSurfaceFormat, QColor, QGuiApplication
+from PySide6.QtGui import QMouseEvent, QPainter, QPaintEvent, QPalette, QSurfaceFormat, QColor, QGuiApplication
 from PySide6.QtOpenGLWidgets import QOpenGLWidget
 from PySide6.QtWidgets import QAbstractItemView, QListView, QLabel
 
@@ -99,6 +99,41 @@ class GalleryGridView(AssetGrid):
         self._updating_style = False
         self._apply_scrollbar_style()
         self._update_empty_state()
+
+    def paintEvent(self, event: QPaintEvent) -> None:  # type: ignore[override]
+        """Fill the viewport background before item painting.
+
+        ``GalleryViewport.paintGL()`` is never invoked by Qt when the widget
+        is used as a ``QListView`` viewport because the list intercepts paint
+        events.  Without an explicit fill the GL framebuffer retains stale
+        content, producing ghost trails on scroll and a transparent background.
+
+        We use ``QPainter`` (not raw GL commands) to fill the background so
+        that we don't corrupt the GL context state that ``QPainter`` relies on
+        inside ``super().paintEvent()``.  Raw ``makeCurrent`` + ``glClear``
+        before QPainter-based painting causes the first draw operation to
+        silently fail on Linux GL drivers, producing a white tile.
+        """
+        viewport = self.viewport()
+        if isinstance(viewport, GalleryViewport):
+            bg = viewport._bg_color or viewport.palette().color(
+                QPalette.ColorRole.Base
+            )
+            painter = QPainter(viewport)
+            painter.fillRect(event.rect(), bg)
+            painter.end()
+        super().paintEvent(event)
+
+    def scrollContentsBy(self, dx: int, dy: int) -> None:
+        """Force a full viewport repaint on scroll.
+
+        The default implementation tries to blit-scroll the viewport surface,
+        which does not work reliably for ``QOpenGLWidget``-backed viewports
+        and results in ghost trails.  Requesting a full update ensures the
+        entire visible area is repainted correctly.
+        """
+        super().scrollContentsBy(dx, dy)
+        self.viewport().update()
 
     def resizeEvent(self, event) -> None:  # type: ignore[override]
         super().resizeEvent(event)

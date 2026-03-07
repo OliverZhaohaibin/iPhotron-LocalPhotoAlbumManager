@@ -34,6 +34,38 @@ else:  # pragma: no cover - exercised only when Pillow is missing
 LOGGER = get_logger()
 
 
+def _extract_duration_from_exiftool(metadata: Dict[str, Any]) -> Optional[float]:
+    """Extract media duration from ExifTool payload when ffprobe is unavailable."""
+
+    duration_keys = (
+        "Duration",
+        "MediaDuration",
+        "TrackDuration",
+        "ContentDuration",
+    )
+
+    for group_name in ("QuickTime", "Composite", "ItemList"):
+        group = _extract_group(metadata, group_name)
+        if not isinstance(group, dict):
+            continue
+        for key in duration_keys:
+            value = _coerce_fractional(group.get(key))
+            if value is not None and value >= 0:
+                return float(value)
+
+    for key, raw_value in metadata.items():
+        if not isinstance(key, str):
+            continue
+        normalized_key = key.strip().lower()
+        if "duration" not in normalized_key:
+            continue
+        value = _coerce_fractional(raw_value)
+        if value is not None and value >= 0:
+            return float(value)
+
+    return None
+
+
 def read_image_meta_with_exiftool(
     path: Path, metadata: Optional[Dict[str, Any]]
 ) -> Dict[str, Any]:
@@ -308,6 +340,11 @@ def read_video_meta(path: Path, metadata: Optional[Dict[str, Any]] = None) -> Di
         if lens_value is not None:
             info["lens"] = lens_value
 
+    if info.get("dur") is None and isinstance(metadata, dict):
+        fallback_duration = _extract_duration_from_exiftool(metadata)
+        if fallback_duration is not None:
+            info["dur"] = fallback_duration
+
     try:
         ffprobe_meta = probe_media(path)
     except ExternalToolError:
@@ -315,11 +352,10 @@ def read_video_meta(path: Path, metadata: Optional[Dict[str, Any]] = None) -> Di
 
     fmt = ffprobe_meta.get("format", {}) if isinstance(ffprobe_meta, dict) else {}
     duration = fmt.get("duration") if isinstance(fmt, dict) else None
-    if isinstance(duration, str):
-        try:
-            info["dur"] = float(duration)
-        except ValueError:
-            info["dur"] = None
+    if isinstance(duration, (int, float, str)):
+        parsed_duration = _coerce_fractional(duration)
+        if parsed_duration is not None:
+            info["dur"] = float(parsed_duration)
 
     if isinstance(fmt, dict):
         size_value = fmt.get("size")

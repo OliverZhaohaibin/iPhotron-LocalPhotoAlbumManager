@@ -270,18 +270,49 @@ def _extract_datetime_from_exiftool(meta: Dict[str, Any]) -> Optional[str]:
 
 
 def _extract_content_id_from_exiftool(meta: Dict[str, Any]) -> Optional[str]:
-    """Extract the Apple ``ContentIdentifier`` used for Live Photo pairing."""
+    """Extract the Apple ``ContentIdentifier`` used for Live Photo pairing.
 
-    apple_group = _extract_group(meta, "Apple")
-    if apple_group:
-        content_id = apple_group.get("ContentIdentifier")
-        if isinstance(content_id, str) and content_id:
-            return content_id
+    Different ExifTool builds/platforms expose this tag in different groups or
+    flattened key forms (e.g. ``Keys:ContentIdentifier`` or
+    ``com.apple.quicktime.content.identifier``). We therefore probe common
+    groups first, then fall back to scanning flat keys.
+    """
 
-    quicktime = _extract_group(meta, "QuickTime")
-    if quicktime:
-        content_id = quicktime.get("ContentIdentifier")
-        if isinstance(content_id, str) and content_id:
-            return content_id
+    def _pick(mapping: Dict[str, Any], *names: str) -> Optional[str]:
+        for name in names:
+            value = mapping.get(name)
+            if isinstance(value, str):
+                normalized = value.strip()
+                if normalized:
+                    return normalized
+        return None
+
+    for group_name in ("Apple", "QuickTime", "Keys", "ItemList", "XMP"):
+        group = _extract_group(meta, group_name)
+        if group:
+            content_id = _pick(
+                group,
+                "ContentIdentifier",
+                "ContentIdentifierUUID",
+                "com.apple.quicktime.content.identifier",
+            )
+            if content_id:
+                return content_id
+
+    for key, value in meta.items():
+        if not isinstance(key, str) or not isinstance(value, str):
+            continue
+        normalized_key = key.strip().lower().replace("_", "")
+        if not normalized_key:
+            continue
+        if (
+            normalized_key.endswith(":contentidentifier")
+            or normalized_key.endswith(":contentidentifieruuid")
+            or normalized_key.endswith(".content.identifier")
+            or normalized_key.endswith("contentidentifier")
+        ):
+            content_id = value.strip()
+            if content_id:
+                return content_id
 
     return None

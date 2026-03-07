@@ -125,8 +125,18 @@ class ThumbnailCacheService(QObject):
 
         # We instantiate signals here. The worker holds a reference to it.
         worker_signals = ThumbnailWorkerSignals()
-        worker_signals.result.connect(self._handle_generation_result)
-        worker_signals.failed.connect(self._handle_generation_failed)
+        # Force queued delivery so thumbnail completion always executes on the
+        # GUI thread.  Some Linux/PySide builds may otherwise invoke the slot
+        # on the worker thread, and creating/updating QPixmaps off-thread can
+        # yield intermittent blank tiles while scrolling.
+        worker_signals.result.connect(
+            self._handle_generation_result,
+            Qt.ConnectionType.QueuedConnection,
+        )
+        worker_signals.failed.connect(
+            self._handle_generation_failed,
+            Qt.ConnectionType.QueuedConnection,
+        )
 
         # We need to ensure worker_signals isn't garbage collected before run() finishes?
         # QThreadPool takes ownership of QRunnable. The QRunnable holds 'signals'.

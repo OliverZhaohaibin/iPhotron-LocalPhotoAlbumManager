@@ -306,6 +306,8 @@ def _parse_duration_value(value: Any) -> Optional[float]:
     )
     if match:
         hours, minutes, seconds = int(match.group(1)), int(match.group(2)), int(match.group(3))
+        if minutes > 59 or seconds > 59:
+            return None
         frac = float(f"0.{match.group(4)}") if match.group(4) else 0.0
         total = hours * 3600 + minutes * 60 + seconds + frac
         return total if total > 0 else None
@@ -323,6 +325,10 @@ def _extract_duration_from_exiftool(meta: Dict[str, Any]) -> Optional[float]:
 
     quicktime = _extract_group(meta, "QuickTime")
     if quicktime:
+        # ``Duration`` is the standard tag.  ``MovieHeaderDuration`` appears in
+        # QuickTime MOV files; ``TrackDuration`` is used for individual tracks
+        # and is checked as a last resort when the container-level tags are
+        # absent (common with AVI wrappers on Linux ExifTool builds).
         for key in ("Duration", "MovieHeaderDuration", "TrackDuration"):
             dur = _parse_duration_value(quicktime.get(key))
             if dur is not None:

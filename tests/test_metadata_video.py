@@ -23,11 +23,13 @@ from iPhoto.io.metadata_extractors import _parse_duration_value, _extract_durati
     ("00:00:45.123000000", 45.123),
     ("01:30:00.000000000", 5400.0),
     ("00:00:10", 10.0),
+    ("00:00:00.000000000", None),  # zero HH:MM:SS with microseconds
     ("0:00:00", None),       # zero duration
     ("", None),              # empty string
     (None, None),            # None
     (0, None),               # zero numeric
     (-5.0, None),            # negative
+    ("00:99:99", None),      # invalid minutes/seconds
 ])
 def test_parse_duration_value(value, expected):
     result = _parse_duration_value(value)

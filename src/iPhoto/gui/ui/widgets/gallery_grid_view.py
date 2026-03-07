@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 from PySide6.QtCore import QEvent, QRect, QSize, Qt, Signal, QPoint
-from PySide6.QtGui import QMouseEvent, QPalette, QColor, QGuiApplication
-from PySide6.QtWidgets import QAbstractItemView, QListView, QLabel
+from PySide6.QtGui import QMouseEvent, QPainter, QPaintEvent, QPalette, QColor, QGuiApplication
+from PySide6.QtWidgets import QAbstractItemView, QListView, QLabel, QStyleOptionViewItem
 
 from ..styles import modern_scrollbar_style
 from .asset_grid import AssetGrid
@@ -46,9 +46,15 @@ class GalleryGridView(AssetGrid):
         self.setWordWrap(False)
         self.setSelectionRectVisible(False)
 
+        # Ensure the viewport paints an opaque background so the gallery is not
+        # transparent when the main window uses WA_TranslucentBackground for
+        # frameless chrome.
+        vp = self.viewport()
+        vp.setAutoFillBackground(True)
+
         self._empty_label = QLabel(
             "No media found. Click Rescan to scan this library.",
-            self.viewport(),
+            vp,
         )
         self._empty_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._empty_label.setWordWrap(True)
@@ -58,6 +64,68 @@ class GalleryGridView(AssetGrid):
         self._updating_style = False
         self._apply_scrollbar_style()
         self._update_empty_state()
+
+    # ------------------------------------------------------------------
+    # Painting
+    # ------------------------------------------------------------------
+    def paintEvent(self, event: QPaintEvent) -> None:  # type: ignore[override]
+        """Paint visible items and one extra row above/below the viewport.
+
+        By pre-rendering items just outside the visible area we prevent the
+        blank-flash that occurs when Qt recycles off-screen item widgets and
+        the user scrolls them back into view.  The extra row is painted into
+        the viewport surface but lies outside the visible region, so it is
+        invisible to the user yet ready for immediate display on scroll.
+        """
+        # Let the base class handle the standard visible items first.
+        super().paintEvent(event)
+
+        cell_h = self.gridSize().height()
+        if cell_h <= 0:
+            return
+
+        model = self.model()
+        if model is None:
+            return
+        row_count = model.rowCount()
+        if row_count == 0:
+            return
+
+        delegate = self.itemDelegate()
+        if delegate is None:
+            return
+
+        vp = self.viewport()
+        vp_rect = vp.rect()
+        visible_top = vp_rect.top()
+        visible_bottom = vp_rect.bottom()
+
+        # Collect indices for one extra row above and below the viewport.
+        extra_indices = []
+        for r in range(row_count):
+            idx = model.index(r, 0)
+            item_rect = self.visualRect(idx)
+            if item_rect.isNull() or not item_rect.isValid():
+                continue
+            # Items whose bottom edge is just above the viewport (within one
+            # cell height) or whose top edge is just below the viewport.
+            if (visible_top - cell_h) <= item_rect.bottom() < visible_top:
+                extra_indices.append((idx, item_rect))
+            elif visible_bottom < item_rect.top() <= (visible_bottom + cell_h):
+                extra_indices.append((idx, item_rect))
+
+        if not extra_indices:
+            return
+
+        painter = QPainter(vp)
+        try:
+            for idx, item_rect in extra_indices:
+                opt = QStyleOptionViewItem()
+                self.initViewItemOption(opt)
+                opt.rect = item_rect
+                delegate.paint(painter, opt, idx)
+        finally:
+            painter.end()
 
     def resizeEvent(self, event) -> None:  # type: ignore[override]
         super().resizeEvent(event)
@@ -111,6 +179,15 @@ class GalleryGridView(AssetGrid):
 
         text_color = palette.color(QPalette.ColorRole.WindowText)
         base_color = palette.color(QPalette.ColorRole.Base)
+
+        # Propagate the base colour to the viewport palette so that
+        # autoFillBackground paints an opaque surface even when the parent
+        # window uses WA_TranslucentBackground.
+        vp = self.viewport()
+        vp_palette = vp.palette()
+        vp_palette.setColor(QPalette.ColorRole.Window, base_color)
+        vp_palette.setColor(QPalette.ColorRole.Base, base_color)
+        vp.setPalette(vp_palette)
 
         # Enforce the background color on the QListView so it is painted opaque
         # in translucent/frameless window configurations.

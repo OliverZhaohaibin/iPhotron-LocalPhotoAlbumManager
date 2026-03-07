@@ -185,7 +185,7 @@ class ScanAlbumUseCase:
                     is_favorite=existing.is_favorite if existing else False,
                     width=row.get('w'),
                     height=row.get('h'),
-                    duration=row.get('duration'),
+                    duration=row.get('dur') or row.get('duration'),
                     metadata=meta_json,
                     content_identifier=row.get('content_identifier'),
                     live_photo_group_id=existing.live_photo_group_id if existing else None

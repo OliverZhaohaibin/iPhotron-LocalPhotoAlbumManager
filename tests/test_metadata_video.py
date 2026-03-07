@@ -64,3 +64,55 @@ def test_read_video_meta_enriches_quicktime_payload(monkeypatch: pytest.MonkeyPa
     assert info["frame_rate"] == pytest.approx(59.94, rel=1e-3)
     assert info["dur"] == pytest.approx(8.01, rel=1e-3)
     assert info["still_image_time"] == pytest.approx(1.5, rel=1e-6)
+
+
+def test_read_video_meta_extracts_content_id_from_flattened_exiftool_key(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    sample_path = tmp_path / "clip.MP4"
+
+    def fake_probe_media(_: Path) -> dict[str, object]:
+        raise metadata.ExternalToolError("ffprobe unavailable")
+
+    monkeypatch.setattr(metadata, "probe_media", fake_probe_media)
+
+    exif_payload = {
+        "Keys:ContentIdentifier": " CID-FROM-KEYS ",
+    }
+
+    info = metadata.read_video_meta(sample_path, exif_payload)
+
+    assert info["content_id"] == "CID-FROM-KEYS"
+
+
+def test_read_video_meta_falls_back_to_stream_duration_when_format_duration_absent(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Duration from the video stream is used when format.duration is absent (Linux MKV/WebM)."""
+
+    sample_path = tmp_path / "clip.mkv"
+
+    def fake_probe_media(_: Path) -> dict[str, object]:
+        return {
+            "format": {
+                "size": "5000000",
+            },
+            "streams": [
+                {
+                    "codec_type": "video",
+                    "codec_name": "vp9",
+                    "width": 1280,
+                    "height": 720,
+                    "avg_frame_rate": "30/1",
+                    "duration": "12.500000",
+                },
+            ],
+        }
+
+    monkeypatch.setattr(metadata, "probe_media", fake_probe_media)
+
+    info = metadata.read_video_meta(sample_path)
+
+    assert info["dur"] == pytest.approx(12.5, rel=1e-6)
+    assert info["w"] == 1280 and info["h"] == 720
+    assert info["codec"] == "vp9"

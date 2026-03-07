@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Optional
 import logging
 import os
+import sys
 
 from PySide6.QtCore import QRect, QRectF, QSize, Qt
 from PySide6.QtGui import (
@@ -27,6 +28,7 @@ from ..models.roles import Roles
 
 _LOGGER = logging.getLogger(__name__)
 _DEBUG_GALLERY = os.getenv("IPHOTO_DEBUG_GALLERY", "").lower() in {"1", "true", "yes", "on"}
+_USE_IMAGE_RENDER_ON_LINUX = sys.platform.startswith("linux")
 
 
 class AssetGridDelegate(QStyledItemDelegate):
@@ -97,11 +99,12 @@ class AssetGridDelegate(QStyledItemDelegate):
 
         if _DEBUG_GALLERY and index.row() < 3:
             _LOGGER.warning(
-                "delegate paint row=%d rect=%s has_pixmap=%s has_micro=%s",
+                "delegate paint row=%d rect=%s has_pixmap=%s has_micro=%s linux_image_path=%s",
                 index.row(),
                 thumb_rect,
                 isinstance(pixmap, QPixmap) and not pixmap.isNull(),
                 isinstance(micro_thumb, QImage) and not micro_thumb.isNull(),
+                _USE_IMAGE_RENDER_ON_LINUX,
             )
 
         if isinstance(pixmap, QPixmap) and not pixmap.isNull():
@@ -113,7 +116,7 @@ class AssetGridDelegate(QStyledItemDelegate):
                 pixmap.size(),
             )
             if not source_rect.isEmpty():
-                painter.drawPixmap(thumb_rect, pixmap, source_rect)
+                self._draw_thumbnail_surface(painter, thumb_rect, pixmap, source_rect)
             else:
                 painter.fillRect(thumb_rect, QColor("#1b1b1b"))
         elif isinstance(micro_thumb, QImage) and not micro_thumb.isNull():
@@ -190,6 +193,27 @@ class AssetGridDelegate(QStyledItemDelegate):
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
+    @staticmethod
+    def _draw_thumbnail_surface(
+        painter: QPainter,
+        target_rect: QRect,
+        pixmap: QPixmap,
+        source_rect: QRect,
+    ) -> None:
+        """Draw thumbnail using a platform-stable surface path.
+
+        Linux Qt raster/backing-store combinations can intermittently paint a
+        blank tile when drawing `QPixmap` during fast scroll repaints, despite
+        the pixmap being valid. Rendering via `QImage` avoids that backend path.
+        """
+
+        if _USE_IMAGE_RENDER_ON_LINUX:
+            image = pixmap.toImage()
+            if not image.isNull():
+                painter.drawImage(target_rect, image, source_rect)
+                return
+        painter.drawPixmap(target_rect, pixmap, source_rect)
+
     @staticmethod
     def _to_safe_source_rect(source_rect: QRectF, bounds: QSize) -> QRect:
         """Convert floating crop rects into a bounded integer source rect.

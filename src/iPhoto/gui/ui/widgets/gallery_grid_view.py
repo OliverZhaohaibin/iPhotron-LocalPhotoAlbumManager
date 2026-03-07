@@ -101,10 +101,23 @@ class GalleryGridView(AssetGrid):
         self._update_empty_state()
 
     def paintEvent(self, event: QPaintEvent) -> None:  # type: ignore[override]
-        """Override paintEvent to force a GL clear before items are drawn."""
-        viewport = self.viewport()
-        if isinstance(viewport, GalleryViewport):
-            viewport.clear_background()
+        """Paint visible grid items.
+
+        On Linux, issuing raw GL commands (``makeCurrent`` + ``glClear``)
+        immediately before ``super().paintEvent()`` leaves the OpenGL state in a
+        configuration that conflicts with the QPainter GL paint-engine
+        initialisation.  The very first ``QPainter`` draw call (for the first
+        visible item) silently fails, producing a blank/white tile.  Subsequent
+        draw calls succeed because the paint-engine finishes its setup after the
+        first attempt.
+
+        The background is instead handled by:
+
+        * ``GalleryViewport.paintGL()`` – clears the FBO on initial show, resize
+          and explicit ``update()`` calls.
+        * The item delegate – fills each cell rect completely with a thumbnail or
+          a dark placeholder colour.
+        """
         super().paintEvent(event)
 
     def resizeEvent(self, event) -> None:  # type: ignore[override]

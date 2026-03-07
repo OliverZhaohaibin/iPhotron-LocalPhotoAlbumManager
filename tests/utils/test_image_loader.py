@@ -55,14 +55,11 @@ def test_generate_micro_thumbnail_small_png():
     # Test with a PNG (no draft support)
     img = Image.new("RGB", (100, 100), "blue")
 
-    import tempfile
-    import os
     with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
         img.save(tmp, format="PNG")
         tmp_path = tmp.name
 
     try:
-        from pathlib import Path
         thumb_bytes = generate_micro_thumbnail(Path(tmp_path))
         assert thumb_bytes is not None
 

@@ -350,6 +350,15 @@ def test_scan_reprocesses_video_with_missing_duration(
     assert assets[0].duration is None  # no duration yet
     assert assets[0].media_type == MediaType.VIDEO
 
+    # Simulate a legacy asset that was scanned BEFORE the fix:
+    # it has no ``_dur_checked`` marker in its metadata, indicating
+    # it was never processed with the corrected code.
+    legacy_asset = assets[0]
+    legacy_meta = dict(legacy_asset.metadata or {})
+    legacy_meta.pop("_dur_checked", None)
+    legacy_asset.metadata = legacy_meta
+    asset_repo.save(legacy_asset)
+
     # 2. Second scan — same file, but now the provider returns a duration.
     #    Without the cache-invalidation fix the cache hit would keep
     #    duration=None forever.
@@ -362,3 +371,51 @@ def test_scan_reprocesses_video_with_missing_duration(
     assets = asset_repo.get_by_album(album.id)
     assert len(assets) == 1
     assert assets[0].duration == pytest.approx(10.29, rel=1e-3)
+    # The corrected scan stamps ``_dur_checked`` so the asset won't be
+    # re-processed on subsequent scans.
+    assert (assets[0].metadata or {}).get("_dur_checked") is True
+
+
+def test_scan_does_not_reprocess_video_with_dur_checked_marker(
+    album_repo, asset_repo, event_bus, thumbnail_generator, tmp_path
+):
+    """Videos with the ``_dur_checked`` marker remain cacheable.
+
+    Once a video has been processed with the corrected duration code, the
+    ``_dur_checked`` marker in its metadata signals that ``duration=None``
+    is genuine (ffprobe/ExifTool couldn't extract it).  Subsequent scans
+    must *not* re-process these assets.
+    """
+    album_path = tmp_path / "DurStable"
+    album_path.mkdir()
+    video = album_path / "no_dur_video.mp4"
+    video.write_bytes(b"\x00" * 128)
+
+    album = Album.create(path=album_path)
+    album_repo.save(album)
+
+    # 1. First scan — provider returns no duration (genuinely unavailable).
+    #    The scan should set ``_dur_checked`` in metadata.
+    uc = ScanAlbumUseCase(
+        album_repo, asset_repo, event_bus,
+        MockMetadataProvider(), thumbnail_generator,
+    )
+    uc.execute(ScanAlbumRequest(album_id=album.id))
+
+    assets = asset_repo.get_by_album(album.id)
+    assert len(assets) == 1
+    assert assets[0].duration is None
+    assert (assets[0].metadata or {}).get("_dur_checked") is True
+
+    # 2. Second scan — swap to _DurMetadataProvider which would set dur.
+    #    Because the asset already has ``_dur_checked``, the cache hit
+    #    must prevent re-processing and duration stays None.
+    uc2 = ScanAlbumUseCase(
+        album_repo, asset_repo, event_bus,
+        _DurMetadataProvider(), thumbnail_generator,
+    )
+    uc2.execute(ScanAlbumRequest(album_id=album.id))
+
+    assets = asset_repo.get_by_album(album.id)
+    assert len(assets) == 1
+    assert assets[0].duration is None  # NOT re-processed → stays None

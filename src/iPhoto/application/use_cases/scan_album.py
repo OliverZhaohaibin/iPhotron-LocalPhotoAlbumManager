@@ -132,11 +132,21 @@ class ScanAlbumUseCase:
                     current_ts = int(stat.st_mtime * 1_000_000)
 
                     if existing.size_bytes == stat.st_size and abs(existing_ts - current_ts) <= 1_000_000:
-                        # Force re-processing when a video asset is missing
-                        # duration.  Earlier code stored duration under the wrong
-                        # key, so cached assets may have ``duration=None`` even
-                        # though ffprobe would return a valid value.
-                        if not (existing.media_type == MediaType.VIDEO and existing.duration is None):
+                        # One-time migration: earlier code stored duration under
+                        # the wrong key, so cached video assets may have
+                        # ``duration=None`` even though ffprobe would return a
+                        # valid value.  We detect the stale state by checking
+                        # for the ``_dur_checked`` marker that the corrected
+                        # code writes into metadata.  Assets scanned with the
+                        # fixed code path always carry the marker, so they
+                        # remain cacheable even when duration is genuinely
+                        # unavailable.
+                        needs_duration_migration = (
+                            existing.media_type == MediaType.VIDEO
+                            and existing.duration is None
+                            and not (existing.metadata or {}).get("_dur_checked")
+                        )
+                        if not needs_duration_migration:
                             # Cache hit
                             processed_ids.add(existing.id)
                             continue
@@ -176,6 +186,13 @@ class ScanAlbumUseCase:
                 meta_json = {k: v for k, v in row.items() if k not in ['id', 'rel', 'bytes', 'dt', 'ts', 'media_type', 'is_favorite', 'parent_album_path', 'micro_thumbnail']}
                 if "micro_thumbnail" in row:
                     meta_json["micro_thumbnail"] = row["micro_thumbnail"]
+
+                # Mark video assets as having been processed with the
+                # corrected duration extraction code.  This prevents
+                # infinite re-processing for videos that genuinely have
+                # no duration available from ffprobe / ExifTool.
+                if mt_enum == MediaType.VIDEO:
+                    meta_json["_dur_checked"] = True
 
                 asset = Asset(
                     id=asset_id,

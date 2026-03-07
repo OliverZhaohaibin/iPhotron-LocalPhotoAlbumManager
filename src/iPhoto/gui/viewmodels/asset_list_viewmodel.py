@@ -26,7 +26,7 @@ _SNAPSHOT_SEPARATOR = b"\x00"
 _SNAPSHOT_NULL_MARKER = b"\xff"
 
 _LOGGER = logging.getLogger(__name__)
-_DEBUG_GALLERY = os.getenv("IPHOTO_DEBUG_GALLERY", "").lower() in {"1", "true", "yes", "on"}
+_DEBUG_GALLERY = os.getenv("IPHOTO_DEBUG_GALLERY", "1").lower() in {"1", "true", "yes", "on"}
 
 
 class AssetListViewModel(QAbstractListModel):
@@ -100,9 +100,10 @@ class AssetListViewModel(QAbstractListModel):
         if role_int == Qt.DecorationRole:
             # Main thumbnail - Async: returns None if not ready
             thumb = self._thumbnails.get_thumbnail(asset.abs_path, self._thumb_size)
-            if _DEBUG_GALLERY and row < 3:
+            if _DEBUG_GALLERY and row < 5:
                 state = "ready" if thumb is not None and not thumb.isNull() else "none"
-                _LOGGER.warning("vm decoration row=%d state=%s path=%s", row, state, asset.abs_path)
+                size = thumb.size() if thumb is not None and not thumb.isNull() else None
+                _LOGGER.warning("vm decoration row=%d state=%s size=%s id=%s path=%s", row, state, size, asset.id, asset.abs_path)
             return thumb
 
         if role_int == Qt.ItemDataRole.ToolTipRole:
@@ -247,8 +248,8 @@ class AssetListViewModel(QAbstractListModel):
             asset = self._data_source.asset_at(row)
             if asset and asset.abs_path == path:
                 idx = self.index(row, 0)
-                if _DEBUG_GALLERY and row < 3:
-                    _LOGGER.warning("vm thumbnailReady row=%d path=%s", row, path)
+                if _DEBUG_GALLERY and row < 5:
+                    _LOGGER.warning("vm thumbnailReady row=%d index_valid=%s path=%s", row, idx.isValid(), path)
                 self.dataChanged.emit(idx, idx, [Qt.DecorationRole])
                 break
 

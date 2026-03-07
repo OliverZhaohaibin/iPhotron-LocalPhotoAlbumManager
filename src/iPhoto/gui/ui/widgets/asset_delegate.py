@@ -27,7 +27,7 @@ from ..geometry_utils import calculate_center_crop
 from ..models.roles import Roles
 
 _LOGGER = logging.getLogger(__name__)
-_DEBUG_GALLERY = os.getenv("IPHOTO_DEBUG_GALLERY", "").lower() in {"1", "true", "yes", "on"}
+_DEBUG_GALLERY = os.getenv("IPHOTO_DEBUG_GALLERY", "1").lower() in {"1", "true", "yes", "on"}
 _USE_IMAGE_RENDER_ON_LINUX = sys.platform.startswith("linux")
 
 
@@ -97,13 +97,17 @@ class AssetGridDelegate(QStyledItemDelegate):
         elif self._filmstrip_mode:
             painter.fillRect(thumb_rect, base_color)
 
-        if _DEBUG_GALLERY and index.row() < 3:
+        if _DEBUG_GALLERY and index.row() < 5:
             _LOGGER.warning(
-                "delegate paint row=%d rect=%s has_pixmap=%s has_micro=%s linux_image_path=%s",
+                "delegate paint row=%d rect=%s state=0x%x selected=%s has_pixmap=%s pixmap_size=%s has_micro=%s micro_size=%s linux_image_path=%s",
                 index.row(),
                 thumb_rect,
+                int(option.state),
+                bool(option.state & QStyle.State_Selected),
                 isinstance(pixmap, QPixmap) and not pixmap.isNull(),
+                pixmap.size() if isinstance(pixmap, QPixmap) and not pixmap.isNull() else None,
                 isinstance(micro_thumb, QImage) and not micro_thumb.isNull(),
+                micro_thumb.size() if isinstance(micro_thumb, QImage) and not micro_thumb.isNull() else None,
                 _USE_IMAGE_RENDER_ON_LINUX,
             )
 
@@ -115,9 +119,17 @@ class AssetGridDelegate(QStyledItemDelegate):
                 calculate_center_crop(pixmap.size(), thumb_rect.size()),
                 pixmap.size(),
             )
+            if _DEBUG_GALLERY and index.row() < 5:
+                _LOGGER.warning(
+                    "delegate pixmap-crop row=%d target=%s source=%s",
+                    index.row(),
+                    thumb_rect,
+                    source_rect,
+                )
             if not source_rect.isEmpty():
                 self._draw_thumbnail_surface(painter, thumb_rect, pixmap, source_rect)
             else:
+                _LOGGER.warning("delegate empty source rect for pixmap row=%d", index.row())
                 painter.fillRect(thumb_rect, QColor("#1b1b1b"))
         elif isinstance(micro_thumb, QImage) and not micro_thumb.isNull():
             # Draw micro thumbnail scaled
@@ -129,11 +141,19 @@ class AssetGridDelegate(QStyledItemDelegate):
                 calculate_center_crop(micro_thumb.size(), thumb_rect.size()),
                 micro_thumb.size(),
             )
+            if _DEBUG_GALLERY and index.row() < 5:
+                _LOGGER.warning(
+                    "delegate micro-crop row=%d target=%s source=%s",
+                    index.row(),
+                    thumb_rect,
+                    source_rect,
+                )
             if not source_rect.isEmpty():
                 # We can draw QImage directly. QPainter handles scaling.
                 # Since it's a tiny image, SmoothPixmapTransform (bilinear) is important.
                 painter.drawImage(thumb_rect, micro_thumb, source_rect)
             else:
+                _LOGGER.warning("delegate empty source rect for micro row=%d", index.row())
                 painter.fillRect(thumb_rect, QColor("#1b1b1b"))
         else:
             painter.fillRect(thumb_rect, QColor("#1b1b1b"))
@@ -209,9 +229,24 @@ class AssetGridDelegate(QStyledItemDelegate):
 
         if _USE_IMAGE_RENDER_ON_LINUX:
             image = pixmap.toImage()
+            if _DEBUG_GALLERY:
+                _LOGGER.warning(
+                    "delegate draw surface=QImage target=%s source=%s image_size=%s null=%s",
+                    target_rect,
+                    source_rect,
+                    image.size(),
+                    image.isNull(),
+                )
             if not image.isNull():
                 painter.drawImage(target_rect, image, source_rect)
                 return
+        if _DEBUG_GALLERY:
+            _LOGGER.warning(
+                "delegate draw surface=QPixmap target=%s source=%s pixmap_size=%s",
+                target_rect,
+                source_rect,
+                pixmap.size(),
+            )
         painter.drawPixmap(target_rect, pixmap, source_rect)
 
     @staticmethod

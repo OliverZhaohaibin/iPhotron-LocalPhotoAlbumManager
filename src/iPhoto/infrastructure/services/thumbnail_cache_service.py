@@ -4,7 +4,7 @@ import os
 from typing import Dict, Optional, Set
 
 import numpy as np
-from PySide6.QtCore import QObject, QSize, Signal, QThreadPool, QRunnable, Qt
+from PySide6.QtCore import QObject, QSize, Signal, QThreadPool, QRunnable, Qt, QThread
 from PySide6.QtGui import QImage, QPainter, QPixmap, QTransform
 
 from iPhoto.infrastructure.services.thumbnail_generator import PillowThumbnailGenerator
@@ -15,7 +15,7 @@ from iPhoto.io import sidecar
 from iPhoto.utils import image_loader
 
 _LOGGER = logging.getLogger(__name__)
-_DEBUG_GALLERY = os.getenv("IPHOTO_DEBUG_GALLERY", "").lower() in {"1", "true", "yes", "on"}
+_DEBUG_GALLERY = os.getenv("IPHOTO_DEBUG_GALLERY", "1").lower() in {"1", "true", "yes", "on"}
 
 class ThumbnailWorkerSignals(QObject):
     """Signals emitted by thumbnail generation workers."""
@@ -41,16 +41,28 @@ class ThumbnailGenerationTask(QRunnable):
         self._signals = signals
 
     def run(self):
+        if _DEBUG_GALLERY:
+            _LOGGER.warning(
+                "thumb worker run start thread=%s path=%s size=%sx%s",
+                QThread.currentThread(),
+                self._path,
+                self._size.width(),
+                self._size.height(),
+            )
         try:
             # Generate logic (CPU intensive)
             qimg = self._renderer(self._path, self._size)
             if qimg is not None and not qimg.isNull():
                 # Emit result back to main thread
+                if _DEBUG_GALLERY:
+                    _LOGGER.warning("thumb worker emit result path=%s image=%dx%d", self._path, qimg.width(), qimg.height())
                 self._signals.result.emit(self._path, self._size, qimg)
                 return
         except Exception:
             # Silently fail or log in generator
             pass
+        if _DEBUG_GALLERY:
+            _LOGGER.warning("thumb worker emit failed path=%s", self._path)
         self._signals.failed.emit(self._path, self._size)
 
 class ThumbnailCacheService(QObject):
@@ -103,7 +115,7 @@ class ThumbnailCacheService(QObject):
         # 1. Memory Check
         if key in self._memory_cache:
             if _DEBUG_GALLERY:
-                _LOGGER.warning("thumb hit memory key=%s path=%s", key[:8], path)
+                _LOGGER.warning("thumb hit memory key=%s size=%sx%s path=%s", key[:8], size.width(), size.height(), path)
             return self._memory_cache[key]
 
         # 2. Disk Check
@@ -112,7 +124,7 @@ class ThumbnailCacheService(QObject):
             pixmap = QPixmap(str(disk_file))
             if not pixmap.isNull():
                 if _DEBUG_GALLERY:
-                    _LOGGER.warning("thumb hit disk key=%s path=%s", key[:8], path)
+                    _LOGGER.warning("thumb hit disk key=%s size=%sx%s path=%s", key[:8], size.width(), size.height(), path)
                 self._add_to_memory(key, pixmap)
                 return pixmap
 
@@ -120,7 +132,7 @@ class ThumbnailCacheService(QObject):
         if key not in self._pending_tasks:
             self._pending_tasks.add(key)
             if _DEBUG_GALLERY:
-                _LOGGER.warning("thumb schedule key=%s path=%s pending=%d", key[:8], path, len(self._pending_tasks))
+                _LOGGER.warning("thumb schedule key=%s path=%s pending=%d active=%d", key[:8], path, len(self._pending_tasks), len(self._active_workers))
             self._start_generation(path, size)
 
         # Return placeholder or None while loading
@@ -155,6 +167,8 @@ class ThumbnailCacheService(QObject):
 
         worker = ThumbnailGenerationTask(self._render_thumbnail, path, size, worker_signals)
         key = self._cache_key(path, size)
+        if _DEBUG_GALLERY:
+            _LOGGER.warning("thumb start_generation key=%s gui_thread=%s", key[:8], QThread.currentThread())
         # Keep worker/signal wrappers alive until we receive completion callbacks.
         # Without this, PySide may garbage collect wrappers too aggressively on
         # some Linux builds, causing queued results to get dropped.
@@ -179,13 +193,14 @@ class ThumbnailCacheService(QObject):
 
             if _DEBUG_GALLERY:
                 _LOGGER.warning(
-                    "thumb ready key=%s path=%s image=%dx%d pending=%d active=%d",
+                    "thumb ready key=%s path=%s image=%dx%d pending=%d active=%d thread=%s",
                     key[:8],
                     path,
                     image.width(),
                     image.height(),
                     len(self._pending_tasks),
                     len(self._active_workers),
+                    QThread.currentThread(),
                 )
             self.thumbnailReady.emit(path)
 

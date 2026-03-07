@@ -101,7 +101,7 @@ class AssetGridDelegate(QStyledItemDelegate):
                     "delegate paint row=%d rect=%s state=%s selected=%s has_pixmap=%s pixmap_size=%s has_micro=%s micro_size=%s linux_image_path=%s",
                     index.row(),
                     thumb_rect,
-                    repr(option.state),
+                    self._state_debug_repr(option.state),
                     bool(option.state & QStyle.State_Selected),
                     isinstance(pixmap, QPixmap) and not pixmap.isNull(),
                     pixmap.size() if isinstance(pixmap, QPixmap) and not pixmap.isNull() else None,
@@ -211,6 +211,15 @@ class AssetGridDelegate(QStyledItemDelegate):
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
+    @staticmethod
+    def _state_debug_repr(state: object) -> str:
+        """Return a robust string representation for Qt state flags."""
+
+        try:
+            return repr(state)
+        except Exception:
+            return f"<{type(state).__name__}>"
+
     @staticmethod
     def _draw_thumbnail_surface(
         painter: QPainter,

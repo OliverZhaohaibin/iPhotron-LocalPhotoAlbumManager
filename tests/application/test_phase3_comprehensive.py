@@ -353,11 +353,11 @@ def test_scan_reprocesses_video_with_missing_duration(
     # Simulate a legacy asset that was scanned BEFORE the fix:
     # it has no ``_dur_checked`` marker in its metadata, indicating
     # it was never processed with the corrected code.
-    legacy_asset = assets[0]
-    legacy_meta = dict(legacy_asset.metadata or {})
-    legacy_meta.pop("_dur_checked", None)
-    legacy_asset.metadata = legacy_meta
-    asset_repo.save(legacy_asset)
+    asset = assets[0]
+    meta = dict(asset.metadata or {})
+    meta.pop("_dur_checked", None)
+    asset.metadata = meta
+    asset_repo.save(asset)
 
     # 2. Second scan — same file, but now the provider returns a duration.
     #    Without the cache-invalidation fix the cache hit would keep
@@ -419,3 +419,4 @@ def test_scan_does_not_reprocess_video_with_dur_checked_marker(
     assets = asset_repo.get_by_album(album.id)
     assert len(assets) == 1
     assert assets[0].duration is None  # NOT re-processed → stays None
+    assert (assets[0].metadata or {}).get("_dur_checked") is True  # marker persists

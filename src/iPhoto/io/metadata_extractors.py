@@ -269,6 +269,84 @@ def _extract_datetime_from_exiftool(meta: Dict[str, Any]) -> Optional[str]:
     return None
 
 
+def _parse_duration_value(value: Any) -> Optional[float]:
+    """Parse a duration from various formats into seconds.
+
+    Accepted formats:
+    * Numeric ``int`` / ``float`` – returned directly.
+    * Plain numeric string – ``"8.01"``
+    * Seconds with unit suffix – ``"8.01 s"``
+    * Matroska / ffprobe HH:MM:SS – ``"00:01:23.456"`` or ``"00:01:23.456000000"``
+    """
+
+    if isinstance(value, (int, float)):
+        return float(value) if value > 0 else None
+    if not isinstance(value, str):
+        return None
+
+    candidate = value.strip()
+    if not candidate:
+        return None
+
+    # Strip a trailing "s" unit that ExifTool sometimes appends.
+    if candidate.lower().endswith(" s"):
+        candidate = candidate[:-2].strip()
+
+    # Try plain float first (covers "8.01" and "123.456000").
+    try:
+        result = float(candidate)
+        return result if result > 0 else None
+    except ValueError:
+        pass
+
+    # Try HH:MM:SS(.fraction) (Matroska DURATION tag).
+    match = re.match(
+        r"(\d+):(\d{2}):(\d{2})(?:\.(\d+))?$",
+        candidate,
+    )
+    if match:
+        hours, minutes, seconds = int(match.group(1)), int(match.group(2)), int(match.group(3))
+        frac = float(f"0.{match.group(4)}") if match.group(4) else 0.0
+        total = hours * 3600 + minutes * 60 + seconds + frac
+        return total if total > 0 else None
+
+    return None
+
+
+def _extract_duration_from_exiftool(meta: Dict[str, Any]) -> Optional[float]:
+    """Extract video duration (in seconds) from ExifTool metadata.
+
+    ExifTool exposes duration in several groups depending on the container
+    format (QuickTime, Matroska, AVI, etc.) and build.  Values may be plain
+    numbers, suffixed with ``" s"``, or formatted as ``HH:MM:SS``.
+    """
+
+    quicktime = _extract_group(meta, "QuickTime")
+    if quicktime:
+        for key in ("Duration", "MovieHeaderDuration", "TrackDuration"):
+            dur = _parse_duration_value(quicktime.get(key))
+            if dur is not None:
+                return dur
+
+    composite = _extract_group(meta, "Composite")
+    if composite:
+        dur = _parse_duration_value(composite.get("Duration"))
+        if dur is not None:
+            return dur
+
+    # Some ExifTool builds emit a flat ``Composite:Duration`` key.
+    for key, value in meta.items():
+        if not isinstance(key, str):
+            continue
+        lower_key = key.lower()
+        if lower_key in ("composite:duration", "quicktime:duration"):
+            dur = _parse_duration_value(value)
+            if dur is not None:
+                return dur
+
+    return None
+
+
 def _extract_content_id_from_exiftool(meta: Dict[str, Any]) -> Optional[str]:
     """Extract the Apple ``ContentIdentifier`` used for Live Photo pairing.
 

@@ -98,10 +98,10 @@ class AssetGridDelegate(QStyledItemDelegate):
 
             if _DEBUG_GALLERY and index.row() < 5:
                 _LOGGER.warning(
-                    "delegate paint row=%d rect=%s state=0x%x selected=%s has_pixmap=%s pixmap_size=%s has_micro=%s micro_size=%s linux_image_path=%s",
+                    "delegate paint row=%d rect=%s state=%s selected=%s has_pixmap=%s pixmap_size=%s has_micro=%s micro_size=%s linux_image_path=%s",
                     index.row(),
                     thumb_rect,
-                    int(option.state),
+                    repr(option.state),
                     bool(option.state & QStyle.State_Selected),
                     isinstance(pixmap, QPixmap) and not pixmap.isNull(),
                     pixmap.size() if isinstance(pixmap, QPixmap) and not pixmap.isNull() else None,

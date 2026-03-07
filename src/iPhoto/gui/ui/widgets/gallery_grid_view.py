@@ -81,7 +81,8 @@ class GalleryGridView(AssetGrid):
         super().paintEvent(event)
 
         cell_h = self.gridSize().height()
-        if cell_h <= 0:
+        cell_w = self.gridSize().width()
+        if cell_h <= 0 or cell_w <= 0:
             return
 
         model = self.model()
@@ -97,22 +98,43 @@ class GalleryGridView(AssetGrid):
 
         vp = self.viewport()
         vp_rect = vp.rect()
-        visible_top = vp_rect.top()
-        visible_bottom = vp_rect.bottom()
 
-        # Collect indices for one extra row above and below the viewport.
+        # Use indexAt() to efficiently locate boundary items instead of
+        # iterating through the entire model.  We probe one cell above the
+        # viewport top and one cell below the viewport bottom.
+        probe_above = QPoint(vp_rect.left(), vp_rect.top() - 1)
+        probe_below = QPoint(vp_rect.left(), vp_rect.bottom() + 1)
+
+        first_above = self.indexAt(probe_above)
+        first_below = self.indexAt(probe_below)
+
+        # Determine the range of model rows for each extra band.
         extra_indices = []
-        for r in range(row_count):
-            idx = model.index(r, 0)
-            item_rect = self.visualRect(idx)
-            if item_rect.isNull() or not item_rect.isValid():
-                continue
-            # Items whose bottom edge is just above the viewport (within one
-            # cell height) or whose top edge is just below the viewport.
-            if (visible_top - cell_h) <= item_rect.bottom() < visible_top:
-                extra_indices.append((idx, item_rect))
-            elif visible_bottom < item_rect.top() <= (visible_bottom + cell_h):
-                extra_indices.append((idx, item_rect))
+
+        if first_above.isValid():
+            above_rect = self.visualRect(first_above)
+            if above_rect.isValid():
+                target_y = above_rect.top()
+                # Collect all items on the same visual row (same y coordinate).
+                cols = max(1, vp_rect.width() // cell_w)
+                start_row = max(0, first_above.row())
+                for r in range(start_row, min(start_row + cols, row_count)):
+                    idx = model.index(r, 0)
+                    r_rect = self.visualRect(idx)
+                    if r_rect.isValid() and r_rect.top() == target_y:
+                        extra_indices.append((idx, r_rect))
+
+        if first_below.isValid():
+            below_rect = self.visualRect(first_below)
+            if below_rect.isValid():
+                target_y = below_rect.top()
+                cols = max(1, vp_rect.width() // cell_w)
+                start_row = first_below.row()
+                for r in range(start_row, min(start_row + cols, row_count)):
+                    idx = model.index(r, 0)
+                    r_rect = self.visualRect(idx)
+                    if r_rect.isValid() and r_rect.top() == target_y:
+                        extra_indices.append((idx, r_rect))
 
         if not extra_indices:
             return

@@ -21,15 +21,23 @@
 ## 📥 Download & Install
 
 [![Download for Windows](https://img.shields.io/badge/⬇️%20Download-Windows%20(.exe)-blue?style=for-the-badge&logo=windows)](https://github.com/OliverZhaohaibin/iPhotron-LocalPhotoAlbumManager/releases/download/v4.3.0/v4.30.exe)
-[![Download for Linux](https://img.shields.io/badge/⬇️%20Download-Linux%20(.deb)-orange?style=for-the-badge&logo=linux&logoColor=white)](https://github.com/OliverZhaohaibin/iPhotron-LocalPhotoAlbumManager/releases/download/v4.3.0/iPhotron_4.30_amd64.deb)
+[![Download for Linux (.deb)](https://img.shields.io/badge/⬇️%20Download-Linux%20(.deb)-orange?style=for-the-badge&logo=linux&logoColor=white)](https://github.com/OliverZhaohaibin/iPhotron-LocalPhotoAlbumManager/releases/download/v4.3.0/iPhotron_4.30_amd64.deb)
+[![Download for Linux (.AppImage)](https://img.shields.io/badge/⬇️%20Download-Linux%20(.AppImage)-brightgreen?style=for-the-badge&logo=linux&logoColor=white)](https://github.com/OliverZhaohaibin/iPhotron-LocalPhotoAlbumManager/releases/download/v4.3.0/iPhotron-x86_64.AppImage)
 
 **💡 Quick Install:** Click the buttons above to download the latest installer directly.
 
 - **Windows:** Run the `.exe` installer directly.
-- **Linux:** Install with the following command:
+- **Linux (.deb):** Install with the following command:
 
 ```bash
 sudo apt install ./iPhotron_4.30_amd64.deb
+```
+
+- **Linux (.AppImage):** Make the file executable and run it:
+
+```bash
+chmod +x iPhotron-x86_64.AppImage
+./iPhotron-x86_64.AppImage
 ```
 
 **For developers** — install from source:

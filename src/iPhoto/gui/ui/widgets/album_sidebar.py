@@ -55,6 +55,10 @@ from ..palette import (
     SIDEBAR_TREE_STYLESHEET,
 )
 
+import logging
+
+_logger = logging.getLogger(__name__)
+
 
 class _DropAwareTree(QTreeView):
     """Tree view that accepts drops of external media files onto albums."""
@@ -343,6 +347,13 @@ class AlbumSidebar(QWidget):
                     self._tree.expand(child)
 
     def _on_model_reset(self) -> None:
+        _logger.info(
+            "_on_model_reset: pending=%s current=%s static=%s library_root=%s",
+            self._pending_selection,
+            self._current_selection,
+            self._current_static_selection,
+            self._library.root(),
+        )
         self._update_title()
         self._expand_defaults()
         if self._pending_selection is not None:
@@ -373,8 +384,10 @@ class AlbumSidebar(QWidget):
         index = self._tree.currentIndex()
         item = self._model.item_from_index(index)
         if item is None:
+            _logger.debug("_on_selection_changed: item is None")
             return
         node_type = item.node_type
+        _logger.info("_on_selection_changed: title=%r node_type=%s", item.title, node_type)
         if node_type == NodeType.ACTION:
             self.bindLibraryRequested.emit()
             return
@@ -384,13 +397,18 @@ class AlbumSidebar(QWidget):
             return
         if node_type == NodeType.STATIC:
             if self._library.root() is None:
+                _logger.warning(
+                    "_on_selection_changed: library root is None, emitting bindLibraryRequested"
+                )
                 self.bindLibraryRequested.emit()
                 return
             self._current_selection = None
             self._current_static_selection = item.title
             if item.title == self.ALL_PHOTOS_TITLE:
+                _logger.info("_on_selection_changed: emitting allPhotosSelected")
                 self.allPhotosSelected.emit()
             else:
+                _logger.info("_on_selection_changed: emitting staticNodeSelected(%r)", item.title)
                 self.staticNodeSelected.emit(item.title)
             return
         self._current_static_selection = None
@@ -481,6 +499,7 @@ class AlbumSidebar(QWidget):
     def select_all_photos(self, emit_signal: bool = False) -> None:
         """Select the "All Photos" static node if it is available."""
 
+        _logger.info("select_all_photos: emit_signal=%s", emit_signal)
         self.select_static_node(self.ALL_PHOTOS_TITLE, emit_signal=emit_signal)
 
     def select_static_node(self, title: str, emit_signal: bool = False) -> None:
@@ -488,22 +507,43 @@ class AlbumSidebar(QWidget):
 
         index = self._find_static_index(title)
         if not index.isValid():
+            _logger.warning("select_static_node: '%s' not found in model", title)
             return
 
         self._current_selection = None
         self._current_static_selection = title
 
+        # Check whether the target index is already selected.  When the caller
+        # requests signal emission but the selection model considers the index
+        # unchanged, ``selectionChanged`` will not fire and downstream handlers
+        # (e.g. loading "All Photos" after binding a library) will be skipped.
+        selection_model = self._tree.selectionModel()
+        has_selection_model = selection_model is not None
+        already_selected = (
+            has_selection_model
+            and self._tree.currentIndex() == index
+        )
+
         # Block signals for static nodes as well to prevent similar feedback loops
         # when programmatically restoring state (e.g. at startup or after resets).
-        selection_model = self._tree.selectionModel()
-        should_block = selection_model is not None and not emit_signal
-        if should_block and selection_model:
+        should_block = has_selection_model and not emit_signal
+        if should_block:
             selection_model.blockSignals(True)
         try:
             self._tree.setCurrentIndex(index)
         finally:
-            if should_block and selection_model:
+            if should_block:
                 selection_model.blockSignals(False)
+
+        # When ``emit_signal`` is requested but the index was already current,
+        # ``setCurrentIndex`` is a no-op and ``selectionChanged`` never fires.
+        # Manually invoke the handler so the view transition still occurs.
+        if emit_signal and already_selected:
+            _logger.info(
+                "select_static_node: '%s' was already selected, manually triggering handler",
+                title,
+            )
+            self._on_selection_changed(None, None)
 
         self._tree.scrollTo(index)
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import sys
 from pathlib import Path
 
@@ -9,9 +10,18 @@ from PySide6.QtCore import QTimer, Qt
 from PySide6.QtGui import QColor, QPalette
 from PySide6.QtWidgets import QApplication
 
+_logger = logging.getLogger(__name__)
+
 
 def main(argv: list[str] | None = None) -> int:
     """Launch the Qt application and return the exit code."""
+
+    # Ensure the ``iPhoto`` root logger is configured before any component
+    # creates a child logger.  ``get_logger()`` lazily attaches a StreamHandler
+    # to the ``iPhoto`` logger so all ``iPhoto.*`` loggers propagate output to
+    # stderr at INFO level by default.
+    from iPhoto.utils.logging import get_logger as _init_logging
+    _init_logging()
 
     arguments = list(sys.argv if argv is None else argv)
     app = QApplication(arguments)
@@ -73,14 +83,18 @@ def main(argv: list[str] | None = None) -> int:
     window.show()
 
     def _initialize_after_show() -> None:
+        _logger.info("_initialize_after_show: creating MainCoordinator")
         coordinator = MainCoordinator(window, context, container)
         window.set_coordinator(coordinator)
         coordinator.start()
+        _logger.info("_initialize_after_show: coordinator started, resuming startup tasks")
         context.resume_startup_tasks()
 
         if len(arguments) > 1:
+            _logger.info("_initialize_after_show: opening album from CLI argument %s", arguments[1])
             coordinator.open_album_from_path(Path(arguments[1]))
             return
+        _logger.info("_initialize_after_show: selecting All Photos in sidebar")
         window.ui.sidebar.select_all_photos(emit_signal=True)
 
     QTimer.singleShot(0, _initialize_after_show)

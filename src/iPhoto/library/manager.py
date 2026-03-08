@@ -92,6 +92,7 @@ class LibraryManager(
     # Binding and tree coordination
     # ------------------------------------------------------------------
     def bind_path(self, root: Path) -> None:
+        LOGGER.info("bind_path: binding to %s", root)
         # Clear existing watches to ensure initialization operations (like creating
         # the deleted items folder) do not trigger "directoryChanged" signals
         # from an active watcher, which would cause a double-refresh.
@@ -106,8 +107,10 @@ class LibraryManager(
         if not normalized.exists() or not normalized.is_dir():
             raise LibraryUnavailableError(f"Library path does not exist: {root}")
         self._root = normalized
+        LOGGER.info("bind_path: normalized root=%s", normalized)
         self._initialize_deleted_dir()
         self._refresh_tree()
+        LOGGER.info("bind_path: tree refreshed, emitting treeUpdated")
 
     def list_albums(self) -> list[AlbumNode]:
         return list(self._albums)

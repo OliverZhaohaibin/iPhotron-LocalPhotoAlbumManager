@@ -518,20 +518,21 @@ class AlbumSidebar(QWidget):
         # unchanged, ``selectionChanged`` will not fire and downstream handlers
         # (e.g. loading "All Photos" after binding a library) will be skipped.
         selection_model = self._tree.selectionModel()
+        has_selection_model = selection_model is not None
         already_selected = (
-            selection_model is not None
+            has_selection_model
             and self._tree.currentIndex() == index
         )
 
         # Block signals for static nodes as well to prevent similar feedback loops
         # when programmatically restoring state (e.g. at startup or after resets).
-        should_block = selection_model is not None and not emit_signal
-        if should_block and selection_model:
+        should_block = has_selection_model and not emit_signal
+        if should_block:
             selection_model.blockSignals(True)
         try:
             self._tree.setCurrentIndex(index)
         finally:
-            if should_block and selection_model:
+            if should_block:
                 selection_model.blockSignals(False)
 
         # When ``emit_signal`` is requested but the index was already current,

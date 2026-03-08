@@ -123,6 +123,7 @@ class NavigationCoordinator(QObject):
 
     def open_all_photos(self):
         """Loads all photos."""
+        LOGGER.debug("open_all_photos: library_root=%s", self._context.library.root())
         self._reset_playback()
         self._router.show_gallery()
         self._static_selection = AlbumSidebar.ALL_PHOTOS_TITLE

@@ -32,6 +32,8 @@ if TYPE_CHECKING:  # pragma: no cover - only for type checking
     from .library.manager import LibraryManager
     from .settings.manager import SettingsManager
 
+_logger = logging.getLogger(__name__)
+
 
 def _create_facade() -> "AppFacade":
     """Factory that imports :class:`AppFacade` lazily to avoid circular imports."""
@@ -172,14 +174,19 @@ class AppContext:
         candidate = self._pending_basic_library_path
         self._pending_basic_library_path = None
         if candidate is None:
+            _logger.info("resume_startup_tasks: no pending library path")
             return
+        _logger.info("resume_startup_tasks: attempting to bind saved library path %s", candidate)
         if candidate.exists():
             try:
                 self.library.bind_path(candidate)
+                _logger.info("resume_startup_tasks: bind_path succeeded, root=%s", self.library.root())
                 self._start_initial_scan_if_needed(candidate)
             except LibraryError as exc:
+                _logger.error("resume_startup_tasks: bind_path failed: %s", exc)
                 self.library.errorRaised.emit(str(exc))
         else:
+            _logger.warning("resume_startup_tasks: saved path does not exist: %s", candidate)
             self.library.errorRaised.emit(
                 f"Basic Library path is unavailable: {candidate}"
             )

@@ -10,8 +10,6 @@ import logging
 import uuid
 from typing import Optional
 
-_logger = logging.getLogger(__name__)
-
 from .di.container import DependencyContainer
 from .domain.repositories import IAlbumRepository, IAssetRepository
 from .infrastructure.repositories.sqlite_asset_repository import SQLiteAssetRepository
@@ -33,6 +31,8 @@ if TYPE_CHECKING:  # pragma: no cover - only for type checking
     from .gui.facade import AppFacade
     from .library.manager import LibraryManager
     from .settings.manager import SettingsManager
+
+_logger = logging.getLogger(__name__)
 
 
 def _create_facade() -> "AppFacade":

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 from PySide6.QtCore import (
@@ -54,8 +55,6 @@ from ..palette import (
     SIDEBAR_TREE_MIN_WIDTH,
     SIDEBAR_TREE_STYLESHEET,
 )
-
-import logging
 
 _logger = logging.getLogger(__name__)
 
@@ -387,7 +386,7 @@ class AlbumSidebar(QWidget):
             _logger.debug("_on_selection_changed: item is None")
             return
         node_type = item.node_type
-        _logger.info("_on_selection_changed: title=%r node_type=%s", item.title, node_type)
+        _logger.debug("_on_selection_changed: title=%r node_type=%s", item.title, node_type)
         if node_type == NodeType.ACTION:
             self.bindLibraryRequested.emit()
             return

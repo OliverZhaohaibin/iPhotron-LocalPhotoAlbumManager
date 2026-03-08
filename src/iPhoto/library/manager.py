@@ -110,7 +110,15 @@ class LibraryManager(
         LOGGER.info("bind_path: normalized root=%s", normalized)
         self._initialize_deleted_dir()
         self._refresh_tree()
-        LOGGER.info("bind_path: tree refreshed, emitting treeUpdated")
+        # ``_refresh_tree()`` skips the ``treeUpdated`` emission when the album
+        # list is unchanged (an optimisation for filesystem-watcher refreshes).
+        # When binding a library for the first time the album list may be empty
+        # both before and after the call, yet the UI model still needs to
+        # transition from the "Bind Basic Library…" placeholder to the full
+        # tree.  Emitting unconditionally here guarantees the model rebuilds.
+        # A redundant second emission is harmless for an infrequent operation.
+        LOGGER.info("bind_path: emitting treeUpdated")
+        self.treeUpdated.emit()
 
     def list_albums(self) -> list[AlbumNode]:
         return list(self._albums)

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Optional
 
@@ -19,6 +20,8 @@ from ..widgets import dialogs
 
 if TYPE_CHECKING:
     from ..widgets.chrome_status_bar import ChromeStatusBar
+
+_logger = logging.getLogger(__name__)
 
 
 class DialogController:
@@ -38,12 +41,17 @@ class DialogController:
     def bind_library_dialog(self) -> Optional[Path]:
         root = dialogs.select_directory(self._parent, "Select Basic Library")
         if root is None:
+            _logger.info("bind_library_dialog: user cancelled folder selection")
             return None
+        _logger.info("bind_library_dialog: user selected folder %s", root)
         try:
             if self._context.library.root() is not None:
+                _logger.info("bind_library_dialog: cancelling active scans before rebind")
                 self._context.facade.cancel_active_scans()
             self._context.library.bind_path(root)
+            _logger.info("bind_library_dialog: bind_path succeeded, root=%s", self._context.library.root())
         except LibraryError as exc:
+            _logger.error("bind_library_dialog: bind_path failed: %s", exc)
             dialogs.show_error(self._parent, str(exc))
             return None
         bound_root = self._context.library.root()
@@ -53,12 +61,17 @@ class DialogController:
             self._status.showMessage(f"Basic Library bound to {bound_root}")
             try:
                 self._context.facade.open_album(bound_root)
+                _logger.info("bind_library_dialog: facade.open_album succeeded")
             except Exception:
-                # Keep binding success even if the initial open fails.
-                pass
+                _logger.exception("bind_library_dialog: facade.open_album failed")
             sidebar = getattr(getattr(self._parent, "ui", None), "sidebar", None)
             if sidebar is not None:
+                _logger.info("bind_library_dialog: selecting All Photos in sidebar")
                 sidebar.select_all_photos(emit_signal=True)
+            else:
+                _logger.warning("bind_library_dialog: sidebar not found on parent")
+        else:
+            _logger.warning("bind_library_dialog: library.root() is None after bind_path")
         return bound_root
 
     def _start_initial_scan_if_needed(self, bound_root: Path) -> None:

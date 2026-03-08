@@ -4,6 +4,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+from PySide6.QtTest import QSignalSpy
 from PySide6.QtWidgets import QApplication
 
 from iPhoto.library.manager import LibraryManager
@@ -63,3 +64,19 @@ def test_bind_path_cancels_scans_on_rebind(tmp_path, qapp):
         manager.bind_path(root)
 
     assert stop_scanning.called
+
+
+def test_bind_path_emits_tree_updated_for_empty_library(tmp_path, qapp):
+    """bind_path must emit treeUpdated even when the library has no album
+    subdirectories.  Without this the AlbumTreeModel never transitions from
+    the 'Bind Basic Library…' placeholder to the full sidebar tree."""
+
+    root = tmp_path / "EmptyLibrary"
+    root.mkdir()
+    # Create only a regular file – no album subdirectories.
+    (root / "photo.jpg").write_bytes(b"fake")
+
+    manager = LibraryManager()
+    spy = QSignalSpy(manager.treeUpdated)
+    manager.bind_path(root)
+    assert spy.count() >= 1, "treeUpdated must be emitted when binding an empty library"

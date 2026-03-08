@@ -446,6 +446,7 @@ class MainCoordinator(QObject):
 
     def _on_library_tree_updated(self) -> None:
         root = self._context.library.root()
+        self._logger.info("_on_library_tree_updated: root=%s", root)
         if root is not None:
             repo, pool = self._build_asset_repository(root)
             self._replace_asset_repository(repo, pool)

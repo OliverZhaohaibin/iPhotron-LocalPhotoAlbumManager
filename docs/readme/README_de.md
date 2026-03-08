@@ -1,7 +1,7 @@
 # 📸 iPhotron
 > Bringen Sie die *Fotos*-Erfahrung von macOS auf Windows — ordnerbasierte, nicht-destruktive Fotoverwaltung mit Live Photo, Karten und intelligenten Alben.
 
-![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS-lightgrey)
+![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey)
 ![Language](https://img.shields.io/badge/language-Python%203.10%2B-blue)
 ![Framework](https://img.shields.io/badge/framework-PySide6%20(Qt6)-orange)
 ![License](https://img.shields.io/badge/license-MIT-green)
@@ -19,9 +19,17 @@
 
 ## 📥 Download & Installation
 
-[![Download iPhoto Latest Release](https://img.shields.io/badge/⬇️%20Download-iPhotron%20Neueste%20Version-blue?style=for-the-badge&logo=windows)](https://github.com/OliverZhaohaibin/iPhotron-LocalPhotoAlbumManager/releases/download/v4.2.1/v4.21.exe)
+[![Für Windows herunterladen](https://img.shields.io/badge/⬇️%20Download-Windows%20(.exe)-blue?style=for-the-badge&logo=windows)](https://github.com/OliverZhaohaibin/iPhotron-LocalPhotoAlbumManager/releases/download/v4.3.0/v4.30.exe)
+[![Für Linux herunterladen](https://img.shields.io/badge/⬇️%20Download-Linux%20(.deb)-orange?style=for-the-badge&logo=linux&logoColor=white)](https://github.com/OliverZhaohaibin/iPhotron-LocalPhotoAlbumManager/releases/download/v4.3.0/iPhotron_4.30_amd64.deb)
 
-**💡 Schnellinstallation:** Klicken Sie auf die Schaltfläche oben, um das neueste Windows-Installationsprogramm (.exe) direkt herunterzuladen.
+**💡 Schnellinstallation:** Klicken Sie auf die Schaltflächen oben, um das neueste Installationsprogramm direkt herunterzuladen.
+
+- **Windows:** Führen Sie das `.exe`-Installationsprogramm direkt aus.
+- **Linux:** Installationsbefehl:
+
+```bash
+sudo apt install ./iPhotron_4.30_amd64.deb
+```
 
 **Für Entwickler:**
 

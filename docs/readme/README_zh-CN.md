@@ -1,7 +1,7 @@
 # 📸 iPhotron
 > 将 macOS *照片* 体验带到 Windows —— 文件夹原生、非破坏性的照片管理，支持实况照片、地图和智能相册。
 
-![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS-lightgrey)
+![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey)
 ![Language](https://img.shields.io/badge/language-Python%203.10%2B-blue)
 ![Framework](https://img.shields.io/badge/framework-PySide6%20(Qt6)-orange)
 ![License](https://img.shields.io/badge/license-MIT-green)
@@ -19,9 +19,17 @@
 
 ## 📥 下载与安装
 
-[![下载 iPhoto 最新版本](https://img.shields.io/badge/⬇️%20下载-iPhotron%20最新版本-blue?style=for-the-badge&logo=windows)](https://github.com/OliverZhaohaibin/iPhotron-LocalPhotoAlbumManager/releases/download/v4.2.1/v4.21.exe)
+[![下载 Windows 版本](https://img.shields.io/badge/⬇️%20下载-Windows%20(.exe)-blue?style=for-the-badge&logo=windows)](https://github.com/OliverZhaohaibin/iPhotron-LocalPhotoAlbumManager/releases/download/v4.3.0/v4.30.exe)
+[![下载 Linux 版本](https://img.shields.io/badge/⬇️%20下载-Linux%20(.deb)-orange?style=for-the-badge&logo=linux&logoColor=white)](https://github.com/OliverZhaohaibin/iPhotron-LocalPhotoAlbumManager/releases/download/v4.3.0/iPhotron_4.30_amd64.deb)
 
-**💡 快速安装：** 点击上方按钮直接下载最新的 Windows 安装程序（.exe）。
+**💡 快速安装：** 点击上方按钮直接下载最新安装程序。
+
+- **Windows：** 直接运行 `.exe` 安装程序。
+- **Linux：** 安装命令为：
+
+```bash
+sudo apt install ./iPhotron_4.30_amd64.deb
+```
 
 **开发者安装：**
 

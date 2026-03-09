@@ -455,9 +455,16 @@ void main() {
     // Apply rotation to get final texture sampling coordinates
     vec2 uv_tex = apply_rotation_90(uv_perspective, uRotate90);
 
-    // Sample the texture at the computed texture-space coordinates
-    vec4 texel = texture(uTex, uv_tex);
-    vec3 c = texel.rgb;
+    // Sample the texture at the computed texture-space coordinates.
+    // Apply noise reduction first so that the bilateral filter operates on raw
+    // texture data (it must sample neighbouring texels) and all subsequent
+    // colour adjustments – including selective color – are preserved.
+    vec3 c;
+    if (uDenoiseAmount > 0.005) {
+        c = apply_denoise(uv_tex);
+    } else {
+        c = texture(uTex, uv_tex).rgb;
+    }
 
     float exposure_term    = uExposure   * 1.5;
     float brightness_term  = uBrightness * 0.75;
@@ -498,10 +505,9 @@ void main() {
         c = apply_definition(c, uv_tex);
     }
 
-    // Apply noise reduction (denoise) after definition, before B&W
-    if (uDenoiseAmount > 0.005) {
-        c = apply_denoise(uv_tex);
-    }
+    // Noise reduction was already applied at the start of the pipeline
+    // (before colour adjustments) so that the bilateral filter samples raw
+    // texture neighbours without discarding selective-color or other edits.
 
     if (uBWEnabled) {
         c = apply_bw(c, uv_tex);

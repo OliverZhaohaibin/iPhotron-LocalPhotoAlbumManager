@@ -299,6 +299,12 @@ class GLRenderer:
             # Selective Color uniforms
             sc_enabled_value = adjustments.get("SelectiveColor_Enabled", False)
             self._set_uniform1i("uSCEnabled", 1 if bool(sc_enabled_value) else 0)
+
+            # Definition uniform – maps UI [0, 1] to internal [0, 0.2]
+            def_enabled_value = adjustments.get("Definition_Enabled", False)
+            def_value = float(adjustments.get("Definition_Value", 0.0))
+            effective_def = def_value * 0.2 if bool(def_enabled_value) else 0.0
+            self._set_uniform1f("uDefinition", effective_def)
             sc_ranges = adjustments.get("SelectiveColor_Ranges")
             if isinstance(sc_ranges, list) and len(sc_ranges) == NUM_RANGES:
                 u0 = np.zeros((NUM_RANGES, 4), dtype=np.float32)

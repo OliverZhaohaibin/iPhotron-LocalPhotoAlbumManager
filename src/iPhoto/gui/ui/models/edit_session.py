@@ -12,6 +12,7 @@ from ....core.color_resolver import COLOR_KEYS, COLOR_RANGES, ColorStats
 from ....core.curve_resolver import DEFAULT_CURVE_POINTS
 from ....core.levels_resolver import DEFAULT_LEVELS_HANDLES
 from ....core.selective_color_resolver import DEFAULT_SELECTIVE_COLOR_RANGES
+from ....core.definition_resolver import DEFAULT_DEFINITION
 
 _BW_RANGE_KEYS = {"BW_Master", "BW_Intensity", "BW_Neutrals", "BW_Tone"}
 
@@ -146,6 +147,12 @@ class EditSession(QObject):
         self._values["SelectiveColor_Ranges"] = [
             list(r) for r in DEFAULT_SELECTIVE_COLOR_RANGES
         ]
+
+        # Definition (Clarity) adjustment – a single float in [0.0, 1.0].
+        self._values["Definition_Enabled"] = False
+        self._ranges["Definition_Enabled"] = (0.0, 1.0)
+        self._values["Definition_Value"] = DEFAULT_DEFINITION
+        self._ranges["Definition_Value"] = (0.0, 1.0)
 
     # ------------------------------------------------------------------
     # Accessors
@@ -303,6 +310,11 @@ class EditSession(QObject):
         defaults.update({
             "SelectiveColor_Enabled": False,
             "SelectiveColor_Ranges": [list(r) for r in DEFAULT_SELECTIVE_COLOR_RANGES],
+        })
+        # Definition defaults
+        defaults.update({
+            "Definition_Enabled": False,
+            "Definition_Value": DEFAULT_DEFINITION,
         })
         self.set_values(defaults, emit_individual=True)
         self.resetPerformed.emit()

@@ -10,6 +10,7 @@ from .collapsible_section import CollapsibleSection
 from .edit_bw_section import EditBWSection
 from .edit_color_section import EditColorSection
 from .edit_curve_section import EditCurveSection
+from .edit_definition_section import EditDefinitionSection
 from .edit_levels_section import EditLevelsSection
 from .edit_light_section import EditLightSection
 from .edit_selective_color_section import EditSelectiveColorSection
@@ -39,6 +40,9 @@ SECTION_CONFIGS: list[SectionConfig] = [
     SectionConfig("wb", "White Balance", "whitebalance.square.svg", EditWBSection, collapsed=True),
     SectionConfig("curve", "Curve", "curve.svg", EditCurveSection, collapsed=True),
     SectionConfig("levels", "Levels", "level.square.svg", EditLevelsSection, collapsed=True),
+    SectionConfig(
+        "definition", "Definition", "definition.svg", EditDefinitionSection, collapsed=True
+    ),
     SectionConfig(
         "selective_color",
         "Selective Color",

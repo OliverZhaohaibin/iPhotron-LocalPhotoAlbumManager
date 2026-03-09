@@ -150,6 +150,12 @@ class EditCoordinator(QObject):
         self._ui.edit_sidebar.curveParamsCommitted.connect(self._handle_curve_params_committed)
         self._ui.edit_sidebar.levelsParamsPreviewed.connect(self._handle_levels_params_previewed)
         self._ui.edit_sidebar.levelsParamsCommitted.connect(self._handle_levels_params_committed)
+        self._ui.edit_sidebar.definitionParamsPreviewed.connect(
+            self._handle_definition_params_previewed
+        )
+        self._ui.edit_sidebar.definitionParamsCommitted.connect(
+            self._handle_definition_params_committed
+        )
         self._ui.edit_sidebar.selectiveColorParamsPreviewed.connect(
             self._handle_selective_color_params_previewed
         )
@@ -553,6 +559,37 @@ class EditCoordinator(QObject):
         updates = {
             "Levels_Enabled": True,
             "Levels_Handles": levels_data.get("Handles", list(DEFAULT_LEVELS_HANDLES)),
+        }
+        self._session.set_values(updates)
+
+    def _handle_definition_params_previewed(self, def_data: dict) -> None:
+        """Apply transient definition previews without mutating session state."""
+
+        if self._session is None or self._compare_active:
+            return
+
+        try:
+            preview_values = self._session.values()
+            preview_values.update({
+                "Definition_Enabled": True,
+                "Definition_Value": float(def_data.get("Value", 0.0)),
+            })
+            adjustments = self._preview_manager.resolve_adjustments(preview_values)
+        except Exception:
+            _LOGGER.exception("Failed to resolve definition preview adjustments")
+            return
+
+        self._ui.edit_image_viewer.set_adjustments(adjustments)
+
+    def _handle_definition_params_committed(self, def_data: dict) -> None:
+        """Persist definition adjustments into the active edit session."""
+
+        if self._session is None:
+            return
+
+        updates = {
+            "Definition_Enabled": True,
+            "Definition_Value": float(def_data.get("Value", 0.0)),
         }
         self._session.set_values(updates)
 

@@ -426,3 +426,53 @@ def _write_selective_color_node(root: ET.Element, values: Mapping[str, Any]) -> 
             rn.set("hue_shift", f"{float(r[2]):.6f}")
             rn.set("sat_adj", f"{float(r[3]):.6f}")
             rn.set("lum_adj", f"{float(r[4]):.6f}")
+
+
+# ---------------------------------------------------------------------------
+# Definition constants
+# ---------------------------------------------------------------------------
+
+_DEFINITION_NODE = "Definition"
+_DEFINITION_ENABLED = "enabled"
+_DEFINITION_VALUE = "value"
+
+# ---------------------------------------------------------------------------
+# Definition helpers
+# ---------------------------------------------------------------------------
+
+
+def _read_definition_from_node(node: ET.Element) -> Dict[str, Any]:
+    """Return definition adjustments described by the ``<Definition>`` *node*."""
+    result: Dict[str, Any] = {}
+
+    enabled_attr = node.get(_DEFINITION_ENABLED)
+    if enabled_attr is not None:
+        result["Definition_Enabled"] = enabled_attr.lower() in {"1", "true", "yes", "on"}
+    else:
+        result["Definition_Enabled"] = False
+
+    value_attr = node.get(_DEFINITION_VALUE)
+    if value_attr is not None:
+        try:
+            result["Definition_Value"] = max(0.0, min(1.0, float(value_attr)))
+        except (ValueError, TypeError):
+            result["Definition_Value"] = 0.0
+    else:
+        result["Definition_Value"] = 0.0
+
+    return result
+
+
+def _write_definition_node(root: ET.Element, values: Mapping[str, Any]) -> None:
+    """Insert/replace the ``<Definition>`` section under *root* using *values*."""
+    _remove_children_case_insensitive(root, _DEFINITION_NODE)
+
+    def_enabled = bool(values.get("Definition_Enabled", False))
+    def_value = float(values.get("Definition_Value", 0.0))
+
+    if not def_enabled and abs(def_value) < 1e-6:
+        return
+
+    node = ET.SubElement(root, _DEFINITION_NODE)
+    node.set(_DEFINITION_ENABLED, "true" if def_enabled else "false")
+    node.set(_DEFINITION_VALUE, f"{def_value:.6f}")

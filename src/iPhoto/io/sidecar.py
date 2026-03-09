@@ -23,12 +23,15 @@ from .sidecar_sections import (
     _write_levels_node,
     _read_selective_color_from_node,
     _write_selective_color_node,
+    _read_definition_from_node,
+    _write_definition_node,
     _CROP_NODE,
     _CROP_CHILD_X,
     _LEGACY_CROP_NODE,
     _CURVE_NODE,
     _LEVELS_NODE,
     _SELECTIVE_COLOR_NODE,
+    _DEFINITION_NODE,
 )
 
 BW_KEYS = (
@@ -214,6 +217,11 @@ def load_adjustments(asset_path: Path) -> Dict[str, Any]:
     if sc_node is not None:
         result.update(_read_selective_color_from_node(sc_node))
 
+    # Load Definition adjustments
+    def_node = _find_child_case_insensitive(root, _DEFINITION_NODE)
+    if def_node is not None:
+        result.update(_read_definition_from_node(def_node))
+
     return result
 
 
@@ -290,6 +298,9 @@ def save_adjustments(asset_path: Path, adjustments: Mapping[str, Any]) -> Path:
 
     # Write Selective Color adjustments
     _write_selective_color_node(root, adjustments)
+
+    # Write Definition adjustments
+    _write_definition_node(root, adjustments)
 
     tmp_path = sidecar_path.with_suffix(sidecar_path.suffix + ".tmp")
     tree = ET.ElementTree(root)
@@ -430,5 +441,11 @@ def resolve_render_adjustments(
         sc_ranges = adjustments.get("SelectiveColor_Ranges")
         if isinstance(sc_ranges, list) and len(sc_ranges) == NUM_RANGES:
             resolved["SelectiveColor_Ranges"] = sc_ranges
+
+    # Definition adjustments - pass through to renderer as-is
+    def_enabled = bool(adjustments.get("Definition_Enabled", False))
+    resolved["Definition_Enabled"] = def_enabled
+    if def_enabled:
+        resolved["Definition_Value"] = max(0.0, min(1.0, float(adjustments.get("Definition_Value", 0.0))))
 
     return resolved

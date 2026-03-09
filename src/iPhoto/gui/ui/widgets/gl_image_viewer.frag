@@ -34,6 +34,8 @@ uniform vec4  uSCRange0[6];
 uniform vec4  uSCRange1[6];
 uniform bool  uSCEnabled;
 
+uniform float uDefinition;   // [0.0, 0.2] definition / clarity strength
+
 uniform vec2  uViewSize;
 uniform vec2  uTexSize;
 uniform float uScale;
@@ -348,6 +350,23 @@ vec3 apply_levels(vec3 color) {
     return vec3(r, g, b);
 }
 
+vec3 apply_definition(vec3 color, vec2 uv) {
+    // Mipmap-based local contrast enhancement (Definition / Clarity).
+    // Samples the original texture at LOD 3, 5, 7 to compute a local mean,
+    // then re-injects the high-frequency detail with midtone protection.
+    vec3 blur1 = textureLod(uTex, uv, 3.0).rgb;
+    vec3 blur2 = textureLod(uTex, uv, 5.0).rgb;
+    vec3 blur3 = textureLod(uTex, uv, 7.0).rgb;
+    vec3 localMean = (blur1 + blur2 + blur3) / 3.0;
+    vec3 detail = color - localMean;
+
+    float luma = dot(color, vec3(0.2126, 0.7152, 0.0722));
+    float midtoneMask = 1.0 - pow(abs(2.0 * luma - 1.0), 2.0);
+
+    float amount = uDefinition * 3.0;
+    return clamp(color + detail * amount * (0.3 + 0.7 * midtoneMask), 0.0, 1.0);
+}
+
 void main() {
     if (uScale <= 0.0) {
         discard;
@@ -432,6 +451,11 @@ void main() {
     // Apply selective color after levels, before B&W
     if (uSCEnabled) {
         c = apply_selective_color(c);
+    }
+
+    // Apply definition (clarity) after selective color, before B&W
+    if (uDefinition > 0.0001) {
+        c = apply_definition(c, uv_tex);
     }
 
     if (uBWEnabled) {

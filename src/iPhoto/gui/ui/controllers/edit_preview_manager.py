@@ -146,6 +146,10 @@ def resolve_adjustment_mapping(
     sc_enabled = bool(session_values.get("SelectiveColor_Enabled", False))
     resolved["SelectiveColor_Enabled"] = 1.0 if sc_enabled else 0.0
 
+    # Preserve the dedicated Definition parameters.
+    def_enabled = bool(session_values.get("Definition_Enabled", False))
+    resolved["Definition_Enabled"] = 1.0 if def_enabled else 0.0
+
     resolved.update(curve_lists)
     return resolved
 

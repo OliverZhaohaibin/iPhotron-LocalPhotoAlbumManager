@@ -78,6 +78,7 @@ _UNIFORM_NAMES = (
     "uSCRange1",
     "uSCEnabled",
     "uDefinition",
+    "uDenoiseAmount",
 )
 
 

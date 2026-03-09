@@ -69,6 +69,12 @@ class EditSidebar(QWidget):
     definitionParamsCommitted = Signal(object)
     """Emitted when definition adjustments should be written to the session."""
 
+    denoiseParamsPreviewed = Signal(object)
+    """Relays live Noise Reduction adjustments to the controller."""
+
+    denoiseParamsCommitted = Signal(object)
+    """Emitted when Noise Reduction adjustments should be written to the session."""
+
     wbEyedropperModeChanged = Signal(object)
     """Relay eyedropper mode toggles from the WB section."""
 
@@ -190,6 +196,7 @@ class EditSidebar(QWidget):
         self._levels_section = _b["levels"].section
         self._definition_section = _b["definition"].section
         self._selective_color_section = _b["selective_color"].section
+        self._denoise_section = _b["denoise"].section
 
         self._light_section_container = _b["light"].container
         self._color_section_container = _b["color"].container
@@ -199,6 +206,7 @@ class EditSidebar(QWidget):
         self._levels_section_container = _b["levels"].container
         self._definition_section_container = _b["definition"].container
         self._selective_color_section_container = _b["selective_color"].container
+        self._denoise_section_container = _b["denoise"].container
 
         self.light_reset_button = _b["light"].reset_button
         self.light_toggle_button = _b["light"].toggle_button
@@ -216,6 +224,8 @@ class EditSidebar(QWidget):
         self.levels_toggle_button = _b["levels"].toggle_button
         self.definition_reset_button = _b["definition"].reset_button
         self.definition_toggle_button = _b["definition"].toggle_button
+        self.denoise_reset_button = _b["denoise"].reset_button
+        self.denoise_toggle_button = _b["denoise"].toggle_button
 
         self.set_mode("adjust")
 

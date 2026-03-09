@@ -61,6 +61,11 @@ class EditSignalRouter:
         sc.selectiveColorParamsCommitted.connect(sidebar.selectiveColorParamsCommitted)
         sc.eyedropperModeChanged.connect(sidebar.selectiveColorEyedropperModeChanged)
 
+        # Denoise-specific relays
+        denoise = bundles["denoise"].section
+        denoise.denoiseParamsPreviewed.connect(sidebar.denoiseParamsPreviewed)
+        denoise.denoiseParamsCommitted.connect(sidebar.denoiseParamsCommitted)
+
         # Perspective controls
         perspective_controls.interactionStarted.connect(sidebar.perspectiveInteractionStarted)
         perspective_controls.interactionFinished.connect(sidebar.perspectiveInteractionFinished)

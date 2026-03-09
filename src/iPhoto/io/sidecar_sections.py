@@ -476,3 +476,53 @@ def _write_definition_node(root: ET.Element, values: Mapping[str, Any]) -> None:
     node = ET.SubElement(root, _DEFINITION_NODE)
     node.set(_DEFINITION_ENABLED, "true" if def_enabled else "false")
     node.set(_DEFINITION_VALUE, f"{def_value:.6f}")
+
+
+# ---------------------------------------------------------------------------
+# Denoise (Noise Reduction) node constants
+# ---------------------------------------------------------------------------
+
+_DENOISE_NODE = "Denoise"
+_DENOISE_ENABLED = "enabled"
+_DENOISE_AMOUNT = "amount"
+
+# ---------------------------------------------------------------------------
+# Denoise helpers
+# ---------------------------------------------------------------------------
+
+
+def _read_denoise_from_node(node: ET.Element) -> Dict[str, Any]:
+    """Return denoise adjustments described by the ``<Denoise>`` *node*."""
+    result: Dict[str, Any] = {}
+
+    enabled_attr = node.get(_DENOISE_ENABLED)
+    if enabled_attr is not None:
+        result["Denoise_Enabled"] = enabled_attr.lower() in {"1", "true", "yes", "on"}
+    else:
+        result["Denoise_Enabled"] = False
+
+    amount_attr = node.get(_DENOISE_AMOUNT)
+    if amount_attr is not None:
+        try:
+            result["Denoise_Amount"] = max(0.0, min(5.0, float(amount_attr)))
+        except (ValueError, TypeError):
+            result["Denoise_Amount"] = 0.0
+    else:
+        result["Denoise_Amount"] = 0.0
+
+    return result
+
+
+def _write_denoise_node(root: ET.Element, values: Mapping[str, Any]) -> None:
+    """Insert/replace the ``<Denoise>`` section under *root* using *values*."""
+    _remove_children_case_insensitive(root, _DENOISE_NODE)
+
+    dn_enabled = bool(values.get("Denoise_Enabled", False))
+    dn_amount = float(values.get("Denoise_Amount", 0.0))
+
+    if not dn_enabled and abs(dn_amount) < 1e-6:
+        return
+
+    node = ET.SubElement(root, _DENOISE_NODE)
+    node.set(_DENOISE_ENABLED, "true" if dn_enabled else "false")
+    node.set(_DENOISE_AMOUNT, f"{dn_amount:.6f}")

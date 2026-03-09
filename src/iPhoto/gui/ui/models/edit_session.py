@@ -14,6 +14,11 @@ from ....core.levels_resolver import DEFAULT_LEVELS_HANDLES
 from ....core.selective_color_resolver import DEFAULT_SELECTIVE_COLOR_RANGES
 from ....core.definition_resolver import DEFAULT_DEFINITION
 from ....core.denoise_resolver import DEFAULT_DENOISE
+from ....core.vignette_resolver import (
+    DEFAULT_VIGNETTE_STRENGTH,
+    DEFAULT_VIGNETTE_RADIUS,
+    DEFAULT_VIGNETTE_SOFTNESS,
+)
 
 _BW_RANGE_KEYS = {"BW_Master", "BW_Intensity", "BW_Neutrals", "BW_Tone"}
 
@@ -160,6 +165,16 @@ class EditSession(QObject):
         self._ranges["Denoise_Enabled"] = (0.0, 1.0)
         self._values["Denoise_Amount"] = DEFAULT_DENOISE
         self._ranges["Denoise_Amount"] = (0.0, 5.0)
+
+        # Vignette adjustment – strength, radius and softness each in [0.0, 1.0].
+        self._values["Vignette_Enabled"] = False
+        self._ranges["Vignette_Enabled"] = (0.0, 1.0)
+        self._values["Vignette_Strength"] = DEFAULT_VIGNETTE_STRENGTH
+        self._ranges["Vignette_Strength"] = (0.0, 1.0)
+        self._values["Vignette_Radius"] = DEFAULT_VIGNETTE_RADIUS
+        self._ranges["Vignette_Radius"] = (0.0, 1.0)
+        self._values["Vignette_Softness"] = DEFAULT_VIGNETTE_SOFTNESS
+        self._ranges["Vignette_Softness"] = (0.0, 1.0)
 
     # ------------------------------------------------------------------
     # Accessors

@@ -75,6 +75,12 @@ class EditSidebar(QWidget):
     denoiseParamsCommitted = Signal(object)
     """Emitted when Noise Reduction adjustments should be written to the session."""
 
+    vignetteParamsPreviewed = Signal(object)
+    """Relays live Vignette adjustments to the controller."""
+
+    vignetteParamsCommitted = Signal(object)
+    """Emitted when Vignette adjustments should be written to the session."""
+
     wbEyedropperModeChanged = Signal(object)
     """Relay eyedropper mode toggles from the WB section."""
 
@@ -197,6 +203,7 @@ class EditSidebar(QWidget):
         self._definition_section = _b["definition"].section
         self._selective_color_section = _b["selective_color"].section
         self._denoise_section = _b["denoise"].section
+        self._vignette_section = _b["vignette"].section
 
         self._light_section_container = _b["light"].container
         self._color_section_container = _b["color"].container
@@ -207,6 +214,7 @@ class EditSidebar(QWidget):
         self._definition_section_container = _b["definition"].container
         self._selective_color_section_container = _b["selective_color"].container
         self._denoise_section_container = _b["denoise"].container
+        self._vignette_section_container = _b["vignette"].container
 
         self.light_reset_button = _b["light"].reset_button
         self.light_toggle_button = _b["light"].toggle_button
@@ -226,6 +234,8 @@ class EditSidebar(QWidget):
         self.definition_toggle_button = _b["definition"].toggle_button
         self.denoise_reset_button = _b["denoise"].reset_button
         self.denoise_toggle_button = _b["denoise"].toggle_button
+        self.vignette_reset_button = _b["vignette"].reset_button
+        self.vignette_toggle_button = _b["vignette"].toggle_button
 
         self.set_mode("adjust")
 

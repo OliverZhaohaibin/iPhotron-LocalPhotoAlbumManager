@@ -311,6 +311,22 @@ class GLRenderer:
             dn_amount = float(adjustments.get("Denoise_Amount", 0.0))
             effective_denoise = dn_amount if bool(dn_enabled_value) else 0.0
             self._set_uniform1f("uDenoiseAmount", effective_denoise)
+
+            # Vignette uniforms
+            vig_enabled_value = adjustments.get("Vignette_Enabled", False)
+            if bool(vig_enabled_value):
+                vig_strength = float(adjustments.get("Vignette_Strength", 0.0))
+                vig_radius = float(adjustments.get("Vignette_Radius", 0.50))
+                vig_softness_ui = float(adjustments.get("Vignette_Softness", 0.0))
+                # Map UI softness [0,1] → actual softness [0.1,1.0]
+                vig_softness = 0.1 + max(0.0, min(1.0, vig_softness_ui)) * 0.9
+            else:
+                vig_strength = 0.0
+                vig_radius = 0.50
+                vig_softness = 0.1
+            self._set_uniform1f("uVignetteStrength", vig_strength)
+            self._set_uniform1f("uVignetteRadius", vig_radius)
+            self._set_uniform1f("uVignetteSoftness", vig_softness)
             sc_ranges = adjustments.get("SelectiveColor_Ranges")
             if isinstance(sc_ranges, list) and len(sc_ranges) == NUM_RANGES:
                 u0 = np.zeros((NUM_RANGES, 4), dtype=np.float32)

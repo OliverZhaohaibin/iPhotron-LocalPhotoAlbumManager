@@ -162,6 +162,12 @@ class EditCoordinator(QObject):
         self._ui.edit_sidebar.denoiseParamsCommitted.connect(
             self._handle_denoise_params_committed
         )
+        self._ui.edit_sidebar.vignetteParamsPreviewed.connect(
+            self._handle_vignette_params_previewed
+        )
+        self._ui.edit_sidebar.vignetteParamsCommitted.connect(
+            self._handle_vignette_params_committed
+        )
         self._ui.edit_sidebar.selectiveColorParamsPreviewed.connect(
             self._handle_selective_color_params_previewed
         )
@@ -627,6 +633,41 @@ class EditCoordinator(QObject):
         updates = {
             "Denoise_Enabled": True,
             "Denoise_Amount": float(dn_data.get("Amount", 0.0)),
+        }
+        self._session.set_values(updates)
+
+    def _handle_vignette_params_previewed(self, vig_data: dict) -> None:
+        """Apply transient vignette previews without mutating session state."""
+
+        if self._session is None or self._compare_active:
+            return
+
+        try:
+            preview_values = self._session.values()
+            preview_values.update({
+                "Vignette_Enabled": True,
+                "Vignette_Strength": float(vig_data.get("Strength", 0.0)),
+                "Vignette_Radius": float(vig_data.get("Radius", 0.50)),
+                "Vignette_Softness": float(vig_data.get("Softness", 0.0)),
+            })
+            adjustments = self._preview_manager.resolve_adjustments(preview_values)
+        except Exception:
+            _LOGGER.exception("Failed to resolve vignette preview adjustments")
+            return
+
+        self._ui.edit_image_viewer.set_adjustments(adjustments)
+
+    def _handle_vignette_params_committed(self, vig_data: dict) -> None:
+        """Persist vignette adjustments into the active edit session."""
+
+        if self._session is None:
+            return
+
+        updates = {
+            "Vignette_Enabled": True,
+            "Vignette_Strength": float(vig_data.get("Strength", 0.0)),
+            "Vignette_Radius": float(vig_data.get("Radius", 0.50)),
+            "Vignette_Softness": float(vig_data.get("Softness", 0.0)),
         }
         self._session.set_values(updates)
 

@@ -12,6 +12,7 @@ from .edit_color_section import EditColorSection
 from .edit_curve_section import EditCurveSection
 from .edit_definition_section import EditDefinitionSection
 from .edit_denoise_section import EditDenoiseSection
+from .edit_vignette_section import EditVignetteSection
 from .edit_levels_section import EditLevelsSection
 from .edit_light_section import EditLightSection
 from .edit_selective_color_section import EditSelectiveColorSection
@@ -57,6 +58,14 @@ SECTION_CONFIGS: list[SectionConfig] = [
         "Noise Reduction",
         "denoise.svg",
         EditDenoiseSection,
+        collapsed=True,
+        icon_scale=1.20,
+    ),
+    SectionConfig(
+        "vignette",
+        "Vignette",
+        "vignette.svg",
+        EditVignetteSection,
         collapsed=True,
         icon_scale=1.20,
     ),

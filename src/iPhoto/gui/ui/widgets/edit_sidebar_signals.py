@@ -66,6 +66,11 @@ class EditSignalRouter:
         denoise.denoiseParamsPreviewed.connect(sidebar.denoiseParamsPreviewed)
         denoise.denoiseParamsCommitted.connect(sidebar.denoiseParamsCommitted)
 
+        # Vignette-specific relays
+        vignette = bundles["vignette"].section
+        vignette.vignetteParamsPreviewed.connect(sidebar.vignetteParamsPreviewed)
+        vignette.vignetteParamsCommitted.connect(sidebar.vignetteParamsCommitted)
+
         # Perspective controls
         perspective_controls.interactionStarted.connect(sidebar.perspectiveInteractionStarted)
         perspective_controls.interactionFinished.connect(sidebar.perspectiveInteractionFinished)

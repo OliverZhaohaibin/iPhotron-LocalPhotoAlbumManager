@@ -1,10 +1,10 @@
-<svg width="55" height="55" viewBox="0 0 55 55" fill="none" xmlns="http://www.w3.org/2000/svg">
+<svg width="43" height="43" viewBox="6 6 43 43" fill="none" xmlns="http://www.w3.org/2000/svg">
   <defs>
-    <pattern id="checker_5x5" x="11" y="11" width="5" height="5" patternUnits="userSpaceOnUse">
-      <rect width="2.5" height="2.5" fill="#A0A0A0"/>
-      <rect x="2.5" y="2.5" width="2.5" height="2.5" fill="#A0A0A0"/>
-      <rect x="2.5" y="0" width="2.5" height="2.5" fill="#111111"/>
-      <rect x="0" y="2.5" width="2.5" height="2.5" fill="#111111"/>
+    <pattern id="checker_10x10_high_contrast" x="11" y="11" width="10" height="10" patternUnits="userSpaceOnUse">
+      <rect width="5" height="5" fill="#FFFFFF"/>
+      <rect x="5" y="5" width="5" height="5" fill="#FFFFFF"/>
+      <rect x="5" y="0" width="5" height="5" fill="#000000"/>
+      <rect x="0" y="5" width="5" height="5" fill="#000000"/>
     </pattern>
 
     <clipPath id="innerClip">
@@ -12,17 +12,21 @@
     </clipPath>
 
     <linearGradient id="trapezoidFade" x1="0%" y1="0%" x2="100%" y2="70%">
-      <stop offset="30%" stop-color="#999999" stop-opacity="1"/> <stop offset="90%" stop-color="#999999" stop-opacity="0"/> </linearGradient>
+      <stop offset="30%" stop-color="#EEEEEE" stop-opacity="1"/>
+      <stop offset="90%" stop-color="#EEEEEE" stop-opacity="0"/>
+    </linearGradient>
 
     <linearGradient id="horizFade" x1="0%" y1="0%" x2="100%" y2="0%">
-      <stop offset="0%" stop-color="#999999" stop-opacity="0.95"/> <stop offset="100%" stop-color="#999999" stop-opacity="0"/> </linearGradient>
+      <stop offset="0%" stop-color="#EEEEEE" stop-opacity="0.95"/>
+      <stop offset="100%" stop-color="#EEEEEE" stop-opacity="0"/>
+    </linearGradient>
   </defs>
 
   <rect x="8" y="8" width="39" height="39" rx="6" fill="#222222" stroke="#999999" stroke-width="2"/>
 
   <g clip-path="url(#innerClip)">
-    <rect x="11" y="11" width="33" height="33" fill="#1A1A1A"/>
-    <rect x="11" y="11" width="33" height="33" fill="url(#checker_5x5)"/>
+    <rect x="11" y="11" width="33" height="33" fill="#000000"/>
+    <rect x="11" y="11" width="33" height="33" fill="url(#checker_10x10_high_contrast)"/>
 
     <rect x="11" y="11" width="33" height="33" fill="url(#trapezoidFade)"/>
     <rect x="11" y="11" width="33" height="33" fill="url(#horizFade)"/>

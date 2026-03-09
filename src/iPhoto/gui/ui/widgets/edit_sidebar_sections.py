@@ -42,7 +42,7 @@ SECTION_CONFIGS: list[SectionConfig] = [
     SectionConfig("curve", "Curve", "curve.svg", EditCurveSection, collapsed=True),
     SectionConfig("levels", "Levels", "level.square.svg", EditLevelsSection, collapsed=True),
     SectionConfig(
-        "definition", "Definition", "definition.svg", EditDefinitionSection, collapsed=True
+        "definition", "Definition", "definition.svg", EditDefinitionSection, collapsed=True, icon_scale=1.25,
     ),
     SectionConfig(
         "selective_color",
@@ -58,6 +58,7 @@ SECTION_CONFIGS: list[SectionConfig] = [
         "denoise.svg",
         EditDenoiseSection,
         collapsed=True,
+        icon_scale=1.20,
     ),
 ]
 

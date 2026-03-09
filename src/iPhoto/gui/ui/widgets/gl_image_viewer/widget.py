@@ -645,6 +645,15 @@ class GLImageViewer(QOpenGLWidget):
         straighten, rotate_steps, _ = self._rotation_parameters()
         self._update_cover_scale(straighten, rotate_steps)
 
+    def showEvent(self, event) -> None:  # type: ignore[override]
+        super().showEvent(event)
+        # QOpenGLWidget may retain a stale framebuffer when it becomes
+        # visible (e.g. after a view-stack transition from the gallery).
+        # This is most noticeable on Linux inside WA_TranslucentBackground
+        # windows, but the explicit update is harmless on other platforms
+        # and keeps the surface fresh in all configurations.
+        self.update()
+
     # --------------------------- Cursor management and helpers ---------------------------
 
     def _handle_cursor_change(self, cursor: Qt.CursorShape | None) -> None:

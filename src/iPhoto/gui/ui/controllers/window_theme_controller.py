@@ -289,7 +289,7 @@ class WindowThemeController(QObject):
             icon_size = getattr(section, "_icon_size", 20)
             if icon_label and icon_name:
                 # Some icons have native colors
-                if icon_name in {"color.circle.svg", "checkmark.svg", "whitebalance.square.svg", "selectivecolor.svg"}:
+                if icon_name in {"color.circle.svg", "checkmark.svg", "whitebalance.square.svg", "selectivecolor.svg", "denoise.svg"}:
                     icon_label.setPixmap(load_icon(icon_name).pixmap(icon_size, icon_size))
                 else:
                     icon_label.setPixmap(load_icon(icon_name, color=icon_color).pixmap(icon_size, icon_size))

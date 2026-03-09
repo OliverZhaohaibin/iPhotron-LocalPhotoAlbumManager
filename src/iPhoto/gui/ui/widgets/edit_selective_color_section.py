@@ -10,7 +10,6 @@ import numpy as np
 from PySide6.QtCore import Qt, QRectF, QPointF, Signal
 from PySide6.QtGui import (
     QColor,
-    QMouseEvent,
     QPainter,
     QPainterPath,
     QPen,
@@ -434,6 +433,9 @@ class EditSelectiveColorSection(QWidget):
         self.refresh_from_session()
 
     def _on_color_clicked(self, idx: int) -> None:
+        # Auto-enable the section when the user clicks a colour button.
+        if self._session is not None and not self._is_enabled():
+            self._session.set_value("SelectiveColor_Enabled", True)
         self._load_sliders_for_color(idx)
         self._update_theme(idx)
 
@@ -451,6 +453,9 @@ class EditSelectiveColorSection(QWidget):
     def _on_slider_changed(self, _value: float) -> None:
         if self._updating_ui:
             return
+        # Auto-enable the section when the user interacts with a slider.
+        if self._session is not None and not self._is_enabled():
+            self._session.set_value("SelectiveColor_Enabled", True)
         idx = self.btn_group.checkedId()
         if idx < 0:
             idx = 0
@@ -495,15 +500,6 @@ class EditSelectiveColorSection(QWidget):
 
     def _apply_enabled_state(self, enabled: bool) -> None:
         self._opacity_effect.setOpacity(1.0 if enabled else 0.5)
-        self.slider_hue.setEnabled(enabled)
-        self.slider_sat.setEnabled(enabled)
-        self.slider_lum.setEnabled(enabled)
-        self.slider_range.setEnabled(enabled)
-        self._pipette_btn.setEnabled(enabled)
-        for button in self.btn_group.buttons():
-            button.setEnabled(enabled)
-        if not enabled and self._pipette_btn.isChecked():
-            self.deactivate_eyedropper()
 
     def _is_enabled(self) -> bool:
         if self._session is None:
@@ -581,6 +577,9 @@ class EditSelectiveColorSection(QWidget):
 
     def _on_pipette_clicked(self) -> None:
         if self._pipette_btn.isChecked():
+            # Auto-enable the section when the user activates the eyedropper.
+            if self._session is not None and not self._is_enabled():
+                self._session.set_value("SelectiveColor_Enabled", True)
             self._eyedropper_active = True
             self.eyedropperModeChanged.emit("selective_color")
         else:
@@ -648,10 +647,3 @@ class EditSelectiveColorSection(QWidget):
 
         # Deactivate the eyedropper after picking
         self.deactivate_eyedropper()
-
-    def mousePressEvent(self, event: QMouseEvent) -> None:
-        """Enable the section on click when it is currently disabled."""
-        if event.button() == Qt.MouseButton.LeftButton:
-            if self._session is not None and not self._is_enabled():
-                self._session.set_value("SelectiveColor_Enabled", True)
-        super().mousePressEvent(event)

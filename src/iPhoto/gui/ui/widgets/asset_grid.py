@@ -12,6 +12,8 @@ from PySide6.QtWidgets import QListView
 
 from ....config import LONG_PRESS_THRESHOLD_MS
 
+_IS_LINUX = sys.platform == "linux"
+
 
 class AssetGrid(QListView):
     """Grid view that distinguishes between clicks and long presses."""
@@ -95,12 +97,6 @@ class AssetGrid(QListView):
     def showEvent(self, event) -> None:  # type: ignore[override]
         super().showEvent(event)
         QTimer.singleShot(0, self._schedule_visible_rows_update)
-        # Ensure the viewport is fully repainted when the grid becomes
-        # visible (e.g. after a view-stack transition).  On Linux the
-        # compositor occasionally caches a stale surface that only refreshes
-        # when the window is moved.
-        if sys.platform == "linux":
-            self.viewport().update()
 
     # ------------------------------------------------------------------
     # Preview configuration
@@ -155,15 +151,26 @@ class AssetGrid(QListView):
         self._schedule_visible_rows_update()
 
     def scrollContentsBy(self, dx: int, dy: int) -> None:  # type: ignore[override]
-        super().scrollContentsBy(dx, dy)
+        if _IS_LINUX:
+            # Double-buffering strategy for Linux/X11 with WA_TranslucentBackground:
+            #
+            # The default ``super().scrollContentsBy()`` calls the C++
+            # ``viewport()->scroll(dx, dy)`` which triggers an ``XCopyArea``
+            # pixel-shift blit.  Under ARGB visuals this blit races with the
+            # compositor and produces visible tearing / checkerboard artefacts.
+            #
+            # We skip the super call entirely so the blit never happens.  The
+            # scrollbar position has *already* been updated by the time this
+            # method is called (by ``QAbstractScrollArea``), so the next
+            # ``paintEvent`` will render all items at their correct offsets.
+            # Calling ``viewport().repaint()`` triggers that paint
+            # synchronously, ensuring every scroll frame is fully composited
+            # from Qt's back buffer before being presented — true double-
+            # buffered rendering with zero tearing.
+            self.viewport().repaint()
+        else:
+            super().scrollContentsBy(dx, dy)
         self._schedule_visible_rows_update()
-        # On Linux, Qt's pixel-shift scroll optimisation within ARGB windows
-        # (created by WA_TranslucentBackground) can produce tearing artefacts
-        # because the compositor may not flush the partial surface update in
-        # time.  Scheduling a full viewport repaint overwrites any stale
-        # regions without affecting other platforms.
-        if sys.platform == "linux":
-            self.viewport().update()
 
     def dragEnterEvent(self, event: QDragEnterEvent) -> None:  # type: ignore[override]
         if not self._external_drop_enabled:

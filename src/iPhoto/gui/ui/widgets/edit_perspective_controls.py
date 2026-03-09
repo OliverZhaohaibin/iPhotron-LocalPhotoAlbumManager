@@ -285,6 +285,8 @@ class _FlipToggleRow(QWidget):
         self._label_button.setFlat(True)
         self._label_button.setCursor(Qt.CursorShape.PointingHandCursor)
         self._label_button.setFont(Edit_SIDEBAR_FONT)
+        # White overlay is correct here: this widget only appears in the edit
+        # sidebar which always forces dark mode.
         self._label_button.setStyleSheet(
             "QPushButton { text-align: left; padding: 0; background: transparent; border: none; }"
             "QPushButton:hover { background-color: rgba(255, 255, 255, 20); border-radius: 4px; }"
@@ -432,6 +434,8 @@ class _AspectRatioSection(QWidget):
             btn.setAutoRaise(True)
             btn.setFixedSize(QSize(48, 48))
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            # White overlay is correct here: this widget only appears in the
+            # edit sidebar which always forces dark mode.
             btn.setStyleSheet(
                 "QToolButton { border: 1px solid #555; border-radius: 4px; background: transparent; }"
                 "QToolButton:hover { background-color: rgba(255, 255, 255, 20); }"

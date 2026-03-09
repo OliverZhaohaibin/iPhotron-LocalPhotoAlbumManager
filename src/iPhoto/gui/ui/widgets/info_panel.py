@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any, Mapping, Optional
 
 from PySide6.QtCore import QDateTime, QLocale, QRectF, Qt
-from PySide6.QtGui import QMouseEvent, QPainter, QPainterPath, QPalette
+from PySide6.QtGui import QColor, QMouseEvent, QPainter, QPainterPath, QPalette
 from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
@@ -91,10 +91,13 @@ class InfoPanel(QWidget):
         self._close_button.setCursor(Qt.CursorShape.PointingHandCursor)
         self._close_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
         self._close_button.setToolTip("Close")
+        _text = self.palette().color(QPalette.ColorRole.WindowText)
+        _hover = QColor(_text); _hover.setAlpha(20)
+        _pressed = QColor(_text); _pressed.setAlpha(35)
         self._close_button.setStyleSheet(
             "QToolButton { background: transparent; border: none; }"
-            "QToolButton:hover { background-color: rgba(128, 128, 128, 40); border-radius: 6px; }"
-            "QToolButton:pressed { background-color: rgba(128, 128, 128, 60); border-radius: 6px; }"
+            f"QToolButton:hover {{ background-color: {_hover.name(QColor.NameFormat.HexArgb)}; border-radius: 6px; }}"
+            f"QToolButton:pressed {{ background-color: {_pressed.name(QColor.NameFormat.HexArgb)}; border-radius: 6px; }}"
         )
         self._close_button.clicked.connect(self.close)
         title_layout.addWidget(

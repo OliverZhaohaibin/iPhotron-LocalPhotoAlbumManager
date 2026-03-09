@@ -154,7 +154,7 @@ src/iPhoto/
 |---------------------|-------------------------------|---------|
 | `face/aligner.py` | *(删除)* | InsightFace `norm_crop` 内置对齐，无需独立实现 |
 | `ocr/text_detector.py` | *(删除)* | RapidOCR 一体化管线，检测+识别合并于 `ocr_engine.py` |
-| `ocr/text_recognizer.py` | *(删除)* | 同上 |
+| `ocr/text_recognizer.py` | *(删除)* | RapidOCR 一体化管线，检测+识别合并于 `ocr_engine.py`，无需独立识别模块 |
 | `compute_backend.py` (OpenCV DNN) | `compute_backend.py` (ONNX RT EP) | 从 `cv2.dnn.DNN_BACKEND_*` 切换为 ONNX Runtime ExecutionProvider |
 | `model_manager.py` (手动 ONNX 下载) | `model_manager.py` (huggingface-hub) | 支持 InsightFace 模型包 + RapidOCR 内置模型 |
 
@@ -653,7 +653,10 @@ class FaceRecognizer:
         app = self._ensure_loaded()
 
         if landmarks is None:
-            raise ValueError("ArcFace requires 5-point landmarks for alignment")
+            raise ValueError(
+                "ArcFace requires 5-point landmarks for alignment. "
+                "Ensure face detection was successful and landmarks were extracted."
+            )
 
         # 使用 insightface 的 norm_crop 进行标准化裁剪
         from insightface.utils.face_align import norm_crop
@@ -661,9 +664,10 @@ class FaceRecognizer:
 
         # 通过 recognition 模型提取 embedding
         # FaceAnalysis 内部的 recognition model 已在 prepare() 时加载
+        # 当 model pack 不含 recognition 模型时（如自定义配置），
+        # 回退到完整 pipeline 以通过 app.get() 自动检测+提取
         rec_model = app.models.get("recognition", None)
         if rec_model is None:
-            # 回退：通过 app.get() 获取完整 embedding
             return self._extract_via_full_pipeline(image, face_box)
 
         embedding = rec_model.get_feat(aligned_face)
@@ -720,7 +724,9 @@ class FaceRecognizer:
             norm = np.linalg.norm(emb)
             return emb / norm if norm > 0 else emb
 
-        # 无法匹配时返回零向量
+        # 无法匹配时返回零向量并记录警告
+        logger.warning("Could not match face box to any detected face; "
+                       "returning zero embedding for box=%s", face_box)
         return np.zeros(self.EMBEDDING_DIM, dtype=np.float32)
 
     @staticmethod
@@ -2455,8 +2461,10 @@ def mock_face_detector():
         mock_cls.return_value = mock_app
 
         # 模拟检测结果
+        # 注意：InsightFace 返回 [x1, y1, x2, y2] 格式的 bbox，
+        # FaceDetector.detect() 会将其转换为 (x, y, w, h) 格式
         mock_face = MagicMock()
-        mock_face.bbox = np.array([100, 100, 200, 200])
+        mock_face.bbox = np.array([100, 100, 200, 200])  # [x1, y1, x2, y2]
         mock_face.det_score = 0.95
         mock_face.kps = np.array([
             [130, 130], [170, 130],  # 左眼、右眼

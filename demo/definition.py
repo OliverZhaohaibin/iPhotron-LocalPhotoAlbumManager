@@ -151,7 +151,7 @@ class DefinitionSlider(QWidget):
         # 3. Tick marks
         painter.setPen(QPen(self.c_tick, 1))
         ticks = 50
-        for i in range(ticks + 1):
+        for i in range(ticks):
             x = (i / ticks) * rect.width()
             h = 6 if i % 5 == 0 else 3
             painter.drawLine(QPointF(x, 0), QPointF(x, h))

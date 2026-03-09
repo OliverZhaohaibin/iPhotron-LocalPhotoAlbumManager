@@ -27,7 +27,7 @@ class DenoiseParams:
 
     def is_identity(self) -> bool:
         """Return True when no noise reduction is applied."""
-        return abs(self.amount) < 1e-6
+        return not self.enabled or abs(self.amount) < 1e-6
 
     def to_dict(self) -> dict:
         return {

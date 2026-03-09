@@ -1,8 +1,25 @@
-# 🛠️ 人脸识别 / OCR 文字识别 — 开发文档
+# 🛠️ 人脸识别 / OCR 文字识别 — 开发文档（方案 B）
 
-> 版本 1.0 · 2026-02-18
+> 版本 2.0 · 2026-03-09
 >
-> 本文档面向开发者，详细描述人脸识别（Face Recognition & Clustering）和 OCR 文字提取子系统的**实现方案、文件结构、信号流、数据流**，以及关键操作的开发指南。
+> 本文档面向开发者，详细描述基于 **InsightFace + RapidOCR + ONNX Runtime** 的人脸识别（Face Recognition & Clustering）和 OCR 文字提取子系统的**实现方案、文件结构、信号流、数据流**，以及关键操作的开发指南。
+>
+> 本文档取代此前基于 OpenCV DNN 的旧方案（v1.0），采用 `immich_integration_feasibility.md` 中推荐的 **方案 B — 提取 Immich 核心依赖库独立集成**。
+
+---
+
+## 技术选型总览
+
+| 模块 | 技术方案 | 许可证 |
+|------|---------|--------|
+| 人脸检测 | InsightFace RetinaFace (ONNX) | MIT |
+| 人脸识别 | InsightFace ArcFace 512-D (ONNX) | MIT |
+| 人脸对齐 | InsightFace `norm_crop` | MIT |
+| OCR 检测+识别 | RapidOCR (PP-OCRv5) | Apache-2.0 |
+| 推理引擎 | ONNX Runtime (CUDA / OpenVINO / CoreML / CPU) | MIT |
+| 模型下载 | huggingface-hub | Apache-2.0 |
+| 人脸聚类 | scikit-learn DBSCAN | BSD-3-Clause |
+| 全文搜索 | SQLite FTS5 | Public Domain |
 
 ---
 
@@ -11,14 +28,15 @@
 1. [文件结构](#1-文件结构)
 2. [模块依赖关系](#2-模块依赖关系)
 3. [核心类设计](#3-核心类设计)
-   - 3.1 [计算后端抽象](#31-计算后端抽象)
-   - 3.2 [人脸检测器](#32-人脸检测器)
-   - 3.3 [人脸特征提取器](#33-人脸特征提取器)
-   - 3.4 [人脸聚类引擎](#34-人脸聚类引擎)
-   - 3.5 [OCR 引擎](#35-ocr-引擎)
-   - 3.6 [数据库仓储层](#36-数据库仓储层)
-   - 3.7 [任务队列与 Worker](#37-任务队列与-worker)
-   - 3.8 [资源调度器](#38-资源调度器)
+   - 3.1 [计算后端抽象（ONNX Runtime EP）](#31-计算后端抽象onnx-runtime-ep)
+   - 3.2 [模型管理器](#32-模型管理器)
+   - 3.3 [人脸检测器（RetinaFace）](#33-人脸检测器retinaface)
+   - 3.4 [人脸特征提取器（ArcFace）](#34-人脸特征提取器arcface)
+   - 3.5 [人脸聚类引擎](#35-人脸聚类引擎)
+   - 3.6 [OCR 引擎（RapidOCR）](#36-ocr-引擎rapidocr)
+   - 3.7 [数据库仓储层](#37-数据库仓储层)
+   - 3.8 [任务队列与 Worker](#38-任务队列与-worker)
+   - 3.9 [资源调度器](#39-资源调度器)
 4. [信号流与事件体系](#4-信号流与事件体系)
 5. [数据流](#5-数据流)
    - 5.1 [全量扫描流程](#51-全量扫描流程)
@@ -32,12 +50,13 @@
    - 6.3 [移动单张人脸](#63-移动单张人脸)
    - 6.4 [命名人物](#64-命名人物)
 7. [文字搜图实现](#7-文字搜图实现)
-8. [CUDA / CPU 后端选择](#8-cuda--cpu-后端选择)
+8. [ONNX Runtime 硬件后端选择](#8-onnx-runtime-硬件后端选择)
 9. [多 Worker 资源公平分配](#9-多-worker-资源公平分配)
 10. [配置项](#10-配置项)
 11. [数据库迁移策略](#11-数据库迁移策略)
-12. [测试策略](#12-测试策略)
-13. [开发里程碑](#13-开发里程碑)
+12. [依赖管理策略](#12-依赖管理策略)
+13. [测试策略](#13-测试策略)
+14. [开发里程碑](#14-开发里程碑)
 
 ---
 
@@ -45,28 +64,27 @@
 
 以下为新增文件在现有项目结构中的位置，遵循 iPhotron 已有的分层架构（Domain → Application → Infrastructure → GUI）。
 
+与旧方案相比，方案 B 简化了人脸与 OCR 子模块的内部结构——InsightFace 和 RapidOCR 已封装完整的检测→对齐→识别管线，无需手动实现对齐器和文字检测/识别的拆分模块。
+
 ```
 src/iPhoto/
 ├── ai/                                    # 🆕 AI 子系统根目录
 │   ├── __init__.py
 │   ├── config.py                          # AI 子系统配置常量
-│   ├── compute_backend.py                 # GPU/CPU 后端检测与选择
+│   ├── compute_backend.py                 # ONNX Runtime EP 后端检测与选择
 │   │
 │   ├── face/                              # 🆕 人脸识别子模块
 │   │   ├── __init__.py
-│   │   ├── detector.py                    # 人脸检测器 (YuNet)
-│   │   ├── recognizer.py                  # 人脸特征提取 (SFace/ArcFace)
-│   │   ├── aligner.py                     # 人脸对齐 (5-point landmark)
-│   │   ├── clustering.py                  # 聚类引擎 (DBSCAN / Chinese Whispers)
+│   │   ├── detector.py                    # 人脸检测器 (InsightFace RetinaFace)
+│   │   ├── recognizer.py                  # 人脸特征提取 (InsightFace ArcFace)
+│   │   ├── clustering.py                  # 聚类引擎 (DBSCAN)
 │   │   ├── cluster_manager.py             # 聚类管理操作 (合并/拆分/移动)
 │   │   ├── quality.py                     # 人脸质量评估 (清晰度/角度)
 │   │   └── models.py                      # 人脸领域数据类 (FaceRecord, Person)
 │   │
 │   ├── ocr/                               # 🆕 OCR 子模块
 │   │   ├── __init__.py
-│   │   ├── text_detector.py               # 文字区域检测 (EAST/DB)
-│   │   ├── text_recognizer.py             # 文字识别 (CRNN)
-│   │   ├── ocr_engine.py                  # OCR 引擎（检测+识别 Pipeline）
+│   │   ├── ocr_engine.py                  # OCR 引擎 (RapidOCR PP-OCRv5 一体化管线)
 │   │   └── models.py                      # OCR 领域数据类 (OCRRegion)
 │   │
 │   ├── db/                                # 🆕 AI 数据库层
@@ -89,7 +107,7 @@ src/iPhoto/
 │   │   ├── gpu_semaphore.py               # GPU 时间片信号量
 │   │   └── fair_scheduler.py              # 加权公平调度器
 │   │
-│   └── model_manager.py                   # 🆕 DNN 模型文件管理（下载/缓存/版本）
+│   └── model_manager.py                   # 🆕 模型文件管理（InsightFace 模型下载/缓存/版本）
 │
 ├── domain/
 │   └── models/
@@ -130,6 +148,16 @@ src/iPhoto/
     └── bootstrap.py                       # 修改：注册 AI 子系统的依赖
 ```
 
+### 与旧方案文件差异
+
+| 旧方案（OpenCV DNN） | 方案 B（InsightFace + RapidOCR） | 变更说明 |
+|---------------------|-------------------------------|---------|
+| `face/aligner.py` | *(删除)* | InsightFace `norm_crop` 内置对齐，无需独立实现 |
+| `ocr/text_detector.py` | *(删除)* | RapidOCR 一体化管线，检测+识别合并于 `ocr_engine.py` |
+| `ocr/text_recognizer.py` | *(删除)* | 同上 |
+| `compute_backend.py` (OpenCV DNN) | `compute_backend.py` (ONNX RT EP) | 从 `cv2.dnn.DNN_BACKEND_*` 切换为 ONNX Runtime ExecutionProvider |
+| `model_manager.py` (手动 ONNX 下载) | `model_manager.py` (huggingface-hub) | 支持 InsightFace 模型包 + RapidOCR 内置模型 |
+
 ---
 
 ## 2. 模块依赖关系
@@ -154,13 +182,13 @@ graph TB
     end
 
     subgraph AI["AI 子系统"]
-        FaceDetector["FaceDetector"]
-        FaceRecognizer["FaceRecognizer"]
-        ClusterEngine["ClusteringEngine"]
+        FaceDetector["FaceDetector<br/>(RetinaFace)"]
+        FaceRecognizer["FaceRecognizer<br/>(ArcFace)"]
+        ClusterEngine["ClusteringEngine<br/>(DBSCAN)"]
         ClusterMgr["ClusterManager"]
-        OCREngine["OCREngine"]
-        Backend["ComputeBackend"]
-        ModelMgr["ModelManager"]
+        OCREngine["OCREngine<br/>(RapidOCR)"]
+        Backend["ComputeBackend<br/>(ONNX RT EP)"]
+        ModelMgr["ModelManager<br/>(huggingface-hub)"]
     end
 
     subgraph Workers["Worker 层"]
@@ -227,18 +255,30 @@ graph TB
     ClusterWorker --> EventBus
 ```
 
+### 关键依赖链
+
+```
+insightface.app.FaceAnalysis ──▶ onnxruntime.InferenceSession
+                                         │
+rapidocr.RapidOCR ─────────────▶ onnxruntime.InferenceSession
+                                         │
+                                    ComputeBackend
+                                    (EP 选择: CUDA → OpenVINO → CoreML → CPU)
+```
+
 ---
 
 ## 3. 核心类设计
 
-### 3.1 计算后端抽象
+### 3.1 计算后端抽象（ONNX Runtime EP）
 
 **文件：** `src/iPhoto/ai/compute_backend.py`
+
+与旧方案基于 `cv2.dnn.DNN_BACKEND_*` 不同，方案 B 使用 **ONNX Runtime Execution Provider (EP)** 机制，支持更广泛的硬件加速后端。
 
 ```python
 from enum import Enum
 from dataclasses import dataclass
-import cv2
 import logging
 
 logger = logging.getLogger(__name__)
@@ -246,20 +286,27 @@ logger = logging.getLogger(__name__)
 
 class BackendType(Enum):
     CUDA = "cuda"
-    OPENCL = "opencl"
+    OPENVINO = "openvino"
+    COREML = "coreml"
     CPU = "cpu"
 
 
 @dataclass(frozen=True)
 class ComputeBackendInfo:
     backend_type: BackendType
-    dnn_backend: int          # cv2.dnn.DNN_BACKEND_*
-    dnn_target: int           # cv2.dnn.DNN_TARGET_*
-    device_name: str          # "NVIDIA GeForce RTX 4090" / "CPU"
+    execution_providers: list[str]   # ONNX Runtime EP 列表
+    device_name: str                 # "NVIDIA GeForce RTX 4090" / "CPU"
 
 
 class ComputeBackend:
-    """单例。应用启动时检测一次硬件能力，整个生命周期内复用。"""
+    """单例。应用启动时检测一次硬件能力，整个生命周期内复用。
+
+    基于 ONNX Runtime 的 Execution Provider 机制，支持：
+    - CUDAExecutionProvider (NVIDIA GPU)
+    - OpenVINOExecutionProvider (Intel GPU / CPU)
+    - CoreMLExecutionProvider (Apple Silicon)
+    - CPUExecutionProvider (通用回退)
+    """
 
     _instance: "ComputeBackend | None" = None
     _info: ComputeBackendInfo
@@ -269,6 +316,11 @@ class ComputeBackend:
         if cls._instance is None:
             cls._instance = cls()
         return cls._instance
+
+    @classmethod
+    def reset(cls) -> None:
+        """用于测试：重置单例。"""
+        cls._instance = None
 
     def __init__(self) -> None:
         self._info = self._detect()
@@ -280,94 +332,218 @@ class ComputeBackend:
     def info(self) -> ComputeBackendInfo:
         return self._info
 
-    def configure_net(self, net: cv2.dnn.Net) -> None:
-        """为 DNN 网络设置推理后端。"""
-        net.setPreferableBackend(self._info.dnn_backend)
-        net.setPreferableTarget(self._info.dnn_target)
+    @property
+    def execution_providers(self) -> list[str]:
+        """返回 ONNX Runtime 的 EP 列表，供 InferenceSession 和 insightface 使用。"""
+        return self._info.execution_providers
 
     @staticmethod
     def _detect() -> ComputeBackendInfo:
+        import onnxruntime as ort
+        available_eps = ort.get_available_providers()
+        logger.debug("ONNX Runtime available EPs: %s", available_eps)
+
         # 1. CUDA
-        try:
-            if cv2.cuda.getCudaEnabledDeviceCount() > 0:
-                device = cv2.cuda.getDevice()
-                name = cv2.cuda.printShortCudaDeviceInfo(device)
-                return ComputeBackendInfo(
-                    backend_type=BackendType.CUDA,
-                    dnn_backend=cv2.dnn.DNN_BACKEND_CUDA,
-                    dnn_target=cv2.dnn.DNN_TARGET_CUDA,
-                    device_name=name or f"CUDA Device {device}",
-                )
-        except Exception:
-            logger.debug("CUDA not available, trying OpenCL")
+        if "CUDAExecutionProvider" in available_eps:
+            device_name = _get_cuda_device_name()
+            return ComputeBackendInfo(
+                backend_type=BackendType.CUDA,
+                execution_providers=[
+                    "CUDAExecutionProvider",
+                    "CPUExecutionProvider",
+                ],
+                device_name=device_name,
+            )
 
-        # 2. OpenCL
-        try:
-            if cv2.ocl.haveOpenCL():
-                cv2.ocl.setUseOpenCL(True)
-                return ComputeBackendInfo(
-                    backend_type=BackendType.OPENCL,
-                    dnn_backend=cv2.dnn.DNN_BACKEND_DEFAULT,
-                    dnn_target=cv2.dnn.DNN_TARGET_OPENCL,
-                    device_name="OpenCL Device",
-                )
-        except Exception:
-            logger.debug("OpenCL not available, falling back to CPU")
+        # 2. OpenVINO (Intel)
+        if "OpenVINOExecutionProvider" in available_eps:
+            return ComputeBackendInfo(
+                backend_type=BackendType.OPENVINO,
+                execution_providers=[
+                    "OpenVINOExecutionProvider",
+                    "CPUExecutionProvider",
+                ],
+                device_name="Intel OpenVINO Device",
+            )
 
-        # 3. CPU fallback
+        # 3. CoreML (Apple Silicon)
+        if "CoreMLExecutionProvider" in available_eps:
+            return ComputeBackendInfo(
+                backend_type=BackendType.COREML,
+                execution_providers=[
+                    "CoreMLExecutionProvider",
+                    "CPUExecutionProvider",
+                ],
+                device_name="Apple CoreML",
+            )
+
+        # 4. CPU fallback
         return ComputeBackendInfo(
             backend_type=BackendType.CPU,
-            dnn_backend=cv2.dnn.DNN_BACKEND_OPENCV,
-            dnn_target=cv2.dnn.DNN_TARGET_CPU,
+            execution_providers=["CPUExecutionProvider"],
             device_name="CPU",
         )
+
+
+def _get_cuda_device_name() -> str:
+    """尝试获取 CUDA 设备名称。"""
+    try:
+        import subprocess
+        result = subprocess.run(
+            ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            return result.stdout.strip().split("\n")[0]
+    except Exception:
+        pass
+    return "NVIDIA GPU"
 ```
 
 ---
 
-### 3.2 人脸检测器
+### 3.2 模型管理器
+
+**文件：** `src/iPhoto/ai/model_manager.py`
+
+方案 B 需要管理两类模型：InsightFace 模型包和 RapidOCR 内置模型。
+
+```python
+import logging
+from pathlib import Path
+
+logger = logging.getLogger(__name__)
+
+
+class ModelManager:
+    """AI 模型文件管理器。
+
+    职责：
+    1. 管理 InsightFace 模型包（buffalo_l / buffalo_s）的下载与缓存
+    2. 确认 RapidOCR 内置模型可用（PP-OCRv5 模型随 pip 安装自带）
+    3. 提供统一的模型路径查询接口
+
+    模型存储位置：
+    - InsightFace: ~/.insightface/models/<model_pack>/  (InsightFace 默认)
+    - RapidOCR:    随包安装 (site-packages/rapidocr_onnxruntime/models/)
+    """
+
+    def __init__(self, models_root: Path | None = None) -> None:
+        self._models_root = models_root or Path.home() / ".insightface" / "models"
+
+    @property
+    def models_root(self) -> Path:
+        return self._models_root
+
+    def ensure_insightface_model(self, model_pack: str = "buffalo_l") -> Path:
+        """确保 InsightFace 模型包已下载。
+
+        InsightFace 在首次调用 FaceAnalysis(name=model_pack) 时会自动从
+        官方服务器下载模型包到 ~/.insightface/models/ 目录。
+
+        Args:
+            model_pack: 模型包名称。可选值：
+                - "buffalo_l" (大模型, 检测+识别精度最高, ~326 MB)
+                - "buffalo_s" (小模型, 速度快, ~159 MB)
+                - "buffalo_m" (中等模型, ~234 MB)
+
+        Returns:
+            模型包目录路径。
+        """
+        model_dir = self._models_root / model_pack
+        if model_dir.exists() and any(model_dir.glob("*.onnx")):
+            logger.info("InsightFace model pack '%s' found at %s",
+                        model_pack, model_dir)
+        else:
+            logger.info("InsightFace model pack '%s' will be downloaded "
+                        "on first use to %s", model_pack, model_dir)
+        return model_dir
+
+    def get_model_info(self) -> dict[str, str]:
+        """返回当前使用的模型信息摘要。"""
+        return {
+            "face_detection": "RetinaFace (InsightFace buffalo_l)",
+            "face_recognition": "ArcFace 512-D (InsightFace buffalo_l)",
+            "ocr": "PP-OCRv5 (RapidOCR built-in)",
+            "inference_engine": "ONNX Runtime",
+        }
+```
+
+---
+
+### 3.3 人脸检测器（RetinaFace）
 
 **文件：** `src/iPhoto/ai/face/detector.py`
 
+基于 InsightFace 的 `FaceAnalysis` API，封装人脸检测功能。RetinaFace 在 WIDER FACE hard 子集上达到 **~94% mAP**，显著优于 YuNet 的 ~86%。
+
 ```python
+from __future__ import annotations
+
 from dataclasses import dataclass
 from pathlib import Path
 
-import cv2
 import numpy as np
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
 class DetectedFace:
     """单张检测到的人脸。"""
-    box: tuple[int, int, int, int]   # (x, y, w, h)
-    confidence: float
-    landmarks: np.ndarray | None     # shape (5, 2) — 5-point landmarks
+    box: tuple[int, int, int, int]        # (x, y, w, h) — 边界框
+    confidence: float                      # 检测置信分数
+    landmarks: np.ndarray | None           # shape (5, 2) — 5-point landmarks
+    embedding: np.ndarray | None = None    # shape (512,) — ArcFace embedding (可选)
 
 
 class FaceDetector:
-    """基于 OpenCV cv2.FaceDetectorYN (YuNet) 的人脸检测器。"""
+    """基于 InsightFace FaceAnalysis (RetinaFace) 的人脸检测器。
 
-    def __init__(self, model_path: Path, input_size: tuple[int, int] = (320, 320),
-                 score_threshold: float = 0.7, nms_threshold: float = 0.3,
+    InsightFace 的 FaceAnalysis 封装了完整的检测→对齐→识别管线，
+    但本类仅暴露检测功能，识别由 FaceRecognizer 独立管理。
+
+    核心优势（相比旧方案 YuNet）：
+    - 检测精度更高：RetinaFace ~94% mAP vs YuNet ~86% mAP
+    - 对小脸、遮挡、大角度场景鲁棒性更强
+    - 5-point landmark 精度更高，为后续对齐提供更好基础
+    """
+
+    def __init__(self, model_pack: str = "buffalo_l",
+                 score_threshold: float = 0.7,
+                 input_size: tuple[int, int] = (640, 640),
                  min_face_size: int = 40) -> None:
-        self._model_path = model_path
-        self._input_size = input_size
+        self._model_pack = model_pack
         self._score_threshold = score_threshold
-        self._nms_threshold = nms_threshold
+        self._input_size = input_size
         self._min_face_size = min_face_size
-        self._detector: cv2.FaceDetectorYN | None = None
+        self._app = None  # insightface.app.FaceAnalysis (lazy init)
 
-    def _ensure_loaded(self) -> cv2.FaceDetectorYN:
-        if self._detector is None:
-            self._detector = cv2.FaceDetectorYN.create(
-                model=str(self._model_path),
-                config="",
-                input_size=self._input_size,
-                score_threshold=self._score_threshold,
-                nms_threshold=self._nms_threshold,
+    def _ensure_loaded(self):
+        """延迟加载 InsightFace FaceAnalysis。
+
+        首次调用时自动下载模型包（如尚未缓存）。
+        """
+        if self._app is None:
+            from insightface.app import FaceAnalysis
+            from iPhoto.ai.compute_backend import ComputeBackend
+
+            backend = ComputeBackend.get()
+            providers = backend.execution_providers
+
+            self._app = FaceAnalysis(
+                name=self._model_pack,
+                providers=providers,
             )
-        return self._detector
+            self._app.prepare(
+                ctx_id=0,
+                det_thresh=self._score_threshold,
+                det_size=self._input_size,
+            )
+            logger.info("FaceDetector loaded: model=%s, providers=%s",
+                        self._model_pack, providers)
+        return self._app
 
     def detect(self, image: np.ndarray) -> list[DetectedFace]:
         """检测图片中所有人脸。
@@ -378,30 +554,26 @@ class FaceDetector:
         Returns:
             按 confidence 降序排列的 DetectedFace 列表。
         """
-        detector = self._ensure_loaded()
-        h, w = image.shape[:2]
-        detector.setInputSize((w, h))
+        app = self._ensure_loaded()
 
-        _, raw_detections = detector.detect(image)
-        if raw_detections is None:
-            return []
+        # InsightFace get() 返回 Face 对象列表
+        faces = app.get(image)
 
         results: list[DetectedFace] = []
-        for det in raw_detections:
-            x, y, fw, fh = int(det[0]), int(det[1]), int(det[2]), int(det[3])
-            confidence = float(det[-1])
+        for face in faces:
+            bbox = face.bbox.astype(int)  # [x1, y1, x2, y2]
+            x1, y1, x2, y2 = bbox
+            w, h = x2 - x1, y2 - y1
 
             # 过滤过小人脸
-            if fw < self._min_face_size or fh < self._min_face_size:
+            if w < self._min_face_size or h < self._min_face_size:
                 continue
 
-            # 提取 5-point landmarks
-            landmarks = det[4:14].reshape(5, 2) if len(det) >= 14 else None
-
             results.append(DetectedFace(
-                box=(x, y, fw, fh),
-                confidence=confidence,
-                landmarks=landmarks,
+                box=(x1, y1, w, h),
+                confidence=float(face.det_score),
+                landmarks=face.kps if face.kps is not None else None,
+                embedding=None,  # 由 FaceRecognizer 单独提取
             ))
 
         results.sort(key=lambda f: f.confidence, reverse=True)
@@ -410,60 +582,92 @@ class FaceDetector:
 
 ---
 
-### 3.3 人脸特征提取器
+### 3.4 人脸特征提取器（ArcFace）
 
 **文件：** `src/iPhoto/ai/face/recognizer.py`
 
+基于 InsightFace 的 ArcFace 模型，提取 **512-D L2-normalized** 特征向量。
+在 LFW 基准上达到 **~99.8%** 准确率，显著优于 SFace 的 ~99.0%。
+
 ```python
+from __future__ import annotations
+
 from pathlib import Path
 
-import cv2
 import numpy as np
+import logging
 
-from iPhoto.ai.compute_backend import ComputeBackend
+from iPhoto.ai.face.detector import DetectedFace
+
+logger = logging.getLogger(__name__)
 
 
 class FaceRecognizer:
-    """基于 OpenCV cv2.FaceRecognizerSF (SFace) 的人脸特征提取器。"""
+    """基于 InsightFace ArcFace 的人脸特征提取器。
 
-    ALIGNED_SIZE = (112, 112)
+    核心优势（相比旧方案 SFace）：
+    - 特征维度统一 512-D，精度更高 (LFW 99.8% vs 99.0%)
+    - InsightFace 内置 norm_crop 对齐，无需手动实现 5-point 仿射变换
+    - ONNX Runtime 推理，GPU 加速范围更广
+    """
 
-    def __init__(self, model_path: Path) -> None:
-        self._model_path = model_path
-        self._recognizer: cv2.FaceRecognizerSF | None = None
+    EMBEDDING_DIM = 512
 
-    def _ensure_loaded(self) -> cv2.FaceRecognizerSF:
-        if self._recognizer is None:
-            self._recognizer = cv2.FaceRecognizerSF.create(
-                model=str(self._model_path),
-                config="",
+    def __init__(self, model_pack: str = "buffalo_l") -> None:
+        self._model_pack = model_pack
+        self._app = None  # insightface.app.FaceAnalysis (lazy init)
+
+    def _ensure_loaded(self):
+        if self._app is None:
+            from insightface.app import FaceAnalysis
+            from iPhoto.ai.compute_backend import ComputeBackend
+
+            backend = ComputeBackend.get()
+            providers = backend.execution_providers
+
+            self._app = FaceAnalysis(
+                name=self._model_pack,
+                providers=providers,
             )
-        return self._recognizer
+            # det_size 较小即可，因为此时主要用于提取 embedding
+            self._app.prepare(ctx_id=0, det_size=(640, 640))
+            logger.info("FaceRecognizer loaded: model=%s", self._model_pack)
+        return self._app
 
     def extract_embedding(self, image: np.ndarray,
                           face_box: tuple[int, int, int, int],
-                          landmarks: np.ndarray | None = None) -> np.ndarray:
+                          landmarks: np.ndarray | None = None
+                          ) -> np.ndarray:
         """提取人脸的归一化特征向量。
+
+        使用 InsightFace 的 norm_crop 进行人脸对齐后提取 ArcFace 特征。
 
         Args:
             image: BGR 原图。
             face_box: (x, y, w, h) 人脸检测框。
-            landmarks: 5-point landmarks (可选，用于对齐)。
+            landmarks: shape (5, 2) 的 5-point landmarks (必须提供)。
 
         Returns:
-            L2-normalized float32 向量，shape (1, D)。
+            L2-normalized float32 向量，shape (512,)。
         """
-        recognizer = self._ensure_loaded()
+        app = self._ensure_loaded()
 
-        # 构造 FaceRecognizerSF 期望的检测结果格式
-        x, y, w, h = face_box
-        face_info = np.array([[x, y, w, h]], dtype=np.float32)
-        if landmarks is not None:
-            lm_flat = landmarks.flatten()
-            face_info = np.hstack([face_info, lm_flat.reshape(1, -1)])
+        if landmarks is None:
+            raise ValueError("ArcFace requires 5-point landmarks for alignment")
 
-        aligned_face = recognizer.alignCrop(image, face_info[0])
-        embedding = recognizer.feature(aligned_face)
+        # 使用 insightface 的 norm_crop 进行标准化裁剪
+        from insightface.utils.face_align import norm_crop
+        aligned_face = norm_crop(image, landmarks)
+
+        # 通过 recognition 模型提取 embedding
+        # FaceAnalysis 内部的 recognition model 已在 prepare() 时加载
+        rec_model = app.models.get("recognition", None)
+        if rec_model is None:
+            # 回退：通过 app.get() 获取完整 embedding
+            return self._extract_via_full_pipeline(image, face_box)
+
+        embedding = rec_model.get_feat(aligned_face)
+        embedding = embedding.flatten()
 
         # L2 归一化
         norm = np.linalg.norm(embedding)
@@ -472,17 +676,80 @@ class FaceRecognizer:
 
         return embedding
 
+    def extract_embedding_batch(self, image: np.ndarray,
+                                detected_faces: list[DetectedFace]
+                                ) -> list[np.ndarray]:
+        """批量提取人脸特征向量。
+
+        一次性提取一张图片中所有检测到的人脸的 embedding。
+
+        Args:
+            image: BGR 原图。
+            detected_faces: 该图片中检测到的人脸列表。
+
+        Returns:
+            与 detected_faces 等长的 embedding 列表，shape 各为 (512,)。
+        """
+        return [
+            self.extract_embedding(image, face.box, face.landmarks)
+            for face in detected_faces
+            if face.landmarks is not None
+        ]
+
+    def _extract_via_full_pipeline(self, image: np.ndarray,
+                                   face_box: tuple[int, int, int, int]
+                                   ) -> np.ndarray:
+        """回退方案：使用 FaceAnalysis.get() 获取 embedding。"""
+        app = self._ensure_loaded()
+        faces = app.get(image)
+
+        # 找到与 face_box 最匹配的人脸
+        x, y, w, h = face_box
+        best_face = None
+        best_iou = 0.0
+        for face in faces:
+            bbox = face.bbox.astype(int)
+            iou = _compute_iou((x, y, x + w, y + h),
+                               (bbox[0], bbox[1], bbox[2], bbox[3]))
+            if iou > best_iou:
+                best_iou = iou
+                best_face = face
+
+        if best_face is not None and best_face.embedding is not None:
+            emb = best_face.embedding.flatten()
+            norm = np.linalg.norm(emb)
+            return emb / norm if norm > 0 else emb
+
+        # 无法匹配时返回零向量
+        return np.zeros(self.EMBEDDING_DIM, dtype=np.float32)
+
     @staticmethod
     def cosine_distance(emb1: np.ndarray, emb2: np.ndarray) -> float:
         """计算两个 embedding 之间的余弦距离 [0, 2]。"""
         return 1.0 - float(np.dot(emb1.flatten(), emb2.flatten()))
+
+
+def _compute_iou(box1: tuple, box2: tuple) -> float:
+    """计算两个矩形框的 IoU (Intersection over Union)。"""
+    x1 = max(box1[0], box2[0])
+    y1 = max(box1[1], box2[1])
+    x2 = min(box1[2], box2[2])
+    y2 = min(box1[3], box2[3])
+
+    inter = max(0, x2 - x1) * max(0, y2 - y1)
+    area1 = (box1[2] - box1[0]) * (box1[3] - box1[1])
+    area2 = (box2[2] - box2[0]) * (box2[3] - box2[1])
+    union = area1 + area2 - inter
+    return inter / union if union > 0 else 0.0
 ```
 
 ---
 
-### 3.4 人脸聚类引擎
+### 3.5 人脸聚类引擎
 
 **文件：** `src/iPhoto/ai/face/clustering.py`
+
+聚类引擎与旧方案完全一致——DBSCAN 算法与模型无关，直接操作 embedding 向量。ArcFace 512-D embedding 的质量更高，将直接提升聚类精度。
 
 ```python
 from dataclasses import dataclass
@@ -503,6 +770,7 @@ class FaceClusteringEngine:
     """基于 DBSCAN 的人脸聚类引擎。
 
     使用余弦距离度量，适合 L2-normalized embedding。
+    ArcFace 512-D embedding 的判别力优于 SFace，在相同阈值下聚类纯度更高。
     """
 
     def __init__(self, distance_threshold: float = 0.6,
@@ -582,18 +850,21 @@ class FaceClusteringEngine:
 
 ---
 
-### 3.5 OCR 引擎
+### 3.6 OCR 引擎（RapidOCR）
 
 **文件：** `src/iPhoto/ai/ocr/ocr_engine.py`
 
-```python
-from dataclasses import dataclass
-from pathlib import Path
+基于 RapidOCR（PP-OCRv5）的**一体化** OCR 管线。与旧方案需要分别实现 `text_detector.py` + `text_recognizer.py` + `ocr_engine.py` 三个文件不同，RapidOCR 将检测、方向分类、识别封装为单一 API 调用。
 
-import cv2
+```python
+from __future__ import annotations
+
+from dataclasses import dataclass
+import logging
+
 import numpy as np
 
-from iPhoto.ai.compute_backend import ComputeBackend
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -607,36 +878,46 @@ class OCRResult:
 
 
 class OCREngine:
-    """文字检测 + 识别 Pipeline。
+    """基于 RapidOCR (PP-OCRv5) 的 OCR 引擎。
 
-    检测：EAST / DB 模型
-    识别：CRNN 模型
+    RapidOCR 封装了百度 PaddleOCR 的 ONNX 模型，提供开箱即用的：
+    - 文字区域检测 (DBNet++ / PP-OCRv5 Det)
+    - 方向分类 (Text Angle Classification)
+    - 文字识别 (CRNN++ / PP-OCRv5 Rec)
+
+    核心优势（相比旧方案 EAST + CRNN）：
+    - 中文 OCR 精度：95%+ vs 80-85% (+10-15%)
+    - 弯曲文本、旋转文本支持更好
+    - 多语言支持：中/英/日/韩/法/德等 80+ 种语言
+    - 无需手动实现裁剪、旋转校正、CTC 解码等
     """
 
-    def __init__(self, detector_model_path: Path,
-                 recognizer_model_path: Path,
+    def __init__(self,
                  confidence_threshold: float = 0.5,
-                 nms_threshold: float = 0.4,
+                 use_angle_cls: bool = True,
                  languages: list[str] | None = None) -> None:
-        self._detector_path = detector_model_path
-        self._recognizer_path = recognizer_model_path
         self._conf_threshold = confidence_threshold
-        self._nms_threshold = nms_threshold
-        self._languages = languages or ["eng", "chi_sim"]
+        self._use_angle_cls = use_angle_cls
+        self._languages = languages or ["ch", "en"]
+        self._engine = None  # rapidocr.RapidOCR (lazy init)
 
-        self._detector: cv2.dnn.Net | None = None
-        self._recognizer: cv2.dnn.Net | None = None
+    def _ensure_loaded(self):
+        """延迟加载 RapidOCR 引擎。
 
-    def _ensure_loaded(self) -> None:
-        backend = ComputeBackend.get()
+        RapidOCR 模型随 pip 安装自带（位于 site-packages），
+        无需额外下载。
+        """
+        if self._engine is None:
+            from rapidocr_onnxruntime import RapidOCR
+            from iPhoto.ai.compute_backend import ComputeBackend
 
-        if self._detector is None:
-            self._detector = cv2.dnn.readNet(str(self._detector_path))
-            backend.configure_net(self._detector)
+            backend = ComputeBackend.get()
 
-        if self._recognizer is None:
-            self._recognizer = cv2.dnn.readNet(str(self._recognizer_path))
-            backend.configure_net(self._recognizer)
+            # RapidOCR 支持通过参数指定 ONNX Runtime providers
+            self._engine = RapidOCR()
+            logger.info("OCREngine loaded: PP-OCRv5, providers=%s",
+                        backend.execution_providers)
+        return self._engine
 
     def process(self, image: np.ndarray) -> list[OCRResult]:
         """对图片执行文字检测 + 识别。
@@ -647,72 +928,77 @@ class OCREngine:
         Returns:
             按位置排序（上到下、左到右）的 OCRResult 列表。
         """
-        self._ensure_loaded()
-        assert self._detector is not None
-        assert self._recognizer is not None
+        engine = self._ensure_loaded()
 
-        # --- 第一阶段：文字区域检测 ---
-        regions = self._detect_text_regions(image)
+        # RapidOCR 一次调用完成检测+方向分类+识别
+        result, _ = engine(image)
 
-        # --- 第二阶段：逐区域识别 ---
-        results: list[OCRResult] = []
-        for (x, y, w, h, angle) in regions:
-            cropped = self._crop_region(image, x, y, w, h, angle)
-            text, confidence, lang = self._recognize_text(cropped)
+        if result is None:
+            return []
 
-            if confidence >= self._conf_threshold and text.strip():
-                results.append(OCRResult(
-                    box=(x, y, w, h),
-                    text=text.strip(),
-                    confidence=confidence,
-                    language=lang,
-                    rotation_angle=angle,
-                ))
+        ocr_results: list[OCRResult] = []
+        for item in result:
+            # RapidOCR 返回格式: [box_points, text, confidence]
+            box_points, text, confidence = item
+
+            if confidence < self._conf_threshold or not text.strip():
+                continue
+
+            # 将多边形坐标转换为 (x, y, w, h) 矩形框
+            box = self._polygon_to_rect(box_points)
+
+            # 计算旋转角度
+            angle = self._estimate_rotation(box_points)
+
+            ocr_results.append(OCRResult(
+                box=box,
+                text=text.strip(),
+                confidence=float(confidence),
+                language=self._detect_language(text),
+                rotation_angle=angle,
+            ))
 
         # 排序：上到下、左到右
-        results.sort(key=lambda r: (r.box[1], r.box[0]))
-        return results
+        ocr_results.sort(key=lambda r: (r.box[1], r.box[0]))
+        return ocr_results
 
-    def _detect_text_regions(self, image: np.ndarray
-                             ) -> list[tuple[int, int, int, int, float]]:
-        """EAST 文字区域检测。返回 (x, y, w, h, angle) 列表。"""
-        # 实现细节：使用 EAST 输出的 scores + geometry
-        # 省略完整实现，关键步骤：
-        # 1. 将图像 resize 到 320x320（或 EAST 输入尺寸）
-        # 2. 前向推理获取 scores 和 geometry
-        # 3. NMS 去重
-        # 4. 映射回原图坐标
-        ...  # 实际实现时填充
-        return []
+    @staticmethod
+    def _polygon_to_rect(box_points) -> tuple[int, int, int, int]:
+        """将 4 点多边形坐标转为 (x, y, w, h) 矩形框。
 
-    def _crop_region(self, image: np.ndarray,
-                     x: int, y: int, w: int, h: int,
-                     angle: float) -> np.ndarray:
-        """裁剪并旋转校正文字区域。"""
-        if abs(angle) < 1.0:
-            return image[y:y+h, x:x+w]
+        box_points: [[x1,y1], [x2,y2], [x3,y3], [x4,y4]] — 顺时针 4 点
+        """
+        pts = np.array(box_points, dtype=np.int32)
+        x_min, y_min = pts.min(axis=0)
+        x_max, y_max = pts.max(axis=0)
+        return (int(x_min), int(y_min), int(x_max - x_min), int(y_max - y_min))
 
-        center = (x + w // 2, y + h // 2)
-        mat = cv2.getRotationMatrix2D(center, angle, 1.0)
-        rotated = cv2.warpAffine(image, mat, (image.shape[1], image.shape[0]))
-        return rotated[y:y+h, x:x+w]
+    @staticmethod
+    def _estimate_rotation(box_points) -> float:
+        """从多边形 4 点估算文字旋转角度。"""
+        pts = np.array(box_points, dtype=np.float32)
+        # 使用上边缘的倾斜角度
+        dx = pts[1][0] - pts[0][0]
+        dy = pts[1][1] - pts[0][1]
+        angle = float(np.degrees(np.arctan2(dy, dx)))
+        return angle
 
-    def _recognize_text(self, region: np.ndarray
-                        ) -> tuple[str, float, str]:
-        """CRNN 文字识别。返回 (text, confidence, language)。"""
-        # 实现细节：
-        # 1. resize 到 CRNN 输入尺寸 (100x32)
-        # 2. 前向推理获取序列输出
-        # 3. CTC 解码得到文字
-        ...  # 实际实现时填充
-        return ("", 0.0, "eng")
+    @staticmethod
+    def _detect_language(text: str) -> str:
+        """简单语言检测：基于字符 Unicode 范围。"""
+        cjk_count = sum(1 for c in text if '\u4e00' <= c <= '\u9fff')
+        if cjk_count > len(text) * 0.3:
+            return "chi_sim"
+        return "eng"
 ```
 
 ---
 
-### 3.6 数据库仓储层
+### 3.7 数据库仓储层
 
 **文件：** `src/iPhoto/ai/db/face_repository.py`
+
+数据库仓储层与旧方案设计完全一致——数据库操作与模型无关。唯一区别是 `embedding_model` 和 `detector_model` 默认值变更为 `'ArcFace_buffalo_l'` 和 `'RetinaFace_buffalo_l'`。
 
 ```python
 import sqlite3
@@ -902,9 +1188,11 @@ class FaceRepository:
 
 ---
 
-### 3.7 任务队列与 Worker
+### 3.8 任务队列与 Worker
 
 **文件：** `src/iPhoto/ai/workers/face_worker.py`
+
+Worker 架构与旧方案一致，但内部调用从 `cv2.FaceDetectorYN` / `cv2.FaceRecognizerSF` 替换为 InsightFace API。
 
 ```python
 import logging
@@ -927,6 +1215,7 @@ class FaceWorker(threading.Thread):
     """人脸检测 + 特征提取 Worker 线程。
 
     从 face_queue 表取任务，处理后写入 faces 表。
+    使用 InsightFace (RetinaFace + ArcFace) 完成检测和特征提取。
     """
 
     def __init__(self, worker_id: int,
@@ -975,12 +1264,16 @@ class FaceWorker(threading.Thread):
 
         # 获取 GPU 时间片
         with self._gpu_sem:
+            # 检测人脸
             faces = self._detector.detect(image)
+
+            # 批量提取 embedding
             for face in faces:
-                embedding = self._recognizer.extract_embedding(
-                    image, face.box, face.landmarks
-                )
-                self._save_face(asset_rel, face, embedding, image.shape)
+                if face.landmarks is not None:
+                    embedding = self._recognizer.extract_embedding(
+                        image, face.box, face.landmarks
+                    )
+                    self._save_face(asset_rel, face, embedding, image.shape)
 
     def _save_face(self, asset_rel: str, face, embedding: np.ndarray,
                    image_shape: tuple) -> None:
@@ -997,13 +1290,13 @@ class FaceWorker(threading.Thread):
             confidence=face.confidence,
             embedding=embedding,
             embedding_dim=embedding.shape[-1],
-            embedding_model="SFace_v2",
+            embedding_model="ArcFace_buffalo_l",
             thumbnail_path=None,
             quality_score=None,
             person_id=None,
             is_key_face=False,
             detected_at=datetime.now(timezone.utc).isoformat(),
-            detector_model="YuNet_v3",
+            detector_model="RetinaFace_buffalo_l",
             image_width=image_shape[1],
             image_height=image_shape[0],
         )
@@ -1012,9 +1305,11 @@ class FaceWorker(threading.Thread):
 
 ---
 
-### 3.8 资源调度器
+### 3.9 资源调度器
 
 **文件：** `src/iPhoto/ai/scheduler/resource_governor.py`
+
+资源调度器与旧方案完全一致——与模型选型无关。
 
 ```python
 import os
@@ -1294,16 +1589,19 @@ OCRWorker 取任务(asset_rel)
 cv2.imread(library_root / asset_rel)
     │
     ▼
-EAST 文字检测模型 → 文字区域列表 [(x,y,w,h,angle), ...]
+RapidOCR 一体化管线 (PP-OCRv5):
+    ├── 文字区域检测 (DBNet++)
+    ├── 方向分类 (Angle Classifier)
+    └── 文字识别 (CRNN++)
     │
     ▼
-逐区域裁剪 + 旋转校正
-    │
-    ▼
-CRNN 文字识别 → (text, confidence, language)
+返回 [(box_points, text, confidence), ...]
     │
     ▼
 过滤低置信度 (< threshold)
+    │
+    ▼
+多边形坐标转矩形 (x, y, w, h) + 旋转角度
     │
     ▼
 写入 ocr_regions 表
@@ -1654,9 +1952,11 @@ class OCRRepository:
 
 ---
 
-## 8. CUDA / CPU 后端选择
+## 8. ONNX Runtime 硬件后端选择
 
 ### 检测流程
+
+与旧方案依赖 `cv2.dnn.DNN_BACKEND_*` 不同，方案 B 通过 ONNX Runtime 的 **Execution Provider (EP)** 机制统一管理多种硬件加速后端。
 
 ```
 应用启动
@@ -1664,50 +1964,80 @@ class OCRRepository:
     ▼
 ComputeBackend._detect()
     │
-    ├── cv2.cuda.getCudaEnabledDeviceCount() > 0 ?
+    ├── ort.get_available_providers()
+    │   检查已安装的 ONNX Runtime EP
+    │
+    ├── "CUDAExecutionProvider" in available ?
     │   ├── YES → BackendType.CUDA
-    │   │         DNN_BACKEND_CUDA + DNN_TARGET_CUDA
-    │   │         ✓ 验证推理（小图测试）
-    │   │         ├── 成功 → 使用 CUDA
-    │   │         └── 失败 → 降级到下一级
+    │   │         providers=["CUDAExecutionProvider", "CPUExecutionProvider"]
+    │   │         ✓ nvidia-smi 获取 GPU 名称
     │   └── NO ↓
     │
-    ├── cv2.ocl.haveOpenCL() ?
-    │   ├── YES → BackendType.OPENCL
-    │   │         DNN_BACKEND_DEFAULT + DNN_TARGET_OPENCL
+    ├── "OpenVINOExecutionProvider" in available ?
+    │   ├── YES → BackendType.OPENVINO
+    │   │         providers=["OpenVINOExecutionProvider", "CPUExecutionProvider"]
+    │   └── NO ↓
+    │
+    ├── "CoreMLExecutionProvider" in available ?
+    │   ├── YES → BackendType.COREML
+    │   │         providers=["CoreMLExecutionProvider", "CPUExecutionProvider"]
     │   └── NO ↓
     │
     └── BackendType.CPU
-        DNN_BACKEND_OPENCV + DNN_TARGET_CPU
+        providers=["CPUExecutionProvider"]
 ```
 
-### OpenCV CUDA 构建要求
+### 支持的硬件后端
 
-要使用 CUDA 加速，需要从源码编译 OpenCV 或使用预编译的 CUDA 版本：
+| 后端 | Python 包 | 适用平台 | 性能预期 |
+|------|-----------|---------|---------|
+| CUDA | `onnxruntime-gpu` | NVIDIA GPU (CUDA 11.8+) | ~15 ms/张 (人脸) |
+| OpenVINO | `onnxruntime-openvino` | Intel GPU / CPU | ~30 ms/张 (人脸) |
+| CoreML | `onnxruntime` (内置) | Apple Silicon (M1/M2/M3) | ~20 ms/张 (人脸) |
+| CPU | `onnxruntime` | 通用回退 | ~100 ms/张 (人脸) |
+
+### 安装指南
 
 ```bash
-# pip 安装标准版（不含 CUDA）
-pip install opencv-python-headless
+# CPU 版本（通用）
+pip install onnxruntime
 
-# 如需 CUDA 支持，需从源码编译：
-# cmake -D WITH_CUDA=ON -D CUDA_TOOLKIT_ROOT_DIR=/usr/local/cuda ...
-# 或使用社区预编译包：
-# pip install opencv-contrib-python-headless  # 部分预编译版含 CUDA
+# CUDA GPU 加速（NVIDIA）
+pip install onnxruntime-gpu
+
+# OpenVINO 加速（Intel）
+pip install onnxruntime-openvino
+
+# Apple Silicon 自动使用 CoreML（内置于 onnxruntime macOS 版）
+pip install onnxruntime  # macOS ARM64 构建自带 CoreML EP
 ```
 
-配置文件中声明后端偏好，运行时自动检测：
+### EP 传递方式
+
+ONNX Runtime EP 通过 `ComputeBackend.execution_providers` 属性传递给 InsightFace 和 RapidOCR：
 
 ```python
-# src/iPhoto/ai/config.py
-AI_CONFIG = {
-    "preferred_backend": "auto",   # "auto" | "cuda" | "cpu"
-    "cuda_device_id": 0,
-    "face_detection_model": "face_detection_yunet_2023mar.onnx",
-    "face_recognition_model": "face_recognition_sface_2021dec.onnx",
-    "text_detection_model": "frozen_east_text_detection.pb",
-    "text_recognition_model": "crnn_cs_CN.onnx",
-}
+# InsightFace 使用 providers 参数
+from insightface.app import FaceAnalysis
+backend = ComputeBackend.get()
+app = FaceAnalysis(name="buffalo_l", providers=backend.execution_providers)
+
+# RapidOCR 通过 onnxruntime 内部自动检测 EP
+# （RapidOCR 使用 ort.InferenceSession，会自动选择最优 EP）
+from rapidocr_onnxruntime import RapidOCR
+engine = RapidOCR()
 ```
+
+### 与旧方案对比
+
+| 特性 | 旧方案 (OpenCV DNN) | 方案 B (ONNX RT EP) |
+|------|---------------------|---------------------|
+| GPU 后端数 | 2 (CUDA, OpenCL) | 6+ (CUDA, OpenVINO, CoreML, ARM NN, MIGraphX, RKNN) |
+| NVIDIA 加速 | 需源码编译 OpenCV | `pip install onnxruntime-gpu` 即可 |
+| Intel 加速 | 仅 OpenCL (有限) | OpenVINO EP (原生优化) |
+| Apple Silicon | ❌ 不支持 | ✅ CoreML EP (原生支持) |
+| ARM 设备 | ❌ 不支持 | ✅ ARM NN EP |
+| 配置方式 | `cv2.dnn.setPreferableBackend()` | `ort.InferenceSession(providers=[...])` |
 
 ---
 
@@ -1794,33 +2124,36 @@ from dataclasses import dataclass, field
 
 @dataclass
 class AIConfig:
-    """AI 子系统配置。"""
+    """AI 子系统配置（方案 B — InsightFace + RapidOCR）。"""
 
     # ── 后端 ──
-    preferred_backend: str = "auto"          # "auto" | "cuda" | "cpu"
+    preferred_backend: str = "auto"          # "auto" | "cuda" | "openvino" | "coreml" | "cpu"
     cuda_device_id: int = 0
 
-    # ── 人脸检测 ──
-    face_detection_model: str = "face_detection_yunet_2023mar.onnx"
-    face_score_threshold: float = 0.7
-    face_nms_threshold: float = 0.3
+    # ── 人脸检测 (InsightFace RetinaFace) ──
+    face_model_pack: str = "buffalo_l"       # InsightFace 模型包名
+                                             # "buffalo_l" (高精度, ~326 MB)
+                                             # "buffalo_s" (轻量, ~159 MB)
+                                             # "buffalo_m" (平衡, ~234 MB)
+    face_score_threshold: float = 0.7        # 检测置信阈值
+    face_det_input_size: tuple[int, int] = (640, 640)  # 检测输入尺寸
     min_face_size: int = 40                  # 最小人脸边长（像素）
     blur_threshold: float = 50.0             # Laplacian 方差阈值（低于此值视为模糊）
     face_thumbnail_size: tuple[int, int] = (160, 160)
 
-    # ── 人脸识别 ──
-    face_recognition_model: str = "face_recognition_sface_2021dec.onnx"
+    # ── 人脸识别 (InsightFace ArcFace) ──
+    # 识别模型随 model_pack 指定，无需单独配置
+    face_embedding_dim: int = 512            # ArcFace 输出维度
 
     # ── 聚类 ──
-    clustering_algorithm: str = "dbscan"     # "dbscan" | "chinese_whispers"
+    clustering_algorithm: str = "dbscan"     # "dbscan"
     clustering_distance_threshold: float = 0.6
     clustering_min_samples: int = 2
 
-    # ── OCR ──
-    text_detection_model: str = "frozen_east_text_detection.pb"
-    text_recognition_model: str = "crnn_cs_CN.onnx"
+    # ── OCR (RapidOCR PP-OCRv5) ──
     ocr_confidence_threshold: float = 0.5
-    ocr_languages: list[str] = field(default_factory=lambda: ["eng", "chi_sim"])
+    ocr_use_angle_cls: bool = True           # 启用方向分类
+    ocr_languages: list[str] = field(default_factory=lambda: ["ch", "en"])
 
     # ── Worker ──
     face_worker_weight: float = 0.6          # CPU 分配权重
@@ -1832,13 +2165,30 @@ class AIConfig:
 
     # ── 模型管理 ──
     models_dir_name: str = "models"          # 相对于 .iPhoto/ 的模型目录
+    insightface_root: str = "~/.insightface/models"  # InsightFace 模型缓存根目录
 ```
+
+### 与旧方案配置差异
+
+| 配置项 | 旧方案值 | 方案 B 值 | 说明 |
+|--------|---------|-----------|------|
+| `face_detection_model` | `"face_detection_yunet_2023mar.onnx"` | *(删除)* 由 `face_model_pack` 替代 | InsightFace 自动管理模型文件 |
+| `face_recognition_model` | `"face_recognition_sface_2021dec.onnx"` | *(删除)* 由 `face_model_pack` 替代 | 同上 |
+| `text_detection_model` | `"frozen_east_text_detection.pb"` | *(删除)* RapidOCR 内置 | PP-OCRv5 模型随 pip 安装自带 |
+| `text_recognition_model` | `"crnn_cs_CN.onnx"` | *(删除)* RapidOCR 内置 | 同上 |
+| `preferred_backend` | `"auto" \| "cuda" \| "cpu"` | `"auto" \| "cuda" \| "openvino" \| "coreml" \| "cpu"` | 更多硬件后端 |
+| *(新增)* `face_model_pack` | — | `"buffalo_l"` | InsightFace 模型包选择 |
+| *(新增)* `face_det_input_size` | — | `(640, 640)` | RetinaFace 输入尺寸 |
+| *(新增)* `ocr_use_angle_cls` | — | `True` | RapidOCR 方向分类 |
+| *(新增)* `insightface_root` | — | `"~/.insightface/models"` | 模型缓存路径 |
 
 ---
 
 ## 11. 数据库迁移策略
 
 遵循 iPhotron 现有的 `migrations.py` 模式，为每个 AI 数据库创建独立的迁移脚本。
+
+与旧方案唯一区别：`embedding_model` 和 `detector_model` 的默认值更新为 InsightFace 模型名称。
 
 ```python
 # src/iPhoto/ai/db/face_database.py
@@ -1856,13 +2206,13 @@ FACE_DB_MIGRATIONS = [
         confidence     REAL NOT NULL,
         embedding      BLOB NOT NULL,
         embedding_dim  INTEGER NOT NULL DEFAULT 512,
-        embedding_model TEXT NOT NULL DEFAULT 'SFace_v2',
+        embedding_model TEXT NOT NULL DEFAULT 'ArcFace_buffalo_l',
         thumbnail_path TEXT,
         quality_score  REAL,
         person_id      TEXT REFERENCES persons(person_id),
         is_key_face    INTEGER NOT NULL DEFAULT 0,
         detected_at    TEXT NOT NULL,
-        detector_model TEXT NOT NULL DEFAULT 'YuNet_v3',
+        detector_model TEXT NOT NULL DEFAULT 'RetinaFace_buffalo_l',
         image_width    INTEGER,
         image_height   INTEGER
     );
@@ -1930,7 +2280,7 @@ OCR_DB_MIGRATIONS = [
         confidence     REAL NOT NULL,
         language       TEXT NOT NULL DEFAULT 'eng',
         rotation_angle REAL DEFAULT 0.0,
-        ocr_model      TEXT NOT NULL DEFAULT 'CRNN_v1',
+        ocr_model      TEXT NOT NULL DEFAULT 'PP-OCRv5',
         detected_at    TEXT NOT NULL,
         image_width    INTEGER,
         image_height   INTEGER
@@ -1978,47 +2328,222 @@ OCR_DB_MIGRATIONS = [
 ]
 ```
 
+### 与旧方案数据库差异
+
+| 字段 | 旧方案默认值 | 方案 B 默认值 |
+|------|-------------|-------------|
+| `faces.embedding_model` | `'SFace_v2'` | `'ArcFace_buffalo_l'` |
+| `faces.detector_model` | `'YuNet_v3'` | `'RetinaFace_buffalo_l'` |
+| `ocr_regions.ocr_model` | `'CRNN_v1'` | `'PP-OCRv5'` |
+
+> **注意**：表结构和索引设计与旧方案完全一致，仅模型名称默认值不同。
+
 ---
 
-## 12. 测试策略
+## 12. 依赖管理策略
+
+### pyproject.toml 配置
+
+方案 B 的新增依赖应加入 `[project.optional-dependencies]`，避免强制所有用户安装 AI 功能：
+
+```toml
+[project.optional-dependencies]
+ai = [
+    "insightface>=0.7.3,<1.0",
+    "onnxruntime>=1.17.0,<2",
+    "rapidocr-onnxruntime>=1.3.0,<2",
+    "scikit-learn>=1.4,<2",
+]
+ai-gpu = [
+    "insightface>=0.7.3,<1.0",
+    "onnxruntime-gpu>=1.17.0,<2",
+    "rapidocr-onnxruntime>=1.3.0,<2",
+    "scikit-learn>=1.4,<2",
+]
+```
+
+### 安装方式
+
+```bash
+# CPU 版本
+pip install -e '.[ai]'
+
+# NVIDIA GPU 加速版本
+pip install -e '.[ai-gpu]'
+```
+
+### 包体积预估
+
+| 组件 | CPU 安装 | GPU 安装 |
+|------|---------|---------|
+| `insightface` | ~50 MB | ~50 MB |
+| `onnxruntime` / `onnxruntime-gpu` | ~50 MB | ~300 MB |
+| `rapidocr-onnxruntime` | ~30 MB | ~30 MB |
+| `scikit-learn` | ~30 MB | ~30 MB |
+| **合计** | **~160 MB** | **~410 MB** |
+| 模型文件 (首次下载) | ~326 MB (buffalo_l) | ~326 MB |
+| **总计（含模型）** | **~486 MB** | **~736 MB** |
+
+### 延迟加载策略
+
+所有 AI 依赖采用延迟导入（在 `_ensure_loaded()` 方法内），确保：
+
+1. **未安装 AI 依赖时**：iPhotron 主功能（相册管理、编辑等）正常运行，AI 功能灰显
+2. **首次使用 AI 功能时**：检测依赖可用性，缺失时提示用户安装
+3. **模型首次使用时**：自动下载并缓存（InsightFace 模型从官方服务器下载）
+
+```python
+# 延迟导入示例 — 不阻塞应用启动
+def _ensure_loaded(self):
+    if self._app is None:
+        try:
+            from insightface.app import FaceAnalysis
+        except ImportError:
+            raise RuntimeError(
+                "AI dependencies not installed. "
+                "Please run: pip install -e '.[ai]'"
+            )
+        # ...
+```
+
+---
+
+## 13. 测试策略
 
 ### 单元测试
 
 | 模块 | 测试重点 | 目录 |
 |------|---------|------|
-| `FaceDetector` | 检测已知图片中的人脸数量和位置 | `tests/ai/face/test_detector.py` |
-| `FaceRecognizer` | 同一人的 embedding 距离 < 阈值；不同人 > 阈值 | `tests/ai/face/test_recognizer.py` |
+| `FaceDetector` | 检测已知图片中的人脸数量和位置；InsightFace API 调用正确性 | `tests/ai/face/test_detector.py` |
+| `FaceRecognizer` | 同一人的 embedding 距离 < 阈值；不同人 > 阈值；norm_crop 对齐正确 | `tests/ai/face/test_recognizer.py` |
 | `FaceClusteringEngine` | DBSCAN 输出正确聚类数和标签 | `tests/ai/face/test_clustering.py` |
 | `ClusterManager` | 合并/拆分/移动操作后数据一致性 | `tests/ai/face/test_cluster_manager.py` |
-| `OCREngine` | 已知文字图片的识别结果匹配 | `tests/ai/ocr/test_ocr_engine.py` |
+| `OCREngine` | RapidOCR 已知文字图片的识别结果匹配；多语言测试 | `tests/ai/ocr/test_ocr_engine.py` |
 | `FaceRepository` | CRUD 操作、事务回滚、去重 | `tests/ai/db/test_face_repository.py` |
 | `OCRRepository` | CRUD + FTS5 搜索 | `tests/ai/db/test_ocr_repository.py` |
 | `ResourceGovernor` | Worker 数量计算正确性 | `tests/ai/scheduler/test_resource_governor.py` |
-| `ComputeBackend` | CPU 回退逻辑 | `tests/ai/test_compute_backend.py` |
+| `ComputeBackend` | ONNX Runtime EP 检测逻辑；CPU 回退 | `tests/ai/test_compute_backend.py` |
+| `ModelManager` | InsightFace 模型路径解析；缓存检测 | `tests/ai/test_model_manager.py` |
 
 ### 集成测试
 
 | 测试项 | 验证内容 |
 |--------|---------|
-| 端到端人脸 Pipeline | 图片 → 检测 → 提取 → 入库 → 聚类 → 查询 |
-| 端到端 OCR Pipeline | 图片 → 检测 → 识别 → 入库 → FTS 搜索 |
+| 端到端人脸 Pipeline | 图片 → RetinaFace 检测 → ArcFace 提取 → 入库 → 聚类 → 查询 |
+| 端到端 OCR Pipeline | 图片 → RapidOCR 识别 → 入库 → FTS 搜索 |
 | 多 Worker 并发 | 多个 Worker 同时处理，无死锁、无数据竞争 |
 | 主队列隔离 | AI Worker 满载时主库扫描速率无显著下降 |
 | 应用重启恢复 | 杀掉进程后重启，未完成任务自动继续 |
+| GPU/CPU 回退 | GPU 不可用时自动回退到 CPU，功能正常 |
+
+### Mock 策略
+
+由于 InsightFace 和 RapidOCR 模型文件较大（~326 MB），CI 环境中使用 Mock：
+
+```python
+# tests/ai/conftest.py
+import pytest
+from unittest.mock import MagicMock, patch
+import numpy as np
+
+
+@pytest.fixture
+def mock_face_detector():
+    """Mock InsightFace FaceAnalysis for unit tests."""
+    with patch("insightface.app.FaceAnalysis") as mock_cls:
+        mock_app = MagicMock()
+        mock_cls.return_value = mock_app
+
+        # 模拟检测结果
+        mock_face = MagicMock()
+        mock_face.bbox = np.array([100, 100, 200, 200])
+        mock_face.det_score = 0.95
+        mock_face.kps = np.array([
+            [130, 130], [170, 130],  # 左眼、右眼
+            [150, 160],              # 鼻尖
+            [130, 180], [170, 180],  # 左嘴角、右嘴角
+        ])
+        mock_face.embedding = np.random.randn(512).astype(np.float32)
+        mock_app.get.return_value = [mock_face]
+
+        yield mock_app
+
+
+@pytest.fixture
+def mock_ocr_engine():
+    """Mock RapidOCR for unit tests."""
+    with patch("rapidocr_onnxruntime.RapidOCR") as mock_cls:
+        mock_engine = MagicMock()
+        mock_cls.return_value = mock_engine
+
+        # 模拟 OCR 结果
+        mock_engine.return_value = (
+            [
+                ([[10, 10], [100, 10], [100, 30], [10, 30]], "Hello World", 0.95),
+                ([[10, 50], [100, 50], [100, 70], [10, 70]], "测试文字", 0.88),
+            ],
+            None,
+        )
+        yield mock_engine
+```
 
 ---
 
-## 13. 开发里程碑
+## 14. 开发里程碑
+
+方案 B 预计总开发周期 **~11 周**，相比旧方案 (~12.5 周) 缩短约 1.5 周，主要得益于：
+- InsightFace 封装完整管线，省去对齐器开发 (~0.5 周)
+- RapidOCR 一体化 API，省去 EAST+CRNN 分步集成 (~1 周)
 
 | 阶段 | 内容 | 预计周期 |
 |------|------|---------|
-| **M1: 基础设施** | ComputeBackend、ModelManager、AI 数据库创建与迁移、配置系统 | 1 周 |
-| **M2: 人脸检测** | FaceDetector、FaceRecognizer、FaceWorker、face_queue | 1.5 周 |
-| **M3: 人脸聚类** | ClusteringEngine、ClusteringWorker、增量聚类 | 1 周 |
+| **M1: 基础设施** | ComputeBackend (ONNX RT EP)、ModelManager (InsightFace 模型管理)、AI 数据库创建与迁移、AIConfig | 1 周 |
+| **M2: 人脸检测+识别** | FaceDetector (RetinaFace)、FaceRecognizer (ArcFace)、FaceWorker、face_queue | 1 周 |
+| **M3: 人脸聚类** | ClusteringEngine (DBSCAN)、ClusteringWorker、增量聚类 | 1 周 |
 | **M4: 聚类管理** | ClusterManager (合并/拆分/移动/命名)、操作日志、撤销 | 1 周 |
-| **M5: OCR** | OCREngine、OCRWorker、ocr_queue、FTS5 索引 | 1.5 周 |
+| **M5: OCR** | OCREngine (RapidOCR PP-OCRv5)、OCRWorker、ocr_queue、FTS5 索引 | 0.5 周 |
 | **M6: 搜索集成** | SearchByTextUseCase、SearchViewModel 改造、跨库查询 | 0.5 周 |
 | **M7: GUI** | PeopleWindow、FaceGridWidget、PersonCard、合并/拆分对话框 | 2 周 |
 | **M8: 资源调度** | ResourceGovernor、GPUSemaphore、FairScheduler、背压 | 1 周 |
-| **M9: 测试与优化** | 单元/集成测试、性能调优、内存优化 | 1.5 周 |
-| **M10: 文档与发布** | 用户文档、CHANGELOG、版本发布 | 0.5 周 |
+| **M9: 测试与优化** | 单元/集成测试、性能调优、内存优化、多平台验证 | 1.5 周 |
+| **M10: 文档与发布** | 用户文档、CHANGELOG、依赖安装指南、版本发布 | 0.5 周 |
+
+### 与旧方案里程碑差异
+
+| 阶段 | 旧方案 | 方案 B | 差异原因 |
+|------|--------|--------|---------|
+| M1 基础设施 | 1 周 | 1 周 | ONNX RT EP 替代 OpenCV DNN 后端，工作量相当 |
+| M2 人脸检测+识别 | 1.5 周 | **1 周** | InsightFace API 更简洁，内置对齐，省 0.5 周 |
+| M5 OCR | 1.5 周 | **0.5 周** | RapidOCR 一体化管线，省去 EAST+CRNN 分步实现 |
+| 总计 | ~12.5 周 | **~11 周** | 节省 ~1.5 周 |
+
+### 里程碑依赖关系
+
+```mermaid
+gantt
+    title 方案 B 开发甘特图
+    dateFormat  YYYY-MM-DD
+    axisFormat  %m-%d
+
+    section 基础设施
+    M1 ComputeBackend + DB + Config    :m1, 2026-03-10, 7d
+
+    section 人脸识别
+    M2 FaceDetector + FaceRecognizer   :m2, after m1, 7d
+    M3 Clustering Engine               :m3, after m2, 7d
+    M4 Cluster Management              :m4, after m3, 7d
+
+    section OCR
+    M5 OCR Engine (RapidOCR)           :m5, after m1, 4d
+    M6 Search Integration              :m6, after m5, 4d
+
+    section GUI
+    M7 GUI Components                  :m7, after m4, 14d
+
+    section 系统
+    M8 Resource Scheduling             :m8, after m2, 7d
+    M9 Testing & Optimization          :m9, after m7, 10d
+    M10 Documentation & Release        :m10, after m9, 4d
+```
+
+> **注意**：M5 (OCR) 与 M2-M4 (人脸) 可以**并行开发**，两条管线共享基础设施 (M1) 但互不依赖。

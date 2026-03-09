@@ -100,6 +100,19 @@ class WindowThemeController(QObject):
         disabled_fg = colors.text_disabled.name()
         outline_color = colors.border_color.name()
 
+        # Semi-transparent hover/pressed backgrounds derived from the text
+        # colour.  On dark themes (white text) these produce a subtle light
+        # overlay; on light themes (black text) they produce a subtle dark
+        # overlay.  Explicit pseudo-state rules prevent the native platform
+        # style from rendering its own hover highlight which, on Linux with
+        # WA_TranslucentBackground, composites as an opaque black rectangle.
+        _hover_bg = QColor(colors.text_primary)
+        _hover_bg.setAlpha(20)
+        hover_bg = _hover_bg.name(QColor.NameFormat.HexArgb)
+        _pressed_bg = QColor(colors.text_primary)
+        _pressed_bg.setAlpha(35)
+        pressed_bg = _pressed_bg.name(QColor.NameFormat.HexArgb)
+
         # Update window title label color directly
         self._ui.window_title_label.setStyleSheet(f"color: {fg_color};")
 
@@ -136,7 +149,9 @@ class WindowThemeController(QObject):
         self._ui.title_bar.setStyleSheet(
             f"QWidget#windowTitleBar {{ background-color: transparent; color: {fg_color}; }}\n"
             f"QWidget#windowTitleBar QLabel {{ color: {fg_color}; }}\n"
-            f"QWidget#windowTitleBar QToolButton {{ color: {fg_color}; }}"
+            f"QWidget#windowTitleBar QToolButton {{ color: {fg_color}; background: transparent; border: none; }}\n"
+            f"QWidget#windowTitleBar QToolButton:hover {{ background-color: {hover_bg}; border-radius: 6px; }}\n"
+            f"QWidget#windowTitleBar QToolButton:pressed {{ background-color: {pressed_bg}; border-radius: 6px; }}"
         )
         separator_color = "#C0C0C0" if not colors.is_dark else outline_color
         # Use light gray for the separator in light mode; otherwise use outline_color
@@ -154,7 +169,9 @@ class WindowThemeController(QObject):
         for btn in (self._ui.rescan_button, self._ui.selection_button):
             name = btn.objectName()
             btn.setStyleSheet(
-                f"QToolButton#{name} {{ background-color: transparent; color: {fg_color}; }}\n"
+                f"QToolButton#{name} {{ background-color: transparent; color: {fg_color}; border: none; }}\n"
+                f"QToolButton#{name}:hover {{ background-color: {hover_bg}; border-radius: 6px; }}\n"
+                f"QToolButton#{name}:pressed {{ background-color: {pressed_bg}; border-radius: 6px; }}\n"
                 f"QToolButton#{name}:disabled {{ background-color: transparent; color: {disabled_fg}; }}"
             )
 
@@ -191,6 +208,9 @@ class WindowThemeController(QObject):
         edit_stylesheet = (
             f"QWidget#editPage {{ background-color: {bg}; }}\n"
             f"QWidget#editPage QLabel, QWidget#editPage QToolButton, QWidget#editHeaderContainer QPushButton {{ color: {fg_color}; }}\n"
+            f"QWidget#editPage QToolButton {{ background: transparent; border: none; }}\n"
+            f"QWidget#editPage QToolButton:hover {{ background-color: {hover_bg}; border-radius: 6px; }}\n"
+            f"QWidget#editPage QToolButton:pressed {{ background-color: {pressed_bg}; border-radius: 6px; }}\n"
             f"QWidget#editHeaderContainer {{ background-color: {panel_bg}; border-radius: 12px; }}\n"
             f"QWidget#editPage EditSidebar, QWidget#editPage EditSidebar QWidget, "
             f"QWidget#editPage QScrollArea, QWidget#editPage QScrollArea > QWidget {{ background-color: {panel_bg}; color: {fg_color}; }}\n"
@@ -200,6 +220,17 @@ class WindowThemeController(QObject):
             f"QWidget#editPage #collapsibleSection QLabel {{ color: {fg_color}; }}"
         )
         self._ui.detail_page.edit_container.setStyleSheet(edit_stylesheet)
+
+        # Detail header QToolButtons (back, info, share, favorite, rotate, zoom)
+        # These live inside the detail chrome container which sits outside the
+        # edit page.  An explicit stylesheet prevents the native Fusion style
+        # from painting its own hover indicator (black on Linux).
+        if self._ui.detail_chrome_container is not None:
+            self._ui.detail_chrome_container.setStyleSheet(
+                f"QToolButton {{ background: transparent; border: none; color: {fg_color}; }}\n"
+                f"QToolButton:hover {{ background-color: {hover_bg}; border-radius: 6px; }}\n"
+                f"QToolButton:pressed {{ background-color: {pressed_bg}; border-radius: 6px; }}"
+            )
 
         # Detail/Edit View Background: Black in Dark Mode
         # Explicitly set the background color even for Light Mode to prevent sticky state

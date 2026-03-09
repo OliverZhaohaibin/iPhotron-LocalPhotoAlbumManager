@@ -87,6 +87,11 @@ class InformationPopup(QWidget):
         self._close_button.setCursor(Qt.CursorShape.PointingHandCursor)
         self._close_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
         self._close_button.setToolTip("Close")
+        self._close_button.setStyleSheet(
+            "QToolButton { background: transparent; border: none; }"
+            "QToolButton:hover { background-color: rgba(128, 128, 128, 40); border-radius: 6px; }"
+            "QToolButton:pressed { background-color: rgba(128, 128, 128, 60); border-radius: 6px; }"
+        )
         self._close_button.clicked.connect(self.close)
         title_layout.addWidget(
             self._close_button, 0, Qt.AlignmentFlag.AlignRight,

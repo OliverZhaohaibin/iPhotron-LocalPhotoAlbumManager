@@ -51,6 +51,32 @@ def test_scroll_linux_skips_super_and_repaints(qapp: QApplication) -> None:
         mock_repaint.assert_called_once()
 
 
+def test_scroll_linux_flushes_pending_layout(qapp: QApplication) -> None:
+    """On Linux, scrollContentsBy must flush pending layout before repaint."""
+    grid = _make_grid(qapp)
+
+    call_order: list[str] = []
+
+    with (
+        patch("iPhoto.gui.ui.widgets.asset_grid._IS_LINUX", True),
+        patch.object(
+            grid,
+            "executeDelayedItemsLayout",
+            side_effect=lambda: call_order.append("layout"),
+        ) as mock_layout,
+        patch.object(
+            grid.viewport(),
+            "repaint",
+            side_effect=lambda: call_order.append("repaint"),
+        ) as mock_repaint,
+    ):
+        AssetGrid.scrollContentsBy(grid, 0, -20)
+        mock_layout.assert_called_once()
+        mock_repaint.assert_called_once()
+        # Layout flush must happen BEFORE the repaint
+        assert call_order == ["layout", "repaint"]
+
+
 def test_scroll_non_linux_calls_super(qapp: QApplication) -> None:
     """On non-Linux platforms, scrollContentsBy must delegate to the base class."""
     grid = _make_grid(qapp)

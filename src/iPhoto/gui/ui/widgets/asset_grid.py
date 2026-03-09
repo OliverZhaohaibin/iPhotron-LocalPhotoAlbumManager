@@ -174,10 +174,17 @@ class AssetGrid(QListView):
             # The scrollbar position has *already* been updated by the time
             # this method is called (by ``QAbstractScrollArea``), so the
             # next ``paintEvent`` will render all items at their correct
-            # offsets.  Calling ``viewport().repaint()`` triggers that paint
-            # synchronously, ensuring every scroll frame is fully composited
-            # from Qt's back buffer before being presented — true double-
-            # buffered rendering with zero tearing.
+            # offsets.
+            #
+            # Skipping super() also skips the ``doDelayedItemsLayout()``
+            # call that ``QListView::scrollContentsBy()`` normally performs.
+            # After a resize, subclasses like ``GalleryGridView`` update
+            # icon/grid sizes which schedules a delayed items layout.  If
+            # the user scrolls before that layout fires, the viewport would
+            # be repainted with stale item positions, producing checkerboard
+            # artefacts.  Flushing the pending layout first ensures item
+            # geometry is up-to-date before the synchronous repaint.
+            self.executeDelayedItemsLayout()
             self.viewport().repaint()
         else:
             super().scrollContentsBy(dx, dy)

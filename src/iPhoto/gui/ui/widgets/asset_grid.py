@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 from typing import Callable, List, Optional
 
@@ -10,6 +11,8 @@ from PySide6.QtGui import QDragEnterEvent, QDragMoveEvent, QDropEvent, QMouseEve
 from PySide6.QtWidgets import QListView
 
 from ....config import LONG_PRESS_THRESHOLD_MS
+
+_IS_LINUX = sys.platform == "linux"
 
 
 class AssetGrid(QListView):
@@ -145,10 +148,46 @@ class AssetGrid(QListView):
 
     def resizeEvent(self, event) -> None:  # type: ignore[override]
         super().resizeEvent(event)
+        if _IS_LINUX:
+            # On Linux with WA_TranslucentBackground, enlarging the window
+            # exposes new viewport area that Qt has not yet painted.  The
+            # compositor may present the frame before the deferred
+            # ``update()`` arrives, producing visible tearing in the
+            # newly exposed region.  A synchronous repaint ensures the
+            # full viewport is composited from Qt's back buffer before
+            # the frame is shown — the same double-buffering strategy
+            # used in ``scrollContentsBy()``.
+            self.viewport().repaint()
         self._schedule_visible_rows_update()
 
     def scrollContentsBy(self, dx: int, dy: int) -> None:  # type: ignore[override]
-        super().scrollContentsBy(dx, dy)
+        if _IS_LINUX:
+            # Double-buffering strategy for Linux with WA_TranslucentBackground:
+            #
+            # The default ``super().scrollContentsBy()`` calls the C++
+            # ``viewport()->scroll(dx, dy)`` which triggers a pixel-shift
+            # blit.  Under ARGB visuals (both X11 and Wayland) this blit
+            # races with the compositor and produces visible tearing or
+            # checkerboard artefacts.
+            #
+            # We skip the super call entirely so the blit never happens.
+            # The scrollbar position has *already* been updated by the time
+            # this method is called (by ``QAbstractScrollArea``), so the
+            # next ``paintEvent`` will render all items at their correct
+            # offsets.
+            #
+            # Skipping super() also skips the ``doDelayedItemsLayout()``
+            # call that ``QListView::scrollContentsBy()`` normally performs.
+            # After a resize, subclasses like ``GalleryGridView`` update
+            # icon/grid sizes which schedules a delayed items layout.  If
+            # the user scrolls before that layout fires, the viewport would
+            # be repainted with stale item positions, producing checkerboard
+            # artefacts.  Flushing the pending layout first ensures item
+            # geometry is up-to-date before the synchronous repaint.
+            self.executeDelayedItemsLayout()
+            self.viewport().repaint()
+        else:
+            super().scrollContentsBy(dx, dy)
         self._schedule_visible_rows_update()
 
     def dragEnterEvent(self, event: QDragEnterEvent) -> None:  # type: ignore[override]

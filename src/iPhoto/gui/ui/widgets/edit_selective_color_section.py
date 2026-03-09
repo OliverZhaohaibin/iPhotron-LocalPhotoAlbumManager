@@ -433,9 +433,7 @@ class EditSelectiveColorSection(QWidget):
         self.refresh_from_session()
 
     def _on_color_clicked(self, idx: int) -> None:
-        # Auto-enable the section when the user clicks a colour button.
-        if self._session is not None and not self._is_enabled():
-            self._session.set_value("SelectiveColor_Enabled", True)
+        self._auto_enable_if_needed()
         self._load_sliders_for_color(idx)
         self._update_theme(idx)
 
@@ -453,9 +451,7 @@ class EditSelectiveColorSection(QWidget):
     def _on_slider_changed(self, _value: float) -> None:
         if self._updating_ui:
             return
-        # Auto-enable the section when the user interacts with a slider.
-        if self._session is not None and not self._is_enabled():
-            self._session.set_value("SelectiveColor_Enabled", True)
+        self._auto_enable_if_needed()
         idx = self.btn_group.checkedId()
         if idx < 0:
             idx = 0
@@ -505,6 +501,15 @@ class EditSelectiveColorSection(QWidget):
         if self._session is None:
             return False
         return bool(self._session.value("SelectiveColor_Enabled"))
+
+    def _auto_enable_if_needed(self) -> None:
+        """Enable the section if it is currently disabled.
+
+        Called from interaction handlers so that any user operation
+        automatically checks the title toggle checkbox.
+        """
+        if self._session is not None and not self._is_enabled():
+            self._session.set_value("SelectiveColor_Enabled", True)
 
     def _update_theme(self, color_idx: int) -> None:
         """Update slider gradient colours based on the active colour range.
@@ -577,9 +582,7 @@ class EditSelectiveColorSection(QWidget):
 
     def _on_pipette_clicked(self) -> None:
         if self._pipette_btn.isChecked():
-            # Auto-enable the section when the user activates the eyedropper.
-            if self._session is not None and not self._is_enabled():
-                self._session.set_value("SelectiveColor_Enabled", True)
+            self._auto_enable_if_needed()
             self._eyedropper_active = True
             self.eyedropperModeChanged.emit("selective_color")
         else:

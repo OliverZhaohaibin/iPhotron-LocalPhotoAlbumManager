@@ -369,11 +369,11 @@ vec3 apply_definition(vec3 color, vec2 uv) {
     return clamp(color + detail * amount * (0.3 + 0.7 * midtoneMask), 0.0, 1.0);
 }
 
-vec3 apply_denoise(vec2 uv) {
+vec3 compute_denoised_source(vec2 uv, vec3 centerColor) {
     // Bilateral filter for edge-preserving noise reduction.
     // Matches the CPU implementation in denoise_resolver.py.
-    // The center color is sampled from the original texture so that both the
-    // center reference and the tap samples live in the same colour space.
+    // ``centerColor`` is passed in from the caller so that the centre texel
+    // fetch is not duplicated when this function is used inside apply_denoise.
     const int RADIUS = 3;
     const float SIGMA_SPACE = 1.5;
 
@@ -382,7 +382,6 @@ vec3 apply_denoise(vec2 uv) {
 
     float sigmaColor = max(uDenoiseAmount * 0.075, 0.001);
 
-    vec3 centerColor = texture(uTex, uv).rgb;
     vec3 resultColor = vec3(0.0);
     float totalWeight = 0.0;
 
@@ -405,6 +404,18 @@ vec3 apply_denoise(vec2 uv) {
     }
 
     return resultColor / totalWeight;
+}
+
+vec3 apply_denoise(vec3 adjustedColor, vec2 uv) {
+    // Preserve all adjustments already accumulated in ``adjustedColor`` and
+    // only add the denoise delta measured on the source texture.  Without
+    // this delta-based merge, enabling denoise replaces the current pipeline
+    // output with raw-texture bilateral samples, which wipes Selective Color
+    // and other earlier adjustments.
+    vec3 sourceCenter = texture(uTex, uv).rgb;
+    vec3 sourceDenoised = compute_denoised_source(uv, sourceCenter);
+    vec3 denoiseDelta = sourceDenoised - sourceCenter;
+    return clamp(adjustedColor + denoiseDelta, 0.0, 1.0);
 }
 
 void main() {
@@ -500,7 +511,7 @@ void main() {
 
     // Apply noise reduction (denoise) after definition, before B&W
     if (uDenoiseAmount > 0.005) {
-        c = apply_denoise(uv_tex);
+        c = apply_denoise(c, uv_tex);
     }
 
     if (uBWEnabled) {

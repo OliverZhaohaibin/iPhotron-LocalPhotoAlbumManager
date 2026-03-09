@@ -77,6 +77,7 @@ _UNIFORM_NAMES = (
     "uSCRange0",
     "uSCRange1",
     "uSCEnabled",
+    "uDefinition",
 )
 
 

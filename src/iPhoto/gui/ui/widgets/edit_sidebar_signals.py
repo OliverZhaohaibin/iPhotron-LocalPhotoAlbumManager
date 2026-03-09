@@ -50,6 +50,11 @@ class EditSignalRouter:
         levels.levelsParamsPreviewed.connect(sidebar.levelsParamsPreviewed)
         levels.levelsParamsCommitted.connect(sidebar.levelsParamsCommitted)
 
+        # Definition-specific relays
+        definition = bundles["definition"].section
+        definition.definitionParamsPreviewed.connect(sidebar.definitionParamsPreviewed)
+        definition.definitionParamsCommitted.connect(sidebar.definitionParamsCommitted)
+
         # Selective Color-specific relays
         sc = bundles["selective_color"].section
         sc.selectiveColorParamsPreviewed.connect(sidebar.selectiveColorParamsPreviewed)

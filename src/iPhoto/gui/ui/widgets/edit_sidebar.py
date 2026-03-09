@@ -63,6 +63,12 @@ class EditSidebar(QWidget):
     levelsParamsCommitted = Signal(object)
     """Emitted when levels adjustments should be written to the session."""
 
+    definitionParamsPreviewed = Signal(object)
+    """Relays live definition adjustments to the controller."""
+
+    definitionParamsCommitted = Signal(object)
+    """Emitted when definition adjustments should be written to the session."""
+
     wbEyedropperModeChanged = Signal(object)
     """Relay eyedropper mode toggles from the WB section."""
 
@@ -182,6 +188,7 @@ class EditSidebar(QWidget):
         self._wb_section = _b["wb"].section
         self._curve_section = _b["curve"].section
         self._levels_section = _b["levels"].section
+        self._definition_section = _b["definition"].section
         self._selective_color_section = _b["selective_color"].section
 
         self._light_section_container = _b["light"].container
@@ -190,6 +197,7 @@ class EditSidebar(QWidget):
         self._wb_section_container = _b["wb"].container
         self._curve_section_container = _b["curve"].container
         self._levels_section_container = _b["levels"].container
+        self._definition_section_container = _b["definition"].container
         self._selective_color_section_container = _b["selective_color"].container
 
         self.light_reset_button = _b["light"].reset_button
@@ -206,6 +214,8 @@ class EditSidebar(QWidget):
         self.selective_color_toggle_button = _b["selective_color"].toggle_button
         self.levels_reset_button = _b["levels"].reset_button
         self.levels_toggle_button = _b["levels"].toggle_button
+        self.definition_reset_button = _b["definition"].reset_button
+        self.definition_toggle_button = _b["definition"].toggle_button
 
         self.set_mode("adjust")
 

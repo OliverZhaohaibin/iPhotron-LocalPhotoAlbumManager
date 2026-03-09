@@ -52,6 +52,7 @@ def test_denoise_sidecar_clamped_round_trip(tmp_path: Path):
     asset = tmp_path / "photo.jpg"
     asset.touch()
 
+    # Save a value within range and verify clamping boundaries
     original = {
         "Denoise_Enabled": True,
         "Denoise_Amount": 4.75,
@@ -61,4 +62,4 @@ def test_denoise_sidecar_clamped_round_trip(tmp_path: Path):
 
     assert loaded["Denoise_Enabled"] is True
     assert loaded["Denoise_Amount"] == pytest.approx(4.75, abs=0.01)
-    assert loaded["Denoise_Amount"] <= 5.0
+    assert 0.0 <= loaded["Denoise_Amount"] <= 5.0

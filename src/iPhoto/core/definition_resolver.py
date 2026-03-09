@@ -62,16 +62,15 @@ def apply_definition(image_array: np.ndarray, strength: float) -> np.ndarray:
     if abs(strength) < 1e-6:
         return image_array
 
-    from scipy.ndimage import uniform_filter
+    import cv2
 
-    has_alpha = image_array.shape[2] == 4
     rgb = image_array[:, :, :3].astype(np.float32) / 255.0
 
     # Approximate mipmap LOD 3 / 5 / 7 using box filters of increasing radius.
     # LOD N ≈ a 2^N pixel neighbourhood – we use box sizes 8, 32, 128 to match.
-    blur1 = uniform_filter(rgb, size=(8, 8, 1), mode="nearest")
-    blur2 = uniform_filter(rgb, size=(32, 32, 1), mode="nearest")
-    blur3 = uniform_filter(rgb, size=(128, 128, 1), mode="nearest")
+    blur1 = cv2.blur(rgb, (8, 8))
+    blur2 = cv2.blur(rgb, (32, 32))
+    blur3 = cv2.blur(rgb, (128, 128))
 
     local_mean = (blur1 + blur2 + blur3) / 3.0
     detail = rgb - local_mean

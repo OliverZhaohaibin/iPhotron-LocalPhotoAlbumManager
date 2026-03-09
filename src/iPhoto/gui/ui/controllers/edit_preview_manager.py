@@ -149,6 +149,7 @@ def resolve_adjustment_mapping(
     # Preserve the dedicated Definition parameters.
     def_enabled = bool(session_values.get("Definition_Enabled", False))
     resolved["Definition_Enabled"] = 1.0 if def_enabled else 0.0
+    resolved["Definition_Value"] = float(session_values.get("Definition_Value", 0.0))
 
     resolved.update(curve_lists)
     return resolved

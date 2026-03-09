@@ -381,8 +381,19 @@ class EditSelectiveColorSection(QWidget):
             if isinstance(ranges, list) and len(ranges) == NUM_RANGES:
                 for i, rng in enumerate(ranges):
                     if isinstance(rng, (list, tuple)) and len(rng) >= 5:
+                        center = float(rng[0])
                         # Restore per-range center hue from session data
-                        self._custom_centers[i] = float(rng[0])
+                        self._custom_centers[i] = center
+                        # When the center hue matches the default, restore the
+                        # original colour swatch so that a reset visually returns
+                        # the buttons to their factory appearance.
+                        if abs(center - DEFAULT_CENTERS[i]) < 1e-4:
+                            default_hex = self.COLOR_HEXES[i]
+                            self._color_hexes[i] = default_hex
+                            btn = self.btn_group.button(i)
+                            if btn is not None:
+                                btn.color = QColor(default_hex)
+                                btn.update()
                         # Convert normalised values back to UI slider values
                         self._ui_store[i, 0] = float(rng[2]) * 100.0  # hue_shift
                         self._ui_store[i, 1] = float(rng[3]) * 100.0  # sat_adj

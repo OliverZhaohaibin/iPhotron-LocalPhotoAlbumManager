@@ -58,6 +58,7 @@ class StubUi(QObject):
         # --- Detail/Edit View ---
         self.detail_page = MagicMock()
         self.detail_page.edit_container = make_widget("editPage")
+        self.detail_chrome_container = make_widget("detailChromeContainer")
 
         self.image_viewer = MagicMock()
         self.image_viewer.set_surface_color_override = MagicMock()

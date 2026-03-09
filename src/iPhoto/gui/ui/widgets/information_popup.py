@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import QRectF, Qt
-from PySide6.QtGui import QMouseEvent, QPainter, QPainterPath, QPalette
+from PySide6.QtCore import QEvent, QRectF, Qt
+from PySide6.QtGui import QColor, QMouseEvent, QPainter, QPainterPath, QPalette
 from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
@@ -87,6 +87,7 @@ class InformationPopup(QWidget):
         self._close_button.setCursor(Qt.CursorShape.PointingHandCursor)
         self._close_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
         self._close_button.setToolTip("Close")
+        self._apply_close_button_style()
         self._close_button.clicked.connect(self.close)
         title_layout.addWidget(
             self._close_button, 0, Qt.AlignmentFlag.AlignRight,
@@ -141,8 +142,29 @@ class InformationPopup(QWidget):
         return self._message_label.text()
 
     # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+    def _apply_close_button_style(self) -> None:
+        """Recompute hover/pressed colours from the current palette."""
+        text = self.palette().color(QPalette.ColorRole.WindowText)
+        hover = QColor(text)
+        hover.setAlpha(20)
+        pressed = QColor(text)
+        pressed.setAlpha(35)
+        self._close_button.setStyleSheet(
+            "QToolButton { background: transparent; border: none; }"
+            f"QToolButton:hover {{ background-color: {hover.name(QColor.NameFormat.HexArgb)}; border-radius: 6px; }}"
+            f"QToolButton:pressed {{ background-color: {pressed.name(QColor.NameFormat.HexArgb)}; border-radius: 6px; }}"
+        )
+
+    # ------------------------------------------------------------------
     # QWidget overrides
     # ------------------------------------------------------------------
+    def changeEvent(self, event: QEvent) -> None:
+        if event.type() == QEvent.Type.PaletteChange:
+            self._apply_close_button_style()
+        super().changeEvent(event)
+
     def paintEvent(self, event) -> None:  # type: ignore[override]
         """Draw an anti-aliased rounded rectangle matching the window palette."""
 

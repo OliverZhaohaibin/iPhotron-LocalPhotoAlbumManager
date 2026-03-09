@@ -38,7 +38,7 @@ class EditDenoiseSection(QWidget):
             "Amount",
             parent=self,
             minimum=0.0,
-            maximum=2.0,
+            maximum=5.0,
             initial=0.0,
         )
         layout.addWidget(self._slider)

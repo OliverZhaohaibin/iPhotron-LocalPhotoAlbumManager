@@ -496,6 +496,8 @@ class EditSelectiveColorSection(QWidget):
 
     def _apply_enabled_state(self, enabled: bool) -> None:
         self._opacity_effect.setOpacity(1.0 if enabled else 0.5)
+        if not enabled and self._pipette_btn.isChecked():
+            self.deactivate_eyedropper()
 
     def _is_enabled(self) -> bool:
         if self._session is None:

@@ -67,7 +67,6 @@ def apply_denoise(image_array: np.ndarray, amount: float) -> np.ndarray:
     has_alpha = image_array.shape[2] == 4
     if has_alpha:
         rgb = image_array[:, :, :3]
-        alpha = image_array[:, :, 3:4]
     else:
         rgb = image_array
 

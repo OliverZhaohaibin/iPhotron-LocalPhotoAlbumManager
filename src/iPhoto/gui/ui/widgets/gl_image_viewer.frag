@@ -369,9 +369,11 @@ vec3 apply_definition(vec3 color, vec2 uv) {
     return clamp(color + detail * amount * (0.3 + 0.7 * midtoneMask), 0.0, 1.0);
 }
 
-vec3 apply_denoise(vec3 centerColor, vec2 uv) {
+vec3 apply_denoise(vec2 uv) {
     // Bilateral filter for edge-preserving noise reduction.
     // Matches the CPU implementation in denoise_resolver.py.
+    // The center color is sampled from the original texture so that both the
+    // center reference and the tap samples live in the same colour space.
     const int RADIUS = 3;
     const float SIGMA_SPACE = 1.5;
 
@@ -380,6 +382,7 @@ vec3 apply_denoise(vec3 centerColor, vec2 uv) {
 
     float sigmaColor = max(uDenoiseAmount * 0.075, 0.001);
 
+    vec3 centerColor = texture(uTex, uv).rgb;
     vec3 resultColor = vec3(0.0);
     float totalWeight = 0.0;
 
@@ -497,7 +500,7 @@ void main() {
 
     // Apply noise reduction (denoise) after definition, before B&W
     if (uDenoiseAmount > 0.005) {
-        c = apply_denoise(c, uv_tex);
+        c = apply_denoise(uv_tex);
     }
 
     if (uBWEnabled) {

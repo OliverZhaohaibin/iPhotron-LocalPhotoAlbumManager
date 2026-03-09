@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 from typing import Callable, List, Optional
 
@@ -94,6 +95,12 @@ class AssetGrid(QListView):
     def showEvent(self, event) -> None:  # type: ignore[override]
         super().showEvent(event)
         QTimer.singleShot(0, self._schedule_visible_rows_update)
+        # Ensure the viewport is fully repainted when the grid becomes
+        # visible (e.g. after a view-stack transition).  On Linux the
+        # compositor occasionally caches a stale surface that only refreshes
+        # when the window is moved.
+        if sys.platform == "linux":
+            self.viewport().update()
 
     # ------------------------------------------------------------------
     # Preview configuration
@@ -150,6 +157,13 @@ class AssetGrid(QListView):
     def scrollContentsBy(self, dx: int, dy: int) -> None:  # type: ignore[override]
         super().scrollContentsBy(dx, dy)
         self._schedule_visible_rows_update()
+        # On Linux, Qt's pixel-shift scroll optimisation within ARGB windows
+        # (created by WA_TranslucentBackground) can produce tearing artefacts
+        # because the compositor may not flush the partial surface update in
+        # time.  Scheduling a full viewport repaint overwrites any stale
+        # regions without affecting other platforms.
+        if sys.platform == "linux":
+            self.viewport().update()
 
     def dragEnterEvent(self, event: QDragEnterEvent) -> None:  # type: ignore[override]
         if not self._external_drop_enabled:

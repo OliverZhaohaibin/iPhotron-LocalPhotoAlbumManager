@@ -1,0 +1,36 @@
+<svg width="55" height="55" viewBox="0 0 55 55" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <pattern id="checker_5x5" x="15" y="15" width="5" height="5" patternUnits="userSpaceOnUse">
+      <rect width="2.5" height="2.5" fill="#7A7A7A"/>
+      <rect x="2.5" y="2.5" width="2.5" height="2.5" fill="#7A7A7A"/>
+      <rect x="2.5" y="0" width="2.5" height="2.5" fill="#2E2E2E"/>
+      <rect x="0" y="2.5" width="2.5" height="2.5" fill="#2E2E2E"/>
+    </pattern>
+
+    <clipPath id="innerClip">
+      <rect x="15" y="15" width="25" height="25" rx="1.5"/>
+    </clipPath>
+
+    <linearGradient id="trapezoidFade" x1="0%" y1="0%" x2="100%" y2="70%">
+      <stop offset="35%" stop-color="#999999" stop-opacity="1"/>
+      <stop offset="70%" stop-color="#999999" stop-opacity="0"/>
+    </linearGradient>
+
+    <linearGradient id="horizFade" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#999999" stop-opacity="0.8"/>
+      <stop offset="100%" stop-color="#999999" stop-opacity="0.5"/>
+    </linearGradient>
+  </defs>
+
+  <rect x="11" y="11" width="33" height="33" rx="5" fill="#222222" stroke="#999999" stroke-width="3"/>
+
+  <g clip-path="url(#innerClip)">
+    <rect x="15" y="15" width="25" height="25" fill="#2E2E2E"/>
+    <rect x="15" y="15" width="25" height="25" fill="url(#checker_5x5)"/>
+
+    <rect x="15" y="15" width="25" height="25" fill="url(#trapezoidFade)"/>
+    <rect x="15" y="15" width="25" height="25" fill="url(#horizFade)"/>
+  </g>
+
+  <rect x="15" y="15" width="25" height="25" rx="1.5" fill="none" stroke="#1A1A1A" stroke-width="1"/>
+</svg>

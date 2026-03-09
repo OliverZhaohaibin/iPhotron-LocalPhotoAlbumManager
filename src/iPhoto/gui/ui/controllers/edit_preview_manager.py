@@ -151,6 +151,11 @@ def resolve_adjustment_mapping(
     resolved["Definition_Enabled"] = 1.0 if def_enabled else 0.0
     resolved["Definition_Value"] = float(session_values.get("Definition_Value", 0.0))
 
+    # Preserve the dedicated Denoise parameters.
+    dn_enabled = bool(session_values.get("Denoise_Enabled", False))
+    resolved["Denoise_Enabled"] = 1.0 if dn_enabled else 0.0
+    resolved["Denoise_Amount"] = float(session_values.get("Denoise_Amount", 0.0))
+
     resolved.update(curve_lists)
     return resolved
 

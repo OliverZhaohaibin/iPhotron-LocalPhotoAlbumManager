@@ -36,6 +36,8 @@ uniform bool  uSCEnabled;
 
 uniform float uDefinition;   // [0.0, 0.2] definition / clarity strength
 
+uniform float uDenoiseAmount;  // bilateral filter strength (0 = off)
+
 uniform vec2  uViewSize;
 uniform vec2  uTexSize;
 uniform float uScale;
@@ -367,6 +369,44 @@ vec3 apply_definition(vec3 color, vec2 uv) {
     return clamp(color + detail * amount * (0.3 + 0.7 * midtoneMask), 0.0, 1.0);
 }
 
+vec3 apply_denoise(vec2 uv) {
+    // Bilateral filter for edge-preserving noise reduction.
+    // Matches the CPU implementation in denoise_resolver.py.
+    // The center color is sampled from the original texture so that both the
+    // center reference and the tap samples live in the same colour space.
+    const int RADIUS = 3;
+    const float SIGMA_SPACE = 1.5;
+
+    vec2 texSize = vec2(textureSize(uTex, 0));
+    vec2 invTexSize = 1.0 / texSize;
+
+    float sigmaColor = max(uDenoiseAmount * 0.075, 0.001);
+
+    vec3 centerColor = texture(uTex, uv).rgb;
+    vec3 resultColor = vec3(0.0);
+    float totalWeight = 0.0;
+
+    for (int y = -RADIUS; y <= RADIUS; ++y) {
+        for (int x = -RADIUS; x <= RADIUS; ++x) {
+            vec2 offset = vec2(float(x), float(y));
+            vec3 sampleColor = texture(uTex, uv + offset * invTexSize).rgb;
+
+            float spaceDist2 = dot(offset, offset);
+            float spaceWeight = exp(-spaceDist2 / (2.0 * SIGMA_SPACE * SIGMA_SPACE));
+
+            vec3 colorDiff = sampleColor - centerColor;
+            float colorDist2 = dot(colorDiff, colorDiff);
+            float colorWeight = exp(-colorDist2 / (2.0 * sigmaColor * sigmaColor));
+
+            float weight = spaceWeight * colorWeight;
+            resultColor += sampleColor * weight;
+            totalWeight += weight;
+        }
+    }
+
+    return resultColor / totalWeight;
+}
+
 void main() {
     if (uScale <= 0.0) {
         discard;
@@ -453,9 +493,14 @@ void main() {
         c = apply_selective_color(c);
     }
 
-    // Apply definition (clarity) after selective color, before B&W
+    // Apply definition (clarity) after selective color, before denoise
     if (uDefinition > 0.0001) {
         c = apply_definition(c, uv_tex);
+    }
+
+    // Apply noise reduction (denoise) after definition, before B&W
+    if (uDenoiseAmount > 0.005) {
+        c = apply_denoise(uv_tex);
     }
 
     if (uBWEnabled) {

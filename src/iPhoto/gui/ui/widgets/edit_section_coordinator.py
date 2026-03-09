@@ -13,6 +13,7 @@ from ....core.curve_resolver import DEFAULT_CURVE_POINTS
 from ....core.levels_resolver import DEFAULT_LEVELS_HANDLES
 from ....core.selective_color_resolver import DEFAULT_SELECTIVE_COLOR_RANGES
 from ....core.definition_resolver import DEFAULT_DEFINITION
+from ....core.denoise_resolver import DEFAULT_DENOISE
 from ..models.edit_session import EditSession
 from ..icon import load_icon
 
@@ -39,6 +40,7 @@ class EditSessionCoordinator(QObject):
         "selective_color": "SelectiveColor_Enabled",
         "levels": "Levels_Enabled",
         "definition": "Definition_Enabled",
+        "denoise": "Denoise_Enabled",
     }
     _ENABLED_KEY_TO_SECTION: dict[str, str] = {v: k for k, v in _ENABLED_KEYS.items()}
 
@@ -169,6 +171,7 @@ class EditSessionCoordinator(QObject):
         "selective_color": "_on_selective_color_reset",
         "levels": "_on_levels_reset",
         "definition": "_on_definition_reset",
+        "denoise": "_on_denoise_reset",
     }
     _TOGGLE_SLOT_ATTR = {
         "light": "_on_light_toggled",
@@ -179,6 +182,7 @@ class EditSessionCoordinator(QObject):
         "selective_color": "_on_selective_color_toggled",
         "levels": "_on_levels_toggled",
         "definition": "_on_definition_toggled",
+        "denoise": "_on_denoise_toggled",
     }
 
     def _disconnect_all(self) -> None:
@@ -231,7 +235,7 @@ class EditSessionCoordinator(QObject):
         for key in self._registry.bundles:
             self._toggle_btn(key).setChecked(False)
             self._update_toggle_icon(key, False)
-        for key in ("bw", "wb", "curve", "selective_color", "levels", "definition"):
+        for key in ("bw", "wb", "curve", "selective_color", "levels", "definition", "denoise"):
             self._reset_btn(key).setEnabled(False)
         self._color_stats = None
 
@@ -380,6 +384,19 @@ class EditSessionCoordinator(QObject):
         self._sync_toggle_state("definition")
         self._sidebar.interactionFinished.emit()
 
+    def _on_denoise_reset(self) -> None:
+        if self._session is None:
+            return
+        self._sidebar.interactionStarted.emit()
+        updates = {
+            "Denoise_Enabled": False,
+            "Denoise_Amount": DEFAULT_DENOISE,
+        }
+        self._session.set_values(updates)
+        self._section("denoise").refresh_from_session()
+        self._sync_toggle_state("denoise")
+        self._sidebar.interactionFinished.emit()
+
     # -- toggle handlers --------------------------------------------------
 
     def _on_light_toggled(self, checked: bool) -> None:
@@ -444,6 +461,14 @@ class EditSessionCoordinator(QObject):
             return
         self._sidebar.interactionStarted.emit()
         self._session.set_value("Definition_Enabled", checked)
+        self._sidebar.interactionFinished.emit()
+
+    def _on_denoise_toggled(self, checked: bool) -> None:
+        self._update_toggle_icon("denoise", checked)
+        if self._session is None:
+            return
+        self._sidebar.interactionStarted.emit()
+        self._session.set_value("Denoise_Enabled", checked)
         self._sidebar.interactionFinished.emit()
 
     # -- session value change handler -------------------------------------

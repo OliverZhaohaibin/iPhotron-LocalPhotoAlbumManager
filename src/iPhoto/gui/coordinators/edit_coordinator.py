@@ -156,6 +156,12 @@ class EditCoordinator(QObject):
         self._ui.edit_sidebar.definitionParamsCommitted.connect(
             self._handle_definition_params_committed
         )
+        self._ui.edit_sidebar.denoiseParamsPreviewed.connect(
+            self._handle_denoise_params_previewed
+        )
+        self._ui.edit_sidebar.denoiseParamsCommitted.connect(
+            self._handle_denoise_params_committed
+        )
         self._ui.edit_sidebar.selectiveColorParamsPreviewed.connect(
             self._handle_selective_color_params_previewed
         )
@@ -590,6 +596,37 @@ class EditCoordinator(QObject):
         updates = {
             "Definition_Enabled": True,
             "Definition_Value": float(def_data.get("Value", 0.0)),
+        }
+        self._session.set_values(updates)
+
+    def _handle_denoise_params_previewed(self, dn_data: dict) -> None:
+        """Apply transient noise-reduction previews without mutating session state."""
+
+        if self._session is None or self._compare_active:
+            return
+
+        try:
+            preview_values = self._session.values()
+            preview_values.update({
+                "Denoise_Enabled": True,
+                "Denoise_Amount": float(dn_data.get("Amount", 0.0)),
+            })
+            adjustments = self._preview_manager.resolve_adjustments(preview_values)
+        except Exception:
+            _LOGGER.exception("Failed to resolve denoise preview adjustments")
+            return
+
+        self._ui.edit_image_viewer.set_adjustments(adjustments)
+
+    def _handle_denoise_params_committed(self, dn_data: dict) -> None:
+        """Persist noise-reduction adjustments into the active edit session."""
+
+        if self._session is None:
+            return
+
+        updates = {
+            "Denoise_Enabled": True,
+            "Denoise_Amount": float(dn_data.get("Amount", 0.0)),
         }
         self._session.set_values(updates)
 

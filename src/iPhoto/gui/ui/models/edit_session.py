@@ -13,6 +13,7 @@ from ....core.curve_resolver import DEFAULT_CURVE_POINTS
 from ....core.levels_resolver import DEFAULT_LEVELS_HANDLES
 from ....core.selective_color_resolver import DEFAULT_SELECTIVE_COLOR_RANGES
 from ....core.definition_resolver import DEFAULT_DEFINITION
+from ....core.denoise_resolver import DEFAULT_DENOISE
 
 _BW_RANGE_KEYS = {"BW_Master", "BW_Intensity", "BW_Neutrals", "BW_Tone"}
 
@@ -153,6 +154,12 @@ class EditSession(QObject):
         self._ranges["Definition_Enabled"] = (0.0, 1.0)
         self._values["Definition_Value"] = DEFAULT_DEFINITION
         self._ranges["Definition_Value"] = (0.0, 1.0)
+
+        # Noise Reduction (Denoise) adjustment – amount in [0.0, 5.0].
+        self._values["Denoise_Enabled"] = False
+        self._ranges["Denoise_Enabled"] = (0.0, 1.0)
+        self._values["Denoise_Amount"] = DEFAULT_DENOISE
+        self._ranges["Denoise_Amount"] = (0.0, 5.0)
 
     # ------------------------------------------------------------------
     # Accessors
@@ -315,6 +322,11 @@ class EditSession(QObject):
         defaults.update({
             "Definition_Enabled": False,
             "Definition_Value": DEFAULT_DEFINITION,
+        })
+        # Denoise defaults
+        defaults.update({
+            "Denoise_Enabled": False,
+            "Denoise_Amount": DEFAULT_DENOISE,
         })
         self.set_values(defaults, emit_individual=True)
         self.resetPerformed.emit()

@@ -305,6 +305,12 @@ class GLRenderer:
             def_value = float(adjustments.get("Definition_Value", 0.0))
             effective_def = def_value * 0.2 if bool(def_enabled_value) else 0.0
             self._set_uniform1f("uDefinition", effective_def)
+
+            # Denoise uniform – pass amount directly to shader
+            dn_enabled_value = adjustments.get("Denoise_Enabled", False)
+            dn_amount = float(adjustments.get("Denoise_Amount", 0.0))
+            effective_denoise = dn_amount if bool(dn_enabled_value) else 0.0
+            self._set_uniform1f("uDenoiseAmount", effective_denoise)
             sc_ranges = adjustments.get("SelectiveColor_Ranges")
             if isinstance(sc_ranges, list) and len(sc_ranges) == NUM_RANGES:
                 u0 = np.zeros((NUM_RANGES, 4), dtype=np.float32)

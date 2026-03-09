@@ -126,7 +126,7 @@ class EditVignetteSection(QWidget):
     # Signal handlers
     # ------------------------------------------------------------------
 
-    def _on_slider_changed(self, _value: float) -> None:
+    def _on_slider_changed(self, _: float) -> None:
         if self._updating_ui:
             return
         self._preview_vignette_changes()

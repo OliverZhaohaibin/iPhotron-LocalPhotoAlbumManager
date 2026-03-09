@@ -83,7 +83,6 @@ def apply_vignette(
         return image_array
 
     h, w = image_array.shape[:2]
-    has_alpha = image_array.shape[2] == 4
 
     # Build coordinate grids centred at (0.5, 0.5), normalised to [0, 1].
     ys = np.linspace(0.0, 1.0, h, dtype=np.float32)

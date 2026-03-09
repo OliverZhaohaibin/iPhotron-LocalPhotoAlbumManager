@@ -232,6 +232,15 @@ class WindowThemeController(QObject):
                 f"QToolButton:pressed {{ background-color: {pressed_bg}; border-radius: 6px; }}"
             )
 
+        # Gallery page back button (cluster gallery mode)
+        # Same treatment as the detail chrome container buttons above.
+        if hasattr(self._ui, "gallery_page") and hasattr(self._ui.gallery_page, "back_button"):
+            self._ui.gallery_page.back_button.setStyleSheet(
+                f"QToolButton {{ background: transparent; border: none; color: {fg_color}; }}\n"
+                f"QToolButton:hover {{ background-color: {hover_bg}; border-radius: 6px; }}\n"
+                f"QToolButton:pressed {{ background-color: {pressed_bg}; border-radius: 6px; }}"
+            )
+
         # Detail/Edit View Background: Black in Dark Mode
         # Explicitly set the background color even for Light Mode to prevent sticky state
         target_surface = "#000000" if colors.is_dark else colors.window_background.name()

@@ -647,10 +647,11 @@ class GLImageViewer(QOpenGLWidget):
 
     def showEvent(self, event) -> None:  # type: ignore[override]
         super().showEvent(event)
-        # On Linux, QOpenGLWidget may retain a stale framebuffer when it
-        # becomes visible inside a WA_TranslucentBackground window (e.g.
-        # after a view-stack transition from the gallery).  An explicit
-        # update ensures the GL surface is repainted immediately.
+        # QOpenGLWidget may retain a stale framebuffer when it becomes
+        # visible (e.g. after a view-stack transition from the gallery).
+        # This is most noticeable on Linux inside WA_TranslucentBackground
+        # windows, but the explicit update is harmless on other platforms
+        # and keeps the surface fresh in all configurations.
         self.update()
 
     # --------------------------- Cursor management and helpers ---------------------------

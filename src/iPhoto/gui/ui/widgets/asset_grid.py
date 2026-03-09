@@ -152,18 +152,19 @@ class AssetGrid(QListView):
 
     def scrollContentsBy(self, dx: int, dy: int) -> None:  # type: ignore[override]
         if _IS_LINUX:
-            # Double-buffering strategy for Linux/X11 with WA_TranslucentBackground:
+            # Double-buffering strategy for Linux with WA_TranslucentBackground:
             #
             # The default ``super().scrollContentsBy()`` calls the C++
-            # ``viewport()->scroll(dx, dy)`` which triggers an ``XCopyArea``
-            # pixel-shift blit.  Under ARGB visuals this blit races with the
-            # compositor and produces visible tearing / checkerboard artefacts.
+            # ``viewport()->scroll(dx, dy)`` which triggers a pixel-shift
+            # blit.  Under ARGB visuals (both X11 and Wayland) this blit
+            # races with the compositor and produces visible tearing or
+            # checkerboard artefacts.
             #
-            # We skip the super call entirely so the blit never happens.  The
-            # scrollbar position has *already* been updated by the time this
-            # method is called (by ``QAbstractScrollArea``), so the next
-            # ``paintEvent`` will render all items at their correct offsets.
-            # Calling ``viewport().repaint()`` triggers that paint
+            # We skip the super call entirely so the blit never happens.
+            # The scrollbar position has *already* been updated by the time
+            # this method is called (by ``QAbstractScrollArea``), so the
+            # next ``paintEvent`` will render all items at their correct
+            # offsets.  Calling ``viewport().repaint()`` triggers that paint
             # synchronously, ensuring every scroll frame is fully composited
             # from Qt's back buffer before being presented — true double-
             # buffered rendering with zero tearing.

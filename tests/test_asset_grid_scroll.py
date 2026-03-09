@@ -7,7 +7,8 @@ pytest.importorskip("PySide6.QtWidgets", reason="Qt widgets not available", exc_
 
 from unittest.mock import patch
 
-from PySide6.QtGui import QStandardItem, QStandardItemModel
+from PySide6.QtCore import QSize
+from PySide6.QtGui import QResizeEvent, QStandardItem, QStandardItemModel
 from PySide6.QtWidgets import QApplication
 
 from iPhoto.gui.ui.widgets.asset_grid import AssetGrid
@@ -59,3 +60,29 @@ def test_scroll_non_linux_calls_super(qapp: QApplication) -> None:
         AssetGrid.scrollContentsBy(grid, 0, -20)
         # Viewport should not have received a forced repaint
         # (the base class handles updating internally)
+
+
+def test_resize_linux_forces_repaint(qapp: QApplication) -> None:
+    """On Linux, resizeEvent must force a synchronous viewport repaint."""
+    grid = _make_grid(qapp)
+
+    with (
+        patch("iPhoto.gui.ui.widgets.asset_grid._IS_LINUX", True),
+        patch.object(grid.viewport(), "repaint") as mock_repaint,
+    ):
+        event = QResizeEvent(QSize(800, 600), QSize(400, 300))
+        AssetGrid.resizeEvent(grid, event)
+        mock_repaint.assert_called_once()
+
+
+def test_resize_non_linux_no_forced_repaint(qapp: QApplication) -> None:
+    """On non-Linux platforms, resizeEvent must not force a synchronous repaint."""
+    grid = _make_grid(qapp)
+
+    with (
+        patch("iPhoto.gui.ui.widgets.asset_grid._IS_LINUX", False),
+        patch.object(grid.viewport(), "repaint") as mock_repaint,
+    ):
+        event = QResizeEvent(QSize(800, 600), QSize(400, 300))
+        AssetGrid.resizeEvent(grid, event)
+        mock_repaint.assert_not_called()

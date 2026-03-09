@@ -148,6 +148,16 @@ class AssetGrid(QListView):
 
     def resizeEvent(self, event) -> None:  # type: ignore[override]
         super().resizeEvent(event)
+        if _IS_LINUX:
+            # On Linux with WA_TranslucentBackground, enlarging the window
+            # exposes new viewport area that Qt has not yet painted.  The
+            # compositor may present the frame before the deferred
+            # ``update()`` arrives, producing visible tearing in the
+            # newly exposed region.  A synchronous repaint ensures the
+            # full viewport is composited from Qt's back buffer before
+            # the frame is shown — the same double-buffering strategy
+            # used in ``scrollContentsBy()``.
+            self.viewport().repaint()
         self._schedule_visible_rows_update()
 
     def scrollContentsBy(self, dx: int, dy: int) -> None:  # type: ignore[override]

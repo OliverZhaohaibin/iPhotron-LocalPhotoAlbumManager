@@ -19,6 +19,7 @@ from PySide6.QtGui import QColor, QCursor, QMouseEvent, QPainter, QResizeEvent, 
 from PySide6.QtWidgets import (
     QFrame,
     QGraphicsOpacityEffect,
+    QGraphicsRectItem,
     QGraphicsScene,
     QGraphicsView,
     QWidget,
@@ -64,10 +65,29 @@ class VideoArea(QWidget):
             raise RuntimeError("PySide6.QtMultimediaWidgets is required for video playback.")
 
         # --- Graphics View Setup ---
+        # A black rectangle sits directly behind the video item so that hardware
+        # compositing sees a black surface underneath the video frame.  Some
+        # codecs (HDR / HEVC) produce washed-out colours when the compositing
+        # backdrop is a non-black colour.
+        #
+        # Unlike the previous approach that tried to match the *inner frame*
+        # geometry, the backing rect now always mirrors the video item's own
+        # bounds.  Since they share the same position and size there is no
+        # geometry-matching complexity and no risk of black edges leaking past
+        # the frame in light-mode themes.  The theme-coloured scene background
+        # fills the letterbox areas outside the video item naturally.
+        self._black_backing: QGraphicsRectItem = QGraphicsRectItem()
+        self._black_backing.setBrush(Qt.black)
+        self._black_backing.setPen(Qt.NoPen)
+        self._black_backing.setZValue(0)
+
         self._video_item = QGraphicsVideoItem()
+        self._video_item.setZValue(1)
         self._video_item.setAspectRatioMode(Qt.AspectRatioMode.KeepAspectRatio)
+        self._video_item.nativeSizeChanged.connect(self._fit_video_item)
 
         self._scene = QGraphicsScene(self)
+        self._scene.addItem(self._black_backing)
         self._scene.addItem(self._video_item)
 
         self._video_view = QGraphicsView(self._scene, self)
@@ -294,8 +314,7 @@ class VideoArea(QWidget):
         rect = self.rect()
         self._video_view.setGeometry(rect)
         self._scene.setSceneRect(QRectF(rect))
-        self._video_item.setSize(self._scene.sceneRect().size())
-        self._video_item.setPos(QPointF())
+        self._fit_video_item()
         self._update_bar_geometry()
 
     def enterEvent(self, event) -> None:  # pragma: no cover - GUI behaviour
@@ -444,6 +463,43 @@ class VideoArea(QWidget):
             y = max(0, rect.height() - bar_height)
         self._player_bar.setGeometry(x, y, bar_width, bar_height)
         self._player_bar.raise_()
+
+    def _fit_video_item(self) -> None:
+        """Size and position the video item to exactly fit the video's aspect ratio.
+
+        When the native size is known the video item is shrunk to the largest
+        aspect-ratio-preserving rectangle that fits inside the scene.  The black
+        backing rectangle is set to the *same* bounds so it sits perfectly behind
+        the video surface (no geometry-matching complexity).  The theme-coloured
+        scene background fills the remaining letterbox areas.
+        """
+
+        scene_rect = self._scene.sceneRect()
+        if scene_rect.isEmpty():
+            return
+
+        native = self._video_item.nativeSize()
+        if native.isEmpty():
+            # No video loaded yet – fill the entire scene so the item is ready
+            # to display the first frame without a layout jump.
+            self._video_item.setSize(scene_rect.size())
+            self._video_item.setPos(QPointF())
+            self._black_backing.setPos(QPointF())
+            self._black_backing.setRect(QRectF())
+            return
+
+        # Compute the largest rectangle inside the scene that preserves the
+        # video's native aspect ratio.
+        fitted = native.scaled(scene_rect.size(), Qt.AspectRatioMode.KeepAspectRatio)
+        x = (scene_rect.width() - fitted.width()) / 2.0
+        y = (scene_rect.height() - fitted.height()) / 2.0
+
+        self._video_item.setSize(fitted)
+        self._video_item.setPos(QPointF(x, y))
+
+        # Mirror the video item's bounds exactly – trivially aligned.
+        self._black_backing.setPos(QPointF(x, y))
+        self._black_backing.setRect(QRectF(QPointF(), fitted))
 
     # ------------------------------------------------------------------
     # Live Photo helpers

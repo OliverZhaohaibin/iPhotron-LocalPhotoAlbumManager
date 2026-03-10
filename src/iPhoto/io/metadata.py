@@ -414,8 +414,46 @@ def read_video_meta(path: Path, metadata: Optional[Dict[str, Any]] = None) -> Di
                 width = stream.get("width")
                 height = stream.get("height")
                 if isinstance(width, int) and isinstance(height, int):
-                    info["w"] = width
-                    info["h"] = height
+                    display_w: float = float(width)
+                    display_h: float = float(height)
+
+                    # Apply Sample Aspect Ratio correction so that
+                    # stored w/h reflect the actual display dimensions.
+                    sar_str = stream.get("sample_aspect_ratio")
+                    if isinstance(sar_str, str) and ":" in sar_str:
+                        parts = sar_str.strip().split(":")
+                        if len(parts) == 2:
+                            try:
+                                sar_num, sar_den = int(parts[0]), int(parts[1])
+                                if sar_num > 0 and sar_den > 0 and (sar_num, sar_den) != (1, 1):
+                                    display_w = width * sar_num / sar_den
+                            except ValueError:
+                                pass
+
+                    # Check for rotation (display matrix or legacy tag).
+                    rotation = 0
+                    side_data_list = stream.get("side_data_list")
+                    if isinstance(side_data_list, list):
+                        for entry in side_data_list:
+                            if isinstance(entry, dict) and "rotation" in entry:
+                                try:
+                                    rotation = int(float(str(entry["rotation"])))
+                                except (ValueError, TypeError):
+                                    pass
+                                break
+                    if rotation == 0 and tags:
+                        rotate_tag = tags.get("rotate")
+                        if rotate_tag is not None:
+                            try:
+                                rotation = int(float(str(rotate_tag)))
+                            except (ValueError, TypeError):
+                                pass
+
+                    if abs(rotation) % 360 in (90, 270):
+                        display_w, display_h = display_h, display_w
+
+                    info["w"] = round(display_w)
+                    info["h"] = round(display_h)
 
                 frame_rate = _coerce_fractional(stream.get("avg_frame_rate"))
                 if frame_rate is None:

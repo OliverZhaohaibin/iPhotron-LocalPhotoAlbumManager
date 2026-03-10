@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Optional, cast
 
 from PySide6.QtCore import (
@@ -11,6 +12,7 @@ from PySide6.QtCore import (
     QPropertyAnimation,
     QPointF,
     QRectF,
+    QSizeF,
     QTimer,
     Qt,
     Signal,
@@ -19,6 +21,7 @@ from PySide6.QtGui import QColor, QCursor, QMouseEvent, QPainter, QResizeEvent, 
 from PySide6.QtWidgets import (
     QFrame,
     QGraphicsOpacityEffect,
+    QGraphicsRectItem,
     QGraphicsScene,
     QGraphicsView,
     QWidget,
@@ -43,6 +46,105 @@ from ....config import (
 from .player_bar import PlayerBar
 from ..palette import viewer_surface_color
 
+_log = logging.getLogger(__name__)
+
+
+def _parse_sar(value: object) -> tuple[int, int] | None:
+    """Parse a ``sample_aspect_ratio`` string like ``"16:11"`` or ``"1:1"``."""
+
+    if not isinstance(value, str):
+        return None
+    parts = value.strip().split(":")
+    if len(parts) != 2:
+        return None
+    try:
+        num, den = int(parts[0]), int(parts[1])
+    except ValueError:
+        return None
+    if num <= 0 or den <= 0:
+        return None
+    return num, den
+
+
+def _probe_display_size(path: Path) -> QSizeF | None:
+    """Return the SAR/rotation-corrected display size using ffprobe.
+
+    ``nativeSize()`` on ``QGraphicsVideoItem`` sometimes reports the coded
+    resolution rather than the display resolution.  This happens when the
+    video has a non-square Sample Aspect Ratio (SAR) or a display-matrix
+    rotation.  VLC and thumbnail generators handle this correctly because
+    they read the SAR/rotation metadata; this helper does the same.
+
+    Returns ``None`` when ffprobe is unavailable or the stream cannot be
+    inspected, in which case the caller should fall back to ``nativeSize()``.
+    """
+
+    try:
+        from ....utils.ffmpeg import probe_media
+        meta = probe_media(path)
+    except Exception:
+        return None
+
+    streams = meta.get("streams", []) if isinstance(meta, dict) else []
+    if not isinstance(streams, list):
+        return None
+
+    for stream in streams:
+        if not isinstance(stream, dict):
+            continue
+        if stream.get("codec_type") != "video":
+            continue
+
+        coded_w = stream.get("width")
+        coded_h = stream.get("height")
+        if not isinstance(coded_w, int) or not isinstance(coded_h, int):
+            continue
+        if coded_w <= 0 or coded_h <= 0:
+            continue
+
+        display_w = float(coded_w)
+        display_h = float(coded_h)
+
+        # Apply Sample Aspect Ratio correction.  A SAR of 16:11 means each
+        # coded pixel is 16/11 times as wide as it is tall, so the display
+        # width is coded_width * sar_num / sar_den.
+        sar = _parse_sar(stream.get("sample_aspect_ratio"))
+        if sar is not None and sar != (1, 1):
+            sar_num, sar_den = sar
+            display_w = coded_w * sar_num / sar_den
+
+        # Check for rotation in side_data_list (display matrix).
+        rotation = 0
+        side_data_list = stream.get("side_data_list")
+        if isinstance(side_data_list, list):
+            for entry in side_data_list:
+                if isinstance(entry, dict) and "rotation" in entry:
+                    try:
+                        rotation = int(float(str(entry["rotation"])))
+                    except (ValueError, TypeError):
+                        pass
+                    break
+
+        # Fall back to stream-level rotation tag (older ffprobe / QuickTime).
+        if rotation == 0:
+            tags = stream.get("tags")
+            if isinstance(tags, dict):
+                rotate_tag = tags.get("rotate")
+                if rotate_tag is not None:
+                    try:
+                        rotation = int(float(str(rotate_tag)))
+                    except (ValueError, TypeError):
+                        pass
+
+        # 90° and 270° rotations swap width and height.
+        rotation = abs(rotation) % 360
+        if rotation in (90, 270):
+            display_w, display_h = display_h, display_w
+
+        return QSizeF(display_w, display_h)
+
+    return None
+
 
 class VideoArea(QWidget):
     """Present a video surface with auto-hiding playback controls."""
@@ -64,10 +166,23 @@ class VideoArea(QWidget):
             raise RuntimeError("PySide6.QtMultimediaWidgets is required for video playback.")
 
         # --- Graphics View Setup ---
+        # A black rectangle sits directly behind the video surface so that
+        # hardware compositing sees a black backing.  Some codecs (HDR / HEVC)
+        # produce washed-out colours when the compositing backdrop is non-black.
+        # The backing rect is sized to match the video item exactly, while the
+        # theme-coloured scene background fills the remaining letterbox areas.
+        self._black_backing: QGraphicsRectItem = QGraphicsRectItem()
+        self._black_backing.setBrush(Qt.black)
+        self._black_backing.setPen(Qt.NoPen)
+        self._black_backing.setZValue(0)
+
         self._video_item = QGraphicsVideoItem()
+        self._video_item.setZValue(1)
         self._video_item.setAspectRatioMode(Qt.AspectRatioMode.KeepAspectRatio)
+        self._video_item.nativeSizeChanged.connect(self._fit_video_item)
 
         self._scene = QGraphicsScene(self)
+        self._scene.addItem(self._black_backing)
         self._scene.addItem(self._video_item)
 
         self._video_view = QGraphicsView(self._scene, self)
@@ -79,14 +194,11 @@ class VideoArea(QWidget):
         # to click a non-interactive chrome element first.
         self._video_view.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setFocusProxy(self._video_view)
-        # Match the photo viewer's light-toned surface for any visible chrome
-        # around the video view (pixel gaps, widget edges).  The *scene*
-        # background is always black so that HDR / HEVC video frames composite
-        # against a black surface – some codecs produce washed-out colours when
-        # the compositing backdrop is a non-black colour.  The video item fills
-        # the entire scene with ``KeepAspectRatio`` so Qt handles SAR, display-
-        # matrix rotation and other codec-level geometry internally; letterbox
-        # / pillarbox areas appear as standard black bars.
+        # Mirror the palette-driven detail background so letterboxed frames sit
+        # on the same neutral backdrop as the surrounding chrome.  The theme
+        # colour is used for the scene background (filling letterbox areas),
+        # while the black backing rect ensures correct HDR/HEVC compositing
+        # directly behind the video content.
         surface_color = viewer_surface_color(self)
         self._default_surface_color = surface_color
         self._surface_override: str | None = None
@@ -95,7 +207,11 @@ class VideoArea(QWidget):
             f"background-color: {surface_color}; border: none;"
         )
         self.setStyleSheet(f"background-color: {surface_color};")
-        self._scene.setBackgroundBrush(QColor("#000000"))
+        self._scene.setBackgroundBrush(QColor(surface_color))
+
+        # Display size obtained from ffprobe (SAR + rotation corrected).
+        # Preferred over nativeSize() which can report coded dimensions.
+        self._display_size: QSizeF | None = None
         # --- End Graphics View Setup ---
 
         # --- Media Player Setup ---
@@ -153,12 +269,7 @@ class VideoArea(QWidget):
         return self._player_bar
 
     def set_surface_color_override(self, colour: str | None) -> None:
-        """Override the viewer backdrop with *colour* or restore the default.
-
-        This only affects the outer widget / viewport chrome.  The scene
-        background is always kept black to guarantee correct HDR / HEVC
-        compositing regardless of the current theme.
-        """
+        """Override the viewer backdrop with *colour* or restore the default."""
 
         self._surface_override = colour
         target = colour if colour is not None else self._default_surface_color
@@ -166,6 +277,7 @@ class VideoArea(QWidget):
         self.setStyleSheet(stylesheet)
         self._video_view.setStyleSheet("background: transparent; border: none;")
         self._video_view.viewport().setStyleSheet(stylesheet)
+        self._scene.setBackgroundBrush(QColor(target))
 
     def set_immersive_background(self, immersive: bool) -> None:
         """Switch to a pure black canvas when immersive full screen mode is active."""
@@ -229,6 +341,7 @@ class VideoArea(QWidget):
 
     def load_video(self, path: Path) -> None:
         """Load a video file for playback."""
+        self._display_size = _probe_display_size(path)
         self._player.setSource(QUrl.fromLocalFile(str(path)))
         # Do not auto-play; let the coordinator decide.
         # But ensure we are at start
@@ -298,8 +411,7 @@ class VideoArea(QWidget):
         rect = self.rect()
         self._video_view.setGeometry(rect)
         self._scene.setSceneRect(QRectF(rect))
-        self._video_item.setSize(self._scene.sceneRect().size())
-        self._video_item.setPos(QPointF())
+        self._fit_video_item()
         self._update_bar_geometry()
 
     def enterEvent(self, event) -> None:  # pragma: no cover - GUI behaviour
@@ -448,6 +560,49 @@ class VideoArea(QWidget):
             y = max(0, rect.height() - bar_height)
         self._player_bar.setGeometry(x, y, bar_width, bar_height)
         self._player_bar.raise_()
+
+    def _fit_video_item(self) -> None:
+        """Size and position the video item to match the video's display aspect ratio.
+
+        When the display size is known (from ffprobe SAR/rotation correction or
+        from ``nativeSize()`` as a fallback) the video item is shrunk to the
+        largest aspect-ratio-preserving rectangle that fits inside the scene.
+        The black backing rectangle is sized to the *same* bounds so it sits
+        exactly behind the video surface, ensuring correct HDR/HEVC compositing
+        without black bars leaking into the theme-coloured letterbox area.
+        """
+
+        scene_rect = self._scene.sceneRect()
+        if scene_rect.isEmpty():
+            return
+
+        # Prefer ffprobe-derived display dimensions over nativeSize() which
+        # may report coded (uncorrected) dimensions for videos with non-square
+        # SAR or display-matrix rotation.
+        effective_size = self._display_size
+        if effective_size is None or effective_size.isEmpty():
+            effective_size = self._video_item.nativeSize()
+        if effective_size.isEmpty():
+            # No video loaded yet – fill the entire scene so the item is ready
+            # to display the first frame without a layout jump.
+            self._video_item.setSize(scene_rect.size())
+            self._video_item.setPos(QPointF())
+            self._black_backing.setPos(QPointF())
+            self._black_backing.setRect(QRectF())
+            return
+
+        # Compute the largest rectangle inside the scene that preserves the
+        # video's display aspect ratio.
+        fitted = effective_size.scaled(scene_rect.size(), Qt.AspectRatioMode.KeepAspectRatio)
+        x = (scene_rect.width() - fitted.width()) / 2.0
+        y = (scene_rect.height() - fitted.height()) / 2.0
+
+        self._video_item.setSize(fitted)
+        self._video_item.setPos(QPointF(x, y))
+
+        # Mirror the video item's bounds exactly – trivially aligned.
+        self._black_backing.setPos(QPointF(x, y))
+        self._black_backing.setRect(QRectF(QPointF(), fitted))
 
     # ------------------------------------------------------------------
     # Live Photo helpers

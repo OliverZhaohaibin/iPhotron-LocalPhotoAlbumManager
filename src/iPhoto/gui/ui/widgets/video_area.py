@@ -104,7 +104,7 @@ def _probe_display_size(path: Path) -> QSizeF | None:
         from ....utils.ffmpeg import probe_media
         meta = probe_media(path)
     except Exception:
-        _log.debug("_probe_display_size: ffprobe unavailable for %s", path.name)
+        _log.debug("[VideoDbg] ffprobe unavailable for %s", path.name)
         return None
 
     streams = meta.get("streams", []) if isinstance(meta, dict) else []
@@ -116,6 +116,19 @@ def _probe_display_size(path: Path) -> QSizeF | None:
             continue
         if stream.get("codec_type") != "video":
             continue
+
+        # Log the raw ffprobe stream metadata for diagnostics.
+        _log.info(
+            "[VideoDbg] ffprobe stream for %s: codec=%s  coded=%sx%s  "
+            "sar=%s  dar=%s  side_data_list=%s  tags.rotate=%s",
+            path.name,
+            stream.get("codec_name"),
+            stream.get("width"), stream.get("height"),
+            stream.get("sample_aspect_ratio", "N/A"),
+            stream.get("display_aspect_ratio", "N/A"),
+            stream.get("side_data_list", "N/A"),
+            (stream.get("tags") or {}).get("rotate", "N/A"),
+        )
 
         coded_w = stream.get("width")
         coded_h = stream.get("height")
@@ -134,6 +147,7 @@ def _probe_display_size(path: Path) -> QSizeF | None:
         if sar is not None and sar != (1, 1):
             sar_num, sar_den = sar
             display_w = coded_w * sar_num / sar_den
+            _log.info("[VideoDbg] SAR correction: %d:%d  display_w -> %.0f", sar_num, sar_den, display_w)
 
         # Check for rotation in side_data_list (display matrix).
         rotation = 0
@@ -151,16 +165,20 @@ def _probe_display_size(path: Path) -> QSizeF | None:
                 rotation = _parse_rotation(tags.get("rotate"))
 
         # 90° and 270° rotations swap width and height.
-        rotation = abs(rotation) % 360
-        if rotation in (90, 270):
+        abs_rotation = abs(rotation) % 360
+        swapped = abs_rotation in (90, 270)
+        if swapped:
             display_w, display_h = display_h, display_w
 
-        _log.debug(
-            "_probe_display_size: %s  coded=%dx%d  rotation=%d  display=%.0fx%.0f",
-            path.name, coded_w, coded_h, rotation, display_w, display_h,
+        _log.info(
+            "[VideoDbg] _probe_display_size result: %s  coded=%dx%d  "
+            "rotation=%d (abs%%360=%d, swapped=%s)  display=%.0fx%.0f",
+            path.name, coded_w, coded_h,
+            rotation, abs_rotation, swapped, display_w, display_h,
         )
         return QSizeF(display_w, display_h)
 
+    _log.warning("[VideoDbg] No video stream found in %s", path.name)
     return None
 
 
@@ -359,7 +377,9 @@ class VideoArea(QWidget):
 
     def load_video(self, path: Path) -> None:
         """Load a video file for playback."""
+        _log.info("[VideoDbg] load_video: %s", path.name)
         self._display_size = _probe_display_size(path)
+        _log.info("[VideoDbg] display_size from probe: %s", self._display_size)
         self._player.setSource(QUrl.fromLocalFile(str(path)))
         # Do not auto-play; let the coordinator decide.
         # But ensure we are at start
@@ -601,8 +621,11 @@ class VideoArea(QWidget):
         # Prefer ffprobe-derived display dimensions (SAR + rotation corrected)
         # over nativeSize() which may report coded (uncorrected) dimensions.
         effective_size = self._display_size
+        native_size = self._video_item.nativeSize()
+        source = "probe"
         if effective_size is None or effective_size.isEmpty():
-            effective_size = self._video_item.nativeSize()
+            effective_size = native_size
+            source = "nativeSize"
         if effective_size.isEmpty():
             # No video loaded yet – fill the entire scene so the item is ready
             # to display the first frame without a layout jump.
@@ -617,6 +640,20 @@ class VideoArea(QWidget):
         fitted = effective_size.scaled(scene_rect.size(), Qt.AspectRatioMode.KeepAspectRatio)
         x = (scene_rect.width() - fitted.width()) / 2.0
         y = (scene_rect.height() - fitted.height()) / 2.0
+
+        _log.info(
+            "[VideoDbg] _fit_video_item: source=%s  nativeSize=%.0fx%.0f  "
+            "probe_display=%.0fx%.0f  effective=%.0fx%.0f  "
+            "scene=%.0fx%.0f  fitted=%.0fx%.0f  pos=(%.0f,%.0f)",
+            source,
+            native_size.width(), native_size.height(),
+            (self._display_size.width() if self._display_size else 0),
+            (self._display_size.height() if self._display_size else 0),
+            effective_size.width(), effective_size.height(),
+            scene_rect.width(), scene_rect.height(),
+            fitted.width(), fitted.height(),
+            x, y,
+        )
 
         self._video_item.setSize(fitted)
         self._video_item.setPos(QPointF(x, y))

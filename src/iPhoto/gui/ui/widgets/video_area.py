@@ -92,6 +92,10 @@ class _VideoGeometry:
     crop_right: int = 0
     crop_top: int = 0
     crop_bottom: int = 0
+    coded_crop_left: int = 0
+    coded_crop_right: int = 0
+    coded_crop_top: int = 0
+    coded_crop_bottom: int = 0
 
     @property
     def has_crop(self) -> bool:
@@ -267,6 +271,10 @@ def _probe_display_size(path: Path) -> _VideoGeometry | None:
             crop_right=crop_display_r,
             crop_top=crop_display_t,
             crop_bottom=crop_display_b,
+            coded_crop_left=crop_left,
+            coded_crop_right=crop_right,
+            coded_crop_top=crop_top,
+            coded_crop_bottom=crop_bottom,
         )
 
     _log.warning("[VideoDbg] No video stream found in %s", path.name)
@@ -718,6 +726,10 @@ class VideoArea(QWidget):
         native_size = self._video_item.nativeSize()
         source = "probe"
         apply_crop_compensation = bool(self._video_geometry and self._video_geometry.has_crop)
+        crop_left = self._video_geometry.crop_left if self._video_geometry else 0
+        crop_right = self._video_geometry.crop_right if self._video_geometry else 0
+        crop_top = self._video_geometry.crop_top if self._video_geometry else 0
+        crop_bottom = self._video_geometry.crop_bottom if self._video_geometry else 0
         if effective_size is None or effective_size.isEmpty():
             effective_size = native_size
             source = "nativeSize"
@@ -751,16 +763,25 @@ class VideoArea(QWidget):
             if native_prefers_unrotated and scene_allows_unrotated:
                 effective_size = unrotated
                 source = "probe(native-orientation-fallback)"
-                # Crop mapping is computed for rotated display coordinates;
-                # disable it in native-orientation fallback to avoid axis mismatch.
-                apply_crop_compensation = False
+                # In native-orientation fallback the display-space crop mapping
+                # no longer matches what backend actually renders. Switch to
+                # coded-space crop values so compensation still converges to the
+                # real visible video edges instead of reintroducing black rims.
+                crop_left = self._video_geometry.coded_crop_left
+                crop_right = self._video_geometry.coded_crop_right
+                crop_top = self._video_geometry.coded_crop_top
+                crop_bottom = self._video_geometry.coded_crop_bottom
                 _log.info(
-                    "[VideoDbg] native orientation fallback: native=%.3f rotated=%.3f unrotated=%.3f fill(rot)=%.0f fill(unrot)=%.0f",
+                    "[VideoDbg] native orientation fallback: native=%.3f rotated=%.3f unrotated=%.3f fill(rot)=%.0f fill(unrot)=%.0f  coded_crop=(%d,%d,%d,%d)",
                     native_aspect,
                     _aspect_ratio(rotated),
                     _aspect_ratio(unrotated),
                     rotated_fill,
                     unrotated_fill,
+                    crop_left,
+                    crop_right,
+                    crop_top,
+                    crop_bottom,
                 )
         if effective_size.isEmpty():
             # No video loaded yet – fill the entire scene so the item is ready
@@ -799,15 +820,11 @@ class VideoArea(QWidget):
             visible_w = max(1.0, self._video_geometry.display_size.width())
             visible_h = max(1.0, self._video_geometry.display_size.height())
 
-            scale_x = (
-                visible_w + self._video_geometry.crop_left + self._video_geometry.crop_right
-            ) / visible_w
-            scale_y = (
-                visible_h + self._video_geometry.crop_top + self._video_geometry.crop_bottom
-            ) / visible_h
+            scale_x = (visible_w + crop_left + crop_right) / visible_w
+            scale_y = (visible_h + crop_top + crop_bottom) / visible_h
             video_size = QSizeF(fitted.width() * scale_x, fitted.height() * scale_y)
-            video_x = x - (fitted.width() * self._video_geometry.crop_left / visible_w)
-            video_y = y - (fitted.height() * self._video_geometry.crop_top / visible_h)
+            video_x = x - (fitted.width() * crop_left / visible_w)
+            video_y = y - (fitted.height() * crop_top / visible_h)
 
             # Some Qt multimedia backends still leak a 1px dark fringe along one
             # or more edges after crop compensation because texture sampling lands
@@ -822,10 +839,10 @@ class VideoArea(QWidget):
             _log.info(
                 "[VideoDbg] applying crop compensation: display_crop l=%d r=%d t=%d b=%d  "
                 "video_size=%.0fx%.0f  video_pos=(%.0f,%.0f)  overscan=%.1fpx",
-                self._video_geometry.crop_left,
-                self._video_geometry.crop_right,
-                self._video_geometry.crop_top,
-                self._video_geometry.crop_bottom,
+                crop_left,
+                crop_right,
+                crop_top,
+                crop_bottom,
                 video_size.width(),
                 video_size.height(),
                 video_x,

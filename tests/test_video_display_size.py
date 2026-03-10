@@ -1,4 +1,11 @@
-"""Tests for SAR / rotation-corrected display size logic."""
+"""Tests for SAR-corrected display size logic.
+
+Rotation is intentionally NOT applied to stored dimensions or display sizing
+because Qt's ``QGraphicsVideoItem`` with ``KeepAspectRatio`` handles
+display-matrix rotation internally.  Swapping w/h for rotation would
+double-apply the transform, producing incorrect letterboxing (e.g. black
+bars on landscape videos).
+"""
 
 from __future__ import annotations
 
@@ -9,7 +16,7 @@ import pytest
 from iPhoto.io import metadata
 
 
-# ── metadata.py: SAR correction in read_video_meta ──────────────────────────
+# ── metadata.py: stored coded dimensions in read_video_meta ─────────────────
 
 
 def _make_probe(streams, fmt=None):
@@ -24,32 +31,8 @@ def _make_probe(streams, fmt=None):
     return fake_probe_media
 
 
-def test_sar_correction_applied_to_stored_dimensions(monkeypatch, tmp_path):
-    """Non-square SAR multiplies the coded width to get display width."""
-
-    sample = tmp_path / "clip.mp4"
-
-    monkeypatch.setattr(
-        metadata,
-        "probe_media",
-        _make_probe([{
-            "codec_type": "video",
-            "codec_name": "h264",
-            "width": 720,
-            "height": 576,
-            "sample_aspect_ratio": "16:11",
-        }]),
-    )
-
-    info = metadata.read_video_meta(sample)
-
-    # 720 * 16 / 11 ≈ 1047.27  →  round → 1047
-    assert info["w"] == round(720 * 16 / 11)
-    assert info["h"] == 576
-
-
-def test_sar_1_1_leaves_dimensions_unchanged(monkeypatch, tmp_path):
-    """SAR 1:1 is the common case and must not alter coded dimensions."""
+def test_coded_dimensions_stored_unchanged(monkeypatch, tmp_path):
+    """read_video_meta stores the coded w/h from ffprobe without modification."""
 
     sample = tmp_path / "clip.mp4"
 
@@ -61,7 +44,6 @@ def test_sar_1_1_leaves_dimensions_unchanged(monkeypatch, tmp_path):
             "codec_name": "hevc",
             "width": 1920,
             "height": 1080,
-            "sample_aspect_ratio": "1:1",
         }]),
     )
 
@@ -71,8 +53,8 @@ def test_sar_1_1_leaves_dimensions_unchanged(monkeypatch, tmp_path):
     assert info["h"] == 1080
 
 
-def test_rotation_90_swaps_dimensions(monkeypatch, tmp_path):
-    """A 90° rotation (portrait iPhone video) should swap w/h."""
+def test_rotation_does_not_swap_stored_dimensions(monkeypatch, tmp_path):
+    """Rotation metadata must NOT swap w/h — Qt handles rotation internally."""
 
     sample = tmp_path / "clip.mov"
 
@@ -92,62 +74,13 @@ def test_rotation_90_swaps_dimensions(monkeypatch, tmp_path):
 
     info = metadata.read_video_meta(sample)
 
-    assert info["w"] == 1080
-    assert info["h"] == 1920
-
-
-def test_rotation_270_swaps_dimensions(monkeypatch, tmp_path):
-    """A 270° rotation should also swap w/h."""
-
-    sample = tmp_path / "clip.mov"
-
-    monkeypatch.setattr(
-        metadata,
-        "probe_media",
-        _make_probe([{
-            "codec_type": "video",
-            "codec_name": "hevc",
-            "width": 1920,
-            "height": 1080,
-            "side_data_list": [
-                {"side_data_type": "Display Matrix", "rotation": -270},
-            ],
-        }]),
-    )
-
-    info = metadata.read_video_meta(sample)
-
-    assert info["w"] == 1080
-    assert info["h"] == 1920
-
-
-def test_rotation_180_keeps_dimensions(monkeypatch, tmp_path):
-    """A 180° rotation does not swap w/h."""
-
-    sample = tmp_path / "clip.mov"
-
-    monkeypatch.setattr(
-        metadata,
-        "probe_media",
-        _make_probe([{
-            "codec_type": "video",
-            "codec_name": "hevc",
-            "width": 1920,
-            "height": 1080,
-            "side_data_list": [
-                {"side_data_type": "Display Matrix", "rotation": 180},
-            ],
-        }]),
-    )
-
-    info = metadata.read_video_meta(sample)
-
+    # Coded dimensions stored as-is, no rotation swap
     assert info["w"] == 1920
     assert info["h"] == 1080
 
 
-def test_rotation_from_legacy_tag(monkeypatch, tmp_path):
-    """Older QuickTime files use a tags.rotate field instead of side_data."""
+def test_legacy_rotate_tag_does_not_swap_stored_dimensions(monkeypatch, tmp_path):
+    """Legacy QuickTime rotate tag must NOT swap stored w/h."""
 
     sample = tmp_path / "clip.mov"
 
@@ -160,55 +93,6 @@ def test_rotation_from_legacy_tag(monkeypatch, tmp_path):
             "width": 1920,
             "height": 1080,
             "tags": {"rotate": "90"},
-        }]),
-    )
-
-    info = metadata.read_video_meta(sample)
-
-    assert info["w"] == 1080
-    assert info["h"] == 1920
-
-
-def test_sar_with_rotation_combined(monkeypatch, tmp_path):
-    """Both SAR and rotation should be applied."""
-
-    sample = tmp_path / "clip.mov"
-
-    monkeypatch.setattr(
-        metadata,
-        "probe_media",
-        _make_probe([{
-            "codec_type": "video",
-            "codec_name": "h264",
-            "width": 720,
-            "height": 576,
-            "sample_aspect_ratio": "16:11",
-            "side_data_list": [
-                {"side_data_type": "Display Matrix", "rotation": -90},
-            ],
-        }]),
-    )
-
-    info = metadata.read_video_meta(sample)
-
-    # SAR first: 720 * 16/11 ≈ 1047, then 90° rotation swaps
-    assert info["w"] == 576
-    assert info["h"] == round(720 * 16 / 11)
-
-
-def test_no_sar_field_leaves_dimensions_unchanged(monkeypatch, tmp_path):
-    """Missing SAR field should leave coded dimensions as-is."""
-
-    sample = tmp_path / "clip.mp4"
-
-    monkeypatch.setattr(
-        metadata,
-        "probe_media",
-        _make_probe([{
-            "codec_type": "video",
-            "codec_name": "hevc",
-            "width": 1920,
-            "height": 1080,
         }]),
     )
 
@@ -265,8 +149,13 @@ def test_probe_display_size_with_sar(monkeypatch):
     assert abs(result.height() - 576) < 0.1
 
 
-def test_probe_display_size_with_rotation(monkeypatch):
-    """_probe_display_size should swap dimensions for 90° rotation."""
+def test_probe_display_size_ignores_rotation(monkeypatch):
+    """_probe_display_size must NOT swap dimensions for rotation.
+
+    Qt handles display-matrix rotation internally in QGraphicsVideoItem.
+    Swapping w/h here would double-apply rotation, causing landscape videos
+    to get portrait backgrounds with top/bottom black bars.
+    """
     from iPhoto.gui.ui.widgets.video_area import _probe_display_size
     from iPhoto.utils import ffmpeg as ffmpeg_mod
 
@@ -286,8 +175,9 @@ def test_probe_display_size_with_rotation(monkeypatch):
 
     result = _probe_display_size(Path("/fake/video.mp4"))
     assert result is not None
-    assert abs(result.width() - 1080) < 0.1
-    assert abs(result.height() - 1920) < 0.1
+    # Dimensions must NOT be swapped — Qt handles rotation internally
+    assert abs(result.width() - 1920) < 0.1
+    assert abs(result.height() - 1080) < 0.1
 
 
 def test_probe_display_size_no_ffprobe(monkeypatch):

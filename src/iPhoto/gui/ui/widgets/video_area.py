@@ -180,7 +180,7 @@ class VideoArea(QWidget):
         self._apply_surface(colour, scene_colour=scene)
 
     def _apply_surface(
-        self, colour: str, *, scene_colour: str | None = None
+        self, colour: str, *, scene_colour: Optional[str] = None
     ) -> None:
         """Apply *colour* to the widget chrome and *scene_colour* to the scene.
 

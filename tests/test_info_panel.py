@@ -112,3 +112,42 @@ def test_info_panel_close_button_closes(qapp: QApplication) -> None:
     assert panel.isVisible()
     panel.close_button.click()
     assert not panel.isVisible()
+
+
+def test_info_panel_centers_on_parent(qapp: QApplication) -> None:
+    """The panel should centre itself over its parent on first show."""
+
+    from PySide6.QtWidgets import QMainWindow
+
+    parent = QMainWindow()
+    parent.setGeometry(200, 200, 800, 600)
+    parent.show()
+
+    panel = InfoPanel(parent)
+    panel.show()
+    qapp.processEvents()
+
+    parent_center = parent.geometry().center()
+    panel_geo = panel.geometry()
+    panel_center = panel_geo.center()
+
+    # Allow a tolerance of half the panel size for rounding
+    assert abs(panel_center.x() - parent_center.x()) <= panel_geo.width() // 2
+    assert abs(panel_center.y() - parent_center.y()) <= panel_geo.height() // 2
+
+    panel.close()
+    parent.close()
+
+
+def test_info_panel_has_shadow_margin(qapp: QApplication) -> None:
+    """The root layout should have non-zero margins to reserve space for the shadow."""
+
+    panel = InfoPanel()
+    layout = panel.layout()
+    margins = layout.contentsMargins()
+    shadow = InfoPanel._SHADOW_SIZE
+    assert margins.left() == shadow
+    assert margins.top() == shadow
+    assert margins.right() == shadow
+    assert margins.bottom() == shadow
+    panel.close()

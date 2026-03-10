@@ -161,12 +161,7 @@ class VideoArea(QWidget):
     def set_immersive_background(self, immersive: bool) -> None:
         """Switch to a pure black canvas when immersive full screen mode is active."""
 
-        colour = "#000000" if immersive else self._default_surface_color
-        stylesheet = f"background-color: {colour}; border: none;"
-        self.setStyleSheet(stylesheet)
-        self._video_view.setStyleSheet("background: transparent; border: none;")
-        self._video_view.viewport().setStyleSheet(stylesheet)
-        # Scene background stays black regardless — see __init__ comments.
+        self._apply_surface_color("#000000" if immersive else self._default_surface_color)
 
     def set_surface_color_override(self, colour: str | None) -> None:
         """Override the viewer backdrop with *colour* or restore the palette default.

@@ -94,7 +94,11 @@ class VideoArea(QWidget):
             f"background-color: {surface_color}; border: none;"
         )
         self.setStyleSheet(f"background-color: {surface_color};")
-        self._scene.setBackgroundBrush(QColor(surface_color))
+        # The scene background must always be black so that QGraphicsVideoItem
+        # composites HDR / HEVC content against a neutral surface.  A non-black
+        # scene background causes the video decoder's colour-space conversion to
+        # blend with the background, producing a washed-out / gray picture.
+        self._scene.setBackgroundBrush(QColor("#000000"))
         # --- End Graphics View Setup ---
 
         # --- Media Player Setup ---
@@ -169,13 +173,20 @@ class VideoArea(QWidget):
         self._apply_surface_color(target)
 
     def _apply_surface_color(self, colour: str) -> None:
-        """Apply *colour* to the widget, viewport, and scene background."""
+        """Apply *colour* to the widget and viewport backgrounds.
+
+        The QGraphicsScene background is **always** kept black so that
+        ``QGraphicsVideoItem`` composites HDR / HEVC content against a
+        neutral surface.  A non-black scene background causes the video
+        decoder's colour-space conversion to blend with the background,
+        producing a washed-out / gray picture on certain displays.
+        """
 
         stylesheet = f"background-color: {colour}; border: none;"
         self.setStyleSheet(f"background-color: {colour};")
         self._video_view.setStyleSheet("background: transparent; border: none;")
         self._video_view.viewport().setStyleSheet(stylesheet)
-        self._scene.setBackgroundBrush(QColor(colour))
+        self._scene.setBackgroundBrush(QColor("#000000"))
 
     def show_controls(self, *, animate: bool = True) -> None:
         """Reveal the playback controls and restart the hide timer."""

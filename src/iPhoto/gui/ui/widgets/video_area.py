@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Optional, cast
+from typing import Optional
 
 from PySide6.QtCore import (
     QEasingCurve,
@@ -19,7 +19,6 @@ from PySide6.QtGui import QColor, QCursor, QMouseEvent, QPainter, QResizeEvent, 
 from PySide6.QtWidgets import (
     QFrame,
     QGraphicsOpacityEffect,
-    QGraphicsRectItem,
     QGraphicsScene,
     QGraphicsView,
     QWidget,
@@ -40,6 +39,7 @@ from ....config import (
     PLAYER_CONTROLS_HIDE_DELAY_MS,
     PLAYER_FADE_IN_MS,
     PLAYER_FADE_OUT_MS,
+    VIDEO_COMPLETE_HOLD_BACKSTEP_MS,
 )
 from .player_bar import PlayerBar
 from ..palette import viewer_surface_color
@@ -65,21 +65,10 @@ class VideoArea(QWidget):
             raise RuntimeError("PySide6.QtMultimediaWidgets is required for video playback.")
 
         # --- Graphics View Setup ---
-        # The dedicated black rectangle lives directly behind the video surface and is kept in
-        # sync with the rendered frame geometry.  This avoids altering the neutral UI chrome
-        # colour while ensuring the darkest pixels inside the video appear truly black.
-        self._black_backing: QGraphicsRectItem = QGraphicsRectItem()
-        self._black_backing.setBrush(Qt.black)
-        self._black_backing.setPen(Qt.NoPen)
-        self._black_backing.setZValue(0)
-
         self._video_item = QGraphicsVideoItem()
-        self._video_item.setZValue(1)
         self._video_item.setAspectRatioMode(Qt.AspectRatioMode.KeepAspectRatio)
-        self._video_item.nativeSizeChanged.connect(self._update_black_backing_geometry)
 
         self._scene = QGraphicsScene(self)
-        self._scene.addItem(self._black_backing)
         self._scene.addItem(self._video_item)
 
         self._video_view = QGraphicsView(self._scene, self)
@@ -91,16 +80,11 @@ class VideoArea(QWidget):
         # to click a non-interactive chrome element first.
         self._video_view.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setFocusProxy(self._video_view)
-        # Match the photo viewer's light-toned surface so letterboxed video frames sit
-        # on the same neutral backdrop.  Using the shared palette value keeps the
-        # photo and video experiences visually consistent while avoiding harsh
-        # contrast against the surrounding chrome.
-        # Mirror the palette-driven detail background so letterboxed frames do not
-        # sit on a subtly different tone compared to the surrounding widgets.
+        # The initial surface colour is derived from the widget palette so the
+        # letterbox areas match the surrounding chrome.  The theme controller
+        # updates this later via ``set_surface_color`` when the palette changes.
         surface_color = viewer_surface_color(self)
         self._default_surface_color = surface_color
-        # Style both the graphics view and its viewport so any revealed margins match the
-        # surrounding detail panel while the application is in its standard chrome mode.
         self._video_view.setStyleSheet("background: transparent; border: none;")
         self._video_view.viewport().setStyleSheet(
             f"background-color: {surface_color}; border: none;"
@@ -167,6 +151,26 @@ class VideoArea(QWidget):
         """Switch to a pure black canvas when immersive full screen mode is active."""
 
         colour = "#000000" if immersive else self._default_surface_color
+        self._apply_surface(colour)
+
+    def set_surface_color(self, colour: str) -> None:
+        """Update the surface colour used for letterbox and background areas.
+
+        Called by the theme controller whenever the application theme changes
+        so that the video canvas stays in sync with the surrounding chrome.
+        ``QGraphicsVideoItem`` renders decoded frames as fully opaque
+        surfaces, so the background colour only affects the letterbox
+        regions — not the video content itself.  This remains safe for
+        HEVC, HDR-10, and HLG material because the decoded pixels are
+        never alpha-blended with the scene background.
+        """
+
+        self._default_surface_color = colour
+        self._apply_surface(colour)
+
+    def _apply_surface(self, colour: str) -> None:
+        """Apply *colour* to the scene background, viewport, and widget."""
+
         stylesheet = f"background-color: {colour}; border: none;"
         self.setStyleSheet(stylesheet)
         self._video_view.setStyleSheet("background: transparent; border: none;")
@@ -272,6 +276,11 @@ class VideoArea(QWidget):
             position = self._player.position()
             if position + 200 < duration:
                 return
+            # Step back a few milliseconds and pause so the last visible
+            # frame remains on screen instead of flashing to black.
+            hold_pos = max(0, duration - VIDEO_COMPLETE_HOLD_BACKSTEP_MS)
+            self._player.setPosition(hold_pos)
+            self._player.pause()
             self.playbackFinished.emit()
 
     def _on_volume_changed(self, value: int) -> None:
@@ -297,7 +306,6 @@ class VideoArea(QWidget):
         self._video_item.setSize(self._scene.sceneRect().size())
         self._video_item.setPos(QPointF())
         self._update_bar_geometry()
-        self._update_black_backing_geometry()
 
     def enterEvent(self, event) -> None:  # pragma: no cover - GUI behaviour
         super().enterEvent(event)
@@ -445,37 +453,6 @@ class VideoArea(QWidget):
             y = max(0, rect.height() - bar_height)
         self._player_bar.setGeometry(x, y, bar_width, bar_height)
         self._player_bar.raise_()
-
-    def _update_black_backing_geometry(self) -> None:
-        """Keep the black backing rectangle aligned with the rendered video frame."""
-
-        video_native_size = self._video_item.nativeSize()
-        if video_native_size.isEmpty():
-            # Collapse the rectangle when no video is loaded so the neutral UI background stays
-            # visible.  This avoids showing a stray black patch before playback starts.
-            self._black_backing.setRect(QRectF())
-            return
-
-        item_size = self._video_item.size()
-        if item_size.isEmpty():
-            # Skip updates until the view establishes a non-zero drawing area.  Attempting to
-            # scale into a zero-sized surface would lead to divisions by zero inside Qt.
-            self._black_backing.setRect(QRectF())
-            return
-
-        # Determine the aspect-ratio preserving rectangle that Qt will use to present the video.
-        # We start with the native pixel size and scale it into the current video item bounds while
-        # maintaining the user's configured aspect mode.
-        scaled_size = video_native_size.scaled(item_size, Qt.AspectRatioMode.KeepAspectRatio)
-        scaled_rect = QRectF(QPointF(), scaled_size)
-
-        # Position the scaled rectangle so it is centred inside the video item, matching the
-        # placement of the actual media frame.
-        item_bounds = QRectF(QPointF(), item_size)
-        scaled_rect.moveCenter(item_bounds.center())
-
-        self._black_backing.setPos(self._video_item.pos())
-        self._black_backing.setRect(scaled_rect)
 
     # ------------------------------------------------------------------
     # Live Photo helpers

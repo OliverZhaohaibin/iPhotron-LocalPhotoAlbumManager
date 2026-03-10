@@ -343,6 +343,13 @@ class EditSession(QObject):
             "Denoise_Enabled": False,
             "Denoise_Amount": DEFAULT_DENOISE,
         })
+        # Vignette defaults
+        defaults.update({
+            "Vignette_Enabled": False,
+            "Vignette_Strength": DEFAULT_VIGNETTE_STRENGTH,
+            "Vignette_Radius": DEFAULT_VIGNETTE_RADIUS,
+            "Vignette_Softness": DEFAULT_VIGNETTE_SOFTNESS,
+        })
         self.set_values(defaults, emit_individual=True)
         self.resetPerformed.emit()
 

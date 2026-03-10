@@ -579,7 +579,7 @@ def _write_sharpen_node(root: ET.Element, values: Mapping[str, Any]) -> None:
     sh_edges = float(values.get("Sharpen_Edges", 0.0))
     sh_falloff = float(values.get("Sharpen_Falloff", 0.0))
 
-    if not sh_enabled and abs(sh_intensity) < 1e-6:
+    if not sh_enabled and abs(sh_intensity) < 1e-6 and abs(sh_edges) < 1e-6 and abs(sh_falloff) < 1e-6:
         return
 
     node = ET.SubElement(root, _SHARPEN_NODE)

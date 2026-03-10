@@ -6,9 +6,9 @@ import pytest
 
 pytest.importorskip("PySide6", reason="PySide6 is required for GUI tests")
 
-from PySide6.QtCore import QEvent, QRectF, QSizeF, Qt
+from PySide6.QtCore import QEvent, Qt
 from PySide6.QtGui import QColor, QShowEvent
-from PySide6.QtWidgets import QApplication, QGraphicsRectItem
+from PySide6.QtWidgets import QApplication
 
 from iPhoto.gui.ui.widgets.video_area import VideoArea
 
@@ -59,50 +59,35 @@ def test_video_area_show_event_calls_super(qapp, mocker):
 
 
 # ------------------------------------------------------------------
-# Black backing & scene background tests
+# Scene background tests
 # ------------------------------------------------------------------
 
 
-def test_black_backing_exists_behind_video_item(qapp):
-    """The black backing rectangle must sit behind the video item (Z < video)."""
+def test_scene_background_is_always_black(qapp):
+    """Scene background must always be black for correct HDR/HEVC compositing."""
     va = VideoArea()
-    assert isinstance(va._black_backing, QGraphicsRectItem)
-    assert va._black_backing.zValue() < va._video_item.zValue()
+    assert va._scene.backgroundBrush().color() == QColor("#000000")
 
 
-def test_black_backing_is_black(qapp):
-    """The backing must be filled with solid black for HDR/HEVC compositing."""
-    va = VideoArea()
-    assert va._black_backing.brush().color() == QColor(Qt.GlobalColor.black)
-
-
-def test_scene_background_matches_surface_color(qapp):
-    """The scene background should use the surface colour, not always black."""
-    va = VideoArea()
-    # After construction, scene brush should NOT be pure black
-    # (it follows the palette-driven surface colour).
-    scene_brush_color = va._scene.backgroundBrush().color()
-    # The exact surface colour depends on the platform palette, but it
-    # should match _default_surface_color.
-    assert scene_brush_color == QColor(va._default_surface_color)
-
-
-def test_apply_surface_color_updates_scene_background(qapp):
-    """_apply_surface_color should set the scene background to the given colour."""
+def test_apply_surface_color_does_not_change_scene(qapp):
+    """_apply_surface_color must not alter the scene background (always black)."""
     va = VideoArea()
     va._apply_surface_color("#FF0000")
-    assert va._scene.backgroundBrush().color() == QColor("#FF0000")
+    assert va._scene.backgroundBrush().color() == QColor("#000000")
 
 
-def test_black_backing_collapsed_when_no_video_loaded(qapp):
-    """Without a loaded video the backing should be collapsed (empty rect)."""
-    va = VideoArea()
-    va._update_black_backing_geometry()
-    assert va._black_backing.rect().isEmpty()
-
-
-def test_set_surface_color_override_updates_scene(qapp):
-    """set_surface_color_override should update scene background to the given colour."""
+def test_set_surface_color_override_keeps_scene_black(qapp):
+    """set_surface_color_override updates widget chrome but scene stays black."""
     va = VideoArea()
     va.set_surface_color_override("#123456")
-    assert va._scene.backgroundBrush().color() == QColor("#123456")
+    assert va._scene.backgroundBrush().color() == QColor("#000000")
+    assert va._default_surface_color == "#123456"
+
+
+def test_immersive_background_keeps_scene_black(qapp):
+    """set_immersive_background must not change the always-black scene."""
+    va = VideoArea()
+    va.set_immersive_background(True)
+    assert va._scene.backgroundBrush().color() == QColor("#000000")
+    va.set_immersive_background(False)
+    assert va._scene.backgroundBrush().color() == QColor("#000000")

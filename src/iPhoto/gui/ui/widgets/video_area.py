@@ -19,7 +19,6 @@ from PySide6.QtGui import QColor, QCursor, QMouseEvent, QPainter, QResizeEvent, 
 from PySide6.QtWidgets import (
     QFrame,
     QGraphicsOpacityEffect,
-    QGraphicsRectItem,
     QGraphicsScene,
     QGraphicsView,
     QWidget,
@@ -65,24 +64,10 @@ class VideoArea(QWidget):
             raise RuntimeError("PySide6.QtMultimediaWidgets is required for video playback.")
 
         # --- Graphics View Setup ---
-        # A dedicated black rectangle lives directly behind the video surface
-        # and is kept in sync with the rendered frame geometry.  This prevents
-        # HDR / HEVC colour-space conversion artefacts (washed-out / grey
-        # picture) that occur when the video composites against a non-black
-        # surface, while still allowing the scene background to use the
-        # theme's surface colour for the letterbox areas.
-        self._black_backing: QGraphicsRectItem = QGraphicsRectItem()
-        self._black_backing.setBrush(Qt.GlobalColor.black)
-        self._black_backing.setPen(Qt.PenStyle.NoPen)
-        self._black_backing.setZValue(0)
-
         self._video_item = QGraphicsVideoItem()
-        self._video_item.setZValue(1)
         self._video_item.setAspectRatioMode(Qt.AspectRatioMode.KeepAspectRatio)
-        self._video_item.nativeSizeChanged.connect(self._update_black_backing_geometry)
 
         self._scene = QGraphicsScene(self)
-        self._scene.addItem(self._black_backing)
         self._scene.addItem(self._video_item)
 
         self._video_view = QGraphicsView(self._scene, self)
@@ -109,11 +94,14 @@ class VideoArea(QWidget):
             f"background-color: {surface_color}; border: none;"
         )
         self.setStyleSheet(f"background-color: {surface_color};")
-        # The scene background uses the surface colour so that letterbox areas
-        # match the surrounding UI chrome.  The dedicated ``_black_backing``
-        # rectangle behind the video item provides the black compositing
-        # surface needed for correct HDR / HEVC rendering.
-        self._scene.setBackgroundBrush(QColor(surface_color))
+        # The scene background is always black so that QGraphicsVideoItem
+        # composites HDR / HEVC content against a neutral surface.  A non-black
+        # scene background causes the video decoder's colour-space conversion to
+        # blend with the background, producing a washed-out / grey picture.
+        # Letterbox areas therefore appear black — the industry standard for
+        # video players — while the widget-level backgrounds track the theme's
+        # surface colour for surrounding chrome consistency.
+        self._scene.setBackgroundBrush(QColor("#000000"))
         # --- End Graphics View Setup ---
 
         # --- Media Player Setup ---
@@ -173,7 +161,12 @@ class VideoArea(QWidget):
     def set_immersive_background(self, immersive: bool) -> None:
         """Switch to a pure black canvas when immersive full screen mode is active."""
 
-        self._apply_surface_color("#000000" if immersive else self._default_surface_color)
+        colour = "#000000" if immersive else self._default_surface_color
+        stylesheet = f"background-color: {colour}; border: none;"
+        self.setStyleSheet(stylesheet)
+        self._video_view.setStyleSheet("background: transparent; border: none;")
+        self._video_view.viewport().setStyleSheet(stylesheet)
+        # Scene background stays black regardless — see __init__ comments.
 
     def set_surface_color_override(self, colour: str | None) -> None:
         """Override the viewer backdrop with *colour* or restore the palette default.
@@ -188,19 +181,19 @@ class VideoArea(QWidget):
         self._apply_surface_color(target)
 
     def _apply_surface_color(self, colour: str) -> None:
-        """Apply *colour* to the widget, viewport, and scene backgrounds.
+        """Apply *colour* to widget and viewport backgrounds.
 
-        The scene background uses the given colour so that letterbox areas
-        match the surrounding chrome.  The dedicated ``_black_backing``
-        rectangle behind the video item provides the black compositing
-        surface that prevents HDR / HEVC washed-out rendering.
+        Only the widget-level backgrounds are updated so that any exposed
+        chrome outside the QGraphicsView matches the current theme.  The
+        QGraphicsScene background is **always** kept black for correct
+        HDR / HEVC compositing — see ``__init__`` for details.
         """
 
         stylesheet = f"background-color: {colour}; border: none;"
         self.setStyleSheet(f"background-color: {colour};")
         self._video_view.setStyleSheet("background: transparent; border: none;")
         self._video_view.viewport().setStyleSheet(stylesheet)
-        self._scene.setBackgroundBrush(QColor(colour))
+        # Scene background intentionally NOT changed — must stay black.
 
     def show_controls(self, *, animate: bool = True) -> None:
         """Reveal the playback controls and restart the hide timer."""
@@ -333,7 +326,6 @@ class VideoArea(QWidget):
         self._video_item.setSize(self._scene.sceneRect().size())
         self._video_item.setPos(QPointF())
         self._update_bar_geometry()
-        self._update_black_backing_geometry()
 
     def enterEvent(self, event) -> None:  # pragma: no cover - GUI behaviour
         super().enterEvent(event)
@@ -481,43 +473,6 @@ class VideoArea(QWidget):
             y = max(0, rect.height() - bar_height)
         self._player_bar.setGeometry(x, y, bar_width, bar_height)
         self._player_bar.raise_()
-
-    def _update_black_backing_geometry(self) -> None:
-        """Keep the black backing rectangle aligned with the rendered video frame.
-
-        The backing provides the black compositing surface behind the video
-        item so that HDR / HEVC content renders without colour artefacts.
-        It is sized to match the aspect-ratio-preserving rectangle that Qt
-        uses internally, and collapses to zero when no video is loaded so the
-        scene background (the surface colour) fills the entire viewport.
-        """
-
-        video_native_size = self._video_item.nativeSize()
-        if video_native_size.isEmpty():
-            # Collapse the rectangle when no video is loaded so the neutral UI
-            # background stays visible.
-            self._black_backing.setRect(QRectF())
-            return
-
-        item_size = self._video_item.size()
-        if item_size.isEmpty():
-            self._black_backing.setRect(QRectF())
-            return
-
-        # Determine the aspect-ratio preserving rectangle that Qt will use to
-        # present the video.
-        scaled_size = video_native_size.scaled(
-            item_size, Qt.AspectRatioMode.KeepAspectRatio
-        )
-        scaled_rect = QRectF(QPointF(), scaled_size)
-
-        # Centre within the video item, matching the placement of the actual
-        # media frame.
-        item_bounds = QRectF(QPointF(), item_size)
-        scaled_rect.moveCenter(item_bounds.center())
-
-        self._black_backing.setPos(self._video_item.pos())
-        self._black_backing.setRect(scaled_rect)
 
     # ------------------------------------------------------------------
     # Live Photo helpers

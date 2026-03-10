@@ -140,23 +140,42 @@ def _probe_display_size(path: Path) -> QSizeF | None:
         display_w = float(coded_w)
         display_h = float(coded_h)
 
+        # Apply frame cropping from side_data_list before SAR/rotation.
+        # e.g. {'side_data_type': 'Frame Cropping', 'crop_left': 88,
+        #        'crop_right': 88, 'crop_top': 66, 'crop_bottom': 66}
+        rotation = 0
+        side_data_list = stream.get("side_data_list")
+        if isinstance(side_data_list, list):
+            for entry in side_data_list:
+                if not isinstance(entry, dict):
+                    continue
+                if entry.get("side_data_type") == "Frame Cropping":
+                    crop_l = entry.get("crop_left", 0) or 0
+                    crop_r = entry.get("crop_right", 0) or 0
+                    crop_t = entry.get("crop_top", 0) or 0
+                    crop_b = entry.get("crop_bottom", 0) or 0
+                    cropped_w = display_w - crop_l - crop_r
+                    cropped_h = display_h - crop_t - crop_b
+                    if cropped_w > 0 and cropped_h > 0:
+                        _log.info(
+                            "[VideoDbg] Frame cropping: l=%d r=%d t=%d b=%d  "
+                            "%.0fx%.0f -> %.0fx%.0f",
+                            crop_l, crop_r, crop_t, crop_b,
+                            display_w, display_h, cropped_w, cropped_h,
+                        )
+                        display_w = cropped_w
+                        display_h = cropped_h
+                if "rotation" in entry and rotation == 0:
+                    rotation = _parse_rotation(entry["rotation"])
+
         # Apply Sample Aspect Ratio correction.  A SAR of 16:11 means each
         # coded pixel is 16/11 times as wide as it is tall, so the display
         # width is coded_width * sar_num / sar_den.
         sar = _parse_sar(stream.get("sample_aspect_ratio"))
         if sar is not None and sar != (1, 1):
             sar_num, sar_den = sar
-            display_w = coded_w * sar_num / sar_den
+            display_w = display_w * sar_num / sar_den
             _log.info("[VideoDbg] SAR correction: %d:%d  display_w -> %.0f", sar_num, sar_den, display_w)
-
-        # Check for rotation in side_data_list (display matrix).
-        rotation = 0
-        side_data_list = stream.get("side_data_list")
-        if isinstance(side_data_list, list):
-            for entry in side_data_list:
-                if isinstance(entry, dict) and "rotation" in entry:
-                    rotation = _parse_rotation(entry["rotation"])
-                    break
 
         # Fall back to stream-level rotation tag (older ffprobe / QuickTime).
         if rotation == 0:
@@ -600,39 +619,67 @@ class VideoArea(QWidget):
         self._player_bar.raise_()
 
     def _fit_video_item(self) -> None:
-        """Size the video item to fill the entire scene.
+        """Size and position the video item to match the video's display aspect ratio.
 
-        ``QGraphicsVideoItem`` with ``KeepAspectRatio`` handles SAR,
-        display-matrix rotation, and frame cropping internally.  The item
-        is sized to the full scene; Qt letterboxes / pillarboxes the
-        content as needed.
+        When the display size is known (from ffprobe SAR + rotation correction
+        or from ``nativeSize()`` as a fallback) the video item is shrunk to the
+        largest aspect-ratio-preserving rectangle that fits inside the scene.
+        The black backing rectangle is sized to the *same* bounds so it sits
+        exactly behind the video surface, ensuring correct HDR/HEVC compositing
+        without black bars leaking into the theme-coloured letterbox area.
 
-        The black backing rectangle also covers the full scene so that
-        any letterbox / pillarbox areas rendered by the item are
-        composited against a black surface — required for correct
-        HDR / HEVC colour reproduction.
+        The display size must account for rotation because Qt renders the
+        **post-rotation** content inside the item bounding box.  If the box
+        has the wrong aspect ratio, the content is letterboxed with black bars.
         """
 
         scene_rect = self._scene.sceneRect()
         if scene_rect.isEmpty():
             return
 
+        # Prefer ffprobe-derived display dimensions (SAR + rotation corrected)
+        # over nativeSize() which may report coded (uncorrected) dimensions.
+        effective_size = self._display_size
         native_size = self._video_item.nativeSize()
+        source = "probe"
+        if effective_size is None or effective_size.isEmpty():
+            effective_size = native_size
+            source = "nativeSize"
+        if effective_size.isEmpty():
+            # No video loaded yet – fill the entire scene so the item is ready
+            # to display the first frame without a layout jump.
+            self._video_item.setSize(scene_rect.size())
+            self._video_item.setPos(QPointF())
+            self._black_backing.setPos(QPointF())
+            self._black_backing.setRect(QRectF())
+            return
+
+        # Compute the largest rectangle inside the scene that preserves the
+        # video's display aspect ratio.
+        fitted = effective_size.scaled(scene_rect.size(), Qt.AspectRatioMode.KeepAspectRatio)
+        x = (scene_rect.width() - fitted.width()) / 2.0
+        y = (scene_rect.height() - fitted.height()) / 2.0
 
         _log.info(
-            "[VideoDbg] _fit_video_item: nativeSize=%.0fx%.0f  "
-            "probe_display=%.0fx%.0f  scene=%.0fx%.0f  → full-scene",
+            "[VideoDbg] _fit_video_item: source=%s  nativeSize=%.0fx%.0f  "
+            "probe_display=%.0fx%.0f  effective=%.0fx%.0f  "
+            "scene=%.0fx%.0f  fitted=%.0fx%.0f  pos=(%.0f,%.0f)",
+            source,
             native_size.width(), native_size.height(),
             (self._display_size.width() if self._display_size else 0),
             (self._display_size.height() if self._display_size else 0),
+            effective_size.width(), effective_size.height(),
             scene_rect.width(), scene_rect.height(),
+            fitted.width(), fitted.height(),
+            x, y,
         )
 
-        self._video_item.setSize(scene_rect.size())
-        self._video_item.setPos(QPointF())
+        self._video_item.setSize(fitted)
+        self._video_item.setPos(QPointF(x, y))
 
-        self._black_backing.setPos(QPointF())
-        self._black_backing.setRect(QRectF(QPointF(), scene_rect.size()))
+        # Mirror the video item's bounds exactly – trivially aligned.
+        self._black_backing.setPos(QPointF(x, y))
+        self._black_backing.setRect(QRectF(QPointF(), fitted))
 
     # ------------------------------------------------------------------
     # Live Photo helpers

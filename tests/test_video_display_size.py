@@ -348,3 +348,105 @@ def test_probe_display_size_no_ffprobe(monkeypatch):
 
     result = _probe_display_size(Path("/fake/video.mp4"))
     assert result is None
+
+
+def test_probe_display_size_frame_cropping(monkeypatch):
+    """_probe_display_size applies frame cropping before SAR/rotation.
+
+    For a coded 1920×1440 video with crop l/r=88, t/b=66 and -90° rotation:
+    - After crop: (1920-176) × (1440-132) = 1744 × 1308
+    - After rotation: 1308 × 1744
+    """
+    from iPhoto.gui.ui.widgets.video_area import _probe_display_size
+    from iPhoto.utils import ffmpeg as ffmpeg_mod
+
+    def fake_probe_media(_):
+        return {
+            "streams": [{
+                "codec_type": "video",
+                "width": 1920,
+                "height": 1440,
+                "side_data_list": [
+                    {
+                        "side_data_type": "Frame Cropping",
+                        "crop_top": 66,
+                        "crop_bottom": 66,
+                        "crop_left": 88,
+                        "crop_right": 88,
+                    },
+                    {"side_data_type": "Display Matrix", "rotation": -90},
+                ],
+            }],
+        }
+
+    monkeypatch.setattr(ffmpeg_mod, "probe_media", fake_probe_media)
+
+    result = _probe_display_size(Path("/fake/video.mov"))
+    assert result is not None
+    # Cropped then rotated: 1308 × 1744
+    assert abs(result.width() - 1308) < 0.1
+    assert abs(result.height() - 1744) < 0.1
+
+
+def test_probe_display_size_frame_cropping_no_rotation(monkeypatch):
+    """Frame cropping without rotation reduces display dimensions."""
+    from iPhoto.gui.ui.widgets.video_area import _probe_display_size
+    from iPhoto.utils import ffmpeg as ffmpeg_mod
+
+    def fake_probe_media(_):
+        return {
+            "streams": [{
+                "codec_type": "video",
+                "width": 1920,
+                "height": 1080,
+                "side_data_list": [
+                    {
+                        "side_data_type": "Frame Cropping",
+                        "crop_top": 10,
+                        "crop_bottom": 10,
+                        "crop_left": 20,
+                        "crop_right": 20,
+                    },
+                ],
+            }],
+        }
+
+    monkeypatch.setattr(ffmpeg_mod, "probe_media", fake_probe_media)
+
+    result = _probe_display_size(Path("/fake/video.mp4"))
+    assert result is not None
+    assert abs(result.width() - 1880) < 0.1
+    assert abs(result.height() - 1060) < 0.1
+
+
+def test_probe_display_size_frame_cropping_with_sar(monkeypatch):
+    """Frame cropping is applied before SAR correction."""
+    from iPhoto.gui.ui.widgets.video_area import _probe_display_size
+    from iPhoto.utils import ffmpeg as ffmpeg_mod
+
+    def fake_probe_media(_):
+        return {
+            "streams": [{
+                "codec_type": "video",
+                "width": 720,
+                "height": 576,
+                "sample_aspect_ratio": "16:11",
+                "side_data_list": [
+                    {
+                        "side_data_type": "Frame Cropping",
+                        "crop_left": 10,
+                        "crop_right": 10,
+                        "crop_top": 0,
+                        "crop_bottom": 0,
+                    },
+                ],
+            }],
+        }
+
+    monkeypatch.setattr(ffmpeg_mod, "probe_media", fake_probe_media)
+
+    result = _probe_display_size(Path("/fake/video.mp4"))
+    assert result is not None
+    # Cropped width = 720-20 = 700, SAR = 16:11 → 700 * 16/11 ≈ 1018.18
+    assert abs(result.width() - 700 * 16 / 11) < 0.1
+    assert abs(result.height() - 576) < 0.1

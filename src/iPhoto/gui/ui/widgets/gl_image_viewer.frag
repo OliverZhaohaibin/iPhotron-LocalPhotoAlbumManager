@@ -427,10 +427,13 @@ vec3 apply_denoise(vec3 adjustedColor, vec2 uv) {
 }
 
 vec3 apply_sharpen(vec3 adjustedColor, vec2 uv) {
-    // Unsharp Mask with edge masking – mirrors the CPU sharpen_resolver.
-    // Operates on the source texture to compute a sharpening delta, then
-    // applies it to the already-processed ``adjustedColor`` so earlier
-    // pipeline stages (selective color, denoise, etc.) are preserved.
+    // Unsharp Mask with edge masking.
+    // Computes the high-pass + edge mask from the source texture (uTex) and
+    // applies the resulting sharpening delta to the already-processed
+    // ``adjustedColor`` so earlier pipeline stages (selective color, denoise,
+    // etc.) are preserved.  The CPU ``sharpen_resolver`` instead runs on the
+    // already-adjusted image, so GPU preview and CPU/export may diverge
+    // slightly when upstream adjustments are active.
     vec2 texSize = vec2(textureSize(uTex, 0));
     vec2 texel = 1.0 / texSize;
 

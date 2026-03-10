@@ -45,6 +45,53 @@ def test_resolve_render_adjustments_handles_missing_values() -> None:
     assert resolved == {}
 
 
+def test_resolve_render_adjustments_sharpen_enabled_gating() -> None:
+    """Sharpen_Enabled gates whether clamped Sharpen params appear in the resolved dict."""
+
+    raw_enabled = {
+        "Sharpen_Enabled": True,
+        "Sharpen_Intensity": 0.8,
+        "Sharpen_Edges": 0.3,
+        "Sharpen_Falloff": 0.6,
+    }
+    resolved = resolve_render_adjustments(raw_enabled, color_stats=ColorStats())
+    assert resolved["Sharpen_Enabled"] is True
+    assert pytest.approx(0.8, rel=1e-6) == resolved["Sharpen_Intensity"]
+    assert pytest.approx(0.3, rel=1e-6) == resolved["Sharpen_Edges"]
+    assert pytest.approx(0.6, rel=1e-6) == resolved["Sharpen_Falloff"]
+
+    # When disabled, the dedicated section does not emit clamped values.
+    # Out-of-range values should NOT be clamped when section is disabled.
+    raw_disabled = {
+        "Sharpen_Enabled": False,
+        "Sharpen_Intensity": 2.5,
+        "Sharpen_Edges": -0.3,
+        "Sharpen_Falloff": 1.5,
+    }
+    resolved_off = resolve_render_adjustments(raw_disabled, color_stats=ColorStats())
+    assert resolved_off["Sharpen_Enabled"] is False
+    # Values flow through the generic loop unclamped when disabled; the
+    # dedicated section only applies clamping when the section is enabled.
+    assert pytest.approx(2.5, rel=1e-6) == resolved_off.get("Sharpen_Intensity", 0.0)
+    assert pytest.approx(-0.3, rel=1e-6) == resolved_off.get("Sharpen_Edges", 0.0)
+    assert pytest.approx(1.5, rel=1e-6) == resolved_off.get("Sharpen_Falloff", 0.0)
+
+
+def test_resolve_render_adjustments_sharpen_clamping() -> None:
+    """Sharpen params are clamped to [0, 1]."""
+
+    raw = {
+        "Sharpen_Enabled": True,
+        "Sharpen_Intensity": 2.5,
+        "Sharpen_Edges": -0.3,
+        "Sharpen_Falloff": 1.5,
+    }
+    resolved = resolve_render_adjustments(raw, color_stats=ColorStats())
+    assert pytest.approx(1.0, rel=1e-6) == resolved["Sharpen_Intensity"]
+    assert pytest.approx(0.0, rel=1e-6) == resolved["Sharpen_Edges"]
+    assert pytest.approx(1.0, rel=1e-6) == resolved["Sharpen_Falloff"]
+
+
 def test_resolve_light_vector_scales_delta_strength() -> None:
     """The fine-tuning overrides should inherit the 0.1 sensitivity factor."""
 

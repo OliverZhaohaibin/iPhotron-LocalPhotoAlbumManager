@@ -784,13 +784,17 @@ class VideoArea(QWidget):
             self._black_backing.setRect(QRectF())
             return
 
-        # Compute the target rectangle for the video content. For cropped
-        # Apple clips we prefer edge-to-edge (aspect-fill) so side/top bars are
-        # eliminated and the visible aperture reaches the viewport edges.
+        # Compute target rectangle. Default to best-fit (no overflow). Only use
+        # edge-to-edge expanding for cropped portrait assets when scene/video
+        # aspect ratios are already close; otherwise expanding can over-zoom.
+        scene_aspect = _aspect_ratio(scene_rect.size())
+        effective_aspect = _aspect_ratio(effective_size)
+        aspect_gap = abs(scene_aspect - effective_aspect)
         edge_to_edge_fill = bool(
             self._video_geometry
             and self._video_geometry.has_crop
             and abs(self._video_geometry.rotation) % 360 in (90, 270)
+            and aspect_gap <= 0.20
         )
         aspect_mode = (
             Qt.AspectRatioMode.KeepAspectRatioByExpanding
@@ -804,7 +808,7 @@ class VideoArea(QWidget):
         _log.info(
             "[VideoDbg] _fit_video_item: source=%s  nativeSize=%.0fx%.0f  "
             "probe_display=%.0fx%.0f  effective=%.0fx%.0f  "
-            "scene=%.0fx%.0f  fitted=%.0fx%.0f  pos=(%.0f,%.0f)  mode=%s",
+            "scene=%.0fx%.0f  fitted=%.0fx%.0f  pos=(%.0f,%.0f)  mode=%s  aspect_gap=%.3f",
             source,
             native_size.width(), native_size.height(),
             (self._video_geometry.display_size.width() if self._video_geometry else 0),
@@ -814,6 +818,7 @@ class VideoArea(QWidget):
             fitted.width(), fitted.height(),
             x, y,
             ("expand" if edge_to_edge_fill else "fit"),
+            aspect_gap,
         )
 
         video_size = QSizeF(fitted)
@@ -867,7 +872,7 @@ class VideoArea(QWidget):
 
         _log.info(
             "[VideoDbg] final geometry: source=%s effective=%.0fx%.0f crop=(l=%d r=%d t=%d b=%d) "
-            "fitted=%.2fx%.2f@(%.2f,%.2f) video_item=%.2fx%.2f@(%.2f,%.2f) scene=%.0fx%.0f mode=%s",
+            "fitted=%.2fx%.2f@(%.2f,%.2f) video_item=%.2fx%.2f@(%.2f,%.2f) scene=%.0fx%.0f mode=%s aspect_gap=%.3f",
             source,
             effective_size.width(),
             effective_size.height(),
@@ -886,6 +891,7 @@ class VideoArea(QWidget):
             scene_rect.width(),
             scene_rect.height(),
             ("expand" if edge_to_edge_fill else "fit"),
+            aspect_gap,
         )
 
         self._video_item.setSize(video_size)

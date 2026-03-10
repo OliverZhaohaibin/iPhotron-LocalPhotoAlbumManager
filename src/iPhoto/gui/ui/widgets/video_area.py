@@ -817,8 +817,11 @@ class VideoArea(QWidget):
         video_y = y
 
         if apply_crop_compensation and self._video_geometry:
-            visible_w = max(1.0, self._video_geometry.display_size.width())
-            visible_h = max(1.0, self._video_geometry.display_size.height())
+            # Crop margins must be normalized in the same coordinate system as
+            # ``effective_size``. This keeps compensation correct when we switch
+            # to native-orientation fallback (using coded-space crop values).
+            visible_w = max(1.0, effective_size.width())
+            visible_h = max(1.0, effective_size.height())
 
             scale_x = (visible_w + crop_left + crop_right) / visible_w
             scale_y = (visible_h + crop_top + crop_bottom) / visible_h

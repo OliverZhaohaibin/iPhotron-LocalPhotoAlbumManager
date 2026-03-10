@@ -25,12 +25,13 @@ from PySide6.QtWidgets import (
 )
 
 try:  # pragma: no cover - optional Qt module
-    from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
+    from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput, QVideoFrameFormat
     from PySide6.QtMultimediaWidgets import QGraphicsVideoItem
 except (ModuleNotFoundError, ImportError):  # pragma: no cover - handled by main window guard
     QGraphicsVideoItem = None  # type: ignore[assignment, misc]
     QMediaPlayer = None
     QAudioOutput = None
+    QVideoFrameFormat = None  # type: ignore[assignment, misc]
 
 from pathlib import Path
 from PySide6.QtCore import QUrl
@@ -103,6 +104,13 @@ class VideoArea(QWidget):
         self._player.durationChanged.connect(self._on_duration_changed)
         self._player.playbackStateChanged.connect(self._on_playback_state_changed)
         self._player.mediaStatusChanged.connect(self._on_media_status_changed)
+
+        # HDR detection state -- reset for each video in ``load_video``.
+        self._hdr_checked = False
+        self._hdr_detected = False
+        sink = self._video_item.videoSink()
+        if sink is not None:
+            sink.videoFrameChanged.connect(self._detect_hdr_once)
         # --- End Media Player Setup ---
 
         self._overlay_margin = 48
@@ -150,32 +158,42 @@ class VideoArea(QWidget):
     def set_immersive_background(self, immersive: bool) -> None:
         """Switch to a pure black canvas when immersive full screen mode is active."""
 
-        colour = "#000000" if immersive else self._default_surface_color
-        self._apply_surface(colour)
+        if immersive:
+            self._apply_surface("#000000")
+        else:
+            colour = self._default_surface_color
+            scene = "#000000" if self._hdr_detected else colour
+            self._apply_surface(colour, scene_colour=scene)
 
     def set_surface_color(self, colour: str) -> None:
         """Update the surface colour used for letterbox and background areas.
 
         Called by the theme controller whenever the application theme changes
         so that the video canvas stays in sync with the surrounding chrome.
-        ``QGraphicsVideoItem`` renders decoded frames as fully opaque
-        surfaces, so the background colour only affects the letterbox
-        regions — not the video content itself.  This remains safe for
-        HEVC, HDR-10, and HLG material because the decoded pixels are
-        never alpha-blended with the scene background.
+        When HDR content is detected the scene background is forced to black
+        to prevent the wide-gamut compositing pipeline from producing washed-out
+        colours; the widget chrome still follows the requested *colour*.
         """
 
         self._default_surface_color = colour
-        self._apply_surface(colour)
+        scene = "#000000" if self._hdr_detected else colour
+        self._apply_surface(colour, scene_colour=scene)
 
-    def _apply_surface(self, colour: str) -> None:
-        """Apply *colour* to the scene background, viewport, and widget."""
+    def _apply_surface(
+        self, colour: str, *, scene_colour: str | None = None
+    ) -> None:
+        """Apply *colour* to the widget chrome and *scene_colour* to the scene.
 
+        When *scene_colour* is ``None`` it defaults to *colour* so both the
+        widget chrome and scene background share the same value.
+        """
+
+        effective_scene = scene_colour if scene_colour is not None else colour
         stylesheet = f"background-color: {colour}; border: none;"
         self.setStyleSheet(stylesheet)
         self._video_view.setStyleSheet("background: transparent; border: none;")
         self._video_view.viewport().setStyleSheet(stylesheet)
-        self._scene.setBackgroundBrush(QColor(colour))
+        self._scene.setBackgroundBrush(QColor(effective_scene))
 
     def show_controls(self, *, animate: bool = True) -> None:
         """Reveal the playback controls and restart the hide timer."""
@@ -234,6 +252,12 @@ class VideoArea(QWidget):
 
     def load_video(self, path: Path) -> None:
         """Load a video file for playback."""
+        # Reset HDR detection for the new video.  The scene background reverts
+        # to the theme-driven default until ``_detect_hdr_once`` inspects the
+        # first decoded frame and overrides it to black when necessary.
+        self._hdr_checked = False
+        self._hdr_detected = False
+        self._scene.setBackgroundBrush(QColor(self._default_surface_color))
         self._player.setSource(QUrl.fromLocalFile(str(path)))
         # Do not auto-play; let the coordinator decide.
         # But ensure we are at start
@@ -281,6 +305,7 @@ class VideoArea(QWidget):
             hold_pos = max(0, duration - VIDEO_COMPLETE_HOLD_BACKSTEP_MS)
             self._player.setPosition(hold_pos)
             self._player.pause()
+            self.show_controls()
             self.playbackFinished.emit()
 
     def _on_volume_changed(self, value: int) -> None:
@@ -292,6 +317,60 @@ class VideoArea(QWidget):
         """Handle mute toggle from the player bar."""
         self._audio_output.setMuted(muted)
         self._on_mouse_activity()
+
+    # ------------------------------------------------------------------
+    # HDR detection
+    # ------------------------------------------------------------------
+    def _detect_hdr_once(self, frame: object) -> None:
+        """Inspect the first decoded frame to detect HDR content.
+
+        Connected to ``QVideoSink.videoFrameChanged``.  The check runs at
+        most once per video load (guarded by ``_hdr_checked``) so the
+        per-frame boolean test is the only runtime cost after the first
+        frame.
+
+        When HDR is detected the scene background is forced to black so
+        that Qt's wide-gamut compositing pipeline renders correct colours
+        instead of the washed-out / grey appearance that occurs with a
+        light backing surface.
+        """
+
+        if self._hdr_checked:
+            return
+        self._hdr_checked = True
+
+        if not getattr(frame, "isValid", lambda: False)():
+            return
+
+        try:
+            fmt = frame.surfaceFormat()
+            self._hdr_detected = self._is_hdr_format(fmt)
+        except Exception:  # pragma: no cover - defensive against Qt API changes
+            self._hdr_detected = False
+
+        if self._hdr_detected:
+            self._scene.setBackgroundBrush(QColor("#000000"))
+
+    @staticmethod
+    def _is_hdr_format(fmt: object) -> bool:
+        """Return ``True`` when *fmt* indicates HDR or wide-gamut content."""
+
+        if QVideoFrameFormat is None:
+            return False
+        try:
+            transfer = fmt.colorTransfer()
+            if transfer in (
+                QVideoFrameFormat.ColorTransfer.ColorTransfer_ST2084,
+                QVideoFrameFormat.ColorTransfer.ColorTransfer_STD_B67,
+            ):
+                return True
+
+            space = fmt.colorSpace()
+            if space == QVideoFrameFormat.ColorSpace.ColorSpace_BT2020:
+                return True
+        except (AttributeError, TypeError):  # pragma: no cover
+            pass
+        return False
 
     # ------------------------------------------------------------------
     # QWidget overrides

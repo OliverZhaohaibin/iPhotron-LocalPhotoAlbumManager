@@ -10,9 +10,9 @@ import pytest
 pytest.importorskip("PySide6", reason="PySide6 is required for GUI tests")
 pytest.importorskip("PySide6.QtMultimediaWidgets", reason="QtMultimediaWidgets is required")
 
-from PySide6.QtCore import QEvent
+from PySide6.QtCore import QEvent, QPointF, QRectF, QSizeF, Qt
 from PySide6.QtGui import QColor, QShowEvent
-from PySide6.QtMultimedia import QMediaPlayer, QVideoFrameFormat
+from PySide6.QtMultimedia import QMediaPlayer
 from PySide6.QtWidgets import QApplication
 
 from iPhoto.config import VIDEO_COMPLETE_HOLD_BACKSTEP_MS
@@ -92,137 +92,63 @@ def test_end_of_media_backsteps_and_pauses(qapp, mocker):
 
 
 # ------------------------------------------------------------------
-# HDR detection
+# Black backing geometry
 # ------------------------------------------------------------------
-def _make_mock_frame(*, transfer, color_space):
-    """Build a mock QVideoFrame with the given colour metadata."""
-    fmt = MagicMock()
-    fmt.colorTransfer.return_value = transfer
-    fmt.colorSpace.return_value = color_space
-    frame = MagicMock()
-    frame.isValid.return_value = True
-    frame.surfaceFormat.return_value = fmt
-    return frame
-
-
-def test_hdr_hlg_forces_black_scene(qapp):
-    """HLG (arib-std-b67) video should force the scene to black."""
+def test_backing_collapsed_when_no_video(qapp, mocker):
+    """Black backing should be collapsed when no video is loaded."""
     video_area = VideoArea()
-    video_area.set_surface_color("#f0f0f0")
 
-    frame = _make_mock_frame(
-        transfer=QVideoFrameFormat.ColorTransfer.ColorTransfer_STD_B67,
-        color_space=QVideoFrameFormat.ColorSpace.ColorSpace_BT2020,
-    )
-    video_area._detect_hdr_once(frame)
+    # nativeSize() returns empty when no video is loaded
+    mocker.patch.object(video_area._video_item, "nativeSize", return_value=QSizeF())
 
-    assert video_area._hdr_detected is True
-    assert video_area._scene.backgroundBrush().color() == QColor("#000000")
+    video_area._update_black_backing_geometry()
+    assert video_area._black_backing.rect() == QRectF()
 
 
-def test_hdr_pq_forces_black_scene(qapp):
-    """PQ / HDR-10 video should force the scene to black."""
+def test_backing_tracks_video_frame(qapp, mocker):
+    """Black backing should match the rendered video frame area."""
     video_area = VideoArea()
-    video_area.set_surface_color("#f0f0f0")
 
-    frame = _make_mock_frame(
-        transfer=QVideoFrameFormat.ColorTransfer.ColorTransfer_ST2084,
-        color_space=QVideoFrameFormat.ColorSpace.ColorSpace_BT2020,
-    )
-    video_area._detect_hdr_once(frame)
+    # Simulate a 1920x1080 video in a 800x600 item
+    mocker.patch.object(video_area._video_item, "nativeSize", return_value=QSizeF(1920, 1080))
+    mocker.patch.object(video_area._video_item, "size", return_value=QSizeF(800, 600))
+    mocker.patch.object(video_area._video_item, "pos", return_value=QPointF(0, 0))
 
-    assert video_area._hdr_detected is True
-    assert video_area._scene.backgroundBrush().color() == QColor("#000000")
+    video_area._update_black_backing_geometry()
+
+    backing_rect = video_area._black_backing.rect()
+    # 1920x1080 scaled to fit 800x600 → 800x450 centred
+    assert abs(backing_rect.width() - 800.0) < 0.01
+    assert abs(backing_rect.height() - 450.0) < 0.01
+    # Centred vertically: (600-450)/2 = 75
+    assert abs(backing_rect.y() - 75.0) < 0.01
 
 
-def test_bt2020_without_hdr_transfer_detected(qapp):
-    """BT.2020 colour space alone is treated as wide-gamut and forces black."""
+def test_backing_letterbox_for_tall_video(qapp, mocker):
+    """Pillarboxed video should have black backing narrower than item."""
     video_area = VideoArea()
-    video_area.set_surface_color("#f0f0f0")
 
-    frame = _make_mock_frame(
-        transfer=QVideoFrameFormat.ColorTransfer.ColorTransfer_BT709,
-        color_space=QVideoFrameFormat.ColorSpace.ColorSpace_BT2020,
-    )
-    video_area._detect_hdr_once(frame)
+    # Simulate a 1080x1920 (portrait) video in a 800x600 item
+    mocker.patch.object(video_area._video_item, "nativeSize", return_value=QSizeF(1080, 1920))
+    mocker.patch.object(video_area._video_item, "size", return_value=QSizeF(800, 600))
+    mocker.patch.object(video_area._video_item, "pos", return_value=QPointF(0, 0))
 
-    assert video_area._hdr_detected is True
-    assert video_area._scene.backgroundBrush().color() == QColor("#000000")
+    video_area._update_black_backing_geometry()
+
+    backing_rect = video_area._black_backing.rect()
+    # 1080x1920 scaled to fit 800x600 → 337.5x600 centred
+    assert abs(backing_rect.height() - 600.0) < 0.01
+    assert backing_rect.width() < 800.0  # pillarboxed
+    # Centred horizontally
+    expected_w = 600.0 * 1080.0 / 1920.0  # 337.5
+    assert abs(backing_rect.width() - expected_w) < 0.01
 
 
-def test_sdr_keeps_surface_color(qapp):
-    """Standard BT.709 SDR video should keep the themed surface colour."""
+def test_surface_color_does_not_affect_backing(qapp):
+    """Changing surface colour should not affect the black backing."""
     video_area = VideoArea()
+
     video_area.set_surface_color("#f0f0f0")
-
-    frame = _make_mock_frame(
-        transfer=QVideoFrameFormat.ColorTransfer.ColorTransfer_BT709,
-        color_space=QVideoFrameFormat.ColorSpace.ColorSpace_BT709,
-    )
-    video_area._detect_hdr_once(frame)
-
-    assert video_area._hdr_detected is False
+    # Scene background follows theme, backing stays black
     assert video_area._scene.backgroundBrush().color() == QColor("#f0f0f0")
-
-
-def test_detect_hdr_only_runs_once(qapp):
-    """Subsequent frames must not re-trigger the HDR check."""
-    video_area = VideoArea()
-    video_area.set_surface_color("#f0f0f0")
-
-    sdr_frame = _make_mock_frame(
-        transfer=QVideoFrameFormat.ColorTransfer.ColorTransfer_BT709,
-        color_space=QVideoFrameFormat.ColorSpace.ColorSpace_BT709,
-    )
-    hdr_frame = _make_mock_frame(
-        transfer=QVideoFrameFormat.ColorTransfer.ColorTransfer_STD_B67,
-        color_space=QVideoFrameFormat.ColorSpace.ColorSpace_BT2020,
-    )
-
-    video_area._detect_hdr_once(sdr_frame)
-    assert video_area._hdr_detected is False
-
-    # Second call should be a no-op
-    video_area._detect_hdr_once(hdr_frame)
-    assert video_area._hdr_detected is False
-
-
-def test_load_video_resets_hdr_state(qapp, mocker):
-    """Loading a new video should reset HDR detection."""
-    video_area = VideoArea()
-    video_area._hdr_detected = True
-    video_area._hdr_checked = True
-    video_area.set_surface_color("#f0f0f0")
-
-    mocker.patch.object(video_area._player, "setSource")
-    mocker.patch.object(video_area._player, "setPosition")
-
-    video_area.load_video(Path("/tmp/test.mp4"))
-
-    assert video_area._hdr_detected is False
-    assert video_area._hdr_checked is False
-    assert video_area._scene.backgroundBrush().color() == QColor("#f0f0f0")
-
-
-def test_set_surface_color_respects_hdr(qapp):
-    """Changing surface colour while HDR is active keeps the scene black."""
-    video_area = VideoArea()
-    video_area._hdr_detected = True
-
-    video_area.set_surface_color("#abcdef")
-
-    # Widget chrome follows the theme colour, but scene stays black
-    assert video_area._default_surface_color == "#abcdef"
-    assert video_area._scene.backgroundBrush().color() == QColor("#000000")
-
-
-def test_immersive_exit_respects_hdr(qapp):
-    """Leaving immersive mode with HDR active keeps the scene black."""
-    video_area = VideoArea()
-    video_area._hdr_detected = True
-    video_area.set_surface_color("#abcdef")
-
-    video_area.set_immersive_background(True)
-    video_area.set_immersive_background(False)
-
-    assert video_area._scene.backgroundBrush().color() == QColor("#000000")
+    assert video_area._black_backing.brush().color() == QColor(Qt.GlobalColor.black)

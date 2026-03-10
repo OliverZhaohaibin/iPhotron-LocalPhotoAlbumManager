@@ -299,7 +299,10 @@ class VideoArea(QWidget):
         self._video_view.setFrameShape(QFrame.Shape.NoFrame)
         self._video_view.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self._video_view.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self._video_view.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        # Avoid edge blending artifacts at the video bounds (visible as thin dark
+        # fringes in light mode on some GPU backends).
+        self._video_view.setRenderHint(QPainter.RenderHint.Antialiasing, False)
+        self._video_view.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, False)
         # Accept focus so keyboard navigation targets the video viewport without requiring the user
         # to click a non-interactive chrome element first.
         self._video_view.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
@@ -746,9 +749,20 @@ class VideoArea(QWidget):
             video_size = QSizeF(fitted.width() * scale_x, fitted.height() * scale_y)
             video_x = x - (fitted.width() * self._video_geometry.crop_left / visible_w)
             video_y = y - (fitted.height() * self._video_geometry.crop_top / visible_h)
+
+            # Some Qt multimedia backends still leak a 1px dark fringe along one
+            # or more edges after crop compensation because texture sampling lands
+            # exactly on boundary texels. Apply a tiny overscan only when crop
+            # metadata is present to hide those fringes without changing the global
+            # light-mode background.
+            overscan_px = 1.0
+            video_x -= overscan_px
+            video_y -= overscan_px
+            video_size = QSizeF(video_size.width() + (2.0 * overscan_px), video_size.height() + (2.0 * overscan_px))
+
             _log.info(
                 "[VideoDbg] applying crop compensation: display_crop l=%d r=%d t=%d b=%d  "
-                "video_size=%.0fx%.0f  video_pos=(%.0f,%.0f)",
+                "video_size=%.0fx%.0f  video_pos=(%.0f,%.0f)  overscan=%.1fpx",
                 self._video_geometry.crop_left,
                 self._video_geometry.crop_right,
                 self._video_geometry.crop_top,
@@ -757,6 +771,7 @@ class VideoArea(QWidget):
                 video_size.height(),
                 video_x,
                 video_y,
+                overscan_px,
             )
 
         self._video_item.setSize(video_size)

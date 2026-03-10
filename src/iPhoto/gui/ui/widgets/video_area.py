@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from typing import Optional, cast
 
 from PySide6.QtCore import (
@@ -80,7 +81,40 @@ def _parse_rotation(value: object) -> int:
         return 0
 
 
-def _probe_display_size(path: Path) -> QSizeF | None:
+@dataclass(frozen=True)
+class _VideoGeometry:
+    """Geometry metadata required to size/crop the video item correctly."""
+
+    display_size: QSizeF
+    coded_size: QSizeF
+    rotation: int
+    crop_left: int = 0
+    crop_right: int = 0
+    crop_top: int = 0
+    crop_bottom: int = 0
+
+    @property
+    def has_crop(self) -> bool:
+        return any((self.crop_left, self.crop_right, self.crop_top, self.crop_bottom))
+
+
+def _rotate_crop_to_display(crop: tuple[int, int, int, int], rotation: int) -> tuple[int, int, int, int]:
+    """Map coded-space crop margins (l/r/t/b) to display-space margins."""
+
+    l, r, t, b = crop
+    rot = rotation % 360
+    if rot == 0:
+        return l, r, t, b
+    if rot == 90:  # 90° CCW
+        return b, t, l, r
+    if rot == 180:
+        return r, l, b, t
+    if rot == 270:  # 90° CW
+        return t, b, r, l
+    return l, r, t, b
+
+
+def _probe_display_size(path: Path) -> _VideoGeometry | None:
     """Return the SAR/rotation-corrected display size using ffprobe.
 
     ``nativeSize()`` on ``QGraphicsVideoItem`` sometimes reports the coded
@@ -144,19 +178,27 @@ def _probe_display_size(path: Path) -> QSizeF | None:
         # e.g. {'side_data_type': 'Frame Cropping', 'crop_left': 88,
         #        'crop_right': 88, 'crop_top': 66, 'crop_bottom': 66}
         rotation = 0
+        crop_left = 0
+        crop_right = 0
+        crop_top = 0
+        crop_bottom = 0
         side_data_list = stream.get("side_data_list")
         if isinstance(side_data_list, list):
             for entry in side_data_list:
                 if not isinstance(entry, dict):
                     continue
                 if entry.get("side_data_type") == "Frame Cropping":
-                    crop_l = entry.get("crop_left", 0) or 0
-                    crop_r = entry.get("crop_right", 0) or 0
-                    crop_t = entry.get("crop_top", 0) or 0
-                    crop_b = entry.get("crop_bottom", 0) or 0
+                    crop_l = int(entry.get("crop_left", 0) or 0)
+                    crop_r = int(entry.get("crop_right", 0) or 0)
+                    crop_t = int(entry.get("crop_top", 0) or 0)
+                    crop_b = int(entry.get("crop_bottom", 0) or 0)
                     cropped_w = display_w - crop_l - crop_r
                     cropped_h = display_h - crop_t - crop_b
                     if cropped_w > 0 and cropped_h > 0:
+                        crop_left = crop_l
+                        crop_right = crop_r
+                        crop_top = crop_t
+                        crop_bottom = crop_b
                         _log.info(
                             "[VideoDbg] Frame cropping: l=%d r=%d t=%d b=%d  "
                             "%.0fx%.0f -> %.0fx%.0f",
@@ -189,13 +231,26 @@ def _probe_display_size(path: Path) -> QSizeF | None:
         if swapped:
             display_w, display_h = display_h, display_w
 
+        crop_display_l, crop_display_r, crop_display_t, crop_display_b = _rotate_crop_to_display(
+            (crop_left, crop_right, crop_top, crop_bottom),
+            rotation,
+        )
+
         _log.info(
             "[VideoDbg] _probe_display_size result: %s  coded=%dx%d  "
             "rotation=%d (abs%%360=%d, swapped=%s)  display=%.0fx%.0f",
             path.name, coded_w, coded_h,
             rotation, abs_rotation, swapped, display_w, display_h,
         )
-        return QSizeF(display_w, display_h)
+        return _VideoGeometry(
+            display_size=QSizeF(display_w, display_h),
+            coded_size=QSizeF(coded_w, coded_h),
+            rotation=rotation,
+            crop_left=crop_display_l,
+            crop_right=crop_display_r,
+            crop_top=crop_display_t,
+            crop_bottom=crop_display_b,
+        )
 
     _log.warning("[VideoDbg] No video stream found in %s", path.name)
     return None
@@ -266,7 +321,7 @@ class VideoArea(QWidget):
 
         # Display size obtained from ffprobe (SAR + rotation corrected).
         # Preferred over nativeSize() which can report coded dimensions.
-        self._display_size: QSizeF | None = None
+        self._video_geometry: _VideoGeometry | None = None
         # --- End Graphics View Setup ---
 
         # --- Media Player Setup ---
@@ -397,8 +452,8 @@ class VideoArea(QWidget):
     def load_video(self, path: Path) -> None:
         """Load a video file for playback."""
         _log.info("[VideoDbg] load_video: %s", path.name)
-        self._display_size = _probe_display_size(path)
-        _log.info("[VideoDbg] display_size from probe: %s", self._display_size)
+        self._video_geometry = _probe_display_size(path)
+        _log.info("[VideoDbg] display_size from probe: %s", self._video_geometry)
         self._player.setSource(QUrl.fromLocalFile(str(path)))
         # Do not auto-play; let the coordinator decide.
         # But ensure we are at start
@@ -639,7 +694,7 @@ class VideoArea(QWidget):
 
         # Prefer ffprobe-derived display dimensions (SAR + rotation corrected)
         # over nativeSize() which may report coded (uncorrected) dimensions.
-        effective_size = self._display_size
+        effective_size = self._video_geometry.display_size if self._video_geometry else None
         native_size = self._video_item.nativeSize()
         source = "probe"
         if effective_size is None or effective_size.isEmpty():
@@ -666,16 +721,46 @@ class VideoArea(QWidget):
             "scene=%.0fx%.0f  fitted=%.0fx%.0f  pos=(%.0f,%.0f)",
             source,
             native_size.width(), native_size.height(),
-            (self._display_size.width() if self._display_size else 0),
-            (self._display_size.height() if self._display_size else 0),
+            (self._video_geometry.display_size.width() if self._video_geometry else 0),
+            (self._video_geometry.display_size.height() if self._video_geometry else 0),
             effective_size.width(), effective_size.height(),
             scene_rect.width(), scene_rect.height(),
             fitted.width(), fitted.height(),
             x, y,
         )
 
-        self._video_item.setSize(fitted)
-        self._video_item.setPos(QPointF(x, y))
+        video_size = QSizeF(fitted)
+        video_x = x
+        video_y = y
+
+        if self._video_geometry and self._video_geometry.has_crop:
+            visible_w = max(1.0, self._video_geometry.display_size.width())
+            visible_h = max(1.0, self._video_geometry.display_size.height())
+
+            scale_x = (
+                visible_w + self._video_geometry.crop_left + self._video_geometry.crop_right
+            ) / visible_w
+            scale_y = (
+                visible_h + self._video_geometry.crop_top + self._video_geometry.crop_bottom
+            ) / visible_h
+            video_size = QSizeF(fitted.width() * scale_x, fitted.height() * scale_y)
+            video_x = x - (fitted.width() * self._video_geometry.crop_left / visible_w)
+            video_y = y - (fitted.height() * self._video_geometry.crop_top / visible_h)
+            _log.info(
+                "[VideoDbg] applying crop compensation: display_crop l=%d r=%d t=%d b=%d  "
+                "video_size=%.0fx%.0f  video_pos=(%.0f,%.0f)",
+                self._video_geometry.crop_left,
+                self._video_geometry.crop_right,
+                self._video_geometry.crop_top,
+                self._video_geometry.crop_bottom,
+                video_size.width(),
+                video_size.height(),
+                video_x,
+                video_y,
+            )
+
+        self._video_item.setSize(video_size)
+        self._video_item.setPos(QPointF(video_x, video_y))
 
         # Mirror the video item's bounds exactly – trivially aligned.
         self._black_backing.setPos(QPointF(x, y))

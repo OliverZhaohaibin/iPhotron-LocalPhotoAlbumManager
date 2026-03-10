@@ -600,67 +600,39 @@ class VideoArea(QWidget):
         self._player_bar.raise_()
 
     def _fit_video_item(self) -> None:
-        """Size and position the video item to match the video's display aspect ratio.
+        """Size the video item to fill the entire scene.
 
-        When the display size is known (from ffprobe SAR + rotation correction
-        or from ``nativeSize()`` as a fallback) the video item is shrunk to the
-        largest aspect-ratio-preserving rectangle that fits inside the scene.
-        The black backing rectangle is sized to the *same* bounds so it sits
-        exactly behind the video surface, ensuring correct HDR/HEVC compositing
-        without black bars leaking into the theme-coloured letterbox area.
+        ``QGraphicsVideoItem`` with ``KeepAspectRatio`` handles SAR,
+        display-matrix rotation, and frame cropping internally.  The item
+        is sized to the full scene; Qt letterboxes / pillarboxes the
+        content as needed.
 
-        The display size must account for rotation because Qt renders the
-        **post-rotation** content inside the item bounding box.  If the box
-        has the wrong aspect ratio, the content is letterboxed with black bars.
+        The black backing rectangle also covers the full scene so that
+        any letterbox / pillarbox areas rendered by the item are
+        composited against a black surface — required for correct
+        HDR / HEVC colour reproduction.
         """
 
         scene_rect = self._scene.sceneRect()
         if scene_rect.isEmpty():
             return
 
-        # Prefer ffprobe-derived display dimensions (SAR + rotation corrected)
-        # over nativeSize() which may report coded (uncorrected) dimensions.
-        effective_size = self._display_size
         native_size = self._video_item.nativeSize()
-        source = "probe"
-        if effective_size is None or effective_size.isEmpty():
-            effective_size = native_size
-            source = "nativeSize"
-        if effective_size.isEmpty():
-            # No video loaded yet – fill the entire scene so the item is ready
-            # to display the first frame without a layout jump.
-            self._video_item.setSize(scene_rect.size())
-            self._video_item.setPos(QPointF())
-            self._black_backing.setPos(QPointF())
-            self._black_backing.setRect(QRectF())
-            return
-
-        # Compute the largest rectangle inside the scene that preserves the
-        # video's display aspect ratio.
-        fitted = effective_size.scaled(scene_rect.size(), Qt.AspectRatioMode.KeepAspectRatio)
-        x = (scene_rect.width() - fitted.width()) / 2.0
-        y = (scene_rect.height() - fitted.height()) / 2.0
 
         _log.info(
-            "[VideoDbg] _fit_video_item: source=%s  nativeSize=%.0fx%.0f  "
-            "probe_display=%.0fx%.0f  effective=%.0fx%.0f  "
-            "scene=%.0fx%.0f  fitted=%.0fx%.0f  pos=(%.0f,%.0f)",
-            source,
+            "[VideoDbg] _fit_video_item: nativeSize=%.0fx%.0f  "
+            "probe_display=%.0fx%.0f  scene=%.0fx%.0f  → full-scene",
             native_size.width(), native_size.height(),
             (self._display_size.width() if self._display_size else 0),
             (self._display_size.height() if self._display_size else 0),
-            effective_size.width(), effective_size.height(),
             scene_rect.width(), scene_rect.height(),
-            fitted.width(), fitted.height(),
-            x, y,
         )
 
-        self._video_item.setSize(fitted)
-        self._video_item.setPos(QPointF(x, y))
+        self._video_item.setSize(scene_rect.size())
+        self._video_item.setPos(QPointF())
 
-        # Mirror the video item's bounds exactly – trivially aligned.
-        self._black_backing.setPos(QPointF(x, y))
-        self._black_backing.setRect(QRectF(QPointF(), fitted))
+        self._black_backing.setPos(QPointF())
+        self._black_backing.setRect(QRectF(QPointF(), scene_rect.size()))
 
     # ------------------------------------------------------------------
     # Live Photo helpers

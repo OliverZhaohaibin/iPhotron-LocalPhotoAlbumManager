@@ -251,6 +251,18 @@ def test_ui_component_styling(window_theme_controller, mock_theme_manager):
     ui.image_viewer.set_surface_color_override.assert_called_with(bg)
 
 
+def test_dark_mode_surface_uses_window_background(window_theme_controller, mock_theme_manager):
+    """In dark mode the viewer surface uses the theme window background, not pure black."""
+    controller, ui, _ = window_theme_controller
+
+    mock_theme_manager.current_colors.return_value = DARK_THEME
+    controller._on_theme_changed(True)
+
+    expected = DARK_THEME.window_background.name()
+    ui.image_viewer.set_surface_color_override.assert_called_with(expected)
+    ui.video_area.set_surface_color_override.assert_called_with(expected)
+
+
 def test_icon_tinting(window_theme_controller, mock_theme_manager):
     """Test that icons are re-tinted."""
     controller, ui, _ = window_theme_controller

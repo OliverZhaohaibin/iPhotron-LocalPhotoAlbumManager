@@ -241,9 +241,12 @@ class WindowThemeController(QObject):
                 f"QToolButton:pressed {{ background-color: {pressed_bg}; border-radius: 6px; }}"
             )
 
-        # Detail/Edit View Background: Black in Dark Mode
-        # Explicitly set the background color even for Light Mode to prevent sticky state
-        target_surface = "#000000" if colors.is_dark else colors.window_background.name()
+        # Detail/Edit View Background
+        # Use the theme's window background so the media surface matches the
+        # surrounding chrome in both light and dark modes.  The video area's
+        # black backing rectangle prevents HDR / HEVC compositing artefacts
+        # even though the scene background is no longer pure black.
+        target_surface = colors.window_background.name()
         self._ui.image_viewer.set_surface_color_override(target_surface)
         self._ui.video_area.set_surface_color_override(target_surface)
 

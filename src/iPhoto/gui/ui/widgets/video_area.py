@@ -734,11 +734,10 @@ class VideoArea(QWidget):
             effective_size = native_size
             source = "nativeSize"
 
-        # Some Qt multimedia backends ignore QuickTime display-matrix rotation
-        # and still render coded orientation. If we force the rotated aspect in
-        # that case, portrait clips can appear "horizontal inside vertical slot"
-        # with large top/bottom black bars. Prefer the orientation whose aspect
-        # is closer to nativeSize() when metadata says 90°/270° rotation.
+        # Keep probe-derived orientation authoritative. Some backends report
+        # nativeSize() in coded orientation (landscape for iPhone portrait clips),
+        # but forcing layout to that orientation causes visibly wrong playback.
+        # We still log the candidate comparison for diagnostics.
         if (
             self._video_geometry
             and not native_size.isEmpty()
@@ -749,13 +748,13 @@ class VideoArea(QWidget):
             native_aspect = _aspect_ratio(native_size)
             rotated_delta = abs(_aspect_ratio(rotated) - native_aspect)
             unrotated_delta = abs(_aspect_ratio(unrotated) - native_aspect)
-
             scene_size = scene_rect.size()
             rotated_fill = _fit_area(rotated, scene_size)
             unrotated_fill = _fit_area(unrotated, scene_size)
-
             _log.info(
-                "[VideoDbg] orientation candidates: native=%.0fx%.0f(%.4f) rotated=%.0fx%.0f(%.4f,Δ=%.4f,fill=%.0f) unrotated=%.0fx%.0f(%.4f,Δ=%.4f,fill=%.0f)",
+                "[VideoDbg] orientation candidates (probe-kept): native=%.0fx%.0f(%.4f) "
+                "rotated=%.0fx%.0f(%.4f,Δ=%.4f,fill=%.0f) "
+                "unrotated=%.0fx%.0f(%.4f,Δ=%.4f,fill=%.0f)",
                 native_size.width(),
                 native_size.height(),
                 native_aspect,
@@ -770,36 +769,6 @@ class VideoArea(QWidget):
                 unrotated_delta,
                 unrotated_fill,
             )
-
-            # Only trust native-orientation fallback when it is clearly more
-            # consistent with backend output *and* does not dramatically reduce
-            # scene coverage. This avoids accidentally forcing landscape layout
-            # for portrait playback and creating large side bars.
-            native_prefers_unrotated = unrotated_delta + 0.02 < rotated_delta
-            scene_allows_unrotated = unrotated_fill >= rotated_fill * 0.90
-            if native_prefers_unrotated and scene_allows_unrotated:
-                effective_size = unrotated
-                source = "probe(native-orientation-fallback)"
-                # In native-orientation fallback the display-space crop mapping
-                # no longer matches what backend actually renders. Switch to
-                # coded-space crop values so compensation still converges to the
-                # real visible video edges instead of reintroducing black rims.
-                crop_left = self._video_geometry.coded_crop_left
-                crop_right = self._video_geometry.coded_crop_right
-                crop_top = self._video_geometry.coded_crop_top
-                crop_bottom = self._video_geometry.coded_crop_bottom
-                _log.info(
-                    "[VideoDbg] native orientation fallback: native=%.3f rotated=%.3f unrotated=%.3f fill(rot)=%.0f fill(unrot)=%.0f  coded_crop=(%d,%d,%d,%d)",
-                    native_aspect,
-                    _aspect_ratio(rotated),
-                    _aspect_ratio(unrotated),
-                    rotated_fill,
-                    unrotated_fill,
-                    crop_left,
-                    crop_right,
-                    crop_top,
-                    crop_bottom,
-                )
         if effective_size.isEmpty():
             # No video loaded yet – fill the entire scene so the item is ready
             # to display the first frame without a layout jump.

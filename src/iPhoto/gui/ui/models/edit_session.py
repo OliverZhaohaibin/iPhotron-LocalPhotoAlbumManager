@@ -14,6 +14,7 @@ from ....core.levels_resolver import DEFAULT_LEVELS_HANDLES
 from ....core.selective_color_resolver import DEFAULT_SELECTIVE_COLOR_RANGES
 from ....core.definition_resolver import DEFAULT_DEFINITION
 from ....core.denoise_resolver import DEFAULT_DENOISE
+from ....core.sharpen_resolver import DEFAULT_SHARPEN
 from ....core.vignette_resolver import (
     DEFAULT_VIGNETTE_STRENGTH,
     DEFAULT_VIGNETTE_RADIUS,
@@ -165,6 +166,12 @@ class EditSession(QObject):
         self._ranges["Denoise_Enabled"] = (0.0, 1.0)
         self._values["Denoise_Amount"] = DEFAULT_DENOISE
         self._ranges["Denoise_Amount"] = (0.0, 5.0)
+
+        # Sharpen adjustment – amount in [0.0, 3.0].
+        self._values["Sharpen_Enabled"] = False
+        self._ranges["Sharpen_Enabled"] = (0.0, 1.0)
+        self._values["Sharpen_Amount"] = DEFAULT_SHARPEN
+        self._ranges["Sharpen_Amount"] = (0.0, 3.0)
 
         # Vignette adjustment – strength, radius and softness each in [0.0, 1.0].
         self._values["Vignette_Enabled"] = False
@@ -342,6 +349,11 @@ class EditSession(QObject):
         defaults.update({
             "Denoise_Enabled": False,
             "Denoise_Amount": DEFAULT_DENOISE,
+        })
+        # Sharpen defaults
+        defaults.update({
+            "Sharpen_Enabled": False,
+            "Sharpen_Amount": DEFAULT_SHARPEN,
         })
         # Vignette defaults
         defaults.update({

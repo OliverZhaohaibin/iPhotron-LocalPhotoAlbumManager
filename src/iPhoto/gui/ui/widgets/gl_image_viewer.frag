@@ -38,6 +38,8 @@ uniform float uDefinition;   // [0.0, 0.2] definition / clarity strength
 
 uniform float uDenoiseAmount;  // bilateral filter strength (0 = off)
 
+uniform float uSharpenAmount;  // unsharp mask gain (0 = off)
+
 uniform float uVignetteStrength;  // [0, 1] edge-darkening intensity
 uniform float uVignetteRadius;    // [0, 1] inner radius
 uniform float uVignetteSoftness;  // [0.1, 1.0] falloff width
@@ -422,6 +424,28 @@ vec3 apply_denoise(vec3 adjustedColor, vec2 uv) {
     return clamp(adjustedColor + denoiseDelta, 0.0, 1.0);
 }
 
+vec3 apply_sharpen(vec3 adjustedColor, vec2 uv) {
+    // Unsharp Mask sharpening applied as a delta to preserve prior adjustments.
+    // Computes a 3×3 box-blur on the source texture, derives the detail layer,
+    // and adds the amplified detail to the current pipeline colour.
+    vec2 texSize = vec2(textureSize(uTex, 0));
+    vec2 inv = 1.0 / texSize;
+    vec3 sourceCenter = texture(uTex, uv).rgb;
+
+    vec3 blur = vec3(0.0);
+    for (int y = -1; y <= 1; y++) {
+        for (int x = -1; x <= 1; x++) {
+            blur += texture(uTex, uv + vec2(float(x), float(y)) * inv).rgb;
+        }
+    }
+    blur /= 9.0;
+
+    vec3 detail = sourceCenter - blur;
+    vec3 sourceSharpened = sourceCenter + detail * uSharpenAmount;
+    vec3 sharpenDelta = sourceSharpened - sourceCenter;
+    return clamp(adjustedColor + sharpenDelta, 0.0, 1.0);
+}
+
 vec3 apply_vignette(vec3 c, vec2 uv) {
     vec2 centered = uv - vec2(0.5);
     float dist = length(centered) * 1.41421356;
@@ -526,12 +550,17 @@ void main() {
         c = apply_definition(c, uv_tex);
     }
 
-    // Apply noise reduction (denoise) after definition, before vignette
+    // Apply noise reduction (denoise) after definition, before sharpen
     if (uDenoiseAmount > 0.005) {
         c = apply_denoise(c, uv_tex);
     }
 
-    // Apply vignette after denoise, before B&W
+    // Apply sharpen after denoise, before vignette
+    if (uSharpenAmount > 0.005) {
+        c = apply_sharpen(c, uv_tex);
+    }
+
+    // Apply vignette after sharpen, before B&W
     if (uVignetteStrength > 0.0001) {
         c = apply_vignette(c, uv_tex);
     }

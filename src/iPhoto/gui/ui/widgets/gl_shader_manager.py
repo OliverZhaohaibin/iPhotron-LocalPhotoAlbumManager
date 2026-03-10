@@ -79,6 +79,7 @@ _UNIFORM_NAMES = (
     "uSCEnabled",
     "uDefinition",
     "uDenoiseAmount",
+    "uSharpenAmount",
     "uVignetteStrength",
     "uVignetteRadius",
     "uVignetteSoftness",

@@ -162,6 +162,12 @@ class EditCoordinator(QObject):
         self._ui.edit_sidebar.denoiseParamsCommitted.connect(
             self._handle_denoise_params_committed
         )
+        self._ui.edit_sidebar.sharpenParamsPreviewed.connect(
+            self._handle_sharpen_params_previewed
+        )
+        self._ui.edit_sidebar.sharpenParamsCommitted.connect(
+            self._handle_sharpen_params_committed
+        )
         self._ui.edit_sidebar.vignetteParamsPreviewed.connect(
             self._handle_vignette_params_previewed
         )
@@ -633,6 +639,37 @@ class EditCoordinator(QObject):
         updates = {
             "Denoise_Enabled": True,
             "Denoise_Amount": float(dn_data.get("Amount", 0.0)),
+        }
+        self._session.set_values(updates)
+
+    def _handle_sharpen_params_previewed(self, sh_data: dict) -> None:
+        """Apply transient sharpen previews without mutating session state."""
+
+        if self._session is None or self._compare_active:
+            return
+
+        try:
+            preview_values = self._session.values()
+            preview_values.update({
+                "Sharpen_Enabled": True,
+                "Sharpen_Amount": float(sh_data.get("Amount", 0.0)),
+            })
+            adjustments = self._preview_manager.resolve_adjustments(preview_values)
+        except Exception:
+            _LOGGER.exception("Failed to resolve sharpen preview adjustments")
+            return
+
+        self._ui.edit_image_viewer.set_adjustments(adjustments)
+
+    def _handle_sharpen_params_committed(self, sh_data: dict) -> None:
+        """Persist sharpen adjustments into the active edit session."""
+
+        if self._session is None:
+            return
+
+        updates = {
+            "Sharpen_Enabled": True,
+            "Sharpen_Amount": float(sh_data.get("Amount", 0.0)),
         }
         self._session.set_values(updates)
 

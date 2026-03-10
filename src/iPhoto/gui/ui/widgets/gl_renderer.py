@@ -312,6 +312,12 @@ class GLRenderer:
             effective_denoise = dn_amount if bool(dn_enabled_value) else 0.0
             self._set_uniform1f("uDenoiseAmount", effective_denoise)
 
+            # Sharpen uniform – pass amount directly to shader
+            sh_enabled_value = adjustments.get("Sharpen_Enabled", False)
+            sh_amount = float(adjustments.get("Sharpen_Amount", 0.0))
+            effective_sharpen = sh_amount if bool(sh_enabled_value) else 0.0
+            self._set_uniform1f("uSharpenAmount", effective_sharpen)
+
             # Vignette uniforms
             vig_enabled_value = adjustments.get("Vignette_Enabled", False)
             if bool(vig_enabled_value):

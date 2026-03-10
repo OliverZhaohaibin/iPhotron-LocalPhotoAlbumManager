@@ -529,6 +529,56 @@ def _write_denoise_node(root: ET.Element, values: Mapping[str, Any]) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Sharpen node constants
+# ---------------------------------------------------------------------------
+
+_SHARPEN_NODE = "Sharpen"
+_SHARPEN_ENABLED = "enabled"
+_SHARPEN_AMOUNT = "amount"
+
+# ---------------------------------------------------------------------------
+# Sharpen helpers
+# ---------------------------------------------------------------------------
+
+
+def _read_sharpen_from_node(node: ET.Element) -> Dict[str, Any]:
+    """Return sharpen adjustments described by the ``<Sharpen>`` *node*."""
+    result: Dict[str, Any] = {}
+
+    enabled_attr = node.get(_SHARPEN_ENABLED)
+    if enabled_attr is not None:
+        result["Sharpen_Enabled"] = enabled_attr.lower() in {"1", "true", "yes", "on"}
+    else:
+        result["Sharpen_Enabled"] = False
+
+    amount_attr = node.get(_SHARPEN_AMOUNT)
+    if amount_attr is not None:
+        try:
+            result["Sharpen_Amount"] = max(0.0, min(3.0, float(amount_attr)))
+        except (ValueError, TypeError):
+            result["Sharpen_Amount"] = 0.0
+    else:
+        result["Sharpen_Amount"] = 0.0
+
+    return result
+
+
+def _write_sharpen_node(root: ET.Element, values: Mapping[str, Any]) -> None:
+    """Insert/replace the ``<Sharpen>`` section under *root* using *values*."""
+    _remove_children_case_insensitive(root, _SHARPEN_NODE)
+
+    sh_enabled = bool(values.get("Sharpen_Enabled", False))
+    sh_amount = float(values.get("Sharpen_Amount", 0.0))
+
+    if not sh_enabled and abs(sh_amount) < 1e-6:
+        return
+
+    node = ET.SubElement(root, _SHARPEN_NODE)
+    node.set(_SHARPEN_ENABLED, "true" if sh_enabled else "false")
+    node.set(_SHARPEN_AMOUNT, f"{sh_amount:.6f}")
+
+
+# ---------------------------------------------------------------------------
 # Vignette node constants
 # ---------------------------------------------------------------------------
 

@@ -127,20 +127,6 @@ def _aspect_ratio(size: QSizeF) -> float:
     return size.width() / h
 
 
-def _fit_area(content: QSizeF, container: QSizeF) -> float:
-    """Return fitted area using KeepAspectRatio."""
-
-    if content.isEmpty() or container.isEmpty():
-        return 0.0
-    fitted = content.scaled(container, Qt.AspectRatioMode.KeepAspectRatio)
-    return fitted.width() * fitted.height()
-
-
-def _fits_within_scene(size: QSizeF, scene: QRectF, *, epsilon: float = 0.5) -> bool:
-    """Return True when *size* is fully contained by *scene* (with tolerance)."""
-
-    return size.width() <= scene.width() + epsilon and size.height() <= scene.height() + epsilon
-
 def _probe_display_size(path: Path) -> _VideoGeometry | None:
     """Return the SAR/rotation-corrected display size using ffprobe.
 
@@ -740,10 +726,10 @@ class VideoArea(QWidget):
             effective_size = native_size
             source = "nativeSize"
 
-        # Keep probe-derived orientation authoritative. Some backends report
-        # nativeSize() in coded orientation (landscape for iPhone portrait clips),
-        # but forcing layout to that orientation causes visibly wrong playback.
-        # We still log the candidate comparison for diagnostics.
+        # Determine whether the active Qt multimedia backend already applies
+        # display-matrix rotation. ``nativeSize()`` reflects backend output
+        # orientation, so we align layout/crop space with that behavior.
+        backend_rotation_mode = "unknown"
         if (
             self._video_geometry
             and not native_size.isEmpty()
@@ -752,28 +738,44 @@ class VideoArea(QWidget):
             rotated = self._video_geometry.display_size
             unrotated = QSizeF(rotated.height(), rotated.width())
             native_aspect = _aspect_ratio(native_size)
-            rotated_delta = abs(_aspect_ratio(rotated) - native_aspect)
-            unrotated_delta = abs(_aspect_ratio(unrotated) - native_aspect)
-            scene_size = scene_rect.size()
-            rotated_fill = _fit_area(rotated, scene_size)
-            unrotated_fill = _fit_area(unrotated, scene_size)
+            rotated_aspect = _aspect_ratio(rotated)
+            unrotated_aspect = _aspect_ratio(unrotated)
+            rotated_delta = abs(rotated_aspect - native_aspect)
+            unrotated_delta = abs(unrotated_aspect - native_aspect)
+
+            # Hard backend-orientation decision: pick whichever orientation is
+            # closer to actual decoded output. This avoids scene-shape heuristics
+            # that can oscillate between wrong fit/expand outcomes.
+            if unrotated_delta + 0.01 < rotated_delta:
+                backend_rotation_mode = "backend-unrotated"
+                effective_size = unrotated
+                crop_left = self._video_geometry.coded_crop_left
+                crop_right = self._video_geometry.coded_crop_right
+                crop_top = self._video_geometry.coded_crop_top
+                crop_bottom = self._video_geometry.coded_crop_bottom
+            else:
+                backend_rotation_mode = "backend-rotated"
+                effective_size = rotated
+                crop_left = self._video_geometry.crop_left
+                crop_right = self._video_geometry.crop_right
+                crop_top = self._video_geometry.crop_top
+                crop_bottom = self._video_geometry.crop_bottom
+
             _log.info(
-                "[VideoDbg] orientation candidates (probe-kept): native=%.0fx%.0f(%.4f) "
-                "rotated=%.0fx%.0f(%.4f,Δ=%.4f,fill=%.0f) "
-                "unrotated=%.0fx%.0f(%.4f,Δ=%.4f,fill=%.0f)",
+                "[VideoDbg] backend rotation detect: mode=%s native=%.0fx%.0f(%.4f) "
+                "rotated=%.0fx%.0f(%.4f,Δ=%.4f) unrotated=%.0fx%.0f(%.4f,Δ=%.4f)",
+                backend_rotation_mode,
                 native_size.width(),
                 native_size.height(),
                 native_aspect,
                 rotated.width(),
                 rotated.height(),
-                _aspect_ratio(rotated),
+                rotated_aspect,
                 rotated_delta,
-                rotated_fill,
                 unrotated.width(),
                 unrotated.height(),
-                _aspect_ratio(unrotated),
+                unrotated_aspect,
                 unrotated_delta,
-                unrotated_fill,
             )
         if effective_size.isEmpty():
             # No video loaded yet – fill the entire scene so the item is ready
@@ -784,31 +786,20 @@ class VideoArea(QWidget):
             self._black_backing.setRect(QRectF())
             return
 
-        # Compute target rectangle. Default to best-fit (no overflow). Only use
-        # edge-to-edge expanding for cropped portrait assets when scene/video
-        # aspect ratios are already close; otherwise expanding can over-zoom.
+        # Always use best-fit for viewport sizing. This gives predictable
+        # "maximum without overflow" behavior while crop compensation removes
+        # encoded clean-aperture rims.
         scene_aspect = _aspect_ratio(scene_rect.size())
         effective_aspect = _aspect_ratio(effective_size)
         aspect_gap = abs(scene_aspect - effective_aspect)
-        edge_to_edge_fill = bool(
-            self._video_geometry
-            and self._video_geometry.has_crop
-            and abs(self._video_geometry.rotation) % 360 in (90, 270)
-            and aspect_gap <= 0.20
-        )
-        aspect_mode = (
-            Qt.AspectRatioMode.KeepAspectRatioByExpanding
-            if edge_to_edge_fill
-            else Qt.AspectRatioMode.KeepAspectRatio
-        )
-        fitted = effective_size.scaled(scene_rect.size(), aspect_mode)
+        fitted = effective_size.scaled(scene_rect.size(), Qt.AspectRatioMode.KeepAspectRatio)
         x = (scene_rect.width() - fitted.width()) / 2.0
         y = (scene_rect.height() - fitted.height()) / 2.0
 
         _log.info(
             "[VideoDbg] _fit_video_item: source=%s  nativeSize=%.0fx%.0f  "
             "probe_display=%.0fx%.0f  effective=%.0fx%.0f  "
-            "scene=%.0fx%.0f  fitted=%.0fx%.0f  pos=(%.0f,%.0f)  mode=%s  aspect_gap=%.3f",
+            "scene=%.0fx%.0f  fitted=%.0fx%.0f  pos=(%.0f,%.0f)  rotation_mode=%s  aspect_gap=%.3f",
             source,
             native_size.width(), native_size.height(),
             (self._video_geometry.display_size.width() if self._video_geometry else 0),
@@ -817,7 +808,7 @@ class VideoArea(QWidget):
             scene_rect.width(), scene_rect.height(),
             fitted.width(), fitted.height(),
             x, y,
-            ("expand" if edge_to_edge_fill else "fit"),
+            backend_rotation_mode,
             aspect_gap,
         )
 
@@ -861,18 +852,10 @@ class VideoArea(QWidget):
                 video_y,
                 overscan_px,
             )
-            _log.info(
-                "[VideoDbg] coverage check: within_scene=%s (scene=%.0fx%.0f, video=%.0fx%.0f)",
-                _fits_within_scene(video_size, scene_rect),
-                scene_rect.width(),
-                scene_rect.height(),
-                video_size.width(),
-                video_size.height(),
-            )
 
         _log.info(
             "[VideoDbg] final geometry: source=%s effective=%.0fx%.0f crop=(l=%d r=%d t=%d b=%d) "
-            "fitted=%.2fx%.2f@(%.2f,%.2f) video_item=%.2fx%.2f@(%.2f,%.2f) scene=%.0fx%.0f mode=%s aspect_gap=%.3f",
+            "fitted=%.2fx%.2f@(%.2f,%.2f) video_item=%.2fx%.2f@(%.2f,%.2f) scene=%.0fx%.0f rotation_mode=%s aspect_gap=%.3f",
             source,
             effective_size.width(),
             effective_size.height(),
@@ -890,21 +873,16 @@ class VideoArea(QWidget):
             video_y,
             scene_rect.width(),
             scene_rect.height(),
-            ("expand" if edge_to_edge_fill else "fit"),
+            backend_rotation_mode,
             aspect_gap,
         )
 
         self._video_item.setSize(video_size)
         self._video_item.setPos(QPointF(video_x, video_y))
 
-        # Keep backing behind the visible video viewport in fill mode to avoid
-        # exposing any contrasting seam at the scene edge.
-        if edge_to_edge_fill:
-            self._black_backing.setPos(scene_rect.topLeft())
-            self._black_backing.setRect(QRectF(QPointF(), scene_rect.size()))
-        else:
-            self._black_backing.setPos(QPointF(x, y))
-            self._black_backing.setRect(QRectF(QPointF(), fitted))
+        # Backing follows the visible fitted viewport bounds.
+        self._black_backing.setPos(QPointF(x, y))
+        self._black_backing.setRect(QRectF(QPointF(), fitted))
 
     # ------------------------------------------------------------------
     # Live Photo helpers

@@ -12,6 +12,7 @@ from PySide6.QtGui import QColor, QShowEvent
 from PySide6.QtMultimedia import QMediaPlayer
 from PySide6.QtWidgets import QApplication
 
+from iPhoto.config import VIDEO_COMPLETE_HOLD_BACKSTEP_MS
 from iPhoto.gui.ui.widgets.video_area import VideoArea
 
 
@@ -101,6 +102,5 @@ def test_end_of_media_backsteps_and_pauses(qapp, mocker):
 
     video_area._on_media_status_changed(QMediaPlayer.MediaStatus.EndOfMedia)
 
-    from iPhoto.config import VIDEO_COMPLETE_HOLD_BACKSTEP_MS
     mock_set_pos.assert_called_once_with(5000 - VIDEO_COMPLETE_HOLD_BACKSTEP_MS)
     mock_pause.assert_called_once()

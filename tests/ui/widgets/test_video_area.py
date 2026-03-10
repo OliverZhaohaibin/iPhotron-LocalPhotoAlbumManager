@@ -42,22 +42,31 @@ def test_video_area_show_event_calls_super(qapp, mocker):
     mock_super_show.assert_called_once_with(show_event)
 
 
-def test_set_surface_color_updates_background(qapp):
-    """set_surface_color should update the scene background and default colour."""
-    video_area = VideoArea()
-
-    video_area.set_surface_color("#000000")
-    assert video_area._default_surface_color == "#000000"
-    assert video_area._scene.backgroundBrush().color() == QColor("#000000")
-
-
-def test_set_surface_color_light_mode(qapp):
-    """In light mode the surface should match the provided colour."""
+def test_set_surface_color_stores_default(qapp):
+    """set_surface_color should store the new default colour."""
     video_area = VideoArea()
 
     video_area.set_surface_color("#f0f0f0")
     assert video_area._default_surface_color == "#f0f0f0"
-    assert video_area._scene.backgroundBrush().color() == QColor("#f0f0f0")
+
+
+def test_scene_background_always_black(qapp):
+    """Scene background must always be black for correct HDR/HEVC compositing."""
+    video_area = VideoArea()
+
+    # Initially black
+    assert video_area._scene.backgroundBrush().color() == QColor("#000000")
+
+    # Stays black even after setting a light surface colour
+    video_area.set_surface_color("#f0f0f0")
+    assert video_area._scene.backgroundBrush().color() == QColor("#000000")
+
+    # Stays black after immersive toggle
+    video_area.set_immersive_background(True)
+    assert video_area._scene.backgroundBrush().color() == QColor("#000000")
+
+    video_area.set_immersive_background(False)
+    assert video_area._scene.backgroundBrush().color() == QColor("#000000")
 
 
 def test_immersive_restores_default_surface(qapp):
@@ -66,10 +75,13 @@ def test_immersive_restores_default_surface(qapp):
     video_area.set_surface_color("#abcdef")
 
     video_area.set_immersive_background(True)
+    # Scene is always black
     assert video_area._scene.backgroundBrush().color() == QColor("#000000")
 
     video_area.set_immersive_background(False)
-    assert video_area._scene.backgroundBrush().color() == QColor("#abcdef")
+    # Scene stays black; default_surface_color is restored for chrome
+    assert video_area._default_surface_color == "#abcdef"
+    assert video_area._scene.backgroundBrush().color() == QColor("#000000")
 
 
 def test_end_of_media_backsteps_and_pauses(qapp, mocker):
@@ -95,14 +107,3 @@ def test_scene_has_no_black_backing(qapp):
     items = video_area._scene.items()
     assert len(items) == 1
     assert items[0] is video_area._video_item
-
-
-def test_scene_background_always_follows_theme(qapp):
-    """Scene background should always match the theme colour, never forced black."""
-    video_area = VideoArea()
-
-    video_area.set_surface_color("#f0f0f0")
-    assert video_area._scene.backgroundBrush().color() == QColor("#f0f0f0")
-
-    video_area.set_surface_color("#abcdef")
-    assert video_area._scene.backgroundBrush().color() == QColor("#abcdef")

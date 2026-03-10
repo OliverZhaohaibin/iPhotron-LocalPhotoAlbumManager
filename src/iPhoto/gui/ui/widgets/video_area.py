@@ -80,9 +80,14 @@ class VideoArea(QWidget):
         # to click a non-interactive chrome element first.
         self._video_view.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setFocusProxy(self._video_view)
-        # The initial surface colour is derived from the widget palette so the
-        # letterbox areas match the surrounding chrome.  The theme controller
-        # updates this later via ``set_surface_color`` when the palette changes.
+        # The scene background is always black so that QGraphicsVideoItem
+        # composites decoded frames correctly for all content including
+        # BT.2020 / HDR-10 / HLG material.  A non-black scene background
+        # causes washed-out / grey colours in the wide-gamut pipeline.
+        # The video item fills the entire scene with KeepAspectRatio and
+        # Qt handles SAR, frame cropping and display-matrix rotation
+        # internally — no manual nativeSize() geometry is needed.
+        self._scene.setBackgroundBrush(QColor("#000000"))
         surface_color = viewer_surface_color(self)
         self._default_surface_color = surface_color
         self._video_view.setStyleSheet("background: transparent; border: none;")
@@ -90,7 +95,6 @@ class VideoArea(QWidget):
             f"background-color: {surface_color}; border: none;"
         )
         self.setStyleSheet(f"background-color: {surface_color};")
-        self._scene.setBackgroundBrush(QColor(surface_color))
         # --- End Graphics View Setup ---
 
         # --- Media Player Setup ---
@@ -154,23 +158,30 @@ class VideoArea(QWidget):
         self._apply_surface(colour)
 
     def set_surface_color(self, colour: str) -> None:
-        """Update the surface colour used for letterbox and background areas.
+        """Update the surface colour used for the widget chrome.
 
-        Called by the theme controller whenever the application theme changes
-        so that the video canvas stays in sync with the surrounding chrome.
+        Called by the theme controller whenever the application theme changes.
+        The scene background stays black for correct HDR/HEVC compositing;
+        only the widget and viewport stylesheets follow the requested colour.
         """
 
         self._default_surface_color = colour
         self._apply_surface(colour)
 
     def _apply_surface(self, colour: str) -> None:
-        """Apply *colour* to the scene background, viewport, and widget."""
+        """Apply *colour* to the widget chrome while keeping the scene black.
+
+        The scene background is always black for correct HDR/HEVC
+        compositing.  The widget and viewport stylesheets follow the
+        requested *colour* so surrounding UI chrome stays in sync with
+        the application theme.
+        """
 
         stylesheet = f"background-color: {colour}; border: none;"
         self.setStyleSheet(stylesheet)
         self._video_view.setStyleSheet("background: transparent; border: none;")
         self._video_view.viewport().setStyleSheet(stylesheet)
-        self._scene.setBackgroundBrush(QColor(colour))
+        self._scene.setBackgroundBrush(QColor("#000000"))
 
     def show_controls(self, *, animate: bool = True) -> None:
         """Reveal the playback controls and restart the hide timer."""

@@ -154,12 +154,7 @@ class VideoArea(QWidget):
     def set_immersive_background(self, immersive: bool) -> None:
         """Switch to a pure black canvas when immersive full screen mode is active."""
 
-        colour = "#000000" if immersive else self._default_surface_color
-        stylesheet = f"background-color: {colour}; border: none;"
-        self.setStyleSheet(stylesheet)
-        self._video_view.setStyleSheet("background: transparent; border: none;")
-        self._video_view.viewport().setStyleSheet(stylesheet)
-        self._scene.setBackgroundBrush(QColor(colour))
+        self._apply_surface_color("#000000" if immersive else self._default_surface_color)
 
     def set_surface_color_override(self, colour: str | None) -> None:
         """Override the viewer backdrop with *colour* or restore the palette default.
@@ -171,11 +166,16 @@ class VideoArea(QWidget):
 
         target = colour if colour is not None else viewer_surface_color(self)
         self._default_surface_color = target
-        stylesheet = f"background-color: {target}; border: none;"
-        self.setStyleSheet(f"background-color: {target};")
+        self._apply_surface_color(target)
+
+    def _apply_surface_color(self, colour: str) -> None:
+        """Apply *colour* to the widget, viewport, and scene background."""
+
+        stylesheet = f"background-color: {colour}; border: none;"
+        self.setStyleSheet(f"background-color: {colour};")
         self._video_view.setStyleSheet("background: transparent; border: none;")
         self._video_view.viewport().setStyleSheet(stylesheet)
-        self._scene.setBackgroundBrush(QColor(target))
+        self._scene.setBackgroundBrush(QColor(colour))
 
     def show_controls(self, *, animate: bool = True) -> None:
         """Reveal the playback controls and restart the hide timer."""

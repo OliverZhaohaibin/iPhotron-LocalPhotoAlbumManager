@@ -66,6 +66,20 @@ def _parse_sar(value: object) -> tuple[int, int] | None:
     return num, den
 
 
+def _parse_rotation(value: object) -> int:
+    """Parse a rotation value that may be int, float, or string.
+
+    ffprobe may report rotation as ``-90``, ``-90.0``, or ``"-90"``.
+    Returns the integer rotation in degrees, or ``0`` on failure.
+    """
+    if value is None:
+        return 0
+    try:
+        return int(float(value))
+    except (ValueError, TypeError):
+        return 0
+
+
 def _probe_display_size(path: Path) -> QSizeF | None:
     """Return the SAR/rotation-corrected display size using ffprobe.
 
@@ -127,22 +141,14 @@ def _probe_display_size(path: Path) -> QSizeF | None:
         if isinstance(side_data_list, list):
             for entry in side_data_list:
                 if isinstance(entry, dict) and "rotation" in entry:
-                    try:
-                        rotation = int(float(str(entry["rotation"])))
-                    except (ValueError, TypeError):
-                        pass
+                    rotation = _parse_rotation(entry["rotation"])
                     break
 
         # Fall back to stream-level rotation tag (older ffprobe / QuickTime).
         if rotation == 0:
             tags = stream.get("tags")
             if isinstance(tags, dict):
-                rotate_tag = tags.get("rotate")
-                if rotate_tag is not None:
-                    try:
-                        rotation = int(float(str(rotate_tag)))
-                    except (ValueError, TypeError):
-                        pass
+                rotation = _parse_rotation(tags.get("rotate"))
 
         # 90° and 270° rotations swap width and height.
         rotation = abs(rotation) % 360

@@ -38,6 +38,10 @@ uniform float uDefinition;   // [0.0, 0.2] definition / clarity strength
 
 uniform float uDenoiseAmount;  // bilateral filter strength (0 = off)
 
+uniform float uSharpenIntensity;  // [0, 1] sharpening amount
+uniform float uSharpenEdges;      // [0, 1] edge detection threshold
+uniform float uSharpenFalloff;    // [0, 1] transition smoothness
+
 uniform float uVignetteStrength;  // [0, 1] edge-darkening intensity
 uniform float uVignetteRadius;    // [0, 1] inner radius
 uniform float uVignetteSoftness;  // [0.1, 1.0] falloff width
@@ -422,6 +426,61 @@ vec3 apply_denoise(vec3 adjustedColor, vec2 uv) {
     return clamp(adjustedColor + denoiseDelta, 0.0, 1.0);
 }
 
+vec3 apply_sharpen(vec3 adjustedColor, vec2 uv) {
+    // Unsharp Mask with edge masking.
+    // Computes the high-pass + edge mask from the source texture (uTex) and
+    // applies the resulting sharpening delta to the already-processed
+    // ``adjustedColor`` so earlier pipeline stages (selective color, denoise,
+    // etc.) are preserved.  The CPU ``sharpen_resolver`` instead runs on the
+    // already-adjusted image, so GPU preview and CPU/export may diverge
+    // slightly when upstream adjustments are active.
+    vec2 texSize = vec2(textureSize(uTex, 0));
+    vec2 texel = 1.0 / texSize;
+
+    // 1. Sample 3x3 neighbourhood from source texture
+    vec3 c00 = texture(uTex, uv + vec2(-texel.x, -texel.y)).rgb;
+    vec3 c10 = texture(uTex, uv + vec2( 0.0,     -texel.y)).rgb;
+    vec3 c20 = texture(uTex, uv + vec2( texel.x, -texel.y)).rgb;
+
+    vec3 c01 = texture(uTex, uv + vec2(-texel.x,  0.0)).rgb;
+    vec3 c11 = texture(uTex, uv).rgb; // center pixel
+    vec3 c21 = texture(uTex, uv + vec2( texel.x,  0.0)).rgb;
+
+    vec3 c02 = texture(uTex, uv + vec2(-texel.x,  texel.y)).rgb;
+    vec3 c12 = texture(uTex, uv + vec2( 0.0,      texel.y)).rgb;
+    vec3 c22 = texture(uTex, uv + vec2( texel.x,  texel.y)).rgb;
+
+    // 2. Approximate Gaussian blur
+    vec3 blur = c11 * 0.25
+              + (c10 + c01 + c21 + c12) * 0.125
+              + (c00 + c20 + c02 + c22) * 0.0625;
+
+    // 3. High-pass detail (Unsharp Mask) on source
+    vec3 highPass = c11 - blur;
+
+    // 4. Local luminance contrast for edge detection
+    vec3 lumaCoef = vec3(0.299, 0.587, 0.114);
+    float lum00 = dot(c00, lumaCoef); float lum10 = dot(c10, lumaCoef);
+    float lum20 = dot(c20, lumaCoef); float lum01 = dot(c01, lumaCoef);
+    float lum11 = dot(c11, lumaCoef); float lum21 = dot(c21, lumaCoef);
+    float lum02 = dot(c02, lumaCoef); float lum12 = dot(c12, lumaCoef);
+    float lum22 = dot(c22, lumaCoef);
+
+    float lMin = min(lum00, min(lum10, min(lum20, min(lum01, min(lum11, min(lum21, min(lum02, min(lum12, lum22))))))));
+    float lMax = max(lum00, max(lum10, max(lum20, max(lum01, max(lum11, max(lum21, max(lum02, max(lum12, lum22))))))));
+    float localContrast = lMax - lMin;
+
+    // 5. Edge mask (smoothstep)
+    float threshold = uSharpenEdges * 0.4;
+    float band = max(uSharpenFalloff * 0.4, 0.001);
+    float mask = smoothstep(threshold, threshold + band, localContrast);
+
+    // 6. Compute sharpening delta on source, apply to processed colour
+    float amount = uSharpenIntensity * 5.0;
+    vec3 sharpenDelta = highPass * amount * mask;
+    return clamp(adjustedColor + sharpenDelta, 0.0, 1.0);
+}
+
 vec3 apply_vignette(vec3 c, vec2 uv) {
     vec2 centered = uv - vec2(0.5);
     float dist = length(centered) * 1.41421356;
@@ -526,12 +585,17 @@ void main() {
         c = apply_definition(c, uv_tex);
     }
 
-    // Apply noise reduction (denoise) after definition, before vignette
+    // Apply noise reduction (denoise) after definition, before sharpen
     if (uDenoiseAmount > 0.005) {
         c = apply_denoise(c, uv_tex);
     }
 
-    // Apply vignette after denoise, before B&W
+    // Apply sharpen after denoise, before vignette
+    if (uSharpenIntensity > 0.0001) {
+        c = apply_sharpen(c, uv_tex);
+    }
+
+    // Apply vignette after sharpen, before B&W
     if (uVignetteStrength > 0.0001) {
         c = apply_vignette(c, uv_tex);
     }

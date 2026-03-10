@@ -27,6 +27,8 @@ from .sidecar_sections import (
     _write_definition_node,
     _read_denoise_from_node,
     _write_denoise_node,
+    _read_sharpen_from_node,
+    _write_sharpen_node,
     _read_vignette_from_node,
     _write_vignette_node,
     _CROP_NODE,
@@ -37,6 +39,7 @@ from .sidecar_sections import (
     _SELECTIVE_COLOR_NODE,
     _DEFINITION_NODE,
     _DENOISE_NODE,
+    _SHARPEN_NODE,
     _VIGNETTE_NODE,
 )
 
@@ -233,6 +236,11 @@ def load_adjustments(asset_path: Path) -> Dict[str, Any]:
     if dn_node is not None:
         result.update(_read_denoise_from_node(dn_node))
 
+    # Load Sharpen adjustments
+    sh_node = _find_child_case_insensitive(root, _SHARPEN_NODE)
+    if sh_node is not None:
+        result.update(_read_sharpen_from_node(sh_node))
+
     # Load Vignette adjustments
     vig_node = _find_child_case_insensitive(root, _VIGNETTE_NODE)
     if vig_node is not None:
@@ -320,6 +328,9 @@ def save_adjustments(asset_path: Path, adjustments: Mapping[str, Any]) -> Path:
 
     # Write Denoise adjustments
     _write_denoise_node(root, adjustments)
+
+    # Write Sharpen adjustments
+    _write_sharpen_node(root, adjustments)
 
     # Write Vignette adjustments
     _write_vignette_node(root, adjustments)
@@ -475,6 +486,14 @@ def resolve_render_adjustments(
     resolved["Denoise_Enabled"] = dn_enabled
     if dn_enabled:
         resolved["Denoise_Amount"] = max(0.0, min(5.0, float(adjustments.get("Denoise_Amount", 0.0))))
+
+    # Sharpen adjustments - pass through to renderer as-is
+    sh_enabled = bool(adjustments.get("Sharpen_Enabled", False))
+    resolved["Sharpen_Enabled"] = sh_enabled
+    if sh_enabled:
+        resolved["Sharpen_Intensity"] = max(0.0, min(1.0, float(adjustments.get("Sharpen_Intensity", 0.0))))
+        resolved["Sharpen_Edges"] = max(0.0, min(1.0, float(adjustments.get("Sharpen_Edges", 0.0))))
+        resolved["Sharpen_Falloff"] = max(0.0, min(1.0, float(adjustments.get("Sharpen_Falloff", 0.0))))
 
     # Vignette adjustments - pass through to renderer as-is
     vig_enabled = bool(adjustments.get("Vignette_Enabled", False))

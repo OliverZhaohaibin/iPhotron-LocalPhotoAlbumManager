@@ -47,6 +47,8 @@ class InfoPanel(QWidget):
 
     _CORNER_RADIUS = 12.0
     _SHADOW_SIZE = 20
+    _SHADOW_MAX_ALPHA = 40
+    _SHADOW_RADIUS_GROWTH = 0.5
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(
@@ -272,14 +274,18 @@ class InfoPanel(QWidget):
         # -- drop shadow ---------------------------------------------------
         shadow_steps = s
         for i in range(shadow_steps):
-            alpha = int(40 * (1 - i / shadow_steps) ** 2)
+            alpha = int(self._SHADOW_MAX_ALPHA * (1 - i / shadow_steps) ** 2)
             if alpha <= 0:
                 continue
             shadow_color = QColor(0, 0, 0, alpha)
             spread = float(i)
             shadow_rect = content_rect.adjusted(-spread, -spread, spread, spread)
             shadow_path = QPainterPath()
-            shadow_path.addRoundedRect(shadow_rect, radius + spread * 0.5, radius + spread * 0.5)
+            shadow_path.addRoundedRect(
+                shadow_rect,
+                radius + spread * self._SHADOW_RADIUS_GROWTH,
+                radius + spread * self._SHADOW_RADIUS_GROWTH,
+            )
             painter.setPen(Qt.PenStyle.NoPen)
             painter.fillPath(shadow_path, shadow_color)
 

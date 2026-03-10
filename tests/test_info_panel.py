@@ -115,7 +115,7 @@ def test_info_panel_close_button_closes(qapp: QApplication) -> None:
 
 
 def test_info_panel_centers_on_parent(qapp: QApplication) -> None:
-    """The panel should centre itself over its parent on first show."""
+    """The panel should center itself over its parent on first show."""
 
     from PySide6.QtWidgets import QMainWindow
 
@@ -128,12 +128,10 @@ def test_info_panel_centers_on_parent(qapp: QApplication) -> None:
     qapp.processEvents()
 
     parent_center = parent.geometry().center()
-    panel_geo = panel.geometry()
-    panel_center = panel_geo.center()
+    panel_center = panel.geometry().center()
 
-    # Allow a tolerance of half the panel size for rounding
-    assert abs(panel_center.x() - parent_center.x()) <= panel_geo.width() // 2
-    assert abs(panel_center.y() - parent_center.y()) <= panel_geo.height() // 2
+    assert abs(panel_center.x() - parent_center.x()) <= 100
+    assert abs(panel_center.y() - parent_center.y()) <= 100
 
     panel.close()
     parent.close()

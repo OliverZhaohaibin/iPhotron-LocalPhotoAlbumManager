@@ -19,7 +19,6 @@ from PySide6.QtGui import QColor, QCursor, QMouseEvent, QPainter, QResizeEvent, 
 from PySide6.QtWidgets import (
     QFrame,
     QGraphicsOpacityEffect,
-    QGraphicsRectItem,
     QGraphicsScene,
     QGraphicsView,
     QWidget,
@@ -65,29 +64,10 @@ class VideoArea(QWidget):
             raise RuntimeError("PySide6.QtMultimediaWidgets is required for video playback.")
 
         # --- Graphics View Setup ---
-        # A black rectangle sits directly behind the video item so that hardware
-        # compositing sees a black surface underneath the video frame.  Some
-        # codecs (HDR / HEVC) produce washed-out colours when the compositing
-        # backdrop is a non-black colour.
-        #
-        # Unlike the previous approach that tried to match the *inner frame*
-        # geometry, the backing rect now always mirrors the video item's own
-        # bounds.  Since they share the same position and size there is no
-        # geometry-matching complexity and no risk of black edges leaking past
-        # the frame in light-mode themes.  The theme-coloured scene background
-        # fills the letterbox areas outside the video item naturally.
-        self._black_backing: QGraphicsRectItem = QGraphicsRectItem()
-        self._black_backing.setBrush(Qt.black)
-        self._black_backing.setPen(Qt.NoPen)
-        self._black_backing.setZValue(0)
-
         self._video_item = QGraphicsVideoItem()
-        self._video_item.setZValue(1)
         self._video_item.setAspectRatioMode(Qt.AspectRatioMode.KeepAspectRatio)
-        self._video_item.nativeSizeChanged.connect(self._fit_video_item)
 
         self._scene = QGraphicsScene(self)
-        self._scene.addItem(self._black_backing)
         self._scene.addItem(self._video_item)
 
         self._video_view = QGraphicsView(self._scene, self)
@@ -99,23 +79,23 @@ class VideoArea(QWidget):
         # to click a non-interactive chrome element first.
         self._video_view.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setFocusProxy(self._video_view)
-        # Match the photo viewer's light-toned surface so letterboxed video frames sit
-        # on the same neutral backdrop.  Using the shared palette value keeps the
-        # photo and video experiences visually consistent while avoiding harsh
-        # contrast against the surrounding chrome.
-        # Mirror the palette-driven detail background so letterboxed frames do not
-        # sit on a subtly different tone compared to the surrounding widgets.
+        # Match the photo viewer's light-toned surface for any visible chrome
+        # around the video view (pixel gaps, widget edges).  The *scene*
+        # background is always black so that HDR / HEVC video frames composite
+        # against a black surface – some codecs produce washed-out colours when
+        # the compositing backdrop is a non-black colour.  The video item fills
+        # the entire scene with ``KeepAspectRatio`` so Qt handles SAR, display-
+        # matrix rotation and other codec-level geometry internally; letterbox
+        # / pillarbox areas appear as standard black bars.
         surface_color = viewer_surface_color(self)
         self._default_surface_color = surface_color
         self._surface_override: str | None = None
-        # Style both the graphics view and its viewport so any revealed margins match the
-        # surrounding detail panel while the application is in its standard chrome mode.
         self._video_view.setStyleSheet("background: transparent; border: none;")
         self._video_view.viewport().setStyleSheet(
             f"background-color: {surface_color}; border: none;"
         )
         self.setStyleSheet(f"background-color: {surface_color};")
-        self._scene.setBackgroundBrush(QColor(surface_color))
+        self._scene.setBackgroundBrush(QColor("#000000"))
         # --- End Graphics View Setup ---
 
         # --- Media Player Setup ---
@@ -173,7 +153,12 @@ class VideoArea(QWidget):
         return self._player_bar
 
     def set_surface_color_override(self, colour: str | None) -> None:
-        """Override the viewer backdrop with *colour* or restore the default."""
+        """Override the viewer backdrop with *colour* or restore the default.
+
+        This only affects the outer widget / viewport chrome.  The scene
+        background is always kept black to guarantee correct HDR / HEVC
+        compositing regardless of the current theme.
+        """
 
         self._surface_override = colour
         target = colour if colour is not None else self._default_surface_color
@@ -181,7 +166,6 @@ class VideoArea(QWidget):
         self.setStyleSheet(stylesheet)
         self._video_view.setStyleSheet("background: transparent; border: none;")
         self._video_view.viewport().setStyleSheet(stylesheet)
-        self._scene.setBackgroundBrush(QColor(target))
 
     def set_immersive_background(self, immersive: bool) -> None:
         """Switch to a pure black canvas when immersive full screen mode is active."""
@@ -314,7 +298,8 @@ class VideoArea(QWidget):
         rect = self.rect()
         self._video_view.setGeometry(rect)
         self._scene.setSceneRect(QRectF(rect))
-        self._fit_video_item()
+        self._video_item.setSize(self._scene.sceneRect().size())
+        self._video_item.setPos(QPointF())
         self._update_bar_geometry()
 
     def enterEvent(self, event) -> None:  # pragma: no cover - GUI behaviour
@@ -463,43 +448,6 @@ class VideoArea(QWidget):
             y = max(0, rect.height() - bar_height)
         self._player_bar.setGeometry(x, y, bar_width, bar_height)
         self._player_bar.raise_()
-
-    def _fit_video_item(self) -> None:
-        """Size and position the video item to exactly fit the video's aspect ratio.
-
-        When the native size is known the video item is shrunk to the largest
-        aspect-ratio-preserving rectangle that fits inside the scene.  The black
-        backing rectangle is set to the *same* bounds so it sits perfectly behind
-        the video surface (no geometry-matching complexity).  The theme-coloured
-        scene background fills the remaining letterbox areas.
-        """
-
-        scene_rect = self._scene.sceneRect()
-        if scene_rect.isEmpty():
-            return
-
-        native = self._video_item.nativeSize()
-        if native.isEmpty():
-            # No video loaded yet – fill the entire scene so the item is ready
-            # to display the first frame without a layout jump.
-            self._video_item.setSize(scene_rect.size())
-            self._video_item.setPos(QPointF())
-            self._black_backing.setPos(QPointF())
-            self._black_backing.setRect(QRectF())
-            return
-
-        # Compute the largest rectangle inside the scene that preserves the
-        # video's native aspect ratio.
-        fitted = native.scaled(scene_rect.size(), Qt.AspectRatioMode.KeepAspectRatio)
-        x = (scene_rect.width() - fitted.width()) / 2.0
-        y = (scene_rect.height() - fitted.height()) / 2.0
-
-        self._video_item.setSize(fitted)
-        self._video_item.setPos(QPointF(x, y))
-
-        # Mirror the video item's bounds exactly – trivially aligned.
-        self._black_backing.setPos(QPointF(x, y))
-        self._black_backing.setRect(QRectF(QPointF(), fitted))
 
     # ------------------------------------------------------------------
     # Live Photo helpers

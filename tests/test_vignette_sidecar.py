@@ -54,20 +54,25 @@ def test_vignette_sidecar_disabled_round_trip(tmp_path: Path):
 
 def test_vignette_sidecar_clamped_round_trip(tmp_path: Path):
     """Vignette values are clamped to [0.0, 1.0] on load."""
+    import xml.etree.ElementTree as ET
+    from iPhoto.io.sidecar import sidecar_path_for_asset
 
     asset = tmp_path / "photo.jpg"
     asset.touch()
 
-    original = {
-        "Vignette_Enabled": True,
-        "Vignette_Strength": 0.85,
-        "Vignette_Radius": 0.30,
-        "Vignette_Softness": 0.90,
-    }
-    save_adjustments(asset, original)
+    # Write XML directly with out-of-range attribute values to test clamping.
+    sidecar = sidecar_path_for_asset(asset)
+    root = ET.Element("iPhotoAdjustments")
+    vig = ET.SubElement(root, "Vignette")
+    vig.set("enabled", "true")
+    vig.set("strength", "1.5")    # above 1.0
+    vig.set("radius", "-0.2")     # below 0.0
+    vig.set("softness", "3.0")    # above 1.0
+    ET.ElementTree(root).write(sidecar, encoding="utf-8", xml_declaration=True)
+
     loaded = load_adjustments(asset)
 
     assert loaded["Vignette_Enabled"] is True
-    assert 0.0 <= loaded["Vignette_Strength"] <= 1.0
-    assert 0.0 <= loaded["Vignette_Radius"] <= 1.0
-    assert 0.0 <= loaded["Vignette_Softness"] <= 1.0
+    assert loaded["Vignette_Strength"] == pytest.approx(1.0)
+    assert loaded["Vignette_Radius"] == pytest.approx(0.0)
+    assert loaded["Vignette_Softness"] == pytest.approx(1.0)

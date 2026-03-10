@@ -114,6 +114,14 @@ def _rotate_crop_to_display(crop: tuple[int, int, int, int], rotation: int) -> t
     return l, r, t, b
 
 
+def _aspect_ratio(size: QSizeF) -> float:
+    """Return width/height while guarding against empty sizes."""
+
+    h = size.height()
+    if h <= 0:
+        return 0.0
+    return size.width() / h
+
 def _probe_display_size(path: Path) -> _VideoGeometry | None:
     """Return the SAR/rotation-corrected display size using ffprobe.
 
@@ -700,9 +708,38 @@ class VideoArea(QWidget):
         effective_size = self._video_geometry.display_size if self._video_geometry else None
         native_size = self._video_item.nativeSize()
         source = "probe"
+        apply_crop_compensation = bool(self._video_geometry and self._video_geometry.has_crop)
         if effective_size is None or effective_size.isEmpty():
             effective_size = native_size
             source = "nativeSize"
+
+        # Some Qt multimedia backends ignore QuickTime display-matrix rotation
+        # and still render coded orientation. If we force the rotated aspect in
+        # that case, portrait clips can appear "horizontal inside vertical slot"
+        # with large top/bottom black bars. Prefer the orientation whose aspect
+        # is closer to nativeSize() when metadata says 90°/270° rotation.
+        if (
+            self._video_geometry
+            and not native_size.isEmpty()
+            and abs(self._video_geometry.rotation) % 360 in (90, 270)
+        ):
+            rotated = self._video_geometry.display_size
+            unrotated = QSizeF(rotated.height(), rotated.width())
+            native_aspect = _aspect_ratio(native_size)
+            rotated_delta = abs(_aspect_ratio(rotated) - native_aspect)
+            unrotated_delta = abs(_aspect_ratio(unrotated) - native_aspect)
+            if unrotated_delta + 0.02 < rotated_delta:
+                effective_size = unrotated
+                source = "probe(native-orientation-fallback)"
+                # Crop mapping is computed for rotated display coordinates;
+                # disable it in native-orientation fallback to avoid axis mismatch.
+                apply_crop_compensation = False
+                _log.info(
+                    "[VideoDbg] native orientation fallback: native=%.3f rotated=%.3f unrotated=%.3f",
+                    native_aspect,
+                    _aspect_ratio(rotated),
+                    _aspect_ratio(unrotated),
+                )
         if effective_size.isEmpty():
             # No video loaded yet – fill the entire scene so the item is ready
             # to display the first frame without a layout jump.
@@ -736,7 +773,7 @@ class VideoArea(QWidget):
         video_x = x
         video_y = y
 
-        if self._video_geometry and self._video_geometry.has_crop:
+        if apply_crop_compensation and self._video_geometry:
             visible_w = max(1.0, self._video_geometry.display_size.width())
             visible_h = max(1.0, self._video_geometry.display_size.height())
 

@@ -122,6 +122,15 @@ def _aspect_ratio(size: QSizeF) -> float:
         return 0.0
     return size.width() / h
 
+
+def _fit_area(content: QSizeF, container: QSizeF) -> float:
+    """Return fitted area using KeepAspectRatio."""
+
+    if content.isEmpty() or container.isEmpty():
+        return 0.0
+    fitted = content.scaled(container, Qt.AspectRatioMode.KeepAspectRatio)
+    return fitted.width() * fitted.height()
+
 def _probe_display_size(path: Path) -> _VideoGeometry | None:
     """Return the SAR/rotation-corrected display size using ffprobe.
 
@@ -728,17 +737,30 @@ class VideoArea(QWidget):
             native_aspect = _aspect_ratio(native_size)
             rotated_delta = abs(_aspect_ratio(rotated) - native_aspect)
             unrotated_delta = abs(_aspect_ratio(unrotated) - native_aspect)
-            if unrotated_delta + 0.02 < rotated_delta:
+
+            scene_size = scene_rect.size()
+            rotated_fill = _fit_area(rotated, scene_size)
+            unrotated_fill = _fit_area(unrotated, scene_size)
+
+            # Only trust native-orientation fallback when it is clearly more
+            # consistent with backend output *and* does not dramatically reduce
+            # scene coverage. This avoids accidentally forcing landscape layout
+            # for portrait playback and creating large side bars.
+            native_prefers_unrotated = unrotated_delta + 0.02 < rotated_delta
+            scene_allows_unrotated = unrotated_fill >= rotated_fill * 0.90
+            if native_prefers_unrotated and scene_allows_unrotated:
                 effective_size = unrotated
                 source = "probe(native-orientation-fallback)"
                 # Crop mapping is computed for rotated display coordinates;
                 # disable it in native-orientation fallback to avoid axis mismatch.
                 apply_crop_compensation = False
                 _log.info(
-                    "[VideoDbg] native orientation fallback: native=%.3f rotated=%.3f unrotated=%.3f",
+                    "[VideoDbg] native orientation fallback: native=%.3f rotated=%.3f unrotated=%.3f fill(rot)=%.0f fill(unrot)=%.0f",
                     native_aspect,
                     _aspect_ratio(rotated),
                     _aspect_ratio(unrotated),
+                    rotated_fill,
+                    unrotated_fill,
                 )
         if effective_size.isEmpty():
             # No video loaded yet – fill the entire scene so the item is ready

@@ -63,6 +63,9 @@ class StubUi(QObject):
         self.image_viewer = MagicMock()
         self.image_viewer.set_surface_color_override = MagicMock()
 
+        self.video_area = MagicMock()
+        self.video_area.set_surface_color_override = MagicMock()
+
         self.edit_button = make_widget("editButton", QPushButton)
 
         # --- Icons / Toolbar ---

@@ -754,6 +754,23 @@ class VideoArea(QWidget):
             rotated_fill = _fit_area(rotated, scene_size)
             unrotated_fill = _fit_area(unrotated, scene_size)
 
+            _log.info(
+                "[VideoDbg] orientation candidates: native=%.0fx%.0f(%.4f) rotated=%.0fx%.0f(%.4f,Δ=%.4f,fill=%.0f) unrotated=%.0fx%.0f(%.4f,Δ=%.4f,fill=%.0f)",
+                native_size.width(),
+                native_size.height(),
+                native_aspect,
+                rotated.width(),
+                rotated.height(),
+                _aspect_ratio(rotated),
+                rotated_delta,
+                rotated_fill,
+                unrotated.width(),
+                unrotated.height(),
+                _aspect_ratio(unrotated),
+                unrotated_delta,
+                unrotated_fill,
+            )
+
             # Only trust native-orientation fallback when it is clearly more
             # consistent with backend output *and* does not dramatically reduce
             # scene coverage. This avoids accidentally forcing landscape layout
@@ -852,6 +869,28 @@ class VideoArea(QWidget):
                 video_y,
                 overscan_px,
             )
+
+        _log.info(
+            "[VideoDbg] final geometry: source=%s effective=%.0fx%.0f crop=(l=%d r=%d t=%d b=%d) "
+            "fitted=%.2fx%.2f@(%.2f,%.2f) video_item=%.2fx%.2f@(%.2f,%.2f) scene=%.0fx%.0f",
+            source,
+            effective_size.width(),
+            effective_size.height(),
+            crop_left,
+            crop_right,
+            crop_top,
+            crop_bottom,
+            fitted.width(),
+            fitted.height(),
+            x,
+            y,
+            video_size.width(),
+            video_size.height(),
+            video_x,
+            video_y,
+            scene_rect.width(),
+            scene_rect.height(),
+        )
 
         self._video_item.setSize(video_size)
         self._video_item.setPos(QPointF(video_x, video_y))

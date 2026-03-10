@@ -66,6 +66,11 @@ class EditSignalRouter:
         denoise.denoiseParamsPreviewed.connect(sidebar.denoiseParamsPreviewed)
         denoise.denoiseParamsCommitted.connect(sidebar.denoiseParamsCommitted)
 
+        # Sharpen-specific relays
+        sharpen = bundles["sharpen"].section
+        sharpen.sharpenParamsPreviewed.connect(sidebar.sharpenParamsPreviewed)
+        sharpen.sharpenParamsCommitted.connect(sidebar.sharpenParamsCommitted)
+
         # Vignette-specific relays
         vignette = bundles["vignette"].section
         vignette.vignetteParamsPreviewed.connect(sidebar.vignetteParamsPreviewed)

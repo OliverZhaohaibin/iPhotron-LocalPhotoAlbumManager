@@ -529,6 +529,67 @@ def _write_denoise_node(root: ET.Element, values: Mapping[str, Any]) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Sharpen node constants
+# ---------------------------------------------------------------------------
+
+_SHARPEN_NODE = "Sharpen"
+_SHARPEN_ENABLED = "enabled"
+_SHARPEN_INTENSITY = "intensity"
+_SHARPEN_EDGES = "edges"
+_SHARPEN_FALLOFF = "falloff"
+
+# ---------------------------------------------------------------------------
+# Sharpen helpers
+# ---------------------------------------------------------------------------
+
+
+def _read_sharpen_from_node(node: ET.Element) -> Dict[str, Any]:
+    """Return sharpen adjustments described by the ``<Sharpen>`` *node*."""
+    result: Dict[str, Any] = {}
+
+    enabled_attr = node.get(_SHARPEN_ENABLED)
+    if enabled_attr is not None:
+        result["Sharpen_Enabled"] = enabled_attr.lower() in {"1", "true", "yes", "on"}
+    else:
+        result["Sharpen_Enabled"] = False
+
+    for attr, key, lo, hi, default in (
+        (_SHARPEN_INTENSITY, "Sharpen_Intensity", 0.0, 1.0, 0.0),
+        (_SHARPEN_EDGES, "Sharpen_Edges", 0.0, 1.0, 0.0),
+        (_SHARPEN_FALLOFF, "Sharpen_Falloff", 0.0, 1.0, 0.0),
+    ):
+        raw = node.get(attr)
+        if raw is not None:
+            try:
+                result[key] = max(lo, min(hi, float(raw)))
+            except (ValueError, TypeError):
+                result[key] = default
+        else:
+            result[key] = default
+
+    return result
+
+
+def _write_sharpen_node(root: ET.Element, values: Mapping[str, Any]) -> None:
+    """Insert/replace the ``<Sharpen>`` section under *root* using *values*."""
+    _remove_children_case_insensitive(root, _SHARPEN_NODE)
+
+    sh_enabled = bool(values.get("Sharpen_Enabled", False))
+    sh_intensity = float(values.get("Sharpen_Intensity", 0.0))
+    sh_edges = float(values.get("Sharpen_Edges", 0.0))
+    sh_falloff = float(values.get("Sharpen_Falloff", 0.0))
+
+    if not sh_enabled and abs(sh_intensity) < 1e-6:
+        return
+
+    node = ET.SubElement(root, _SHARPEN_NODE)
+    node.set(_SHARPEN_ENABLED, "true" if sh_enabled else "false")
+    node.set(_SHARPEN_INTENSITY, f"{sh_intensity:.6f}")
+    node.set(_SHARPEN_EDGES, f"{sh_edges:.6f}")
+    node.set(_SHARPEN_FALLOFF, f"{sh_falloff:.6f}")
+
+
+# ---------------------------------------------------------------------------
 # Vignette node constants
 # ---------------------------------------------------------------------------
 

@@ -156,6 +156,13 @@ def resolve_adjustment_mapping(
     resolved["Denoise_Enabled"] = 1.0 if dn_enabled else 0.0
     resolved["Denoise_Amount"] = float(session_values.get("Denoise_Amount", 0.0))
 
+    # Preserve the dedicated Sharpen parameters.
+    sh_enabled = bool(session_values.get("Sharpen_Enabled", False))
+    resolved["Sharpen_Enabled"] = 1.0 if sh_enabled else 0.0
+    resolved["Sharpen_Intensity"] = float(session_values.get("Sharpen_Intensity", 0.0))
+    resolved["Sharpen_Edges"] = float(session_values.get("Sharpen_Edges", 0.0))
+    resolved["Sharpen_Falloff"] = float(session_values.get("Sharpen_Falloff", 0.0))
+
     # Preserve the dedicated Vignette parameters.
     vig_enabled = bool(session_values.get("Vignette_Enabled", False))
     resolved["Vignette_Enabled"] = 1.0 if vig_enabled else 0.0

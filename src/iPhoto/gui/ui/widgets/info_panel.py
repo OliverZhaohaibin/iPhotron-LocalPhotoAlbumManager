@@ -46,8 +46,8 @@ class InfoPanel(QWidget):
     """
 
     _CORNER_RADIUS = 12.0
-    _SHADOW_SIZE = 20
-    _SHADOW_MAX_ALPHA = 40
+    _SHADOW_SIZE = 16
+    _SHADOW_MAX_ALPHA = 18
     _SHADOW_RADIUS_GROWTH = 0.5
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
@@ -129,7 +129,7 @@ class InfoPanel(QWidget):
         # -- root layout ---------------------------------------------------
         s = self._SHADOW_SIZE
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(s, s, s, s)
+        layout.setContentsMargins(0, 0, s, s)
         layout.setSpacing(0)
         layout.addWidget(self._title_bar)
 
@@ -265,13 +265,13 @@ class InfoPanel(QWidget):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
 
         s = self._SHADOW_SIZE
-        content_rect = QRectF(self.rect()).adjusted(s, s, -s, -s)
+        content_rect = QRectF(self.rect()).adjusted(0, 0, -s, -s)
         radius = min(
             self._CORNER_RADIUS,
             min(content_rect.width(), content_rect.height()) / 2.0,
         )
 
-        # -- drop shadow ---------------------------------------------------
+        # -- drop shadow (right + bottom only) -----------------------------
         shadow_steps = s
         for i in range(shadow_steps):
             alpha = int(self._SHADOW_MAX_ALPHA * (1 - i / shadow_steps) ** 2)
@@ -279,7 +279,7 @@ class InfoPanel(QWidget):
                 continue
             shadow_color = QColor(0, 0, 0, alpha)
             spread = float(i)
-            shadow_rect = content_rect.adjusted(-spread, -spread, spread, spread)
+            shadow_rect = content_rect.adjusted(spread, spread, spread, spread)
             shadow_path = QPainterPath()
             shadow_path.addRoundedRect(
                 shadow_rect,

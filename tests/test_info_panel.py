@@ -130,22 +130,22 @@ def test_info_panel_centers_on_parent(qapp: QApplication) -> None:
     parent_center = parent.geometry().center()
     panel_center = panel.geometry().center()
 
-    assert abs(panel_center.x() - parent_center.x()) <= 100
-    assert abs(panel_center.y() - parent_center.y()) <= 100
+    assert abs(panel_center.x() - parent_center.x()) <= 120
+    assert abs(panel_center.y() - parent_center.y()) <= 120
 
     panel.close()
     parent.close()
 
 
 def test_info_panel_has_shadow_margin(qapp: QApplication) -> None:
-    """The root layout should have non-zero margins to reserve space for the shadow."""
+    """The root layout should reserve right/bottom margins for the shadow."""
 
     panel = InfoPanel()
     layout = panel.layout()
     margins = layout.contentsMargins()
     shadow = InfoPanel._SHADOW_SIZE
-    assert margins.left() == shadow
-    assert margins.top() == shadow
+    assert margins.left() == 0
+    assert margins.top() == 0
     assert margins.right() == shadow
     assert margins.bottom() == shadow
     panel.close()

@@ -245,6 +245,7 @@ class WindowThemeController(QObject):
         # Explicitly set the background color even for Light Mode to prevent sticky state
         target_surface = "#000000" if colors.is_dark else colors.window_background.name()
         self._ui.image_viewer.set_surface_color_override(target_surface)
+        self._ui.video_area.set_surface_color_override(target_surface)
 
         # 3. Update Icons and Buttons
         self._update_icon_tints(colors)

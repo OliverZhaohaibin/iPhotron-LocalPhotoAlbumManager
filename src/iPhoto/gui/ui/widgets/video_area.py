@@ -99,6 +99,7 @@ class VideoArea(QWidget):
         # sit on a subtly different tone compared to the surrounding widgets.
         surface_color = viewer_surface_color(self)
         self._default_surface_color = surface_color
+        self._surface_override: str | None = None
         # Style both the graphics view and its viewport so any revealed margins match the
         # surrounding detail panel while the application is in its standard chrome mode.
         self._video_view.setStyleSheet("background: transparent; border: none;")
@@ -163,15 +164,21 @@ class VideoArea(QWidget):
 
         return self._player_bar
 
-    def set_immersive_background(self, immersive: bool) -> None:
-        """Switch to a pure black canvas when immersive full screen mode is active."""
+    def set_surface_color_override(self, colour: str | None) -> None:
+        """Override the viewer backdrop with *colour* or restore the default."""
 
-        colour = "#000000" if immersive else self._default_surface_color
-        stylesheet = f"background-color: {colour}; border: none;"
+        self._surface_override = colour
+        target = colour if colour is not None else self._default_surface_color
+        stylesheet = f"background-color: {target}; border: none;"
         self.setStyleSheet(stylesheet)
         self._video_view.setStyleSheet("background: transparent; border: none;")
         self._video_view.viewport().setStyleSheet(stylesheet)
-        self._scene.setBackgroundBrush(QColor(colour))
+        self._scene.setBackgroundBrush(QColor(target))
+
+    def set_immersive_background(self, immersive: bool) -> None:
+        """Switch to a pure black canvas when immersive full screen mode is active."""
+
+        self.set_surface_color_override("#000000" if immersive else None)
 
     def show_controls(self, *, animate: bool = True) -> None:
         """Reveal the playback controls and restart the hide timer."""

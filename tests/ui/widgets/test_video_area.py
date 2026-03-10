@@ -94,7 +94,7 @@ def test_apply_surface_color_updates_scene_background(qapp):
     assert va._scene.backgroundBrush().color() == QColor("#FF0000")
 
 
-def test_backing_collapsed_when_no_native_size(qapp):
+def test_black_backing_collapsed_when_no_video_loaded(qapp):
     """Without a loaded video the backing should be collapsed (empty rect)."""
     va = VideoArea()
     va._update_black_backing_geometry()

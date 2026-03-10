@@ -135,6 +135,12 @@ def _fit_area(content: QSizeF, container: QSizeF) -> float:
     fitted = content.scaled(container, Qt.AspectRatioMode.KeepAspectRatio)
     return fitted.width() * fitted.height()
 
+
+def _fits_within_scene(size: QSizeF, scene: QRectF, *, epsilon: float = 0.5) -> bool:
+    """Return True when *size* is fully contained by *scene* (with tolerance)."""
+
+    return size.width() <= scene.width() + epsilon and size.height() <= scene.height() + epsilon
+
 def _probe_display_size(path: Path) -> _VideoGeometry | None:
     """Return the SAR/rotation-corrected display size using ffprobe.
 
@@ -778,16 +784,27 @@ class VideoArea(QWidget):
             self._black_backing.setRect(QRectF())
             return
 
-        # Compute the largest rectangle inside the scene that preserves the
-        # video's display aspect ratio.
-        fitted = effective_size.scaled(scene_rect.size(), Qt.AspectRatioMode.KeepAspectRatio)
+        # Compute the target rectangle for the video content. For cropped
+        # Apple clips we prefer edge-to-edge (aspect-fill) so side/top bars are
+        # eliminated and the visible aperture reaches the viewport edges.
+        edge_to_edge_fill = bool(
+            self._video_geometry
+            and self._video_geometry.has_crop
+            and abs(self._video_geometry.rotation) % 360 in (90, 270)
+        )
+        aspect_mode = (
+            Qt.AspectRatioMode.KeepAspectRatioByExpanding
+            if edge_to_edge_fill
+            else Qt.AspectRatioMode.KeepAspectRatio
+        )
+        fitted = effective_size.scaled(scene_rect.size(), aspect_mode)
         x = (scene_rect.width() - fitted.width()) / 2.0
         y = (scene_rect.height() - fitted.height()) / 2.0
 
         _log.info(
             "[VideoDbg] _fit_video_item: source=%s  nativeSize=%.0fx%.0f  "
             "probe_display=%.0fx%.0f  effective=%.0fx%.0f  "
-            "scene=%.0fx%.0f  fitted=%.0fx%.0f  pos=(%.0f,%.0f)",
+            "scene=%.0fx%.0f  fitted=%.0fx%.0f  pos=(%.0f,%.0f)  mode=%s",
             source,
             native_size.width(), native_size.height(),
             (self._video_geometry.display_size.width() if self._video_geometry else 0),
@@ -796,6 +813,7 @@ class VideoArea(QWidget):
             scene_rect.width(), scene_rect.height(),
             fitted.width(), fitted.height(),
             x, y,
+            ("expand" if edge_to_edge_fill else "fit"),
         )
 
         video_size = QSizeF(fitted)
@@ -838,10 +856,18 @@ class VideoArea(QWidget):
                 video_y,
                 overscan_px,
             )
+            _log.info(
+                "[VideoDbg] coverage check: within_scene=%s (scene=%.0fx%.0f, video=%.0fx%.0f)",
+                _fits_within_scene(video_size, scene_rect),
+                scene_rect.width(),
+                scene_rect.height(),
+                video_size.width(),
+                video_size.height(),
+            )
 
         _log.info(
             "[VideoDbg] final geometry: source=%s effective=%.0fx%.0f crop=(l=%d r=%d t=%d b=%d) "
-            "fitted=%.2fx%.2f@(%.2f,%.2f) video_item=%.2fx%.2f@(%.2f,%.2f) scene=%.0fx%.0f",
+            "fitted=%.2fx%.2f@(%.2f,%.2f) video_item=%.2fx%.2f@(%.2f,%.2f) scene=%.0fx%.0f mode=%s",
             source,
             effective_size.width(),
             effective_size.height(),
@@ -859,14 +885,20 @@ class VideoArea(QWidget):
             video_y,
             scene_rect.width(),
             scene_rect.height(),
+            ("expand" if edge_to_edge_fill else "fit"),
         )
 
         self._video_item.setSize(video_size)
         self._video_item.setPos(QPointF(video_x, video_y))
 
-        # Mirror the video item's bounds exactly – trivially aligned.
-        self._black_backing.setPos(QPointF(x, y))
-        self._black_backing.setRect(QRectF(QPointF(), fitted))
+        # Keep backing behind the visible video viewport in fill mode to avoid
+        # exposing any contrasting seam at the scene edge.
+        if edge_to_edge_fill:
+            self._black_backing.setPos(scene_rect.topLeft())
+            self._black_backing.setRect(QRectF(QPointF(), scene_rect.size()))
+        else:
+            self._black_backing.setPos(QPointF(x, y))
+            self._black_backing.setRect(QRectF(QPointF(), fitted))
 
     # ------------------------------------------------------------------
     # Live Photo helpers

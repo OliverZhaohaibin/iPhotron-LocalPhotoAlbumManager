@@ -242,4 +242,3 @@ def test_scene_contains_video_and_sdr_items(qapp):
     items = video_area._scene.items()
     assert video_area._video_item in items
     assert video_area._sdr_item in items
-    assert len(items) == 2

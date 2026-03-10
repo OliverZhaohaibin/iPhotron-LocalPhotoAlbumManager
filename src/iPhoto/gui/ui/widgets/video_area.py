@@ -101,7 +101,7 @@ class _SdrVideoItem(QGraphicsItem):
 
     When the playback pipeline detects HDR content, :class:`VideoArea` hides
     the standard :class:`QGraphicsVideoItem` and directs each incoming
-    :class:`QVideoFrame` through :pymethod:`QVideoFrame.toImage` — which
+    :class:`QVideoFrame` through :meth:`QVideoFrame.toImage` — which
     applies Qt's built-in tone-mapping / colour-space conversion — then
     paints the resulting 8-bit sRGB :class:`QImage` via the QPainter path.
 

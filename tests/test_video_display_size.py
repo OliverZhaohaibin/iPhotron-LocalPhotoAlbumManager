@@ -53,6 +53,36 @@ def test_coded_dimensions_stored_unchanged(monkeypatch, tmp_path):
     assert info["h"] == 1080
 
 
+def test_sar_does_not_alter_stored_dimensions(monkeypatch, tmp_path):
+    """SAR is NOT applied to stored w/h — coded dimensions are stored as-is.
+
+    The display-size correction for non-square SAR is handled at rendering
+    time by ``_probe_display_size()`` in video_area.py.  The stored metadata
+    reflects the coded resolution from ffprobe, matching the original
+    codebase behaviour.
+    """
+
+    sample = tmp_path / "clip.mp4"
+
+    monkeypatch.setattr(
+        metadata,
+        "probe_media",
+        _make_probe([{
+            "codec_type": "video",
+            "codec_name": "h264",
+            "width": 720,
+            "height": 576,
+            "sample_aspect_ratio": "16:11",
+        }]),
+    )
+
+    info = metadata.read_video_meta(sample)
+
+    # Coded dimensions, not SAR-corrected display dimensions
+    assert info["w"] == 720
+    assert info["h"] == 576
+
+
 def test_rotation_does_not_swap_stored_dimensions(monkeypatch, tmp_path):
     """Rotation metadata must NOT swap w/h — Qt handles rotation internally."""
 

@@ -19,7 +19,6 @@ from PySide6.QtGui import QColor, QCursor, QMouseEvent, QPainter, QResizeEvent, 
 from PySide6.QtWidgets import (
     QFrame,
     QGraphicsOpacityEffect,
-    QGraphicsRectItem,
     QGraphicsScene,
     QGraphicsView,
     QWidget,
@@ -66,26 +65,10 @@ class VideoArea(QWidget):
             raise RuntimeError("PySide6.QtMultimediaWidgets is required for video playback.")
 
         # --- Graphics View Setup ---
-        # A dedicated black rectangle lives directly behind the video surface
-        # and is kept in sync with the rendered frame geometry via
-        # ``_update_black_backing_geometry``.  The scene background uses the
-        # theme colour so letterbox areas match the surrounding chrome, while
-        # the black backing ensures correct colour compositing for all content
-        # including BT.2020 / HDR-10 / HLG material.  ``QGraphicsVideoItem``
-        # composites decoded frames against the surface behind it; a non-black
-        # backing in the wide-gamut pipeline produces washed-out colours.
-        self._black_backing: QGraphicsRectItem = QGraphicsRectItem()
-        self._black_backing.setBrush(Qt.GlobalColor.black)
-        self._black_backing.setPen(Qt.PenStyle.NoPen)
-        self._black_backing.setZValue(0)
-
         self._video_item = QGraphicsVideoItem()
-        self._video_item.setZValue(1)
         self._video_item.setAspectRatioMode(Qt.AspectRatioMode.KeepAspectRatio)
-        self._video_item.nativeSizeChanged.connect(self._update_black_backing_geometry)
 
         self._scene = QGraphicsScene(self)
-        self._scene.addItem(self._black_backing)
         self._scene.addItem(self._video_item)
 
         self._video_view = QGraphicsView(self._scene, self)
@@ -175,8 +158,6 @@ class VideoArea(QWidget):
 
         Called by the theme controller whenever the application theme changes
         so that the video canvas stays in sync with the surrounding chrome.
-        The black backing rectangle behind the video frame ensures correct
-        BT.2020 / HDR compositing regardless of the chosen surface colour.
         """
 
         self._default_surface_color = colour
@@ -321,7 +302,6 @@ class VideoArea(QWidget):
         self._video_item.setSize(self._scene.sceneRect().size())
         self._video_item.setPos(QPointF())
         self._update_bar_geometry()
-        self._update_black_backing_geometry()
 
     def enterEvent(self, event) -> None:  # pragma: no cover - GUI behaviour
         super().enterEvent(event)
@@ -469,44 +449,6 @@ class VideoArea(QWidget):
             y = max(0, rect.height() - bar_height)
         self._player_bar.setGeometry(x, y, bar_width, bar_height)
         self._player_bar.raise_()
-
-    def _update_black_backing_geometry(self) -> None:
-        """Keep the black backing rectangle aligned with the rendered video frame.
-
-        ``QGraphicsVideoItem`` uses ``nativeSize()`` internally to determine the
-        aspect-ratio-preserving sub-rectangle when ``KeepAspectRatio`` is active.
-        We replicate the same calculation here so the backing tracks the rendered
-        frame exactly — any rounding is identical to what the video item itself
-        performs.  The scene background (theme colour) fills the remaining
-        letterbox areas so no black edges are visible.
-        """
-
-        video_native_size = self._video_item.nativeSize()
-        if video_native_size.isEmpty():
-            # Collapse the rectangle when no video is loaded so the neutral UI
-            # background stays visible.
-            self._black_backing.setRect(QRectF())
-            return
-
-        item_size = self._video_item.size()
-        if item_size.isEmpty():
-            self._black_backing.setRect(QRectF())
-            return
-
-        # Replicate the aspect-ratio preserving rectangle that Qt uses to
-        # present the video frame inside the item bounds.
-        scaled_size = video_native_size.scaled(
-            item_size, Qt.AspectRatioMode.KeepAspectRatio
-        )
-        scaled_rect = QRectF(QPointF(), scaled_size)
-
-        # Centre the scaled rectangle inside the item, matching the placement
-        # of the actual media frame.
-        item_bounds = QRectF(QPointF(), item_size)
-        scaled_rect.moveCenter(item_bounds.center())
-
-        self._black_backing.setPos(self._video_item.pos())
-        self._black_backing.setRect(scaled_rect)
 
     # ------------------------------------------------------------------
     # Live Photo helpers

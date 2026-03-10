@@ -3,14 +3,12 @@
 from __future__ import annotations
 
 from pathlib import Path
-from unittest.mock import MagicMock
 
 import pytest
 
 pytest.importorskip("PySide6", reason="PySide6 is required for GUI tests")
 pytest.importorskip("PySide6.QtMultimediaWidgets", reason="QtMultimediaWidgets is required")
 
-from PySide6.QtCore import QEvent, QPointF, QRectF, QSizeF, Qt
 from PySide6.QtGui import QColor, QShowEvent
 from PySide6.QtMultimedia import QMediaPlayer
 from PySide6.QtWidgets import QApplication
@@ -91,64 +89,22 @@ def test_end_of_media_backsteps_and_pauses(qapp, mocker):
     mock_pause.assert_called_once()
 
 
-# ------------------------------------------------------------------
-# Black backing geometry
-# ------------------------------------------------------------------
-def test_backing_collapsed_when_no_video(qapp, mocker):
-    """Black backing should be collapsed when no video is loaded."""
+def test_scene_has_no_black_backing(qapp):
+    """The scene should contain only the video item, no black backing rectangle."""
     video_area = VideoArea()
 
-    # nativeSize() returns empty when no video is loaded
-    mocker.patch.object(video_area._video_item, "nativeSize", return_value=QSizeF())
-
-    video_area._update_black_backing_geometry()
-    assert video_area._black_backing.rect() == QRectF()
-
-
-def test_backing_tracks_video_frame(qapp, mocker):
-    """Black backing should match the rendered video frame area."""
-    video_area = VideoArea()
-
-    # Simulate a 1920x1080 video in a 800x600 item
-    mocker.patch.object(video_area._video_item, "nativeSize", return_value=QSizeF(1920, 1080))
-    mocker.patch.object(video_area._video_item, "size", return_value=QSizeF(800, 600))
-    mocker.patch.object(video_area._video_item, "pos", return_value=QPointF(0, 0))
-
-    video_area._update_black_backing_geometry()
-
-    backing_rect = video_area._black_backing.rect()
-    # 1920x1080 scaled to fit 800x600 → 800x450 centred
-    assert abs(backing_rect.width() - 800.0) < 0.01
-    assert abs(backing_rect.height() - 450.0) < 0.01
-    # Centred vertically: (600-450)/2 = 75
-    assert abs(backing_rect.y() - 75.0) < 0.01
+    # Only one item in the scene: the video item itself
+    items = video_area._scene.items()
+    assert len(items) == 1
+    assert items[0] is video_area._video_item
 
 
-def test_backing_letterbox_for_tall_video(qapp, mocker):
-    """Pillarboxed video should have black backing narrower than item."""
-    video_area = VideoArea()
-
-    # Simulate a 1080x1920 (portrait) video in a 800x600 item
-    mocker.patch.object(video_area._video_item, "nativeSize", return_value=QSizeF(1080, 1920))
-    mocker.patch.object(video_area._video_item, "size", return_value=QSizeF(800, 600))
-    mocker.patch.object(video_area._video_item, "pos", return_value=QPointF(0, 0))
-
-    video_area._update_black_backing_geometry()
-
-    backing_rect = video_area._black_backing.rect()
-    # 1080x1920 scaled to fit 800x600 → 337.5x600 centred
-    assert abs(backing_rect.height() - 600.0) < 0.01
-    assert backing_rect.width() < 800.0  # pillarboxed
-    # Centred horizontally
-    expected_w = 600.0 * 1080.0 / 1920.0  # 337.5
-    assert abs(backing_rect.width() - expected_w) < 0.01
-
-
-def test_surface_color_does_not_affect_backing(qapp):
-    """Changing surface colour should not affect the black backing."""
+def test_scene_background_always_follows_theme(qapp):
+    """Scene background should always match the theme colour, never forced black."""
     video_area = VideoArea()
 
     video_area.set_surface_color("#f0f0f0")
-    # Scene background follows theme, backing stays black
     assert video_area._scene.backgroundBrush().color() == QColor("#f0f0f0")
-    assert video_area._black_backing.brush().color() == QColor(Qt.GlobalColor.black)
+
+    video_area.set_surface_color("#abcdef")
+    assert video_area._scene.backgroundBrush().color() == QColor("#abcdef")

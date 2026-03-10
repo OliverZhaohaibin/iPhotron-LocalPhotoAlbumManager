@@ -156,6 +156,13 @@ def resolve_adjustment_mapping(
     resolved["Denoise_Enabled"] = 1.0 if dn_enabled else 0.0
     resolved["Denoise_Amount"] = float(session_values.get("Denoise_Amount", 0.0))
 
+    # Preserve the dedicated Vignette parameters.
+    vig_enabled = bool(session_values.get("Vignette_Enabled", False))
+    resolved["Vignette_Enabled"] = 1.0 if vig_enabled else 0.0
+    resolved["Vignette_Strength"] = float(session_values.get("Vignette_Strength", 0.0))
+    resolved["Vignette_Radius"] = float(session_values.get("Vignette_Radius", 0.50))
+    resolved["Vignette_Softness"] = float(session_values.get("Vignette_Softness", 0.0))
+
     resolved.update(curve_lists)
     return resolved
 

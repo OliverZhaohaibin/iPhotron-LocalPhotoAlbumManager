@@ -38,6 +38,10 @@ uniform float uDefinition;   // [0.0, 0.2] definition / clarity strength
 
 uniform float uDenoiseAmount;  // bilateral filter strength (0 = off)
 
+uniform float uVignetteStrength;  // [0, 1] edge-darkening intensity
+uniform float uVignetteRadius;    // [0, 1] inner radius
+uniform float uVignetteSoftness;  // [0.1, 1.0] falloff width
+
 uniform vec2  uViewSize;
 uniform vec2  uTexSize;
 uniform float uScale;
@@ -418,6 +422,19 @@ vec3 apply_denoise(vec3 adjustedColor, vec2 uv) {
     return clamp(adjustedColor + denoiseDelta, 0.0, 1.0);
 }
 
+vec3 apply_vignette(vec3 c, vec2 uv) {
+    vec2 centered = uv - vec2(0.5);
+    float dist = length(centered) * 1.41421356;
+
+    float inner = clamp(uVignetteRadius, 0.0, 1.0);
+    float soft  = clamp(uVignetteSoftness, 0.1, 1.0);
+
+    float vignette = smoothstep(inner, inner + soft, dist);
+    float darken   = 1.0 - vignette * clamp(uVignetteStrength, 0.0, 1.0);
+
+    return c * darken;
+}
+
 void main() {
     if (uScale <= 0.0) {
         discard;
@@ -509,9 +526,14 @@ void main() {
         c = apply_definition(c, uv_tex);
     }
 
-    // Apply noise reduction (denoise) after definition, before B&W
+    // Apply noise reduction (denoise) after definition, before vignette
     if (uDenoiseAmount > 0.005) {
         c = apply_denoise(c, uv_tex);
+    }
+
+    // Apply vignette after denoise, before B&W
+    if (uVignetteStrength > 0.0001) {
+        c = apply_vignette(c, uv_tex);
     }
 
     if (uBWEnabled) {

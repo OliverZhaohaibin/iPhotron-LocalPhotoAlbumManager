@@ -526,3 +526,62 @@ def _write_denoise_node(root: ET.Element, values: Mapping[str, Any]) -> None:
     node = ET.SubElement(root, _DENOISE_NODE)
     node.set(_DENOISE_ENABLED, "true" if dn_enabled else "false")
     node.set(_DENOISE_AMOUNT, f"{dn_amount:.6f}")
+
+
+# ---------------------------------------------------------------------------
+# Vignette node constants
+# ---------------------------------------------------------------------------
+
+_VIGNETTE_NODE = "Vignette"
+_VIGNETTE_ENABLED = "enabled"
+_VIGNETTE_STRENGTH = "strength"
+_VIGNETTE_RADIUS = "radius"
+_VIGNETTE_SOFTNESS = "softness"
+
+# ---------------------------------------------------------------------------
+# Vignette helpers
+# ---------------------------------------------------------------------------
+
+
+def _read_vignette_from_node(node: ET.Element) -> Dict[str, Any]:
+    """Return vignette adjustments described by the ``<Vignette>`` *node*."""
+    result: Dict[str, Any] = {}
+
+    enabled_attr = node.get(_VIGNETTE_ENABLED)
+    if enabled_attr is not None:
+        result["Vignette_Enabled"] = enabled_attr.lower() in {"1", "true", "yes", "on"}
+    else:
+        result["Vignette_Enabled"] = False
+
+    for attr, key, lo, hi, default in (
+        (_VIGNETTE_STRENGTH, "Vignette_Strength", 0.0, 1.0, 0.0),
+        (_VIGNETTE_RADIUS, "Vignette_Radius", 0.0, 1.0, 0.50),
+        (_VIGNETTE_SOFTNESS, "Vignette_Softness", 0.0, 1.0, 0.0),
+    ):
+        raw = node.get(attr)
+        if raw is not None:
+            try:
+                result[key] = max(lo, min(hi, float(raw)))
+            except (ValueError, TypeError):
+                result[key] = default
+        else:
+            result[key] = default
+
+    return result
+
+
+def _write_vignette_node(root: ET.Element, values: Mapping[str, Any]) -> None:
+    """Insert/replace the ``<Vignette>`` section under *root* using *values*."""
+    _remove_children_case_insensitive(root, _VIGNETTE_NODE)
+
+    vig_enabled = bool(values.get("Vignette_Enabled", False))
+    vig_strength = float(values.get("Vignette_Strength", 0.0))
+
+    if not vig_enabled and abs(vig_strength) < 1e-6:
+        return
+
+    node = ET.SubElement(root, _VIGNETTE_NODE)
+    node.set(_VIGNETTE_ENABLED, "true" if vig_enabled else "false")
+    node.set(_VIGNETTE_STRENGTH, f"{vig_strength:.6f}")
+    node.set(_VIGNETTE_RADIUS, f"{float(values.get('Vignette_Radius', 0.50)):.6f}")
+    node.set(_VIGNETTE_SOFTNESS, f"{float(values.get('Vignette_Softness', 0.0)):.6f}")

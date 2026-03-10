@@ -32,6 +32,7 @@ from ..selective_color_resolver import (
 )
 from ..definition_resolver import apply_definition as apply_definition_cpu
 from ..denoise_resolver import apply_denoise as apply_denoise_cpu
+from ..vignette_resolver import apply_vignette as apply_vignette_cpu
 from ..wb_resolver import WBParams, apply_wb
 from .fallback_executor import apply_adjustments_fallback, apply_bw_using_qcolor
 from .jit_executor import (
@@ -168,6 +169,13 @@ def apply_adjustments(
     _dn_amount = float(adjustments.get("Denoise_Amount", 0.0))
     denoise_enabled = _dn_flag and abs(_dn_amount) > 1e-6
 
+    # Extract Vignette parameters
+    _vig_flag = bool(adjustments.get("Vignette_Enabled", False))
+    _vig_strength = float(adjustments.get("Vignette_Strength", 0.0))
+    _vig_radius = float(adjustments.get("Vignette_Radius", 0.50))
+    _vig_softness = float(adjustments.get("Vignette_Softness", 0.0))
+    vignette_enabled = _vig_flag and abs(_vig_strength) > 1e-6
+
     # Extract white balance parameters
     wb_flag = adjustments.get("WB_Enabled")
     if wb_flag is None:
@@ -190,7 +198,7 @@ def apply_adjustments(
             black_point,
         )
     ) and all(abs(value) < 1e-6 for value in (saturation, vibrance)) and cast < 1e-6:
-        if not apply_bw and not curve_enabled and not levels_enabled and not wb_enabled and not sc_enabled and not definition_enabled and not denoise_enabled:
+        if not apply_bw and not curve_enabled and not levels_enabled and not wb_enabled and not sc_enabled and not definition_enabled and not denoise_enabled and not vignette_enabled:
             # Nothing to do - return a cheap copy so callers still get a detached
             # instance they are free to mutate independently.
             return QImage(result)
@@ -284,9 +292,15 @@ def apply_adjustments(
         if definition_enabled:
             transformed = _apply_definition_to_qimage(transformed, _def_value)
 
-        # Apply Denoise after definition, before B&W
+        # Apply Denoise after definition, before vignette
         if denoise_enabled:
             transformed = _apply_denoise_to_qimage(transformed, _dn_amount)
+
+        # Apply Vignette after denoise, before B&W
+        if vignette_enabled:
+            transformed = _apply_vignette_to_qimage(
+                transformed, _vig_strength, _vig_radius, _vig_softness
+            )
 
         if apply_bw:
             if not apply_bw_only(
@@ -405,6 +419,12 @@ def apply_adjustments(
     # Apply Denoise after definition
     if denoise_enabled:
         result = _apply_denoise_to_qimage(result, _dn_amount)
+
+    # Apply Vignette after denoise
+    if vignette_enabled:
+        result = _apply_vignette_to_qimage(
+            result, _vig_strength, _vig_radius, _vig_softness
+        )
 
     return result
 
@@ -553,6 +573,28 @@ def _apply_denoise_to_qimage(image: QImage, amount: float) -> QImage:
 
     arr = np.frombuffer(ptr, dtype=np.uint8).reshape((height, width, 4)).copy()
     arr = apply_denoise_cpu(arr, amount)
+
+    result = QImage(arr.data, width, height, arr.strides[0], QImage.Format.Format_RGBA8888).copy()
+    return result.convertToFormat(QImage.Format.Format_ARGB32)
+
+
+def _apply_vignette_to_qimage(
+    image: QImage, strength: float, radius: float, softness: float
+) -> QImage:
+    """Apply vignette edge-darkening to a QImage."""
+    if abs(strength) < 1e-6:
+        return image
+
+    img = image.convertToFormat(QImage.Format.Format_RGBA8888)
+    width = img.width()
+    height = img.height()
+    ptr = img.bits()
+    byte_count = img.sizeInBytes()
+    if hasattr(ptr, "setsize"):
+        ptr.setsize(byte_count)
+
+    arr = np.frombuffer(ptr, dtype=np.uint8).reshape((height, width, 4)).copy()
+    arr = apply_vignette_cpu(arr, strength, radius, softness)
 
     result = QImage(arr.data, width, height, arr.strides[0], QImage.Format.Format_RGBA8888).copy()
     return result.convertToFormat(QImage.Format.Format_ARGB32)

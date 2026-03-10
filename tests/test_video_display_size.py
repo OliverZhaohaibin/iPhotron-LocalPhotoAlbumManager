@@ -1,10 +1,12 @@
-"""Tests for SAR-corrected display size logic.
+"""Tests for SAR/rotation-corrected display size logic.
 
-Rotation is intentionally NOT applied to stored dimensions or display sizing
-because Qt's ``QGraphicsVideoItem`` with ``KeepAspectRatio`` handles
-display-matrix rotation internally.  Swapping w/h for rotation would
-double-apply the transform, producing incorrect letterboxing (e.g. black
-bars on landscape videos).
+``_probe_display_size`` applies both SAR and rotation corrections so the
+video item bounding box matches the **post-rotation** display aspect ratio.
+Qt's ``QGraphicsVideoItem`` renders post-rotation content inside the item;
+without the correct aspect ratio the content is letterboxed with black bars.
+
+``read_video_meta`` stores raw coded dimensions from ffprobe — no SAR or
+rotation correction — matching the original codebase behaviour.
 """
 
 from __future__ import annotations
@@ -84,7 +86,7 @@ def test_sar_does_not_alter_stored_dimensions(monkeypatch, tmp_path):
 
 
 def test_rotation_does_not_swap_stored_dimensions(monkeypatch, tmp_path):
-    """Rotation metadata must NOT swap w/h — Qt handles rotation internally."""
+    """Rotation metadata must NOT swap stored w/h — coded dims are stored."""
 
     sample = tmp_path / "clip.mov"
 
@@ -179,12 +181,13 @@ def test_probe_display_size_with_sar(monkeypatch):
     assert abs(result.height() - 576) < 0.1
 
 
-def test_probe_display_size_ignores_rotation(monkeypatch):
-    """_probe_display_size must NOT swap dimensions for rotation.
+def test_probe_display_size_swaps_for_90_rotation(monkeypatch):
+    """_probe_display_size must swap dimensions for 90° rotation.
 
-    Qt handles display-matrix rotation internally in QGraphicsVideoItem.
-    Swapping w/h here would double-apply rotation, causing landscape videos
-    to get portrait backgrounds with top/bottom black bars.
+    Qt renders post-rotation content inside the video item bounding box.
+    For a coded 1920×1080 video with -90° rotation, the display size is
+    1080×1920 (portrait).  The item must be sized to this portrait ratio
+    so the content fills it without internal black bars.
     """
     from iPhoto.gui.ui.widgets.video_area import _probe_display_size
     from iPhoto.utils import ffmpeg as ffmpeg_mod
@@ -205,9 +208,132 @@ def test_probe_display_size_ignores_rotation(monkeypatch):
 
     result = _probe_display_size(Path("/fake/video.mp4"))
     assert result is not None
-    # Dimensions must NOT be swapped — Qt handles rotation internally
+    # Dimensions swapped for 90° rotation
+    assert abs(result.width() - 1080) < 0.1
+    assert abs(result.height() - 1920) < 0.1
+
+
+def test_probe_display_size_swaps_for_270_rotation(monkeypatch):
+    """_probe_display_size must swap dimensions for 270° rotation."""
+    from iPhoto.gui.ui.widgets.video_area import _probe_display_size
+    from iPhoto.utils import ffmpeg as ffmpeg_mod
+
+    def fake_probe_media(_):
+        return {
+            "streams": [{
+                "codec_type": "video",
+                "width": 1920,
+                "height": 1440,
+                "side_data_list": [
+                    {"side_data_type": "Display Matrix", "rotation": -270},
+                ],
+            }],
+        }
+
+    monkeypatch.setattr(ffmpeg_mod, "probe_media", fake_probe_media)
+
+    result = _probe_display_size(Path("/fake/video.mp4"))
+    assert result is not None
+    # Dimensions swapped for 270° rotation
+    assert abs(result.width() - 1440) < 0.1
+    assert abs(result.height() - 1920) < 0.1
+
+
+def test_probe_display_size_no_swap_for_180_rotation(monkeypatch):
+    """180° rotation does not swap w/h."""
+    from iPhoto.gui.ui.widgets.video_area import _probe_display_size
+    from iPhoto.utils import ffmpeg as ffmpeg_mod
+
+    def fake_probe_media(_):
+        return {
+            "streams": [{
+                "codec_type": "video",
+                "width": 1920,
+                "height": 1080,
+                "side_data_list": [
+                    {"side_data_type": "Display Matrix", "rotation": 180},
+                ],
+            }],
+        }
+
+    monkeypatch.setattr(ffmpeg_mod, "probe_media", fake_probe_media)
+
+    result = _probe_display_size(Path("/fake/video.mp4"))
+    assert result is not None
     assert abs(result.width() - 1920) < 0.1
     assert abs(result.height() - 1080) < 0.1
+
+
+def test_probe_display_size_no_swap_for_zero_rotation(monkeypatch):
+    """A video with no rotation keeps coded dimensions."""
+    from iPhoto.gui.ui.widgets.video_area import _probe_display_size
+    from iPhoto.utils import ffmpeg as ffmpeg_mod
+
+    def fake_probe_media(_):
+        return {
+            "streams": [{
+                "codec_type": "video",
+                "width": 1920,
+                "height": 1080,
+            }],
+        }
+
+    monkeypatch.setattr(ffmpeg_mod, "probe_media", fake_probe_media)
+
+    result = _probe_display_size(Path("/fake/video.mp4"))
+    assert result is not None
+    assert abs(result.width() - 1920) < 0.1
+    assert abs(result.height() - 1080) < 0.1
+
+
+def test_probe_display_size_legacy_rotate_tag(monkeypatch):
+    """_probe_display_size should swap for legacy QuickTime rotate tag."""
+    from iPhoto.gui.ui.widgets.video_area import _probe_display_size
+    from iPhoto.utils import ffmpeg as ffmpeg_mod
+
+    def fake_probe_media(_):
+        return {
+            "streams": [{
+                "codec_type": "video",
+                "width": 1920,
+                "height": 1440,
+                "tags": {"rotate": "90"},
+            }],
+        }
+
+    monkeypatch.setattr(ffmpeg_mod, "probe_media", fake_probe_media)
+
+    result = _probe_display_size(Path("/fake/video.mp4"))
+    assert result is not None
+    assert abs(result.width() - 1440) < 0.1
+    assert abs(result.height() - 1920) < 0.1
+
+
+def test_probe_display_size_sar_plus_rotation(monkeypatch):
+    """Both SAR correction and rotation should be applied together."""
+    from iPhoto.gui.ui.widgets.video_area import _probe_display_size
+    from iPhoto.utils import ffmpeg as ffmpeg_mod
+
+    def fake_probe_media(_):
+        return {
+            "streams": [{
+                "codec_type": "video",
+                "width": 720,
+                "height": 576,
+                "sample_aspect_ratio": "16:11",
+                "side_data_list": [
+                    {"side_data_type": "Display Matrix", "rotation": -90},
+                ],
+            }],
+        }
+
+    monkeypatch.setattr(ffmpeg_mod, "probe_media", fake_probe_media)
+
+    result = _probe_display_size(Path("/fake/video.mp4"))
+    assert result is not None
+    # SAR correction: 720 * 16/11 ≈ 1047.27, then 90° rotation swaps
+    assert abs(result.width() - 576) < 0.1
+    assert abs(result.height() - 720 * 16 / 11) < 0.1
 
 
 def test_probe_display_size_no_ffprobe(monkeypatch):

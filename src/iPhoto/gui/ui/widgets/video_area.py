@@ -67,17 +67,20 @@ def _parse_sar(value: object) -> tuple[int, int] | None:
 
 
 def _probe_display_size(path: Path) -> QSizeF | None:
-    """Return the SAR-corrected display size using ffprobe.
+    """Return the SAR/rotation-corrected display size using ffprobe.
 
     ``nativeSize()`` on ``QGraphicsVideoItem`` sometimes reports the coded
-    resolution rather than the display resolution for videos with a
-    non-square Sample Aspect Ratio (SAR).  This helper reads the SAR from
-    ffprobe and applies the correction.
+    resolution rather than the display resolution.  This happens when the
+    video has a non-square Sample Aspect Ratio (SAR) or a display-matrix
+    rotation.  This helper reads the SAR and rotation from ffprobe and
+    applies the corrections so the video item bounding box matches the
+    **post-rotation** display aspect ratio.
 
-    Rotation is **not** applied here because ``QGraphicsVideoItem`` with
-    ``KeepAspectRatio`` already handles the display-matrix rotation
-    internally.  Swapping width/height for rotation would double-apply
-    the transform and produce incorrect letterboxing.
+    Qt's ``QGraphicsVideoItem`` with ``KeepAspectRatio`` renders the
+    post-rotation content inside its bounding box.  If the bounding box
+    has the wrong aspect ratio, the content is letterboxed *inside* the
+    item with black bars.  To avoid this, the item size must match the
+    actual display aspect ratio including rotation.
 
     Returns ``None`` when ffprobe is unavailable or the stream cannot be
     inspected, in which case the caller should fall back to ``nativeSize()``.
@@ -87,6 +90,7 @@ def _probe_display_size(path: Path) -> QSizeF | None:
         from ....utils.ffmpeg import probe_media
         meta = probe_media(path)
     except Exception:
+        _log.debug("_probe_display_size: ffprobe unavailable for %s", path.name)
         return None
 
     streams = meta.get("streams", []) if isinstance(meta, dict) else []
@@ -117,6 +121,38 @@ def _probe_display_size(path: Path) -> QSizeF | None:
             sar_num, sar_den = sar
             display_w = coded_w * sar_num / sar_den
 
+        # Check for rotation in side_data_list (display matrix).
+        rotation = 0
+        side_data_list = stream.get("side_data_list")
+        if isinstance(side_data_list, list):
+            for entry in side_data_list:
+                if isinstance(entry, dict) and "rotation" in entry:
+                    try:
+                        rotation = int(float(str(entry["rotation"])))
+                    except (ValueError, TypeError):
+                        pass
+                    break
+
+        # Fall back to stream-level rotation tag (older ffprobe / QuickTime).
+        if rotation == 0:
+            tags = stream.get("tags")
+            if isinstance(tags, dict):
+                rotate_tag = tags.get("rotate")
+                if rotate_tag is not None:
+                    try:
+                        rotation = int(float(str(rotate_tag)))
+                    except (ValueError, TypeError):
+                        pass
+
+        # 90° and 270° rotations swap width and height.
+        rotation = abs(rotation) % 360
+        if rotation in (90, 270):
+            display_w, display_h = display_h, display_w
+
+        _log.debug(
+            "_probe_display_size: %s  coded=%dx%d  rotation=%d  display=%.0fx%.0f",
+            path.name, coded_w, coded_h, rotation, display_w, display_h,
+        )
         return QSizeF(display_w, display_h)
 
     return None
@@ -540,24 +576,24 @@ class VideoArea(QWidget):
     def _fit_video_item(self) -> None:
         """Size and position the video item to match the video's display aspect ratio.
 
-        When the display size is known (from ffprobe SAR correction or from
-        ``nativeSize()`` as a fallback) the video item is shrunk to the
+        When the display size is known (from ffprobe SAR + rotation correction
+        or from ``nativeSize()`` as a fallback) the video item is shrunk to the
         largest aspect-ratio-preserving rectangle that fits inside the scene.
         The black backing rectangle is sized to the *same* bounds so it sits
         exactly behind the video surface, ensuring correct HDR/HEVC compositing
         without black bars leaking into the theme-coloured letterbox area.
 
-        Rotation is handled internally by Qt's ``QGraphicsVideoItem`` with
-        ``KeepAspectRatio`` and must **not** be pre-applied to the dimensions.
+        The display size must account for rotation because Qt renders the
+        **post-rotation** content inside the item bounding box.  If the box
+        has the wrong aspect ratio, the content is letterboxed with black bars.
         """
 
         scene_rect = self._scene.sceneRect()
         if scene_rect.isEmpty():
             return
 
-        # Prefer ffprobe-derived display dimensions over nativeSize() which
-        # may report coded (uncorrected) dimensions for videos with non-square
-        # SAR.  Rotation is NOT applied – Qt handles it internally.
+        # Prefer ffprobe-derived display dimensions (SAR + rotation corrected)
+        # over nativeSize() which may report coded (uncorrected) dimensions.
         effective_size = self._display_size
         if effective_size is None or effective_size.isEmpty():
             effective_size = self._video_item.nativeSize()

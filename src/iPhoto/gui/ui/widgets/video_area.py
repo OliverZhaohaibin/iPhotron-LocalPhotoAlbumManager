@@ -260,8 +260,17 @@ class VideoArea(QWidget):
         self._player.setPosition(position)
 
     def stop(self) -> None:
-        """Stop playback and reset."""
+        """Stop playback, release the media source and clear the renderer.
+
+        Clearing the source ensures that the video decoder fully releases its
+        resources and that no stale frames are sent through the ``QVideoSink``
+        after stopping.  Clearing the renderer removes any residual frame
+        texture so that subsequent media transitions never flash the last
+        rendered video frame.
+        """
         self._player.stop()
+        self._player.setSource(QUrl())
+        self._renderer.clear_frame()
 
     def _on_video_frame(self, frame: "QVideoFrame") -> None:
         """Forward each decoded frame to the GPU renderer."""

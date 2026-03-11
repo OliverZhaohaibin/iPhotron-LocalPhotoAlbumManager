@@ -7,12 +7,11 @@ import pytest
 pytest.importorskip("PySide6", reason="PySide6 is required for GUI tests")
 pytest.importorskip("PySide6.QtMultimedia", reason="QtMultimedia is required")
 
-from unittest.mock import MagicMock
 from pathlib import Path
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor, QShowEvent
-from PySide6.QtMultimedia import QMediaPlayer, QVideoFrame, QVideoFrameFormat
+from PySide6.QtMultimedia import QMediaPlayer, QVideoFrameFormat
 from PySide6.QtWidgets import QApplication, QRhiWidget
 
 from iPhoto.config import VIDEO_COMPLETE_HOLD_BACKSTEP_MS

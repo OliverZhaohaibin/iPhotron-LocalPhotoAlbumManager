@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import logging
 from typing import Optional
 
 from PySide6.QtCore import (
@@ -41,8 +40,6 @@ except (ModuleNotFoundError, ImportError):  # pragma: no cover - handled by main
 
 from pathlib import Path
 from PySide6.QtCore import QUrl
-
-_log = logging.getLogger(__name__)
 
 from ....config import (
     PLAYER_CONTROLS_HIDE_DELAY_MS,

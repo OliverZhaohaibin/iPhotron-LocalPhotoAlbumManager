@@ -517,6 +517,11 @@ class GLImageViewer(QRhiWidget):
         """QRhiWidget override: release GL resources."""
         self._gl_initialized = False
         if self._renderer is not None:
+            rhi = self.rhi()
+            if rhi is not None:
+                # Ensure the underlying OpenGL context is current before
+                # issuing raw GL deletes in GLRenderer.destroy_resources().
+                rhi.makeThreadLocalNativeContextCurrent()
             self._renderer.destroy_resources()
 
     def render(self, cb) -> None:  # type: ignore[override]
@@ -582,6 +587,7 @@ class GLImageViewer(QRhiWidget):
         if not self._renderer.has_texture():
             cb.endExternal()
             cb.endPass()
+            self._emit_first_frame_ready()
             return
 
         effective_scale = self._transform_controller.get_effective_scale()

@@ -624,12 +624,6 @@ class VideoRendererWidget(QRhiWidget):
             self._tex_rgba.create()
             self._rebuild_srb(rhi)
 
-        # Update native size for RGBA path
-        new_size = QSizeF(w, h)
-        if new_size != self._native_size:
-            self._native_size = new_size
-            self.nativeSizeChanged.emit(new_size)
-
         # Set format to RGBA passthrough for shader
         self._fmt_enum = _FMT_RGBA
 

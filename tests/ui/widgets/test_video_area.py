@@ -238,6 +238,27 @@ class TestVideoRendererWidget:
         w.update_frame(None)
         assert w._has_frame is False
 
+    def test_clear_frame_resets_texture_formats(self, qapp):
+        """clear_frame should reset the tracked Y/UV texture formats so
+        that switching between NV12 (8-bit R8) and P010 (10-bit R16) at the
+        same resolution forces texture recreation."""
+        w = VideoRendererWidget()
+        # Simulate having uploaded an NV12 frame (sets tracked formats)
+        from PySide6.QtGui import QRhiTexture
+
+        w._tex_y_fmt = QRhiTexture.Format.R8
+        w._tex_uv_fmt = QRhiTexture.Format.RG8
+        w.clear_frame()
+        assert w._tex_y_fmt is None
+        assert w._tex_uv_fmt is None
+
+    def test_initial_texture_formats_are_none(self, qapp):
+        """Texture format tracking should start as None so the first video
+        always creates textures with the correct format."""
+        w = VideoRendererWidget()
+        assert w._tex_y_fmt is None
+        assert w._tex_uv_fmt is None
+
 
 # ------------------------------------------------------------------
 # VideoArea – construction & public API

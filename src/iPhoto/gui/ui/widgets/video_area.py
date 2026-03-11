@@ -10,9 +10,6 @@ from PySide6.QtCore import (
     QEvent,
     QObject,
     QPropertyAnimation,
-    QPointF,
-    QRectF,
-    QSizeF,
     QTimer,
     Qt,
     Signal,
@@ -20,19 +17,13 @@ from PySide6.QtCore import (
 from PySide6.QtGui import (
     QColor,
     QCursor,
-    QImage,
     QMouseEvent,
-    QPainter,
     QResizeEvent,
     QWheelEvent,
 )
 from PySide6.QtWidgets import (
-    QFrame,
-    QGraphicsItem,
     QGraphicsOpacityEffect,
-    QGraphicsScene,
-    QGraphicsView,
-    QStyleOptionGraphicsItem,
+    QVBoxLayout,
     QWidget,
 )
 
@@ -41,15 +32,13 @@ try:  # pragma: no cover - optional Qt module
         QAudioOutput,
         QMediaPlayer,
         QVideoFrame,
-        QVideoFrameFormat,
+        QVideoSink,
     )
-    from PySide6.QtMultimediaWidgets import QGraphicsVideoItem
 except (ModuleNotFoundError, ImportError):  # pragma: no cover - handled by main window guard
-    QGraphicsVideoItem = None  # type: ignore[assignment, misc]
     QMediaPlayer = None
     QAudioOutput = None
     QVideoFrame = None  # type: ignore[assignment, misc]
-    QVideoFrameFormat = None  # type: ignore[assignment, misc]
+    QVideoSink = None  # type: ignore[assignment, misc]
 
 from pathlib import Path
 from PySide6.QtCore import QUrl
@@ -63,104 +52,22 @@ from ....config import (
     VIDEO_COMPLETE_HOLD_BACKSTEP_MS,
 )
 from .player_bar import PlayerBar
+from .video_renderer_widget import VideoRendererWidget
 from ..palette import viewer_surface_color
 
 
-# ---------------------------------------------------------------------------
-# HDR detection helpers
-# ---------------------------------------------------------------------------
-
-def _is_hdr_frame_format(fmt: "QVideoFrameFormat") -> bool:
-    """Return ``True`` when *fmt* indicates HDR / wide-gamut content.
-
-    Checks for BT.2020 colour space or HLG / PQ transfer functions which
-    require tone-mapping for correct SDR display.
-    """
-
-    if QVideoFrameFormat is None:
-        return False
-    try:
-        if fmt.colorSpace() == QVideoFrameFormat.ColorSpace.ColorSpace_BT2020:
-            return True
-        if fmt.colorTransfer() in {
-            QVideoFrameFormat.ColorTransfer.ColorTransfer_ST2084,
-            QVideoFrameFormat.ColorTransfer.ColorTransfer_STD_B67,
-        }:
-            return True
-    except Exception:  # pragma: no cover - defensive
-        pass
-    return False
-
-
-# ---------------------------------------------------------------------------
-# Custom QGraphicsItem for SDR-converted HDR video frames
-# ---------------------------------------------------------------------------
-
-class _SdrVideoItem(QGraphicsItem):
-    """Lightweight item that renders SDR-converted video frames.
-
-    When the playback pipeline detects HDR content, :class:`VideoArea` hides
-    the standard :class:`QGraphicsVideoItem` and directs each incoming
-    :class:`QVideoFrame` through :meth:`QVideoFrame.toImage` — which
-    applies Qt's built-in tone-mapping / colour-space conversion — then
-    paints the resulting 8-bit sRGB :class:`QImage` via the QPainter path.
-
-    This avoids the compositing artefacts (washed-out / grey colours) that
-    occur when the RHI shader for ``QGraphicsVideoItem`` renders HDR textures
-    against a non-black scene background.
-    """
-
-    def __init__(self, parent: Optional[QGraphicsItem] = None) -> None:
-        super().__init__(parent)
-        self._image: QImage = QImage()
-        self._size: QSizeF = QSizeF()
-
-    # -- geometry ----------------------------------------------------------
-
-    def setSize(self, size: QSizeF) -> None:
-        if self._size != size:
-            self.prepareGeometryChange()
-            self._size = size
-
-    def boundingRect(self) -> QRectF:
-        return QRectF(QPointF(), self._size)
-
-    # -- frame update ------------------------------------------------------
-
-    def updateFrame(self, frame: "QVideoFrame") -> None:
-        """Convert *frame* to an SDR QImage and schedule a repaint."""
-
-        if not frame.isValid():
-            return
-        img = frame.toImage()
-        if not img.isNull():
-            self._image = img
-            self.update()
-
-    def clearFrame(self) -> None:
-        self._image = QImage()
-        self.update()
-
-    # -- painting ----------------------------------------------------------
-
-    def paint(
-        self,
-        painter: QPainter,
-        option: QStyleOptionGraphicsItem,
-        widget: Optional[QWidget] = None,
-    ) -> None:
-        if self._image.isNull() or self._size.isEmpty():
-            return
-        img_size = QSizeF(self._image.width(), self._image.height())
-        scaled = img_size.scaled(self._size, Qt.AspectRatioMode.KeepAspectRatio)
-        target = QRectF(QPointF(), scaled)
-        target.moveCenter(QRectF(QPointF(), self._size).center())
-        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
-        painter.drawImage(target, self._image)
-
-
 class VideoArea(QWidget):
-    """Present a video surface with auto-hiding playback controls."""
+    """Present a video surface with auto-hiding playback controls.
+
+    Uses :class:`VideoRendererWidget` (``QRhiWidget``) for GPU-accelerated
+    rendering with proper colour-science handling: YUV→RGB conversion,
+    correct BT.601/709/2020 matrix selection, limited/full range, and
+    HDR→SDR tone mapping for PQ (ST.2084) and HLG (STD-B67) content.
+
+    Decoded frames are received from a ``QVideoSink`` and uploaded as GPU
+    textures.  The rendering result is always fully opaque (alpha = 1.0),
+    independent of any parent-widget background colour.
+    """
 
     mouseActive = Signal()
     controlsVisibleChanged = Signal(bool)
@@ -175,67 +82,40 @@ class VideoArea(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         self.setMouseTracking(True)
 
-        if QGraphicsVideoItem is None:
-            raise RuntimeError("PySide6.QtMultimediaWidgets is required for video playback.")
+        if QMediaPlayer is None or QVideoSink is None:
+            raise RuntimeError(
+                "PySide6.QtMultimedia is required for video playback."
+            )
 
-        # --- Graphics View Setup ---
-        self._video_item = QGraphicsVideoItem()
-        self._video_item.setAspectRatioMode(Qt.AspectRatioMode.KeepAspectRatio)
-
-        # SDR fallback item for HDR content — hidden until HDR is detected.
-        self._sdr_item = _SdrVideoItem()
-        self._sdr_item.setZValue(1)
-        self._sdr_item.hide()
-
-        self._scene = QGraphicsScene(self)
-        self._scene.addItem(self._video_item)
-        self._scene.addItem(self._sdr_item)
-
-        self._video_view = QGraphicsView(self._scene, self)
-        self._video_view.setFrameShape(QFrame.Shape.NoFrame)
-        self._video_view.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self._video_view.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self._video_view.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-        # Accept focus so keyboard navigation targets the video viewport without requiring the user
-        # to click a non-interactive chrome element first.
-        self._video_view.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
-        self.setFocusProxy(self._video_view)
-        # Match the photo viewer's light-toned surface so letterboxed video frames sit
-        # on the same neutral backdrop.  The theme controller updates this later via
-        # ``set_surface_color`` when the palette changes.
+        # --- Video Renderer Setup ---
         surface_color = viewer_surface_color(self)
         self._default_surface_color = surface_color
-        self._video_view.setStyleSheet("background: transparent; border: none;")
-        self._video_view.viewport().setStyleSheet(
-            f"background-color: {surface_color}; border: none;"
-        )
-        self.setStyleSheet(f"background-color: {surface_color};")
-        self._scene.setBackgroundBrush(QColor(surface_color))
-        # --- End Graphics View Setup ---
+
+        self._renderer = VideoRendererWidget(self)
+        self._renderer.set_letterbox_color(QColor(surface_color))
+        # Accept focus so keyboard navigation targets the video surface
+        # without requiring the user to click a non-interactive element.
+        self._renderer.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.setFocusProxy(self._renderer)
+
+        self._apply_surface(surface_color)
+        # --- End Video Renderer Setup ---
 
         # --- Media Player Setup ---
         self._player = QMediaPlayer(self)
         self._audio_output = QAudioOutput(self)
         self._player.setAudioOutput(self._audio_output)
-        self._player.setVideoOutput(self._video_item)
+
+        # Route decoded frames through QVideoSink → our custom renderer.
+        self._video_sink = QVideoSink(self)
+        self._player.setVideoOutput(self._video_sink)
+        self._video_sink.videoFrameChanged.connect(self._on_video_frame)
 
         self._player.positionChanged.connect(self._on_position_changed)
         self._player.durationChanged.connect(self._on_duration_changed)
         self._player.playbackStateChanged.connect(self._on_playback_state_changed)
         self._player.mediaStatusChanged.connect(self._on_media_status_changed)
         # --- End Media Player Setup ---
-
-        # --- HDR Detection ---
-        # Track whether the current media uses an HDR colour space so we can
-        # switch to the SDR fallback rendering path.
-        self._hdr_detected: bool = False
-        self._hdr_checked: bool = False
-        # Connect once to the video item's internal sink.  The sink object
-        # persists across media changes, so one connection is sufficient.
-        _sink = self._video_item.videoSink()
-        if _sink is not None:
-            _sink.videoFrameChanged.connect(self._on_video_frame_changed)
-        # --- End HDR Detection ---
 
         self._overlay_margin = 48
         self._player_bar = PlayerBar(self)
@@ -244,7 +124,7 @@ class VideoArea(QWidget):
 
         self._controls_visible = False
         self._target_opacity = 0.0
-        self._host_widget: QWidget | None = self._video_view
+        self._host_widget: QWidget | None = self._renderer
         self._window_host: QWidget | None = None
         self._controls_enabled = True
 
@@ -268,10 +148,10 @@ class VideoArea(QWidget):
     # Public API
     # ------------------------------------------------------------------
     @property
-    def video_item(self) -> QGraphicsVideoItem:
-        """Return the embedded :class:`QGraphicsVideoItem` for media output."""
+    def renderer(self) -> VideoRendererWidget:
+        """Return the :class:`VideoRendererWidget` for direct access."""
 
-        return self._video_item
+        return self._renderer
 
     @property
     def player_bar(self) -> PlayerBar:
@@ -296,13 +176,10 @@ class VideoArea(QWidget):
         self._apply_surface(colour)
 
     def _apply_surface(self, colour: str) -> None:
-        """Apply *colour* to the scene background, viewport, and widget."""
+        """Apply *colour* to the renderer letterbox, widget, and stylesheet."""
 
-        stylesheet = f"background-color: {colour}; border: none;"
-        self.setStyleSheet(stylesheet)
-        self._video_view.setStyleSheet("background: transparent; border: none;")
-        self._video_view.viewport().setStyleSheet(stylesheet)
-        self._scene.setBackgroundBrush(QColor(colour))
+        self._renderer.set_letterbox_color(QColor(colour))
+        self.setStyleSheet(f"background-color: {colour}; border: none;")
 
     def show_controls(self, *, animate: bool = True) -> None:
         """Reveal the playback controls and restart the hide timer."""
@@ -361,14 +238,7 @@ class VideoArea(QWidget):
 
     def load_video(self, path: Path) -> None:
         """Load a video file for playback."""
-        # Reset HDR detection so the first decoded frame re-evaluates
-        # whether the new media requires the SDR fallback path.
-        self._hdr_detected = False
-        self._hdr_checked = False
-        self._video_item.show()
-        self._sdr_item.clearFrame()
-        self._sdr_item.hide()
-
+        self._renderer.clear_frame()
         self._player.setSource(QUrl.fromLocalFile(str(path)))
         # Do not auto-play; let the coordinator decide.
         # But ensure we are at start
@@ -389,6 +259,10 @@ class VideoArea(QWidget):
     def stop(self) -> None:
         """Stop playback and reset."""
         self._player.stop()
+
+    def _on_video_frame(self, frame: "QVideoFrame") -> None:
+        """Forward each decoded frame to the GPU renderer."""
+        self._renderer.update_frame(frame)
 
     def _on_position_changed(self, position: int) -> None:
         self._player_bar.set_position(position)
@@ -437,13 +311,7 @@ class VideoArea(QWidget):
 
         super().resizeEvent(event)
         rect = self.rect()
-        self._video_view.setGeometry(rect)
-        self._scene.setSceneRect(QRectF(rect))
-        scene_size = self._scene.sceneRect().size()
-        self._video_item.setSize(scene_size)
-        self._video_item.setPos(QPointF())
-        self._sdr_item.setSize(QSizeF(scene_size))
-        self._sdr_item.setPos(QPointF())
+        self._renderer.setGeometry(rect)
         self._update_bar_geometry()
 
     def enterEvent(self, event) -> None:  # pragma: no cover - GUI behaviour
@@ -535,23 +403,24 @@ class VideoArea(QWidget):
         elif self._controls_visible:
             self._hide_timer.start(PLAYER_CONTROLS_HIDE_DELAY_MS)
 
-    def video_view(self) -> QGraphicsView:
-        """Return the graphics view hosting the video surface."""
+    def video_view(self) -> QWidget:
+        """Return the video renderer widget for focus/event handling.
 
-        # Exposing the graphics view allows higher-level widgets to install
-        # shortcut filters directly on the focus target instead of reaching into
-        # private attributes.  The method keeps the detail view wiring explicit
-        # while still encapsulating the scene graph setup within ``VideoArea``.
-        return self._video_view
+        Previously returned a ``QGraphicsView``; now returns the
+        :class:`VideoRendererWidget` which hosts the GPU rendering surface.
+        """
+
+        return self._renderer
 
     def video_viewport(self) -> QWidget:
-        """Return the viewport widget that accepts keyboard focus."""
+        """Return the widget that accepts keyboard focus.
 
-        # Keyboard shortcuts are intercepted at the viewport level so the main
-        # window can consume navigation keys before Qt treats them as focus
-        # traversal requests.  Providing the widget through a helper keeps the
-        # shortcut configuration readable from the controller layer.
-        return self._video_view.viewport()
+        Keyboard shortcuts are intercepted at this level so the main window
+        can consume navigation keys before Qt treats them as focus traversal
+        requests.
+        """
+
+        return self._renderer
 
     def _animate_to(self, value: float, duration: int) -> None:
         self._fade_anim.stop()
@@ -592,30 +461,6 @@ class VideoArea(QWidget):
             y = max(0, rect.height() - bar_height)
         self._player_bar.setGeometry(x, y, bar_width, bar_height)
         self._player_bar.raise_()
-
-    # ------------------------------------------------------------------
-    # HDR → SDR fallback rendering
-    # ------------------------------------------------------------------
-    def _on_video_frame_changed(self, frame: "QVideoFrame") -> None:
-        """Handle each decoded video frame from the internal sink.
-
-        On the first frame of a new media source we inspect the colour-space
-        metadata.  If HDR is detected the standard ``QGraphicsVideoItem`` is
-        hidden and subsequent frames are tone-mapped to SDR via
-        ``QVideoFrame.toImage()`` and painted through :class:`_SdrVideoItem`.
-        """
-
-        if not self._hdr_checked:
-            self._hdr_checked = True
-            fmt = frame.surfaceFormat()
-            if _is_hdr_frame_format(fmt):
-                _log.debug("HDR content detected – activating SDR fallback renderer")
-                self._hdr_detected = True
-                self._video_item.hide()
-                self._sdr_item.show()
-
-        if self._hdr_detected:
-            self._sdr_item.updateFrame(frame)
 
     # ------------------------------------------------------------------
     # Live Photo helpers

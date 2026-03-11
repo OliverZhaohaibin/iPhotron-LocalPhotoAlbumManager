@@ -56,6 +56,9 @@ iphoto-gui = "iPhoto.gui.main:main"
 [tool.setuptools]
 package-dir = {"" = "src"}
 
+[tool.setuptools.package-data]
+"iPhoto" = ["**/*.qsb", "**/*.frag", "**/*.vert", "**/*.svg", "**/*.json", "**/*.yaml"]
+
 
 [tool.setuptools.packages.find]
 where = ["src"]

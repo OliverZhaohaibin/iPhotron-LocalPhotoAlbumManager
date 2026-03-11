@@ -177,8 +177,10 @@ class PlayerViewController(QObject):
         """Begin loading ``source`` asynchronously, returning scheduling success."""
         self._loading_source = source
 
-        # 1) 先切到 GL 视图，保证有有效的 GL 上下文
-        self.show_image_surface()
+        # Keep the opaque placeholder surface visible while the still image is
+        # loading. Switching to the QRhi widget too early can expose a transient
+        # transparent frame on first open before the first render pass completes.
+        self.show_placeholder()
 
         # 2) 若有占位图，先显示；否则仅清空，不上传空图像
         if placeholder is not None and not placeholder.isNull():
@@ -323,13 +325,13 @@ class PlayerViewController(QObject):
 
     def _apply_still_frame(self, source: Path, image: QImage, adjustments: dict) -> None:
         """Render the still image on the GL viewer."""
-        self.show_image_surface()
         self._image_viewer.set_image(
             image,
             adjustments,
             image_source=source,
             reset_view=True,
         )
+        self.show_image_surface()
         self._image_viewer.update()
 
     def _release_worker(self, worker: _AdjustedImageWorker) -> None:

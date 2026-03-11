@@ -177,14 +177,19 @@ class PlayerViewController(QObject):
         """Begin loading ``source`` asynchronously, returning scheduling success."""
         self._loading_source = source
 
-        # 1) 先切到 GL 视图，保证有有效的 GL 上下文
-        self.show_image_surface()
-
-        # 2) 若有占位图，先显示；否则仅清空，不上传空图像
         if placeholder is not None and not placeholder.isNull():
+            # Seed the GL viewer with an opaque placeholder frame first so the
+            # initial transition to the detail page never exposes a transparent
+            # surface while the full-resolution decode is still in flight.
+            # ``set_placeholder`` only updates cached image state and does not
+            # require the widget to be visible/current.
             self._image_viewer.set_placeholder(placeholder)
+            self.show_image_surface()
         else:
-            self._image_viewer.set_image(None, {})
+            # Keep the QLabel placeholder visible until the decoded still frame
+            # is ready. Switching to the GL widget with no frame can expose one
+            # transparent composition cycle on some GPU/driver combinations.
+            self.show_placeholder()
 
         signals = _AdjustedImageSignals()
         worker = _AdjustedImageWorker(source, signals)

@@ -77,6 +77,7 @@ class GLImageViewer(QRhiWidget):
     cropInteractionStarted = Signal()
     cropInteractionFinished = Signal()
     colorPicked = Signal(float, float, float)
+    firstFrameReady = Signal()
 
     def __init__(self, parent: QRhiWidget | None = None) -> None:
         super().__init__(parent)
@@ -98,6 +99,7 @@ class GLImageViewer(QRhiWidget):
         self._gl_funcs: QOpenGLFunctions_3_3_Core | None = None
         self._renderer: GLRenderer | None = None
         self._gl_initialized = False
+        self._first_render_done = False
 
         # 状态
         self._image: QImage | None = None
@@ -531,6 +533,7 @@ class GLImageViewer(QRhiWidget):
                 QRhiDepthStencilClearValue(),
             )
             cb.endPass()
+            self._emit_first_frame_ready()
             return
         gf = self._gl_funcs
         if gf is None or self._renderer is None:
@@ -541,6 +544,7 @@ class GLImageViewer(QRhiWidget):
                 QRhiDepthStencilClearValue(),
             )
             cb.endPass()
+            self._emit_first_frame_ready()
             return
 
         output_size = self.renderTarget().pixelSize()
@@ -637,6 +641,13 @@ class GLImageViewer(QRhiWidget):
         # --- End raw OpenGL block ---
         cb.endExternal()
         cb.endPass()
+        self._emit_first_frame_ready()
+
+    def _emit_first_frame_ready(self) -> None:
+        """Notify listeners that the first opaque frame has been rendered."""
+        if not self._first_render_done:
+            self._first_render_done = True
+            self.firstFrameReady.emit()
 
     # --------------------------- Crop helpers ---------------------------
 

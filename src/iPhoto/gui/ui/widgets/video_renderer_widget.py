@@ -161,6 +161,7 @@ class VideoRendererWidget(QRhiWidget):
     """
 
     nativeSizeChanged = Signal(QSizeF)
+    firstFrameReady = Signal()
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
@@ -185,6 +186,7 @@ class VideoRendererWidget(QRhiWidget):
         self._current_frame: Optional["QVideoFrame"] = None
         self._frame_dirty = False
         self._native_size = QSizeF()
+        self._first_render_done = False
 
         # --- RHI resources (created in initialize()) ---
         self._pipeline: Optional[QRhiGraphicsPipeline] = None
@@ -414,6 +416,7 @@ class VideoRendererWidget(QRhiWidget):
                 QRhiDepthStencilClearValue(),
             )
             cb.endPass()
+            self._emit_first_frame_ready()
             return
 
         rhi = self.rhi()
@@ -452,6 +455,13 @@ class VideoRendererWidget(QRhiWidget):
         cb.setVertexInput(0, vbuf_binding)
         cb.draw(6)  # 6 vertices = 2 triangles
         cb.endPass()
+        self._emit_first_frame_ready()
+
+    def _emit_first_frame_ready(self) -> None:
+        """Notify listeners that the first opaque frame has been rendered."""
+        if not self._first_render_done:
+            self._first_render_done = True
+            self.firstFrameReady.emit()
 
     def releaseResources(self) -> None:  # type: ignore[override]
         """Clean up GPU resources."""

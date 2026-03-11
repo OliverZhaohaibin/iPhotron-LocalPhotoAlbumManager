@@ -8,10 +8,13 @@ when switching to a QRhiWidget that has not yet rendered.
 
 from __future__ import annotations
 
+import os
+
 import pytest
 
-pytest.importorskip("PySide6", reason="PySide6 is required for GUI tests")
-pytest.importorskip("PySide6.QtMultimedia", reason="QtMultimedia is required")
+pytest.importorskip("PySide6", reason="PySide6 is required for GUI tests", exc_type=ImportError)
+pytest.importorskip("PySide6.QtWidgets", reason="Qt widgets not available", exc_type=ImportError)
+pytest.importorskip("PySide6.QtMultimedia", reason="QtMultimedia is required", exc_type=ImportError)
 
 from unittest.mock import MagicMock, patch
 
@@ -42,9 +45,10 @@ class _FakeImageViewer(QWidget):
         pass
 
 
-@pytest.fixture
+@pytest.fixture(scope="module")
 def qapp():
     """Create QApplication instance for Qt tests."""
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
     app = QApplication.instance()
     if app is None:
         app = QApplication([])

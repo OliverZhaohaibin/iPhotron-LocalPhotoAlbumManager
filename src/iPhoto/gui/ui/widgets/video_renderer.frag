@@ -22,6 +22,11 @@ layout(std140, binding = 0) uniform buf {
     vec4 u_letterbox_color;
     // Video rect within viewport: (x, y, w, h) normalised to [0,1]
     vec4 u_video_rect;
+    // Rotation in clockwise 90° steps (0..3) and mirror flag (0 or 1)
+    int u_rotate90;
+    int u_mirror;
+    int _pad0;
+    int _pad1;
 };
 
 // ---------------------------------------------------------------
@@ -129,15 +134,37 @@ void main()
         return;
     }
 
+    // Apply rotation to the sampling UV.  The display matrix rotation tells
+    // us how the raw frame pixels should be rotated *clockwise* to reach the
+    // correct on-screen orientation.  We invert this by rotating the texture
+    // coordinates counter-clockwise by the same amount.
+    vec2 sample_uv = video_uv;
+    int steps = u_rotate90 % 4;
+    if (steps == 1) {
+        // 90° CW display → rotate UV 90° CCW
+        sample_uv = vec2(sample_uv.y, 1.0 - sample_uv.x);
+    } else if (steps == 2) {
+        // 180°
+        sample_uv = vec2(1.0 - sample_uv.x, 1.0 - sample_uv.y);
+    } else if (steps == 3) {
+        // 270° CW display → rotate UV 90° CW
+        sample_uv = vec2(1.0 - sample_uv.y, sample_uv.x);
+    }
+
+    // Horizontal mirror
+    if (u_mirror != 0) {
+        sample_uv.x = 1.0 - sample_uv.x;
+    }
+
     vec3 rgb;
 
     if (u_format == 2) {
         // RGBA passthrough
-        rgb = texture(tex_rgba, video_uv).rgb;
+        rgb = texture(tex_rgba, sample_uv).rgb;
     } else {
         // YUV sampling
-        float y_raw = texture(tex_y, video_uv).r;
-        vec2 uv_raw = texture(tex_uv, video_uv).rg;
+        float y_raw = texture(tex_y, sample_uv).r;
+        vec2 uv_raw = texture(tex_uv, sample_uv).rg;
 
         float y, u, v;
 

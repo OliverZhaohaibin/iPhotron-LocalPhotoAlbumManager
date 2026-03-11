@@ -67,8 +67,12 @@ _FRAG_QSB = _SHADER_DIR / "video_renderer.frag.qsb"
 #   int u_range;           // offset 12
 #   vec4 u_letterbox_color;// offset 16  (4 floats)
 #   vec4 u_video_rect;     // offset 32  (4 floats)
-#                          // total = 48 bytes
-_UBO_SIZE = 48
+#   int u_rotate90;        // offset 48
+#   int u_mirror;          // offset 52
+#   int _pad0;             // offset 56
+#   int _pad1;             // offset 60
+#                          // total = 64 bytes
+_UBO_SIZE = 64
 
 
 def _load_shader(path: Path) -> QShader:
@@ -189,6 +193,8 @@ class VideoRendererWidget(QRhiWidget):
         self._cs_enum = _CS_BT709
         self._tf_enum = _TF_SDR
         self._range_enum = _RANGE_LIMITED
+        self._rotate90_steps = 0
+        self._mirror = 0
 
     # ------------------------------------------------------------------
     # Public API
@@ -204,7 +210,23 @@ class VideoRendererWidget(QRhiWidget):
         fmt = frame.surfaceFormat()
         w = fmt.frameWidth()
         h = fmt.frameHeight()
-        new_size = QSizeF(w, h)
+
+        # Extract display matrix rotation and mirror state from the
+        # container metadata that Qt exposes via ``QVideoFrameFormat``.
+        rotation = fmt.rotation()
+        rot_deg = rotation.value if hasattr(rotation, "value") else int(rotation)
+        self._rotate90_steps = (rot_deg // 90) % 4
+        self._mirror = 1 if fmt.isMirrored() else 0
+
+        # Compute the *display* native size: for 90°/270° rotations the
+        # width and height are swapped so that the aspect-ratio letterbox
+        # calculation uses the orientation the user sees.
+        if self._rotate90_steps in (1, 3):
+            display_w, display_h = h, w
+        else:
+            display_w, display_h = w, h
+
+        new_size = QSizeF(display_w, display_h)
         if new_size != self._native_size:
             self._native_size = new_size
             self.nativeSizeChanged.emit(new_size)
@@ -221,6 +243,8 @@ class VideoRendererWidget(QRhiWidget):
         self._current_frame = None
         self._frame_dirty = True
         self._native_size = QSizeF()
+        self._rotate90_steps = 0
+        self._mirror = 0
         self.update()
 
     def set_letterbox_color(self, color: QColor) -> None:
@@ -620,13 +644,17 @@ class VideoRendererWidget(QRhiWidget):
 
         # Pack uniform data (std140)
         ubo_data = struct.pack(
-            "iiii4f4f",
+            "iiii4f4fiiii",
             self._fmt_enum,
             self._cs_enum,
             self._tf_enum,
             self._range_enum,
             lr, lg, lb, la,  # u_letterbox_color
             vx, vy, vw, vh,  # u_video_rect
+            self._rotate90_steps,  # u_rotate90
+            self._mirror,          # u_mirror
+            0,                     # _pad0
+            0,                     # _pad1
         )
 
         ru.updateDynamicBuffer(self._ubuf, 0, len(ubo_data), ubo_data)

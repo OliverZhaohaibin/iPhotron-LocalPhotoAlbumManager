@@ -325,7 +325,17 @@ class DetailPageWidget(QWidget):
         self.player_stack.addWidget(self.video_area)
         self.player_stack.setCurrentWidget(self.player_placeholder)
 
+        # Give the stacked widget an opaque palette-derived background so that
+        # the very first frame transition (placeholder → viewer) never flashes
+        # a transparent surface while the GL/RHI widget is still initialising.
+        # Using ``palette(window)`` keeps it in sync across light / dark mode.
+        self.player_stack.setAutoFillBackground(True)
+        self.player_stack.setStyleSheet(
+            "QStackedWidget { background-color: palette(window); }"
+        )
+
         player_container = QWidget(self)
+        player_container.setAutoFillBackground(True)
         player_layout = QVBoxLayout(player_container)
         player_layout.setContentsMargins(0, 0, 0, 0)
         player_layout.setSpacing(0)

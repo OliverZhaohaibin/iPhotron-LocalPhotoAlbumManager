@@ -90,6 +90,16 @@ class PlaybackCoordinator(QObject):
         self._active_live_still: Optional[Path] = None
         self._resume_after_transition = False
 
+        # Debounce rapid play_asset() calls (e.g. holding an arrow key) so that
+        # only the *last* requested row is actually loaded.  This prevents the
+        # player from being overwhelmed with overlapping load/play cycles that
+        # can lead to freezes or corrupted state.
+        self._pending_play_row: int | None = None
+        self._play_debounce = QTimer(self)
+        self._play_debounce.setSingleShot(True)
+        self._play_debounce.setInterval(60)
+        self._play_debounce.timeout.connect(self._execute_pending_play)
+
         self._connect_signals()
         self._connect_zoom_controls()
         self._restore_filmstrip_preference()
@@ -232,23 +242,54 @@ class PlaybackCoordinator(QObject):
         self._player_view.video_area.seek(position)
 
     def play_asset(self, row: int):
-        """Switch to detail view and play/show the asset at the given row."""
+        """Switch to detail view and play/show the asset at the given row.
+
+        Rapid calls (e.g. holding an arrow key) are coalesced via a short
+        debounce timer so that only the *last* requested row triggers the
+        expensive load/play cycle.
+        """
         # Validate row
         if row < 0 or row >= self._asset_vm.rowCount():
             return
 
+        # Show detail view and update lightweight UI immediately so the user
+        # sees a responsive reaction even while the debounce timer is running.
         self._router.show_detail()
         self._current_row = row
-
-        # Notify selection change
         self.assetChanged.emit(row)
-
-        # Sync ViewModel State (for Delegate sizing)
         self._asset_vm.set_current_row(row)
         self._update_header(row)
-
-        # Sync Filmstrip
         self._sync_filmstrip_selection(row)
+
+        # Stop any active video / live-motion playback so the decoder releases
+        # its resources before the next asset attempts to use the same sink.
+        if self._active_live_motion:
+            self._active_live_motion = None
+            self._active_live_still = None
+            self._player_view.defer_still_updates(False)
+        self._player_view.video_area.stop()
+
+        # Record the target row and (re-)start the debounce timer.
+        self._pending_play_row = row
+        self._play_debounce.start()
+
+    # ------------------------------------------------------------------
+    def _execute_pending_play(self) -> None:
+        """Execute the most recently requested play_asset row."""
+        row = self._pending_play_row
+        self._pending_play_row = None
+        if row is None:
+            return
+        if row < 0 or row >= self._asset_vm.rowCount():
+            return
+        self._do_play_asset(row)
+
+    # ------------------------------------------------------------------
+    def _do_play_asset(self, row: int) -> None:
+        """Internal implementation of *play_asset* — called after debounce."""
+        # Validate row (may have become stale after the debounce delay)
+        if row < 0 or row >= self._asset_vm.rowCount():
+            return
 
         idx = self._asset_vm.index(row, 0)
         abs_path = self._asset_vm.data(idx, Roles.ABS)

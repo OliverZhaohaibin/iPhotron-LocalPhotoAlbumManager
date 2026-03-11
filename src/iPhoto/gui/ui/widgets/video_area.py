@@ -75,6 +75,7 @@ class VideoArea(QWidget):
     playbackFinished = Signal()
     nextItemRequested = Signal()
     prevItemRequested = Signal()
+    firstFrameAvailable = Signal()
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
@@ -133,6 +134,7 @@ class VideoArea(QWidget):
         self._host_widget: QWidget | None = self._renderer
         self._window_host: QWidget | None = None
         self._controls_enabled = True
+        self._awaiting_first_frame = False
 
         effect = QGraphicsOpacityEffect(self._player_bar)
         effect.setOpacity(0.0)
@@ -244,6 +246,7 @@ class VideoArea(QWidget):
 
     def load_video(self, path: Path) -> None:
         """Load a video file for playback."""
+        self._awaiting_first_frame = True
         self._renderer.clear_frame()
         self._player.setSource(QUrl.fromLocalFile(str(path)))
         # Do not auto-play; let the coordinator decide.
@@ -269,6 +272,9 @@ class VideoArea(QWidget):
     def _on_video_frame(self, frame: "QVideoFrame") -> None:
         """Forward each decoded frame to the GPU renderer."""
         self._renderer.update_frame(frame)
+        if self._awaiting_first_frame:
+            self._awaiting_first_frame = False
+            self.firstFrameAvailable.emit()
 
     def _on_position_changed(self, position: int) -> None:
         self._player_bar.set_position(position)

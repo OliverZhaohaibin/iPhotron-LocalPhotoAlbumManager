@@ -110,6 +110,9 @@ class PlayerViewController(QObject):
         self._loading_source: Optional[Path] = None
         self._defer_still_updates = False
         self._pending_still: Optional[tuple[Path, QImage, dict]] = None
+        self._pending_video_surface: Optional[bool] = None
+
+        self._video_area.firstFrameAvailable.connect(self._reveal_pending_video_surface)
 
     # ------------------------------------------------------------------
     # High-level surface selection helpers
@@ -131,6 +134,7 @@ class PlayerViewController(QObject):
         # Hide lingering transport controls from the video surface so the
         # still viewer never inherits a faded overlay background.
         self._video_area.hide_controls(animate=False)
+        self._pending_video_surface = None
         if self._player_stack.currentWidget() is not self._image_viewer:
             if self._player_stack.indexOf(self._image_viewer) != -1:
                 self._player_stack.setCurrentWidget(self._image_viewer)
@@ -140,6 +144,21 @@ class PlayerViewController(QObject):
         # soon as Qt processes the next paint cycle, mirroring the responsiveness
         # of the legacy QLabel-based viewer.
         self._image_viewer.update()
+
+    def defer_video_surface_until_frame(self, *, interactive: bool) -> None:
+        """Keep the placeholder visible until the first decoded video frame arrives."""
+
+        self._pending_video_surface = bool(interactive)
+        self.show_placeholder()
+
+    def _reveal_pending_video_surface(self) -> None:
+        """Switch to the video surface once a frame is available."""
+
+        if self._pending_video_surface is None:
+            return
+        interactive = self._pending_video_surface
+        self._pending_video_surface = None
+        self.show_video_surface(interactive=interactive)
 
     def show_video_surface(self, *, interactive: bool) -> None:
         """Switch the stacked widget to the video surface.

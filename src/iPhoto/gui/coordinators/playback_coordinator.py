@@ -316,7 +316,7 @@ class PlaybackCoordinator(QObject):
 
         # Load Media
         if is_video:
-            self._player_view.show_video_surface(interactive=True)
+            self._player_view.defer_video_surface_until_frame(interactive=True)
             self._player_view.video_area.load_video(source)
             self._player_view.video_area.play()
             self._player_bar.setEnabled(True)
@@ -357,7 +357,7 @@ class PlaybackCoordinator(QObject):
         self._active_live_motion = motion_path
         self._active_live_still = still_source
         self._player_view.defer_still_updates(True)
-        self._player_view.show_video_surface(interactive=False)
+        self._player_view.defer_video_surface_until_frame(interactive=False)
         self._player_view.video_area.load_video(motion_path)
         self._player_view.video_area.play()
         self._player_bar.setEnabled(False)

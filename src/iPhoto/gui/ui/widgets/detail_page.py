@@ -57,6 +57,10 @@ class DetailPageWidget(QWidget):
         self.setAutoFillBackground(True)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, False)
 
+        # Initialised in ``_build_player_area()``; set here so that
+        # ``hide_rhi_init_cover()`` and ``resizeEvent`` always find the attr.
+        self._rhi_init_cover: QWidget | None = None
+
         # Edit chrome -------------------------------------------------------
         self.edit_mode_group = QActionGroup(main_window)
         self.edit_mode_group.setExclusive(True)
@@ -522,7 +526,7 @@ class DetailPageWidget(QWidget):
 
     def hide_rhi_init_cover(self) -> None:
         """Remove the opaque cover once the first QRhiWidget frame is ready."""
-        if hasattr(self, "_rhi_init_cover") and self._rhi_init_cover is not None:
+        if self._rhi_init_cover is not None:
             self._rhi_init_cover.hide()
             self._rhi_init_cover.deleteLater()
             self._rhi_init_cover = None
@@ -530,8 +534,7 @@ class DetailPageWidget(QWidget):
     def _update_rhi_init_cover_geometry(self) -> None:
         """Keep the init cover sized to match the player_stack area."""
         if (
-            hasattr(self, "_rhi_init_cover")
-            and self._rhi_init_cover is not None
+            self._rhi_init_cover is not None
             and self._rhi_init_cover.isVisible()
             and self.player_container is not None
         ):

@@ -214,7 +214,10 @@ class VideoRendererWidget(QRhiWidget):
         # Extract display matrix rotation and mirror state from the
         # container metadata that Qt exposes via ``QVideoFrameFormat``.
         rotation = fmt.rotation()
-        rot_deg = rotation.value if hasattr(rotation, "value") else int(rotation)
+        try:
+            rot_deg = rotation.value if hasattr(rotation, "value") else int(rotation)
+        except (TypeError, ValueError):
+            rot_deg = 0
         self._rotate90_steps = (rot_deg // 90) % 4
         self._mirror = 1 if fmt.isMirrored() else 0
 

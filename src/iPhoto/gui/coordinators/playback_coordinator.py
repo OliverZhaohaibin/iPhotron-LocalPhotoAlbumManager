@@ -16,6 +16,7 @@ from iPhoto.gui.ui.models.roles import Roles
 from iPhoto.gui.ui.widgets.info_panel import InfoPanel
 from iPhoto.io.metadata import read_image_meta
 from iPhoto.io import sidecar
+from iPhoto.config import PLAY_ASSET_DEBOUNCE_MS
 
 if TYPE_CHECKING:
     from iPhoto.gui.ui.widgets.player_bar import PlayerBar
@@ -97,7 +98,7 @@ class PlaybackCoordinator(QObject):
         self._pending_play_row: int | None = None
         self._play_debounce = QTimer(self)
         self._play_debounce.setSingleShot(True)
-        self._play_debounce.setInterval(60)
+        self._play_debounce.setInterval(PLAY_ASSET_DEBOUNCE_MS)
         self._play_debounce.timeout.connect(self._execute_pending_play)
 
         self._connect_signals()

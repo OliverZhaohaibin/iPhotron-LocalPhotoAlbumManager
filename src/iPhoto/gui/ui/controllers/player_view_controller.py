@@ -110,6 +110,10 @@ class PlayerViewController(QObject):
         self._loading_source: Optional[Path] = None
         self._defer_still_updates = False
         self._pending_still: Optional[tuple[Path, QImage, dict]] = None
+        # Cold-start buffering: keep the placeholder surface visible until the
+        # first decoded still frame is ready, avoiding a one-frame transparent
+        # flash while the GL/RHI pipeline creates its initial context.
+        self._has_presented_still_frame = False
 
     # ------------------------------------------------------------------
     # High-level surface selection helpers
@@ -177,13 +181,18 @@ class PlayerViewController(QObject):
         """Begin loading ``source`` asynchronously, returning scheduling success."""
         self._loading_source = source
 
-        # 1) 先切到 GL 视图，保证有有效的 GL 上下文
-        self.show_image_surface()
+        cold_start = not self._should_show_surface_before_load()
 
-        # 2) 若有占位图，先显示；否则仅清空，不上传空图像
+        # Keep an opaque placeholder visible during the very first still-image
+        # transition. Subsequent navigations keep the old GPU frame visible,
+        # which acts as a natural back buffer.
+        if not cold_start:
+            self.show_image_surface()
+
+        # 1) 若有占位图，先显示；否则仅清空，不上传空图像
         if placeholder is not None and not placeholder.isNull():
             self._image_viewer.set_placeholder(placeholder)
-        else:
+        elif not cold_start:
             self._image_viewer.set_image(None, {})
 
         signals = _AdjustedImageSignals()
@@ -212,6 +221,11 @@ class PlayerViewController(QObject):
             self.imageLoadingFailed.emit(source, str(exc))
             return False
         return True
+
+    def _should_show_surface_before_load(self) -> bool:
+        """Return whether pre-loading should switch to the GL image surface."""
+
+        return self._has_presented_still_frame
 
     def defer_still_updates(self, enabled: bool) -> None:
         """Control whether still frames should be applied immediately."""
@@ -330,6 +344,7 @@ class PlayerViewController(QObject):
             image_source=source,
             reset_view=True,
         )
+        self._has_presented_still_frame = True
         self._image_viewer.update()
 
     def _release_worker(self, worker: _AdjustedImageWorker) -> None:

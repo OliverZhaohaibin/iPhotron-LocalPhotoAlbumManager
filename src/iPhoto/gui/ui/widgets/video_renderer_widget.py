@@ -189,6 +189,7 @@ class VideoRendererWidget(QRhiWidget):
         self._frame_dirty = False
         self._native_size = QSizeF()
         self._first_render_done = False
+        self._has_frame = False
 
         # --- RHI resources (created in initialize()) ---
         self._pipeline: Optional[QRhiGraphicsPipeline] = None
@@ -218,6 +219,7 @@ class VideoRendererWidget(QRhiWidget):
             return
         self._current_frame = frame
         self._frame_dirty = True
+        self._has_frame = True
 
         # Check for resolution change
         fmt = frame.surfaceFormat()
@@ -257,10 +259,11 @@ class VideoRendererWidget(QRhiWidget):
     def clear_frame(self) -> None:
         """Clear the current frame and repaint with letterbox only."""
         self._current_frame = None
-        self._frame_dirty = True
+        self._frame_dirty = False
         self._native_size = QSizeF()
         self._rotate90_steps = 0
         self._mirror = 0
+        self._has_frame = False
         self.update()
 
     def set_letterbox_color(self, color: QColor) -> None:
@@ -427,6 +430,21 @@ class VideoRendererWidget(QRhiWidget):
 
         output_size = self.renderTarget().pixelSize()
         if output_size.isEmpty():
+            return
+
+        # When no video frame has been loaded (or after clear_frame()), fill
+        # the render target with the opaque letterbox colour.  This prevents
+        # stale texture data from a previously played video from flashing on
+        # screen during media transitions (video→video or video→image).
+        if not self._has_frame:
+            lc = self._letterbox_color
+            cb.beginPass(
+                self.renderTarget(),
+                QColor.fromRgbF(lc.redF(), lc.greenF(), lc.blueF(), 1.0),
+                QRhiDepthStencilClearValue(),
+            )
+            cb.endPass()
+            self._emit_first_frame_ready()
             return
 
         ru = rhi.nextResourceUpdateBatch()

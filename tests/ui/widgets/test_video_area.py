@@ -11,7 +11,7 @@ from pathlib import Path
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor, QShowEvent
-from PySide6.QtMultimedia import QMediaPlayer, QVideoFrameFormat
+from PySide6.QtMultimedia import QMediaPlayer, QVideoFrame, QVideoFrameFormat
 from PySide6.QtWidgets import QApplication, QRhiWidget
 
 from iPhoto.config import VIDEO_COMPLETE_HOLD_BACKSTEP_MS
@@ -124,6 +124,41 @@ class TestVideoRendererWidget:
         assert w._current_frame is None
         assert w.native_size().isEmpty()
 
+    def test_initial_has_frame_false(self, qapp):
+        """Widget should start with _has_frame == False."""
+        w = VideoRendererWidget()
+        assert w._has_frame is False
+
+    def test_clear_frame_resets_has_frame(self, qapp):
+        """clear_frame should set _has_frame to False so the renderer
+        draws only the letterbox colour instead of stale texture data."""
+        w = VideoRendererWidget()
+        # Simulate having received a frame
+        w._has_frame = True
+        w.clear_frame()
+        assert w._has_frame is False
+        assert w._frame_dirty is False
+
+    def test_update_frame_sets_has_frame(self, qapp):
+        """update_frame should set _has_frame to True when a valid frame arrives."""
+        w = VideoRendererWidget()
+        assert w._has_frame is False
+
+        from PySide6.QtCore import QSize
+        fmt = QVideoFrameFormat(
+            QSize(320, 240), QVideoFrameFormat.PixelFormat.Format_RGBA8888
+        )
+        frame = QVideoFrame(fmt)
+        w.update_frame(frame)
+        assert w._has_frame is True
+
+    def test_update_frame_ignores_invalid(self, qapp):
+        """update_frame should leave _has_frame unchanged for invalid frames."""
+        w = VideoRendererWidget()
+        assert w._has_frame is False
+        w.update_frame(None)
+        assert w._has_frame is False
+
 
 # ------------------------------------------------------------------
 # VideoArea – construction & public API
@@ -233,4 +268,21 @@ class TestVideoArea:
 
         va.load_video(Path("/fake/video.mp4"))
 
+        mock_clear.assert_called_once()
+
+    def test_stop_clears_frame_and_source(self, qapp, mocker):
+        """stop() should clear the renderer frame and release the media source."""
+        va = VideoArea()
+        mock_stop = mocker.patch.object(va._player, "stop")
+        mock_set_source = mocker.patch.object(va._player, "setSource")
+        mock_clear = mocker.patch.object(va._renderer, "clear_frame")
+
+        va.stop()
+
+        mock_stop.assert_called_once()
+        # Source should be cleared (empty QUrl)
+        mock_set_source.assert_called_once()
+        called_url = mock_set_source.call_args[0][0]
+        assert called_url.isEmpty()
+        # Renderer frame should be cleared
         mock_clear.assert_called_once()

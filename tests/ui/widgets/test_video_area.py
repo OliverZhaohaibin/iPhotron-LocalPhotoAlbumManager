@@ -139,6 +139,85 @@ class TestVideoRendererWidget:
         assert w._has_frame is False
         assert w._frame_dirty is False
 
+    def test_set_container_rotation(self, qapp):
+        """set_container_rotation should store the probed values."""
+        w = VideoRendererWidget()
+        w.set_container_rotation(90, 1920, 1440)
+        assert w._container_rotation_cw == 90
+        assert w._container_raw_w == 1920
+        assert w._container_raw_h == 1440
+
+    def test_clear_frame_resets_container_rotation(self, qapp):
+        """clear_frame should also reset the container rotation state."""
+        w = VideoRendererWidget()
+        w.set_container_rotation(90, 1920, 1440)
+        w.clear_frame()
+        assert w._container_rotation_cw == 0
+        assert w._container_raw_w == 0
+        assert w._container_raw_h == 0
+
+    def test_fallback_rotation_when_qt_reports_zero(self, qapp):
+        """When Qt reports 0° but container has rotation, apply fallback."""
+        w = VideoRendererWidget()
+        w.set_container_rotation(90, 1920, 1440)
+
+        # Create a frame with dimensions matching the raw stream (not pre-rotated)
+        from PySide6.QtCore import QSize
+        fmt = QVideoFrameFormat(
+            QSize(1920, 1440), QVideoFrameFormat.PixelFormat.Format_RGBA8888
+        )
+        # Qt default rotation is 0°
+        frame = QVideoFrame(fmt)
+        w.update_frame(frame)
+
+        # Container rotation 90° CW → steps = 1
+        assert w._rotate90_steps == 1
+
+    def test_no_double_rotation_when_prerotated(self, qapp):
+        """When GStreamer pre-rotates frames, do not apply container rotation again."""
+        w = VideoRendererWidget()
+        w.set_container_rotation(90, 1920, 1440)
+
+        # Frame dimensions are swapped compared to raw stream → pre-rotated
+        from PySide6.QtCore import QSize
+        fmt = QVideoFrameFormat(
+            QSize(1440, 1920), QVideoFrameFormat.PixelFormat.Format_RGBA8888
+        )
+        frame = QVideoFrame(fmt)
+        w.update_frame(frame)
+
+        # Pre-rotated → no additional rotation
+        assert w._rotate90_steps == 0
+
+    def test_no_fallback_when_no_container_rotation(self, qapp):
+        """When container has no rotation, steps stay at 0."""
+        w = VideoRendererWidget()
+        w.set_container_rotation(0, 1920, 1440)
+
+        from PySide6.QtCore import QSize
+        fmt = QVideoFrameFormat(
+            QSize(1920, 1440), QVideoFrameFormat.PixelFormat.Format_RGBA8888
+        )
+        frame = QVideoFrame(fmt)
+        w.update_frame(frame)
+        assert w._rotate90_steps == 0
+
+    def test_container_rotation_overrides_qt_rotation(self, qapp):
+        """ffprobe rotation is always preferred over Qt's platform-dependent value."""
+        w = VideoRendererWidget()
+        # Container says 90° CW (correct for a -90° CCW display matrix).
+        w.set_container_rotation(90, 1920, 1440)
+
+        from PySide6.QtCore import QSize
+        fmt = QVideoFrameFormat(
+            QSize(1920, 1440), QVideoFrameFormat.PixelFormat.Format_RGBA8888
+        )
+        frame = QVideoFrame(fmt)
+        w.update_frame(frame)
+
+        # Container rotation (90° CW) wins → steps = 1
+        assert w._rotate90_steps == 1
+
     def test_update_frame_sets_has_frame(self, qapp):
         """update_frame should set _has_frame to True when a valid frame arrives."""
         w = VideoRendererWidget()
@@ -265,10 +344,46 @@ class TestVideoArea:
         mocker.patch.object(va._player, "setSource")
         mocker.patch.object(va._player, "setPosition")
         mock_clear = mocker.patch.object(va._renderer, "clear_frame")
+        mocker.patch(
+            "iPhoto.gui.ui.widgets.video_area.probe_video_rotation",
+            return_value=(0, 0, 0),
+        )
 
         va.load_video(Path("/fake/video.mp4"))
 
         mock_clear.assert_called_once()
+
+    def test_load_video_probes_and_sets_container_rotation(self, qapp, mocker):
+        """load_video should probe rotation and forward to the renderer."""
+        va = VideoArea()
+        mocker.patch.object(va._player, "setSource")
+        mocker.patch.object(va._player, "setPosition")
+        mocker.patch.object(va._renderer, "clear_frame")
+        mock_set_rot = mocker.patch.object(va._renderer, "set_container_rotation")
+        mocker.patch(
+            "iPhoto.gui.ui.widgets.video_area.probe_video_rotation",
+            return_value=(90, 1920, 1440),
+        )
+
+        va.load_video(Path("/fake/portrait.mov"))
+
+        mock_set_rot.assert_called_once_with(90, 1920, 1440)
+
+    def test_load_video_handles_probe_failure(self, qapp, mocker):
+        """load_video should still work when ffprobe returns no rotation."""
+        va = VideoArea()
+        mocker.patch.object(va._player, "setSource")
+        mocker.patch.object(va._player, "setPosition")
+        mocker.patch.object(va._renderer, "clear_frame")
+        mock_set_rot = mocker.patch.object(va._renderer, "set_container_rotation")
+        mocker.patch(
+            "iPhoto.gui.ui.widgets.video_area.probe_video_rotation",
+            return_value=(0, 0, 0),
+        )
+
+        va.load_video(Path("/fake/video.mp4"))
+
+        mock_set_rot.assert_called_once_with(0, 0, 0)
 
     def test_stop_clears_frame_and_source(self, qapp, mocker):
         """stop() should clear the renderer frame and release the media source."""

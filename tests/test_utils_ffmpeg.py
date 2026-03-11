@@ -15,6 +15,219 @@ def _fake_completed_process(command: list[str], stdout: bytes = b"") -> subproce
     return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr=b"")
 
 
+# -----------------------------------------------------------------------
+# probe_video_rotation
+# -----------------------------------------------------------------------
+
+
+class TestProbeVideoRotation:
+    """Tests for ``probe_video_rotation``."""
+
+    def test_returns_rotation_from_display_matrix(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Display Matrix side data with -90° (CCW) → 90° CW."""
+
+        video = tmp_path / "portrait.mov"
+
+        def fake_probe(src: Path) -> dict:
+            assert src == video
+            return {
+                "streams": [
+                    {
+                        "codec_type": "video",
+                        "width": 1920,
+                        "height": 1440,
+                        "side_data_list": [
+                            {
+                                "side_data_type": "Display Matrix",
+                                "rotation": -90,
+                            }
+                        ],
+                    }
+                ]
+            }
+
+        monkeypatch.setattr(ffmpeg, "probe_media", fake_probe)
+
+        cw, raw_w, raw_h = ffmpeg.probe_video_rotation(video)
+        assert cw == 90
+        assert raw_w == 1920
+        assert raw_h == 1440
+
+    def test_returns_zero_for_no_rotation(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """A video without display matrix returns 0."""
+
+        video = tmp_path / "landscape.mp4"
+
+        def fake_probe(src: Path) -> dict:
+            return {
+                "streams": [
+                    {
+                        "codec_type": "video",
+                        "width": 1920,
+                        "height": 1080,
+                    }
+                ]
+            }
+
+        monkeypatch.setattr(ffmpeg, "probe_media", fake_probe)
+
+        cw, raw_w, raw_h = ffmpeg.probe_video_rotation(video)
+        assert cw == 0
+        assert raw_w == 1920
+        assert raw_h == 1080
+
+    def test_returns_zero_on_ffprobe_failure(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """When ffprobe is unavailable, return (0, 0, 0)."""
+
+        video = tmp_path / "broken.mp4"
+
+        def failing_probe(src: Path) -> dict:
+            raise ExternalToolError("ffprobe not found")
+
+        monkeypatch.setattr(ffmpeg, "probe_media", failing_probe)
+
+        assert ffmpeg.probe_video_rotation(video) == (0, 0, 0)
+
+    def test_handles_180_rotation(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Display Matrix with 180° → 180° CW."""
+
+        video = tmp_path / "upside_down.mp4"
+
+        def fake_probe(src: Path) -> dict:
+            return {
+                "streams": [
+                    {
+                        "codec_type": "video",
+                        "width": 1920,
+                        "height": 1080,
+                        "side_data_list": [
+                            {
+                                "side_data_type": "Display Matrix",
+                                "rotation": 180,
+                            }
+                        ],
+                    }
+                ]
+            }
+
+        monkeypatch.setattr(ffmpeg, "probe_media", fake_probe)
+
+        cw, _, _ = ffmpeg.probe_video_rotation(video)
+        assert cw == 180
+
+    def test_handles_90_cw_rotation(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Display Matrix rotation value 90 (= 90° CCW) → 270° CW."""
+
+        video = tmp_path / "rotated.mp4"
+
+        def fake_probe(src: Path) -> dict:
+            return {
+                "streams": [
+                    {
+                        "codec_type": "video",
+                        "width": 1080,
+                        "height": 1920,
+                        "side_data_list": [
+                            {
+                                "side_data_type": "Display Matrix",
+                                "rotation": 90,
+                            }
+                        ],
+                    }
+                ]
+            }
+
+        monkeypatch.setattr(ffmpeg, "probe_media", fake_probe)
+
+        cw, _, _ = ffmpeg.probe_video_rotation(video)
+        assert cw == 270
+
+    def test_skips_non_video_streams(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Audio streams are ignored; first video stream is used."""
+
+        video = tmp_path / "clip.mov"
+
+        def fake_probe(src: Path) -> dict:
+            return {
+                "streams": [
+                    {"codec_type": "audio", "codec_name": "aac"},
+                    {
+                        "codec_type": "video",
+                        "width": 3840,
+                        "height": 2160,
+                        "side_data_list": [
+                            {
+                                "side_data_type": "Display Matrix",
+                                "rotation": -90,
+                            }
+                        ],
+                    },
+                ]
+            }
+
+        monkeypatch.setattr(ffmpeg, "probe_media", fake_probe)
+
+        cw, raw_w, raw_h = ffmpeg.probe_video_rotation(video)
+        assert cw == 90
+        assert raw_w == 3840
+        assert raw_h == 2160
+
+    def test_returns_zero_for_empty_streams(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """No streams at all returns (0, 0, 0)."""
+
+        video = tmp_path / "empty.mp4"
+
+        def fake_probe(src: Path) -> dict:
+            return {"streams": []}
+
+        monkeypatch.setattr(ffmpeg, "probe_media", fake_probe)
+
+        assert ffmpeg.probe_video_rotation(video) == (0, 0, 0)
+
+    def test_snaps_near_90_value(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """A non-exact rotation (e.g. -89.9°) snaps to 90° CW."""
+
+        video = tmp_path / "nearly.mp4"
+
+        def fake_probe(src: Path) -> dict:
+            return {
+                "streams": [
+                    {
+                        "codec_type": "video",
+                        "width": 1920,
+                        "height": 1080,
+                        "side_data_list": [
+                            {
+                                "side_data_type": "Display Matrix",
+                                "rotation": -89.9,
+                            }
+                        ],
+                    }
+                ]
+            }
+
+        monkeypatch.setattr(ffmpeg, "probe_media", fake_probe)
+
+        cw, _, _ = ffmpeg.probe_video_rotation(video)
+        assert cw == 90
+
+
 def test_extract_video_frame_uses_yuv_format_for_jpeg(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """Ensure JPEG extractions request a YUV pixel format."""
 

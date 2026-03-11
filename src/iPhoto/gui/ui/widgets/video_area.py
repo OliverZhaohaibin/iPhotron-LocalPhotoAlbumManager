@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+from pathlib import Path
 from typing import Optional
 
 from PySide6.QtCore import (
@@ -11,6 +13,7 @@ from PySide6.QtCore import (
     QPropertyAnimation,
     QTimer,
     Qt,
+    QUrl,
     Signal,
 )
 from PySide6.QtGui import (
@@ -38,18 +41,18 @@ except (ModuleNotFoundError, ImportError):  # pragma: no cover - handled by main
     QVideoFrame = None  # type: ignore[assignment, misc]
     QVideoSink = None  # type: ignore[assignment, misc]
 
-from pathlib import Path
-from PySide6.QtCore import QUrl
-
 from ....config import (
     PLAYER_CONTROLS_HIDE_DELAY_MS,
     PLAYER_FADE_IN_MS,
     PLAYER_FADE_OUT_MS,
     VIDEO_COMPLETE_HOLD_BACKSTEP_MS,
 )
+from ....utils.ffmpeg import probe_video_rotation
 from .player_bar import PlayerBar
 from .video_renderer_widget import VideoRendererWidget
 from ..palette import viewer_surface_color
+
+_log = logging.getLogger(__name__)
 
 
 class VideoArea(QWidget):
@@ -242,6 +245,19 @@ class VideoArea(QWidget):
     def load_video(self, path: Path) -> None:
         """Load a video file for playback."""
         self._renderer.clear_frame()
+
+        # Probe the container-level display-matrix rotation from ffprobe
+        # *before* setting the source.  The renderer uses the probed value
+        # as the primary rotation source (more reliable across platforms
+        # than Qt's ``QVideoFrameFormat.rotation()``).
+        cw_deg, raw_w, raw_h = probe_video_rotation(path)
+        self._renderer.set_container_rotation(cw_deg, raw_w, raw_h)
+        if cw_deg:
+            _log.debug(
+                "Container rotation for %s: %d° CW (raw %dx%d)",
+                path.name, cw_deg, raw_w, raw_h,
+            )
+
         self._player.setSource(QUrl.fromLocalFile(str(path)))
         # Do not auto-play; let the coordinator decide.
         # But ensure we are at start

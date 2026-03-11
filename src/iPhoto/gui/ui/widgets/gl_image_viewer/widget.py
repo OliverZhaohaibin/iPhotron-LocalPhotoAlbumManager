@@ -81,6 +81,7 @@ class GLImageViewer(QRhiWidget):
     def __init__(self, parent: QRhiWidget | None = None) -> None:
         super().__init__(parent)
         self.setMouseTracking(True)
+        self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent, True)
 
         # Use the same OpenGL backend as the QRhiWidget-based video renderer
         # so that both widgets share a single rendering infrastructure.
@@ -509,12 +510,6 @@ class GLImageViewer(QRhiWidget):
 
     def render(self, cb) -> None:  # type: ignore[override]
         """QRhiWidget override: render the current image via raw OpenGL."""
-        if not self._gl_initialized:
-            return
-        gf = self._gl_funcs
-        if gf is None or self._renderer is None:
-            return
-
         output_size = self.renderTarget().pixelSize()
         if output_size.isEmpty():
             return
@@ -528,6 +523,16 @@ class GLImageViewer(QRhiWidget):
             QColor(0, 0, 0, 255),
             QRhiDepthStencilClearValue(),
         )
+
+        if not self._gl_initialized:
+            cb.endPass()
+            return
+
+        gf = self._gl_funcs
+        if gf is None or self._renderer is None:
+            cb.endPass()
+            return
+
         cb.beginExternal()
 
         # --- All raw OpenGL calls happen between beginExternal/endExternal ---

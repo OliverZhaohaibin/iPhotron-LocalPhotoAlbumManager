@@ -2,6 +2,10 @@
 GPU-accelerated image viewer (pure OpenGL texture upload; pixel-accurate zoom/pan).
 - Ensures magnification samples the ORIGINAL pixels (no Qt/FBO resampling).
 - Uses GL 3.3 Core, VAO/VBO, and a raw glTexImage2D + glTexSubImage2D upload path.
+- Rendered inside a QRhiWidget via beginExternal()/endExternal() so that both the
+  image viewer and the QRhiWidget-based video renderer share a unified rendering
+  backend, eliminating the intermittent GPU state corruption (花屏) that occurred
+  when mixing QOpenGLWidget and QRhiWidget in the same QStackedWidget.
 """
 
 from __future__ import annotations
@@ -18,13 +22,13 @@ from PySide6.QtGui import (
     QImage,
     QMouseEvent,
     QPixmap,
-    QSurfaceFormat,
+    QRhiDepthStencilClearValue,
     QWheelEvent,
 )
 from PySide6.QtOpenGL import (
     QOpenGLFunctions_3_3_Core,
 )
-from PySide6.QtOpenGLWidgets import QOpenGLWidget
+from PySide6.QtWidgets import QRhiWidget
 
 from ..gl_crop_controller import CropInteractionController
 from ..gl_renderer import GLRenderer
@@ -51,8 +55,16 @@ except Exception:
         return QColor(0, 0, 0)
 
 
-class GLImageViewer(QOpenGLWidget):
-    """A QWidget that displays GPU-rendered images with pixel-accurate zoom."""
+class GLImageViewer(QRhiWidget):
+    """A QWidget that displays GPU-rendered images with pixel-accurate zoom.
+
+    Internally uses raw OpenGL 3.3 Core via ``beginExternal()`` /
+    ``endExternal()`` within the QRhi render pass.  This makes it a
+    QRhiWidget, the same base class as the video renderer, so that both
+    widgets share a single rendering backend inside the ``QStackedWidget``
+    and avoid the intermittent GPU state corruption that occurred when
+    mixing ``QOpenGLWidget`` and ``QRhiWidget``.
+    """
 
     # Signals（保持与旧版一致）
     replayRequested = Signal()
@@ -65,18 +77,30 @@ class GLImageViewer(QOpenGLWidget):
     cropInteractionStarted = Signal()
     cropInteractionFinished = Signal()
     colorPicked = Signal(float, float, float)
+    firstFrameReady = Signal()
+    """Emitted once after the first opaque frame has been rendered."""
 
-    def __init__(self, parent: QOpenGLWidget | None = None) -> None:
+    def __init__(self, parent: QRhiWidget | None = None) -> None:
         super().__init__(parent)
         self.setMouseTracking(True)
 
-        # 强制 3.3 Core
-        fmt = QSurfaceFormat()
-        fmt.setVersion(3, 3)
-        fmt.setProfile(QSurfaceFormat.CoreProfile)
-        self.setFormat(fmt)
+        # Use the same OpenGL backend as the QRhiWidget-based video renderer
+        # so that both widgets share a single rendering infrastructure.
+        # Must be called in the constructor — Qt docs state that calling
+        # setApi() after the widget is shown may have no effect.
+        self.setApi(QRhiWidget.Api.OpenGL)
+
+        # Declare that this widget always produces fully opaque output so
+        # the compositor never expects transparency from the first paint.
+        self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent, True)
+        # Prevent the main window's WA_TranslucentBackground from cascading
+        # into this widget and causing transparent first-frame flashes.
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, False)
+
         self._gl_funcs: QOpenGLFunctions_3_3_Core | None = None
         self._renderer: GLRenderer | None = None
+        self._gl_initialized = False
+        self._first_render_done = False
 
         # 状态
         self._image: QImage | None = None
@@ -86,16 +110,16 @@ class GLImageViewer(QOpenGLWidget):
         # Texture resource manager
         self._texture_manager = TextureResourceManager(
             renderer_provider=lambda: self._renderer,
-            context_provider=lambda: self.context(),
-            make_current=self.makeCurrent,
-            done_current=self.doneCurrent,
+            context_provider=lambda: self.rhi(),
+            make_current=self._make_gl_current,
+            done_current=self._done_gl_current,
         )
 
         # Adjustment LUT applicator
         self._adjustment_applicator = AdjustmentApplicator(
             renderer_provider=lambda: self._renderer,
-            make_current=self.makeCurrent,
-            done_current=self.doneCurrent,
+            make_current=self._make_gl_current,
+            done_current=self._done_gl_current,
         )
 
         # Surface colour / fullscreen handler
@@ -153,16 +177,41 @@ class GLImageViewer(QOpenGLWidget):
             on_cancel_auto_crop_lock=self._cancel_auto_crop_lock,
         )
 
+    # ------------------------------------------------------------------
+    # GL context helpers (replace QOpenGLWidget.makeCurrent/doneCurrent)
+    # ------------------------------------------------------------------
+    def _make_gl_current(self) -> None:
+        """Make the underlying OpenGL context current for raw GL calls.
+
+        Used by helpers that need to issue GL calls outside the
+        ``initialize()``/``render()`` cycle (e.g. texture deletion,
+        LUT upload, offscreen render).
+        """
+        rhi = self.rhi()
+        if rhi is not None:
+            rhi.makeThreadLocalNativeContextCurrent()
+
+    @staticmethod
+    def _done_gl_current() -> None:
+        """Release the GL context after out-of-render-cycle GL work.
+
+        With ``QRhiWidget`` / ``QRhi`` the context lifetime is managed by
+        the framework, so this is intentionally a no-op.  It exists solely
+        to satisfy the callback signature expected by
+        ``TextureResourceManager``, ``AdjustmentApplicator`` and
+        ``OffscreenRenderer``.
+        """
+
     # --------------------------- Public API ---------------------------
 
     def shutdown(self) -> None:
         """Clean up GL resources."""
-        self.makeCurrent()
+        self._make_gl_current()
         try:
             if self._renderer is not None:
                 self._renderer.destroy_resources()
         finally:
-            self.doneCurrent()
+            self._done_gl_current()
 
     def set_image(
         self,
@@ -426,9 +475,9 @@ class GLImageViewer(QOpenGLWidget):
         """
         return OffscreenRenderer.render(
             renderer=self._renderer,
-            context=self.context(),
-            make_current=self.makeCurrent,
-            done_current=self.doneCurrent,
+            context=self.rhi(),
+            make_current=self._make_gl_current,
+            done_current=self._done_gl_current,
             image=self._image,
             adjustments=adjustments or self._adjustments,
             target_size=target_size,
@@ -437,7 +486,17 @@ class GLImageViewer(QOpenGLWidget):
 
     # --------------------------- GL lifecycle ---------------------------
 
-    def initializeGL(self) -> None:
+    def initialize(self, cb) -> None:  # type: ignore[override]
+        """QRhiWidget override: initialise raw GL resources once."""
+        if self._gl_initialized:
+            return
+        rhi = self.rhi()
+        if rhi is None:
+            _LOGGER.warning("QRhi not available — image rendering disabled")
+            return
+        # Make the underlying OpenGL context current so we can issue raw GL
+        # calls (create shaders, VAO, VBO, textures, …).
+        rhi.makeThreadLocalNativeContextCurrent()
         self._gl_funcs = QOpenGLFunctions_3_3_Core()
         self._gl_funcs.initializeOpenGLFunctions()
         gf = self._gl_funcs
@@ -452,15 +511,66 @@ class GLImageViewer(QOpenGLWidget):
 
         dpr = self.devicePixelRatioF()
         gf.glViewport(0, 0, int(self.width() * dpr), int(self.height() * dpr))
+        self._gl_initialized = True
 
-    def paintGL(self) -> None:
+    def releaseResources(self) -> None:  # type: ignore[override]
+        """QRhiWidget override: release GL resources."""
+        self._gl_initialized = False
+        if self._renderer is not None:
+            rhi = self.rhi()
+            if rhi is not None:
+                # Ensure the underlying OpenGL context is current before
+                # issuing raw GL deletes in GLRenderer.destroy_resources().
+                rhi.makeThreadLocalNativeContextCurrent()
+            self._renderer.destroy_resources()
+
+    def render(self, cb) -> None:  # type: ignore[override]
+        """QRhiWidget override: render the current image via raw OpenGL."""
+        if not self._gl_initialized:
+            # GL resources are not yet available but we MUST still clear the
+            # render target with an opaque colour so the surface is never
+            # transparent.  An early bare return would leave the texture
+            # uninitialised, compositing as transparent under the main
+            # window's WA_TranslucentBackground.
+            bg = self._fullscreen_handler.backdrop_color
+            cb.beginPass(
+                self.renderTarget(),
+                QColor.fromRgbF(bg.redF(), bg.greenF(), bg.blueF(), 1.0),
+                QRhiDepthStencilClearValue(),
+            )
+            cb.endPass()
+            self._emit_first_frame_ready()
+            return
         gf = self._gl_funcs
         if gf is None or self._renderer is None:
+            bg = self._fullscreen_handler.backdrop_color
+            cb.beginPass(
+                self.renderTarget(),
+                QColor.fromRgbF(bg.redF(), bg.greenF(), bg.blueF(), 1.0),
+                QRhiDepthStencilClearValue(),
+            )
+            cb.endPass()
+            self._emit_first_frame_ready()
             return
 
-        dpr = self.devicePixelRatioF()
-        vw = max(1, int(round(self.width() * dpr)))
-        vh = max(1, int(round(self.height() * dpr)))
+        output_size = self.renderTarget().pixelSize()
+        if output_size.isEmpty():
+            return
+
+        # Start a QRhi render pass (required by QRhiWidget) then immediately
+        # switch to raw OpenGL via beginExternal()/endExternal().  This lets
+        # us keep all existing GL 3.3 shader code unchanged while both
+        # widgets share the same QRhi rendering infrastructure.
+        cb.beginPass(
+            self.renderTarget(),
+            QColor(0, 0, 0, 255),
+            QRhiDepthStencilClearValue(),
+        )
+        cb.beginExternal()
+
+        # --- All raw OpenGL calls happen between beginExternal/endExternal ---
+        vw = max(1, output_size.width())
+        vh = max(1, output_size.height())
         gf.glViewport(0, 0, vw, vh)
         bg = self._fullscreen_handler.backdrop_color
         gf.glClearColor(bg.redF(), bg.greenF(), bg.blueF(), 1.0)
@@ -475,6 +585,9 @@ class GLImageViewer(QOpenGLWidget):
             straighten, rotate_steps, _ = self._rotation_parameters()
             self._update_cover_scale(straighten, rotate_steps)
         if not self._renderer.has_texture():
+            cb.endExternal()
+            cb.endPass()
+            self._emit_first_frame_ready()
             return
 
         effective_scale = self._transform_controller.get_effective_scale()
@@ -531,6 +644,17 @@ class GLImageViewer(QOpenGLWidget):
                     crop_rect=crop_rect,
                     faded=self._crop_controller.is_faded_out(),
                 )
+
+        # --- End raw OpenGL block ---
+        cb.endExternal()
+        cb.endPass()
+        self._emit_first_frame_ready()
+
+    def _emit_first_frame_ready(self) -> None:
+        """Notify listeners that the first opaque frame has been rendered."""
+        if not self._first_render_done:
+            self._first_render_done = True
+            self.firstFrameReady.emit()
 
     # --------------------------- Crop helpers ---------------------------
 
@@ -630,12 +754,10 @@ class GLImageViewer(QOpenGLWidget):
     def wheelEvent(self, event: QWheelEvent) -> None:
         self._input_handler.handle_wheel(event)
 
-    def resizeGL(self, w: int, h: int) -> None:
-        gf = self._gl_funcs
-        if not gf:
-            return
-        dpr = self.devicePixelRatioF()
-        gf.glViewport(0, 0, max(1, int(round(w * dpr))), max(1, int(round(h * dpr))))
+    # QRhiWidget does not have a resizeGL callback.  The viewport is set
+    # dynamically at the start of each render() call using
+    # ``self.renderTarget().pixelSize()``, which automatically accounts for
+    # DPR and window resizing.
 
     def resizeEvent(self, event) -> None:  # type: ignore[override]
         super().resizeEvent(event)
@@ -647,11 +769,8 @@ class GLImageViewer(QOpenGLWidget):
 
     def showEvent(self, event) -> None:  # type: ignore[override]
         super().showEvent(event)
-        # QOpenGLWidget may retain a stale framebuffer when it becomes
-        # visible (e.g. after a view-stack transition from the gallery).
-        # This is most noticeable on Linux inside WA_TranslucentBackground
-        # windows, but the explicit update is harmless on other platforms
-        # and keeps the surface fresh in all configurations.
+        # Request a fresh render when the widget becomes visible again
+        # (e.g. after switching back from the video surface).
         self.update()
 
     # --------------------------- Cursor management and helpers ---------------------------

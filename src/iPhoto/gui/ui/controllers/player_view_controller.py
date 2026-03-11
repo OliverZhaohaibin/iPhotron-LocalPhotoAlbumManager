@@ -111,9 +111,33 @@ class PlayerViewController(QObject):
         self._defer_still_updates = False
         self._pending_still: Optional[tuple[Path, QImage, dict]] = None
 
+        # Connect to firstFrameReady from both QRhiWidget subclasses so we
+        # can remove the opaque init cover once either widget has rendered
+        # its first opaque frame.
+        self._image_viewer.firstFrameReady.connect(self._on_rhi_first_frame)
+        self._video_area.renderer.firstFrameReady.connect(
+            self._on_rhi_first_frame,
+        )
+
     # ------------------------------------------------------------------
     # High-level surface selection helpers
     # ------------------------------------------------------------------
+
+    def _on_rhi_first_frame(self) -> None:
+        """Hide the opaque init cover once a QRhiWidget has rendered."""
+        # Walk up from the player_stack to find the DetailPageWidget and
+        # ask it to remove the init cover.  The cover is only needed for
+        # the very first render; subsequent switches are instant because
+        # the GPU context already exists.
+        from ..widgets.detail_page import DetailPageWidget
+
+        widget = self._player_stack.parent()
+        while widget is not None:
+            if isinstance(widget, DetailPageWidget):
+                widget.hide_rhi_init_cover()
+                break
+            widget = widget.parent()
+
     def show_placeholder(self) -> None:
         """Display the placeholder widget and clear any previous image."""
         self._video_area.hide_controls(animate=False)

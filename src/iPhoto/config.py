@@ -57,6 +57,11 @@ VIDEO_MEMORY_CACHE_MAX_BYTES: Final[int] = 512 * 1024 * 1024
 # pause so that the last frame remains visible instead of flashing to black.
 VIDEO_COMPLETE_HOLD_BACKSTEP_MS: Final[int] = 80
 
+# Minimum interval between successive play_asset() calls.  Rapid key presses
+# (e.g. holding an arrow key) are coalesced so that only the last requested
+# row triggers the expensive load/play cycle.
+PLAY_ASSET_DEBOUNCE_MS: Final[int] = 60
+
 # Delay/animation timings for the floating playback controls.
 PLAYER_CONTROLS_HIDE_DELAY_MS: Final[int] = 2000
 PLAYER_FADE_IN_MS: Final[int] = 150

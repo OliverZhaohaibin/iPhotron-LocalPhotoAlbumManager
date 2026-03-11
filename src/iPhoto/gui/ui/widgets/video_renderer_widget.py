@@ -514,9 +514,7 @@ class VideoRendererWidget(QRhiWidget):
             y_data_size = y_bytes_per_line * h
             y_data = bytes(y_data_ptr[:y_data_size])
 
-            y_sub = QRhiTextureSubresourceUploadDescription(
-                y_data, y_bytes_per_line * h
-            )
+            y_sub = QRhiTextureSubresourceUploadDescription(y_data)
             y_sub.setDataStride(y_bytes_per_line)
             y_upload = QRhiTextureUploadDescription(
                 QRhiTextureUploadEntry(0, 0, y_sub)
@@ -532,9 +530,7 @@ class VideoRendererWidget(QRhiWidget):
             uv_data_size = uv_bytes_per_line * uv_h
             uv_data = bytes(uv_data_ptr[:uv_data_size])
 
-            uv_sub = QRhiTextureSubresourceUploadDescription(
-                uv_data, uv_bytes_per_line * uv_h
-            )
+            uv_sub = QRhiTextureSubresourceUploadDescription(uv_data)
             uv_sub.setDataStride(uv_bytes_per_line)
             uv_upload = QRhiTextureUploadDescription(
                 QRhiTextureUploadEntry(0, 0, uv_sub)

@@ -189,30 +189,18 @@ class TestVideoRendererWidget:
         # Pre-rotated → no additional rotation
         assert w._rotate90_steps == 0
 
-    def test_no_fallback_when_qt_reports_rotation(self, qapp):
-        """When Qt already reports the correct rotation, do not override."""
+    def test_no_fallback_when_no_container_rotation(self, qapp):
+        """When container has no rotation, steps stay at 0."""
         w = VideoRendererWidget()
-        w.set_container_rotation(270, 1920, 1440)
+        w.set_container_rotation(0, 1920, 1440)
 
         from PySide6.QtCore import QSize
         fmt = QVideoFrameFormat(
             QSize(1920, 1440), QVideoFrameFormat.PixelFormat.Format_RGBA8888
         )
         frame = QVideoFrame(fmt)
-
-        # Simulate Qt reporting the correct rotation via the format
-        # We directly check: if rot_deg != 0, the fallback branch is skipped.
-        # Since QVideoFrameFormat default rotation is 0° we simulate
-        # a non-zero Qt rotation by checking that container_rotation_cw
-        # is not used when Qt does report rotation.
-        # For this test, Qt reports 0 but container has rotation.
-        # This is actually covered by test_fallback_rotation_when_qt_reports_zero.
-        # Here we verify that no container rotation is needed when no rotation
-        # is set.
-        w2 = VideoRendererWidget()
-        w2.set_container_rotation(0, 1920, 1440)
-        w2.update_frame(frame)
-        assert w2._rotate90_steps == 0
+        w.update_frame(frame)
+        assert w._rotate90_steps == 0
 
     def test_update_frame_sets_has_frame(self, qapp):
         """update_frame should set _has_frame to True when a valid frame arrives."""

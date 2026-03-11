@@ -398,16 +398,13 @@ def probe_video_rotation(source: Path) -> tuple[int, int, int]:
         # Convert the raw angle (which follows ``av_display_rotation_get``
         # sign convention) to clockwise degrees matching Qt's
         # ``QVideoFrameFormat.Rotation`` values.
-        # In Python ``-90 % 360 == 270`` which is exactly the mapping Qt
-        # performs internally.
-        raw_angle = int(round(rotation))
-        cw = raw_angle % 360
+        # Snap to the nearest 90° first so non-exact values (e.g. -89.9°)
+        # still map correctly, then convert via Python modulo
+        # (``-90 % 360 == 270``).
+        snapped = round(rotation / 90.0) * 90
+        cw = int(snapped) % 360
 
-        # Snap to the nearest multiple of 90° so that non-exact values
-        # (e.g. -89.9°) still map to a valid step.
-        snapped = (round(cw / 90) * 90) % 360
-
-        return (snapped, raw_w, raw_h)
+        return (cw, raw_w, raw_h)
 
     return (0, 0, 0)
 

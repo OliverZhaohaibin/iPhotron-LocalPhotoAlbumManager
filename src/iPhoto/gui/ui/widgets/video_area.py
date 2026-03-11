@@ -254,7 +254,7 @@ class VideoArea(QWidget):
         # renderer uses the probed value as a fallback.
         try:
             cw_deg, raw_w, raw_h = probe_video_rotation(path)
-        except Exception:  # pragma: no cover - ffprobe not available
+        except Exception:
             cw_deg, raw_w, raw_h = 0, 0, 0
         self._renderer.set_container_rotation(cw_deg, raw_w, raw_h)
         if cw_deg:

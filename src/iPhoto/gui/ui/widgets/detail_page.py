@@ -7,6 +7,7 @@ from PySide6.QtGui import QAction, QActionGroup, QColor, QFont
 from PySide6.QtWidgets import (
     QFrame,
     QGraphicsDropShadowEffect,
+    QGridLayout,
     QHBoxLayout,
     QLabel,
     QPushButton,
@@ -351,18 +352,24 @@ class DetailPageWidget(QWidget):
         player_container.setAttribute(
             Qt.WidgetAttribute.WA_TranslucentBackground, False,
         )
-        player_layout = QVBoxLayout(player_container)
+        # Use QGridLayout so the init cover and the player_stack can share
+        # the same cell (0, 0).  The layout automatically sizes both
+        # children to fill the available space without manual geometry
+        # management.
+        player_layout = QGridLayout(player_container)
         player_layout.setContentsMargins(0, 0, 0, 0)
         player_layout.setSpacing(0)
-        player_layout.addWidget(self.player_stack)
+        player_layout.addWidget(self.player_stack, 0, 0)
         self.player_container = player_container
 
         # Opaque cover that hides the QRhiWidget area until its first frame
         # has been rendered.  QRhiWidget replaces its backing-store region
         # with its own texture; before the first render() call that texture
-        # is uninitialised / transparent.  This cover sits on top of the
-        # player_stack and is removed by ``hide_rhi_init_cover()`` once any
-        # QRhiWidget child signals ``firstFrameReady``.
+        # is uninitialised / transparent.  This cover occupies the same
+        # grid cell as the player_stack and is raised above it so it
+        # visually hides any transparent texture.  It is removed by
+        # ``hide_rhi_init_cover()`` once any QRhiWidget child signals
+        # ``firstFrameReady``.
         self._rhi_init_cover = QWidget(player_container)
         self._rhi_init_cover.setAutoFillBackground(True)
         self._rhi_init_cover.setAttribute(
@@ -371,6 +378,7 @@ class DetailPageWidget(QWidget):
         self._rhi_init_cover.setStyleSheet(
             "background-color: palette(window);"
         )
+        player_layout.addWidget(self._rhi_init_cover, 0, 0)
         self._rhi_init_cover.raise_()
 
         self.live_badge.setParent(player_container)
@@ -530,22 +538,6 @@ class DetailPageWidget(QWidget):
             self._rhi_init_cover.hide()
             self._rhi_init_cover.deleteLater()
             self._rhi_init_cover = None
-
-    def _update_rhi_init_cover_geometry(self) -> None:
-        """Keep the init cover sized to match the player_stack area."""
-        if (
-            self._rhi_init_cover is not None
-            and self._rhi_init_cover.isVisible()
-            and self.player_container is not None
-        ):
-            self._rhi_init_cover.setGeometry(
-                self.player_stack.geometry()
-            )
-            self._rhi_init_cover.raise_()
-
-    def resizeEvent(self, event) -> None:  # type: ignore[override]
-        super().resizeEvent(event)
-        self._update_rhi_init_cover_geometry()
 
 
 __all__ = ["DetailPageWidget"]

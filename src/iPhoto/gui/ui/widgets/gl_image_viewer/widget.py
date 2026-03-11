@@ -90,6 +90,7 @@ class GLImageViewer(QRhiWidget):
         self._gl_funcs: QOpenGLFunctions_3_3_Core | None = None
         self._renderer: GLRenderer | None = None
         self._gl_initialized = False
+        self._texture_needs_upload = False
 
         # 状态
         self._image: QImage | None = None
@@ -241,6 +242,7 @@ class GLImageViewer(QRhiWidget):
         # Update texture resource tracking
         self._texture_manager.set_image(image, image_source)
         self._image = image
+        self._texture_needs_upload = image is not None and not image.isNull()
         self._adjustments = dict(adjustments or {})
         self._update_crop_perspective_state()
         self._adjustment_applicator.update_curve_lut_if_needed(self._adjustments)
@@ -251,6 +253,7 @@ class GLImageViewer(QRhiWidget):
         if image is None or image.isNull():
             # Clear resources and reset state
             self._texture_manager.clear_image()
+            self._texture_needs_upload = False
             self._auto_crop_view_locked = False
             self._transform_controller.set_image_cover_scale(1.0)
 
@@ -264,7 +267,9 @@ class GLImageViewer(QRhiWidget):
         """Display *pixmap* without changing the tracked image source."""
 
         if pixmap and not pixmap.isNull():
-            self.set_image(pixmap.toImage(), {}, image_source=self.current_image_source())
+            # Force a fresh upload for placeholder content so the first frame
+            # never reuses stale GPU texture data from the previous asset.
+            self.set_image(pixmap.toImage(), {}, image_source=None)
         else:
             self.set_image(None, {}, image_source=None)
 
@@ -546,9 +551,10 @@ class GLImageViewer(QRhiWidget):
         if (
             self._image is not None
             and not self._image.isNull()
-            and not self._renderer.has_texture()
+            and (self._texture_needs_upload or not self._renderer.has_texture())
         ):
             self._renderer.upload_texture(self._image)
+            self._texture_needs_upload = False
             straighten, rotate_steps, _ = self._rotation_parameters()
             self._update_cover_scale(straighten, rotate_steps)
         if not self._renderer.has_texture():

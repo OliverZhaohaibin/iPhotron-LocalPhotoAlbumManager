@@ -8,7 +8,7 @@ from typing import Callable, Optional
 
 from PySide6.QtCore import QPointF, QRectF, Qt
 from PySide6.QtGui import QMouseEvent, QWheelEvent
-from PySide6.QtOpenGLWidgets import QOpenGLWidget
+from PySide6.QtWidgets import QWidget
 
 
 def compute_fit_to_view_scale(
@@ -97,7 +97,7 @@ class ViewTransformController:
 
     def __init__(
         self,
-        viewer: QOpenGLWidget,
+        viewer: QWidget,
         *,
         texture_size_provider: Callable[[], tuple[int, int]],
         on_zoom_changed: Callable[[float], None],

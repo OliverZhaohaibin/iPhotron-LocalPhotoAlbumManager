@@ -34,6 +34,18 @@ uniform vec4  uSCRange0[6];
 uniform vec4  uSCRange1[6];
 uniform bool  uSCEnabled;
 
+uniform float uDefinition;   // [0.0, 0.2] definition / clarity strength
+
+uniform float uDenoiseAmount;  // bilateral filter strength (0 = off)
+
+uniform float uSharpenIntensity;  // [0, 1] sharpening amount
+uniform float uSharpenEdges;      // [0, 1] edge detection threshold
+uniform float uSharpenFalloff;    // [0, 1] transition smoothness
+
+uniform float uVignetteStrength;  // [0, 1] edge-darkening intensity
+uniform float uVignetteRadius;    // [0, 1] inner radius
+uniform float uVignetteSoftness;  // [0.1, 1.0] falloff width
+
 uniform vec2  uViewSize;
 uniform vec2  uTexSize;
 uniform float uScale;
@@ -348,6 +360,140 @@ vec3 apply_levels(vec3 color) {
     return vec3(r, g, b);
 }
 
+vec3 apply_definition(vec3 color, vec2 uv) {
+    // Mipmap-based local contrast enhancement (Definition / Clarity).
+    // Samples the original texture at LOD 3, 5, 7 to compute a local mean,
+    // then re-injects the high-frequency detail with midtone protection.
+    vec3 blur1 = textureLod(uTex, uv, 3.0).rgb;
+    vec3 blur2 = textureLod(uTex, uv, 5.0).rgb;
+    vec3 blur3 = textureLod(uTex, uv, 7.0).rgb;
+    vec3 localMean = (blur1 + blur2 + blur3) / 3.0;
+    vec3 detail = color - localMean;
+
+    float luma = dot(color, vec3(0.2126, 0.7152, 0.0722));
+    float midtoneMask = 1.0 - pow(abs(2.0 * luma - 1.0), 2.0);
+
+    float amount = uDefinition * 3.0;
+    return clamp(color + detail * amount * (0.3 + 0.7 * midtoneMask), 0.0, 1.0);
+}
+
+vec3 compute_denoised_source(vec2 uv, vec3 centerColor) {
+    // Bilateral filter for edge-preserving noise reduction.
+    // Matches the CPU implementation in denoise_resolver.py.
+    // ``centerColor`` is passed in from the caller so that the centre texel
+    // fetch is not duplicated when this function is used inside apply_denoise.
+    const int RADIUS = 3;
+    const float SIGMA_SPACE = 1.5;
+
+    vec2 texSize = vec2(textureSize(uTex, 0));
+    vec2 invTexSize = 1.0 / texSize;
+
+    float sigmaColor = max(uDenoiseAmount * 0.075, 0.001);
+
+    vec3 resultColor = vec3(0.0);
+    float totalWeight = 0.0;
+
+    for (int y = -RADIUS; y <= RADIUS; ++y) {
+        for (int x = -RADIUS; x <= RADIUS; ++x) {
+            vec2 offset = vec2(float(x), float(y));
+            vec3 sampleColor = texture(uTex, uv + offset * invTexSize).rgb;
+
+            float spaceDist2 = dot(offset, offset);
+            float spaceWeight = exp(-spaceDist2 / (2.0 * SIGMA_SPACE * SIGMA_SPACE));
+
+            vec3 colorDiff = sampleColor - centerColor;
+            float colorDist2 = dot(colorDiff, colorDiff);
+            float colorWeight = exp(-colorDist2 / (2.0 * sigmaColor * sigmaColor));
+
+            float weight = spaceWeight * colorWeight;
+            resultColor += sampleColor * weight;
+            totalWeight += weight;
+        }
+    }
+
+    return resultColor / totalWeight;
+}
+
+vec3 apply_denoise(vec3 adjustedColor, vec2 uv) {
+    // Preserve all adjustments already accumulated in ``adjustedColor`` and
+    // only add the denoise delta measured on the source texture.  Without
+    // this delta-based merge, enabling denoise replaces the current pipeline
+    // output with raw-texture bilateral samples, which wipes Selective Color
+    // and other earlier adjustments.
+    vec3 sourceCenter = texture(uTex, uv).rgb;
+    vec3 sourceDenoised = compute_denoised_source(uv, sourceCenter);
+    vec3 denoiseDelta = sourceDenoised - sourceCenter;
+    return clamp(adjustedColor + denoiseDelta, 0.0, 1.0);
+}
+
+vec3 apply_sharpen(vec3 adjustedColor, vec2 uv) {
+    // Unsharp Mask with edge masking.
+    // Computes the high-pass + edge mask from the source texture (uTex) and
+    // applies the resulting sharpening delta to the already-processed
+    // ``adjustedColor`` so earlier pipeline stages (selective color, denoise,
+    // etc.) are preserved.  The CPU ``sharpen_resolver`` instead runs on the
+    // already-adjusted image, so GPU preview and CPU/export may diverge
+    // slightly when upstream adjustments are active.
+    vec2 texSize = vec2(textureSize(uTex, 0));
+    vec2 texel = 1.0 / texSize;
+
+    // 1. Sample 3x3 neighbourhood from source texture
+    vec3 c00 = texture(uTex, uv + vec2(-texel.x, -texel.y)).rgb;
+    vec3 c10 = texture(uTex, uv + vec2( 0.0,     -texel.y)).rgb;
+    vec3 c20 = texture(uTex, uv + vec2( texel.x, -texel.y)).rgb;
+
+    vec3 c01 = texture(uTex, uv + vec2(-texel.x,  0.0)).rgb;
+    vec3 c11 = texture(uTex, uv).rgb; // center pixel
+    vec3 c21 = texture(uTex, uv + vec2( texel.x,  0.0)).rgb;
+
+    vec3 c02 = texture(uTex, uv + vec2(-texel.x,  texel.y)).rgb;
+    vec3 c12 = texture(uTex, uv + vec2( 0.0,      texel.y)).rgb;
+    vec3 c22 = texture(uTex, uv + vec2( texel.x,  texel.y)).rgb;
+
+    // 2. Approximate Gaussian blur
+    vec3 blur = c11 * 0.25
+              + (c10 + c01 + c21 + c12) * 0.125
+              + (c00 + c20 + c02 + c22) * 0.0625;
+
+    // 3. High-pass detail (Unsharp Mask) on source
+    vec3 highPass = c11 - blur;
+
+    // 4. Local luminance contrast for edge detection
+    vec3 lumaCoef = vec3(0.299, 0.587, 0.114);
+    float lum00 = dot(c00, lumaCoef); float lum10 = dot(c10, lumaCoef);
+    float lum20 = dot(c20, lumaCoef); float lum01 = dot(c01, lumaCoef);
+    float lum11 = dot(c11, lumaCoef); float lum21 = dot(c21, lumaCoef);
+    float lum02 = dot(c02, lumaCoef); float lum12 = dot(c12, lumaCoef);
+    float lum22 = dot(c22, lumaCoef);
+
+    float lMin = min(lum00, min(lum10, min(lum20, min(lum01, min(lum11, min(lum21, min(lum02, min(lum12, lum22))))))));
+    float lMax = max(lum00, max(lum10, max(lum20, max(lum01, max(lum11, max(lum21, max(lum02, max(lum12, lum22))))))));
+    float localContrast = lMax - lMin;
+
+    // 5. Edge mask (smoothstep)
+    float threshold = uSharpenEdges * 0.4;
+    float band = max(uSharpenFalloff * 0.4, 0.001);
+    float mask = smoothstep(threshold, threshold + band, localContrast);
+
+    // 6. Compute sharpening delta on source, apply to processed colour
+    float amount = uSharpenIntensity * 5.0;
+    vec3 sharpenDelta = highPass * amount * mask;
+    return clamp(adjustedColor + sharpenDelta, 0.0, 1.0);
+}
+
+vec3 apply_vignette(vec3 c, vec2 uv) {
+    vec2 centered = uv - vec2(0.5);
+    float dist = length(centered) * 1.41421356;
+
+    float inner = clamp(uVignetteRadius, 0.0, 1.0);
+    float soft  = clamp(uVignetteSoftness, 0.1, 1.0);
+
+    float vignette = smoothstep(inner, inner + soft, dist);
+    float darken   = 1.0 - vignette * clamp(uVignetteStrength, 0.0, 1.0);
+
+    return c * darken;
+}
+
 void main() {
     if (uScale <= 0.0) {
         discard;
@@ -432,6 +578,26 @@ void main() {
     // Apply selective color after levels, before B&W
     if (uSCEnabled) {
         c = apply_selective_color(c);
+    }
+
+    // Apply definition (clarity) after selective color, before denoise
+    if (uDefinition > 0.0001) {
+        c = apply_definition(c, uv_tex);
+    }
+
+    // Apply noise reduction (denoise) after definition, before sharpen
+    if (uDenoiseAmount > 0.005) {
+        c = apply_denoise(c, uv_tex);
+    }
+
+    // Apply sharpen after denoise, before vignette
+    if (uSharpenIntensity > 0.0001) {
+        c = apply_sharpen(c, uv_tex);
+    }
+
+    // Apply vignette after sharpen, before B&W
+    if (uVignetteStrength > 0.0001) {
+        c = apply_vignette(c, uv_tex);
     }
 
     if (uBWEnabled) {

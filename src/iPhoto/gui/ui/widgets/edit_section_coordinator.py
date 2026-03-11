@@ -12,6 +12,18 @@ from ....core.color_resolver import COLOR_KEYS, ColorStats
 from ....core.curve_resolver import DEFAULT_CURVE_POINTS
 from ....core.levels_resolver import DEFAULT_LEVELS_HANDLES
 from ....core.selective_color_resolver import DEFAULT_SELECTIVE_COLOR_RANGES
+from ....core.definition_resolver import DEFAULT_DEFINITION
+from ....core.denoise_resolver import DEFAULT_DENOISE
+from ....core.sharpen_resolver import (
+    DEFAULT_SHARPEN_INTENSITY,
+    DEFAULT_SHARPEN_EDGES,
+    DEFAULT_SHARPEN_FALLOFF,
+)
+from ....core.vignette_resolver import (
+    DEFAULT_VIGNETTE_STRENGTH,
+    DEFAULT_VIGNETTE_RADIUS,
+    DEFAULT_VIGNETTE_SOFTNESS,
+)
 from ..models.edit_session import EditSession
 from ..icon import load_icon
 
@@ -37,6 +49,10 @@ class EditSessionCoordinator(QObject):
         "curve": "Curve_Enabled",
         "selective_color": "SelectiveColor_Enabled",
         "levels": "Levels_Enabled",
+        "definition": "Definition_Enabled",
+        "denoise": "Denoise_Enabled",
+        "sharpen": "Sharpen_Enabled",
+        "vignette": "Vignette_Enabled",
     }
     _ENABLED_KEY_TO_SECTION: dict[str, str] = {v: k for k, v in _ENABLED_KEYS.items()}
 
@@ -166,6 +182,10 @@ class EditSessionCoordinator(QObject):
         "curve": "_on_curve_reset",
         "selective_color": "_on_selective_color_reset",
         "levels": "_on_levels_reset",
+        "definition": "_on_definition_reset",
+        "denoise": "_on_denoise_reset",
+        "sharpen": "_on_sharpen_reset",
+        "vignette": "_on_vignette_reset",
     }
     _TOGGLE_SLOT_ATTR = {
         "light": "_on_light_toggled",
@@ -175,6 +195,10 @@ class EditSessionCoordinator(QObject):
         "curve": "_on_curve_toggled",
         "selective_color": "_on_selective_color_toggled",
         "levels": "_on_levels_toggled",
+        "definition": "_on_definition_toggled",
+        "denoise": "_on_denoise_toggled",
+        "sharpen": "_on_sharpen_toggled",
+        "vignette": "_on_vignette_toggled",
     }
 
     def _disconnect_all(self) -> None:
@@ -227,7 +251,7 @@ class EditSessionCoordinator(QObject):
         for key in self._registry.bundles:
             self._toggle_btn(key).setChecked(False)
             self._update_toggle_icon(key, False)
-        for key in ("bw", "wb", "curve", "selective_color", "levels"):
+        for key in ("bw", "wb", "curve", "selective_color", "levels", "definition", "denoise", "sharpen", "vignette"):
             self._reset_btn(key).setEnabled(False)
         self._color_stats = None
 
@@ -363,6 +387,62 @@ class EditSessionCoordinator(QObject):
         self._sync_toggle_state("levels")
         self._sidebar.interactionFinished.emit()
 
+    def _on_definition_reset(self) -> None:
+        if self._session is None:
+            return
+        self._sidebar.interactionStarted.emit()
+        updates = {
+            "Definition_Enabled": False,
+            "Definition_Value": DEFAULT_DEFINITION,
+        }
+        self._session.set_values(updates)
+        self._section("definition").refresh_from_session()
+        self._sync_toggle_state("definition")
+        self._sidebar.interactionFinished.emit()
+
+    def _on_denoise_reset(self) -> None:
+        if self._session is None:
+            return
+        self._sidebar.interactionStarted.emit()
+        updates = {
+            "Denoise_Enabled": False,
+            "Denoise_Amount": DEFAULT_DENOISE,
+        }
+        self._session.set_values(updates)
+        self._section("denoise").refresh_from_session()
+        self._sync_toggle_state("denoise")
+        self._sidebar.interactionFinished.emit()
+
+    def _on_sharpen_reset(self) -> None:
+        if self._session is None:
+            return
+        self._sidebar.interactionStarted.emit()
+        updates = {
+            "Sharpen_Enabled": False,
+            "Sharpen_Intensity": DEFAULT_SHARPEN_INTENSITY,
+            "Sharpen_Edges": DEFAULT_SHARPEN_EDGES,
+            "Sharpen_Falloff": DEFAULT_SHARPEN_FALLOFF,
+        }
+        self._session.set_values(updates)
+        self._section("sharpen").refresh_from_session()
+        self._sync_toggle_state("sharpen")
+        self._sidebar.interactionFinished.emit()
+
+    def _on_vignette_reset(self) -> None:
+        if self._session is None:
+            return
+        self._sidebar.interactionStarted.emit()
+        updates = {
+            "Vignette_Enabled": False,
+            "Vignette_Strength": DEFAULT_VIGNETTE_STRENGTH,
+            "Vignette_Radius": DEFAULT_VIGNETTE_RADIUS,
+            "Vignette_Softness": DEFAULT_VIGNETTE_SOFTNESS,
+        }
+        self._session.set_values(updates)
+        self._section("vignette").refresh_from_session()
+        self._sync_toggle_state("vignette")
+        self._sidebar.interactionFinished.emit()
+
     # -- toggle handlers --------------------------------------------------
 
     def _on_light_toggled(self, checked: bool) -> None:
@@ -419,6 +499,38 @@ class EditSessionCoordinator(QObject):
             return
         self._sidebar.interactionStarted.emit()
         self._session.set_value("Levels_Enabled", checked)
+        self._sidebar.interactionFinished.emit()
+
+    def _on_definition_toggled(self, checked: bool) -> None:
+        self._update_toggle_icon("definition", checked)
+        if self._session is None:
+            return
+        self._sidebar.interactionStarted.emit()
+        self._session.set_value("Definition_Enabled", checked)
+        self._sidebar.interactionFinished.emit()
+
+    def _on_denoise_toggled(self, checked: bool) -> None:
+        self._update_toggle_icon("denoise", checked)
+        if self._session is None:
+            return
+        self._sidebar.interactionStarted.emit()
+        self._session.set_value("Denoise_Enabled", checked)
+        self._sidebar.interactionFinished.emit()
+
+    def _on_sharpen_toggled(self, checked: bool) -> None:
+        self._update_toggle_icon("sharpen", checked)
+        if self._session is None:
+            return
+        self._sidebar.interactionStarted.emit()
+        self._session.set_value("Sharpen_Enabled", checked)
+        self._sidebar.interactionFinished.emit()
+
+    def _on_vignette_toggled(self, checked: bool) -> None:
+        self._update_toggle_icon("vignette", checked)
+        if self._session is None:
+            return
+        self._sidebar.interactionStarted.emit()
+        self._session.set_value("Vignette_Enabled", checked)
         self._sidebar.interactionFinished.emit()
 
     # -- session value change handler -------------------------------------

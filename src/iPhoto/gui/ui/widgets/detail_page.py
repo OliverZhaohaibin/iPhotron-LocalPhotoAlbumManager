@@ -7,6 +7,7 @@ from PySide6.QtGui import QAction, QActionGroup, QColor, QFont
 from PySide6.QtWidgets import (
     QFrame,
     QGraphicsDropShadowEffect,
+    QGridLayout,
     QHBoxLayout,
     QLabel,
     QPushButton,
@@ -51,6 +52,15 @@ class DetailPageWidget(QWidget):
     ) -> None:
         super().__init__(parent)
         self.setObjectName("detailPage")
+
+        # Block the WA_TranslucentBackground cascade from the main window so
+        # this page always has an opaque backing in the view stack.
+        self.setAutoFillBackground(True)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, False)
+
+        # Initialised in ``_build_player_area()``; set here so that
+        # ``hide_rhi_init_cover()`` and ``resizeEvent`` always find the attr.
+        self._rhi_init_cover: QWidget | None = None
 
         # Edit chrome -------------------------------------------------------
         self.edit_mode_group = QActionGroup(main_window)
@@ -325,12 +335,51 @@ class DetailPageWidget(QWidget):
         self.player_stack.addWidget(self.video_area)
         self.player_stack.setCurrentWidget(self.player_placeholder)
 
+        # Give the stacked widget an opaque palette-derived background so that
+        # the very first frame transition (placeholder → viewer) never flashes
+        # a transparent surface while the GL/RHI widget is still initialising.
+        # Using ``palette(window)`` keeps it in sync across light / dark mode.
+        self.player_stack.setAutoFillBackground(True)
+        self.player_stack.setAttribute(
+            Qt.WidgetAttribute.WA_TranslucentBackground, False,
+        )
+        self.player_stack.setStyleSheet(
+            "QStackedWidget { background-color: palette(window); }"
+        )
+
         player_container = QWidget(self)
-        player_layout = QVBoxLayout(player_container)
+        player_container.setAutoFillBackground(True)
+        player_container.setAttribute(
+            Qt.WidgetAttribute.WA_TranslucentBackground, False,
+        )
+        # Use QGridLayout so the init cover and the player_stack can share
+        # the same cell (0, 0).  The layout automatically sizes both
+        # children to fill the available space without manual geometry
+        # management.
+        player_layout = QGridLayout(player_container)
         player_layout.setContentsMargins(0, 0, 0, 0)
         player_layout.setSpacing(0)
-        player_layout.addWidget(self.player_stack)
+        player_layout.addWidget(self.player_stack, 0, 0)
         self.player_container = player_container
+
+        # Opaque cover that hides the QRhiWidget area until its first frame
+        # has been rendered.  QRhiWidget replaces its backing-store region
+        # with its own texture; before the first render() call that texture
+        # is uninitialised / transparent.  This cover occupies the same
+        # grid cell as the player_stack and is raised above it so it
+        # visually hides any transparent texture.  It is removed by
+        # ``hide_rhi_init_cover()`` once any QRhiWidget child signals
+        # ``firstFrameReady``.
+        self._rhi_init_cover = QWidget(player_container)
+        self._rhi_init_cover.setAutoFillBackground(True)
+        self._rhi_init_cover.setAttribute(
+            Qt.WidgetAttribute.WA_TranslucentBackground, False,
+        )
+        self._rhi_init_cover.setStyleSheet(
+            "background-color: palette(window);"
+        )
+        player_layout.addWidget(self._rhi_init_cover, 0, 0)
+        self._rhi_init_cover.raise_()
 
         self.live_badge.setParent(player_container)
         self.badge_host = player_container
@@ -478,6 +527,49 @@ class DetailPageWidget(QWidget):
         button.setFixedSize(HEADER_BUTTON_SIZE)
         button.setAutoRaise(True)
         button.setToolTip(tooltip)
+
+    # ------------------------------------------------------------------
+    # QRhiWidget init cover
+    # ------------------------------------------------------------------
+
+    def hide_rhi_init_cover(self) -> None:
+        """Remove the opaque cover once the first QRhiWidget frame is ready."""
+        if self._rhi_init_cover is not None:
+            self._rhi_init_cover.hide()
+            self._rhi_init_cover.deleteLater()
+            self._rhi_init_cover = None
+
+    def show_rhi_init_cover(self) -> None:
+        """Re-create and show the opaque init cover.
+
+        Called when the player stack is about to switch to a QRhiWidget
+        that has never rendered.  The backing texture of an uninitialised
+        ``QRhiWidget`` is transparent; this cover hides the transparent
+        region until ``hide_rhi_init_cover()`` is called after the widget
+        renders its first opaque frame.
+        """
+        if self._rhi_init_cover is not None:
+            # Cover still exists – just make sure it is visible and on top.
+            self._rhi_init_cover.show()
+            self._rhi_init_cover.raise_()
+            return
+
+        player_container = self.player_container
+        if player_container is None:
+            return
+
+        self._rhi_init_cover = QWidget(player_container)
+        self._rhi_init_cover.setAutoFillBackground(True)
+        self._rhi_init_cover.setAttribute(
+            Qt.WidgetAttribute.WA_TranslucentBackground, False,
+        )
+        self._rhi_init_cover.setStyleSheet(
+            "background-color: palette(window);"
+        )
+        layout = player_container.layout()
+        if layout is not None:
+            layout.addWidget(self._rhi_init_cover, 0, 0)
+        self._rhi_init_cover.raise_()
 
 
 __all__ = ["DetailPageWidget"]

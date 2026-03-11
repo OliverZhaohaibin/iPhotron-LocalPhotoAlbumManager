@@ -146,6 +146,30 @@ def resolve_adjustment_mapping(
     sc_enabled = bool(session_values.get("SelectiveColor_Enabled", False))
     resolved["SelectiveColor_Enabled"] = 1.0 if sc_enabled else 0.0
 
+    # Preserve the dedicated Definition parameters.
+    def_enabled = bool(session_values.get("Definition_Enabled", False))
+    resolved["Definition_Enabled"] = 1.0 if def_enabled else 0.0
+    resolved["Definition_Value"] = float(session_values.get("Definition_Value", 0.0))
+
+    # Preserve the dedicated Denoise parameters.
+    dn_enabled = bool(session_values.get("Denoise_Enabled", False))
+    resolved["Denoise_Enabled"] = 1.0 if dn_enabled else 0.0
+    resolved["Denoise_Amount"] = float(session_values.get("Denoise_Amount", 0.0))
+
+    # Preserve the dedicated Sharpen parameters.
+    sh_enabled = bool(session_values.get("Sharpen_Enabled", False))
+    resolved["Sharpen_Enabled"] = 1.0 if sh_enabled else 0.0
+    resolved["Sharpen_Intensity"] = float(session_values.get("Sharpen_Intensity", 0.0))
+    resolved["Sharpen_Edges"] = float(session_values.get("Sharpen_Edges", 0.0))
+    resolved["Sharpen_Falloff"] = float(session_values.get("Sharpen_Falloff", 0.0))
+
+    # Preserve the dedicated Vignette parameters.
+    vig_enabled = bool(session_values.get("Vignette_Enabled", False))
+    resolved["Vignette_Enabled"] = 1.0 if vig_enabled else 0.0
+    resolved["Vignette_Strength"] = float(session_values.get("Vignette_Strength", 0.0))
+    resolved["Vignette_Radius"] = float(session_values.get("Vignette_Radius", 0.50))
+    resolved["Vignette_Softness"] = float(session_values.get("Vignette_Softness", 0.0))
+
     resolved.update(curve_lists)
     return resolved
 

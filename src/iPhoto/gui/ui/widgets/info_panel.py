@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any, Mapping, Optional
 
 from PySide6.QtCore import QDateTime, QEvent, QLocale, QRectF, Qt
-from PySide6.QtGui import QColor, QMouseEvent, QPainter, QPainterPath, QPalette
+from PySide6.QtGui import QColor, QMouseEvent, QPainter, QPainterPath, QPalette, QShowEvent
 from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
@@ -46,6 +46,9 @@ class InfoPanel(QWidget):
     """
 
     _CORNER_RADIUS = 12.0
+    _SHADOW_SIZE = 16
+    _SHADOW_MAX_ALPHA = 18
+    _SHADOW_RADIUS_GROWTH = 0.5
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(
@@ -63,6 +66,7 @@ class InfoPanel(QWidget):
         self._current_rel: Optional[str] = None
         self._drag_active = False
         self._drag_offset = None
+        self._centered = False
 
         # -- title bar -----------------------------------------------------
         self._title_bar = QWidget(self)
@@ -123,8 +127,9 @@ class InfoPanel(QWidget):
         self._exposure_label.setWordWrap(True)
 
         # -- root layout ---------------------------------------------------
+        s = self._SHADOW_SIZE
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setContentsMargins(0, 0, s, s)
         layout.setSpacing(0)
         layout.addWidget(self._title_bar)
 
@@ -237,21 +242,56 @@ class InfoPanel(QWidget):
             self._apply_close_button_style()
         super().changeEvent(event)
 
+    def showEvent(self, event: QShowEvent) -> None:
+        """Centre the panel over its parent window the first time it appears."""
+
+        super().showEvent(event)
+        if not self._centered:
+            self._centered = True
+            parent = self.parentWidget()
+            if parent is not None and parent.isVisible():
+                center = parent.geometry().center()
+                hint = self.sizeHint()
+                self.move(
+                    center.x() - hint.width() // 2,
+                    center.y() - hint.height() // 2,
+                )
+
     def paintEvent(self, event) -> None:  # type: ignore[override]
-        """Draw an anti-aliased rounded rectangle matching the window palette."""
+        """Draw drop shadow and an anti-aliased rounded rectangle."""
 
         del event
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
 
-        rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        s = self._SHADOW_SIZE
+        content_rect = QRectF(self.rect()).adjusted(0, 0, -s, -s)
         radius = min(
             self._CORNER_RADIUS,
-            min(rect.width(), rect.height()) / 2.0,
+            min(content_rect.width(), content_rect.height()) / 2.0,
         )
 
+        # -- drop shadow (right + bottom only) -----------------------------
+        shadow_steps = s
+        for i in range(shadow_steps):
+            alpha = int(self._SHADOW_MAX_ALPHA * (1 - i / shadow_steps) ** 2)
+            if alpha <= 0:
+                continue
+            shadow_color = QColor(0, 0, 0, alpha)
+            spread = float(i)
+            shadow_rect = content_rect.adjusted(spread, spread, spread, spread)
+            shadow_path = QPainterPath()
+            shadow_path.addRoundedRect(
+                shadow_rect,
+                radius + spread * self._SHADOW_RADIUS_GROWTH,
+                radius + spread * self._SHADOW_RADIUS_GROWTH,
+            )
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.fillPath(shadow_path, shadow_color)
+
+        # -- background ----------------------------------------------------
         path = QPainterPath()
-        path.addRoundedRect(rect, radius, radius)
+        path.addRoundedRect(content_rect.adjusted(0.5, 0.5, -0.5, -0.5), radius, radius)
 
         bg_color = self.palette().color(QPalette.ColorRole.Window)
         painter.setPen(Qt.PenStyle.NoPen)

@@ -12,6 +12,18 @@ from ....core.color_resolver import COLOR_KEYS, COLOR_RANGES, ColorStats
 from ....core.curve_resolver import DEFAULT_CURVE_POINTS
 from ....core.levels_resolver import DEFAULT_LEVELS_HANDLES
 from ....core.selective_color_resolver import DEFAULT_SELECTIVE_COLOR_RANGES
+from ....core.definition_resolver import DEFAULT_DEFINITION
+from ....core.sharpen_resolver import (
+    DEFAULT_SHARPEN_INTENSITY,
+    DEFAULT_SHARPEN_EDGES,
+    DEFAULT_SHARPEN_FALLOFF,
+)
+from ....core.denoise_resolver import DEFAULT_DENOISE
+from ....core.vignette_resolver import (
+    DEFAULT_VIGNETTE_STRENGTH,
+    DEFAULT_VIGNETTE_RADIUS,
+    DEFAULT_VIGNETTE_SOFTNESS,
+)
 
 _BW_RANGE_KEYS = {"BW_Master", "BW_Intensity", "BW_Neutrals", "BW_Tone"}
 
@@ -146,6 +158,38 @@ class EditSession(QObject):
         self._values["SelectiveColor_Ranges"] = [
             list(r) for r in DEFAULT_SELECTIVE_COLOR_RANGES
         ]
+
+        # Definition (Clarity) adjustment – a single float in [0.0, 1.0].
+        self._values["Definition_Enabled"] = False
+        self._ranges["Definition_Enabled"] = (0.0, 1.0)
+        self._values["Definition_Value"] = DEFAULT_DEFINITION
+        self._ranges["Definition_Value"] = (0.0, 1.0)
+
+        # Noise Reduction (Denoise) adjustment – amount in [0.0, 5.0].
+        self._values["Denoise_Enabled"] = False
+        self._ranges["Denoise_Enabled"] = (0.0, 1.0)
+        self._values["Denoise_Amount"] = DEFAULT_DENOISE
+        self._ranges["Denoise_Amount"] = (0.0, 5.0)
+
+        # Sharpen adjustment – intensity, edges and falloff each in [0.0, 1.0].
+        self._values["Sharpen_Enabled"] = False
+        self._ranges["Sharpen_Enabled"] = (0.0, 1.0)
+        self._values["Sharpen_Intensity"] = DEFAULT_SHARPEN_INTENSITY
+        self._ranges["Sharpen_Intensity"] = (0.0, 1.0)
+        self._values["Sharpen_Edges"] = DEFAULT_SHARPEN_EDGES
+        self._ranges["Sharpen_Edges"] = (0.0, 1.0)
+        self._values["Sharpen_Falloff"] = DEFAULT_SHARPEN_FALLOFF
+        self._ranges["Sharpen_Falloff"] = (0.0, 1.0)
+
+        # Vignette adjustment – strength, radius and softness each in [0.0, 1.0].
+        self._values["Vignette_Enabled"] = False
+        self._ranges["Vignette_Enabled"] = (0.0, 1.0)
+        self._values["Vignette_Strength"] = DEFAULT_VIGNETTE_STRENGTH
+        self._ranges["Vignette_Strength"] = (0.0, 1.0)
+        self._values["Vignette_Radius"] = DEFAULT_VIGNETTE_RADIUS
+        self._ranges["Vignette_Radius"] = (0.0, 1.0)
+        self._values["Vignette_Softness"] = DEFAULT_VIGNETTE_SOFTNESS
+        self._ranges["Vignette_Softness"] = (0.0, 1.0)
 
     # ------------------------------------------------------------------
     # Accessors
@@ -303,6 +347,30 @@ class EditSession(QObject):
         defaults.update({
             "SelectiveColor_Enabled": False,
             "SelectiveColor_Ranges": [list(r) for r in DEFAULT_SELECTIVE_COLOR_RANGES],
+        })
+        # Definition defaults
+        defaults.update({
+            "Definition_Enabled": False,
+            "Definition_Value": DEFAULT_DEFINITION,
+        })
+        # Denoise defaults
+        defaults.update({
+            "Denoise_Enabled": False,
+            "Denoise_Amount": DEFAULT_DENOISE,
+        })
+        # Sharpen defaults
+        defaults.update({
+            "Sharpen_Enabled": False,
+            "Sharpen_Intensity": DEFAULT_SHARPEN_INTENSITY,
+            "Sharpen_Edges": DEFAULT_SHARPEN_EDGES,
+            "Sharpen_Falloff": DEFAULT_SHARPEN_FALLOFF,
+        })
+        # Vignette defaults
+        defaults.update({
+            "Vignette_Enabled": False,
+            "Vignette_Strength": DEFAULT_VIGNETTE_STRENGTH,
+            "Vignette_Radius": DEFAULT_VIGNETTE_RADIUS,
+            "Vignette_Softness": DEFAULT_VIGNETTE_SOFTNESS,
         })
         self.set_values(defaults, emit_individual=True)
         self.resetPerformed.emit()

@@ -245,6 +245,10 @@ class WindowThemeController(QObject):
         # Explicitly set the background color even for Light Mode to prevent sticky state
         target_surface = "#000000" if colors.is_dark else colors.window_background.name()
         self._ui.image_viewer.set_surface_color_override(target_surface)
+        # Keep the video area background in sync with the theme so it matches
+        # the surrounding chrome.  In dark mode the surface is pure black;
+        # in light mode it matches the window background.
+        self._ui.video_area.set_surface_color(target_surface)
 
         # 3. Update Icons and Buttons
         self._update_icon_tints(colors)
@@ -289,7 +293,7 @@ class WindowThemeController(QObject):
             icon_size = getattr(section, "_icon_size", 20)
             if icon_label and icon_name:
                 # Some icons have native colors
-                if icon_name in {"color.circle.svg", "checkmark.svg", "whitebalance.square.svg", "selectivecolor.svg"}:
+                if icon_name in {"color.circle.svg", "checkmark.svg", "whitebalance.square.svg", "selectivecolor.svg", "denoise.svg"}:
                     icon_label.setPixmap(load_icon(icon_name).pixmap(icon_size, icon_size))
                 else:
                     icon_label.setPixmap(load_icon(icon_name, color=icon_color).pixmap(icon_size, icon_size))

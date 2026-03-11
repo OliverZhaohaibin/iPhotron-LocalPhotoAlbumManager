@@ -63,6 +63,30 @@ class EditSidebar(QWidget):
     levelsParamsCommitted = Signal(object)
     """Emitted when levels adjustments should be written to the session."""
 
+    definitionParamsPreviewed = Signal(object)
+    """Relays live definition adjustments to the controller."""
+
+    definitionParamsCommitted = Signal(object)
+    """Emitted when definition adjustments should be written to the session."""
+
+    denoiseParamsPreviewed = Signal(object)
+    """Relays live Noise Reduction adjustments to the controller."""
+
+    denoiseParamsCommitted = Signal(object)
+    """Emitted when Noise Reduction adjustments should be written to the session."""
+
+    sharpenParamsPreviewed = Signal(object)
+    """Relays live Sharpen adjustments to the controller."""
+
+    sharpenParamsCommitted = Signal(object)
+    """Emitted when Sharpen adjustments should be written to the session."""
+
+    vignetteParamsPreviewed = Signal(object)
+    """Relays live Vignette adjustments to the controller."""
+
+    vignetteParamsCommitted = Signal(object)
+    """Emitted when Vignette adjustments should be written to the session."""
+
     wbEyedropperModeChanged = Signal(object)
     """Relay eyedropper mode toggles from the WB section."""
 
@@ -182,7 +206,11 @@ class EditSidebar(QWidget):
         self._wb_section = _b["wb"].section
         self._curve_section = _b["curve"].section
         self._levels_section = _b["levels"].section
+        self._definition_section = _b["definition"].section
         self._selective_color_section = _b["selective_color"].section
+        self._denoise_section = _b["denoise"].section
+        self._sharpen_section = _b["sharpen"].section
+        self._vignette_section = _b["vignette"].section
 
         self._light_section_container = _b["light"].container
         self._color_section_container = _b["color"].container
@@ -190,7 +218,11 @@ class EditSidebar(QWidget):
         self._wb_section_container = _b["wb"].container
         self._curve_section_container = _b["curve"].container
         self._levels_section_container = _b["levels"].container
+        self._definition_section_container = _b["definition"].container
         self._selective_color_section_container = _b["selective_color"].container
+        self._denoise_section_container = _b["denoise"].container
+        self._sharpen_section_container = _b["sharpen"].container
+        self._vignette_section_container = _b["vignette"].container
 
         self.light_reset_button = _b["light"].reset_button
         self.light_toggle_button = _b["light"].toggle_button
@@ -206,6 +238,14 @@ class EditSidebar(QWidget):
         self.selective_color_toggle_button = _b["selective_color"].toggle_button
         self.levels_reset_button = _b["levels"].reset_button
         self.levels_toggle_button = _b["levels"].toggle_button
+        self.definition_reset_button = _b["definition"].reset_button
+        self.definition_toggle_button = _b["definition"].toggle_button
+        self.denoise_reset_button = _b["denoise"].reset_button
+        self.denoise_toggle_button = _b["denoise"].toggle_button
+        self.sharpen_reset_button = _b["sharpen"].reset_button
+        self.sharpen_toggle_button = _b["sharpen"].toggle_button
+        self.vignette_reset_button = _b["vignette"].reset_button
+        self.vignette_toggle_button = _b["vignette"].toggle_button
 
         self.set_mode("adjust")
 

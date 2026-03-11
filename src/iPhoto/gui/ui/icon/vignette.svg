@@ -1,0 +1,21 @@
+<svg width="55" height="55" viewBox="8 8 39 39" xmlns="http://www.w3.org/2000/svg">
+  <!-- 外圈 -->
+  <circle
+    cx="27.5"
+    cy="27.5"
+    r="16"
+    fill="none"
+    stroke="#CFCFCF"
+    stroke-width="2.625"
+  />
+
+  <!-- 内圈 -->
+  <circle
+    cx="27.5"
+    cy="27.5"
+    r="11.5"
+    fill="none"
+    stroke="#CFCFCF"
+    stroke-width="1.5"
+  />
+</svg>

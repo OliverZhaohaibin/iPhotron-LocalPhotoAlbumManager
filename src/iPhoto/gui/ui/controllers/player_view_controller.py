@@ -111,9 +111,59 @@ class PlayerViewController(QObject):
         self._defer_still_updates = False
         self._pending_still: Optional[tuple[Path, QImage, dict]] = None
 
+        # Per-widget first-render tracking.  QRhiWidget backing textures are
+        # uninitialised (transparent) until the first ``render()`` call fills
+        # them.  An opaque *init cover* in the DetailPageWidget hides this
+        # transparent region.  The cover must stay visible until the currently
+        # shown QRhiWidget has rendered at least once; only then is it safe to
+        # remove.  When switching to a widget that has *not* yet rendered we
+        # re-show the cover to prevent a one-frame transparency flash.
+        self._image_viewer_rendered = False
+        self._video_renderer_rendered = False
+
+        self._image_viewer.firstFrameReady.connect(self._on_image_first_render)
+        self._video_area.renderer.firstFrameReady.connect(
+            self._on_video_first_render,
+        )
+
     # ------------------------------------------------------------------
     # High-level surface selection helpers
     # ------------------------------------------------------------------
+
+    def _on_image_first_render(self) -> None:
+        """Mark image viewer as initialised; hide cover if it is visible."""
+        self._image_viewer_rendered = True
+        if self._player_stack.currentWidget() is self._image_viewer:
+            self._hide_detail_init_cover()
+
+    def _on_video_first_render(self) -> None:
+        """Mark video renderer as initialised; hide cover if it is visible."""
+        self._video_renderer_rendered = True
+        if self._player_stack.currentWidget() is self._video_area:
+            self._hide_detail_init_cover()
+
+    def _hide_detail_init_cover(self) -> None:
+        """Walk up to ``DetailPageWidget`` and hide the init cover."""
+        from ..widgets.detail_page import DetailPageWidget
+
+        widget = self._player_stack.parent()
+        while widget is not None:
+            if isinstance(widget, DetailPageWidget):
+                widget.hide_rhi_init_cover()
+                break
+            widget = widget.parent()
+
+    def _show_detail_init_cover(self) -> None:
+        """Walk up to ``DetailPageWidget`` and re-show the init cover."""
+        from ..widgets.detail_page import DetailPageWidget
+
+        widget = self._player_stack.parent()
+        while widget is not None:
+            if isinstance(widget, DetailPageWidget):
+                widget.show_rhi_init_cover()
+                break
+            widget = widget.parent()
+
     def show_placeholder(self) -> None:
         """Display the placeholder widget and clear any previous image."""
         self._video_area.hide_controls(animate=False)
@@ -131,6 +181,14 @@ class PlayerViewController(QObject):
         # Hide lingering transport controls from the video surface so the
         # still viewer never inherits a faded overlay background.
         self._video_area.hide_controls(animate=False)
+
+        # If the image viewer has never rendered, its QRhiWidget backing
+        # texture is still uninitialised (transparent).  Re-show the opaque
+        # init cover *before* switching the stack so the user never sees a
+        # transparent frame.
+        if not self._image_viewer_rendered:
+            self._show_detail_init_cover()
+
         if self._player_stack.currentWidget() is not self._image_viewer:
             if self._player_stack.indexOf(self._image_viewer) != -1:
                 self._player_stack.setCurrentWidget(self._image_viewer)
@@ -159,6 +217,13 @@ class PlayerViewController(QObject):
             self._video_area.show_controls(animate=False)
         else:
             self._video_area.hide_controls(animate=False)
+
+        # If the video renderer has never rendered, its QRhiWidget backing
+        # texture is still uninitialised (transparent).  Re-show the opaque
+        # init cover *before* switching the stack so the user never sees a
+        # transparent frame.
+        if not self._video_renderer_rendered:
+            self._show_detail_init_cover()
 
         if self._player_stack.currentWidget() is not self._video_area:
             self._player_stack.setCurrentWidget(self._video_area)

@@ -10,6 +10,10 @@ from .collapsible_section import CollapsibleSection
 from .edit_bw_section import EditBWSection
 from .edit_color_section import EditColorSection
 from .edit_curve_section import EditCurveSection
+from .edit_definition_section import EditDefinitionSection
+from .edit_denoise_section import EditDenoiseSection
+from .edit_sharpen_section import EditSharpenSection
+from .edit_vignette_section import EditVignetteSection
 from .edit_levels_section import EditLevelsSection
 from .edit_light_section import EditLightSection
 from .edit_selective_color_section import EditSelectiveColorSection
@@ -40,12 +44,39 @@ SECTION_CONFIGS: list[SectionConfig] = [
     SectionConfig("curve", "Curve", "curve.svg", EditCurveSection, collapsed=True),
     SectionConfig("levels", "Levels", "level.square.svg", EditLevelsSection, collapsed=True),
     SectionConfig(
+        "definition", "Definition", "definition.svg", EditDefinitionSection, collapsed=True, icon_scale=1.25,
+    ),
+    SectionConfig(
         "selective_color",
         "Selective Color",
         "selectivecolor.svg",
         EditSelectiveColorSection,
         collapsed=True,
         icon_scale=0.95,
+    ),
+    SectionConfig(
+        "denoise",
+        "Noise Reduction",
+        "denoise.svg",
+        EditDenoiseSection,
+        collapsed=True,
+        icon_scale=1.20,
+    ),
+    SectionConfig(
+        "sharpen",
+        "Sharpen",
+        "sharpen.svg",
+        EditSharpenSection,
+        collapsed=True,
+        icon_scale=1.20,
+    ),
+    SectionConfig(
+        "vignette",
+        "Vignette",
+        "vignette.svg",
+        EditVignetteSection,
+        collapsed=True,
+        icon_scale=1.20,
     ),
 ]
 

@@ -299,6 +299,48 @@ class GLRenderer:
             # Selective Color uniforms
             sc_enabled_value = adjustments.get("SelectiveColor_Enabled", False)
             self._set_uniform1i("uSCEnabled", 1 if bool(sc_enabled_value) else 0)
+
+            # Definition uniform – maps UI [0, 1] to internal [0, 0.2]
+            def_enabled_value = adjustments.get("Definition_Enabled", False)
+            def_value = float(adjustments.get("Definition_Value", 0.0))
+            effective_def = def_value * 0.2 if bool(def_enabled_value) else 0.0
+            self._set_uniform1f("uDefinition", effective_def)
+
+            # Denoise uniform – pass amount directly to shader
+            dn_enabled_value = adjustments.get("Denoise_Enabled", False)
+            dn_amount = float(adjustments.get("Denoise_Amount", 0.0))
+            effective_denoise = dn_amount if bool(dn_enabled_value) else 0.0
+            self._set_uniform1f("uDenoiseAmount", effective_denoise)
+
+            # Sharpen uniforms
+            sh_enabled_value = adjustments.get("Sharpen_Enabled", False)
+            if bool(sh_enabled_value):
+                sh_intensity = float(adjustments.get("Sharpen_Intensity", 0.0))
+                sh_edges = float(adjustments.get("Sharpen_Edges", 0.0))
+                sh_falloff = float(adjustments.get("Sharpen_Falloff", 0.0))
+            else:
+                sh_intensity = 0.0
+                sh_edges = 0.0
+                sh_falloff = 0.0
+            self._set_uniform1f("uSharpenIntensity", sh_intensity)
+            self._set_uniform1f("uSharpenEdges", sh_edges)
+            self._set_uniform1f("uSharpenFalloff", sh_falloff)
+
+            # Vignette uniforms
+            vig_enabled_value = adjustments.get("Vignette_Enabled", False)
+            if bool(vig_enabled_value):
+                vig_strength = float(adjustments.get("Vignette_Strength", 0.0))
+                vig_radius = float(adjustments.get("Vignette_Radius", 0.50))
+                vig_softness_ui = float(adjustments.get("Vignette_Softness", 0.0))
+                # Map UI softness [0,1] → actual softness [0.1,1.0]
+                vig_softness = 0.1 + max(0.0, min(1.0, vig_softness_ui)) * 0.9
+            else:
+                vig_strength = 0.0
+                vig_radius = 0.50
+                vig_softness = 0.1
+            self._set_uniform1f("uVignetteStrength", vig_strength)
+            self._set_uniform1f("uVignetteRadius", vig_radius)
+            self._set_uniform1f("uVignetteSoftness", vig_softness)
             sc_ranges = adjustments.get("SelectiveColor_Ranges")
             if isinstance(sc_ranges, list) and len(sc_ranges) == NUM_RANGES:
                 u0 = np.zeros((NUM_RANGES, 4), dtype=np.float32)

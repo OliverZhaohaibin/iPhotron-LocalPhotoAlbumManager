@@ -50,11 +50,31 @@ class EditSignalRouter:
         levels.levelsParamsPreviewed.connect(sidebar.levelsParamsPreviewed)
         levels.levelsParamsCommitted.connect(sidebar.levelsParamsCommitted)
 
+        # Definition-specific relays
+        definition = bundles["definition"].section
+        definition.definitionParamsPreviewed.connect(sidebar.definitionParamsPreviewed)
+        definition.definitionParamsCommitted.connect(sidebar.definitionParamsCommitted)
+
         # Selective Color-specific relays
         sc = bundles["selective_color"].section
         sc.selectiveColorParamsPreviewed.connect(sidebar.selectiveColorParamsPreviewed)
         sc.selectiveColorParamsCommitted.connect(sidebar.selectiveColorParamsCommitted)
         sc.eyedropperModeChanged.connect(sidebar.selectiveColorEyedropperModeChanged)
+
+        # Denoise-specific relays
+        denoise = bundles["denoise"].section
+        denoise.denoiseParamsPreviewed.connect(sidebar.denoiseParamsPreviewed)
+        denoise.denoiseParamsCommitted.connect(sidebar.denoiseParamsCommitted)
+
+        # Sharpen-specific relays
+        sharpen = bundles["sharpen"].section
+        sharpen.sharpenParamsPreviewed.connect(sidebar.sharpenParamsPreviewed)
+        sharpen.sharpenParamsCommitted.connect(sidebar.sharpenParamsCommitted)
+
+        # Vignette-specific relays
+        vignette = bundles["vignette"].section
+        vignette.vignetteParamsPreviewed.connect(sidebar.vignetteParamsPreviewed)
+        vignette.vignetteParamsCommitted.connect(sidebar.vignetteParamsCommitted)
 
         # Perspective controls
         perspective_controls.interactionStarted.connect(sidebar.perspectiveInteractionStarted)

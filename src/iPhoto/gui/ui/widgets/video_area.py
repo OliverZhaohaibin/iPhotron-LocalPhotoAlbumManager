@@ -2,51 +2,71 @@
 
 from __future__ import annotations
 
-from typing import Optional, cast
+import logging
+from pathlib import Path
+from typing import Optional
 
 from PySide6.QtCore import (
     QEasingCurve,
     QEvent,
     QObject,
     QPropertyAnimation,
-    QPointF,
-    QRectF,
     QTimer,
     Qt,
+    QUrl,
     Signal,
 )
-from PySide6.QtGui import QColor, QCursor, QMouseEvent, QPainter, QResizeEvent, QWheelEvent
+from PySide6.QtGui import (
+    QColor,
+    QCursor,
+    QMouseEvent,
+    QResizeEvent,
+    QWheelEvent,
+)
 from PySide6.QtWidgets import (
-    QFrame,
     QGraphicsOpacityEffect,
-    QGraphicsRectItem,
-    QGraphicsScene,
-    QGraphicsView,
     QWidget,
 )
 
 try:  # pragma: no cover - optional Qt module
-    from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
-    from PySide6.QtMultimediaWidgets import QGraphicsVideoItem
+    from PySide6.QtMultimedia import (
+        QAudioOutput,
+        QMediaPlayer,
+        QVideoFrame,
+        QVideoSink,
+    )
 except (ModuleNotFoundError, ImportError):  # pragma: no cover - handled by main window guard
-    QGraphicsVideoItem = None  # type: ignore[assignment, misc]
     QMediaPlayer = None
     QAudioOutput = None
-
-from pathlib import Path
-from PySide6.QtCore import QUrl
+    QVideoFrame = None  # type: ignore[assignment, misc]
+    QVideoSink = None  # type: ignore[assignment, misc]
 
 from ....config import (
     PLAYER_CONTROLS_HIDE_DELAY_MS,
     PLAYER_FADE_IN_MS,
     PLAYER_FADE_OUT_MS,
+    VIDEO_COMPLETE_HOLD_BACKSTEP_MS,
 )
+from ....utils.ffmpeg import probe_video_rotation
 from .player_bar import PlayerBar
+from .video_renderer_widget import VideoRendererWidget
 from ..palette import viewer_surface_color
+
+_log = logging.getLogger(__name__)
 
 
 class VideoArea(QWidget):
-    """Present a video surface with auto-hiding playback controls."""
+    """Present a video surface with auto-hiding playback controls.
+
+    Uses :class:`VideoRendererWidget` (``QRhiWidget``) for GPU-accelerated
+    rendering with proper colour-science handling: YUV→RGB conversion,
+    correct BT.601/709/2020 matrix selection, limited/full range, and
+    HDR→SDR tone mapping for PQ (ST.2084) and HLG (STD-B67) content.
+
+    Decoded frames are received from a ``QVideoSink`` and uploaded as GPU
+    textures.  The rendering result is always fully opaque (alpha = 1.0),
+    independent of any parent-widget background colour.
+    """
 
     mouseActive = Signal()
     controlsVisibleChanged = Signal(bool)
@@ -59,61 +79,43 @@ class VideoArea(QWidget):
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        # Prevent the WA_TranslucentBackground cascade from the main window
+        # from making the video surface transparent.
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, False)
+        self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent, True)
         self.setMouseTracking(True)
 
-        if QGraphicsVideoItem is None:
-            raise RuntimeError("PySide6.QtMultimediaWidgets is required for video playback.")
+        if QMediaPlayer is None or QVideoSink is None:
+            raise RuntimeError(
+                "PySide6.QtMultimedia is required for video playback."
+            )
 
-        # --- Graphics View Setup ---
-        # The dedicated black rectangle lives directly behind the video surface and is kept in
-        # sync with the rendered frame geometry.  This avoids altering the neutral UI chrome
-        # colour while ensuring the darkest pixels inside the video appear truly black.
-        self._black_backing: QGraphicsRectItem = QGraphicsRectItem()
-        self._black_backing.setBrush(Qt.black)
-        self._black_backing.setPen(Qt.NoPen)
-        self._black_backing.setZValue(0)
-
-        self._video_item = QGraphicsVideoItem()
-        self._video_item.setZValue(1)
-        self._video_item.setAspectRatioMode(Qt.AspectRatioMode.KeepAspectRatio)
-        self._video_item.nativeSizeChanged.connect(self._update_black_backing_geometry)
-
-        self._scene = QGraphicsScene(self)
-        self._scene.addItem(self._black_backing)
-        self._scene.addItem(self._video_item)
-
-        self._video_view = QGraphicsView(self._scene, self)
-        self._video_view.setFrameShape(QFrame.Shape.NoFrame)
-        self._video_view.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self._video_view.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self._video_view.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-        # Accept focus so keyboard navigation targets the video viewport without requiring the user
-        # to click a non-interactive chrome element first.
-        self._video_view.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
-        self.setFocusProxy(self._video_view)
-        # Match the photo viewer's light-toned surface so letterboxed video frames sit
-        # on the same neutral backdrop.  Using the shared palette value keeps the
-        # photo and video experiences visually consistent while avoiding harsh
-        # contrast against the surrounding chrome.
-        # Mirror the palette-driven detail background so letterboxed frames do not
-        # sit on a subtly different tone compared to the surrounding widgets.
+        # --- Video Renderer Setup ---
         surface_color = viewer_surface_color(self)
         self._default_surface_color = surface_color
-        # Style both the graphics view and its viewport so any revealed margins match the
-        # surrounding detail panel while the application is in its standard chrome mode.
-        self._video_view.setStyleSheet("background: transparent; border: none;")
-        self._video_view.viewport().setStyleSheet(
-            f"background-color: {surface_color}; border: none;"
-        )
-        self.setStyleSheet(f"background-color: {surface_color};")
-        self._scene.setBackgroundBrush(QColor(surface_color))
-        # --- End Graphics View Setup ---
+
+        self._renderer = VideoRendererWidget(self)
+        self._renderer.set_letterbox_color(QColor(surface_color))
+        # Ensure the renderer is also opaque and doesn't inherit transparency.
+        self._renderer.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, False)
+        self._renderer.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent, True)
+        # Accept focus so keyboard navigation targets the video surface
+        # without requiring the user to click a non-interactive element.
+        self._renderer.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.setFocusProxy(self._renderer)
+
+        self._apply_surface(surface_color)
+        # --- End Video Renderer Setup ---
 
         # --- Media Player Setup ---
         self._player = QMediaPlayer(self)
         self._audio_output = QAudioOutput(self)
         self._player.setAudioOutput(self._audio_output)
-        self._player.setVideoOutput(self._video_item)
+
+        # Route decoded frames through QVideoSink → our custom renderer.
+        self._video_sink = QVideoSink(self)
+        self._player.setVideoOutput(self._video_sink)
+        self._video_sink.videoFrameChanged.connect(self._on_video_frame)
 
         self._player.positionChanged.connect(self._on_position_changed)
         self._player.durationChanged.connect(self._on_duration_changed)
@@ -128,7 +130,7 @@ class VideoArea(QWidget):
 
         self._controls_visible = False
         self._target_opacity = 0.0
-        self._host_widget: QWidget | None = self._video_view
+        self._host_widget: QWidget | None = self._renderer
         self._window_host: QWidget | None = None
         self._controls_enabled = True
 
@@ -152,10 +154,10 @@ class VideoArea(QWidget):
     # Public API
     # ------------------------------------------------------------------
     @property
-    def video_item(self) -> QGraphicsVideoItem:
-        """Return the embedded :class:`QGraphicsVideoItem` for media output."""
+    def renderer(self) -> VideoRendererWidget:
+        """Return the :class:`VideoRendererWidget` for direct access."""
 
-        return self._video_item
+        return self._renderer
 
     @property
     def player_bar(self) -> PlayerBar:
@@ -167,11 +169,23 @@ class VideoArea(QWidget):
         """Switch to a pure black canvas when immersive full screen mode is active."""
 
         colour = "#000000" if immersive else self._default_surface_color
-        stylesheet = f"background-color: {colour}; border: none;"
-        self.setStyleSheet(stylesheet)
-        self._video_view.setStyleSheet("background: transparent; border: none;")
-        self._video_view.viewport().setStyleSheet(stylesheet)
-        self._scene.setBackgroundBrush(QColor(colour))
+        self._apply_surface(colour)
+
+    def set_surface_color(self, colour: str) -> None:
+        """Update the surface colour used for letterbox and background areas.
+
+        Called by the theme controller whenever the application theme changes
+        so that the video canvas stays in sync with the surrounding chrome.
+        """
+
+        self._default_surface_color = colour
+        self._apply_surface(colour)
+
+    def _apply_surface(self, colour: str) -> None:
+        """Apply *colour* to the renderer letterbox, widget, and stylesheet."""
+
+        self._renderer.set_letterbox_color(QColor(colour))
+        self.setStyleSheet(f"background-color: {colour}; border: none;")
 
     def show_controls(self, *, animate: bool = True) -> None:
         """Reveal the playback controls and restart the hide timer."""
@@ -230,6 +244,20 @@ class VideoArea(QWidget):
 
     def load_video(self, path: Path) -> None:
         """Load a video file for playback."""
+        self._renderer.clear_frame()
+
+        # Probe the container-level display-matrix rotation from ffprobe
+        # *before* setting the source.  The renderer uses the probed value
+        # as the primary rotation source (more reliable across platforms
+        # than Qt's ``QVideoFrameFormat.rotation()``).
+        cw_deg, raw_w, raw_h = probe_video_rotation(path)
+        self._renderer.set_container_rotation(cw_deg, raw_w, raw_h)
+        if cw_deg:
+            _log.debug(
+                "Container rotation for %s: %d° CW (raw %dx%d)",
+                path.name, cw_deg, raw_w, raw_h,
+            )
+
         self._player.setSource(QUrl.fromLocalFile(str(path)))
         # Do not auto-play; let the coordinator decide.
         # But ensure we are at start
@@ -248,8 +276,21 @@ class VideoArea(QWidget):
         self._player.setPosition(position)
 
     def stop(self) -> None:
-        """Stop playback and reset."""
+        """Stop playback, release the media source and clear the renderer.
+
+        Clearing the source ensures that the video decoder fully releases its
+        resources and that no stale frames are sent through the ``QVideoSink``
+        after stopping.  Clearing the renderer removes any residual frame
+        texture so that subsequent media transitions never flash the last
+        rendered video frame.
+        """
         self._player.stop()
+        self._player.setSource(QUrl())
+        self._renderer.clear_frame()
+
+    def _on_video_frame(self, frame: "QVideoFrame") -> None:
+        """Forward each decoded frame to the GPU renderer."""
+        self._renderer.update_frame(frame)
 
     def _on_position_changed(self, position: int) -> None:
         self._player_bar.set_position(position)
@@ -272,6 +313,12 @@ class VideoArea(QWidget):
             position = self._player.position()
             if position + 200 < duration:
                 return
+            # Step back a few milliseconds and pause so the last visible
+            # frame remains on screen instead of flashing to black.
+            hold_pos = max(0, duration - VIDEO_COMPLETE_HOLD_BACKSTEP_MS)
+            self._player.setPosition(hold_pos)
+            self._player.pause()
+            self.show_controls()
             self.playbackFinished.emit()
 
     def _on_volume_changed(self, value: int) -> None:
@@ -292,12 +339,8 @@ class VideoArea(QWidget):
 
         super().resizeEvent(event)
         rect = self.rect()
-        self._video_view.setGeometry(rect)
-        self._scene.setSceneRect(QRectF(rect))
-        self._video_item.setSize(self._scene.sceneRect().size())
-        self._video_item.setPos(QPointF())
+        self._renderer.setGeometry(rect)
         self._update_bar_geometry()
-        self._update_black_backing_geometry()
 
     def enterEvent(self, event) -> None:  # pragma: no cover - GUI behaviour
         super().enterEvent(event)
@@ -388,23 +431,24 @@ class VideoArea(QWidget):
         elif self._controls_visible:
             self._hide_timer.start(PLAYER_CONTROLS_HIDE_DELAY_MS)
 
-    def video_view(self) -> QGraphicsView:
-        """Return the graphics view hosting the video surface."""
+    def video_view(self) -> QWidget:
+        """Return the video renderer widget for focus/event handling.
 
-        # Exposing the graphics view allows higher-level widgets to install
-        # shortcut filters directly on the focus target instead of reaching into
-        # private attributes.  The method keeps the detail view wiring explicit
-        # while still encapsulating the scene graph setup within ``VideoArea``.
-        return self._video_view
+        Previously returned a ``QGraphicsView``; now returns the
+        :class:`VideoRendererWidget` which hosts the GPU rendering surface.
+        """
+
+        return self._renderer
 
     def video_viewport(self) -> QWidget:
-        """Return the viewport widget that accepts keyboard focus."""
+        """Return the widget that accepts keyboard focus.
 
-        # Keyboard shortcuts are intercepted at the viewport level so the main
-        # window can consume navigation keys before Qt treats them as focus
-        # traversal requests.  Providing the widget through a helper keeps the
-        # shortcut configuration readable from the controller layer.
-        return self._video_view.viewport()
+        Keyboard shortcuts are intercepted at this level so the main window
+        can consume navigation keys before Qt treats them as focus traversal
+        requests.
+        """
+
+        return self._renderer
 
     def _animate_to(self, value: float, duration: int) -> None:
         self._fade_anim.stop()
@@ -445,37 +489,6 @@ class VideoArea(QWidget):
             y = max(0, rect.height() - bar_height)
         self._player_bar.setGeometry(x, y, bar_width, bar_height)
         self._player_bar.raise_()
-
-    def _update_black_backing_geometry(self) -> None:
-        """Keep the black backing rectangle aligned with the rendered video frame."""
-
-        video_native_size = self._video_item.nativeSize()
-        if video_native_size.isEmpty():
-            # Collapse the rectangle when no video is loaded so the neutral UI background stays
-            # visible.  This avoids showing a stray black patch before playback starts.
-            self._black_backing.setRect(QRectF())
-            return
-
-        item_size = self._video_item.size()
-        if item_size.isEmpty():
-            # Skip updates until the view establishes a non-zero drawing area.  Attempting to
-            # scale into a zero-sized surface would lead to divisions by zero inside Qt.
-            self._black_backing.setRect(QRectF())
-            return
-
-        # Determine the aspect-ratio preserving rectangle that Qt will use to present the video.
-        # We start with the native pixel size and scale it into the current video item bounds while
-        # maintaining the user's configured aspect mode.
-        scaled_size = video_native_size.scaled(item_size, Qt.AspectRatioMode.KeepAspectRatio)
-        scaled_rect = QRectF(QPointF(), scaled_size)
-
-        # Position the scaled rectangle so it is centred inside the video item, matching the
-        # placement of the actual media frame.
-        item_bounds = QRectF(QPointF(), item_size)
-        scaled_rect.moveCenter(item_bounds.center())
-
-        self._black_backing.setPos(self._video_item.pos())
-        self._black_backing.setRect(scaled_rect)
 
     # ------------------------------------------------------------------
     # Live Photo helpers

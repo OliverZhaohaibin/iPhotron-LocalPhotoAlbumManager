@@ -63,6 +63,9 @@ class StubUi(QObject):
         self.image_viewer = MagicMock()
         self.image_viewer.set_surface_color_override = MagicMock()
 
+        self.video_area = MagicMock()
+        self.video_area.set_surface_color = MagicMock()
+
         self.edit_button = make_widget("editButton", QPushButton)
 
         # --- Icons / Toolbar ---
@@ -156,6 +159,9 @@ def test_theme_change_handler(window_theme_controller, mock_theme_manager):
     stylesheet_arg = ui.sidebar.setStyleSheet.call_args[0][0]
     assert f"background-color: {expected_bg}" in stylesheet_arg
 
+    # Video area should receive black in dark mode
+    ui.video_area.set_surface_color.assert_called_with("#000000")
+
 
 def test_apply_edit_theme(window_theme_controller, mock_theme_manager):
     """Test forcing edit mode (dark mode)."""
@@ -246,6 +252,10 @@ def test_ui_component_styling(window_theme_controller, mock_theme_manager):
     # 4. Image Viewer Surface
     # In Light Mode, surface should be window background
     ui.image_viewer.set_surface_color_override.assert_called_with(bg)
+
+    # 5. Video Area Surface
+    # In Light Mode, video area should match window background
+    ui.video_area.set_surface_color.assert_called_with(bg)
 
 
 def test_icon_tinting(window_theme_controller, mock_theme_manager):

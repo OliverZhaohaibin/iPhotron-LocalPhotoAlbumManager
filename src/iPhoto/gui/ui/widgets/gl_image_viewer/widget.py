@@ -80,6 +80,12 @@ class GLImageViewer(QRhiWidget):
 
     def __init__(self, parent: QRhiWidget | None = None) -> None:
         super().__init__(parent)
+        # Prevent the frameless window's translucent background from bleeding
+        # through before the first QRhi/OpenGL frame is produced.
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, False)
+        self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent, True)
+        self.setAutoFillBackground(True)
         self.setMouseTracking(True)
 
         # Use the same OpenGL backend as the QRhiWidget-based video renderer
@@ -525,7 +531,7 @@ class GLImageViewer(QRhiWidget):
         # widgets share the same QRhi rendering infrastructure.
         cb.beginPass(
             self.renderTarget(),
-            QColor(0, 0, 0, 255),
+            QColor(self._fullscreen_handler.backdrop_color),
             QRhiDepthStencilClearValue(),
         )
         cb.beginExternal()

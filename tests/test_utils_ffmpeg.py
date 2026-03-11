@@ -26,7 +26,7 @@ class TestProbeVideoRotation:
     def test_returns_rotation_from_display_matrix(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
-        """Display Matrix side data with -90° → 270° CW."""
+        """Display Matrix side data with -90° (CCW) → 90° CW."""
 
         video = tmp_path / "portrait.mov"
 
@@ -51,7 +51,7 @@ class TestProbeVideoRotation:
         monkeypatch.setattr(ffmpeg, "probe_media", fake_probe)
 
         cw, raw_w, raw_h = ffmpeg.probe_video_rotation(video)
-        assert cw == 270
+        assert cw == 90
         assert raw_w == 1920
         assert raw_h == 1440
 
@@ -126,7 +126,7 @@ class TestProbeVideoRotation:
     def test_handles_90_cw_rotation(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
-        """Display Matrix with 90° → 90° CW."""
+        """Display Matrix rotation value 90 (= 90° CCW) → 270° CW."""
 
         video = tmp_path / "rotated.mp4"
 
@@ -150,7 +150,7 @@ class TestProbeVideoRotation:
         monkeypatch.setattr(ffmpeg, "probe_media", fake_probe)
 
         cw, _, _ = ffmpeg.probe_video_rotation(video)
-        assert cw == 90
+        assert cw == 270
 
     def test_skips_non_video_streams(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -180,7 +180,7 @@ class TestProbeVideoRotation:
         monkeypatch.setattr(ffmpeg, "probe_media", fake_probe)
 
         cw, raw_w, raw_h = ffmpeg.probe_video_rotation(video)
-        assert cw == 270
+        assert cw == 90
         assert raw_w == 3840
         assert raw_h == 2160
 
@@ -201,7 +201,7 @@ class TestProbeVideoRotation:
     def test_snaps_near_90_value(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
-        """A non-exact rotation (e.g. -89.9°) snaps to 270° CW."""
+        """A non-exact rotation (e.g. -89.9°) snaps to 90° CW."""
 
         video = tmp_path / "nearly.mp4"
 
@@ -225,7 +225,7 @@ class TestProbeVideoRotation:
         monkeypatch.setattr(ffmpeg, "probe_media", fake_probe)
 
         cw, _, _ = ffmpeg.probe_video_rotation(video)
-        assert cw == 270
+        assert cw == 90
 
 
 def test_extract_video_frame_uses_yuv_format_for_jpeg(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

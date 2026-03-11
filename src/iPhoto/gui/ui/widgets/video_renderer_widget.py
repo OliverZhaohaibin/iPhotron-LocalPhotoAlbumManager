@@ -210,9 +210,11 @@ class VideoRendererWidget(QRhiWidget):
         self._rotate90_steps = 0
         self._mirror = 0
 
-        # Container-level rotation obtained from ffprobe.  Used as a fallback
-        # on Linux where Qt's GStreamer backend may not populate
-        # ``QVideoFrameFormat.rotation()`` from the display-matrix metadata.
+        # Container-level rotation obtained from ffprobe.  Used as the
+        # primary rotation source on all platforms because Qt's
+        # ``QVideoFrameFormat.rotation()`` can report platform-dependent
+        # values.  When ffprobe data is unavailable the code falls back to
+        # Qt's value.
         self._container_rotation_cw: int = 0
         self._container_raw_w: int = 0
         self._container_raw_h: int = 0

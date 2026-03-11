@@ -249,9 +249,9 @@ class VideoArea(QWidget):
         self._renderer.clear_frame()
 
         # Probe the container-level display-matrix rotation from ffprobe
-        # *before* setting the source.  On Linux the Qt GStreamer backend may
-        # not expose the rotation via ``QVideoFrameFormat.rotation()``; the
-        # renderer uses the probed value as a fallback.
+        # *before* setting the source.  The renderer uses the probed value
+        # as the primary rotation source (more reliable across platforms
+        # than Qt's ``QVideoFrameFormat.rotation()``).
         try:
             cw_deg, raw_w, raw_h = probe_video_rotation(path)
         except Exception:

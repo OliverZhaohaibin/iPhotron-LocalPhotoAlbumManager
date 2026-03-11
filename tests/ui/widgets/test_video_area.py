@@ -142,15 +142,15 @@ class TestVideoRendererWidget:
     def test_set_container_rotation(self, qapp):
         """set_container_rotation should store the probed values."""
         w = VideoRendererWidget()
-        w.set_container_rotation(270, 1920, 1440)
-        assert w._container_rotation_cw == 270
+        w.set_container_rotation(90, 1920, 1440)
+        assert w._container_rotation_cw == 90
         assert w._container_raw_w == 1920
         assert w._container_raw_h == 1440
 
     def test_clear_frame_resets_container_rotation(self, qapp):
         """clear_frame should also reset the container rotation state."""
         w = VideoRendererWidget()
-        w.set_container_rotation(270, 1920, 1440)
+        w.set_container_rotation(90, 1920, 1440)
         w.clear_frame()
         assert w._container_rotation_cw == 0
         assert w._container_raw_w == 0
@@ -159,7 +159,7 @@ class TestVideoRendererWidget:
     def test_fallback_rotation_when_qt_reports_zero(self, qapp):
         """When Qt reports 0° but container has rotation, apply fallback."""
         w = VideoRendererWidget()
-        w.set_container_rotation(270, 1920, 1440)
+        w.set_container_rotation(90, 1920, 1440)
 
         # Create a frame with dimensions matching the raw stream (not pre-rotated)
         from PySide6.QtCore import QSize
@@ -170,13 +170,13 @@ class TestVideoRendererWidget:
         frame = QVideoFrame(fmt)
         w.update_frame(frame)
 
-        # Fallback should apply 270° → steps = 3
-        assert w._rotate90_steps == 3
+        # Container rotation 90° CW → steps = 1
+        assert w._rotate90_steps == 1
 
     def test_no_double_rotation_when_prerotated(self, qapp):
         """When GStreamer pre-rotates frames, do not apply container rotation again."""
         w = VideoRendererWidget()
-        w.set_container_rotation(270, 1920, 1440)
+        w.set_container_rotation(90, 1920, 1440)
 
         # Frame dimensions are swapped compared to raw stream → pre-rotated
         from PySide6.QtCore import QSize
@@ -205,10 +205,8 @@ class TestVideoRendererWidget:
     def test_container_rotation_overrides_qt_rotation(self, qapp):
         """ffprobe rotation is always preferred over Qt's platform-dependent value."""
         w = VideoRendererWidget()
-        # Container says 270° CW (correct for a -90° display matrix).
-        # Even if Qt reports a different value (e.g. 90° on some Linux
-        # backends), the ffprobe-derived rotation takes precedence.
-        w.set_container_rotation(270, 1920, 1440)
+        # Container says 90° CW (correct for a -90° CCW display matrix).
+        w.set_container_rotation(90, 1920, 1440)
 
         from PySide6.QtCore import QSize
         fmt = QVideoFrameFormat(
@@ -217,8 +215,8 @@ class TestVideoRendererWidget:
         frame = QVideoFrame(fmt)
         w.update_frame(frame)
 
-        # Container rotation (270) wins regardless of Qt's rotation
-        assert w._rotate90_steps == 3
+        # Container rotation (90° CW) wins → steps = 1
+        assert w._rotate90_steps == 1
 
     def test_update_frame_sets_has_frame(self, qapp):
         """update_frame should set _has_frame to True when a valid frame arrives."""
@@ -364,12 +362,12 @@ class TestVideoArea:
         mock_set_rot = mocker.patch.object(va._renderer, "set_container_rotation")
         mocker.patch(
             "iPhoto.gui.ui.widgets.video_area.probe_video_rotation",
-            return_value=(270, 1920, 1440),
+            return_value=(90, 1920, 1440),
         )
 
         va.load_video(Path("/fake/portrait.mov"))
 
-        mock_set_rot.assert_called_once_with(270, 1920, 1440)
+        mock_set_rot.assert_called_once_with(90, 1920, 1440)
 
     def test_load_video_handles_probe_failure(self, qapp, mocker):
         """load_video should still work when ffprobe fails."""

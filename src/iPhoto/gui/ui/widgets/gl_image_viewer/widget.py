@@ -84,7 +84,16 @@ class GLImageViewer(QRhiWidget):
 
         # Use the same OpenGL backend as the QRhiWidget-based video renderer
         # so that both widgets share a single rendering infrastructure.
+        # Must be called in the constructor — Qt docs state that calling
+        # setApi() after the widget is shown may have no effect.
         self.setApi(QRhiWidget.Api.OpenGL)
+
+        # Declare that this widget always produces fully opaque output so
+        # the compositor never expects transparency from the first paint.
+        self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent, True)
+        # Prevent the main window's WA_TranslucentBackground from cascading
+        # into this widget and causing transparent first-frame flashes.
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, False)
 
         self._gl_funcs: QOpenGLFunctions_3_3_Core | None = None
         self._renderer: GLRenderer | None = None
@@ -510,9 +519,28 @@ class GLImageViewer(QRhiWidget):
     def render(self, cb) -> None:  # type: ignore[override]
         """QRhiWidget override: render the current image via raw OpenGL."""
         if not self._gl_initialized:
+            # GL resources are not yet available but we MUST still clear the
+            # render target with an opaque colour so the surface is never
+            # transparent.  An early bare return would leave the texture
+            # uninitialised, compositing as transparent under the main
+            # window's WA_TranslucentBackground.
+            bg = self._fullscreen_handler.backdrop_color
+            cb.beginPass(
+                self.renderTarget(),
+                QColor.fromRgbF(bg.redF(), bg.greenF(), bg.blueF(), 1.0),
+                QRhiDepthStencilClearValue(),
+            )
+            cb.endPass()
             return
         gf = self._gl_funcs
         if gf is None or self._renderer is None:
+            bg = self._fullscreen_handler.backdrop_color
+            cb.beginPass(
+                self.renderTarget(),
+                QColor.fromRgbF(bg.redF(), bg.greenF(), bg.blueF(), 1.0),
+                QRhiDepthStencilClearValue(),
+            )
+            cb.endPass()
             return
 
         output_size = self.renderTarget().pixelSize()

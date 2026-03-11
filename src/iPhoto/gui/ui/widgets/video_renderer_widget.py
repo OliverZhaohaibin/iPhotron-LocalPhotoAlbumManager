@@ -169,7 +169,16 @@ class VideoRendererWidget(QRhiWidget):
         # Force the OpenGL backend so both QRhiWidget-based renderers
         # (image viewer and video renderer) share the same rendering
         # infrastructure inside the QStackedWidget.
+        # Must be called in the constructor — Qt docs state that calling
+        # setApi() after the widget is shown may have no effect.
         self.setApi(QRhiWidget.Api.OpenGL)
+
+        # Declare that this widget always produces fully opaque output so
+        # the compositor never expects transparency from the first paint.
+        self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent, True)
+        # Prevent the main window's WA_TranslucentBackground from cascading
+        # into this widget and causing transparent first-frame flashes.
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, False)
 
         # --- state ---
         self._letterbox_color = QColor("#e8e8e8")
@@ -396,6 +405,15 @@ class VideoRendererWidget(QRhiWidget):
     def render(self, cb) -> None:  # type: ignore[override]
         """Render the current video frame (or letterbox if no frame is present)."""
         if not self._initialized:
+            # GPU pipeline not yet ready but we MUST still clear the render
+            # target with an opaque colour so the surface is never transparent.
+            lc = self._letterbox_color
+            cb.beginPass(
+                self.renderTarget(),
+                QColor.fromRgbF(lc.redF(), lc.greenF(), lc.blueF(), 1.0),
+                QRhiDepthStencilClearValue(),
+            )
+            cb.endPass()
             return
 
         rhi = self.rhi()

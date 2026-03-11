@@ -539,5 +539,37 @@ class DetailPageWidget(QWidget):
             self._rhi_init_cover.deleteLater()
             self._rhi_init_cover = None
 
+    def show_rhi_init_cover(self) -> None:
+        """Re-create and show the opaque init cover.
+
+        Called when the player stack is about to switch to a QRhiWidget
+        that has never rendered.  The backing texture of an uninitialised
+        ``QRhiWidget`` is transparent; this cover hides the transparent
+        region until ``hide_rhi_init_cover()`` is called after the widget
+        renders its first opaque frame.
+        """
+        if self._rhi_init_cover is not None:
+            # Cover still exists – just make sure it is visible and on top.
+            self._rhi_init_cover.show()
+            self._rhi_init_cover.raise_()
+            return
+
+        player_container = self.player_container
+        if player_container is None:
+            return
+
+        self._rhi_init_cover = QWidget(player_container)
+        self._rhi_init_cover.setAutoFillBackground(True)
+        self._rhi_init_cover.setAttribute(
+            Qt.WidgetAttribute.WA_TranslucentBackground, False,
+        )
+        self._rhi_init_cover.setStyleSheet(
+            "background-color: palette(window);"
+        )
+        layout = player_container.layout()
+        if layout is not None:
+            layout.addWidget(self._rhi_init_cover, 0, 0)
+        self._rhi_init_cover.raise_()
+
 
 __all__ = ["DetailPageWidget"]

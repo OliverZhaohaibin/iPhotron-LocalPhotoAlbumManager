@@ -293,8 +293,16 @@ class VideoRendererWidget(QRhiWidget):
                     # Dimensions don't match exactly (e.g. slight crop or
                     # scaling by the decoder).  Compare aspect ratios.
                     frame_ar = w / h if h > 0 else 0.0
+                    raw_ar = raw_w / raw_h if raw_h > 0 else 0.0
                     rotated_ar = raw_h / raw_w if raw_w > 0 else 0.0
-                    if rotated_ar > 0 and abs(frame_ar - rotated_ar) < 0.05:
+                    # If the frame matches the *rotated* aspect but NOT the
+                    # original, the backend pre-rotated.  For nearly-square
+                    # videos both ratios are close; prefer "not pre-rotated".
+                    if (
+                        rotated_ar > 0
+                        and abs(frame_ar - rotated_ar) < 0.05
+                        and (raw_ar <= 0 or abs(frame_ar - raw_ar) >= 0.05)
+                    ):
                         pre_rotated = True
 
             rot_deg = 0 if pre_rotated else container_rot
@@ -711,17 +719,14 @@ class VideoRendererWidget(QRhiWidget):
         h = img.height()
 
         # On some Qt versions ``toImage()`` applies the frame's rotation
-        # internally, producing an image whose dimensions differ from the
-        # surface format's ``frameWidth``/``frameHeight``.  When that happens
-        # the texture already contains correctly-oriented pixels and the
-        # shader must NOT apply an additional rotation.
+        # internally, producing an image whose dimensions are the transpose
+        # of the surface format's ``frameWidth``/``frameHeight``.  When that
+        # happens the texture already contains correctly-oriented pixels and
+        # the shader must NOT apply an additional rotation.
         fmt = frame.surfaceFormat()
         fmt_w = fmt.frameWidth()
         fmt_h = fmt.frameHeight()
-        if self._rotate90_steps in (1, 3) and (
-            (w == fmt_h and h == fmt_w) or
-            (w != fmt_w and h != fmt_h)
-        ):
+        if self._rotate90_steps in (1, 3) and w == fmt_h and h == fmt_w:
             self._rotate90_steps = 0
             self._mirror = 0
             # Update the display native size to match the (now pre-rotated)

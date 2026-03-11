@@ -200,8 +200,8 @@ class VideoRendererWidget(QRhiWidget):
         self._tex_y: Optional[QRhiTexture] = None
         self._tex_uv: Optional[QRhiTexture] = None
         self._tex_rgba: Optional[QRhiTexture] = None
-        self._tex_y_fmt: Optional[int] = None  # QRhiTexture.Format enum value
-        self._tex_uv_fmt: Optional[int] = None  # QRhiTexture.Format enum value
+        self._tex_y_fmt: Optional[QRhiTexture.Format] = None
+        self._tex_uv_fmt: Optional[QRhiTexture.Format] = None
         self._initialized = False
 
         # Frame metadata (updated per frame)

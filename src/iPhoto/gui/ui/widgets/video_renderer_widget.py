@@ -354,7 +354,7 @@ class VideoRendererWidget(QRhiWidget):
         self._pipeline.create()
 
         # Upload vertex data
-        ru = cb.newResourceUpdateBatch()
+        ru = rhi.nextResourceUpdateBatch()
         ru.uploadStaticBuffer(self._vbuf, vdata)
         cb.resourceUpdate(ru)
 
@@ -374,7 +374,7 @@ class VideoRendererWidget(QRhiWidget):
         if output_size.isEmpty():
             return
 
-        ru = cb.newResourceUpdateBatch()
+        ru = rhi.nextResourceUpdateBatch()
 
         # Upload frame data if dirty
         if self._frame_dirty:

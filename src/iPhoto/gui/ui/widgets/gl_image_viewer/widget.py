@@ -17,6 +17,7 @@ from typing import Any
 
 from OpenGL import GL as gl
 from PySide6.QtCore import QPointF, QSize, Qt, Signal, QRectF
+from PySide6.QtWidgets import QSizePolicy
 from PySide6.QtGui import (
     QColor,
     QImage,
@@ -81,6 +82,13 @@ class GLImageViewer(QRhiWidget):
     def __init__(self, parent: QRhiWidget | None = None) -> None:
         super().__init__(parent)
         self.setMouseTracking(True)
+
+        # Force an opaque backing store so the frameless/translucent main
+        # window never leaks through during cold-start QRhi frame setup.
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, False)
+        self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent, True)
+        self.setAutoFillBackground(True)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
 
         # Use the same OpenGL backend as the QRhiWidget-based video renderer
         # so that both widgets share a single rendering infrastructure.

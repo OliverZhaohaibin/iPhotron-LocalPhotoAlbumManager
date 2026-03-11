@@ -162,6 +162,13 @@ class VideoRendererWidget(QRhiWidget):
         super().__init__(parent)
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
 
+        # Force the OpenGL backend so QRhiWidget and QOpenGLWidget (used by
+        # GLImageViewer) share the same rendering infrastructure.  Without
+        # this, the default backend on Windows is Direct3D which conflicts
+        # with the QOpenGLWidget-based image viewer when both live inside the
+        # same QStackedWidget, causing the GL viewer to render transparent.
+        self.setApi(QRhiWidget.Api.OpenGL)
+
         # --- state ---
         self._letterbox_color = QColor("#e8e8e8")
         self._current_frame: Optional["QVideoFrame"] = None

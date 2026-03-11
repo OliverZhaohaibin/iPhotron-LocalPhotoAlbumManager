@@ -23,7 +23,6 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import (
     QGraphicsOpacityEffect,
-    QVBoxLayout,
     QWidget,
 )
 
@@ -80,6 +79,12 @@ class VideoArea(QWidget):
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        # Prevent the WA_TranslucentBackground cascade from the main window
+        # from making the video surface transparent.  This also avoids
+        # interfering with the sibling QOpenGLWidget (GLImageViewer) that
+        # shares the same QStackedWidget.
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, False)
+        self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent, True)
         self.setMouseTracking(True)
 
         if QMediaPlayer is None or QVideoSink is None:
@@ -93,6 +98,9 @@ class VideoArea(QWidget):
 
         self._renderer = VideoRendererWidget(self)
         self._renderer.set_letterbox_color(QColor(surface_color))
+        # Ensure the renderer is also opaque and doesn't inherit transparency.
+        self._renderer.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, False)
+        self._renderer.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent, True)
         # Accept focus so keyboard navigation targets the video surface
         # without requiring the user to click a non-interactive element.
         self._renderer.setFocusPolicy(Qt.FocusPolicy.StrongFocus)

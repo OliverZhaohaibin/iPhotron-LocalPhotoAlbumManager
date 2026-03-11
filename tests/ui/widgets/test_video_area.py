@@ -10,9 +10,10 @@ pytest.importorskip("PySide6.QtMultimedia", reason="QtMultimedia is required")
 from unittest.mock import MagicMock
 from pathlib import Path
 
+from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor, QShowEvent
 from PySide6.QtMultimedia import QMediaPlayer, QVideoFrame, QVideoFrameFormat
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QRhiWidget
 
 from iPhoto.config import VIDEO_COMPLETE_HOLD_BACKSTEP_MS
 from iPhoto.gui.ui.widgets.video_area import VideoArea
@@ -147,6 +148,19 @@ class TestVideoArea:
         """VideoArea should use QVideoSink, not QGraphicsVideoItem."""
         va = VideoArea()
         assert va._video_sink is not None
+
+    def test_renderer_uses_opengl_api(self, qapp):
+        """VideoRendererWidget must use the OpenGL backend to coexist with QOpenGLWidget."""
+        va = VideoArea()
+        assert va._renderer.api() == QRhiWidget.Api.OpenGL
+
+    def test_opaque_widget_attributes(self, qapp):
+        """VideoArea and renderer must block WA_TranslucentBackground cascade."""
+        va = VideoArea()
+        assert not va.testAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        assert va.testAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent)
+        assert not va._renderer.testAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        assert va._renderer.testAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent)
 
     def test_surface_color_updates_letterbox(self, qapp):
         """set_surface_color should update the renderer's letterbox color."""

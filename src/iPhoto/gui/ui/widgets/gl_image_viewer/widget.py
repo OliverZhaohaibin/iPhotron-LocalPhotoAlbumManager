@@ -78,6 +78,7 @@ class GLImageViewer(QRhiWidget):
     cropInteractionFinished = Signal()
     colorPicked = Signal(float, float, float)
     firstFrameReady = Signal()
+    """Emitted once after the first opaque frame has been rendered."""
 
     def __init__(self, parent: QRhiWidget | None = None) -> None:
         super().__init__(parent)

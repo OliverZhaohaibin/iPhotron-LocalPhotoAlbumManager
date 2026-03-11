@@ -158,6 +158,8 @@ class VideoRendererWidget(QRhiWidget):
     -------
     nativeSizeChanged(QSizeF)
         Emitted when the decoded video resolution changes.
+    firstFrameReady()
+        Emitted once after the first opaque frame has been rendered.
     """
 
     nativeSizeChanged = Signal(QSizeF)

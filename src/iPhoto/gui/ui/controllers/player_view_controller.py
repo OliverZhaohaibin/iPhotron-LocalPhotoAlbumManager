@@ -114,6 +114,7 @@ class PlayerViewController(QObject):
         # first decoded still frame is ready, avoiding a one-frame transparent
         # flash while the GL/RHI pipeline creates its initial context.
         self._has_presented_still_frame = False
+        self._startup_warmup_done = False
 
     # ------------------------------------------------------------------
     # High-level surface selection helpers
@@ -227,6 +228,22 @@ class PlayerViewController(QObject):
 
         return self._has_presented_still_frame
 
+    def prewarm_image_surface(self) -> None:
+        """Prime the GL viewer with an opaque tiny frame during app startup."""
+
+        if self._startup_warmup_done:
+            return
+
+        warmup = QImage(2, 2, QImage.Format.Format_RGBA8888)
+        warmup.fill(0xFF000000)
+        self._image_viewer.set_image(
+            warmup,
+            {},
+            image_source="__startup_warmup__",
+            reset_view=False,
+        )
+        self._startup_warmup_done = True
+
     def defer_still_updates(self, enabled: bool) -> None:
         """Control whether still frames should be applied immediately."""
         self._defer_still_updates = bool(enabled)
@@ -337,13 +354,15 @@ class PlayerViewController(QObject):
 
     def _apply_still_frame(self, source: Path, image: QImage, adjustments: dict) -> None:
         """Render the still image on the GL viewer."""
-        self.show_image_surface()
+        # Upload the target frame first so the first surface swap never shows
+        # an empty/cleared GL frame between placeholder and real content.
         self._image_viewer.set_image(
             image,
             adjustments,
             image_source=source,
             reset_view=True,
         )
+        self.show_image_surface()
         self._has_presented_still_frame = True
         self._image_viewer.update()
 

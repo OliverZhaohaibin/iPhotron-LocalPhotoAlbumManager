@@ -16,6 +16,7 @@ from PySide6.QtCore import (
     QItemSelectionModel,
     QCoreApplication,
     Qt,
+    QTimer,
 )
 from PySide6.QtGui import QShortcut, QKeySequence, QAction
 
@@ -259,6 +260,9 @@ class MainCoordinator(QObject):
         """Start the coordinator."""
         self._logger.info("MainCoordinator started")
         self._view_router.show_gallery()
+        # Warm up the still-image GL surface early so first detail entry
+        # does not pay full QRhi/texture cold-start cost on click.
+        QTimer.singleShot(0, self._player_view_controller.prewarm_image_surface)
 
     # ------------------------------------------------------------------
     # Window manager integration (legacy interface)

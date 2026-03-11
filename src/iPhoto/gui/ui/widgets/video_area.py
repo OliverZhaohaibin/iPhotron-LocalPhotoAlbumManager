@@ -41,15 +41,20 @@ except (ModuleNotFoundError, ImportError):  # pragma: no cover - handled by main
 from pathlib import Path
 from PySide6.QtCore import QUrl
 
+import logging
+
 from ....config import (
     PLAYER_CONTROLS_HIDE_DELAY_MS,
     PLAYER_FADE_IN_MS,
     PLAYER_FADE_OUT_MS,
     VIDEO_COMPLETE_HOLD_BACKSTEP_MS,
 )
+from ....utils.ffmpeg import probe_video_rotation
 from .player_bar import PlayerBar
 from .video_renderer_widget import VideoRendererWidget
 from ..palette import viewer_surface_color
+
+_log = logging.getLogger(__name__)
 
 
 class VideoArea(QWidget):
@@ -242,6 +247,22 @@ class VideoArea(QWidget):
     def load_video(self, path: Path) -> None:
         """Load a video file for playback."""
         self._renderer.clear_frame()
+
+        # Probe the container-level display-matrix rotation from ffprobe
+        # *before* setting the source.  On Linux the Qt GStreamer backend may
+        # not expose the rotation via ``QVideoFrameFormat.rotation()``; the
+        # renderer uses the probed value as a fallback.
+        try:
+            cw_deg, raw_w, raw_h = probe_video_rotation(path)
+        except Exception:  # pragma: no cover - ffprobe not available
+            cw_deg, raw_w, raw_h = 0, 0, 0
+        self._renderer.set_container_rotation(cw_deg, raw_w, raw_h)
+        if cw_deg:
+            _log.debug(
+                "Container rotation for %s: %d° CW (raw %dx%d)",
+                path.name, cw_deg, raw_w, raw_h,
+            )
+
         self._player.setSource(QUrl.fromLocalFile(str(path)))
         # Do not auto-play; let the coordinator decide.
         # But ensure we are at start

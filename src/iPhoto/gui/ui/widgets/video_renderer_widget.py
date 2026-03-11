@@ -210,9 +210,40 @@ class VideoRendererWidget(QRhiWidget):
         self._rotate90_steps = 0
         self._mirror = 0
 
+        # Container-level rotation obtained from ffprobe.  Used as a fallback
+        # on Linux where Qt's GStreamer backend may not populate
+        # ``QVideoFrameFormat.rotation()`` from the display-matrix metadata.
+        self._container_rotation_cw: int = 0
+        self._container_raw_w: int = 0
+        self._container_raw_h: int = 0
+
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
+    def set_container_rotation(
+        self,
+        cw_degrees: int,
+        raw_w: int,
+        raw_h: int,
+    ) -> None:
+        """Store the container-level display-matrix rotation from ffprobe.
+
+        Parameters
+        ----------
+        cw_degrees:
+            Clockwise rotation in degrees (0, 90, 180, 270) that should be
+            applied to the raw decoded frame for correct display.
+        raw_w, raw_h:
+            Coded pixel dimensions of the video stream *before* rotation.
+            These are used to detect whether the multimedia backend has
+            already pre-rotated the decoded frames (by comparing against
+            the frame dimensions reported by ``QVideoFrameFormat``).
+        """
+
+        self._container_rotation_cw = cw_degrees
+        self._container_raw_w = raw_w
+        self._container_raw_h = raw_h
+
     def update_frame(self, frame: "QVideoFrame") -> None:
         """Accept a new video frame and schedule a repaint."""
         if frame is None or not frame.isValid():
@@ -233,6 +264,45 @@ class VideoRendererWidget(QRhiWidget):
             rot_deg = rotation.value if hasattr(rotation, "value") else int(rotation)
         except (TypeError, ValueError):
             rot_deg = 0
+
+        # ---- Linux fallback ------------------------------------------------
+        # On Linux the GStreamer-based multimedia backend sometimes does NOT
+        # populate ``QVideoFrameFormat.rotation()`` from the container's
+        # display-matrix metadata (the value stays at 0).  When that happens
+        # we fall back to the rotation obtained from ffprobe
+        # (``_container_rotation_cw``) which was set by ``VideoArea`` at load
+        # time.
+        #
+        # To avoid *double* rotation (in case GStreamer already pre-rotated the
+        # pixel data), we compare the decoded frame dimensions with the raw
+        # coded dimensions from ffprobe:
+        #   • dimensions match the raw stream   → NOT pre-rotated → apply
+        #   • dimensions match the *rotated* raw → pre-rotated     → skip
+        if rot_deg == 0 and self._container_rotation_cw != 0:
+            raw_w = self._container_raw_w
+            raw_h = self._container_raw_h
+            if raw_w > 0 and raw_h > 0:
+                if w == raw_w and h == raw_h:
+                    # Frame dimensions match raw stream → backend did NOT
+                    # pre-rotate → apply the container rotation.
+                    rot_deg = self._container_rotation_cw
+                elif w == raw_h and h == raw_w:
+                    # Frame dimensions are the transpose of the raw stream →
+                    # backend already pre-rotated → do NOT rotate again.
+                    rot_deg = 0
+                else:
+                    # Dimensions don't match exactly (e.g. slight crop or
+                    # scaling by the decoder).  Compare aspect ratios as a
+                    # heuristic.
+                    frame_ar = w / h if h > 0 else 0.0
+                    raw_ar = raw_w / raw_h if raw_h > 0 else 0.0
+                    rotated_ar = raw_h / raw_w if raw_w > 0 else 0.0
+                    if raw_ar > 0 and abs(frame_ar - raw_ar) < 0.05:
+                        rot_deg = self._container_rotation_cw
+                    elif rotated_ar > 0 and abs(frame_ar - rotated_ar) < 0.05:
+                        rot_deg = 0
+        # ---- end Linux fallback ---------------------------------------------
+
         self._rotate90_steps = (rot_deg // 90) % 4
         self._mirror = 1 if fmt.isMirrored() else 0
 
@@ -263,6 +333,9 @@ class VideoRendererWidget(QRhiWidget):
         self._native_size = QSizeF()
         self._rotate90_steps = 0
         self._mirror = 0
+        self._container_rotation_cw = 0
+        self._container_raw_w = 0
+        self._container_raw_h = 0
         self._has_frame = False
         self.update()
 

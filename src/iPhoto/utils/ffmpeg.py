@@ -343,6 +343,75 @@ def _extract_with_opencv(
     except Exception:
         return None
 
+def probe_video_rotation(source: Path) -> tuple[int, int, int]:
+    """Return the display-matrix rotation and raw coded dimensions for *source*.
+
+    Returns a tuple ``(cw_degrees, raw_width, raw_height)`` where
+    *cw_degrees* is the clockwise rotation (0, 90, 180, 270) that must be
+    applied to the raw decoded frame for correct on-screen orientation.
+    *raw_width* and *raw_height* are the coded pixel dimensions **before**
+    rotation.
+
+    The value is derived from the ``Display Matrix`` side-data entry of the
+    first video stream.  On failure the tuple ``(0, 0, 0)`` is returned so
+    callers can safely destructure without error handling.
+    """
+
+    try:
+        meta = probe_media(source)
+    except ExternalToolError:
+        return (0, 0, 0)
+
+    streams = meta.get("streams", [])
+    if not isinstance(streams, list):
+        return (0, 0, 0)
+
+    for stream in streams:
+        if not isinstance(stream, dict):
+            continue
+        if stream.get("codec_type") != "video":
+            continue
+
+        raw_w = 0
+        raw_h = 0
+        try:
+            raw_w = int(stream.get("width", 0))
+            raw_h = int(stream.get("height", 0))
+        except (TypeError, ValueError):
+            pass
+
+        rotation = 0.0
+
+        # Primary source: Display Matrix in side_data_list.
+        side_data = stream.get("side_data_list", [])
+        if isinstance(side_data, list):
+            for sd in side_data:
+                if not isinstance(sd, dict):
+                    continue
+                if sd.get("side_data_type") == "Display Matrix":
+                    try:
+                        rotation = float(sd.get("rotation", 0))
+                    except (TypeError, ValueError):
+                        rotation = 0.0
+                    break
+
+        # Convert the raw angle (which follows ``av_display_rotation_get``
+        # sign convention) to clockwise degrees matching Qt's
+        # ``QVideoFrameFormat.Rotation`` values.
+        # In Python ``-90 % 360 == 270`` which is exactly the mapping Qt
+        # performs internally.
+        raw_angle = int(round(rotation))
+        cw = raw_angle % 360
+
+        # Snap to the nearest multiple of 90° so that non-exact values
+        # (e.g. -89.9°) still map to a valid step.
+        snapped = (round(cw / 90) * 90) % 360
+
+        return (snapped, raw_w, raw_h)
+
+    return (0, 0, 0)
+
+
 def probe_media(source: Path) -> Dict[str, Any]:
     """Return ffprobe metadata for *source*.
 

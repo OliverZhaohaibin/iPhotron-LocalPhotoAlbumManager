@@ -257,51 +257,55 @@ class VideoRendererWidget(QRhiWidget):
         w = fmt.frameWidth()
         h = fmt.frameHeight()
 
-        # Extract display matrix rotation and mirror state from the
-        # container metadata that Qt exposes via ``QVideoFrameFormat``.
-        rotation = fmt.rotation()
-        try:
-            rot_deg = rotation.value if hasattr(rotation, "value") else int(rotation)
-        except (TypeError, ValueError):
-            rot_deg = 0
-
-        # ---- Linux fallback ------------------------------------------------
-        # On Linux the GStreamer-based multimedia backend sometimes does NOT
-        # populate ``QVideoFrameFormat.rotation()`` from the container's
-        # display-matrix metadata (the value stays at 0).  When that happens
-        # we fall back to the rotation obtained from ffprobe
-        # (``_container_rotation_cw``) which was set by ``VideoArea`` at load
-        # time.
+        # ---- Rotation resolution -------------------------------------------
+        # Qt's ``QVideoFrameFormat.rotation()`` value can differ across
+        # platforms: on Windows (Media Foundation) it usually reports the
+        # correct clockwise rotation from the display matrix; on Linux
+        # (FFmpeg / GStreamer backends) the value may be wrong (e.g. negated
+        # sign) or the backend may pre-rotate the pixel data while *still*
+        # reporting the original rotation, causing double rotation.
         #
-        # To avoid *double* rotation (in case GStreamer already pre-rotated the
-        # pixel data), we compare the decoded frame dimensions with the raw
-        # coded dimensions from ffprobe:
-        #   • dimensions match the raw stream   → NOT pre-rotated → apply
-        #   • dimensions match the *rotated* raw → pre-rotated     → skip
-        if rot_deg == 0 and self._container_rotation_cw != 0:
-            raw_w = self._container_raw_w
-            raw_h = self._container_raw_h
-            if raw_w > 0 and raw_h > 0:
-                if w == raw_w and h == raw_h:
-                    # Frame dimensions match raw stream → backend did NOT
-                    # pre-rotate → apply the container rotation.
-                    rot_deg = self._container_rotation_cw
-                elif w == raw_h and h == raw_w:
-                    # Frame dimensions are the transpose of the raw stream →
-                    # backend already pre-rotated → do NOT rotate again.
-                    rot_deg = 0
-                else:
+        # The most reliable cross-platform source of truth is the ffprobe
+        # display-matrix metadata stored in ``_container_rotation_cw`` (set
+        # by ``VideoArea`` at load time).  When that information is available
+        # we use it *instead of* Qt's rotation, combined with a dimension
+        # comparison to detect whether the multimedia backend already
+        # pre-rotated the decoded frames:
+        #
+        #   • frame dims match raw stream dims  → NOT pre-rotated → apply
+        #   • frame dims match *rotated* raw    → pre-rotated     → skip
+        #
+        # When ffprobe metadata is unavailable we fall back to Qt's value.
+        container_rot = self._container_rotation_cw
+        raw_w = self._container_raw_w
+        raw_h = self._container_raw_h
+
+        if container_rot != 0 and raw_w > 0 and raw_h > 0:
+            # ffprobe rotation available — use it as the primary source.
+            pre_rotated = False
+
+            if container_rot in (90, 270):
+                # 90°/270° rotation swaps width and height; use that to
+                # detect whether the backend already applied the rotation.
+                if w == raw_h and h == raw_w:
+                    pre_rotated = True
+                elif w != raw_w or h != raw_h:
                     # Dimensions don't match exactly (e.g. slight crop or
-                    # scaling by the decoder).  Compare aspect ratios as a
-                    # heuristic.
+                    # scaling by the decoder).  Compare aspect ratios.
                     frame_ar = w / h if h > 0 else 0.0
-                    raw_ar = raw_w / raw_h if raw_h > 0 else 0.0
                     rotated_ar = raw_h / raw_w if raw_w > 0 else 0.0
-                    if raw_ar > 0 and abs(frame_ar - raw_ar) < 0.05:
-                        rot_deg = self._container_rotation_cw
-                    elif rotated_ar > 0 and abs(frame_ar - rotated_ar) < 0.05:
-                        rot_deg = 0
-        # ---- end Linux fallback ---------------------------------------------
+                    if rotated_ar > 0 and abs(frame_ar - rotated_ar) < 0.05:
+                        pre_rotated = True
+
+            rot_deg = 0 if pre_rotated else container_rot
+        else:
+            # No container rotation info — fall back to Qt's value.
+            rotation = fmt.rotation()
+            try:
+                rot_deg = rotation.value if hasattr(rotation, "value") else int(rotation)
+            except (TypeError, ValueError):
+                rot_deg = 0
+        # ---- end rotation resolution ----------------------------------------
 
         self._rotate90_steps = (rot_deg // 90) % 4
         self._mirror = 1 if fmt.isMirrored() else 0
@@ -705,6 +709,27 @@ class VideoRendererWidget(QRhiWidget):
 
         w = img.width()
         h = img.height()
+
+        # On some Qt versions ``toImage()`` applies the frame's rotation
+        # internally, producing an image whose dimensions differ from the
+        # surface format's ``frameWidth``/``frameHeight``.  When that happens
+        # the texture already contains correctly-oriented pixels and the
+        # shader must NOT apply an additional rotation.
+        fmt = frame.surfaceFormat()
+        fmt_w = fmt.frameWidth()
+        fmt_h = fmt.frameHeight()
+        if self._rotate90_steps in (1, 3) and (
+            (w == fmt_h and h == fmt_w) or
+            (w != fmt_w and h != fmt_h)
+        ):
+            self._rotate90_steps = 0
+            self._mirror = 0
+            # Update the display native size to match the (now pre-rotated)
+            # image dimensions so the aspect-ratio letterbox is correct.
+            new_size = QSizeF(w, h)
+            if new_size != self._native_size:
+                self._native_size = new_size
+                self.nativeSizeChanged.emit(new_size)
 
         if (self._tex_rgba is None or
                 self._tex_rgba.pixelSize().width() != w or

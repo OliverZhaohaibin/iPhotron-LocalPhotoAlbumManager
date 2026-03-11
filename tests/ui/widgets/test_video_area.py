@@ -202,6 +202,24 @@ class TestVideoRendererWidget:
         w.update_frame(frame)
         assert w._rotate90_steps == 0
 
+    def test_container_rotation_overrides_qt_rotation(self, qapp):
+        """ffprobe rotation is always preferred over Qt's platform-dependent value."""
+        w = VideoRendererWidget()
+        # Container says 270° CW (correct for a -90° display matrix).
+        # Even if Qt reports a different value (e.g. 90° on some Linux
+        # backends), the ffprobe-derived rotation takes precedence.
+        w.set_container_rotation(270, 1920, 1440)
+
+        from PySide6.QtCore import QSize
+        fmt = QVideoFrameFormat(
+            QSize(1920, 1440), QVideoFrameFormat.PixelFormat.Format_RGBA8888
+        )
+        frame = QVideoFrame(fmt)
+        w.update_frame(frame)
+
+        # Container rotation (270) wins regardless of Qt's rotation
+        assert w._rotate90_steps == 3
+
     def test_update_frame_sets_has_frame(self, qapp):
         """update_frame should set _has_frame to True when a valid frame arrives."""
         w = VideoRendererWidget()

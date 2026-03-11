@@ -432,7 +432,7 @@ class VideoRendererWidget(QRhiWidget):
         cb.resourceUpdate(ru)
 
         # Draw
-        cb.beginPass(self.renderTarget(), QColor(0, 0, 0, 255), QRhiDepthStencilClearValue())
+        cb.beginPass(self.renderTarget(), QColor(self._letterbox_color), QRhiDepthStencilClearValue())
         cb.setGraphicsPipeline(self._pipeline)
         cb.setShaderResources(self._srb)
         cb.setViewport(QRhiViewport(0, 0, output_size.width(), output_size.height()))

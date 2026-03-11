@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Optional, Set
 
-from PySide6.QtCore import QObject, QRunnable, QThreadPool, Signal
+from PySide6.QtCore import QObject, QRunnable, QThreadPool, Signal, QTimer
 from PySide6.QtGui import QImage, QPixmap
 from PySide6.QtWidgets import QStackedWidget, QWidget
 
@@ -16,6 +16,8 @@ from ..widgets.gl_image_viewer import GLImageViewer
 from ..widgets.live_badge import LiveBadge
 from ..widgets.video_area import VideoArea
 
+
+_VIDEO_SURFACE_DEFER_TIMEOUT_MS = 15
 
 class _AdjustedImageSignals(QObject):
     """Relay worker completion events back to the GUI thread."""
@@ -111,6 +113,7 @@ class PlayerViewController(QObject):
         self._defer_still_updates = False
         self._pending_still: Optional[tuple[Path, QImage, dict]] = None
         self._pending_video_surface: Optional[bool] = None
+        self._pending_video_generation = 0
 
         self._video_area.firstFrameAvailable.connect(self._reveal_pending_video_surface)
 
@@ -135,6 +138,7 @@ class PlayerViewController(QObject):
         # still viewer never inherits a faded overlay background.
         self._video_area.hide_controls(animate=False)
         self._pending_video_surface = None
+        self._pending_video_generation += 1
         if self._player_stack.currentWidget() is not self._image_viewer:
             if self._player_stack.indexOf(self._image_viewer) != -1:
                 self._player_stack.setCurrentWidget(self._image_viewer)
@@ -146,10 +150,19 @@ class PlayerViewController(QObject):
         self._image_viewer.update()
 
     def defer_video_surface_until_frame(self, *, interactive: bool) -> None:
-        """Keep the placeholder visible until the first decoded video frame arrives."""
+        """Keep placeholder briefly, but reveal video no later than 15 ms."""
 
         self._pending_video_surface = bool(interactive)
+        self._pending_video_generation += 1
+        generation = self._pending_video_generation
         self.show_placeholder()
+
+        def _reveal_with_timeout() -> None:
+            if generation != self._pending_video_generation:
+                return
+            self._reveal_pending_video_surface()
+
+        QTimer.singleShot(_VIDEO_SURFACE_DEFER_TIMEOUT_MS, _reveal_with_timeout)
 
     def _reveal_pending_video_surface(self) -> None:
         """Switch to the video surface once a frame is available."""

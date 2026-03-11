@@ -161,6 +161,7 @@ class VideoRendererWidget(QRhiWidget):
     """
 
     nativeSizeChanged = Signal(QSizeF)
+    firstFrameRendered = Signal()
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
@@ -187,6 +188,8 @@ class VideoRendererWidget(QRhiWidget):
         self._tex_uv: Optional[QRhiTexture] = None
         self._tex_rgba: Optional[QRhiTexture] = None
         self._initialized = False
+        self._has_video_content = False
+        self._emitted_first_frame_rendered = False
 
         # Frame metadata (updated per frame)
         self._fmt_enum = _FMT_RGBA
@@ -248,6 +251,8 @@ class VideoRendererWidget(QRhiWidget):
         self._native_size = QSizeF()
         self._rotate90_steps = 0
         self._mirror = 0
+        self._has_video_content = False
+        self._emitted_first_frame_rendered = False
         self.update()
 
     def set_letterbox_color(self, color: QColor) -> None:
@@ -415,6 +420,7 @@ class VideoRendererWidget(QRhiWidget):
         if self._frame_dirty:
             if self._upload_frame(rhi, ru):
                 self._frame_dirty = False
+                self._has_video_content = True
                 # Release the decoded frame reference immediately so the
                 # hardware decoder can recycle its buffer.  All pixel data
                 # has already been copied into GPU textures.
@@ -434,6 +440,10 @@ class VideoRendererWidget(QRhiWidget):
         cb.setVertexInput(0, vbuf_binding)
         cb.draw(6)  # 6 vertices = 2 triangles
         cb.endPass()
+
+        if self._has_video_content and not self._emitted_first_frame_rendered:
+            self._emitted_first_frame_rendered = True
+            self.firstFrameRendered.emit()
 
     def releaseResources(self) -> None:  # type: ignore[override]
         """Clean up GPU resources."""

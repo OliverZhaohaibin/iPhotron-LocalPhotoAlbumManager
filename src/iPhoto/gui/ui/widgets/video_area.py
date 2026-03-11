@@ -96,6 +96,7 @@ class VideoArea(QWidget):
         self._default_surface_color = surface_color
 
         self._renderer = VideoRendererWidget(self)
+        self._renderer.firstFrameRendered.connect(self._on_renderer_first_frame_rendered)
         self._renderer.set_letterbox_color(QColor(surface_color))
         # Ensure the renderer is also opaque and doesn't inherit transparency.
         self._renderer.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, False)
@@ -104,6 +105,11 @@ class VideoArea(QWidget):
         # without requiring the user to click a non-interactive element.
         self._renderer.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setFocusProxy(self._renderer)
+
+        self._bootstrap_cover = QWidget(self)
+        self._bootstrap_cover.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self._bootstrap_cover.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self._bootstrap_cover.hide()
 
         self._apply_surface(surface_color)
         # --- End Video Renderer Setup ---
@@ -188,6 +194,7 @@ class VideoArea(QWidget):
 
         self._renderer.set_letterbox_color(QColor(colour))
         self.setStyleSheet(f"background-color: {colour}; border: none;")
+        self._bootstrap_cover.setStyleSheet(f"background-color: {colour}; border: none;")
 
     def show_controls(self, *, animate: bool = True) -> None:
         """Reveal the playback controls and restart the hide timer."""
@@ -247,6 +254,7 @@ class VideoArea(QWidget):
     def load_video(self, path: Path) -> None:
         """Load a video file for playback."""
         self._awaiting_first_frame = True
+        self._show_bootstrap_cover()
         self._renderer.clear_frame()
         self._player.setSource(QUrl.fromLocalFile(str(path)))
         # Do not auto-play; let the coordinator decide.
@@ -315,6 +323,20 @@ class VideoArea(QWidget):
         self._audio_output.setMuted(muted)
         self._on_mouse_activity()
 
+    def _show_bootstrap_cover(self) -> None:
+        """Show an opaque cover until the first video frame is actually rendered."""
+
+        self._bootstrap_cover.setGeometry(self.rect())
+        self._bootstrap_cover.show()
+        self._bootstrap_cover.raise_()
+        self._player_bar.raise_()
+
+    def _on_renderer_first_frame_rendered(self) -> None:
+        """Hide the startup cover after the first frame has been presented."""
+
+        if self._bootstrap_cover.isVisible():
+            self._bootstrap_cover.hide()
+
     # ------------------------------------------------------------------
     # QWidget overrides
     # ------------------------------------------------------------------
@@ -324,6 +346,7 @@ class VideoArea(QWidget):
         super().resizeEvent(event)
         rect = self.rect()
         self._renderer.setGeometry(rect)
+        self._bootstrap_cover.setGeometry(rect)
         self._update_bar_geometry()
 
     def enterEvent(self, event) -> None:  # pragma: no cover - GUI behaviour
@@ -366,6 +389,7 @@ class VideoArea(QWidget):
     def hideEvent(self, event) -> None:  # pragma: no cover - GUI behaviour
         super().hideEvent(event)
         self.hide_controls(animate=False)
+        self._bootstrap_cover.hide()
 
     def eventFilter(self, watched: QObject, event: QEvent) -> bool:  # pragma: no cover - GUI behaviour
         if event.type() in {

@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Optional, Set
 
 from PySide6.QtCore import QObject, QRunnable, QThreadPool, Signal, QTimer
-from PySide6.QtGui import QImage, QPixmap
+from PySide6.QtGui import QImage, QPixmap, QPalette
 from PySide6.QtWidgets import QStackedWidget, QWidget
 
 from ....utils import image_loader
@@ -209,19 +209,16 @@ class PlayerViewController(QObject):
         """Begin loading ``source`` asynchronously, returning scheduling success."""
         self._loading_source = source
 
-        if placeholder is not None and not placeholder.isNull():
-            # Seed the GL viewer with an opaque placeholder frame first so the
-            # initial transition to the detail page never exposes a transparent
-            # surface while the full-resolution decode is still in flight.
-            # ``set_placeholder`` only updates cached image state and does not
-            # require the widget to be visible/current.
-            self._image_viewer.set_placeholder(placeholder)
-            self.show_image_surface()
-        else:
-            # Keep the QLabel placeholder visible until the decoded still frame
-            # is ready. Switching to the GL widget with no frame can expose one
-            # transparent composition cycle on some GPU/driver combinations.
-            self.show_placeholder()
+        # Always switch to the GL surface immediately to avoid a decode-bound
+        # placeholder dwell that feels like input lag.  When callers do not
+        # provide a thumbnail we synthesise a tiny opaque fallback frame so the
+        # viewer never presents an empty/transparent surface.
+        safe_placeholder = placeholder
+        if safe_placeholder is None or safe_placeholder.isNull():
+            safe_placeholder = self._opaque_fallback_placeholder()
+
+        self._image_viewer.set_placeholder(safe_placeholder)
+        self.show_image_surface()
 
         signals = _AdjustedImageSignals()
         worker = _AdjustedImageWorker(source, signals)
@@ -264,6 +261,18 @@ class PlayerViewController(QObject):
         self._pending_still = None
         self._apply_still_frame(source, image, adjustments)
         return True
+
+    def _opaque_fallback_placeholder(self) -> QPixmap:
+        """Create a tiny opaque fallback frame matching the viewer backdrop."""
+
+        colour = self._image_viewer.palette().color(QPalette.ColorRole.Window)
+        if not colour.isValid() or colour.alpha() < 255:
+            colour = self._video_area.palette().color(QPalette.ColorRole.Window)
+            colour.setAlpha(255)
+
+        pixmap = QPixmap(2, 2)
+        pixmap.fill(colour)
+        return pixmap
 
     def clear_image(self) -> None:
         """Remove any pixmap currently shown in the image viewer."""

@@ -354,6 +354,12 @@ class PlayerViewController(QObject):
 
     def _apply_still_frame(self, source: Path, image: QImage, adjustments: dict) -> None:
         """Render the still image on the GL viewer."""
+        # Startup warmup may leave a tiny placeholder texture resident on GPU.
+        # Clear it before the first real still so the renderer uploads the
+        # decoded frame instead of reusing the warmup black texture.
+        if not self._has_presented_still_frame and self._startup_warmup_done:
+            self._image_viewer.clear()
+
         # Upload the target frame first so the first surface swap never shows
         # an empty/cleared GL frame between placeholder and real content.
         self._image_viewer.set_image(

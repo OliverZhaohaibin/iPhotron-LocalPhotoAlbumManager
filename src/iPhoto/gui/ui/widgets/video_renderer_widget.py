@@ -395,15 +395,22 @@ class VideoRendererWidget(QRhiWidget):
 
     def render(self, cb) -> None:  # type: ignore[override]
         """Render the current video frame (or letterbox if no frame is present)."""
+        output_size = self.renderTarget().pixelSize()
+        if output_size.isEmpty():
+            return
+
+        # Always clear to an opaque colour first, even before initialization
+        # has completed. This prevents a one-frame transparent flash when the
+        # detail page first shows a QRhiWidget surface.
+        cb.beginPass(self.renderTarget(), QColor(0, 0, 0, 255), QRhiDepthStencilClearValue())
+
         if not self._initialized:
+            cb.endPass()
             return
 
         rhi = self.rhi()
         if rhi is None:
-            return
-
-        output_size = self.renderTarget().pixelSize()
-        if output_size.isEmpty():
+            cb.endPass()
             return
 
         ru = rhi.nextResourceUpdateBatch()
@@ -426,7 +433,6 @@ class VideoRendererWidget(QRhiWidget):
         cb.resourceUpdate(ru)
 
         # Draw
-        cb.beginPass(self.renderTarget(), QColor(0, 0, 0, 255), QRhiDepthStencilClearValue())
         cb.setGraphicsPipeline(self._pipeline)
         cb.setShaderResources(self._srb)
         cb.setViewport(QRhiViewport(0, 0, output_size.width(), output_size.height()))

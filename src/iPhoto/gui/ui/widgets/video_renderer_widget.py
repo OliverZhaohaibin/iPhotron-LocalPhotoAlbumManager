@@ -200,6 +200,8 @@ class VideoRendererWidget(QRhiWidget):
         self._tex_y: Optional[QRhiTexture] = None
         self._tex_uv: Optional[QRhiTexture] = None
         self._tex_rgba: Optional[QRhiTexture] = None
+        self._tex_y_fmt: Optional[int] = None  # QRhiTexture.Format enum value
+        self._tex_uv_fmt: Optional[int] = None  # QRhiTexture.Format enum value
         self._initialized = False
 
         # Frame metadata (updated per frame)
@@ -356,6 +358,12 @@ class VideoRendererWidget(QRhiWidget):
         self._container_raw_w = 0
         self._container_raw_h = 0
         self._has_frame = False
+        # Reset tracked texture formats so that the next video always
+        # recreates textures with the correct format, even when the
+        # resolution is identical (e.g. switching between an 8-bit NV12
+        # and a 10-bit P010 stream at the same frame size).
+        self._tex_y_fmt = None
+        self._tex_uv_fmt = None
         self.update()
 
     def set_letterbox_color(self, color: QColor) -> None:
@@ -646,14 +654,20 @@ class VideoRendererWidget(QRhiWidget):
             if pf == QVideoFrameFormat.PixelFormat.Format_P010:
                 y_format = QRhiTexture.Format.R16
 
-            # Recreate Y texture if size changed
+            # Recreate Y texture if size or format changed.
+            # Both dimensions AND format must match; switching between an
+            # 8-bit (NV12 → R8) and 10-bit (P010 → R16) stream at the same
+            # resolution would otherwise reuse a texture with the wrong
+            # format, causing garbled frames or GPU crashes.
             if (self._tex_y is None or
                     self._tex_y.pixelSize().width() != w or
-                    self._tex_y.pixelSize().height() != h):
+                    self._tex_y.pixelSize().height() != h or
+                    self._tex_y_fmt != y_format):
                 if self._tex_y is not None:
                     self._tex_y.destroy()
                 self._tex_y = rhi.newTexture(y_format, QSize(w, h))
                 self._tex_y.create()
+                self._tex_y_fmt = y_format
                 self._rebuild_srb(rhi)
 
             # UV plane (half resolution, 2 channels)
@@ -665,11 +679,13 @@ class VideoRendererWidget(QRhiWidget):
 
             if (self._tex_uv is None or
                     self._tex_uv.pixelSize().width() != uv_w or
-                    self._tex_uv.pixelSize().height() != uv_h):
+                    self._tex_uv.pixelSize().height() != uv_h or
+                    self._tex_uv_fmt != uv_format):
                 if self._tex_uv is not None:
                     self._tex_uv.destroy()
                 self._tex_uv = rhi.newTexture(uv_format, QSize(uv_w, uv_h))
                 self._tex_uv.create()
+                self._tex_uv_fmt = uv_format
                 self._rebuild_srb(rhi)
 
             # Upload Y plane

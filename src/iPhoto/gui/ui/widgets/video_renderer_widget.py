@@ -162,11 +162,9 @@ class VideoRendererWidget(QRhiWidget):
         super().__init__(parent)
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
 
-        # Force the OpenGL backend so QRhiWidget and QOpenGLWidget (used by
-        # GLImageViewer) share the same rendering infrastructure.  Without
-        # this, the default backend on Windows is Direct3D which conflicts
-        # with the QOpenGLWidget-based image viewer when both live inside the
-        # same QStackedWidget, causing the GL viewer to render transparent.
+        # Force the OpenGL backend so both QRhiWidget-based renderers
+        # (image viewer and video renderer) share the same rendering
+        # infrastructure inside the QStackedWidget.
         self.setApi(QRhiWidget.Api.OpenGL)
 
         # --- state ---
@@ -383,10 +381,17 @@ class VideoRendererWidget(QRhiWidget):
 
         ru = rhi.nextResourceUpdateBatch()
 
-        # Upload frame data if dirty
+        # Upload frame data if dirty.
+        # Only clear the dirty flag *after* the upload succeeds so that a
+        # failed map/upload attempt is retried on the next render cycle
+        # instead of leaving uninitialized textures on screen.
         if self._frame_dirty:
-            self._frame_dirty = False
-            self._upload_frame(rhi, ru)
+            if self._upload_frame(rhi, ru):
+                self._frame_dirty = False
+                # Release the decoded frame reference immediately so the
+                # hardware decoder can recycle its buffer.  All pixel data
+                # has already been copied into GPU textures.
+                self._current_frame = None
 
         # Update uniform buffer
         self._update_uniforms(ru, output_size)
@@ -411,14 +416,18 @@ class VideoRendererWidget(QRhiWidget):
     # ------------------------------------------------------------------
     # Frame upload helpers
     # ------------------------------------------------------------------
-    def _upload_frame(self, rhi: QRhi, ru) -> None:
-        """Upload the current video frame data to GPU textures."""
+    def _upload_frame(self, rhi: QRhi, ru) -> bool:
+        """Upload the current video frame data to GPU textures.
+
+        Returns ``True`` if the upload succeeded.  A return of ``False``
+        means the frame should be retried on the next render cycle.
+        """
         frame = self._current_frame
         if frame is None:
-            return
+            return False
 
         if not frame.isValid():
-            return
+            return False
 
         fmt = frame.surfaceFormat()
         pf = fmt.pixelFormat()
@@ -427,20 +436,43 @@ class VideoRendererWidget(QRhiWidget):
             QVideoFrameFormat.PixelFormat.Format_NV12,
             QVideoFrameFormat.PixelFormat.Format_P010,
         ):
-            self._upload_nv12_frame(rhi, ru, frame, pf)
+            ok = self._upload_nv12_frame(rhi, ru, frame, pf)
+            if not ok:
+                # Hardware-decoded NV12/P010 frames may occasionally fail to
+                # map (e.g. decoder buffer recycling, GPU fence timeout).
+                # Fall back to Qt's built-in toImage() conversion which
+                # handles platform quirks internally.
+                _log.debug("NV12/P010 upload failed – falling back to RGBA path")
+                return self._upload_rgba_frame(rhi, ru, frame)
+            return True
         else:
-            self._upload_rgba_frame(rhi, ru, frame)
+            return self._upload_rgba_frame(rhi, ru, frame)
 
-    def _upload_nv12_frame(self, rhi: QRhi, ru, frame: "QVideoFrame", pf) -> None:
-        """Upload NV12/P010 frame planes as Y + UV textures."""
+    def _upload_nv12_frame(self, rhi: QRhi, ru, frame: "QVideoFrame", pf) -> bool:
+        """Upload NV12/P010 frame planes as Y + UV textures.
+
+        Returns ``True`` on success.
+        """
         if not frame.map(QVideoFrame.MapMode.ReadOnly):
             _log.debug("Failed to map video frame for reading")
-            return
+            return False
 
         try:
             fmt = frame.surfaceFormat()
             w = fmt.frameWidth()
             h = fmt.frameHeight()
+
+            if w <= 0 or h <= 0:
+                _log.debug("Frame has invalid dimensions: %dx%d", w, h)
+                return False
+
+            # Validate that we have at least 2 planes (Y + UV)
+            plane_count = frame.planeCount()
+            if plane_count < 2:
+                _log.debug(
+                    "NV12/P010 frame has only %d planes (need 2)", plane_count
+                )
+                return False
 
             # Y plane
             y_format = QRhiTexture.Format.R8
@@ -474,46 +506,54 @@ class VideoRendererWidget(QRhiWidget):
                 self._rebuild_srb(rhi)
 
             # Upload Y plane
-            plane_count = frame.planeCount()
-            if plane_count >= 1:
-                y_bytes_per_line = frame.bytesPerLine(0)
-                y_data_ptr = frame.bits(0)
-                y_data_size = y_bytes_per_line * h
-                y_data = bytes(y_data_ptr[:y_data_size])
+            y_bytes_per_line = frame.bytesPerLine(0)
+            y_data_ptr = frame.bits(0)
+            if y_bytes_per_line <= 0 or y_data_ptr is None:
+                _log.debug("Y plane has invalid stride or null data pointer")
+                return False
+            y_data_size = y_bytes_per_line * h
+            y_data = bytes(y_data_ptr[:y_data_size])
 
-                y_sub = QRhiTextureSubresourceUploadDescription(
-                    y_data, y_bytes_per_line * h
-                )
-                y_sub.setDataStride(y_bytes_per_line)
-                y_upload = QRhiTextureUploadDescription(
-                    QRhiTextureUploadEntry(0, 0, y_sub)
-                )
-                ru.uploadTexture(self._tex_y, y_upload)
+            y_sub = QRhiTextureSubresourceUploadDescription(
+                y_data, y_bytes_per_line * h
+            )
+            y_sub.setDataStride(y_bytes_per_line)
+            y_upload = QRhiTextureUploadDescription(
+                QRhiTextureUploadEntry(0, 0, y_sub)
+            )
+            ru.uploadTexture(self._tex_y, y_upload)
 
             # Upload UV plane
-            if plane_count >= 2:
-                uv_bytes_per_line = frame.bytesPerLine(1)
-                uv_data_ptr = frame.bits(1)
-                uv_data_size = uv_bytes_per_line * uv_h
-                uv_data = bytes(uv_data_ptr[:uv_data_size])
+            uv_bytes_per_line = frame.bytesPerLine(1)
+            uv_data_ptr = frame.bits(1)
+            if uv_bytes_per_line <= 0 or uv_data_ptr is None:
+                _log.debug("UV plane has invalid stride or null data pointer")
+                return False
+            uv_data_size = uv_bytes_per_line * uv_h
+            uv_data = bytes(uv_data_ptr[:uv_data_size])
 
-                uv_sub = QRhiTextureSubresourceUploadDescription(
-                    uv_data, uv_bytes_per_line * uv_h
-                )
-                uv_sub.setDataStride(uv_bytes_per_line)
-                uv_upload = QRhiTextureUploadDescription(
-                    QRhiTextureUploadEntry(0, 0, uv_sub)
-                )
-                ru.uploadTexture(self._tex_uv, uv_upload)
+            uv_sub = QRhiTextureSubresourceUploadDescription(
+                uv_data, uv_bytes_per_line * uv_h
+            )
+            uv_sub.setDataStride(uv_bytes_per_line)
+            uv_upload = QRhiTextureUploadDescription(
+                QRhiTextureUploadEntry(0, 0, uv_sub)
+            )
+            ru.uploadTexture(self._tex_uv, uv_upload)
+
+            return True
 
         finally:
             frame.unmap()
 
-    def _upload_rgba_frame(self, rhi: QRhi, ru, frame: "QVideoFrame") -> None:
-        """Convert frame to RGBA QImage and upload as a single texture."""
+    def _upload_rgba_frame(self, rhi: QRhi, ru, frame: "QVideoFrame") -> bool:
+        """Convert frame to RGBA QImage and upload as a single texture.
+
+        Returns ``True`` on success.
+        """
         img = frame.toImage()
         if img.isNull():
-            return
+            return False
 
         # Ensure RGBA8888 format
         if img.format() != QImage.Format.Format_RGBA8888:
@@ -545,6 +585,7 @@ class VideoRendererWidget(QRhiWidget):
             QRhiTextureUploadEntry(0, 0, rgba_sub)
         )
         ru.uploadTexture(self._tex_rgba, rgba_upload)
+        return True
 
     # ------------------------------------------------------------------
     # Uniform update

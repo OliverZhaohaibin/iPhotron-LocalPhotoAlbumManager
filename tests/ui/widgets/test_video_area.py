@@ -150,7 +150,7 @@ class TestVideoArea:
         assert va._video_sink is not None
 
     def test_renderer_uses_opengl_api(self, qapp):
-        """VideoRendererWidget must use the OpenGL backend to coexist with QOpenGLWidget."""
+        """VideoRendererWidget must use the OpenGL backend (same as GLImageViewer)."""
         va = VideoArea()
         assert va._renderer.api() == QRhiWidget.Api.OpenGL
 

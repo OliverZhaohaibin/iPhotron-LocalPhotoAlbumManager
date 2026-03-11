@@ -80,9 +80,7 @@ class VideoArea(QWidget):
         super().__init__(parent)
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         # Prevent the WA_TranslucentBackground cascade from the main window
-        # from making the video surface transparent.  This also avoids
-        # interfering with the sibling QOpenGLWidget (GLImageViewer) that
-        # shares the same QStackedWidget.
+        # from making the video surface transparent.
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, False)
         self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent, True)
         self.setMouseTracking(True)

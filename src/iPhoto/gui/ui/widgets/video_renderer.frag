@@ -144,10 +144,15 @@ void main()
         if (u_range == 0) {
             // Limited / video range
             if (u_format == 1) {
-                // P010: 10-bit data in upper bits of 16-bit, already normalised by GL
-                y = (y_raw * 255.0 - 16.0) / 219.0;
-                u = (uv_raw.r * 255.0 - 128.0) / 224.0;
-                v = (uv_raw.g * 255.0 - 128.0) / 224.0;
+                // P010: 10-bit data in upper bits of 16-bit.
+                // GL normalises the R16 texel to [0, 1] representing the
+                // full 16-bit range.  The actual data occupies the top 10
+                // bits, so the effective 10-bit value is y_raw * 65535 / 64
+                // ≈ y_raw * 1023.  Limited-range 10-bit: Y [64, 940],
+                // UV [64, 960] with mid-point 512.
+                y = (y_raw * 1023.0 - 64.0) / 876.0;
+                u = (uv_raw.r * 1023.0 - 512.0) / 896.0;
+                v = (uv_raw.g * 1023.0 - 512.0) / 896.0;
             } else {
                 // NV12: 8-bit
                 y = (y_raw * 255.0 - 16.0) / 219.0;

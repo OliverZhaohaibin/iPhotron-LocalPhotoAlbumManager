@@ -330,11 +330,11 @@ class VideoRendererWidget(QRhiWidget):
             QRhiShaderStage(QRhiShaderStage.Type.Fragment, frag_shader),
         ])
 
-        # Vertex input layout: 2 floats (pos) + 2 floats (uv) = 16 bytes per vertex
-        input_layout = QRhiGraphicsPipeline.TargetBlend()
-        input_layout.enable = False  # No blending — always opaque
+        # Disable alpha blending — the video surface is always fully opaque.
+        target_blend = QRhiGraphicsPipeline.TargetBlend()
+        target_blend.enable = False
 
-        self._pipeline.setTargetBlends([input_layout])
+        self._pipeline.setTargetBlends([target_blend])
         self._pipeline.setShaderResourceBindings(self._srb)
         self._pipeline.setRenderPassDescriptor(self.renderTarget().renderPassDescriptor())
 

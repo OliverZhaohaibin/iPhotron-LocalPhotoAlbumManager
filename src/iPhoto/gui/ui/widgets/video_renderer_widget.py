@@ -282,13 +282,14 @@ class VideoRendererWidget(QRhiWidget):
         raw_w = self._container_raw_w
         raw_h = self._container_raw_h
 
-        if container_rot != 0 and raw_w > 0 and raw_h > 0:
+        if container_rot != 0:
             # ffprobe rotation available — use it as the primary source.
             pre_rotated = False
 
-            if container_rot in (90, 270):
+            if container_rot in (90, 270) and raw_w > 0 and raw_h > 0:
                 # 90°/270° rotation swaps width and height; use that to
                 # detect whether the backend already applied the rotation.
+                # Pre-rotation detection requires raw coded dimensions.
                 if w == raw_h and h == raw_w:
                     pre_rotated = True
                 elif w != raw_w or h != raw_h:
@@ -308,8 +309,12 @@ class VideoRendererWidget(QRhiWidget):
                         pre_rotated = True
 
             rot_deg = 0 if pre_rotated else container_rot
+        elif raw_w > 0:
+            # ffprobe ran successfully but reported 0° — trust it; do not
+            # fall back to Qt which may report a different value.
+            rot_deg = 0
         else:
-            # No container rotation info — fall back to Qt's value.
+            # No ffprobe data at all — fall back to Qt's value.
             rotation = fmt.rotation()
             try:
                 rot_deg = rotation.value if hasattr(rotation, "value") else int(rotation)
@@ -722,13 +727,13 @@ class VideoRendererWidget(QRhiWidget):
 
         # On some Qt versions ``toImage()`` applies the frame's rotation
         # internally, producing an image whose dimensions are the transpose
-        # of the surface format's ``frameWidth``/``frameHeight``.  When that
-        # happens the texture already contains correctly-oriented pixels and
-        # the shader must NOT apply an additional rotation.
+        # of the surface format's ``frameWidth``/``frameHeight``.  We always
+        # compare the image size against the surface format, regardless of
+        # the current ``_rotate90_steps`` value.
         fmt = frame.surfaceFormat()
         fmt_w = fmt.frameWidth()
         fmt_h = fmt.frameHeight()
-        if self._rotate90_steps in (1, 3) and w == fmt_h and h == fmt_w:
+        if fmt_w > 0 and fmt_h > 0 and w == fmt_h and h == fmt_w:
             self._rotate90_steps = 0
             self._mirror = 0
             # Update the display native size to match the (now pre-rotated)

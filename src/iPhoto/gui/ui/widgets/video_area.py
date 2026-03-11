@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+from pathlib import Path
 from typing import Optional
 
 from PySide6.QtCore import (
@@ -11,6 +13,7 @@ from PySide6.QtCore import (
     QPropertyAnimation,
     QTimer,
     Qt,
+    QUrl,
     Signal,
 )
 from PySide6.QtGui import (
@@ -37,11 +40,6 @@ except (ModuleNotFoundError, ImportError):  # pragma: no cover - handled by main
     QAudioOutput = None
     QVideoFrame = None  # type: ignore[assignment, misc]
     QVideoSink = None  # type: ignore[assignment, misc]
-
-from pathlib import Path
-from PySide6.QtCore import QUrl
-
-import logging
 
 from ....config import (
     PLAYER_CONTROLS_HIDE_DELAY_MS,
@@ -252,10 +250,7 @@ class VideoArea(QWidget):
         # *before* setting the source.  The renderer uses the probed value
         # as the primary rotation source (more reliable across platforms
         # than Qt's ``QVideoFrameFormat.rotation()``).
-        try:
-            cw_deg, raw_w, raw_h = probe_video_rotation(path)
-        except Exception:
-            cw_deg, raw_w, raw_h = 0, 0, 0
+        cw_deg, raw_w, raw_h = probe_video_rotation(path)
         self._renderer.set_container_rotation(cw_deg, raw_w, raw_h)
         if cw_deg:
             _log.debug(

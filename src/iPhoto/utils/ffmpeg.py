@@ -343,6 +343,7 @@ def _extract_with_opencv(
     except Exception:
         return None
 
+
 def probe_video_rotation(source: Path) -> tuple[int, int, int]:
     """Return the display-matrix rotation and raw coded dimensions for *source*.
 

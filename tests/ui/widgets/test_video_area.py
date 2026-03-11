@@ -370,7 +370,7 @@ class TestVideoArea:
         mock_set_rot.assert_called_once_with(90, 1920, 1440)
 
     def test_load_video_handles_probe_failure(self, qapp, mocker):
-        """load_video should still work when ffprobe fails."""
+        """load_video should still work when ffprobe returns no rotation."""
         va = VideoArea()
         mocker.patch.object(va._player, "setSource")
         mocker.patch.object(va._player, "setPosition")
@@ -378,10 +378,9 @@ class TestVideoArea:
         mock_set_rot = mocker.patch.object(va._renderer, "set_container_rotation")
         mocker.patch(
             "iPhoto.gui.ui.widgets.video_area.probe_video_rotation",
-            side_effect=Exception("ffprobe not installed"),
+            return_value=(0, 0, 0),
         )
 
-        # Should not raise
         va.load_video(Path("/fake/video.mp4"))
 
         mock_set_rot.assert_called_once_with(0, 0, 0)

@@ -34,6 +34,7 @@ from probe import _get_video_info, _get_video_info_pyav
 from extraction import (
     _run_contact_sheet,
     _split_strip_bgra,
+    _split_strip_bgra_to_rgb,
     _extract_thumbnails_pyav,
     _extract_single_frame,
     _build_single_pass_cmd,
@@ -47,6 +48,11 @@ try:
     from _native import bgra_to_rgb as _c_bgra_to_rgb
 except ImportError:
     _c_bgra_to_rgb = None
+
+try:
+    from _native import bgra_to_rgb_multi as _c_bgra_to_rgb_multi
+except ImportError:
+    _c_bgra_to_rgb_multi = None
 
 
 class ThumbnailWorker(QThread):
@@ -225,7 +231,7 @@ class ThumbnailWorker(QThread):
 
         Uses ffmpeg ``tile=Nx1`` filter: one process, one container parse,
         one output buffer.  The strip is split into individual frames
-        client-side using memoryview slicing.
+        client-side using C-accelerated pixel operations.
         """
         print("[thumbnail] Trying contact-sheet")
         result = _run_contact_sheet(
@@ -253,15 +259,54 @@ class ThumbnailWorker(QThread):
                 ('pipe', thumb_w, strip_h, frame_buf),
             )
 
-        # Cache as RGB for future instant load
-        self._cache_results_bgra(thumb_w, strip_h, actual_count, frames)
+        # Cache as RGB — use combined C split+convert when available
+        # to avoid N intermediate BGRA buffers and N ctypes calls
+        self._cache_strip_bgra(
+            strip_data, thumb_w, strip_h, actual_count, frames,
+        )
 
         return actual_count > 0
 
+    def _cache_strip_bgra(self, strip_data, thumb_w, thumb_h, count,
+                          bgra_frames):
+        """Convert BGRA strip to concatenated RGB and store in disk cache.
+
+        Prefers the combined C ``split_strip_bgra_to_rgb`` which performs
+        split + BGRA→RGB in a single pass over the strip data, eliminating
+        N intermediate BGRA allocations and N ctypes calls.  Falls back to
+        per-frame conversion if the strip data is unavailable.
+        """
+        try:
+            # Fast path: single C call over the strip
+            all_rgb = _split_strip_bgra_to_rgb(
+                strip_data, thumb_w, thumb_h, count,
+            )
+            cache_put(self.video_path, thumb_w, thumb_h, count, all_rgb)
+        except Exception as e:
+            print(f"[cache] Strip→RGB error: {e}")
+            # Fall back to per-frame conversion
+            self._cache_results_bgra(thumb_w, thumb_h, count, bgra_frames)
+
     def _cache_results_bgra(self, thumb_w, thumb_h, count, bgra_frames):
-        """Convert BGRA frames to RGB and store in disk cache."""
+        """Convert BGRA frames to RGB and store in disk cache.
+
+        Uses batch C conversion (one ctypes call for all frames) when
+        available, then falls back to per-frame C, then pure Python.
+        """
         try:
             n_pixels = thumb_w * thumb_h
+
+            # Fast path: batch convert all frames in one C call
+            if _c_bgra_to_rgb_multi is not None:
+                n_frames = len(bgra_frames)
+                concat_bgra = b"".join(bgra_frames)
+                all_rgb = _c_bgra_to_rgb_multi(
+                    concat_bgra, n_pixels, n_frames,
+                )
+                cache_put(self.video_path, thumb_w, thumb_h, n_frames, all_rgb)
+                return
+
+            # Medium path: per-frame C conversion
             rgb_parts = []
             for buf in bgra_frames:
                 if _c_bgra_to_rgb is not None:

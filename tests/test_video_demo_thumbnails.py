@@ -57,6 +57,7 @@ _snap_to_keyframes = extraction_mod._snap_to_keyframes
 _build_contact_sheet_cmd = extraction_mod._build_contact_sheet_cmd
 _run_contact_sheet = extraction_mod._run_contact_sheet
 _split_strip_bgra = extraction_mod._split_strip_bgra
+_split_strip_bgra_to_rgb = extraction_mod._split_strip_bgra_to_rgb
 
 
 def _seed_hwaccel_cache(value):
@@ -1637,3 +1638,345 @@ def _python_split_strip(strip_buf, thumb_w, thumb_h, count):
             dst_off = y * thumb_w * 4
             frames[i][dst_off:dst_off + thumb_w * 4] = mv[src_off:src_off + thumb_w * 4]
     return [bytes(f) for f in frames]
+
+
+# ---------------------------------------------------------------------------
+# Tests for new C-accelerated functions
+# ---------------------------------------------------------------------------
+
+def _skip_if_no_c():
+    """Skip the test if the C extension is not available."""
+    try:
+        from _native import _find_or_build_lib
+        if _find_or_build_lib() is None:
+            pytest.skip("C extension not available")
+    except ImportError:
+        pytest.skip("C extension not importable")
+
+
+class TestSplitStripBgraToRgb:
+    """Tests for _split_strip_bgra_to_rgb() — combined split+convert."""
+
+    def test_correct_output_size(self) -> None:
+        """Output size is thumb_w * thumb_h * 3 * count."""
+        thumb_w, thumb_h, count = 4, 2, 3
+        strip_w = thumb_w * count
+        strip = bytes([0x10, 0x20, 0x30, 0xFF] * (strip_w * thumb_h))
+        rgb = _split_strip_bgra_to_rgb(strip, thumb_w, thumb_h, count)
+        assert len(rgb) == thumb_w * thumb_h * 3 * count
+
+    def test_matches_separate_split_and_convert(self) -> None:
+        """Combined function produces same RGB as split + bgra_to_rgb."""
+        try:
+            from _native import bgra_to_rgb as c_bgra
+        except ImportError:
+            c_bgra = None
+
+        thumb_w, thumb_h, count = 4, 3, 2
+        strip_w = thumb_w * count
+        import random
+        random.seed(99)
+        strip = bytes(random.getrandbits(8) for _ in range(strip_w * thumb_h * 4))
+
+        # Combined path
+        combined_rgb = _split_strip_bgra_to_rgb(strip, thumb_w, thumb_h, count)
+
+        # Separate path: split then convert each frame
+        frames = _split_strip_bgra(strip, thumb_w, thumb_h, count)
+        separate_parts = []
+        n_pixels = thumb_w * thumb_h
+        for f in frames:
+            if c_bgra is not None:
+                separate_parts.append(c_bgra(f, n_pixels))
+            else:
+                # Pure Python convert
+                mv = memoryview(f)
+                rgb = bytearray(n_pixels * 3)
+                for i in range(n_pixels):
+                    s = i * 4
+                    d = i * 3
+                    rgb[d] = mv[s + 2]
+                    rgb[d + 1] = mv[s + 1]
+                    rgb[d + 2] = mv[s]
+                separate_parts.append(bytes(rgb))
+        separate_rgb = b"".join(separate_parts)
+
+        assert combined_rgb == separate_rgb
+
+    def test_single_frame(self) -> None:
+        """Single-frame strip returns correctly converted RGB."""
+        # BGRA pixel: B=0x10, G=0x20, R=0x30, A=0xFF
+        thumb_w, thumb_h = 2, 2
+        bgra_pixel = bytes([0x10, 0x20, 0x30, 0xFF])
+        strip = bgra_pixel * (thumb_w * thumb_h)
+        rgb = _split_strip_bgra_to_rgb(strip, thumb_w, thumb_h, 1)
+        # Expected RGB: R=0x30, G=0x20, B=0x10 for each pixel
+        expected_pixel = bytes([0x30, 0x20, 0x10])
+        expected = expected_pixel * (thumb_w * thumb_h)
+        assert rgb == expected
+
+
+class TestSplitStripBgraToRgbNative:
+    """Tests for the C implementation of split_strip_bgra_to_rgb."""
+
+    def test_c_matches_python_random(self) -> None:
+        """C split_strip_bgra_to_rgb matches Python fallback for random data."""
+        _skip_if_no_c()
+        from _native import split_strip_bgra_to_rgb as c_func
+
+        thumb_w, thumb_h, count = 8, 6, 5
+        strip_w = thumb_w * count
+        import random
+        random.seed(77)
+        strip = bytes(random.getrandbits(8) for _ in range(strip_w * thumb_h * 4))
+
+        c_rgb = c_func(strip, thumb_w, thumb_h, count)
+
+        # Python reference: force the wrapper down its pure-Python fallback
+        with patch.object(extraction_mod, "_c_split_strip_bgra_to_rgb", None):
+            py_rgb = _split_strip_bgra_to_rgb(strip, thumb_w, thumb_h, count)
+
+        assert c_rgb == py_rgb
+
+
+class TestBgraToRgbMulti:
+    """Tests for bgra_to_rgb_multi — batch BGRA→RGB conversion."""
+
+    def test_matches_individual_calls(self) -> None:
+        """Batch convert produces same result as N individual conversions."""
+        _skip_if_no_c()
+        from _native import bgra_to_rgb as c_single
+        from _native import bgra_to_rgb_multi as c_multi
+
+        pixels_per_frame = 16
+        n_frames = 4
+        import random
+        random.seed(55)
+        bgra = bytes(random.getrandbits(8)
+                     for _ in range(pixels_per_frame * n_frames * 4))
+
+        # Batch
+        batch_rgb = c_multi(bgra, pixels_per_frame, n_frames)
+
+        # Individual
+        parts = []
+        frame_bgra_sz = pixels_per_frame * 4
+        for i in range(n_frames):
+            part = bgra[i * frame_bgra_sz:(i + 1) * frame_bgra_sz]
+            parts.append(c_single(part, pixels_per_frame))
+        individual_rgb = b"".join(parts)
+
+        assert batch_rgb == individual_rgb
+
+    def test_output_size(self) -> None:
+        """Output size is pixels_per_frame * n_frames * 3."""
+        _skip_if_no_c()
+        from _native import bgra_to_rgb_multi as c_multi
+        bgra = bytes([0x10, 0x20, 0x30, 0xFF] * 8)
+        rgb = c_multi(bgra, 4, 2)
+        assert len(rgb) == 4 * 2 * 3
+
+
+class TestRotateBgra:
+    """Tests for rotate_bgra — BGRA rotation."""
+
+    def _make_2x2_bgra(self):
+        """Create a 2×2 BGRA image with distinct pixels.
+
+        Layout (B, G, R, A):
+          (0,0)=TL  (1,0)=TR
+          (0,1)=BL  (1,1)=BR
+        """
+        TL = bytes([0x00, 0x00, 0xFF, 0xFF])  # red
+        TR = bytes([0x00, 0xFF, 0x00, 0xFF])  # green
+        BL = bytes([0xFF, 0x00, 0x00, 0xFF])  # blue
+        BR = bytes([0xFF, 0xFF, 0xFF, 0xFF])  # white
+        return TL + TR + BL + BR, TL, TR, BL, BR
+
+    def _pixel_at(self, buf, w, x, y):
+        off = (y * w + x) * 4
+        return buf[off:off + 4]
+
+    def test_no_rotation(self) -> None:
+        """0° rotation returns identical buffer."""
+        _skip_if_no_c()
+        from _native import rotate_bgra
+        img, TL, TR, BL, BR = self._make_2x2_bgra()
+        out = rotate_bgra(img, 2, 2, degrees=0, vflip=False)
+        assert out == img
+
+    def test_rotation_180(self) -> None:
+        """180° rotation swaps diagonally."""
+        _skip_if_no_c()
+        from _native import rotate_bgra
+        img, TL, TR, BL, BR = self._make_2x2_bgra()
+        out = rotate_bgra(img, 2, 2, degrees=180, vflip=False)
+        # After 180: (0,0)=BR, (1,0)=BL, (0,1)=TR, (1,1)=TL
+        assert self._pixel_at(out, 2, 0, 0) == BR
+        assert self._pixel_at(out, 2, 1, 0) == BL
+        assert self._pixel_at(out, 2, 0, 1) == TR
+        assert self._pixel_at(out, 2, 1, 1) == TL
+
+    def test_rotation_90(self) -> None:
+        """90° CW rotation produces correct pixel mapping."""
+        _skip_if_no_c()
+        from _native import rotate_bgra
+        img, TL, TR, BL, BR = self._make_2x2_bgra()
+        out = rotate_bgra(img, 2, 2, degrees=90, vflip=False)
+        # After 90° CW: dst is 2×2 (src_h × src_w = 2×2)
+        # (0,0)=BL, (1,0)=TL, (0,1)=BR, (1,1)=TR
+        assert self._pixel_at(out, 2, 0, 0) == BL
+        assert self._pixel_at(out, 2, 1, 0) == TL
+        assert self._pixel_at(out, 2, 0, 1) == BR
+        assert self._pixel_at(out, 2, 1, 1) == TR
+
+    def test_rotation_270(self) -> None:
+        """270° CW rotation produces correct pixel mapping."""
+        _skip_if_no_c()
+        from _native import rotate_bgra
+        img, TL, TR, BL, BR = self._make_2x2_bgra()
+        out = rotate_bgra(img, 2, 2, degrees=270, vflip=False)
+        # After 270° CW: dst is 2×2
+        # (0,0)=TR, (1,0)=BR, (0,1)=TL, (1,1)=BL
+        assert self._pixel_at(out, 2, 0, 0) == TR
+        assert self._pixel_at(out, 2, 1, 0) == BR
+        assert self._pixel_at(out, 2, 0, 1) == TL
+        assert self._pixel_at(out, 2, 1, 1) == BL
+
+    def test_vflip(self) -> None:
+        """vflip swaps top and bottom rows."""
+        _skip_if_no_c()
+        from _native import rotate_bgra
+        img, TL, TR, BL, BR = self._make_2x2_bgra()
+        out = rotate_bgra(img, 2, 2, degrees=0, vflip=True)
+        # After vflip: (0,0)=BL, (1,0)=BR, (0,1)=TL, (1,1)=TR
+        assert self._pixel_at(out, 2, 0, 0) == BL
+        assert self._pixel_at(out, 2, 1, 0) == BR
+        assert self._pixel_at(out, 2, 0, 1) == TL
+        assert self._pixel_at(out, 2, 1, 1) == TR
+
+    def test_rectangular_rotation_90(self) -> None:
+        """90° rotation of 3×2 image produces 2×3 output."""
+        _skip_if_no_c()
+        from _native import rotate_bgra
+        # 3×2 image (3 wide, 2 tall)
+        src_w, src_h = 3, 2
+        img = bytes(range(src_w * src_h * 4))
+        out = rotate_bgra(img, src_w, src_h, degrees=90, vflip=False)
+        # Output should be src_h × src_w = 2 × 3
+        assert len(out) == src_w * src_h * 4  # same total pixels
+
+
+class TestSnapToKeyframesNative:
+    """Tests for the C snap_to_keyframes function."""
+
+    def test_matches_python_bisect(self) -> None:
+        """C snap produces same results as Python bisect version."""
+        _skip_if_no_c()
+        from _native import snap_to_keyframes as c_snap
+
+        keyframes = [0.0, 2.0, 4.0, 6.0, 8.0, 10.0]
+        targets = [0.5, 1.5, 3.0, 5.5, 7.0, 9.9, 11.0]
+
+        c_result = c_snap(targets, keyframes)
+
+        # Force Python fallback so comparison is meaningful
+        with patch.object(extraction_mod, "_c_snap_to_keyframes", None):
+            py_result = _snap_to_keyframes(targets, keyframes)
+
+        assert len(c_result) == len(py_result)
+        for (ci, ct), (pi, pt) in zip(c_result, py_result):
+            assert ci == pi
+            assert abs(ct - pt) < 1e-9, f"Mismatch at index {ci}: C={ct}, Py={pt}"
+
+    def test_empty_keyframes(self) -> None:
+        """Empty keyframes returns original targets."""
+        _skip_if_no_c()
+        from _native import snap_to_keyframes as c_snap
+
+        targets = [1.0, 2.0, 3.0]
+        result = c_snap(targets, [])
+        assert result == [(0, 1.0), (1, 2.0), (2, 3.0)]
+
+    def test_single_keyframe(self) -> None:
+        """All targets snap to the single keyframe."""
+        _skip_if_no_c()
+        from _native import snap_to_keyframes as c_snap
+
+        result = c_snap([0.5, 5.0, 100.0], [3.0])
+        for _, t in result:
+            assert t == 3.0
+
+
+class TestScaleBilinearBgra:
+    """Tests for scale_bilinear_bgra — bilinear downscaling."""
+
+    def test_output_size(self) -> None:
+        """Output has correct dimensions."""
+        _skip_if_no_c()
+        from _native import scale_bilinear_bgra
+
+        src_w, src_h = 8, 6
+        dst_w, dst_h = 4, 3
+        src = bytes([128] * (src_w * src_h * 4))
+        out = scale_bilinear_bgra(src, src_w, src_h, dst_w, dst_h)
+        assert len(out) == dst_w * dst_h * 4
+
+    def test_uniform_color_preserved(self) -> None:
+        """Uniform color image downscales to same color."""
+        _skip_if_no_c()
+        from _native import scale_bilinear_bgra
+
+        src_w, src_h = 10, 10
+        dst_w, dst_h = 3, 3
+        # All pixels (B=50, G=100, R=150, A=200)
+        pixel = bytes([50, 100, 150, 200])
+        src = pixel * (src_w * src_h)
+        out = scale_bilinear_bgra(src, src_w, src_h, dst_w, dst_h)
+        # Every output pixel should be the same color
+        for i in range(dst_w * dst_h):
+            p = out[i * 4:(i + 1) * 4]
+            assert p == pixel, f"Pixel {i} mismatch: {list(p)}"
+
+    def test_identity_scale(self) -> None:
+        """Scaling to same size preserves pixels."""
+        _skip_if_no_c()
+        from _native import scale_bilinear_bgra
+
+        src_w, src_h = 4, 4
+        import random
+        random.seed(33)
+        src = bytes(random.getrandbits(8) for _ in range(src_w * src_h * 4))
+        out = scale_bilinear_bgra(src, src_w, src_h, src_w, src_h)
+        assert out == src
+
+    def test_single_pixel_source(self) -> None:
+        """1×1 source fills entire destination with the single pixel."""
+        _skip_if_no_c()
+        from _native import scale_bilinear_bgra
+
+        pixel = bytes([10, 20, 30, 255])
+        out = scale_bilinear_bgra(pixel, 1, 1, 3, 3)
+        assert len(out) == 3 * 3 * 4
+        for i in range(9):
+            assert out[i * 4:(i + 1) * 4] == pixel
+
+    def test_single_row_source(self) -> None:
+        """1-pixel-tall source does not segfault and produces correct size."""
+        _skip_if_no_c()
+        from _native import scale_bilinear_bgra
+
+        src_w = 4
+        src = bytes(i % 256 for i in range(src_w * 4))
+        out = scale_bilinear_bgra(src, src_w, 1, 2, 2)
+        assert len(out) == 2 * 2 * 4
+
+    def test_single_column_source(self) -> None:
+        """1-pixel-wide source does not segfault and produces correct size."""
+        _skip_if_no_c()
+        from _native import scale_bilinear_bgra
+
+        src_h = 4
+        src = bytes(i % 256 for i in range(src_h * 4))
+        out = scale_bilinear_bgra(src, 1, src_h, 2, 2)
+        assert len(out) == 2 * 2 * 4

@@ -11,7 +11,7 @@ from PySide6.QtWidgets import (
     QPushButton, QFileDialog, QFrame, QSizePolicy,
 )
 from PySide6.QtCore import Qt, QUrl, QSize, Signal
-from PySide6.QtGui import QIcon, QPixmap, QImage, QPalette, QPainter, QPen, QColor
+from PySide6.QtGui import QIcon, QPixmap, QImage, QPalette, QPainter, QPainterPath, QPen, QColor
 from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
 from PySide6.QtMultimediaWidgets import QVideoWidget
 
@@ -324,7 +324,6 @@ class _ThumbnailCanvas(QWidget):
         self._border_color = QColor(THEME_COLOR)
         self._playhead_dragging = False
         self.setObjectName("StripContainer")
-        self.setAttribute(Qt.WA_OpaquePaintEvent)
         self.setCursor(Qt.PointingHandCursor)
 
     def set_pixmaps(self, pixmaps):
@@ -379,10 +378,23 @@ class _ThumbnailCanvas(QWidget):
 
     def paintEvent(self, event):
         painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
         w = self.width()
         h = self.height()
         y_offset = BORDER_THICKNESS
         draw_h = h - 2 * BORDER_THICKNESS
+
+        # Clip to bar shape — right corners rounded, left corners square
+        r = float(CORNER_RADIUS)
+        clip = QPainterPath()
+        clip.moveTo(0, 0)
+        clip.lineTo(w - r, 0)
+        clip.arcTo(w - 2 * r, 0, 2 * r, 2 * r, 90, -90)
+        clip.lineTo(w, h - r)
+        clip.arcTo(w - 2 * r, h - 2 * r, 2 * r, 2 * r, 0, -90)
+        clip.lineTo(0, h)
+        clip.closeSubpath()
+        painter.setClipPath(clip)
 
         # 1. Border / background colour
         painter.fillRect(self.rect(), self._border_color)

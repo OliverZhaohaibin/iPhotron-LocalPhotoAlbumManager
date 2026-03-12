@@ -63,7 +63,7 @@ QPushButton#PlayButton:hover {{ background-color: {HOVER_COLOR}; }}
 
 /* === Thumbnail strip middle container === */
 QWidget#StripContainer {{
-    background-color: {THEME_COLOR};
+    background-color: transparent;
 }}
 
 QScrollArea {{

@@ -387,13 +387,13 @@ class _ThumbnailCanvas(QWidget):
         # Clip to bar shape — right corners rounded, left corners square
         r = float(CORNER_RADIUS)
         clip = QPainterPath()
-        clip.moveTo(0, 0)
-        clip.lineTo(w - r, 0)
-        clip.arcTo(w - 2 * r, 0, 2 * r, 2 * r, 90, -90)
-        clip.lineTo(w, h - r)
-        clip.arcTo(w - 2 * r, h - 2 * r, 2 * r, 2 * r, 0, -90)
-        clip.lineTo(0, h)
-        clip.closeSubpath()
+        clip.moveTo(0, 0)                                            # top-left
+        clip.lineTo(w - r, 0)                                        # top edge
+        clip.arcTo(w - 2 * r, 0, 2 * r, 2 * r, 90, -90)            # top-right
+        clip.lineTo(w, h - r)                                        # right edge
+        clip.arcTo(w - 2 * r, h - 2 * r, 2 * r, 2 * r, 0, -90)     # bottom-right
+        clip.lineTo(0, h)                                            # bottom edge
+        clip.closeSubpath()                                          # left edge
         painter.setClipPath(clip)
 
         # 1. Border / background colour

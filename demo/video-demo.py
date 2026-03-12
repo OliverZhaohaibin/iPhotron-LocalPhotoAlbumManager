@@ -16,7 +16,7 @@ _video_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "video")
 if _video_dir not in sys.path:
     sys.path.insert(0, _video_dir)
 
-# Prevent PySide6 Qt import errors from bubbling before we re-export
+# Import QApplication for the legacy __main__ entry point below
 from PySide6.QtWidgets import QApplication
 
 # Re-export all public symbols for backward compatibility
@@ -38,7 +38,8 @@ from extraction import (  # noqa: F401
     _build_contact_sheet_cmd, _run_contact_sheet, _split_strip_bgra,
     _get_keyframe_timestamps_pyav, _snap_to_keyframes,
     _pyav_extract_segment, _extract_thumbnails_pyav,
-    _build_popen_priority_kwargs, _extract_frame_pipe,
+    _build_popen_priority_kwargs, _lower_process_priority,
+    _extract_frame_pipe,
     _try_extract_pipe_hwaccel, _try_extract_pipe_sw, _try_extract_pipe_auto,
     _run_pipe_cmd, _extract_single_frame, _build_single_pass_cmd,
 )

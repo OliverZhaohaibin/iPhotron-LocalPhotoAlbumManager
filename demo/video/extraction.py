@@ -4,8 +4,8 @@ Strategy priority (fastest first):
   0. **Contact-sheet** (ffmpeg ``tile=Nx1``): one process, one output image,
      one BGRA buffer.  Eliminates N signal/slot + N QImage + N scaledToHeight
      + N repaint costs.
-  1. **PyAV sequential forward-decode**: single container, ``thread_count=0``
-     (auto), keyframe-only skip via ``codec_context.skip_frame``, sequential
+  1. **PyAV sequential forward-decode**: single container, ``thread_count=2``,
+     keyframe-only skip via ``codec_context.skip_frame``, sequential
      forward seeks with deduplication.  Zero subprocess overhead.
   2. Single-pass ffmpeg pipe (GPU + keyframe-only)
   3. Single-pass ffmpeg pipe (keyframe-only, no GPU)
@@ -20,8 +20,7 @@ import bisect
 import concurrent.futures
 import os
 import subprocess
-import ctypes
-import ctypes.util
+
 
 try:
     import av as _av_module
@@ -41,10 +40,8 @@ from hwaccel import _detect_hwaccel, _build_hwaccel_output_format
 # Try to import C-accelerated helpers; fall back to pure-Python
 try:
     from _native import split_strip_bgra as _c_split_strip_bgra
-    from _native import bgra_to_rgb as _c_bgra_to_rgb
 except ImportError:
     _c_split_strip_bgra = None
-    _c_bgra_to_rgb = None
 
 
 # =====================================================================
@@ -441,7 +438,13 @@ def _split_strip_bgra(strip_buf: bytes, thumb_w: int, thumb_h: int,
 # =====================================================================
 
 def _build_popen_priority_kwargs():
-    """Build OS-specific kwargs to lower the priority of ffmpeg child processes."""
+    """Build OS-specific kwargs to lower the priority of ffmpeg child processes.
+
+    Returns ``(startupinfo, popen_kwargs)``.  On POSIX, priority is lowered
+    *after* process creation via :func:`_lower_process_priority` instead of
+    ``preexec_fn`` (which is not safe in multi-threaded processes such as
+    ``QThread``).
+    """
     popen_kwargs = {}
     startupinfo = None
     if os.name == 'nt':
@@ -449,9 +452,20 @@ def _build_popen_priority_kwargs():
         startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
         # BELOW_NORMAL_PRIORITY_CLASS on Windows
         popen_kwargs['creationflags'] = 0x00004000
-    else:
-        popen_kwargs['preexec_fn'] = lambda: os.nice(10)
     return startupinfo, popen_kwargs
+
+
+def _lower_process_priority(proc):
+    """Best-effort lowering of a child process's scheduling priority (POSIX).
+
+    Called immediately after ``Popen`` to replace the former ``preexec_fn``
+    approach, which is not safe in multi-threaded programs.
+    """
+    if os.name != 'nt' and proc and proc.pid:
+        try:
+            os.setpriority(os.PRIO_PROCESS, proc.pid, 10)
+        except (OSError, PermissionError):
+            pass
 
 
 def _extract_frame_pipe(video_path, timestamp, thumb_w, thumb_h):
@@ -671,6 +685,7 @@ def _extract_single_frame(args):
             startupinfo=startupinfo,
             **popen_kwargs,
         )
+        _lower_process_priority(proc)
         proc.wait()
         if os.path.exists(out_path) and os.path.getsize(out_path) > 0:
             return ('file', out_path)
@@ -705,15 +720,11 @@ def _build_single_pass_cmd(video_path, thumb_w, thumb_h, fps_rate,
     if keyframe_only:
         cmd.extend(['-skip_frame', 'nokey'])
     cmd.extend(['-i', video_path])
-    # Use select='eq(pict_type,I)' for precise keyframe-only filtering;
-    # combined with -skip_frame nokey this ensures only I-frames are
-    # decoded AND passed through the filter chain.
-    if keyframe_only:
-        vf = (f"select='eq(pict_type\\,I)',"
-              f"fps={fps_rate:.6f},"
-              f"scale={thumb_w}:{thumb_h},format=bgra")
-    else:
-        vf = f"fps={fps_rate:.6f},scale={thumb_w}:{thumb_h},format=bgra"
+    # -skip_frame nokey already limits decode to keyframes, so adding a
+    # select='eq(pict_type,I)' filter here would be redundant and add
+    # overhead on this hot path.  We rely solely on skip_frame for
+    # keyframe-only behavior.
+    vf = f"fps={fps_rate:.6f},scale={thumb_w}:{thumb_h},format=bgra"
     cmd.extend(['-vf', vf, '-an', '-f', 'rawvideo', '-vsync', 'vfr',
                 'pipe:1'])
     return cmd

@@ -530,12 +530,13 @@ class TestExtractSingleFrame:
         assert "-nostdin" in captured_cmd
         assert "-probesize" in captured_cmd
 
-    def test_unix_preexec_fn_sets_nice(self, tmp_path: Path) -> None:
-        """On Unix, file fallback preexec_fn is set to nice the ffmpeg child."""
+    def test_unix_lower_priority_after_popen(self, tmp_path: Path) -> None:
+        """On Unix, _lower_process_priority is called after Popen to nice the child."""
         out_path = str(tmp_path / "thumb_0000.jpg")
 
         with patch.object(extraction_mod, "_extract_frame_pipe", return_value=None), \
-             patch.object(subprocess, "Popen") as mock_popen:
+             patch.object(subprocess, "Popen") as mock_popen, \
+             patch.object(extraction_mod, "_lower_process_priority") as mock_lower:
             proc_mock = MagicMock()
             proc_mock.wait.return_value = 0
             mock_popen.return_value = proc_mock
@@ -544,11 +545,7 @@ class TestExtractSingleFrame:
             args = ("video.mp4", 0.0, 42, out_path, 80)
             _extract_single_frame(args)
 
-            call_kwargs = mock_popen.call_args[1]
-            assert "preexec_fn" in call_kwargs
-            with patch("os.nice") as mock_nice:
-                call_kwargs["preexec_fn"]()
-                mock_nice.assert_called_once_with(10)
+            mock_lower.assert_called_once_with(proc_mock)
 
     def test_windows_low_priority(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """On Windows, BELOW_NORMAL_PRIORITY_CLASS is passed to Popen."""
@@ -577,11 +574,11 @@ class TestExtractSingleFrame:
 class TestBuildPopenPriorityKwargs:
     """Tests for _build_popen_priority_kwargs()."""
 
-    def test_unix_returns_preexec_fn(self) -> None:
-        """On Unix, returns preexec_fn in kwargs."""
+    def test_unix_returns_no_preexec_fn(self) -> None:
+        """On Unix, returns empty kwargs (priority lowered post-Popen instead)."""
         startupinfo, kwargs = _build_popen_priority_kwargs()
         assert startupinfo is None
-        assert "preexec_fn" in kwargs
+        assert "preexec_fn" not in kwargs
 
     def test_windows_returns_creationflags(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """On Windows, returns BELOW_NORMAL_PRIORITY_CLASS."""
@@ -676,8 +673,9 @@ class TestBuildSinglePassCmd:
         assert 'fps=' in vf
         assert 'scale=80:42' in vf
         assert 'format=bgra' in vf
-        assert "select=" in vf
-        assert "pict_type" in vf
+        # -skip_frame nokey already limits to keyframes; select filter is
+        # redundant and should NOT be present (removed for performance).
+        assert "select=" not in vf
 
     def test_cpu_keyframe_command(self) -> None:
         """CPU + keyframe-only: no -hwaccel, has -skip_frame."""

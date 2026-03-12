@@ -10,7 +10,6 @@ from __future__ import annotations
 import hashlib
 import os
 import struct
-import time
 
 from config import CACHE_DIR
 

@@ -1,8 +1,8 @@
 """ThumbnailWorker — background thread for timeline thumbnail generation.
 
 Strategy hierarchy (fastest first):
-  0. Contact-sheet via ffmpeg tile=Nx1 (one image, one process) — ~200 ms
-  1. Disk cache (instant on repeated open)
+  0. Disk cache (instant on repeated open)
+  1. Contact-sheet via ffmpeg tile=Nx1 (one image, one process) — ~200 ms
   2. PyAV in-process extraction (zero subprocess overhead) — ~300-600 ms
   3. Single-pass GPU + keyframe-only pipe
   4. Single-pass keyframe-only pipe (no GPU)
@@ -28,17 +28,17 @@ except ImportError:
 from PySide6.QtCore import QThread, Signal
 
 from config import (
-    THUMB_WIDTH, PYAV_MAX_WORKERS, MAX_FFMPEG_SLICES, FRAME_READ_BUFFER,
+    THUMB_WIDTH, MAX_FFMPEG_SLICES, FRAME_READ_BUFFER,
 )
 from probe import _get_video_info, _get_video_info_pyav
 from extraction import (
-    _build_contact_sheet_cmd,
     _run_contact_sheet,
     _split_strip_bgra,
     _extract_thumbnails_pyav,
     _extract_single_frame,
     _build_single_pass_cmd,
     _build_popen_priority_kwargs,
+    _lower_process_priority,
 )
 from cache import cache_get, cache_put
 
@@ -63,8 +63,6 @@ class ThumbnailWorker(QThread):
     """
     # Progressive: emits one thumbnail at a time as it arrives
     thumbnail_ready = Signal(object)
-    # Contact-sheet: emits (strip_w, strip_h, bgra_bytes, thumb_w, count)
-    strip_ready = Signal(object)
     # Batch fallback: emits all results at once (parallel path)
     thumbnails_ready = Signal(list)
     error_occurred = Signal(str)
@@ -91,6 +89,8 @@ class ThumbnailWorker(QThread):
                 self._proc.kill()
             except OSError:
                 pass
+            finally:
+                self._proc = None
 
     def run(self):
         try:
@@ -328,6 +328,7 @@ class ThumbnailWorker(QThread):
                 startupinfo=startupinfo,
                 **popen_kwargs,
             )
+            _lower_process_priority(proc)
             self._proc = proc
 
             count = 0
@@ -426,6 +427,7 @@ class ThumbnailWorker(QThread):
                     startupinfo=startupinfo,
                     **popen_kwargs,
                 )
+                _lower_process_priority(proc)
                 frames = []
                 max_read = n_frames + FRAME_READ_BUFFER
                 for _ in range(max_read):

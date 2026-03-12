@@ -355,6 +355,10 @@ class VideoEditor(QMainWindow):
         if self._thumb_worker and self._thumb_worker.isRunning():
             self._thumb_worker.abort()
             self._thumb_worker.wait(3000)
-        if self.temp_dir and os.path.exists(self.temp_dir):
+        if (
+            self.temp_dir
+            and os.path.exists(self.temp_dir)
+            and (not self._thumb_worker or not self._thumb_worker.isRunning())
+        ):
             shutil.rmtree(self.temp_dir)
         event.accept()

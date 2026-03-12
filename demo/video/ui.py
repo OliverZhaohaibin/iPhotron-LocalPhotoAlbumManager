@@ -28,13 +28,14 @@ class HandleButton(QPushButton):
     """Custom handle button: draws bold white arrows and supports dragging."""
 
     dragStarted = Signal()
-    dragMoved = Signal(int)       # x position in parent coordinates
+    dragMoved = Signal(int)       # handle left-edge x in parent coordinates
     dragFinished = Signal()
 
     def __init__(self, arrow_type="left", parent=None):
         super().__init__(parent)
         self.arrow_type = arrow_type
         self._dragging = False
+        self._grab_offset_x = 0
         self.setFixedWidth(24)
         self.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)
         self.setCursor(Qt.PointingHandCursor)
@@ -43,13 +44,14 @@ class HandleButton(QPushButton):
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
             self._dragging = True
+            self._grab_offset_x = int(event.position().x())
             self.setCursor(Qt.ClosedHandCursor)
             self.dragStarted.emit()
 
     def mouseMoveEvent(self, event):
         if self._dragging:
             pos_in_parent = self.mapToParent(event.position().toPoint())
-            self.dragMoved.emit(pos_in_parent.x())
+            self.dragMoved.emit(pos_in_parent.x() - self._grab_offset_x)
 
     def mouseReleaseEvent(self, event):
         if event.button() == Qt.LeftButton and self._dragging:
@@ -89,13 +91,15 @@ class HandleButton(QPushButton):
 
 
 class ThumbnailBar(QWidget):
-    """Thumbnail strip that draws all pixmaps via QPainter — no child widgets.
+    """Thumbnail strip with absolutely-positioned, movable trim handles.
 
-    Supports a draggable playhead cursor, draggable left/right handles for
-    setting video in/out points, and a highlight colour while handles are
-    dragged.  The left handle gains rounded left-side corners when the
-    in-point moves away from the start, and reverts to straight corners
-    when it returns to the edge.
+    The canvas fills the entire widget.  Left and right handles overlay on
+    top and physically slide inward/outward as the user drags them.  Dimmed
+    overlays cover the trimmed-out regions (outside the handles).
+
+    The left handle gains rounded left-side corners when the in-point moves
+    away from the left edge, and reverts to straight corners when it returns
+    to the edge.
     """
 
     inPointChanged = Signal(float)    # 0.0 – 1.0
@@ -114,26 +118,25 @@ class ThumbnailBar(QWidget):
         self._out_ratio = 1.0
         self._handle_dragging = False
 
+        # Canvas fills the entire widget via layout
         self._main_layout = QHBoxLayout(self)
         self._main_layout.setContentsMargins(0, 0, 0, 0)
         self._main_layout.setSpacing(0)
 
-        # 1. Left handle
-        self.btn_left = HandleButton(arrow_type="left")
+        self._canvas = _ThumbnailCanvas(self)
+        self._main_layout.addWidget(self._canvas, stretch=1)
+
+        # Handles are absolutely-positioned children (overlaid on canvas)
+        self.btn_left = HandleButton(arrow_type="left", parent=self)
         self.btn_left.setObjectName("HandleLeft")
         self.btn_left.setStyleSheet(self._left_handle_style())
 
-        # 2. Thumbnail canvas (custom painted)
-        self._canvas = _ThumbnailCanvas(self)
-
-        # 3. Right handle
-        self.btn_right = HandleButton(arrow_type="right")
+        self.btn_right = HandleButton(arrow_type="right", parent=self)
         self.btn_right.setObjectName("HandleRight")
         self.btn_right.setStyleSheet(self._right_handle_style())
 
-        self._main_layout.addWidget(self.btn_left)
-        self._main_layout.addWidget(self._canvas, stretch=1)
-        self._main_layout.addWidget(self.btn_right)
+        self.btn_left.raise_()
+        self.btn_right.raise_()
 
         # --- connect handle drag signals ---
         self.btn_left.dragStarted.connect(self._on_drag_start)
@@ -175,38 +178,69 @@ class ThumbnailBar(QWidget):
         """Update the playhead cursor position (0.0 – 1.0)."""
         self._canvas.set_playhead(max(0.0, min(1.0, ratio)))
 
+    # --- layout / geometry --------------------------------------------------
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._update_handle_positions()
+
+    def _update_handle_positions(self):
+        """Reposition handles according to current in/out ratios."""
+        w = self.width()
+        h = self.height()
+        hw = self.btn_left.width()  # 24
+
+        # Left handle: its left edge sits at in_ratio * w
+        left_x = int(self._in_ratio * w)
+        self.btn_left.setGeometry(left_x, 0, hw, h)
+
+        # Right handle: its right edge sits at out_ratio * w
+        right_x = int(self._out_ratio * w) - hw
+        self.btn_right.setGeometry(right_x, 0, hw, h)
+
+        self.btn_left.raise_()
+        self.btn_right.raise_()
+
     # --- handle drag slots --------------------------------------------------
 
     def _on_drag_start(self):
         self._handle_dragging = True
         self._apply_drag_colors()
 
-    def _on_left_drag_moved(self, parent_x):
-        canvas_left = self.btn_left.width()
-        canvas_w = self._canvas.width()
-        if canvas_w <= 0:
+    def _on_left_drag_moved(self, handle_left_x):
+        """handle_left_x = intended left edge of the left handle."""
+        w = self.width()
+        if w <= 0:
             return
-        ratio = (parent_x - canvas_left) / canvas_w
-        ratio = max(0.0, min(self._out_ratio - MIN_TRIM_GAP, ratio))
+        hw = self.btn_left.width()
+        ratio = handle_left_x / w
+        # Ensure handles never overlap (need ≥ 2× handle-width gap)
+        min_gap = max(MIN_TRIM_GAP, 2 * hw / w)
+        ratio = max(0.0, min(self._out_ratio - min_gap, ratio))
         if ratio != self._in_ratio:
             self._in_ratio = ratio
             self._canvas.set_trim(self._in_ratio, self._out_ratio)
+            self._update_handle_positions()
             self.inPointChanged.emit(self._in_ratio)
             # Refresh left handle corners (rounded ↔ straight)
             self.btn_left.setStyleSheet(
                 self._left_handle_style(highlight=True),
             )
 
-    def _on_right_drag_moved(self, parent_x):
-        canvas_left = self.btn_left.width()
-        canvas_w = self._canvas.width()
-        if canvas_w <= 0:
+    def _on_right_drag_moved(self, handle_left_x):
+        """handle_left_x = intended left edge of the right handle."""
+        w = self.width()
+        if w <= 0:
             return
-        ratio = (parent_x - canvas_left) / canvas_w
-        ratio = max(self._in_ratio + MIN_TRIM_GAP, min(1.0, ratio))
+        hw = self.btn_right.width()
+        # Right handle's right edge determines the out-point
+        ratio = (handle_left_x + hw) / w
+        min_gap = max(MIN_TRIM_GAP, 2 * hw / w)
+        ratio = max(self._in_ratio + min_gap, min(1.0, ratio))
         if ratio != self._out_ratio:
             self._out_ratio = ratio
             self._canvas.set_trim(self._in_ratio, self._out_ratio)
+            self._update_handle_positions()
             self.outPointChanged.emit(self._out_ratio)
 
     def _on_drag_end(self):

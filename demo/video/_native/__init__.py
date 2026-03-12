@@ -49,11 +49,20 @@ def _find_or_build_lib():
                     check=True, capture_output=True,
                 )
             else:
-                subprocess.run(
-                    ['gcc', '-O3', '-march=native', '-shared', '-fPIC',
-                     '-o', lib_path, src_path],
-                    check=True, capture_output=True,
-                )
+                # Try with -march=native first (optimal for the local CPU).
+                # Fall back to -O2 without -march=native for broader compat.
+                try:
+                    subprocess.run(
+                        ['gcc', '-O3', '-march=native', '-shared', '-fPIC',
+                         '-o', lib_path, src_path],
+                        check=True, capture_output=True,
+                    )
+                except subprocess.CalledProcessError:
+                    subprocess.run(
+                        ['gcc', '-O2', '-shared', '-fPIC',
+                         '-o', lib_path, src_path],
+                        check=True, capture_output=True,
+                    )
         except (FileNotFoundError, subprocess.CalledProcessError) as e:
             print(f"[fast_thumb] JIT compile failed: {e}")
             return None

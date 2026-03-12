@@ -4,8 +4,14 @@ from __future__ import annotations
 
 import os
 
-# --- 1. Icon path configuration ---
-BASE_PATH = r"D:\python_code\iPhoto\iPhotos\src\iPhoto\gui\ui\icon"
+# --- 1. Icon path configuration (demo defaults; override per installation) ---
+BASE_PATH = os.environ.get(
+    "IPHOTO_ICON_DIR",
+    os.path.join(
+        os.path.dirname(os.path.abspath(__file__)),
+        "..", "..", "src", "iPhoto", "gui", "ui", "icon",
+    ),
+)
 ICON_PLAY = os.path.join(BASE_PATH, "play.fill.svg")
 ICON_LEFT = os.path.join(BASE_PATH, "chevron.left.svg")
 ICON_RIGHT = os.path.join(BASE_PATH, "chevron.right.svg")

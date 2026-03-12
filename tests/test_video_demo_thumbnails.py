@@ -1,0 +1,1377 @@
+"""Tests for the parallel thumbnail extraction in demo/video-demo.py."""
+
+from __future__ import annotations
+
+import os
+import subprocess
+from pathlib import Path
+from unittest.mock import patch, MagicMock, call
+
+import pytest
+
+# Import the module-level function under test
+import importlib.util
+
+_spec = importlib.util.spec_from_file_location(
+    "video_demo",
+    os.path.join(os.path.dirname(__file__), "..", "demo", "video-demo.py"),
+)
+video_demo = importlib.util.module_from_spec(_spec)
+
+# Prevent PySide6 imports from failing in headless CI
+import sys
+for mod_name in [
+    "PySide6", "PySide6.QtWidgets", "PySide6.QtCore", "PySide6.QtGui",
+    "PySide6.QtMultimedia", "PySide6.QtMultimediaWidgets",
+]:
+    sys.modules.setdefault(mod_name, MagicMock())
+
+_spec.loader.exec_module(video_demo)
+
+_extract_single_frame = video_demo._extract_single_frame
+_get_video_info = video_demo._get_video_info
+_get_video_info_pyav = video_demo._get_video_info_pyav
+_extract_thumbnails_pyav = video_demo._extract_thumbnails_pyav
+_pyav_extract_segment = video_demo._pyav_extract_segment
+_detect_hwaccel = video_demo._detect_hwaccel
+_build_hwaccel_output_format = video_demo._build_hwaccel_output_format
+_run_pipe_cmd = video_demo._run_pipe_cmd
+_try_extract_pipe_hwaccel = video_demo._try_extract_pipe_hwaccel
+_try_extract_pipe_sw = video_demo._try_extract_pipe_sw
+_try_extract_pipe_auto = video_demo._try_extract_pipe_auto
+_extract_frame_pipe = video_demo._extract_frame_pipe
+_build_popen_priority_kwargs = video_demo._build_popen_priority_kwargs
+_build_single_pass_cmd = video_demo._build_single_pass_cmd
+_detect_rotation_pyav = video_demo._detect_rotation_pyav
+_parse_rotation_from_ffprobe = video_demo._parse_rotation_from_ffprobe
+_displaymatrix_has_vflip = video_demo._displaymatrix_has_vflip
+_get_keyframe_timestamps_pyav = video_demo._get_keyframe_timestamps_pyav
+_snap_to_keyframes = video_demo._snap_to_keyframes
+
+
+@pytest.fixture(autouse=True)
+def _reset_hwaccel_cache():
+    """Reset the global hwaccel cache before each test."""
+    video_demo._hwaccel_cache = None
+    yield
+    video_demo._hwaccel_cache = None
+
+
+class TestDetectHwaccel:
+    """Tests for _detect_hwaccel()."""
+
+    def test_detects_d3d11va_with_scale_d3d11(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """When ffmpeg reports d3d11va + scale_d3d11 filter."""
+        monkeypatch.setattr(os, "name", "nt")
+        mock_si = MagicMock()
+        mock_si.dwFlags = 0
+        monkeypatch.setattr(subprocess, "STARTUPINFO", lambda: mock_si, raising=False)
+        monkeypatch.setattr(subprocess, "STARTF_USESHOWWINDOW", 1, raising=False)
+
+        def fake_run(cmd, **kw):
+            if '-hwaccels' in cmd:
+                return subprocess.CompletedProcess(cmd, 0, stdout="d3d11va\ncuda\n", stderr="")
+            if '-filters' in cmd:
+                return subprocess.CompletedProcess(cmd, 0, stdout="scale_d3d11\nscale_cuda\n", stderr="")
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        hw = _detect_hwaccel()
+        # On Windows, cuda is preferred over d3d11va
+        assert hw['hwaccel'] == 'cuda'
+        assert hw['scale_filter'] == 'scale_cuda'
+        assert 'hwdownload' in hw['download_filter']
+
+    def test_detects_d3d11va_when_no_cuda(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """d3d11va is selected when CUDA is not available (AMD/Intel GPU)."""
+        monkeypatch.setattr(os, "name", "nt")
+        mock_si = MagicMock()
+        mock_si.dwFlags = 0
+        monkeypatch.setattr(subprocess, "STARTUPINFO", lambda: mock_si, raising=False)
+        monkeypatch.setattr(subprocess, "STARTF_USESHOWWINDOW", 1, raising=False)
+
+        def fake_run(cmd, **kw):
+            if '-hwaccels' in cmd:
+                return subprocess.CompletedProcess(cmd, 0, stdout="d3d11va\n", stderr="")
+            if '-filters' in cmd:
+                return subprocess.CompletedProcess(cmd, 0, stdout="scale_d3d11\n", stderr="")
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        hw = _detect_hwaccel()
+        assert hw['hwaccel'] == 'd3d11va'
+        assert hw['scale_filter'] == 'scale_d3d11'
+        assert 'hwdownload' in hw['download_filter']
+
+    def test_detects_d3d11va_without_gpu_scale(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """d3d11va decode but no GPU scale filter → CPU scale after hwdownload."""
+        monkeypatch.setattr(os, "name", "nt")
+        mock_si = MagicMock()
+        mock_si.dwFlags = 0
+        monkeypatch.setattr(subprocess, "STARTUPINFO", lambda: mock_si, raising=False)
+        monkeypatch.setattr(subprocess, "STARTF_USESHOWWINDOW", 1, raising=False)
+
+        def fake_run(cmd, **kw):
+            if '-hwaccels' in cmd:
+                return subprocess.CompletedProcess(cmd, 0, stdout="d3d11va\n", stderr="")
+            if '-filters' in cmd:
+                return subprocess.CompletedProcess(cmd, 0, stdout="scale\n", stderr="")
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        hw = _detect_hwaccel()
+        assert hw['hwaccel'] == 'd3d11va'
+        assert hw['scale_filter'] == 'scale'
+        assert 'hwdownload' in hw['download_filter']
+
+    def test_detects_cuda_on_linux(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """CUDA detection on Linux (NVIDIA GPU)."""
+        monkeypatch.setattr(os, "name", "posix")
+        monkeypatch.setattr(sys, "platform", "linux")
+
+        def fake_run(cmd, **kw):
+            if '-hwaccels' in cmd:
+                return subprocess.CompletedProcess(cmd, 0, stdout="cuda\nvaapi\n", stderr="")
+            if '-filters' in cmd:
+                return subprocess.CompletedProcess(cmd, 0, stdout="scale_cuda\nscale_vaapi\n", stderr="")
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        hw = _detect_hwaccel()
+        assert hw['hwaccel'] == 'cuda'
+        assert hw['scale_filter'] == 'scale_cuda'
+
+    def test_detects_videotoolbox(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """macOS videotoolbox detection."""
+        monkeypatch.setattr(os, "name", "posix")
+        monkeypatch.setattr(sys, "platform", "darwin")
+
+        def fake_run(cmd, **kw):
+            if '-hwaccels' in cmd:
+                return subprocess.CompletedProcess(cmd, 0, stdout="videotoolbox\n", stderr="")
+            if '-filters' in cmd:
+                return subprocess.CompletedProcess(cmd, 0, stdout="scale_vt\n", stderr="")
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        hw = _detect_hwaccel()
+        assert hw['hwaccel'] == 'videotoolbox'
+        assert hw['scale_filter'] == 'scale_vt'
+
+    def test_detects_vaapi(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Linux VAAPI detection."""
+        monkeypatch.setattr(os, "name", "posix")
+        monkeypatch.setattr(sys, "platform", "linux")
+
+        def fake_run(cmd, **kw):
+            if '-hwaccels' in cmd:
+                return subprocess.CompletedProcess(cmd, 0, stdout="vaapi\n", stderr="")
+            if '-filters' in cmd:
+                return subprocess.CompletedProcess(cmd, 0, stdout="scale_vaapi\n", stderr="")
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        hw = _detect_hwaccel()
+        assert hw['hwaccel'] == 'vaapi'
+        assert hw['scale_filter'] == 'scale_vaapi'
+
+    def test_detects_hwaccel_from_stderr(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Some ffmpeg versions output hwaccel info to stderr."""
+        monkeypatch.setattr(os, "name", "nt")
+        mock_si = MagicMock()
+        mock_si.dwFlags = 0
+        monkeypatch.setattr(subprocess, "STARTUPINFO", lambda: mock_si, raising=False)
+        monkeypatch.setattr(subprocess, "STARTF_USESHOWWINDOW", 1, raising=False)
+
+        def fake_run(cmd, **kw):
+            if '-hwaccels' in cmd:
+                return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="d3d11va\n")
+            if '-filters' in cmd:
+                return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="scale_d3d11\n")
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        hw = _detect_hwaccel()
+        assert hw['hwaccel'] == 'd3d11va'
+        assert hw['scale_filter'] == 'scale_d3d11'
+
+    def test_no_hwaccel_available(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """When no hardware acceleration is available, returns None hwaccel."""
+        def fake_run(cmd, **kw):
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        hw = _detect_hwaccel()
+        assert hw['hwaccel'] is None
+        assert hw['scale_filter'] == 'scale'
+
+    def test_detection_is_cached(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Second call returns cached result without running subprocess."""
+        call_count = 0
+
+        def fake_run(cmd, **kw):
+            nonlocal call_count
+            call_count += 1
+            return subprocess.CompletedProcess(cmd, 0, stdout="d3d11va\n", stderr="")
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        _detect_hwaccel()
+        first_count = call_count
+        _detect_hwaccel()
+        assert call_count == first_count  # no additional subprocess calls
+
+    def test_handles_ffmpeg_not_found(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """When ffmpeg is not installed, gracefully returns no hwaccel."""
+        monkeypatch.setattr(
+            subprocess, "run", MagicMock(side_effect=FileNotFoundError("ffmpeg")),
+        )
+        hw = _detect_hwaccel()
+        assert hw['hwaccel'] is None
+
+
+class TestBuildHwaccelOutputFormat:
+    """Tests for _build_hwaccel_output_format()."""
+
+    def test_d3d11va_maps_to_d3d11(self) -> None:
+        assert _build_hwaccel_output_format('d3d11va') == 'd3d11'
+
+    def test_cuda_maps_to_cuda(self) -> None:
+        assert _build_hwaccel_output_format('cuda') == 'cuda'
+
+    def test_videotoolbox_maps_to_vld(self) -> None:
+        assert _build_hwaccel_output_format('videotoolbox') == 'videotoolbox_vld'
+
+    def test_vaapi_maps_to_vaapi(self) -> None:
+        assert _build_hwaccel_output_format('vaapi') == 'vaapi'
+
+    def test_qsv_maps_to_qsv(self) -> None:
+        assert _build_hwaccel_output_format('qsv') == 'qsv'
+
+    def test_unknown_returns_itself(self) -> None:
+        assert _build_hwaccel_output_format('dxva2') == 'dxva2'
+
+
+class TestRunPipeCmd:
+    """Tests for _run_pipe_cmd()."""
+
+    def test_returns_tuple_on_correct_size(self) -> None:
+        """When stdout has exactly W*H*4 bytes, returns (w, h, bytes)."""
+        w, h = 4, 2
+        expected = b'\x00' * (w * h * 4)
+
+        with patch.object(subprocess, "run") as mock_run:
+            mock_run.return_value = subprocess.CompletedProcess(
+                [], 0, stdout=expected, stderr=b"",
+            )
+            result = _run_pipe_cmd(['ffmpeg', 'test'], w, h)
+
+        assert result is not None
+        assert result == (w, h, expected)
+
+    def test_returns_none_on_wrong_size(self) -> None:
+        """When stdout size doesn't match, returns None."""
+        with patch.object(subprocess, "run") as mock_run:
+            mock_run.return_value = subprocess.CompletedProcess(
+                [], 0, stdout=b"short", stderr=b"",
+            )
+            result = _run_pipe_cmd(['ffmpeg', 'test'], 10, 10)
+
+        assert result is None
+
+    def test_returns_none_on_nonzero_exit(self) -> None:
+        """When ffmpeg exits with error, returns None."""
+        with patch.object(subprocess, "run") as mock_run:
+            mock_run.return_value = subprocess.CompletedProcess(
+                [], 1, stdout=b"", stderr=b"error message",
+            )
+            result = _run_pipe_cmd(['-hwaccel', 'auto', 'test'], 4, 2)
+
+        assert result is None
+
+    def test_returns_none_on_exception(self) -> None:
+        """When subprocess raises, returns None."""
+        with patch.object(subprocess, "run", side_effect=FileNotFoundError("ffmpeg")):
+            result = _run_pipe_cmd(['ffmpeg', 'test'], 4, 2)
+
+        assert result is None
+
+
+class TestTryExtractPipeHwaccel:
+    """Tests for _try_extract_pipe_hwaccel()."""
+
+    def test_builds_gpu_scale_command(self) -> None:
+        """When GPU scale filter is available, builds correct -vf chain."""
+        hw = {
+            'hwaccel': 'd3d11va',
+            'scale_filter': 'scale_d3d11',
+            'download_filter': 'hwdownload',
+            'pix_fmt': 'bgra',
+        }
+        w, h = 160, 90
+        expected_buf = b'\x00' * (w * h * 4)
+
+        with patch.object(subprocess, "run") as mock_run:
+            mock_run.return_value = subprocess.CompletedProcess(
+                [], 0, stdout=expected_buf, stderr=b"",
+            )
+            result = _try_extract_pipe_hwaccel("video.mp4", 5.0, w, h, hw)
+
+            cmd = mock_run.call_args[0][0]
+
+        assert result is not None
+        assert result == (w, h, expected_buf)
+        assert '-hwaccel' in cmd
+        assert 'd3d11va' in cmd
+        assert '-hwaccel_output_format' in cmd
+        assert 'd3d11' in cmd
+        assert '-nostdin' in cmd
+        assert '-probesize' in cmd
+        # Check the -vf filter chain
+        vf_idx = cmd.index('-vf')
+        vf = cmd[vf_idx + 1]
+        assert 'scale_d3d11=160:90' in vf
+        assert 'hwdownload' in vf
+        # format=bgra must be a separate filter AFTER hwdownload
+        assert vf.endswith('format=bgra')
+        assert '-f' in cmd
+        assert 'rawvideo' in cmd
+        assert 'pipe:1' in cmd
+
+    def test_hwdownload_then_cpu_scale(self) -> None:
+        """When no GPU scale filter, hwdownload first then CPU scale."""
+        hw = {
+            'hwaccel': 'd3d11va',
+            'scale_filter': 'scale',
+            'download_filter': 'hwdownload',
+            'pix_fmt': 'bgra',
+        }
+        w, h = 160, 90
+        expected_buf = b'\x00' * (w * h * 4)
+
+        with patch.object(subprocess, "run") as mock_run:
+            mock_run.return_value = subprocess.CompletedProcess(
+                [], 0, stdout=expected_buf, stderr=b"",
+            )
+            result = _try_extract_pipe_hwaccel("video.mp4", 5.0, w, h, hw)
+            cmd = mock_run.call_args[0][0]
+
+        assert result is not None
+        vf_idx = cmd.index('-vf')
+        vf = cmd[vf_idx + 1]
+        # Order: hwdownload → scale → format=bgra
+        assert vf == 'hwdownload,scale=160:90,format=bgra'
+
+
+class TestTryExtractPipeSw:
+    """Tests for _try_extract_pipe_sw()."""
+
+    def test_sw_pipe_command(self) -> None:
+        """Software pipe uses scale + format=bgra."""
+        w, h = 80, 45
+        expected_buf = b'\x00' * (w * h * 4)
+
+        with patch.object(subprocess, "run") as mock_run:
+            mock_run.return_value = subprocess.CompletedProcess(
+                [], 0, stdout=expected_buf, stderr=b"",
+            )
+            result = _try_extract_pipe_sw("video.mp4", 10.0, w, h)
+            cmd = mock_run.call_args[0][0]
+
+        assert result is not None
+        assert result == (w, h, expected_buf)
+        vf_idx = cmd.index('-vf')
+        vf = cmd[vf_idx + 1]
+        assert f'scale={w}:{h}' in vf
+        assert 'format=bgra' in vf
+        assert '-hwaccel' not in cmd  # no hwaccel in SW path
+        assert '-nostdin' in cmd  # stdin blocking prevention
+
+
+class TestTryExtractPipeAuto:
+    """Tests for _try_extract_pipe_auto()."""
+
+    def test_auto_gpu_pipe_uses_hwaccel_auto(self) -> None:
+        """Auto GPU pipe uses -hwaccel auto for robust GPU detection."""
+        w, h = 80, 42
+        expected_buf = b'\x00' * (w * h * 4)
+
+        with patch.object(subprocess, "run") as mock_run:
+            mock_run.return_value = subprocess.CompletedProcess(
+                [], 0, stdout=expected_buf, stderr=b"",
+            )
+            result = _try_extract_pipe_auto("video.mp4", 5.0, w, h)
+            cmd = mock_run.call_args[0][0]
+
+        assert result is not None
+        assert result == (w, h, expected_buf)
+        assert '-hwaccel' in cmd
+        hwaccel_idx = cmd.index('-hwaccel')
+        assert cmd[hwaccel_idx + 1] == 'auto'
+        # Should NOT have -hwaccel_output_format (auto doesn't need it)
+        assert '-hwaccel_output_format' not in cmd
+        assert '-nostdin' in cmd
+        assert '-probesize' in cmd
+        vf_idx = cmd.index('-vf')
+        vf = cmd[vf_idx + 1]
+        assert f'scale={w}:{h}' in vf
+        assert 'format=bgra' in vf
+
+    def test_auto_gpu_returns_none_on_failure(self) -> None:
+        """When auto GPU fails, returns None."""
+        with patch.object(subprocess, "run") as mock_run:
+            mock_run.return_value = subprocess.CompletedProcess(
+                [], 1, stdout=b"", stderr=b"hwaccel error",
+            )
+            result = _try_extract_pipe_auto("video.mp4", 5.0, 80, 42)
+
+        assert result is None
+
+
+class TestExtractSingleFrame:
+    """Unit tests for the _extract_single_frame worker function."""
+
+    def test_pipe_path_returns_pipe_tuple(self) -> None:
+        """When pipe extraction succeeds, returns ('pipe', w, h, bytes)."""
+        w, h = 80, 42
+        fake_buf = b'\x00' * (w * h * 4)
+
+        with patch.object(video_demo, "_extract_frame_pipe") as mock_pipe:
+            mock_pipe.return_value = (w, h, fake_buf)
+
+            # 5-tuple with thumb_w
+            args = ("video.mp4", 5.0, h, "/tmp/out.jpg", w)
+            result = _extract_single_frame(args)
+
+        assert result is not None
+        assert result[0] == 'pipe'
+        assert result[1] == w
+        assert result[2] == h
+        assert result[3] == fake_buf
+
+    def test_file_fallback_on_pipe_failure(self, tmp_path: Path) -> None:
+        """When pipe fails, falls back to file-based extraction."""
+        out_path = str(tmp_path / "thumb_0000.jpg")
+
+        with patch.object(video_demo, "_extract_frame_pipe", return_value=None), \
+             patch.object(subprocess, "Popen") as mock_popen:
+            proc_mock = MagicMock()
+            proc_mock.wait.return_value = 0
+            mock_popen.return_value = proc_mock
+            Path(out_path).write_bytes(b"\xff\xd8\xff")
+
+            args = ("video.mp4", 5.0, 42, out_path, 80)
+            result = _extract_single_frame(args)
+
+        assert result is not None
+        assert result[0] == 'file'
+        assert result[1] == out_path
+
+    def test_file_fallback_without_thumb_w(self, tmp_path: Path) -> None:
+        """When no thumb_w (4-tuple args), goes directly to file fallback."""
+        out_path = str(tmp_path / "thumb_0000.jpg")
+
+        with patch.object(subprocess, "Popen") as mock_popen:
+            proc_mock = MagicMock()
+            proc_mock.wait.return_value = 0
+            mock_popen.return_value = proc_mock
+            Path(out_path).write_bytes(b"\xff\xd8\xff")
+
+            args = ("video.mp4", 5.0, 42, out_path)
+            result = _extract_single_frame(args)
+
+        assert result is not None
+        assert result[0] == 'file'
+
+    def test_returns_none_on_total_failure(self, tmp_path: Path) -> None:
+        """When both pipe and file fail, returns None."""
+        out_path = str(tmp_path / "thumb_0000.jpg")
+
+        with patch.object(video_demo, "_extract_frame_pipe", return_value=None), \
+             patch.object(subprocess, "Popen", side_effect=FileNotFoundError("ffmpeg")):
+            args = ("video.mp4", 0.0, 42, out_path, 80)
+            result = _extract_single_frame(args)
+
+        assert result is None
+
+    def test_file_fallback_ffmpeg_uses_ss(self, tmp_path: Path) -> None:
+        """File fallback still uses -ss and -frames:v 1 with perf flags."""
+        out_path = str(tmp_path / "thumb_0001.jpg")
+
+        with patch.object(video_demo, "_extract_frame_pipe", return_value=None), \
+             patch.object(subprocess, "Popen") as mock_popen:
+            proc_mock = MagicMock()
+            proc_mock.wait.return_value = 0
+            mock_popen.return_value = proc_mock
+            Path(out_path).write_bytes(b"\xff\xd8\xff")
+
+            args = ("video.mp4", 10.5, 42, out_path, 80)
+            _extract_single_frame(args)
+            captured_cmd = mock_popen.call_args[0][0]
+
+        assert "-ss" in captured_cmd
+        assert "-frames:v" in captured_cmd
+        assert "-nostdin" in captured_cmd
+        assert "-probesize" in captured_cmd
+
+    def test_unix_preexec_fn_sets_nice(self, tmp_path: Path) -> None:
+        """On Unix, file fallback preexec_fn is set to nice the ffmpeg child."""
+        out_path = str(tmp_path / "thumb_0000.jpg")
+
+        with patch.object(video_demo, "_extract_frame_pipe", return_value=None), \
+             patch.object(subprocess, "Popen") as mock_popen:
+            proc_mock = MagicMock()
+            proc_mock.wait.return_value = 0
+            mock_popen.return_value = proc_mock
+            Path(out_path).write_bytes(b"\xff\xd8\xff")
+
+            args = ("video.mp4", 0.0, 42, out_path, 80)
+            _extract_single_frame(args)
+
+            call_kwargs = mock_popen.call_args[1]
+            assert "preexec_fn" in call_kwargs
+            with patch("os.nice") as mock_nice:
+                call_kwargs["preexec_fn"]()
+                mock_nice.assert_called_once_with(10)
+
+    def test_windows_low_priority(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """On Windows, BELOW_NORMAL_PRIORITY_CLASS is passed to Popen."""
+        out_path = str(tmp_path / "thumb_0000.jpg")
+        monkeypatch.setattr(os, "name", "nt")
+
+        mock_startupinfo = MagicMock()
+        mock_startupinfo.dwFlags = 0
+        monkeypatch.setattr(subprocess, "STARTUPINFO", lambda: mock_startupinfo, raising=False)
+        monkeypatch.setattr(subprocess, "STARTF_USESHOWWINDOW", 1, raising=False)
+
+        with patch.object(video_demo, "_extract_frame_pipe", return_value=None), \
+             patch.object(subprocess, "Popen") as mock_popen:
+            proc_mock = MagicMock()
+            proc_mock.wait.return_value = 0
+            mock_popen.return_value = proc_mock
+            Path(out_path).write_bytes(b"\xff\xd8\xff")
+
+            args = ("video.mp4", 0.0, 42, out_path, 80)
+            _extract_single_frame(args)
+
+            call_kwargs = mock_popen.call_args[1]
+            assert call_kwargs.get("creationflags") == 0x00004000
+
+
+class TestBuildPopenPriorityKwargs:
+    """Tests for _build_popen_priority_kwargs()."""
+
+    def test_unix_returns_preexec_fn(self) -> None:
+        """On Unix, returns preexec_fn in kwargs."""
+        startupinfo, kwargs = _build_popen_priority_kwargs()
+        assert startupinfo is None
+        assert "preexec_fn" in kwargs
+
+    def test_windows_returns_creationflags(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """On Windows, returns BELOW_NORMAL_PRIORITY_CLASS."""
+        monkeypatch.setattr(os, "name", "nt")
+        mock_startupinfo = MagicMock()
+        mock_startupinfo.dwFlags = 0
+        monkeypatch.setattr(subprocess, "STARTUPINFO", lambda: mock_startupinfo, raising=False)
+        monkeypatch.setattr(subprocess, "STARTF_USESHOWWINDOW", 1, raising=False)
+
+        startupinfo, kwargs = _build_popen_priority_kwargs()
+        assert startupinfo is not None
+        assert kwargs.get("creationflags") == 0x00004000
+
+
+class TestGetVideoInfo:
+    """Unit tests for _get_video_info."""
+
+    def test_returns_width_height_duration(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Successful probe returns (width, height, duration, rotation, vflip)."""
+        fake_output = '{"streams":[{"width":1920,"height":1080,"duration":"30.0"}]}'
+        fake_result = subprocess.CompletedProcess([], 0, stdout=fake_output, stderr="")
+        monkeypatch.setattr(subprocess, "run", lambda *a, **kw: fake_result)
+
+        w, h, d, rot, vf = _get_video_info("test.mp4")
+        assert (w, h, d, rot, vf) == (1920, 1080, 30.0, 0, False)
+
+    def test_returns_zeros_on_failure(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """On probe failure, returns (0, 0, 0, 0, False)."""
+        monkeypatch.setattr(
+            subprocess, "run",
+            lambda *a, **kw: subprocess.CompletedProcess([], 1, stdout="", stderr="error"),
+        )
+
+        w, h, d, rot, vf = _get_video_info("nonexistent.mp4")
+        assert (w, h, d, rot, vf) == (0, 0, 0, 0, False)
+
+    def test_rotation_90_swaps_dimensions(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """When rotate=90 tag is present, width and height are swapped."""
+        fake_output = '{"streams":[{"width":1920,"height":1080,"duration":"30.0","tags":{"rotate":"90"}}]}'
+        fake_result = subprocess.CompletedProcess([], 0, stdout=fake_output, stderr="")
+        monkeypatch.setattr(subprocess, "run", lambda *a, **kw: fake_result)
+
+        w, h, d, rot, vf = _get_video_info("portrait.mp4")
+        assert (w, h) == (1080, 1920)
+        assert rot == 90
+
+    def test_rotation_270_swaps_dimensions(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """When rotate=270 tag is present, width and height are swapped."""
+        fake_output = '{"streams":[{"width":1920,"height":1080,"duration":"30.0","tags":{"rotate":"270"}}]}'
+        fake_result = subprocess.CompletedProcess([], 0, stdout=fake_output, stderr="")
+        monkeypatch.setattr(subprocess, "run", lambda *a, **kw: fake_result)
+
+        w, h, d, rot, vf = _get_video_info("portrait.mp4")
+        assert (w, h) == (1080, 1920)
+        assert rot == 270
+
+    def test_rotation_180_keeps_dimensions(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """When rotate=180 tag is present, dimensions stay the same."""
+        fake_output = '{"streams":[{"width":1920,"height":1080,"duration":"30.0","tags":{"rotate":"180"}}]}'
+        fake_result = subprocess.CompletedProcess([], 0, stdout=fake_output, stderr="")
+        monkeypatch.setattr(subprocess, "run", lambda *a, **kw: fake_result)
+
+        w, h, d, rot, vf = _get_video_info("flipped.mp4")
+        assert (w, h) == (1920, 1080)
+        assert rot == 180
+
+
+class TestBuildSinglePassCmd:
+    """Tests for _build_single_pass_cmd()."""
+
+    def test_gpu_keyframe_command(self) -> None:
+        """GPU + keyframe-only produces correct flags."""
+        cmd = _build_single_pass_cmd(
+            "video.mp4", 80, 42, 0.5,
+            hwaccel=True, keyframe_only=True,
+        )
+        assert '-hwaccel' in cmd
+        assert 'auto' in cmd
+        assert '-skip_frame' in cmd
+        assert 'nokey' in cmd
+        assert '-an' in cmd
+        assert '-f' in cmd
+        assert 'rawvideo' in cmd
+        assert 'pipe:1' in cmd
+        assert '-nostdin' in cmd
+        assert '-probesize' in cmd
+        assert '-fflags' in cmd
+        assert '-vsync' in cmd
+        assert 'vfr' in cmd
+        vf_idx = cmd.index('-vf')
+        vf = cmd[vf_idx + 1]
+        assert 'fps=' in vf
+        assert 'scale=80:42' in vf
+        assert 'format=bgra' in vf
+        assert "select=" in vf
+        assert "pict_type" in vf
+
+    def test_cpu_keyframe_command(self) -> None:
+        """CPU + keyframe-only: no -hwaccel, has -skip_frame."""
+        cmd = _build_single_pass_cmd(
+            "video.mp4", 80, 42, 0.5,
+            hwaccel=False, keyframe_only=True,
+        )
+        assert '-hwaccel' not in cmd
+        assert '-skip_frame' in cmd
+        assert 'nokey' in cmd
+        assert '-nostdin' in cmd
+
+    def test_cpu_full_decode_command(self) -> None:
+        """CPU without keyframe skip: no -hwaccel, no -skip_frame, no select."""
+        cmd = _build_single_pass_cmd(
+            "video.mp4", 80, 42, 0.5,
+            hwaccel=False, keyframe_only=False,
+        )
+        assert '-hwaccel' not in cmd
+        assert '-skip_frame' not in cmd
+        assert '-nostdin' in cmd
+        vf_idx = cmd.index('-vf')
+        vf = cmd[vf_idx + 1]
+        assert "select=" not in vf
+
+    def test_fps_rate_in_vf(self) -> None:
+        """fps rate is correctly embedded in the -vf filter chain."""
+        cmd = _build_single_pass_cmd(
+            "video.mp4", 160, 90, 0.123456,
+            hwaccel=False, keyframe_only=False,
+        )
+        vf_idx = cmd.index('-vf')
+        vf = cmd[vf_idx + 1]
+        assert 'fps=0.123456' in vf
+        assert 'scale=160:90' in vf
+
+
+# ---------------------------------------------------------------------------
+# PyAV-based extraction tests
+# ---------------------------------------------------------------------------
+
+class TestGetVideoInfoPyav:
+    """Tests for _get_video_info_pyav()."""
+
+    def test_returns_width_height_duration(self) -> None:
+        """Successful probe returns (width, height, duration, rotation, vflip)."""
+        mock_stream = MagicMock()
+        mock_stream.codec_context.width = 1920
+        mock_stream.codec_context.height = 1080
+        mock_stream.duration = 900000
+        mock_stream.time_base = MagicMock()
+        mock_stream.time_base.__float__ = lambda self: 1 / 30000.0
+        mock_stream.time_base.__mul__ = lambda self, other: other * (1 / 30000.0)
+        mock_stream.time_base.__rmul__ = lambda self, other: other * (1 / 30000.0)
+        mock_stream.metadata = {}
+        mock_stream.side_data = {}
+
+        mock_container = MagicMock()
+        mock_container.streams.video = [mock_stream]
+        mock_container.duration = None
+
+        with patch.object(video_demo, '_av_module') as mock_av:
+            mock_av.open.return_value = mock_container
+            w, h, d, rot, vf = _get_video_info_pyav("test.mp4")
+
+        assert w == 1920
+        assert h == 1080
+        assert d == pytest.approx(30.0, abs=0.1)
+        assert rot == 0
+        assert vf is False
+
+    def test_falls_back_to_container_duration(self) -> None:
+        """When stream.duration is None, uses container.duration."""
+        mock_stream = MagicMock()
+        mock_stream.codec_context.width = 3840
+        mock_stream.codec_context.height = 2160
+        mock_stream.duration = None
+        mock_stream.time_base = None
+        mock_stream.metadata = {}
+        mock_stream.side_data = {}
+
+        mock_container = MagicMock()
+        mock_container.streams.video = [mock_stream]
+        mock_container.duration = 60_000_000  # microseconds
+
+        with patch.object(video_demo, '_av_module') as mock_av:
+            mock_av.time_base = 1_000_000
+            mock_av.open.return_value = mock_container
+            w, h, d, rot, vf = _get_video_info_pyav("test.mp4")
+
+        assert w == 3840
+        assert h == 2160
+        assert d == pytest.approx(60.0, abs=0.1)
+
+    def test_returns_zeros_on_failure(self) -> None:
+        """On probe failure, returns (0, 0, 0, 0, False)."""
+        with patch.object(video_demo, '_av_module') as mock_av:
+            mock_av.open.side_effect = Exception("file not found")
+            w, h, d, rot, vf = _get_video_info_pyav("nonexistent.mp4")
+
+        assert (w, h, d, rot, vf) == (0, 0, 0, 0, False)
+
+    def test_rotation_90_swaps_dimensions(self) -> None:
+        """When rotate=90 metadata tag, dimensions are swapped."""
+        mock_stream = MagicMock()
+        mock_stream.codec_context.width = 1920
+        mock_stream.codec_context.height = 1080
+        mock_stream.duration = 300000
+        mock_stream.time_base = MagicMock()
+        mock_stream.time_base.__float__ = lambda self: 1 / 30000.0
+        mock_stream.time_base.__mul__ = lambda self, o: o * (1 / 30000.0)
+        mock_stream.time_base.__rmul__ = lambda self, o: o * (1 / 30000.0)
+        mock_stream.metadata = {'rotate': '90'}
+        mock_stream.side_data = {}
+
+        mock_container = MagicMock()
+        mock_container.streams.video = [mock_stream]
+        mock_container.duration = None
+
+        with patch.object(video_demo, '_av_module') as mock_av:
+            mock_av.open.return_value = mock_container
+            w, h, d, rot, vf = _get_video_info_pyav("portrait.mp4")
+
+        assert (w, h) == (1080, 1920)
+        assert rot == 90
+
+
+class TestPyavExtractSegment:
+    """Tests for _pyav_extract_segment() (individual seeks per frame)."""
+
+    def _make_mock_container(self, tb=1/30000.0, frame_pts_list=None):
+        """Build a mock container whose decode() yields frames with PTS.
+
+        Each call to decode() returns the next single-frame iterator
+        (matching the per-seek pattern used by _pyav_extract_segment).
+        """
+        if frame_pts_list is None:
+            frame_pts_list = [0, 75000, 150000]  # 0s, 2.5s, 5s at tb
+
+        mock_img = MagicMock()
+        mock_img.tobytes.return_value = b'\x00' * (80 * 42 * 3)
+        mock_img.transpose.return_value = mock_img
+
+        from fractions import Fraction
+        time_base = Fraction(1, 30000)
+
+        frames = []
+        for pts in frame_pts_list:
+            f = MagicMock()
+            f.pts = pts
+            f.to_image.return_value = mock_img
+            frames.append(f)
+
+        mock_stream = MagicMock()
+        mock_stream.time_base = time_base
+
+        mock_container = MagicMock()
+        mock_container.streams.video = [mock_stream]
+        # Each call to decode() returns a fresh single-frame iterator
+        mock_container.decode.side_effect = [
+            iter([f]) for f in frames
+        ]
+        return mock_container, frames, mock_img
+
+    def test_extracts_frames_for_indices(self) -> None:
+        """Returns one result per (index, time) pair."""
+        mc, _, _ = self._make_mock_container(
+            frame_pts_list=[0, 75000, 150000],
+        )
+        indices = [(0, 0.0), (1, 2.5), (2, 5.0)]
+        with patch.object(video_demo, '_av_module') as mock_av:
+            mock_av.open.return_value = mc
+            results = _pyav_extract_segment("t.mp4", indices, 80, 42)
+
+        assert len(results) == 3
+        for global_idx, w, h, data in results:
+            assert w == 80
+            assert h == 42
+
+    def test_preserves_global_index(self) -> None:
+        """Returned tuples contain the correct global index in order."""
+        mc, _, _ = self._make_mock_container(
+            frame_pts_list=[300000, 600000],
+        )
+        indices = [(5, 10.0), (9, 20.0)]
+        with patch.object(video_demo, '_av_module') as mock_av:
+            mock_av.open.return_value = mc
+            results = _pyav_extract_segment("t.mp4", indices, 80, 42)
+
+        idx_list = [r[0] for r in results]
+        assert idx_list == [5, 9]
+
+    def test_uses_fast_bilinear(self) -> None:
+        """frame.to_image uses FAST_BILINEAR interpolation."""
+        mc, frames, _ = self._make_mock_container(
+            frame_pts_list=[0],
+        )
+        indices = [(0, 0.0)]
+        with patch.object(video_demo, '_av_module') as mock_av:
+            mock_av.open.return_value = mc
+            _pyav_extract_segment("t.mp4", indices, 80, 42)
+        frames[0].to_image.assert_called_with(
+            width=80, height=42, interpolation='FAST_BILINEAR',
+        )
+
+    def test_sets_thread_count(self) -> None:
+        """Codec context thread_count is set to 2 to reduce contention."""
+        mc, _, _ = self._make_mock_container(frame_pts_list=[0])
+        indices = [(0, 0.0)]
+        with patch.object(video_demo, '_av_module') as mock_av:
+            mock_av.open.return_value = mc
+            _pyav_extract_segment("t.mp4", indices, 80, 42)
+        stream = mc.streams.video[0]
+        assert stream.codec_context.thread_count == 2
+
+    def test_seeks_per_frame(self) -> None:
+        """Container.seek() is called once per target frame."""
+        mc, _, _ = self._make_mock_container(
+            frame_pts_list=[0, 75000, 150000],
+        )
+        indices = [(0, 0.0), (1, 2.5), (2, 5.0)]
+        with patch.object(video_demo, '_av_module') as mock_av:
+            mock_av.open.return_value = mc
+            _pyav_extract_segment("t.mp4", indices, 80, 42)
+        # Individual seeks: one seek per target
+        assert mc.seek.call_count == 3
+
+    def test_rotation_90_swaps_extract_dims(self) -> None:
+        """For 90° rotation, extract at swapped dims then rotate."""
+        mc, frames, mock_img = self._make_mock_container(
+            frame_pts_list=[0],
+        )
+        indices = [(0, 0.0)]
+        with patch.object(video_demo, '_av_module') as mock_av:
+            mock_av.open.return_value = mc
+            results = _pyav_extract_segment(
+                "t.mp4", indices, 80, 42, rotation=90,
+            )
+        # Should extract at swapped dims (h, w) = (42, 80)
+        frames[0].to_image.assert_called_with(
+            width=42, height=80, interpolation='FAST_BILINEAR',
+        )
+        # Should call transpose for rotation
+        from PIL import Image
+        mock_img.transpose.assert_called_with(Image.Transpose.ROTATE_270)
+        assert len(results) == 1
+        assert results[0][1] == 80  # display width
+        assert results[0][2] == 42  # display height
+
+    def test_rotation_180_keeps_dims(self) -> None:
+        """For 180° rotation, extract at same dims then rotate."""
+        mc, frames, mock_img = self._make_mock_container(
+            frame_pts_list=[0],
+        )
+        indices = [(0, 0.0)]
+        with patch.object(video_demo, '_av_module') as mock_av:
+            mock_av.open.return_value = mc
+            results = _pyav_extract_segment(
+                "t.mp4", indices, 80, 42, rotation=180,
+            )
+        frames[0].to_image.assert_called_with(
+            width=80, height=42, interpolation='FAST_BILINEAR',
+        )
+        from PIL import Image
+        mock_img.transpose.assert_called_with(Image.Transpose.ROTATE_180)
+
+    def test_vflip_applied(self) -> None:
+        """Vertical flip is applied when vflip=True."""
+        mc, _, mock_img = self._make_mock_container(
+            frame_pts_list=[0],
+        )
+        indices = [(0, 0.0)]
+        with patch.object(video_demo, '_av_module') as mock_av:
+            mock_av.open.return_value = mc
+            _pyav_extract_segment(
+                "t.mp4", indices, 80, 42, vflip=True,
+            )
+        from PIL import Image
+        mock_img.transpose.assert_called_with(
+            Image.Transpose.FLIP_TOP_BOTTOM,
+        )
+
+    def test_closes_container_on_error(self) -> None:
+        """Container is closed even when decode fails."""
+        mc = MagicMock()
+        mc.streams.video = [MagicMock()]
+        mc.streams.video[0].time_base = MagicMock()
+        mc.streams.video[0].time_base.__float__ = lambda self: 1/30000.0
+        mc.decode.side_effect = Exception("decode error")
+        with patch.object(video_demo, '_av_module') as mock_av:
+            mock_av.open.return_value = mc
+            results = _pyav_extract_segment("t.mp4", [(0, 0.0)], 80, 42)
+        assert results == []
+        mc.close.assert_called_once()
+
+    def test_returns_empty_on_open_error(self) -> None:
+        """Returns empty list when av.open fails."""
+        with patch.object(video_demo, '_av_module') as mock_av:
+            mock_av.open.side_effect = Exception("file error")
+            results = _pyav_extract_segment("bad.mp4", [(0, 0.0)], 80, 42)
+        assert results == []
+
+    def test_returns_empty_on_empty_indices(self) -> None:
+        """Returns empty list when indices list is empty."""
+        results = _pyav_extract_segment("t.mp4", [], 80, 42)
+        assert results == []
+
+
+class TestExtractThumbnailsPyav:
+    """Tests for _extract_thumbnails_pyav() (keyframe-aware multi-threaded)."""
+
+    def _make_mock_container(self, tb=1/30000.0, duration=300000):
+        mock_img = MagicMock()
+        mock_img.tobytes.return_value = b'\x00' * (80 * 42 * 3)
+        mock_img.transpose.return_value = mock_img
+
+        from fractions import Fraction
+        time_base = Fraction(1, 30000)
+
+        mock_stream = MagicMock()
+        mock_stream.duration = duration
+        mock_stream.time_base = time_base
+
+        mock_container = MagicMock()
+        mock_container.streams.video = [mock_stream]
+        mock_container.duration = None
+
+        # For continuous decode, return frames with PTS values
+        def make_frames(s):
+            frames = []
+            for i in range(10):
+                f = MagicMock()
+                f.pts = int(i * 2.0 / float(time_base))
+                f.to_image.return_value = mock_img
+                frames.append(f)
+            return iter(frames)
+        mock_container.decode.side_effect = make_frames
+        return mock_container, mock_img
+
+    def test_extracts_correct_number_of_frames(self) -> None:
+        """Returns the requested number of thumbnails."""
+        mc, _ = self._make_mock_container()
+        with patch.object(video_demo, '_av_module') as mock_av:
+            mock_av.open.return_value = mc
+            with patch('os.cpu_count', return_value=1):
+                with patch.object(
+                    video_demo, '_get_keyframe_timestamps_pyav',
+                    return_value=[],
+                ):
+                    results = _extract_thumbnails_pyav(
+                        "test.mp4", 5, 80, 42,
+                    )
+        assert len(results) == 5
+        for w, h, data in results:
+            assert w == 80
+            assert h == 42
+            assert len(data) == 80 * 42 * 3
+
+    def test_calls_callback_for_each_frame(self) -> None:
+        """Callback is called for each extracted frame."""
+        mc, _ = self._make_mock_container()
+        callback = MagicMock()
+        with patch.object(video_demo, '_av_module') as mock_av:
+            mock_av.open.return_value = mc
+            with patch('os.cpu_count', return_value=1):
+                with patch.object(
+                    video_demo, '_get_keyframe_timestamps_pyav',
+                    return_value=[],
+                ):
+                    _extract_thumbnails_pyav(
+                        "test.mp4", 3, 80, 42, callback=callback,
+                    )
+        assert callback.call_count == 3
+
+    def test_returns_empty_on_error(self) -> None:
+        """Returns empty list when PyAV fails."""
+        with patch.object(video_demo, '_av_module') as mock_av:
+            mock_av.open.side_effect = Exception("codec error")
+            results = _extract_thumbnails_pyav("bad.mp4", 5, 80, 42)
+        assert results == []
+
+    def test_multithreaded_with_multiple_cpus(self) -> None:
+        """Uses multiple threads when CPU count > 2."""
+        mc, _ = self._make_mock_container()
+        with patch.object(video_demo, '_av_module') as mock_av:
+            mock_av.open.return_value = mc
+            with patch('os.cpu_count', return_value=8):
+                with patch.object(
+                    video_demo, '_get_keyframe_timestamps_pyav',
+                    return_value=[],
+                ):
+                    results = _extract_thumbnails_pyav(
+                        "test.mp4", 8, 80, 42,
+                    )
+        assert len(results) == 8
+
+    def test_results_are_sorted_by_index(self) -> None:
+        """Results are returned in frame order regardless of thread."""
+        mc, _ = self._make_mock_container()
+        with patch.object(video_demo, '_av_module') as mock_av:
+            mock_av.open.return_value = mc
+            with patch('os.cpu_count', return_value=4):
+                with patch.object(
+                    video_demo, '_get_keyframe_timestamps_pyav',
+                    return_value=[],
+                ):
+                    results = _extract_thumbnails_pyav(
+                        "test.mp4", 10, 80, 42,
+                    )
+        assert len(results) == 10
+
+    def test_uses_keyframe_snapping(self) -> None:
+        """When keyframes available, snaps targets to nearest keyframe."""
+        mc, _ = self._make_mock_container()
+        kf_times = [0.0, 2.0, 4.0, 6.0, 8.0]
+        with patch.object(video_demo, '_av_module') as mock_av:
+            mock_av.open.return_value = mc
+            with patch('os.cpu_count', return_value=1):
+                with patch.object(
+                    video_demo, '_get_keyframe_timestamps_pyav',
+                    return_value=kf_times,
+                ):
+                    results = _extract_thumbnails_pyav(
+                        "test.mp4", 3, 80, 42,
+                    )
+        assert len(results) == 3
+
+
+# ---------------------------------------------------------------------------
+# Rotation / flip detection tests
+# ---------------------------------------------------------------------------
+
+class TestParseRotationFromFfprobe:
+    """Tests for _parse_rotation_from_ffprobe()."""
+
+    def test_no_rotation(self) -> None:
+        rot, vflip = _parse_rotation_from_ffprobe({})
+        assert rot == 0
+        assert vflip is False
+
+    def test_rotate_tag_90(self) -> None:
+        rot, vflip = _parse_rotation_from_ffprobe(
+            {'tags': {'rotate': '90'}},
+        )
+        assert rot == 90
+
+    def test_rotate_tag_270(self) -> None:
+        rot, vflip = _parse_rotation_from_ffprobe(
+            {'tags': {'rotate': '270'}},
+        )
+        assert rot == 270
+
+    def test_rotate_tag_180(self) -> None:
+        rot, vflip = _parse_rotation_from_ffprobe(
+            {'tags': {'rotate': '180'}},
+        )
+        assert rot == 180
+
+    def test_display_matrix_rotation(self) -> None:
+        """side_data_list with Display Matrix rotation=-90 → 90° CW."""
+        sd = {
+            'side_data_list': [{
+                'side_data_type': 'Display Matrix',
+                'rotation': -90,
+            }],
+        }
+        rot, vflip = _parse_rotation_from_ffprobe(sd)
+        assert rot == 90
+
+    def test_display_matrix_rotation_negative_270(self) -> None:
+        """rotation=-270 → 270° CW."""
+        sd = {
+            'side_data_list': [{
+                'side_data_type': 'Display Matrix',
+                'rotation': -270,
+            }],
+        }
+        rot, vflip = _parse_rotation_from_ffprobe(sd)
+        assert rot == 270
+
+    def test_snaps_to_nearest_90(self) -> None:
+        """Non-standard rotation (e.g. 89°) snaps to nearest 90°."""
+        rot, _ = _parse_rotation_from_ffprobe({'tags': {'rotate': '89'}})
+        assert rot == 90
+        rot, _ = _parse_rotation_from_ffprobe({'tags': {'rotate': '91'}})
+        assert rot == 90
+
+    def test_rotate_tag_takes_priority_over_side_data(self) -> None:
+        """When both rotate tag and side_data exist, rotate tag wins."""
+        sd = {
+            'tags': {'rotate': '180'},
+            'side_data_list': [{
+                'side_data_type': 'Display Matrix',
+                'rotation': -90,
+            }],
+        }
+        rot, _ = _parse_rotation_from_ffprobe(sd)
+        assert rot == 180
+
+
+class TestDisplaymatrixHasVflip:
+    """Tests for _displaymatrix_has_vflip()."""
+
+    def test_normal_matrix(self) -> None:
+        # Identity-like: positive [1][1] → no vflip
+        dm = "00010000 00000000 00000000\n00000000 00010000 00000000\n00000000 00000000 40000000"
+        assert _displaymatrix_has_vflip(dm) is False
+
+    def test_vflip_matrix(self) -> None:
+        # Negative [1][1] in second row → vflip
+        dm = "00010000 00000000 00000000\n00000000 FFFF0000 00000000\n00000000 00000000 40000000"
+        assert _displaymatrix_has_vflip(dm) is True
+
+    def test_empty_string(self) -> None:
+        assert _displaymatrix_has_vflip("") is False
+
+    def test_invalid_string(self) -> None:
+        assert _displaymatrix_has_vflip("not a matrix") is False
+
+
+class TestDetectRotationPyav:
+    """Tests for _detect_rotation_pyav()."""
+
+    def test_no_rotation_metadata(self) -> None:
+        stream = MagicMock()
+        stream.metadata = {}
+        rot, vflip = _detect_rotation_pyav(stream)
+        assert rot == 0
+        assert vflip is False
+
+    def test_rotate_tag_90(self) -> None:
+        stream = MagicMock()
+        stream.metadata = {'rotate': '90'}
+        rot, vflip = _detect_rotation_pyav(stream)
+        assert rot == 90
+
+    def test_rotate_tag_270(self) -> None:
+        stream = MagicMock()
+        stream.metadata = {'rotate': '270'}
+        rot, vflip = _detect_rotation_pyav(stream)
+        assert rot == 270
+
+    def test_no_side_data_attr(self) -> None:
+        """Gracefully handles missing side_data attribute."""
+        stream = MagicMock(spec=[])
+        stream.metadata = {'rotate': '180'}
+        rot, vflip = _detect_rotation_pyav(stream)
+        assert rot == 180
+
+    def test_frame_rotation_90(self) -> None:
+        """Detects 90° CW from frame.rotation (CCW=-90)."""
+        stream = MagicMock()
+        stream.metadata = {}
+        frame = MagicMock()
+        frame.rotation = -90  # CCW → 90° CW
+        frame.side_data = {}
+        container = MagicMock()
+        container.decode.return_value = iter([frame])
+        rot, vflip = _detect_rotation_pyav(stream, container)
+        assert rot == 90
+
+    def test_frame_rotation_270(self) -> None:
+        """Detects 270° CW from frame.rotation (CCW=90)."""
+        stream = MagicMock()
+        stream.metadata = {}
+        frame = MagicMock()
+        frame.rotation = 90  # CCW → 270° CW
+        frame.side_data = {}
+        container = MagicMock()
+        container.decode.return_value = iter([frame])
+        rot, vflip = _detect_rotation_pyav(stream, container)
+        assert rot == 270
+
+    def test_frame_rotation_180(self) -> None:
+        """Detects 180° from frame.rotation."""
+        stream = MagicMock()
+        stream.metadata = {}
+        frame = MagicMock()
+        frame.rotation = -180
+        frame.side_data = {}
+        container = MagicMock()
+        container.decode.return_value = iter([frame])
+        rot, vflip = _detect_rotation_pyav(stream, container)
+        assert rot == 180
+
+    def test_rotate_tag_takes_priority_over_frame(self) -> None:
+        """When rotate tag exists, frame.rotation is not checked."""
+        stream = MagicMock()
+        stream.metadata = {'rotate': '90'}
+        frame = MagicMock()
+        frame.rotation = -180  # would give 180 if checked
+        container = MagicMock()
+        container.decode.return_value = iter([frame])
+        rot, vflip = _detect_rotation_pyav(stream, container)
+        assert rot == 90
+
+    def test_no_container_no_frame_check(self) -> None:
+        """Without container, only metadata tag is checked."""
+        stream = MagicMock()
+        stream.metadata = {}
+        rot, vflip = _detect_rotation_pyav(stream, container=None)
+        assert rot == 0
+
+
+# ---------------------------------------------------------------------------
+# Keyframe-aware sampling tests
+# ---------------------------------------------------------------------------
+
+class TestGetKeyframeTimestampsPyav:
+    """Tests for _get_keyframe_timestamps_pyav() (packet-level demux)."""
+
+    def test_returns_keyframe_timestamps(self) -> None:
+        """Extracts timestamps from keyframe packets (no decoding)."""
+        from fractions import Fraction
+        tb = Fraction(1, 30000)
+        mock_packets = []
+        for pts, is_kf in [(0, True), (15000, False), (90000, True),
+                           (105000, False), (180000, True)]:
+            p = MagicMock()
+            p.pts = pts
+            p.is_keyframe = is_kf
+            mock_packets.append(p)
+        # Flush packet at end (pts=None)
+        flush = MagicMock()
+        flush.pts = None
+        flush.is_keyframe = False
+        mock_packets.append(flush)
+
+        mock_stream = MagicMock()
+        mock_stream.time_base = tb
+
+        mc = MagicMock()
+        mc.streams.video = [mock_stream]
+        mc.demux.return_value = iter(mock_packets)
+
+        with patch.object(video_demo, '_av_module') as mock_av:
+            mock_av.open.return_value = mc
+            kf = _get_keyframe_timestamps_pyav("test.mp4")
+
+        # Only keyframe packets (3 of 5 + flush)
+        assert len(kf) == 3
+        assert abs(kf[0] - 0.0) < 0.01
+        assert abs(kf[1] - 3.0) < 0.01
+        assert abs(kf[2] - 6.0) < 0.01
+
+    def test_uses_demux_not_decode(self) -> None:
+        """Uses container.demux() (packet-level) not decode (no decoding)."""
+        mc = MagicMock()
+        mc.streams.video = [MagicMock()]
+        mc.streams.video[0].time_base = MagicMock()
+        mc.streams.video[0].time_base.__float__ = lambda self: 1/30000.0
+        mc.demux.return_value = iter([])
+        with patch.object(video_demo, '_av_module') as mock_av:
+            mock_av.open.return_value = mc
+            _get_keyframe_timestamps_pyav("test.mp4")
+        mc.demux.assert_called_once()
+        mc.decode.assert_not_called()
+
+    def test_returns_empty_on_error(self) -> None:
+        """Returns empty list on failure."""
+        with patch.object(video_demo, '_av_module') as mock_av:
+            mock_av.open.side_effect = Exception("bad file")
+            kf = _get_keyframe_timestamps_pyav("bad.mp4")
+        assert kf == []
+
+    def test_closes_container(self) -> None:
+        """Container is closed after scanning."""
+        mc = MagicMock()
+        mc.streams.video = [MagicMock()]
+        mc.streams.video[0].time_base = MagicMock()
+        mc.streams.video[0].time_base.__float__ = lambda self: 1/30000.0
+        mc.demux.return_value = iter([])
+        with patch.object(video_demo, '_av_module') as mock_av:
+            mock_av.open.return_value = mc
+            _get_keyframe_timestamps_pyav("test.mp4")
+        mc.close.assert_called_once()
+
+
+class TestSnapToKeyframes:
+    """Tests for _snap_to_keyframes()."""
+
+    def test_snaps_to_nearest(self) -> None:
+        """Each target maps to its nearest keyframe."""
+        keyframes = [0.0, 2.0, 4.0, 6.0, 8.0, 10.0]
+        targets = [0.9, 3.1, 7.9]
+        result = _snap_to_keyframes(targets, keyframes)
+        assert len(result) == 3
+        assert result[0] == (0, 0.0)   # 0.9 → nearest 0.0
+        assert result[1] == (1, 4.0)   # 3.1 → nearest 4.0
+        assert result[2] == (2, 8.0)   # 7.9 → nearest 8.0
+
+    def test_empty_keyframes_returns_original(self) -> None:
+        """With no keyframes, returns original targets."""
+        targets = [1.0, 2.0, 3.0]
+        result = _snap_to_keyframes(targets, [])
+        assert result == [(0, 1.0), (1, 2.0), (2, 3.0)]
+
+    def test_single_keyframe(self) -> None:
+        """All targets snap to the single available keyframe."""
+        result = _snap_to_keyframes([0.5, 2.0, 5.0], [1.0])
+        assert all(t == 1.0 for _, t in result)
+
+    def test_preserves_index(self) -> None:
+        """Original index is preserved in output."""
+        result = _snap_to_keyframes([0.0, 5.0], [0.0, 10.0])
+        assert result[0][0] == 0
+        assert result[1][0] == 1
+
+    def test_exact_match(self) -> None:
+        """Exact keyframe timestamps are matched directly."""
+        keyframes = [0.0, 2.0, 4.0]
+        result = _snap_to_keyframes([2.0, 4.0], keyframes)
+        assert result[0] == (0, 2.0)
+        assert result[1] == (1, 4.0)

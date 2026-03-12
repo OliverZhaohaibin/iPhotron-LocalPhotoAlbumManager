@@ -18,7 +18,8 @@ from PySide6.QtMultimediaWidgets import QVideoWidget
 from config import (
     BAR_HEIGHT, THUMB_WIDTH, CORNER_RADIUS, BORDER_THICKNESS,
     THUMB_LOGICAL_HEIGHT, ARROW_THICKNESS, THEME_COLOR, HOVER_COLOR,
-    TRIM_HIGHLIGHT_COLOR, ICON_PLAY, STYLESHEET,
+    TRIM_HIGHLIGHT_COLOR, MIN_TRIM_GAP, OUT_POINT_OFFSET_MS,
+    ICON_PLAY, STYLESHEET,
 )
 from worker import ThumbnailWorker
 
@@ -196,7 +197,7 @@ class ThumbnailBar(QWidget):
         if canvas_w <= 0:
             return
         ratio = (parent_x - canvas_left) / canvas_w
-        ratio = max(0.0, min(self._out_ratio - 0.01, ratio))
+        ratio = max(0.0, min(self._out_ratio - MIN_TRIM_GAP, ratio))
         if ratio != self._in_ratio:
             self._in_ratio = ratio
             self._canvas.set_trim(self._in_ratio, self._out_ratio)
@@ -208,7 +209,7 @@ class ThumbnailBar(QWidget):
         if canvas_w <= 0:
             return
         ratio = (parent_x - canvas_left) / canvas_w
-        ratio = max(self._in_ratio + 0.01, min(1.0, ratio))
+        ratio = max(self._in_ratio + MIN_TRIM_GAP, min(1.0, ratio))
         if ratio != self._out_ratio:
             self._out_ratio = ratio
             self._canvas.set_trim(self._in_ratio, self._out_ratio)
@@ -448,7 +449,7 @@ class VideoEditor(QMainWindow):
         # Enforce out-point boundary
         if self._out_point_ms and position >= self._out_point_ms:
             self.player.pause()
-            self.player.setPosition(max(self._out_point_ms - 50, 0))
+            self.player.setPosition(max(self._out_point_ms - OUT_POINT_OFFSET_MS, 0))
             if not os.path.exists(ICON_PLAY):
                 self.play_btn.setText("▶")
 

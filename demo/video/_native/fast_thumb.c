@@ -198,8 +198,8 @@ API void snap_to_keyframes(const double *targets, int n_targets,
         if (lo < n_keyframes && lo > 0) {
             double diff_hi = fabs(keyframes[lo] - t);
             double diff_lo = fabs(keyframes[lo - 1] - t);
-            /* <= matches Python min() which picks first candidate
-             * (keyframes[pos]) when equal. */
+            /* When equidistant, prefer keyframes[lo] (the later/higher
+             * keyframe) to match Python bisect_left ordering. */
             best = (diff_hi <= diff_lo) ? keyframes[lo] : keyframes[lo - 1];
         } else if (lo < n_keyframes) {
             best = keyframes[lo];

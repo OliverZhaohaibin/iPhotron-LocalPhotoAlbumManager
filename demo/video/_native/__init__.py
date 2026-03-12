@@ -375,9 +375,10 @@ def scale_bilinear_bgra(bgra_buf: bytes, src_w: int, src_h: int,
 
     # Degenerate: 1×1 source → fill with the single pixel
     if src_w == 1 and src_h == 1:
-        pixel = bytes(mv[0:4])
+        pixel = mv[0:4]
         for i in range(dst_w * dst_h):
-            dst[i * 4:(i + 1) * 4] = pixel
+            off = i * 4
+            dst[off:off + 4] = pixel
         return bytes(dst)
 
     # Degenerate: single row → horizontal interpolation only

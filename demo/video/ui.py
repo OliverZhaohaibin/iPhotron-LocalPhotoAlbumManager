@@ -468,10 +468,10 @@ class VideoEditor(QMainWindow):
         self._scrubbing = False
         self.thumb_strip.playheadSeeked.connect(self._on_playhead_seeked)
         self.thumb_strip.playheadDragStarted.connect(
-            lambda: setattr(self, '_scrubbing', True),
+            self._on_playhead_drag_started,
         )
         self.thumb_strip.playheadDragFinished.connect(
-            lambda: setattr(self, '_scrubbing', False),
+            self._on_playhead_drag_finished,
         )
 
     def open_file(self):
@@ -539,6 +539,12 @@ class VideoEditor(QMainWindow):
         pos = int(ratio * self._duration_ms)
         pos = max(self._in_point_ms, min(self._out_point_ms, pos))
         self.player.setPosition(pos)
+
+    def _on_playhead_drag_started(self):
+        self._scrubbing = True
+
+    def _on_playhead_drag_finished(self):
+        self._scrubbing = False
 
     def get_video_info(self, video_path):
         """Use ffprobe to get video duration and resolution."""

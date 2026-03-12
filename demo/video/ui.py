@@ -91,12 +91,18 @@ class HandleButton(QPushButton):
 class ThumbnailBar(QWidget):
     """Thumbnail strip that draws all pixmaps via QPainter — no child widgets.
 
-    Supports a playhead cursor, draggable left/right handles for setting
-    video in/out points, and a highlight colour while handles are dragged.
+    Supports a draggable playhead cursor, draggable left/right handles for
+    setting video in/out points, and a highlight colour while handles are
+    dragged.  The left handle gains rounded left-side corners when the
+    in-point moves away from the start, and reverts to straight corners
+    when it returns to the edge.
     """
 
     inPointChanged = Signal(float)    # 0.0 – 1.0
     outPointChanged = Signal(float)   # 0.0 – 1.0
+    playheadSeeked = Signal(float)    # 0.0 – 1.0
+    playheadDragStarted = Signal()
+    playheadDragFinished = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -112,31 +118,10 @@ class ThumbnailBar(QWidget):
         self._main_layout.setContentsMargins(0, 0, 0, 0)
         self._main_layout.setSpacing(0)
 
-        # --- default stylesheets (saved for restore) ---
-        self._default_style_left = f"""
-            QPushButton {{
-                background-color: {THEME_COLOR};
-                border: none;
-                border-radius: 0px;
-            }}
-            QPushButton:hover {{ background-color: {HOVER_COLOR}; }}
-        """
-        self._default_style_right = f"""
-            QPushButton {{
-                background-color: {THEME_COLOR};
-                border: none;
-                border-top-left-radius: 0px;
-                border-bottom-left-radius: 0px;
-                border-top-right-radius: {CORNER_RADIUS}px;
-                border-bottom-right-radius: {CORNER_RADIUS}px;
-            }}
-            QPushButton:hover {{ background-color: {HOVER_COLOR}; }}
-        """
-
         # 1. Left handle
         self.btn_left = HandleButton(arrow_type="left")
         self.btn_left.setObjectName("HandleLeft")
-        self.btn_left.setStyleSheet(self._default_style_left)
+        self.btn_left.setStyleSheet(self._left_handle_style())
 
         # 2. Thumbnail canvas (custom painted)
         self._canvas = _ThumbnailCanvas(self)
@@ -144,7 +129,7 @@ class ThumbnailBar(QWidget):
         # 3. Right handle
         self.btn_right = HandleButton(arrow_type="right")
         self.btn_right.setObjectName("HandleRight")
-        self.btn_right.setStyleSheet(self._default_style_right)
+        self.btn_right.setStyleSheet(self._right_handle_style())
 
         self._main_layout.addWidget(self.btn_left)
         self._main_layout.addWidget(self._canvas, stretch=1)
@@ -158,6 +143,11 @@ class ThumbnailBar(QWidget):
         self.btn_right.dragStarted.connect(self._on_drag_start)
         self.btn_right.dragMoved.connect(self._on_right_drag_moved)
         self.btn_right.dragFinished.connect(self._on_drag_end)
+
+        # --- forward playhead signals from canvas ---
+        self._canvas.playheadSeeked.connect(self.playheadSeeked)
+        self._canvas.playheadDragStarted.connect(self.playheadDragStarted)
+        self._canvas.playheadDragFinished.connect(self.playheadDragFinished)
 
     # --- public API ---------------------------------------------------------
 
@@ -202,6 +192,10 @@ class ThumbnailBar(QWidget):
             self._in_ratio = ratio
             self._canvas.set_trim(self._in_ratio, self._out_ratio)
             self.inPointChanged.emit(self._in_ratio)
+            # Refresh left handle corners (rounded ↔ straight)
+            self.btn_left.setStyleSheet(
+                self._left_handle_style(highlight=True),
+            )
 
     def _on_right_drag_moved(self, parent_x):
         canvas_left = self.btn_left.width()
@@ -219,38 +213,71 @@ class ThumbnailBar(QWidget):
         self._handle_dragging = False
         self._restore_default_colors()
 
-    # --- drag colour helpers ------------------------------------------------
+    # --- handle style helpers -----------------------------------------------
 
-    def _apply_drag_colors(self):
-        """Turn handles + canvas border to TRIM_HIGHLIGHT_COLOR."""
-        hl = TRIM_HIGHLIGHT_COLOR
-        self.btn_left.setStyleSheet(f"""
+    def _left_handle_style(self, highlight=False):
+        """Build stylesheet for left handle — corners depend on in-point."""
+        bg = TRIM_HIGHLIGHT_COLOR if highlight else THEME_COLOR
+        tl = f"{CORNER_RADIUS}px" if self._in_ratio > 0 else "0px"
+        bl = tl
+        style = f"""
             QPushButton {{
-                background-color: {hl}; border: none; border-radius: 0px;
+                background-color: {bg};
+                border: none;
+                border-top-left-radius: {tl};
+                border-bottom-left-radius: {bl};
+                border-top-right-radius: 0px;
+                border-bottom-right-radius: 0px;
             }}
-        """)
-        self.btn_right.setStyleSheet(f"""
+        """
+        if not highlight:
+            style += f"""
+                QPushButton:hover {{ background-color: {HOVER_COLOR}; }}
+            """
+        return style
+
+    def _right_handle_style(self, highlight=False):
+        """Build stylesheet for right handle — right corners always rounded."""
+        bg = TRIM_HIGHLIGHT_COLOR if highlight else THEME_COLOR
+        style = f"""
             QPushButton {{
-                background-color: {hl}; border: none;
+                background-color: {bg};
+                border: none;
+                border-top-left-radius: 0px;
+                border-bottom-left-radius: 0px;
                 border-top-right-radius: {CORNER_RADIUS}px;
                 border-bottom-right-radius: {CORNER_RADIUS}px;
             }}
-        """)
-        self._canvas.set_border_color(QColor(hl))
+        """
+        if not highlight:
+            style += f"""
+                QPushButton:hover {{ background-color: {HOVER_COLOR}; }}
+            """
+        return style
+
+    def _apply_drag_colors(self):
+        """Turn handles + canvas border to TRIM_HIGHLIGHT_COLOR."""
+        self.btn_left.setStyleSheet(self._left_handle_style(highlight=True))
+        self.btn_right.setStyleSheet(self._right_handle_style(highlight=True))
+        self._canvas.set_border_color(QColor(TRIM_HIGHLIGHT_COLOR))
 
     def _restore_default_colors(self):
         """Revert handles + canvas border to the default theme."""
-        self.btn_left.setStyleSheet(self._default_style_left)
-        self.btn_right.setStyleSheet(self._default_style_right)
+        self.btn_left.setStyleSheet(self._left_handle_style())
+        self.btn_right.setStyleSheet(self._right_handle_style())
         self._canvas.set_border_color(QColor(THEME_COLOR))
 
 
 class _ThumbnailCanvas(QWidget):
     """Lightweight widget painting QPixmaps side by side — zero child widgets.
 
-    Also draws a playhead cursor (thin white vertical line) and
+    Also draws a draggable playhead cursor (thin white vertical line) and
     semi-transparent dim overlays for trimmed-out regions.
     """
+
+    playheadSeeked = Signal(float)       # ratio 0.0 – 1.0
+    playheadDragStarted = Signal()
+    playheadDragFinished = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -259,8 +286,10 @@ class _ThumbnailCanvas(QWidget):
         self._in_ratio = 0.0
         self._out_ratio = 1.0
         self._border_color = QColor(THEME_COLOR)
+        self._playhead_dragging = False
         self.setObjectName("StripContainer")
         self.setAttribute(Qt.WA_OpaquePaintEvent)
+        self.setCursor(Qt.PointingHandCursor)
 
     def set_pixmaps(self, pixmaps):
         self._pixmaps = pixmaps
@@ -281,6 +310,36 @@ class _ThumbnailCanvas(QWidget):
         """Override the border (background) colour shown around thumbnails."""
         self._border_color = QColor(color)
         self.update()
+
+    # --- playhead drag interaction ---
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self._playhead_dragging = True
+            self.setCursor(Qt.ClosedHandCursor)
+            self.playheadDragStarted.emit()
+            self._seek_to_x(event.position().x())
+
+    def mouseMoveEvent(self, event):
+        if self._playhead_dragging:
+            self._seek_to_x(event.position().x())
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.LeftButton and self._playhead_dragging:
+            self._playhead_dragging = False
+            self.setCursor(Qt.PointingHandCursor)
+            self.playheadDragFinished.emit()
+
+    def _seek_to_x(self, x):
+        w = self.width()
+        if w <= 0:
+            return
+        ratio = max(0.0, min(1.0, x / w))
+        self._playhead_ratio = ratio
+        self.update()
+        self.playheadSeeked.emit(ratio)
+
+    # --- painting ---
 
     def paintEvent(self, event):
         painter = QPainter(self)
@@ -405,6 +464,16 @@ class VideoEditor(QMainWindow):
         self.thumb_strip.inPointChanged.connect(self._on_in_point_changed)
         self.thumb_strip.outPointChanged.connect(self._on_out_point_changed)
 
+        # Playhead scrubbing
+        self._scrubbing = False
+        self.thumb_strip.playheadSeeked.connect(self._on_playhead_seeked)
+        self.thumb_strip.playheadDragStarted.connect(
+            lambda: setattr(self, '_scrubbing', True),
+        )
+        self.thumb_strip.playheadDragFinished.connect(
+            lambda: setattr(self, '_scrubbing', False),
+        )
+
     def open_file(self):
         file_path, _ = QFileDialog.getOpenFileName(
             self, "Select Video", "",
@@ -442,7 +511,7 @@ class VideoEditor(QMainWindow):
         self._out_point_ms = duration
 
     def _on_position_changed(self, position):
-        if self._duration_ms <= 0:
+        if self._duration_ms <= 0 or self._scrubbing:
             return
         ratio = position / self._duration_ms
         self.thumb_strip.set_playhead_ratio(ratio)
@@ -462,6 +531,14 @@ class VideoEditor(QMainWindow):
         self._out_point_ms = int(ratio * self._duration_ms)
         if self.player.position() > self._out_point_ms:
             self.player.setPosition(self._out_point_ms)
+
+    def _on_playhead_seeked(self, ratio):
+        """Seek the player when the user drags the playhead on the canvas."""
+        if self._duration_ms <= 0:
+            return
+        pos = int(ratio * self._duration_ms)
+        pos = max(self._in_point_ms, min(self._out_point_ms, pos))
+        self.player.setPosition(pos)
 
     def get_video_info(self, video_path):
         """Use ffprobe to get video duration and resolution."""

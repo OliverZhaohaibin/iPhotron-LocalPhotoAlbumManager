@@ -1720,7 +1720,7 @@ class TestSplitStripBgraToRgbNative:
     """Tests for the C implementation of split_strip_bgra_to_rgb."""
 
     def test_c_matches_python_random(self) -> None:
-        """C split_strip_bgra_to_rgb matches Python for random data."""
+        """C split_strip_bgra_to_rgb matches Python fallback for random data."""
         _skip_if_no_c()
         from _native import split_strip_bgra_to_rgb as c_func
 
@@ -1732,8 +1732,9 @@ class TestSplitStripBgraToRgbNative:
 
         c_rgb = c_func(strip, thumb_w, thumb_h, count)
 
-        # Python reference
-        py_rgb = _split_strip_bgra_to_rgb(strip, thumb_w, thumb_h, count)
+        # Python reference: force the wrapper down its pure-Python fallback
+        with patch.object(extraction_mod, "_c_split_strip_bgra_to_rgb", None):
+            py_rgb = _split_strip_bgra_to_rgb(strip, thumb_w, thumb_h, count)
 
         assert c_rgb == py_rgb
 
@@ -1878,7 +1879,10 @@ class TestSnapToKeyframesNative:
         targets = [0.5, 1.5, 3.0, 5.5, 7.0, 9.9, 11.0]
 
         c_result = c_snap(targets, keyframes)
-        py_result = _snap_to_keyframes(targets, keyframes)
+
+        # Force Python fallback so comparison is meaningful
+        with patch.object(extraction_mod, "_c_snap_to_keyframes", None):
+            py_result = _snap_to_keyframes(targets, keyframes)
 
         assert len(c_result) == len(py_result)
         for (ci, ct), (pi, pt) in zip(c_result, py_result):
@@ -1945,3 +1949,34 @@ class TestScaleBilinearBgra:
         src = bytes(random.getrandbits(8) for _ in range(src_w * src_h * 4))
         out = scale_bilinear_bgra(src, src_w, src_h, src_w, src_h)
         assert out == src
+
+    def test_single_pixel_source(self) -> None:
+        """1×1 source fills entire destination with the single pixel."""
+        _skip_if_no_c()
+        from _native import scale_bilinear_bgra
+
+        pixel = bytes([10, 20, 30, 255])
+        out = scale_bilinear_bgra(pixel, 1, 1, 3, 3)
+        assert len(out) == 3 * 3 * 4
+        for i in range(9):
+            assert out[i * 4:(i + 1) * 4] == pixel
+
+    def test_single_row_source(self) -> None:
+        """1-pixel-tall source does not segfault and produces correct size."""
+        _skip_if_no_c()
+        from _native import scale_bilinear_bgra
+
+        src_w = 4
+        src = bytes(i % 256 for i in range(src_w * 4))
+        out = scale_bilinear_bgra(src, src_w, 1, 2, 2)
+        assert len(out) == 2 * 2 * 4
+
+    def test_single_column_source(self) -> None:
+        """1-pixel-wide source does not segfault and produces correct size."""
+        _skip_if_no_c()
+        from _native import scale_bilinear_bgra
+
+        src_h = 4
+        src = bytes(i % 256 for i in range(src_h * 4))
+        out = scale_bilinear_bgra(src, 1, src_h, 2, 2)
+        assert len(out) == 2 * 2 * 4

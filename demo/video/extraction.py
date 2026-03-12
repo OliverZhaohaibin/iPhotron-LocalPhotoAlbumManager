@@ -53,15 +53,7 @@ try:
 except ImportError:
     _c_snap_to_keyframes = None
 
-try:
-    from _native import rotate_bgra as _c_rotate_bgra
-except ImportError:
-    _c_rotate_bgra = None
 
-try:
-    from _native import scale_bilinear_bgra as _c_scale_bilinear_bgra
-except ImportError:
-    _c_scale_bilinear_bgra = None
 
 
 # =====================================================================

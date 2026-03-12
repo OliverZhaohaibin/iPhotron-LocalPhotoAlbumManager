@@ -372,6 +372,56 @@ def scale_bilinear_bgra(bgra_buf: bytes, src_w: int, src_h: int,
     # Pure Python fallback (bilinear)
     dst = bytearray(dst_size)
     mv = memoryview(bgra_buf)
+
+    # Degenerate: 1×1 source → fill with the single pixel
+    if src_w == 1 and src_h == 1:
+        pixel = bytes(mv[0:4])
+        for i in range(dst_w * dst_h):
+            dst[i * 4:(i + 1) * 4] = pixel
+        return bytes(dst)
+
+    # Degenerate: single row → horizontal interpolation only
+    if src_h == 1:
+        x_ratio = (src_w - 1) / max(dst_w - 1, 1)
+        for dy in range(dst_h):
+            for dx in range(dst_w):
+                gx = dx * x_ratio
+                sx = int(gx)
+                fx = gx - sx
+                if sx >= src_w - 1:
+                    sx = src_w - 2
+                    fx = 1.0
+                if sx < 0:
+                    sx = 0
+                    fx = 0.0
+                for c in range(4):
+                    p0 = mv[sx * 4 + c]
+                    p1 = mv[(sx + 1) * 4 + c]
+                    v = p0 * (1 - fx) + p1 * fx
+                    dst[(dy * dst_w + dx) * 4 + c] = max(0, min(255, int(v + 0.5)))
+        return bytes(dst)
+
+    # Degenerate: single column → vertical interpolation only
+    if src_w == 1:
+        y_ratio = (src_h - 1) / max(dst_h - 1, 1)
+        for dy in range(dst_h):
+            gy = dy * y_ratio
+            sy = int(gy)
+            fy = gy - sy
+            if sy >= src_h - 1:
+                sy = src_h - 2
+                fy = 1.0
+            if sy < 0:
+                sy = 0
+                fy = 0.0
+            for dx in range(dst_w):
+                for c in range(4):
+                    p0 = mv[sy * 4 + c]
+                    p1 = mv[(sy + 1) * 4 + c]
+                    v = p0 * (1 - fy) + p1 * fy
+                    dst[(dy * dst_w + dx) * 4 + c] = max(0, min(255, int(v + 0.5)))
+        return bytes(dst)
+
     x_ratio = (src_w - 1) / max(dst_w - 1, 1)
     y_ratio = (src_h - 1) / max(dst_h - 1, 1)
     for dy in range(dst_h):

@@ -298,11 +298,12 @@ class ThumbnailWorker(QThread):
 
             # Fast path: batch convert all frames in one C call
             if _c_bgra_to_rgb_multi is not None:
+                n_frames = len(bgra_frames)
                 concat_bgra = b"".join(bgra_frames)
                 all_rgb = _c_bgra_to_rgb_multi(
-                    concat_bgra, n_pixels, count,
+                    concat_bgra, n_pixels, n_frames,
                 )
-                cache_put(self.video_path, thumb_w, thumb_h, count, all_rgb)
+                cache_put(self.video_path, thumb_w, thumb_h, n_frames, all_rgb)
                 return
 
             # Medium path: per-frame C conversion

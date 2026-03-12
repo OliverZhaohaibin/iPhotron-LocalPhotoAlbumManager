@@ -190,22 +190,21 @@ API void snap_to_keyframes(const double *targets, int n_targets,
             else
                 hi = mid;
         }
-        /* lo is the insertion point (first keyframe >= t) */
-        double best = keyframes[0];
-        double best_diff = fabs(best - t);
-        if (lo < n_keyframes) {
-            double diff = fabs(keyframes[lo] - t);
-            if (diff < best_diff) {
-                best = keyframes[lo];
-                best_diff = diff;
-            }
-        }
-        if (lo > 0) {
-            double diff = fabs(keyframes[lo - 1] - t);
-            if (diff < best_diff) {
-                best = keyframes[lo - 1];
-                best_diff = diff;
-            }
+        /* lo is the insertion point (first keyframe >= t).
+         * Match Python bisect_left tie-breaking: when equidistant,
+         * prefer the later (higher) keyframe (keyframes[lo]).
+         */
+        double best;
+        if (lo < n_keyframes && lo > 0) {
+            double diff_hi = fabs(keyframes[lo] - t);
+            double diff_lo = fabs(keyframes[lo - 1] - t);
+            /* <= matches Python min() which picks first candidate
+             * (keyframes[pos]) when equal. */
+            best = (diff_hi <= diff_lo) ? keyframes[lo] : keyframes[lo - 1];
+        } else if (lo < n_keyframes) {
+            best = keyframes[lo];
+        } else {
+            best = keyframes[lo - 1];
         }
         out_times[i] = best;
     }
@@ -224,6 +223,63 @@ API void scale_bilinear_bgra(const uint8_t *src, int src_w, int src_h,
 {
     if (dst_w <= 0 || dst_h <= 0 || src_w <= 0 || src_h <= 0)
         return;
+
+    /* Handle degenerate 1-pixel-wide or 1-pixel-tall sources:
+     * bilinear interpolation needs at least 2×2, so replicate the
+     * single row/column to fill the destination.                   */
+    if (src_w == 1 && src_h == 1) {
+        for (int i = 0; i < dst_w * dst_h; i++)
+            memcpy(dst + i * 4, src, 4);
+        return;
+    }
+    if (src_h == 1) {
+        /* Single row — interpolate horizontally only */
+        const double x_ratio = (double)(src_w - 1) / (dst_w > 1 ? dst_w - 1 : 1);
+        for (int dy = 0; dy < dst_h; dy++) {
+            uint8_t *drow = dst + dy * dst_w * 4;
+            for (int dx = 0; dx < dst_w; dx++) {
+                double gx = dx * x_ratio;
+                int sx = (int)gx;
+                double fx = gx - sx;
+                if (sx >= src_w - 1) { sx = src_w - 2; fx = 1.0; }
+                if (sx < 0) { sx = 0; fx = 0.0; }
+                const uint8_t *p0 = src + sx * 4;
+                const uint8_t *p1 = p0 + 4;
+                for (int c = 0; c < 4; c++) {
+                    double v = p0[c] * (1.0 - fx) + p1[c] * fx;
+                    int iv = (int)(v + 0.5);
+                    if (iv < 0) iv = 0;
+                    if (iv > 255) iv = 255;
+                    drow[dx * 4 + c] = (uint8_t)iv;
+                }
+            }
+        }
+        return;
+    }
+    if (src_w == 1) {
+        /* Single column — interpolate vertically only */
+        const double y_ratio = (double)(src_h - 1) / (dst_h > 1 ? dst_h - 1 : 1);
+        for (int dy = 0; dy < dst_h; dy++) {
+            double gy = dy * y_ratio;
+            int sy = (int)gy;
+            double fy = gy - sy;
+            if (sy >= src_h - 1) { sy = src_h - 2; fy = 1.0; }
+            if (sy < 0) { sy = 0; fy = 0.0; }
+            const uint8_t *p0 = src + sy * 4;
+            const uint8_t *p1 = p0 + 4;
+            uint8_t *drow = dst + dy * dst_w * 4;
+            for (int dx = 0; dx < dst_w; dx++) {
+                for (int c = 0; c < 4; c++) {
+                    double v = p0[c] * (1.0 - fy) + p1[c] * fy;
+                    int iv = (int)(v + 0.5);
+                    if (iv < 0) iv = 0;
+                    if (iv > 255) iv = 255;
+                    drow[dx * 4 + c] = (uint8_t)iv;
+                }
+            }
+        }
+        return;
+    }
 
     const double x_ratio = (double)(src_w - 1) / (dst_w > 1 ? dst_w - 1 : 1);
     const double y_ratio = (double)(src_h - 1) / (dst_h > 1 ? dst_h - 1 : 1);

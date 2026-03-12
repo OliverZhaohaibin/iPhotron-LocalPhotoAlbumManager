@@ -16,9 +16,7 @@ Exported functions::
 
 from __future__ import annotations
 
-import bisect
 import ctypes
-import math
 import os
 import subprocess
 import sys
@@ -338,6 +336,7 @@ def snap_to_keyframes(target_times: list[float],
         return [(c_indices[i], c_times[i]) for i in range(n_t)]
 
     # Pure Python fallback
+    import bisect
     snapped = []
     for i, t in enumerate(target_times):
         pos = bisect.bisect_left(keyframes, t)

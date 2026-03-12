@@ -213,6 +213,7 @@ class ThumbnailBar(QWidget):
         if w <= 0:
             return
         hw = self.btn_left.width()
+        handle_left_x = max(0, min(handle_left_x, w))
         ratio = handle_left_x / w
         # Ensure handles never overlap (need ≥ 2× handle-width gap)
         min_gap = max(MIN_TRIM_GAP, 2 * hw / w)
@@ -233,6 +234,7 @@ class ThumbnailBar(QWidget):
         if w <= 0:
             return
         hw = self.btn_right.width()
+        handle_left_x = max(0, min(handle_left_x, w))
         # Right handle's right edge determines the out-point
         ratio = (handle_left_x + hw) / w
         min_gap = max(MIN_TRIM_GAP, 2 * hw / w)

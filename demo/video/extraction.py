@@ -43,6 +43,26 @@ try:
 except ImportError:
     _c_split_strip_bgra = None
 
+try:
+    from _native import split_strip_bgra_to_rgb as _c_split_strip_bgra_to_rgb
+except ImportError:
+    _c_split_strip_bgra_to_rgb = None
+
+try:
+    from _native import snap_to_keyframes as _c_snap_to_keyframes
+except ImportError:
+    _c_snap_to_keyframes = None
+
+try:
+    from _native import rotate_bgra as _c_rotate_bgra
+except ImportError:
+    _c_rotate_bgra = None
+
+try:
+    from _native import scale_bilinear_bgra as _c_scale_bilinear_bgra
+except ImportError:
+    _c_scale_bilinear_bgra = None
+
 
 # =====================================================================
 # Contact-sheet strategy (ffmpeg tile=Nx1) — Strategy 0
@@ -181,6 +201,7 @@ def _snap_to_keyframes(target_times, keyframes):
     """Map each target time to the nearest keyframe timestamp.
 
     If no keyframes are available, returns the original target_times.
+    Uses C binary search when available for maximum speed.
 
     Args:
         target_times: List of desired float timestamps.
@@ -191,6 +212,9 @@ def _snap_to_keyframes(target_times, keyframes):
     """
     if not keyframes:
         return list(enumerate(target_times))
+
+    if _c_snap_to_keyframes is not None:
+        return _c_snap_to_keyframes(target_times, keyframes)
 
     snapped = []
     for i, t in enumerate(target_times):
@@ -431,6 +455,38 @@ def _split_strip_bgra(strip_buf: bytes, thumb_w: int, thumb_h: int,
                 mv[src_off:src_off + thumb_w * 4]
 
     return [bytes(f) for f in frames]
+
+
+def _split_strip_bgra_to_rgb(strip_buf: bytes, thumb_w: int, thumb_h: int,
+                              count: int) -> bytes:
+    """Split a BGRA strip and convert to concatenated RGB888 in one pass.
+
+    Returns a single ``bytes`` of size ``thumb_w * thumb_h * 3 * count``
+    containing *count* RGB frames laid out sequentially.  A single C call
+    replaces N separate split + convert operations — the hot path for
+    caching after contact-sheet extraction.
+    """
+    if _c_split_strip_bgra_to_rgb is not None:
+        return _c_split_strip_bgra_to_rgb(strip_buf, thumb_w, thumb_h, count)
+
+    # Pure-Python fallback: split then convert row-by-row
+    strip_row_bytes = thumb_w * count * 4
+    rgb_frame_bytes = thumb_w * thumb_h * 3
+    rgb_total = rgb_frame_bytes * count
+    rgb = bytearray(rgb_total)
+    mv = memoryview(strip_buf)
+    for y in range(thumb_h):
+        row_start = y * strip_row_bytes
+        for i in range(count):
+            src_off = row_start + i * thumb_w * 4
+            dst_off = i * rgb_frame_bytes + y * thumb_w * 3
+            for x in range(thumb_w):
+                s = src_off + x * 4
+                d = dst_off + x * 3
+                rgb[d] = mv[s + 2]
+                rgb[d + 1] = mv[s + 1]
+                rgb[d + 2] = mv[s]
+    return bytes(rgb)
 
 
 # =====================================================================

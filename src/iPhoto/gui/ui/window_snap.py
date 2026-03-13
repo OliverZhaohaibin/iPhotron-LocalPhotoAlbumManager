@@ -100,25 +100,37 @@ def detect_snap_zone(cursor_global: QPoint, screen: "QScreen | None") -> SnapZon
     near_top = y <= avail.top() + _EDGE_THRESHOLD
     near_bottom = y >= avail.bottom() - _EDGE_THRESHOLD
 
-    # No edge proximity – nothing to snap.
-    if not (near_left or near_right or near_top or near_bottom):
-        return SnapZone.NONE
-
-    corner_snap = _supports_corner_snap()
     in_top_corner = y <= avail.top() + _CORNER_SIZE
     in_bottom_corner = y >= avail.bottom() - _CORNER_SIZE
     in_left_corner = x <= avail.left() + _CORNER_SIZE
     in_right_corner = x >= avail.right() - _CORNER_SIZE
 
+    near_any_edge = near_left or near_right or near_top or near_bottom
+    # On platforms with corner snap, also activate for the wider corner
+    # squares so the user doesn't have to reach the exact 8-px edge strip.
+    near_any_corner = _supports_corner_snap() and (
+        (in_left_corner and in_top_corner)
+        or (in_right_corner and in_top_corner)
+        or (in_left_corner and in_bottom_corner)
+        or (in_right_corner and in_bottom_corner)
+    )
+
+    # No edge / corner proximity – nothing to snap.
+    if not (near_any_edge or near_any_corner):
+        return SnapZone.NONE
+
     # Corner zones (Windows / Linux only) --------------------------------
-    if corner_snap:
-        if near_left and in_top_corner and (near_top or in_left_corner):
+    # Corners are detected when the cursor is within _CORNER_SIZE of
+    # both a horizontal and a vertical edge, forming a square region at
+    # each screen corner.
+    if _supports_corner_snap():
+        if in_left_corner and in_top_corner:
             return SnapZone.TOP_LEFT
-        if near_right and in_top_corner and (near_top or in_right_corner):
+        if in_right_corner and in_top_corner:
             return SnapZone.TOP_RIGHT
-        if near_left and in_bottom_corner and (near_bottom or in_left_corner):
+        if in_left_corner and in_bottom_corner:
             return SnapZone.BOTTOM_LEFT
-        if near_right and in_bottom_corner and (near_bottom or in_right_corner):
+        if in_right_corner and in_bottom_corner:
             return SnapZone.BOTTOM_RIGHT
 
     # Edge zones ----------------------------------------------------------

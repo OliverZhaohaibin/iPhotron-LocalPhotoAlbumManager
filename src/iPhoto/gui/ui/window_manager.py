@@ -482,12 +482,16 @@ class FramelessWindowManager(QObject):
             return
         if self._geometry_fix_in_progress:
             return
+        if self._snap_helper.is_snapped():
+            return
         handle = self._window.windowHandle()
         screen = handle.screen() if handle is not None else None
         self._clamp_window_to_screen(screen)
 
     def _clamp_window_to_screen(self, screen: object) -> None:
         if self._is_fullscreen_or_maximized():
+            return
+        if self._snap_helper.is_snapped():
             return
         available = self._available_rect(screen)
         if available is None:

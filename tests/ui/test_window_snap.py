@@ -9,6 +9,7 @@ from PySide6.QtCore import QPoint, QRect
 from iPhoto.gui.ui.window_snap import (
     EdgeSnapHelper,
     SnapZone,
+    _CORNER_SIZE,
     _EDGE_THRESHOLD,
     detect_snap_zone,
     snap_geometry,
@@ -67,8 +68,14 @@ class TestDetectSnapZone:
     # Corner snapping (Linux platform for tests) --------------------------
 
     @patch("iPhoto.gui.ui.window_snap._platform", return_value="linux")
-    def test_top_left_corner(self, _mock: MagicMock) -> None:
+    def test_top_left_corner_at_edge(self, _mock: MagicMock) -> None:
         pt = QPoint(_EDGE_THRESHOLD, _EDGE_THRESHOLD)
+        assert detect_snap_zone(pt, _SCREEN) is SnapZone.TOP_LEFT
+
+    @patch("iPhoto.gui.ui.window_snap._platform", return_value="linux")
+    def test_top_left_corner_wide_region(self, _mock: MagicMock) -> None:
+        """Corner detection uses the full _CORNER_SIZE square, not just the 8px edge."""
+        pt = QPoint(_CORNER_SIZE - 1, _CORNER_SIZE - 1)
         assert detect_snap_zone(pt, _SCREEN) is SnapZone.TOP_LEFT
 
     @patch("iPhoto.gui.ui.window_snap._platform", return_value="linux")
@@ -84,6 +91,12 @@ class TestDetectSnapZone:
     @patch("iPhoto.gui.ui.window_snap._platform", return_value="linux")
     def test_bottom_right_corner(self, _mock: MagicMock) -> None:
         pt = QPoint(1920 - _EDGE_THRESHOLD, 1080 - _EDGE_THRESHOLD)
+        assert detect_snap_zone(pt, _SCREEN) is SnapZone.BOTTOM_RIGHT
+
+    @patch("iPhoto.gui.ui.window_snap._platform", return_value="linux")
+    def test_bottom_right_corner_wide_region(self, _mock: MagicMock) -> None:
+        """Corner detection uses the full _CORNER_SIZE square at bottom-right."""
+        pt = QPoint(1920 - _CORNER_SIZE + 1, 1080 - _CORNER_SIZE + 1)
         assert detect_snap_zone(pt, _SCREEN) is SnapZone.BOTTOM_RIGHT
 
     # macOS disables corner snapping --------------------------------------

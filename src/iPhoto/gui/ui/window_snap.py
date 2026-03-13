@@ -259,7 +259,7 @@ class EdgeSnapHelper:
         self._snap_helper.update(cursor_global, screen)
 
         # in _handle_title_bar_drag  (MouseButtonRelease):
-        rect = self._snap_helper.commit()
+        rect = self._snap_helper.commit_with_screen(screen)
         if not rect.isEmpty():
             self._window.setGeometry(rect)
 
@@ -306,28 +306,13 @@ class EdgeSnapHelper:
             rect = snap_geometry(zone, screen)
             self._ensure_overlay().show_zone(rect)
 
-    def commit(self) -> QRect:
-        """Call on mouse release.  Returns the snap geometry or empty rect."""
-        if self._overlay is not None:
-            self._overlay.dismiss()
-        zone = self._current_zone
-        self._current_zone = SnapZone.NONE
-
-        if zone is SnapZone.NONE:
-            if self._is_snapped:
-                # The user dragged away from a snapped position – not
-                # near any edge.  The caller already moved the window via
-                # normal drag, so we just clear the snap state.
-                self._is_snapped = False
-                self._pre_snap_geometry = None
-            return QRect()
-
-        # We need the screen to compute geometry – but we've already
-        # computed it via `update`, so derive it from the overlay.
-        return QRect()
-
     def commit_with_screen(self, screen: "QScreen | None") -> QRect:
-        """Call on mouse release with the current screen reference."""
+        """Finalise the drag – return snap geometry or an empty ``QRect``.
+
+        Call this on ``MouseButtonRelease``.  If the cursor was in a snap
+        zone the corresponding tiled geometry is returned so the caller
+        can apply it via ``QWidget.setGeometry``.
+        """
         if self._overlay is not None:
             self._overlay.dismiss()
         zone = self._current_zone

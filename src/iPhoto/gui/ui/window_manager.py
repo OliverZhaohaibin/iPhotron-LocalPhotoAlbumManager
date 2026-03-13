@@ -451,6 +451,9 @@ class FramelessWindowManager(QObject):
         if self._is_fullscreen_or_maximized():
             self._last_screen_dpr = self._screen_dpr(new_screen)
             return
+        if self._snap_helper.is_snapped():
+            self._last_screen_dpr = self._screen_dpr(new_screen)
+            return
 
         available = self._available_rect(new_screen)
         if available is None:
@@ -584,13 +587,24 @@ class FramelessWindowManager(QObject):
 
         return False
 
-    @staticmethod
-    def _screen_at(global_pos: QPoint):
-        """Return the ``QScreen`` at *global_pos*, or ``None``."""
+    def _screen_at(self, global_pos: QPoint):
+        """Return the ``QScreen`` at *global_pos*, or ``None``.
+
+        On some Linux window managers the cursor can reach the exclusive
+        boundary of the screen rect (``x == screen.x() + screen.width()``).
+        ``QApplication.screenAt`` returns ``None`` for that position because
+        it lies outside the ``QRect``.  We fall back to the window's own
+        screen so that edge-snap detection still works at the boundary.
+        """
         app = QApplication.instance()
         if app is None:
             return None
-        return app.screenAt(global_pos)
+        screen = app.screenAt(global_pos)
+        if screen is None:
+            handle = self._window.windowHandle()
+            if handle is not None:
+                screen = handle.screen()
+        return screen
 
     def _update_fullscreen_button_icon(self) -> None:
         if self._immersive_active:

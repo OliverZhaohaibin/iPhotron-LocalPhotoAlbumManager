@@ -61,6 +61,22 @@ class TestDetectSnapZone:
         pt = QPoint(1920 - _EDGE_THRESHOLD, 540)
         assert detect_snap_zone(pt, _SCREEN) is SnapZone.RIGHT
 
+    def test_right_edge_at_exclusive_boundary(self) -> None:
+        """Cursor at x == screen.width() (exclusive boundary) still triggers RIGHT.
+
+        On some Linux window managers the cursor can reach the exclusive
+        boundary of the screen rect.  When a valid screen is provided
+        via the fallback the detection must still work.
+        """
+        pt = QPoint(1920, 540)
+        assert detect_snap_zone(pt, _SCREEN) is SnapZone.RIGHT
+
+    def test_bottom_edge_at_exclusive_boundary(self) -> None:
+        """Cursor at y == screen.height() still triggers NONE (no bottom zone)."""
+        pt = QPoint(960, 1080)
+        # No dedicated bottom-edge snap zone exists, so NONE is expected.
+        assert detect_snap_zone(pt, _SCREEN) is SnapZone.NONE
+
     def test_top_edge(self) -> None:
         pt = QPoint(960, _EDGE_THRESHOLD)
         assert detect_snap_zone(pt, _SCREEN) is SnapZone.TOP
@@ -246,3 +262,32 @@ class TestEdgeSnapHelper:
         rect = helper.commit_with_screen(_SCREEN)
         assert rect.isEmpty()
         assert not helper.is_snapped()
+
+    def test_snap_right_commit(self) -> None:
+        """Right-edge snap produces the expected right-half geometry."""
+        helper = _make_helper()
+        helper.begin_drag(QRect(100, 100, 800, 600))
+        helper.update(QPoint(1920 - _EDGE_THRESHOLD, 540), _SCREEN)
+        assert helper.current_zone is SnapZone.RIGHT
+
+        rect = helper.commit_with_screen(_SCREEN)
+        assert rect == QRect(960, 0, 960, 1080)
+        assert helper.is_snapped()
+
+    def test_snap_right_at_exclusive_boundary(self) -> None:
+        """Cursor at x == screen.width() still snaps to the right half.
+
+        This reproduces the Linux issue where the cursor reaches the
+        exclusive boundary of the screen rect (x == 1920 for a 1920-wide
+        screen).  When the caller supplies the fallback screen the snap
+        must still succeed.
+        """
+        helper = _make_helper()
+        helper.begin_drag(QRect(100, 100, 800, 600))
+        # Simulate cursor at x=1920, one pixel past QRect.right()
+        helper.update(QPoint(1920, 540), _SCREEN)
+        assert helper.current_zone is SnapZone.RIGHT
+
+        rect = helper.commit_with_screen(_SCREEN)
+        assert rect == QRect(960, 0, 960, 1080)
+        assert helper.is_snapped()

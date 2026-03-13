@@ -25,6 +25,9 @@ THUMB_LOGICAL_HEIGHT = BAR_HEIGHT - 2 * BORDER_THICKNESS
 ARROW_THICKNESS = 3
 THEME_COLOR = "#3a3a3a"
 HOVER_COLOR = "#505050"
+TRIM_HIGHLIGHT_COLOR = "#FFD60A"
+MIN_TRIM_GAP = 0.01          # minimum ratio gap between in/out handles
+OUT_POINT_OFFSET_MS = 50     # ms before out-point to pause at
 
 # --- 3. Parallelism tuning ---
 PYAV_MAX_WORKERS = 4
@@ -60,7 +63,7 @@ QPushButton#PlayButton:hover {{ background-color: {HOVER_COLOR}; }}
 
 /* === Thumbnail strip middle container === */
 QWidget#StripContainer {{
-    background-color: {THEME_COLOR};
+    background-color: transparent;
 }}
 
 QScrollArea {{

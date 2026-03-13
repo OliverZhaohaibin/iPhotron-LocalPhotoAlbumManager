@@ -27,6 +27,7 @@ from .icon import load_icon
 from .styles import modern_scrollbar_style
 from .widgets.custom_tooltip import FloatingToolTip, ToolTipEventFilter
 from .window_shell import RoundedWindowShell
+from .window_snap import EdgeSnapHelper
 
 if TYPE_CHECKING:  # pragma: no cover - used only for type checking
     from PySide6.QtGui import QResizeEvent
@@ -76,6 +77,7 @@ class FramelessWindowManager(QObject):
         self._previous_window_state = self._window.windowState()
         self._drag_active = False
         self._drag_offset = QPoint()
+        self._snap_helper = EdgeSnapHelper()
         self._geometry_fix_in_progress = False
         self._tracked_window_handle: QObject | None = None
         self._last_screen_dpr = 1.0
@@ -116,6 +118,7 @@ class FramelessWindowManager(QObject):
                     app.setProperty("floatingToolTipFilter", None)
         self._tooltip_filter = None
         self._window_tooltip.hide_tooltip()
+        self._snap_helper.cleanup()
 
     # ------------------------------------------------------------------
     # Menu helpers
@@ -531,21 +534,59 @@ class FramelessWindowManager(QObject):
             mouse_event = cast(QMouseEvent, event)
             if mouse_event.button() == Qt.MouseButton.LeftButton:
                 self._drag_active = True
+                cursor_global = mouse_event.globalPosition().toPoint()
                 self._drag_offset = (
-                    mouse_event.globalPosition().toPoint()
-                    - self._window.frameGeometry().topLeft()
+                    cursor_global - self._window.frameGeometry().topLeft()
                 )
+
+                # When un-snapping, restore the pre-snap size and
+                # recompute the drag offset so the cursor sits at a
+                # proportional position within the restored window.
+                if self._snap_helper.is_snapped():
+                    pre = self._snap_helper.pre_snap_geometry()
+                    if pre is not None:
+                        cur_w = self._window.width()
+                        ratio = (
+                            self._drag_offset.x() / cur_w if cur_w else 0.5
+                        )
+                        new_x = int(pre.width() * ratio)
+                        new_y = self._drag_offset.y()
+                        self._drag_offset = QPoint(new_x, new_y)
+                        self._window.resize(pre.size())
+
+                self._snap_helper.begin_drag(self._window.geometry())
                 return True
+
         if event.type() == QEvent.Type.MouseMove and self._drag_active:
             mouse_event = cast(QMouseEvent, event)
             if mouse_event.buttons() & Qt.MouseButton.LeftButton:
-                new_pos = mouse_event.globalPosition().toPoint() - self._drag_offset
+                cursor_global = mouse_event.globalPosition().toPoint()
+                new_pos = cursor_global - self._drag_offset
                 self._window.move(new_pos)
+
+                screen = self._screen_at(cursor_global)
+                self._snap_helper.update(cursor_global, screen)
             return True
+
         if event.type() == QEvent.Type.MouseButtonRelease and self._drag_active:
             self._drag_active = False
+            mouse_event = cast(QMouseEvent, event)
+            cursor_global = mouse_event.globalPosition().toPoint()
+            screen = self._screen_at(cursor_global)
+            snap_rect = self._snap_helper.commit_with_screen(screen)
+            if not snap_rect.isEmpty():
+                self._window.setGeometry(snap_rect)
             return True
+
         return False
+
+    @staticmethod
+    def _screen_at(global_pos: QPoint):
+        """Return the ``QScreen`` at *global_pos*, or ``None``."""
+        app = QApplication.instance()
+        if app is None:
+            return None
+        return app.screenAt(global_pos)
 
     def _update_fullscreen_button_icon(self) -> None:
         if self._immersive_active:

@@ -284,7 +284,7 @@ class TestEdgeSnapHelper:
         """
         helper = _make_helper()
         helper.begin_drag(QRect(100, 100, 800, 600))
-        # Simulate cursor at x=1920, one pixel past QRect.right()
+        # Simulate cursor at x=1920 (the exclusive boundary of a 1920-wide screen)
         helper.update(QPoint(1920, 540), _SCREEN)
         assert helper.current_zone is SnapZone.RIGHT
 

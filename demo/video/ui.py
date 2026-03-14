@@ -25,7 +25,13 @@ from worker import ThumbnailWorker
 
 
 class HandleButton(QPushButton):
-    """Custom handle button: draws bold white arrows and supports dragging."""
+    """Custom handle button: draws bold white arrows and supports dragging.
+
+    Background painting with per-corner radii is done manually via
+    QPainterPath so that rounded corners survive geometry changes during
+    drag operations (Qt stylesheet border-radius can be lost after
+    setGeometry / repaint cycles).
+    """
 
     dragStarted = Signal()
     dragMoved = Signal(int)       # handle left-edge x in parent coordinates
@@ -36,9 +42,40 @@ class HandleButton(QPushButton):
         self.arrow_type = arrow_type
         self._dragging = False
         self._grab_offset_x = 0
+        self._bg_color = QColor(THEME_COLOR)
+        self._corner_tl = 0.0
+        self._corner_bl = 0.0
+        self._corner_tr = 0.0
+        self._corner_br = 0.0
+        self._hovered = False
+        self._allow_hover = True
         self.setFixedWidth(HANDLE_WIDTH)
         self.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)
         self.setCursor(Qt.PointingHandCursor)
+        self.setAttribute(Qt.WA_Hover, True)
+
+    def set_handle_style(self, bg_color, tl=0.0, bl=0.0, tr=0.0, br=0.0,
+                         allow_hover=True):
+        """Set background colour and per-corner radii, then repaint."""
+        self._bg_color = QColor(bg_color)
+        self._corner_tl = float(tl)
+        self._corner_bl = float(bl)
+        self._corner_tr = float(tr)
+        self._corner_br = float(br)
+        self._allow_hover = allow_hover
+        self.update()
+
+    # --- hover tracking -----------------------------------------------------
+
+    def enterEvent(self, event):
+        self._hovered = True
+        self.update()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        self._hovered = False
+        self.update()
+        super().leaveEvent(event)
 
     # --- drag interaction ---
     def mousePressEvent(self, event):
@@ -60,18 +97,53 @@ class HandleButton(QPushButton):
             self.dragFinished.emit()
 
     def paintEvent(self, event):
-        super().paintEvent(event)
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
 
+        w = self.width()
+        h = self.height()
+
+        # --- background with per-corner radii ---
+        bg = (QColor(HOVER_COLOR)
+              if self._hovered and self._allow_hover
+              else self._bg_color)
+        tl = self._corner_tl
+        tr = self._corner_tr
+        bl = self._corner_bl
+        br = self._corner_br
+
+        path = QPainterPath()
+        path.moveTo(tl, 0)
+        path.lineTo(w - tr, 0)
+        if tr > 0:
+            path.arcTo(w - 2 * tr, 0, 2 * tr, 2 * tr, 90, -90)
+        else:
+            path.lineTo(w, 0)
+        path.lineTo(w, h - br)
+        if br > 0:
+            path.arcTo(w - 2 * br, h - 2 * br, 2 * br, 2 * br, 0, -90)
+        else:
+            path.lineTo(w, h)
+        path.lineTo(bl, h)
+        if bl > 0:
+            path.arcTo(0, h - 2 * bl, 2 * bl, 2 * bl, 270, -90)
+        else:
+            path.lineTo(0, h)
+        path.lineTo(0, tl)
+        if tl > 0:
+            path.arcTo(0, 0, 2 * tl, 2 * tl, 180, -90)
+        else:
+            path.lineTo(0, 0)
+        path.closeSubpath()
+        painter.fillPath(path, bg)
+
+        # --- arrow glyph ---
         pen = QPen(Qt.white)
         pen.setWidth(ARROW_THICKNESS)
         pen.setCapStyle(Qt.RoundCap)
         pen.setJoinStyle(Qt.RoundJoin)
         painter.setPen(pen)
 
-        w = self.width()
-        h = self.height()
         arrow_w = 8
         arrow_h = 14
         cx = w / 2
@@ -88,6 +160,7 @@ class HandleButton(QPushButton):
 
         painter.drawLine(int(p1[0]), int(p1[1]), int(p2[0]), int(p2[1]))
         painter.drawLine(int(p2[0]), int(p2[1]), int(p3[0]), int(p3[1]))
+        painter.end()
 
 
 class ThumbnailBar(QWidget):
@@ -129,11 +202,11 @@ class ThumbnailBar(QWidget):
         # Handles are absolutely-positioned children (overlaid on canvas)
         self.btn_left = HandleButton(arrow_type="left", parent=self)
         self.btn_left.setObjectName("HandleLeft")
-        self.btn_left.setStyleSheet(self._left_handle_style())
+        self._apply_left_style()
 
         self.btn_right = HandleButton(arrow_type="right", parent=self)
         self.btn_right.setObjectName("HandleRight")
-        self.btn_right.setStyleSheet(self._right_handle_style())
+        self._apply_right_style()
 
         self.btn_left.raise_()
         self.btn_right.raise_()
@@ -224,9 +297,7 @@ class ThumbnailBar(QWidget):
             self._update_handle_positions()
             self.inPointChanged.emit(self._in_ratio)
             # Refresh left handle corners (rounded ↔ straight)
-            self.btn_left.setStyleSheet(
-                self._left_handle_style(highlight=True),
-            )
+            self._apply_left_style(highlight=True)
 
     def _on_right_drag_moved(self, handle_left_x):
         """handle_left_x = intended left edge of the right handle."""
@@ -246,9 +317,7 @@ class ThumbnailBar(QWidget):
             self.outPointChanged.emit(self._out_ratio)
             # Refresh right handle style to prevent rounded corners from
             # being lost during drag (mirrors _on_left_drag_moved pattern)
-            self.btn_right.setStyleSheet(
-                self._right_handle_style(highlight=True),
-            )
+            self._apply_right_style(highlight=True)
 
     def _on_drag_end(self):
         self._handle_dragging = False
@@ -256,56 +325,32 @@ class ThumbnailBar(QWidget):
 
     # --- handle style helpers -----------------------------------------------
 
-    def _left_handle_style(self, highlight=False):
-        """Build stylesheet for left handle — corners depend on in-point."""
+    def _apply_left_style(self, highlight=False):
+        """Apply style to left handle — corners depend on in-point."""
         bg = TRIM_HIGHLIGHT_COLOR if highlight else THEME_COLOR
-        tl = f"{CORNER_RADIUS}px" if self._in_ratio > 0 else "0px"
-        bl = tl
-        style = f"""
-            QPushButton {{
-                background-color: {bg};
-                border: none;
-                border-top-left-radius: {tl};
-                border-bottom-left-radius: {bl};
-                border-top-right-radius: 0px;
-                border-bottom-right-radius: 0px;
-            }}
-        """
-        if not highlight:
-            style += f"""
-                QPushButton:hover {{ background-color: {HOVER_COLOR}; }}
-            """
-        return style
+        r = float(CORNER_RADIUS) if self._in_ratio > 0 else 0.0
+        self.btn_left.set_handle_style(
+            bg, tl=r, bl=r, allow_hover=not highlight,
+        )
 
-    def _right_handle_style(self, highlight=False):
-        """Build stylesheet for right handle — right corners always rounded."""
+    def _apply_right_style(self, highlight=False):
+        """Apply style to right handle — right corners always rounded."""
         bg = TRIM_HIGHLIGHT_COLOR if highlight else THEME_COLOR
-        style = f"""
-            QPushButton {{
-                background-color: {bg};
-                border: none;
-                border-top-left-radius: 0px;
-                border-bottom-left-radius: 0px;
-                border-top-right-radius: {CORNER_RADIUS}px;
-                border-bottom-right-radius: {CORNER_RADIUS}px;
-            }}
-        """
-        if not highlight:
-            style += f"""
-                QPushButton:hover {{ background-color: {HOVER_COLOR}; }}
-            """
-        return style
+        r = float(CORNER_RADIUS)
+        self.btn_right.set_handle_style(
+            bg, tr=r, br=r, allow_hover=not highlight,
+        )
 
     def _apply_drag_colors(self):
         """Turn handles + canvas border to TRIM_HIGHLIGHT_COLOR."""
-        self.btn_left.setStyleSheet(self._left_handle_style(highlight=True))
-        self.btn_right.setStyleSheet(self._right_handle_style(highlight=True))
+        self._apply_left_style(highlight=True)
+        self._apply_right_style(highlight=True)
         self._canvas.set_border_color(QColor(TRIM_HIGHLIGHT_COLOR))
 
     def _restore_default_colors(self):
         """Revert handles + canvas border to the default theme."""
-        self.btn_left.setStyleSheet(self._left_handle_style())
-        self.btn_right.setStyleSheet(self._right_handle_style())
+        self._apply_left_style()
+        self._apply_right_style()
         self._canvas.set_border_color(QColor(THEME_COLOR))
 
 

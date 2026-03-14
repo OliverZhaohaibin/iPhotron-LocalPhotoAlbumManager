@@ -17,8 +17,8 @@ from PySide6.QtMultimediaWidgets import QVideoWidget
 
 from config import (
     BAR_HEIGHT, THUMB_WIDTH, CORNER_RADIUS, BORDER_THICKNESS,
-    THUMB_LOGICAL_HEIGHT, ARROW_THICKNESS, THEME_COLOR, HOVER_COLOR,
-    TRIM_HIGHLIGHT_COLOR, MIN_TRIM_GAP, OUT_POINT_OFFSET_MS,
+    HANDLE_WIDTH, THUMB_LOGICAL_HEIGHT, ARROW_THICKNESS, THEME_COLOR,
+    HOVER_COLOR, TRIM_HIGHLIGHT_COLOR, MIN_TRIM_GAP, OUT_POINT_OFFSET_MS,
     ICON_PLAY, STYLESHEET,
 )
 from worker import ThumbnailWorker
@@ -36,7 +36,7 @@ class HandleButton(QPushButton):
         self.arrow_type = arrow_type
         self._dragging = False
         self._grab_offset_x = 0
-        self.setFixedWidth(24)
+        self.setFixedWidth(HANDLE_WIDTH)
         self.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)
         self.setCursor(Qt.PointingHandCursor)
 
@@ -244,6 +244,10 @@ class ThumbnailBar(QWidget):
             self._canvas.set_trim(self._in_ratio, self._out_ratio)
             self._update_handle_positions()
             self.outPointChanged.emit(self._out_ratio)
+            # Refresh right handle corners (keep rounded effect)
+            self.btn_right.setStyleSheet(
+                self._right_handle_style(highlight=True),
+            )
 
     def _on_drag_end(self):
         self._handle_dragging = False
@@ -369,7 +373,17 @@ class _ThumbnailCanvas(QWidget):
         w = self.width()
         if w <= 0:
             return
-        ratio = max(0.0, min(1.0, x / w))
+        hw = HANDLE_WIDTH
+        left_inner = self._in_ratio * w + hw
+        right_inner = self._out_ratio * w - hw
+        span = right_inner - left_inner
+        ratio_span = self._out_ratio - self._in_ratio
+        if span > 0 and ratio_span > 0:
+            t = (x - left_inner) / span
+            t = max(0.0, min(1.0, t))
+            ratio = self._in_ratio + t * ratio_span
+        else:
+            ratio = self._in_ratio
         self._playhead_ratio = ratio
         self.update()
         self.playheadSeeked.emit(ratio)
@@ -396,8 +410,23 @@ class _ThumbnailCanvas(QWidget):
         clip.closeSubpath()                                          # left edge
         painter.setClipPath(clip)
 
-        # 1. Border / background colour
-        painter.fillRect(self.rect(), self._border_color)
+        # 1. Default background
+        painter.fillRect(self.rect(), QColor(THEME_COLOR))
+
+        # 1b. Highlight top/bottom border strips between handles only
+        hw = HANDLE_WIDTH
+        left_inner = int(self._in_ratio * w) + hw
+        right_inner = int(self._out_ratio * w) - hw
+        border_w = max(0, right_inner - left_inner)
+        if border_w > 0:
+            painter.fillRect(
+                left_inner, 0, border_w, BORDER_THICKNESS,
+                self._border_color,
+            )
+            painter.fillRect(
+                left_inner, h - BORDER_THICKNESS, border_w, BORDER_THICKNESS,
+                self._border_color,
+            )
 
         # 2. Thumbnails
         x = 0
@@ -417,9 +446,19 @@ class _ThumbnailCanvas(QWidget):
             out_x = int(self._out_ratio * w)
             painter.fillRect(out_x, 0, w - out_x, h, dim)
 
-        # 4. Playhead cursor — thin white vertical line (cf. warmth-ui.py)
+        # 4. Playhead cursor — thin white vertical line (inner side of handles)
         if w > 0:
-            playhead_x = int(self._playhead_ratio * w)
+            hw = HANDLE_WIDTH
+            left_inner = int(self._in_ratio * w) + hw
+            right_inner = int(self._out_ratio * w) - hw
+            span = right_inner - left_inner
+            ratio_span = self._out_ratio - self._in_ratio
+            if span > 0 and ratio_span > 0:
+                t = (self._playhead_ratio - self._in_ratio) / ratio_span
+                t = max(0.0, min(1.0, t))
+                playhead_x = int(left_inner + t * span)
+            else:
+                playhead_x = left_inner
             pen = QPen(QColor(255, 255, 255), 2)
             painter.setPen(pen)
             painter.drawLine(playhead_x, 0, playhead_x, h)

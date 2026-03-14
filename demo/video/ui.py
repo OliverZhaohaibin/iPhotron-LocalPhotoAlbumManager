@@ -460,8 +460,8 @@ class _ThumbnailCanvas(QWidget):
         clip.closeSubpath()                                          # left edge
         painter.setClipPath(clip)
 
-        # 1. Default background
-        painter.fillRect(self.rect(), QColor(THEME_COLOR))
+        # 1. Default background (use configured border/background color)
+        painter.fillRect(self.rect(), self._border_color)
 
         # 1b. Highlight top/bottom border strips between handles only
         left_inner, right_inner = self._inner_bounds(w)

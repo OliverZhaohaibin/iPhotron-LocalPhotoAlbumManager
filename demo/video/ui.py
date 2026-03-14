@@ -18,8 +18,8 @@ from PySide6.QtMultimediaWidgets import QVideoWidget
 from config import (
     BAR_HEIGHT, THUMB_WIDTH, CORNER_RADIUS, BORDER_THICKNESS,
     HANDLE_WIDTH, THUMB_LOGICAL_HEIGHT, ARROW_THICKNESS, THEME_COLOR,
-    HOVER_COLOR, TRIM_HIGHLIGHT_COLOR, MIN_TRIM_GAP, OUT_POINT_OFFSET_MS,
-    ICON_PLAY, STYLESHEET,
+    HOVER_COLOR, TRIM_HIGHLIGHT_COLOR, BOTTOM_BG_COLOR, MIN_TRIM_GAP,
+    OUT_POINT_OFFSET_MS, ICON_PLAY, STYLESHEET,
 )
 from worker import ThumbnailWorker
 
@@ -111,6 +111,12 @@ class HandleButton(QPushButton):
         tr = self._corner_tr
         bl = self._corner_bl
         br = self._corner_br
+
+        # Fill the entire rect with the outer background first so that
+        # rounded-corner areas always contrast with the handle colour,
+        # not just during hover/press states.
+        if tl > 0 or tr > 0 or bl > 0 or br > 0:
+            painter.fillRect(self.rect(), QColor(BOTTOM_BG_COLOR))
 
         path = QPainterPath()
         path.moveTo(tl, 0)

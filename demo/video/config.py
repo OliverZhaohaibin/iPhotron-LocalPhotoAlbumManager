@@ -27,6 +27,7 @@ ARROW_THICKNESS = 3
 THEME_COLOR = "#3a3a3a"
 HOVER_COLOR = "#505050"
 TRIM_HIGHLIGHT_COLOR = "#FFD60A"
+BOTTOM_BG_COLOR = "#252525"
 MIN_TRIM_GAP = 0.01          # minimum ratio gap between in/out handles
 OUT_POINT_OFFSET_MS = 50     # ms before out-point to pause at
 
@@ -46,7 +47,7 @@ QMainWindow {{
 
 /* Bottom area background */
 QFrame#BottomControlFrame {{
-    background-color: #252525;
+    background-color: {BOTTOM_BG_COLOR};
     border-top: 1px solid #333;
 }}
 

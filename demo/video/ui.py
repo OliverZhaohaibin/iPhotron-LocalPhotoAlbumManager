@@ -244,7 +244,8 @@ class ThumbnailBar(QWidget):
             self._canvas.set_trim(self._in_ratio, self._out_ratio)
             self._update_handle_positions()
             self.outPointChanged.emit(self._out_ratio)
-            # Refresh right handle corners (keep rounded effect)
+            # Refresh right handle style to prevent rounded corners from
+            # being lost during drag (mirrors _on_left_drag_moved pattern)
             self.btn_right.setStyleSheet(
                 self._right_handle_style(highlight=True),
             )
@@ -350,6 +351,12 @@ class _ThumbnailCanvas(QWidget):
         self._border_color = QColor(color)
         self.update()
 
+    def _inner_bounds(self, w):
+        """Return (left_inner, right_inner) pixel edges inside the handles."""
+        left_inner = self._in_ratio * w + HANDLE_WIDTH
+        right_inner = self._out_ratio * w - HANDLE_WIDTH
+        return left_inner, right_inner
+
     # --- playhead drag interaction ---
 
     def mousePressEvent(self, event):
@@ -373,9 +380,7 @@ class _ThumbnailCanvas(QWidget):
         w = self.width()
         if w <= 0:
             return
-        hw = HANDLE_WIDTH
-        left_inner = self._in_ratio * w + hw
-        right_inner = self._out_ratio * w - hw
+        left_inner, right_inner = self._inner_bounds(w)
         span = right_inner - left_inner
         ratio_span = self._out_ratio - self._in_ratio
         if span > 0 and ratio_span > 0:
@@ -414,17 +419,17 @@ class _ThumbnailCanvas(QWidget):
         painter.fillRect(self.rect(), QColor(THEME_COLOR))
 
         # 1b. Highlight top/bottom border strips between handles only
-        hw = HANDLE_WIDTH
-        left_inner = int(self._in_ratio * w) + hw
-        right_inner = int(self._out_ratio * w) - hw
-        border_w = max(0, right_inner - left_inner)
+        left_inner, right_inner = self._inner_bounds(w)
+        left_inner_i = int(left_inner)
+        right_inner_i = int(right_inner)
+        border_w = max(0, right_inner_i - left_inner_i)
         if border_w > 0:
             painter.fillRect(
-                left_inner, 0, border_w, BORDER_THICKNESS,
+                left_inner_i, 0, border_w, BORDER_THICKNESS,
                 self._border_color,
             )
             painter.fillRect(
-                left_inner, h - BORDER_THICKNESS, border_w, BORDER_THICKNESS,
+                left_inner_i, h - BORDER_THICKNESS, border_w, BORDER_THICKNESS,
                 self._border_color,
             )
 
@@ -448,9 +453,7 @@ class _ThumbnailCanvas(QWidget):
 
         # 4. Playhead cursor — thin white vertical line (inner side of handles)
         if w > 0:
-            hw = HANDLE_WIDTH
-            left_inner = int(self._in_ratio * w) + hw
-            right_inner = int(self._out_ratio * w) - hw
+            left_inner, right_inner = self._inner_bounds(w)
             span = right_inner - left_inner
             ratio_span = self._out_ratio - self._in_ratio
             if span > 0 and ratio_span > 0:
@@ -458,7 +461,7 @@ class _ThumbnailCanvas(QWidget):
                 t = max(0.0, min(1.0, t))
                 playhead_x = int(left_inner + t * span)
             else:
-                playhead_x = left_inner
+                playhead_x = int(left_inner)
             pen = QPen(QColor(255, 255, 255), 2)
             painter.setPen(pen)
             painter.drawLine(playhead_x, 0, playhead_x, h)

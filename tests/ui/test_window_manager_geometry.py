@@ -43,7 +43,13 @@ def test_apply_screen_change_fix_rescales_and_repositions() -> None:
     window = MagicMock()
     window.size.return_value = QSize(2200, 1600)
     window.frameGeometry.return_value = frame_rect
+    window.isFullScreen.return_value = False
+    window.isMaximized.return_value = False
     manager._window = window
+
+    snap_helper = MagicMock()
+    snap_helper.is_snapped.return_value = False
+    manager._snap_helper = snap_helper
 
     target_screen = _FakeScreen(QRect(0, 0, 2560, 1440), dpr=2.0)
     manager._apply_screen_change_fix(1.0, target_screen)

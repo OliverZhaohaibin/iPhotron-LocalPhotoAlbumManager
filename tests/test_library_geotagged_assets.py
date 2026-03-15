@@ -1,6 +1,7 @@
 import json
 import os
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -17,7 +18,6 @@ pytest.importorskip(
 
 from PySide6.QtWidgets import QApplication
 
-from iPhoto.config import WORK_DIR_NAME
 from iPhoto.library.manager import LibraryManager
 
 
@@ -54,16 +54,18 @@ def test_geotagged_assets_use_classifier(tmp_path: Path, qapp: QApplication) -> 
     asset_path.write_bytes(b"fake-image")
     _write_album_manifest(album)
 
-    work_dir = album / WORK_DIR_NAME
-    work_dir.mkdir(parents=True, exist_ok=True)
-    index_path = work_dir / "index.jsonl"
     row = {
-        "rel": "photo.jpg",
+        "rel": "Album/photo.jpg",
         "gps": {"lat": 10.0, "lon": 20.0},
         "mime": "image/jpeg",
         "id": "asset-1",
+        "parent_album_path": "Album",
     }
-    index_path.write_text(json.dumps(row) + "\n", encoding="utf-8")
+
+    # Insert data through the repository API (the real data path)
+    from iPhoto.cache.index_store import get_global_repository
+    repo = get_global_repository(root)
+    repo.write_rows([row])
 
     manager = LibraryManager()
     manager.bind_path(root)

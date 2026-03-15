@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Iterable
 
 import pytest
 
@@ -43,7 +42,6 @@ def qapp() -> QApplication:
 def _create_service(
     *,
     task_manager,
-    asset_list_model,
     current_album,
     library_manager=None,
 ) -> AssetMoveService:
@@ -51,7 +49,6 @@ def _create_service(
 
     return AssetMoveService(
         task_manager=task_manager,
-        asset_list_model_provider=lambda: asset_list_model,
         current_album_getter=current_album,
         library_manager_getter=(lambda: library_manager),
     )
@@ -65,11 +62,9 @@ def test_move_assets_requires_active_album(
     """No album should result in an error and a rollback of optimistic moves."""
 
     task_manager = mocker.MagicMock()
-    asset_list_model = mocker.MagicMock()
 
     service = _create_service(
         task_manager=task_manager,
-        asset_list_model=asset_list_model,
         current_album=lambda: None,
     )
 
@@ -78,7 +73,6 @@ def test_move_assets_requires_active_album(
 
     service.move_assets([tmp_path / "file.jpg"], tmp_path / "dest")
 
-    asset_list_model.rollback_pending_moves.assert_called_once()
     assert errors == ["No album is currently open."]
     task_manager.submit_task.assert_not_called()
 
@@ -99,40 +93,11 @@ def test_move_assets_submits_worker_and_emits_completion(
 
     task_manager = mocker.MagicMock()
 
-    class _ListModelSpy:
-        """Spy model that records method calls for assertions."""
-
-        def __init__(self) -> None:
-            self.pending_rolled_back = 0
-            self.finalised: list[list[tuple[Path, Path]]] = []
-            self.move_updates: list[tuple[list[str], Path, bool]] = []
-
-        def rollback_pending_moves(self) -> None:
-            self.pending_rolled_back += 1
-
-        def finalise_move_results(self, pairs: Iterable[tuple[Path, Path]]) -> None:
-            self.finalised.append(list(pairs))
-
-        def has_pending_move_placeholders(self) -> bool:
-            return False
-
-        def update_rows_for_move(
-            self,
-            rels: Iterable[str],
-            destination_root: Path,
-            *,
-            is_source_main_view: bool = False,
-        ) -> None:
-            self.move_updates.append((list(rels), destination_root, is_source_main_view))
-
-    list_model = _ListModelSpy()
-
     album = mocker.MagicMock()
     album.root = source_root
 
     service = _create_service(
         task_manager=task_manager,
-        asset_list_model=list_model,
         current_album=lambda: album,
     )
 
@@ -168,16 +133,11 @@ def test_move_assets_submits_worker_and_emits_completion(
     kwargs["on_finished"](source_root, destination_root, moved_pairs, True, True)
 
     assert results == [(source_root, destination_root, True, "Moved 1 item.")]
-    assert list_model.finalised == [[(asset, destination_root / asset.name)]]
-    assert list_model.pending_rolled_back == 0
-    assert list_model.move_updates == [
-        ([asset.relative_to(source_root).as_posix()], destination_root, False)
-    ]
     assert detailed_results == [
         (
             source_root,
             destination_root,
-            [[asset, destination_root / asset.name]],
+            [(asset, destination_root / asset.name)],
             True,
             True,
             False,
@@ -235,11 +195,9 @@ def test_restore_repopulates_library_index(
     assert restored_asset.exists()
     assert not trashed_asset.exists()
 
+    # MoveWorker stores everything in the global library-root DB.
     library_rows = list(IndexStore(library_root).read_all())
     assert any(row.get("rel") == f"AlbumA/{asset_name}" for row in library_rows)
-
-    album_rows = list(IndexStore(album_root).read_all())
-    assert any(row.get("rel") == asset_name for row in album_rows)
 
 
 def test_delete_records_original_path_for_restore(
@@ -313,10 +271,10 @@ def test_move_from_library_root_updates_source_album_index(
     monkeypatch.setattr(move_worker_module, "process_media_paths", _fake_process_media_paths)
     monkeypatch.setattr(move_worker_module.backend, "pair", lambda *_, **__: None)
 
+    # Pre-populate the global library-root DB (MoveWorker only uses this DB).
     IndexStore(library_root).write_rows(
         [{"rel": f"AlbumA/{asset.name}", "abs": str(asset.resolve())}]
     )
-    IndexStore(album_a).write_rows([{"rel": asset.name, "abs": str(asset.resolve())}])
 
     signals = MoveSignals()
     worker = MoveWorker(
@@ -329,16 +287,11 @@ def test_move_from_library_root_updates_source_album_index(
 
     worker.run()
 
-    album_a_rows = list(IndexStore(album_a).read_all())
-    assert album_a_rows == []
-
+    # The MoveWorker only uses the single global DB at library_root.
     library_rows = list(IndexStore(library_root).read_all())
-    assert len(library_rows) == 1
-    assert library_rows[0]["rel"] == f"AlbumB/{asset.name}"
-
-    album_b_rows = list(IndexStore(album_b).read_all())
-    assert len(album_b_rows) == 1
-    assert album_b_rows[0]["rel"] == asset.name
+    # Source row removed, destination row inserted.
+    assert not any(r.get("rel") == f"AlbumA/{asset.name}" for r in library_rows)
+    assert any(r.get("rel") == f"AlbumB/{asset.name}" for r in library_rows)
 
 
 def test_delete_collision_assigns_unique_trash_paths(

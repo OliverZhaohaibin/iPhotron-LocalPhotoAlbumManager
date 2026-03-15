@@ -1,4 +1,5 @@
 
+import os
 import subprocess
 import pytest
 from unittest.mock import patch
@@ -28,6 +29,7 @@ def mock_windows_environment(monkeypatch):
     if not hasattr(subprocess, "CREATE_NO_WINDOW"):
         monkeypatch.setattr(subprocess, "CREATE_NO_WINDOW", 0x08000000, raising=False)
 
+@pytest.mark.skipif(os.name != "nt", reason="Windows-only test")
 def test_exiftool_windows_startupinfo(mock_windows_environment):
     """Test that exiftool calls subprocess with STARTUPINFO on Windows."""
     with patch("subprocess.run") as mock_run, \
@@ -57,6 +59,7 @@ def test_exiftool_windows_startupinfo(mock_windows_environment):
         assert "creationflags" in kwargs
         assert kwargs["creationflags"] == subprocess.CREATE_NO_WINDOW
 
+@pytest.mark.skipif(os.name != "nt", reason="Windows-only test")
 def test_ffmpeg_windows_startupinfo(mock_windows_environment):
     """Test that ffmpeg calls subprocess with STARTUPINFO on Windows."""
     with patch("subprocess.run") as mock_run:

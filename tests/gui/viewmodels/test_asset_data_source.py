@@ -72,12 +72,13 @@ def test_to_dto_handles_none_width_height():
 
 def test_update_favorite_status():
     repo = Mock()
-    # Mock find_by_query to return a list
-    repo.find_by_query.return_value = [
-        Asset(id="1", album_id="a", path=Path("p.jpg"), media_type=MediaType.IMAGE, size_bytes=0, is_favorite=False)
-    ]
     source = AssetDataSource(repo)
-    source.load(AssetQuery())
+
+    # Directly convert a domain Asset to DTO and pre-populate the data source.
+    asset = Asset(id="1", album_id="a", path=Path("p.jpg"), media_type=MediaType.IMAGE, size_bytes=0, is_favorite=False)
+    dto = source._to_dto(asset)
+    source._cached_dtos = [dto]
+    source._total_count = 1
 
     assert source.asset_at(0).is_favorite is False
 

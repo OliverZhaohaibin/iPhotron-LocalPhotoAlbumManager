@@ -207,8 +207,8 @@ def pytest_collection_modifyitems(config, items):
 def pytest_ignore_collect(collection_path, config):
     """Avoid importing Qt-dependent test modules when QtWidgets is missing."""
     if HAS_QTWIDGETS:
-        return False
+        return None  # defer to --ignore flags and other mechanisms
     path_str = str(collection_path)
     if "/ui/" in path_str or "/gui/" in path_str:
         return True
-    return False
+    return None

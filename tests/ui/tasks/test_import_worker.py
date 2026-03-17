@@ -60,8 +60,8 @@ def test_import_worker_prefers_pair_over_rescan(qapp: QApplication, tmp_path: Pa
         rescan.return_value = None
 
         def copier(src: Path, dst: Path) -> Path:
-            target = dst / name
-            target.write_bytes(read_bytes())
+            target = dst / src.name
+            target.write_bytes(src.read_bytes())
             return target
 
         worker = ImportWorker([source], destination, copier, signals)

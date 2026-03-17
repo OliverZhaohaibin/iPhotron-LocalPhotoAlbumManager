@@ -53,7 +53,9 @@ def test_save_and_get_asset(repo, sample_asset):
     assert retrieved.id == sample_asset.id
     assert retrieved.path == sample_asset.path
     assert retrieved.media_type == MediaType.IMAGE
-    assert retrieved.metadata == sample_asset.metadata
+    # The repository enriches metadata with live_role when persisting.
+    for key, value in sample_asset.metadata.items():
+        assert retrieved.metadata[key] == value
     assert retrieved.parent_album_path == "album_1"
 
 def test_update_asset(repo, sample_asset):

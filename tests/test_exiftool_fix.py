@@ -13,6 +13,10 @@ def test_get_metadata_batch_uses_posix_paths():
     mock_path = MagicMock(spec=Path)
     mock_path.__str__.return_value = "D:\\folder\\file.jpg"
     mock_path.as_posix.return_value = "D:/folder/file.jpg"
+    # The code calls path.absolute().as_posix(), so chain the mock properly
+    mock_absolute = MagicMock()
+    mock_absolute.as_posix.return_value = "D:/folder/file.jpg"
+    mock_path.absolute.return_value = mock_absolute
 
     # We need to ensure that the temp file content is checked before it is deleted.
     # We can do this by inspecting the file inside the mock for subprocess.run

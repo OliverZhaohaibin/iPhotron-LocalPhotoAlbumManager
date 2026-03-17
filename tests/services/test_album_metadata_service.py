@@ -70,7 +70,6 @@ class DummyAlbum:
 
 def _build_service(
     *,
-    asset_model,
     current_album: Callable[[], DummyAlbum | None],
     library_manager_getter: Callable[[], object | None],
     refresh,
@@ -78,7 +77,6 @@ def _build_service(
     """Create a service instance with timer scheduling patched for tests."""
 
     service = AlbumMetadataService(
-        asset_list_model_provider=lambda: asset_model,
         current_album_getter=current_album,
         library_manager_getter=library_manager_getter,
         refresh_view=refresh,
@@ -120,11 +118,9 @@ def test_toggle_featured_updates_current_and_library_album(
 
     manager = mocker.MagicMock()
     manager.root.return_value = library_root
-    asset_model = mocker.MagicMock()
     refresh = mocker.MagicMock()
 
     service = _build_service(
-        asset_model=asset_model,
         current_album=lambda: dummy_album,
         library_manager_getter=lambda: manager,
         refresh=refresh,
@@ -136,7 +132,6 @@ def test_toggle_featured_updates_current_and_library_album(
     assert result is True
     assert dummy_album.manifest["featured"] == ["photo.jpg"]
     assert dummy_album.saved == 1
-    asset_model.update_featured_status.assert_called_once_with("photo.jpg", True)
 
     # The library root receives the fully qualified path for shared favorites.
     assert root_album.manifest["featured"] == ["Trip/photo.jpg"]
@@ -167,12 +162,10 @@ def test_toggle_featured_rolls_back_on_failure(
         lambda _delay, callback: callback(),
     )
 
-    asset_model = mocker.MagicMock()
     refresh = mocker.MagicMock()
     errors: list[str] = []
 
     service = _build_service(
-        asset_model=asset_model,
         current_album=lambda: dummy_album,
         library_manager_getter=lambda: None,
         refresh=refresh,
@@ -184,7 +177,6 @@ def test_toggle_featured_rolls_back_on_failure(
     # The method should report the original state and avoid touching the model.
     assert result is True
     assert dummy_album.manifest["featured"] == ["photo.jpg"]
-    asset_model.update_featured_status.assert_not_called()
     assert errors == ["boom"]
     refresh.assert_not_called()
 
@@ -238,11 +230,9 @@ def test_toggle_featured_from_library_root_updates_sub_album(
 
     manager = mocker.MagicMock()
     manager.root.return_value = library_root
-    asset_model = mocker.MagicMock()
     refresh = mocker.MagicMock()
 
     service = _build_service(
-        asset_model=asset_model,
         current_album=lambda: root_album,
         library_manager_getter=lambda: manager,
         refresh=refresh,
@@ -263,7 +253,6 @@ def test_toggle_featured_from_library_root_updates_sub_album(
     # Repository should be called twice (once for root, once for sub-album)
     assert index_store_mock.set_favorite_status.call_count == 2
     
-    asset_model.update_featured_status.assert_called_once_with("Trip/photo.jpg", True)
     refresh.assert_not_called()
 
 
@@ -313,11 +302,9 @@ def test_toggle_featured_from_library_root_for_root_asset(
 
     manager = mocker.MagicMock()
     manager.root.return_value = library_root
-    asset_model = mocker.MagicMock()
     refresh = mocker.MagicMock()
 
     service = _build_service(
-        asset_model=asset_model,
         current_album=lambda: root_album,
         library_manager_getter=lambda: manager,
         refresh=refresh,
@@ -338,7 +325,6 @@ def test_toggle_featured_from_library_root_for_root_asset(
     # Repository should be called once (for root as primary)
     assert index_store_mock.set_favorite_status.call_count == 1
     
-    asset_model.update_featured_status.assert_called_once_with("photo.jpg", True)
     refresh.assert_not_called()
 
 
@@ -367,11 +353,9 @@ def test_ensure_featured_entries_updates_album(
         lambda _delay, callback: callback(),
     )
 
-    asset_model = mocker.MagicMock()
     refresh = mocker.MagicMock()
 
     service = _build_service(
-        asset_model=asset_model,
         current_album=lambda: current_album,
         library_manager_getter=lambda: None,
         refresh=refresh,
@@ -383,7 +367,6 @@ def test_ensure_featured_entries_updates_album(
     assert sorted(dummy_album.manifest["featured"]) == ["a.jpg", "b.jpg"]
     assert dummy_album.saved == 1
     refresh.assert_not_called()
-    asset_model.update_featured_status.assert_not_called()
 
 
 def test_toggle_featured_identifies_correct_physical_root_nested(
@@ -461,11 +444,9 @@ def test_toggle_featured_identifies_correct_physical_root_nested(
 
     manager = mocker.MagicMock()
     manager.root.return_value = library_root
-    asset_model = mocker.MagicMock()
     refresh = mocker.MagicMock()
 
     service = _build_service(
-        asset_model=asset_model,
         current_album=lambda: root_album,  # We are in Library Root view
         library_manager_getter=lambda: manager,
         refresh=refresh,

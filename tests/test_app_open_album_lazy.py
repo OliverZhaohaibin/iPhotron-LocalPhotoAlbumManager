@@ -96,7 +96,7 @@ def test_open_album_scans_when_empty_autoscan_enabled(monkeypatch, tmp_path):
         captured_rows.append(rows)
 
     monkeypatch.setattr(app, "get_global_repository", lambda root: DummyStore(root))
-    monkeypatch.setattr("iPhoto.io.scanner.scan_album", fake_scan_album)
+    monkeypatch.setattr("iPhoto.io.scanner_adapter.scan_album", fake_scan_album)
     monkeypatch.setattr(app, "_ensure_links", record_ensure_links)
 
     album = app.open_album(album_dir, autoscan=True, hydrate_index=False)

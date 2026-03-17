@@ -175,14 +175,23 @@ def _iter_discovered_chunks_fallback(
 ) -> Iterator[tuple[DiscoveredPath, ...]]:
     supported = frozenset(ext.lower() for ext in supported_extensions)
     skip_names = frozenset(skip_dir_names)
-    discovered: list[DiscoveredPath] = []
 
-    def _walk(current: Path) -> bool:
+    current_chunk: list[DiscoveredPath] = []
+    chunk_bytes = 0
+
+    # Iterative stack-based walk so chunks can be yielded incrementally
+    # without collecting the entire file list into memory first.
+    stack: list[Path] = [root]
+    while stack:
+        if stop_event is not None and stop_event.is_set():
+            break
+        current = stack.pop()
+        subdirs: list[Path] = []
         try:
             with os.scandir(current) as entries:
                 for entry in entries:
                     if stop_event is not None and stop_event.is_set():
-                        return True
+                        break
 
                     name = entry.name
                     if entry.is_dir(follow_symlinks=False):
@@ -190,8 +199,7 @@ def _iter_discovered_chunks_fallback(
                             continue
                         if skip_hidden_dirs and name.startswith("."):
                             continue
-                        if _walk(Path(entry.path)):
-                            return True
+                        subdirs.append(Path(entry.path))
                         continue
 
                     if not entry.is_file(follow_symlinks=False):
@@ -211,35 +219,33 @@ def _iter_discovered_chunks_fallback(
                         ):
                             continue
 
-                    discovered.append(
-                        DiscoveredPath(
-                            path=path,
-                            rel_path=rel_path,
-                            media_kind=_media_kind_from_suffix(suffix),
-                        )
+                    item = DiscoveredPath(
+                        path=path,
+                        rel_path=rel_path,
+                        media_kind=_media_kind_from_suffix(suffix),
                     )
+                    item_bytes = len(str(path)) + len(rel_path)
+
+                    # Flush the current chunk before it exceeds the limits.
+                    if current_chunk and (
+                        len(current_chunk) >= max_items
+                        or (max_bytes > 0 and chunk_bytes + item_bytes > max_bytes)
+                    ):
+                        yield tuple(current_chunk)
+                        current_chunk = []
+                        chunk_bytes = 0
+
+                    current_chunk.append(item)
+                    chunk_bytes += item_bytes
+
         except PermissionError:
             LOGGER.warning("Permission denied: %s", current)
-        return False
 
-    _walk(root)
+        # Push subdirs in reverse order so the first subdir is processed next.
+        stack.extend(reversed(subdirs))
 
-    index = 0
-    while index < len(discovered):
-        if stop_event is not None and stop_event.is_set():
-            break
-        chunk: list[DiscoveredPath] = []
-        chunk_bytes = 0
-        while index < len(discovered) and len(chunk) < max_items:
-            item = discovered[index]
-            item_bytes = len(str(item.path)) + len(item.rel_path)
-            if chunk and max_bytes > 0 and chunk_bytes + item_bytes > max_bytes:
-                break
-            chunk.append(item)
-            chunk_bytes += item_bytes
-            index += 1
-        if chunk:
-            yield tuple(chunk)
+    if current_chunk:
+        yield tuple(current_chunk)
 
 
 def _media_kind_from_suffix(suffix: str) -> int:

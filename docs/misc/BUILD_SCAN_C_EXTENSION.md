@@ -12,7 +12,7 @@ That means:
 
 Native source directory:
 
-- [src/iPhoto/_native](/D:/python_code/yg-iPhoto/iPhotos-LocalPhotoAlbumManager/src/iPhoto/_native)
+- [src/iPhoto/_native](../../src/iPhoto/_native)
 
 Runtime-loaded binaries:
 

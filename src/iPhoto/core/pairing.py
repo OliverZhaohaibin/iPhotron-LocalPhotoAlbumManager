@@ -3,21 +3,30 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from datetime import datetime
 from pathlib import Path
+from time import perf_counter
 from typing import Dict, Iterable, List, Tuple
 
 from dateutil import parser
 
+from .. import _native
 from ..config import LIVE_DURATION_PREFERRED, PAIR_TIME_DELTA_SEC
 from ..models.types import LiveGroup
+from ..utils.logging import get_logger
+
+LOGGER = get_logger()
 
 
-def _parse_dt(value: str | None) -> datetime | None:
-    if not value:
+def _parse_dt_us(value: object) -> int | None:
+    if not isinstance(value, str) or not value:
         return None
+
+    native_ts = _native.parse_iso8601_to_unix_us(value)
+    if native_ts is not None:
+        return native_ts
+
     try:
-        return parser.isoparse(value)
+        return int(parser.isoparse(value).timestamp() * 1_000_000)
     except (ValueError, TypeError):
         return None
 
@@ -32,6 +41,7 @@ _IMAGE_EXTENSIONS = {
     ".heicf",
 }
 
+
 def _is_photo(row: Dict[str, object]) -> bool:
     mime = row.get("mime")
     if isinstance(mime, str) and mime.lower().startswith("image/"):
@@ -45,17 +55,9 @@ def _is_photo(row: Dict[str, object]) -> bool:
 def _is_video(row: Dict[str, object]) -> bool:
     """Return True if the row represents a Live Photo motion component."""
 
-    # If the asset has an explicit Content Identifier, it is definitely part of
-    # a Live Photo pair regardless of the container format (e.g. MP4).
-    # We must explicitly exclude the still image component (which shares the
-    # same identifier) to avoid ambiguity if the caller checks predicates in
-    # isolation or in a different order.
     if row.get("content_id") and not _is_photo(row):
         return True
 
-    # Restrict Live Photo pairing to QuickTime movie sources. Generic videos like
-    # MP4 clips should remain visible in the main asset list instead of being
-    # paired and hidden behind a still image.
     mime = row.get("mime")
     if isinstance(mime, str) and mime.lower() == "video/quicktime":
         return True
@@ -72,6 +74,11 @@ def _normalise_content_id(value: object) -> str | None:
 
     if not isinstance(value, str):
         return None
+
+    native_value = _native.normalise_content_id(value)
+    if native_value is not None:
+        return native_value
+
     trimmed = value.strip()
     if not trimmed:
         return None
@@ -81,6 +88,67 @@ def _normalise_content_id(value: object) -> str | None:
 def pair_live(index_rows: List[Dict[str, object]]) -> List[LiveGroup]:
     """Pair still and motion assets into :class:`LiveGroup` objects."""
 
+    started_at = perf_counter()
+    chunks = 0
+    groups = _pair_live_native(index_rows)
+    if groups is not None:
+        chunks = max(1, (len(index_rows) + _native.PAIR_FEED_CHUNK_ITEMS - 1) // _native.PAIR_FEED_CHUNK_ITEMS)
+        LOGGER.info(
+            "pair_live finished in %.2fs (chunks=%d, items=%d)",
+            perf_counter() - started_at,
+            chunks,
+            len(index_rows),
+        )
+        return groups
+
+    groups = _pair_live_python(index_rows)
+    if index_rows:
+        chunks = max(1, (len(index_rows) + _native.PAIR_FEED_CHUNK_ITEMS - 1) // _native.PAIR_FEED_CHUNK_ITEMS)
+    LOGGER.info(
+        "pair_live finished in %.2fs (chunks=%d, items=%d)",
+        perf_counter() - started_at,
+        chunks,
+        len(index_rows),
+    )
+    return groups
+
+
+def _pair_live_native(index_rows: List[Dict[str, object]]) -> List[LiveGroup] | None:
+    native_rows = [
+        _native.NativePairRowInput(
+            rel=row.get("rel") if isinstance(row.get("rel"), str) else None,
+            mime=row.get("mime") if isinstance(row.get("mime"), str) else None,
+            dt=row.get("dt") if isinstance(row.get("dt"), str) else None,
+            content_id=row.get("content_id") if isinstance(row.get("content_id"), str) else None,
+            dur=float(row["dur"]) if isinstance(row.get("dur"), (int, float)) else None,
+            still_image_time=(
+                float(row["still_image_time"])
+                if isinstance(row.get("still_image_time"), (int, float))
+                else None
+            ),
+        )
+        for row in index_rows
+    ]
+
+    execution = _native.pair_rows(native_rows)
+    if execution is None:
+        return None
+
+    groups: list[LiveGroup] = []
+    for match in execution.matches:
+        if match.still_index >= len(index_rows) or match.motion_index >= len(index_rows):
+            return None
+        groups.append(
+            _build_group(
+                index_rows[match.still_index],
+                index_rows[match.motion_index],
+                confidence=match.confidence,
+            )
+        )
+    return groups
+
+
+def _pair_live_python(index_rows: List[Dict[str, object]]) -> List[LiveGroup]:
     photos: Dict[str, Dict[str, object]] = {}
     videos: Dict[str, Dict[str, object]] = {}
     for row in index_rows:
@@ -92,7 +160,6 @@ def pair_live(index_rows: List[Dict[str, object]]) -> List[LiveGroup]:
     matched: Dict[str, LiveGroup] = {}
     used_videos: set[str] = set()
 
-    # 1) strong match by content_id
     video_by_cid: Dict[str, List[Dict[str, object]]] = defaultdict(list)
     for video in videos.values():
         cid = _normalise_content_id(video.get("content_id"))
@@ -116,7 +183,6 @@ def pair_live(index_rows: List[Dict[str, object]]) -> List[LiveGroup]:
             )
             used_videos.add(chosen["rel"])
 
-    # 2) medium match by same stem + time delta
     for photo in photos.values():
         if photo["rel"] in matched:
             continue
@@ -127,7 +193,6 @@ def pair_live(index_rows: List[Dict[str, object]]) -> List[LiveGroup]:
             used_videos.add(chosen["rel"])
             matched[photo["rel"]] = _build_group(photo, chosen, confidence=0.7)
 
-    # 3) weak match by directory proximity
     for photo in photos.values():
         if photo["rel"] in matched:
             continue
@@ -146,15 +211,15 @@ def _match_by_time(
     candidates: Iterable[Dict[str, object]],
     used_videos: set[str],
 ) -> Dict[str, object] | None:
-    photo_dt = _parse_dt(photo.get("dt"))
+    photo_dt = _parse_dt_us(photo.get("dt"))
     best: Tuple[float, Dict[str, object]] | None = None
     for candidate in candidates:
         if candidate["rel"] in used_videos:
             continue
-        video_dt = _parse_dt(candidate.get("dt"))
-        if not photo_dt or not video_dt:
+        video_dt = _parse_dt_us(candidate.get("dt"))
+        if photo_dt is None or video_dt is None:
             continue
-        delta = abs((photo_dt - video_dt).total_seconds())
+        delta = abs(photo_dt - video_dt) / 1_000_000
         if delta > PAIR_TIME_DELTA_SEC:
             continue
         if best is None or delta < best[0]:
@@ -178,15 +243,12 @@ def _select_best_video(candidates: Iterable[Dict[str, object]]) -> Dict[str, obj
             if current_score > best_score:
                 best = candidate
                 continue
-            elif current_score < best_score:
+            if current_score < best_score:
                 continue
-        # Prefer video with still_image_time over one without
         best_time = best.get("still_image_time")
         if still_time is not None and best_time is None:
             best = candidate
         elif still_time is not None and best_time is not None:
-            # Prefer valid non-negative still_image_time,
-            # then prefer smaller values.
             if still_time >= 0 and (best_time < 0 or still_time < best_time):
                 best = candidate
     return best

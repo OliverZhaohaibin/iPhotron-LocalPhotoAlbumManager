@@ -9,6 +9,8 @@ import re
 from pathlib import Path
 from typing import Iterable, Iterator, Optional, Tuple
 
+from .. import _native
+
 
 def _expand(pattern: str) -> Iterator[str]:
     match = re.search(r"\{([^{}]*,[^{}]*)\}", pattern)
@@ -39,27 +41,71 @@ def is_excluded(path: Path, globs: Iterable[str], *, root: Path) -> bool:
     """
 
     rel = path.relative_to(root).as_posix()
-    for pattern in globs:
-        for expanded in _expand_cached(pattern):
-            if fnmatch.fnmatch(rel, expanded):
-                return True
-            if expanded.startswith("**/") and fnmatch.fnmatch(rel, expanded[3:]):
-                return True
-    return False
+    return is_excluded_rel(rel, globs)
 
 
 def should_include(path: Path, include_globs: Iterable[str], exclude_globs: Iterable[str], *, root: Path) -> bool:
     """Return ``True`` if *path* should be scanned."""
 
-    if is_excluded(path, exclude_globs, root=root):
-        return False
     rel = path.relative_to(root).as_posix()
-    for pattern in include_globs:
-        for expanded in _expand_cached(pattern):
-            if fnmatch.fnmatch(rel, expanded):
-                return True
-            if expanded.startswith("**/") and fnmatch.fnmatch(rel, expanded[3:]):
-                return True
+    return should_include_rel(rel, include_globs, exclude_globs)
+
+
+def is_excluded_rel(rel: str, globs: Iterable[str]) -> bool:
+    """Return ``True`` if *rel* matches one of *globs*."""
+
+    return is_excluded_rel_expanded(rel, expand_globs(globs))
+
+
+def should_include_rel(rel: str, include_globs: Iterable[str], exclude_globs: Iterable[str]) -> bool:
+    """Return ``True`` if the relative POSIX path *rel* should be scanned."""
+
+    expanded_include = expand_globs(include_globs)
+    expanded_exclude = expand_globs(exclude_globs)
+
+    native_match = _native.should_include_rel(rel, expanded_include, expanded_exclude)
+    if native_match is not None:
+        return native_match
+
+    return should_include_rel_expanded(rel, expanded_include, expanded_exclude)
+
+
+def expand_globs(globs: Iterable[str]) -> Tuple[str, ...]:
+    """Return *globs* with brace patterns expanded and cached per pattern."""
+
+    return tuple(
+        expanded
+        for pattern in globs
+        for expanded in _expand_cached(pattern)
+    )
+
+
+def is_excluded_rel_expanded(rel: str, globs: Iterable[str]) -> bool:
+    """Return ``True`` if *rel* matches one of the already-expanded *globs*."""
+
+    for expanded in globs:
+        if fnmatch.fnmatch(rel, expanded):
+            return True
+        if expanded.startswith("**/") and fnmatch.fnmatch(rel, expanded[3:]):
+            return True
+    return False
+
+
+def should_include_rel_expanded(
+    rel: str,
+    include_globs: Iterable[str],
+    exclude_globs: Iterable[str],
+) -> bool:
+    """Return ``True`` for an already-expanded include/exclude glob set."""
+
+    if is_excluded_rel_expanded(rel, exclude_globs):
+        return False
+
+    for expanded in include_globs:
+        if fnmatch.fnmatch(rel, expanded):
+            return True
+        if expanded.startswith("**/") and fnmatch.fnmatch(rel, expanded[3:]):
+            return True
     return False
 
 

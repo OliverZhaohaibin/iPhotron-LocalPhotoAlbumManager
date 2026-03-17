@@ -1,10 +1,10 @@
 import logging
-import os
 import queue
 import threading
 import unicodedata
 from datetime import datetime
 from pathlib import Path
+from time import perf_counter
 from typing import List, Set, Dict, Optional, Any
 from dataclasses import dataclass
 
@@ -14,7 +14,7 @@ from iPhoto.domain.repositories import IAlbumRepository, IAssetRepository
 from iPhoto.events.bus import EventBus, Event
 from iPhoto.application.interfaces import IMetadataProvider, IThumbnailGenerator
 from iPhoto.config import WORK_DIR_NAME, EXPORT_DIR_NAME, DEFAULT_INCLUDE, DEFAULT_EXCLUDE
-from iPhoto.utils.pathutils import should_include
+from iPhoto.io.discovery import iter_discovered_chunks
 
 @dataclass(kw_only=True)
 class AlbumScannedEvent(Event):
@@ -32,27 +32,30 @@ class FileDiscoveryThread(threading.Thread):
         self._exclude = exclude or DEFAULT_EXCLUDE
         self._stop_event = threading.Event()
         self.total_found = 0
+        self.total_chunks = 0
+        self.elapsed_s = 0.0
         self.daemon = True
 
     def run(self):
+        started_at = perf_counter()
         try:
-            for dirpath, dirnames, filenames in os.walk(self._root):
+            for chunk in iter_discovered_chunks(
+                self._root,
+                include_globs=self._include,
+                exclude_globs=self._exclude,
+                skip_dir_names=(WORK_DIR_NAME, EXPORT_DIR_NAME),
+                stop_event=self._stop_event,
+            ):
                 if self._stop_event.is_set():
                     break
-
-                # Prune internal dirs
-                dirnames[:] = [d for d in dirnames if d != WORK_DIR_NAME and d != EXPORT_DIR_NAME]
-
-                for name in filenames:
-                    if self._stop_event.is_set():
-                        break
-
-                    candidate = Path(dirpath) / name
-
-                    if should_include(candidate, self._include, self._exclude, root=self._root):
-                        self._queue.put(candidate)
-                        self.total_found += 1
+                path_chunk = [item.path for item in chunk]
+                if not path_chunk:
+                    continue
+                self._queue.put(path_chunk)
+                self.total_chunks += 1
+                self.total_found += len(path_chunk)
         finally:
+            self.elapsed_s = perf_counter() - started_at
             self._queue.put(None) # Signal end
 
     def stop(self):
@@ -224,14 +227,19 @@ class ScanAlbumUseCase:
 
         # Consume queue
         while True:
-            path = path_queue.get()
-            if path is None:
+            queued = path_queue.get()
+            if queued is None:
                 break
 
-            batch.append(path)
-            if len(batch) >= BATCH_SIZE:
-                process_batch(batch)
-                batch = []
+            if isinstance(queued, list):
+                batch.extend(queued)
+            else:
+                batch.append(queued)
+
+            while len(batch) >= BATCH_SIZE:
+                current_batch = batch[:BATCH_SIZE]
+                del batch[:BATCH_SIZE]
+                process_batch(current_batch)
 
         # Flush remaining
         if batch:

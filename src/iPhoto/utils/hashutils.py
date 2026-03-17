@@ -7,6 +7,8 @@ import os
 
 import xxhash
 
+from .. import _native
+
 
 def file_xxh3(path: Path, *, chunk_size: int = 1024 * 1024) -> str:
     """Return the XXH3 128-bit hash of *path*."""
@@ -27,6 +29,10 @@ def compute_file_id(path: Path) -> str:
     For small files (< 2MB), hashes the entire content using XXH3.
     For large files, hashes a sample of the content (Head/Mid/Tail) + Size.
     """
+    native_hash = _native.compute_file_id(path)
+    if native_hash is not None:
+        return native_hash
+
     threshold = 2 * 1024 * 1024  # 2 MB
 
     with path.open("rb") as f:

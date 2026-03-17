@@ -58,3 +58,13 @@ def test_should_include(tmp_path):
 
     # Excluded
     assert not should_include(root / "bad.jpg", include, exclude, root=root)
+
+
+def test_should_include_falls_back_for_character_class_patterns(tmp_path):
+    root = tmp_path
+    include = ["photo.[jJ][pP][gG]"]
+    exclude = []
+
+    assert should_include(root / "photo.jpg", include, exclude, root=root)
+    assert should_include(root / "photo.JPG", include, exclude, root=root)
+    assert not should_include(root / "photo.png", include, exclude, root=root)

@@ -31,6 +31,7 @@ from typing import Callable, Generator, Optional
 from iPhoto.domain.models.core import Asset
 from iPhoto.events.bus import EventBus
 from iPhoto.events.album_events import ScanProgressEvent
+from iPhoto.io.discovery import iter_discovered_files
 from iPhoto.media_classifier import IMAGE_EXTENSIONS, VIDEO_EXTENSIONS
 
 LOGGER = logging.getLogger(__name__)
@@ -220,16 +221,12 @@ class ParallelScanner:
 
     def _discover_files(self, path: Path) -> Generator[Path, None, None]:
         """Yield supported media files using a generator to reduce memory."""
-        try:
-            for entry in os.scandir(path):
-                if self._cancelled.is_set():
-                    return
-                if entry.is_file(follow_symlinks=False) and self._is_supported(entry.name):
-                    yield Path(entry.path)
-                elif entry.is_dir(follow_symlinks=False) and not entry.name.startswith("."):
-                    yield from self._discover_files(Path(entry.path))
-        except PermissionError:
-            LOGGER.warning("Permission denied: %s", path)
+        yield from iter_discovered_files(
+            path,
+            supported_extensions=tuple(sorted(_SUPPORTED_EXTENSIONS)),
+            skip_hidden_dirs=True,
+            stop_event=self._cancelled,
+        )
 
     @staticmethod
     def _is_supported(filename: str) -> bool:

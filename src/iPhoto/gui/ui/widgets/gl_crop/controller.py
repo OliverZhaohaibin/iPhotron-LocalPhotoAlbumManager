@@ -573,7 +573,10 @@ class CropInteractionController:
         if tex_w <= 0 or tex_h <= 0:
             return self._transform_controller.get_effective_scale()
 
-        vw, vh = self._transform_controller._get_view_dimensions_device_px()
+        view_dims = self._transform_controller._get_view_dimensions_device_px()
+        if not isinstance(view_dims, tuple) or len(view_dims) != 2:
+            return self._transform_controller.get_effective_scale()
+        vw, vh = view_dims
         crop_state = self._model.get_crop_state()
         crop_rect = crop_state.to_pixel_rect(tex_w, tex_h)
         crop_width = max(1.0, crop_rect["right"] - crop_rect["left"])

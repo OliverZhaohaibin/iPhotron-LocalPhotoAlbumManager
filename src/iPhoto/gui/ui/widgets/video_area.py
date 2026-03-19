@@ -47,7 +47,7 @@ from ....config import (
     PLAYER_FADE_OUT_MS,
     VIDEO_COMPLETE_HOLD_BACKSTEP_MS,
 )
-from ....utils.ffmpeg import probe_video_rotation
+from ....utils.ffmpeg import get_linux_180_prerotate_hint, probe_video_rotation
 from .player_bar import PlayerBar
 from .video_renderer_widget import VideoRendererWidget
 from ..palette import viewer_surface_color
@@ -252,6 +252,7 @@ class VideoArea(QWidget):
         # than Qt's ``QVideoFrameFormat.rotation()``).
         cw_deg, raw_w, raw_h = probe_video_rotation(path)
         self._renderer.set_container_rotation(cw_deg, raw_w, raw_h)
+        self._renderer.set_linux_180_hint(get_linux_180_prerotate_hint(path))
         if cw_deg:
             _log.debug(
                 "Container rotation for %s: %d° CW (raw %dx%d)",
@@ -265,6 +266,19 @@ class VideoArea(QWidget):
 
     def play(self) -> None:
         """Start or resume playback."""
+        # If playback previously reached ``EndOfMedia`` we keep the last frame
+        # visible by stepping back a few milliseconds and pausing.  Pressing
+        # play again should restart from the beginning instead of resuming
+        # from that hold position.
+        duration = self._player.duration()
+        position = self._player.position()
+        hold_pos = max(0, duration - VIDEO_COMPLETE_HOLD_BACKSTEP_MS)
+        if (
+            duration > 0
+            and self._player.playbackState() == QMediaPlayer.PlaybackState.PausedState
+            and position >= hold_pos
+        ):
+            self._player.setPosition(0)
         self._player.play()
 
     def pause(self) -> None:

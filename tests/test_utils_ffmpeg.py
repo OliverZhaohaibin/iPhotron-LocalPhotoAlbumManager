@@ -227,6 +227,70 @@ class TestProbeVideoRotation:
         cw, _, _ = ffmpeg.probe_video_rotation(video)
         assert cw == 90
 
+    def test_probe_video_rotation_info_sets_quicktime_180_hint(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """QuickTime/Core Media 180° streams should surface Linux hint."""
+
+        video = tmp_path / "iphone.mov"
+
+        def fake_probe(src: Path) -> dict:
+            return {
+                "format": {"tags": {"major_brand": "qt  "}},
+                "streams": [
+                    {
+                        "codec_type": "video",
+                        "width": 1280,
+                        "height": 720,
+                        "side_data_list": [
+                            {
+                                "side_data_type": "Display Matrix",
+                                "rotation": -180,
+                            }
+                        ],
+                        "tags": {"handler_name": "Core Media Video"},
+                    }
+                ],
+            }
+
+        monkeypatch.setattr(ffmpeg, "probe_media", fake_probe)
+
+        cw, raw_w, raw_h, linux_180_hint = ffmpeg.probe_video_rotation_info(video)
+        assert (cw, raw_w, raw_h) == (180, 1280, 720)
+        assert linux_180_hint is True
+
+    def test_probe_video_rotation_info_180_without_apple_metadata_has_no_hint(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Non-QuickTime 180° streams should not set Linux pre-rotation hint."""
+
+        video = tmp_path / "generic.mp4"
+
+        def fake_probe(src: Path) -> dict:
+            return {
+                "format": {"tags": {"major_brand": "mp42"}},
+                "streams": [
+                    {
+                        "codec_type": "video",
+                        "width": 1920,
+                        "height": 1080,
+                        "side_data_list": [
+                            {
+                                "side_data_type": "Display Matrix",
+                                "rotation": 180,
+                            }
+                        ],
+                        "tags": {"handler_name": "VideoHandler"},
+                    }
+                ],
+            }
+
+        monkeypatch.setattr(ffmpeg, "probe_media", fake_probe)
+
+        cw, raw_w, raw_h, linux_180_hint = ffmpeg.probe_video_rotation_info(video)
+        assert (cw, raw_w, raw_h) == (180, 1920, 1080)
+        assert linux_180_hint is False
+
 
 def test_extract_video_frame_uses_yuv_format_for_jpeg(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """Ensure JPEG extractions request a YUV pixel format."""

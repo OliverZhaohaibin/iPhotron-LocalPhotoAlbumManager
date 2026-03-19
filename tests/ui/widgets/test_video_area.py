@@ -33,6 +33,32 @@ from iPhoto.gui.ui.widgets.video_renderer_widget import (
 )
 
 
+def _set_rotation_180(fmt: QVideoFrameFormat) -> None:
+    """Set 180° rotation in a Qt-version-compatible way."""
+    rot_enum = getattr(QVideoFrameFormat, "Rotation", None)
+    if rot_enum is not None and hasattr(rot_enum, "Clockwise180"):
+        fmt.setRotation(rot_enum.Clockwise180)
+        return
+
+    try:
+        from PySide6.QtMultimedia import QtVideo
+
+        if hasattr(QtVideo, "Rotation") and hasattr(QtVideo.Rotation, "Clockwise180"):
+            fmt.setRotation(QtVideo.Rotation.Clockwise180)
+            return
+    except (ModuleNotFoundError, ImportError):
+        pass
+
+    # Last-resort fallback for bindings that expose a different enum path.
+    for enum_name in ("Rotated180", "Clockwise180"):
+        rotation_value = getattr(fmt.rotation(), enum_name, None)
+        if rotation_value is not None:
+            fmt.setRotation(rotation_value)
+            return
+
+    raise RuntimeError("Could not resolve a Qt-compatible 180° rotation enum")
+
+
 @pytest.fixture
 def qapp():
     """Create QApplication instance for Qt tests."""
@@ -187,6 +213,74 @@ class TestVideoRendererWidget:
         w.update_frame(frame)
 
         # Pre-rotated → no additional rotation
+        assert w._rotate90_steps == 0
+
+    def test_no_double_rotation_for_linux_180_prerotated(self, qapp, mocker):
+        """Linux-specific 180° clips should not be rotated twice."""
+        w = VideoRendererWidget()
+        w.set_container_rotation(180, 1280, 720)
+
+        mocker.patch("iPhoto.gui.ui.widgets.video_renderer_widget.sys.platform", "linux")
+        mocker.patch.dict(
+            "iPhoto.gui.ui.widgets.video_renderer_widget.os.environ",
+            {"QT_MEDIA_BACKEND": "gstreamer"},
+            clear=False,
+        )
+
+        from PySide6.QtCore import QSize
+        fmt = QVideoFrameFormat(
+            QSize(1280, 720), QVideoFrameFormat.PixelFormat.Format_RGBA8888
+        )
+        _set_rotation_180(fmt)
+        frame = QVideoFrame(fmt)
+        w.update_frame(frame)
+
+        # Heuristic should treat this as pre-rotated.
+        assert w._rotate90_steps == 0
+
+    def test_linux_180_without_backend_hint_keeps_container_rotation(self, qapp, mocker):
+        """Linux 180° streams should still rotate when no pre-rotation hint exists."""
+        w = VideoRendererWidget()
+        w.set_container_rotation(180, 1280, 720)
+
+        mocker.patch("iPhoto.gui.ui.widgets.video_renderer_widget.sys.platform", "linux")
+        mocker.patch.dict(
+            "iPhoto.gui.ui.widgets.video_renderer_widget.os.environ",
+            {},
+            clear=True,
+        )
+
+        from PySide6.QtCore import QSize
+        fmt = QVideoFrameFormat(
+            QSize(1280, 720), QVideoFrameFormat.PixelFormat.Format_RGBA8888
+        )
+        _set_rotation_180(fmt)
+        frame = QVideoFrame(fmt)
+        w.update_frame(frame)
+
+        # No backend hint/override -> apply container 180° correction.
+        assert w._rotate90_steps == 2
+
+    def test_linux_180_with_container_hint_skips_rotation(self, qapp, mocker):
+        """Container hint should allow Linux 180° pre-rotation detection."""
+        w = VideoRendererWidget()
+        w.set_container_rotation(180, 1280, 720, linux_180_hint=True)
+
+        mocker.patch("iPhoto.gui.ui.widgets.video_renderer_widget.sys.platform", "linux")
+        mocker.patch.dict(
+            "iPhoto.gui.ui.widgets.video_renderer_widget.os.environ",
+            {},
+            clear=True,
+        )
+
+        from PySide6.QtCore import QSize
+        fmt = QVideoFrameFormat(
+            QSize(1280, 720), QVideoFrameFormat.PixelFormat.Format_RGBA8888
+        )
+        _set_rotation_180(fmt)
+        frame = QVideoFrame(fmt)
+        w.update_frame(frame)
+
         assert w._rotate90_steps == 0
 
     def test_no_fallback_when_no_container_rotation(self, qapp):
@@ -358,6 +452,29 @@ class TestVideoArea:
 
         mock_set_pos.assert_called_once_with(5000 - VIDEO_COMPLETE_HOLD_BACKSTEP_MS)
         mock_pause.assert_called_once()
+
+    def test_play_restarts_when_paused_on_end_hold_frame(self, qapp, mocker):
+        """Pressing play after auto-pause at the end should restart from 0."""
+        va = VideoArea()
+
+        mocker.patch.object(va._player, "duration", return_value=5000)
+        mocker.patch.object(
+            va._player,
+            "position",
+            return_value=5000 - VIDEO_COMPLETE_HOLD_BACKSTEP_MS,
+        )
+        mocker.patch.object(
+            va._player,
+            "playbackState",
+            return_value=QMediaPlayer.PlaybackState.PausedState,
+        )
+        mock_set_pos = mocker.patch.object(va._player, "setPosition")
+        mock_play = mocker.patch.object(va._player, "play")
+
+        va.play()
+
+        mock_set_pos.assert_called_once_with(0)
+        mock_play.assert_called_once()
 
     def test_load_video_clears_frame(self, qapp, mocker):
         """load_video should clear the renderer frame."""

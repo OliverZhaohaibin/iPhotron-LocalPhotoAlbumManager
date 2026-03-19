@@ -131,3 +131,29 @@ def test_extract_frame_with_pyav_exception_returns_none(mock_av, tmp_path):
     mock_av.open.side_effect = Exception("Boom")
     result = ffmpeg.extract_frame_with_pyav(tmp_path / "video.mp4")
     assert result is None
+
+
+@patch("iPhoto.utils.ffmpeg.av")
+def test_extract_frame_with_pyav_applies_display_rotation(mock_av, monkeypatch, tmp_path):
+    """PyAV path should rotate frames using ffprobe display-matrix metadata."""
+    video_path = tmp_path / "video.mp4"
+
+    mock_container = MagicMock()
+    mock_av.open.return_value.__enter__.return_value = mock_container
+    mock_container.streams.video = [MagicMock()]
+
+    mock_frame = MagicMock()
+    mock_frame.pts = 0
+    mock_frame.to_image.return_value = Image.new("RGB", (160, 90))
+    mock_container.decode.return_value = [mock_frame]
+
+    monkeypatch.setattr(
+        ffmpeg,
+        "probe_video_rotation_info",
+        lambda src: (90, 160, 90, False) if src == video_path else (0, 0, 0, False),
+    )
+
+    result = ffmpeg.extract_frame_with_pyav(video_path, at=None)
+
+    assert result is not None
+    assert result.size == (90, 160)

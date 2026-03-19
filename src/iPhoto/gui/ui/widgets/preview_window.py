@@ -199,6 +199,7 @@ class PreviewWindow(QWidget):
         self._current_native_size = QSizeF()
         self._anchor_rect: Optional[QRect] = None
         self._anchor_point: Optional[QPoint] = None
+        self._aspect_ratio_hint: Optional[float] = None
         self._native_size_seeded_from_probe = False
 
         layout = QVBoxLayout(self)
@@ -234,7 +235,13 @@ class PreviewWindow(QWidget):
         self._close_timer.timeout.connect(self._do_close)
         self.hide()
 
-    def show_preview(self, source: Path | str, at: Optional[QRect | QPoint] = None) -> None:
+    def show_preview(
+        self,
+        source: Path | str,
+        at: Optional[QRect | QPoint] = None,
+        *,
+        aspect_ratio_hint: Optional[float] = None,
+    ) -> None:
         """Display *source* near *at* and start playback immediately."""
 
         path = Path(source)
@@ -242,6 +249,11 @@ class PreviewWindow(QWidget):
         self._media.stop()
         self._current_native_size = QSizeF()
         self._native_size_seeded_from_probe = False
+        self._aspect_ratio_hint = None
+        if isinstance(aspect_ratio_hint, (int, float)):
+            numeric = float(aspect_ratio_hint)
+            if numeric > 0.0:
+                self._aspect_ratio_hint = numeric
         self._anchor_rect = at if isinstance(at, QRect) else None
         self._anchor_point = at if isinstance(at, QPoint) else None
         self._prime_native_size_from_probe(path)
@@ -296,6 +308,8 @@ class PreviewWindow(QWidget):
         native_height = float(self._current_native_size.height())
         if native_width > 0.0 and native_height > 0.0:
             return native_width / native_height
+        if self._aspect_ratio_hint is not None and self._aspect_ratio_hint > 0.0:
+            return self._aspect_ratio_hint
         return 16.0 / 9.0
 
     def _size_for_aspect(self, max_dimension: int, aspect_ratio: float) -> QSize:

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from functools import partial
 from pathlib import Path
+from typing import Any, Optional
 
 from PySide6.QtCore import QModelIndex, QObject, QRect
 
@@ -62,4 +63,53 @@ class PreviewController(QObject):
         preview_path = Path(str(preview_raw))
         rect = view.visualRect(index)
         global_rect = QRect(view.viewport().mapToGlobal(rect.topLeft()), rect.size())
-        self._preview_window.show_preview(preview_path, global_rect)
+        aspect_hint = self._extract_aspect_hint(index.data(Roles.INFO))
+        self._preview_window.show_preview(
+            preview_path,
+            global_rect,
+            aspect_ratio_hint=aspect_hint,
+        )
+
+    def _extract_aspect_hint(self, info: Any) -> Optional[float]:
+        """Return a best-effort display aspect ratio hint from model metadata."""
+
+        if not isinstance(info, dict):
+            return None
+
+        def _to_float(value: Any) -> Optional[float]:
+            if isinstance(value, bool):
+                return None
+            if isinstance(value, (int, float)):
+                numeric = float(value)
+                return numeric if numeric > 0.0 else None
+            if isinstance(value, str):
+                try:
+                    numeric = float(value.strip())
+                except ValueError:
+                    return None
+                return numeric if numeric > 0.0 else None
+            return None
+
+        width = _to_float(info.get("w")) or _to_float(info.get("width"))
+        height = _to_float(info.get("h")) or _to_float(info.get("height"))
+        if width is None or height is None:
+            return None
+
+        rotation_value = (
+            info.get("rotation")
+            or info.get("rotate")
+            or info.get("video_rotation")
+            or info.get("display_rotation")
+        )
+        rotation = 0
+        if rotation_value is not None:
+            try:
+                rotation = int(float(rotation_value)) % 360
+            except (TypeError, ValueError):
+                rotation = 0
+        if rotation in (90, 270):
+            width, height = height, width
+
+        if height <= 0.0:
+            return None
+        return width / height

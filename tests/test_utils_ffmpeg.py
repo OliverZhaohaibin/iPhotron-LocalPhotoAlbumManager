@@ -507,3 +507,73 @@ def test_extract_with_opencv_scales_and_encodes(monkeypatch: pytest.MonkeyPatch,
     ]
     assert capture.set_calls[0][0] == FakeCV2.CAP_PROP_POS_MSEC
     assert capture.released is True
+
+
+def test_extract_with_opencv_applies_display_rotation(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """OpenCV fallback should rotate decoded frames using display-matrix metadata."""
+
+    input_path = tmp_path / "video.mp4"
+    input_path.touch()
+
+    class FakeFrame:
+        def __init__(self, width: int, height: int) -> None:
+            self.shape = (height, width, 3)
+
+    class FakeCapture:
+        def isOpened(self) -> bool:
+            return True
+
+        def set(self, prop: int, value: float) -> bool:
+            return True
+
+        def read(self) -> tuple[bool, FakeFrame]:
+            return True, FakeFrame(160, 90)
+
+        def release(self) -> None:
+            return None
+
+    rotate_calls: list[int] = []
+    encoded_shapes: list[tuple[int, int]] = []
+
+    class FakeCV2:
+        CAP_PROP_POS_MSEC = 0
+        CAP_PROP_FPS = 1
+        CAP_PROP_POS_FRAMES = 2
+        INTER_AREA = 3
+        IMWRITE_JPEG_QUALITY = 4
+        ROTATE_90_CLOCKWISE = 10
+
+        @staticmethod
+        def VideoCapture(path: str) -> FakeCapture:  # type: ignore[override]
+            assert path == str(input_path)
+            return FakeCapture()
+
+        @staticmethod
+        def rotate(frame: FakeFrame, flag: int) -> FakeFrame:
+            rotate_calls.append(flag)
+            assert flag == FakeCV2.ROTATE_90_CLOCKWISE
+            h, w = frame.shape[:2]
+            return FakeFrame(h, w)
+
+        @staticmethod
+        def imencode(ext: str, frame: FakeFrame, params: list[int]) -> tuple[bool, object]:
+            encoded_shapes.append(frame.shape[:2])
+
+            class _Buffer:
+                def __bytes__(self) -> bytes:
+                    return b"encoded"
+
+            return True, _Buffer()
+
+    monkeypatch.setattr(ffmpeg, "cv2", FakeCV2)
+    monkeypatch.setattr(
+        ffmpeg,
+        "probe_video_rotation_info",
+        lambda src: (90, 160, 90, False) if src == input_path else (0, 0, 0, False),
+    )
+
+    data = ffmpeg._extract_with_opencv(input_path, at=None, scale=None, format="jpeg")
+
+    assert data == b"encoded"
+    assert rotate_calls == [FakeCV2.ROTATE_90_CLOCKWISE]
+    assert encoded_shapes == [(160, 90)]

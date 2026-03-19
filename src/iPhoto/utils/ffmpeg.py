@@ -98,6 +98,7 @@ def extract_frame_with_pyav(
 
                 # Once we reach or pass the target, use this frame
                 image = frame.to_image()
+                image = _orient_pil_frame_from_metadata(source, image)
 
                 # Handle scaling if requested
                 if (
@@ -126,6 +127,14 @@ def extract_frame_with_pyav(
     except (av.FFmpegError, ValueError, IndexError, Exception):
         # Fallback to other methods if PyAV fails for any reason
         return None
+
+
+def _orient_pil_frame_from_metadata(source: Path, image: "Image.Image") -> "Image.Image":
+    """Rotate a decoded PIL frame to match ffmpeg's display orientation."""
+    cw_degrees, _, _, _ = probe_video_rotation_info(source)
+    if cw_degrees not in {90, 180, 270}:
+        return image
+    return image.rotate(-cw_degrees, expand=True)
 
 
 def extract_video_frame(
@@ -295,12 +304,11 @@ def _extract_with_opencv(
     if not ok or frame is None:
         return None
 
+    target_frame = _orient_opencv_frame_from_metadata(source, frame)
     try:
-        height, width = frame.shape[:2]
+        height, width = target_frame.shape[:2]
     except Exception:
         return None
-
-    target_frame = frame
     if (
         scale is not None
         and width > 0
@@ -343,6 +351,29 @@ def _extract_with_opencv(
         return bytes(buffer)
     except Exception:
         return None
+
+
+def _orient_opencv_frame_from_metadata(source: Path, frame: Any) -> Any:
+    """Rotate an OpenCV frame to match ffmpeg's display orientation."""
+    if cv2 is None:
+        return frame
+
+    cw_degrees, _, _, _ = probe_video_rotation_info(source)
+    if cw_degrees == 90:
+        rotate_flag = getattr(cv2, "ROTATE_90_CLOCKWISE", None)
+    elif cw_degrees == 180:
+        rotate_flag = getattr(cv2, "ROTATE_180", None)
+    elif cw_degrees == 270:
+        rotate_flag = getattr(cv2, "ROTATE_90_COUNTERCLOCKWISE", None)
+    else:
+        rotate_flag = None
+
+    if rotate_flag is None:
+        return frame
+    try:
+        return cv2.rotate(frame, rotate_flag)
+    except Exception:
+        return frame
 
 
 def probe_video_rotation_info(source: Path) -> tuple[int, int, int, bool]:

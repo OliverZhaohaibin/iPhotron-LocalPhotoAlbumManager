@@ -18,6 +18,7 @@ parent-widget background colour.
 from __future__ import annotations
 
 import logging
+import os
 import struct
 import sys
 from pathlib import Path
@@ -103,6 +104,26 @@ _TF_HLG = 2
 # Range enum
 _RANGE_LIMITED = 0
 _RANGE_FULL = 1
+
+
+def _should_assume_linux_180_prerotated() -> bool:
+    """Return whether Linux 180° streams should be treated as pre-rotated.
+
+    ``QVideoFrameFormat.rotation()`` reports metadata, not post-decode pixel
+    orientation, so it is insufficient on its own to conclude that a Linux
+    frame has already been pre-rotated. Restrict this 180° workaround to
+    backends/environments that explicitly opt in.
+    """
+
+    if not sys.platform.startswith("linux"):
+        return False
+
+    backend = os.environ.get("QT_MEDIA_BACKEND", "").strip().lower()
+    if backend == "gstreamer":
+        return True
+
+    forced = os.environ.get("IPHOTRON_ASSUME_LINUX_180_PREROTATED", "")
+    return forced.strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _classify_frame_format(fmt: "QVideoFrameFormat") -> tuple[int, int, int, int]:
@@ -317,16 +338,17 @@ class VideoRendererWidget(QRhiWidget):
                 # while rotation metadata is still reported, which causes a
                 # double 180° flip if we apply container rotation again.
                 #
-                # Heuristic: when Qt still reports a 180° frame rotation on
-                # Linux, treat that combination as pre-rotated and skip the
-                # extra transform.
+                # Heuristic: only when Qt reports 180° *and* the environment
+                # indicates a Linux backend known to pre-rotate pixels (or an
+                # explicit opt-in override), treat the frame as pre-rotated
+                # and skip the extra transform.
                 qt_rot = 0
                 rotation = fmt.rotation()
                 try:
                     qt_rot = rotation.value if hasattr(rotation, "value") else int(rotation)
                 except (TypeError, ValueError):
                     qt_rot = 0
-                if sys.platform.startswith("linux") and abs(qt_rot) % 360 == 180:
+                if abs(qt_rot) % 360 == 180 and _should_assume_linux_180_prerotated():
                     pre_rotated = True
 
             rot_deg = 0 if pre_rotated else container_rot

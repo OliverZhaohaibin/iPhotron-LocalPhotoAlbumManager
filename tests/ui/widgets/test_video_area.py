@@ -38,8 +38,25 @@ def _set_rotation_180(fmt: QVideoFrameFormat) -> None:
     rot_enum = getattr(QVideoFrameFormat, "Rotation", None)
     if rot_enum is not None and hasattr(rot_enum, "Clockwise180"):
         fmt.setRotation(rot_enum.Clockwise180)
-    else:
-        fmt.setRotation(180)
+        return
+
+    try:
+        from PySide6.QtMultimedia import QtVideo
+
+        if hasattr(QtVideo, "Rotation") and hasattr(QtVideo.Rotation, "Clockwise180"):
+            fmt.setRotation(QtVideo.Rotation.Clockwise180)
+            return
+    except (ModuleNotFoundError, ImportError):
+        pass
+
+    # Last-resort fallback for bindings that expose a different enum path.
+    for enum_name in ("Rotated180", "Clockwise180"):
+        rotation_value = getattr(fmt.rotation(), enum_name, None)
+        if rotation_value is not None:
+            fmt.setRotation(rotation_value)
+            return
+
+    raise RuntimeError("Could not resolve a Qt-compatible 180° rotation enum")
 
 
 @pytest.fixture

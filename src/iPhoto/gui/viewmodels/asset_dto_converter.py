@@ -233,7 +233,16 @@ def geotagged_asset_to_dto(asset: object, library_root: Path) -> Optional[AssetD
     rel_path = Path(asset.library_relative)
 
     is_video = asset.is_video
-    media_type = "video" if is_video else "image"
+    live_photo_group_id = getattr(asset, "live_photo_group_id", None)
+    live_partner_rel = getattr(asset, "live_partner_rel", None)
+    is_live = (
+        not is_video
+        and (
+            (isinstance(live_photo_group_id, str) and bool(live_photo_group_id.strip()))
+            or (isinstance(live_partner_rel, str) and bool(live_partner_rel.strip()))
+        )
+    )
+    media_type = "video" if is_video else ("live" if is_live else "image")
 
     metadata: dict = {
         "gps": {
@@ -243,6 +252,10 @@ def geotagged_asset_to_dto(asset: object, library_root: Path) -> Optional[AssetD
     }
     if asset.location_name:
         metadata["location"] = asset.location_name
+    if isinstance(live_photo_group_id, str) and live_photo_group_id.strip():
+        metadata["live_photo_group_id"] = live_photo_group_id.strip()
+    if isinstance(live_partner_rel, str) and live_partner_rel.strip():
+        metadata["live_partner_rel"] = live_partner_rel.strip()
 
     captured_at: Optional[datetime] = None
     asset_created_at = getattr(asset, "created_at", None)
@@ -270,7 +283,7 @@ def geotagged_asset_to_dto(asset: object, library_root: Path) -> Optional[AssetD
         size_bytes=0,
         metadata=metadata,
         is_favorite=False,
-        is_live=False,
+        is_live=is_live,
         is_pano=False,
         micro_thumbnail=None,
     )

@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+from concurrent.futures import Future, ThreadPoolExecutor
 import importlib.util
 from pathlib import Path
 from typing import Callable, Optional
 
-from PySide6.QtCore import QPoint, QRect, QRectF, QSize, QSizeF, Qt, QTimer
+from PySide6.QtCore import QPoint, QRect, QRectF, QSize, QSizeF, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QPainter, QPainterPath, QPen, QResizeEvent
 from PySide6.QtWidgets import (
     QFrame,
@@ -24,6 +25,7 @@ from ....config import (
     PREVIEW_WINDOW_DEFAULT_WIDTH,
     PREVIEW_WINDOW_MUTED,
 )
+from ....utils.ffmpeg import probe_video_rotation
 from ..media import MediaController, require_multimedia
 
 if importlib.util.find_spec("PySide6.QtMultimediaWidgets") is not None:
@@ -178,6 +180,10 @@ class _PreviewFrame(QWidget):
 class PreviewWindow(QWidget):
     """Frameless preview surface that reuses the media controller API."""
 
+    _probe_executor: ThreadPoolExecutor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="preview-probe")
+    _native_size_probe_cache: dict[str, tuple[float, float]] = {}
+    _probe_result_ready = Signal(int, str, float, float)
+
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         require_multimedia()
         flags = (
@@ -195,6 +201,16 @@ class PreviewWindow(QWidget):
         self._corner_radius = PREVIEW_WINDOW_CORNER_RADIUS
         default_height = max(1, int(PREVIEW_WINDOW_DEFAULT_WIDTH * 9 / 16))
         self._content_size = QSize(PREVIEW_WINDOW_DEFAULT_WIDTH, default_height)
+        self._current_native_size = QSizeF()
+        self._anchor_rect: Optional[QRect] = None
+        self._anchor_point: Optional[QPoint] = None
+        self._aspect_ratio_hint: Optional[float] = None
+        self._native_size_seeded_from_probe = False
+        self._native_size_seeded = False
+        self._pending_orientation_flip: Optional[int] = None
+        self._active_probe_request_id = 0
+        self._active_source_key = ""
+        self._probe_future: Optional[Future[tuple[float, float]]] = None
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(
@@ -222,36 +238,44 @@ class PreviewWindow(QWidget):
         self._media = MediaController(self)
         self._media.set_video_output(self._frame.video_item())
         self._media.set_muted(PREVIEW_WINDOW_MUTED)
+        self._frame.video_item().nativeSizeChanged.connect(self._on_native_size_changed)
 
         self._close_timer = QTimer(self)
         self._close_timer.setSingleShot(True)
         self._close_timer.timeout.connect(self._do_close)
+        self._probe_result_ready.connect(self._on_probe_result_ready)
         self.hide()
 
-    def show_preview(self, source: Path | str, at: Optional[QRect | QPoint] = None) -> None:
+    def show_preview(
+        self,
+        source: Path | str,
+        at: Optional[QRect | QPoint] = None,
+        *,
+        aspect_ratio_hint: Optional[float] = None,
+    ) -> None:
         """Display *source* near *at* and start playback immediately."""
 
         path = Path(source)
         self._close_timer.stop()
         self._media.stop()
+        self._current_native_size = QSizeF()
+        self._native_size_seeded_from_probe = False
+        self._native_size_seeded = False
+        self._pending_orientation_flip = None
+        self._aspect_ratio_hint = None
+        self._active_probe_request_id += 1
+        self._active_source_key = str(path.resolve())
+        if isinstance(aspect_ratio_hint, (int, float)):
+            numeric = float(aspect_ratio_hint)
+            if numeric > 0.0:
+                self._aspect_ratio_hint = numeric
+                self._native_size_seeded = True
+        self._anchor_rect = at if isinstance(at, QRect) else None
+        self._anchor_point = at if isinstance(at, QPoint) else None
+        self._prime_native_size_async(path, request_id=self._active_probe_request_id)
         self._media.load(path)
 
-        if isinstance(at, QRect):
-            width = max(PREVIEW_WINDOW_DEFAULT_WIDTH, at.width())
-            height = max(int(width * 9 / 16), at.height())
-            width = max(width, int(height * 16 / 9))
-            self._apply_content_size(width, height)
-            center = at.center()
-            origin = QPoint(center.x() - self.width() // 2, center.y() - self.height() // 2)
-            origin = self._clamp_to_screen(origin)
-            self.move(origin)
-        else:
-            width = PREVIEW_WINDOW_DEFAULT_WIDTH
-            height = max(1, int(width * 9 / 16))
-            self._apply_content_size(width, height)
-            if isinstance(at, QPoint):
-                origin = self._clamp_to_screen(at)
-                self.move(origin)
+        self._apply_layout_for_anchor()
 
         self.show()
         self.raise_()
@@ -294,3 +318,158 @@ class PreviewWindow(QWidget):
         if self.size() != QSize(total_width, total_height):
             self.resize(total_width, total_height)
         self._frame.set_corner_radius(self._corner_radius)
+
+    def _effective_aspect_ratio(self) -> float:
+        native_width = float(self._current_native_size.width())
+        native_height = float(self._current_native_size.height())
+        if native_width > 0.0 and native_height > 0.0:
+            return native_width / native_height
+        if self._aspect_ratio_hint is not None and self._aspect_ratio_hint > 0.0:
+            return self._aspect_ratio_hint
+        return 16.0 / 9.0
+
+    def _size_for_aspect(self, max_dimension: int, aspect_ratio: float) -> QSize:
+        base = max(1, int(max_dimension))
+        aspect = max(0.01, float(aspect_ratio))
+        if aspect >= 1.0:
+            width = base
+            height = max(1, int(round(width / aspect)))
+        else:
+            height = base
+            width = max(1, int(round(height * aspect)))
+        return QSize(width, height)
+
+    def _apply_layout_for_anchor(self) -> None:
+        aspect_ratio = self._effective_aspect_ratio()
+        if self._anchor_rect is not None:
+            base_dimension = max(
+                PREVIEW_WINDOW_DEFAULT_WIDTH,
+                self._anchor_rect.width(),
+                self._anchor_rect.height(),
+            )
+            content_size = self._size_for_aspect(base_dimension, aspect_ratio)
+            self._apply_content_size(content_size.width(), content_size.height())
+            center = self._anchor_rect.center()
+            origin = QPoint(center.x() - self.width() // 2, center.y() - self.height() // 2)
+            self.move(self._clamp_to_screen(origin))
+            return
+
+        content_size = self._size_for_aspect(PREVIEW_WINDOW_DEFAULT_WIDTH, aspect_ratio)
+        self._apply_content_size(content_size.width(), content_size.height())
+        if self._anchor_point is not None:
+            self.move(self._clamp_to_screen(self._anchor_point))
+
+    def _on_native_size_changed(self, size: QSizeF) -> None:
+        if size.width() <= 0.0 or size.height() <= 0.0:
+            return
+        if self._current_native_size == size:
+            return
+        candidate_aspect = float(size.width()) / float(size.height())
+        current_w = float(self._current_native_size.width())
+        current_h = float(self._current_native_size.height())
+        current_aspect = (current_w / current_h) if (current_w > 0.0 and current_h > 0.0) else None
+
+        def _orientation(aspect: float) -> int:
+            if aspect < 0.95:
+                return -1  # portrait
+            if aspect > 1.05:
+                return 1  # landscape
+            return 0  # near-square / unknown
+
+        if self._native_size_seeded and current_aspect is not None:
+            current_orientation = _orientation(current_aspect)
+            candidate_orientation = _orientation(candidate_aspect)
+            if current_orientation != 0 and candidate_orientation != 0:
+                if current_orientation != candidate_orientation:
+                    # Guard against one-off orientation flips reported by some
+                    # backends (e.g. portrait → temporary landscape → portrait).
+                    if self._pending_orientation_flip != candidate_orientation:
+                        self._pending_orientation_flip = candidate_orientation
+                        return
+                else:
+                    self._pending_orientation_flip = None
+
+        if self._native_size_seeded_from_probe:
+            if current_aspect is not None:
+                candidate_is_square = 0.9 <= candidate_aspect <= 1.1
+                current_is_square = 0.9 <= current_aspect <= 1.1
+                # Some multimedia backends briefly report a square native size
+                # before stabilising to the true rotated dimensions. When a
+                # probe-derived size is already available, ignore this transient
+                # square update to prevent a visible "square flash".
+                if candidate_is_square and not current_is_square:
+                    return
+            self._native_size_seeded_from_probe = False
+        self._native_size_seeded = False
+        self._pending_orientation_flip = None
+        self._current_native_size = QSizeF(size)
+        self._apply_layout_for_anchor()
+
+    def _prime_native_size_async(self, source: Path, *, request_id: int) -> None:
+        """Seed preview size using cached/async ffprobe metadata when available."""
+
+        source_key = str(source.resolve())
+        cached_size = self._native_size_probe_cache.get(source_key)
+        if cached_size is not None:
+            cached_width, cached_height = cached_size
+            if cached_width > 0.0 and cached_height > 0.0:
+                self._current_native_size = QSizeF(cached_width, cached_height)
+                self._native_size_seeded_from_probe = True
+                self._native_size_seeded = True
+                return
+
+        self._probe_future = self._probe_executor.submit(self._probe_native_size, source)
+        self._probe_future.add_done_callback(
+            lambda future, rid=request_id, sk=source_key: self._on_probe_future_done(
+                request_id=rid,
+                source_key=sk,
+                future=future,
+            )
+        )
+
+    @staticmethod
+    def _probe_native_size(source: Path) -> tuple[float, float]:
+        """Return display dimensions inferred from ffprobe metadata."""
+
+        cw_degrees, raw_width, raw_height = probe_video_rotation(source)
+        if raw_width <= 0 or raw_height <= 0:
+            return (0.0, 0.0)
+        if cw_degrees in (90, 270):
+            display_width = raw_height
+            display_height = raw_width
+        else:
+            display_width = raw_width
+            display_height = raw_height
+        return (float(display_width), float(display_height))
+
+    def _on_probe_future_done(
+        self,
+        *,
+        request_id: int,
+        source_key: str,
+        future: Future[tuple[float, float]],
+    ) -> None:
+        try:
+            display_width, display_height = future.result()
+        except Exception:
+            display_width, display_height = 0.0, 0.0
+        self._probe_result_ready.emit(request_id, source_key, display_width, display_height)
+
+    def _on_probe_result_ready(
+        self,
+        request_id: int,
+        source_key: str,
+        display_width: float,
+        display_height: float,
+    ) -> None:
+        if request_id != self._active_probe_request_id:
+            return
+        if source_key != self._active_source_key:
+            return
+        if display_width <= 0.0 or display_height <= 0.0:
+            return
+        self._native_size_probe_cache[source_key] = (display_width, display_height)
+        self._current_native_size = QSizeF(display_width, display_height)
+        self._native_size_seeded_from_probe = True
+        self._native_size_seeded = True
+        self._apply_layout_for_anchor()

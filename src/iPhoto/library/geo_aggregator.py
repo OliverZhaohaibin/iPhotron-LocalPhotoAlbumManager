@@ -45,6 +45,12 @@ class GeotaggedAsset:
     location_name: Optional[str]
     """Human-readable label derived from the asset's GPS coordinate."""
 
+    live_photo_group_id: Optional[str]
+    """Stable identifier linking the still image to its paired motion asset."""
+
+    live_partner_rel: Optional[str]
+    """Library-relative path of the paired motion file when known."""
+
 
 class GeoAggregatorMixin:
     """Mixin providing geotagged asset collection for LibraryManager."""
@@ -125,6 +131,27 @@ class GeoAggregatorMixin:
                 duration_value: Optional[float] = float(duration)
             else:
                 duration_value = None
+            live_role_raw = row.get("live_role")
+            live_role = int(live_role_raw) if isinstance(live_role_raw, (int, float)) else 0
+            # Keep only visible rows to mirror regular gallery queries.
+            # Hidden motion components (live_role != 0) must not be shown as
+            # standalone assets in the location cluster gallery.
+            if live_role != 0:
+                continue
+
+            live_group_raw = row.get("live_photo_group_id")
+            live_group_id = (
+                str(live_group_raw).strip()
+                if isinstance(live_group_raw, str) and live_group_raw.strip()
+                else None
+            )
+            partner_raw = row.get("live_partner_rel")
+            live_partner_rel = (
+                str(partner_raw).strip()
+                if isinstance(partner_raw, str) and partner_raw.strip()
+                else None
+            )
+
             assets.append(
                 GeotaggedAsset(
                     library_relative=library_relative_str,
@@ -139,6 +166,8 @@ class GeoAggregatorMixin:
                     still_image_time=still_image_value,
                     duration=duration_value,
                     location_name=location_name,
+                    live_photo_group_id=live_group_id,
+                    live_partner_rel=live_partner_rel,
                 )
             )
 

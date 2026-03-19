@@ -195,6 +195,9 @@ class PreviewWindow(QWidget):
         self._corner_radius = PREVIEW_WINDOW_CORNER_RADIUS
         default_height = max(1, int(PREVIEW_WINDOW_DEFAULT_WIDTH * 9 / 16))
         self._content_size = QSize(PREVIEW_WINDOW_DEFAULT_WIDTH, default_height)
+        self._current_native_size = QSizeF()
+        self._anchor_rect: Optional[QRect] = None
+        self._anchor_point: Optional[QPoint] = None
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(
@@ -222,6 +225,7 @@ class PreviewWindow(QWidget):
         self._media = MediaController(self)
         self._media.set_video_output(self._frame.video_item())
         self._media.set_muted(PREVIEW_WINDOW_MUTED)
+        self._frame.video_item().nativeSizeChanged.connect(self._on_native_size_changed)
 
         self._close_timer = QTimer(self)
         self._close_timer.setSingleShot(True)
@@ -234,24 +238,12 @@ class PreviewWindow(QWidget):
         path = Path(source)
         self._close_timer.stop()
         self._media.stop()
+        self._current_native_size = QSizeF()
+        self._anchor_rect = at if isinstance(at, QRect) else None
+        self._anchor_point = at if isinstance(at, QPoint) else None
         self._media.load(path)
 
-        if isinstance(at, QRect):
-            width = max(PREVIEW_WINDOW_DEFAULT_WIDTH, at.width())
-            height = max(int(width * 9 / 16), at.height())
-            width = max(width, int(height * 16 / 9))
-            self._apply_content_size(width, height)
-            center = at.center()
-            origin = QPoint(center.x() - self.width() // 2, center.y() - self.height() // 2)
-            origin = self._clamp_to_screen(origin)
-            self.move(origin)
-        else:
-            width = PREVIEW_WINDOW_DEFAULT_WIDTH
-            height = max(1, int(width * 9 / 16))
-            self._apply_content_size(width, height)
-            if isinstance(at, QPoint):
-                origin = self._clamp_to_screen(at)
-                self.move(origin)
+        self._apply_layout_for_anchor()
 
         self.show()
         self.raise_()
@@ -294,3 +286,49 @@ class PreviewWindow(QWidget):
         if self.size() != QSize(total_width, total_height):
             self.resize(total_width, total_height)
         self._frame.set_corner_radius(self._corner_radius)
+
+    def _effective_aspect_ratio(self) -> float:
+        native_width = float(self._current_native_size.width())
+        native_height = float(self._current_native_size.height())
+        if native_width > 0.0 and native_height > 0.0:
+            return native_width / native_height
+        return 16.0 / 9.0
+
+    def _size_for_aspect(self, max_dimension: int, aspect_ratio: float) -> QSize:
+        base = max(1, int(max_dimension))
+        aspect = max(0.01, float(aspect_ratio))
+        if aspect >= 1.0:
+            width = base
+            height = max(1, int(round(width / aspect)))
+        else:
+            height = base
+            width = max(1, int(round(height * aspect)))
+        return QSize(width, height)
+
+    def _apply_layout_for_anchor(self) -> None:
+        aspect_ratio = self._effective_aspect_ratio()
+        if self._anchor_rect is not None:
+            base_dimension = max(
+                PREVIEW_WINDOW_DEFAULT_WIDTH,
+                self._anchor_rect.width(),
+                self._anchor_rect.height(),
+            )
+            content_size = self._size_for_aspect(base_dimension, aspect_ratio)
+            self._apply_content_size(content_size.width(), content_size.height())
+            center = self._anchor_rect.center()
+            origin = QPoint(center.x() - self.width() // 2, center.y() - self.height() // 2)
+            self.move(self._clamp_to_screen(origin))
+            return
+
+        content_size = self._size_for_aspect(PREVIEW_WINDOW_DEFAULT_WIDTH, aspect_ratio)
+        self._apply_content_size(content_size.width(), content_size.height())
+        if self._anchor_point is not None:
+            self.move(self._clamp_to_screen(self._anchor_point))
+
+    def _on_native_size_changed(self, size: QSizeF) -> None:
+        if size.width() <= 0.0 or size.height() <= 0.0:
+            return
+        if self._current_native_size == size:
+            return
+        self._current_native_size = QSizeF(size)
+        self._apply_layout_for_anchor()

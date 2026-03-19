@@ -199,6 +199,7 @@ class PreviewWindow(QWidget):
         self._current_native_size = QSizeF()
         self._anchor_rect: Optional[QRect] = None
         self._anchor_point: Optional[QPoint] = None
+        self._native_size_seeded_from_probe = False
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(
@@ -240,6 +241,7 @@ class PreviewWindow(QWidget):
         self._close_timer.stop()
         self._media.stop()
         self._current_native_size = QSizeF()
+        self._native_size_seeded_from_probe = False
         self._anchor_rect = at if isinstance(at, QRect) else None
         self._anchor_point = at if isinstance(at, QPoint) else None
         self._prime_native_size_from_probe(path)
@@ -332,6 +334,21 @@ class PreviewWindow(QWidget):
             return
         if self._current_native_size == size:
             return
+        if self._native_size_seeded_from_probe:
+            candidate_aspect = float(size.width()) / float(size.height())
+            current_w = float(self._current_native_size.width())
+            current_h = float(self._current_native_size.height())
+            if current_w > 0.0 and current_h > 0.0:
+                current_aspect = current_w / current_h
+                candidate_is_square = 0.9 <= candidate_aspect <= 1.1
+                current_is_square = 0.9 <= current_aspect <= 1.1
+                # Some multimedia backends briefly report a square native size
+                # before stabilising to the true rotated dimensions. When a
+                # probe-derived size is already available, ignore this transient
+                # square update to prevent a visible "square flash".
+                if candidate_is_square and not current_is_square:
+                    return
+            self._native_size_seeded_from_probe = False
         self._current_native_size = QSizeF(size)
         self._apply_layout_for_anchor()
 
@@ -348,3 +365,4 @@ class PreviewWindow(QWidget):
             display_width = raw_width
             display_height = raw_height
         self._current_native_size = QSizeF(float(display_width), float(display_height))
+        self._native_size_seeded_from_probe = True

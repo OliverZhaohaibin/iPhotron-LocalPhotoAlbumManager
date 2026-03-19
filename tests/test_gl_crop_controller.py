@@ -1,7 +1,9 @@
-
-import pytest
 from unittest.mock import MagicMock
+
+from PySide6.QtCore import QPointF
+
 from iPhoto.gui.ui.widgets.gl_crop.controller import CropInteractionController
+
 
 def create_controller():
     texture_provider = MagicMock(return_value=(300, 200))
@@ -20,6 +22,7 @@ def create_controller():
         on_cursor_change=MagicMock(),
         on_request_update=on_update,
     )
+
 
 def test_update_perspective_applies_new_crop_on_rotation_change():
     controller = create_controller()
@@ -42,6 +45,7 @@ def test_update_perspective_applies_new_crop_on_rotation_change():
     assert state.cx == 0.8
     assert controller._model._rotate_steps == 1
 
+
 def test_update_perspective_ignores_new_crop_if_rotation_unchanged_and_active():
     controller = create_controller()
     controller.update_perspective(0, 0, 0, 0, False)
@@ -60,6 +64,8 @@ def test_update_perspective_ignores_new_crop_if_rotation_unchanged_and_active():
     # Verify IGNORED (because active)
     state = controller.get_crop_state()
     assert state.cx == 0.5
+    controller.set_active(False)
+
 
 def test_update_perspective_applies_new_crop_if_inactive():
     controller = create_controller()
@@ -82,3 +88,12 @@ def test_update_perspective_applies_new_crop_if_inactive():
     state = controller.get_crop_state()
     assert state.cx == 0.1
     assert state.width == 0.1
+
+
+def test_animation_frame_ignores_invalid_transform_geometry():
+    controller = create_controller()
+    controller._on_request_update.reset_mock()
+
+    controller._on_animation_frame(1.0, QPointF(10, 10))
+
+    controller._on_request_update.assert_not_called()

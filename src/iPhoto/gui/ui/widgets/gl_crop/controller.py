@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import math
+import numbers
 from collections.abc import Callable, Mapping
 
 from PySide6.QtCore import QObject, QPointF, Qt
@@ -27,6 +28,32 @@ _LOGGER = logging.getLogger(__name__)
 _MIN_DIMENSION_EPSILON = 1e-9
 # Tolerance for floating-point aspect-ratio comparison.
 _ASPECT_RATIO_TOLERANCE = 1e-6
+
+
+def _coerce_real(value: object, default: float) -> float:
+    """Return *value* as a finite float-like number or *default*."""
+
+    if isinstance(value, numbers.Real) and not isinstance(value, bool):
+        return float(value)
+    return float(default)
+
+
+def _coerce_real_pair(value: object) -> tuple[float, float] | None:
+    """Return a numeric pair from *value* when possible."""
+
+    if not isinstance(value, tuple) or len(value) != 2:
+        return None
+
+    first, second = value
+    if (
+        not isinstance(first, numbers.Real)
+        or isinstance(first, bool)
+        or not isinstance(second, numbers.Real)
+        or isinstance(second, bool)
+    ):
+        return None
+
+    return float(first), float(second)
 
 
 def _fit_crop_aspect(
@@ -536,7 +563,7 @@ class CropInteractionController:
         target_scale = self._target_scale_for_crop()
         crop_state = self._model.get_crop_state()
         target_center = crop_state.center_pixels(tex_w, tex_h)
-        start_scale = self._transform_controller.get_effective_scale()
+        start_scale = _coerce_real(self._transform_controller.get_effective_scale(), 1.0)
         start_center = self._transform_controller.get_image_center_pixels()
 
         self._animator.start_animation(
@@ -550,12 +577,17 @@ class CropInteractionController:
         if tex_w <= 0 or tex_h <= 0:
             return
 
-        vw, vh = self._transform_controller._get_view_dimensions_device_px()
-        fit_w, fit_h = self._transform_controller._get_fit_texture_size()
+        view_dims = _coerce_real_pair(self._transform_controller._get_view_dimensions_device_px())
+        fit_size = _coerce_real_pair(self._transform_controller._get_fit_texture_size())
+        if view_dims is None or fit_size is None:
+            return
+
+        vw, vh = view_dims
+        fit_w, fit_h = fit_size
         tex_size = (int(fit_w), int(fit_h))
         base_scale = compute_fit_to_view_scale(tex_size, vw, vh)
-        min_zoom = self._transform_controller.minimum_zoom()
-        max_zoom = self._transform_controller.maximum_zoom()
+        min_zoom = _coerce_real(self._transform_controller.minimum_zoom(), 0.1)
+        max_zoom = _coerce_real(self._transform_controller.maximum_zoom(), 16.0)
         zoom_factor = max(min_zoom, min(max_zoom, scale / max(base_scale, 1e-6)))
         self._transform_controller.set_zoom_factor_direct(zoom_factor)
         actual_scale = self._transform_controller.get_effective_scale()
@@ -571,25 +603,25 @@ class CropInteractionController:
         """Calculate the target scale for crop fade-out animation."""
         tex_w, tex_h = self._texture_size_provider()
         if tex_w <= 0 or tex_h <= 0:
-            return self._transform_controller.get_effective_scale()
+            return _coerce_real(self._transform_controller.get_effective_scale(), 1.0)
 
-        view_dims = self._transform_controller._get_view_dimensions_device_px()
-        if not isinstance(view_dims, tuple) or len(view_dims) != 2:
-            return self._transform_controller.get_effective_scale()
+        view_dims = _coerce_real_pair(self._transform_controller._get_view_dimensions_device_px())
+        if view_dims is None:
+            return _coerce_real(self._transform_controller.get_effective_scale(), 1.0)
         vw, vh = view_dims
         crop_state = self._model.get_crop_state()
         crop_rect = crop_state.to_pixel_rect(tex_w, tex_h)
         crop_width = max(1.0, crop_rect["right"] - crop_rect["left"])
         crop_height = max(1.0, crop_rect["bottom"] - crop_rect["top"])
-        padding = 20.0 * self._transform_controller._get_dpr()
+        padding = 20.0 * _coerce_real(self._transform_controller._get_dpr(), 1.0)
         available_w = max(1.0, vw - padding * 2.0)
         available_h = max(1.0, vh - padding * 2.0)
         scale_w = available_w / crop_width
         scale_h = available_h / crop_height
         target_scale = min(scale_w, scale_h)
         base_scale = compute_fit_to_view_scale((tex_w, tex_h), vw, vh)
-        min_scale = base_scale * self._transform_controller.minimum_zoom()
-        max_scale = base_scale * self._transform_controller.maximum_zoom()
+        min_scale = base_scale * _coerce_real(self._transform_controller.minimum_zoom(), 0.1)
+        max_scale = base_scale * _coerce_real(self._transform_controller.maximum_zoom(), 16.0)
         return max(min_scale, min(max_scale, target_scale))
 
     # ------------------------------------------------------------------

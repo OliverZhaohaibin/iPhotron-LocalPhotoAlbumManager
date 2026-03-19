@@ -1,5 +1,7 @@
 """Tests for the gl_crop CropAnimator module."""
 
+from unittest.mock import MagicMock
+
 import pytest
 from PySide6.QtCore import QPointF
 
@@ -104,3 +106,27 @@ def test_animator_animation_duration(mock_callbacks):
         duration=0.0,  # Zero duration
     )
     assert animator.is_animating()
+
+
+def test_animator_coerces_invalid_centers(mock_callbacks):
+    """Non-Qt test doubles should not crash animation startup."""
+    from iPhoto.gui.ui.widgets.gl_crop.animator import CropAnimator
+
+    animator = CropAnimator(
+        on_idle_timeout=mock_callbacks.on_idle,
+        on_animation_frame=mock_callbacks.on_frame,
+        on_animation_complete=mock_callbacks.on_complete,
+    )
+
+    animator.start_animation(
+        start_scale=1.0,
+        target_scale=2.0,
+        start_center=MagicMock(),
+        target_center=MagicMock(),
+        duration=0.3,
+    )
+
+    assert animator.is_animating()
+    assert animator._anim_start_center == QPointF()
+    assert animator._anim_target_center == QPointF()
+    animator.stop_animation()

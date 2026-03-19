@@ -33,6 +33,15 @@ from iPhoto.gui.ui.widgets.video_renderer_widget import (
 )
 
 
+def _set_rotation_180(fmt: QVideoFrameFormat) -> None:
+    """Set 180° rotation in a Qt-version-compatible way."""
+    rot_enum = getattr(QVideoFrameFormat, "Rotation", None)
+    if rot_enum is not None and hasattr(rot_enum, "Clockwise180"):
+        fmt.setRotation(rot_enum.Clockwise180)
+    else:
+        fmt.setRotation(180)
+
+
 @pytest.fixture
 def qapp():
     """Create QApplication instance for Qt tests."""
@@ -205,7 +214,7 @@ class TestVideoRendererWidget:
         fmt = QVideoFrameFormat(
             QSize(1280, 720), QVideoFrameFormat.PixelFormat.Format_RGBA8888
         )
-        fmt.setRotation(QVideoFrameFormat.Rotation.Clockwise180)
+        _set_rotation_180(fmt)
         frame = QVideoFrame(fmt)
         w.update_frame(frame)
 
@@ -228,7 +237,7 @@ class TestVideoRendererWidget:
         fmt = QVideoFrameFormat(
             QSize(1280, 720), QVideoFrameFormat.PixelFormat.Format_RGBA8888
         )
-        fmt.setRotation(QVideoFrameFormat.Rotation.Clockwise180)
+        _set_rotation_180(fmt)
         frame = QVideoFrame(fmt)
         w.update_frame(frame)
 
@@ -251,7 +260,7 @@ class TestVideoRendererWidget:
         fmt = QVideoFrameFormat(
             QSize(1280, 720), QVideoFrameFormat.PixelFormat.Format_RGBA8888
         )
-        fmt.setRotation(QVideoFrameFormat.Rotation.Clockwise180)
+        _set_rotation_180(fmt)
         frame = QVideoFrame(fmt)
         w.update_frame(frame)
 

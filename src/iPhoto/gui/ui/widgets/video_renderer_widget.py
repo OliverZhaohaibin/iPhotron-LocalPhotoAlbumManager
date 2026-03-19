@@ -279,6 +279,10 @@ class VideoRendererWidget(QRhiWidget):
         self._container_raw_h = raw_h
         self._container_linux_180_hint = bool(linux_180_hint)
 
+    def set_linux_180_hint(self, enabled: bool) -> None:
+        """Set whether Linux 180° pre-rotation workaround is hinted."""
+        self._container_linux_180_hint = bool(enabled)
+
     def update_frame(self, frame: "QVideoFrame") -> None:
         """Accept a new video frame and schedule a repaint."""
         if frame is None or not frame.isValid():

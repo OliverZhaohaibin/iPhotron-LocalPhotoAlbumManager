@@ -24,6 +24,7 @@ except Exception:  # pragma: no cover - OpenCV not available or broken
     cv2 = None  # type: ignore[assignment]
 
 _FFMPEG_LOG_LEVEL = "error"
+_LINUX_180_HINT_CACHE: dict[str, bool] = {}
 
 
 def _run_command(command: Sequence[str]) -> subprocess.CompletedProcess[bytes]:
@@ -422,6 +423,7 @@ def probe_video_rotation_info(source: Path) -> tuple[int, int, int, bool]:
 
             linux_180_hint = (major_brand == "qt") or ("core media video" in handler_name)
 
+        _LINUX_180_HINT_CACHE[str(source.resolve())] = linux_180_hint
         return (cw, raw_w, raw_h, linux_180_hint)
 
     return (0, 0, 0, False)
@@ -432,6 +434,12 @@ def probe_video_rotation(source: Path) -> tuple[int, int, int]:
 
     cw, raw_w, raw_h, _ = probe_video_rotation_info(source)
     return (cw, raw_w, raw_h)
+
+
+def get_linux_180_prerotate_hint(source: Path) -> bool:
+    """Return the most recently probed Linux 180° hint for *source*."""
+
+    return _LINUX_180_HINT_CACHE.get(str(source.resolve()), False)
 
 
 def probe_media(source: Path) -> Dict[str, Any]:

@@ -201,6 +201,8 @@ class PreviewWindow(QWidget):
         self._anchor_point: Optional[QPoint] = None
         self._aspect_ratio_hint: Optional[float] = None
         self._native_size_seeded_from_probe = False
+        self._native_size_seeded = False
+        self._pending_orientation_flip: Optional[int] = None
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(
@@ -249,11 +251,14 @@ class PreviewWindow(QWidget):
         self._media.stop()
         self._current_native_size = QSizeF()
         self._native_size_seeded_from_probe = False
+        self._native_size_seeded = False
+        self._pending_orientation_flip = None
         self._aspect_ratio_hint = None
         if isinstance(aspect_ratio_hint, (int, float)):
             numeric = float(aspect_ratio_hint)
             if numeric > 0.0:
                 self._aspect_ratio_hint = numeric
+                self._native_size_seeded = True
         self._anchor_rect = at if isinstance(at, QRect) else None
         self._anchor_point = at if isinstance(at, QPoint) else None
         self._prime_native_size_from_probe(path)
@@ -348,12 +353,33 @@ class PreviewWindow(QWidget):
             return
         if self._current_native_size == size:
             return
+        candidate_aspect = float(size.width()) / float(size.height())
+        current_w = float(self._current_native_size.width())
+        current_h = float(self._current_native_size.height())
+        current_aspect = (current_w / current_h) if (current_w > 0.0 and current_h > 0.0) else None
+
+        def _orientation(aspect: float) -> int:
+            if aspect < 0.95:
+                return -1  # portrait
+            if aspect > 1.05:
+                return 1  # landscape
+            return 0  # near-square / unknown
+
+        if self._native_size_seeded and current_aspect is not None:
+            current_orientation = _orientation(current_aspect)
+            candidate_orientation = _orientation(candidate_aspect)
+            if current_orientation != 0 and candidate_orientation != 0:
+                if current_orientation != candidate_orientation:
+                    # Guard against one-off orientation flips reported by some
+                    # backends (e.g. portrait → temporary landscape → portrait).
+                    if self._pending_orientation_flip != candidate_orientation:
+                        self._pending_orientation_flip = candidate_orientation
+                        return
+                else:
+                    self._pending_orientation_flip = None
+
         if self._native_size_seeded_from_probe:
-            candidate_aspect = float(size.width()) / float(size.height())
-            current_w = float(self._current_native_size.width())
-            current_h = float(self._current_native_size.height())
-            if current_w > 0.0 and current_h > 0.0:
-                current_aspect = current_w / current_h
+            if current_aspect is not None:
                 candidate_is_square = 0.9 <= candidate_aspect <= 1.1
                 current_is_square = 0.9 <= current_aspect <= 1.1
                 # Some multimedia backends briefly report a square native size
@@ -363,6 +389,8 @@ class PreviewWindow(QWidget):
                 if candidate_is_square and not current_is_square:
                     return
             self._native_size_seeded_from_probe = False
+        self._native_size_seeded = False
+        self._pending_orientation_flip = None
         self._current_native_size = QSizeF(size)
         self._apply_layout_for_anchor()
 
@@ -380,3 +408,4 @@ class PreviewWindow(QWidget):
             display_height = raw_height
         self._current_native_size = QSizeF(float(display_width), float(display_height))
         self._native_size_seeded_from_probe = True
+        self._native_size_seeded = True

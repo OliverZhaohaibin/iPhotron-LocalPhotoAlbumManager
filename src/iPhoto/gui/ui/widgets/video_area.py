@@ -265,6 +265,19 @@ class VideoArea(QWidget):
 
     def play(self) -> None:
         """Start or resume playback."""
+        # If playback previously reached ``EndOfMedia`` we keep the last frame
+        # visible by stepping back a few milliseconds and pausing.  Pressing
+        # play again should restart from the beginning instead of resuming
+        # from that hold position.
+        duration = self._player.duration()
+        position = self._player.position()
+        hold_pos = max(0, duration - VIDEO_COMPLETE_HOLD_BACKSTEP_MS)
+        if (
+            duration > 0
+            and self._player.playbackState() == QMediaPlayer.PlaybackState.PausedState
+            and position >= hold_pos
+        ):
+            self._player.setPosition(0)
         self._player.play()
 
     def pause(self) -> None:

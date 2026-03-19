@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import logging
 import struct
+import sys
 from pathlib import Path
 from typing import Optional
 
@@ -309,6 +310,24 @@ class VideoRendererWidget(QRhiWidget):
                         and (raw_ar <= 0 or abs(frame_ar - raw_ar) >= 0.05)
                     ):
                         pre_rotated = True
+            elif container_rot == 180:
+                # 180° rotation keeps width/height unchanged, so dimension
+                # checks cannot detect pre-rotated frames.  On Linux backends
+                # (FFmpeg/GStreamer), some clips are already decoded upright
+                # while rotation metadata is still reported, which causes a
+                # double 180° flip if we apply container rotation again.
+                #
+                # Heuristic: when Qt still reports a 180° frame rotation on
+                # Linux, treat that combination as pre-rotated and skip the
+                # extra transform.
+                qt_rot = 0
+                rotation = fmt.rotation()
+                try:
+                    qt_rot = rotation.value if hasattr(rotation, "value") else int(rotation)
+                except (TypeError, ValueError):
+                    qt_rot = 0
+                if sys.platform.startswith("linux") and abs(qt_rot) % 360 == 180:
+                    pre_rotated = True
 
             rot_deg = 0 if pre_rotated else container_rot
         elif raw_w > 0:

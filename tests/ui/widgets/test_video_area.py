@@ -189,6 +189,24 @@ class TestVideoRendererWidget:
         # Pre-rotated → no additional rotation
         assert w._rotate90_steps == 0
 
+    def test_no_double_rotation_for_linux_180_prerotated(self, qapp, mocker):
+        """Linux-specific 180° clips should not be rotated twice."""
+        w = VideoRendererWidget()
+        w.set_container_rotation(180, 1280, 720)
+
+        mocker.patch("iPhoto.gui.ui.widgets.video_renderer_widget.sys.platform", "linux")
+
+        from PySide6.QtCore import QSize
+        fmt = QVideoFrameFormat(
+            QSize(1280, 720), QVideoFrameFormat.PixelFormat.Format_RGBA8888
+        )
+        fmt.setRotation(QVideoFrameFormat.Rotation.Clockwise180)
+        frame = QVideoFrame(fmt)
+        w.update_frame(frame)
+
+        # Heuristic should treat this as pre-rotated.
+        assert w._rotate90_steps == 0
+
     def test_no_fallback_when_no_container_rotation(self, qapp):
         """When container has no rotation, steps stay at 0."""
         w = VideoRendererWidget()
@@ -358,6 +376,29 @@ class TestVideoArea:
 
         mock_set_pos.assert_called_once_with(5000 - VIDEO_COMPLETE_HOLD_BACKSTEP_MS)
         mock_pause.assert_called_once()
+
+    def test_play_restarts_when_paused_on_end_hold_frame(self, qapp, mocker):
+        """Pressing play after auto-pause at the end should restart from 0."""
+        va = VideoArea()
+
+        mocker.patch.object(va._player, "duration", return_value=5000)
+        mocker.patch.object(
+            va._player,
+            "position",
+            return_value=5000 - VIDEO_COMPLETE_HOLD_BACKSTEP_MS,
+        )
+        mocker.patch.object(
+            va._player,
+            "playbackState",
+            return_value=QMediaPlayer.PlaybackState.PausedState,
+        )
+        mock_set_pos = mocker.patch.object(va._player, "setPosition")
+        mock_play = mocker.patch.object(va._player, "play")
+
+        va.play()
+
+        mock_set_pos.assert_called_once_with(0)
+        mock_play.assert_called_once()
 
     def test_load_video_clears_frame(self, qapp, mocker):
         """load_video should clear the renderer frame."""

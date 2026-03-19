@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+from concurrent.futures import Future, ThreadPoolExecutor
 import importlib.util
 from pathlib import Path
 from typing import Callable, Optional
 
-from PySide6.QtCore import QPoint, QRect, QRectF, QSize, QSizeF, Qt, QTimer
+from PySide6.QtCore import QPoint, QRect, QRectF, QSize, QSizeF, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QPainter, QPainterPath, QPen, QResizeEvent
 from PySide6.QtWidgets import (
     QFrame,
@@ -179,6 +180,10 @@ class _PreviewFrame(QWidget):
 class PreviewWindow(QWidget):
     """Frameless preview surface that reuses the media controller API."""
 
+    _probe_executor: ThreadPoolExecutor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="preview-probe")
+    _native_size_probe_cache: dict[str, tuple[float, float]] = {}
+    _probe_result_ready = Signal(int, str, float, float)
+
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         require_multimedia()
         flags = (
@@ -203,6 +208,9 @@ class PreviewWindow(QWidget):
         self._native_size_seeded_from_probe = False
         self._native_size_seeded = False
         self._pending_orientation_flip: Optional[int] = None
+        self._active_probe_request_id = 0
+        self._active_source_key = ""
+        self._probe_future: Optional[Future[tuple[float, float]]] = None
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(
@@ -235,6 +243,7 @@ class PreviewWindow(QWidget):
         self._close_timer = QTimer(self)
         self._close_timer.setSingleShot(True)
         self._close_timer.timeout.connect(self._do_close)
+        self._probe_result_ready.connect(self._on_probe_result_ready)
         self.hide()
 
     def show_preview(
@@ -254,6 +263,8 @@ class PreviewWindow(QWidget):
         self._native_size_seeded = False
         self._pending_orientation_flip = None
         self._aspect_ratio_hint = None
+        self._active_probe_request_id += 1
+        self._active_source_key = str(path.resolve())
         if isinstance(aspect_ratio_hint, (int, float)):
             numeric = float(aspect_ratio_hint)
             if numeric > 0.0:
@@ -261,7 +272,7 @@ class PreviewWindow(QWidget):
                 self._native_size_seeded = True
         self._anchor_rect = at if isinstance(at, QRect) else None
         self._anchor_point = at if isinstance(at, QPoint) else None
-        self._prime_native_size_from_probe(path)
+        self._prime_native_size_async(path, request_id=self._active_probe_request_id)
         self._media.load(path)
 
         self._apply_layout_for_anchor()
@@ -394,18 +405,71 @@ class PreviewWindow(QWidget):
         self._current_native_size = QSizeF(size)
         self._apply_layout_for_anchor()
 
-    def _prime_native_size_from_probe(self, source: Path) -> None:
-        """Seed preview size using ffprobe rotation metadata when available."""
+    def _prime_native_size_async(self, source: Path, *, request_id: int) -> None:
+        """Seed preview size using cached/async ffprobe metadata when available."""
+
+        source_key = str(source.resolve())
+        cached_size = self._native_size_probe_cache.get(source_key)
+        if cached_size is not None:
+            cached_width, cached_height = cached_size
+            if cached_width > 0.0 and cached_height > 0.0:
+                self._current_native_size = QSizeF(cached_width, cached_height)
+                self._native_size_seeded_from_probe = True
+                self._native_size_seeded = True
+                return
+
+        self._probe_future = self._probe_executor.submit(self._probe_native_size, source)
+        self._probe_future.add_done_callback(
+            lambda future, rid=request_id, sk=source_key: self._on_probe_future_done(
+                request_id=rid,
+                source_key=sk,
+                future=future,
+            )
+        )
+
+    @staticmethod
+    def _probe_native_size(source: Path) -> tuple[float, float]:
+        """Return display dimensions inferred from ffprobe metadata."""
 
         cw_degrees, raw_width, raw_height = probe_video_rotation(source)
         if raw_width <= 0 or raw_height <= 0:
-            return
+            return (0.0, 0.0)
         if cw_degrees in (90, 270):
             display_width = raw_height
             display_height = raw_width
         else:
             display_width = raw_width
             display_height = raw_height
-        self._current_native_size = QSizeF(float(display_width), float(display_height))
+        return (float(display_width), float(display_height))
+
+    def _on_probe_future_done(
+        self,
+        *,
+        request_id: int,
+        source_key: str,
+        future: Future[tuple[float, float]],
+    ) -> None:
+        try:
+            display_width, display_height = future.result()
+        except Exception:
+            display_width, display_height = 0.0, 0.0
+        self._probe_result_ready.emit(request_id, source_key, display_width, display_height)
+
+    def _on_probe_result_ready(
+        self,
+        request_id: int,
+        source_key: str,
+        display_width: float,
+        display_height: float,
+    ) -> None:
+        if request_id != self._active_probe_request_id:
+            return
+        if source_key != self._active_source_key:
+            return
+        if display_width <= 0.0 or display_height <= 0.0:
+            return
+        self._native_size_probe_cache[source_key] = (display_width, display_height)
+        self._current_native_size = QSizeF(display_width, display_height)
         self._native_size_seeded_from_probe = True
         self._native_size_seeded = True
+        self._apply_layout_for_anchor()

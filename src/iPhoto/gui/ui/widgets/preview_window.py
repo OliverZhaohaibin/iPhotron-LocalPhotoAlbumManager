@@ -24,6 +24,7 @@ from ....config import (
     PREVIEW_WINDOW_DEFAULT_WIDTH,
     PREVIEW_WINDOW_MUTED,
 )
+from ....utils.ffmpeg import probe_video_rotation
 from ..media import MediaController, require_multimedia
 
 if importlib.util.find_spec("PySide6.QtMultimediaWidgets") is not None:
@@ -241,6 +242,7 @@ class PreviewWindow(QWidget):
         self._current_native_size = QSizeF()
         self._anchor_rect = at if isinstance(at, QRect) else None
         self._anchor_point = at if isinstance(at, QPoint) else None
+        self._prime_native_size_from_probe(path)
         self._media.load(path)
 
         self._apply_layout_for_anchor()
@@ -332,3 +334,17 @@ class PreviewWindow(QWidget):
             return
         self._current_native_size = QSizeF(size)
         self._apply_layout_for_anchor()
+
+    def _prime_native_size_from_probe(self, source: Path) -> None:
+        """Seed preview size using ffprobe rotation metadata when available."""
+
+        cw_degrees, raw_width, raw_height = probe_video_rotation(source)
+        if raw_width <= 0 or raw_height <= 0:
+            return
+        if cw_degrees in (90, 270):
+            display_width = raw_height
+            display_height = raw_width
+        else:
+            display_width = raw_width
+            display_height = raw_height
+        self._current_native_size = QSizeF(float(display_width), float(display_height))

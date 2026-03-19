@@ -106,7 +106,7 @@ _RANGE_LIMITED = 0
 _RANGE_FULL = 1
 
 
-def _should_assume_linux_180_prerotated() -> bool:
+def _should_assume_linux_180_prerotated(container_hint: bool) -> bool:
     """Return whether Linux 180° streams should be treated as pre-rotated.
 
     ``QVideoFrameFormat.rotation()`` reports metadata, not post-decode pixel
@@ -119,7 +119,10 @@ def _should_assume_linux_180_prerotated() -> bool:
         return False
 
     backend = os.environ.get("QT_MEDIA_BACKEND", "").strip().lower()
-    if backend == "gstreamer":
+    if backend in {"gstreamer", "ffmpeg"}:
+        return True
+
+    if container_hint:
         return True
 
     forced = os.environ.get("IPHOTRON_ASSUME_LINUX_180_PREROTATED", "")
@@ -242,6 +245,7 @@ class VideoRendererWidget(QRhiWidget):
         self._container_rotation_cw: int = 0
         self._container_raw_w: int = 0
         self._container_raw_h: int = 0
+        self._container_linux_180_hint: bool = False
 
     # ------------------------------------------------------------------
     # Public API
@@ -251,6 +255,7 @@ class VideoRendererWidget(QRhiWidget):
         cw_degrees: int,
         raw_w: int,
         raw_h: int,
+        linux_180_hint: bool = False,
     ) -> None:
         """Store the container-level display-matrix rotation from ffprobe.
 
@@ -264,11 +269,15 @@ class VideoRendererWidget(QRhiWidget):
             These are used to detect whether the multimedia backend has
             already pre-rotated the decoded frames (by comparing against
             the frame dimensions reported by ``QVideoFrameFormat``).
+        linux_180_hint:
+            Optional probe hint for 180° clips that commonly arrive already
+            upright on Linux backends (e.g. some Apple QuickTime sources).
         """
 
         self._container_rotation_cw = cw_degrees
         self._container_raw_w = raw_w
         self._container_raw_h = raw_h
+        self._container_linux_180_hint = bool(linux_180_hint)
 
     def update_frame(self, frame: "QVideoFrame") -> None:
         """Accept a new video frame and schedule a repaint."""
@@ -348,7 +357,10 @@ class VideoRendererWidget(QRhiWidget):
                     qt_rot = rotation.value if hasattr(rotation, "value") else int(rotation)
                 except (TypeError, ValueError):
                     qt_rot = 0
-                if abs(qt_rot) % 360 == 180 and _should_assume_linux_180_prerotated():
+                if (
+                    abs(qt_rot) % 360 == 180
+                    and _should_assume_linux_180_prerotated(self._container_linux_180_hint)
+                ):
                     pre_rotated = True
 
             rot_deg = 0 if pre_rotated else container_rot
@@ -398,6 +410,7 @@ class VideoRendererWidget(QRhiWidget):
         self._container_rotation_cw = 0
         self._container_raw_w = 0
         self._container_raw_h = 0
+        self._container_linux_180_hint = False
         self._has_frame = False
         # Reset tracked texture formats so that the next video always
         # recreates textures with the correct format, even when the

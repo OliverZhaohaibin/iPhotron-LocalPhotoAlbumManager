@@ -47,7 +47,7 @@ from ....config import (
     PLAYER_FADE_OUT_MS,
     VIDEO_COMPLETE_HOLD_BACKSTEP_MS,
 )
-from ....utils.ffmpeg import probe_video_rotation
+from ....utils.ffmpeg import probe_video_rotation_info
 from .player_bar import PlayerBar
 from .video_renderer_widget import VideoRendererWidget
 from ..palette import viewer_surface_color
@@ -250,8 +250,8 @@ class VideoArea(QWidget):
         # *before* setting the source.  The renderer uses the probed value
         # as the primary rotation source (more reliable across platforms
         # than Qt's ``QVideoFrameFormat.rotation()``).
-        cw_deg, raw_w, raw_h = probe_video_rotation(path)
-        self._renderer.set_container_rotation(cw_deg, raw_w, raw_h)
+        cw_deg, raw_w, raw_h, linux_180_hint = probe_video_rotation_info(path)
+        self._renderer.set_container_rotation(cw_deg, raw_w, raw_h, linux_180_hint)
         if cw_deg:
             _log.debug(
                 "Container rotation for %s: %d° CW (raw %dx%d)",

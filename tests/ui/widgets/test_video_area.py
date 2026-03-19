@@ -235,6 +235,28 @@ class TestVideoRendererWidget:
         # No backend hint/override -> apply container 180° correction.
         assert w._rotate90_steps == 2
 
+    def test_linux_180_with_container_hint_skips_rotation(self, qapp, mocker):
+        """Container hint should allow Linux 180° pre-rotation detection."""
+        w = VideoRendererWidget()
+        w.set_container_rotation(180, 1280, 720, linux_180_hint=True)
+
+        mocker.patch("iPhoto.gui.ui.widgets.video_renderer_widget.sys.platform", "linux")
+        mocker.patch.dict(
+            "iPhoto.gui.ui.widgets.video_renderer_widget.os.environ",
+            {},
+            clear=True,
+        )
+
+        from PySide6.QtCore import QSize
+        fmt = QVideoFrameFormat(
+            QSize(1280, 720), QVideoFrameFormat.PixelFormat.Format_RGBA8888
+        )
+        fmt.setRotation(QVideoFrameFormat.Rotation.Clockwise180)
+        frame = QVideoFrame(fmt)
+        w.update_frame(frame)
+
+        assert w._rotate90_steps == 0
+
     def test_no_fallback_when_no_container_rotation(self, qapp):
         """When container has no rotation, steps stay at 0."""
         w = VideoRendererWidget()

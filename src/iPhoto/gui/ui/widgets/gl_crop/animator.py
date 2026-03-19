@@ -7,12 +7,45 @@ knowledge of the view transform or crop state.
 
 from __future__ import annotations
 
+import numbers
 import time
 from collections.abc import Callable
 
 from PySide6.QtCore import QObject, QPointF, QTimer
 
 from .utils import ease_out_cubic
+
+
+def _as_qpointf(value: object) -> QPointF:
+    """Return *value* as a ``QPointF`` or fall back to the origin."""
+
+    try:
+        return QPointF(value)
+    except TypeError:
+        pass
+
+    x_value = getattr(value, "x", None)
+    y_value = getattr(value, "y", None)
+    if callable(x_value):
+        try:
+            x_value = x_value()
+        except Exception:
+            x_value = None
+    if callable(y_value):
+        try:
+            y_value = y_value()
+        except Exception:
+            y_value = None
+
+    if (
+        isinstance(x_value, numbers.Real)
+        and not isinstance(x_value, bool)
+        and isinstance(y_value, numbers.Real)
+        and not isinstance(y_value, bool)
+    ):
+        return QPointF(float(x_value), float(y_value))
+
+    return QPointF()
 
 
 class CropAnimator:
@@ -108,8 +141,8 @@ class CropAnimator:
         self._anim_duration = max(0.0, float(duration))
         self._anim_start_scale = float(start_scale)
         self._anim_target_scale = float(target_scale)
-        self._anim_start_center = QPointF(start_center)
-        self._anim_target_center = QPointF(target_center)
+        self._anim_start_center = _as_qpointf(start_center)
+        self._anim_target_center = _as_qpointf(target_center)
         self._anim_timer.start()
 
     def _handle_idle_timeout(self) -> None:

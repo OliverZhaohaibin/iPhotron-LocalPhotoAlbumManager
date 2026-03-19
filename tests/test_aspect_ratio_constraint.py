@@ -168,6 +168,7 @@ class TestControllerLockedAspect:
         assert abs(pixel_aspect - 1.0) < 1e-4
         # The on_crop_changed callback should have been called
         ctrl._on_crop_changed_callback.assert_called()
+        ctrl.set_active(False)
 
     def test_set_locked_aspect_ratio_no_change_when_inactive(self):
         """When crop mode is not active, setting a ratio should only store it."""

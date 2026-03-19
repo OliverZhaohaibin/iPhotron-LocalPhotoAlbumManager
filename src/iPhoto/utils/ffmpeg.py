@@ -24,6 +24,7 @@ except Exception:  # pragma: no cover - OpenCV not available or broken
     cv2 = None  # type: ignore[assignment]
 
 _FFMPEG_LOG_LEVEL = "error"
+_LINUX_180_HINT_CACHE: dict[str, bool] = {}
 
 
 def _run_command(command: Sequence[str]) -> subprocess.CompletedProcess[bytes]:
@@ -344,28 +345,30 @@ def _extract_with_opencv(
         return None
 
 
-def probe_video_rotation(source: Path) -> tuple[int, int, int]:
-    """Return the display-matrix rotation and raw coded dimensions for *source*.
+def probe_video_rotation_info(source: Path) -> tuple[int, int, int, bool]:
+    """Return rotation/raw dimensions and Linux 180° pre-rotation hint.
 
-    Returns a tuple ``(cw_degrees, raw_width, raw_height)`` where
+    Returns a tuple ``(cw_degrees, raw_width, raw_height, linux_180_hint)`` where
     *cw_degrees* is the clockwise rotation (0, 90, 180, 270) that must be
     applied to the raw decoded frame for correct on-screen orientation.
     *raw_width* and *raw_height* are the coded pixel dimensions **before**
-    rotation.
+    rotation. *linux_180_hint* flags sources where Linux multimedia backends
+    are known to often deliver already-upright frames while preserving 180°
+    display-matrix metadata (notably some Apple QuickTime/iPhone files).
 
     The value is derived from the ``Display Matrix`` side-data entry of the
-    first video stream.  On failure the tuple ``(0, 0, 0)`` is returned so
+    first video stream.  On failure the tuple ``(0, 0, 0, False)`` is returned so
     callers can safely destructure without error handling.
     """
 
     try:
         meta = probe_media(source)
     except ExternalToolError:
-        return (0, 0, 0)
+        return (0, 0, 0, False)
 
     streams = meta.get("streams", [])
     if not isinstance(streams, list):
-        return (0, 0, 0)
+        return (0, 0, 0, False)
 
     for stream in streams:
         if not isinstance(stream, dict):
@@ -405,9 +408,38 @@ def probe_video_rotation(source: Path) -> tuple[int, int, int]:
         snapped = round(rotation / 90.0) * 90
         cw = int(-snapped) % 360
 
-        return (cw, raw_w, raw_h)
+        linux_180_hint = False
+        if cw == 180:
+            format_dict = meta.get("format", {})
+            fmt_tags = format_dict.get("tags", {}) if isinstance(format_dict, dict) else {}
+            major_brand = ""
+            if isinstance(fmt_tags, dict):
+                major_brand = str(fmt_tags.get("major_brand", "")).strip().lower()
 
-    return (0, 0, 0)
+            stream_tags = stream.get("tags", {})
+            handler_name = ""
+            if isinstance(stream_tags, dict):
+                handler_name = str(stream_tags.get("handler_name", "")).strip().lower()
+
+            linux_180_hint = (major_brand == "qt") or ("core media video" in handler_name)
+
+        _LINUX_180_HINT_CACHE[str(source.resolve())] = linux_180_hint
+        return (cw, raw_w, raw_h, linux_180_hint)
+
+    return (0, 0, 0, False)
+
+
+def probe_video_rotation(source: Path) -> tuple[int, int, int]:
+    """Return ``(cw_degrees, raw_width, raw_height)`` rotation info for *source*."""
+
+    cw, raw_w, raw_h, _ = probe_video_rotation_info(source)
+    return (cw, raw_w, raw_h)
+
+
+def get_linux_180_prerotate_hint(source: Path) -> bool:
+    """Return the most recently probed Linux 180° hint for *source*."""
+
+    return _LINUX_180_HINT_CACHE.get(str(source.resolve()), False)
 
 
 def probe_media(source: Path) -> Dict[str, Any]:

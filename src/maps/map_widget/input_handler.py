@@ -26,6 +26,13 @@ class InputHandler(QObject):
         self._last_mouse_pos = QPointF()
 
     # ------------------------------------------------------------------
+    def set_zoom_limits(self, minimum: float, maximum: float) -> None:
+        """Update the interactive zoom range used by wheel gestures."""
+
+        self._min_zoom = float(minimum)
+        self._max_zoom = float(maximum)
+
+    # ------------------------------------------------------------------
     def handle_mouse_press(self, event) -> None:
         """Start a drag gesture when the primary mouse button is pressed."""
 

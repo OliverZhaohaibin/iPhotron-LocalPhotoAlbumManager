@@ -21,8 +21,10 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import QApplication, QVBoxLayout, QWidget
 
+from maps.map_sources import MapSourceSpec, has_usable_osmand_default
 from maps.map_widget.map_gl_widget import MapGLWidget
 from maps.map_widget.map_widget import MapWidget
+from maps.map_widget.qt_location_map_widget import QtLocationMapWidget
 from maps.map_widget.map_renderer import CityAnnotation
 
 from ....library.manager import GeotaggedAsset
@@ -244,25 +246,52 @@ class PhotoMapView(QWidget):
     This enables O(1) gallery opening without additional database lookups.
     """
 
-    def __init__(self, parent: Optional[QWidget] = None) -> None:
+    def __init__(
+        self,
+        parent: Optional[QWidget] = None,
+        *,
+        map_source: MapSourceSpec | None = None,
+    ) -> None:
         super().__init__(parent)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
 
-        self._map_widget: MapWidget | MapGLWidget
+        self._map_widget: MapWidget | MapGLWidget | QtLocationMapWidget
 
-        if check_opengl_support():
-            # Prefer the GPU accelerated widget when the platform exposes the
-            # necessary OpenGL capabilities.  This dramatically improves pan and
-            # zoom smoothness for larger libraries.
-            self._map_widget = MapGLWidget(self)
-            logger.info("Photo map initialised with GPU acceleration enabled.")
+        if map_source is None:
+            if has_usable_osmand_default():
+                resolved_map_source = MapSourceSpec.default()
+                if check_opengl_support():
+                    self._map_widget = MapGLWidget(self, map_source=resolved_map_source)
+                    logger.info("Photo map initialised with the OsmAnd OBF backend (GPU).")
+                else:
+                    self._map_widget = MapWidget(self, map_source=resolved_map_source)
+                    logger.info("Photo map initialised with the OsmAnd OBF backend (CPU).")
+            else:
+                try:
+                    self._map_widget = QtLocationMapWidget(self)
+                    logger.info("Photo map initialised with Qt Location OSM backend.")
+                except Exception as exc:  # noqa: BLE001 - fall back gracefully
+                    logger.warning(
+                        "Qt Location backend unavailable, falling back to the legacy map widgets: %s",
+                        exc,
+                    )
+                    resolved_map_source = MapSourceSpec.legacy_default()
+                    if check_opengl_support():
+                        self._map_widget = MapGLWidget(self, map_source=resolved_map_source)
+                        logger.info("Photo map initialised with GPU acceleration enabled.")
+                    else:
+                        self._map_widget = MapWidget(self, map_source=resolved_map_source)
+                        logger.info("Photo map using CPU rendering because OpenGL is unavailable.")
         else:
-            # Fall back to the CPU implementation to keep the feature usable on
-            # systems where OpenGL is unavailable or unstable.
-            self._map_widget = MapWidget(self)
-            logger.info("Photo map using CPU rendering because OpenGL is unavailable.")
+            resolved_map_source = map_source
+            if check_opengl_support():
+                self._map_widget = MapGLWidget(self, map_source=resolved_map_source)
+                logger.info("Photo map initialised with GPU acceleration enabled.")
+            else:
+                self._map_widget = MapWidget(self, map_source=resolved_map_source)
+                logger.info("Photo map using CPU rendering because OpenGL is unavailable.")
         layout.addWidget(self._map_widget)
 
         self._overlay = _MarkerLayer(self)
@@ -277,6 +306,7 @@ class PhotoMapView(QWidget):
             self._thumbnail_loader,
             marker_size=self._overlay.marker_size,
             thumbnail_size=self._overlay.thumbnail_size,
+            provides_place_labels=self._map_widget.map_backend_metadata().provides_place_labels,
             parent=self,
         )
 
@@ -323,7 +353,7 @@ class PhotoMapView(QWidget):
 
         self.clusterActivated.emit(assets)
 
-    def map_widget(self) -> MapWidget | MapGLWidget:
+    def map_widget(self) -> MapWidget | MapGLWidget | QtLocationMapWidget:
         """Expose the underlying map widget for integration tests."""
 
         return self._map_widget
@@ -427,3 +457,4 @@ class PhotoMapView(QWidget):
 
 
 __all__ = ["PhotoMapView"]
+

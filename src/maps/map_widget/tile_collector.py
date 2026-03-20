@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import math
 
+from maps.tile_backend import TilePayload
+
 from .tile_manager import TileManager
 from .viewport import ViewState
 
@@ -12,7 +14,7 @@ def collect_tiles(
     view_state: ViewState,
     tile_manager: TileManager,
 ) -> tuple[
-    list[tuple[tuple[int, int, int], dict, float, float, int, int]],
+    list[tuple[tuple[int, int, int], TilePayload, float, float, int, int]],
     list[tuple[float, tuple[int, int, int]]],
 ]:
     """Gather tiles that intersect the viewport and schedule missing ones."""
@@ -26,7 +28,7 @@ def collect_tiles(
         (view_state.view_top_left_y + view_state.height) / view_state.scaled_tile_size
     )
 
-    tiles_to_draw: list[tuple[tuple[int, int, int], dict, float, float, int, int]] = []
+    tiles_to_draw: list[tuple[tuple[int, int, int], TilePayload, float, float, int, int]] = []
     tiles_to_request: list[tuple[float, tuple[int, int, int]]] = []
 
     for tile_y in range(start_tile_y, end_tile_y):

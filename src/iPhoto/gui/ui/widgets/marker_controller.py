@@ -12,6 +12,7 @@ from PySide6.QtGui import QPixmap
 
 from maps.map_widget.map_gl_widget import MapGLWidget
 from maps.map_widget.map_widget import MapWidget
+from maps.map_widget.qt_location_map_widget import QtLocationMapWidget
 from maps.map_widget.map_renderer import CityAnnotation
 
 from ....library.manager import GeotaggedAsset
@@ -271,11 +272,12 @@ class MarkerController(QObject):
 
     def __init__(
         self,
-        map_widget: MapWidget | MapGLWidget,
+        map_widget: MapWidget | MapGLWidget | QtLocationMapWidget,
         thumbnail_loader: ThumbnailLoader,
         *,
         marker_size: int,
         thumbnail_size: int,
+        provides_place_labels: bool = False,
         parent: Optional[QObject] = None,
     ) -> None:
         super().__init__(parent)
@@ -283,6 +285,7 @@ class MarkerController(QObject):
         self._thumbnail_loader = thumbnail_loader
         self._marker_size = int(marker_size)
         self._thumbnail_size = int(thumbnail_size)
+        self._provides_place_labels = bool(provides_place_labels)
         self._assets: list[GeotaggedAsset] = []
         self._library_root: Optional[Path] = None
         self._clusters: list[_MarkerCluster] = []
@@ -447,6 +450,12 @@ class MarkerController(QObject):
         self, clusters: Sequence[_MarkerCluster]
     ) -> None:
         """Publish city labels that correspond to the currently visible clusters."""
+
+        if self._provides_place_labels:
+            if self._city_annotations:
+                self._city_annotations = []
+                self.citiesUpdated.emit([])
+            return
 
         fetch_level = max(0, int(math.floor(self._view_zoom)))
         if fetch_level < self.CITY_LABEL_FETCH_LEVEL or not clusters:
@@ -624,3 +633,4 @@ class MarkerController(QObject):
         return math.hypot(a.x() - b.x(), a.y() - b.y())
 
 __all__ = ["MarkerController", "_MarkerCluster"]
+

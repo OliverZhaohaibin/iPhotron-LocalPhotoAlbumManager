@@ -9,8 +9,9 @@ from typing import Callable, Protocol, Sequence
 from PySide6.QtCore import QPointF, QTimer
 from PySide6.QtGui import QPainter
 
+from maps.map_sources import MapBackendMetadata, MapSourceSpec
 from maps.style_resolver import StyleLoadError, StyleResolver
-from maps.tile_parser import TileParser
+from maps.tile_backend import FallbackTileBackend, LegacyVectorBackend, OsmAndRasterBackend
 
 from .input_handler import InputHandler
 from .layer import LayerPlan
@@ -42,6 +43,9 @@ class SupportsMapViewport(Protocol):
     def setMinimumSize(self, width: int, height: int) -> None:  # pragma: no cover - Qt helper
         ...
 
+    def devicePixelRatioF(self) -> float:  # pragma: no cover - Qt helper
+        ...
+
 
 class MapWidgetBase(Protocol):
     """Structural typing hook used by ``main.py`` for widget factories."""
@@ -59,25 +63,22 @@ class MapWidgetBase(Protocol):
     def shutdown(self) -> None:  # pragma: no cover - interface definition only
         ...
 
+    def map_backend_metadata(self) -> MapBackendMetadata:  # pragma: no cover - interface definition only
+        ...
+
 
 class MapWidgetController:
     """Encapsulate rendering, tile management, and input handling logic."""
 
     TILE_SIZE = 256
-    # MapLibre's baked vector tiles only provide meaningful detail between zoom
-    # levels roughly two and six.  Clamping the interaction range keeps the
-    # world from repeating at extremely low zoom values while still allowing
-    # users to zoom in far enough to inspect individual countries and regions.
-    # A minimum zoom of ``2.0`` also guarantees the virtual map is taller than a
-    # typical desktop viewport so the poles never expose blank background
-    # padding.
-    MIN_ZOOM = 2.0
-    MAX_ZOOM = 8.5
+    DEFAULT_MIN_ZOOM = 2.0
+    DEFAULT_MAX_ZOOM = 19.0
 
     def __init__(
         self,
         widget: SupportsMapViewport,
         *,
+        map_source: MapSourceSpec | None = None,
         tile_root: Path | str = "tiles",
         style_path: Path | str = "style.json",
     ) -> None:
@@ -99,23 +100,25 @@ class MapWidgetController:
 
         package_root = Path(__file__).resolve().parent.parent
 
-        # ``PhotoMapView`` embeds the widget from inside the main desktop
-        # application where the current working directory differs from the
-        # standalone demo in ``maps/main.py``.  Resolving the asset paths against
-        # the package directory keeps the map functional regardless of where the
-        # process was started.
-        tile_root_path = Path(tile_root)
-        if not tile_root_path.is_absolute():
-            tile_root_path = package_root / tile_root_path
+        requested_source = self._resolve_source_spec(
+            package_root,
+            map_source=map_source,
+            tile_root=tile_root,
+            style_path=style_path,
+        )
+        legacy_source = self._resolve_legacy_source(package_root, requested_source)
 
-        style_path_obj = Path(style_path)
-        if not style_path_obj.is_absolute():
-            style_path_obj = package_root / style_path_obj
+        self._legacy_backend = LegacyVectorBackend(legacy_source)
+        if requested_source.kind == "osmand_obf":
+            self._tile_backend = FallbackTileBackend(
+                OsmAndRasterBackend(requested_source),
+                self._legacy_backend,
+            )
+        else:
+            self._tile_backend = self._legacy_backend
 
-        # ``TileParser`` performs the expensive vector tile decoding while the
-        # style resolver exposes drawing instructions taken from ``style.json``.
-        self._tile_parser = TileParser(tile_root_path)
-        self._style = StyleResolver(style_path_obj)
+        self._backend_metadata = self._tile_backend.probe()
+        self._style = StyleResolver(self._legacy_backend.style_path)
 
         definitions = self._style.vector_layer_definitions()
         if not definitions:
@@ -136,7 +139,7 @@ class MapWidgetController:
         # Parenting the helper ``QObject`` instances to the widget guarantees
         # they share its lifetime and prevents premature destruction when the
         # surrounding UI is replaced.
-        self._tile_manager = TileManager(self._tile_parser, cache_limit=256, parent=self._widget)
+        self._tile_manager = TileManager(self._tile_backend, cache_limit=256, parent=self._widget)
         self._renderer = MapRenderer(
             style=self._style,
             tile_manager=self._tile_manager,
@@ -145,8 +148,8 @@ class MapWidgetController:
         )
         self._renderer.set_cities([])
         self._input_handler = InputHandler(
-            min_zoom=self.MIN_ZOOM,
-            max_zoom=self.MAX_ZOOM,
+            min_zoom=self._backend_metadata.min_zoom,
+            max_zoom=self._backend_metadata.max_zoom,
             parent=self._widget,
         )
 
@@ -169,8 +172,13 @@ class MapWidgetController:
 
         self._center_x = 0.5
         self._center_y = 0.5
-        self._zoom = 2.0
+        self._min_zoom = float(self._backend_metadata.min_zoom)
+        self._max_zoom = float(self._backend_metadata.max_zoom)
+        self._default_zoom = min(max(2.0, self._min_zoom), self._max_zoom)
+        self._zoom = self._default_zoom
+        self._device_scale = 1.0
         self._cities: list[CityAnnotation] = []
+        self._tile_manager.set_device_scale(self._device_pixel_ratio())
 
     # ------------------------------------------------------------------
     @property
@@ -180,10 +188,16 @@ class MapWidgetController:
         return self._zoom
 
     # ------------------------------------------------------------------
+    def map_backend_metadata(self) -> MapBackendMetadata:
+        """Expose backend capabilities to the surrounding UI layer."""
+
+        return self._backend_metadata
+
+    # ------------------------------------------------------------------
     def set_zoom(self, zoom: float) -> None:
         """Clamp ``zoom`` to the supported range and schedule a repaint."""
 
-        zoom = max(self.MIN_ZOOM, min(self.MAX_ZOOM, zoom))
+        zoom = max(self._min_zoom, min(self._max_zoom, zoom))
         if zoom == self._zoom:
             return
         self._zoom = zoom
@@ -196,7 +210,7 @@ class MapWidgetController:
 
         self._center_x = 0.5
         self._center_y = 0.5
-        self.set_zoom(2.0)
+        self.set_zoom(self._default_zoom)
         self._widget.update()
         self._notify_view_changed()
 
@@ -209,6 +223,11 @@ class MapWidgetController:
     # ------------------------------------------------------------------
     def render(self, painter: QPainter) -> None:
         """Draw the current frame into ``painter`` using MapLibre styling."""
+
+        current_scale = self._device_pixel_ratio()
+        if abs(current_scale - self._device_scale) > 1e-6:
+            self._device_scale = current_scale
+            self._tile_manager.set_device_scale(current_scale)
 
         painter.setRenderHint(QPainter.Antialiasing, True)
         self._renderer.render(
@@ -389,7 +408,7 @@ class MapWidgetController:
         mouse_world_x = (view_top_left_x + anchor.x()) / world_size
         mouse_world_y = (view_top_left_y + anchor.y()) / world_size
 
-        self._zoom = max(self.MIN_ZOOM, min(self.MAX_ZOOM, new_zoom))
+        self._zoom = max(self._min_zoom, min(self._max_zoom, new_zoom))
         new_world_size = self._world_size()
         new_center_px = mouse_world_x * new_world_size - anchor.x() + self._widget.width() / 2.0
         new_center_py = mouse_world_y * new_world_size - anchor.y() + self._widget.height() / 2.0
@@ -458,6 +477,49 @@ class MapWidgetController:
                 callback(self._center_x, self._center_y, self._zoom)
             except Exception:  # pragma: no cover - best effort notification
                 continue
+
+    # ------------------------------------------------------------------
+    def _resolve_source_spec(
+        self,
+        package_root: Path,
+        *,
+        map_source: MapSourceSpec | None,
+        tile_root: Path | str,
+        style_path: Path | str,
+    ) -> MapSourceSpec:
+        """Return the requested source spec with absolute paths."""
+
+        if map_source is not None:
+            return map_source.resolved(package_root)
+
+        if str(tile_root) != "tiles" or str(style_path) != "style.json":
+            return MapSourceSpec(
+                kind="legacy_pbf",
+                data_path=tile_root,
+                style_path=style_path,
+            ).resolved(package_root)
+
+        return MapSourceSpec.default(package_root).resolved(package_root)
+
+    # ------------------------------------------------------------------
+    def _resolve_legacy_source(self, package_root: Path, requested_source: MapSourceSpec) -> MapSourceSpec:
+        """Choose the legacy vector fallback used for styling and compatibility."""
+
+        if requested_source.kind == "legacy_pbf":
+            return requested_source
+        return MapSourceSpec.legacy_default(package_root).resolved(package_root)
+
+    # ------------------------------------------------------------------
+    def _device_pixel_ratio(self) -> float:
+        """Return the widget device scale used for raster tile rendering."""
+
+        ratio_getter = getattr(self._widget, "devicePixelRatioF", None)
+        if callable(ratio_getter):
+            try:
+                return max(1.0, float(ratio_getter()))
+            except Exception:
+                return 1.0
+        return 1.0
 
     # ------------------------------------------------------------------
     def _lonlat_to_world(self, lon: float, lat: float) -> tuple[float, float] | None:

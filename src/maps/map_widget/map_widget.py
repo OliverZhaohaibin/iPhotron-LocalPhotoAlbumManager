@@ -6,11 +6,12 @@ from pathlib import Path
 from typing import Sequence
 
 from PySide6.QtCore import QPointF, Signal
-from PySide6.QtGui import QCloseEvent, QPainter
+from PySide6.QtGui import QCloseEvent, QPainter, QResizeEvent
 from PySide6.QtWidgets import QWidget
 
 from ._map_widget_base import MapWidgetController
 from .map_renderer import CityAnnotation
+from maps.map_sources import MapBackendMetadata, MapSourceSpec
 
 
 class MapWidget(QWidget):
@@ -29,6 +30,7 @@ class MapWidget(QWidget):
         self,
         parent: QWidget | None = None,
         *,
+        map_source: MapSourceSpec | None = None,
         tile_root: Path | str = "tiles",
         style_path: Path | str = "style.json",
     ) -> None:
@@ -39,6 +41,7 @@ class MapWidget(QWidget):
         # QWidget specific concerns.
         self._controller = MapWidgetController(
             self,
+            map_source=map_source,
             tile_root=tile_root,
             style_path=style_path,
         )
@@ -76,6 +79,12 @@ class MapWidget(QWidget):
         """Stop background work before the widget is destroyed."""
 
         self._controller.shutdown()
+
+    # ------------------------------------------------------------------
+    def map_backend_metadata(self) -> MapBackendMetadata:
+        """Expose the active map backend capabilities."""
+
+        return self._controller.map_backend_metadata()
 
     # ------------------------------------------------------------------
     def project_lonlat(self, lon: float, lat: float) -> QPointF | None:

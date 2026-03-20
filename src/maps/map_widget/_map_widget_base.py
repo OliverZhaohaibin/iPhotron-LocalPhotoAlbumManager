@@ -54,10 +54,25 @@ class MapWidgetBase(Protocol):
     def zoom(self) -> float:  # pragma: no cover - interface definition only
         ...
 
+    def width(self) -> int:  # pragma: no cover - interface definition only
+        ...
+
+    def height(self) -> int:  # pragma: no cover - interface definition only
+        ...
+
     def set_zoom(self, zoom: float) -> None:  # pragma: no cover - interface definition only
         ...
 
     def reset_view(self) -> None:  # pragma: no cover - interface definition only
+        ...
+
+    def pan_by_pixels(self, delta_x: float, delta_y: float) -> None:  # pragma: no cover - interface definition only
+        ...
+
+    def center_lonlat(self) -> tuple[float, float]:  # pragma: no cover - interface definition only
+        ...
+
+    def setFocus(self) -> None:  # pragma: no cover - interface definition only
         ...
 
     def shutdown(self) -> None:  # pragma: no cover - interface definition only
@@ -215,6 +230,23 @@ class MapWidgetController:
         self._notify_view_changed()
 
     # ------------------------------------------------------------------
+    def pan_by_pixels(self, delta_x: float, delta_y: float) -> None:
+        """Translate the camera by a fixed on-screen pixel delta."""
+
+        world_size = self._world_size()
+        self._center_x -= float(delta_x) / world_size
+        self._center_y -= float(delta_y) / world_size
+        self._wrap_center()
+        self._widget.update()
+        self._notify_view_changed()
+
+    # ------------------------------------------------------------------
+    def center_lonlat(self) -> tuple[float, float]:
+        """Return the viewport centre as a ``(lon, lat)`` tuple."""
+
+        return self._normalized_to_lonlat(self._center_x, self._center_y)
+
+    # ------------------------------------------------------------------
     def shutdown(self) -> None:
         """Stop the tile loader thread so the application can exit cleanly."""
 
@@ -368,12 +400,7 @@ class MapWidgetController:
     def _on_pan_requested(self, delta: QPointF) -> None:
         """Translate drag gestures from screen space to world space."""
 
-        world_size = self._world_size()
-        self._center_x -= delta.x() / world_size
-        self._center_y -= delta.y() / world_size
-        self._wrap_center()
-        self._widget.update()
-        self._notify_view_changed()
+        self.pan_by_pixels(delta.x(), delta.y())
 
     # ------------------------------------------------------------------
     def _notify_pan_delta(self, delta: QPointF) -> None:
@@ -536,6 +563,17 @@ class MapWidgetController:
         sin_lat = math.sin(math.radians(lat))
         y = (0.5 - math.log((1 + sin_lat) / (1 - sin_lat)) / (4 * math.pi)) * world_size
         return x, y
+
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _normalized_to_lonlat(center_x: float, center_y: float) -> tuple[float, float]:
+        """Convert normalized Web Mercator coordinates back into lon/lat."""
+
+        wrapped_x = float(center_x) % 1.0
+        clamped_y = min(max(float(center_y), 0.0), 1.0)
+        lon = wrapped_x * 360.0 - 180.0
+        lat = math.degrees(math.atan(math.sinh(math.pi * (1.0 - 2.0 * clamped_y))))
+        return lon, lat
 
 
 __all__ = ["MapWidgetBase", "MapWidgetController", "SupportsMapViewport"]

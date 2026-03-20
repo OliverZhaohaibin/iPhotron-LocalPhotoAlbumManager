@@ -76,6 +76,18 @@ class MapGLWidget(QOpenGLWidget):
         self._controller.reset_view()
 
     # ------------------------------------------------------------------
+    def pan_by_pixels(self, delta_x: float, delta_y: float) -> None:
+        """Translate the camera by a fixed on-screen pixel delta."""
+
+        self._controller.pan_by_pixels(delta_x, delta_y)
+
+    # ------------------------------------------------------------------
+    def center_lonlat(self) -> tuple[float, float]:
+        """Return the current viewport centre as ``(lon, lat)``."""
+
+        return self._controller.center_lonlat()
+
+    # ------------------------------------------------------------------
     def shutdown(self) -> None:
         """Stop background work before the widget is destroyed."""
 

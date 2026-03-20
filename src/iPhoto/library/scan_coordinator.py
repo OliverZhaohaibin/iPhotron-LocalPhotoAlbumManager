@@ -1,4 +1,4 @@
-"""Scan scheduling, progress tracking, and live scan buffer management."""
+"""Scan scheduling, progress tracking, and live scan compatibility reads."""
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Dict, Iterable, List, Optional
 
 from PySide6.QtCore import QMutexLocker
 
+from ..cache.index_store import get_global_repository
 from ..utils.logging import get_logger
 from .workers.scanner_worker import ScannerSignals, ScannerWorker
 
@@ -18,8 +19,6 @@ LOGGER = get_logger()
 
 class ScanCoordinatorMixin:
     """Mixin providing scan scheduling and progress for LibraryManager."""
-
-    _MAX_LIVE_BUFFER_SIZE = 5000
 
     def start_scanning(self, root: Path, include: Iterable[str], exclude: Iterable[str]) -> None:
         """Start a background scan for the given root directory.
@@ -82,95 +81,174 @@ class ScanCoordinatorMixin:
             return False
 
     def get_live_scan_results(self, relative_to: Optional[Path] = None) -> List[Dict]:
-        """Return a snapshot of valid items currently in the scan buffer.
+        """Return a best-effort snapshot of live scan results.
 
         Args:
-            relative_to: If provided, only returns items that are descendants of this path.
+            relative_to: If provided, only returns items that are descendants of
+                this path.
+
+        Notes:
+            The scan coordinator no longer treats the in-memory list as the
+            authoritative browsing cache. When available, results are now read
+            back from the on-disk database snapshot. The old in-memory list is
+            only used as a compatibility fallback for tests or callers that
+            manually inject rows.
         """
         locker = QMutexLocker(self._scan_buffer_lock)
-        if not self._live_scan_buffer:
-            return []
-
-        if relative_to is None:
-            return list(self._live_scan_buffer)
-
-        # Capture root inside lock to prevent race with stop_scanning
         scan_root = self._live_scan_root
-        if not scan_root:
+        buffer_snapshot = list(self._live_scan_buffer)
+        library_root = self._root
+
+        if scan_root is None:
             return []
 
-        # Optimization: Resolve paths once outside the loop to avoid I/O blocking per item.
+        if buffer_snapshot:
+            return self._remap_live_rows(buffer_snapshot, scan_root, relative_to)
+
+        if library_root is None:
+            return []
+
+        base_root = scan_root if relative_to is None else relative_to
+        query_root = self._resolve_live_query_root(scan_root, base_root)
+        if query_root is None:
+            return []
+
+        db_rows = self._read_live_rows_from_store(query_root, library_root)
+        if not db_rows:
+            return []
+        return self._rewrite_rows_relative_to(db_rows, query_root, base_root)
+
+    def _resolve_live_query_root(
+        self,
+        scan_root: Path,
+        relative_to: Optional[Path],
+    ) -> Optional[Path]:
+        if relative_to is None:
+            return scan_root
+        try:
+            rel_root_res = relative_to.resolve()
+            scan_root_res = scan_root.resolve()
+        except OSError:
+            return None
+
+        if scan_root_res == rel_root_res:
+            return scan_root
+        if rel_root_res in scan_root_res.parents:
+            return scan_root
+        if scan_root_res in rel_root_res.parents:
+            return relative_to
+        return None
+
+    def _read_live_rows_from_store(
+        self,
+        query_root: Path,
+        library_root: Path,
+    ) -> List[Dict]:
+        try:
+            store = get_global_repository(library_root)
+            try:
+                album_path = query_root.resolve().relative_to(library_root.resolve()).as_posix()
+            except (OSError, ValueError):
+                try:
+                    album_path = query_root.relative_to(library_root).as_posix()
+                except ValueError:
+                    album_path = None
+
+            if album_path in (None, "", "."):
+                rows = store.read_all(sort_by_date=True, filter_hidden=True)
+            else:
+                rows = store.read_album_assets(
+                    album_path,
+                    include_subalbums=True,
+                    sort_by_date=True,
+                    filter_hidden=True,
+                )
+            return [dict(row) for row in rows]
+        except Exception:
+            LOGGER.debug("Failed to read live scan rows from store", exc_info=True)
+            return []
+
+    def _rewrite_rows_relative_to(
+        self,
+        rows: List[Dict],
+        query_root: Path,
+        relative_to: Optional[Path],
+    ) -> List[Dict]:
+        if self._root is None:
+            return []
+        target_root = relative_to or query_root
+        rewritten: List[Dict] = []
+        for row in rows:
+            rel_value = row.get("rel")
+            if not isinstance(rel_value, str) or not rel_value:
+                continue
+            try:
+                abs_path = (self._root / rel_value).resolve()
+                rel_path = abs_path.relative_to(target_root.resolve()).as_posix()
+            except (OSError, ValueError):
+                continue
+            updated = dict(row)
+            updated["rel"] = rel_path
+            rewritten.append(updated)
+        return rewritten
+
+    def _remap_live_rows(
+        self,
+        rows: List[Dict],
+        scan_root: Path,
+        relative_to: Optional[Path],
+    ) -> List[Dict]:
+        if relative_to is None:
+            return list(rows)
+
         try:
             scan_root_res = scan_root.resolve()
             rel_root_res = relative_to.resolve()
         except OSError:
             return []
 
-        # Determine the relationship between scan root and view root.
-        # Case A: Same path. No path adjustment needed.
         if scan_root_res == rel_root_res:
-            return list(self._live_scan_buffer)
+            return list(rows)
 
-        filtered = []
-        # Case B: Scanning a child, viewing a parent (e.g., scan Vacation, view Photos).
-        # We need to prepend the relative difference to the item paths.
+        filtered: List[Dict] = []
         if rel_root_res in scan_root_res.parents:
             prefix = scan_root_res.relative_to(rel_root_res).as_posix()
-            for item in self._live_scan_buffer:
+            for item in rows:
                 item_rel = item.get("rel")
                 if not isinstance(item_rel, str) or not item_rel:
                     continue
                 new_item = item.copy()
                 new_item["rel"] = f"{prefix}/{item_rel}"
                 filtered.append(new_item)
+            return filtered
 
-        # Case C: Scanning a parent, viewing a child (e.g., scan Photos, view Vacation).
-        # We need to filter items that belong to the child and strip the prefix.
-        elif scan_root_res in rel_root_res.parents:
+        if scan_root_res in rel_root_res.parents:
             prefix = rel_root_res.relative_to(scan_root_res).as_posix()
-            # We add a slash to ensure we match directory boundaries (e.g. "Vacation/" vs "VacationTrip")
             prefix_slash = f"{prefix}/"
-            for item in self._live_scan_buffer:
+            for item in rows:
                 item_rel = item.get("rel")
                 if not isinstance(item_rel, str):
                     continue
-                # Check if the item is inside the viewing directory
                 if item_rel == prefix or item_rel.startswith(prefix_slash):
                     new_item = item.copy()
-                    # Strip the prefix to make it relative to the viewing directory
-                    # e.g. "Vacation/img.jpg" -> "img.jpg"
                     new_item["rel"] = item_rel[len(prefix_slash):] if item_rel != prefix else ""
-                    if not new_item["rel"]:
-                        continue # Should not happen for files, but safeguard
-                    filtered.append(new_item)
+                    if new_item["rel"]:
+                        filtered.append(new_item)
+            return filtered
 
-        # Case D: Disjoint paths (e.g. scan Photos/A, view Photos/B).
-        # Return empty list.
-
-        return filtered
+        return []
 
     def _on_scan_chunk(self, root: Path, chunk: List[dict]) -> None:
-        """Handle incoming scan chunks: update buffer only."""
+        """Handle incoming scan chunks after persistence.
+
+        The scan worker already persists each chunk to disk before this signal is
+        observed. The browsing layer now treats the database as the source of
+        truth, so we only relay the invalidation event here.
+        """
 
         if not chunk:
             return
 
-        # 1. Update In-Memory Buffer
-        locker = QMutexLocker(self._scan_buffer_lock)
-        # Check buffer limit
-        if len(self._live_scan_buffer) < self._MAX_LIVE_BUFFER_SIZE:
-            self._live_scan_buffer.extend(chunk)
-        else:
-            # If buffer is full, we rely on disk.
-            # We can optionally rotate, but simply stopping accumulation is safer for memory.
-            # The consuming models should have already pulled earlier data.
-            LOGGER.warning(
-                f"Live scan buffer for {root} reached its limit of {self._MAX_LIVE_BUFFER_SIZE} items. "
-                f"{len(chunk)} new items were not added to the in-memory buffer; relying on disk persistence."
-            )
-
-        # 2. Forward signal
-        # The persistence is now handled by the ScannerWorker in the background thread.
         self.scanChunkReady.emit(root, chunk)
 
     def _on_scan_finished(self, root: Path, rows: List[dict]) -> None:

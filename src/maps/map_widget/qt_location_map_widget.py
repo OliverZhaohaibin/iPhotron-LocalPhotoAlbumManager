@@ -125,6 +125,21 @@ class QtLocationMapWidget(QQuickWidget):
         self._sync_map_camera()
         self._emit_view_change()
 
+    def pan_by_pixels(self, delta_x: float, delta_y: float) -> None:
+        """Translate the viewport by a fixed on-screen pixel delta."""
+
+        world_size = self._world_size()
+        self._center_x -= float(delta_x) / world_size
+        self._center_y -= float(delta_y) / world_size
+        self._wrap_center()
+        self._sync_map_camera()
+        self._emit_view_change()
+
+    def center_lonlat(self) -> tuple[float, float]:
+        """Return the current viewport centre as ``(lon, lat)``."""
+
+        return normalized_to_lonlat(self._center_x, self._center_y)
+
     def shutdown(self) -> None:
         return None
 

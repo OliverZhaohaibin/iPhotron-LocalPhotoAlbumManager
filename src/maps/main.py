@@ -1,20 +1,26 @@
-"""Entry point for the PySide6 based map preview application."""
+"""Entry point for the PySide6-based map preview application."""
 
 from __future__ import annotations
+
+if __package__ in {None, ""}:  # pragma: no cover - direct script bootstrap
+    import sys
+    from pathlib import Path
+
+    _SRC_ROOT = Path(__file__).resolve().parents[1]
+    if str(_SRC_ROOT) not in sys.path:
+        sys.path.insert(0, str(_SRC_ROOT))
 
 import sys
 from pathlib import Path
 
-from PySide6.QtCore import Qt
-from PySide6.QtGui import QAction, QOffscreenSurface, QOpenGLContext
+from PySide6.QtGui import QAction, QKeySequence, QOffscreenSurface, QOpenGLContext
 from PySide6.QtWidgets import QApplication, QFileDialog, QMainWindow, QMessageBox
 
-from map_sources import MapSourceSpec
-
-from map_widget._map_widget_base import MapWidgetBase
-from maps.map_widget import MapWidget, MapGLWidget
-from style_resolver import StyleLoadError
-from tile_parser import TileLoadingError
+from maps.map_sources import MapBackendMetadata, MapSourceSpec, has_usable_osmand_default
+from maps.map_widget import MapGLWidget, MapWidget
+from maps.map_widget._map_widget_base import MapWidgetBase
+from maps.style_resolver import StyleLoadError
+from maps.tile_parser import TileLoadingError
 
 
 def check_opengl_support() -> bool:
@@ -41,8 +47,49 @@ def check_opengl_support() -> bool:
         return False
 
 
+def choose_default_map_source(package_root: Path) -> MapSourceSpec:
+    """Return the best startup source for the standalone preview window."""
+
+    if has_usable_osmand_default(package_root):
+        return MapSourceSpec.osmand_default(package_root)
+    return MapSourceSpec.legacy_default(package_root)
+
+
+def describe_active_backend(
+    requested_source: MapSourceSpec,
+    metadata: MapBackendMetadata,
+) -> str:
+    """Return a short human-readable label for the active runtime backend."""
+
+    if requested_source.kind == "osmand_obf":
+        if metadata.tile_kind == "raster":
+            return "OBF Raster"
+        return "Legacy Vector Fallback"
+    return "Legacy Vector"
+
+
+def format_status_message(
+    requested_source: MapSourceSpec,
+    metadata: MapBackendMetadata,
+    *,
+    zoom: float,
+    longitude: float,
+    latitude: float,
+) -> str:
+    """Summarize the current map state for the status bar."""
+
+    backend_label = describe_active_backend(requested_source, metadata)
+    source_path = Path(requested_source.data_path).name
+    return (
+        f"{backend_label} | Zoom {zoom:.2f} | Center {latitude:.4f}, {longitude:.4f}"
+        f" | Source {source_path}"
+    )
+
+
 class MainWindow(QMainWindow):
     """Primary application window that hosts an interactive map widget."""
+
+    PAN_FRACTION = 0.18
 
     def __init__(
         self,
@@ -54,14 +101,13 @@ class MainWindow(QMainWindow):
     ) -> None:
         super().__init__()
         self.setWindowTitle("Map Preview")
-        self.resize(1024, 768)
+        self.resize(1280, 860)
 
         self._package_root = Path(__file__).resolve().parent
         self._tile_root = tile_root
         self._style_path = style_path
-        self._map_source = (map_source or MapSourceSpec.default(self._package_root)).resolved(
-            self._package_root,
-        )
+        chosen_source = map_source or choose_default_map_source(self._package_root)
+        self._map_source = chosen_source.resolved(self._package_root)
         if self._map_source.kind == "legacy_pbf":
             self._tile_root = str(self._map_source.data_path)
             self._style_path = str(self._map_source.style_path or self._style_path)
@@ -72,28 +118,47 @@ class MainWindow(QMainWindow):
 
         self._create_actions()
         self._create_menus()
-        self._update_window_title()
+        self.statusBar().showMessage("Ready")
+        self._refresh_window_chrome()
+        self._announce_backend_state()
 
     # ------------------------------------------------------------------
     def _create_actions(self) -> None:
         """Assemble actions that appear in the menu bar."""
 
         self._action_zoom_in = QAction("Zoom In", self)
-        self._action_zoom_in.setShortcut(Qt.Key_Plus)
+        self._action_zoom_in.setShortcuts([QKeySequence("+"), QKeySequence("=")])
         self._action_zoom_in.triggered.connect(self._zoom_in)
 
         self._action_zoom_out = QAction("Zoom Out", self)
-        self._action_zoom_out.setShortcut(Qt.Key_Minus)
+        self._action_zoom_out.setShortcuts([QKeySequence("-"), QKeySequence("_")])
         self._action_zoom_out.triggered.connect(self._zoom_out)
+
+        self._action_reset_view = QAction("Reset View", self)
+        self._action_reset_view.setShortcuts([QKeySequence("Home"), QKeySequence("R")])
+        self._action_reset_view.triggered.connect(self._reset_view)
+
+        self._action_pan_left = QAction("Pan Left", self)
+        self._action_pan_left.setShortcuts([QKeySequence("Left"), QKeySequence("A")])
+        self._action_pan_left.triggered.connect(lambda: self._pan_by_fraction(-self.PAN_FRACTION, 0.0))
+
+        self._action_pan_right = QAction("Pan Right", self)
+        self._action_pan_right.setShortcuts([QKeySequence("Right"), QKeySequence("D")])
+        self._action_pan_right.triggered.connect(lambda: self._pan_by_fraction(self.PAN_FRACTION, 0.0))
+
+        self._action_pan_up = QAction("Pan Up", self)
+        self._action_pan_up.setShortcuts([QKeySequence("Up"), QKeySequence("W")])
+        self._action_pan_up.triggered.connect(lambda: self._pan_by_fraction(0.0, -self.PAN_FRACTION))
+
+        self._action_pan_down = QAction("Pan Down", self)
+        self._action_pan_down.setShortcuts([QKeySequence("Down"), QKeySequence("S")])
+        self._action_pan_down.triggered.connect(lambda: self._pan_by_fraction(0.0, self.PAN_FRACTION))
 
         self._action_open_style = QAction("Load Legacy Style...", self)
         self._action_open_style.triggered.connect(self._open_style)
 
         self._action_open_map_source = QAction("Select Map Source...", self)
         self._action_open_map_source.triggered.connect(self._open_map_source)
-
-        self._action_reset_view = QAction("Reset View", self)
-        self._action_reset_view.triggered.connect(self._reset_view)
 
     # ------------------------------------------------------------------
     def _create_menus(self) -> None:
@@ -104,8 +169,13 @@ class MainWindow(QMainWindow):
         view_menu = menu_bar.addMenu("View")
         view_menu.addAction(self._action_zoom_in)
         view_menu.addAction(self._action_zoom_out)
-        view_menu.addSeparator()
         view_menu.addAction(self._action_reset_view)
+
+        navigate_menu = menu_bar.addMenu("Navigate")
+        navigate_menu.addAction(self._action_pan_left)
+        navigate_menu.addAction(self._action_pan_right)
+        navigate_menu.addAction(self._action_pan_up)
+        navigate_menu.addAction(self._action_pan_down)
 
         file_menu = menu_bar.addMenu("File")
         file_menu.addAction(self._action_open_style)
@@ -141,21 +211,27 @@ class MainWindow(QMainWindow):
         """Increase the zoom level using a multiplicative factor."""
 
         self._map_widget.set_zoom(self._map_widget.zoom * 1.5)
-        self._update_window_title()
 
     # ------------------------------------------------------------------
     def _zoom_out(self) -> None:
         """Decrease the zoom level while maintaining smooth transitions."""
 
         self._map_widget.set_zoom(self._map_widget.zoom / 1.5)
-        self._update_window_title()
 
     # ------------------------------------------------------------------
     def _reset_view(self) -> None:
         """Re-center the map and return to the default zoom level."""
 
         self._map_widget.reset_view()
-        self._update_window_title()
+
+    # ------------------------------------------------------------------
+    def _pan_by_fraction(self, fraction_x: float, fraction_y: float) -> None:
+        """Translate the map by a fraction of the current viewport size."""
+
+        self._map_widget.pan_by_pixels(
+            self._map_widget.width() * fraction_x,
+            self._map_widget.height() * fraction_y,
+        )
 
     # ------------------------------------------------------------------
     def _open_style(self) -> None:
@@ -197,7 +273,7 @@ class MainWindow(QMainWindow):
         self._style_path = path
         self._map_source = new_source
         self._set_central_map(widget)
-        self._update_window_title()
+        self._announce_backend_state()
 
     # ------------------------------------------------------------------
     def _open_map_source(self) -> None:
@@ -225,7 +301,7 @@ class MainWindow(QMainWindow):
 
             self._map_source = new_source
             self._set_central_map(widget)
-            self._update_window_title()
+            self._announce_backend_state()
             return
 
         directory = QFileDialog.getExistingDirectory(
@@ -253,14 +329,61 @@ class MainWindow(QMainWindow):
         self._tile_root = directory
         self._map_source = new_source
         self._set_central_map(widget)
+        self._announce_backend_state()
+
+    # ------------------------------------------------------------------
+    def _active_backend_label(self) -> str:
+        """Return a concise label describing the active runtime backend."""
+
+        return describe_active_backend(self._map_source, self._map_widget.map_backend_metadata())
+
+    # ------------------------------------------------------------------
+    def _refresh_window_chrome(self) -> None:
+        """Synchronize the title bar and status bar with the current view."""
+
         self._update_window_title()
+        self._update_status_bar()
 
     # ------------------------------------------------------------------
     def _update_window_title(self) -> None:
-        """Include the active backend and zoom level in the window title."""
+        """Include backend and zoom details in the main window title."""
 
-        source_name = "OBF" if self._map_source.kind == "osmand_obf" else "PBF"
-        self.setWindowTitle(f"Map Preview - {source_name} - Zoom {self._map_widget.zoom:.2f}")
+        self.setWindowTitle(
+            f"Map Preview - {self._active_backend_label()} - Zoom {self._map_widget.zoom:.2f}",
+        )
+
+    # ------------------------------------------------------------------
+    def _update_status_bar(self) -> None:
+        """Display the current backend, zoom level, and map center."""
+
+        longitude, latitude = self._map_widget.center_lonlat()
+        status_text = format_status_message(
+            self._map_source,
+            self._map_widget.map_backend_metadata(),
+            zoom=self._map_widget.zoom,
+            longitude=longitude,
+            latitude=latitude,
+        )
+        self.statusBar().showMessage(status_text)
+
+    # ------------------------------------------------------------------
+    def _announce_backend_state(self) -> None:
+        """Inform the user when the requested OBF source fell back to legacy tiles."""
+
+        self._refresh_window_chrome()
+        metadata = self._map_widget.map_backend_metadata()
+        if self._map_source.kind == "osmand_obf" and metadata.tile_kind != "raster":
+            self.statusBar().showMessage(
+                "OsmAnd helper is unavailable, so the preview is using the legacy vector fallback.",
+                10000,
+            )
+
+    # ------------------------------------------------------------------
+    def _handle_view_changed(self, center_x: float, center_y: float, zoom: float) -> None:
+        """Refresh title and status text when the viewport changes."""
+
+        del center_x, center_y, zoom
+        self._refresh_window_chrome()
 
     # ------------------------------------------------------------------
     def _set_central_map(self, widget: MapWidgetBase) -> None:
@@ -268,11 +391,21 @@ class MainWindow(QMainWindow):
 
         old = self.takeCentralWidget()
         if old is not None:
+            if hasattr(old, "viewChanged"):
+                try:
+                    old.viewChanged.disconnect(self._handle_view_changed)  # type: ignore[attr-defined]
+                except (RuntimeError, TypeError):
+                    pass
             if hasattr(old, "shutdown"):
                 old.shutdown()  # type: ignore[call-arg]
             old.deleteLater()
+
         self._map_widget = widget
         self.setCentralWidget(self._map_widget)
+        if hasattr(self._map_widget, "viewChanged"):
+            self._map_widget.viewChanged.connect(self._handle_view_changed)  # type: ignore[attr-defined]
+        self._map_widget.setFocus()
+        self._refresh_window_chrome()
 
 
 def main() -> int:

@@ -1,4 +1,4 @@
-"""Regression tests for frameless window geometry clamping across screen changes."""
+"""Tests for frameless window geometry clamping, screen changes, and Wayland drag."""
 
 from __future__ import annotations
 

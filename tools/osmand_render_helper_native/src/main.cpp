@@ -25,7 +25,6 @@
 #include <OsmAndCore/Map/MapPrimitivesProvider.h>
 #include <OsmAndCore/Map/MapPresentationEnvironment.h>
 #include <OsmAndCore/Map/MapPrimitiviser.h>
-#include <OsmAndCore/Map/MapRasterLayerProvider_Software.h>
 #include <OsmAndCore/Map/ObfMapObjectsProvider.h>
 #include <OsmAndCore/Map/MapStylesCollection.h>
 #include <OsmAndCore/ObfsCollection.h>
@@ -37,6 +36,7 @@ namespace
 constexpr int kReferenceTileSize = 256;
 constexpr double kDefaultMinZoom = 2.0;
 constexpr double kDefaultMaxZoom = 19.0;
+constexpr int kConcurrentObfReadLimit = 0;
 
 QJsonObject makeErrorResponse(const QString& message)
 {
@@ -118,6 +118,8 @@ public:
         _locale = QLocale::system().name().section(QLatin1Char('_'), 0, 0).toLower();
         if (_locale.isEmpty())
             _locale = QStringLiteral("en");
+        _deviceScale = 0.0;
+        _rasterSize = kReferenceTileSize;
         _initialized = true;
         return true;
     }
@@ -128,7 +130,7 @@ public:
         int y,
         double deviceScale,
         const QString& outputPath,
-        QString& errorMessage) const
+        QString& errorMessage)
     {
         if (!_initialized)
         {
@@ -150,40 +152,12 @@ public:
         const auto zoomLevel = static_cast<OsmAnd::ZoomLevel>(z);
         const auto bbox31 = OsmAnd::Utilities::tileBoundingBox31(tileId, zoomLevel);
         const auto effectiveScale = std::max(1.0, deviceScale);
-        const auto rasterSize = static_cast<unsigned int>(std::lround(kReferenceTileSize * effectiveScale));
+        if (!ensureRenderPipeline(effectiveScale, errorMessage))
+            return false;
 
+        const auto rasterSize = _rasterSize;
         QDir().mkpath(QFileInfo(outputPath).absolutePath());
 
-        std::cerr << "render: resolve style" << std::endl;
-        const auto mapStyle = _stylesCollection->getResolvedStyleByName(_styleName);
-        if (!mapStyle)
-        {
-            errorMessage = QStringLiteral("Unable to resolve rendering style: %1").arg(_styleName);
-            return false;
-        }
-
-        std::cerr << "render: presentation env" << std::endl;
-        const auto mapPresentationEnvironment = std::make_shared<OsmAnd::MapPresentationEnvironment>(
-            mapStyle,
-            static_cast<float>(effectiveScale),
-            1.0f,
-            1.0f);
-        mapPresentationEnvironment->setLocaleLanguageId(_locale);
-        mapPresentationEnvironment->setSettings(QHash<QString, QString>{
-            {QStringLiteral("nightMode"), _nightMode ? QStringLiteral("true") : QStringLiteral("false")},
-        });
-
-        std::cerr << "render: primitiviser" << std::endl;
-        const auto primitiviser = std::make_shared<OsmAnd::MapPrimitiviser>(mapPresentationEnvironment);
-        std::cerr << "render: map objects provider" << std::endl;
-        const auto mapObjectsProvider = std::make_shared<OsmAnd::ObfMapObjectsProvider>(_obfsCollection, OsmAnd::ObfMapObjectsProvider::Mode::OnlyBinaryMapObjects, 1);
-        std::cerr << "render: primitives provider" << std::endl;
-        const auto primitivesProvider = std::make_shared<OsmAnd::MapPrimitivesProvider>(
-            mapObjectsProvider,
-            primitiviser,
-            rasterSize);
-
-        std::cerr << "render: build request" << std::endl;
         OsmAnd::MapPrimitivesProvider::Request request;
         request.tileId = tileId;
         request.zoom = zoomLevel;
@@ -192,23 +166,12 @@ public:
         request.areaTime = QDateTime::currentMSecsSinceEpoch();
         request.queryController = std::make_shared<OsmAnd::SimpleQueryController>();
 
-        std::shared_ptr<OsmAnd::IMapObjectsProvider::Data> mapObjectsData;
-        std::cerr << "render: obtain map objects" << std::endl;
-        if (!mapObjectsProvider->obtainTiledMapObjects(request, mapObjectsData))
-        {
-            errorMessage = QStringLiteral("Failed to obtain map objects for tile rendering");
-            return false;
-        }
-        std::cerr << "render: got map objects" << std::endl;
-
         std::shared_ptr<OsmAnd::MapPrimitivesProvider::Data> primitivesData;
-        std::cerr << "render: obtain primitives" << std::endl;
-        if (!primitivesProvider->obtainTiledPrimitives(request, primitivesData))
+        if (!_primitivesProvider->obtainTiledPrimitives(request, primitivesData))
         {
             errorMessage = QStringLiteral("Failed to obtain map primitives for tile rendering");
             return false;
         }
-        std::cerr << "render: got primitives" << std::endl;
 
         SkBitmap bitmap;
         if (!bitmap.tryAllocPixels(SkImageInfo::MakeN32Premul(rasterSize, rasterSize)))
@@ -218,13 +181,11 @@ public:
         }
 
         SkCanvas canvas(bitmap);
-        canvas.clear(mapPresentationEnvironment->getDefaultBackgroundColor(zoomLevel).toSkColor());
+        canvas.clear(_mapPresentationEnvironment->getDefaultBackgroundColor(zoomLevel).toSkColor());
 
         if (primitivesData && primitivesData->primitivisedObjects)
         {
-            std::cerr << "render: rasterize primitives" << std::endl;
-            OsmAnd::MapRasterizer rasterizer(mapPresentationEnvironment);
-            rasterizer.rasterize(
+            _rasterizer->rasterize(
                 bbox31,
                 primitivesData->primitivisedObjects,
                 canvas,
@@ -232,10 +193,8 @@ public:
                 nullptr,
                 nullptr,
                 request.queryController);
-            std::cerr << "render: rasterized primitives" << std::endl;
         }
 
-        std::cerr << "render: encode image" << std::endl;
         const auto image = bitmap.asImage();
         if (!image)
         {
@@ -278,11 +237,18 @@ public:
         _provider.reset();
         _stylesCollection.reset();
         _obfsCollection.reset();
+        _mapPresentationEnvironment.reset();
+        _primitiviser.reset();
+        _mapObjectsProvider.reset();
+        _primitivesProvider.reset();
+        _rasterizer.reset();
         _resourcesRoot.clear();
         _stylePath.clear();
         _styleName.clear();
         _locale.clear();
         _nightMode = false;
+        _deviceScale = 0.0;
+        _rasterSize = kReferenceTileSize;
         _initialized = false;
     }
 
@@ -292,14 +258,69 @@ public:
     }
 
 private:
+    bool ensureRenderPipeline(double deviceScale, QString& errorMessage)
+    {
+        const auto effectiveScale = std::max(1.0, deviceScale);
+        const auto rasterSize = static_cast<unsigned int>(std::lround(kReferenceTileSize * effectiveScale));
+        const auto scaleChanged = std::abs(_deviceScale - effectiveScale) > 1e-6;
+        if (!scaleChanged && _mapPresentationEnvironment && _primitiviser && _mapObjectsProvider
+            && _primitivesProvider && _rasterizer && _rasterSize == rasterSize)
+        {
+            return true;
+        }
+
+        const auto mapStyle = _stylesCollection->getResolvedStyleByName(_styleName);
+        if (!mapStyle)
+        {
+            errorMessage = QStringLiteral("Unable to resolve rendering style: %1").arg(_styleName);
+            return false;
+        }
+
+        auto mapPresentationEnvironment = std::make_shared<OsmAnd::MapPresentationEnvironment>(
+            mapStyle,
+            static_cast<float>(effectiveScale),
+            1.0f,
+            1.0f);
+        mapPresentationEnvironment->setLocaleLanguageId(_locale);
+        mapPresentationEnvironment->setSettings(QHash<QString, QString>{
+            {QStringLiteral("nightMode"), _nightMode ? QStringLiteral("true") : QStringLiteral("false")},
+        });
+
+        auto primitiviser = std::make_shared<OsmAnd::MapPrimitiviser>(mapPresentationEnvironment);
+        auto mapObjectsProvider = std::make_shared<OsmAnd::ObfMapObjectsProvider>(
+            _obfsCollection,
+            OsmAnd::ObfMapObjectsProvider::Mode::OnlyBinaryMapObjects,
+            kConcurrentObfReadLimit);
+        auto primitivesProvider = std::make_shared<OsmAnd::MapPrimitivesProvider>(
+            mapObjectsProvider,
+            primitiviser,
+            rasterSize);
+
+        _mapPresentationEnvironment = std::move(mapPresentationEnvironment);
+        _primitiviser = std::move(primitiviser);
+        _mapObjectsProvider = std::move(mapObjectsProvider);
+        _primitivesProvider = std::move(primitivesProvider);
+        _rasterizer = std::make_unique<OsmAnd::MapRasterizer>(_mapPresentationEnvironment);
+        _deviceScale = effectiveScale;
+        _rasterSize = rasterSize;
+        return true;
+    }
+
     std::shared_ptr<const FileSystemCoreResourcesProvider> _provider;
     std::shared_ptr<OsmAnd::MapStylesCollection> _stylesCollection;
     std::shared_ptr<OsmAnd::ObfsCollection> _obfsCollection;
+    std::shared_ptr<OsmAnd::MapPresentationEnvironment> _mapPresentationEnvironment;
+    std::shared_ptr<OsmAnd::MapPrimitiviser> _primitiviser;
+    std::shared_ptr<OsmAnd::ObfMapObjectsProvider> _mapObjectsProvider;
+    std::shared_ptr<OsmAnd::MapPrimitivesProvider> _primitivesProvider;
+    std::unique_ptr<OsmAnd::MapRasterizer> _rasterizer;
     QString _resourcesRoot;
     QString _stylePath;
     QString _styleName;
     QString _locale;
     bool _nightMode = false;
+    double _deviceScale = 0.0;
+    unsigned int _rasterSize = kReferenceTileSize;
     bool _initialized = false;
 };
 
@@ -322,7 +343,7 @@ QJsonObject handleInitCommand(const QJsonObject& command, OsmAndRenderHelperSess
     return response;
 }
 
-QJsonObject handleRenderCommand(const QJsonObject& command, const OsmAndRenderHelperSession& session)
+QJsonObject handleRenderCommand(const QJsonObject& command, OsmAndRenderHelperSession& session)
 {
     QString errorMessage;
     const auto z = command.value(QStringLiteral("z")).toInt(-1);
@@ -426,11 +447,11 @@ int runOneShotRender(int argc, char** argv)
 }
 }
 
-#include <QApplication>
+#include <QCoreApplication>
 
 int main(int argc, char** argv)
 {
-    QApplication app(argc, argv);
+    QCoreApplication app(argc, argv);
     OsmAnd::Logger::get()->setSeverityLevelThreshold(static_cast<OsmAnd::LogSeverityLevel>(999));
 
     if (argc > 1)
@@ -474,3 +495,4 @@ int main(int argc, char** argv)
     session.shutdown();
     return 0;
 }
+

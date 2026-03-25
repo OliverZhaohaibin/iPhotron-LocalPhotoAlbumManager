@@ -11,9 +11,12 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QLocale>
+#include <QMetaObject>
 #include <QMouseEvent>
 #include <QOpenGLContext>
 #include <QOpenGLFunctions>
+#include <QPointer>
+#include <QStandardPaths>
 #include <QWheelEvent>
 
 #include <OsmAndCore.h>
@@ -40,6 +43,7 @@ constexpr double kDefaultZoom = 2.0;
 constexpr float kDefaultFieldOfView = 16.5f;
 constexpr float kDefaultElevationAngle = 90.0f;
 constexpr double kPi = 3.14159265358979323846;
+constexpr int kConcurrentObfReadLimit = 0;
 
 class CoreRuntime
 {
@@ -113,6 +117,17 @@ inline double clampLatitude(double latitude)
 {
     return std::clamp(latitude, -kMercatorLatBound, kMercatorLatBound);
 }
+
+QString openGlShadersCachePath()
+{
+    const auto baseCachePath = QStandardPaths::writableLocation(QStandardPaths::CacheLocation);
+    if (baseCachePath.isEmpty())
+        return QString();
+
+    const auto cachePath = QDir(baseCachePath).filePath(QStringLiteral("maps/osmand_gl_shaders"));
+    QDir().mkpath(cachePath);
+    return cachePath;
+}
 }
 
 OsmAndNativeMapWidget* OsmAndNativeMapWidget::create(
@@ -133,6 +148,7 @@ OsmAndNativeMapWidget::OsmAndNativeMapWidget(const Configuration& configuration,
     : QOpenGLWidget(parent)
     , _configuration(configuration)
 {
+    setUpdateBehavior(QOpenGLWidget::NoPartialUpdate);
     setMouseTracking(true);
     setFocusPolicy(Qt::StrongFocus);
     setMinimumSize(640, 480);
@@ -398,15 +414,20 @@ bool OsmAndNativeMapWidget::ensureRenderer()
     _mapObjectsProvider = std::make_shared<OsmAnd::ObfMapObjectsProvider>(
         _obfsCollection,
         OsmAnd::ObfMapObjectsProvider::Mode::OnlyBinaryMapObjects,
-        1);
+        kConcurrentObfReadLimit);
     _mapPrimitivesProvider = std::make_shared<OsmAnd::MapPrimitivesProvider>(
         _mapObjectsProvider,
         _primitiviser,
         kReferenceTileSize);
     _mapSymbolsProvider = std::make_shared<OsmAnd::MapObjectsSymbolsProvider>(
         _mapPrimitivesProvider,
-        kReferenceTileSize);
-    _mapRasterLayerProvider = std::make_shared<OsmAnd::MapRasterLayerProvider_Software>(_mapPrimitivesProvider);
+        kReferenceTileSize,
+        std::shared_ptr<const OsmAnd::SymbolRasterizer>(),
+        true);
+    _mapRasterLayerProvider = std::make_shared<OsmAnd::MapRasterLayerProvider_Software>(
+        _mapPrimitivesProvider,
+        true,
+        true);
     _mapRenderer = OsmAnd::createMapRenderer(OsmAnd::MapRendererClass::AtlasMapRenderer_OpenGL2plus);
     if (!_mapRenderer)
     {
@@ -416,6 +437,17 @@ bool OsmAndNativeMapWidget::ensureRenderer()
 
     OsmAnd::MapRendererSetupOptions setupOptions;
     setupOptions.gpuWorkerThreadEnabled = false;
+    setupOptions.displayDensityFactor = static_cast<float>(std::max(1.0, devicePixelRatioF()));
+    setupOptions.pathToOpenGLShadersCache = openGlShadersCachePath();
+    setupOptions.frameUpdateRequestCallback =
+        [widget = QPointer<OsmAndNativeMapWidget>(this)]
+        (const OsmAnd::IMapRenderer*)
+        {
+            if (!widget)
+                return;
+
+            QMetaObject::invokeMethod(widget.data(), "update", Qt::QueuedConnection);
+        };
     if (!_mapRenderer->setup(setupOptions))
     {
         _initError = QStringLiteral("Failed to setup the OsmAnd renderer");

@@ -426,8 +426,11 @@ int runOneShotRender(int argc, char** argv)
 }
 }
 
+#include <QApplication>
+
 int main(int argc, char** argv)
 {
+    QApplication app(argc, argv);
     OsmAnd::Logger::get()->setSeverityLevelThreshold(static_cast<OsmAnd::LogSeverityLevel>(999));
 
     if (argc > 1)

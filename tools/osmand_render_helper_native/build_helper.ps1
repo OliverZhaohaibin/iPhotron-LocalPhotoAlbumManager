@@ -48,9 +48,12 @@ if ($LASTEXITCODE -ne 0) {
     throw "CMake configure failed with exit code $LASTEXITCODE"
 }
 
-& $CMakeExe --build $buildRoot --config $BuildType --target osmand_render_helper
+& $CMakeExe --build $buildRoot --config $BuildType --target osmand_render_helper osmand_native_widget
 if ($LASTEXITCODE -ne 0) {
     throw "CMake build failed with exit code $LASTEXITCODE"
 }
 
 Write-Host "Helper built at: $(Join-Path $projectRoot 'dist\osmand_render_helper.exe')"
+if (Test-Path (Join-Path $projectRoot 'dist\osmand_native_widget.dll')) {
+    Write-Host "Native widget built at: $(Join-Path $projectRoot 'dist\osmand_native_widget.dll')"
+}

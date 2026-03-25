@@ -16,8 +16,14 @@ from pathlib import Path
 from PySide6.QtGui import QAction, QKeySequence, QOffscreenSurface, QOpenGLContext
 from PySide6.QtWidgets import QApplication, QFileDialog, QMainWindow, QMessageBox
 
-from maps.map_sources import MapBackendMetadata, MapSourceSpec, has_usable_osmand_default
-from maps.map_widget import MapGLWidget, MapWidget
+from maps.map_sources import (
+    MapBackendMetadata,
+    MapSourceSpec,
+    has_usable_osmand_default,
+    has_usable_osmand_native_widget,
+)
+from maps.map_widget import MapGLWidget, MapWidget, NativeOsmAndWidget
+from maps.map_widget.native_osmand_widget import probe_native_widget_runtime
 from maps.map_widget._map_widget_base import MapWidgetBase
 from maps.style_resolver import StyleLoadError
 from maps.tile_parser import TileLoadingError
@@ -42,17 +48,34 @@ def check_opengl_support() -> bool:
         context.doneCurrent()
         return True
     except Exception:
-        # Any failure means the platform cannot offer the required OpenGL
-        # features, so we fall back to the CPU implementation.
         return False
 
 
 def choose_default_map_source(package_root: Path) -> MapSourceSpec:
     """Return the best startup source for the standalone preview window."""
 
-    if has_usable_osmand_default(package_root):
+    if has_usable_osmand_native_widget(package_root) or has_usable_osmand_default(package_root):
         return MapSourceSpec.osmand_default(package_root)
     return MapSourceSpec.legacy_default(package_root)
+
+
+def choose_native_widget_class(
+    package_root: Path,
+    *,
+    use_opengl: bool,
+) -> tuple[type[MapWidgetBase] | None, str]:
+    if not use_opengl:
+        return None, "OpenGL support unavailable. Falling back to CPU rendering."
+
+    if not has_usable_osmand_native_widget(package_root):
+        return None, "OpenGL support detected. Using GPU accelerated Python rendering."
+
+    is_available, reason = probe_native_widget_runtime(package_root)
+    if is_available:
+        return NativeOsmAndWidget, "OpenGL support detected. Using the native OsmAnd widget when OBF data is selected."
+
+    detail = f" Native widget disabled: {reason}." if reason else ""
+    return None, f"OpenGL support detected.{detail} Using GPU accelerated Python rendering."
 
 
 def describe_active_backend(
@@ -98,6 +121,7 @@ class MainWindow(QMainWindow):
         *,
         map_source: MapSourceSpec | None = None,
         widget_class: type[MapWidgetBase] | None = None,
+        native_widget_class: type[MapWidgetBase] | None = None,
     ) -> None:
         super().__init__()
         self.setWindowTitle("Map Preview")
@@ -113,6 +137,7 @@ class MainWindow(QMainWindow):
             self._style_path = str(self._map_source.style_path or self._style_path)
 
         self._widget_cls: type[MapWidgetBase] = widget_class or MapWidget
+        self._native_widget_cls = native_widget_class
         self._map_widget: MapWidgetBase = self._create_map_widget(map_source=self._map_source)
         self._set_central_map(self._map_widget)
 
@@ -122,10 +147,7 @@ class MainWindow(QMainWindow):
         self._refresh_window_chrome()
         self._announce_backend_state()
 
-    # ------------------------------------------------------------------
     def _create_actions(self) -> None:
-        """Assemble actions that appear in the menu bar."""
-
         self._action_zoom_in = QAction("Zoom In", self)
         self._action_zoom_in.setShortcuts([QKeySequence("+"), QKeySequence("=")])
         self._action_zoom_in.triggered.connect(self._zoom_in)
@@ -160,10 +182,7 @@ class MainWindow(QMainWindow):
         self._action_open_map_source = QAction("Select Map Source...", self)
         self._action_open_map_source.triggered.connect(self._open_map_source)
 
-    # ------------------------------------------------------------------
     def _create_menus(self) -> None:
-        """Create the menu structure shown in the window."""
-
         menu_bar = self.menuBar()
 
         view_menu = menu_bar.addMenu("View")
@@ -181,15 +200,22 @@ class MainWindow(QMainWindow):
         file_menu.addAction(self._action_open_style)
         file_menu.addAction(self._action_open_map_source)
 
-    # ------------------------------------------------------------------
     def _create_map_widget(self, *, map_source: MapSourceSpec) -> MapWidgetBase:
-        """Instantiate the preferred widget class with CPU fallback."""
+        if map_source.kind == "osmand_obf" and self._native_widget_cls is not None:
+            try:
+                return self._native_widget_cls(map_source=map_source)
+            except Exception as exc:  # pragma: no cover - best effort error reporting
+                import sys, traceback
+                print(f"[main] NativeOsmAndWidget failed: {type(exc).__name__}: {exc}", file=sys.stderr)
+                traceback.print_exc(file=sys.stderr)
+                self.statusBar().showMessage(
+                    f"Native OsmAnd widget unavailable, falling back to the Python renderer: {exc}",
+                    8000,
+                )
 
         try:
-            widget = self._widget_cls(map_source=map_source)
+            return self._widget_cls(map_source=map_source)
         except (StyleLoadError, TileLoadingError):
-            # Style and tile loading errors should propagate so the caller can
-            # provide a more helpful error dialog.
             raise
         except Exception as exc:  # pragma: no cover - best effort error reporting
             if self._widget_cls is MapWidget:
@@ -203,40 +229,24 @@ class MainWindow(QMainWindow):
                 f"Details: {exc}",
             )
             self._widget_cls = MapWidget
-            widget = MapWidget(map_source=map_source)
-        return widget
+            return MapWidget(map_source=map_source)
 
-    # ------------------------------------------------------------------
     def _zoom_in(self) -> None:
-        """Increase the zoom level using a multiplicative factor."""
-
         self._map_widget.set_zoom(self._map_widget.zoom * 1.5)
 
-    # ------------------------------------------------------------------
     def _zoom_out(self) -> None:
-        """Decrease the zoom level while maintaining smooth transitions."""
-
         self._map_widget.set_zoom(self._map_widget.zoom / 1.5)
 
-    # ------------------------------------------------------------------
     def _reset_view(self) -> None:
-        """Re-center the map and return to the default zoom level."""
-
         self._map_widget.reset_view()
 
-    # ------------------------------------------------------------------
     def _pan_by_fraction(self, fraction_x: float, fraction_y: float) -> None:
-        """Translate the map by a fraction of the current viewport size."""
-
         self._map_widget.pan_by_pixels(
             self._map_widget.width() * fraction_x,
             self._map_widget.height() * fraction_y,
         )
 
-    # ------------------------------------------------------------------
     def _open_style(self) -> None:
-        """Allow the user to select a different legacy ``style.json`` file."""
-
         if self._map_source.kind != "legacy_pbf":
             QMessageBox.information(
                 self,
@@ -263,10 +273,10 @@ class MainWindow(QMainWindow):
 
         try:
             widget = self._create_map_widget(map_source=new_source)
-        except StyleLoadError as exc:  # pragma: no cover - best effort error reporting
+        except StyleLoadError as exc:
             QMessageBox.critical(self, "Error", f"Unable to load the style file:\n{exc}")
             return
-        except TileLoadingError as exc:  # pragma: no cover - best effort error reporting
+        except TileLoadingError as exc:
             QMessageBox.critical(self, "Error", f"Unable to initialize tiles:\n{exc}")
             return
 
@@ -275,10 +285,7 @@ class MainWindow(QMainWindow):
         self._set_central_map(widget)
         self._announce_backend_state()
 
-    # ------------------------------------------------------------------
     def _open_map_source(self) -> None:
-        """Allow the user to switch between OBF and legacy tile sources."""
-
         default_osmand = MapSourceSpec.osmand_default(self._package_root).resolved(self._package_root)
         path, _ = QFileDialog.getOpenFileName(
             self,
@@ -295,7 +302,7 @@ class MainWindow(QMainWindow):
             ).resolved(self._package_root)
             try:
                 widget = self._create_map_widget(map_source=new_source)
-            except (StyleLoadError, TileLoadingError) as exc:  # pragma: no cover - best effort error reporting
+            except (StyleLoadError, TileLoadingError) as exc:
                 QMessageBox.critical(self, "Error", f"Unable to open the OBF source:\n{exc}")
                 return
 
@@ -319,10 +326,10 @@ class MainWindow(QMainWindow):
         ).resolved(self._package_root)
         try:
             widget = self._create_map_widget(map_source=new_source)
-        except StyleLoadError as exc:  # pragma: no cover - best effort error reporting
+        except StyleLoadError as exc:
             QMessageBox.critical(self, "Error", f"Unable to load the style file:\n{exc}")
             return
-        except TileLoadingError as exc:  # pragma: no cover - best effort error reporting
+        except TileLoadingError as exc:
             QMessageBox.critical(self, "Error", f"Unable to open the tile directory:\n{exc}")
             return
 
@@ -331,31 +338,19 @@ class MainWindow(QMainWindow):
         self._set_central_map(widget)
         self._announce_backend_state()
 
-    # ------------------------------------------------------------------
     def _active_backend_label(self) -> str:
-        """Return a concise label describing the active runtime backend."""
-
         return describe_active_backend(self._map_source, self._map_widget.map_backend_metadata())
 
-    # ------------------------------------------------------------------
     def _refresh_window_chrome(self) -> None:
-        """Synchronize the title bar and status bar with the current view."""
-
         self._update_window_title()
         self._update_status_bar()
 
-    # ------------------------------------------------------------------
     def _update_window_title(self) -> None:
-        """Include backend and zoom details in the main window title."""
-
         self.setWindowTitle(
             f"Map Preview - {self._active_backend_label()} - Zoom {self._map_widget.zoom:.2f}",
         )
 
-    # ------------------------------------------------------------------
     def _update_status_bar(self) -> None:
-        """Display the current backend, zoom level, and map center."""
-
         longitude, latitude = self._map_widget.center_lonlat()
         status_text = format_status_message(
             self._map_source,
@@ -366,29 +361,20 @@ class MainWindow(QMainWindow):
         )
         self.statusBar().showMessage(status_text)
 
-    # ------------------------------------------------------------------
     def _announce_backend_state(self) -> None:
-        """Inform the user when the requested OBF source fell back to legacy tiles."""
-
         self._refresh_window_chrome()
         metadata = self._map_widget.map_backend_metadata()
         if self._map_source.kind == "osmand_obf" and metadata.tile_kind != "raster":
             self.statusBar().showMessage(
-                "OsmAnd helper is unavailable, so the preview is using the legacy vector fallback.",
+                "OsmAnd native/helper backend is unavailable, so the preview is using the legacy vector fallback.",
                 10000,
             )
 
-    # ------------------------------------------------------------------
     def _handle_view_changed(self, center_x: float, center_y: float, zoom: float) -> None:
-        """Refresh title and status text when the viewport changes."""
-
         del center_x, center_y, zoom
         self._refresh_window_chrome()
 
-    # ------------------------------------------------------------------
     def _set_central_map(self, widget: MapWidgetBase) -> None:
-        """Replace the current central widget with ``widget`` safely."""
-
         old = self.takeCentralWidget()
         if old is not None:
             if hasattr(old, "viewChanged"):
@@ -409,19 +395,16 @@ class MainWindow(QMainWindow):
 
 
 def main() -> int:
-    """Application entry point used by ``python main.py``."""
-
     app = QApplication(sys.argv)
 
+    package_root = Path(__file__).resolve().parent
     use_opengl = check_opengl_support()
     widget_cls: type[MapWidgetBase] = MapGLWidget if use_opengl else MapWidget
-    if use_opengl:
-        print("OpenGL support detected. Using GPU accelerated rendering.")
-    else:
-        print("OpenGL support unavailable. Falling back to CPU rendering.")
+    native_widget_cls, startup_message = choose_native_widget_class(package_root, use_opengl=use_opengl)
+    print(startup_message)
 
     try:
-        window = MainWindow(widget_class=widget_cls)
+        window = MainWindow(widget_class=widget_cls, native_widget_class=native_widget_cls)
     except (StyleLoadError, TileLoadingError) as exc:
         QMessageBox.critical(None, "Error", f"Failed to initialize map:\n{exc}")
         return 1

@@ -21,7 +21,7 @@ list(PREPEND CMAKE_PREFIX_PATH "${QT_ROOT}")
 set(Qt5Core_DIR "${CMAKE_CURRENT_SOURCE_DIR}/cmake/Qt5Core" CACHE PATH "Qt5Core compatibility shim")
 set(Qt5Network_DIR "${CMAKE_CURRENT_SOURCE_DIR}/cmake/Qt5Network" CACHE PATH "Qt5Network compatibility shim")
 
-find_package(Qt6 REQUIRED COMPONENTS Core Network)
+find_package(Qt6 REQUIRED COMPONENTS Core Network Gui Widgets OpenGL OpenGLWidgets)
 
 set(OSMAND_ROOT "${OSMAND_VENDOR_ROOT}" CACHE PATH "Synthetic OsmAnd root that exposes core and core-legacy side by side")
 set(OSMAND_OWN_SHIPPED_QT OFF CACHE BOOL "Use system Qt instead of OsmAnd-shipped Qt")
@@ -36,10 +36,21 @@ set(ws2_32_LIBRARY ws2_32 CACHE STRING "Winsock library used by MinGW builds")
 
 include("${OSMAND_VENDOR_ROOT}/core/core.cmake")
 
-add_executable(osmand_render_helper
+set(OSMAND_COMMON_SOURCES
     src/file_system_core_resources_provider.cpp
     src/file_system_core_resources_provider.h
+)
+
+add_executable(osmand_render_helper
+    ${OSMAND_COMMON_SOURCES}
     src/main.cpp
+)
+
+add_library(osmand_native_widget SHARED
+    ${OSMAND_COMMON_SOURCES}
+    src/osmand_native_map_widget.cpp
+    src/osmand_native_map_widget.h
+    src/osmand_native_widget_bridge.cpp
 )
 
 target_link_libraries(osmand_render_helper
@@ -47,9 +58,26 @@ target_link_libraries(osmand_render_helper
         OsmAndCoreTools_static
         Qt6::Core
         Qt6::Network
+        Qt6::Gui
+        Qt6::Widgets
+)
+
+target_link_libraries(osmand_native_widget
+    PRIVATE
+        OsmAndCoreTools_static
+        Qt6::Core
+        Qt6::Gui
+        Qt6::Widgets
+        Qt6::OpenGL
+        Qt6::OpenGLWidgets
 )
 
 target_include_directories(osmand_render_helper
+    PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src"
+)
+
+target_include_directories(osmand_native_widget
     PRIVATE
         "${CMAKE_CURRENT_SOURCE_DIR}/src"
 )
@@ -61,6 +89,21 @@ set_target_properties(osmand_render_helper PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY_RELEASE "${CMAKE_CURRENT_SOURCE_DIR}/dist"
     RUNTIME_OUTPUT_DIRECTORY_RELWITHDEBINFO "${CMAKE_CURRENT_SOURCE_DIR}/dist"
     RUNTIME_OUTPUT_DIRECTORY_MINSIZEREL "${CMAKE_CURRENT_SOURCE_DIR}/dist"
+)
+
+set_target_properties(osmand_native_widget PROPERTIES
+    PREFIX ""
+    OUTPUT_NAME "osmand_native_widget"
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/dist"
+    RUNTIME_OUTPUT_DIRECTORY_DEBUG "${CMAKE_CURRENT_SOURCE_DIR}/dist"
+    RUNTIME_OUTPUT_DIRECTORY_RELEASE "${CMAKE_CURRENT_SOURCE_DIR}/dist"
+    RUNTIME_OUTPUT_DIRECTORY_RELWITHDEBINFO "${CMAKE_CURRENT_SOURCE_DIR}/dist"
+    RUNTIME_OUTPUT_DIRECTORY_MINSIZEREL "${CMAKE_CURRENT_SOURCE_DIR}/dist"
+    LIBRARY_OUTPUT_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/dist"
+    LIBRARY_OUTPUT_DIRECTORY_DEBUG "${CMAKE_CURRENT_SOURCE_DIR}/dist"
+    LIBRARY_OUTPUT_DIRECTORY_RELEASE "${CMAKE_CURRENT_SOURCE_DIR}/dist"
+    LIBRARY_OUTPUT_DIRECTORY_RELWITHDEBINFO "${CMAKE_CURRENT_SOURCE_DIR}/dist"
+    LIBRARY_OUTPUT_DIRECTORY_MINSIZEREL "${CMAKE_CURRENT_SOURCE_DIR}/dist"
 )
 
 set(_helper_dist_dir "${CMAKE_CURRENT_SOURCE_DIR}/dist")
@@ -76,6 +119,15 @@ if(EXISTS "${_windeployqt}")
         COMMAND_EXPAND_LISTS
         VERBATIM
     )
+    add_custom_command(TARGET osmand_native_widget POST_BUILD
+        COMMAND "${_windeployqt}"
+            --no-translations
+            --no-system-d3d-compiler
+            --no-opengl-sw
+            "$<TARGET_FILE:osmand_native_widget>"
+        COMMAND_EXPAND_LISTS
+        VERBATIM
+    )
 endif()
 
 foreach(_mingw_runtime IN ITEMS libgcc_s_seh-1.dll libstdc++-6.dll libwinpthread-1.dll)
@@ -86,7 +138,11 @@ foreach(_mingw_runtime IN ITEMS libgcc_s_seh-1.dll libstdc++-6.dll libwinpthread
                 "${_helper_dist_dir}/${_mingw_runtime}"
             VERBATIM
         )
+        add_custom_command(TARGET osmand_native_widget POST_BUILD
+            COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+                "${MINGW_ROOT}/bin/${_mingw_runtime}"
+                "${_helper_dist_dir}/${_mingw_runtime}"
+            VERBATIM
+        )
     endif()
 endforeach()
-
-

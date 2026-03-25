@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import logging
 from collections import OrderedDict
+from collections import deque
 from typing import Iterable
 
-from PySide6.QtCore import QObject, QThread, Signal, Slot
+from PySide6.QtCore import QObject, QThread, QTimer, Signal, Slot
 
 from maps.map_sources import MapBackendMetadata
 from maps.tile_backend import TileBackend, TilePayload
@@ -22,10 +23,27 @@ class _TileWorker(QObject):
     def __init__(self, tile_backend: TileBackend) -> None:
         super().__init__()
         self._tile_backend = tile_backend
+        self._request_queue: deque[tuple[int, int, int]] = deque()
+        self._busy = False
 
     @Slot(int, int, int)
     def request_tile(self, z: int, x: int, y: int) -> None:
-        """Load a tile inside the worker thread and report the outcome."""
+        """Queue tile requests so the helper protocol is never re-entered."""
+
+        self._request_queue.append((z, x, y))
+        if self._busy:
+            return
+
+        self._busy = True
+        self._drain_queue()
+
+    @Slot()
+    def _drain_queue(self) -> None:
+        if not self._request_queue:
+            self._busy = False
+            return
+
+        z, x, y = self._request_queue.popleft()
 
         try:
             tile = self._tile_backend.load_tile(z, x, y)
@@ -38,13 +56,13 @@ class _TileWorker(QObject):
                 exc,
             )
             self.tile_missing.emit(z, x, y)
-            return
+        else:
+            if tile is None:
+                self.tile_missing.emit(z, x, y)
+            else:
+                self.tile_loaded.emit(z, x, y, tile)
 
-        if tile is None:
-            self.tile_missing.emit(z, x, y)
-            return
-
-        self.tile_loaded.emit(z, x, y, tile)
+        QTimer.singleShot(0, self._drain_queue)
 
 
 class TileManager(QObject):

@@ -36,8 +36,9 @@ def collect_tiles(
             continue
         for tile_x in range(start_tile_x, end_tile_x):
             wrapped_x = tile_x % view_state.tiles_across
-            flipped_y = (view_state.tiles_across - 1) - tile_y
-            tile_key = (view_state.fetch_zoom, wrapped_x, flipped_y)
+            tile_scheme = tile_manager.metadata.tile_scheme
+            resolved_y = (view_state.tiles_across - 1) - tile_y if tile_scheme == "tms" else tile_y
+            tile_key = (view_state.fetch_zoom, wrapped_x, resolved_y)
 
             tile_origin_x = tile_x * view_state.scaled_tile_size - view_state.view_top_left_x
             tile_origin_y = tile_y * view_state.scaled_tile_size - view_state.view_top_left_y

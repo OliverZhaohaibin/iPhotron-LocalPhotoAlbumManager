@@ -23,6 +23,8 @@ DEFAULT_QT_ROOT = Path(r"C:\Qt\6.10.1\mingw_64")
 DEFAULT_MINGW_ROOT = Path(r"C:\Qt\Tools\mingw1310_64")
 ENV_QT_ROOT = "IPHOTO_OSMAND_QT_ROOT"
 ENV_MINGW_ROOT = "IPHOTO_OSMAND_MINGW_ROOT"
+DEFAULT_HELPER_INIT_TIMEOUT_MS = 30000
+DEFAULT_HELPER_RENDER_TIMEOUT_MS = 30000
 
 
 class TileBackendUnavailableError(TileLoadingError):
@@ -106,6 +108,7 @@ class LegacyVectorBackend:
                 max_zoom=max_zoom,
                 provides_place_labels=False,
                 tile_kind="vector",
+                tile_scheme="tms",
             )
 
         return MapBackendMetadata(
@@ -113,17 +116,20 @@ class LegacyVectorBackend:
             max_zoom=6.0,
             provides_place_labels=False,
             tile_kind="vector",
+            tile_scheme="tms",
         )
 
 
 class OsmAndRasterBackend:
     """Load map tiles through an external OsmAnd-compatible helper."""
 
+    CACHE_SCHEMA_VERSION = "2"
     DEFAULT_METADATA = MapBackendMetadata(
         min_zoom=2.0,
         max_zoom=19.0,
         provides_place_labels=True,
         tile_kind="raster",
+        tile_scheme="xyz",
     )
 
     def __init__(self, source: MapSourceSpec) -> None:
@@ -146,22 +152,21 @@ class OsmAndRasterBackend:
         if cache_path.exists():
             return self._load_cached_tile(cache_path)
 
-        process = self._ensure_process()
-        request = {
-            "command": "render",
-            "z": int(z),
-            "x": int(x),
-            "y": int(y),
-            "device_scale": float(self._device_scale),
-            "output_path": str(cache_path),
-        }
-        response = self._communicate(process, request)
-        if response.get("status") != "ok":
-            message = str(response.get("message", "unknown render failure"))
-            raise TileRenderError(message)
-
-        if not cache_path.exists():
-            raise TileRenderError(f"OsmAnd helper reported success but '{cache_path}' was not created")
+        for attempt in range(2):
+            try:
+                self._render_tile_to_cache(z, x, y, cache_path)
+                break
+            except TileBackendUnavailableError:
+                self._remove_partial_cache_file(cache_path)
+                if attempt >= 1:
+                    raise
+                LOGGER.warning(
+                    "OsmAnd helper became unavailable while rendering %s/%s/%s; restarting and retrying once",
+                    z,
+                    x,
+                    y,
+                )
+                self.shutdown()
 
         return self._load_cached_tile(cache_path)
 
@@ -195,6 +200,7 @@ class OsmAndRasterBackend:
             )
 
         process = QProcess()
+        process.setProcessChannelMode(QProcess.ProcessChannelMode.ForwardedErrorChannel)
         process.setProgram(command[0])
         process.setArguments(list(command[1:]))
         process.setProcessEnvironment(_helper_process_environment(Path(command[0])))
@@ -215,7 +221,7 @@ class OsmAndRasterBackend:
                 "style_path": str(self._source.style_path),
                 "night_mode": False,
             },
-            timeout_ms=15000,
+            timeout_ms=DEFAULT_HELPER_INIT_TIMEOUT_MS,
         )
         if response.get("status") != "ok":
             process.kill()
@@ -233,6 +239,7 @@ class OsmAndRasterBackend:
                 ),
             ),
             tile_kind="raster",
+            tile_scheme="xyz",
         )
         self._process = process
         return process
@@ -247,27 +254,33 @@ class OsmAndRasterBackend:
         message = json.dumps(payload, ensure_ascii=True) + "\n"
         process.write(message.encode("utf8"))
         if not process.waitForBytesWritten(timeout_ms):
+            self._discard_process(process)
             raise TileBackendUnavailableError("Timed out while writing to the OsmAnd helper")
 
         if not process.canReadLine() and not process.waitForReadyRead(timeout_ms):
+            self._discard_process(process)
             raise TileBackendUnavailableError("Timed out while waiting for the OsmAnd helper")
 
         while not process.canReadLine():
             if not process.waitForReadyRead(timeout_ms):
+                self._discard_process(process)
                 raise TileBackendUnavailableError("Timed out while reading from the OsmAnd helper")
 
         raw_line = bytes(process.readLine()).decode("utf8", errors="replace").strip()
         if not raw_line:
+            self._discard_process(process)
             raise TileBackendUnavailableError("OsmAnd helper returned an empty response")
 
         try:
             response = json.loads(raw_line)
         except json.JSONDecodeError as exc:
+            self._discard_process(process)
             raise TileBackendUnavailableError(
                 f"OsmAnd helper returned invalid JSON: {raw_line!r}",
             ) from exc
 
         if not isinstance(response, dict):
+            self._discard_process(process)
             raise TileBackendUnavailableError("OsmAnd helper returned a non-object JSON response")
 
         return response
@@ -286,6 +299,37 @@ class OsmAndRasterBackend:
     def _helper_command(self) -> tuple[str, ...] | None:
         return self._source.helper_command
 
+    def _render_tile_to_cache(self, z: int, x: int, y: int, cache_path: Path) -> None:
+        process = self._ensure_process()
+        request = {
+            "command": "render",
+            "z": int(z),
+            "x": int(x),
+            "y": int(y),
+            "device_scale": float(self._device_scale),
+            "output_path": str(cache_path),
+        }
+        response = self._communicate(process, request, timeout_ms=DEFAULT_HELPER_RENDER_TIMEOUT_MS)
+        if response.get("status") != "ok":
+            message = str(response.get("message", "unknown render failure"))
+            raise TileRenderError(message)
+
+        if not cache_path.exists():
+            raise TileRenderError(f"OsmAnd helper reported success but '{cache_path}' was not created")
+
+    def _discard_process(self, process: QProcess) -> None:
+        if self._process is process:
+            self._process = None
+        if process.state() != QProcess.ProcessState.NotRunning:
+            process.kill()
+            process.waitForFinished(1000)
+
+    def _remove_partial_cache_file(self, cache_path: Path) -> None:
+        try:
+            cache_path.unlink(missing_ok=True)
+        except OSError:
+            LOGGER.debug("Failed to remove partial cache file '%s'", cache_path, exc_info=True)
+
     def _cache_file_path(self, z: int, x: int, y: int) -> Path:
         cache_root = self._cache_directory()
         scale_tag = f"{self._device_scale:.2f}".replace(".", "_")
@@ -301,9 +345,11 @@ class OsmAndRasterBackend:
             fingerprint = hashlib.sha256(
                 "|".join(
                     (
+                        self.CACHE_SCHEMA_VERSION,
                         str(self._source.data_path),
                         str(self._source.style_path),
                         str(self._source.resources_root),
+                        "|".join(self._source.helper_command or ()),
                     ),
                 ).encode("utf8"),
             ).hexdigest()[:16]
@@ -420,8 +466,18 @@ class FallbackTileBackend:
                 if tile is not None:
                     return tile
             except TileBackendUnavailableError as exc:
-                LOGGER.warning("Primary map backend disabled after runtime failure: %s", exc)
+                LOGGER.warning(
+                    "Primary map backend disabled after runtime failure on %s/%s/%s: %s",
+                    z,
+                    x,
+                    y,
+                    exc,
+                )
                 self._primary_enabled = False
+                try:
+                    self._primary.shutdown()
+                except Exception:  # pragma: no cover - best effort cleanup only
+                    LOGGER.debug("Primary backend shutdown failed after runtime error", exc_info=True)
                 self.metadata = self._fallback.probe()
             except TileLoadingError as exc:
                 LOGGER.warning(

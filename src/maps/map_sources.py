@@ -12,7 +12,10 @@ DEFAULT_OSMAND_RESOURCES_ROOT = Path(r"D:\python_code\maps_of_iPhoto\OsmAnd-reso
 DEFAULT_OSMAND_STYLE_PATH = DEFAULT_OSMAND_RESOURCES_ROOT / "rendering_styles" / "snowmobile.render.xml"
 DEFAULT_OFFICIAL_OSMAND_ROOT = Path(r"D:\python_code\maps_of_iPhoto")
 ENV_OSMAND_HELPER = "IPHOTO_OSMAND_RENDER_HELPER"
+ENV_OSMAND_NATIVE_WIDGET_LIBRARY = "IPHOTO_OSMAND_NATIVE_WIDGET_LIBRARY"
 DEFAULT_HELPER_RELATIVE_PATH = Path("tools") / "osmand_render_helper_native" / "dist" / "osmand_render_helper.exe"
+DEFAULT_NATIVE_WIDGET_RELATIVE_PATH = Path("tools") / "osmand_render_helper_native" / "dist" / "osmand_native_widget.dll"
+DEFAULT_NATIVE_WIDGET_RELATIVE_PATH_MINGW = Path("tools") / "osmand_render_helper_native" / "dist" / "libosmand_native_widget.dll"
 
 
 @dataclass(frozen=True)
@@ -23,6 +26,7 @@ class MapBackendMetadata:
     max_zoom: float
     provides_place_labels: bool
     tile_kind: Literal["vector", "raster"]
+    tile_scheme: Literal["tms", "xyz"] = "tms"
 
 
 @dataclass(frozen=True)
@@ -79,11 +83,7 @@ class MapSourceSpec:
 
         root = package_root or _package_root()
         osmand = cls.osmand_default(root)
-        if (
-            Path(osmand.data_path).exists()
-            and Path(osmand.resources_root or "").exists()
-            and Path(osmand.style_path or "").exists()
-        ):
+        if _has_osmand_data_assets(root):
             return osmand
         return cls.legacy_default(root)
 
@@ -103,16 +103,44 @@ def resolve_osmand_helper_command(package_root: Path | None = None) -> tuple[str
     return parts or None
 
 
+def resolve_osmand_native_widget_library(package_root: Path | None = None) -> Path | None:
+    """Return the native Qt widget DLL path when it is available."""
+
+    raw_value = os.environ.get(ENV_OSMAND_NATIVE_WIDGET_LIBRARY, "").strip()
+    if raw_value:
+        candidate = Path(raw_value)
+        if not candidate.is_absolute():
+            candidate = (package_root or _package_root()) / candidate
+        return candidate if candidate.exists() else None
+
+    root = package_root or _package_root()
+    for candidate in _default_native_widget_candidates(root):
+        if candidate.exists():
+            return candidate
+    return None
+
+
 def has_usable_osmand_default(package_root: Path | None = None) -> bool:
     """Return ``True`` when the bundled OBF source and helper are both available."""
 
     root = package_root or _package_root()
     source = MapSourceSpec.osmand_default(root).resolved(root)
+    return _has_osmand_data_assets(root) and bool(source.helper_command)
+
+
+def has_usable_osmand_native_widget(package_root: Path | None = None) -> bool:
+    """Return ``True`` when the bundled OBF source and native widget DLL are available."""
+
+    root = package_root or _package_root()
+    return _has_osmand_data_assets(root) and resolve_osmand_native_widget_library(root) is not None
+
+
+def _has_osmand_data_assets(package_root: Path) -> bool:
+    source = MapSourceSpec.osmand_default(package_root).resolved(package_root)
     return (
         Path(source.data_path).exists()
         and Path(source.resources_root or "").exists()
         and Path(source.style_path or "").exists()
-        and bool(source.helper_command)
     )
 
 
@@ -149,14 +177,55 @@ def _default_helper_candidates(package_root: Path) -> tuple[Path, ...]:
         Path("binaries") / "windows" / "gcc-amd64" / "amd64" / "RelWithDebInfo" / "osmand_render_helper.exe",
         Path("binaries") / "windows" / "msvc-amd64" / "amd64" / "osmand_render_helper.exe",
     )
+    return _collect_candidate_paths(search_roots, official_roots, DEFAULT_HELPER_RELATIVE_PATH, official_relatives)
+
+
+def _default_native_widget_candidates(package_root: Path) -> tuple[Path, ...]:
+    normalized_root = Path(package_root).resolve()
+    search_roots = (
+        normalized_root,
+        normalized_root.parent,
+        normalized_root.parent.parent,
+    )
+    official_roots = (
+        DEFAULT_OFFICIAL_OSMAND_ROOT.resolve(),
+    )
+    official_relatives = (
+        # Without prefix (MSVC / renamed)
+        Path("binaries") / "windows" / "gcc-amd64" / "Release" / "osmand_native_widget.dll",
+        Path("binaries") / "windows" / "gcc-amd64" / "amd64" / "Release" / "osmand_native_widget.dll",
+        Path("binaries") / "windows" / "gcc-amd64" / "amd64" / "RelWithDebInfo" / "osmand_native_widget.dll",
+        Path("binaries") / "windows" / "msvc-amd64" / "amd64" / "osmand_native_widget.dll",
+        # With MinGW 'lib' prefix
+        Path("binaries") / "windows" / "gcc-amd64" / "Release" / "libosmand_native_widget.dll",
+        Path("binaries") / "windows" / "gcc-amd64" / "amd64" / "Release" / "libosmand_native_widget.dll",
+    )
+    # Try both dist-relative paths (no-prefix first, then MinGW prefix)
+    candidates = _collect_candidate_paths(
+        search_roots, official_roots, DEFAULT_NATIVE_WIDGET_RELATIVE_PATH, official_relatives
+    )
+    candidates_mingw = _collect_candidate_paths(
+        search_roots, (DEFAULT_OFFICIAL_OSMAND_ROOT.resolve(),), DEFAULT_NATIVE_WIDGET_RELATIVE_PATH_MINGW, ()
+    )
+    return candidates + candidates_mingw
+
+
+def _collect_candidate_paths(
+    search_roots: tuple[Path, ...],
+    official_roots: tuple[Path, ...],
+    local_relative_path: Path,
+    official_relatives: tuple[Path, ...],
+) -> tuple[Path, ...]:
     seen: set[Path] = set()
     candidates: list[Path] = []
+
     for root in search_roots:
-        candidate = (root / DEFAULT_HELPER_RELATIVE_PATH).resolve()
+        candidate = (root / local_relative_path).resolve()
         if candidate in seen:
             continue
         seen.add(candidate)
         candidates.append(candidate)
+
     for root in official_roots:
         for relative in official_relatives:
             candidate = (root / relative).resolve()
@@ -164,17 +233,22 @@ def _default_helper_candidates(package_root: Path) -> tuple[Path, ...]:
                 continue
             seen.add(candidate)
             candidates.append(candidate)
+
     return tuple(candidates)
 
 
 __all__ = [
+    "DEFAULT_HELPER_RELATIVE_PATH",
+    "DEFAULT_NATIVE_WIDGET_RELATIVE_PATH",
+    "DEFAULT_OFFICIAL_OSMAND_ROOT",
     "DEFAULT_OSMAND_RESOURCES_ROOT",
     "DEFAULT_OSMAND_STYLE_PATH",
-    "DEFAULT_HELPER_RELATIVE_PATH",
-    "DEFAULT_OFFICIAL_OSMAND_ROOT",
     "ENV_OSMAND_HELPER",
+    "ENV_OSMAND_NATIVE_WIDGET_LIBRARY",
     "MapBackendMetadata",
     "MapSourceSpec",
     "has_usable_osmand_default",
+    "has_usable_osmand_native_widget",
     "resolve_osmand_helper_command",
+    "resolve_osmand_native_widget_library",
 ]

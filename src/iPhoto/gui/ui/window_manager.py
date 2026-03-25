@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 from contextlib import contextmanager
 from typing import Iterable, Iterator, TYPE_CHECKING, cast
 
@@ -47,6 +48,24 @@ PLAYBACK_RESUME_DELAY_MS = 120
 _MIN_WINDOW_WIDTH = 900
 _MIN_WINDOW_HEIGHT = 640
 _SCREEN_CLAMP_MARGIN = 40
+
+
+def _is_wayland() -> bool:
+    """Return ``True`` when the application is running on Linux under Wayland.
+
+    On Wayland, move requests for *top-level* ``QWidget`` windows are typically
+    ignored because the compositor owns window positioning, whereas child
+    widgets can still be repositioned normally. The check is intentionally
+    narrow so that it only affects Linux+Wayland sessions and leaves X11,
+    Windows, and macOS behaviour completely unchanged.
+    """
+    if sys.platform != "linux":
+        return False
+    app = QApplication.instance()
+    if app is None:
+        return False
+    platform_name = app.platformName()
+    return platform_name.lower() == "wayland"
 
 
 class FramelessWindowManager(QObject):
@@ -540,7 +559,6 @@ class FramelessWindowManager(QObject):
         if event.type() == QEvent.Type.MouseButtonPress:
             mouse_event = cast(QMouseEvent, event)
             if mouse_event.button() == Qt.MouseButton.LeftButton:
-                self._drag_active = True
                 cursor_global = mouse_event.globalPosition().toPoint()
                 self._drag_offset = (
                     cursor_global - self._window.frameGeometry().topLeft()
@@ -562,6 +580,19 @@ class FramelessWindowManager(QObject):
                         self._window.resize(pre.size())
 
                 self._snap_helper.begin_drag(self._window.geometry())
+
+                # On Wayland, move requests for top-level QWidget windows are
+                # ignored by the compositor.  Delegate the interactive move to
+                # the compositor via startSystemMove() so that dragging works
+                # correctly on KDE Plasma / GNOME Wayland sessions.  This path
+                # is intentionally narrow and does not affect X11, Windows, or
+                # macOS behaviour.
+                if _is_wayland():
+                    handle = self._window.windowHandle()
+                    if handle is not None and handle.startSystemMove():
+                        return True
+
+                self._drag_active = True
                 return True
 
         if event.type() == QEvent.Type.MouseMove and self._drag_active:

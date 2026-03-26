@@ -4,6 +4,80 @@ All notable changes to **iPhotron** are documented in this file.
 
 ---
 
+## 🚀 v4.5.0 — Color Grading Expansion & Video Compatibility Improvements
+
+🎨 *A richer color grading workflow, new creative tools, stronger video compatibility, and more native desktop window behavior.*
+
+### Key Updates
+
+#### 🎨 Expanded Color Grading Workflow
+- Further refined the color grading experience for smoother, more precise adjustment workflows.
+- Added new editing tools including **Definition**, **Noise Reduction**, **Sharpen**, and **Vignette**.
+- **Sharpen** includes dedicated `Intensity`, `Edges`, and `Falloff` controls, while **Vignette** adds `Strength`, `Radius`, and `Softness` adjustments.
+- Improved the overall editing flow to make advanced adjustments feel more consistent and intuitive.
+
+#### 🎬 Video Preview & Playback Fixes
+- **Fixed preview black borders:** Videos now render correctly in preview mode without unwanted letterboxing artifacts.
+- **Fixed HEVC and HDR display issues:** Improved compatibility for modern video formats to ensure more reliable playback and preview rendering.
+- Better overall media presentation consistency across different codecs and dynamic-range formats.
+
+#### 🐧 Linux Video Thumbnail Reliability
+- **Fixed incorrect thumbnail orientation on Linux:** Resolved an intermittent issue that could generate video thumbnails with the wrong rotation.
+- Improved thumbnail generation stability for rotated and metadata-sensitive video sources on Linux systems.
+
+#### 🪟 Native Window Snapping
+- Added support for native window snapping behavior to better match each platform's built-in desktop experience.
+- Window management now feels more natural and integrated across supported operating systems.
+
+---
+
+## 🚀 v4.3.0 — Linux Alpha, RAW Support & Crop Refinements
+
+📸 *Linux enters Alpha testing, RAW workflows arrive, and cropping becomes more precise and familiar.*
+
+### Key Updates
+
+#### 🐧 Linux Version Enters Alpha Testing
+- The **Linux version is now officially in Alpha testing**, bringing the iPhotron experience to a whole new platform.
+- Early Linux builds extend photo management workflows beyond Windows and macOS while broader compatibility work continues.
+
+#### 📷 Native RAW Image Support
+- Added support for **RAW format images**.
+- You can now seamlessly import, view, and manage uncompressed, high-quality RAW photos directly inside your library.
+
+#### ✂️ Aspect Ratio Constraints for Cropping
+- Added aspect ratio constraint options to the crop tool.
+- The cropping workflow now feels closer to the native macOS Photos experience, making edits more intuitive, precise, and familiar.
+
+#### 🐛 Fullscreen and General Bug Fixes
+- Fixed a bug affecting fullscreen mode to ensure a more seamless and reliable viewing experience.
+- Resolved a range of smaller issues under the hood to improve overall stability.
+
+---
+
+## 🚀 v4.1.0 — MVVM Refinement & Major Scrolling Performance Boost
+
+📸 *A more complete MVVM foundation with dramatically smoother scrolling and more stable large-library browsing.*
+
+### Key Updates
+
+#### 🏗️ MVVM Architecture — More Complete, More Stable State-Driven UI
+- **Stronger MVVM boundaries:** Clearer responsibilities across View / ViewModel / Model reduce cross-layer coupling and implicit dependencies.
+- **Upgraded state management:** Standardized UI State (`Loading / Content / Empty / Error`) helps prevent edge-case rendering divergence.
+- **More consistent unidirectional data flow:** The View only subscribes to ViewModel outputs, while all mutations enter through the ViewModel.
+- **Better testability:** Critical logic moved into ViewModel plus UseCase/Service layers for finer unit testing and safer regression coverage.
+- **Lifecycle & resource governance:** Subscriptions and async tasks are properly scoped and disposed with lifecycle events to reduce leaks and background overhead.
+
+#### ⚡ Scrolling Performance Boost — Dramatically Smoother Browsing
+- **Lighter rendering pipeline:** Reduced unnecessary re-renders and layout recalculations for steadier high FPS while scrolling.
+- **Enhanced virtualization for lists and grids:** Improved visible-range computation and reuse strategy to lower UI workload on large datasets.
+- **Smarter thumbnail loading:** Prefetching and prioritization now focus on on-screen items, with progressive loading and better decode scheduling.
+- **Cache improvements:** Multi-level caching (`memory + disk`) with smarter eviction stabilizes hit rate and reduces redundant decoding.
+- **Async task coordination:** Better debouncing and coalescing for rapid scroll events helps avoid main-thread contention and request storms.
+- **Lower memory churn:** Fewer transient allocations during fast scrolling reduce GC/ARC pressure and micro-stutters.
+
+---
+
 ## 🚀 v4.00 — MVVM Architecture & Advanced Editing
 
 📸 *MVVM architecture for smooth performance, color curves support, and cluster-based map browsing.*

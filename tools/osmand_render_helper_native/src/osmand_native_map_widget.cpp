@@ -17,6 +17,7 @@
 #include <QOpenGLFunctions>
 #include <QPointer>
 #include <QStandardPaths>
+#include <QThread>
 #include <QWheelEvent>
 
 #include <OsmAndCore.h>
@@ -42,6 +43,12 @@ constexpr double kDefaultMaxZoom = 19.0;
 constexpr double kDefaultZoom = 2.0;
 constexpr float kDefaultFieldOfView = 16.5f;
 constexpr float kDefaultElevationAngle = 90.0f;
+constexpr float kStableDetailedDistance = 0.5f;
+constexpr float kInteractiveDetailedDistance = 0.0f;
+constexpr float kStableSymbolsOpacity = 1.0f;
+constexpr float kInteractiveSymbolsOpacity = 0.0f;
+constexpr float kInteractiveReferenceTileSizeOnScreen = 384.0f;
+constexpr int kInteractionSettleDelayMs = 140;
 constexpr double kPi = 3.14159265358979323846;
 constexpr int kConcurrentObfReadLimit = 0;
 
@@ -147,7 +154,12 @@ OsmAndNativeMapWidget* OsmAndNativeMapWidget::create(
 OsmAndNativeMapWidget::OsmAndNativeMapWidget(const Configuration& configuration, QWidget* parent)
     : QOpenGLWidget(parent)
     , _configuration(configuration)
+    , _interactionTimer(this)
 {
+    _interactionTimer.setSingleShot(true);
+    _interactionTimer.setInterval(kInteractionSettleDelayMs);
+    connect(&_interactionTimer, &QTimer::timeout, this, &OsmAndNativeMapWidget::finishInteractiveRendering);
+
     setUpdateBehavior(QOpenGLWidget::NoPartialUpdate);
     setMouseTracking(true);
     setFocusPolicy(Qt::StrongFocus);
@@ -182,19 +194,22 @@ void OsmAndNativeMapWidget::setZoomLevel(double zoomLevel)
     if (std::abs(clampedZoom - _zoomLevel) <= 1e-6)
         return;
 
+    beginInteractiveRendering();
+    scheduleInteractiveRenderingFinish();
     _zoomLevel = clampedZoom;
     wrapCenter();
-    syncRendererCamera(true);
+    syncRendererCamera(false);
     update();
 }
 
 void OsmAndNativeMapWidget::resetView()
 {
+    finishInteractiveRendering();
     _centerX = 0.5;
     _centerY = 0.5;
     _zoomLevel = _defaultZoomLevel;
     wrapCenter();
-    syncRendererCamera(true);
+    syncRendererCamera(false);
     update();
 }
 
@@ -204,20 +219,23 @@ void OsmAndNativeMapWidget::panByPixels(double deltaX, double deltaY)
     if (currentWorldSize <= 0.0)
         return;
 
+    beginInteractiveRendering();
+    scheduleInteractiveRenderingFinish();
     _centerX -= deltaX / currentWorldSize;
     _centerY -= deltaY / currentWorldSize;
     wrapCenter();
-    syncRendererCamera(true);
+    syncRendererCamera(false);
     update();
 }
 
 void OsmAndNativeMapWidget::setCenterLonLat(double longitude, double latitude)
 {
+    finishInteractiveRendering();
     const auto normalized = lonLatToNormalized(longitude, latitude);
     _centerX = normalized.x();
     _centerY = normalized.y();
     wrapCenter();
-    syncRendererCamera(true);
+    syncRendererCamera(false);
     update();
 }
 
@@ -268,6 +286,8 @@ void OsmAndNativeMapWidget::mousePressEvent(QMouseEvent* event)
 {
     if (event->button() == Qt::LeftButton)
     {
+        beginInteractiveRendering();
+        scheduleInteractiveRenderingFinish();
         _dragging = true;
         _lastMousePosition = event->position();
         setCursor(Qt::ClosedHandCursor);
@@ -301,6 +321,7 @@ void OsmAndNativeMapWidget::mouseReleaseEvent(QMouseEvent* event)
     {
         _dragging = false;
         unsetCursor();
+        scheduleInteractiveRenderingFinish();
         event->accept();
         return;
     }
@@ -339,10 +360,12 @@ void OsmAndNativeMapWidget::wheelEvent(QWheelEvent* event)
     const auto newCenterPixelX = mouseWorldX * newWorldSize - event->position().x() + width() / 2.0;
     const auto newCenterPixelY = mouseWorldY * newWorldSize - event->position().y() + height() / 2.0;
 
+    beginInteractiveRendering();
+    scheduleInteractiveRenderingFinish();
     _centerX = newCenterPixelX / newWorldSize;
     _centerY = newCenterPixelY / newWorldSize;
     wrapCenter();
-    syncRendererCamera(true);
+    syncRendererCamera(false);
     update();
     event->accept();
 }
@@ -456,12 +479,13 @@ bool OsmAndNativeMapWidget::ensureRenderer()
     }
 
     const auto rendererConfiguration = std::static_pointer_cast<OsmAnd::AtlasMapRendererConfiguration>(_mapRenderer->getConfiguration());
-    rendererConfiguration->referenceTileSizeOnScreenInPixels = kReferenceTileSize;
+    rendererConfiguration->referenceTileSizeOnScreenInPixels = static_cast<float>(kReferenceTileSize);
     _mapRenderer->setConfiguration(rendererConfiguration);
     _mapRenderer->setFieldOfView(kDefaultFieldOfView);
     _mapRenderer->setElevationAngle(kDefaultElevationAngle);
     _mapRenderer->setMapLayerProvider(0, _mapRasterLayerProvider);
     _mapRenderer->addSymbolsProvider(_mapSymbolsProvider);
+    _mapRenderer->setResourceWorkerThreadsLimit(static_cast<unsigned int>(std::clamp(QThread::idealThreadCount(), 4, 8)));
     syncRendererViewport(true);
     syncRendererCamera(true);
 
@@ -476,6 +500,8 @@ bool OsmAndNativeMapWidget::ensureRenderer()
     _maxZoomLevel = std::max(_minZoomLevel, static_cast<double>(_mapRenderer->getMaxZoomLevel()));
     _defaultZoomLevel = std::clamp(kDefaultZoom, _minZoomLevel, _maxZoomLevel);
     _zoomLevel = std::clamp(_zoomLevel, _minZoomLevel, _maxZoomLevel);
+    _mapRenderer->setDetailedDistance(kStableDetailedDistance, true);
+    _mapRenderer->setSymbolsOpacity(kStableSymbolsOpacity, true);
     syncRendererCamera(true);
     return true;
 }
@@ -507,10 +533,78 @@ void OsmAndNativeMapWidget::syncRendererCamera(bool forcedUpdate)
     _mapRenderer->forcedFrameInvalidate();
 }
 
+void OsmAndNativeMapWidget::beginInteractiveRendering()
+{
+    if (_interactionTimer.isActive())
+        _interactionTimer.stop();
+
+    if (_interactiveRendering)
+        return;
+
+    _interactiveRendering = true;
+    if (_mapRenderer)
+    {
+        const auto rendererConfiguration = std::static_pointer_cast<OsmAnd::AtlasMapRendererConfiguration>(_mapRenderer->getConfiguration());
+        rendererConfiguration->referenceTileSizeOnScreenInPixels = kInteractiveReferenceTileSizeOnScreen;
+        _mapRenderer->setConfiguration(rendererConfiguration);
+        _mapRenderer->setDetailedDistance(kInteractiveDetailedDistance);
+        _mapRenderer->setSymbolsOpacity(kInteractiveSymbolsOpacity);
+        if (!_symbolsSuspendedByInteraction && !_mapRenderer->isSymbolsUpdateSuspended())
+            _symbolsSuspendedByInteraction = _mapRenderer->suspendSymbolsUpdate();
+        _mapRenderer->forcedFrameInvalidate();
+    }
+}
+
+void OsmAndNativeMapWidget::scheduleInteractiveRenderingFinish()
+{
+    _interactionTimer.start();
+}
+
+void OsmAndNativeMapWidget::finishInteractiveRendering()
+{
+    if (_interactionTimer.isActive())
+        _interactionTimer.stop();
+
+    if (!_interactiveRendering)
+        return;
+
+    _interactiveRendering = false;
+    if (_mapRenderer)
+    {
+        const auto rendererConfiguration = std::static_pointer_cast<OsmAnd::AtlasMapRendererConfiguration>(_mapRenderer->getConfiguration());
+        rendererConfiguration->referenceTileSizeOnScreenInPixels = static_cast<float>(kReferenceTileSize);
+        _mapRenderer->setConfiguration(rendererConfiguration);
+        _mapRenderer->setDetailedDistance(kStableDetailedDistance);
+        _mapRenderer->setSymbolsOpacity(kStableSymbolsOpacity);
+        if (_symbolsSuspendedByInteraction)
+        {
+            _mapRenderer->resumeSymbolsUpdate();
+            _symbolsSuspendedByInteraction = false;
+        }
+        _mapRenderer->forcedFrameInvalidate();
+    }
+    else
+    {
+        _symbolsSuspendedByInteraction = false;
+    }
+
+    update();
+}
+
 void OsmAndNativeMapWidget::cleanupRenderer()
 {
+    if (_interactionTimer.isActive())
+        _interactionTimer.stop();
+
     if (!_mapRenderer)
         return;
+
+    if (_symbolsSuspendedByInteraction)
+    {
+        _mapRenderer->resumeSymbolsUpdate();
+        _symbolsSuspendedByInteraction = false;
+    }
+    _interactiveRendering = false;
 
     const auto hadContext = context() != nullptr;
     if (hadContext)
@@ -573,4 +667,3 @@ QPointF OsmAndNativeMapWidget::normalizedToLonLat(double normalizedX, double nor
     const auto latitude = std::atan(std::sinh(kPi * (1.0 - 2.0 * clampedY))) * 180.0 / kPi;
     return {longitude, latitude};
 }
-

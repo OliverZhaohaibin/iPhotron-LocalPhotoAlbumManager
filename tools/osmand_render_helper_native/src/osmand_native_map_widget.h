@@ -7,6 +7,7 @@
 #include <QOpenGLWidget>
 #include <QPointF>
 #include <QString>
+#include <QTimer>
 
 namespace OsmAnd
 {
@@ -61,6 +62,9 @@ private:
     bool ensureRenderer();
     void syncRendererViewport(bool forcedUpdate = false);
     void syncRendererCamera(bool forcedUpdate = false);
+    void beginInteractiveRendering();
+    void scheduleInteractiveRenderingFinish();
+    void finishInteractiveRendering();
     void cleanupRenderer();
     void wrapCenter();
     double worldSize() const;
@@ -81,6 +85,9 @@ private:
     double _minZoomLevel = 2.0;
     double _maxZoomLevel = 19.0;
     double _defaultZoomLevel = 2.0;
+    QTimer _interactionTimer;
+    bool _interactiveRendering = false;
+    bool _symbolsSuspendedByInteraction = false;
 
     std::shared_ptr<OsmAnd::MapStylesCollection> _stylesCollection;
     std::shared_ptr<OsmAnd::ObfsCollection> _obfsCollection;

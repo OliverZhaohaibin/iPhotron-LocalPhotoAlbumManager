@@ -14,6 +14,7 @@ DEFAULT_OFFICIAL_OSMAND_ROOT = Path(r"D:\python_code\maps_of_iPhoto")
 ENV_OSMAND_HELPER = "IPHOTO_OSMAND_RENDER_HELPER"
 ENV_OSMAND_NATIVE_WIDGET_LIBRARY = "IPHOTO_OSMAND_NATIVE_WIDGET_LIBRARY"
 DEFAULT_HELPER_RELATIVE_PATH = Path("tools") / "osmand_render_helper_native" / "dist" / "osmand_render_helper.exe"
+DEFAULT_NATIVE_WIDGET_RELATIVE_PATH_MSVC = Path("tools") / "osmand_render_helper_native" / "dist-msvc" / "osmand_native_widget.dll"
 DEFAULT_NATIVE_WIDGET_RELATIVE_PATH = Path("tools") / "osmand_render_helper_native" / "dist" / "osmand_native_widget.dll"
 DEFAULT_NATIVE_WIDGET_RELATIVE_PATH_MINGW = Path("tools") / "osmand_render_helper_native" / "dist" / "libosmand_native_widget.dll"
 
@@ -175,6 +176,8 @@ def _default_helper_candidates(package_root: Path) -> tuple[Path, ...]:
         Path("binaries") / "windows" / "gcc-amd64" / "Release" / "osmand_render_helper.exe",
         Path("binaries") / "windows" / "gcc-amd64" / "amd64" / "Release" / "osmand_render_helper.exe",
         Path("binaries") / "windows" / "gcc-amd64" / "amd64" / "RelWithDebInfo" / "osmand_render_helper.exe",
+        Path("binaries") / "windows" / "msvc-amd64" / "amd64" / "Release" / "osmand_render_helper.exe",
+        Path("binaries") / "windows" / "msvc-amd64" / "amd64" / "RelWithDebInfo" / "osmand_render_helper.exe",
         Path("binaries") / "windows" / "msvc-amd64" / "amd64" / "osmand_render_helper.exe",
     )
     return _collect_candidate_paths(search_roots, official_roots, DEFAULT_HELPER_RELATIVE_PATH, official_relatives)
@@ -191,23 +194,20 @@ def _default_native_widget_candidates(package_root: Path) -> tuple[Path, ...]:
         DEFAULT_OFFICIAL_OSMAND_ROOT.resolve(),
     )
     official_relatives = (
-        # Without prefix (MSVC / renamed)
+        Path("binaries") / "windows" / "msvc-amd64" / "amd64" / "Release" / "osmand_native_widget.dll",
+        Path("binaries") / "windows" / "msvc-amd64" / "amd64" / "RelWithDebInfo" / "osmand_native_widget.dll",
+        Path("binaries") / "windows" / "msvc-amd64" / "amd64" / "osmand_native_widget.dll",
         Path("binaries") / "windows" / "gcc-amd64" / "Release" / "osmand_native_widget.dll",
         Path("binaries") / "windows" / "gcc-amd64" / "amd64" / "Release" / "osmand_native_widget.dll",
         Path("binaries") / "windows" / "gcc-amd64" / "amd64" / "RelWithDebInfo" / "osmand_native_widget.dll",
-        Path("binaries") / "windows" / "msvc-amd64" / "amd64" / "osmand_native_widget.dll",
-        # With MinGW 'lib' prefix
         Path("binaries") / "windows" / "gcc-amd64" / "Release" / "libosmand_native_widget.dll",
         Path("binaries") / "windows" / "gcc-amd64" / "amd64" / "Release" / "libosmand_native_widget.dll",
     )
-    # Try both dist-relative paths (no-prefix first, then MinGW prefix)
-    candidates = _collect_candidate_paths(
-        search_roots, official_roots, DEFAULT_NATIVE_WIDGET_RELATIVE_PATH, official_relatives
-    )
-    candidates_mingw = _collect_candidate_paths(
-        search_roots, (DEFAULT_OFFICIAL_OSMAND_ROOT.resolve(),), DEFAULT_NATIVE_WIDGET_RELATIVE_PATH_MINGW, ()
-    )
-    return candidates + candidates_mingw
+    local_candidates_msvc = _collect_candidate_paths(search_roots, (), DEFAULT_NATIVE_WIDGET_RELATIVE_PATH_MSVC, ())
+    local_candidates = _collect_candidate_paths(search_roots, (), DEFAULT_NATIVE_WIDGET_RELATIVE_PATH, ())
+    local_candidates_mingw = _collect_candidate_paths(search_roots, (), DEFAULT_NATIVE_WIDGET_RELATIVE_PATH_MINGW, ())
+    official_candidates = _collect_candidate_paths((), official_roots, DEFAULT_NATIVE_WIDGET_RELATIVE_PATH, official_relatives)
+    return local_candidates_msvc + local_candidates + local_candidates_mingw + official_candidates
 
 
 def _collect_candidate_paths(
@@ -239,6 +239,7 @@ def _collect_candidate_paths(
 
 __all__ = [
     "DEFAULT_HELPER_RELATIVE_PATH",
+    "DEFAULT_NATIVE_WIDGET_RELATIVE_PATH_MSVC",
     "DEFAULT_NATIVE_WIDGET_RELATIVE_PATH",
     "DEFAULT_OFFICIAL_OSMAND_ROOT",
     "DEFAULT_OSMAND_RESOURCES_ROOT",

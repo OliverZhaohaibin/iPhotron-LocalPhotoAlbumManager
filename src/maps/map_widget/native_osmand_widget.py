@@ -48,30 +48,35 @@ def _load_bridge(library_path: Path) -> _BridgeAPI:
     _ensure_dll_directory(pyside_root)
     _ensure_dll_directory(shiboken_root)
 
-    # The binaries/Release dir contains libOsmAndCore_shared.dll etc.
-    _ensure_dll_directory(library_path.parent)
-
-    # The dist/ dir (created by CMake + windeployqt) contains Qt6*.dll plus
-    # MinGW runtime DLLs and is the most reliable location for all deps.
+    # Prefer a colocated runtime mirror so the widget DLL and its OsmAnd
+    # dependencies stay on the same search path without disturbing the helper's
+    # MinGW-only dist/ directory.
     dist_dir = library_path.parent
-    # Heuristic: if the DLL is in a binaries/…/Release path, dist/ lives at
-    # tools/osmand_render_helper_native/dist/ relative to the package root.
+    package_root = Path(__file__).resolve().parents[3]
     for candidate_dist in [
-        library_path.parent.parent.parent.parent  # binaries/windows/gcc-amd64/Release → workspace root
+        library_path.parent.parent.parent.parent
+            / "tools" / "osmand_render_helper_native" / "dist-msvc",
+        library_path.parent.parent.parent.parent
             / "tools" / "osmand_render_helper_native" / "dist",
-        Path(__file__).resolve().parent.parent.parent  # maps/ → iPhotos/src → iPhotos → tools sibling
-            / "tools" / "osmand_render_helper_native" / "dist",
+        package_root / "tools" / "osmand_render_helper_native" / "dist-msvc",
+        package_root / "tools" / "osmand_render_helper_native" / "dist",
     ]:
         if candidate_dist.is_dir():
             dist_dir = candidate_dist
-            _ensure_dll_directory(candidate_dist)
-            # If the DLL also exists in dist/, prefer that copy since it sits
-            # next to all its runtime dependencies.
+            # If the DLL also exists in the runtime mirror, prefer that copy
+            # since it sits next to all its native dependencies.
             for dll_name in ("osmand_native_widget.dll", "libosmand_native_widget.dll"):
                 dist_dll = candidate_dist / dll_name
                 if dist_dll.exists():
                     library_path = dist_dll
+                    break
             break
+
+    # Register the final chosen DLL directory first so dependency lookup stays
+    # aligned with the widget binary we are about to load.
+    _ensure_dll_directory(library_path.parent)
+    if dist_dir != library_path.parent:
+        _ensure_dll_directory(dist_dir)
 
     library = ctypes.WinDLL(str(library_path))
     library.osmand_create_map_widget.argtypes = [
@@ -274,4 +279,3 @@ class NativeOsmAndWidget(QWidget):
 
 
 __all__ = ["NativeOsmAndWidget", "probe_native_widget_runtime"]
-

@@ -54,7 +54,7 @@ def check_opengl_support() -> bool:
 def choose_default_map_source(package_root: Path) -> MapSourceSpec:
     """Return the best startup source for the standalone preview window."""
 
-    if has_usable_osmand_native_widget(package_root) or has_usable_osmand_default(package_root):
+    if has_usable_osmand_default(package_root):
         return MapSourceSpec.osmand_default(package_root)
     return MapSourceSpec.legacy_default(package_root)
 
@@ -63,9 +63,13 @@ def choose_native_widget_class(
     package_root: Path,
     *,
     use_opengl: bool,
+    prefer_native_widget: bool = True,
 ) -> tuple[type[MapWidgetBase] | None, str]:
     if not use_opengl:
         return None, "OpenGL support unavailable. Falling back to CPU rendering."
+
+    if not prefer_native_widget:
+        return None, "OpenGL support detected. Using the same GPU accelerated Python renderer as the Location section."
 
     if not has_usable_osmand_native_widget(package_root):
         return None, "OpenGL support detected. Using GPU accelerated Python rendering."
@@ -400,7 +404,11 @@ def main() -> int:
     package_root = Path(__file__).resolve().parent
     use_opengl = check_opengl_support()
     widget_cls: type[MapWidgetBase] = MapGLWidget if use_opengl else MapWidget
-    native_widget_cls, startup_message = choose_native_widget_class(package_root, use_opengl=use_opengl)
+    native_widget_cls, startup_message = choose_native_widget_class(
+        package_root,
+        use_opengl=use_opengl,
+        prefer_native_widget=False,
+    )
     print(startup_message)
 
     try:

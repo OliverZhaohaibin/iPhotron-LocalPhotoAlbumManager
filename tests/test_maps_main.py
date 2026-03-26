@@ -9,15 +9,18 @@ from maps.main import (
 from maps.map_sources import MapBackendMetadata, MapSourceSpec
 
 
-def test_choose_default_map_source_prefers_obf_when_native_widget_is_usable(tmp_path, monkeypatch) -> None:
+def test_choose_default_map_source_falls_back_to_legacy_when_only_native_widget_is_usable(
+    tmp_path,
+    monkeypatch,
+) -> None:
     package_root = tmp_path / "maps"
     monkeypatch.setattr("maps.main.has_usable_osmand_native_widget", lambda root: root == package_root)
     monkeypatch.setattr("maps.main.has_usable_osmand_default", lambda root: False)
 
     source = choose_default_map_source(package_root)
 
-    assert source.kind == "osmand_obf"
-    assert Path(source.data_path) == package_root / "tiles" / "World_basemap_2.obf"
+    assert source.kind == "legacy_pbf"
+    assert Path(source.data_path) == package_root / "tiles"
 
 
 def test_choose_default_map_source_prefers_obf_when_helper_is_usable(tmp_path, monkeypatch) -> None:
@@ -65,6 +68,27 @@ def test_choose_native_widget_class_falls_back_when_runtime_probe_fails(tmp_path
 
     assert widget_cls is None
     assert "WinError 127" in message
+
+
+def test_choose_native_widget_class_can_force_python_renderer(tmp_path, monkeypatch) -> None:
+    package_root = tmp_path / "maps"
+    probe_calls: list[Path] = []
+
+    monkeypatch.setattr("maps.main.has_usable_osmand_native_widget", lambda root: root == package_root)
+    monkeypatch.setattr(
+        "maps.main.probe_native_widget_runtime",
+        lambda root: (probe_calls.append(root), (True, None))[1],
+    )
+
+    widget_cls, message = choose_native_widget_class(
+        package_root,
+        use_opengl=True,
+        prefer_native_widget=False,
+    )
+
+    assert widget_cls is None
+    assert "Location section" in message
+    assert probe_calls == []
 
 
 def test_describe_active_backend_distinguishes_helper_and_fallback() -> None:

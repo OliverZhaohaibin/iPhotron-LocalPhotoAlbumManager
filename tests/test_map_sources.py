@@ -4,6 +4,7 @@ from maps import map_sources
 from maps.map_sources import (
     MapSourceSpec,
     has_usable_osmand_default,
+    resolve_osmand_native_widget_library,
     resolve_osmand_helper_command,
 )
 
@@ -97,6 +98,32 @@ def test_resolve_osmand_helper_command_discovers_official_build_output(tmp_path,
     command = resolve_osmand_helper_command(package_root)
 
     assert command == (str(helper_path.resolve()),)
+
+
+def test_resolve_osmand_native_widget_library_prefers_official_release_output(tmp_path, monkeypatch) -> None:
+    package_root = tmp_path / "src" / "maps"
+    package_root.mkdir(parents=True)
+    local_dll = tmp_path / "tools" / "osmand_render_helper_native" / "dist-msvc" / "osmand_native_widget.dll"
+    local_dll.parent.mkdir(parents=True)
+    local_dll.write_bytes(b"old")
+    official_dll = (
+        tmp_path
+        / "official"
+        / "binaries"
+        / "windows"
+        / "msvc-amd64"
+        / "Release"
+        / "osmand_native_widget.dll"
+    )
+    official_dll.parent.mkdir(parents=True)
+    official_dll.write_bytes(b"new")
+
+    monkeypatch.delenv(map_sources.ENV_OSMAND_NATIVE_WIDGET_LIBRARY, raising=False)
+    monkeypatch.setattr(map_sources, "DEFAULT_OFFICIAL_OSMAND_ROOT", tmp_path / "official")
+
+    resolved = resolve_osmand_native_widget_library(package_root)
+
+    assert resolved == official_dll.resolve()
 
 
 def test_has_usable_osmand_default_requires_helper(tmp_path, monkeypatch) -> None:

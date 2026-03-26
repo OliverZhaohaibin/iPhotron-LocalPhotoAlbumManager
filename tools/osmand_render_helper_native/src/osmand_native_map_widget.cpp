@@ -8,6 +8,7 @@
 #include <mutex>
 
 #include <QDir>
+#include <QCryptographicHash>
 #include <QFile>
 #include <QFileInfo>
 #include <QLocale>
@@ -47,7 +48,6 @@ constexpr float kStableDetailedDistance = 0.5f;
 constexpr float kInteractiveDetailedDistance = 0.0f;
 constexpr float kStableSymbolsOpacity = 1.0f;
 constexpr float kInteractiveSymbolsOpacity = 0.0f;
-constexpr float kInteractiveReferenceTileSizeOnScreen = 384.0f;
 constexpr int kInteractionSettleDelayMs = 140;
 constexpr double kPi = 3.14159265358979323846;
 constexpr int kConcurrentObfReadLimit = 0;
@@ -131,7 +131,29 @@ QString openGlShadersCachePath()
     if (baseCachePath.isEmpty())
         return QString();
 
-    const auto cachePath = QDir(baseCachePath).filePath(QStringLiteral("maps/osmand_gl_shaders"));
+    QByteArray fingerprintSeed("shader-cache-v2");
+    if (auto* currentContext = QOpenGLContext::currentContext())
+    {
+        if (auto* functions = currentContext->functions())
+        {
+            const auto appendString = [&fingerprintSeed, functions](const GLenum name)
+            {
+                const auto* rawValue = reinterpret_cast<const char*>(functions->glGetString(name));
+                if (rawValue != nullptr)
+                    fingerprintSeed.append(rawValue);
+                fingerprintSeed.append('\n');
+            };
+            appendString(GL_VENDOR);
+            appendString(GL_RENDERER);
+            appendString(GL_VERSION);
+            appendString(GL_SHADING_LANGUAGE_VERSION);
+        }
+    }
+
+    const auto cacheKey = QString::fromLatin1(
+        QCryptographicHash::hash(fingerprintSeed, QCryptographicHash::Sha1).toHex().left(16));
+    const auto cachePath = QDir(baseCachePath).filePath(
+        QStringLiteral("maps/osmand_gl_shaders/%1").arg(cacheKey));
     QDir().mkpath(cachePath);
     return cachePath;
 }
@@ -242,6 +264,20 @@ void OsmAndNativeMapWidget::setCenterLonLat(double longitude, double latitude)
 QPointF OsmAndNativeMapWidget::centerLonLat() const
 {
     return normalizedToLonLat(_centerX, _centerY);
+}
+
+bool OsmAndNativeMapWidget::projectLonLat(double longitude, double latitude, QPointF& outScreenPoint) const
+{
+    if (!_mapRenderer)
+        return false;
+
+    const auto position31 = OsmAnd::Utilities::convertLatLonTo31(OsmAnd::LatLon(latitude, longitude));
+    OsmAnd::PointI screenPoint;
+    if (!_mapRenderer->obtainScreenPointFromPosition(position31, screenPoint, false))
+        return false;
+
+    outScreenPoint = QPointF(screenPoint.x, screenPoint.y);
+    return true;
 }
 
 void OsmAndNativeMapWidget::initializeGL()
@@ -512,10 +548,14 @@ void OsmAndNativeMapWidget::syncRendererViewport(bool forcedUpdate)
         return;
 
     const auto scale = std::max(1.0, devicePixelRatioF());
-    const auto pixelWidth = std::max(1, static_cast<int>(std::lround(width() * scale)));
-    const auto pixelHeight = std::max(1, static_cast<int>(std::lround(height() * scale)));
-    _mapRenderer->setWindowSize(OsmAnd::PointI(pixelWidth, pixelHeight), forcedUpdate);
-    _mapRenderer->setViewport(OsmAnd::AreaI(0, 0, pixelHeight, pixelWidth), forcedUpdate);
+    const auto logicalWidth = std::max(1, width());
+    const auto logicalHeight = std::max(1, height());
+    // OsmAnd expects window/viewport geometry in widget coordinates and applies
+    // the high-DPI scale separately via ``setViewportScale()``. Passing device
+    // pixels here as well effectively doubles the DPR and can make the
+    // renderer wrap the map vertically at low zoom levels.
+    _mapRenderer->setWindowSize(OsmAnd::PointI(logicalWidth, logicalHeight), forcedUpdate);
+    _mapRenderer->setViewport(OsmAnd::AreaI(0, 0, logicalHeight, logicalWidth), forcedUpdate);
     _mapRenderer->setViewportScale(scale, forcedUpdate);
 }
 
@@ -544,9 +584,8 @@ void OsmAndNativeMapWidget::beginInteractiveRendering()
     _interactiveRendering = true;
     if (_mapRenderer)
     {
-        const auto rendererConfiguration = std::static_pointer_cast<OsmAnd::AtlasMapRendererConfiguration>(_mapRenderer->getConfiguration());
-        rendererConfiguration->referenceTileSizeOnScreenInPixels = kInteractiveReferenceTileSizeOnScreen;
-        _mapRenderer->setConfiguration(rendererConfiguration);
+        // Keep the reference tile size stable while interacting so the camera
+        // scale does not visibly jump at the start/end of drag or wheel input.
         _mapRenderer->setDetailedDistance(kInteractiveDetailedDistance);
         _mapRenderer->setSymbolsOpacity(kInteractiveSymbolsOpacity);
         if (!_symbolsSuspendedByInteraction && !_mapRenderer->isSymbolsUpdateSuspended())
@@ -571,9 +610,6 @@ void OsmAndNativeMapWidget::finishInteractiveRendering()
     _interactiveRendering = false;
     if (_mapRenderer)
     {
-        const auto rendererConfiguration = std::static_pointer_cast<OsmAnd::AtlasMapRendererConfiguration>(_mapRenderer->getConfiguration());
-        rendererConfiguration->referenceTileSizeOnScreenInPixels = static_cast<float>(kReferenceTileSize);
-        _mapRenderer->setConfiguration(rendererConfiguration);
         _mapRenderer->setDetailedDistance(kStableDetailedDistance);
         _mapRenderer->setSymbolsOpacity(kStableSymbolsOpacity);
         if (_symbolsSuspendedByInteraction)

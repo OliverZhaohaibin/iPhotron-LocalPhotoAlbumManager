@@ -45,6 +45,7 @@ public:
     void panByPixels(double deltaX, double deltaY);
     void setCenterLonLat(double longitude, double latitude);
     QPointF centerLonLat() const;
+    bool projectLonLat(double longitude, double latitude, QPointF& outScreenPoint) const;
 
 protected:
     void initializeGL() override;

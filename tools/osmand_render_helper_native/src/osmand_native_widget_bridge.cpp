@@ -120,6 +120,32 @@ __declspec(dllexport) void osmand_widget_get_center_lonlat(void* widgetPointer, 
     *longitude = 0.0;
     *latitude = 0.0;
 }
+
+__declspec(dllexport) int osmand_widget_project_lonlat(
+    void* widgetPointer,
+    double longitude,
+    double latitude,
+    double* screenX,
+    double* screenY)
+{
+    if (!screenX || !screenY)
+        return 0;
+
+    if (const auto* widget = widgetFromPointer(widgetPointer))
+    {
+        QPointF screenPoint;
+        if (widget->projectLonLat(longitude, latitude, screenPoint))
+        {
+            *screenX = screenPoint.x();
+            *screenY = screenPoint.y();
+            return 1;
+        }
+    }
+
+    *screenX = 0.0;
+    *screenY = 0.0;
+    return 0;
+}
 }
 
 

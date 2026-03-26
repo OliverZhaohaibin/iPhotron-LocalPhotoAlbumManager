@@ -6,7 +6,7 @@ import math
 from pathlib import Path
 from typing import Callable, Protocol, Sequence
 
-from PySide6.QtCore import QPointF, QTimer
+from PySide6.QtCore import QObject, QPointF, QTimer
 from PySide6.QtGui import QPainter
 
 from maps.map_sources import MapBackendMetadata, MapSourceSpec
@@ -72,6 +72,9 @@ class MapWidgetBase(Protocol):
     def center_lonlat(self) -> tuple[float, float]:  # pragma: no cover - interface definition only
         ...
 
+    def project_lonlat(self, lon: float, lat: float) -> QPointF | None:  # pragma: no cover - interface definition only
+        ...
+
     def setFocus(self) -> None:  # pragma: no cover - interface definition only
         ...
 
@@ -79,6 +82,15 @@ class MapWidgetBase(Protocol):
         ...
 
     def map_backend_metadata(self) -> MapBackendMetadata:  # pragma: no cover - interface definition only
+        ...
+
+    def set_city_annotations(self, cities: Sequence[CityAnnotation]) -> None:  # pragma: no cover - interface definition only
+        ...
+
+    def city_at(self, position: QPointF) -> str | None:  # pragma: no cover - interface definition only
+        ...
+
+    def event_target(self) -> QObject:  # pragma: no cover - interface definition only
         ...
 
 

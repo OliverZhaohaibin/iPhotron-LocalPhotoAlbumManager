@@ -188,6 +188,11 @@ class QtLocationMapWidget(QQuickWidget):
     def city_at(self, position: QPointF) -> str | None:
         return None
 
+    def event_target(self) -> QWidget:
+        """Return the widget that directly receives pointer input events."""
+
+        return self
+
     def closeEvent(self, event: QCloseEvent) -> None:  # type: ignore[override]
         self.shutdown()
         super().closeEvent(event)

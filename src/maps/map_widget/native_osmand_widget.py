@@ -7,11 +7,11 @@ import math
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 
 import PySide6
 import shiboken6
-from PySide6.QtCore import QPointF, QTimer, Signal
+from PySide6.QtCore import QEvent, QObject, QPointF, Qt, QTimer, Signal
 from PySide6.QtWidgets import QVBoxLayout, QWidget
 
 from maps.map_sources import (
@@ -19,6 +19,7 @@ from maps.map_sources import (
     MapSourceSpec,
     resolve_osmand_native_widget_library,
 )
+from maps.map_widget.map_renderer import CityAnnotation
 from maps.tile_parser import TileLoadingError
 
 MERCATOR_LAT_BOUND = 85.05112878
@@ -48,9 +49,10 @@ def _load_bridge(library_path: Path) -> _BridgeAPI:
     _ensure_dll_directory(pyside_root)
     _ensure_dll_directory(shiboken_root)
 
-    # Prefer a colocated runtime mirror so the widget DLL and its OsmAnd
-    # dependencies stay on the same search path without disturbing the helper's
-    # MinGW-only dist/ directory.
+    # Register colocated runtime mirrors for dependency lookup, but keep the
+    # originally resolved widget DLL path intact. Otherwise a freshly built
+    # official Release binary can be silently replaced by an older dist-msvc
+    # copy that happens to exist in the workspace.
     dist_dir = library_path.parent
     package_root = Path(__file__).resolve().parents[3]
     for candidate_dist in [
@@ -63,16 +65,9 @@ def _load_bridge(library_path: Path) -> _BridgeAPI:
     ]:
         if candidate_dist.is_dir():
             dist_dir = candidate_dist
-            # If the DLL also exists in the runtime mirror, prefer that copy
-            # since it sits next to all its native dependencies.
-            for dll_name in ("osmand_native_widget.dll", "libosmand_native_widget.dll"):
-                dist_dll = candidate_dist / dll_name
-                if dist_dll.exists():
-                    library_path = dist_dll
-                    break
             break
 
-    # Register the final chosen DLL directory first so dependency lookup stays
+    # Register the selected DLL directory first so dependency lookup stays
     # aligned with the widget binary we are about to load.
     _ensure_dll_directory(library_path.parent)
     if dist_dir != library_path.parent:
@@ -110,6 +105,14 @@ def _load_bridge(library_path: Path) -> _BridgeAPI:
         ctypes.POINTER(ctypes.c_double),
     ]
     library.osmand_widget_get_center_lonlat.restype = None
+    library.osmand_widget_project_lonlat.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_double,
+        ctypes.c_double,
+        ctypes.POINTER(ctypes.c_double),
+        ctypes.POINTER(ctypes.c_double),
+    ]
+    library.osmand_widget_project_lonlat.restype = ctypes.c_int
     return _BridgeAPI(library=library)
 
 
@@ -168,6 +171,7 @@ class NativeOsmAndWidget(QWidget):
         library_path = resolve_osmand_native_widget_library(package_root)
         if library_path is None:
             raise TileLoadingError("The native OsmAnd widget DLL is not available")
+        self._library_path = library_path.resolve()
 
         self._bridge = _load_bridge(library_path)
         error_buffer = ctypes.create_unicode_buffer(4096)
@@ -197,6 +201,9 @@ class NativeOsmAndWidget(QWidget):
         self.setFocusProxy(self._native_widget)
         self.setMouseTracking(True)
         self.setMinimumSize(640, 480)
+        self._native_widget.installEventFilter(self)
+        self._bridge_dragging = False
+        self._bridge_last_mouse_pos = QPointF()
 
         min_zoom = float(self._bridge.library.osmand_widget_get_min_zoom(self._native_pointer)) or 2.0
         max_zoom = float(self._bridge.library.osmand_widget_get_max_zoom(self._native_pointer)) or 19.0
@@ -213,6 +220,10 @@ class NativeOsmAndWidget(QWidget):
         self._state_timer.setInterval(120)
         self._state_timer.timeout.connect(self._poll_view_state)
         self._state_timer.start()
+        self._deferred_view_sync_timer = QTimer(self)
+        self._deferred_view_sync_timer.setSingleShot(True)
+        self._deferred_view_sync_timer.setInterval(0)
+        self._deferred_view_sync_timer.timeout.connect(self._emit_view_change)
         self._emit_view_change()
 
     @property
@@ -254,9 +265,93 @@ class NativeOsmAndWidget(QWidget):
     def shutdown(self) -> None:
         if self._state_timer.isActive():
             self._state_timer.stop()
+        if self._deferred_view_sync_timer.isActive():
+            self._deferred_view_sync_timer.stop()
 
     def map_backend_metadata(self) -> MapBackendMetadata:
         return self._metadata
+
+    def loaded_library_path(self) -> Path:
+        return self._library_path
+
+    def set_city_annotations(self, cities: Sequence[CityAnnotation]) -> None:
+        del cities
+        return None
+
+    def city_at(self, position: QPointF) -> str | None:
+        del position
+        return None
+
+    def event_target(self) -> QObject:
+        return self._native_widget
+
+    def prefers_exact_screen_projection(self) -> bool:
+        return True
+
+    def project_lonlat(self, lon: float, lat: float) -> QPointF | None:
+        screen_x = ctypes.c_double(0.0)
+        screen_y = ctypes.c_double(0.0)
+        projected = self._bridge.library.osmand_widget_project_lonlat(
+            self._native_pointer,
+            float(lon),
+            float(lat),
+            ctypes.byref(screen_x),
+            ctypes.byref(screen_y),
+        )
+        if projected:
+            return QPointF(float(screen_x.value), float(screen_y.value))
+
+        try:
+            world_position = _lonlat_to_normalized(lon, lat)
+        except (TypeError, ValueError):
+            return None
+
+        world_size = float(256.0 * (2.0 ** self.zoom))
+        world_x = world_position[0] * world_size
+        world_y = world_position[1] * world_size
+
+        center_lon, center_lat = self.center_lonlat()
+        center_x, center_y = _lonlat_to_normalized(center_lon, center_lat)
+        center_px = center_x * world_size
+        center_py = center_y * world_size
+        delta_x = world_x - center_px
+        if delta_x > world_size / 2.0:
+            world_x -= world_size
+        elif delta_x < -world_size / 2.0:
+            world_x += world_size
+
+        top_left_x = center_px - self.width() / 2.0
+        top_left_y = center_py - self.height() / 2.0
+        return QPointF(world_x - top_left_x, world_y - top_left_y)
+
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:  # type: ignore[override]
+        if watched is self._native_widget:
+            event_type = event.type()
+            if event_type == QEvent.Type.MouseButtonPress:
+                mouse_event = event
+                if mouse_event.button() == Qt.MouseButton.LeftButton:
+                    self._bridge_dragging = True
+                    self._bridge_last_mouse_pos = mouse_event.position()
+                    self._schedule_deferred_view_sync()
+            elif event_type == QEvent.Type.MouseMove:
+                mouse_event = event
+                if self._bridge_dragging and mouse_event.buttons() & Qt.MouseButton.LeftButton:
+                    current_pos = mouse_event.position()
+                    delta = current_pos - self._bridge_last_mouse_pos
+                    self._bridge_last_mouse_pos = current_pos
+                    if not delta.isNull():
+                        self.panned.emit(QPointF(delta))
+                    self._schedule_deferred_view_sync()
+            elif event_type == QEvent.Type.MouseButtonRelease:
+                mouse_event = event
+                if self._bridge_dragging and mouse_event.button() == Qt.MouseButton.LeftButton:
+                    self._bridge_dragging = False
+                    self.panFinished.emit()
+                    self._schedule_deferred_view_sync()
+            elif event_type in {QEvent.Type.Wheel, QEvent.Type.Resize}:
+                self._schedule_deferred_view_sync()
+
+        return super().eventFilter(watched, event)
 
     def _emit_view_change(self) -> None:
         center_x, center_y, zoom = self._read_view_state()
@@ -271,6 +366,10 @@ class NativeOsmAndWidget(QWidget):
         if any(abs(current - previous) > 1e-6 for current, previous in zip(current_state, self._last_view_state)):
             self._last_view_state = current_state
             self.viewChanged.emit(*current_state)
+
+    def _schedule_deferred_view_sync(self) -> None:
+        if not self._deferred_view_sync_timer.isActive():
+            self._deferred_view_sync_timer.start()
 
     def _read_view_state(self) -> tuple[float, float, float]:
         longitude, latitude = self.center_lonlat()

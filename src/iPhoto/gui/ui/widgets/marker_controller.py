@@ -10,9 +10,7 @@ from typing import Callable, Dict, Iterable, Optional, Sequence
 from PySide6.QtCore import QObject, QPointF, QRectF, QSize, QThread, QTimer, Signal
 from PySide6.QtGui import QPixmap
 
-from maps.map_widget.map_gl_widget import MapGLWidget
-from maps.map_widget.map_widget import MapWidget
-from maps.map_widget.qt_location_map_widget import QtLocationMapWidget
+from maps.map_widget._map_widget_base import MapWidgetBase
 from maps.map_widget.map_renderer import CityAnnotation
 
 from ....library.manager import GeotaggedAsset
@@ -272,7 +270,7 @@ class MarkerController(QObject):
 
     def __init__(
         self,
-        map_widget: MapWidget | MapGLWidget | QtLocationMapWidget,
+        map_widget: MapWidgetBase,
         thumbnail_loader: ThumbnailLoader,
         *,
         marker_size: int,
@@ -294,6 +292,9 @@ class MarkerController(QObject):
         self._view_center_y = 0.5
         self._view_zoom = float(self._map_widget.zoom)
         self._is_panning = False
+        self._prefer_exact_screen_projection = bool(
+            getattr(self._map_widget, "prefers_exact_screen_projection", lambda: False)()
+        )
 
         self._cluster_timer = QTimer(self)
         self._cluster_timer.setSingleShot(True)
@@ -523,8 +524,9 @@ class MarkerController(QObject):
     def _rebuild_photo_clusters(self) -> None:
         """Generate thumbnail clusters for the current viewport dimensions."""
 
-        size = self._map_widget.size()
-        if size.isEmpty():
+        width = self._map_widget.width()
+        height = self._map_widget.height()
+        if width <= 0 or height <= 0:
             if self._clusters:
                 self._clusters = []
                 self.clustersUpdated.emit([])
@@ -532,12 +534,21 @@ class MarkerController(QObject):
 
         threshold = max(self._marker_size * 0.6, 48.0)
         cell_size = max(int(threshold), 1)
-        width = size.width()
-        height = size.height()
         margin = self._marker_size
 
         self._cluster_worker.interrupt()
         self._cluster_request_id += 1
+        if self._prefer_exact_screen_projection:
+            clusters = self._build_exact_projection_clusters(
+                width=width,
+                height=height,
+                threshold=float(threshold),
+                cell_size=cell_size,
+                margin=margin,
+            )
+            self._publish_clusters(clusters)
+            return
+
         request_id = self._cluster_request_id
         self._clustering_requested.emit(
             request_id,
@@ -560,6 +571,11 @@ class MarkerController(QObject):
         if request_id != self._cluster_request_id:
             return
 
+        self._publish_clusters(clusters)
+
+    def _publish_clusters(self, clusters: list[_MarkerCluster]) -> None:
+        """Publish a stable cluster snapshot to the overlay and label layers."""
+
         for cluster in clusters:
             cluster.bounding_rect = self._marker_rect(cluster.screen_pos)
             self._ensure_thumbnail(cluster.representative)
@@ -567,6 +583,71 @@ class MarkerController(QObject):
         self._clusters = clusters
         self._update_city_annotations_for_clusters(self._clusters)
         self.clustersUpdated.emit(self._clusters)
+
+    def _build_exact_projection_clusters(
+        self,
+        *,
+        width: int,
+        height: int,
+        threshold: float,
+        cell_size: int,
+        margin: int,
+    ) -> list[_MarkerCluster]:
+        """Cluster assets using the map widget's exact screen projection."""
+
+        grid: Dict[tuple[int, int], list[_MarkerCluster]] = {}
+        clusters: list[_MarkerCluster] = []
+
+        for asset in self._assets:
+            point = self._map_widget.project_lonlat(asset.longitude, asset.latitude)
+            if point is None:
+                continue
+
+            if point.x() < -margin or point.y() < -margin:
+                continue
+            if point.x() > width + margin or point.y() > height + margin:
+                continue
+
+            cell_x = int(point.x() // cell_size)
+            cell_y = int(point.y() // cell_size)
+            candidates: list[_MarkerCluster] = []
+            for dx in (-1, 0, 1):
+                for dy in (-1, 0, 1):
+                    candidates.extend(grid.get((cell_x + dx, cell_y + dy), []))
+
+            assigned = False
+            for cluster in candidates:
+                if MarkerController.distance(cluster.screen_pos, point) <= threshold:
+                    cluster.add_asset(asset, projected_point=point)
+                    new_cell = (
+                        int(cluster.screen_pos.x() // cell_size),
+                        int(cluster.screen_pos.y() // cell_size),
+                    )
+                    if getattr(cluster, "cell", None) != new_cell:
+                        old_cell = getattr(cluster, "cell", None)
+                        if old_cell in grid:
+                            try:
+                                grid[old_cell].remove(cluster)
+                            except ValueError:
+                                pass
+                        grid.setdefault(new_cell, []).append(cluster)
+                        cluster.cell = new_cell  # type: ignore[attr-defined]
+                    assigned = True
+                    break
+
+            if not assigned:
+                cluster = _MarkerCluster(
+                    representative=asset,
+                    assets=[asset],
+                    screen_pos=point,
+                )
+                cluster.cell = (cell_x, cell_y)  # type: ignore[attr-defined]
+                cluster.screen_x_sum = point.x()
+                cluster.screen_y_sum = point.y()
+                clusters.append(cluster)
+                grid.setdefault((cell_x, cell_y), []).append(cluster)
+
+        return clusters
 
     def _cluster_label(
         self, cluster: _MarkerCluster

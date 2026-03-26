@@ -51,11 +51,24 @@ def check_opengl_support() -> bool:
         return False
 
 
-def choose_default_map_source(package_root: Path) -> MapSourceSpec:
+def choose_default_map_source(
+    package_root: Path,
+    *,
+    use_opengl: bool = True,
+    native_widget_runtime_available: bool | None = None,
+) -> MapSourceSpec:
     """Return the best startup source for the standalone preview window."""
 
     if has_usable_osmand_default(package_root):
         return MapSourceSpec.osmand_default(package_root)
+
+    if use_opengl and has_usable_osmand_native_widget(package_root):
+        is_available = native_widget_runtime_available
+        if is_available is None:
+            is_available, _ = probe_native_widget_runtime(package_root)
+        if is_available:
+            return MapSourceSpec.osmand_default(package_root)
+
     return MapSourceSpec.legacy_default(package_root)
 
 
@@ -80,6 +93,63 @@ def choose_native_widget_class(
 
     detail = f" Native widget disabled: {reason}." if reason else ""
     return None, f"OpenGL support detected.{detail} Using GPU accelerated Python rendering."
+
+
+def _backend_kind_for_widget(
+    map_widget: MapWidgetBase,
+    *,
+    map_source: MapSourceSpec,
+) -> str:
+    if isinstance(map_widget, NativeOsmAndWidget):
+        return "osmand_native"
+    if map_source.kind == "osmand_obf":
+        return "osmand_python"
+    return "legacy_python"
+
+
+def _confirmed_gl_state(
+    map_widget: MapWidgetBase,
+    *,
+    backend_kind: str,
+) -> str:
+    if backend_kind == "osmand_native":
+        return "true"
+    if isinstance(map_widget, MapGLWidget):
+        return "true"
+    if isinstance(map_widget, MapWidget):
+        return "false"
+    return "unknown"
+
+
+def format_map_runtime_diagnostics(
+    map_widget: MapWidgetBase,
+    *,
+    map_source: MapSourceSpec,
+) -> str:
+    """Return a one-line runtime summary that proves whether GL is active."""
+
+    backend_kind = _backend_kind_for_widget(map_widget, map_source=map_source)
+    metadata = map_widget.map_backend_metadata()
+    event_target = map_widget.event_target()
+    event_target_name = getattr(event_target, "objectName", lambda: "")()
+    if not event_target_name:
+        event_target_name = type(event_target).__name__
+    native_library_path = getattr(map_widget, "loaded_library_path", lambda: None)()
+    native_library_suffix = ""
+    if native_library_path:
+        native_library_suffix = f" native_dll={native_library_path}"
+
+    return (
+        "[maps.main] "
+        f"backend={backend_kind} "
+        f"confirmed_gl={_confirmed_gl_state(map_widget, backend_kind=backend_kind)} "
+        f"widget={type(map_widget).__name__} "
+        f"event_target={event_target_name} "
+        f"source={map_source.kind} "
+        f"tile_kind={metadata.tile_kind} "
+        f"tile_scheme={metadata.tile_scheme}"
+        f"{native_library_suffix}"
+    )
 
 
 def describe_active_backend(
@@ -134,14 +204,19 @@ class MainWindow(QMainWindow):
         self._package_root = Path(__file__).resolve().parent
         self._tile_root = tile_root
         self._style_path = style_path
-        chosen_source = map_source or choose_default_map_source(self._package_root)
+        self._widget_cls: type[MapWidgetBase] = widget_class or MapWidget
+        self._native_widget_cls = native_widget_class
+        self._runtime_diagnostics = ""
+        chosen_source = map_source or choose_default_map_source(
+            self._package_root,
+            use_opengl=self._native_widget_cls is not None or self._widget_cls is MapGLWidget,
+            native_widget_runtime_available=True if self._native_widget_cls is not None else None,
+        )
         self._map_source = chosen_source.resolved(self._package_root)
         if self._map_source.kind == "legacy_pbf":
             self._tile_root = str(self._map_source.data_path)
             self._style_path = str(self._map_source.style_path or self._style_path)
 
-        self._widget_cls: type[MapWidgetBase] = widget_class or MapWidget
-        self._native_widget_cls = native_widget_class
         self._map_widget: MapWidgetBase = self._create_map_widget(map_source=self._map_source)
         self._set_central_map(self._map_widget)
 
@@ -367,12 +442,25 @@ class MainWindow(QMainWindow):
 
     def _announce_backend_state(self) -> None:
         self._refresh_window_chrome()
+        self._emit_runtime_diagnostics()
         metadata = self._map_widget.map_backend_metadata()
         if self._map_source.kind == "osmand_obf" and metadata.tile_kind != "raster":
             self.statusBar().showMessage(
                 "OsmAnd native/helper backend is unavailable, so the preview is using the legacy vector fallback.",
                 10000,
             )
+
+    def _emit_runtime_diagnostics(self) -> None:
+        self._runtime_diagnostics = format_map_runtime_diagnostics(
+            self._map_widget,
+            map_source=self._map_source,
+        )
+        print(self._runtime_diagnostics, flush=True)
+
+    def runtime_diagnostics(self) -> str:
+        """Return the latest runtime diagnostics emitted by the preview window."""
+
+        return self._runtime_diagnostics
 
     def _handle_view_changed(self, center_x: float, center_y: float, zoom: float) -> None:
         del center_x, center_y, zoom
@@ -407,12 +495,20 @@ def main() -> int:
     native_widget_cls, startup_message = choose_native_widget_class(
         package_root,
         use_opengl=use_opengl,
-        prefer_native_widget=False,
     )
-    print(startup_message)
+    default_map_source = choose_default_map_source(
+        package_root,
+        use_opengl=use_opengl,
+        native_widget_runtime_available=True if native_widget_cls is not None else None,
+    )
+    print(startup_message, flush=True)
 
     try:
-        window = MainWindow(widget_class=widget_cls, native_widget_class=native_widget_cls)
+        window = MainWindow(
+            map_source=default_map_source,
+            widget_class=widget_cls,
+            native_widget_class=native_widget_cls,
+        )
     except (StyleLoadError, TileLoadingError) as exc:
         QMessageBox.critical(None, "Error", f"Failed to initialize map:\n{exc}")
         return 1

@@ -176,6 +176,7 @@ def _default_helper_candidates(package_root: Path) -> tuple[Path, ...]:
         Path("binaries") / "windows" / "gcc-amd64" / "Release" / "osmand_render_helper.exe",
         Path("binaries") / "windows" / "gcc-amd64" / "amd64" / "Release" / "osmand_render_helper.exe",
         Path("binaries") / "windows" / "gcc-amd64" / "amd64" / "RelWithDebInfo" / "osmand_render_helper.exe",
+        Path("binaries") / "windows" / "msvc-amd64" / "Release" / "osmand_render_helper.exe",
         Path("binaries") / "windows" / "msvc-amd64" / "amd64" / "Release" / "osmand_render_helper.exe",
         Path("binaries") / "windows" / "msvc-amd64" / "amd64" / "RelWithDebInfo" / "osmand_render_helper.exe",
         Path("binaries") / "windows" / "msvc-amd64" / "amd64" / "osmand_render_helper.exe",
@@ -194,6 +195,7 @@ def _default_native_widget_candidates(package_root: Path) -> tuple[Path, ...]:
         DEFAULT_OFFICIAL_OSMAND_ROOT.resolve(),
     )
     official_relatives = (
+        Path("binaries") / "windows" / "msvc-amd64" / "Release" / "osmand_native_widget.dll",
         Path("binaries") / "windows" / "msvc-amd64" / "amd64" / "Release" / "osmand_native_widget.dll",
         Path("binaries") / "windows" / "msvc-amd64" / "amd64" / "RelWithDebInfo" / "osmand_native_widget.dll",
         Path("binaries") / "windows" / "msvc-amd64" / "amd64" / "osmand_native_widget.dll",
@@ -203,11 +205,11 @@ def _default_native_widget_candidates(package_root: Path) -> tuple[Path, ...]:
         Path("binaries") / "windows" / "gcc-amd64" / "Release" / "libosmand_native_widget.dll",
         Path("binaries") / "windows" / "gcc-amd64" / "amd64" / "Release" / "libosmand_native_widget.dll",
     )
+    official_candidates = _collect_candidate_paths((), official_roots, DEFAULT_NATIVE_WIDGET_RELATIVE_PATH, official_relatives)
     local_candidates_msvc = _collect_candidate_paths(search_roots, (), DEFAULT_NATIVE_WIDGET_RELATIVE_PATH_MSVC, ())
     local_candidates = _collect_candidate_paths(search_roots, (), DEFAULT_NATIVE_WIDGET_RELATIVE_PATH, ())
     local_candidates_mingw = _collect_candidate_paths(search_roots, (), DEFAULT_NATIVE_WIDGET_RELATIVE_PATH_MINGW, ())
-    official_candidates = _collect_candidate_paths((), official_roots, DEFAULT_NATIVE_WIDGET_RELATIVE_PATH, official_relatives)
-    return local_candidates_msvc + local_candidates + local_candidates_mingw + official_candidates
+    return official_candidates + local_candidates_msvc + local_candidates + local_candidates_mingw
 
 
 def _collect_candidate_paths(

@@ -130,6 +130,12 @@ class MapGLWidget(QOpenGLWidget):
         return self._controller.city_at(position)
 
     # ------------------------------------------------------------------
+    def event_target(self) -> QWidget:
+        """Return the widget that directly receives pointer input events."""
+
+        return self
+
+    # ------------------------------------------------------------------
     def paintGL(self) -> None:  # type: ignore[override]
         """Render the current frame inside the active OpenGL context."""
 

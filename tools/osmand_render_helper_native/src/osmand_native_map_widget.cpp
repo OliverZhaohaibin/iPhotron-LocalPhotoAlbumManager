@@ -3,6 +3,7 @@
 #include "file_system_core_resources_provider.h"
 
 #include <algorithm>
+#include <cstdlib>
 #include <cmath>
 #include <memory>
 #include <mutex>
@@ -11,6 +12,8 @@
 #include <QCryptographicHash>
 #include <QFile>
 #include <QFileInfo>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QLocale>
 #include <QMetaObject>
 #include <QMouseEvent>
@@ -18,13 +21,23 @@
 #include <QOpenGLFunctions>
 #include <QPointer>
 #include <QStandardPaths>
+#include <QStringList>
 #include <QThread>
 #include <QWheelEvent>
 
+#include <SkBitmap.h>
+#include <SkData.h>
+#include <SkEncodedImageFormat.h>
+
 #include <OsmAndCore.h>
+#include <OsmAndCore/CachingTypefaceFinder.h>
+#include <OsmAndCore/EmbeddedTypefaceFinder.h>
 #include <OsmAndCore/Logging.h>
 #include <OsmAndCore/ObfsCollection.h>
+#include <OsmAndCore/SimpleQueryController.h>
+#include <OsmAndCore/TextRasterizer.h>
 #include <OsmAndCore/Utilities.h>
+#include <OsmAndCore/Data/MapObject.h>
 #include <OsmAndCore/Map/AtlasMapRendererConfiguration.h>
 #include <OsmAndCore/Map/IMapRenderer.h>
 #include <OsmAndCore/Map/MapObjectsSymbolsProvider.h>
@@ -32,6 +45,7 @@
 #include <OsmAndCore/Map/MapPrimitivesProvider.h>
 #include <OsmAndCore/Map/MapPrimitiviser.h>
 #include <OsmAndCore/Map/MapRasterLayerProvider_Software.h>
+#include <OsmAndCore/Map/SymbolRasterizer.h>
 #include <OsmAndCore/Map/MapStylesCollection.h>
 #include <OsmAndCore/Map/ObfMapObjectsProvider.h>
 
@@ -157,6 +171,71 @@ QString openGlShadersCachePath()
     QDir().mkpath(cachePath);
     return cachePath;
 }
+
+bool writeImageAsPng(const sk_sp<const SkImage>& image, const QString& outputPath)
+{
+    if (!image)
+        return false;
+
+    QDir().mkpath(QFileInfo(outputPath).absolutePath());
+    const auto encodedImage = image->encodeToData(SkEncodedImageFormat::kPNG, 100);
+    if (!encodedImage)
+        return false;
+
+    QFile outputFile(outputPath);
+    if (!outputFile.open(QIODevice::WriteOnly | QIODevice::Truncate))
+        return false;
+
+    const auto bytesWritten =
+        outputFile.write(reinterpret_cast<const char*>(encodedImage->data()), encodedImage->size());
+    outputFile.close();
+    return bytesWritten == encodedImage->size();
+}
+
+std::shared_ptr<const OsmAnd::TextRasterizer> createEmbeddedOnlyTextRasterizer()
+{
+    return std::make_shared<OsmAnd::TextRasterizer>(
+        std::shared_ptr<const OsmAnd::ITypefaceFinder>(
+            new OsmAnd::CachingTypefaceFinder(
+                std::shared_ptr<const OsmAnd::ITypefaceFinder>(
+                    new OsmAnd::EmbeddedTypefaceFinder()))));
+}
+
+void dumpTextRasterizerProbe(
+    const QString& tag,
+    const std::shared_ptr<const OsmAnd::TextRasterizer>& rasterizer,
+    const QString& text)
+{
+    if (!rasterizer || text.isEmpty())
+        return;
+
+    OsmAnd::TextRasterizer::Style style;
+    style
+        .setSize(24.0f)
+        .setBold(false)
+        .setItalic(false)
+        .setColor(OsmAnd::ColorARGB(255, 0, 0, 0))
+        .setHaloRadius(4)
+        .setHaloColor(OsmAnd::ColorARGB(255, 255, 255, 255));
+
+    const auto image = rasterizer->rasterize(text, style);
+    const auto outputPath = QDir::current().filePath(
+        QStringLiteral("debug/text_probe_%1.png").arg(tag));
+    const auto ok = writeImageAsPng(image, outputPath);
+    const auto payload = QJsonObject{
+        {QStringLiteral("tag"), tag},
+        {QStringLiteral("path"), outputPath},
+        {QStringLiteral("ok"), ok},
+        {QStringLiteral("width"), image ? image->width() : 0},
+        {QStringLiteral("height"), image ? image->height() : 0},
+        {QStringLiteral("text"), text},
+    };
+    std::cout
+        << "[osmand_native_widget][text_probe] "
+        << QJsonDocument(payload).toJson(QJsonDocument::Compact).constData()
+        << std::endl;
+}
+
 }
 
 OsmAndNativeMapWidget* OsmAndNativeMapWidget::create(
@@ -538,8 +617,169 @@ bool OsmAndNativeMapWidget::ensureRenderer()
     _zoomLevel = std::clamp(_zoomLevel, _minZoomLevel, _maxZoomLevel);
     _mapRenderer->setDetailedDistance(kStableDetailedDistance, true);
     _mapRenderer->setSymbolsOpacity(kStableSymbolsOpacity, true);
+    maybeDumpCaptionDiagnostics();
     syncRendererCamera(true);
     return true;
+}
+
+void OsmAndNativeMapWidget::maybeDumpCaptionDiagnostics()
+{
+    if (_captionDiagnosticsDumped || !_mapObjectsProvider)
+        return;
+    if (std::getenv("IPHOTO_OSMAND_DEBUG_CAPTIONS") == nullptr)
+        return;
+
+    _captionDiagnosticsDumped = true;
+
+    const auto integralZoom = std::clamp(
+        static_cast<int>(std::floor(_zoomLevel)),
+        static_cast<int>(kDefaultMinZoom),
+        static_cast<int>(kDefaultMaxZoom));
+    const auto zoomLevel = static_cast<OsmAnd::ZoomLevel>(integralZoom);
+    const auto tilesCount = 1 << integralZoom;
+    const auto tileX = std::clamp(static_cast<int>(std::floor(_centerX * tilesCount)), 0, tilesCount - 1);
+    const auto tileY = std::clamp(static_cast<int>(std::floor(_centerY * tilesCount)), 0, tilesCount - 1);
+    const auto tileId = OsmAnd::TileId::fromXY(tileX, tileY);
+
+    OsmAnd::ObfMapObjectsProvider::Request request;
+    request.tileId = tileId;
+    request.zoom = zoomLevel;
+    request.detailedZoom = zoomLevel;
+    request.visibleArea31 = OsmAnd::Utilities::tileBoundingBox31(tileId, zoomLevel);
+    request.areaTime = QDateTime::currentMSecsSinceEpoch();
+    request.queryController = std::make_shared<OsmAnd::SimpleQueryController>();
+
+    std::shared_ptr<OsmAnd::ObfMapObjectsProvider::Data> mapObjectsData;
+    if (!_mapObjectsProvider->obtainTiledObfMapObjects(request, mapObjectsData) || !mapObjectsData)
+    {
+        std::cerr << "[osmand_native_widget][caption] failed to obtain map objects for diagnostics" << std::endl;
+        return;
+    }
+
+    std::cout
+        << "[osmand_native_widget][caption] "
+        << QJsonDocument(QJsonObject{
+               {QStringLiteral("tile_z"), integralZoom},
+               {QStringLiteral("tile_x"), tileX},
+               {QStringLiteral("tile_y"), tileY},
+               {QStringLiteral("objects"), static_cast<int>(mapObjectsData->mapObjects.size())},
+           }).toJson(QJsonDocument::Compact).constData()
+        << std::endl;
+
+    int emitted = 0;
+    for (const auto& mapObject : constOf(mapObjectsData->mapObjects))
+    {
+        if (!mapObject || mapObject->captions.isEmpty())
+            continue;
+
+        const auto nativeCaption = mapObject->getCaptionInNativeLanguage();
+        const auto englishCaption = mapObject->getCaptionInLanguage(QStringLiteral("en"));
+        if (nativeCaption.isEmpty() && englishCaption.isEmpty())
+            continue;
+
+        const auto payload = QJsonObject{
+            {QStringLiteral("object"), mapObject->toString()},
+            {QStringLiteral("native"), nativeCaption},
+            {QStringLiteral("en"), englishCaption},
+            {QStringLiteral("captions_count"), static_cast<int>(mapObject->captions.size())},
+        };
+        std::cout
+            << "[osmand_native_widget][caption] "
+            << QJsonDocument(payload).toJson(QJsonDocument::Compact).constData()
+            << std::endl;
+
+        emitted++;
+        if (emitted >= 20)
+            break;
+    }
+
+    if (std::getenv("IPHOTO_OSMAND_DEBUG_TEXT_SYMBOLS") != nullptr && _mapPrimitivesProvider)
+    {
+        OsmAnd::MapPrimitivesProvider::Request primitivesRequest;
+        primitivesRequest.tileId = tileId;
+        primitivesRequest.zoom = zoomLevel;
+        primitivesRequest.detailedZoom = zoomLevel;
+        primitivesRequest.visibleArea31 = request.visibleArea31;
+        primitivesRequest.areaTime = request.areaTime;
+        primitivesRequest.queryController = request.queryController;
+
+        std::shared_ptr<OsmAnd::MapPrimitivesProvider::Data> primitivesData;
+        if (_mapPrimitivesProvider->obtainTiledPrimitives(primitivesRequest, primitivesData)
+            && primitivesData
+            && primitivesData->primitivisedObjects)
+        {
+            int textSymbolsEmitted = 0;
+            for (const auto& symbolsGroupEntry : rangeOf(constOf(primitivesData->primitivisedObjects->symbolsGroups)))
+            {
+                const auto& symbolsGroup = symbolsGroupEntry.value();
+                for (const auto& symbol : constOf(symbolsGroup->symbols))
+                {
+                    const auto textSymbol =
+                        std::dynamic_pointer_cast<const OsmAnd::MapPrimitiviser::TextSymbol>(symbol);
+                    if (!textSymbol)
+                        continue;
+
+                    const auto payload = QJsonObject{
+                        {QStringLiteral("base"), textSymbol->baseValue},
+                        {QStringLiteral("value"), textSymbol->value},
+                        {QStringLiteral("on_path"), textSymbol->drawOnPath},
+                        {QStringLiteral("shield"), textSymbol->shieldResourceName},
+                    };
+                    std::cout
+                        << "[osmand_native_widget][text_symbol] "
+                        << QJsonDocument(payload).toJson(QJsonDocument::Compact).constData()
+                        << std::endl;
+
+                    textSymbolsEmitted++;
+                    if (textSymbolsEmitted >= 20)
+                        break;
+                }
+                if (textSymbolsEmitted >= 20)
+                    break;
+            }
+        }
+    }
+
+    if (std::getenv("IPHOTO_OSMAND_DEBUG_TEXT_RASTERIZER") != nullptr)
+    {
+        QStringList sampleLines{
+            QStringLiteral("Germany"),
+            QStringLiteral("Deutschland"),
+            QStringLiteral("Lower Saxony"),
+            QStringLiteral("Niedersachsen"),
+            QStringLiteral("Saxony-Anhalt"),
+            QStringLiteral("Thuringia"),
+            QStringLiteral("Bad Nenndorf"),
+            QStringLiteral("Bueckeburg"),
+            QStringLiteral("Thueringen"),
+        };
+        for (const auto& mapObject : constOf(mapObjectsData->mapObjects))
+        {
+            if (!mapObject)
+                continue;
+
+            const auto englishCaption = mapObject->getCaptionInLanguage(QStringLiteral("en"));
+            if (!englishCaption.isEmpty() && !sampleLines.contains(englishCaption))
+                sampleLines.push_back(englishCaption);
+
+            if (sampleLines.size() >= 12)
+                break;
+        }
+
+        const auto sampleText = sampleLines.join(QLatin1Char('\n'));
+        dumpTextRasterizerProbe(
+            QStringLiteral("default"),
+            OsmAnd::TextRasterizer::getDefault(),
+            sampleText);
+        dumpTextRasterizerProbe(
+            QStringLiteral("system"),
+            OsmAnd::TextRasterizer::getOnlySystemFonts(),
+            sampleText);
+        dumpTextRasterizerProbe(
+            QStringLiteral("embedded"),
+            createEmbeddedOnlyTextRasterizer(),
+            sampleText);
+    }
 }
 
 void OsmAndNativeMapWidget::syncRendererViewport(bool forcedUpdate)

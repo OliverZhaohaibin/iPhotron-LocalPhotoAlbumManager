@@ -12,6 +12,7 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QLocale>
+#include <QStringList>
 
 #include <SkBitmap.h>
 #include <SkCanvas.h>
@@ -21,6 +22,7 @@
 #include <OsmAndCore.h>
 #include <OsmAndCore/Logging.h>
 #include <OsmAndCore/SimpleQueryController.h>
+#include <OsmAndCore/Data/MapObject.h>
 #include <OsmAndCore/Map/MapRasterizer.h>
 #include <OsmAndCore/Map/MapPrimitivesProvider.h>
 #include <OsmAndCore/Map/MapPresentationEnvironment.h>
@@ -227,6 +229,88 @@ public:
         return true;
     }
 
+    bool dumpTileCaptions(
+        int z,
+        int x,
+        int y,
+        int limit,
+        QString& errorMessage)
+    {
+        if (!_initialized)
+        {
+            errorMessage = QStringLiteral("helper was not initialized");
+            return false;
+        }
+        if (z < 0 || z > static_cast<int>(OsmAnd::ZoomLevel::MaxZoomLevel))
+        {
+            errorMessage = QStringLiteral("zoom is out of range: %1").arg(z);
+            return false;
+        }
+        if (limit <= 0)
+            limit = 30;
+
+        if (!ensureRenderPipeline(1.0, errorMessage))
+            return false;
+
+        const auto tileId = OsmAnd::TileId::fromXY(x, y);
+        const auto zoomLevel = static_cast<OsmAnd::ZoomLevel>(z);
+        const auto bbox31 = OsmAnd::Utilities::tileBoundingBox31(tileId, zoomLevel);
+
+        OsmAnd::ObfMapObjectsProvider::Request request;
+        request.tileId = tileId;
+        request.zoom = zoomLevel;
+        request.detailedZoom = zoomLevel;
+        request.visibleArea31 = bbox31;
+        request.areaTime = QDateTime::currentMSecsSinceEpoch();
+        request.queryController = std::make_shared<OsmAnd::SimpleQueryController>();
+
+        std::shared_ptr<OsmAnd::ObfMapObjectsProvider::Data> mapObjectsData;
+        if (!_mapObjectsProvider->obtainTiledObfMapObjects(request, mapObjectsData))
+        {
+            errorMessage = QStringLiteral("Failed to obtain map objects for caption dump");
+            return false;
+        }
+        if (!mapObjectsData)
+        {
+            errorMessage = QStringLiteral("Caption dump returned no map object payload");
+            return false;
+        }
+
+        int emitted = 0;
+        for (const auto& mapObject : constOf(mapObjectsData->mapObjects))
+        {
+            if (!mapObject || mapObject->captions.isEmpty())
+                continue;
+
+            const auto nativeCaption = mapObject->getCaptionInNativeLanguage();
+            const auto englishCaption = mapObject->getCaptionInLanguage(QStringLiteral("en"));
+            if (nativeCaption.isEmpty() && englishCaption.isEmpty())
+                continue;
+
+            QJsonObject entry{
+                {QStringLiteral("object"), mapObject->toString()},
+                {QStringLiteral("native"), nativeCaption},
+                {QStringLiteral("en"), englishCaption},
+                {QStringLiteral("captions_count"), static_cast<int>(mapObject->captions.size())},
+            };
+            std::cout << QJsonDocument(entry).toJson(QJsonDocument::Compact).constData() << std::endl;
+
+            emitted++;
+            if (emitted >= limit)
+                break;
+        }
+
+        if (emitted == 0)
+        {
+            std::cout << QJsonDocument(QJsonObject{
+                {QStringLiteral("status"), QStringLiteral("empty")},
+                {QStringLiteral("message"), QStringLiteral("No captions were found for the requested tile")},
+            }).toJson(QJsonDocument::Compact).constData() << std::endl;
+        }
+
+        return true;
+    }
+
     void shutdown()
     {
         if (_initialized)
@@ -377,28 +461,28 @@ QJsonObject dispatchCommand(const QJsonObject& command, OsmAndRenderHelperSessio
     return makeErrorResponse(QStringLiteral("unknown command: %1").arg(commandName));
 }
 
-int runOneShotRender(int argc, char** argv)
+int runOneShotRender(const QStringList& arguments)
 {
-    if (argc != 9 && argc != 10)
+    if (arguments.size() != 9 && arguments.size() != 10)
     {
         std::cerr << "usage: osmand_render_helper --render-tile <obf> <resources> <style> <z> <x> <y> <output> [deviceScale]" << std::endl;
         return 2;
     }
 
     bool ok = false;
-    const auto z = QString::fromLocal8Bit(argv[5]).toInt(&ok);
+    const auto z = arguments.at(5).toInt(&ok);
     if (!ok)
     {
         std::cerr << "invalid z value" << std::endl;
         return 2;
     }
-    const auto x = QString::fromLocal8Bit(argv[6]).toInt(&ok);
+    const auto x = arguments.at(6).toInt(&ok);
     if (!ok)
     {
         std::cerr << "invalid x value" << std::endl;
         return 2;
     }
-    const auto y = QString::fromLocal8Bit(argv[7]).toInt(&ok);
+    const auto y = arguments.at(7).toInt(&ok);
     if (!ok)
     {
         std::cerr << "invalid y value" << std::endl;
@@ -406,9 +490,9 @@ int runOneShotRender(int argc, char** argv)
     }
 
     double deviceScale = 1.0;
-    if (argc == 10)
+    if (arguments.size() == 10)
     {
-        deviceScale = QString::fromLocal8Bit(argv[9]).toDouble(&ok);
+        deviceScale = arguments.at(9).toDouble(&ok);
         if (!ok)
         {
             std::cerr << "invalid deviceScale value" << std::endl;
@@ -419,13 +503,13 @@ int runOneShotRender(int argc, char** argv)
     OsmAndRenderHelperSession session;
     QString errorMessage;
     if (!session.initialize(
-        QString::fromLocal8Bit(argv[2]),
-        QString::fromLocal8Bit(argv[3]),
-        QString::fromLocal8Bit(argv[4]),
+        arguments.at(2),
+        arguments.at(3),
+        arguments.at(4),
         false,
         errorMessage))
     {
-        std::cerr << errorMessage.toStdString() << std::endl;
+        std::cerr << errorMessage.toUtf8().constData() << std::endl;
         return 1;
     }
 
@@ -434,10 +518,78 @@ int runOneShotRender(int argc, char** argv)
         x,
         y,
         deviceScale,
-        QString::fromLocal8Bit(argv[8]),
+        arguments.at(8),
         errorMessage))
     {
-        std::cerr << errorMessage.toStdString() << std::endl;
+        std::cerr << errorMessage.toUtf8().constData() << std::endl;
+        session.shutdown();
+        return 1;
+    }
+
+    session.shutdown();
+    return 0;
+}
+
+int runOneShotCaptionDump(const QStringList& arguments)
+{
+    if (arguments.size() != 8 && arguments.size() != 9)
+    {
+        std::cerr << "usage: osmand_render_helper --dump-captions <obf> <resources> <style> <z> <x> <y> [limit]" << std::endl;
+        return 2;
+    }
+
+    bool ok = false;
+    const auto z = arguments.at(5).toInt(&ok);
+    if (!ok)
+    {
+        std::cerr << "invalid z value" << std::endl;
+        return 2;
+    }
+    const auto x = arguments.at(6).toInt(&ok);
+    if (!ok)
+    {
+        std::cerr << "invalid x value" << std::endl;
+        return 2;
+    }
+    const auto y = arguments.at(7).toInt(&ok);
+    if (!ok)
+    {
+        std::cerr << "invalid y value" << std::endl;
+        return 2;
+    }
+
+    int limit = 30;
+    if (arguments.size() == 9)
+    {
+        limit = arguments.at(8).toInt(&ok);
+        if (!ok)
+        {
+            std::cerr << "invalid limit value" << std::endl;
+            return 2;
+        }
+    }
+
+    OsmAndRenderHelperSession session;
+    QString errorMessage;
+    if (!session.initialize(
+        arguments.at(2),
+        arguments.at(3),
+        arguments.at(4),
+        false,
+        errorMessage))
+    {
+        std::cerr << errorMessage.toUtf8().constData() << std::endl;
+        return 1;
+    }
+
+    if (!session.dumpTileCaptions(
+        z,
+        x,
+        y,
+        limit,
+        errorMessage))
+    {
+        std::cerr << errorMessage.toUtf8().constData() << std::endl;
         session.shutdown();
         return 1;
     }
@@ -453,14 +605,17 @@ int main(int argc, char** argv)
 {
     QCoreApplication app(argc, argv);
     OsmAnd::Logger::get()->setSeverityLevelThreshold(static_cast<OsmAnd::LogSeverityLevel>(999));
+    const auto arguments = app.arguments();
 
-    if (argc > 1)
+    if (arguments.size() > 1)
     {
-        const auto command = QString::fromLocal8Bit(argv[1]);
+        const auto command = arguments.at(1);
         if (command == QLatin1String("--render-tile"))
-            return runOneShotRender(argc, argv);
+            return runOneShotRender(arguments);
+        if (command == QLatin1String("--dump-captions"))
+            return runOneShotCaptionDump(arguments);
 
-        std::cerr << "unknown command line mode: " << command.toStdString() << std::endl;
+        std::cerr << "unknown command line mode: " << command.toUtf8().constData() << std::endl;
         return 2;
     }
 

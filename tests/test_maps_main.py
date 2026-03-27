@@ -1,7 +1,9 @@
 ﻿from pathlib import Path
 
 from maps.main import (
+    build_argument_parser,
     choose_default_map_source,
+    choose_launch_configuration,
     choose_native_widget_class,
     describe_active_backend,
     format_map_runtime_diagnostics,
@@ -120,6 +122,79 @@ def test_choose_native_widget_class_can_force_python_renderer(tmp_path, monkeypa
     assert widget_cls is None
     assert "Location section" in message
     assert probe_calls == []
+
+
+def test_build_argument_parser_supports_debug_capture_flags() -> None:
+    parser = build_argument_parser()
+
+    parsed = parser.parse_args(
+        [
+            "--backend",
+            "native",
+            "--center",
+            "9.5683",
+            "51.2195",
+            "--zoom",
+            "7.47",
+            "--screenshot",
+            "debug/native.png",
+            "--capture-delay-ms",
+            "2500",
+        ]
+    )
+
+    assert parsed.backend == "native"
+    assert parsed.center == [9.5683, 51.2195]
+    assert parsed.zoom == 7.47
+    assert parsed.screenshot == Path("debug/native.png")
+    assert parsed.capture_delay_ms == 2500
+
+
+def test_choose_launch_configuration_can_force_native_backend(tmp_path, monkeypatch) -> None:
+    package_root = tmp_path / "maps"
+    monkeypatch.setattr("maps.main.has_usable_osmand_native_widget", lambda root: root == package_root)
+    monkeypatch.setattr("maps.main.probe_native_widget_runtime", lambda root: (True, None))
+
+    launch_config = choose_launch_configuration(
+        package_root,
+        use_opengl=True,
+        backend="native",
+    )
+
+    assert launch_config.map_source.kind == "osmand_obf"
+    assert Path(launch_config.map_source.data_path) == package_root / "tiles" / "World_basemap_2.obf"
+    assert launch_config.native_widget_class is not None
+    assert "native OsmAnd widget" in launch_config.startup_message
+
+
+def test_choose_launch_configuration_can_force_python_obf_backend(tmp_path, monkeypatch) -> None:
+    package_root = tmp_path / "maps"
+    monkeypatch.setattr("maps.main.has_usable_osmand_default", lambda root: root == package_root)
+
+    launch_config = choose_launch_configuration(
+        package_root,
+        use_opengl=True,
+        backend="python",
+    )
+
+    assert launch_config.map_source.kind == "osmand_obf"
+    assert launch_config.native_widget_class is None
+    assert "Python OBF renderer" in launch_config.startup_message
+
+
+def test_choose_launch_configuration_can_force_legacy_backend(tmp_path) -> None:
+    package_root = tmp_path / "maps"
+
+    launch_config = choose_launch_configuration(
+        package_root,
+        use_opengl=False,
+        backend="legacy",
+    )
+
+    assert launch_config.map_source.kind == "legacy_pbf"
+    assert Path(launch_config.map_source.data_path) == package_root / "tiles"
+    assert launch_config.native_widget_class is None
+    assert "legacy vector renderer" in launch_config.startup_message
 
 
 def test_format_map_runtime_diagnostics_reports_native_gl(monkeypatch) -> None:

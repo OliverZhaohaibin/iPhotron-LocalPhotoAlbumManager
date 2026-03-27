@@ -61,6 +61,7 @@ private:
 
     bool initializeResources(QString& errorMessage);
     bool ensureRenderer();
+    void maybeDumpCaptionDiagnostics();
     void syncRendererViewport(bool forcedUpdate = false);
     void syncRendererCamera(bool forcedUpdate = false);
     void beginInteractiveRendering();
@@ -89,6 +90,7 @@ private:
     QTimer _interactionTimer;
     bool _interactiveRendering = false;
     bool _symbolsSuspendedByInteraction = false;
+    bool _captionDiagnosticsDumped = false;
 
     std::shared_ptr<OsmAnd::MapStylesCollection> _stylesCollection;
     std::shared_ptr<OsmAnd::ObfsCollection> _obfsCollection;

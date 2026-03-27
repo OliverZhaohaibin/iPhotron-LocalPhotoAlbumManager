@@ -59,6 +59,7 @@ class QtLocationMapWidget(QQuickWidget):
         provides_place_labels=True,
         tile_kind="raster",
         tile_scheme="xyz",
+        fetch_max_zoom=19,
     )
 
     def __init__(

@@ -89,12 +89,20 @@ def _has_resolved_osmand_assets(map_source: MapSourceSpec) -> bool:
     )
 
 
+def _preferred_python_widget_class(*, use_opengl: bool) -> type[MapWidgetBase]:
+    """Return the standard Python-backed widget class for the current runtime."""
+
+    return MapGLWidget if use_opengl else MapWidget
+
+
 def choose_map_widget_backend(
     map_source: MapSourceSpec | None,
     *,
     use_opengl: bool,
 ) -> tuple[type[MapWidgetBase], MapSourceSpec | None, str]:
     """Return the preferred widget class and source for the photo map view."""
+
+    python_widget_cls = _preferred_python_widget_class(use_opengl=use_opengl)
 
     if map_source is not None:
         resolved_map_source = _resolve_map_source(map_source)
@@ -103,11 +111,9 @@ def choose_map_widget_backend(
                 is_available, _ = probe_native_widget_runtime(_MAPS_PACKAGE_ROOT)
                 if is_available:
                     return NativeOsmAndWidget, resolved_map_source, "osmand_native"
-            widget_cls: type[MapWidgetBase] = MapGLWidget if use_opengl else MapWidget
-            return widget_cls, resolved_map_source, "osmand_python"
+            return python_widget_cls, resolved_map_source, "osmand_python"
 
-        widget_cls = MapGLWidget if use_opengl else MapWidget
-        return widget_cls, resolved_map_source, "legacy_python"
+        return python_widget_cls, resolved_map_source, "legacy_python"
 
     default_osmand_source = MapSourceSpec.osmand_default(_MAPS_PACKAGE_ROOT).resolved(_MAPS_PACKAGE_ROOT)
     if _has_resolved_osmand_assets(default_osmand_source):
@@ -116,10 +122,10 @@ def choose_map_widget_backend(
             if is_available:
                 return NativeOsmAndWidget, default_osmand_source, "osmand_native"
         if has_usable_osmand_default(_MAPS_PACKAGE_ROOT):
-            widget_cls = MapGLWidget if use_opengl else MapWidget
-            return widget_cls, default_osmand_source, "osmand_python"
+            return python_widget_cls, default_osmand_source, "osmand_python"
 
-    return QtLocationMapWidget, None, "qtlocation"
+    legacy_source = MapSourceSpec.legacy_default(_MAPS_PACKAGE_ROOT).resolved(_MAPS_PACKAGE_ROOT)
+    return python_widget_cls, legacy_source, "legacy_python"
 
 
 def _confirmed_gl_state(
@@ -393,25 +399,38 @@ class PhotoMapView(QWidget):
             try:
                 self._map_widget = widget_cls(self, map_source=resolved_map_source)
             except Exception as exc:
-                if backend_kind != "osmand_native":
+                if backend_kind == "osmand_native":
+                    logger.warning(
+                        "Native OsmAnd widget unavailable, falling back to the Python OBF renderer: %s",
+                        exc,
+                    )
+                    fallback_cls = _preferred_python_widget_class(use_opengl=use_opengl)
+                    self._map_widget = fallback_cls(self, map_source=resolved_map_source)
+                    backend_kind = "osmand_python"
+                elif widget_cls is MapGLWidget:
+                    logger.warning(
+                        "OpenGL photo map unavailable, falling back to the CPU renderer: %s",
+                        exc,
+                    )
+                    self._map_widget = MapWidget(self, map_source=resolved_map_source)
+                else:
                     raise
-                logger.warning(
-                    "Native OsmAnd widget unavailable, falling back to the Python OBF renderer: %s",
-                    exc,
-                )
-                fallback_cls = MapGLWidget if use_opengl else MapWidget
-                self._map_widget = fallback_cls(self, map_source=resolved_map_source)
-                backend_kind = "osmand_python"
 
+            actual_uses_gl = _confirmed_gl_state(
+                self._map_widget,
+                backend_kind=backend_kind,
+            ) == "true"
             if backend_kind == "osmand_native":
                 logger.info("Photo map initialised with the native OsmAnd OBF backend.")
             elif resolved_map_source.kind == "osmand_obf":
-                if use_opengl:
+                if actual_uses_gl:
                     logger.info("Photo map initialised with the OsmAnd OBF backend (GPU fallback).")
                 else:
                     logger.info("Photo map initialised with the OsmAnd OBF backend (CPU fallback).")
-            elif use_opengl:
+            elif actual_uses_gl:
                 logger.info("Photo map initialised with GPU acceleration enabled.")
+            elif use_opengl:
+                logger.info("Photo map initialised with the legacy CPU map backend.")
             else:
                 logger.info("Photo map using CPU rendering because OpenGL is unavailable.")
         layout.addWidget(self._map_widget)

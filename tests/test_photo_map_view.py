@@ -21,7 +21,6 @@ from iPhoto.gui.ui.widgets import photo_map_view as photo_map_view_module
 from maps.map_sources import MapBackendMetadata, MapSourceSpec
 from maps.map_widget.map_gl_widget import MapGLWidget
 from maps.map_widget.native_osmand_widget import NativeOsmAndWidget
-from maps.map_widget.qt_location_map_widget import QtLocationMapWidget
 
 
 @pytest.fixture
@@ -274,7 +273,7 @@ def test_choose_map_widget_backend_falls_back_to_python_obf_when_native_probe_fa
     assert resolved_source.kind == "osmand_obf"
 
 
-def test_choose_map_widget_backend_uses_qt_location_when_obf_is_unavailable(monkeypatch) -> None:
+def test_choose_map_widget_backend_falls_back_to_legacy_when_obf_is_unavailable(monkeypatch) -> None:
     monkeypatch.setattr(photo_map_view_module, "has_usable_osmand_native_widget", lambda root: False)
     monkeypatch.setattr(photo_map_view_module, "has_usable_osmand_default", lambda root: False)
     monkeypatch.setattr(photo_map_view_module, "_has_resolved_osmand_assets", lambda source: False)
@@ -284,9 +283,11 @@ def test_choose_map_widget_backend_uses_qt_location_when_obf_is_unavailable(monk
         use_opengl=True,
     )
 
-    assert widget_cls is QtLocationMapWidget
-    assert resolved_source is None
-    assert backend_kind == "qtlocation"
+    assert widget_cls is MapGLWidget
+    assert resolved_source is not None
+    assert resolved_source.kind == "legacy_pbf"
+    assert Path(resolved_source.data_path) == photo_map_view_module._MAPS_PACKAGE_ROOT / "tiles"
+    assert backend_kind == "legacy_python"
 
 
 def test_native_osmand_widget_bridges_drag_release_and_wheel_events(qapp: QApplication, monkeypatch, tmp_path) -> None:
@@ -430,5 +431,43 @@ def test_photo_map_view_falls_back_to_python_widget_when_native_init_fails(
         assert isinstance(view.map_widget(), _FallbackMapWidget)
         assert "backend=osmand_python" in view.runtime_diagnostics()
         assert "confirmed_gl=true" in view.runtime_diagnostics()
+    finally:
+        view.close()
+
+
+def test_photo_map_view_falls_back_to_cpu_widget_when_legacy_gl_init_fails(
+    qapp: QApplication,
+    monkeypatch,
+    tmp_path,
+) -> None:
+    del qapp, tmp_path
+
+    source = MapSourceSpec(
+        kind="legacy_pbf",
+        data_path="tiles",
+        style_path="style.json",
+    )
+
+    class _RaisingGLWidget(QWidget):
+        def __init__(self, *args, **kwargs) -> None:
+            del args, kwargs
+            raise RuntimeError("gl init failed")
+
+    monkeypatch.setattr(
+        photo_map_view_module,
+        "choose_map_widget_backend",
+        lambda map_source, use_opengl: (photo_map_view_module.MapGLWidget, source, "legacy_python"),
+    )
+    monkeypatch.setattr(photo_map_view_module, "check_opengl_support", lambda: True)
+    monkeypatch.setattr(photo_map_view_module, "MapGLWidget", _RaisingGLWidget)
+    monkeypatch.setattr(photo_map_view_module, "MapWidget", _FallbackMapWidget)
+    monkeypatch.setattr(photo_map_view_module, "ThumbnailLoader", _DummyThumbnailLoader)
+    monkeypatch.setattr(photo_map_view_module, "MarkerController", _DummyMarkerController)
+
+    view = photo_map_view_module.PhotoMapView(map_source=source)
+    try:
+        assert isinstance(view.map_widget(), _FallbackMapWidget)
+        assert "backend=legacy_python" in view.runtime_diagnostics()
+        assert "confirmed_gl=false" in view.runtime_diagnostics()
     finally:
         view.close()

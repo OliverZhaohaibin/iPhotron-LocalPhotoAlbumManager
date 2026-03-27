@@ -1,10 +1,16 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 from pathlib import Path
 
 from maps.map_sources import MapBackendMetadata, MapSourceSpec
-from maps.tile_backend import FallbackTileBackend, OsmAndRasterBackend, TileBackendUnavailableError
+from maps.tile_backend import (
+    FallbackTileBackend,
+    LegacyVectorBackend,
+    OsmAndRasterBackend,
+    TileBackendUnavailableError,
+)
 
 
 @dataclass
@@ -80,6 +86,29 @@ def test_fallback_backend_disables_primary_after_runtime_unavailable() -> None:
     assert primary.shutdown_called is True
     assert fallback.load_calls == 2
     assert backend.probe() == fallback.metadata
+
+
+def test_legacy_vector_backend_restores_previous_interactive_zoom_range(tmp_path) -> None:
+    tile_root = tmp_path / "tiles"
+    tile_root.mkdir()
+    (tile_root / "tiles.json").write_text(
+        json.dumps({"minzoom": 0, "maxzoom": 6}),
+        encoding="utf-8",
+    )
+
+    backend = LegacyVectorBackend(
+        MapSourceSpec(
+            kind="legacy_pbf",
+            data_path=tile_root,
+            style_path=tmp_path / "style.json",
+        )
+    )
+
+    metadata = backend.probe()
+
+    assert metadata.min_zoom == 2.0
+    assert metadata.max_zoom == 8.5
+    assert metadata.fetch_max_zoom == 6
 
 
 def test_osmand_raster_backend_retries_once_after_runtime_unavailable(tmp_path, monkeypatch) -> None:

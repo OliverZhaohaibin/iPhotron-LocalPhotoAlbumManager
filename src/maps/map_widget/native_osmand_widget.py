@@ -213,6 +213,7 @@ class NativeOsmAndWidget(QWidget):
             provides_place_labels=True,
             tile_kind="raster",
             tile_scheme="xyz",
+            fetch_max_zoom=max(0, int(max(max_zoom, min_zoom))),
         )
 
         self._last_view_state: tuple[float, float, float] | None = None

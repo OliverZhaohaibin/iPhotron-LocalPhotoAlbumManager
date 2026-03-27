@@ -71,6 +71,10 @@ class TileBackend(Protocol):
 class LegacyVectorBackend:
     """Wrap the existing local Mapbox vector-tile directory."""
 
+    INTERACTIVE_MIN_ZOOM = 2.0
+    INTERACTIVE_MAX_ZOOM = 8.5
+    DEFAULT_FETCH_MAX_ZOOM = 6
+
     def __init__(self, source: MapSourceSpec) -> None:
         if source.kind != "legacy_pbf":
             raise ValueError("LegacyVectorBackend requires a legacy_pbf source")
@@ -101,22 +105,28 @@ class LegacyVectorBackend:
                 raw = json.loads(tiles_json.read_text(encoding="utf8"))
             except (OSError, json.JSONDecodeError):
                 raw = {}
-            min_zoom = float(raw.get("minzoom", 0.0))
-            max_zoom = float(raw.get("maxzoom", 6.0))
+            # Preserve the pre-OBF interaction range for the legacy fallback
+            # while still fetching only from the tile levels that exist on disk.
+            try:
+                fetch_max_zoom = max(0, int(float(raw.get("maxzoom", self.DEFAULT_FETCH_MAX_ZOOM))))
+            except (TypeError, ValueError):
+                fetch_max_zoom = self.DEFAULT_FETCH_MAX_ZOOM
             return MapBackendMetadata(
-                min_zoom=min_zoom,
-                max_zoom=max_zoom,
+                min_zoom=self.INTERACTIVE_MIN_ZOOM,
+                max_zoom=self.INTERACTIVE_MAX_ZOOM,
                 provides_place_labels=False,
                 tile_kind="vector",
                 tile_scheme="tms",
+                fetch_max_zoom=fetch_max_zoom,
             )
 
         return MapBackendMetadata(
-            min_zoom=0.0,
-            max_zoom=6.0,
+            min_zoom=self.INTERACTIVE_MIN_ZOOM,
+            max_zoom=self.INTERACTIVE_MAX_ZOOM,
             provides_place_labels=False,
             tile_kind="vector",
             tile_scheme="tms",
+            fetch_max_zoom=self.DEFAULT_FETCH_MAX_ZOOM,
         )
 
 
@@ -130,6 +140,7 @@ class OsmAndRasterBackend:
         provides_place_labels=True,
         tile_kind="raster",
         tile_scheme="xyz",
+        fetch_max_zoom=19,
     )
 
     def __init__(self, source: MapSourceSpec) -> None:
@@ -240,6 +251,10 @@ class OsmAndRasterBackend:
             ),
             tile_kind="raster",
             tile_scheme="xyz",
+            fetch_max_zoom=max(
+                0,
+                int(float(response.get("max_zoom", self.DEFAULT_METADATA.max_zoom))),
+            ),
         )
         self._process = process
         return process

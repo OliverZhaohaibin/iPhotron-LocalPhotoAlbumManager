@@ -84,6 +84,10 @@ class MapRenderer:
         # background used across the application.
         painter.fillRect(0, 0, width, height, QColor("#88a8c2"))
 
+        fetch_max_zoom = self._tile_manager.metadata.fetch_max_zoom
+        if fetch_max_zoom is None:
+            fetch_max_zoom = max(0, int(math.floor(self._tile_manager.metadata.max_zoom)))
+
         view_state = compute_view_state(
             center_x,
             center_y,
@@ -91,7 +95,7 @@ class MapRenderer:
             width,
             height,
             self._tile_size,
-            max_tile_zoom_level=max(0, int(math.floor(self._tile_manager.metadata.max_zoom))),
+            max_tile_zoom_level=fetch_max_zoom,
         )
         # Collision tracking must start fresh for every paint pass because the
         # widget rerenders the entire viewport each time.

@@ -28,6 +28,7 @@ class MapBackendMetadata:
     provides_place_labels: bool
     tile_kind: Literal["vector", "raster"]
     tile_scheme: Literal["tms", "xyz"] = "tms"
+    fetch_max_zoom: int | None = None
 
 
 @dataclass(frozen=True)

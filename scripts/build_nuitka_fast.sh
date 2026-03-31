@@ -19,7 +19,6 @@ python -m nuitka \
   --include-data-dir=src/maps/tiles=maps/tiles \
   --include-data-file=src/maps/style.json=maps/style.json \
   --include-data-dir=src/maps/map_widget/qml=maps/map_widget/qml \
-  --include-data-dir=tools/osmand_render_helper_native/dist=tools/osmand_render_helper_native/dist \
   --assume-yes-for-downloads \
   --output-dir=dist \
   src/iPhoto/gui/main.py

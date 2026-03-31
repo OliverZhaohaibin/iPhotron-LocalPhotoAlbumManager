@@ -11,13 +11,14 @@ if __package__ in {None, ""}:  # pragma: no cover - direct script bootstrap
         sys.path.insert(0, str(_SRC_ROOT))
 
 import argparse
+import os
 import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Sequence
 
-from PySide6.QtCore import QTimer
-from PySide6.QtGui import QAction, QKeySequence, QOffscreenSurface, QOpenGLContext
+from PySide6.QtCore import Qt, QTimer
+from PySide6.QtGui import QAction, QKeySequence, QOffscreenSurface, QOpenGLContext, QSurfaceFormat
 from PySide6.QtWidgets import QApplication, QFileDialog, QMainWindow, QMessageBox
 
 from maps.map_sources import (
@@ -30,7 +31,10 @@ from maps.map_widget import MapGLWidget, MapWidget, NativeOsmAndWidget
 from maps.map_widget.native_osmand_widget import probe_native_widget_runtime
 from maps.map_widget._map_widget_base import MapWidgetBase
 from maps.style_resolver import StyleLoadError
+from maps.tile_backend import OsmAndRasterBackend
 from maps.tile_parser import TileLoadingError
+
+_PYTHON_OBF_RUNTIME_PROBE: dict[Path, tuple[bool, str | None]] = {}
 
 
 @dataclass(frozen=True)
@@ -46,20 +50,26 @@ class PreviewLaunchConfig:
 def check_opengl_support() -> bool:
     """Return ``True`` when the system can create a basic OpenGL context."""
 
+    if os.environ.get("IPHOTO_DISABLE_OPENGL", "").strip().lower() in {"1", "true", "yes", "on"}:
+        return False
+
     try:
         surface = QOffscreenSurface()
         surface.create()
-        if not surface.isValid():
-            return False
 
         context = QOpenGLContext()
         if not context.create():
             return False
 
-        if not context.makeCurrent(surface):
+        if hasattr(context, "isValid") and not context.isValid():
             return False
 
-        context.doneCurrent()
+        # ``QOffscreenSurface.makeCurrent()`` is a useful warm-up when it works,
+        # but some drivers reject offscreen binding even though ``QOpenGLWidget``
+        # itself renders correctly. Treat a valid context as sufficient and use
+        # ``makeCurrent`` only as an optional best-effort probe.
+        if surface.isValid() and context.makeCurrent(surface):
+            context.doneCurrent()
         return True
     except Exception:
         return False
@@ -109,6 +119,31 @@ def choose_native_widget_class(
     return None, f"OpenGL support detected.{detail} Using GPU accelerated Python rendering."
 
 
+def probe_python_obf_runtime(package_root: Path | None = None) -> tuple[bool, str | None]:
+    """Return whether the bundled Python OBF helper can initialize quickly."""
+
+    root = (package_root or Path(__file__).resolve().parent).resolve()
+    cached = _PYTHON_OBF_RUNTIME_PROBE.get(root)
+    if cached is not None:
+        return cached
+
+    if not has_usable_osmand_default(root):
+        result = (False, "The OsmAnd helper backend is unavailable")
+    else:
+        backend = OsmAndRasterBackend(MapSourceSpec.osmand_default(root).resolved(root))
+        try:
+            backend.probe()
+        except Exception as exc:  # pragma: no cover - exercised only on local runtimes
+            result = (False, f"{type(exc).__name__}: {exc}")
+        else:
+            result = (True, None)
+        finally:
+            backend.shutdown()
+
+    _PYTHON_OBF_RUNTIME_PROBE[root] = result
+    return result
+
+
 def build_argument_parser() -> argparse.ArgumentParser:
     """Return the CLI parser used by the standalone preview entry point."""
 
@@ -145,6 +180,26 @@ def build_argument_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def configure_qt_opengl_defaults() -> None:
+    """Prefer desktop OpenGL for the standalone preview before app creation."""
+
+    if os.environ.get("IPHOTO_DISABLE_OPENGL", "").strip().lower() in {"1", "true", "yes", "on"}:
+        return
+
+    try:
+        QApplication.setAttribute(Qt.ApplicationAttribute.AA_UseDesktopOpenGL, True)
+        QApplication.setAttribute(Qt.ApplicationAttribute.AA_ShareOpenGLContexts, True)
+    except Exception:
+        return
+
+    try:
+        surface_format = QSurfaceFormat()
+        surface_format.setRenderableType(QSurfaceFormat.RenderableType.OpenGL)
+        QSurfaceFormat.setDefaultFormat(surface_format)
+    except Exception:
+        return
+
+
 def choose_launch_configuration(
     package_root: Path,
     *,
@@ -155,22 +210,40 @@ def choose_launch_configuration(
 
     widget_cls: type[MapWidgetBase] = MapGLWidget if use_opengl else MapWidget
     normalized_backend = backend.strip().lower()
+    renderer_label = "GPU accelerated" if use_opengl else "CPU"
 
     if normalized_backend == "auto":
-        native_widget_cls, startup_message = choose_native_widget_class(
-            package_root,
-            use_opengl=use_opengl,
-        )
-        default_map_source = choose_default_map_source(
-            package_root,
-            use_opengl=use_opengl,
-            native_widget_runtime_available=True if native_widget_cls is not None else None,
-        )
+        if use_opengl and has_usable_osmand_native_widget(package_root):
+            is_available, reason = probe_native_widget_runtime(package_root)
+            if is_available:
+                return PreviewLaunchConfig(
+                    map_source=MapSourceSpec.osmand_default(package_root),
+                    widget_class=widget_cls,
+                    native_widget_class=NativeOsmAndWidget,
+                    startup_message="OpenGL support detected. Using the native OsmAnd widget.",
+                )
+            native_detail = f" Native widget unavailable: {reason}." if reason else ""
+        else:
+            native_detail = ""
+
+        helper_runtime_available = False
+        helper_reason: str | None = None
+        if has_usable_osmand_default(package_root):
+            helper_runtime_available, helper_reason = probe_python_obf_runtime(package_root)
+        if helper_runtime_available:
+            return PreviewLaunchConfig(
+                map_source=MapSourceSpec.osmand_default(package_root),
+                widget_class=widget_cls,
+                native_widget_class=None,
+                startup_message=f"Using the {renderer_label} Python OBF renderer.{native_detail}",
+            )
+
+        detail = f" OBF helper unavailable: {helper_reason}." if helper_reason else ""
         return PreviewLaunchConfig(
-            map_source=default_map_source,
+            map_source=MapSourceSpec.legacy_default(package_root),
             widget_class=widget_cls,
-            native_widget_class=native_widget_cls,
-            startup_message=startup_message,
+            native_widget_class=None,
+            startup_message=f"Using the {renderer_label} legacy vector renderer.{native_detail}{detail}",
         )
 
     if normalized_backend == "native":
@@ -192,7 +265,10 @@ def choose_launch_configuration(
     if normalized_backend == "python":
         if not has_usable_osmand_default(package_root):
             raise TileLoadingError("The OsmAnd helper backend is unavailable, so the Python OBF renderer can not be forced")
-        renderer_label = "GPU accelerated" if use_opengl else "CPU"
+        is_available, reason = probe_python_obf_runtime(package_root)
+        if not is_available:
+            detail = f": {reason}" if reason else ""
+            raise TileLoadingError(f"The Python OBF renderer failed its runtime probe{detail}")
         return PreviewLaunchConfig(
             map_source=MapSourceSpec.osmand_default(package_root),
             widget_class=widget_cls,
@@ -201,7 +277,6 @@ def choose_launch_configuration(
         )
 
     if normalized_backend == "legacy":
-        renderer_label = "GPU accelerated" if use_opengl else "CPU"
         return PreviewLaunchConfig(
             map_source=MapSourceSpec.legacy_default(package_root),
             widget_class=widget_cls,
@@ -657,6 +732,7 @@ def _schedule_screenshot_capture(
 def main(argv: Sequence[str] | None = None) -> int:
     arguments = list(argv if argv is not None else sys.argv[1:])
     parsed_args = build_argument_parser().parse_args(arguments)
+    configure_qt_opengl_defaults()
     app = QApplication([Path(__file__).name, *arguments])
 
     package_root = Path(__file__).resolve().parent
@@ -675,8 +751,28 @@ def main(argv: Sequence[str] | None = None) -> int:
             native_widget_class=launch_config.native_widget_class,
         )
     except (StyleLoadError, TileLoadingError) as exc:
-        QMessageBox.critical(None, "Error", f"Failed to initialize map:\n{exc}")
-        return 1
+        if parsed_args.backend == "auto" and launch_config.map_source.kind == "osmand_obf":
+            fallback_config = choose_launch_configuration(
+                package_root,
+                use_opengl=use_opengl,
+                backend="legacy",
+            )
+            print(
+                f"[maps.main] Python OBF startup failed ({exc}). Falling back to legacy preview.",
+                flush=True,
+            )
+            try:
+                window = MainWindow(
+                    map_source=fallback_config.map_source,
+                    widget_class=fallback_config.widget_class,
+                    native_widget_class=fallback_config.native_widget_class,
+                )
+            except (StyleLoadError, TileLoadingError):
+                QMessageBox.critical(None, "Error", f"Failed to initialize map:\n{exc}")
+                return 1
+        else:
+            QMessageBox.critical(None, "Error", f"Failed to initialize map:\n{exc}")
+            return 1
 
     if parsed_args.center is not None or parsed_args.zoom is not None:
         center = tuple(parsed_args.center) if parsed_args.center is not None else None

@@ -49,29 +49,11 @@ def _load_bridge(library_path: Path) -> _BridgeAPI:
     _ensure_dll_directory(pyside_root)
     _ensure_dll_directory(shiboken_root)
 
-    # Register colocated runtime mirrors for dependency lookup, but keep the
-    # originally resolved widget DLL path intact. Otherwise a freshly built
-    # official Release binary can be silently replaced by an older dist-msvc
-    # copy that happens to exist in the workspace.
-    dist_dir = library_path.parent
-    package_root = Path(__file__).resolve().parents[3]
-    for candidate_dist in [
-        library_path.parent.parent.parent.parent
-            / "tools" / "osmand_render_helper_native" / "dist-msvc",
-        library_path.parent.parent.parent.parent
-            / "tools" / "osmand_render_helper_native" / "dist",
-        package_root / "tools" / "osmand_render_helper_native" / "dist-msvc",
-        package_root / "tools" / "osmand_render_helper_native" / "dist",
-    ]:
-        if candidate_dist.is_dir():
-            dist_dir = candidate_dist
-            break
-
-    # Register the selected DLL directory first so dependency lookup stays
-    # aligned with the widget binary we are about to load.
+    # The extension layout keeps the widget DLL and its transitive runtime
+    # dependencies together in the same directory, so registering the resolved
+    # parent directory is sufficient and avoids accidentally picking up stale
+    # binaries from old build output folders.
     _ensure_dll_directory(library_path.parent)
-    if dist_dir != library_path.parent:
-        _ensure_dll_directory(dist_dir)
 
     library = ctypes.WinDLL(str(library_path))
     library.osmand_create_map_widget.argtypes = [

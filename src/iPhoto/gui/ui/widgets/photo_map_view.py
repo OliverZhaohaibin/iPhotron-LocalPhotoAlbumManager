@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from logging import getLogger
 from pathlib import Path
 from typing import Dict, Iterable, Optional, cast
@@ -49,23 +50,29 @@ _MAPS_PACKAGE_ROOT = Path(__file__).resolve().parents[4] / "maps"
 def check_opengl_support() -> bool:
     """Return ``True`` when the system can create a basic OpenGL context."""
 
+    if os.environ.get("IPHOTO_DISABLE_OPENGL", "").strip().lower() in {"1", "true", "yes", "on"}:
+        return False
+
     try:
         # ``QOffscreenSurface`` keeps the detection lightweight by avoiding any
         # visible windows while still exercising the platform specific OpenGL
         # plumbing that the accelerated widget relies on.
         surface = QOffscreenSurface()
         surface.create()
-        if not surface.isValid():
-            return False
 
         context = QOpenGLContext()
         if not context.create():
             return False
 
-        if not context.makeCurrent(surface):
+        if hasattr(context, "isValid") and not context.isValid():
             return False
 
-        context.doneCurrent()
+        # Some drivers refuse offscreen ``makeCurrent()`` even though a
+        # ``QOpenGLWidget`` can still render successfully. A valid context is
+        # enough to attempt the accelerated path; binding it offscreen remains a
+        # best-effort warm-up instead of a hard requirement.
+        if surface.isValid() and context.makeCurrent(surface):
+            context.doneCurrent()
         return True
     except Exception:  # noqa: BLE001 - fall back gracefully on any Qt failure
         # Creating the surface or context can fail in virtualised or

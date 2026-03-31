@@ -1,4 +1,4 @@
-param(
+﻿param(
     [string]$OsmAndWorkspaceRoot = "D:\python_code\maps_of_iPhoto",
     [string]$PythonVenv = "D:\python_code\iPhoto\.venv",
     [string]$PySide6Root = "",
@@ -452,9 +452,9 @@ elseif (-not (Test-Path $physicalBuildDir)) {
 }
 
 if (-not $ConfigureOnly) {
-    & $CMakeExe --build $shortBuildDir --target osmand_native_widget --config $BuildType --parallel $Jobs -- /m:$Jobs /nodeReuse:false /p:UseMultiToolTask=true /p:CL_MPCount=$Jobs /p:BuildInParallel=true
+    & $CMakeExe --build $shortBuildDir --target osmand_render_helper osmand_native_widget --config $BuildType --parallel $Jobs -- /m:$Jobs /nodeReuse:false /p:UseMultiToolTask=true /p:CL_MPCount=$Jobs /p:BuildInParallel=true
     if ($LASTEXITCODE -ne 0) {
-        throw "Official OsmAnd native widget build failed with exit code $LASTEXITCODE"
+        throw "Official OsmAnd helper/native widget build failed with exit code $LASTEXITCODE"
     }
 
     $widgetCandidates = Get-ChildItem -Path (Join-Path $workspaceRoot 'binaries\windows\msvc-amd64') -Recurse -Filter osmand_native_widget.dll -File |
@@ -470,12 +470,31 @@ if (-not $ConfigureOnly) {
         $widgetOutput = $widgetCandidates | Select-Object -First 1
     }
 
+    $helperCandidates = Get-ChildItem -Path (Join-Path $workspaceRoot 'binaries\windows\msvc-amd64') -Recurse -Filter osmand_render_helper.exe -File |
+        Sort-Object FullName
+    if (-not $helperCandidates) {
+        throw "Helper executable was not produced under $msvcOutputRoot"
+    }
+
+    $helperOutput = $helperCandidates |
+        Where-Object { $_.FullName -match [regex]::Escape("\\$BuildType\\") } |
+        Select-Object -First 1
+    if (-not $helperOutput) {
+        $helperOutput = $helperCandidates | Select-Object -First 1
+    }
+
     $binaryOutputDir = $widgetOutput.Directory.FullName
+    if ($helperOutput.Directory.FullName -ne $binaryOutputDir) {
+        throw "Helper and native widget were produced in different directories: $($helperOutput.Directory.FullName) vs $binaryOutputDir"
+    }
     New-Item -ItemType Directory -Force -Path $localDistDir | Out-Null
+    Copy-Item -Path $helperOutput.FullName -Destination $localDistDir -Force
     Copy-DirectoryDlls -SourceDir $binaryOutputDir -DestinationDir $localDistDir
 
     $widgetDistPath = Join-Path $localDistDir 'osmand_native_widget.dll'
     Assert-Exists $widgetDistPath
+    $helperDistPath = Join-Path $localDistDir 'osmand_render_helper.exe'
+    Assert-Exists $helperDistPath
 }
 
 Write-Host "MSVC native widget output root: $msvcOutputRoot"
@@ -483,4 +502,6 @@ Write-Host "Using Qt headers root: $QtHeadersRoot"
 Write-Host "Build parallelism: $Jobs"
 if (-not $ConfigureOnly) {
     Write-Host "Native widget runtime mirrored to: $localDistDir"
+    Write-Host "Helper runtime mirrored to: $localDistDir"
 }
+

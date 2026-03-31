@@ -256,6 +256,37 @@ def test_choose_map_widget_backend_prefers_native_when_runtime_is_available(monk
     assert resolved_source.kind == "osmand_obf"
 
 
+def test_photo_map_check_opengl_support_accepts_valid_context_when_offscreen_make_current_fails(
+    monkeypatch,
+) -> None:
+    class FakeSurface:
+        def create(self) -> None:
+            return None
+
+        def isValid(self) -> bool:
+            return True
+
+    class FakeContext:
+        def create(self) -> bool:
+            return True
+
+        def isValid(self) -> bool:
+            return True
+
+        def makeCurrent(self, surface) -> bool:
+            del surface
+            return False
+
+        def doneCurrent(self) -> None:
+            return None
+
+    monkeypatch.setattr(photo_map_view_module, "QOffscreenSurface", lambda: FakeSurface())
+    monkeypatch.setattr(photo_map_view_module, "QOpenGLContext", lambda: FakeContext())
+    monkeypatch.delenv("IPHOTO_DISABLE_OPENGL", raising=False)
+
+    assert photo_map_view_module.check_opengl_support() is True
+
+
 def test_choose_map_widget_backend_falls_back_to_python_obf_when_native_probe_fails(monkeypatch) -> None:
     monkeypatch.setattr(photo_map_view_module, "has_usable_osmand_native_widget", lambda root: True)
     monkeypatch.setattr(photo_map_view_module, "probe_native_widget_runtime", lambda root: (False, "runtime error"))

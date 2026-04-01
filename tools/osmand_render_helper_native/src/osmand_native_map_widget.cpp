@@ -10,6 +10,8 @@
 
 #include <QDir>
 #include <QCryptographicHash>
+#include <QCoreApplication>
+#include <QDateTime>
 #include <QFile>
 #include <QFileInfo>
 #include <QJsonDocument>
@@ -20,6 +22,7 @@
 #include <QOpenGLContext>
 #include <QOpenGLFunctions>
 #include <QPointer>
+#include <QSurfaceFormat>
 #include <QStandardPaths>
 #include <QStringList>
 #include <QThread>
@@ -145,7 +148,20 @@ QString openGlShadersCachePath()
     if (baseCachePath.isEmpty())
         return QString();
 
-    QByteArray fingerprintSeed("shader-cache-v2");
+    QByteArray fingerprintSeed("shader-cache-v3");
+    const auto applicationPath = QCoreApplication::applicationFilePath();
+    if (!applicationPath.isEmpty())
+    {
+        fingerprintSeed.append(applicationPath.toUtf8());
+        fingerprintSeed.append('\n');
+
+        const QFileInfo applicationInfo(applicationPath);
+        fingerprintSeed.append(applicationInfo.lastModified().toString(Qt::ISODateWithMs).toUtf8());
+        fingerprintSeed.append('\n');
+        fingerprintSeed.append(QByteArray::number(applicationInfo.size()));
+        fingerprintSeed.append('\n');
+    }
+
     if (auto* currentContext = QOpenGLContext::currentContext())
     {
         if (auto* functions = currentContext->functions())
@@ -170,6 +186,17 @@ QString openGlShadersCachePath()
         QStringLiteral("maps/osmand_gl_shaders/%1").arg(cacheKey));
     QDir().mkpath(cachePath);
     return cachePath;
+}
+
+QSurfaceFormat nativeWidgetSurfaceFormat()
+{
+    auto format = QSurfaceFormat::defaultFormat();
+    format.setRenderableType(QSurfaceFormat::OpenGL);
+    if (format.depthBufferSize() < 24)
+        format.setDepthBufferSize(24);
+    if (format.stencilBufferSize() < 8)
+        format.setStencilBufferSize(8);
+    return format;
 }
 
 bool writeImageAsPng(const sk_sp<const SkImage>& image, const QString& outputPath)
@@ -257,6 +284,7 @@ OsmAndNativeMapWidget::OsmAndNativeMapWidget(const Configuration& configuration,
     , _configuration(configuration)
     , _interactionTimer(this)
 {
+    setFormat(nativeWidgetSurfaceFormat());
     _interactionTimer.setSingleShot(true);
     _interactionTimer.setInterval(kInteractionSettleDelayMs);
     connect(&_interactionTimer, &QTimer::timeout, this, &OsmAndNativeMapWidget::finishInteractiveRendering);

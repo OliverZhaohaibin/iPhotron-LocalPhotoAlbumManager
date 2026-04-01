@@ -26,6 +26,7 @@ from maps.map_sources import (
     MapSourceSpec,
     has_usable_osmand_default,
     has_usable_osmand_native_widget,
+    prefer_osmand_native_widget,
 )
 from maps.map_widget import MapGLWidget, MapWidget, NativeOsmAndWidget
 from maps.map_widget.native_osmand_widget import probe_native_widget_runtime
@@ -83,10 +84,12 @@ def choose_default_map_source(
 ) -> MapSourceSpec:
     """Return the best startup source for the standalone preview window."""
 
+    prefer_native_widget = use_opengl and prefer_osmand_native_widget()
+
     if has_usable_osmand_default(package_root):
         return MapSourceSpec.osmand_default(package_root)
 
-    if use_opengl and has_usable_osmand_native_widget(package_root):
+    if prefer_native_widget and has_usable_osmand_native_widget(package_root):
         is_available = native_widget_runtime_available
         if is_available is None:
             is_available, _ = probe_native_widget_runtime(package_root)
@@ -107,6 +110,9 @@ def choose_native_widget_class(
 
     if not prefer_native_widget:
         return None, "OpenGL support detected. Using the same GPU accelerated Python renderer as the Location section."
+
+    if not prefer_osmand_native_widget():
+        return None, "OpenGL support detected. Native widget disabled by configuration; using the Python OBF renderer."
 
     if not has_usable_osmand_native_widget(package_root):
         return None, "OpenGL support detected. Using GPU accelerated Python rendering."
@@ -132,7 +138,7 @@ def probe_python_obf_runtime(package_root: Path | None = None) -> tuple[bool, st
     else:
         backend = OsmAndRasterBackend(MapSourceSpec.osmand_default(root).resolved(root))
         try:
-            backend.probe()
+            backend.probe_runtime()
         except Exception as exc:  # pragma: no cover - exercised only on local runtimes
             result = (False, f"{type(exc).__name__}: {exc}")
         else:
@@ -213,7 +219,8 @@ def choose_launch_configuration(
     renderer_label = "GPU accelerated" if use_opengl else "CPU"
 
     if normalized_backend == "auto":
-        if use_opengl and has_usable_osmand_native_widget(package_root):
+        prefer_native_widget = use_opengl and prefer_osmand_native_widget()
+        if prefer_native_widget and has_usable_osmand_native_widget(package_root):
             is_available, reason = probe_native_widget_runtime(package_root)
             if is_available:
                 return PreviewLaunchConfig(
@@ -223,6 +230,8 @@ def choose_launch_configuration(
                     startup_message="OpenGL support detected. Using the native OsmAnd widget.",
                 )
             native_detail = f" Native widget unavailable: {reason}." if reason else ""
+        elif use_opengl and not prefer_native_widget:
+            native_detail = " Native widget disabled by configuration."
         else:
             native_detail = ""
 

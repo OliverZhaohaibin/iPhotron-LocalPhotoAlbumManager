@@ -154,6 +154,12 @@ class OsmAndRasterBackend:
 
     def probe(self) -> MapBackendMetadata:
         self._validate_paths()
+        return self.metadata
+
+    def probe_runtime(self) -> MapBackendMetadata:
+        """Start the helper once in the current thread for diagnostics only."""
+
+        self._validate_paths()
         self._ensure_process()
         return self.metadata
 

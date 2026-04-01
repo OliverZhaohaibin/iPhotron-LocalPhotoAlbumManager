@@ -64,6 +64,7 @@ class NavigationCoordinator(QObject):
         self._static_selection: Optional[str] = None
         self._playback_coordinator: Optional[PlaybackCoordinator] = None
         self._in_cluster_gallery: bool = False  # Tracks if we're viewing a cluster gallery from map
+        self._location_request_serial = 0
 
         # Trash Cleanup State
         self._trash_cleanup_running = False
@@ -218,15 +219,13 @@ class NavigationCoordinator(QObject):
         self._clear_cluster_gallery_mode()
         self._static_selection = "Location"
         self._asset_vm.set_active_root(root)
-
-        assets = self._context.library.get_geotagged_assets()
-        map_view = self._router.map_view()
-        if map_view is not None:
-            map_view.set_assets(assets, root)
-        else:
-            LOGGER.warning("Map view is unavailable; cannot display location section.")
-
         self._router.show_map()
+        self._location_request_serial += 1
+        request_serial = self._location_request_serial
+        QTimer.singleShot(
+            0,
+            lambda root=root, request_serial=request_serial: self._populate_location_view(root, request_serial),
+        )
 
     def open_cluster_gallery(self, assets: list) -> None:
         """Open gallery view for a clicked map cluster.
@@ -275,6 +274,14 @@ class NavigationCoordinator(QObject):
 
         self._clear_cluster_gallery_mode()
         self._router.show_map()
+        self._location_request_serial += 1
+        request_serial = self._location_request_serial
+        root = self._context.library.root()
+        if root is not None:
+            QTimer.singleShot(
+                0,
+                lambda root=root, request_serial=request_serial: self._populate_location_view(root, request_serial),
+            )
 
     def is_in_cluster_gallery(self) -> bool:
         """Return True if currently viewing a cluster gallery from the map."""
@@ -315,6 +322,24 @@ class NavigationCoordinator(QObject):
     def _reset_playback(self):
         if self._playback_coordinator:
             self._playback_coordinator.reset_for_gallery()
+
+    def _populate_location_view(self, root: Path, request_serial: int) -> None:
+        """Load or refresh the visible map view after the stack switch settles."""
+
+        if request_serial != self._location_request_serial:
+            return
+        if self._static_selection != "Location":
+            return
+        if self._context.library.root() != root:
+            return
+
+        map_view = self._router.map_view()
+        if map_view is None:
+            LOGGER.warning("Map view is unavailable; cannot display location section.")
+            return
+
+        assets = self._context.library.get_geotagged_assets()
+        map_view.set_assets(assets, root)
 
     def _clear_cluster_gallery_mode(self) -> None:
         """Exit cluster gallery mode and hide the back button header.

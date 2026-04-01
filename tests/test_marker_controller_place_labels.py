@@ -52,7 +52,12 @@ class _ExactProjectionMapWidget(_DummyMapWidget):
 
 
 class _DummyThumbnailLoader(QObject):
+    def __init__(self) -> None:
+        super().__init__()
+        self.reset_calls: list[Path] = []
+
     def reset_for_album(self, root: Path) -> None:
+        self.reset_calls.append(root)
         return None
 
     def request(self, *args, **kwargs):
@@ -153,3 +158,53 @@ def test_marker_controller_uses_exact_screen_projection_when_requested(
     assert len(controller._clusters) == 2
     assert controller._clusters[0].screen_pos == QPointF(120.0, 180.0)
     assert controller._clusters[1].screen_pos == QPointF(620.0, 420.0)
+
+
+def test_marker_controller_reuses_existing_map_state_when_assets_are_unchanged(
+    qapp: QCoreApplication,
+    tmp_path: Path,
+) -> None:
+    loader = _DummyThumbnailLoader()
+    controller = MarkerController(
+        _DummyMapWidget(),
+        loader,
+        marker_size=72,
+        thumbnail_size=192,
+        provides_place_labels=False,
+    )
+    invalidations: list[bool] = []
+    city_updates: list[list[CityAnnotation]] = []
+    controller.thumbnailsInvalidated.connect(lambda: invalidations.append(True))
+    controller.citiesUpdated.connect(lambda cities: city_updates.append(list(cities)))
+
+    asset = GeotaggedAsset(
+        library_relative="a.jpg",
+        album_relative="a.jpg",
+        absolute_path=tmp_path / "a.jpg",
+        album_path=tmp_path,
+        asset_id="a",
+        latitude=20.0,
+        longitude=10.0,
+        is_image=True,
+        is_video=False,
+        still_image_time=None,
+        duration=None,
+        location_name=None,
+        live_photo_group_id=None,
+        live_partner_rel=None,
+    )
+
+    try:
+        controller.set_assets([asset], tmp_path)
+        qapp.processEvents()
+        first_invalidations = len(invalidations)
+        first_city_updates = len(city_updates)
+
+        controller.set_assets([asset], tmp_path)
+        qapp.processEvents()
+    finally:
+        controller.shutdown()
+
+    assert loader.reset_calls == [tmp_path]
+    assert len(invalidations) == first_invalidations
+    assert len(city_updates) == first_city_updates

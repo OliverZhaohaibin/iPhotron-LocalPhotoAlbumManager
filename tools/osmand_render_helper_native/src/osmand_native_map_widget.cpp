@@ -69,6 +69,16 @@ constexpr int kInteractionSettleDelayMs = 140;
 constexpr double kPi = 3.14159265358979323846;
 constexpr int kConcurrentObfReadLimit = 0;
 
+bool isTruthyEnvValue(const QString& value)
+{
+    const auto normalized = value.trimmed().toLower();
+    return
+        normalized == QLatin1String("1") ||
+        normalized == QLatin1String("true") ||
+        normalized == QLatin1String("yes") ||
+        normalized == QLatin1String("on");
+}
+
 class CoreRuntime
 {
 public:
@@ -144,6 +154,9 @@ inline double clampLatitude(double latitude)
 
 QString openGlShadersCachePath()
 {
+    if (isTruthyEnvValue(qEnvironmentVariable("IPHOTO_OSMAND_DISABLE_SHADER_CACHE")))
+        return QString();
+
     const auto baseCachePath = QStandardPaths::writableLocation(QStandardPaths::CacheLocation);
     if (baseCachePath.isEmpty())
         return QString();
@@ -166,6 +179,8 @@ QString openGlShadersCachePath()
     {
         if (auto* functions = currentContext->functions())
         {
+            QByteArray vendorName;
+            QByteArray rendererName;
             const auto appendString = [&fingerprintSeed, functions](const GLenum name)
             {
                 const auto* rawValue = reinterpret_cast<const char*>(functions->glGetString(name));
@@ -173,6 +188,24 @@ QString openGlShadersCachePath()
                     fingerprintSeed.append(rawValue);
                 fingerprintSeed.append('\n');
             };
+            const auto readString = [functions](const GLenum name) -> QByteArray
+            {
+                const auto* rawValue = reinterpret_cast<const char*>(functions->glGetString(name));
+                return rawValue != nullptr ? QByteArray(rawValue) : QByteArray();
+            };
+            vendorName = readString(GL_VENDOR);
+            rendererName = readString(GL_RENDERER);
+            const auto vendorLower = QString::fromLatin1(vendorName).toLower();
+            const auto rendererLower = QString::fromLatin1(rendererName).toLower();
+            if (vendorLower.contains(QStringLiteral("intel")) || rendererLower.contains(QStringLiteral("intel")))
+            {
+                // Intel's Windows driver has been observed to emit unusable
+                // program binaries for OsmAnd shaders. Reusing those binaries
+                // causes a guaranteed link failure before the renderer falls
+                // back to recompiling from source, which is exactly the stall
+                // visible when entering the Location view.
+                return QString();
+            }
             appendString(GL_VENDOR);
             appendString(GL_RENDERER);
             appendString(GL_VERSION);

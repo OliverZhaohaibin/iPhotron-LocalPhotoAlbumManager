@@ -81,6 +81,8 @@ class LibraryManager(
         self._live_scan_buffer: List[Dict] = []
         self._live_scan_root: Optional[Path] = None
         self._scan_buffer_lock = QMutex()
+        self._geotagged_assets_cache: Optional[List[GeotaggedAsset]] = None
+        self._geotagged_assets_cache_root: Optional[Path] = None
 
     # ------------------------------------------------------------------
     # Basic properties
@@ -107,6 +109,8 @@ class LibraryManager(
         if not normalized.exists() or not normalized.is_dir():
             raise LibraryUnavailableError(f"Library path does not exist: {root}")
         self._root = normalized
+        self._geotagged_assets_cache = None
+        self._geotagged_assets_cache_root = None
         LOGGER.info("bind_path: normalized root=%s", normalized)
         self._initialize_deleted_dir()
         self._refresh_tree()
@@ -150,6 +154,8 @@ class LibraryManager(
             self._watcher.removePaths(self._watcher.directories())
         self._live_scan_buffer.clear()
         self._live_scan_root = None
+        self._geotagged_assets_cache = None
+        self._geotagged_assets_cache_root = None
 
     # ------------------------------------------------------------------
     # Internal helpers (coordinator-level)
@@ -165,6 +171,8 @@ class LibraryManager(
             self._children = {}
             self._nodes = {}
             self._deleted_dir = None
+            self._geotagged_assets_cache = None
+            self._geotagged_assets_cache_root = None
             self._rebuild_watches()
             self.treeUpdated.emit()
             return
@@ -196,6 +204,8 @@ class LibraryManager(
         self._albums = refreshed_albums
         self._children = refreshed_children
         self._nodes = new_nodes
+        self._geotagged_assets_cache = None
+        self._geotagged_assets_cache_root = None
         self._rebuild_watches()
         self.treeUpdated.emit()
 

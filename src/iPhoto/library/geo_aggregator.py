@@ -62,6 +62,11 @@ class GeoAggregatorMixin:
         """
 
         root = self._require_root()
+        cached_root = getattr(self, "_geotagged_assets_cache_root", None)
+        cached_assets = getattr(self, "_geotagged_assets_cache", None)
+        if cached_root == root and cached_assets is not None:
+            return list(cached_assets)
+
         # Track resolved absolute paths we've already yielded. The global
         # index at the library root guarantees uniqueness of library-relative
         # paths, but files may still be reachable via multiple album roots
@@ -172,4 +177,6 @@ class GeoAggregatorMixin:
             )
 
         assets.sort(key=lambda item: item.library_relative)
+        setattr(self, "_geotagged_assets_cache_root", root)
+        setattr(self, "_geotagged_assets_cache", list(assets))
         return assets

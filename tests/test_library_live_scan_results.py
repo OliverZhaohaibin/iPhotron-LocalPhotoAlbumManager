@@ -99,3 +99,16 @@ def test_get_live_scan_results_disjoint_paths(tmp_path):
     results = manager.get_live_scan_results(relative_to=b)
 
     assert len(results) == 0
+
+
+def test_scan_chunk_does_not_accumulate_live_buffer(tmp_path):
+    root = tmp_path / "Library"
+    root.mkdir()
+
+    manager = LibraryManager()
+    manager._live_scan_root = root
+    manager._live_scan_buffer = [{"rel": "existing.jpg", "id": "1"}]
+
+    manager._on_scan_chunk(root, [{"rel": "new.jpg", "id": "2"}])
+
+    assert manager._live_scan_buffer == [{"rel": "existing.jpg", "id": "1"}]

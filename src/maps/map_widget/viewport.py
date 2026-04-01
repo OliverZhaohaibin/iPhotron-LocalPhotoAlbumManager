@@ -5,10 +5,10 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 
-# ``MAX_TILE_ZOOM_LEVEL`` reflects the highest tile zoom level available from the
-# bundled map source. When the view zoom exceeds this value we keep rendering the
-# level-6 tiles and upscale them so that the user never sees empty space.
-MAX_TILE_ZOOM_LEVEL = 6
+# ``DEFAULT_MAX_TILE_ZOOM_LEVEL`` reflects the highest tile zoom level available
+# from the bundled legacy vector source. Other backends can override this value
+# at render time via ``compute_view_state(..., max_tile_zoom_level=...)``.
+DEFAULT_MAX_TILE_ZOOM_LEVEL = 6
 MERCATOR_LAT_BOUND = 85.05112878
 
 
@@ -33,6 +33,8 @@ def compute_view_state(
     width: int,
     height: int,
     tile_size: int,
+    *,
+    max_tile_zoom_level: int = DEFAULT_MAX_TILE_ZOOM_LEVEL,
 ) -> ViewState:
     """Translate widget geometry into the parameters used during rendering."""
 
@@ -46,7 +48,7 @@ def compute_view_state(
     # the renderer keeps drawing level-6 tiles when the interactive zoom is
     # higher than the tile set supports. The resulting ``scale_factor``
     # ensures that those tiles are magnified to match the desired view.
-    fetch_zoom = min(MAX_TILE_ZOOM_LEVEL, max(0, math.floor(zoom)))
+    fetch_zoom = min(max_tile_zoom_level, max(0, math.floor(zoom)))
     tiles_across = 1 << fetch_zoom if fetch_zoom >= 0 else 1
     scale_factor = 2 ** (zoom - fetch_zoom)
     scaled_tile_size = tile_size * scale_factor

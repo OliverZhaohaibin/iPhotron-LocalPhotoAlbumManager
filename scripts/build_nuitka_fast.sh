@@ -15,6 +15,10 @@ python -m nuitka \
   --nofollow-import-to=pytest \
   --nofollow-import-to=iPhoto.tests \
   --include-package=iPhoto \
+  --include-package=maps \
+  --include-data-dir=src/maps/tiles=maps/tiles \
+  --include-data-file=src/maps/style.json=maps/style.json \
+  --include-data-dir=src/maps/map_widget/qml=maps/map_widget/qml \
   --assume-yes-for-downloads \
   --output-dir=dist \
   src/iPhoto/gui/main.py

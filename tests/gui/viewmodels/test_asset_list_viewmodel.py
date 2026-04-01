@@ -53,6 +53,25 @@ def test_load_query(view_model, mock_data_source):
     view_model.load_query(query)
     mock_data_source.load.assert_called_with(query)
 
+def test_reload_current_query(view_model, mock_data_source):
+    view_model.reload_current_query()
+    mock_data_source.reload_current_query.assert_called_once()
+
+
+def test_load_query_balances_model_reset_on_error(view_model, mock_data_source):
+    mock_data_source.load.side_effect = RuntimeError("boom")
+    query = AssetQuery(album_path="test")
+
+    with (
+        pytest.raises(RuntimeError, match="boom"),
+        patch.object(view_model, "beginResetModel") as begin_reset,
+        patch.object(view_model, "endResetModel") as end_reset,
+    ):
+        view_model.load_query(query)
+
+    begin_reset.assert_called_once()
+    end_reset.assert_called_once()
+
 def test_row_count(view_model, mock_data_source):
     mock_data_source.count.return_value = 5
     assert view_model.rowCount() == 5
@@ -109,6 +128,16 @@ def test_get_qml_helper(view_model, mock_data_source):
 def test_invalid_index(view_model):
     result = view_model.data(QModelIndex(), Qt.DisplayRole)
     assert result is None
+
+def test_current_role_without_loaded_asset(view_model, mock_data_source):
+    mock_data_source.count.return_value = 1
+    view_model.set_current_row(0)
+    index = view_model.index(0, 0)
+    assert view_model.data(index, Roles.IS_CURRENT) is True
+
+def test_prioritize_rows_delegates_to_data_source(view_model, mock_data_source):
+    view_model.prioritize_rows(10, 25)
+    mock_data_source.prioritize_rows.assert_called_once_with(10, 25)
 
 
 def test_unchanged_count_skips_reset(view_model, mock_data_source):

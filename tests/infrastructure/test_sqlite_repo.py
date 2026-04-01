@@ -160,32 +160,49 @@ def test_repo_migrates_legacy_app_schema(tmp_path):
                 live_photo_group_id TEXT
             )
         """)
-        conn.execute(
+        conn.executemany(
             """
             INSERT INTO assets
             (id, album_id, path, media_type, size_bytes, created_at, width, height,
              duration, metadata, content_identifier, live_photo_group_id)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (
-                "legacy-1",
-                "album-legacy",
-                "legacy/photo.jpg",
-                "photo",
-                321,
-                "2023-01-02T03:04:05",
-                640,
-                480,
-                4.25,
-                json.dumps({"iso": 200}),
-                "cid-legacy",
-                "group-legacy",
-            ),
+            [
+                (
+                    "legacy-1",
+                    "album-legacy",
+                    "legacy/photo.jpg",
+                    "photo",
+                    321,
+                    "2023-01-02T03:04:05",
+                    640,
+                    480,
+                    None,
+                    json.dumps({"iso": 200}),
+                    "cid-legacy",
+                    "group-legacy",
+                ),
+                (
+                    "legacy-vid",
+                    "album-legacy",
+                    "legacy/clip.mp4",
+                    "video",
+                    999,
+                    "2023-06-15T10:00:00",
+                    1920,
+                    1080,
+                    4.25,
+                    json.dumps({"codec": "h264"}),
+                    "cid-vid",
+                    None,
+                ),
+            ],
         )
 
     pool = ConnectionPool(db_path)
     repo = SQLiteAssetRepository(pool)
 
+    # -- photo row --
     legacy = repo.get("legacy-1")
     assert legacy is not None
     assert legacy.path == Path("legacy/photo.jpg")
@@ -193,10 +210,33 @@ def test_repo_migrates_legacy_app_schema(tmp_path):
     assert legacy.created_at == datetime(2023, 1, 2, 3, 4, 5)
     assert legacy.width == 640
     assert legacy.height == 480
-    assert legacy.duration == pytest.approx(4.25)
+    assert legacy.media_type == MediaType.IMAGE
     assert legacy.content_identifier == "cid-legacy"
     assert legacy.metadata["iso"] == 200
 
+    # -- video row --
+    legacy_vid = repo.get("legacy-vid")
+    assert legacy_vid is not None
+    assert legacy_vid.path == Path("legacy/clip.mp4")
+    assert legacy_vid.size_bytes == 999
+    assert legacy_vid.created_at == datetime(2023, 6, 15, 10, 0, 0)
+    assert legacy_vid.width == 1920
+    assert legacy_vid.height == 1080
+    assert legacy_vid.duration == pytest.approx(4.25)
+    assert legacy_vid.media_type == MediaType.VIDEO
+    assert legacy_vid.content_identifier == "cid-vid"
+    assert legacy_vid.metadata["codec"] == "h264"
+
+    # -- media-type filtering works after migration --
+    photo_results = repo.find_by_query(AssetQuery(media_types=[MediaType.IMAGE]))
+    assert any(a.id == "legacy-1" for a in photo_results)
+    assert all(a.id != "legacy-vid" for a in photo_results)
+
+    video_results = repo.find_by_query(AssetQuery(media_types=[MediaType.VIDEO]))
+    assert any(a.id == "legacy-vid" for a in video_results)
+    assert all(a.id != "legacy-1" for a in video_results)
+
+    # -- new asset save/retrieve after migration --
     repo.save(
         Asset(
             id="legacy-2",
@@ -215,3 +255,21 @@ def test_repo_migrates_legacy_app_schema(tmp_path):
     assert saved.path == Path("legacy/new.jpg")
     assert saved.parent_album_path == "legacy"
     assert saved.metadata["flag"] is True
+
+    # -- VIDEO asset saved post-migration also round-trips correctly --
+    repo.save(
+        Asset(
+            id="new-vid",
+            album_id="album-legacy",
+            path=Path("legacy/new_clip.mp4"),
+            media_type=MediaType.VIDEO,
+            size_bytes=555,
+            created_at=datetime(2024, 2, 1, 8, 0, 0),
+            duration=10.0,
+            parent_album_path="legacy",
+        )
+    )
+    new_vid = repo.get("new-vid")
+    assert new_vid is not None
+    assert new_vid.media_type == MediaType.VIDEO
+    assert new_vid.duration == pytest.approx(10.0)

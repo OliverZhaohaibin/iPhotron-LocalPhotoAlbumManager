@@ -146,6 +146,17 @@ class SQLiteAssetRepository(IAssetRepository):
                     "WHERE content_id IS NULL AND content_identifier IS NOT NULL"
                 )
 
+            # Normalize legacy string media_type values ('photo'/'video'/'live') to integers (0/1).
+            # The repository queries use integer comparisons (media_type = 0/1), so any row
+            # still storing TEXT would silently fail those filters.
+            conn.execute(
+                "UPDATE assets SET media_type = CASE "
+                "WHEN media_type = 'video' THEN 1 "
+                "WHEN media_type IN ('photo', 'live') THEN 0 "
+                "ELSE 0 END "
+                "WHERE typeof(media_type) = 'text'"
+            )
+
     def _ensure_indices(self):
         """Create indices after table and columns exist."""
         with self._pool.connection() as conn:
@@ -312,12 +323,14 @@ class SQLiteAssetRepository(IAssetRepository):
             sql = "SELECT * FROM assets WHERE 1=1"
 
         params = []
+        # Use CAST so that comparisons work regardless of whether media_type is stored
+        # as INTEGER (new schema) or as TEXT '0'/'1' (legacy TEXT column after migration).
         sql += (
             " AND ("
             "live_role IS NULL OR live_role != 1"
             ")"
             " AND NOT ("
-            "live_role IS NULL AND live_photo_group_id IS NOT NULL AND media_type = 1"
+            "live_role IS NULL AND live_photo_group_id IS NOT NULL AND CAST(media_type AS INTEGER) = 1"
             ")"
         )
 
@@ -350,14 +363,14 @@ class SQLiteAssetRepository(IAssetRepository):
                     "("
                     "(live_role = 0 AND live_partner_rel IS NOT NULL)"
                     " OR "
-                    "(live_photo_group_id IS NOT NULL AND media_type != 1)"
+                    "(live_photo_group_id IS NOT NULL AND CAST(media_type AS INTEGER) != 1)"
                     ")"
                 )
 
             if includes_image:
-                media_clauses.append("media_type = 0")
+                media_clauses.append("CAST(media_type AS INTEGER) = 0")
             if includes_video:
-                media_clauses.append("media_type = 1")
+                media_clauses.append("CAST(media_type AS INTEGER) = 1")
 
             if media_clauses:
                 sql += " AND (" + " OR ".join(media_clauses) + ")"
@@ -411,10 +424,14 @@ class SQLiteAssetRepository(IAssetRepository):
             except ValueError:
                 pass
 
-        # 3. Media Type (Int -> Enum)
+        # 3. Media Type (Int or normalized string → Enum)
+        # Legacy TEXT columns may store '0'/'1' after migration, or named strings
+        # like 'photo'/'video' in un-migrated rows read without going through migration.
         mt_raw = row["media_type"]
-        if isinstance(mt_raw, int):
-            media_type = MediaType.VIDEO if mt_raw == 1 else MediaType.IMAGE
+        if mt_raw in (1, '1'):
+            media_type = MediaType.VIDEO
+        elif mt_raw in (0, '0'):
+            media_type = MediaType.IMAGE
         else:
             try:
                 media_type = MediaType(mt_raw)

@@ -2,12 +2,11 @@ from __future__ import annotations
 
 import hashlib
 from pathlib import Path
-from typing import Any, Dict, Optional, cast
+from typing import Any, Dict, Optional
 
 from PySide6.QtCore import (
     QAbstractListModel,
     QModelIndex,
-    QObject,
     QSize,
     Qt,
     Slot,
@@ -38,7 +37,12 @@ class AssetListViewModel(QAbstractListModel):
         self._current_row = -1
 
         # Connect signals
-        self._data_source.dataChanged.connect(self._on_source_changed)
+        window_changed = getattr(self._data_source, "windowChanged", None)
+        if window_changed is not None and hasattr(window_changed, "connect"):
+            window_changed.connect(self._on_window_changed)
+        count_changed = getattr(self._data_source, "countChanged", None)
+        if count_changed is not None and hasattr(count_changed, "connect"):
+            count_changed.connect(self._on_count_changed)
         self._thumbnails.thumbnailReady.connect(self._on_thumbnail_ready)
         # Track the last observed asset signature; None means no prior snapshot yet.
         self._last_snapshot: Optional[tuple[int, bytes]] = None
@@ -46,7 +50,11 @@ class AssetListViewModel(QAbstractListModel):
     def load_query(self, query: AssetQuery):
         """Triggers data loading for a new query."""
         self._last_snapshot = None
-        self._data_source.load(query)
+        self.beginResetModel()
+        try:
+            self._data_source.load(query)
+        finally:
+            self.endResetModel()
 
     def load_geotagged_assets(self, assets: list, library_root: Path) -> None:
         """Load a pre-computed list of geotagged assets for cluster gallery view.
@@ -59,7 +67,20 @@ class AssetListViewModel(QAbstractListModel):
             library_root: The library root path for resolving absolute paths.
         """
         self._last_snapshot = None
-        self._data_source.load_geotagged_assets(assets, library_root)
+        self.beginResetModel()
+        try:
+            self._data_source.load_geotagged_assets(assets, library_root)
+        finally:
+            self.endResetModel()
+
+    def reload_current_query(self) -> None:
+        """Reload the active query with a controlled model reset."""
+        self._last_snapshot = None
+        self.beginResetModel()
+        try:
+            self._data_source.reload_current_query()
+        finally:
+            self.endResetModel()
 
     def set_active_root(self, root: Optional[Path]) -> None:
         """Update the active root so scan chunks map to the current view."""
@@ -77,12 +98,17 @@ class AssetListViewModel(QAbstractListModel):
             return None
 
         row = index.row()
+        role_int = int(role)
+
+        if role_int == Roles.IS_CURRENT:
+            return row == self._current_row
+
+        if role_int == Roles.IS_SPACER:
+            return False
+
         asset: Optional[AssetDTO] = self._data_source.asset_at(row)
         if not asset:
             return None
-
-        # Convert Enum/Flag roles to int if necessary (PySide6 usually passes int)
-        role_int = int(role)
 
         # --- Standard Roles ---
         if role_int == Qt.ItemDataRole.DisplayRole:
@@ -185,12 +211,6 @@ class AssetListViewModel(QAbstractListModel):
         if role_int == Roles.IS_PANO:
             return asset.is_pano
 
-        if role_int == Roles.IS_SPACER:
-            return False # ViewModels usually don't have spacers, unless inserted
-
-        if role_int == Roles.IS_CURRENT:
-            return row == self._current_row
-
         return None
 
     def _resolve_live_motion(self, asset: AssetDTO) -> tuple[Optional[Path], Optional[Path]]:
@@ -210,8 +230,14 @@ class AssetListViewModel(QAbstractListModel):
         group_id = metadata.get("live_photo_group_id")
         if not group_id:
             return None, None
-        for idx in range(self._data_source.count()):
-            candidate = self._data_source.asset_at(idx)
+        iter_cached_rows = getattr(self._data_source, "_iter_cached_rows", None)
+        if callable(iter_cached_rows):
+            candidates = [candidate for _, candidate in iter_cached_rows()]
+        else:
+            candidates = [
+                self._data_source.asset_at(idx) for idx in range(self._data_source.count())
+            ]
+        for candidate in candidates:
             if candidate is None or not candidate.is_video:
                 continue
             candidate_group = (candidate.metadata or {}).get("live_photo_group_id")
@@ -230,16 +256,34 @@ class AssetListViewModel(QAbstractListModel):
         self.endResetModel()
         self._last_snapshot = current_snapshot
 
-    def _on_thumbnail_ready(self, path: Path):
-        # Find index for path and emit dataChanged
-        # Linear search for now (optimization: use a dict map in DataSource)
+    def _on_window_changed(self, first: int, last: int) -> None:
         count = self.rowCount()
-        for row in range(count):
-            asset = self._data_source.asset_at(row)
-            if asset and asset.abs_path == path:
-                idx = self.index(row, 0)
-                self.dataChanged.emit(idx, idx, [Qt.DecorationRole])
-                break
+        if count <= 0:
+            return
+        first = max(0, min(first, count - 1))
+        last = max(first, min(last, count - 1))
+        top = self.index(first, 0)
+        bottom = self.index(last, 0)
+        if top.isValid() and bottom.isValid():
+            self.dataChanged.emit(top, bottom, [])
+
+    def _on_count_changed(self, old_count: int, new_count: int) -> None:
+        if old_count == new_count:
+            return
+        if self._current_row >= new_count:
+            self._current_row = -1
+        self._last_snapshot = None
+        self.beginResetModel()
+        self.endResetModel()
+
+    def _on_thumbnail_ready(self, path: Path):
+        row_for_path = getattr(self._data_source, "row_for_path", None)
+        row = row_for_path(path) if callable(row_for_path) else None
+        if row is None:
+            return
+        idx = self.index(row, 0)
+        if idx.isValid():
+            self.dataChanged.emit(idx, idx, [Qt.DecorationRole])
 
     def _snapshot_hash(self, count: int) -> bytes:
         digest = hashlib.blake2b(digest_size=16)
@@ -269,21 +313,26 @@ class AssetListViewModel(QAbstractListModel):
         """Forces a thumbnail refresh for the given path."""
         path = Path(path_str)
         self._thumbnails.invalidate(path, size=self._thumb_size)
-        # Notify views
-        count = self.rowCount()
-        for row in range(count):
-            asset = self._data_source.asset_at(row)
-            if asset:
-                if str(asset.abs_path) == path_str or str(asset.rel_path) == path_str:
-                    idx = self.index(row, 0)
-                    self.dataChanged.emit(idx, idx, [Qt.DecorationRole])
-                    break
+        row_for_path = getattr(self._data_source, "row_for_path", None)
+        row = row_for_path(path) if callable(row_for_path) else None
+        if row is None:
+            return
+        idx = self.index(row, 0)
+        if idx.isValid():
+            self.dataChanged.emit(idx, idx, [Qt.DecorationRole])
 
     def thumbnail_loader(self):
         pass
 
     def prioritize_rows(self, first: int, last: int):
-        pass
+        prioritize = getattr(self._data_source, "prioritize_rows", None)
+        if callable(prioritize):
+            prioritize(first, last)
+
+    def pin_row(self, row: int) -> None:
+        pin = getattr(self._data_source, "pin_row", None)
+        if callable(pin):
+            pin(row)
 
     def update_favorite(self, row: int, is_favorite: bool):
         """Updates the favorite status in the data source and notifies views."""
@@ -321,7 +370,7 @@ class AssetListViewModel(QAbstractListModel):
             return False
         rows = list(range(row, row + count))
         self.beginRemoveRows(parent, row, row + count - 1)
-        self._data_source.remove_rows(rows)
+        self._data_source.remove_rows(rows, emit=False)
         self.endRemoveRows()
         return True
 
@@ -332,6 +381,8 @@ class AssetListViewModel(QAbstractListModel):
 
         old_row = self._current_row
         self._current_row = row
+        if row >= 0:
+            self.pin_row(row)
 
         # Notify old row
         if old_row >= 0:

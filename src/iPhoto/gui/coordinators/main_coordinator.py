@@ -338,9 +338,11 @@ class MainCoordinator(QObject):
         ui = self._window.ui
         self._context.library.treeUpdated.connect(self._on_library_tree_updated)
         self._facade.scanChunkReady.connect(self._asset_data_source.handle_scan_chunk)
+        self._facade.scanFinished.connect(self._asset_data_source.handle_scan_finished)
 
         # Grid interactions
         ui.grid_view.itemClicked.connect(self._on_asset_clicked)
+        ui.grid_view.visibleRowsChanged.connect(self._asset_list_vm.prioritize_rows)
 
         # Filmstrip clicks are now handled by PlaybackCoordinator
 
@@ -456,7 +458,7 @@ class MainCoordinator(QObject):
         else:
             cache_root = Path.home() / ".iPhoto" / "cache" / "thumbs"
         self._thumbnail_service.set_disk_cache_path(cache_root)
-        self._asset_data_source.reload_current_query()
+        self._asset_list_vm.reload_current_query()
 
     def _build_asset_repository(
         self, root: Path

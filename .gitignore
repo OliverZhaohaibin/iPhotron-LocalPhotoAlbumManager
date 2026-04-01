@@ -212,3 +212,12 @@ __marimo__/
 /tmp/
 [\\]tmp[\\]**
 .idea/
+/tools/osmand_render_helper_native/qt6-msvc-importlibs/
+/tools/osmand_render_helper_native/dist-msvc/
+/tools/osmand_render_helper_native/build_only_log.txt
+/tools/osmand_render_helper_native/build_verbose2.txt
+/tools/osmand_render_helper_native/qt_include_smoke.cpp
+/CMakeFiles/
+/debug/
+/src/maps/tiles/World_basemap_2.obf
+/src/maps/tiles/extension/

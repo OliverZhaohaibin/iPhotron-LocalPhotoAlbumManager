@@ -12,6 +12,7 @@ from PySide6.QtWidgets import QWidget
 
 from ._map_widget_base import MapWidgetController
 from .map_renderer import CityAnnotation
+from maps.map_sources import MapBackendMetadata, MapSourceSpec
 
 
 class MapGLWidget(QOpenGLWidget):
@@ -30,6 +31,7 @@ class MapGLWidget(QOpenGLWidget):
         self,
         parent: QWidget | None = None,
         *,
+        map_source: MapSourceSpec | None = None,
         tile_root: Path | str = "tiles",
         style_path: Path | str = "style.json",
     ) -> None:
@@ -41,6 +43,7 @@ class MapGLWidget(QOpenGLWidget):
         # OpenGL specific surface lifecycle.
         self._controller = MapWidgetController(
             self,
+            map_source=map_source,
             tile_root=tile_root,
             style_path=style_path,
         )
@@ -73,10 +76,28 @@ class MapGLWidget(QOpenGLWidget):
         self._controller.reset_view()
 
     # ------------------------------------------------------------------
+    def pan_by_pixels(self, delta_x: float, delta_y: float) -> None:
+        """Translate the camera by a fixed on-screen pixel delta."""
+
+        self._controller.pan_by_pixels(delta_x, delta_y)
+
+    # ------------------------------------------------------------------
+    def center_lonlat(self) -> tuple[float, float]:
+        """Return the current viewport centre as ``(lon, lat)``."""
+
+        return self._controller.center_lonlat()
+
+    # ------------------------------------------------------------------
     def shutdown(self) -> None:
         """Stop background work before the widget is destroyed."""
 
         self._controller.shutdown()
+
+    # ------------------------------------------------------------------
+    def map_backend_metadata(self) -> MapBackendMetadata:
+        """Expose the active map backend capabilities."""
+
+        return self._controller.map_backend_metadata()
 
     # ------------------------------------------------------------------
     def project_lonlat(self, lon: float, lat: float) -> QPointF | None:
@@ -107,6 +128,12 @@ class MapGLWidget(QOpenGLWidget):
         """Return the full label text for the city under ``position`` if any."""
 
         return self._controller.city_at(position)
+
+    # ------------------------------------------------------------------
+    def event_target(self) -> QWidget:
+        """Return the widget that directly receives pointer input events."""
+
+        return self
 
     # ------------------------------------------------------------------
     def paintGL(self) -> None:  # type: ignore[override]

@@ -10,6 +10,7 @@ from PySide6.QtCore import QPointF, QRectF, Qt
 from PySide6.QtGui import QColor, QFont, QFontMetricsF, QPainter, QPainterPath, QPen
 
 from maps.style_resolver import StyleResolver
+from maps.tile_backend import RasterTile, TilePayload
 
 from .city_label_layout import CityAnnotation, RenderedCityLabel, render_cities  # noqa: F401 – re-export
 from .geometry import extract_geometry, normalize_lines, normalize_points, normalize_polygons
@@ -83,7 +84,19 @@ class MapRenderer:
         # background used across the application.
         painter.fillRect(0, 0, width, height, QColor("#88a8c2"))
 
-        view_state = compute_view_state(center_x, center_y, zoom, width, height, self._tile_size)
+        fetch_max_zoom = self._tile_manager.metadata.fetch_max_zoom
+        if fetch_max_zoom is None:
+            fetch_max_zoom = max(0, int(math.floor(self._tile_manager.metadata.max_zoom)))
+
+        view_state = compute_view_state(
+            center_x,
+            center_y,
+            zoom,
+            width,
+            height,
+            self._tile_size,
+            max_tile_zoom_level=fetch_max_zoom,
+        )
         # Collision tracking must start fresh for every paint pass because the
         # widget rerenders the entire viewport each time.
         self._label_collision_boxes.clear()
@@ -117,12 +130,22 @@ class MapRenderer:
     def _render_tiles(
         self,
         painter: QPainter,
-        tiles_to_draw: list[tuple[tuple[int, int, int], dict, float, float, int, int]],
+        tiles_to_draw: list[tuple[tuple[int, int, int], TilePayload, float, float, int, int]],
         view_state: ViewState,
     ) -> None:
         """Iterate over the visible tiles and draw each requested layer."""
 
         for tile_key, tile_data, tile_origin_x, tile_origin_y, wrapped_x, tile_y in tiles_to_draw:
+            if isinstance(tile_data, RasterTile):
+                self._draw_raster_tile(
+                    painter,
+                    tile_data,
+                    tile_origin_x,
+                    tile_origin_y,
+                    view_state.scaled_tile_size,
+                )
+                continue
+
             for plan in self._layers:
                 if not self._style.is_layer_visible(plan.style_layer, view_state.zoom):
                     continue
@@ -185,6 +208,25 @@ class MapRenderer:
                         view_state.zoom,
                         view_state.fetch_zoom,
                     )
+
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _draw_raster_tile(
+        painter: QPainter,
+        tile: RasterTile,
+        origin_x: float,
+        origin_y: float,
+        scaled_tile_size: float,
+    ) -> None:
+        """Draw a prerendered raster tile supplied by the OBF backend."""
+
+        painter.save()
+        painter.setRenderHint(QPainter.SmoothPixmapTransform, True)
+        painter.drawImage(
+            QRectF(origin_x, origin_y, scaled_tile_size, scaled_tile_size),
+            tile.image,
+        )
+        painter.restore()
 
     # ------------------------------------------------------------------
     def _make_path_cache_key(

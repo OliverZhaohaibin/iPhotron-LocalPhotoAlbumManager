@@ -92,6 +92,11 @@ class SQLiteAssetRepository(IAssetRepository):
             # Safe to create index even if column contains NULLs
             conn.execute("CREATE INDEX IF NOT EXISTS idx_assets_album_id ON assets(album_id)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_assets_parent_album_path ON assets(parent_album_path)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_assets_dt_id_desc ON assets(dt DESC, id DESC)")
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_assets_parent_album_path_dt_id_desc "
+                "ON assets(parent_album_path, dt DESC, id DESC)"
+            )
 
     def get(self, id: str) -> Optional[Asset]:
         # Note: legacy schema doesn't force ID uniqueness globally, but practically it's our Entity ID.

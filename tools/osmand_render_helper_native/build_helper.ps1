@@ -1,14 +1,21 @@
 param(
     [string]$QtRoot = "C:\Qt\6.10.1\mingw_64",
     [string]$MinGWRoot = "C:\Qt\Tools\mingw1310_64",
-    [string]$OsmAndCoreSource = "D:\python_code\maps_of_iPhoto\OsmAnd-core",
-    [string]$OsmAndCoreLegacySource = "D:\python_code\maps_of_iPhoto\OsmAnd-core-legacy",
+    [string]$OsmAndCoreSource = "",
+    [string]$OsmAndCoreLegacySource = "",
     [string]$BuildType = "Release",
     [string]$CMakeExe = "C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe",
     [string]$Generator = "MinGW Makefiles"
 )
 
 $ErrorActionPreference = "Stop"
+
+if (-not $OsmAndCoreSource) {
+    throw "OsmAndCoreSource is required. Pass -OsmAndCoreSource <path-to-OsmAnd-core>."
+}
+if (-not $OsmAndCoreLegacySource) {
+    throw "OsmAndCoreLegacySource is required. Pass -OsmAndCoreLegacySource <path-to-OsmAnd-core-legacy>."
+}
 
 $projectRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $vendorRoot = Join-Path $projectRoot "vendor\osmand"

@@ -1,6 +1,6 @@
 param(
-    [string]$OsmAndWorkspaceRoot = "D:\python_code\maps_of_iPhoto",
-    [string]$PythonVenv = "D:\python_code\iPhoto\.venv",
+    [string]$OsmAndWorkspaceRoot = "",
+    [string]$PythonVenv = "",
     [string]$QtRoot = "C:\Qt\6.10.1\mingw_64",
     [string]$MinGWRoot = "C:\Qt\Tools\mingw1310_64",
     [string]$CMakeExe = "C:\Qt\Tools\CMake_64\bin\cmake.exe",
@@ -16,6 +16,13 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+
+if (-not $OsmAndWorkspaceRoot) {
+    throw "OsmAndWorkspaceRoot is required. Pass -OsmAndWorkspaceRoot <path-to-osmand-workspace>."
+}
+if (-not $PythonVenv) {
+    throw "PythonVenv is required. Pass -PythonVenv <path-to-python-venv>."
+}
 
 if ($ConfigureOnly -and $BuildOnly) {
     throw "ConfigureOnly and BuildOnly can not be used together."

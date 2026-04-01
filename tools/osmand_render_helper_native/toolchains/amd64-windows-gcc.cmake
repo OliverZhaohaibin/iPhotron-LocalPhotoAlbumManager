@@ -1,4 +1,4 @@
-﻿set(CMAKE_SYSTEM_NAME Windows)
+set(CMAKE_SYSTEM_NAME Windows)
 
 if(NOT DEFINED OSMAND_MINGW_ROOT)
     set(OSMAND_MINGW_ROOT "C:/Qt/Tools/mingw1310_64" CACHE PATH "MinGW root used by the official OsmAnd helper build")

@@ -98,6 +98,8 @@ class ScanCoordinatorMixin:
         scan_root = self._live_scan_root
         buffer_snapshot = list(self._live_scan_buffer)
         library_root = self._root
+        # Release the lock before performing any potentially slow I/O.
+        del locker
 
         if scan_root is None:
             return []

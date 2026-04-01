@@ -1,4 +1,4 @@
-﻿"""Public package interface for the map widget components.
+"""Public package interface for the map widget components.
 
 This module re-exports the high-level classes that external callers relied on
 before the refactor, keeping backwards compatibility for imports such as

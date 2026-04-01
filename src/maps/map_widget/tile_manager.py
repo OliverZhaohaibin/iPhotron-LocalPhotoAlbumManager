@@ -89,7 +89,6 @@ class TileManager(QObject):
         self._tile_cache: OrderedDict[tuple[int, int, int], TilePayload] = OrderedDict()
         self._pending_tiles: set[tuple[int, int, int]] = set()
         self._missing_tiles: set[tuple[int, int, int]] = set()
-        self._metadata = self._tile_backend.probe()
 
         self._loader_thread: QThread | None = QThread(self)
         self._tile_worker = _TileWorker(self._tile_backend)
@@ -104,16 +103,13 @@ class TileManager(QObject):
     def shutdown(self) -> None:
         """Stop the background worker thread and release resources."""
 
-        self._tile_backend.shutdown()
-
-        if self._loader_thread is None:
-            return
-
-        if self._loader_thread.isRunning():
+        if self._loader_thread is not None and self._loader_thread.isRunning():
             self._loader_thread.quit()
             self._loader_thread.wait()
 
         self._loader_thread = None
+
+        self._tile_backend.shutdown()
 
     # ------------------------------------------------------------------
     def get_tile(self, tile_key: tuple[int, int, int]) -> TilePayload | None:
@@ -151,7 +147,7 @@ class TileManager(QObject):
     def metadata(self) -> MapBackendMetadata:
         """Expose the active backend metadata to the renderer/controller."""
 
-        return self._metadata
+        return self._tile_backend.metadata
 
     # ------------------------------------------------------------------
     def set_device_scale(self, scale: float) -> None:

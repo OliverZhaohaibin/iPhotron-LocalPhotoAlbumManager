@@ -1,4 +1,4 @@
-﻿include_guard(GLOBAL)
+include_guard(GLOBAL)
 
 find_package(Qt6 REQUIRED COMPONENTS Core Network)
 

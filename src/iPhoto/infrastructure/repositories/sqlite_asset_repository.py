@@ -17,6 +17,21 @@ class SQLiteAssetRepository(IAssetRepository):
         self._migrate_schema()
         self._ensure_indices()
 
+    @staticmethod
+    def _get_asset_columns(conn) -> set[str]:
+        cursor = conn.execute("PRAGMA table_info(assets)")
+        return {row["name"] for row in cursor.fetchall()}
+
+    @staticmethod
+    def _first_non_null(row, *columns: str):
+        keys = set(row.keys())
+        for column in columns:
+            if column in keys:
+                value = row[column]
+                if value is not None and value != "":
+                    return value
+        return None
+
     def _init_table(self):
         with self._pool.connection() as conn:
             # Match Legacy Schema: PK is 'rel' (path)
@@ -66,37 +81,89 @@ class SQLiteAssetRepository(IAssetRepository):
     def _migrate_schema(self):
         """Ensure schema has all required columns for existing databases."""
         with self._pool.connection() as conn:
-            cursor = conn.execute("PRAGMA table_info(assets)")
-            columns = {row["name"] for row in cursor.fetchall()}
+            columns = self._get_asset_columns(conn)
 
-            # Critical missing columns
+            # Support both the legacy cache schema (rel/dt/bytes/w/h/dur) and
+            # the newer application schema (path/created_at/size_bytes/...).
             missing_cols = {
+                "rel": "TEXT",
+                "dt": "TEXT",
+                "ts": "INTEGER",
+                "bytes": "INTEGER",
+                "w": "INTEGER",
+                "h": "INTEGER",
+                "dur": "REAL",
                 "album_id": "TEXT",
                 "live_photo_group_id": "TEXT",
                 "metadata": "TEXT",
+                "content_id": "TEXT",
                 "content_identifier": "TEXT",
                 "is_favorite": "INTEGER DEFAULT 0",
                 "parent_album_path": "TEXT",
                 "media_type": "INTEGER",
                 "live_role": "INTEGER DEFAULT 0",
                 "live_partner_rel": "TEXT",
+                "micro_thumbnail": "BLOB",
             }
 
             for col, dtype in missing_cols.items():
                 if col not in columns:
                     conn.execute(f"ALTER TABLE assets ADD COLUMN {col} {dtype}")
 
+            if "path" in columns:
+                conn.execute(
+                    "UPDATE assets SET rel = path "
+                    "WHERE (rel IS NULL OR rel = '') AND path IS NOT NULL"
+                )
+            if "created_at" in columns:
+                conn.execute(
+                    "UPDATE assets SET dt = created_at "
+                    "WHERE dt IS NULL AND created_at IS NOT NULL"
+                )
+            if "size_bytes" in columns:
+                conn.execute(
+                    "UPDATE assets SET bytes = size_bytes "
+                    "WHERE bytes IS NULL AND size_bytes IS NOT NULL"
+                )
+            if "width" in columns:
+                conn.execute(
+                    "UPDATE assets SET w = width "
+                    "WHERE w IS NULL AND width IS NOT NULL"
+                )
+            if "height" in columns:
+                conn.execute(
+                    "UPDATE assets SET h = height "
+                    "WHERE h IS NULL AND height IS NOT NULL"
+                )
+            if "duration" in columns:
+                conn.execute(
+                    "UPDATE assets SET dur = duration "
+                    "WHERE dur IS NULL AND duration IS NOT NULL"
+                )
+            if "content_identifier" in columns:
+                conn.execute(
+                    "UPDATE assets SET content_id = content_identifier "
+                    "WHERE content_id IS NULL AND content_identifier IS NOT NULL"
+                )
+
     def _ensure_indices(self):
         """Create indices after table and columns exist."""
         with self._pool.connection() as conn:
-            # Safe to create index even if column contains NULLs
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_assets_album_id ON assets(album_id)")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_assets_parent_album_path ON assets(parent_album_path)")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_assets_dt_id_desc ON assets(dt DESC, id DESC)")
-            conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_assets_parent_album_path_dt_id_desc "
-                "ON assets(parent_album_path, dt DESC, id DESC)"
-            )
+            columns = self._get_asset_columns(conn)
+
+            if "rel" in columns:
+                conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_assets_rel ON assets(rel)")
+            if "album_id" in columns:
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_assets_album_id ON assets(album_id)")
+            if "parent_album_path" in columns:
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_assets_parent_album_path ON assets(parent_album_path)")
+            if {"dt", "id"}.issubset(columns):
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_assets_dt_id_desc ON assets(dt DESC, id DESC)")
+            if {"parent_album_path", "dt", "id"}.issubset(columns):
+                conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_assets_parent_album_path_dt_id_desc "
+                    "ON assets(parent_album_path, dt DESC, id DESC)"
+                )
 
     def get(self, id: str) -> Optional[Asset]:
         # Note: legacy schema doesn't force ID uniqueness globally, but practically it's our Entity ID.
@@ -330,20 +397,19 @@ class SQLiteAssetRepository(IAssetRepository):
 
     def _map_row_to_asset(self, row) -> Asset:
         # Handle column name differences (rel vs path, dt vs created_at, bytes vs size_bytes)
-        keys = row.keys()
+        keys = set(row.keys())
 
         # 1. Path/Rel
-        rel_path = row["rel"] if "rel" in keys else row.get("path")
+        rel_path = self._first_non_null(row, "rel", "path")
 
         # 2. DateTime
         created_at = None
-        if "dt" in keys and row["dt"]:
-             try:
-                 created_at = datetime.fromisoformat(row["dt"].replace("Z", "+00:00"))
-             except ValueError:
-                 pass
-        elif "created_at" in keys and row["created_at"]:
-             created_at = datetime.fromisoformat(row["created_at"])
+        dt_value = self._first_non_null(row, "dt", "created_at")
+        if dt_value:
+            try:
+                created_at = datetime.fromisoformat(dt_value.replace("Z", "+00:00"))
+            except ValueError:
+                pass
 
         # 3. Media Type (Int -> Enum)
         mt_raw = row["media_type"]
@@ -357,25 +423,25 @@ class SQLiteAssetRepository(IAssetRepository):
 
         # 4. JSON Fields
         meta = {}
-        if "metadata" in keys and row["metadata"]:
+        metadata_value = self._first_non_null(row, "metadata")
+        if metadata_value:
             try:
-                meta = json.loads(row["metadata"])
+                meta = json.loads(metadata_value)
             except json.JSONDecodeError:
                 pass
 
         # 5. Optional columns handling
-        is_favorite = bool(row["is_favorite"]) if "is_favorite" in keys and row["is_favorite"] else False
-        album_id = row["album_id"] if "album_id" in keys else None
-        live_group = row["live_photo_group_id"] if "live_photo_group_id" in keys else None
-        live_partner_rel = row["live_partner_rel"] if "live_partner_rel" in keys else None
-        live_role = row["live_role"] if "live_role" in keys else None
-        content_id = row["content_identifier"] if "content_identifier" in keys else row.get("content_id")
-        location = row["location"] if "location" in keys else None
-        micro_thumbnail = row["micro_thumbnail"] if "micro_thumbnail" in keys else None
-        if micro_thumbnail is None and "thumb_16" in keys:
-            micro_thumbnail = row["thumb_16"]
+        favorite_raw = self._first_non_null(row, "is_favorite")
+        is_favorite = bool(favorite_raw) if favorite_raw is not None else False
+        album_id = self._first_non_null(row, "album_id")
+        live_group = self._first_non_null(row, "live_photo_group_id")
+        live_partner_rel = self._first_non_null(row, "live_partner_rel")
+        live_role = self._first_non_null(row, "live_role")
+        content_id = self._first_non_null(row, "content_identifier", "content_id")
+        location = self._first_non_null(row, "location")
+        micro_thumbnail = self._first_non_null(row, "micro_thumbnail", "thumb_16")
 
-        gps = row["gps"] if "gps" in keys else None
+        gps = self._first_non_null(row, "gps")
         if isinstance(gps, str) and gps.strip():
             try:
                 parsed_gps = json.loads(gps)
@@ -401,14 +467,14 @@ class SQLiteAssetRepository(IAssetRepository):
             album_id=album_id or "", # Default to empty string if missing? Or Optional
             path=Path(rel_path),
             media_type=media_type,
-            size_bytes=row["bytes"] if "bytes" in keys else row.get("size_bytes", 0),
+            size_bytes=self._first_non_null(row, "bytes", "size_bytes") or 0,
             created_at=created_at,
-            width=row["w"] if "w" in keys else row.get("width"),
-            height=row["h"] if "h" in keys else row.get("height"),
-            duration=row["dur"] if "dur" in keys else row.get("duration"),
+            width=self._first_non_null(row, "w", "width"),
+            height=self._first_non_null(row, "h", "height"),
+            duration=self._first_non_null(row, "dur", "duration"),
             metadata=meta,
             content_identifier=content_id,
             live_photo_group_id=live_group,
             is_favorite=is_favorite,
-            parent_album_path=row["parent_album_path"] if "parent_album_path" in keys else None
+            parent_album_path=self._first_non_null(row, "parent_album_path")
         )

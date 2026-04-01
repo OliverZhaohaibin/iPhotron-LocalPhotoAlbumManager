@@ -138,3 +138,80 @@ def test_pagination(repo):
     results = repo.find_by_query(query)
     assert len(results) == 3
     assert results[0].id == "3"
+
+
+def test_repo_migrates_legacy_app_schema(tmp_path):
+    db_path = tmp_path / "legacy_repo.sqlite"
+
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("""
+            CREATE TABLE assets (
+                id TEXT PRIMARY KEY,
+                album_id TEXT,
+                path TEXT,
+                media_type TEXT,
+                size_bytes INTEGER,
+                created_at TEXT,
+                width INTEGER,
+                height INTEGER,
+                duration REAL,
+                metadata TEXT,
+                content_identifier TEXT,
+                live_photo_group_id TEXT
+            )
+        """)
+        conn.execute(
+            """
+            INSERT INTO assets
+            (id, album_id, path, media_type, size_bytes, created_at, width, height,
+             duration, metadata, content_identifier, live_photo_group_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "legacy-1",
+                "album-legacy",
+                "legacy/photo.jpg",
+                "photo",
+                321,
+                "2023-01-02T03:04:05",
+                640,
+                480,
+                4.25,
+                json.dumps({"iso": 200}),
+                "cid-legacy",
+                "group-legacy",
+            ),
+        )
+
+    pool = ConnectionPool(db_path)
+    repo = SQLiteAssetRepository(pool)
+
+    legacy = repo.get("legacy-1")
+    assert legacy is not None
+    assert legacy.path == Path("legacy/photo.jpg")
+    assert legacy.size_bytes == 321
+    assert legacy.created_at == datetime(2023, 1, 2, 3, 4, 5)
+    assert legacy.width == 640
+    assert legacy.height == 480
+    assert legacy.duration == pytest.approx(4.25)
+    assert legacy.content_identifier == "cid-legacy"
+    assert legacy.metadata["iso"] == 200
+
+    repo.save(
+        Asset(
+            id="legacy-2",
+            album_id="album-legacy",
+            path=Path("legacy/new.jpg"),
+            media_type=MediaType.IMAGE,
+            size_bytes=111,
+            created_at=datetime(2024, 1, 1, 12, 0, 0),
+            metadata={"flag": True},
+            parent_album_path="legacy",
+        )
+    )
+
+    saved = repo.get("legacy-2")
+    assert saved is not None
+    assert saved.path == Path("legacy/new.jpg")
+    assert saved.parent_album_path == "legacy"
+    assert saved.metadata["flag"] is True

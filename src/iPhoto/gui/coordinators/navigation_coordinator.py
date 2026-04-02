@@ -8,7 +8,7 @@ import logging
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, Optional
 
-from PySide6.QtCore import QObject, QTimer, Signal
+from PySide6.QtCore import QObject, QRunnable, QThreadPool, QTimer, Signal
 
 from iPhoto.events.bus import EventBus
 from iPhoto.application.services.album_service import AlbumService
@@ -28,6 +28,38 @@ if TYPE_CHECKING:
     from iPhoto.gui.coordinators.playback_coordinator import PlaybackCoordinator
 
 LOGGER = logging.getLogger(__name__)
+
+
+class _LocationAssetsSignals(QObject):
+    """Signals emitted by the background geotagged-assets worker."""
+
+    finished = Signal(int, object, list, float)
+    failed = Signal(int, object, str)
+
+
+class _LocationAssetsWorker(QRunnable):
+    """Load geotagged assets off the UI thread so map navigation stays snappy."""
+
+    def __init__(self, request_serial: int, root: Path, library) -> None:
+        super().__init__()
+        self._request_serial = int(request_serial)
+        self._root = root
+        self._library = library
+        self.signals = _LocationAssetsSignals()
+
+    def run(self) -> None:  # type: ignore[override]
+        started = time.perf_counter()
+        try:
+            assets = list(self._library.get_geotagged_assets())
+        except Exception as exc:  # pragma: no cover - defensive background propagation
+            self.signals.failed.emit(self._request_serial, self._root, str(exc))
+            return
+        self.signals.finished.emit(
+            self._request_serial,
+            self._root,
+            assets,
+            (time.perf_counter() - started) * 1000.0,
+        )
 
 
 class NavigationCoordinator(QObject):
@@ -65,6 +97,8 @@ class NavigationCoordinator(QObject):
         self._playback_coordinator: Optional[PlaybackCoordinator] = None
         self._in_cluster_gallery: bool = False  # Tracks if we're viewing a cluster gallery from map
         self._location_request_serial = 0
+        self._location_assets_pool = QThreadPool.globalInstance()
+        self._location_assets_worker: _LocationAssetsWorker | None = None
 
         # Trash Cleanup State
         self._trash_cleanup_running = False
@@ -222,6 +256,9 @@ class NavigationCoordinator(QObject):
         self._router.show_map()
         self._location_request_serial += 1
         request_serial = self._location_request_serial
+        map_view = self._router.map_view()
+        if map_view is not None:
+            map_view.clear()
         QTimer.singleShot(
             0,
             lambda root=root, request_serial=request_serial: self._populate_location_view(root, request_serial),
@@ -324,7 +361,7 @@ class NavigationCoordinator(QObject):
             self._playback_coordinator.reset_for_gallery()
 
     def _populate_location_view(self, root: Path, request_serial: int) -> None:
-        """Load or refresh the visible map view after the stack switch settles."""
+        """Start background loading of geotagged assets for the visible map view."""
 
         if request_serial != self._location_request_serial:
             return
@@ -338,8 +375,49 @@ class NavigationCoordinator(QObject):
             LOGGER.warning("Map view is unavailable; cannot display location section.")
             return
 
-        assets = self._context.library.get_geotagged_assets()
-        map_view.set_assets(assets, root)
+        worker = _LocationAssetsWorker(request_serial, root, self._context.library)
+        worker.signals.finished.connect(self._handle_location_assets_loaded)
+        worker.signals.failed.connect(self._handle_location_assets_failed)
+        self._location_assets_worker = worker
+        self._location_assets_pool.start(worker)
+
+    def _handle_location_assets_loaded(
+        self,
+        request_serial: int,
+        root: object,
+        assets: list,
+        _fetch_elapsed_ms: float,
+    ) -> None:
+        root_path = Path(root)
+        if request_serial != self._location_request_serial:
+            self._location_assets_worker = None
+            return
+        if self._static_selection != "Location":
+            self._location_assets_worker = None
+            return
+        if self._context.library.root() != root_path:
+            self._location_assets_worker = None
+            return
+
+        map_view = self._router.map_view()
+        if map_view is None:
+            self._location_assets_worker = None
+            return
+
+        map_view.set_assets(assets, root_path)
+        self._location_assets_worker = None
+
+    def _handle_location_assets_failed(self, request_serial: int, root: object, message: str) -> None:
+        root_path = Path(root)
+        if request_serial != self._location_request_serial:
+            self._location_assets_worker = None
+            return
+        LOGGER.warning(
+            "Failed to load geotagged assets for Location view at %s: %s",
+            root_path,
+            message,
+        )
+        self._location_assets_worker = None
 
     def _clear_cluster_gallery_mode(self) -> None:
         """Exit cluster gallery mode and hide the back button header.

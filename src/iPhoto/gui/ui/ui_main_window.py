@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+
 from PySide6.QtCore import QCoreApplication, QMetaObject, QSize, Qt
 from PySide6.QtGui import QColor, QPalette
 from PySide6.QtWidgets import (
@@ -10,6 +12,7 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QSizeGrip,
     QSizePolicy,
+    QStackedLayout,
     QSplitter,
     QStackedWidget,
     QVBoxLayout,
@@ -31,6 +34,25 @@ from .widgets import (
 )
 from .widgets.albums_dashboard import AlbumsDashboard
 from .widgets.gl_image_viewer import GLImageViewer
+
+
+def _configure_main_view_stack(view_stack: QStackedWidget, map_view: object) -> None:
+    """Keep the native map page alive across view switches when possible."""
+
+    stack_layout = view_stack.layout()
+    if (
+        isinstance(stack_layout, QStackedLayout)
+        and hasattr(map_view, "uses_native_osmand_widget")
+        and map_view.uses_native_osmand_widget()
+        and os.environ.get("IPHOTO_KEEP_NATIVE_MAP_PAGE_ALIVE", "").strip().lower()
+        in {"1", "true", "yes", "on"}
+    ):
+        # Keeping the native map page visible underneath the active page
+        # avoids Qt tearing down the packaged QOpenGLWidget context every
+        # time the user leaves the Location section. This is opt-in because
+        # some packaged Qt builds emit QPainter/QGraphicsEffect warnings when
+        # a hidden OpenGL page remains stacked beneath the active page.
+        stack_layout.setStackingMode(QStackedLayout.StackAll)
 
 
 class Ui_MainWindow(object):
@@ -198,6 +220,7 @@ class Ui_MainWindow(object):
 
         self.albums_dashboard_page = AlbumsDashboard(library, MainWindow)
         self.view_stack.addWidget(self.albums_dashboard_page)
+        _configure_main_view_stack(self.view_stack, self.map_view)
 
         self.view_stack.setCurrentWidget(self.gallery_page)
         right_layout.addWidget(self.view_stack)

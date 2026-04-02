@@ -126,6 +126,24 @@ def test_choose_native_widget_class_can_force_python_renderer(tmp_path, monkeypa
     assert probe_calls == []
 
 
+def test_choose_native_widget_class_prefers_python_renderer_when_native_is_disabled(tmp_path, monkeypatch) -> None:
+    package_root = tmp_path / "maps"
+    probe_calls: list[Path] = []
+
+    monkeypatch.setattr("maps.main.prefer_osmand_native_widget", lambda: False)
+    monkeypatch.setattr("maps.main.has_usable_osmand_native_widget", lambda root: root == package_root)
+    monkeypatch.setattr(
+        "maps.main.probe_native_widget_runtime",
+        lambda root: (probe_calls.append(root), (True, None))[1],
+    )
+
+    widget_cls, message = choose_native_widget_class(package_root, use_opengl=True)
+
+    assert widget_cls is None
+    assert "disabled by configuration" in message
+    assert probe_calls == []
+
+
 def test_build_argument_parser_supports_debug_capture_flags() -> None:
     parser = build_argument_parser()
 
@@ -263,6 +281,27 @@ def test_choose_launch_configuration_auto_prefers_python_obf_when_native_is_unav
     assert launch_config.map_source.kind == "osmand_obf"
     assert launch_config.native_widget_class is None
     assert "Python OBF renderer" in launch_config.startup_message
+
+
+def test_choose_launch_configuration_auto_prefers_python_obf_when_native_is_disabled(tmp_path, monkeypatch) -> None:
+    package_root = tmp_path / "maps"
+
+    monkeypatch.setattr("maps.main.prefer_osmand_native_widget", lambda: False)
+    monkeypatch.setattr("maps.main.has_usable_osmand_native_widget", lambda root: root == package_root)
+    monkeypatch.setattr("maps.main.probe_native_widget_runtime", lambda root: (True, None))
+    monkeypatch.setattr("maps.main.has_usable_osmand_default", lambda root: root == package_root)
+    monkeypatch.setattr("maps.main.probe_python_obf_runtime", lambda root: (True, None))
+
+    launch_config = choose_launch_configuration(
+        package_root,
+        use_opengl=True,
+        backend="auto",
+    )
+
+    assert launch_config.map_source.kind == "osmand_obf"
+    assert launch_config.native_widget_class is None
+    assert "Python OBF renderer" in launch_config.startup_message
+    assert "disabled by configuration" in launch_config.startup_message
 
 
 def test_choose_launch_configuration_auto_falls_back_to_legacy_when_helper_runtime_probe_fails(

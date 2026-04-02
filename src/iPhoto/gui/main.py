@@ -3,14 +3,37 @@
 from __future__ import annotations
 
 import logging
+import os
 import sys
 from pathlib import Path
 
 from PySide6.QtCore import QTimer, Qt
-from PySide6.QtGui import QColor, QPalette
+from PySide6.QtGui import QColor, QPalette, QSurfaceFormat
 from PySide6.QtWidgets import QApplication
 
 _logger = logging.getLogger(__name__)
+
+
+def _configure_qt_opengl_defaults() -> None:
+    """Apply the same desktop OpenGL defaults used by the standalone map tool."""
+
+    if os.environ.get("IPHOTO_DISABLE_OPENGL", "").strip().lower() in {"1", "true", "yes", "on"}:
+        return
+
+    try:
+        QApplication.setAttribute(Qt.ApplicationAttribute.AA_UseDesktopOpenGL, True)
+        QApplication.setAttribute(Qt.ApplicationAttribute.AA_ShareOpenGLContexts, True)
+    except Exception:
+        return
+
+    try:
+        surface_format = QSurfaceFormat()
+        surface_format.setRenderableType(QSurfaceFormat.RenderableType.OpenGL)
+        surface_format.setDepthBufferSize(24)
+        surface_format.setStencilBufferSize(8)
+        QSurfaceFormat.setDefaultFormat(surface_format)
+    except Exception:
+        return
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -24,6 +47,7 @@ def main(argv: list[str] | None = None) -> int:
     _init_logging()
 
     arguments = list(sys.argv if argv is None else argv)
+    _configure_qt_opengl_defaults()
     app = QApplication(arguments)
 
     # ``QToolTip`` instances inherit ``WA_TranslucentBackground`` from the frameless

@@ -314,10 +314,25 @@ class MarkerController(QObject):
     def set_assets(self, assets: Iterable[GeotaggedAsset], library_root: Path) -> None:
         """Replace the asset catalogue shown on the map."""
 
-        self._assets = [asset for asset in assets if isinstance(asset, GeotaggedAsset)]
+        normalized_assets = [asset for asset in assets if isinstance(asset, GeotaggedAsset)]
+        same_root = self._library_root == library_root
+        same_assets = (
+            same_root
+            and len(normalized_assets) == len(self._assets)
+            and all(
+                incoming_asset is existing_asset
+                for incoming_asset, existing_asset in zip(normalized_assets, self._assets)
+            )
+        )
+        if same_assets:
+            self._schedule_cluster_update()
+            return
+
+        self._assets = normalized_assets
         self._library_root = library_root
         self._city_annotations = []
-        self._thumbnail_loader.reset_for_album(library_root)
+        if not same_root:
+            self._thumbnail_loader.reset_for_album(library_root)
         self.thumbnailsInvalidated.emit()
         self.citiesUpdated.emit([])
         self._schedule_cluster_update()

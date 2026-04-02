@@ -76,3 +76,45 @@ def test_geotagged_assets_use_classifier(tmp_path: Path, qapp: QApplication) -> 
     asset = assets[0]
     assert asset.is_image is True
     assert asset.is_video is False
+
+
+def test_geotagged_assets_reuse_cached_rows_until_library_changes(
+    tmp_path: Path,
+    qapp: QApplication,
+) -> None:
+    """Repeated Location opens should not reread geotagged rows every time."""
+
+    del qapp
+    root = tmp_path / "Library"
+    album = root / "Album"
+    asset_path = album / "photo.jpg"
+    asset_path.parent.mkdir(parents=True, exist_ok=True)
+    asset_path.write_bytes(b"fake-image")
+    _write_album_manifest(album)
+
+    row = {
+        "rel": "Album/photo.jpg",
+        "gps": {"lat": 10.0, "lon": 20.0},
+        "mime": "image/jpeg",
+        "id": "asset-1",
+        "parent_album_path": "Album",
+    }
+
+    class _Repo:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def read_geotagged(self):
+            self.calls += 1
+            return [row]
+
+    repo = _Repo()
+    manager = LibraryManager()
+    manager.bind_path(root)
+
+    with patch("iPhoto.library.geo_aggregator.get_global_repository", return_value=repo):
+        first = manager.get_geotagged_assets()
+        second = manager.get_geotagged_assets()
+
+    assert repo.calls == 1
+    assert first == second

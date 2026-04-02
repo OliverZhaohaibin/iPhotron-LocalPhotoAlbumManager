@@ -15,6 +15,7 @@ DEFAULT_OSMAND_RESOURCES_ROOT = DEFAULT_OSMAND_EXTENSION_RELATIVE_ROOT
 DEFAULT_OSMAND_STYLE_PATH = DEFAULT_OSMAND_RESOURCES_ROOT / "rendering_styles" / DEFAULT_OSMAND_STYLE_FILENAME
 ENV_OSMAND_HELPER = "IPHOTO_OSMAND_RENDER_HELPER"
 ENV_OSMAND_NATIVE_WIDGET_LIBRARY = "IPHOTO_OSMAND_NATIVE_WIDGET_LIBRARY"
+ENV_PREFER_OSMAND_NATIVE_WIDGET = "IPHOTO_PREFER_OSMAND_NATIVE_WIDGET"
 DEFAULT_HELPER_RELATIVE_PATH = DEFAULT_OSMAND_EXTENSION_RELATIVE_ROOT / "bin" / "osmand_render_helper.exe"
 DEFAULT_NATIVE_WIDGET_RELATIVE_PATH_MSVC = (
     DEFAULT_OSMAND_EXTENSION_RELATIVE_ROOT / "bin" / "osmand_native_widget.dll"
@@ -23,6 +24,24 @@ DEFAULT_NATIVE_WIDGET_RELATIVE_PATH = DEFAULT_NATIVE_WIDGET_RELATIVE_PATH_MSVC
 DEFAULT_NATIVE_WIDGET_RELATIVE_PATH_MINGW = (
     DEFAULT_OSMAND_EXTENSION_RELATIVE_ROOT / "bin" / "libosmand_native_widget.dll"
 )
+_TRUE_ENV_VALUES = {"1", "true", "yes", "on"}
+_FALSE_ENV_VALUES = {"0", "false", "no", "off"}
+
+
+def prefer_osmand_native_widget() -> bool:
+    """Return whether auto-selection should prefer the native OsmAnd widget.
+
+    The native widget stays enabled by default so packaged builds can use the
+    fully OpenGL-backed OBF renderer. Set
+    ``IPHOTO_PREFER_OSMAND_NATIVE_WIDGET=0`` to force the Python OBF path.
+    """
+
+    raw_value = os.environ.get(ENV_PREFER_OSMAND_NATIVE_WIDGET, "").strip().lower()
+    if raw_value in _TRUE_ENV_VALUES:
+        return True
+    if raw_value in _FALSE_ENV_VALUES:
+        return False
+    return True
 
 
 @dataclass(frozen=True)
@@ -241,11 +260,13 @@ __all__ = [
     "DEFAULT_OSMAND_STYLE_PATH",
     "ENV_OSMAND_HELPER",
     "ENV_OSMAND_NATIVE_WIDGET_LIBRARY",
+    "ENV_PREFER_OSMAND_NATIVE_WIDGET",
     "MapBackendMetadata",
     "MapSourceSpec",
     "default_osmand_extension_root",
     "has_usable_osmand_default",
     "has_usable_osmand_native_widget",
+    "prefer_osmand_native_widget",
     "resolve_osmand_helper_command",
     "resolve_osmand_native_widget_library",
 ]

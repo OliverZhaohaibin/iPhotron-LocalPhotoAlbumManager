@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import tempfile
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Optional, Protocol, TypeAlias
@@ -25,6 +26,26 @@ ENV_QT_ROOT = "IPHOTO_OSMAND_QT_ROOT"
 ENV_MINGW_ROOT = "IPHOTO_OSMAND_MINGW_ROOT"
 DEFAULT_HELPER_INIT_TIMEOUT_MS = 5000
 DEFAULT_HELPER_RENDER_TIMEOUT_MS = 30000
+
+
+def _startup_profile_enabled() -> bool:
+    return os.environ.get("IPHOTO_OSMAND_PROFILE_STARTUP", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def _log_startup_profile(stage: str, elapsed_ms: float, **details: object) -> None:
+    if not _startup_profile_enabled():
+        return
+
+    suffix = ""
+    if details:
+        parts = [f"{key}={value}" for key, value in details.items()]
+        suffix = " " + " ".join(parts)
+    LOGGER.info("[osmand_helper][startup] %s %.1fms%s", stage, elapsed_ms, suffix)
 
 
 class TileBackendUnavailableError(TileLoadingError):
@@ -154,6 +175,12 @@ class OsmAndRasterBackend:
 
     def probe(self) -> MapBackendMetadata:
         self._validate_paths()
+        return self.metadata
+
+    def probe_runtime(self) -> MapBackendMetadata:
+        """Start the helper once in the current thread for diagnostics only."""
+
+        self._validate_paths()
         self._ensure_process()
         return self.metadata
 
@@ -210,11 +237,13 @@ class OsmAndRasterBackend:
                 "OsmAnd helper command not configured. Set IPHOTO_OSMAND_RENDER_HELPER.",
             )
 
+        total_started = time.perf_counter()
         process = QProcess()
         process.setProcessChannelMode(QProcess.ProcessChannelMode.ForwardedErrorChannel)
         process.setProgram(command[0])
         process.setArguments(list(command[1:]))
         process.setProcessEnvironment(_helper_process_environment(Path(command[0])))
+        start_wait_started = time.perf_counter()
         process.start()
         if not process.waitForStarted(5000):
             stderr = bytes(process.readAllStandardError()).decode("utf8", errors="replace").strip()
@@ -222,7 +251,13 @@ class OsmAndRasterBackend:
             raise TileBackendUnavailableError(
                 f"Unable to start OsmAnd helper '{command[0]}'{detail}",
             )
+        _log_startup_profile(
+            "helper_waitForStarted",
+            (time.perf_counter() - start_wait_started) * 1000.0,
+            command=command[0],
+        )
 
+        init_started = time.perf_counter()
         response = self._communicate(
             process,
             {
@@ -233,6 +268,11 @@ class OsmAndRasterBackend:
                 "night_mode": False,
             },
             timeout_ms=DEFAULT_HELPER_INIT_TIMEOUT_MS,
+        )
+        _log_startup_profile(
+            "helper_init",
+            (time.perf_counter() - init_started) * 1000.0,
+            source=self._source.data_path,
         )
         if response.get("status") != "ok":
             process.kill()
@@ -257,6 +297,11 @@ class OsmAndRasterBackend:
             ),
         )
         self._process = process
+        _log_startup_profile(
+            "helper_total_startup",
+            (time.perf_counter() - total_started) * 1000.0,
+            source=self._source.data_path,
+        )
         return process
 
     def _communicate(
@@ -324,7 +369,15 @@ class OsmAndRasterBackend:
             "device_scale": float(self._device_scale),
             "output_path": str(cache_path),
         }
+        render_started = time.perf_counter()
         response = self._communicate(process, request, timeout_ms=DEFAULT_HELPER_RENDER_TIMEOUT_MS)
+        _log_startup_profile(
+            "helper_render",
+            (time.perf_counter() - render_started) * 1000.0,
+            z=z,
+            x=x,
+            y=y,
+        )
         if response.get("status") != "ok":
             message = str(response.get("message", "unknown render failure"))
             raise TileRenderError(message)

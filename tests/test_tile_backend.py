@@ -147,3 +147,43 @@ def test_osmand_raster_backend_retries_once_after_runtime_unavailable(tmp_path, 
     assert tile == ("tile", cache_path)
     assert len(attempts) == 2
     assert len(shutdown_calls) == 1
+
+
+def test_osmand_raster_backend_probe_does_not_start_helper_process(tmp_path, monkeypatch) -> None:
+    source = MapSourceSpec(
+        kind="osmand_obf",
+        data_path=tmp_path / "world.obf",
+        resources_root=tmp_path,
+        style_path=tmp_path / "style.xml",
+        helper_command=("helper.exe",),
+    )
+    backend = OsmAndRasterBackend(source)
+    ensure_calls: list[int] = []
+
+    monkeypatch.setattr(backend, "_validate_paths", lambda: None)
+    monkeypatch.setattr(backend, "_ensure_process", lambda: ensure_calls.append(1))
+
+    metadata = backend.probe()
+
+    assert metadata == backend.metadata
+    assert ensure_calls == []
+
+
+def test_osmand_raster_backend_probe_runtime_starts_helper_process(tmp_path, monkeypatch) -> None:
+    source = MapSourceSpec(
+        kind="osmand_obf",
+        data_path=tmp_path / "world.obf",
+        resources_root=tmp_path,
+        style_path=tmp_path / "style.xml",
+        helper_command=("helper.exe",),
+    )
+    backend = OsmAndRasterBackend(source)
+    ensure_calls: list[int] = []
+
+    monkeypatch.setattr(backend, "_validate_paths", lambda: None)
+    monkeypatch.setattr(backend, "_ensure_process", lambda: ensure_calls.append(1))
+
+    metadata = backend.probe_runtime()
+
+    assert metadata == backend.metadata
+    assert ensure_calls == [1]

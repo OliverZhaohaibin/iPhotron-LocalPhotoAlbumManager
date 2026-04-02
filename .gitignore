@@ -219,5 +219,6 @@ __marimo__/
 /tools/osmand_render_helper_native/qt_include_smoke.cpp
 /CMakeFiles/
 /debug/
+/.codex_staging/
 /src/maps/tiles/World_basemap_2.obf
 /src/maps/tiles/extension/

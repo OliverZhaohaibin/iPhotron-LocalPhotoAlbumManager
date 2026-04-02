@@ -7,7 +7,7 @@ from collections import OrderedDict
 from collections import deque
 from typing import Iterable
 
-from PySide6.QtCore import QObject, QThread, QTimer, Signal, Slot
+from PySide6.QtCore import QMetaObject, QObject, QThread, QTimer, Qt, Signal, Slot
 
 from maps.map_sources import MapBackendMetadata
 from maps.tile_backend import TileBackend, TilePayload
@@ -64,6 +64,14 @@ class _TileWorker(QObject):
 
         QTimer.singleShot(0, self._drain_queue)
 
+    @Slot()
+    def shutdown_backend(self) -> None:
+        """Release backend resources from the worker thread that owns them."""
+
+        self._request_queue.clear()
+        self._busy = False
+        self._tile_backend.shutdown()
+
 
 class TileManager(QObject):
     """Manage tile loading, caching, and worker thread lifecycle."""
@@ -104,12 +112,17 @@ class TileManager(QObject):
         """Stop the background worker thread and release resources."""
 
         if self._loader_thread is not None and self._loader_thread.isRunning():
+            QMetaObject.invokeMethod(
+                self._tile_worker,
+                "shutdown_backend",
+                Qt.ConnectionType.BlockingQueuedConnection,
+            )
             self._loader_thread.quit()
             self._loader_thread.wait()
+        else:
+            self._tile_backend.shutdown()
 
         self._loader_thread = None
-
-        self._tile_backend.shutdown()
 
     # ------------------------------------------------------------------
     def get_tile(self, tile_key: tuple[int, int, int]) -> TilePayload | None:

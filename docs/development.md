@@ -1,4 +1,4 @@
-# Ã°Å¸Â§Â° Development Guide
+# 🧰 Development Guide
 
 > Development environment, dependencies, build/package, debugging, code style, and commit conventions for **iPhotron**.
 
@@ -8,7 +8,7 @@
 
 | Requirement | Version |
 |-------------|---------|
-| Python | Ã¢â€°Â¥ 3.12 |
+| Python | ≥ 3.12 |
 | ExifTool | Latest (in `PATH`) |
 | FFmpeg / FFprobe | Latest (in `PATH`) |
 | Git | Latest |
@@ -56,7 +56,7 @@ Managed in `pyproject.toml`:
 | `Pillow` / `pillow-heif` | Image loading (HEIC support) |
 | `imagehash` / `xxhash` | Perceptual & fast hashing |
 | `opencv-python-headless` | Image processing |
-| `reverse-geocoder` | GPS Ã¢â€ â€™ location name |
+| `reverse-geocoder` | GPS → location name |
 | `pyexiftool` | ExifTool wrapper |
 | `numpy` / `numba` | Numeric computation & JIT |
 | `mapbox-vector-tile` | Map tile parsing |
@@ -157,11 +157,11 @@ iphoto-gui
 |------|---------|--------|
 | `ruff` | Linting & import sorting | `pyproject.toml` `[tool.ruff]` |
 | `black` | Code formatting | `pyproject.toml` `[tool.black]` |
-| `mypy` | Static type checking | Ã¢â‚¬â€ |
+| `mypy` | Static type checking | — |
 
 ### Style Rules
 
-- **Line length:** Ã¢â€°Â¤ 100 characters
+- **Line length:** ≤ 100 characters
 - **Type hints:** Use full annotations (e.g., `Optional[str]`, `list[Path]`, `dict[str, Any]`)
 - **Imports:** Sorted by `ruff` (isort-compatible)
 - **Docstrings:** Use triple-double-quote style

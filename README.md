@@ -101,6 +101,29 @@ Key highlights:
 ![Preview interface](docs/picture/preview.png)
 ---
 
+## 🗺 Maps Extension
+
+iPhotron's offline OBF map runtime ships as a self-contained **maps extension**
+rooted at `src/maps/tiles/extension/`. That directory is the contract consumed
+by local development, packaged builds, and the Windows installer.
+
+The extension currently contains:
+- `World_basemap_2.obf` offline map data
+- OsmAnd resources under `misc/`, `poi/`, `rendering_styles/`, and `routing/`
+- native binaries under `bin/`, including `osmand_render_helper.exe`,
+  `osmand_native_widget.dll`, `OsmAndCore_shared.dll`, and the required Qt DLLs
+
+The extension is built upstream from the standalone
+[PySide6-OsmAnd-SDK](https://github.com/OliverZhaohaibin/PySide6-OsmAnd-SDK)
+sub-project. That repository carries the vendored OsmAnd sources, Windows build
+scripts, native Qt widget bridge, and preview app used to produce the runtime
+consumed here.
+
+See [Development](docs/development.md) for the full "build the maps extension
+from the side project" workflow, and
+[Executable Build](docs/misc/BUILD_EXE.md) for how the extension is synchronized
+into Nuitka and Windows installer builds.
+
 ## ✨ Features
 
 ### 🗺 Location View
@@ -158,13 +181,15 @@ For deeper technical details, see the following docs:
 
 [![Architecture](https://img.shields.io/badge/📐_Architecture-blue?style=for-the-badge)](docs/architecture.md)
 [![Development](https://img.shields.io/badge/🧰_Development-green?style=for-the-badge)](docs/development.md)
+[![Executable Build](https://img.shields.io/badge/🧱_Executable_Build-purple?style=for-the-badge)](docs/misc/BUILD_EXE.md)
 [![Security](https://img.shields.io/badge/🔒_Security-red?style=for-the-badge)](docs/security.md)
 [![Changelog](https://img.shields.io/badge/📋_Changelog-orange?style=for-the-badge)](docs/CHANGELOG.md)
 
 | Document | Description |
 |----------|-------------|
 | [Architecture](docs/architecture.md) | Overall architecture, module boundaries, data flow, key design decisions |
-| [Development](docs/development.md) | Dev environment, dependencies, build/package, debugging, code style, commit conventions |
+| [Development](docs/development.md) | Dev environment, dependencies, debugging, and the full side-project-based maps extension workflow |
+| [Executable Build](docs/misc/BUILD_EXE.md) | Nuitka packaging, AOT filters, maps extension sync, and Windows installer/runtime notes |
 | [Security](docs/security.md) | Permissions, encryption, data storage locations, threat model |
 | [Changelog](docs/CHANGELOG.md) | All version release notes and changes |
 

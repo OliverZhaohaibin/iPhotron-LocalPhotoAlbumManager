@@ -31,10 +31,7 @@ from maps.map_sources import (
 from maps.map_widget._map_widget_base import MapWidgetBase
 from maps.map_widget.map_gl_widget import MapGLWidget
 from maps.map_widget.map_widget import MapWidget
-from maps.map_widget.native_osmand_widget import (
-    NativeOsmAndWidget,
-    probe_native_widget_runtime,
-)
+from maps.map_widget.native_osmand_widget import NativeOsmAndWidget
 from maps.map_widget.qt_location_map_widget import QtLocationMapWidget
 from maps.map_widget.map_renderer import CityAnnotation
 
@@ -117,9 +114,7 @@ def choose_map_widget_backend(
         resolved_map_source = _resolve_map_source(map_source)
         if resolved_map_source.kind == "osmand_obf":
             if native_widget_allowed and has_usable_osmand_native_widget(_MAPS_PACKAGE_ROOT):
-                is_available, _ = probe_native_widget_runtime(_MAPS_PACKAGE_ROOT)
-                if is_available:
-                    return NativeOsmAndWidget, resolved_map_source, "osmand_native"
+                return NativeOsmAndWidget, resolved_map_source, "osmand_native"
             return python_widget_cls, resolved_map_source, "osmand_python"
 
         return python_widget_cls, resolved_map_source, "legacy_python"
@@ -127,9 +122,7 @@ def choose_map_widget_backend(
     default_osmand_source = MapSourceSpec.osmand_default(_MAPS_PACKAGE_ROOT).resolved(_MAPS_PACKAGE_ROOT)
     if _has_resolved_osmand_assets(default_osmand_source):
         if native_widget_allowed and has_usable_osmand_native_widget(_MAPS_PACKAGE_ROOT):
-            is_available, _ = probe_native_widget_runtime(_MAPS_PACKAGE_ROOT)
-            if is_available:
-                return NativeOsmAndWidget, default_osmand_source, "osmand_native"
+            return NativeOsmAndWidget, default_osmand_source, "osmand_native"
         if has_usable_osmand_default(_MAPS_PACKAGE_ROOT):
             return python_widget_cls, default_osmand_source, "osmand_python"
 
@@ -498,6 +491,11 @@ class PhotoMapView(QWidget):
         """Expose the underlying map widget for integration tests."""
 
         return self._map_widget
+
+    def uses_native_osmand_widget(self) -> bool:
+        """Return ``True`` when the current backend is the native GL widget."""
+
+        return isinstance(self._map_widget, NativeOsmAndWidget)
 
     def runtime_diagnostics(self) -> str:
         """Return the last emitted runtime diagnostics line."""

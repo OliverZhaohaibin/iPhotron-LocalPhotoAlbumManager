@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import ctypes
+import logging
 import math
 import os
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Sequence
@@ -25,11 +27,32 @@ from maps.tile_parser import TileLoadingError
 MERCATOR_LAT_BOUND = 85.05112878
 _NATIVE_DLL_DIR_HANDLES: list[Any] = []
 _NATIVE_WIDGET_RUNTIME_PROBE: dict[Path, tuple[bool, str | None]] = {}
+_LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
 class _BridgeAPI:
     library: ctypes.WinDLL
+
+
+def _startup_profile_enabled() -> bool:
+    return os.environ.get("IPHOTO_OSMAND_PROFILE_STARTUP", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def _log_startup_profile(stage: str, elapsed_ms: float, **details: object) -> None:
+    if not _startup_profile_enabled():
+        return
+
+    suffix = ""
+    if details:
+        parts = [f"{key}={value}" for key, value in details.items()]
+        suffix = " " + " ".join(parts)
+    _LOGGER.info("[native_osmand_widget][startup] %s %.1fms%s", stage, elapsed_ms, suffix)
 
 
 def _ensure_dll_directory(path: Path) -> None:
@@ -55,7 +78,13 @@ def _load_bridge(library_path: Path) -> _BridgeAPI:
     # binaries from old build output folders.
     _ensure_dll_directory(library_path.parent)
 
+    load_started = time.perf_counter()
     library = ctypes.WinDLL(str(library_path))
+    _log_startup_profile(
+        "load_bridge",
+        (time.perf_counter() - load_started) * 1000.0,
+        library=library_path,
+    )
     library.osmand_create_map_widget.argtypes = [
         ctypes.c_void_p,
         ctypes.c_wchar_p,
@@ -155,6 +184,7 @@ class NativeOsmAndWidget(QWidget):
             raise TileLoadingError("The native OsmAnd widget DLL is not available")
         self._library_path = library_path.resolve()
 
+        create_started = time.perf_counter()
         self._bridge = _load_bridge(library_path)
         error_buffer = ctypes.create_unicode_buffer(4096)
         parent_pointer = int(shiboken6.getCppPointer(self)[0])
@@ -172,6 +202,11 @@ class NativeOsmAndWidget(QWidget):
             import sys
             print(f"[NativeOsmAndWidget] osmand_create_map_widget failed: {message}", file=sys.stderr)
             raise TileLoadingError(message)
+        _log_startup_profile(
+            "create_widget_bridge",
+            (time.perf_counter() - create_started) * 1000.0,
+            source=self._map_source.data_path,
+        )
 
         self._native_pointer = ctypes.c_void_p(native_pointer)
         self._native_widget = shiboken6.wrapInstance(int(native_pointer), QWidget)

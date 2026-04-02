@@ -239,9 +239,8 @@ class _FallbackMapWidget(QWidget):
         return self
 
 
-def test_choose_map_widget_backend_prefers_native_when_runtime_is_available(monkeypatch) -> None:
+def test_choose_map_widget_backend_prefers_native_when_runtime_files_are_available(monkeypatch) -> None:
     monkeypatch.setattr(photo_map_view_module, "has_usable_osmand_native_widget", lambda root: True)
-    monkeypatch.setattr(photo_map_view_module, "probe_native_widget_runtime", lambda root: (True, None))
     monkeypatch.setattr(photo_map_view_module, "has_usable_osmand_default", lambda root: False)
     monkeypatch.setattr(photo_map_view_module, "_has_resolved_osmand_assets", lambda source: True)
 
@@ -287,9 +286,8 @@ def test_photo_map_check_opengl_support_accepts_valid_context_when_offscreen_mak
     assert photo_map_view_module.check_opengl_support() is True
 
 
-def test_choose_map_widget_backend_falls_back_to_python_obf_when_native_probe_fails(monkeypatch) -> None:
-    monkeypatch.setattr(photo_map_view_module, "has_usable_osmand_native_widget", lambda root: True)
-    monkeypatch.setattr(photo_map_view_module, "probe_native_widget_runtime", lambda root: (False, "runtime error"))
+def test_choose_map_widget_backend_uses_python_obf_when_native_widget_files_are_unavailable(monkeypatch) -> None:
+    monkeypatch.setattr(photo_map_view_module, "has_usable_osmand_native_widget", lambda root: False)
     monkeypatch.setattr(photo_map_view_module, "has_usable_osmand_default", lambda root: True)
     monkeypatch.setattr(photo_map_view_module, "_has_resolved_osmand_assets", lambda source: True)
 
@@ -307,7 +305,6 @@ def test_choose_map_widget_backend_falls_back_to_python_obf_when_native_probe_fa
 def test_choose_map_widget_backend_prefers_python_obf_when_native_is_disabled(monkeypatch) -> None:
     monkeypatch.setattr(photo_map_view_module, "prefer_osmand_native_widget", lambda: False)
     monkeypatch.setattr(photo_map_view_module, "has_usable_osmand_native_widget", lambda root: True)
-    monkeypatch.setattr(photo_map_view_module, "probe_native_widget_runtime", lambda root: (True, None))
     monkeypatch.setattr(photo_map_view_module, "has_usable_osmand_default", lambda root: True)
     monkeypatch.setattr(photo_map_view_module, "_has_resolved_osmand_assets", lambda source: True)
 

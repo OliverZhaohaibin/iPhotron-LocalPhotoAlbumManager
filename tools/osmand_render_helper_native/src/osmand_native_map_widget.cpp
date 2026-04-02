@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cstdlib>
 #include <cmath>
+#include <iostream>
 #include <memory>
 #include <mutex>
 
@@ -12,6 +13,7 @@
 #include <QCryptographicHash>
 #include <QCoreApplication>
 #include <QDateTime>
+#include <QElapsedTimer>
 #include <QFile>
 #include <QFileInfo>
 #include <QJsonDocument>
@@ -77,6 +79,30 @@ bool isTruthyEnvValue(const QString& value)
         normalized == QLatin1String("true") ||
         normalized == QLatin1String("yes") ||
         normalized == QLatin1String("on");
+}
+
+bool startupProfileEnabled()
+{
+    return isTruthyEnvValue(qEnvironmentVariable("IPHOTO_OSMAND_PROFILE_STARTUP"));
+}
+
+void logStartupProfile(
+    const char* stage,
+    const double elapsedMs,
+    const QString& details = QString())
+{
+    if (!startupProfileEnabled())
+        return;
+
+    std::cout
+        << "[osmand_native_widget][startup] "
+        << stage
+        << ' '
+        << elapsedMs
+        << "ms";
+    if (!details.isEmpty())
+        std::cout << ' ' << details.toStdString();
+    std::cout << std::endl;
 }
 
 class CoreRuntime
@@ -317,6 +343,10 @@ OsmAndNativeMapWidget::OsmAndNativeMapWidget(const Configuration& configuration,
     , _configuration(configuration)
     , _interactionTimer(this)
 {
+    _startupProfileEnabled = startupProfileEnabled();
+    if (_startupProfileEnabled)
+        _startupProfileTimer.start();
+
     setFormat(nativeWidgetSurfaceFormat());
     _interactionTimer.setSingleShot(true);
     _interactionTimer.setInterval(kInteractionSettleDelayMs);
@@ -422,9 +452,21 @@ bool OsmAndNativeMapWidget::projectLonLat(double longitude, double latitude, QPo
 
 void OsmAndNativeMapWidget::initializeGL()
 {
+    QElapsedTimer stageTimer;
+    if (_startupProfileEnabled)
+        stageTimer.start();
     connect(context(), &QOpenGLContext::aboutToBeDestroyed, this, &OsmAndNativeMapWidget::cleanupRenderer, Qt::DirectConnection);
     if (!ensureRenderer() && _initError.isEmpty())
         _initError = QStringLiteral("Failed to initialize the native OsmAnd renderer");
+    if (_startupProfileEnabled)
+    {
+        logStartupProfile(
+            "initializeGL",
+            static_cast<double>(stageTimer.nsecsElapsed()) / 1000000.0,
+            QStringLiteral("since_widget=%1 error=%2")
+                .arg(static_cast<double>(_startupProfileTimer.nsecsElapsed()) / 1000000.0, 0, 'f', 1)
+                .arg(_initError.isEmpty() ? QStringLiteral("none") : _initError));
+    }
 }
 
 void OsmAndNativeMapWidget::resizeGL(int width, int height)
@@ -437,6 +479,10 @@ void OsmAndNativeMapWidget::resizeGL(int width, int height)
 
 void OsmAndNativeMapWidget::paintGL()
 {
+    QElapsedTimer stageTimer;
+    if (_startupProfileEnabled)
+        stageTimer.start();
+
     if (!ensureRenderer())
     {
         if (auto* functions = context() ? context()->functions() : nullptr)
@@ -451,8 +497,33 @@ void OsmAndNativeMapWidget::paintGL()
     syncRendererCamera(false);
 
     _mapRenderer->update();
-    if (_mapRenderer->prepareFrame())
+    const auto prepared = _mapRenderer->prepareFrame();
+    if (prepared)
+    {
         _mapRenderer->renderFrame();
+        if (_coldStartBootstrapPending)
+        {
+            _coldStartBootstrapPending = false;
+            scheduleInteractiveRenderingFinish();
+        }
+        if (_startupProfileEnabled && !_firstPreparedFrameLogged)
+        {
+            _firstPreparedFrameLogged = true;
+            logStartupProfile(
+                "first_prepareFrame",
+                static_cast<double>(stageTimer.nsecsElapsed()) / 1000000.0,
+                QStringLiteral("since_widget=%1")
+                    .arg(static_cast<double>(_startupProfileTimer.nsecsElapsed()) / 1000000.0, 0, 'f', 1));
+        }
+    }
+    else if (_startupProfileEnabled && !_firstPreparedFrameLogged)
+    {
+        logStartupProfile(
+            "prepareFrame_pending",
+            static_cast<double>(stageTimer.nsecsElapsed()) / 1000000.0,
+            QStringLiteral("since_widget=%1")
+                .arg(static_cast<double>(_startupProfileTimer.nsecsElapsed()) / 1000000.0, 0, 'f', 1));
+    }
 
     if (!_mapRenderer->isIdle() || _mapRenderer->isFrameInvalidated())
         update();
@@ -587,6 +658,14 @@ bool OsmAndNativeMapWidget::initializeResources(QString& errorMessage)
 
 bool OsmAndNativeMapWidget::ensureRenderer()
 {
+    QElapsedTimer totalTimer;
+    QElapsedTimer stageTimer;
+    if (_startupProfileEnabled)
+    {
+        totalTimer.start();
+        stageTimer.start();
+    }
+
     if (_mapRenderer)
         return true;
     if (!_resourcesReady)
@@ -653,6 +732,15 @@ bool OsmAndNativeMapWidget::ensureRenderer()
         _mapRenderer.reset();
         return false;
     }
+    if (_startupProfileEnabled)
+    {
+        logStartupProfile(
+            "renderer_setup",
+            static_cast<double>(stageTimer.nsecsElapsed()) / 1000000.0,
+            QStringLiteral("since_widget=%1")
+                .arg(static_cast<double>(_startupProfileTimer.nsecsElapsed()) / 1000000.0, 0, 'f', 1));
+        stageTimer.restart();
+    }
 
     const auto rendererConfiguration = std::static_pointer_cast<OsmAnd::AtlasMapRendererConfiguration>(_mapRenderer->getConfiguration());
     rendererConfiguration->referenceTileSizeOnScreenInPixels = static_cast<float>(kReferenceTileSize);
@@ -671,15 +759,35 @@ bool OsmAndNativeMapWidget::ensureRenderer()
         _mapRenderer.reset();
         return false;
     }
+    if (_startupProfileEnabled)
+    {
+        logStartupProfile(
+            "initializeRendering",
+            static_cast<double>(stageTimer.nsecsElapsed()) / 1000000.0,
+            QStringLiteral("since_widget=%1")
+                .arg(static_cast<double>(_startupProfileTimer.nsecsElapsed()) / 1000000.0, 0, 'f', 1));
+        stageTimer.restart();
+    }
 
     _minZoomLevel = std::max(kDefaultMinZoom, static_cast<double>(_mapRenderer->getMinZoomLevel()));
     _maxZoomLevel = std::max(_minZoomLevel, static_cast<double>(_mapRenderer->getMaxZoomLevel()));
     _defaultZoomLevel = std::clamp(kDefaultZoom, _minZoomLevel, _maxZoomLevel);
     _zoomLevel = std::clamp(_zoomLevel, _minZoomLevel, _maxZoomLevel);
-    _mapRenderer->setDetailedDistance(kStableDetailedDistance, true);
-    _mapRenderer->setSymbolsOpacity(kStableSymbolsOpacity, true);
+    // Bootstrap the first visible frame in the lighter interaction profile so
+    // packaged builds can present the map immediately and restore labels/details
+    // a moment later instead of blocking the UI during the first Location show.
+    beginInteractiveRendering();
+    _coldStartBootstrapPending = true;
     maybeDumpCaptionDiagnostics();
     syncRendererCamera(true);
+    if (_startupProfileEnabled)
+    {
+        logStartupProfile(
+            "ensureRenderer_total",
+            static_cast<double>(totalTimer.nsecsElapsed()) / 1000000.0,
+            QStringLiteral("since_widget=%1")
+                .arg(static_cast<double>(_startupProfileTimer.nsecsElapsed()) / 1000000.0, 0, 'f', 1));
+    }
     return true;
 }
 
@@ -932,6 +1040,8 @@ void OsmAndNativeMapWidget::cleanupRenderer()
 {
     if (_interactionTimer.isActive())
         _interactionTimer.stop();
+
+    _coldStartBootstrapPending = false;
 
     if (!_mapRenderer)
         return;

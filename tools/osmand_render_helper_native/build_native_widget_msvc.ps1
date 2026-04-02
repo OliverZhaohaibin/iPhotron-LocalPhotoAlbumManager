@@ -1,4 +1,4 @@
-﻿param(
+param(
     [string]$OsmAndWorkspaceRoot = "D:\python_code\maps_of_iPhoto",
     [string]$PythonVenv = "D:\python_code\iPhoto\.venv",
     [string]$PySide6Root = "",
@@ -325,6 +325,8 @@ $shortBuildDir = "${workspaceDriveRoot}baked\amd64-windows-msvc.qt6.msvs"
 $physicalBuildDir = Join-Path $workspaceRoot 'baked\amd64-windows-msvc.qt6.msvs'
 $msvcOutputRoot = Join-Path $workspaceRoot 'binaries\windows\msvc-amd64\amd64'
 $localDistDir = Join-Path $projectRoot 'dist-msvc'
+$repoRoot = [IO.Path]::GetFullPath((Join-Path $projectRoot '..\\..'))
+$packagedExtensionRuntimeDir = Join-Path $repoRoot 'src\\maps\\tiles\\extension\\bin'
 
 Assert-Exists $workspaceRoot
 Assert-Exists (Join-Path $workspaceRoot 'build')
@@ -332,6 +334,7 @@ Assert-Exists (Join-Path $workspaceRoot 'OsmAnd-core')
 Assert-Exists (Join-Path $workspaceRoot 'OsmAnd-core-legacy')
 Assert-Exists (Join-Path $workspaceRoot 'OsmAnd-resources')
 Assert-Exists $projectRoot
+Assert-Exists $repoRoot
 Assert-Exists $officialCppToolsRoot
 Assert-Exists $qt5CoreShim
 Assert-Exists $qt5NetworkShim
@@ -495,6 +498,10 @@ if (-not $ConfigureOnly) {
     Assert-Exists $widgetDistPath
     $helperDistPath = Join-Path $localDistDir 'osmand_render_helper.exe'
     Assert-Exists $helperDistPath
+
+    New-Item -ItemType Directory -Force -Path $packagedExtensionRuntimeDir | Out-Null
+    Copy-Item -Path $helperDistPath -Destination $packagedExtensionRuntimeDir -Force
+    Copy-DirectoryDlls -SourceDir $localDistDir -DestinationDir $packagedExtensionRuntimeDir
 }
 
 Write-Host "MSVC native widget output root: $msvcOutputRoot"

@@ -4,6 +4,7 @@
 
 #include <memory>
 
+#include <QElapsedTimer>
 #include <QOpenGLWidget>
 #include <QPointF>
 #include <QString>
@@ -91,6 +92,10 @@ private:
     bool _interactiveRendering = false;
     bool _symbolsSuspendedByInteraction = false;
     bool _captionDiagnosticsDumped = false;
+    bool _coldStartBootstrapPending = false;
+    bool _startupProfileEnabled = false;
+    bool _firstPreparedFrameLogged = false;
+    QElapsedTimer _startupProfileTimer;
 
     std::shared_ptr<OsmAnd::MapStylesCollection> _stylesCollection;
     std::shared_ptr<OsmAnd::ObfsCollection> _obfsCollection;

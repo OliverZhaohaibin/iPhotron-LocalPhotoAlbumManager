@@ -316,7 +316,15 @@ class MarkerController(QObject):
 
         normalized_assets = [asset for asset in assets if isinstance(asset, GeotaggedAsset)]
         same_root = self._library_root == library_root
-        if same_root and normalized_assets == self._assets:
+        same_assets = (
+            same_root
+            and len(normalized_assets) == len(self._assets)
+            and all(
+                incoming_asset is existing_asset
+                for incoming_asset, existing_asset in zip(normalized_assets, self._assets)
+            )
+        )
+        if same_assets:
             self._schedule_cluster_update()
             return
 

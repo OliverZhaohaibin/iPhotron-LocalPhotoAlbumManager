@@ -95,6 +95,7 @@ private:
     bool _coldStartBootstrapPending = false;
     bool _startupProfileEnabled = false;
     bool _firstPreparedFrameLogged = false;
+    bool _prepareFramePendingLogged = false;
     QElapsedTimer _startupProfileTimer;
 
     std::shared_ptr<OsmAnd::MapStylesCollection> _stylesCollection;

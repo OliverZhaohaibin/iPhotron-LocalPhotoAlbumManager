@@ -6,6 +6,7 @@ settings, and transaction context management.
 from __future__ import annotations
 
 import sqlite3
+import threading
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator, Optional
@@ -31,7 +32,16 @@ class DatabaseManager:
             db_path: Path to the SQLite database file.
         """
         self.db_path = db_path
-        self._conn: Optional[sqlite3.Connection] = None
+        self._local = threading.local()
+
+    @property
+    def _conn(self) -> Optional[sqlite3.Connection]:
+        """Return the database connection for the current thread."""
+        return getattr(self._local, "conn", None)
+
+    @_conn.setter
+    def _conn(self, value: Optional[sqlite3.Connection]) -> None:
+        self._local.conn = value
 
     def get_connection(self) -> sqlite3.Connection:
         """Get or create a database connection.

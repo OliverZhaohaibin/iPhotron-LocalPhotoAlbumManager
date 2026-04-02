@@ -516,8 +516,9 @@ void OsmAndNativeMapWidget::paintGL()
                     .arg(static_cast<double>(_startupProfileTimer.nsecsElapsed()) / 1000000.0, 0, 'f', 1));
         }
     }
-    else if (_startupProfileEnabled && !_firstPreparedFrameLogged)
+    else if (_startupProfileEnabled && !_firstPreparedFrameLogged && !_prepareFramePendingLogged)
     {
+        _prepareFramePendingLogged = true;
         logStartupProfile(
             "prepareFrame_pending",
             static_cast<double>(stageTimer.nsecsElapsed()) / 1000000.0,

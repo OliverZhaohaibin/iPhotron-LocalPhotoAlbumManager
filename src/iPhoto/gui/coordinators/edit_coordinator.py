@@ -680,6 +680,11 @@ class EditCoordinator(QObject):
             trim_range_ms=trim_range_ms,
             adjusted_preview=needs_adjusted_preview,
         )
+        # Mirror the gallery -> detail playback path so the first post-edit
+        # frame is decoded immediately. Without restarting playback here the
+        # GL preview may remain blank or keep the stale edit framing because no
+        # fresh frame arrives to trigger the deferred reset/centering logic.
+        self._ui.video_area.play()
 
     def _queue_video_trim_thumbnails(self, duration_sec: float | None) -> None:
         if self._current_source is None or duration_sec is None or duration_sec <= 0.0:

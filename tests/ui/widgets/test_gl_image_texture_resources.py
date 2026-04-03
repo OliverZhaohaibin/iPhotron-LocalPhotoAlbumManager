@@ -2,6 +2,11 @@
 
 from __future__ import annotations
 
+import pytest
+
+pytest.importorskip("PySide6", reason="PySide6 is required for GUI tests", exc_type=ImportError)
+pytest.importorskip("PySide6.QtGui", reason="Qt GUI not available", exc_type=ImportError)
+
 from PySide6.QtGui import QImage
 
 from iPhoto.gui.ui.widgets.gl_image_viewer.resources import TextureResourceManager

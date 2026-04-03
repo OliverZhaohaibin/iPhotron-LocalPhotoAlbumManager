@@ -10,8 +10,8 @@ from PySide6.QtGui import QImage
 
 from ....config import THUMBNAIL_SEEK_GUARD_SEC
 from ....errors import ExternalToolError
-from ....utils.ffmpeg import extract_video_frame, extract_frame_with_pyav
 from ....utils import image_loader
+from ....utils.ffmpeg import extract_frame_with_pyav, extract_video_frame
 
 
 def grab_video_frame(
@@ -75,10 +75,13 @@ def _seek_targets(
         trim_out = full_duration if full_duration is not None else max(trim_out, trim_in)
     window_duration = max(trim_out - trim_in, 0.0)
 
-    def add(candidate: Optional[float]) -> None:
+    def add(candidate: Optional[float], *, absolute: bool = False) -> None:
         if candidate is None:
             key: Optional[float] = None
             value: Optional[float] = None
+        elif absolute:
+            value = _normalize_seek(candidate, full_duration)
+            key = value
         else:
             value = _normalize_seek(candidate, window_duration or None)
             value += trim_in
@@ -92,7 +95,7 @@ def _seek_targets(
         if trim_in <= still_image_time <= trim_out:
             add(still_image_time - trim_in)
         else:
-            add(still_image_time)
+            add(still_image_time, absolute=True)
     elif window_duration > 0:
         add(window_duration / 2.0)
     elif duration is not None and duration > 0:

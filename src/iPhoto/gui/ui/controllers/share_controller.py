@@ -2,26 +2,34 @@
 
 from __future__ import annotations
 
+import hashlib
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 from typing import Optional
 
-from PySide6.QtCore import QObject, QMimeData, QUrl, QThreadPool, QRunnable, Signal, QAbstractItemModel
-from PySide6.QtGui import QAction, QGuiApplication, QImage, QTransform
+from PySide6.QtCore import (
+    QAbstractItemModel,
+    QMimeData,
+    QObject,
+    QRunnable,
+    QThreadPool,
+    QUrl,
+    Signal,
+)
+from PySide6.QtGui import QAction, QActionGroup, QGuiApplication, QImage, QTransform
 from PySide6.QtWidgets import QPushButton
-from PySide6.QtGui import QActionGroup
 
-from ....io import sidecar
-from ....core.export import get_unique_destination, render_video
+from ....core.export import render_video
 from ....core.filters.facade import apply_adjustments
-from ....utils import image_loader
+from ....io import sidecar
 from ....media_classifier import VIDEO_EXTENSIONS
+from ....utils import image_loader
 from ..media import PlaylistController
 from ..models.roles import Roles
 from ..widgets.notification_toast import NotificationToast
-
 from .status_bar_controller import StatusBarController
 
 
@@ -123,6 +131,20 @@ class RenderVideoClipboardSignals(QObject):
     failed = Signal(str)
 
 
+_SHARE_DIR_MAX_AGE_SEC = 24 * 3600  # prune temp video files older than 24 hours
+
+
+def _prune_share_dir(directory: Path) -> None:
+    """Remove MP4 files in *directory* that are older than ``_SHARE_DIR_MAX_AGE_SEC``."""
+    cutoff = time.time() - _SHARE_DIR_MAX_AGE_SEC
+    for item in directory.glob("*.mp4"):
+        try:
+            if item.stat().st_mtime < cutoff:
+                item.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
 class RenderVideoClipboardWorker(QRunnable):
     """Render the current video with sidecar edits and expose the exported file."""
 
@@ -135,7 +157,9 @@ class RenderVideoClipboardWorker(QRunnable):
         try:
             output_dir = Path(tempfile.gettempdir()) / "iPhoto-share"
             output_dir.mkdir(parents=True, exist_ok=True)
-            destination = get_unique_destination(output_dir / f"{self._path.stem}.mp4")
+            _prune_share_dir(output_dir)
+            path_hash = hashlib.sha1(str(self._path.resolve()).encode()).hexdigest()[:12]
+            destination = output_dir / f"{self._path.stem}_{path_hash}.mp4"
             if render_video(self._path, destination):
                 self.signals.success.emit(str(destination))
             else:

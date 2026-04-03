@@ -685,15 +685,19 @@ def _write_video_node(root: ET.Element, values: Mapping[str, Any]) -> None:
 
     _remove_children_case_insensitive(root, _VIDEO_NODE)
 
-    trim_in = values.get(VIDEO_TRIM_IN_KEY)
-    trim_out = values.get(VIDEO_TRIM_OUT_KEY)
-    if trim_in is None and trim_out is None:
+    raw_trim_in = values.get(VIDEO_TRIM_IN_KEY)
+    raw_trim_out = values.get(VIDEO_TRIM_OUT_KEY)
+
+    trim_in = None if raw_trim_in is None else max(0.0, _float_or_default(raw_trim_in, 0.0))
+    trim_out = None if raw_trim_out is None else max(0.0, _float_or_default(raw_trim_out, 0.0))
+
+    if (trim_in is None or trim_in <= 0.0) and (trim_out is None or trim_out <= 0.0):
         return
 
     node = ET.SubElement(root, _VIDEO_NODE)
     if trim_in is not None:
         child = ET.SubElement(node, _VIDEO_TRIM_IN_SEC)
-        child.text = f"{max(0.0, _float_or_default(trim_in, 0.0)):.6f}"
+        child.text = f"{trim_in:.6f}"
     if trim_out is not None:
         child = ET.SubElement(node, _VIDEO_TRIM_OUT_SEC)
-        child.text = f"{max(0.0, _float_or_default(trim_out, 0.0)):.6f}"
+        child.text = f"{trim_out:.6f}"

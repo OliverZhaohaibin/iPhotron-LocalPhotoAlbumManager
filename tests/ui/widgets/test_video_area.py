@@ -613,6 +613,62 @@ class TestVideoArea:
         mock_set_video_frame.assert_called_once()
         mock_to_image.assert_not_called()
 
+    def test_on_duration_changed_initialises_trim_when_unset(self, qapp, mocker):
+        """When no trim range is set, duration change should initialise trim to full range."""
+        va = VideoArea()
+        mocker.patch.object(va._player_bar, "set_duration")
+
+        va._on_duration_changed(5000)
+
+        assert va._trim_in_ms == 0
+        assert va._trim_out_ms == 5000
+
+    def test_on_duration_changed_clamps_trim_out_to_duration(self, qapp, mocker):
+        """Trim out beyond the actual duration should be clamped."""
+        va = VideoArea()
+        va._trim_in_ms = 1000
+        va._trim_out_ms = 9000  # stale value beyond real duration
+        mocker.patch.object(va._player_bar, "set_duration")
+        mocker.patch.object(va._player, "position", return_value=2000)
+        mock_set_pos = mocker.patch.object(va._player, "setPosition")
+
+        va._on_duration_changed(5000)
+
+        assert va._trim_in_ms == 1000
+        assert va._trim_out_ms == 5000
+        mock_set_pos.assert_not_called()  # position (2000) is within clamped range
+
+    def test_on_duration_changed_seeks_back_when_position_beyond_trim_out(self, qapp, mocker):
+        """Player position beyond the clamped trim_out should trigger a seek."""
+        va = VideoArea()
+        va._trim_in_ms = 1000
+        va._trim_out_ms = 9000
+        mocker.patch.object(va._player_bar, "set_duration")
+        mocker.patch.object(va._player, "position", return_value=8000)
+        mock_set_pos = mocker.patch.object(va._player, "setPosition")
+
+        va._on_duration_changed(5000)
+
+        assert va._trim_out_ms == 5000
+        mock_set_pos.assert_called_once_with(5000)
+
+    def test_on_duration_changed_resets_to_full_when_trim_collapses(self, qapp, mocker):
+        """When clamping causes trim_in >= trim_out, reset to full range."""
+        va = VideoArea()
+        # Both trim values exceed the real duration (4000 ms), so after clamping
+        # both become 4000 and the range is invalid (trim_in == trim_out).
+        va._trim_in_ms = 6000
+        va._trim_out_ms = 9000
+        mocker.patch.object(va._player_bar, "set_duration")
+        mocker.patch.object(va._player, "position", return_value=0)
+        mocker.patch.object(va._player, "setPosition")
+
+        va._on_duration_changed(4000)
+
+        assert va._trim_in_ms == 0
+        assert va._trim_out_ms == 4000
+
+
 
 def test_gl_image_viewer_reuses_adjustments_for_successive_video_frames(qapp, mocker):
     """Streaming frames with unchanged adjustments should not rebuild LUT state."""

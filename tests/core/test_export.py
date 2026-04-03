@@ -3,6 +3,7 @@
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import pytest
 from PySide6.QtGui import QImage
 
 from iPhoto.core.export import (
@@ -10,6 +11,8 @@ from iPhoto.core.export import (
     get_unique_destination,
     render_image,
     resolve_export_path,
+    _parse_hhmmss_duration,
+    _probe_duration_seconds,
 )
 
 
@@ -160,3 +163,101 @@ def test_export_asset_renders_edited_video(
     assert export_asset(video, export_root, library_root)
     mock_render_video.assert_called_once()
     mock_shutil.copy2.assert_not_called()
+
+
+class TestParseHhmmss:
+    def test_valid_hhmmss(self):
+        assert _parse_hhmmss_duration("00:01:23.456") == pytest.approx(83.456)
+
+    def test_valid_zero_hours(self):
+        assert _parse_hhmmss_duration("00:00:10.0") == pytest.approx(10.0)
+
+    def test_valid_large_hours(self):
+        assert _parse_hhmmss_duration("02:00:00.0") == pytest.approx(7200.0)
+
+    def test_zero_duration_returns_none(self):
+        assert _parse_hhmmss_duration("00:00:00.000") is None
+
+    def test_minutes_out_of_range(self):
+        assert _parse_hhmmss_duration("00:60:00.0") is None
+
+    def test_seconds_out_of_range(self):
+        assert _parse_hhmmss_duration("00:00:60.0") is None
+
+    def test_negative_hours(self):
+        assert _parse_hhmmss_duration("-1:00:00.0") is None
+
+    def test_wrong_separator_count(self):
+        assert _parse_hhmmss_duration("83.456") is None
+
+    def test_non_numeric(self):
+        assert _parse_hhmmss_duration("hh:mm:ss") is None
+
+    def test_none_input(self):
+        assert _parse_hhmmss_duration(None) is None
+
+    def test_non_string_input(self):
+        assert _parse_hhmmss_duration(123) is None
+
+
+class TestProbeDurationSeconds:
+    def test_returns_format_duration(self):
+        meta = {"format": {"duration": "12.5"}, "streams": []}
+        assert _probe_duration_seconds(meta) == pytest.approx(12.5)
+
+    def test_format_duration_takes_priority_over_stream(self):
+        meta = {
+            "format": {"duration": "12.5"},
+            "streams": [{"codec_type": "video", "duration": "99.0"}],
+        }
+        assert _probe_duration_seconds(meta) == pytest.approx(12.5)
+
+    def test_falls_back_to_format_tags_hhmmss(self):
+        meta = {
+            "format": {"tags": {"DURATION": "00:00:08.500000000"}},
+            "streams": [],
+        }
+        assert _probe_duration_seconds(meta) == pytest.approx(8.5)
+
+    def test_falls_back_to_stream_duration_in_seconds(self):
+        meta = {
+            "format": {},
+            "streams": [{"codec_type": "video", "duration": "30.0"}],
+        }
+        # stream["duration"] is already seconds — must NOT be multiplied by time_base
+        assert _probe_duration_seconds(meta) == pytest.approx(30.0)
+
+    def test_stream_duration_not_multiplied_by_time_base(self):
+        meta = {
+            "format": {},
+            "streams": [
+                {"codec_type": "video", "duration": "10.0", "time_base": "1/90000"}
+            ],
+        }
+        # If incorrectly multiplied: 10.0 * (1/90000) ≈ 0.000111 — must return 10.0
+        assert _probe_duration_seconds(meta) == pytest.approx(10.0)
+
+    def test_falls_back_to_duration_ts_times_time_base(self):
+        meta = {
+            "format": {},
+            "streams": [
+                {"codec_type": "video", "duration_ts": "900000", "time_base": "1/90000"}
+            ],
+        }
+        assert _probe_duration_seconds(meta) == pytest.approx(10.0)
+
+    def test_skips_audio_streams(self):
+        meta = {
+            "format": {},
+            "streams": [
+                {"codec_type": "audio", "duration": "5.0"},
+                {"codec_type": "video", "duration": "8.0"},
+            ],
+        }
+        assert _probe_duration_seconds(meta) == pytest.approx(8.0)
+
+    def test_returns_none_for_missing_duration(self):
+        assert _probe_duration_seconds({}) is None
+
+    def test_returns_none_for_non_dict(self):
+        assert _probe_duration_seconds(None) is None

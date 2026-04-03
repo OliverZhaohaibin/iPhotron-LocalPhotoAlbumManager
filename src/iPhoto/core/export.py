@@ -262,7 +262,7 @@ def export_asset(
         # RAW files always need rendering because they cannot be opened by
         # standard image viewers.  Edited raster images are also rendered.
         should_render = (not is_video) and (has_sidecar or is_raw)
-        should_render_video = is_video and sidecar.video_has_visible_edits(raw_adjustments, video_duration)
+        should_render_video = is_video and has_sidecar and sidecar.video_has_visible_edits(raw_adjustments, video_duration)
 
         if should_render:
             image = render_image(source_path)

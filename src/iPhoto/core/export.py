@@ -2,24 +2,24 @@
 
 from __future__ import annotations
 
-import os
 import logging
-import subprocess
+import os
 import shutil
+import subprocess
 from fractions import Fraction
 from pathlib import Path
 
 from PySide6.QtGui import QImage, QTransform
 
-from ..io import sidecar
 from ..errors import ExternalToolError
-from .filters.facade import apply_adjustments
-from .color_resolver import compute_color_statistics
+from ..gui.ui.tasks.thumbnail_renderer import apply_geometry_and_crop
+from ..io import sidecar
+from ..media_classifier import VIDEO_EXTENSIONS
 from ..utils import image_loader
 from ..utils.ffmpeg import probe_media, probe_video_rotation
-from ..media_classifier import VIDEO_EXTENSIONS
+from .color_resolver import compute_color_statistics
+from .filters.facade import apply_adjustments
 from .raw_processor import RAW_EXTENSIONS
-from ..gui.ui.tasks.thumbnail_renderer import apply_geometry_and_crop
 
 try:  # pragma: no cover - optional dependency
     import av  # type: ignore
@@ -458,7 +458,7 @@ def _start_video_encoder(
     return subprocess.Popen(
         command,
         stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
+        stdout=subprocess.DEVNULL,
         stderr=subprocess.PIPE,
         startupinfo=startupinfo,
         creationflags=creationflags,
@@ -474,11 +474,9 @@ def _write_rgba_frame(process: subprocess.Popen, image: QImage) -> None:
 def _finalise_video_encoder(process: subprocess.Popen) -> str:
     if process.stdin is not None:
         process.stdin.close()
-    stderr = b""
-    if process.stderr is not None:
-        stderr = process.stderr.read()
-    returncode = process.wait()
-    message = stderr.decode("utf-8", "ignore").strip()
+    _, stderr_bytes = process.communicate()
+    returncode = process.returncode
+    message = stderr_bytes.decode("utf-8", "ignore").strip() if stderr_bytes else ""
     if returncode != 0:
         raise ExternalToolError(message or "ffmpeg video encode failed")
     return message

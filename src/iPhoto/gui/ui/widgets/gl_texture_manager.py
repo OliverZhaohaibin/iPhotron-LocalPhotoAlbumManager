@@ -6,8 +6,8 @@ from __future__ import annotations
 import logging
 
 import numpy as np
-from PySide6.QtGui import QImage
 from OpenGL import GL as gl
+from PySide6.QtGui import QImage
 
 try:
     from PySide6.QtMultimedia import QVideoFrame, QVideoFrameFormat
@@ -65,9 +65,12 @@ def _classify_video_frame_format(
         return (_VIDEO_FMT_NONE, _CS_BT709, _TF_SDR, _RANGE_LIMITED)
 
     pf = fmt.pixelFormat()
-    if pf == QVideoFrameFormat.PixelFormat.Format_NV12:
+    pixel_enum = QVideoFrameFormat.PixelFormat
+    format_nv12 = getattr(pixel_enum, "Format_NV12", None)
+    format_p010 = getattr(pixel_enum, "Format_P010", None)
+    if format_nv12 is not None and pf == format_nv12:
         pixel_fmt = _VIDEO_FMT_NV12
-    elif pf == QVideoFrameFormat.PixelFormat.Format_P010:
+    elif format_p010 is not None and pf == format_p010:
         pixel_fmt = _VIDEO_FMT_P010
     else:
         pixel_fmt = _VIDEO_FMT_NONE
@@ -261,6 +264,8 @@ class TextureManager:
                 frame.bits(0),
                 height,
             )
+            gl.glBindTexture(gl.GL_TEXTURE_2D, self._video_y_texture_id)
+            gl.glGenerateMipmap(gl.GL_TEXTURE_2D)
             self._upload_plane(
                 self._video_uv_texture_id,
                 uv_width,
@@ -272,6 +277,8 @@ class TextureManager:
                 frame.bits(1),
                 uv_height,
             )
+            gl.glBindTexture(gl.GL_TEXTURE_2D, self._video_uv_texture_id)
+            gl.glGenerateMipmap(gl.GL_TEXTURE_2D)
         finally:
             frame.unmap()
 
@@ -352,7 +359,7 @@ class TextureManager:
                 pixel_type,
                 None,
             )
-            gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MIN_FILTER, gl.GL_LINEAR)
+            gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MIN_FILTER, gl.GL_LINEAR_MIPMAP_LINEAR)
             gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MAG_FILTER, gl.GL_LINEAR)
             gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_WRAP_S, gl.GL_CLAMP_TO_EDGE)
             gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_WRAP_T, gl.GL_CLAMP_TO_EDGE)
@@ -453,7 +460,7 @@ class TextureManager:
     ) -> None:
         if bytes_per_line <= 0 or bits is None:
             raise ValueError("Packed video frame has invalid stride or data pointer")
-        self._ensure_source_texture(width, height, use_mipmaps=False)
+        self._ensure_source_texture(width, height, use_mipmaps=True)
 
         data_size = bytes_per_line * line_count
         if hasattr(bits, "setsize"):
@@ -477,6 +484,7 @@ class TextureManager:
         )
         gl.glPixelStorei(gl.GL_UNPACK_ROW_LENGTH, 0)
         gl.glPixelStorei(gl.GL_UNPACK_ALIGNMENT, 4)
+        gl.glGenerateMipmap(gl.GL_TEXTURE_2D)
 
     # ------------------------------------------------------------------
     # Curve LUT texture

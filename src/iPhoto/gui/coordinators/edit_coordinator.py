@@ -238,6 +238,8 @@ class EditCoordinator(QObject):
         self._ui.video_area.colorPicked.connect(self._handle_color_picked)
         self._ui.video_area.durationChanged.connect(self._handle_video_duration_changed)
         self._ui.video_area.positionChanged.connect(self._handle_video_position_changed)
+        self._ui.video_area.playbackStateChanged.connect(self._handle_video_playback_state_changed)
+        self._ui.video_trim_bar.playPauseRequested.connect(self._handle_video_trim_play_pause_requested)
         self._ui.video_trim_bar.inPointChanged.connect(self._handle_trim_in_ratio_changed)
         self._ui.video_trim_bar.outPointChanged.connect(self._handle_trim_out_ratio_changed)
         self._ui.video_trim_bar.playheadSeeked.connect(self._handle_trim_playhead_seeked)
@@ -374,6 +376,7 @@ class EditCoordinator(QObject):
         self._ui.video_trim_bar.clear()
         self._ui.video_trim_bar.set_trim_ratios(0.0, 1.0)
         self._ui.video_trim_bar.set_playhead_ratio(0.0)
+        self._ui.video_trim_bar.set_playing(False)
         self._ui.video_area.play()
 
     def _on_edit_image_loaded(self, path: Path, image: QImage):
@@ -736,6 +739,23 @@ class EditCoordinator(QObject):
         if self._session is None or not self._is_video_source():
             return
         self._ui.video_trim_bar.set_playhead_ratio(self._safe_video_ratio(position_ms))
+
+    def _handle_video_playback_state_changed(self, is_playing: bool) -> None:
+        """Keep the trim-bar transport button aligned with the edit preview state."""
+
+        if self._session is None or not self._is_video_source():
+            return
+        self._ui.video_trim_bar.set_playing(is_playing)
+
+    def _handle_video_trim_play_pause_requested(self) -> None:
+        """Toggle playback from the trim bar's demo-style play button."""
+
+        if self._session is None or not self._is_video_source():
+            return
+        if self._ui.video_area.is_playing():
+            self._ui.video_area.pause()
+        else:
+            self._ui.video_area.play()
 
     def _handle_trim_in_ratio_changed(self, ratio: float) -> None:
         if self._session is None or not self._is_video_source():

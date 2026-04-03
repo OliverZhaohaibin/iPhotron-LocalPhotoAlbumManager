@@ -4,26 +4,30 @@ from __future__ import annotations
 
 from typing import Iterable
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import QSize, Qt, Signal
 from PySide6.QtGui import QColor, QPainter, QPainterPath, QPen, QPixmap
 from PySide6.QtWidgets import (
+    QFrame,
     QHBoxLayout,
     QPushButton,
     QSizePolicy,
+    QVBoxLayout,
     QWidget,
 )
 
-BAR_HEIGHT = 88
-THUMB_LOGICAL_HEIGHT = 72
-CORNER_RADIUS = 12
+from ..icon import load_icon
+
+BAR_HEIGHT = 50
+THUMB_LOGICAL_HEIGHT = BAR_HEIGHT - 2 * 4
+CORNER_RADIUS = 6
 BORDER_THICKNESS = 4
 HANDLE_WIDTH = 24
 ARROW_THICKNESS = 3
-THEME_COLOR = "#111111"
-HOVER_COLOR = "#3b82f6"
-TRIM_HIGHLIGHT_COLOR = "#4cc2ff"
-BOTTOM_BG_COLOR = "#050505"
-MIN_TRIM_GAP = 0.04
+THEME_COLOR = "#3a3a3a"
+HOVER_COLOR = "#505050"
+TRIM_HIGHLIGHT_COLOR = "#FFD60A"
+BOTTOM_BG_COLOR = "#252525"
+MIN_TRIM_GAP = 0.01
 
 
 class _HandleButton(QPushButton):
@@ -173,6 +177,7 @@ class _ThumbnailCanvas(QWidget):
         self._playhead_dragging = False
         self._static_cache = QPixmap()
         self._static_cache_dirty = True
+        self.setObjectName("StripContainer")
         self.setCursor(Qt.CursorShape.PointingHandCursor)
 
     def set_pixmaps(self, pixmaps: Iterable[QPixmap]) -> None:
@@ -347,6 +352,7 @@ class _ThumbnailCanvas(QWidget):
 class VideoTrimBar(QWidget):
     """Timeline widget matching the trim interaction from the video demo."""
 
+    playPauseRequested = Signal()
     inPointChanged = Signal(float)
     outPointChanged = Signal(float)
     playheadSeeked = Signal(float)
@@ -357,25 +363,86 @@ class VideoTrimBar(QWidget):
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self.setFixedHeight(BAR_HEIGHT)
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.setFixedHeight(BAR_HEIGHT + 30)
         self._pixmaps: list[QPixmap] = []
         self._in_ratio = 0.0
         self._out_ratio = 1.0
         self._handle_dragging = False
+        self._playing = False
+        self._play_icon = load_icon("play.fill.svg")
+        self._pause_icon = load_icon("pause.fill.svg")
 
-        layout = QHBoxLayout(self)
+        self.setStyleSheet(
+            f"""
+            QFrame#BottomControlFrame {{
+                background-color: {BOTTOM_BG_COLOR};
+                border-top: 1px solid #333333;
+            }}
+            QPushButton#PlayButton {{
+                background-color: {THEME_COLOR};
+                border: none;
+                border-top-left-radius: {CORNER_RADIUS}px;
+                border-bottom-left-radius: {CORNER_RADIUS}px;
+                border-top-right-radius: 0px;
+                border-bottom-right-radius: 0px;
+                color: white;
+            }}
+            QPushButton#PlayButton:hover {{
+                background-color: {HOVER_COLOR};
+            }}
+            QWidget#StripContainer {{
+                background-color: transparent;
+            }}
+            """
+        )
+
+        layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
 
-        self._canvas = _ThumbnailCanvas(self)
-        layout.addWidget(self._canvas, stretch=1)
+        self._bottom_frame = QFrame(self)
+        self._bottom_frame.setObjectName("BottomControlFrame")
+        self._bottom_frame.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self._bottom_frame.setFixedHeight(BAR_HEIGHT + 30)
+        layout.addWidget(self._bottom_frame)
 
-        self._left_handle = _HandleButton("left", self)
-        self._right_handle = _HandleButton("right", self)
+        bottom_layout = QHBoxLayout(self._bottom_frame)
+        bottom_layout.setContentsMargins(20, 15, 20, 15)
+        bottom_layout.setSpacing(0)
+
+        controls_layout = QHBoxLayout()
+        controls_layout.setContentsMargins(0, 0, 0, 0)
+        controls_layout.setSpacing(2)
+        bottom_layout.addLayout(controls_layout)
+
+        self._play_button = QPushButton(self._bottom_frame)
+        self._play_button.setObjectName("PlayButton")
+        self._play_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._play_button.setFixedSize(50, BAR_HEIGHT)
+        self._play_button.setIconSize(QSize(20, 20))
+        self._play_button.clicked.connect(lambda checked=False: self.playPauseRequested.emit())
+        controls_layout.addWidget(self._play_button)
+
+        self._strip_host = QWidget(self._bottom_frame)
+        self._strip_host.setFixedHeight(BAR_HEIGHT)
+        self._strip_host.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        strip_layout = QHBoxLayout(self._strip_host)
+        strip_layout.setContentsMargins(0, 0, 0, 0)
+        strip_layout.setSpacing(0)
+        controls_layout.addWidget(self._strip_host, stretch=1)
+
+        self._canvas = _ThumbnailCanvas(self._strip_host)
+        strip_layout.addWidget(self._canvas, stretch=1)
+
+        self._left_handle = _HandleButton("left", self._strip_host)
+        self._right_handle = _HandleButton("right", self._strip_host)
         self._apply_left_style()
         self._apply_right_style()
         self._left_handle.raise_()
         self._right_handle.raise_()
+        self.set_playing(False)
 
         self._left_handle.dragStarted.connect(self._on_drag_start)
         self._left_handle.dragMoved.connect(self._on_left_drag_moved)
@@ -391,6 +458,7 @@ class VideoTrimBar(QWidget):
     def clear(self) -> None:
         self._pixmaps.clear()
         self._canvas.set_pixmaps(())
+        self.set_playing(False)
 
     def set_thumbnails(self, pixmaps: Iterable[QPixmap]) -> None:
         prepared: list[QPixmap] = []
@@ -427,13 +495,33 @@ class VideoTrimBar(QWidget):
     def trim_ratios(self) -> tuple[float, float]:
         return (self._in_ratio, self._out_ratio)
 
+    def is_playing(self) -> bool:
+        """Return whether the trim bar transport is currently in the playing state."""
+
+        return self._playing
+
+    def set_playing(self, is_playing: bool) -> None:
+        """Synchronise the left transport button with the active playback state."""
+
+        self._playing = bool(is_playing)
+        icon = self._pause_icon if self._playing else self._play_icon
+        fallback_text = "⏸" if self._playing else "▶"
+        if not icon.isNull():
+            self._play_button.setIcon(icon)
+            self._play_button.setText("")
+        else:
+            self._play_button.setIcon(icon)
+            self._play_button.setText(fallback_text)
+
     def resizeEvent(self, event) -> None:  # pragma: no cover - GUI behaviour
         super().resizeEvent(event)
         self._update_handle_positions()
 
     def _update_handle_positions(self) -> None:
-        width = self.width()
-        height = self.height()
+        width = self._strip_host.width()
+        height = self._strip_host.height()
+        if width <= 0 or height <= 0:
+            return
         handle_width = self._left_handle.width()
         left_x = int(self._in_ratio * width)
         right_x = int(self._out_ratio * width) - handle_width
@@ -448,7 +536,7 @@ class VideoTrimBar(QWidget):
         self._apply_drag_colors()
 
     def _on_left_drag_moved(self, handle_left_x: int) -> None:
-        width = self.width()
+        width = self._strip_host.width()
         if width <= 0:
             return
         handle_width = self._left_handle.width()
@@ -464,7 +552,7 @@ class VideoTrimBar(QWidget):
             self.inPointChanged.emit(self._in_ratio)
 
     def _on_right_drag_moved(self, handle_left_x: int) -> None:
-        width = self.width()
+        width = self._strip_host.width()
         if width <= 0:
             return
         handle_width = self._right_handle.width()

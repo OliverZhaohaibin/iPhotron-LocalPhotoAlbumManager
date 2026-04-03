@@ -412,7 +412,7 @@ class DetailPageWidget(QWidget):
         self.player_column = QWidget(edit_body)
         player_column_layout = QVBoxLayout(self.player_column)
         player_column_layout.setContentsMargins(0, 0, 0, 0)
-        player_column_layout.setSpacing(10)
+        player_column_layout.setSpacing(0)
         player_column_layout.addWidget(self.player_container, 1)
         player_column_layout.addWidget(self.video_trim_bar)
 

@@ -494,6 +494,46 @@ class TestVideoArea:
         mock_set_pos.assert_called_once_with(0)
         mock_play.assert_called_once()
 
+    def test_trim_out_pause_arms_restart_from_trim_in(self, qapp, mocker):
+        """Auto-pausing at the trim out-point should arm replay from trim in."""
+
+        va = VideoArea()
+        va._trim_in_ms = 1200
+        va._trim_out_ms = 4200
+
+        mock_pause = mocker.patch.object(va._player, "pause")
+        mock_set_pos = mocker.patch.object(va._player, "setPosition")
+        mock_show_controls = mocker.patch.object(va, "show_controls")
+        finished_spy = mocker.Mock()
+        va.playbackFinished.connect(finished_spy)
+
+        va._on_position_changed(4200)
+
+        mock_pause.assert_called_once()
+        mock_set_pos.assert_called_once_with(4200 - VIDEO_COMPLETE_HOLD_BACKSTEP_MS)
+        mock_show_controls.assert_called_once()
+        finished_spy.assert_called_once_with()
+        assert va._restart_from_trim_in_on_play is True
+
+    def test_play_restarts_from_trim_in_after_trim_out_hold(self, qapp, mocker):
+        """Pressing play after trimming stopped playback should restart at trim in."""
+
+        va = VideoArea()
+        va._trim_in_ms = 1200
+        va._trim_out_ms = 4200
+        va._restart_from_trim_in_on_play = True
+
+        mocker.patch.object(va._player, "duration", return_value=5000)
+        mocker.patch.object(va._player, "position", return_value=4200 - VIDEO_COMPLETE_HOLD_BACKSTEP_MS)
+        mock_set_pos = mocker.patch.object(va._player, "setPosition")
+        mock_play = mocker.patch.object(va._player, "play")
+
+        va.play()
+
+        mock_set_pos.assert_called_once_with(1200)
+        mock_play.assert_called_once()
+        assert va._restart_from_trim_in_on_play is False
+
     def test_load_video_clears_frame(self, qapp, mocker):
         """load_video should clear the renderer frame."""
         va = VideoArea()

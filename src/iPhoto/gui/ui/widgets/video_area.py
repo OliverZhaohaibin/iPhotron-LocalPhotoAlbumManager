@@ -136,6 +136,7 @@ class VideoArea(QWidget):
         self._current_source: Path | None = None
         self._adjusted_first_frame_pending = False
         self._suppress_trim_pause = False
+        self._restart_from_trim_in_on_play = False
 
         self._apply_surface(surface_color)
         # --- End Video Renderer Setup ---
@@ -244,6 +245,7 @@ class VideoArea(QWidget):
     def set_trim_range_ms(self, trim_in_ms: int, trim_out_ms: int) -> None:
         """Update the active in/out points in milliseconds."""
 
+        self._restart_from_trim_in_on_play = False
         duration = max(int(self._current_duration_ms), 0)
         if duration > 0:
             trim_in, trim_out = normalise_video_trim(
@@ -440,7 +442,10 @@ class VideoArea(QWidget):
         duration = self._player.duration()
         position = self._player.position()
         hold_pos = max(0, duration - VIDEO_COMPLETE_HOLD_BACKSTEP_MS)
-        if (
+        if self._restart_from_trim_in_on_play:
+            self._player.setPosition(self._trim_in_ms if self._trim_in_ms > 0 else 0)
+            self._restart_from_trim_in_on_play = False
+        elif (
             duration > 0
             and self._player.playbackState() == QMediaPlayer.PlaybackState.PausedState
             and position >= hold_pos
@@ -452,12 +457,18 @@ class VideoArea(QWidget):
             self._player.setPosition(self._trim_in_ms)
         self._player.play()
 
+    def is_playing(self) -> bool:
+        """Return whether the underlying media player is actively playing."""
+
+        return self._player.playbackState() == QMediaPlayer.PlaybackState.PlayingState
+
     def pause(self) -> None:
         """Pause playback."""
         self._player.pause()
 
     def seek(self, position: int) -> None:
         """Seek to a specific position in milliseconds."""
+        self._restart_from_trim_in_on_play = False
         target = int(position)
         if target < self._trim_in_ms:
             target = self._trim_in_ms
@@ -482,6 +493,7 @@ class VideoArea(QWidget):
         self._current_duration_ms = 0
         self._trim_in_ms = 0
         self._trim_out_ms = 0
+        self._restart_from_trim_in_on_play = False
 
     def _on_video_frame(self, frame: "QVideoFrame") -> None:
         """Forward each decoded frame to the GPU renderer."""
@@ -501,12 +513,15 @@ class VideoArea(QWidget):
             if not self._suppress_trim_pause:
                 self._suppress_trim_pause = True
                 hold_pos = max(self._trim_in_ms, self._trim_out_ms - VIDEO_COMPLETE_HOLD_BACKSTEP_MS)
+                self._restart_from_trim_in_on_play = True
                 self._player.pause()
                 self._player.setPosition(hold_pos)
                 self._suppress_trim_pause = False
                 self.show_controls()
                 self.playbackFinished.emit()
             return
+        if not self._suppress_trim_pause:
+            self._restart_from_trim_in_on_play = False
         self._player_bar.set_position(position)
         self.positionChanged.emit(position)
 
@@ -536,6 +551,7 @@ class VideoArea(QWidget):
             # Step back a few milliseconds and pause so the last visible
             # frame remains on screen instead of flashing to black.
             hold_pos = max(0, duration - VIDEO_COMPLETE_HOLD_BACKSTEP_MS)
+            self._restart_from_trim_in_on_play = True
             self._player.setPosition(hold_pos)
             self._player.pause()
             self.show_controls()

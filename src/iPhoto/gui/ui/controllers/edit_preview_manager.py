@@ -8,13 +8,8 @@ from typing import Mapping, Optional
 from PySide6.QtCore import QObject, QThreadPool, QTimer, Qt, Signal, QSize
 from PySide6.QtGui import QImage, QPixmap
 
-from ....core.light_resolver import LIGHT_KEYS, resolve_light_vector
-from ....core.color_resolver import (
-    COLOR_KEYS,
-    ColorResolver,
-    ColorStats,
-    compute_color_statistics,
-)
+from ....core.adjustment_mapping import resolve_adjustment_mapping as _resolve_adjustment_mapping
+from ....core.color_resolver import ColorStats, compute_color_statistics
 from ....core.preview_backends import (
     PreviewBackend,
     PreviewSession,
@@ -27,151 +22,19 @@ from ..tasks.preview_render_worker import PreviewRenderWorker
 _LOGGER = logging.getLogger(__name__)
 
 
-# ---------------------------------------------------------------------------
-# Adjustment helpers
-# ---------------------------------------------------------------------------
-
 def resolve_adjustment_mapping(
     session_values: Mapping[str, float | bool | list],
     *,
     stats: ColorStats | None = None,
 ) -> dict[str, float | bool | list]:
-    """Return shader-friendly adjustments derived from *session_values*.
+    """Return shader-friendly adjustments derived from *session_values*."""
 
-    The helper mirrors the Photos-compatible colour math used by the CPU preview
-    renderer so both the OpenGL shader and the background pixmap pipeline apply
-    identical transformations.  Passing a :class:`ColorStats` instance ensures
-    colour tools such as the Cast slider honour the white balance sampled from
-    the source frame while keeping the function side-effect free for callers
-    that do not have statistics available yet.
-    """
-
-    # Keys that contain list data (curve control points, levels handles) - skip these
-    _CURVE_LIST_KEYS = {"Curve_RGB", "Curve_Red", "Curve_Green", "Curve_Blue"}
-    _LIST_KEYS = _CURVE_LIST_KEYS | {"Levels_Handles", "SelectiveColor_Ranges"}
-
-    resolved: dict[str, float | bool | list] = {}
-    overrides: dict[str, float] = {}
-    color_overrides: dict[str, float] = {}
-    curve_lists: dict[str, list] = {}
-
-    master_value = float(session_values.get("Light_Master", 0.0))
-    light_enabled = bool(session_values.get("Light_Enabled", True))
-    color_master = float(session_values.get("Color_Master", 0.0))
-    color_enabled = bool(session_values.get("Color_Enabled", True))
-
-    for key, value in session_values.items():
-        if key in ("Light_Master", "Light_Enabled", "Color_Master", "Color_Enabled"):
-            continue
-        if key == "BW_Master":
-            continue
-        # List keys are forwarded verbatim so the GL viewer / CPU renderer can use them.
-        if key in _LIST_KEYS:
-            if isinstance(value, list):
-                curve_lists[key] = value
-            continue
-        if key in LIGHT_KEYS:
-            overrides[key] = float(value)
-        elif key in COLOR_KEYS:
-            color_overrides[key] = float(value)
-        else:
-            # Handle boolean values that might be passed
-            if isinstance(value, bool):
-                resolved[key] = 1.0 if value else 0.0
-            elif isinstance(value, (int, float)):
-                resolved[key] = float(value)
-            # Skip any other non-numeric types (like lists)
-
-    if light_enabled:
-        resolved.update(resolve_light_vector(master_value, overrides, mode="delta"))
-    else:
-        resolved.update({key: 0.0 for key in LIGHT_KEYS})
-
-    stats_obj = stats or ColorStats()
-    if color_enabled:
-        resolved.update(
-            ColorResolver.resolve_color_vector(
-                color_master,
-                color_overrides,
-                stats=stats_obj,
-                mode="delta",
-            )
-        )
-    else:
-        resolved.update({key: 0.0 for key in COLOR_KEYS})
-
-    gain_r, gain_g, gain_b = stats_obj.white_balance_gain
-    resolved["Color_Gain_R"] = float(gain_r)
-    resolved["Color_Gain_G"] = float(gain_g)
-    resolved["Color_Gain_B"] = float(gain_b)
-
-    # Preserve the dedicated Black & White parameters so the GPU and CPU pipelines share the
-    # updated shader-compatible values.
-    bw_enabled = bool(session_values.get("BW_Enabled", False))
-    # The shader receives a dedicated toggle so it can entirely skip the costly
-    # monochrome branch when the effect is disabled.  Expressing the boolean as
-    # a float keeps the adjustment dictionary homogeneous for downstream code
-    # that expects numeric uniform values.
-    resolved["BWEnabled"] = 1.0 if bw_enabled else 0.0
-
-    if bw_enabled:
-        resolved["BWIntensity"] = float(session_values.get("BW_Intensity", 0.5))
-        resolved["BWNeutrals"] = float(session_values.get("BW_Neutrals", 0.0))
-        resolved["BWTone"] = float(session_values.get("BW_Tone", 0.0))
-        resolved["BWGrain"] = float(session_values.get("BW_Grain", 0.0))
-    else:
-        resolved["BWIntensity"] = 0.5
-        resolved["BWNeutrals"] = 0.0
-        resolved["BWTone"] = 0.0
-        resolved["BWGrain"] = 0.0
-
-    # Preserve the dedicated White Balance parameters so the GPU and CPU
-    # pipelines share the updated shader-compatible values.
-    wb_enabled = bool(session_values.get("WB_Enabled", False))
-    resolved["WBEnabled"] = 1.0 if wb_enabled else 0.0
-    if wb_enabled:
-        resolved["WBWarmth"] = float(session_values.get("WB_Warmth", 0.0))
-        resolved["WBTemperature"] = float(session_values.get("WB_Temperature", 0.0))
-        resolved["WBTint"] = float(session_values.get("WB_Tint", 0.0))
-    else:
-        resolved["WBWarmth"] = 0.0
-        resolved["WBTemperature"] = 0.0
-        resolved["WBTint"] = 0.0
-
-    # Preserve the dedicated Levels parameters.
-    levels_enabled = bool(session_values.get("Levels_Enabled", False))
-    resolved["Levels_Enabled"] = 1.0 if levels_enabled else 0.0
-
-    # Preserve the dedicated Selective Color parameters.
-    sc_enabled = bool(session_values.get("SelectiveColor_Enabled", False))
-    resolved["SelectiveColor_Enabled"] = 1.0 if sc_enabled else 0.0
-
-    # Preserve the dedicated Definition parameters.
-    def_enabled = bool(session_values.get("Definition_Enabled", False))
-    resolved["Definition_Enabled"] = 1.0 if def_enabled else 0.0
-    resolved["Definition_Value"] = float(session_values.get("Definition_Value", 0.0))
-
-    # Preserve the dedicated Denoise parameters.
-    dn_enabled = bool(session_values.get("Denoise_Enabled", False))
-    resolved["Denoise_Enabled"] = 1.0 if dn_enabled else 0.0
-    resolved["Denoise_Amount"] = float(session_values.get("Denoise_Amount", 0.0))
-
-    # Preserve the dedicated Sharpen parameters.
-    sh_enabled = bool(session_values.get("Sharpen_Enabled", False))
-    resolved["Sharpen_Enabled"] = 1.0 if sh_enabled else 0.0
-    resolved["Sharpen_Intensity"] = float(session_values.get("Sharpen_Intensity", 0.0))
-    resolved["Sharpen_Edges"] = float(session_values.get("Sharpen_Edges", 0.0))
-    resolved["Sharpen_Falloff"] = float(session_values.get("Sharpen_Falloff", 0.0))
-
-    # Preserve the dedicated Vignette parameters.
-    vig_enabled = bool(session_values.get("Vignette_Enabled", False))
-    resolved["Vignette_Enabled"] = 1.0 if vig_enabled else 0.0
-    resolved["Vignette_Strength"] = float(session_values.get("Vignette_Strength", 0.0))
-    resolved["Vignette_Radius"] = float(session_values.get("Vignette_Radius", 0.50))
-    resolved["Vignette_Softness"] = float(session_values.get("Vignette_Softness", 0.0))
-
-    resolved.update(curve_lists)
-    return resolved
+    return _resolve_adjustment_mapping(
+        session_values,
+        stats=stats,
+        bool_as_float=True,
+        normalize_bw_for_render=False,
+    )
 
 
 class EditPreviewManager(QObject):

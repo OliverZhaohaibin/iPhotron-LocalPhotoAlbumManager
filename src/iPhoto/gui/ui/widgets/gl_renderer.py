@@ -149,6 +149,11 @@ class GLRenderer:
         """Upload *image* to the GPU and return ``(id, width, height)``."""
         return self._tex_mgr.upload_texture(image)
 
+    def upload_video_frame(self, frame) -> tuple[int, int]:
+        """Upload a decoded video frame directly as shader-readable textures."""
+
+        return self._tex_mgr.upload_video_frame(frame)
+
     def delete_texture(self) -> None:
         """Delete the currently bound texture, if any."""
         self._tex_mgr.delete_texture()
@@ -170,6 +175,16 @@ class GLRenderer:
     def has_texture(self) -> bool:
         """Return ``True`` if a GPU texture is currently resident."""
         return self._tex_mgr.has_texture()
+
+    def has_video_texture(self) -> bool:
+        """Return ``True`` when a YUV video texture pair is resident."""
+
+        return self._tex_mgr.has_video_texture()
+
+    def video_metadata(self) -> tuple[int, int, int, int]:
+        """Return video metadata for the active texture source."""
+
+        return self._tex_mgr.video_metadata()
 
     def texture_size(self) -> tuple[int, int]:
         """Return the uploaded texture dimensions as ``(width, height)``."""
@@ -216,7 +231,7 @@ class GLRenderer:
 
         if self._program is None:
             raise RuntimeError("Renderer has not been initialised")
-        if self._texture_id == 0:
+        if not self._tex_mgr.has_texture():
             return
         if scale <= 0.0:
             return
@@ -235,6 +250,31 @@ class GLRenderer:
             gf.glActiveTexture(gl.GL_TEXTURE0)
             gf.glBindTexture(gl.GL_TEXTURE_2D, int(self._texture_id))
             self._set_uniform1i("uTex", 0)
+            has_video_texture = self._tex_mgr.has_video_texture()
+            self._set_uniform1i("uSourceKind", 1 if has_video_texture else 0)
+
+            if has_video_texture:
+                video_y_tex, video_uv_tex = self._tex_mgr.video_texture_ids()
+                gf.glActiveTexture(gl.GL_TEXTURE3)
+                gf.glBindTexture(gl.GL_TEXTURE_2D, int(video_y_tex))
+                self._set_uniform1i("uVideoYTex", 3)
+                gf.glActiveTexture(gl.GL_TEXTURE4)
+                gf.glBindTexture(gl.GL_TEXTURE_2D, int(video_uv_tex))
+                self._set_uniform1i("uVideoUVTex", 4)
+                video_format, video_colorspace, video_transfer, video_range = self._tex_mgr.video_metadata()
+            else:
+                gf.glActiveTexture(gl.GL_TEXTURE3)
+                gf.glBindTexture(gl.GL_TEXTURE_2D, 0)
+                self._set_uniform1i("uVideoYTex", 3)
+                gf.glActiveTexture(gl.GL_TEXTURE4)
+                gf.glBindTexture(gl.GL_TEXTURE_2D, 0)
+                self._set_uniform1i("uVideoUVTex", 4)
+                video_format, video_colorspace, video_transfer, video_range = (0, 1, 0, 0)
+
+            self._set_uniform1i("uVideoFormat", int(video_format))
+            self._set_uniform1i("uVideoColorSpace", int(video_colorspace))
+            self._set_uniform1i("uVideoTransfer", int(video_transfer))
+            self._set_uniform1i("uVideoRange", int(video_range))
 
             def adjustment_value(key: str, default: float = 0.0) -> float:
                 return float(adjustments.get(key, default))

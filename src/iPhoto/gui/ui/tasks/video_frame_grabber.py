@@ -20,12 +20,19 @@ def grab_video_frame(
     *,
     still_image_time: Optional[float] = None,
     duration: Optional[float] = None,
+    trim_in_sec: Optional[float] = None,
+    trim_out_sec: Optional[float] = None,
 ) -> Optional[QImage]:
     """Return a decoded frame for *path* scaled to *size*."""
 
     target_size = (max(size.width(), 1), max(size.height(), 1))
 
-    for target in _seek_targets(still_image_time, duration):
+    for target in _seek_targets(
+        still_image_time,
+        duration,
+        trim_in_sec=trim_in_sec,
+        trim_out_sec=trim_out_sec,
+    ):
         # 1. Try PyAV first (direct memory access, faster)
         pil_image = extract_frame_with_pyav(path, at=target, scale=target_size)
         if pil_image:
@@ -48,17 +55,33 @@ def grab_video_frame(
 
 
 def _seek_targets(
-    still_image_time: Optional[float], duration: Optional[float]
+    still_image_time: Optional[float],
+    duration: Optional[float],
+    *,
+    trim_in_sec: Optional[float] = None,
+    trim_out_sec: Optional[float] = None,
 ) -> Iterable[Optional[float]]:
     targets: List[Optional[float]] = []
     seen: set[Optional[float]] = set()
+
+    full_duration = duration if duration and duration > 0 else None
+    trim_in = max(float(trim_in_sec or 0.0), 0.0)
+    trim_out = float(trim_out_sec) if trim_out_sec is not None else (full_duration or trim_in)
+    if full_duration is not None:
+        trim_in = min(trim_in, full_duration)
+        trim_out = min(max(trim_out, trim_in), full_duration)
+    if trim_out <= trim_in:
+        trim_in = 0.0
+        trim_out = full_duration if full_duration is not None else max(trim_out, trim_in)
+    window_duration = max(trim_out - trim_in, 0.0)
 
     def add(candidate: Optional[float]) -> None:
         if candidate is None:
             key: Optional[float] = None
             value: Optional[float] = None
         else:
-            value = _normalize_seek(candidate, duration)
+            value = _normalize_seek(candidate, window_duration or None)
+            value += trim_in
             key = value
         if key in seen:
             return
@@ -66,7 +89,12 @@ def _seek_targets(
         targets.append(value)
 
     if still_image_time is not None:
-        add(still_image_time)
+        if trim_in <= still_image_time <= trim_out:
+            add(still_image_time - trim_in)
+        else:
+            add(still_image_time)
+    elif window_duration > 0:
+        add(window_duration / 2.0)
     elif duration is not None and duration > 0:
         add(duration / 2.0)
     add(None)

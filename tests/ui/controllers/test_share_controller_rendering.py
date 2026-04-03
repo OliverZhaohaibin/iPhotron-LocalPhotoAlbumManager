@@ -184,6 +184,28 @@ def test_copy_file_with_sidecar_failure(controller_factory, mocker, tmp_path, qa
     mock_clipboard_inst.setMimeData.assert_called()
     assert "Copied Original File" in controller._toast.messages
 
+
+def test_copy_file_with_video_sidecar_uses_video_render(controller_factory, mocker, tmp_path):
+    path = tmp_path / "clip.mov"
+    path.touch()
+    sidecar_path = path.with_suffix(".ipo")
+    sidecar_path.touch()
+
+    mocker.patch("iPhoto.io.sidecar.sidecar_path_for_asset", return_value=sidecar_path)
+    mocker.patch("iPhoto.io.sidecar.load_adjustments", return_value={"Video_Trim_In_Sec": 1.0})
+    mocker.patch("iPhoto.io.sidecar.video_has_visible_edits", return_value=True)
+
+    settings = StubSettings("copy_file")
+    playlist = StubPlaylist(0)
+    model = StubAssetModel(str(path))
+    controller = controller_factory(settings=settings, playlist=playlist, asset_model=model)
+
+    render_spy = mocker.patch.object(controller, "_copy_rendered_video_to_clipboard")
+
+    controller._copy_file_to_clipboard(path)
+
+    render_spy.assert_called_once_with(path)
+
 def test_worker_logic(mocker, tmp_path):
     """Test RenderClipboardWorker internal logic."""
     path = tmp_path / "test.jpg"

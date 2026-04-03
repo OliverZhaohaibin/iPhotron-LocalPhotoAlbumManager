@@ -16,6 +16,7 @@ from .information_popup import InformationPopup
 from .main_header import MainHeaderWidget
 from .player_bar import PlayerBar
 from .video_area import VideoArea
+from .video_trim_bar import VideoTrimBar
 from .preview_window import PreviewWindow
 from .photo_map_view import PhotoMapView
 from .live_badge import LiveBadge
@@ -38,6 +39,7 @@ __all__ = [
     "InformationPopup",
     "PlayerBar",
     "VideoArea",
+    "VideoTrimBar",
     "PreviewWindow",
     "LiveBadge",
     "PhotoMapView",

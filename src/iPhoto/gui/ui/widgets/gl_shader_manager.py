@@ -40,6 +40,13 @@ void main() {
 
 _UNIFORM_NAMES = (
     "uTex",
+    "uSourceKind",
+    "uVideoYTex",
+    "uVideoUVTex",
+    "uVideoFormat",
+    "uVideoColorSpace",
+    "uVideoTransfer",
+    "uVideoRange",
     "uBrilliance",
     "uExposure",
     "uHighlights",

@@ -3,6 +3,13 @@ in vec2 vUV;
 out vec4 FragColor;
 
 uniform sampler2D uTex;
+uniform int   uSourceKind;      // 0 = RGBA image texture, 1 = YUV video planes
+uniform sampler2D uVideoYTex;
+uniform sampler2D uVideoUVTex;
+uniform int   uVideoFormat;     // 0 = none/RGBA fallback, 1 = NV12, 2 = P010
+uniform int   uVideoColorSpace; // 0 = BT.601, 1 = BT.709, 2 = BT.2020
+uniform int   uVideoTransfer;   // 0 = SDR, 1 = PQ, 2 = HLG
+uniform int   uVideoRange;      // 0 = limited, 1 = full
 
 uniform float uBrilliance;
 uniform float uExposure;
@@ -58,6 +65,90 @@ uniform float uCropW;
 uniform float uCropH;
 uniform mat3  uPerspectiveMatrix;
 uniform int   uRotate90;  // 0, 1, 2, 3 for 0°, 90°, 180°, 270° CCW rotation
+
+const int VIDEO_FMT_NONE = 0;
+const int VIDEO_FMT_NV12 = 1;
+const int VIDEO_FMT_P010 = 2;
+const int VIDEO_CS_BT601 = 0;
+const int VIDEO_CS_BT709 = 1;
+const int VIDEO_CS_BT2020 = 2;
+const int VIDEO_TF_SDR = 0;
+const int VIDEO_TF_PQ = 1;
+const int VIDEO_TF_HLG = 2;
+const int VIDEO_RANGE_LIMITED = 0;
+const int VIDEO_RANGE_FULL = 1;
+
+const mat3 yuv2rgb_601 = mat3(
+    1.0,     1.0,     1.0,
+    0.0,    -0.34414, 1.772,
+    1.402,  -0.71414, 0.0
+);
+
+const mat3 yuv2rgb_709 = mat3(
+    1.0,     1.0,     1.0,
+    0.0,    -0.18732, 1.8556,
+    1.5748, -0.46812, 0.0
+);
+
+const mat3 yuv2rgb_2020 = mat3(
+    1.0,     1.0,     1.0,
+    0.0,    -0.16455, 1.8814,
+    1.4746, -0.57135, 0.0
+);
+
+vec3 pq_eotf(vec3 e) {
+    const float m1 = 0.1593017578125;
+    const float m2 = 78.84375;
+    const float c1 = 0.8359375;
+    const float c2 = 18.8515625;
+    const float c3 = 18.6875;
+
+    vec3 ep = pow(max(e, vec3(0.0)), vec3(1.0 / m2));
+    vec3 num = max(ep - c1, vec3(0.0));
+    vec3 den = c2 - c3 * ep;
+    return pow(num / max(den, vec3(1e-6)), vec3(1.0 / m1));
+}
+
+vec3 hlg_eotf(vec3 e) {
+    const float a = 0.17883277;
+    const float b = 0.28466892;
+    const float c = 0.55991073;
+
+    vec3 result;
+    for (int i = 0; i < 3; i++) {
+        float v = e[i];
+        if (v <= 0.5)
+            result[i] = (v * v) / 3.0;
+        else
+            result[i] = (exp((v - c) / a) + b) / 12.0;
+    }
+    return result;
+}
+
+vec3 tonemap_reinhard(vec3 linear_rgb) {
+    float luma = dot(linear_rgb, vec3(0.2627, 0.6780, 0.0593));
+    float mapped_luma = luma / (1.0 + luma);
+    float scale = (luma > 1e-6) ? mapped_luma / luma : 0.0;
+    return linear_rgb * scale;
+}
+
+const mat3 bt2020_to_bt709 = mat3(
+    1.6605, -0.1246, -0.0182,
+   -0.5876,  1.1329, -0.1006,
+   -0.0728, -0.0083,  1.1187
+);
+
+vec3 linear_to_srgb(vec3 linear_rgb) {
+    vec3 result;
+    for (int i = 0; i < 3; i++) {
+        float v = linear_rgb[i];
+        if (v <= 0.0031308)
+            result[i] = 12.92 * v;
+        else
+            result[i] = 1.055 * pow(v, 1.0 / 2.4) - 0.055;
+    }
+    return result;
+}
 
 float clamp01(float x) { return clamp(x, 0.0, 1.0); }
 
@@ -140,6 +231,79 @@ float grain_noise(vec2 uv, float grain_amount) {
     }
     float noise = fract(sin(dot(uv, vec2(12.9898, 78.233))) * 43758.5453);
     return (noise - 0.5) * 0.2 * grain_amount;
+}
+
+vec3 decode_video_sample(vec2 uv, float lod) {
+    float y_raw = textureLod(uVideoYTex, uv, lod).r;
+    vec2 uv_raw = textureLod(uVideoUVTex, uv, lod).rg;
+
+    float y;
+    float u;
+    float v;
+
+    if (uVideoRange == VIDEO_RANGE_LIMITED) {
+        if (uVideoFormat == VIDEO_FMT_P010) {
+            y = (y_raw * 1023.0 - 64.0) / 876.0;
+            u = (uv_raw.r * 1023.0 - 512.0) / 896.0;
+            v = (uv_raw.g * 1023.0 - 512.0) / 896.0;
+        } else {
+            y = (y_raw * 255.0 - 16.0) / 219.0;
+            u = (uv_raw.r * 255.0 - 128.0) / 224.0;
+            v = (uv_raw.g * 255.0 - 128.0) / 224.0;
+        }
+    } else {
+        y = y_raw;
+        u = uv_raw.r - 0.5;
+        v = uv_raw.g - 0.5;
+    }
+
+    vec3 yuv_vec = vec3(y, u, v);
+    vec3 rgb;
+
+    if (uVideoColorSpace == VIDEO_CS_BT2020)
+        rgb = yuv2rgb_2020 * yuv_vec;
+    else if (uVideoColorSpace == VIDEO_CS_BT601)
+        rgb = yuv2rgb_601 * yuv_vec;
+    else
+        rgb = yuv2rgb_709 * yuv_vec;
+
+    if (uVideoTransfer == VIDEO_TF_PQ) {
+        vec3 linear_rgb = pq_eotf(rgb);
+        linear_rgb *= 100.0;
+        linear_rgb = tonemap_reinhard(linear_rgb);
+        if (uVideoColorSpace == VIDEO_CS_BT2020)
+            linear_rgb = bt2020_to_bt709 * linear_rgb;
+        rgb = linear_to_srgb(clamp(linear_rgb, vec3(0.0), vec3(1.0)));
+    } else if (uVideoTransfer == VIDEO_TF_HLG) {
+        vec3 linear_rgb = hlg_eotf(rgb);
+        linear_rgb = tonemap_reinhard(linear_rgb);
+        if (uVideoColorSpace == VIDEO_CS_BT2020)
+            linear_rgb = bt2020_to_bt709 * linear_rgb;
+        rgb = linear_to_srgb(clamp(linear_rgb, vec3(0.0), vec3(1.0)));
+    }
+
+    return clamp(rgb, 0.0, 1.0);
+}
+
+vec3 sample_source_rgb(vec2 uv) {
+    if (uSourceKind == 1 && uVideoFormat != VIDEO_FMT_NONE) {
+        return decode_video_sample(uv, 0.0);
+    }
+    return texture(uTex, uv).rgb;
+}
+
+vec3 sample_source_rgb_lod(vec2 uv, float lod) {
+    if (uSourceKind == 1 && uVideoFormat != VIDEO_FMT_NONE) {
+        return decode_video_sample(uv, lod);
+    }
+    return textureLod(uTex, uv, lod).rgb;
+}
+
+vec2 source_texture_size() {
+    if (uSourceKind == 1 && uVideoFormat != VIDEO_FMT_NONE) {
+        return vec2(textureSize(uVideoYTex, 0));
+    }
+    return vec2(textureSize(uTex, 0));
 }
 
 vec2 apply_inverse_perspective(vec2 uv) {
@@ -364,9 +528,9 @@ vec3 apply_definition(vec3 color, vec2 uv) {
     // Mipmap-based local contrast enhancement (Definition / Clarity).
     // Samples the original texture at LOD 3, 5, 7 to compute a local mean,
     // then re-injects the high-frequency detail with midtone protection.
-    vec3 blur1 = textureLod(uTex, uv, 3.0).rgb;
-    vec3 blur2 = textureLod(uTex, uv, 5.0).rgb;
-    vec3 blur3 = textureLod(uTex, uv, 7.0).rgb;
+    vec3 blur1 = sample_source_rgb_lod(uv, 3.0);
+    vec3 blur2 = sample_source_rgb_lod(uv, 5.0);
+    vec3 blur3 = sample_source_rgb_lod(uv, 7.0);
     vec3 localMean = (blur1 + blur2 + blur3) / 3.0;
     vec3 detail = color - localMean;
 
@@ -385,7 +549,7 @@ vec3 compute_denoised_source(vec2 uv, vec3 centerColor) {
     const int RADIUS = 3;
     const float SIGMA_SPACE = 1.5;
 
-    vec2 texSize = vec2(textureSize(uTex, 0));
+    vec2 texSize = source_texture_size();
     vec2 invTexSize = 1.0 / texSize;
 
     float sigmaColor = max(uDenoiseAmount * 0.075, 0.001);
@@ -396,7 +560,7 @@ vec3 compute_denoised_source(vec2 uv, vec3 centerColor) {
     for (int y = -RADIUS; y <= RADIUS; ++y) {
         for (int x = -RADIUS; x <= RADIUS; ++x) {
             vec2 offset = vec2(float(x), float(y));
-            vec3 sampleColor = texture(uTex, uv + offset * invTexSize).rgb;
+            vec3 sampleColor = sample_source_rgb(uv + offset * invTexSize);
 
             float spaceDist2 = dot(offset, offset);
             float spaceWeight = exp(-spaceDist2 / (2.0 * SIGMA_SPACE * SIGMA_SPACE));
@@ -420,7 +584,7 @@ vec3 apply_denoise(vec3 adjustedColor, vec2 uv) {
     // this delta-based merge, enabling denoise replaces the current pipeline
     // output with raw-texture bilateral samples, which wipes Selective Color
     // and other earlier adjustments.
-    vec3 sourceCenter = texture(uTex, uv).rgb;
+    vec3 sourceCenter = sample_source_rgb(uv);
     vec3 sourceDenoised = compute_denoised_source(uv, sourceCenter);
     vec3 denoiseDelta = sourceDenoised - sourceCenter;
     return clamp(adjustedColor + denoiseDelta, 0.0, 1.0);
@@ -434,21 +598,21 @@ vec3 apply_sharpen(vec3 adjustedColor, vec2 uv) {
     // etc.) are preserved.  The CPU ``sharpen_resolver`` instead runs on the
     // already-adjusted image, so GPU preview and CPU/export may diverge
     // slightly when upstream adjustments are active.
-    vec2 texSize = vec2(textureSize(uTex, 0));
+    vec2 texSize = source_texture_size();
     vec2 texel = 1.0 / texSize;
 
     // 1. Sample 3x3 neighbourhood from source texture
-    vec3 c00 = texture(uTex, uv + vec2(-texel.x, -texel.y)).rgb;
-    vec3 c10 = texture(uTex, uv + vec2( 0.0,     -texel.y)).rgb;
-    vec3 c20 = texture(uTex, uv + vec2( texel.x, -texel.y)).rgb;
+    vec3 c00 = sample_source_rgb(uv + vec2(-texel.x, -texel.y));
+    vec3 c10 = sample_source_rgb(uv + vec2( 0.0,     -texel.y));
+    vec3 c20 = sample_source_rgb(uv + vec2( texel.x, -texel.y));
 
-    vec3 c01 = texture(uTex, uv + vec2(-texel.x,  0.0)).rgb;
-    vec3 c11 = texture(uTex, uv).rgb; // center pixel
-    vec3 c21 = texture(uTex, uv + vec2( texel.x,  0.0)).rgb;
+    vec3 c01 = sample_source_rgb(uv + vec2(-texel.x,  0.0));
+    vec3 c11 = sample_source_rgb(uv); // center pixel
+    vec3 c21 = sample_source_rgb(uv + vec2( texel.x,  0.0));
 
-    vec3 c02 = texture(uTex, uv + vec2(-texel.x,  texel.y)).rgb;
-    vec3 c12 = texture(uTex, uv + vec2( 0.0,      texel.y)).rgb;
-    vec3 c22 = texture(uTex, uv + vec2( texel.x,  texel.y)).rgb;
+    vec3 c02 = sample_source_rgb(uv + vec2(-texel.x,  texel.y));
+    vec3 c12 = sample_source_rgb(uv + vec2( 0.0,      texel.y));
+    vec3 c22 = sample_source_rgb(uv + vec2( texel.x,  texel.y));
 
     // 2. Approximate Gaussian blur
     vec3 blur = c11 * 0.25
@@ -543,8 +707,7 @@ void main() {
     vec2 uv_tex = apply_rotation_90(uv_perspective, uRotate90);
 
     // Sample the texture at the computed texture-space coordinates
-    vec4 texel = texture(uTex, uv_tex);
-    vec3 c = texel.rgb;
+    vec3 c = sample_source_rgb(uv_tex);
 
     float exposure_term    = uExposure   * 1.5;
     float brightness_term  = uBrightness * 0.75;

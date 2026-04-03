@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Optional
+from typing import Mapping, Optional
 
 from PySide6.QtCore import (
     QEasingCurve,
     QEvent,
     QObject,
+    QPointF,
     QPropertyAnimation,
     QTimer,
     Qt,
@@ -19,12 +20,14 @@ from PySide6.QtCore import (
 from PySide6.QtGui import (
     QColor,
     QCursor,
+    QImage,
     QMouseEvent,
     QResizeEvent,
     QWheelEvent,
 )
 from PySide6.QtWidgets import (
     QGraphicsOpacityEffect,
+    QStackedWidget,
     QWidget,
 )
 
@@ -47,7 +50,9 @@ from ....config import (
     PLAYER_FADE_OUT_MS,
     VIDEO_COMPLETE_HOLD_BACKSTEP_MS,
 )
+from ....core.adjustment_mapping import normalise_video_trim
 from ....utils.ffmpeg import get_linux_180_prerotate_hint, probe_video_rotation
+from .gl_image_viewer import GLImageViewer
 from .player_bar import PlayerBar
 from .video_renderer_widget import VideoRendererWidget
 from ..palette import viewer_surface_color
@@ -75,6 +80,14 @@ class VideoArea(QWidget):
     playbackFinished = Signal()
     nextItemRequested = Signal()
     prevItemRequested = Signal()
+    positionChanged = Signal(int)
+    durationChanged = Signal(int)
+    zoomChanged = Signal(float)
+    cropChanged = Signal(float, float, float, float)
+    cropInteractionStarted = Signal()
+    cropInteractionFinished = Signal()
+    colorPicked = Signal(float, float, float)
+    firstFrameReady = Signal()
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
@@ -94,7 +107,8 @@ class VideoArea(QWidget):
         surface_color = viewer_surface_color(self)
         self._default_surface_color = surface_color
 
-        self._renderer = VideoRendererWidget(self)
+        self._surface_stack = QStackedWidget(self)
+        self._renderer = VideoRendererWidget(self._surface_stack)
         self._renderer.set_letterbox_color(QColor(surface_color))
         # Ensure the renderer is also opaque and doesn't inherit transparency.
         self._renderer.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, False)
@@ -102,7 +116,22 @@ class VideoArea(QWidget):
         # Accept focus so keyboard navigation targets the video surface
         # without requiring the user to click a non-interactive element.
         self._renderer.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self._edit_viewer = GLImageViewer(self._surface_stack)
+        self._edit_viewer.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self._surface_stack.addWidget(self._renderer)
+        self._surface_stack.addWidget(self._edit_viewer)
+        self._surface_stack.setCurrentWidget(self._renderer)
         self.setFocusProxy(self._renderer)
+
+        self._adjusted_preview_enabled = False
+        self._edit_mode_active = False
+        self._current_adjustments: dict[str, object] = {}
+        self._trim_in_ms = 0
+        self._trim_out_ms = 0
+        self._current_duration_ms = 0
+        self._current_source: Path | None = None
+        self._adjusted_first_frame_pending = False
+        self._suppress_trim_pause = False
 
         self._apply_surface(surface_color)
         # --- End Video Renderer Setup ---
@@ -149,6 +178,7 @@ class VideoArea(QWidget):
 
         self._install_activity_filters()
         self._wire_player_bar()
+        self._wire_edit_viewer()
 
     # ------------------------------------------------------------------
     # Public API
@@ -164,6 +194,116 @@ class VideoArea(QWidget):
         """Return the floating :class:`PlayerBar`."""
 
         return self._player_bar
+
+    @property
+    def edit_viewer(self) -> GLImageViewer:
+        """Expose the GL-based adjusted video preview surface."""
+
+        return self._edit_viewer
+
+    def adjusted_preview_enabled(self) -> bool:
+        """Return whether decoded frames are routed through the GL edit viewer."""
+
+        return self._adjusted_preview_enabled
+
+    def set_adjusted_preview_enabled(self, enabled: bool) -> None:
+        """Route decoded frames through the adjusted GL preview when *enabled*."""
+
+        target = bool(enabled)
+        if self._adjusted_preview_enabled == target:
+            return
+        self._adjusted_preview_enabled = target
+        self._surface_stack.setCurrentWidget(self._edit_viewer if target else self._renderer)
+        self.setFocusProxy(self._edit_viewer if target else self._renderer)
+        if target:
+            self._adjusted_first_frame_pending = True
+            self._edit_viewer.set_adjustments(self._current_adjustments)
+            if self._current_duration_ms > 0:
+                self._edit_viewer.update()
+        else:
+            self._edit_mode_active = False
+
+    def set_edit_mode_active(self, active: bool) -> None:
+        """Mark whether the video area is currently being used inside Edit mode."""
+
+        self._edit_mode_active = bool(active)
+        if self._edit_mode_active:
+            self.set_adjusted_preview_enabled(True)
+
+    def set_adjustments(self, adjustments: Mapping[str, object] | None = None) -> None:
+        """Apply GL adjustments to the adjusted preview surface."""
+
+        self._current_adjustments = dict(adjustments or {})
+        self._edit_viewer.set_adjustments(self._current_adjustments)
+
+    def set_trim_range_ms(self, trim_in_ms: int, trim_out_ms: int) -> None:
+        """Update the active in/out points in milliseconds."""
+
+        duration = max(int(self._current_duration_ms), 0)
+        if duration > 0:
+            trim_in, trim_out = normalise_video_trim(
+                {
+                    "Video_Trim_In_Sec": max(trim_in_ms, 0) / 1000.0,
+                    "Video_Trim_Out_Sec": max(trim_out_ms, 0) / 1000.0,
+                },
+                duration / 1000.0,
+            )
+            self._trim_in_ms = int(round(trim_in * 1000.0))
+            self._trim_out_ms = int(round(trim_out * 1000.0))
+        else:
+            self._trim_in_ms = max(int(trim_in_ms), 0)
+            self._trim_out_ms = max(int(trim_out_ms), self._trim_in_ms)
+        if self._player.position() < self._trim_in_ms:
+            self._player.setPosition(self._trim_in_ms)
+        elif self._trim_out_ms > 0 and self._player.position() > self._trim_out_ms:
+            self._player.setPosition(self._trim_out_ms)
+
+    def trim_range_ms(self) -> tuple[int, int]:
+        """Return the current trim range in milliseconds."""
+
+        return (self._trim_in_ms, self._trim_out_ms)
+
+    def setCropMode(self, enabled: bool, values=None) -> None:
+        """Proxy crop mode toggling to the adjusted preview surface."""
+
+        self.set_adjusted_preview_enabled(True)
+        self._edit_viewer.setCropMode(enabled, values)
+
+    def crop_values(self) -> dict[str, float]:
+        """Return the current crop mapping from the adjusted preview surface."""
+
+        return self._edit_viewer.crop_values()
+
+    def start_perspective_interaction(self) -> None:
+        self._edit_viewer.start_perspective_interaction()
+
+    def end_perspective_interaction(self) -> None:
+        self._edit_viewer.end_perspective_interaction()
+
+    def set_crop_aspect_ratio(self, ratio: float) -> None:
+        self._edit_viewer.set_crop_aspect_ratio(ratio)
+
+    def rotate_image_ccw(self) -> dict[str, float]:
+        self.set_adjusted_preview_enabled(True)
+        return self._edit_viewer.rotate_image_ccw()
+
+    def set_zoom(self, factor: float, anchor: QPointF | None = None) -> None:
+        self._edit_viewer.set_zoom(factor, anchor=anchor or self.viewport_center())
+
+    def reset_zoom(self) -> None:
+        self._edit_viewer.reset_zoom()
+
+    def zoom_in(self) -> None:
+        self._edit_viewer.zoom_in()
+
+    def zoom_out(self) -> None:
+        self._edit_viewer.zoom_out()
+
+    def viewport_center(self) -> QPointF:
+        return self._edit_viewer.viewport_center()
+
+    def set_eyedropper_mode(self, active: bool) -> None:
+        self._edit_viewer.set_eyedropper_mode(active)
 
     def set_immersive_background(self, immersive: bool) -> None:
         """Switch to a pure black canvas when immersive full screen mode is active."""
@@ -185,6 +325,7 @@ class VideoArea(QWidget):
         """Apply *colour* to the renderer letterbox, widget, and stylesheet."""
 
         self._renderer.set_letterbox_color(QColor(colour))
+        self._edit_viewer.set_surface_color_override(colour)
         self.setStyleSheet(f"background-color: {colour}; border: none;")
 
     def show_controls(self, *, animate: bool = True) -> None:
@@ -242,9 +383,28 @@ class VideoArea(QWidget):
         self._audio_output.setMuted(muted)
         self._player_bar.set_muted(muted)
 
-    def load_video(self, path: Path) -> None:
+    def load_video(
+        self,
+        path: Path,
+        *,
+        adjustments: Mapping[str, object] | None = None,
+        trim_range_ms: tuple[int, int] | None = None,
+        adjusted_preview: bool | None = None,
+    ) -> None:
         """Load a video file for playback."""
+
+        self._current_source = path
+        self._current_adjustments = dict(adjustments or {})
+        if adjusted_preview is not None:
+            self.set_adjusted_preview_enabled(adjusted_preview)
+        if self._adjusted_preview_enabled:
+            self._adjusted_first_frame_pending = True
+        self._edit_viewer.set_adjustments(self._current_adjustments)
+        self._edit_viewer.clear()
         self._renderer.clear_frame()
+        self._trim_in_ms = 0
+        self._trim_out_ms = 0
+        self._current_duration_ms = 0
 
         # Probe the container-level display-matrix rotation from ffprobe
         # *before* setting the source.  The renderer uses the probed value
@@ -262,7 +422,9 @@ class VideoArea(QWidget):
         self._player.setSource(QUrl.fromLocalFile(str(path)))
         # Do not auto-play; let the coordinator decide.
         # But ensure we are at start
-        self._player.setPosition(0)
+        if trim_range_ms is not None:
+            self.set_trim_range_ms(*trim_range_ms)
+        self._player.setPosition(self._trim_in_ms if self._trim_in_ms > 0 else 0)
 
     def play(self) -> None:
         """Start or resume playback."""
@@ -278,7 +440,11 @@ class VideoArea(QWidget):
             and self._player.playbackState() == QMediaPlayer.PlaybackState.PausedState
             and position >= hold_pos
         ):
-            self._player.setPosition(0)
+            self._player.setPosition(self._trim_in_ms if self._trim_in_ms > 0 else 0)
+        elif position < self._trim_in_ms or (
+            self._trim_out_ms > 0 and position >= self._trim_out_ms
+        ):
+            self._player.setPosition(self._trim_in_ms)
         self._player.play()
 
     def pause(self) -> None:
@@ -287,7 +453,12 @@ class VideoArea(QWidget):
 
     def seek(self, position: int) -> None:
         """Seek to a specific position in milliseconds."""
-        self._player.setPosition(position)
+        target = int(position)
+        if target < self._trim_in_ms:
+            target = self._trim_in_ms
+        if self._trim_out_ms > self._trim_in_ms and target > self._trim_out_ms:
+            target = self._trim_out_ms
+        self._player.setPosition(target)
 
     def stop(self) -> None:
         """Stop playback, release the media source and clear the renderer.
@@ -301,16 +472,46 @@ class VideoArea(QWidget):
         self._player.stop()
         self._player.setSource(QUrl())
         self._renderer.clear_frame()
+        self._edit_viewer.clear()
+        self._current_source = None
+        self._current_duration_ms = 0
+        self._trim_in_ms = 0
+        self._trim_out_ms = 0
 
     def _on_video_frame(self, frame: "QVideoFrame") -> None:
         """Forward each decoded frame to the GPU renderer."""
-        self._renderer.update_frame(frame)
+        if self._adjusted_preview_enabled:
+            reset_view = self._adjusted_first_frame_pending
+            self._adjusted_first_frame_pending = False
+            self._edit_viewer.set_video_frame(
+                frame,
+                self._current_adjustments,
+                reset_view=reset_view,
+            )
+        else:
+            self._renderer.update_frame(frame)
 
     def _on_position_changed(self, position: int) -> None:
+        if self._trim_out_ms > self._trim_in_ms and position >= self._trim_out_ms:
+            if not self._suppress_trim_pause:
+                self._suppress_trim_pause = True
+                hold_pos = max(self._trim_in_ms, self._trim_out_ms - VIDEO_COMPLETE_HOLD_BACKSTEP_MS)
+                self._player.pause()
+                self._player.setPosition(hold_pos)
+                self._suppress_trim_pause = False
+                self.show_controls()
+                self.playbackFinished.emit()
+            return
         self._player_bar.set_position(position)
+        self.positionChanged.emit(position)
 
     def _on_duration_changed(self, duration: int) -> None:
+        self._current_duration_ms = int(duration)
+        if self._trim_out_ms <= self._trim_in_ms:
+            self._trim_in_ms = 0
+            self._trim_out_ms = int(duration)
         self._player_bar.set_duration(duration)
+        self.durationChanged.emit(duration)
 
     def _on_playback_state_changed(self, state: QMediaPlayer.PlaybackState) -> None:
         is_playing = (state == QMediaPlayer.PlaybackState.PlayingState)
@@ -321,7 +522,7 @@ class VideoArea(QWidget):
 
     def _on_media_status_changed(self, status: QMediaPlayer.MediaStatus) -> None:
         if status == QMediaPlayer.MediaStatus.EndOfMedia:
-            duration = self._player.duration()
+            duration = self._trim_out_ms if self._trim_out_ms > self._trim_in_ms else self._player.duration()
             if duration <= 0:
                 return
             position = self._player.position()
@@ -353,7 +554,7 @@ class VideoArea(QWidget):
 
         super().resizeEvent(event)
         rect = self.rect()
-        self._renderer.setGeometry(rect)
+        self._surface_stack.setGeometry(rect)
         self._update_bar_geometry()
 
     def enterEvent(self, event) -> None:  # pragma: no cover - GUI behaviour
@@ -430,6 +631,17 @@ class VideoArea(QWidget):
         self._player_bar.volumeChanged.connect(self._on_volume_changed)
         self._player_bar.muteToggled.connect(self._on_mute_toggled)
 
+    def _wire_edit_viewer(self) -> None:
+        """Forward image-viewer style signals from the adjusted preview surface."""
+
+        self._edit_viewer.zoomChanged.connect(self.zoomChanged)
+        self._edit_viewer.cropChanged.connect(self.cropChanged)
+        self._edit_viewer.cropInteractionStarted.connect(self.cropInteractionStarted)
+        self._edit_viewer.cropInteractionFinished.connect(self.cropInteractionFinished)
+        self._edit_viewer.colorPicked.connect(self.colorPicked)
+        self._edit_viewer.firstFrameReady.connect(self.firstFrameReady)
+        self._renderer.firstFrameReady.connect(self.firstFrameReady)
+
     def _on_mouse_activity(self) -> None:
         if not self._controls_enabled:
             return
@@ -446,23 +658,14 @@ class VideoArea(QWidget):
             self._hide_timer.start(PLAYER_CONTROLS_HIDE_DELAY_MS)
 
     def video_view(self) -> QWidget:
-        """Return the video renderer widget for focus/event handling.
+        """Return the currently active video surface for focus/event handling."""
 
-        Previously returned a ``QGraphicsView``; now returns the
-        :class:`VideoRendererWidget` which hosts the GPU rendering surface.
-        """
-
-        return self._renderer
+        return self._edit_viewer if self._adjusted_preview_enabled else self._renderer
 
     def video_viewport(self) -> QWidget:
-        """Return the widget that accepts keyboard focus.
+        """Return the widget that accepts keyboard focus."""
 
-        Keyboard shortcuts are intercepted at this level so the main window
-        can consume navigation keys before Qt treats them as focus traversal
-        requests.
-        """
-
-        return self._renderer
+        return self.video_view()
 
     def _animate_to(self, value: float, duration: int) -> None:
         self._fade_anim.stop()

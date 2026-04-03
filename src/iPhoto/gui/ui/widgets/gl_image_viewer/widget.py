@@ -30,6 +30,11 @@ from PySide6.QtOpenGL import (
 )
 from PySide6.QtWidgets import QRhiWidget
 
+try:  # pragma: no cover - optional Qt module
+    from PySide6.QtMultimedia import QVideoFrame
+except (ModuleNotFoundError, ImportError):  # pragma: no cover
+    QVideoFrame = None  # type: ignore[assignment, misc]
+
 from ..gl_crop_controller import CropInteractionController
 from ..gl_renderer import GLRenderer
 from ..view_transform_controller import ViewTransformController
@@ -104,6 +109,9 @@ class GLImageViewer(QRhiWidget):
 
         # 状态
         self._image: QImage | None = None
+        self._video_frame = None
+        self._video_frame_dirty = False
+        self._using_video_frame_source = False
         self._adjustments: dict[str, Any] = {}
         self._eyedropper_active = False
 
@@ -220,6 +228,7 @@ class GLImageViewer(QRhiWidget):
         *,
         image_source: object | None = None,
         reset_view: bool = True,
+        force_texture_refresh: bool = False,
     ) -> None:
         """Display *image* together with optional colour *adjustments*.
 
@@ -239,9 +248,15 @@ class GLImageViewer(QRhiWidget):
             pan state.  Passing ``False`` keeps the current transform so edit
             mode can reuse the detail view framing without a visible jump.
         """
+        self._video_frame = None
+        self._video_frame_dirty = False
+        self._using_video_frame_source = False
 
         # Check if we can reuse the existing texture
-        if self._texture_manager.should_reuse_texture(image_source):
+        if (
+            not force_texture_refresh
+            and self._texture_manager.should_reuse_texture(image_source)
+        ):
             if image is not None and not image.isNull():
                 # Skip texture re-upload, only update adjustments. Preserve the
                 # current zoom/pan state so adjustment previews stay anchored
@@ -250,7 +265,11 @@ class GLImageViewer(QRhiWidget):
                 return
 
         # Update texture resource tracking
-        self._texture_manager.set_image(image, image_source)
+        self._texture_manager.set_image(
+            image,
+            image_source,
+            force_upload=force_texture_refresh,
+        )
         self._image = image
         self._adjustments = dict(adjustments or {})
         self._update_crop_perspective_state()
@@ -271,6 +290,36 @@ class GLImageViewer(QRhiWidget):
             # exposes.  ``reset_view`` lets callers preserve the zoom when the
             # user toggles between detail and edit modes.
             self.reset_zoom()
+
+    def set_video_frame(
+        self,
+        frame,
+        adjustments: Mapping[str, float] | None = None,
+        *,
+        reset_view: bool = True,
+    ) -> None:
+        """Display *frame* directly through the OpenGL shader pipeline."""
+
+        if QVideoFrame is None or frame is None or not frame.isValid():
+            return
+
+        starting_video_source = not self._using_video_frame_source
+        if starting_video_source:
+            self._texture_manager.clear_image()
+        self._using_video_frame_source = True
+        self._image = None
+        self._video_frame = frame
+        self._video_frame_dirty = True
+        if adjustments is not None and adjustments != self._adjustments:
+            self.set_adjustments(dict(adjustments))
+        self._loading_overlay.hide()
+        if starting_video_source:
+            self._time_base = time.monotonic()
+
+        if reset_view:
+            self.reset_zoom()
+        self.update()
+
     def set_placeholder(self, pixmap: QPixmap | None) -> None:
         """Display *pixmap* without changing the tracked image source."""
 
@@ -506,6 +555,7 @@ class GLImageViewer(QRhiWidget):
 
         self._renderer = GLRenderer(gf, parent=self)
         self._renderer.initialize_resources()
+        self._adjustment_applicator.invalidate_cache()
         self._adjustment_applicator.update_curve_lut_if_needed(self._adjustments)
         self._adjustment_applicator.update_levels_lut_if_needed(self._adjustments)
 
@@ -577,11 +627,24 @@ class GLImageViewer(QRhiWidget):
         gf.glClear(gl.GL_COLOR_BUFFER_BIT)
 
         if (
+            self._using_video_frame_source
+            and self._video_frame_dirty
+            and self._video_frame is not None
+        ):
+            try:
+                self._renderer.upload_video_frame(self._video_frame)
+            except Exception:
+                _LOGGER.exception("Failed to upload video frame into GLImageViewer")
+            self._video_frame = None
+            self._video_frame_dirty = False
+            straighten, rotate_steps, _ = self._rotation_parameters()
+            self._update_cover_scale(straighten, rotate_steps)
+        elif (
             self._image is not None
             and not self._image.isNull()
-            and not self._renderer.has_texture()
+            and self._texture_manager.needs_texture_upload()
         ):
-            self._renderer.upload_texture(self._image)
+            self._texture_manager.upload_texture_if_needed(self._image)
             straighten, rotate_steps, _ = self._rotation_parameters()
             self._update_cover_scale(straighten, rotate_steps)
         if not self._renderer.has_texture():

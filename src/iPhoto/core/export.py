@@ -2,17 +2,29 @@
 
 from __future__ import annotations
 
+import os
 import logging
+import subprocess
 import shutil
+from fractions import Fraction
 from pathlib import Path
 
 from PySide6.QtGui import QImage, QTransform
 
 from ..io import sidecar
+from ..errors import ExternalToolError
 from .filters.facade import apply_adjustments
+from .color_resolver import compute_color_statistics
 from ..utils import image_loader
+from ..utils.ffmpeg import probe_media, probe_video_rotation
 from ..media_classifier import VIDEO_EXTENSIONS
 from .raw_processor import RAW_EXTENSIONS
+from ..gui.ui.tasks.thumbnail_renderer import apply_geometry_and_crop
+
+try:  # pragma: no cover - optional dependency
+    import av  # type: ignore
+except Exception:  # pragma: no cover - optional dependency
+    av = None  # type: ignore[assignment]
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -89,6 +101,98 @@ def render_image(path: Path) -> QImage | None:
     return filtered_image
 
 
+def render_video(path: Path, destination: Path) -> bool:
+    """Render *path* to *destination* as MP4 with trim and adjustments applied."""
+
+    if av is None:
+        _LOGGER.error("Video export requires PyAV for frame decoding")
+        return False
+
+    raw_adjustments = sidecar.load_adjustments(path)
+    try:
+        probe = probe_media(path)
+    except ExternalToolError:
+        _LOGGER.exception("Failed to probe video metadata for %s", path)
+        return False
+
+    duration_sec = _probe_duration_seconds(probe)
+    trim_in_sec, trim_out_sec = sidecar.normalise_video_trim(raw_adjustments, duration_sec)
+    rotation_cw, _, _ = probe_video_rotation(path)
+
+    try:
+        with av.open(str(path)) as container:
+            if not container.streams.video:
+                return False
+            stream = container.streams.video[0]
+            fps = _probe_frame_rate(probe, stream)
+            frame_iterator = _iter_export_frames(
+                container,
+                stream,
+                trim_in_sec=trim_in_sec,
+                trim_out_sec=trim_out_sec,
+                rotation_cw=rotation_cw,
+            )
+            first_source = next(frame_iterator, None)
+            if first_source is None:
+                return False
+
+            try:
+                color_stats = compute_color_statistics(first_source)
+            except Exception:
+                _LOGGER.exception("Failed to compute video export color statistics")
+                color_stats = None
+            resolved_adjustments = sidecar.resolve_render_adjustments(
+                raw_adjustments,
+                color_stats=color_stats,
+            )
+
+            first_rendered = _render_video_frame(first_source, raw_adjustments, resolved_adjustments, color_stats)
+            if first_rendered is None or first_rendered.isNull():
+                return False
+            first_rendered = _ensure_even_video_frame(first_rendered)
+            if first_rendered.isNull():
+                return False
+
+            encoder = _start_video_encoder(
+                source=path,
+                destination=destination,
+                width=first_rendered.width(),
+                height=first_rendered.height(),
+                fps=fps,
+                trim_in_sec=trim_in_sec,
+                trim_out_sec=trim_out_sec,
+            )
+            try:
+                _write_rgba_frame(encoder, first_rendered)
+                for frame_image in frame_iterator:
+                    rendered = _render_video_frame(
+                        frame_image,
+                        raw_adjustments,
+                        resolved_adjustments,
+                        color_stats,
+                    )
+                    if rendered is None or rendered.isNull():
+                        continue
+                    rendered = _ensure_even_video_frame(rendered)
+                    if rendered.isNull():
+                        continue
+                    _write_rgba_frame(encoder, rendered)
+            finally:
+                stderr = _finalise_video_encoder(encoder)
+
+    except Exception:
+        _LOGGER.exception("Video export failed for %s", path)
+        try:
+            destination.unlink(missing_ok=True)
+        except OSError:
+            pass
+        return False
+
+    if stderr:
+        _LOGGER.debug("ffmpeg video export stderr for %s: %s", path, stderr)
+    return True
+
+
 def _clamp(val: float) -> float:
     return max(0.0, min(1.0, val))
 
@@ -145,12 +249,20 @@ def export_asset(
         is_video = source_path.suffix.lower() in VIDEO_EXTENSIONS
         is_raw = source_path.suffix.lower() in RAW_EXTENSIONS
         has_sidecar = sidecar.sidecar_path_for_asset(source_path).exists()
+        raw_adjustments = sidecar.load_adjustments(source_path) if is_video and has_sidecar else {}
+        video_duration = None
+        if is_video and has_sidecar:
+            try:
+                video_duration = _probe_duration_seconds(probe_media(source_path))
+            except ExternalToolError:
+                video_duration = None
 
         qt_fmt, suffix = EXPORT_FORMATS.get(export_format, EXPORT_FORMATS[DEFAULT_EXPORT_FORMAT])
 
         # RAW files always need rendering because they cannot be opened by
         # standard image viewers.  Edited raster images are also rendered.
         should_render = (not is_video) and (has_sidecar or is_raw)
+        should_render_video = is_video and sidecar.video_has_visible_edits(raw_adjustments, video_duration)
 
         if should_render:
             image = render_image(source_path)
@@ -170,6 +282,11 @@ def export_asset(
                 )
                 return False
 
+        if should_render_video:
+            final_dest = destination_path.with_suffix(".mp4")
+            final_dest = get_unique_destination(final_dest)
+            return render_video(source_path, final_dest)
+
         # Case B: Unedited raster or Video -> Copy
         final_dest = get_unique_destination(destination_path)
         shutil.copy2(source_path, final_dest)
@@ -178,3 +295,231 @@ def export_asset(
     except Exception:
         _LOGGER.exception("Export failed for %s", source_path)
         return False
+
+
+def _probe_duration_seconds(metadata: dict) -> float | None:
+    fmt = metadata.get("format", {}) if isinstance(metadata, dict) else {}
+    duration = _coerce_float(fmt.get("duration")) if isinstance(fmt, dict) else None
+    if duration and duration > 0.0:
+        return duration
+    streams = metadata.get("streams", []) if isinstance(metadata, dict) else []
+    if not isinstance(streams, list):
+        return None
+    for stream in streams:
+        if not isinstance(stream, dict) or stream.get("codec_type") != "video":
+            continue
+        stream_duration = _coerce_float(stream.get("duration"))
+        time_base = _parse_ratio(stream.get("time_base"))
+        if stream_duration is not None and time_base is not None and stream_duration > 0.0 and time_base > 0.0:
+            return stream_duration * time_base
+    return None
+
+
+def _probe_frame_rate(metadata: dict, stream) -> float:
+    streams = metadata.get("streams", []) if isinstance(metadata, dict) else []
+    if isinstance(streams, list):
+        for entry in streams:
+            if not isinstance(entry, dict) or entry.get("codec_type") != "video":
+                continue
+            for key in ("avg_frame_rate", "r_frame_rate"):
+                rate = _parse_ratio(entry.get(key))
+                if rate and rate > 0.0:
+                    return min(rate, 240.0)
+    average_rate = getattr(stream, "average_rate", None)
+    if average_rate:
+        try:
+            rate = float(average_rate)
+        except (TypeError, ValueError, ZeroDivisionError):
+            rate = 0.0
+        if rate > 0.0:
+            return min(rate, 240.0)
+    return 30.0
+
+
+def _iter_export_frames(
+    container,
+    stream,
+    *,
+    trim_in_sec: float,
+    trim_out_sec: float,
+    rotation_cw: int,
+):
+    try:
+        time_base = float(stream.time_base) if stream.time_base is not None else None
+    except (TypeError, ValueError, ZeroDivisionError):
+        time_base = None
+
+    if trim_in_sec > 0.0 and time_base and time_base > 0.0:
+        try:
+            container.seek(int(trim_in_sec / time_base), stream=stream)
+        except Exception:
+            pass
+
+    for frame in container.decode(stream):
+        frame_time = getattr(frame, "time", None)
+        if frame_time is None and frame.pts is not None and time_base:
+            frame_time = float(frame.pts) * time_base
+        if frame_time is None:
+            frame_time = 0.0
+        if frame_time + 1e-6 < trim_in_sec:
+            continue
+        if trim_out_sec > trim_in_sec and frame_time >= trim_out_sec - 1e-6:
+            break
+        pil_image = frame.to_image()
+        if rotation_cw in {90, 180, 270}:
+            pil_image = pil_image.rotate(-rotation_cw, expand=True)
+        qimage = image_loader.qimage_from_pil(pil_image)
+        if qimage is None or qimage.isNull():
+            continue
+        yield qimage
+
+
+def _render_video_frame(
+    image: QImage,
+    raw_adjustments: dict,
+    resolved_adjustments: dict,
+    color_stats,
+) -> QImage | None:
+    transformed = apply_geometry_and_crop(image, raw_adjustments)
+    if transformed is None:
+        return None
+    return apply_adjustments(transformed, resolved_adjustments, color_stats=color_stats)
+
+
+def _ensure_even_video_frame(image: QImage) -> QImage:
+    width = image.width()
+    height = image.height()
+    even_width = max(2, width - (width % 2))
+    even_height = max(2, height - (height % 2))
+    if even_width == width and even_height == height:
+        return image
+    return image.copy(0, 0, even_width, even_height)
+
+
+def _start_video_encoder(
+    *,
+    source: Path,
+    destination: Path,
+    width: int,
+    height: int,
+    fps: float,
+    trim_in_sec: float,
+    trim_out_sec: float,
+) -> subprocess.Popen:
+    command = [
+        "ffmpeg",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-nostdin",
+        "-y",
+        "-f",
+        "rawvideo",
+        "-pix_fmt",
+        "rgba",
+        "-s",
+        f"{width}x{height}",
+        "-r",
+        f"{max(fps, 1.0):.6f}",
+        "-i",
+        "pipe:0",
+    ]
+    if trim_in_sec > 0.0:
+        command += ["-ss", f"{trim_in_sec:.3f}"]
+    if trim_out_sec > trim_in_sec:
+        command += ["-to", f"{trim_out_sec:.3f}"]
+    command += [
+        "-i",
+        str(source.absolute()),
+        "-map",
+        "0:v:0",
+        "-map",
+        "1:a:0?",
+        "-c:v",
+        "libx264",
+        "-pix_fmt",
+        "yuv420p",
+        "-c:a",
+        "aac",
+        "-movflags",
+        "+faststart",
+        "-shortest",
+        str(destination),
+    ]
+
+    startupinfo = None
+    creationflags = 0
+    if os.name == "nt":
+        startupinfo = subprocess.STARTUPINFO()
+        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        startupinfo.wShowWindow = subprocess.SW_HIDE
+        creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
+    return subprocess.Popen(
+        command,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        startupinfo=startupinfo,
+        creationflags=creationflags,
+    )
+
+
+def _write_rgba_frame(process: subprocess.Popen, image: QImage) -> None:
+    if process.stdin is None:
+        raise RuntimeError("ffmpeg encoder stdin is not available")
+    process.stdin.write(_qimage_to_rgba_bytes(image))
+
+
+def _finalise_video_encoder(process: subprocess.Popen) -> str:
+    if process.stdin is not None:
+        process.stdin.close()
+    stderr = b""
+    if process.stderr is not None:
+        stderr = process.stderr.read()
+    returncode = process.wait()
+    message = stderr.decode("utf-8", "ignore").strip()
+    if returncode != 0:
+        raise ExternalToolError(message or "ffmpeg video encode failed")
+    return message
+
+
+def _qimage_to_rgba_bytes(image: QImage) -> bytes:
+    converted = image.convertToFormat(QImage.Format.Format_RGBA8888)
+    ptr = converted.bits()
+    ptr.setsize(converted.sizeInBytes())
+    raw = bytes(ptr)
+    row_stride = converted.bytesPerLine()
+    row_width = converted.width() * 4
+    if row_stride == row_width:
+        return raw
+    rows = [
+        raw[row * row_stride: row * row_stride + row_width]
+        for row in range(converted.height())
+    ]
+    return b"".join(rows)
+
+
+def _parse_ratio(value) -> float | None:
+    if value in (None, "", "0/0"):
+        return None
+    try:
+        if isinstance(value, str) and "/" in value:
+            ratio = float(Fraction(value))
+        else:
+            ratio = float(value)
+    except (TypeError, ValueError, ZeroDivisionError):
+        return None
+    if ratio <= 0.0:
+        return None
+    return ratio
+
+
+def _coerce_float(value) -> float | None:
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return None
+    if numeric <= 0.0:
+        return None
+    return numeric

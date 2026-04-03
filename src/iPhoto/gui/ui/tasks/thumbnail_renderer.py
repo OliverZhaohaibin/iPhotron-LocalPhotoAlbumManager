@@ -48,16 +48,20 @@ def render_video(
     duration: Optional[float],
 ) -> Optional[QImage]:  # pragma: no cover - worker helper
     """Grab a video frame, apply sidecar adjustments and return a composited thumbnail."""
+    raw_adjustments = sidecar.load_adjustments(abs_path)
+    trim_in_sec, trim_out_sec = sidecar.normalise_video_trim(raw_adjustments, duration)
+
     image = grab_video_frame(
         abs_path,
         size,
         still_image_time=still_image_time,
         duration=duration,
+        trim_in_sec=trim_in_sec,
+        trim_out_sec=trim_out_sec,
     )
     if image is None:
         return None
 
-    raw_adjustments = sidecar.load_adjustments(abs_path)
     stats = compute_color_statistics(image) if raw_adjustments else None
     adjustments = sidecar.resolve_render_adjustments(
         raw_adjustments,
@@ -176,6 +180,9 @@ def seek_targets(
     is_video: bool,
     still_image_time: Optional[float],
     duration: Optional[float],
+    *,
+    trim_in_sec: Optional[float] = None,
+    trim_out_sec: Optional[float] = None,
 ) -> List[Optional[float]]:
     """
     Return a list of seek offsets (in seconds) for video thumbnails, applying guard rails
@@ -208,8 +215,26 @@ def seek_targets(
         seen.add(key)
         targets.append(value)
 
+    full_duration = duration if duration and duration > 0 else None
+    trim_in = max(float(trim_in_sec or 0.0), 0.0)
+    trim_out = float(trim_out_sec) if trim_out_sec is not None else (full_duration or trim_in)
+    if full_duration is not None:
+        trim_in = min(trim_in, full_duration)
+        trim_out = min(max(trim_out, trim_in), full_duration)
+    if trim_out <= trim_in:
+        trim_in = 0.0
+        trim_out = full_duration if full_duration is not None else max(trim_out, trim_in)
+    window_duration = max(trim_out - trim_in, 0.0)
+
     if still_image_time is not None:
-        add(still_image_time)
+        if trim_in <= still_image_time <= trim_out:
+            add(still_image_time)
+        elif window_duration > 0:
+            add(trim_in + window_duration / 2.0)
+        else:
+            add(still_image_time)
+    elif window_duration > 0:
+        add(trim_in + window_duration / 2.0)
     elif duration is not None and duration > 0:
         add(duration / 2.0)
     add(None)

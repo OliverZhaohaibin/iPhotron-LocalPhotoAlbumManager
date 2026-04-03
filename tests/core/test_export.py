@@ -81,10 +81,11 @@ def test_render_image(mock_apply, mock_loader, mock_sidecar) -> None:
     mock_apply.assert_called()
 
 
+@patch("iPhoto.core.export.render_video")
 @patch("iPhoto.core.export.render_image")
 @patch("iPhoto.core.export.shutil")
 @patch("iPhoto.core.export.sidecar")
-def test_export_asset(mock_sidecar, mock_shutil, mock_render, tmp_path: Path) -> None:
+def test_export_asset(mock_sidecar, mock_shutil, mock_render, mock_render_video, tmp_path: Path) -> None:
     export_root = tmp_path / "exported"
     library_root = tmp_path
 
@@ -97,9 +98,13 @@ def test_export_asset(mock_sidecar, mock_shutil, mock_render, tmp_path: Path) ->
     # Case A: Video -> Copy
     video = album / "vid.mov"
     video.touch()
+    mock_ipo_missing = MagicMock()
+    mock_ipo_missing.exists.return_value = False
+    mock_sidecar.sidecar_path_for_asset.return_value = mock_ipo_missing
     assert export_asset(video, export_root, library_root)
     mock_shutil.copy2.assert_called()
     mock_render.assert_not_called()
+    mock_render_video.assert_not_called()
 
     # Case B: Image + No Sidecar -> Copy
     mock_ipo_missing = MagicMock()
@@ -110,6 +115,7 @@ def test_export_asset(mock_sidecar, mock_shutil, mock_render, tmp_path: Path) ->
     assert export_asset(source, export_root, library_root)
     mock_shutil.copy2.assert_called()
     mock_render.assert_not_called()
+    mock_render_video.assert_not_called()
 
     # Case C: Image + Sidecar -> Render
     mock_ipo_exists = MagicMock()
@@ -123,3 +129,34 @@ def test_export_asset(mock_sidecar, mock_shutil, mock_render, tmp_path: Path) ->
     assert export_asset(source, export_root, library_root)
     mock_render.assert_called_with(source)
     mock_qimage.save.assert_called()
+
+
+@patch("iPhoto.core.export.render_video")
+@patch("iPhoto.core.export.shutil")
+@patch("iPhoto.core.export.probe_media")
+@patch("iPhoto.core.export.sidecar")
+def test_export_asset_renders_edited_video(
+    mock_sidecar,
+    mock_probe_media,
+    mock_shutil,
+    mock_render_video,
+    tmp_path: Path,
+) -> None:
+    export_root = tmp_path / "exported"
+    library_root = tmp_path
+    album = tmp_path / "Album"
+    album.mkdir()
+    video = album / "edited.mov"
+    video.touch()
+
+    mock_ipo_exists = MagicMock()
+    mock_ipo_exists.exists.return_value = True
+    mock_sidecar.sidecar_path_for_asset.return_value = mock_ipo_exists
+    mock_sidecar.load_adjustments.return_value = {"Video_Trim_In_Sec": 1.0}
+    mock_sidecar.video_has_visible_edits.return_value = True
+    mock_probe_media.return_value = {"format": {"duration": "12.0"}}
+    mock_render_video.return_value = True
+
+    assert export_asset(video, export_root, library_root)
+    mock_render_video.assert_called_once()
+    mock_shutil.copy2.assert_not_called()

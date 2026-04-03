@@ -24,6 +24,7 @@ from ....core.vignette_resolver import (
     DEFAULT_VIGNETTE_RADIUS,
     DEFAULT_VIGNETTE_SOFTNESS,
 )
+from ....core.adjustment_mapping import VIDEO_TRIM_IN_KEY, VIDEO_TRIM_OUT_KEY
 
 _BW_RANGE_KEYS = {"BW_Master", "BW_Intensity", "BW_Neutrals", "BW_Tone"}
 
@@ -190,6 +191,13 @@ class EditSession(QObject):
         self._ranges["Vignette_Radius"] = (0.0, 1.0)
         self._values["Vignette_Softness"] = DEFAULT_VIGNETTE_SOFTNESS
         self._ranges["Vignette_Softness"] = (0.0, 1.0)
+
+        # Video trim is persisted in seconds. The coordinator normalises the
+        # persisted values against the current clip duration when entering edit.
+        self._values[VIDEO_TRIM_IN_KEY] = 0.0
+        self._ranges[VIDEO_TRIM_IN_KEY] = (0.0, 24 * 60 * 60.0)
+        self._values[VIDEO_TRIM_OUT_KEY] = 0.0
+        self._ranges[VIDEO_TRIM_OUT_KEY] = (0.0, 24 * 60 * 60.0)
 
     # ------------------------------------------------------------------
     # Accessors
@@ -371,6 +379,10 @@ class EditSession(QObject):
             "Vignette_Strength": DEFAULT_VIGNETTE_STRENGTH,
             "Vignette_Radius": DEFAULT_VIGNETTE_RADIUS,
             "Vignette_Softness": DEFAULT_VIGNETTE_SOFTNESS,
+        })
+        defaults.update({
+            VIDEO_TRIM_IN_KEY: 0.0,
+            VIDEO_TRIM_OUT_KEY: 0.0,
         })
         self.set_values(defaults, emit_individual=True)
         self.resetPerformed.emit()

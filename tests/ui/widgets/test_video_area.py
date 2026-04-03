@@ -9,12 +9,13 @@ pytest.importorskip("PySide6.QtMultimedia", reason="QtMultimedia is required")
 
 from pathlib import Path
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QSize, Qt
 from PySide6.QtGui import QColor, QShowEvent
 from PySide6.QtMultimedia import QMediaPlayer, QVideoFrame, QVideoFrameFormat
 from PySide6.QtWidgets import QApplication, QRhiWidget
 
 from iPhoto.config import VIDEO_COMPLETE_HOLD_BACKSTEP_MS
+from iPhoto.gui.ui.widgets.gl_image_viewer import GLImageViewer
 from iPhoto.gui.ui.widgets.video_area import VideoArea
 from iPhoto.gui.ui.widgets.video_renderer_widget import (
     VideoRendererWidget,
@@ -539,3 +540,35 @@ class TestVideoArea:
         assert called_url.isEmpty()
         # Renderer frame should be cleared
         mock_clear.assert_called_once()
+
+    def test_adjusted_preview_uses_direct_video_frame_path(self, qapp, mocker):
+        """Adjusted video preview should bypass QImage conversion."""
+        va = VideoArea()
+        va.set_adjusted_preview_enabled(True)
+
+        frame = mocker.Mock()
+        frame.isValid.return_value = True
+        mock_set_video_frame = mocker.patch.object(va._edit_viewer, "set_video_frame")
+        mock_to_image = mocker.patch.object(frame, "toImage")
+
+        va._on_video_frame(frame)
+
+        mock_set_video_frame.assert_called_once()
+        mock_to_image.assert_not_called()
+
+
+def test_gl_image_viewer_reuses_adjustments_for_successive_video_frames(qapp, mocker):
+    """Streaming frames with unchanged adjustments should not rebuild LUT state."""
+
+    viewer = GLImageViewer()
+    fmt = QVideoFrameFormat(QSize(320, 240), QVideoFrameFormat.PixelFormat.Format_RGBA8888)
+    frame = QVideoFrame(fmt)
+    viewer._adjustments = {"Exposure": 0.25}
+
+    mock_set_adjustments = mocker.patch.object(viewer, "set_adjustments")
+
+    viewer.set_video_frame(frame, {"Exposure": 0.25}, reset_view=False)
+
+    mock_set_adjustments.assert_not_called()
+    assert viewer._video_frame is frame
+    assert viewer._video_frame_dirty is True

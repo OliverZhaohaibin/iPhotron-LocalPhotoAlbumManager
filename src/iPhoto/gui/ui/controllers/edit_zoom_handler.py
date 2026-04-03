@@ -9,13 +9,14 @@ from PySide6.QtWidgets import QPushButton, QSlider
 
 if TYPE_CHECKING:
     from ..widgets.gl_image_viewer import GLImageViewer
+    from ..widgets.video_area import VideoArea
 
 class EditZoomHandler(QObject):
     """Manages the connection between the global zoom toolbar and the edit viewer."""
 
     def __init__(
         self,
-        viewer: GLImageViewer,
+        viewer: GLImageViewer | "VideoArea",
         zoom_in_button: QPushButton,
         zoom_out_button: QPushButton,
         zoom_slider: QSlider,
@@ -69,3 +70,14 @@ class EditZoomHandler(QObject):
         self._zoom_slider.blockSignals(True)
         self._zoom_slider.setValue(slider_value)
         self._zoom_slider.blockSignals(False)
+    def set_viewer(self, viewer: GLImageViewer | "VideoArea") -> None:
+        """Retarget the shared zoom controls to *viewer*."""
+
+        if self._viewer is viewer:
+            return
+        was_connected = self._connected
+        if was_connected:
+            self.disconnect_controls()
+        self._viewer = viewer
+        if was_connected:
+            self.connect_controls()

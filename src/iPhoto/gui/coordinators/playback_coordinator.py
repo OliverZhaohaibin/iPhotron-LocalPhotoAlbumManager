@@ -297,6 +297,7 @@ class PlaybackCoordinator(QObject):
         is_video = self._asset_vm.data(idx, Roles.IS_VIDEO)
         is_live = self._asset_vm.data(idx, Roles.IS_LIVE)
         is_fav = self._asset_vm.data(idx, Roles.FEATURED)
+        info = self._asset_vm.data(idx, Roles.INFO) or {}
 
         if not abs_path:
             return
@@ -317,7 +318,28 @@ class PlaybackCoordinator(QObject):
         # Load Media
         if is_video:
             self._player_view.show_video_surface(interactive=True)
-            self._player_view.video_area.load_video(source)
+            raw_adjustments = sidecar.load_adjustments(source)
+            duration_sec = None
+            if isinstance(info, dict):
+                try:
+                    duration_sec = float(info.get("dur") or info.get("duration") or 0.0) or None
+                except (TypeError, ValueError):
+                    duration_sec = None
+            has_trim = sidecar.trim_is_non_default(raw_adjustments, duration_sec)
+            needs_adjusted_preview = sidecar.has_non_default_adjustments(raw_adjustments)
+            trim_in_sec, trim_out_sec = sidecar.normalise_video_trim(raw_adjustments, duration_sec)
+            trim_range_ms = None
+            if has_trim:
+                trim_range_ms = (
+                    int(round(trim_in_sec * 1000.0)),
+                    int(round(trim_out_sec * 1000.0)),
+                )
+            self._player_view.video_area.load_video(
+                source,
+                adjustments=sidecar.resolve_render_adjustments(raw_adjustments) if needs_adjusted_preview else None,
+                trim_range_ms=trim_range_ms,
+                adjusted_preview=needs_adjusted_preview,
+            )
             self._player_view.video_area.play()
             self._player_bar.setEnabled(True)
             self._zoom_widget.hide()
@@ -358,7 +380,12 @@ class PlaybackCoordinator(QObject):
         self._active_live_still = still_source
         self._player_view.defer_still_updates(True)
         self._player_view.show_video_surface(interactive=False)
-        self._player_view.video_area.load_video(motion_path)
+        self._player_view.video_area.load_video(
+            motion_path,
+            adjustments=None,
+            trim_range_ms=None,
+            adjusted_preview=False,
+        )
         self._player_view.video_area.play()
         self._player_bar.setEnabled(False)
         self._is_playing = True

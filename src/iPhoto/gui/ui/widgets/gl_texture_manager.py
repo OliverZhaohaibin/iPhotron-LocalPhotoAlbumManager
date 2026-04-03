@@ -264,7 +264,6 @@ class TextureManager:
                 frame.bits(0),
                 height,
             )
-            gl.glBindTexture(gl.GL_TEXTURE_2D, self._video_y_texture_id)
             gl.glGenerateMipmap(gl.GL_TEXTURE_2D)
             self._upload_plane(
                 self._video_uv_texture_id,
@@ -277,7 +276,6 @@ class TextureManager:
                 frame.bits(1),
                 uv_height,
             )
-            gl.glBindTexture(gl.GL_TEXTURE_2D, self._video_uv_texture_id)
             gl.glGenerateMipmap(gl.GL_TEXTURE_2D)
         finally:
             frame.unmap()

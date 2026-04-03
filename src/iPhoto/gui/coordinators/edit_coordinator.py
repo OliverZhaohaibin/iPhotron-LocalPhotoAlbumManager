@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import math
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional
 
@@ -30,6 +31,7 @@ from iPhoto.gui.ui.palette import viewer_surface_color
 from iPhoto.io import sidecar
 from iPhoto.media_classifier import VIDEO_EXTENSIONS
 from iPhoto.utils.logging import get_logger
+from iPhoto.utils.ffmpeg import probe_video_rotation
 from iPhoto.core.adjustment_mapping import (
     VIDEO_TRIM_IN_KEY,
     VIDEO_TRIM_OUT_KEY,
@@ -711,11 +713,7 @@ class EditCoordinator(QObject):
             return
         diag_duration = None if duration_sec is None else round(duration_sec, 3)
         target_width = 96
-        width = self._ui.video_trim_bar.thumbnail_view_width()
-        if width > 0:
-            count = max(6, min(24, width // max(target_width, 1)))
-        else:
-            count = 10
+        width, count = self._estimate_video_trim_thumbnail_request(self._current_source)
         self._video_thumbnail_generation += 1
         generation = self._video_thumbnail_generation
         worker = VideoTrimThumbnailWorker(
@@ -845,6 +843,31 @@ class EditCoordinator(QObject):
         )
         self._video_trim_worker = None
 
+    def _estimate_video_trim_thumbnail_request(self, source: Path) -> tuple[int, int]:
+        width = self._ui.video_trim_bar.thumbnail_view_width()
+        if width < 100:
+            width = 1000
+
+        rotation, raw_w, raw_h = probe_video_rotation(source)
+        if rotation in {90, 270}:
+            display_w, display_h = raw_h, raw_w
+        else:
+            display_w, display_h = raw_w, raw_h
+
+        logical_thumb_h = 42.0
+        logical_thumb_w = 0.0
+        if display_w > 0 and display_h > 0:
+            logical_thumb_w = display_w * (logical_thumb_h / float(display_h))
+
+        if logical_thumb_w > 1.0:
+            count = int(math.ceil(width / logical_thumb_w)) + 2
+        else:
+            count = width // max(96, 1)
+
+        count = max(int(count), 6)
+        count = min(count, 60)
+        return width, count
+
     def _handle_video_duration_changed(self, duration_ms: int) -> None:
         if self._session is None or not self._is_video_source():
             return
@@ -863,7 +886,12 @@ class EditCoordinator(QObject):
         )
         active_diag = self._video_trim_diag.get(self._video_thumbnail_generation, {})
         has_thumbnails = bool(active_diag.get("received_images")) or bool(active_diag.get("ready_image_count"))
-        if self._video_trim_worker is None and not has_thumbnails:
+        desired_count = 0
+        if self._current_source is not None:
+            _, desired_count = self._estimate_video_trim_thumbnail_request(self._current_source)
+        requested_count = int(active_diag.get("requested_count", 0) or 0)
+        needs_more = has_thumbnails and requested_count < desired_count
+        if self._video_trim_worker is None and (not has_thumbnails or needs_more):
             self._queue_video_trim_thumbnails(duration_sec)
         else:
             self._emit_video_trim_diag(
@@ -871,6 +899,8 @@ class EditCoordinator(QObject):
                 generation=self._video_thumbnail_generation,
                 worker_active=self._video_trim_worker is not None,
                 has_thumbnails=has_thumbnails,
+                requested_count=requested_count,
+                desired_count=desired_count,
             )
         self._video_sidebar_preview_timer.start()
 

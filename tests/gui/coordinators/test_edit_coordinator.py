@@ -73,6 +73,9 @@ def test_queue_video_trim_thumbnails_accepts_missing_duration() -> None:
     ) as worker_cls, patch(
         "iPhoto.gui.coordinators.edit_coordinator.QThreadPool.globalInstance",
         return_value=pool,
+    ), patch(
+        "iPhoto.gui.coordinators.edit_coordinator.probe_video_rotation",
+        return_value=(0, 0, 0),
     ):
         EditCoordinator._queue_video_trim_thumbnails(coordinator, None)
 
@@ -87,3 +90,22 @@ def test_queue_video_trim_thumbnails_accepts_missing_duration() -> None:
     assert coordinator._video_trim_diag[1]["duration_sec"] is None
     trim_bar.clear.assert_called_once_with()
     pool.start.assert_called_once_with(worker_instance, -1)
+
+
+def test_estimate_video_trim_thumbnail_request_scales_for_portrait_video() -> None:
+    coordinator = EditCoordinator.__new__(EditCoordinator)
+    trim_bar = Mock()
+    trim_bar.thumbnail_view_width.return_value = 1000
+    coordinator._ui = SimpleNamespace(video_trim_bar=trim_bar)
+
+    with patch(
+        "iPhoto.gui.coordinators.edit_coordinator.probe_video_rotation",
+        return_value=(0, 540, 960),
+    ):
+        width, count = EditCoordinator._estimate_video_trim_thumbnail_request(
+            coordinator,
+            Path("/fake/video.mp4"),
+        )
+
+    assert width == 1000
+    assert count == 45

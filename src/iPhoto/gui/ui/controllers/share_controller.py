@@ -158,7 +158,7 @@ class RenderVideoClipboardWorker(QRunnable):
             output_dir = Path(tempfile.gettempdir()) / "iPhoto-share"
             output_dir.mkdir(parents=True, exist_ok=True)
             _prune_share_dir(output_dir)
-            path_hash = hashlib.sha1(str(self._path.resolve()).encode()).hexdigest()[:12]
+            path_hash = hashlib.sha256(str(self._path.resolve()).encode()).hexdigest()[:12]
             destination = output_dir / f"{self._path.stem}_{path_hash}.mp4"
             if render_video(self._path, destination):
                 self.signals.success.emit(str(destination))

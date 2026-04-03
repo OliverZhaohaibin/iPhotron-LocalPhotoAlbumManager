@@ -535,7 +535,8 @@ class VideoArea(QWidget):
         if not self._suppress_trim_pause and display_position == position:
             self._restart_from_trim_in_on_play = False
             self._end_hold_display_ms = None
-        self._sync_position_display(display_position)
+        if not self._suppress_trim_pause:
+            self._sync_position_display(display_position)
 
     def _on_duration_changed(self, duration: int) -> None:
         self._current_duration_ms = int(duration)
@@ -712,13 +713,13 @@ class VideoArea(QWidget):
     def _wire_edit_viewer(self) -> None:
         """Forward image-viewer style signals from the adjusted preview surface."""
 
-        self._edit_viewer.zoomChanged.connect(self.zoomChanged)
-        self._edit_viewer.cropChanged.connect(self.cropChanged)
-        self._edit_viewer.cropInteractionStarted.connect(self.cropInteractionStarted)
-        self._edit_viewer.cropInteractionFinished.connect(self.cropInteractionFinished)
-        self._edit_viewer.colorPicked.connect(self.colorPicked)
-        self._edit_viewer.firstFrameReady.connect(self.firstFrameReady)
-        self._renderer.firstFrameReady.connect(self.firstFrameReady)
+        self._edit_viewer.zoomChanged.connect(self.zoomChanged.emit)
+        self._edit_viewer.cropChanged.connect(self.cropChanged.emit)
+        self._edit_viewer.cropInteractionStarted.connect(self.cropInteractionStarted.emit)
+        self._edit_viewer.cropInteractionFinished.connect(self.cropInteractionFinished.emit)
+        self._edit_viewer.colorPicked.connect(self.colorPicked.emit)
+        self._edit_viewer.firstFrameReady.connect(self.firstFrameReady.emit)
+        self._renderer.firstFrameReady.connect(self.firstFrameReady.emit)
 
     def _on_mouse_activity(self) -> None:
         if not self._controls_enabled:

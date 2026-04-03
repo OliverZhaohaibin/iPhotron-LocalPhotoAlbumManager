@@ -35,21 +35,23 @@ def _source_path() -> Path:
 
 
 def _build_library() -> bool:
-    """Compile the native helper library.
+    """Ensure the native helper library is available.
 
-    Compilation is **only attempted** when the environment variable
-    ``IPHOTO_BUILD_NATIVE_THUMB`` is set to ``1``.  This avoids unexpected
-    toolchain invocations on end-user systems, in sandboxes, or during normal
-    app startup.  When the variable is absent, this function returns ``False``
-    immediately so the pure-Python fallback is used.
+    If a prebuilt shared library already exists next to this module, it is used
+    unconditionally. Compilation is only attempted when the environment
+    variable ``IPHOTO_BUILD_NATIVE_THUMB`` is set to ``1``. This avoids
+    unexpected toolchain invocations on end-user systems, in sandboxes, or
+    during normal app startup while still allowing packaged native builds to
+    load normally.
     """
+    lib_path = _library_path()
+    if lib_path.exists():
+        return True
+
     if os.environ.get("IPHOTO_BUILD_NATIVE_THUMB") != "1":
         return False
 
-    lib_path = _library_path()
     src_path = _source_path()
-    if lib_path.exists():
-        return True
     if not src_path.exists():
         return False
 
@@ -61,8 +63,14 @@ def _build_library() -> bool:
             ]
         else:
             commands = [
-                ["gcc", "-O3", "-march=native", "-shared", "-fPIC", "-o", str(lib_path), str(src_path), "-lm"],
-                ["gcc", "-O2", "-shared", "-fPIC", "-o", str(lib_path), str(src_path), "-lm"],
+                [
+                    "gcc", "-O3", "-march=native", "-shared", "-fPIC",
+                    "-o", str(lib_path), str(src_path), "-lm",
+                ],
+                [
+                    "gcc", "-O2", "-shared", "-fPIC",
+                    "-o", str(lib_path), str(src_path), "-lm",
+                ],
             ]
 
         for command in commands:

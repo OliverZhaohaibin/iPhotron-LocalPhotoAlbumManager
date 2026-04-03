@@ -5,6 +5,10 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import pytest
+
+pytest.importorskip("PySide6", reason="PySide6 is required for edit coordinator tests", exc_type=ImportError)
+pytest.importorskip("PySide6.QtWidgets", reason="Qt widgets not available", exc_type=ImportError)
+
 from PySide6.QtGui import QImage
 from PySide6.QtWidgets import QApplication, QSlider
 
@@ -12,7 +16,7 @@ from iPhoto.core.adjustment_mapping import VIDEO_TRIM_IN_KEY, VIDEO_TRIM_OUT_KEY
 from iPhoto.gui.coordinators.edit_coordinator import EditCoordinator
 
 
-@pytest.fixture
+@pytest.fixture(scope="module")
 def qapp():
     app = QApplication.instance()
     if app is None:

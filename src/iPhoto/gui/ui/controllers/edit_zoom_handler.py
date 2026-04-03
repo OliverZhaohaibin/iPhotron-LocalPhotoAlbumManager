@@ -70,6 +70,7 @@ class EditZoomHandler(QObject):
         self._zoom_slider.blockSignals(True)
         self._zoom_slider.setValue(slider_value)
         self._zoom_slider.blockSignals(False)
+
     def set_viewer(self, viewer: GLImageViewer | "VideoArea") -> None:
         """Retarget the shared zoom controls to *viewer*."""
 

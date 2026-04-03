@@ -253,15 +253,9 @@ class _ThumbnailCanvas(QWidget):
         width = self.width()
         if width <= 0:
             return
-        left_inner, right_inner = self._inner_bounds(width)
-        span = right_inner - left_inner
-        ratio_span = self._out_ratio - self._in_ratio
-        if span > 0 and ratio_span > 0:
-            t = (x_pos - left_inner) / span
-            t = max(0.0, min(1.0, t))
-            ratio = self._in_ratio + t * ratio_span
-        else:
-            ratio = self._in_ratio
+        max_x = max(width - 1, 1)
+        ratio = max(0.0, min(1.0, float(x_pos) / float(max_x)))
+        ratio = max(self._in_ratio, min(self._out_ratio, ratio))
         self._playhead_ratio = ratio
         self.update()
         self.playheadSeeked.emit(ratio)
@@ -277,14 +271,9 @@ class _ThumbnailCanvas(QWidget):
         width = self.width()
         if width <= 0:
             return None
-        left_inner, right_inner = self._inner_bounds(width)
-        span = right_inner - left_inner
-        ratio_span = self._out_ratio - self._in_ratio
-        if span > 0 and ratio_span > 0:
-            t = (self._playhead_ratio - self._in_ratio) / ratio_span
-            t = max(0.0, min(1.0, t))
-            return int(left_inner + t * span)
-        return int(left_inner)
+        max_x = max(width - 1, 0)
+        ratio = max(0.0, min(1.0, self._playhead_ratio))
+        return int(round(ratio * max_x))
 
     def _rebuild_static_cache(self) -> None:
         width = self.width()

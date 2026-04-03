@@ -18,6 +18,7 @@ from iPhoto.gui.ui.widgets.video_trim_bar import (
     THEME_COLOR,
     TRIM_HIGHLIGHT_COLOR,
     VideoTrimBar,
+    _ThumbnailCanvas,
     _HandleButton,
 )
 
@@ -93,3 +94,18 @@ def test_handle_drag_uses_parent_global_position_not_local_clip() -> None:
     parent_x = _HandleButton._parent_x_from_event(fake_parent, fake_event)
 
     assert parent_x == 180
+
+
+def test_playhead_position_is_not_recomputed_when_trim_changes() -> None:
+    """Changing in/out handles should not remap the current playhead position."""
+
+    canvas = _ThumbnailCanvas()
+    canvas.resize(400, BAR_HEIGHT)
+    canvas.set_playhead(0.5)
+    before = canvas._playhead_x()
+
+    canvas.set_trim(0.2, 0.8)
+    after = canvas._playhead_x()
+
+    assert before == 200
+    assert after == before

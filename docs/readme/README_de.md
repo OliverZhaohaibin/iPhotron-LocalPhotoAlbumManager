@@ -95,6 +95,30 @@ Wichtige Highlights:
 ![Preview interface](../picture/preview.png)
 ---
 
+## 🗺 Maps Extension
+
+Die Offline-OBF-Kartenlaufzeit von iPhotron wird als selbstenthaltene
+**maps extension** unter `src/maps/tiles/extension/` bereitgestellt. Genau
+dieses Verzeichnislayout wird von der lokalen Entwicklung, von Paket-Builds
+und vom Windows-Installer verwendet.
+
+Die Extension enthält derzeit:
+- Offline-Kartendaten in `World_basemap_2.obf`
+- OsmAnd-Ressourcen unter `misc/`, `poi/`, `rendering_styles/` und `routing/`
+- native Binärdateien unter `bin/`, darunter `osmand_render_helper.exe`,
+  `osmand_native_widget.dll`, `OsmAndCore_shared.dll` und die benötigten Qt-DLLs
+
+Die Extension wird im Upstream-Teilprojekt
+[PySide6-OsmAnd-SDK](https://github.com/OliverZhaohaibin/PySide6-OsmAnd-SDK)
+gebaut. Dieses Repository enthält die vendorten OsmAnd-Quellen, Windows-
+Buildskripte, die native Qt-Widget-Bridge und die Preview-App, aus denen die
+hier verwendete Laufzeit erzeugt wird.
+
+Den vollständigen Workflow "maps extension aus dem Side-Project in dieses
+Repository übernehmen" findest du in [Development](../development.md). Hinweise
+zu Nuitka, Runtime-Synchronisierung und Windows-Installer stehen in
+[Executable Build](../misc/BUILD_EXE.md).
+
 ## ✨ Funktionen
 
 ### 🗺 Standortansicht
@@ -157,13 +181,15 @@ Detaillierte technische Dokumentation (auf Englisch):
 
 [![Architecture](https://img.shields.io/badge/📐_Architecture-blue?style=for-the-badge)](../architecture.md)
 [![Development](https://img.shields.io/badge/🧰_Development-green?style=for-the-badge)](../development.md)
+[![Executable Build](https://img.shields.io/badge/🧱_Executable_Build-purple?style=for-the-badge)](../misc/BUILD_EXE.md)
 [![Security](https://img.shields.io/badge/🔒_Security-red?style=for-the-badge)](../security.md)
 [![Changelog](https://img.shields.io/badge/📋_Changelog-orange?style=for-the-badge)](../CHANGELOG.md)
 
 | Dokument | Beschreibung |
 |----------|-------------|
 | [Architecture](../architecture.md) | Gesamtarchitektur, Modulgrenzen, Datenfluss, wichtige Designentscheidungen |
-| [Development](../development.md) | Entwicklungsumgebung, Abhängigkeiten, Build/Paket, Debugging, Code-Stil, Commit-Konventionen |
+| [Development](../development.md) | Entwicklungsumgebung, Abhängigkeiten, Debugging und der vollständige maps-extension-Workflow über das Side-Project |
+| [Executable Build](../misc/BUILD_EXE.md) | Nuitka-Paketierung, AOT, maps-extension-Synchronisierung und Hinweise zum Windows-Installer |
 | [Security](../security.md) | Berechtigungen, Verschlüsselung, Datenspeicherorte, Bedrohungsmodell |
 | [Changelog](../CHANGELOG.md) | Alle Versionshinweise und Änderungen |
 

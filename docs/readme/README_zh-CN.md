@@ -94,6 +94,28 @@ iphoto-gui /photos/LondonTrip
 ![Preview interface](../picture/preview.png)
 ---
 
+## 🗺 Maps Extension
+
+iPhotron 的离线 OBF 地图运行时以自包含的 **maps extension** 形式提供，
+根目录位于 `src/maps/tiles/extension/`。本项目源码运行、Nuitka 打包产物、
+以及 Windows 安装器都以这套目录结构作为运行时约定。
+
+当前 extension 主要包含：
+- `World_basemap_2.obf` 离线地图数据
+- `misc/`、`poi/`、`rendering_styles/`、`routing/` 下的 OsmAnd 资源
+- `bin/` 下的原生二进制，例如 `osmand_render_helper.exe`、
+  `osmand_native_widget.dll`、`OsmAndCore_shared.dll` 以及所需 Qt DLL
+
+这套 extension 的上游构建工作区是独立子项目
+[PySide6-OsmAnd-SDK](https://github.com/OliverZhaohaibin/PySide6-OsmAnd-SDK)。
+该仓库维护 vendored OsmAnd 源码、Windows 构建脚本、原生 Qt Widget bridge
+以及预览程序，本仓库消费的运行时产物正是由它生成。
+
+完整的“如何基于 side project 构建本仓库 maps extension”流程请参阅
+[Development](../development.md)；
+Nuitka 打包、runtime 同步与安装器说明请参阅
+[Executable Build](../misc/BUILD_EXE.md)。
+
 ## ✨ 功能特性
 
 ### 🗺 位置视图
@@ -154,13 +176,15 @@ iphoto-gui /photos/LondonTrip
 
 [![Architecture](https://img.shields.io/badge/📐_Architecture-blue?style=for-the-badge)](../architecture.md)
 [![Development](https://img.shields.io/badge/🧰_Development-green?style=for-the-badge)](../development.md)
+[![Executable Build](https://img.shields.io/badge/🧱_Executable_Build-purple?style=for-the-badge)](../misc/BUILD_EXE.md)
 [![Security](https://img.shields.io/badge/🔒_Security-red?style=for-the-badge)](../security.md)
 [![Changelog](https://img.shields.io/badge/📋_Changelog-orange?style=for-the-badge)](../CHANGELOG.md)
 
 | 文档 | 说明 |
 |------|------|
 | [Architecture](../architecture.md) | 整体架构、模块边界、数据流、关键设计决策 |
-| [Development](../development.md) | 开发环境、依赖、构建/打包、调试、代码风格、提交规范 |
+| [Development](../development.md) | 开发环境、依赖、调试，以及基于 side project 的 maps extension 完整构建流程 |
+| [Executable Build](../misc/BUILD_EXE.md) | Nuitka 打包、AOT、maps extension 同步与 Windows 安装器说明 |
 | [Security](../security.md) | 权限、加密、数据存储位置、威胁模型 |
 | [Changelog](../CHANGELOG.md) | 所有版本更新记录 |
 

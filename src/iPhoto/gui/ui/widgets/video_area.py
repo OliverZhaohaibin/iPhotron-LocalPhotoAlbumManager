@@ -137,6 +137,7 @@ class VideoArea(QWidget):
         self._adjusted_first_frame_pending = False
         self._suppress_trim_pause = False
         self._restart_from_trim_in_on_play = False
+        self._end_hold_display_ms: int | None = None
 
         self._apply_surface(surface_color)
         # --- End Video Renderer Setup ---
@@ -246,6 +247,7 @@ class VideoArea(QWidget):
         """Update the active in/out points in milliseconds."""
 
         self._restart_from_trim_in_on_play = False
+        self._end_hold_display_ms = None
         duration = max(int(self._current_duration_ms), 0)
         if duration > 0:
             trim_in, trim_out = normalise_video_trim(
@@ -412,6 +414,7 @@ class VideoArea(QWidget):
         self._trim_in_ms = 0
         self._trim_out_ms = 0
         self._current_duration_ms = 0
+        self._end_hold_display_ms = None
 
         # Probe the container-level display-matrix rotation from ffprobe
         # *before* setting the source.  The renderer uses the probed value
@@ -445,16 +448,19 @@ class VideoArea(QWidget):
         if self._restart_from_trim_in_on_play:
             self._player.setPosition(self._trim_in_ms if self._trim_in_ms > 0 else 0)
             self._restart_from_trim_in_on_play = False
+            self._end_hold_display_ms = None
         elif (
             duration > 0
             and self._player.playbackState() == QMediaPlayer.PlaybackState.PausedState
             and position >= hold_pos
         ):
             self._player.setPosition(self._trim_in_ms if self._trim_in_ms > 0 else 0)
+            self._end_hold_display_ms = None
         elif position < self._trim_in_ms or (
             self._trim_out_ms > 0 and position >= self._trim_out_ms
         ):
             self._player.setPosition(self._trim_in_ms)
+            self._end_hold_display_ms = None
         self._player.play()
 
     def is_playing(self) -> bool:
@@ -469,6 +475,7 @@ class VideoArea(QWidget):
     def seek(self, position: int) -> None:
         """Seek to a specific position in milliseconds."""
         self._restart_from_trim_in_on_play = False
+        self._end_hold_display_ms = None
         target = int(position)
         if target < self._trim_in_ms:
             target = self._trim_in_ms
@@ -494,6 +501,7 @@ class VideoArea(QWidget):
         self._trim_in_ms = 0
         self._trim_out_ms = 0
         self._restart_from_trim_in_on_play = False
+        self._end_hold_display_ms = None
 
     def _on_video_frame(self, frame: "QVideoFrame") -> None:
         """Forward each decoded frame to the GPU renderer."""
@@ -510,20 +518,20 @@ class VideoArea(QWidget):
 
     def _on_position_changed(self, position: int) -> None:
         if self._trim_out_ms > self._trim_in_ms and position >= self._trim_out_ms:
-            if not self._suppress_trim_pause:
-                self._suppress_trim_pause = True
-                hold_pos = max(self._trim_in_ms, self._trim_out_ms - VIDEO_COMPLETE_HOLD_BACKSTEP_MS)
-                self._restart_from_trim_in_on_play = True
-                self._player.pause()
-                self._player.setPosition(hold_pos)
-                self._suppress_trim_pause = False
-                self.show_controls()
-                self.playbackFinished.emit()
+            self._enter_end_hold(
+                end_pos=self._trim_out_ms,
+                hold_pos=max(
+                    self._trim_in_ms,
+                    self._trim_out_ms - VIDEO_COMPLETE_HOLD_BACKSTEP_MS,
+                ),
+            )
             return
-        if not self._suppress_trim_pause:
+        display_position = self._display_position(position)
+        if not self._suppress_trim_pause and display_position == position:
             self._restart_from_trim_in_on_play = False
-        self._player_bar.set_position(position)
-        self.positionChanged.emit(position)
+            self._end_hold_display_ms = None
+        self._player_bar.set_position(display_position)
+        self.positionChanged.emit(display_position)
 
     def _on_duration_changed(self, duration: int) -> None:
         self._current_duration_ms = int(duration)
@@ -561,12 +569,42 @@ class VideoArea(QWidget):
                 return
             # Step back a few milliseconds and pause so the last visible
             # frame remains on screen instead of flashing to black.
-            hold_pos = max(0, duration - VIDEO_COMPLETE_HOLD_BACKSTEP_MS)
-            self._restart_from_trim_in_on_play = True
-            self._player.setPosition(hold_pos)
-            self._player.pause()
-            self.show_controls()
-            self.playbackFinished.emit()
+            self._enter_end_hold(
+                end_pos=int(duration),
+                hold_pos=max(0, int(duration) - VIDEO_COMPLETE_HOLD_BACKSTEP_MS),
+            )
+
+    def _display_position(self, position: int) -> int:
+        """Return the timeline position that should be exposed to the UI."""
+
+        if self._restart_from_trim_in_on_play and self._end_hold_display_ms is not None:
+            end_pos = self._end_hold_display_ms
+            lower_bound = max(self._trim_in_ms, end_pos - VIDEO_COMPLETE_HOLD_BACKSTEP_MS)
+            if lower_bound <= position <= end_pos:
+                return end_pos
+        return position
+
+    def _enter_end_hold(self, *, end_pos: int, hold_pos: int) -> None:
+        """Pause on the last frame while keeping the timeline cursor at the end."""
+
+        end_pos = max(0, int(end_pos))
+        hold_pos = max(0, min(int(hold_pos), end_pos))
+        if self._restart_from_trim_in_on_play and self._end_hold_display_ms == end_pos:
+            self._player_bar.set_position(end_pos)
+            self.positionChanged.emit(end_pos)
+            return
+        if self._suppress_trim_pause:
+            return
+        self._suppress_trim_pause = True
+        self._end_hold_display_ms = end_pos
+        self._restart_from_trim_in_on_play = True
+        self._player.pause()
+        self._player.setPosition(hold_pos)
+        self._suppress_trim_pause = False
+        self._player_bar.set_position(end_pos)
+        self.positionChanged.emit(end_pos)
+        self.show_controls()
+        self.playbackFinished.emit()
 
     def _on_volume_changed(self, value: int) -> None:
         """Handle volume changes from the player bar."""

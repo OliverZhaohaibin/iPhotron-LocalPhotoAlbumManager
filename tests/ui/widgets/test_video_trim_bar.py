@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import pytest
+from types import SimpleNamespace
 
 pytest.importorskip("PySide6", reason="PySide6 is required for GUI tests", exc_type=ImportError)
 pytest.importorskip("PySide6.QtWidgets", reason="Qt widgets not available", exc_type=ImportError)
 
+from PySide6.QtCore import QPoint, QPointF
 from PySide6.QtWidgets import QApplication, QFrame, QPushButton
 
 from iPhoto.gui.ui.widgets.video_trim_bar import (
@@ -16,6 +18,7 @@ from iPhoto.gui.ui.widgets.video_trim_bar import (
     THEME_COLOR,
     TRIM_HIGHLIGHT_COLOR,
     VideoTrimBar,
+    _HandleButton,
 )
 
 
@@ -76,3 +79,17 @@ def test_set_playing_tracks_transport_state(qapp) -> None:
 
     bar.set_playing(False)
     assert bar.is_playing() is False
+
+
+def test_handle_drag_uses_parent_global_position_not_local_clip() -> None:
+    """Dragging should follow the global cursor position even past button edges."""
+
+    fake_parent = SimpleNamespace(mapFromGlobal=lambda point: QPoint(180, point.y()))
+    fake_event = SimpleNamespace(
+        globalPosition=lambda: QPointF(420.0, 32.0),
+        position=lambda: QPointF(23.0, 12.0),
+    )
+
+    parent_x = _HandleButton._parent_x_from_event(fake_parent, fake_event)
+
+    assert parent_x == 180

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Iterable
 
-from PySide6.QtCore import QSize, Qt, Signal
+from PySide6.QtCore import QPointF, QSize, Qt, Signal
 from PySide6.QtGui import QColor, QPainter, QPainterPath, QPen, QPixmap
 from PySide6.QtWidgets import (
     QFrame,
@@ -91,8 +91,25 @@ class _HandleButton(QPushButton):
 
     def mouseMoveEvent(self, event) -> None:  # pragma: no cover - GUI behaviour
         if self._dragging:
-            pos_in_parent = self.mapToParent(event.position().toPoint())
-            self.dragMoved.emit(pos_in_parent.x() - self._grab_offset_x)
+            parent_x = self._parent_x_from_event(self.parentWidget(), event)
+            self.dragMoved.emit(parent_x - self._grab_offset_x)
+
+    @staticmethod
+    def _parent_x_from_event(parent: QWidget | None, event) -> int:
+        """Return the cursor x-position in *parent* coordinates.
+
+        During handle drags Qt keeps delivering mouse-move events to the
+        pressed button even after the cursor leaves its rect. Using the local
+        event position makes the x-value clamp to the button edge, which causes
+        the right trim handle to lag behind the cursor. Mapping the global
+        cursor position back into the parent keeps both handles aligned with the
+        actual pointer.
+        """
+
+        global_pos = event.globalPosition() if hasattr(event, "globalPosition") else QPointF()
+        if parent is not None:
+            return parent.mapFromGlobal(global_pos.toPoint()).x()
+        return int(event.position().x())
 
     def mouseReleaseEvent(self, event) -> None:  # pragma: no cover - GUI behaviour
         if event.button() == Qt.MouseButton.LeftButton and self._dragging:

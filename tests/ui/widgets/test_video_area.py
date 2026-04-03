@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from unittest.mock import Mock, call, patch
+
 import pytest
 
 pytest.importorskip("PySide6", reason="PySide6 is required for GUI tests")
@@ -515,6 +517,40 @@ class TestVideoArea:
         finished_spy.assert_called_once_with()
         assert va._restart_from_trim_in_on_play is True
 
+    def test_trim_out_hold_keeps_timeline_cursor_at_out_point(self, qapp) -> None:
+        """The playhead should stay at trim-out instead of visibly stepping back."""
+
+        va = VideoArea()
+        va._trim_in_ms = 1200
+        va._trim_out_ms = 4200
+        position_spy = Mock()
+        va.positionChanged.connect(position_spy)
+
+        with patch.object(va._player, "pause"), patch.object(
+            va._player,
+            "setPosition",
+        ) as mock_set_pos, patch.object(
+            va._player_bar,
+            "set_position",
+        ) as mock_bar_pos, patch.object(
+            va,
+            "show_controls",
+        ):
+            va._on_position_changed(4200)
+            va._on_position_changed(4200 - VIDEO_COMPLETE_HOLD_BACKSTEP_MS)
+
+        assert mock_set_pos.call_args_list == [
+            call(4200 - VIDEO_COMPLETE_HOLD_BACKSTEP_MS),
+        ]
+        assert mock_bar_pos.call_args_list == [
+            call(4200),
+            call(4200),
+        ]
+        assert position_spy.call_args_list == [
+            call(4200),
+            call(4200),
+        ]
+
     def test_play_restarts_from_trim_in_after_trim_out_hold(self, qapp, mocker):
         """Pressing play after trimming stopped playback should restart at trim in."""
 
@@ -533,6 +569,45 @@ class TestVideoArea:
         mock_set_pos.assert_called_once_with(1200)
         mock_play.assert_called_once()
         assert va._restart_from_trim_in_on_play is False
+
+    def test_end_of_media_hold_keeps_timeline_cursor_at_duration(self, qapp) -> None:
+        """The playhead should remain at the duration marker after EndOfMedia."""
+
+        va = VideoArea()
+        position_spy = Mock()
+        va.positionChanged.connect(position_spy)
+
+        with patch.object(va._player, "duration", return_value=5000), patch.object(
+            va._player,
+            "position",
+            return_value=5000,
+        ), patch.object(
+            va._player,
+            "pause",
+        ), patch.object(
+            va._player,
+            "setPosition",
+        ) as mock_set_pos, patch.object(
+            va._player_bar,
+            "set_position",
+        ) as mock_bar_pos, patch.object(
+            va,
+            "show_controls",
+        ):
+            va._on_media_status_changed(QMediaPlayer.MediaStatus.EndOfMedia)
+            va._on_position_changed(5000 - VIDEO_COMPLETE_HOLD_BACKSTEP_MS)
+
+        assert mock_set_pos.call_args_list == [
+            call(5000 - VIDEO_COMPLETE_HOLD_BACKSTEP_MS),
+        ]
+        assert mock_bar_pos.call_args_list == [
+            call(5000),
+            call(5000),
+        ]
+        assert position_spy.call_args_list == [
+            call(5000),
+            call(5000),
+        ]
 
     def test_load_video_clears_frame(self, qapp, mocker):
         """load_video should clear the renderer frame."""

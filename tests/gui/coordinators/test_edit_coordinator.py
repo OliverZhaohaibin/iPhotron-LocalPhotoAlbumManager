@@ -2,41 +2,37 @@ from __future__ import annotations
 
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
 from iPhoto.gui.coordinators.edit_coordinator import EditCoordinator
 
 
-def test_restore_detail_video_preview_reloads_and_restarts_playback(mocker) -> None:
+def test_restore_detail_video_preview_reloads_and_restarts_playback() -> None:
     coordinator = EditCoordinator.__new__(EditCoordinator)
-    video_area = mocker.Mock()
+    video_area = Mock()
     coordinator._ui = SimpleNamespace(video_area=video_area)
 
     source = Path("/fake/video.mp4")
     raw_adjustments = {"Crop_W": 0.8}
     render_adjustments = {"Crop_W": 0.8, "Exposure": 0.2}
 
-    mocker.patch(
+    with patch(
         "iPhoto.gui.coordinators.edit_coordinator.sidecar.load_adjustments",
         return_value=raw_adjustments,
-    )
-    mocker.patch(
+    ), patch(
         "iPhoto.gui.coordinators.edit_coordinator.sidecar.trim_is_non_default",
         return_value=True,
-    )
-    mocker.patch(
+    ), patch(
         "iPhoto.gui.coordinators.edit_coordinator.sidecar.has_non_default_adjustments",
         return_value=True,
-    )
-    mocker.patch(
+    ), patch(
         "iPhoto.gui.coordinators.edit_coordinator.sidecar.normalise_video_trim",
         return_value=(1.25, 4.5),
-    )
-    mocker.patch(
+    ), patch(
         "iPhoto.gui.coordinators.edit_coordinator.sidecar.resolve_render_adjustments",
         return_value=render_adjustments,
-    )
-
-    EditCoordinator._restore_detail_video_preview(coordinator, source)
+    ):
+        EditCoordinator._restore_detail_video_preview(coordinator, source)
 
     video_area.load_video.assert_called_once_with(
         source,
@@ -45,3 +41,49 @@ def test_restore_detail_video_preview_reloads_and_restarts_playback(mocker) -> N
         adjusted_preview=True,
     )
     video_area.play.assert_called_once_with()
+
+
+def test_queue_video_trim_thumbnails_accepts_missing_duration() -> None:
+    coordinator = EditCoordinator.__new__(EditCoordinator)
+    trim_bar = Mock()
+    trim_bar.thumbnail_view_width.return_value = 0
+    coordinator._ui = SimpleNamespace(video_trim_bar=trim_bar)
+    coordinator._current_source = Path("/fake/video.mp4")
+    coordinator._video_thumbnail_generation = 0
+    coordinator._video_trim_diag = {}
+    coordinator._video_trim_worker = None
+    coordinator._emit_video_trim_diag = Mock()
+
+    class _SignalStub:
+        def connect(self, *args, **kwargs) -> None:
+            return None
+
+    worker_instance = SimpleNamespace(
+        signals=SimpleNamespace(
+            thumbnail=_SignalStub(),
+            ready=_SignalStub(),
+            error=_SignalStub(),
+            finished=_SignalStub(),
+        )
+    )
+    pool = Mock()
+    with patch(
+        "iPhoto.gui.coordinators.edit_coordinator.VideoTrimThumbnailWorker",
+        return_value=worker_instance,
+    ) as worker_cls, patch(
+        "iPhoto.gui.coordinators.edit_coordinator.QThreadPool.globalInstance",
+        return_value=pool,
+    ):
+        EditCoordinator._queue_video_trim_thumbnails(coordinator, None)
+
+    worker_cls.assert_called_once_with(
+        Path("/fake/video.mp4"),
+        generation=1,
+        duration_sec=None,
+        target_height=72,
+        target_width=96,
+        count=10,
+    )
+    assert coordinator._video_trim_diag[1]["duration_sec"] is None
+    trim_bar.clear.assert_called_once_with()
+    pool.start.assert_called_once_with(worker_instance, -1)

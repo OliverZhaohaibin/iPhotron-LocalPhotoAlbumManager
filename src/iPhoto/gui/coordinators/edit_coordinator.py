@@ -6,7 +6,7 @@ import logging
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional
 
-from PySide6.QtCore import QObject, QSize, QThreadPool, QTimer
+from PySide6.QtCore import QObject, QSize, Qt, QThreadPool, QTimer
 from PySide6.QtGui import QImage, QPixmap
 
 from iPhoto.gui.coordinators.view_router import ViewRouter
@@ -29,6 +29,7 @@ from iPhoto.gui.ui.controllers.edit_preview_manager import resolve_adjustment_ma
 from iPhoto.gui.ui.palette import viewer_surface_color
 from iPhoto.io import sidecar
 from iPhoto.media_classifier import VIDEO_EXTENSIONS
+from iPhoto.utils.logging import get_logger
 from iPhoto.core.adjustment_mapping import (
     VIDEO_TRIM_IN_KEY,
     VIDEO_TRIM_OUT_KEY,
@@ -44,6 +45,7 @@ if TYPE_CHECKING:
     from iPhoto.gui.coordinators.navigation_coordinator import NavigationCoordinator
 
 _LOGGER = logging.getLogger(__name__)
+_APP_LOGGER = get_logger().getChild("video_trim")
 
 
 class EditCoordinator(QObject):
@@ -90,6 +92,8 @@ class EditCoordinator(QObject):
         self._video_color_stats = None
         self._video_thumbnail_generation = 0
         self._video_sidebar_generation = 0
+        self._video_trim_worker: VideoTrimThumbnailWorker | None = None
+        self._video_trim_diag: dict[int, dict[str, object]] = {}
         self._pending_video_duration_sec: float | None = None
 
         # Helpers / Sub-controllers (Ported from EditController)
@@ -297,6 +301,11 @@ class EditCoordinator(QObject):
             return
 
         self._current_source = asset_path
+        self._emit_video_trim_diag(
+            "enter_edit_mode",
+            source=asset_path,
+            is_video=asset_path.suffix.lower() in VIDEO_EXTENSIONS,
+        )
 
         # Load Adjustments
         adjustments = sidecar.load_adjustments(asset_path)
@@ -358,6 +367,7 @@ class EditCoordinator(QObject):
 
         if self._session is None:
             return
+        self._emit_video_trim_diag("start_video_edit_load", source=source)
         self._video_color_stats = None
         self._pending_video_duration_sec = None
         self._video_trim_thumbnail_timer.stop()
@@ -378,6 +388,7 @@ class EditCoordinator(QObject):
         self._ui.video_trim_bar.set_trim_ratios(0.0, 1.0)
         self._ui.video_trim_bar.set_playhead_ratio(0.0)
         self._ui.video_trim_bar.set_playing(False)
+        self._queue_video_trim_thumbnails(None)
         self._ui.video_area.play()
 
     def _on_edit_image_loaded(self, path: Path, image: QImage):
@@ -439,6 +450,8 @@ class EditCoordinator(QObject):
         self._video_sidebar_preview_timer.stop()
         self._video_thumbnail_generation += 1
         self._video_sidebar_generation += 1
+        self._video_trim_worker = None
+        self._video_trim_diag.clear()
 
         if self._theme_controller:
             self._theme_controller.restore_global_theme()
@@ -689,10 +702,16 @@ class EditCoordinator(QObject):
         self._ui.video_area.play()
 
     def _queue_video_trim_thumbnails(self, duration_sec: float | None) -> None:
-        if self._current_source is None or duration_sec is None or duration_sec <= 0.0:
+        if self._current_source is None:
+            self._emit_video_trim_diag(
+                "skip",
+                source=self._current_source,
+                duration_sec=duration_sec,
+            )
             return
+        diag_duration = None if duration_sec is None else round(duration_sec, 3)
         target_width = 96
-        width = self._ui.video_trim_bar.width()
+        width = self._ui.video_trim_bar.thumbnail_view_width()
         if width > 0:
             count = max(6, min(24, width // max(target_width, 1)))
         else:
@@ -701,34 +720,130 @@ class EditCoordinator(QObject):
         generation = self._video_thumbnail_generation
         worker = VideoTrimThumbnailWorker(
             self._current_source,
+            generation=generation,
             duration_sec=duration_sec,
             target_height=72,
             target_width=target_width,
             count=count,
         )
-
-        def _handle_ready(pixmaps, *, worker_generation=generation):
-            if worker_generation != self._video_thumbnail_generation:
-                return
-            if self._session is None or not self._is_video_source():
-                return
-            self._ui.video_trim_bar.set_thumbnails(
-                [
-                    QPixmap.fromImage(image)
-                    for image in pixmaps
-                    if image is not None and not image.isNull()
-                ]
-            )
-            self._apply_video_trim_from_session()
-
-        def _handle_error(message: str, *, worker_generation=generation):
-            if worker_generation != self._video_thumbnail_generation:
-                return
-            _LOGGER.debug("Failed to generate trim thumbnails for %s: %s", self._current_source, message)
-
-        worker.signals.ready.connect(_handle_ready)
-        worker.signals.error.connect(_handle_error)
+        self._video_trim_diag[generation] = {
+            "source": str(self._current_source),
+            "requested_count": count,
+            "duration_sec": diag_duration,
+            "received_images": 0,
+            "ready_batches": 0,
+            "errors": [],
+        }
+        self._emit_video_trim_diag(
+            "queue",
+            generation=generation,
+            source=self._current_source,
+            duration_sec=diag_duration,
+            width=width,
+            requested_count=count,
+        )
+        self._ui.video_trim_bar.clear()
+        self._video_trim_worker = worker
+        worker.signals.thumbnail.connect(
+            self._handle_video_trim_thumbnail_image,
+            Qt.ConnectionType.QueuedConnection,
+        )
+        worker.signals.ready.connect(
+            self._handle_video_trim_thumbnails_ready,
+            Qt.ConnectionType.QueuedConnection,
+        )
+        worker.signals.error.connect(
+            self._handle_video_trim_thumbnail_error,
+            Qt.ConnectionType.QueuedConnection,
+        )
+        worker.signals.finished.connect(
+        self._handle_video_trim_thumbnail_finished,
+            Qt.ConnectionType.QueuedConnection,
+        )
         QThreadPool.globalInstance().start(worker, -1)
+
+    def _handle_video_trim_thumbnail_image(self, image: QImage, generation: int) -> None:
+        if generation != self._video_thumbnail_generation:
+            self._emit_video_trim_diag("drop_image_stale", generation=generation)
+            return
+        if self._session is None or not self._is_video_source() or image.isNull():
+            self._emit_video_trim_diag(
+                "drop_image_invalid",
+                generation=generation,
+                is_video=self._is_video_source(),
+                session=self._session is not None,
+                is_null=image.isNull(),
+            )
+            return
+        diag = self._video_trim_diag.setdefault(generation, {})
+        received = int(diag.get("received_images", 0)) + 1
+        diag["received_images"] = received
+        if received <= 3 or received % 5 == 0:
+            self._emit_video_trim_diag(
+                "image",
+                generation=generation,
+                received_images=received,
+                size=f"{image.width()}x{image.height()}",
+            )
+        self._ui.video_trim_bar.add_thumbnail(QPixmap.fromImage(image))
+
+    def _handle_video_trim_thumbnails_ready(self, images: list[QImage], generation: int) -> None:
+        if generation != self._video_thumbnail_generation:
+            self._emit_video_trim_diag("drop_ready_stale", generation=generation, image_count=len(images))
+            return
+        if self._session is None or not self._is_video_source():
+            self._emit_video_trim_diag(
+                "drop_ready_invalid",
+                generation=generation,
+                image_count=len(images),
+                is_video=self._is_video_source(),
+                session=self._session is not None,
+            )
+            return
+        diag = self._video_trim_diag.setdefault(generation, {})
+        diag["ready_batches"] = int(diag.get("ready_batches", 0)) + 1
+        diag["ready_image_count"] = len(images)
+        self._emit_video_trim_diag(
+            "ready",
+            generation=generation,
+            image_count=len(images),
+            ready_batches=diag["ready_batches"],
+        )
+        self._ui.video_trim_bar.set_thumbnails(
+            [
+                QPixmap.fromImage(image)
+                for image in images
+                if image is not None and not image.isNull()
+            ]
+        )
+        self._apply_video_trim_from_session()
+
+    def _handle_video_trim_thumbnail_error(self, generation: int, message: str) -> None:
+        if generation != self._video_thumbnail_generation:
+            self._emit_video_trim_diag("drop_error_stale", generation=generation, message=message)
+            return
+        diag = self._video_trim_diag.setdefault(generation, {})
+        errors = list(diag.get("errors", []))
+        errors.append(message)
+        diag["errors"] = errors
+        self._emit_video_trim_diag("error", generation=generation, message=message)
+        _LOGGER.warning("Failed to generate trim thumbnails for %s: %s", self._current_source, message)
+
+    def _handle_video_trim_thumbnail_finished(self, generation: int) -> None:
+        if generation != self._video_thumbnail_generation:
+            self._emit_video_trim_diag("drop_finished_stale", generation=generation)
+            return
+        diag = self._video_trim_diag.get(generation, {})
+        self._emit_video_trim_diag(
+            "finished",
+            generation=generation,
+            requested_count=diag.get("requested_count"),
+            received_images=diag.get("received_images"),
+            ready_batches=diag.get("ready_batches"),
+            ready_image_count=diag.get("ready_image_count"),
+            errors=diag.get("errors"),
+        )
+        self._video_trim_worker = None
 
     def _handle_video_duration_changed(self, duration_ms: int) -> None:
         if self._session is None or not self._is_video_source():
@@ -739,8 +854,33 @@ class EditCoordinator(QObject):
         canonical = self._canonical_trim_updates(trim_in_sec, trim_out_sec, duration_sec)
         self._session.set_values(canonical, emit_individual=False)
         self._apply_video_trim_from_session()
-        self._video_trim_thumbnail_timer.start()
+        self._emit_video_trim_diag(
+            "duration_changed",
+            duration_ms=duration_ms,
+            duration_sec=round(duration_sec, 3),
+            trim_in=round(trim_in_sec, 3),
+            trim_out=round(trim_out_sec, 3),
+        )
+        active_diag = self._video_trim_diag.get(self._video_thumbnail_generation, {})
+        has_thumbnails = bool(active_diag.get("received_images")) or bool(active_diag.get("ready_image_count"))
+        if self._video_trim_worker is None and not has_thumbnails:
+            self._queue_video_trim_thumbnails(duration_sec)
+        else:
+            self._emit_video_trim_diag(
+                "duration_changed_no_requeue",
+                generation=self._video_thumbnail_generation,
+                worker_active=self._video_trim_worker is not None,
+                has_thumbnails=has_thumbnails,
+            )
         self._video_sidebar_preview_timer.start()
+
+    def _emit_video_trim_diag(self, stage: str, **fields: object) -> None:
+        parts = [f"{key}={value}" for key, value in fields.items()]
+        message = f"[video-trim] {stage}"
+        if parts:
+            message += " | " + ", ".join(parts)
+        print(message)
+        _APP_LOGGER.warning(message)
 
     def _handle_video_position_changed(self, position_ms: int) -> None:
         if self._session is None or not self._is_video_source():

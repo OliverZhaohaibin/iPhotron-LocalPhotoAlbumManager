@@ -54,16 +54,16 @@ def test_video_trim_bar_builds_demo_transport_shell(qapp) -> None:
     assert bar._strip_host.height() == BAR_HEIGHT
 
 
-def test_play_button_emits_transport_signal(qapp, mocker) -> None:
+def test_play_button_emits_transport_signal(qapp) -> None:
     """Clicking the left transport button should emit playPauseRequested."""
 
     bar = VideoTrimBar()
-    spy = mocker.Mock()
-    bar.playPauseRequested.connect(spy)
+    calls: list[bool] = []
+    bar.playPauseRequested.connect(lambda: calls.append(True))
 
     bar._play_button.click()
 
-    spy.assert_called_once_with()
+    assert calls == [True]
 
 
 def test_set_playing_tracks_transport_state(qapp) -> None:

@@ -486,6 +486,11 @@ class VideoTrimBar(QWidget):
     def set_playhead_ratio(self, ratio: float) -> None:
         self._canvas.set_playhead(ratio)
 
+    def thumbnail_view_width(self) -> int:
+        """Return the drawable width used to decide how many thumbnails to request."""
+
+        return max(self._canvas.width(), self._strip_host.width(), 0)
+
     def set_trim_ratios(self, in_ratio: float, out_ratio: float) -> None:
         self._in_ratio = max(0.0, min(1.0, in_ratio))
         self._out_ratio = max(self._in_ratio, min(1.0, out_ratio))

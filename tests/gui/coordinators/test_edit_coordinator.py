@@ -4,7 +4,18 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
+import pytest
+from PySide6.QtWidgets import QApplication, QSlider
+
 from iPhoto.gui.coordinators.edit_coordinator import EditCoordinator
+
+
+@pytest.fixture
+def qapp():
+    app = QApplication.instance()
+    if app is None:
+        app = QApplication([])
+    yield app
 
 
 def test_restore_detail_video_preview_reloads_and_restarts_playback() -> None:
@@ -109,3 +120,79 @@ def test_estimate_video_trim_thumbnail_request_scales_for_portrait_video() -> No
 
     assert width == 1000
     assert count == 45
+
+
+def test_probe_video_frame_step_ms_uses_metadata_frame_rate() -> None:
+    coordinator = EditCoordinator.__new__(EditCoordinator)
+
+    with patch(
+        "iPhoto.gui.coordinators.edit_coordinator.read_video_meta",
+        return_value={"frame_rate": 59.94},
+    ):
+        step_ms = EditCoordinator._probe_video_frame_step_ms(
+            coordinator,
+            Path("/fake/video.mp4"),
+        )
+
+    assert step_ms == 17
+
+
+def test_video_play_pause_shortcut_toggles_edit_video_transport() -> None:
+    coordinator = EditCoordinator.__new__(EditCoordinator)
+    video_area = Mock()
+    video_area.is_playing.return_value = True
+    coordinator._ui = SimpleNamespace(video_area=video_area)
+    coordinator._session = object()
+    coordinator._current_source = Path("/fake/video.mp4")
+    coordinator._router = SimpleNamespace(is_edit_view_active=lambda: True)
+
+    EditCoordinator._handle_video_play_pause_shortcut(coordinator)
+
+    video_area.pause.assert_called_once_with()
+    video_area.note_activity.assert_called_once_with()
+
+
+def test_video_frame_step_shortcut_pauses_and_seeks() -> None:
+    coordinator = EditCoordinator.__new__(EditCoordinator)
+    player_bar = Mock()
+    player_bar.position.return_value = 1000
+    video_area = Mock()
+    video_area.player_bar = player_bar
+    coordinator._ui = SimpleNamespace(video_area=video_area)
+    coordinator._session = object()
+    coordinator._current_source = Path("/fake/video.mp4")
+    coordinator._router = SimpleNamespace(is_edit_view_active=lambda: True)
+    coordinator._video_frame_step_ms = 17
+
+    with patch(
+        "iPhoto.gui.coordinators.edit_coordinator.QApplication.focusWidget",
+        return_value=None,
+    ):
+        EditCoordinator._handle_video_frame_step_shortcut(coordinator, 1)
+
+    video_area.pause.assert_called_once_with()
+    video_area.seek.assert_called_once_with(1017)
+    video_area.note_activity.assert_called_once_with()
+
+
+def test_video_frame_step_shortcut_yields_to_slider_focus(qapp) -> None:
+    coordinator = EditCoordinator.__new__(EditCoordinator)
+    player_bar = Mock()
+    player_bar.position.return_value = 1000
+    video_area = Mock()
+    video_area.player_bar = player_bar
+    coordinator._ui = SimpleNamespace(video_area=video_area)
+    coordinator._session = object()
+    coordinator._current_source = Path("/fake/video.mp4")
+    coordinator._router = SimpleNamespace(is_edit_view_active=lambda: True)
+    coordinator._video_frame_step_ms = 17
+    slider = QSlider()
+
+    with patch(
+        "iPhoto.gui.coordinators.edit_coordinator.QApplication.focusWidget",
+        return_value=slider,
+    ):
+        EditCoordinator._handle_video_frame_step_shortcut(coordinator, 1)
+
+    video_area.pause.assert_not_called()
+    video_area.seek.assert_not_called()

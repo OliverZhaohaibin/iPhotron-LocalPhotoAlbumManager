@@ -8,7 +8,17 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Optional
 
 from PySide6.QtCore import QObject, QSize, Qt, QThreadPool, QTimer
-from PySide6.QtGui import QImage, QPixmap
+from PySide6.QtGui import QImage, QKeySequence, QPixmap, QShortcut
+from PySide6.QtWidgets import (
+    QApplication,
+    QAbstractSlider,
+    QAbstractSpinBox,
+    QComboBox,
+    QLineEdit,
+    QPlainTextEdit,
+    QTextEdit,
+    QWidget,
+)
 
 from iPhoto.gui.coordinators.view_router import ViewRouter
 from iPhoto.events.bus import EventBus
@@ -29,6 +39,7 @@ from iPhoto.gui.ui.tasks.video_sidebar_preview_worker import (
 from iPhoto.gui.ui.controllers.edit_preview_manager import resolve_adjustment_mapping
 from iPhoto.gui.ui.palette import viewer_surface_color
 from iPhoto.io import sidecar
+from iPhoto.io.metadata import read_video_meta
 from iPhoto.media_classifier import VIDEO_EXTENSIONS
 from iPhoto.utils.logging import get_logger
 from iPhoto.utils.ffmpeg import probe_video_rotation
@@ -48,6 +59,7 @@ if TYPE_CHECKING:
 
 _LOGGER = logging.getLogger(__name__)
 _APP_LOGGER = get_logger().getChild("video_trim")
+_DEFAULT_VIDEO_FRAME_STEP_MS = 33
 
 
 class EditCoordinator(QObject):
@@ -97,6 +109,10 @@ class EditCoordinator(QObject):
         self._video_trim_worker: VideoTrimThumbnailWorker | None = None
         self._video_trim_diag: dict[int, dict[str, object]] = {}
         self._pending_video_duration_sec: float | None = None
+        self._video_frame_step_ms = _DEFAULT_VIDEO_FRAME_STEP_MS
+        self._video_play_pause_shortcut: QShortcut | None = None
+        self._video_prev_frame_shortcut: QShortcut | None = None
+        self._video_next_frame_shortcut: QShortcut | None = None
 
         # Helpers / Sub-controllers (Ported from EditController)
         self._zoom_handler = EditZoomHandler(
@@ -155,6 +171,25 @@ class EditCoordinator(QObject):
         self._eyedropper_target = "curve"
 
         self._connect_signals()
+        if isinstance(window, QWidget):
+            self._setup_video_edit_shortcuts(window)
+
+    def _setup_video_edit_shortcuts(self, host: QWidget) -> None:
+        self._video_play_pause_shortcut = QShortcut(QKeySequence(Qt.Key.Key_Space), host)
+        self._video_play_pause_shortcut.setContext(Qt.ShortcutContext.WindowShortcut)
+        self._video_play_pause_shortcut.activated.connect(self._handle_video_play_pause_shortcut)
+
+        self._video_prev_frame_shortcut = QShortcut(QKeySequence(Qt.Key.Key_Left), host)
+        self._video_prev_frame_shortcut.setContext(Qt.ShortcutContext.WindowShortcut)
+        self._video_prev_frame_shortcut.activated.connect(
+            lambda: self._handle_video_frame_step_shortcut(-1)
+        )
+
+        self._video_next_frame_shortcut = QShortcut(QKeySequence(Qt.Key.Key_Right), host)
+        self._video_next_frame_shortcut.setContext(Qt.ShortcutContext.WindowShortcut)
+        self._video_next_frame_shortcut.activated.connect(
+            lambda: self._handle_video_frame_step_shortcut(1)
+        )
 
     def _connect_signals(self):
         # Pipeline signals
@@ -370,6 +405,7 @@ class EditCoordinator(QObject):
         if self._session is None:
             return
         self._emit_video_trim_diag("start_video_edit_load", source=source)
+        self._video_frame_step_ms = self._probe_video_frame_step_ms(source)
         self._video_color_stats = None
         self._pending_video_duration_sec = None
         self._video_trim_thumbnail_timer.stop()
@@ -454,6 +490,7 @@ class EditCoordinator(QObject):
         self._video_sidebar_generation += 1
         self._video_trim_worker = None
         self._video_trim_diag.clear()
+        self._video_frame_step_ms = _DEFAULT_VIDEO_FRAME_STEP_MS
 
         if self._theme_controller:
             self._theme_controller.restore_global_theme()
@@ -933,6 +970,63 @@ class EditCoordinator(QObject):
             self._ui.video_area.pause()
         else:
             self._ui.video_area.play()
+
+    def _handle_video_play_pause_shortcut(self) -> None:
+        if not self._can_handle_video_edit_transport_shortcut(allow_conflicting_focus=True):
+            return
+        self._handle_video_trim_play_pause_requested()
+        self._ui.video_area.note_activity()
+
+    def _handle_video_frame_step_shortcut(self, direction: int) -> None:
+        if direction == 0:
+            return
+        if not self._can_handle_video_edit_transport_shortcut(allow_conflicting_focus=False):
+            return
+        step_ms = max(int(self._video_frame_step_ms), 1)
+        position_ms = int(self._ui.video_area.player_bar.position())
+        self._ui.video_area.pause()
+        self._ui.video_area.seek(position_ms + int(direction) * step_ms)
+        self._ui.video_area.note_activity()
+
+    def _can_handle_video_edit_transport_shortcut(self, *, allow_conflicting_focus: bool) -> bool:
+        if self._session is None or not self._is_video_source():
+            return False
+        if not self._router.is_edit_view_active():
+            return False
+        if allow_conflicting_focus:
+            return True
+        return not self._focus_blocks_video_transport_shortcuts(QApplication.focusWidget())
+
+    @staticmethod
+    def _focus_blocks_video_transport_shortcuts(widget: QWidget | None) -> bool:
+        if widget is None:
+            return False
+        return isinstance(
+            widget,
+            (
+                QAbstractSlider,
+                QAbstractSpinBox,
+                QComboBox,
+                QLineEdit,
+                QPlainTextEdit,
+                QTextEdit,
+            ),
+        )
+
+    def _probe_video_frame_step_ms(self, source: Path) -> int:
+        try:
+            info = read_video_meta(source)
+        except Exception:
+            _LOGGER.debug("Failed to probe frame rate for %s", source, exc_info=True)
+            return _DEFAULT_VIDEO_FRAME_STEP_MS
+
+        try:
+            frame_rate = float(info.get("frame_rate"))
+        except (TypeError, ValueError):
+            return _DEFAULT_VIDEO_FRAME_STEP_MS
+        if frame_rate <= 0.0:
+            return _DEFAULT_VIDEO_FRAME_STEP_MS
+        return max(int(round(1000.0 / frame_rate)), 1)
 
     def _handle_trim_in_ratio_changed(self, ratio: float) -> None:
         if self._session is None or not self._is_video_source():

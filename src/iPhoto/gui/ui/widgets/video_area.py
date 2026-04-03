@@ -534,6 +534,10 @@ class VideoArea(QWidget):
             # Clamp an existing trim range to the newly known duration.
             self._trim_in_ms = min(self._trim_in_ms, int(duration))
             self._trim_out_ms = min(self._trim_out_ms, int(duration))
+            # After clamping, guard against an invalid range (trim_in >= trim_out).
+            if self._trim_in_ms >= self._trim_out_ms:
+                self._trim_in_ms = 0
+                self._trim_out_ms = int(duration)
             current_pos = self._player.position()
             if current_pos > self._trim_out_ms:
                 self._player.setPosition(self._trim_out_ms)

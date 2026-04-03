@@ -336,11 +336,15 @@ def _parse_hhmmss_duration(value: object) -> float | None:
     if len(parts) != 3:
         return None
     try:
-        hours, minutes, seconds = int(parts[0]), int(parts[1]), float(parts[2])
-        total = hours * 3600 + minutes * 60 + seconds
-        return total if total > 0 else None
+        hours = int(parts[0])
+        minutes = int(parts[1])
+        seconds = float(parts[2])
     except (ValueError, TypeError):
         return None
+    if hours < 0 or minutes < 0 or minutes >= 60 or seconds < 0.0 or seconds >= 60.0:
+        return None
+    total = hours * 3600 + minutes * 60 + seconds
+    return total if total > 0 else None
 
 
 def _probe_frame_rate(metadata: dict, stream) -> float:

@@ -299,20 +299,48 @@ def export_asset(
 
 def _probe_duration_seconds(metadata: dict) -> float | None:
     fmt = metadata.get("format", {}) if isinstance(metadata, dict) else {}
-    duration = _coerce_float(fmt.get("duration")) if isinstance(fmt, dict) else None
-    if duration and duration > 0.0:
-        return duration
+    if isinstance(fmt, dict):
+        # Preferred: format.duration is already expressed in seconds.
+        duration = _coerce_float(fmt.get("duration"))
+        if duration and duration > 0.0:
+            return duration
+        # Secondary: format.tags["DURATION"] (HH:MM:SS, common in Matroska).
+        fmt_tags = fmt.get("tags")
+        if isinstance(fmt_tags, dict):
+            tag_dur = _parse_hhmmss_duration(fmt_tags.get("DURATION"))
+            if tag_dur is not None and tag_dur > 0.0:
+                return tag_dur
     streams = metadata.get("streams", []) if isinstance(metadata, dict) else []
     if not isinstance(streams, list):
         return None
     for stream in streams:
         if not isinstance(stream, dict) or stream.get("codec_type") != "video":
             continue
+        # stream["duration"] is already expressed in seconds in ffprobe JSON.
         stream_duration = _coerce_float(stream.get("duration"))
+        if stream_duration is not None and stream_duration > 0.0:
+            return stream_duration
+        # Fallback: duration_ts (timebase units) × time_base.
+        duration_ts = _coerce_float(stream.get("duration_ts"))
         time_base = _parse_ratio(stream.get("time_base"))
-        if stream_duration is not None and time_base is not None and stream_duration > 0.0 and time_base > 0.0:
-            return stream_duration * time_base
+        if duration_ts is not None and time_base is not None and duration_ts > 0.0 and time_base > 0.0:
+            return duration_ts * time_base
     return None
+
+
+def _parse_hhmmss_duration(value: object) -> float | None:
+    """Parse an HH:MM:SS.sss duration string (as used in ffprobe tags) to seconds."""
+    if not isinstance(value, str):
+        return None
+    parts = value.strip().split(":")
+    if len(parts) != 3:
+        return None
+    try:
+        hours, minutes, seconds = int(parts[0]), int(parts[1]), float(parts[2])
+        total = hours * 3600 + minutes * 60 + seconds
+        return total if total > 0 else None
+    except (ValueError, TypeError):
+        return None
 
 
 def _probe_frame_rate(metadata: dict, stream) -> float:

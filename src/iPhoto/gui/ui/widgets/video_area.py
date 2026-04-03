@@ -12,8 +12,8 @@ from PySide6.QtCore import (
     QObject,
     QPointF,
     QPropertyAnimation,
-    QTimer,
     Qt,
+    QTimer,
     QUrl,
     Signal,
 )
@@ -52,10 +52,10 @@ from ....config import (
 )
 from ....core.adjustment_mapping import normalise_video_trim
 from ....utils.ffmpeg import get_linux_180_prerotate_hint, probe_video_rotation
+from ..palette import viewer_surface_color
 from .gl_image_viewer import GLImageViewer
 from .player_bar import PlayerBar
 from .video_renderer_widget import VideoRendererWidget
-from ..palette import viewer_surface_color
 
 _log = logging.getLogger(__name__)
 
@@ -530,6 +530,13 @@ class VideoArea(QWidget):
         if self._trim_out_ms <= self._trim_in_ms:
             self._trim_in_ms = 0
             self._trim_out_ms = int(duration)
+        elif duration > 0:
+            # Clamp an existing trim range to the newly known duration.
+            self._trim_in_ms = min(self._trim_in_ms, int(duration))
+            self._trim_out_ms = min(self._trim_out_ms, int(duration))
+            current_pos = self._player.position()
+            if current_pos > self._trim_out_ms:
+                self._player.setPosition(self._trim_out_ms)
         self._player_bar.set_duration(duration)
         self.durationChanged.emit(duration)
 

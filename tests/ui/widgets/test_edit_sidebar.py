@@ -5,14 +5,15 @@ from __future__ import annotations
 import pytest
 
 pytest.importorskip("PySide6", reason="PySide6 is required for GUI tests")
+pytest.importorskip("PySide6.QtWidgets", reason="Qt widgets not available", exc_type=ImportError)
 
 from PySide6.QtWidgets import QApplication
 
-from iPhoto.gui.ui.widgets.edit_sidebar import EditSidebar
 from iPhoto.gui.ui.widgets.edit_bw_section import EditBWSection
+from iPhoto.gui.ui.widgets.edit_sidebar import EditSidebar
 
 
-@pytest.fixture
+@pytest.fixture(scope="module")
 def qapp():
     """Provide a QApplication instance for widget tests."""
 

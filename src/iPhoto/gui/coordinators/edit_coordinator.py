@@ -308,6 +308,7 @@ class EditCoordinator(QObject):
         self._session = session
         self._history_manager.set_session(session)
         self._ui.edit_sidebar.set_session(session)
+        self._ui.edit_sidebar.set_video_edit_mode(self._is_video_source())
 
         viewport = self._active_edit_viewport()
         self._zoom_handler.set_viewer(viewport)
@@ -452,6 +453,7 @@ class EditCoordinator(QObject):
             self._restore_detail_video_preview(source)
 
         self._ui.edit_sidebar.set_session(None)
+        self._ui.edit_sidebar.set_video_edit_mode(False)
         self._router.show_detail()
         self._transition_manager.leave_edit_mode(animate=True)
 

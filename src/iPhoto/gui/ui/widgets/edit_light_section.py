@@ -41,6 +41,7 @@ class EditLightSection(QWidget):
         self._rows: Dict[str, _SliderRow] = {}
         self._thread_pool = QThreadPool.globalInstance()
         self._active_thumbnail_workers: list[ThumbnailGeneratorWorker] = []
+        self._video_mode = False
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -95,6 +96,14 @@ class EditLightSection(QWidget):
         self.options_section.set_expanded(False)
         layout.addWidget(self.options_section)
         layout.addStretch(1)
+
+    def set_video_mode(self, enabled: bool) -> None:
+        """Flatten the section for video editing while preserving image behaviour."""
+
+        self._video_mode = bool(enabled)
+        self.master_slider.setVisible(not self._video_mode)
+        self.options_section.set_header_visible(not self._video_mode)
+        self.options_section.set_expanded(self._video_mode)
 
     # ------------------------------------------------------------------
     def bind_session(self, session: Optional[EditSession]) -> None:
@@ -208,7 +217,8 @@ class EditLightSection(QWidget):
         """Forward *image* to the master slider so it can refresh thumbnails."""
 
         self.master_slider.setImage(image)
-        self._start_master_thumbnail_generation()
+        if not self._video_mode:
+            self._start_master_thumbnail_generation()
 
     @Slot()
     def _handle_disabled_slider_click(self) -> None:

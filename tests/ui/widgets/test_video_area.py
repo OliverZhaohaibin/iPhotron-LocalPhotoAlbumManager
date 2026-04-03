@@ -9,7 +9,7 @@ pytest.importorskip("PySide6.QtMultimedia", reason="QtMultimedia is required")
 
 from pathlib import Path
 
-from PySide6.QtCore import QSize, Qt
+from PySide6.QtCore import QRectF, QSize, Qt
 from PySide6.QtGui import QColor, QShowEvent
 from PySide6.QtMultimedia import QMediaPlayer, QVideoFrame, QVideoFrameFormat
 from PySide6.QtWidgets import QApplication, QRhiWidget
@@ -369,9 +369,10 @@ class TestVideoArea:
         assert isinstance(va._renderer, VideoRendererWidget)
 
     def test_renderer_is_child(self, qapp):
-        """The renderer should be a child widget of VideoArea."""
+        """The renderer should live inside VideoArea's surface stack."""
         va = VideoArea()
-        assert va._renderer.parent() is va
+        assert va._renderer.parent() is va._surface_stack
+        assert va._surface_stack.parent() is va
 
     def test_has_video_sink(self, qapp):
         """VideoArea should use QVideoSink, not QGraphicsVideoItem."""
@@ -418,6 +419,22 @@ class TestVideoArea:
         """video_viewport() should return the VideoRendererWidget."""
         va = VideoArea()
         assert va.video_viewport() is va._renderer
+
+    def test_playback_preview_keeps_crop_framing_disabled(self, qapp):
+        """Playback should avoid edit-style crop zooming by default."""
+        va = VideoArea()
+        assert va.edit_viewer.crop_framing_enabled() is False
+
+    def test_edit_mode_enables_crop_framing_for_adjusted_preview(self, qapp):
+        """Edit mode should opt into crop framing on the shared GL preview."""
+        va = VideoArea()
+
+        va.set_edit_mode_active(True)
+        assert va.edit_viewer.crop_framing_enabled() is True
+        assert va.adjusted_preview_enabled() is True
+
+        va.set_edit_mode_active(False)
+        assert va.edit_viewer.crop_framing_enabled() is False
 
     def test_player_bar_accessible(self, qapp):
         """player_bar property should return the PlayerBar instance."""
@@ -572,3 +589,103 @@ def test_gl_image_viewer_reuses_adjustments_for_successive_video_frames(qapp, mo
     mock_set_adjustments.assert_not_called()
     assert viewer._video_frame is frame
     assert viewer._video_frame_dirty is True
+
+
+def test_gl_image_viewer_defers_video_reset_until_texture_upload(qapp, mocker):
+    """Video crop framing should wait until the first frame texture exists."""
+
+    viewer = GLImageViewer()
+    fmt = QVideoFrameFormat(QSize(320, 240), QVideoFrameFormat.PixelFormat.Format_RGBA8888)
+    frame = QVideoFrame(fmt)
+    viewer._adjustments = {"Crop_CX": 0.5, "Crop_CY": 0.5, "Crop_W": 0.6, "Crop_H": 0.6}
+
+    mock_reset_zoom = mocker.patch.object(viewer, "reset_zoom")
+
+    viewer.set_video_frame(frame, viewer._adjustments, reset_view=True)
+
+    mock_reset_zoom.assert_not_called()
+    assert viewer._pending_video_reset_view is True
+
+
+def test_gl_image_viewer_resets_after_first_video_upload(qapp, mocker):
+    """Deferred video framing should run once the frame texture has been uploaded."""
+
+    viewer = GLImageViewer()
+    viewer._gl_initialized = True
+    viewer._using_video_frame_source = True
+    viewer._video_frame_dirty = True
+    frame = mocker.Mock()
+    viewer._video_frame = frame
+    viewer._pending_video_reset_view = True
+
+    gl_funcs = mocker.Mock()
+    viewer._gl_funcs = gl_funcs
+
+    renderer = mocker.Mock()
+    renderer.has_texture.return_value = True
+    renderer.texture_size.return_value = (320, 240)
+    viewer._renderer = renderer
+
+    mocker.patch.object(viewer, "_update_cover_scale")
+    mock_reset_zoom = mocker.patch.object(viewer, "reset_zoom")
+    target = mocker.Mock()
+    target.pixelSize.return_value = QSize(320, 240)
+    mocker.patch.object(viewer, "renderTarget", return_value=target)
+
+    cb = mocker.Mock()
+
+    viewer.render(cb)
+
+    renderer.upload_video_frame.assert_called_once_with(frame)
+    mock_reset_zoom.assert_called_once()
+    assert viewer._pending_video_reset_view is False
+
+
+def test_gl_image_viewer_centers_crop_when_framing_disabled(qapp, mocker):
+    """Playback-mode resets should recenter the crop without reframing it."""
+
+    viewer = GLImageViewer()
+    viewer.set_crop_framing_enabled(False)
+
+    mock_center_crop = mocker.patch.object(viewer, "_center_crop_if_available", return_value=True)
+    mock_frame_crop = mocker.patch.object(viewer, "_frame_crop_if_available")
+    mock_reset = mocker.patch.object(viewer._transform_controller, "reset_zoom")
+
+    viewer.reset_zoom()
+
+    mock_center_crop.assert_called_once()
+    mock_frame_crop.assert_not_called()
+    mock_reset.assert_not_called()
+    assert viewer._auto_crop_view_locked is False
+
+
+def test_gl_image_viewer_center_crop_uses_partial_fit_zoom(qapp, mocker):
+    """Playback crop centering should apply a moderated crop-fit zoom."""
+
+    viewer = GLImageViewer()
+    viewer.set_crop_center_zoom_strength(0.5)
+    crop_rect = QRectF(40.0, 30.0, 160.0, 90.0)
+
+    mocker.patch(
+        "iPhoto.gui.ui.widgets.gl_image_viewer.crop_viewport.compute_crop_rect_pixels",
+        return_value=crop_rect,
+    )
+    mock_reset = mocker.patch.object(viewer._transform_controller, "reset_zoom")
+    mock_fit = mocker.patch.object(
+        viewer._transform_controller,
+        "compute_texture_rect_fit",
+        return_value=(4.0, 2.0),
+    )
+    mock_zoom = mocker.patch.object(viewer._transform_controller, "set_zoom_factor_direct")
+    mock_apply_center = mocker.patch.object(
+        viewer._transform_controller,
+        "apply_image_center_pixels",
+    )
+
+    assert viewer._center_crop_if_available() is True
+
+    mock_reset.assert_called_once()
+    mock_fit.assert_called_once_with(crop_rect)
+    mock_zoom.assert_called_once_with(2.0)
+    mock_apply_center.assert_called_once_with(crop_rect.center())
+    assert viewer._auto_crop_center_locked is True

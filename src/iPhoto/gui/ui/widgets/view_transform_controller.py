@@ -446,22 +446,41 @@ class ViewTransformController:
         if view_width <= 0.0 or view_height <= 0.0:
             return False
 
+        fit_result = self.compute_texture_rect_fit(rect)
+        if fit_result is None:
+            return False
+
+        target_zoom, target_scale = fit_result
+        self.set_zoom_factor_direct(target_zoom)
+        self.apply_image_center_pixels(rect.center(), scale=target_scale)
+        return True
+
+    def compute_texture_rect_fit(self, rect: QRectF) -> tuple[float, float] | None:
+        """Return ``(target_zoom, target_scale)`` needed to fit *rect*."""
+
+        tex_w, tex_h = self._texture_size_provider()
+        if tex_w <= 0 or tex_h <= 0:
+            return None
+        if rect.width() <= 0.0 or rect.height() <= 0.0:
+            return None
+
+        view_width, view_height = self._get_view_dimensions_device_px()
+        if view_width <= 0.0 or view_height <= 0.0:
+            return None
+
         fit_w, fit_h = self._get_fit_texture_size()
         base_scale = compute_fit_to_view_scale((fit_w, fit_h), view_width, view_height)
         if base_scale <= 0.0:
-            return False
+            return None
 
         target_scale = compute_fit_to_view_scale(
-            (float(rect.width()), float(rect.height())), view_width, view_height
+            (float(rect.width()), float(rect.height())),
+            view_width,
+            view_height,
         )
         if target_scale <= 0.0:
-            return False
-
-        target_zoom = target_scale / base_scale
-        self.set_zoom_factor_direct(target_zoom)
-        effective_scale = base_scale * self._zoom_factor
-        self.apply_image_center_pixels(rect.center(), scale=effective_scale)
-        return True
+            return None
+        return (target_scale / base_scale, target_scale)
 
     # ------------------------------------------------------------------
     # Convenience methods that use internal viewport state

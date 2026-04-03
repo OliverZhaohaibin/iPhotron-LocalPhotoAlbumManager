@@ -112,6 +112,9 @@ class GLImageViewer(QRhiWidget):
         self._video_frame = None
         self._video_frame_dirty = False
         self._using_video_frame_source = False
+        self._pending_video_reset_view = False
+        self._reset_zoom_frames_crop = True
+        self._crop_center_zoom_strength = 0.5
         self._adjustments: dict[str, Any] = {}
         self._eyedropper_active = False
 
@@ -173,6 +176,7 @@ class GLImageViewer(QRhiWidget):
             on_interaction_finished=self.cropInteractionFinished.emit,
         )
         self._auto_crop_view_locked: bool = False
+        self._auto_crop_center_locked: bool = False
         self._update_crop_perspective_state()
 
         # Input event handler
@@ -251,6 +255,7 @@ class GLImageViewer(QRhiWidget):
         self._video_frame = None
         self._video_frame_dirty = False
         self._using_video_frame_source = False
+        self._pending_video_reset_view = False
 
         # Check if we can reuse the existing texture
         if (
@@ -282,6 +287,7 @@ class GLImageViewer(QRhiWidget):
             # Clear resources and reset state
             self._texture_manager.clear_image()
             self._auto_crop_view_locked = False
+            self._auto_crop_center_locked = False
             self._transform_controller.set_image_cover_scale(1.0)
 
         if reset_view:
@@ -317,7 +323,7 @@ class GLImageViewer(QRhiWidget):
             self._time_base = time.monotonic()
 
         if reset_view:
-            self.reset_zoom()
+            self._pending_video_reset_view = True
         self.update()
 
     def set_placeholder(self, pixmap: QPixmap | None) -> None:
@@ -376,6 +382,8 @@ class GLImageViewer(QRhiWidget):
             self._crop_controller.set_active(True, logical_values)
         if self._auto_crop_view_locked and not self._crop_controller.is_active():
             self._reapply_locked_crop_view()
+        elif self._auto_crop_center_locked and not self._crop_controller.is_active():
+            self._reapply_locked_crop_center()
         self.update()
 
     def current_image_source(self) -> object | None:
@@ -422,6 +430,33 @@ class GLImageViewer(QRhiWidget):
     def set_surface_color_override(self, colour: str | None) -> None:
         """Override the viewer backdrop with *colour* or restore the default."""
         self._fullscreen_handler.set_surface_color_override(colour)
+
+    def set_crop_framing_enabled(self, enabled: bool) -> None:
+        """Control whether ``reset_zoom()`` frames the stored crop region."""
+
+        target = bool(enabled)
+        if self._reset_zoom_frames_crop == target:
+            return
+        self._reset_zoom_frames_crop = target
+        if not target:
+            self._auto_crop_view_locked = False
+        else:
+            self._auto_crop_center_locked = False
+
+    def crop_framing_enabled(self) -> bool:
+        """Return whether ``reset_zoom()`` currently frames the crop region."""
+
+        return self._reset_zoom_frames_crop
+
+    def set_crop_center_zoom_strength(self, strength: float) -> None:
+        """Tune how strongly playback follows the crop fit when framing is off."""
+
+        self._crop_center_zoom_strength = max(0.0, min(1.0, float(strength)))
+
+    def crop_center_zoom_strength(self) -> float:
+        """Return the partial crop-fit strength used outside crop framing mode."""
+
+        return self._crop_center_zoom_strength
 
     def set_immersive_background(self, immersive: bool) -> None:
         """Toggle the pure black immersive backdrop used in immersive mode."""
@@ -479,6 +514,13 @@ class GLImageViewer(QRhiWidget):
         if self._crop_controller.is_active():
             self._transform_controller.reset_zoom()
             return
+        if not self._reset_zoom_frames_crop:
+            self._auto_crop_view_locked = False
+            if not self._center_crop_if_available():
+                self._auto_crop_center_locked = False
+                self._transform_controller.reset_zoom()
+            return
+        self._auto_crop_center_locked = False
         if not self._frame_crop_if_available():
             self._auto_crop_view_locked = False
             self._transform_controller.reset_zoom()
@@ -639,6 +681,9 @@ class GLImageViewer(QRhiWidget):
             self._video_frame_dirty = False
             straighten, rotate_steps, _ = self._rotation_parameters()
             self._update_cover_scale(straighten, rotate_steps)
+            if self._pending_video_reset_view:
+                self._pending_video_reset_view = False
+                self.reset_zoom()
         elif (
             self._image is not None
             and not self._image.isNull()
@@ -827,6 +872,8 @@ class GLImageViewer(QRhiWidget):
         self._loading_overlay.update_geometry(self.size())
         if self._auto_crop_view_locked and not self._crop_controller.is_active():
             self._reapply_locked_crop_view()
+        elif self._auto_crop_center_locked and not self._crop_controller.is_active():
+            self._reapply_locked_crop_center()
         straighten, rotate_steps, _ = self._rotation_parameters()
         self._update_cover_scale(straighten, rotate_steps)
 
@@ -850,8 +897,14 @@ class GLImageViewer(QRhiWidget):
     def _frame_crop_if_available(self) -> bool:
         return crop_viewport.frame_crop_if_available(self)
 
+    def _center_crop_if_available(self) -> bool:
+        return crop_viewport.center_crop_if_available(self)
+
     def _reapply_locked_crop_view(self) -> None:
         crop_viewport.reapply_locked_crop_view(self)
+
+    def _reapply_locked_crop_center(self) -> None:
+        crop_viewport.reapply_locked_crop_center(self)
 
     def _cancel_auto_crop_lock(self) -> None:
         crop_viewport.cancel_auto_crop_lock(self)

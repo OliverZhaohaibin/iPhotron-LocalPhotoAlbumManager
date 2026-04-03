@@ -118,6 +118,10 @@ class VideoArea(QWidget):
         self._renderer.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self._edit_viewer = GLImageViewer(self._surface_stack)
         self._edit_viewer.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        # Playback should keep the legacy detail-page proportions: the crop is
+        # centered, but we do not zoom it to fill the viewport. Edit mode opts
+        # back into crop framing on the same shared GL surface.
+        self._edit_viewer.set_crop_framing_enabled(False)
         self._surface_stack.addWidget(self._renderer)
         self._surface_stack.addWidget(self._edit_viewer)
         self._surface_stack.setCurrentWidget(self._renderer)
@@ -227,6 +231,7 @@ class VideoArea(QWidget):
         """Mark whether the video area is currently being used inside Edit mode."""
 
         self._edit_mode_active = bool(active)
+        self._edit_viewer.set_crop_framing_enabled(self._edit_mode_active)
         if self._edit_mode_active:
             self.set_adjusted_preview_enabled(True)
 

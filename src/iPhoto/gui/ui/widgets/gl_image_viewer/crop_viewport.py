@@ -136,6 +136,32 @@ def frame_crop_if_available(viewer: GLImageViewer) -> bool:
     return False
 
 
+def center_crop_if_available(viewer: GLImageViewer) -> bool:
+    """Recenter the viewport on the stored crop while keeping fit-to-view zoom."""
+    if viewer._crop_controller.is_active():
+        return False
+    crop_rect = compute_crop_rect_pixels(viewer)
+    if crop_rect is None:
+        viewer._auto_crop_center_locked = False
+        return False
+    viewer._transform_controller.reset_zoom()
+    fit_result = viewer._transform_controller.compute_texture_rect_fit(crop_rect)
+    if fit_result is not None:
+        target_zoom, _ = fit_result
+        strength = max(0.0, min(1.0, viewer.crop_center_zoom_strength()))
+        if target_zoom > 1.0 and strength > 0.0:
+            # Interpolate between full-frame fit and crop-fill fit.  Using the
+            # geometric mean keeps playback closer to the v4.6.0 video layout:
+            # the crop is clearly emphasised without jumping all the way to the
+            # edit-mode "fill the crop" presentation.
+            partial_zoom = target_zoom ** strength
+            if partial_zoom > 1.0 + 1e-6:
+                viewer._transform_controller.set_zoom_factor_direct(partial_zoom)
+    viewer._transform_controller.apply_image_center_pixels(crop_rect.center())
+    viewer._auto_crop_center_locked = True
+    return True
+
+
 def reapply_locked_crop_view(viewer: GLImageViewer) -> None:
     """Re-apply the stored crop framing after resizes or adjustment edits."""
     if not viewer._auto_crop_view_locked:
@@ -148,9 +174,18 @@ def reapply_locked_crop_view(viewer: GLImageViewer) -> None:
         viewer._auto_crop_view_locked = False
 
 
+def reapply_locked_crop_center(viewer: GLImageViewer) -> None:
+    """Recenter the crop after resizes without changing the fit baseline."""
+    if not viewer._auto_crop_center_locked:
+        return
+    if not center_crop_if_available(viewer):
+        viewer._auto_crop_center_locked = False
+
+
 def cancel_auto_crop_lock(viewer: GLImageViewer) -> None:
     """Disable auto-crop framing so manual gestures stay respected."""
     viewer._auto_crop_view_locked = False
+    viewer._auto_crop_center_locked = False
 
 
 # ── Crop interaction callback ──────────────────────────────────────────

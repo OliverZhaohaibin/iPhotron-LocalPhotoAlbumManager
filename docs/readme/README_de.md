@@ -19,7 +19,7 @@
 
 ## 📥 Download & Installation
 
-[![Für Windows herunterladen](https://img.shields.io/badge/⬇️%20Download-Windows%20(.exe)-blue?style=for-the-badge&logo=windows)](https://github.com/OliverZhaohaibin/iPhotron-LocalPhotoAlbumManager/releases/download/v4.5.0/v4.50.exe)
+[![Für Windows herunterladen](https://img.shields.io/badge/⬇️%20Download-Windows%20(.exe)-blue?style=for-the-badge&logo=windows)](https://github.com/OliverZhaohaibin/iPhotron-LocalPhotoAlbumManager/releases/download/v4.6.0/v4.60-x86_64-setup.exe)
 [![Für Linux herunterladen](https://img.shields.io/badge/⬇️%20Download-Linux%20(.deb)-orange?style=for-the-badge&logo=linux&logoColor=white)](https://github.com/OliverZhaohaibin/iPhotron-LocalPhotoAlbumManager/releases/download/v4.5.0/iPhotron_4.50_amd64.deb)
 [![Download for Linux (.AppImage)](https://img.shields.io/badge/⬇️%20Download-Linux%20(.AppImage)-brightgreen?style=for-the-badge&logo=linux&logoColor=white)](https://github.com/OliverZhaohaibin/iPhotron-LocalPhotoAlbumManager/releases/download/v4.5.0/iPhotron-x86_64.AppImage)
 
@@ -107,6 +107,15 @@ Die Extension enthält derzeit:
 - OsmAnd-Ressourcen unter `misc/`, `poi/`, `rendering_styles/` und `routing/`
 - native Binärdateien unter `bin/`, darunter `osmand_render_helper.exe`,
   `osmand_native_widget.dll`, `OsmAndCore_shared.dll` und die benötigten Qt-DLLs
+
+> **Derzeit nur Windows:** Die unten gezeigte vollständige native
+> maps-extension-Laufzeit ist aktuell nur unter Windows verfügbar. Unter Linux
+> und macOS verwendet iPhotron weiterhin den bestehenden Python-/Legacy-
+> Kartenpfad.
+
+| Ohne Maps Extension | Mit Maps Extension |
+| --- | --- |
+| ![Ohne Maps Extension](../picture/without_extension.png) | ![Mit Maps Extension](../picture/maps_extension.png) |
 
 Die Extension wird im Upstream-Teilprojekt
 [PySide6-OsmAnd-SDK](https://github.com/OliverZhaohaibin/PySide6-OsmAnd-SDK)

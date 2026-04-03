@@ -511,6 +511,11 @@ class VideoTrimBar(QWidget):
         self._out_ratio = max(self._in_ratio, min(1.0, out_ratio))
         self._canvas.set_trim(self._in_ratio, self._out_ratio)
         self._update_handle_positions()
+        if self._handle_dragging:
+            self._apply_drag_colors()
+        else:
+            self._apply_left_style()
+            self._apply_right_style()
 
     def trim_ratios(self) -> tuple[float, float]:
         return (self._in_ratio, self._out_ratio)

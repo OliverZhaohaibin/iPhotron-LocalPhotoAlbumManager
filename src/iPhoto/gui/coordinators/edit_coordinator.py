@@ -407,7 +407,7 @@ class EditCoordinator(QObject):
         self._emit_video_trim_diag("start_video_edit_load", source=source)
         self._video_frame_step_ms = self._probe_video_frame_step_ms(source)
         self._video_color_stats = None
-        self._pending_video_duration_sec = None
+        self._pending_video_duration_sec = self._probe_video_duration_sec(source)
         self._video_trim_thumbnail_timer.stop()
         self._video_sidebar_preview_timer.stop()
         self._ui.video_area.set_edit_mode_active(True)
@@ -415,7 +415,17 @@ class EditCoordinator(QObject):
         self._ui.video_area.hide_controls(animate=False)
         self._ui.video_area.set_adjusted_preview_enabled(True)
         self._ui.video_area.set_adjustments(self._resolve_session_adjustments())
-        trim_in, trim_out = normalise_video_trim(self._session.values(), None)
+        trim_in, trim_out = normalise_video_trim(
+            self._session.values(),
+            self._pending_video_duration_sec,
+        )
+        if self._pending_video_duration_sec is not None:
+            canonical = self._canonical_trim_updates(
+                trim_in,
+                trim_out,
+                self._pending_video_duration_sec,
+            )
+            self._session.set_values(canonical, emit_individual=False)
         self._ui.video_area.load_video(
             source,
             adjustments=self._resolve_session_adjustments(),
@@ -423,10 +433,15 @@ class EditCoordinator(QObject):
             adjusted_preview=True,
         )
         self._ui.video_trim_bar.clear()
-        self._ui.video_trim_bar.set_trim_ratios(0.0, 1.0)
-        self._ui.video_trim_bar.set_playhead_ratio(0.0)
+        if self._pending_video_duration_sec is not None:
+            in_ratio, out_ratio = self._trim_ratios_for_duration(self._pending_video_duration_sec)
+            self._ui.video_trim_bar.set_trim_ratios(in_ratio, out_ratio)
+            self._ui.video_trim_bar.set_playhead_ratio(in_ratio)
+        else:
+            self._ui.video_trim_bar.set_trim_ratios(0.0, 1.0)
+            self._ui.video_trim_bar.set_playhead_ratio(0.0)
         self._ui.video_trim_bar.set_playing(False)
-        self._queue_video_trim_thumbnails(None)
+        self._queue_video_trim_thumbnails(self._pending_video_duration_sec)
         self._ui.video_area.play()
 
     def _on_edit_image_loaded(self, path: Path, image: QImage):
@@ -637,10 +652,15 @@ class EditCoordinator(QObject):
         }
 
     def _trim_ratios_for_session(self) -> tuple[float, float]:
-        duration_sec = self._video_duration_sec()
-        trim_in_sec, trim_out_sec = self._normalised_video_trim()
+        return self._trim_ratios_for_duration(self._video_duration_sec())
+
+    def _trim_ratios_for_duration(self, duration_sec: float | None) -> tuple[float, float]:
         if duration_sec is None or duration_sec <= 0.0:
             return (0.0, 1.0)
+        trim_in_sec, trim_out_sec = normalise_video_trim(
+            self._session.values() if self._session is not None else {},
+            duration_sec,
+        )
         return (
             max(0.0, min(1.0, trim_in_sec / duration_sec)),
             max(0.0, min(1.0, trim_out_sec / duration_sec)),
@@ -820,6 +840,7 @@ class EditCoordinator(QObject):
                 received_images=received,
                 size=f"{image.width()}x{image.height()}",
             )
+        self._apply_video_trim_from_session()
         self._ui.video_trim_bar.add_thumbnail(QPixmap.fromImage(image))
 
     def _handle_video_trim_thumbnails_ready(self, images: list[QImage], generation: int) -> None:
@@ -844,6 +865,7 @@ class EditCoordinator(QObject):
             image_count=len(images),
             ready_batches=diag["ready_batches"],
         )
+        self._apply_video_trim_from_session()
         self._ui.video_trim_bar.set_thumbnails(
             [
                 QPixmap.fromImage(image)
@@ -851,7 +873,6 @@ class EditCoordinator(QObject):
                 if image is not None and not image.isNull()
             ]
         )
-        self._apply_video_trim_from_session()
 
     def _handle_video_trim_thumbnail_error(self, generation: int, message: str) -> None:
         if generation != self._video_thumbnail_generation:
@@ -1027,6 +1048,21 @@ class EditCoordinator(QObject):
         if frame_rate <= 0.0:
             return _DEFAULT_VIDEO_FRAME_STEP_MS
         return max(int(round(1000.0 / frame_rate)), 1)
+
+    def _probe_video_duration_sec(self, source: Path) -> float | None:
+        try:
+            info = read_video_meta(source)
+        except Exception:
+            _LOGGER.debug("Failed to probe duration for %s", source, exc_info=True)
+            return None
+
+        try:
+            duration_sec = float(info.get("dur") or info.get("duration") or 0.0)
+        except (AttributeError, TypeError, ValueError):
+            return None
+        if duration_sec <= 0.0:
+            return None
+        return duration_sec
 
     def _handle_trim_in_ratio_changed(self, ratio: float) -> None:
         if self._session is None or not self._is_video_source():

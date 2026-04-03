@@ -58,6 +58,17 @@ def test_video_trim_bar_builds_demo_transport_shell(qapp) -> None:
     assert bar._strip_host.height() == BAR_HEIGHT
 
 
+def test_set_trim_ratios_updates_left_handle_default_corner_style(qapp) -> None:
+    """Programmatic trim updates should make the left handle rounded in default state."""
+
+    bar = VideoTrimBar()
+
+    bar.set_trim_ratios(0.2, 0.8)
+
+    assert bar._left_handle._corner_tl == 6.0
+    assert bar._left_handle._corner_bl == 6.0
+
+
 def test_play_button_emits_transport_signal(qapp) -> None:
     """Clicking the left transport button should emit playPauseRequested."""
 

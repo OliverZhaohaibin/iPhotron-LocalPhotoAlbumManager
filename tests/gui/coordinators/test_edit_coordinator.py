@@ -5,8 +5,10 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import pytest
+from PySide6.QtGui import QImage
 from PySide6.QtWidgets import QApplication, QSlider
 
+from iPhoto.core.adjustment_mapping import VIDEO_TRIM_IN_KEY, VIDEO_TRIM_OUT_KEY
 from iPhoto.gui.coordinators.edit_coordinator import EditCoordinator
 
 
@@ -135,6 +137,89 @@ def test_probe_video_frame_step_ms_uses_metadata_frame_rate() -> None:
         )
 
     assert step_ms == 17
+
+
+def test_start_video_edit_load_sets_trim_before_queueing_thumbnails() -> None:
+    coordinator = EditCoordinator.__new__(EditCoordinator)
+    video_area = Mock()
+    trim_bar = Mock()
+    order: list[object] = []
+    trim_bar.clear.side_effect = lambda: order.append("clear")
+    trim_bar.set_trim_ratios.side_effect = lambda *_: order.append("trim")
+    trim_bar.set_playhead_ratio.side_effect = lambda *_: order.append("playhead")
+    trim_bar.set_playing.side_effect = lambda *_: order.append("playing")
+    coordinator._ui = SimpleNamespace(video_area=video_area, video_trim_bar=trim_bar)
+    coordinator._session = SimpleNamespace(
+        values=lambda: {
+            VIDEO_TRIM_IN_KEY: 1.0,
+            VIDEO_TRIM_OUT_KEY: 4.0,
+        },
+        set_values=Mock(),
+    )
+    coordinator._emit_video_trim_diag = Mock()
+    coordinator._probe_video_frame_step_ms = Mock(return_value=17)
+    coordinator._probe_video_duration_sec = Mock(return_value=5.0)
+    coordinator._resolve_session_adjustments = Mock(return_value={})
+    coordinator._queue_video_trim_thumbnails = Mock(
+        side_effect=lambda duration: order.append(("queue", duration))
+    )
+    coordinator._video_trim_thumbnail_timer = Mock(stop=Mock())
+    coordinator._video_sidebar_preview_timer = Mock(stop=Mock())
+    coordinator._video_color_stats = None
+    coordinator._pending_video_duration_sec = None
+
+    EditCoordinator._start_video_edit_load(coordinator, Path("/fake/video.mp4"))
+
+    video_area.load_video.assert_called_once_with(
+        Path("/fake/video.mp4"),
+        adjustments={},
+        trim_range_ms=(1000, 4000),
+        adjusted_preview=True,
+    )
+    trim_bar.set_trim_ratios.assert_called_once_with(0.2, 0.8)
+    trim_bar.set_playhead_ratio.assert_called_once_with(0.2)
+    coordinator._queue_video_trim_thumbnails.assert_called_once_with(5.0)
+    assert order.index("trim") < order.index(("queue", 5.0))
+
+
+def test_thumbnail_image_handler_applies_trim_before_adding(qapp) -> None:
+    coordinator = EditCoordinator.__new__(EditCoordinator)
+    trim_bar = Mock()
+    order: list[str] = []
+    trim_bar.add_thumbnail.side_effect = lambda *_: order.append("add")
+    coordinator._ui = SimpleNamespace(video_trim_bar=trim_bar)
+    coordinator._video_thumbnail_generation = 1
+    coordinator._video_trim_diag = {}
+    coordinator._current_source = Path("/fake/video.mp4")
+    coordinator._emit_video_trim_diag = Mock()
+    coordinator._apply_video_trim_from_session = Mock(side_effect=lambda: order.append("trim"))
+    coordinator._session = object()
+    image = QImage(8, 8, QImage.Format.Format_ARGB32)
+
+    with patch("iPhoto.gui.coordinators.edit_coordinator.QPixmap.fromImage", return_value=Mock()):
+        EditCoordinator._handle_video_trim_thumbnail_image(coordinator, image, 1)
+
+    assert order == ["trim", "add"]
+
+
+def test_thumbnail_ready_handler_applies_trim_before_setting(qapp) -> None:
+    coordinator = EditCoordinator.__new__(EditCoordinator)
+    trim_bar = Mock()
+    order: list[str] = []
+    trim_bar.set_thumbnails.side_effect = lambda *_: order.append("thumbs")
+    coordinator._ui = SimpleNamespace(video_trim_bar=trim_bar)
+    coordinator._video_thumbnail_generation = 1
+    coordinator._video_trim_diag = {}
+    coordinator._current_source = Path("/fake/video.mp4")
+    coordinator._emit_video_trim_diag = Mock()
+    coordinator._apply_video_trim_from_session = Mock(side_effect=lambda: order.append("trim"))
+    coordinator._session = object()
+    image = QImage(8, 8, QImage.Format.Format_ARGB32)
+
+    with patch("iPhoto.gui.coordinators.edit_coordinator.QPixmap.fromImage", return_value=Mock()):
+        EditCoordinator._handle_video_trim_thumbnails_ready(coordinator, [image], 1)
+
+    assert order == ["trim", "thumbs"]
 
 
 def test_video_play_pause_shortcut_toggles_edit_video_transport() -> None:

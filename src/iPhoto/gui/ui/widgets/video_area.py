@@ -262,10 +262,15 @@ class VideoArea(QWidget):
         else:
             self._trim_in_ms = max(int(trim_in_ms), 0)
             self._trim_out_ms = max(int(trim_out_ms), self._trim_in_ms)
-        if self._player.position() < self._trim_in_ms:
-            self._player.setPosition(self._trim_in_ms)
-        elif self._trim_out_ms > 0 and self._player.position() > self._trim_out_ms:
-            self._player.setPosition(self._trim_out_ms)
+        current_pos = self._player.position()
+        clamped_pos = current_pos
+        if current_pos < self._trim_in_ms:
+            clamped_pos = self._trim_in_ms
+        elif self._trim_out_ms > 0 and current_pos > self._trim_out_ms:
+            clamped_pos = self._trim_out_ms
+        if clamped_pos != current_pos:
+            self._player.setPosition(clamped_pos)
+            self._sync_position_display(clamped_pos)
 
     def trim_range_ms(self) -> tuple[int, int]:
         """Return the current trim range in milliseconds."""
@@ -530,8 +535,7 @@ class VideoArea(QWidget):
         if not self._suppress_trim_pause and display_position == position:
             self._restart_from_trim_in_on_play = False
             self._end_hold_display_ms = None
-        self._player_bar.set_position(display_position)
-        self.positionChanged.emit(display_position)
+        self._sync_position_display(display_position)
 
     def _on_duration_changed(self, duration: int) -> None:
         self._current_duration_ms = int(duration)
@@ -584,14 +588,19 @@ class VideoArea(QWidget):
                 return end_pos
         return position
 
+    def _sync_position_display(self, position: int) -> None:
+        """Synchronise the visible timeline position with the current playhead."""
+
+        self._player_bar.set_position(position)
+        self.positionChanged.emit(position)
+
     def _enter_end_hold(self, *, end_pos: int, hold_pos: int) -> None:
         """Pause on the last frame while keeping the timeline cursor at the end."""
 
         end_pos = max(0, int(end_pos))
         hold_pos = max(0, min(int(hold_pos), end_pos))
         if self._restart_from_trim_in_on_play and self._end_hold_display_ms == end_pos:
-            self._player_bar.set_position(end_pos)
-            self.positionChanged.emit(end_pos)
+            self._sync_position_display(end_pos)
             return
         if self._suppress_trim_pause:
             return
@@ -601,8 +610,7 @@ class VideoArea(QWidget):
         self._player.pause()
         self._player.setPosition(hold_pos)
         self._suppress_trim_pause = False
-        self._player_bar.set_position(end_pos)
-        self.positionChanged.emit(end_pos)
+        self._sync_position_display(end_pos)
         self.show_controls()
         self.playbackFinished.emit()
 

@@ -570,6 +570,29 @@ class TestVideoArea:
         mock_play.assert_called_once()
         assert va._restart_from_trim_in_on_play is False
 
+    def test_set_trim_range_updates_display_immediately_when_position_is_clamped(self, qapp) -> None:
+        """Changing trim should immediately move the visible playhead into range."""
+
+        va = VideoArea()
+        va._current_duration_ms = 5000
+        position_spy = Mock()
+        va.positionChanged.connect(position_spy)
+
+        with patch.object(va._player, "position", return_value=4300), patch.object(
+            va._player,
+            "setPosition",
+        ) as mock_set_pos, patch.object(
+            va._player_bar,
+            "set_position",
+        ) as mock_bar_pos:
+            va.set_trim_range_ms(1200, 4200)
+
+        mock_set_pos.assert_called_once_with(4200)
+        mock_bar_pos.assert_called_once_with(4200)
+        assert position_spy.call_args_list == [
+            call(4200),
+        ]
+
     def test_end_of_media_hold_keeps_timeline_cursor_at_duration(self, qapp) -> None:
         """The playhead should remain at the duration marker after EndOfMedia."""
 

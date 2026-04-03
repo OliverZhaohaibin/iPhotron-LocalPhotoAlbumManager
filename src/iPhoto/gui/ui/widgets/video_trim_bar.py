@@ -204,6 +204,7 @@ class _ThumbnailCanvas(QWidget):
 
     def set_playhead(self, ratio: float) -> None:
         new_ratio = max(0.0, min(1.0, ratio))
+        new_ratio = max(self._in_ratio, min(self._out_ratio, new_ratio))
         if abs(new_ratio - self._playhead_ratio) < 1e-4 and not self._static_cache_dirty:
             return
         old_x = self._playhead_x()
@@ -219,6 +220,10 @@ class _ThumbnailCanvas(QWidget):
     def set_trim(self, in_ratio: float, out_ratio: float) -> None:
         self._in_ratio = max(0.0, min(1.0, in_ratio))
         self._out_ratio = max(self._in_ratio, min(1.0, out_ratio))
+        self._playhead_ratio = max(
+            self._in_ratio,
+            min(self._out_ratio, self._playhead_ratio),
+        )
         self._mark_static_dirty()
         self.update()
 
@@ -273,7 +278,11 @@ class _ThumbnailCanvas(QWidget):
             return None
         max_x = max(width - 1, 0)
         ratio = max(0.0, min(1.0, self._playhead_ratio))
-        return int(round(ratio * max_x))
+        x_pos = float(ratio * max_x)
+        left_inner, right_inner = self._inner_bounds(width)
+        if right_inner >= left_inner:
+            x_pos = max(left_inner, min(right_inner, x_pos))
+        return int(round(x_pos))
 
     def _rebuild_static_cache(self) -> None:
         width = self.width()
@@ -550,8 +559,9 @@ class VideoTrimBar(QWidget):
         width = self._strip_host.width()
         if width <= 0:
             return
+        requested_left_x = int(handle_left_x)
         handle_width = self._left_handle.width()
-        handle_left_x = max(0, min(handle_left_x, width))
+        handle_left_x = max(0, min(requested_left_x, width))
         ratio = handle_left_x / width
         min_gap = max(MIN_TRIM_GAP, 2 * handle_width / width)
         ratio = max(0.0, min(self._out_ratio - min_gap, ratio))
@@ -566,8 +576,9 @@ class VideoTrimBar(QWidget):
         width = self._strip_host.width()
         if width <= 0:
             return
+        requested_left_x = int(handle_left_x)
         handle_width = self._right_handle.width()
-        handle_left_x = max(0, min(handle_left_x, width))
+        handle_left_x = max(0, min(requested_left_x, width))
         ratio = (handle_left_x + handle_width) / width
         min_gap = max(MIN_TRIM_GAP, 2 * handle_width / width)
         ratio = max(self._in_ratio + min_gap, min(1.0, ratio))

@@ -109,3 +109,39 @@ def test_playhead_position_is_not_recomputed_when_trim_changes() -> None:
 
     assert before == 200
     assert after == before
+
+
+def test_playhead_clamps_to_trim_when_trim_crosses_it() -> None:
+    """The playhead should snap inward only when a trim handle passes over it."""
+
+    canvas = _ThumbnailCanvas()
+    canvas.resize(400, BAR_HEIGHT)
+    canvas.set_playhead(0.7)
+
+    canvas.set_trim(0.2, 0.5)
+
+    assert canvas._playhead_x() == 176
+
+
+def test_set_playhead_clamps_ratio_to_current_trim() -> None:
+    """Explicit playhead updates should never render outside the active trim range."""
+
+    canvas = _ThumbnailCanvas()
+    canvas.resize(400, BAR_HEIGHT)
+    canvas.set_trim(0.2, 0.5)
+
+    canvas.set_playhead(0.8)
+
+    assert canvas._playhead_x() == 176
+
+
+def test_playhead_clamps_to_left_handle_inner_edge() -> None:
+    """When trim-in overtakes the playhead, the white line should sit inside the left handle."""
+
+    canvas = _ThumbnailCanvas()
+    canvas.resize(400, BAR_HEIGHT)
+    canvas.set_playhead(0.1)
+
+    canvas.set_trim(0.2, 0.8)
+
+    assert canvas._playhead_x() == 104

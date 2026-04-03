@@ -4,6 +4,35 @@ All notable changes to **iPhotron** are documented in this file.
 
 ---
 
+## 🚀 v4.6.0 — Windows Maps Extension & Offline OsmAnd Runtime
+
+🗺️ *A new Windows-only maps extension brings the offline OsmAnd/OBF runtime into iPhotron, with clearer packaging, installer integration, and a documented upstream build workflow.*
+
+### Key Updates
+
+#### 🗺️ Windows Maps Extension
+- Added a self-contained **maps extension** rooted at `src/maps/tiles/extension/` for the offline OBF map runtime.
+- The bundled extension now carries `World_basemap_2.obf`, OsmAnd resources, and native runtime binaries in one predictable layout.
+- Windows builds can use the native OsmAnd widget runtime for a fuller offline map experience while keeping the repository self-contained.
+
+#### ⚙️ Runtime Selection & Fallback Behavior
+- Improved map backend startup so iPhotron can prefer the native Windows widget when the runtime is healthy.
+- Preserved the Python/helper-backed OBF renderer as a practical fallback path.
+- Linux and macOS continue using the existing Python / legacy map path while the native maps extension remains Windows only.
+
+#### 📦 Packaging & Installer Integration
+- Aligned local development, Nuitka packaging, and the Windows installer around the same extension directory contract.
+- Documented how the extension is synchronized into packaged builds and optional installer assets.
+- Made Windows release work more reproducible by standardizing which runtime artifacts ship with the application.
+
+#### 🧰 Upstream Build Workflow
+- Split the OsmAnd runtime build pipeline into the dedicated
+  [PySide6-OsmAnd-SDK](https://github.com/OliverZhaohaibin/PySide6-OsmAnd-SDK) side project.
+- Added clearer developer documentation for building, syncing, and validating the maps extension from the upstream workspace.
+- Improved the handoff between runtime experimentation in the side project and release packaging in the main iPhotron repository.
+
+---
+
 ## 🚀 v4.5.0 — Color Grading Expansion & Video Compatibility Improvements
 
 🎨 *A richer color grading workflow, new creative tools, stronger video compatibility, and more native desktop window behavior.*

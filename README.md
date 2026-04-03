@@ -113,6 +113,14 @@ The extension currently contains:
 - native binaries under `bin/`, including `osmand_render_helper.exe`,
   `osmand_native_widget.dll`, `OsmAndCore_shared.dll`, and the required Qt DLLs
 
+> **Windows only:** The full native maps extension runtime shown below is
+> currently available on Windows only. On Linux and macOS, iPhotron continues
+> to use the existing Python/legacy map path.
+
+| Without maps extension | With maps extension |
+| --- | --- |
+| ![Without maps extension](docs/picture/without_extension.png) | ![With maps extension](docs/picture/maps_extension.png) |
+
 The extension is built upstream from the standalone
 [PySide6-OsmAnd-SDK](https://github.com/OliverZhaohaibin/PySide6-OsmAnd-SDK)
 sub-project. That repository carries the vendored OsmAnd sources, Windows build

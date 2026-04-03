@@ -23,8 +23,8 @@ from PySide6.QtCore import QObject, QRunnable, QSize, Signal
 from PySide6.QtGui import QImage
 
 from ....errors import ExternalToolError
-from ....utils.logging import get_logger
 from ....utils.ffmpeg import probe_media, probe_video_rotation
+from ....utils.logging import get_logger
 from .video_frame_grabber import grab_video_frame
 from .video_trim_native import split_strip_bgra, split_strip_bgra_to_rgb
 
@@ -400,8 +400,7 @@ class VideoTrimThumbnailWorker(QRunnable):
         message = f"[video-trim-worker] {stage}"
         if parts:
             message += " | " + ", ".join(parts)
-        print(message)
-        _LOGGER.warning(message)
+        _LOGGER.debug(message)
 
 
 def _qimage_from_bgra(data: bytes, width: int, height: int) -> QImage | None:

@@ -12,13 +12,13 @@ from pathlib import Path
 from PySide6.QtGui import QImage, QTransform
 
 from ..errors import ExternalToolError
-from ..gui.ui.tasks.thumbnail_renderer import apply_geometry_and_crop
 from ..io import sidecar
 from ..media_classifier import VIDEO_EXTENSIONS
 from ..utils import image_loader
 from ..utils.ffmpeg import probe_media, probe_video_rotation
 from .color_resolver import compute_color_statistics
 from .filters.facade import apply_adjustments
+from .geometry import apply_geometry_and_crop
 from .raw_processor import RAW_EXTENSIONS
 
 try:  # pragma: no cover - optional dependency

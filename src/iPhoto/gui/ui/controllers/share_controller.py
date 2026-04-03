@@ -22,11 +22,13 @@ from PySide6.QtCore import (
 from PySide6.QtGui import QAction, QActionGroup, QGuiApplication, QImage, QTransform
 from PySide6.QtWidgets import QPushButton
 
-from ....core.export import render_video
+from ....core.export import _probe_duration_seconds, render_video
 from ....core.filters.facade import apply_adjustments
+from ....errors import ExternalToolError
 from ....io import sidecar
 from ....media_classifier import VIDEO_EXTENSIONS
 from ....utils import image_loader
+from ....utils.ffmpeg import probe_media
 from ..media import PlaylistController
 from ..models.roles import Roles
 from ..widgets.notification_toast import NotificationToast
@@ -264,7 +266,15 @@ class ShareController(QObject):
         if sidecar_path.exists():
             if path.suffix.lower() in VIDEO_EXTENSIONS:
                 raw_adjustments = sidecar.load_adjustments(path)
-                if sidecar.video_has_visible_edits(raw_adjustments, None):
+                # Probe duration so trim_is_non_default can compare against the
+                # full clip length; without it, any stored trimOutSec would be
+                # treated as an edit even when it equals the clip duration.
+                video_duration: float | None = None
+                try:
+                    video_duration = _probe_duration_seconds(probe_media(path))
+                except ExternalToolError:
+                    pass
+                if sidecar.video_has_visible_edits(raw_adjustments, video_duration):
                     self._copy_rendered_video_to_clipboard(path)
                 else:
                     mime_data = self._build_file_mime_data(path)

@@ -35,6 +35,17 @@ def _source_path() -> Path:
 
 
 def _build_library() -> bool:
+    """Compile the native helper library.
+
+    Compilation is **only attempted** when the environment variable
+    ``IPHOTO_BUILD_NATIVE_THUMB`` is set to ``1``.  This avoids unexpected
+    toolchain invocations on end-user systems, in sandboxes, or during normal
+    app startup.  When the variable is absent, this function returns ``False``
+    immediately so the pure-Python fallback is used.
+    """
+    if os.environ.get("IPHOTO_BUILD_NATIVE_THUMB") != "1":
+        return False
+
     lib_path = _library_path()
     src_path = _source_path()
     if lib_path.exists():

@@ -95,20 +95,29 @@ def renderer(mock_gl_funcs):
         renderer.initialize_resources()
         return renderer
 
-def test_render_upload_matrix_transpose_flag(renderer, mock_gl_funcs):
-    """Verify that matrix uniforms are uploaded via raw OpenGL with GL_TRUE transpose."""
+def test_render_upload_matrix_uses_column_major_data_without_transpose(renderer, mock_gl_funcs):
+    """Matrix uniforms should upload pre-transposed data with GL_FALSE transpose."""
 
     view_width = 800.0
     view_height = 600.0
     scale = 1.0
     pan = QPointF(0.0, 0.0)
     adjustments = {}
+    perspective_matrix = gl_renderer_mod.np.array(
+        [
+            [1.0, 2.0, 3.0],
+            [4.0, 5.0, 6.0],
+            [7.0, 8.0, 9.0],
+        ],
+        dtype=gl_renderer_mod.np.float32,
+    )
 
     renderer._texture_id = 1
     renderer._texture_width = 100
     renderer._texture_height = 100
 
-    with patch.object(gl_renderer_mod.gl, "glUniformMatrix3fv") as raw_uniform_matrix3fv:
+    with patch.object(gl_renderer_mod, "build_perspective_matrix", return_value=perspective_matrix), \
+         patch.object(gl_renderer_mod.gl, "glUniformMatrix3fv") as raw_uniform_matrix3fv:
         renderer.render(
             view_width=view_width,
             view_height=view_height,
@@ -126,7 +135,11 @@ def test_render_upload_matrix_transpose_flag(renderer, mock_gl_funcs):
         transpose = args[2]
         if location == 1:
             found = True
-            assert transpose == 1, "Expected transpose=1 (GL_TRUE)"
+            assert transpose == 0, "Expected transpose=0 (GL_FALSE)"
+            gl_renderer_mod.np.testing.assert_allclose(
+                gl_renderer_mod.np.asarray(args[3]),
+                perspective_matrix.T,
+            )
 
     assert found, "glUniformMatrix3fv was not called for uPerspectiveMatrix"
     mock_gl_funcs.glUniformMatrix3fv.assert_not_called()

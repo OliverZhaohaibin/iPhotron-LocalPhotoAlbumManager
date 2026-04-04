@@ -46,14 +46,16 @@ class UniformState:
         if location == -1:
             return
 
-        # Mesa is stricter than the Windows drivers we test against when Qt's
-        # wrapper receives Python sequences here. Upload a contiguous float32
-        # array through raw OpenGL to keep matrix uniforms portable.
-        matrix_data = np.ascontiguousarray(matrix, dtype=np.float32)
+        # OpenGL expects column-major matrix data when transpose is GL_FALSE.
+        # Uploading with transpose=GL_TRUE works on our Windows test machines
+        # but is rejected by some Linux/EGL/GLES stacks with GL_INVALID_OPERATION.
+        # Pre-transpose the numpy row-major matrix instead so the upload stays
+        # portable across both desktop GL and GLES-backed QRhi contexts.
+        matrix_data = np.ascontiguousarray(np.asarray(matrix, dtype=np.float32).T)
 
         gl.glUniformMatrix3fv(
             location,
             1,
-            1,  # GL_TRUE: row-major numpy -> column-major OpenGL
+            0,  # GL_FALSE: already converted to column-major layout above
             matrix_data,
         )

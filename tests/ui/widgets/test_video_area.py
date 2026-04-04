@@ -736,9 +736,9 @@ class TestVideoArea:
         mocker.patch.object(va._renderer, "set_linux_180_hint")
         mocker.patch.object(va._edit_viewer, "set_adjustments")
         mocker.patch.object(va._edit_viewer, "clear")
-        mock_set_source_rotation = mocker.patch.object(
+        mock_set_pending_source_rotation = mocker.patch.object(
             va._edit_viewer,
-            "set_video_source_rotation",
+            "set_pending_video_source_rotation",
         )
         mock_set_video_frame = mocker.patch.object(va._edit_viewer, "set_video_frame")
         mocker.patch(
@@ -760,7 +760,7 @@ class TestVideoArea:
         )
         va._on_video_frame(frame)
 
-        assert mock_set_source_rotation.call_args_list[-1] == call(90)
+        assert mock_set_pending_source_rotation.call_args_list[-1] == call(90)
         mock_set_video_frame.assert_called_once()
 
     def test_on_duration_changed_initialises_trim_when_unset(self, qapp, mocker):
@@ -918,7 +918,7 @@ def test_gl_image_viewer_clears_source_rotation_when_qt_fallback_is_prerotated(q
     viewer._gl_initialized = True
     viewer._using_video_frame_source = True
     viewer._video_frame_dirty = True
-    viewer._source_rotate90_steps = 1
+    viewer._pending_source_rotate90_steps = 1
     frame = mocker.Mock()
     viewer._video_frame = frame
 
@@ -942,6 +942,63 @@ def test_gl_image_viewer_clears_source_rotation_when_qt_fallback_is_prerotated(q
     viewer.render(cb)
 
     assert viewer._source_rotate90_steps == 0
+
+
+def test_gl_image_viewer_defers_rotation_until_new_video_frame_upload(qapp, mocker):
+    """Queued frame rotation should not mutate the currently displayed texture."""
+
+    viewer = GLImageViewer()
+    viewer._using_video_frame_source = True
+    viewer._source_rotate90_steps = 0
+
+    mock_update_crop = mocker.patch.object(viewer, "_update_crop_perspective_state")
+    mock_reapply_view = mocker.patch.object(viewer, "_reapply_locked_crop_view")
+    mock_reapply_center = mocker.patch.object(viewer, "_reapply_locked_crop_center")
+    mock_update = mocker.patch.object(viewer, "update")
+
+    viewer.set_pending_video_source_rotation(90)
+
+    assert viewer._source_rotate90_steps == 0
+    assert viewer._pending_source_rotate90_steps == 1
+    mock_update_crop.assert_not_called()
+    mock_reapply_view.assert_not_called()
+    mock_reapply_center.assert_not_called()
+    mock_update.assert_not_called()
+
+
+def test_gl_image_viewer_applies_pending_rotation_after_video_frame_upload(qapp, mocker):
+    """Non-prerotated uploads should adopt the queued frame rotation once uploaded."""
+
+    viewer = GLImageViewer()
+    viewer._gl_initialized = True
+    viewer._using_video_frame_source = True
+    viewer._video_frame_dirty = True
+    viewer._pending_source_rotate90_steps = 1
+    frame = mocker.Mock()
+    viewer._video_frame = frame
+
+    gl_funcs = mocker.Mock()
+    viewer._gl_funcs = gl_funcs
+
+    renderer = mocker.Mock()
+    renderer.has_texture.return_value = True
+    renderer.last_video_upload_pre_rotated.return_value = False
+    renderer.texture_size.return_value = (1920, 1440)
+    viewer._renderer = renderer
+
+    mock_update_cover_scale = mocker.patch.object(viewer, "_update_cover_scale")
+    mocker.patch.object(viewer, "reset_zoom")
+    target = mocker.Mock()
+    target.pixelSize.return_value = QSize(320, 240)
+    mocker.patch.object(viewer, "renderTarget", return_value=target)
+
+    cb = mocker.Mock()
+
+    viewer.render(cb)
+
+    assert viewer._source_rotate90_steps == 1
+    assert viewer._pending_source_rotate90_steps is None
+    mock_update_cover_scale.assert_called()
 
 
 def test_gl_image_viewer_centers_crop_when_framing_disabled(qapp, mocker):

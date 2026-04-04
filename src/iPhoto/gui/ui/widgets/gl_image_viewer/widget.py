@@ -119,6 +119,7 @@ class GLImageViewer(QRhiWidget):
         self._transparent_rounded_clip_enabled = False
         self._rounded_clip_radius = 0.0
         self._source_rotate90_steps = 0
+        self._pending_source_rotate90_steps: int | None = None
         self._adjustments: dict[str, Any] = {}
         self._eyedropper_active = False
 
@@ -260,6 +261,7 @@ class GLImageViewer(QRhiWidget):
         self._video_frame_dirty = False
         self._using_video_frame_source = False
         self._pending_video_reset_view = False
+        self._pending_source_rotate90_steps = None
 
         # Check if we can reuse the existing texture
         if (
@@ -465,6 +467,20 @@ class GLImageViewer(QRhiWidget):
         """Apply the resolved container rotation for streamed video frames."""
 
         rotate_steps = (int(cw_degrees) // 90) % 4
+        self._pending_source_rotate90_steps = None
+        self._apply_video_source_rotation_steps(rotate_steps)
+
+    def set_pending_video_source_rotation(self, cw_degrees: int) -> None:
+        """Queue the container rotation for the next uploaded video frame."""
+
+        self._pending_source_rotate90_steps = (int(cw_degrees) // 90) % 4
+
+    def _apply_video_source_rotation_steps(
+        self,
+        rotate_steps: int,
+        *,
+        request_update: bool = True,
+    ) -> None:
         if self._source_rotate90_steps == rotate_steps:
             return
         self._source_rotate90_steps = rotate_steps
@@ -478,7 +494,8 @@ class GLImageViewer(QRhiWidget):
         if self._renderer is not None and self._renderer.has_texture():
             straighten, rotate_steps, _ = self._rotation_parameters()
             self._update_cover_scale(straighten, rotate_steps)
-        self.update()
+        if request_update:
+            self.update()
 
     def _display_rotate_steps(self, values: Mapping[str, Any] | None = None) -> int:
         mapped_values = values if values is not None else self._adjustments
@@ -754,8 +771,19 @@ class GLImageViewer(QRhiWidget):
         ):
             try:
                 self._renderer.upload_video_frame(self._video_frame)
-                if self._renderer.last_video_upload_pre_rotated():
-                    self.set_video_source_rotation(0)
+                pending_rotation = self._pending_source_rotate90_steps
+                if pending_rotation is None:
+                    pending_rotation = self._source_rotate90_steps
+                final_rotation = (
+                    0
+                    if self._renderer.last_video_upload_pre_rotated()
+                    else pending_rotation
+                )
+                self._apply_video_source_rotation_steps(
+                    final_rotation,
+                    request_update=False,
+                )
+                self._pending_source_rotate90_steps = None
             except Exception:
                 _LOGGER.exception("Failed to upload video frame into GLImageViewer")
             self._video_frame = None

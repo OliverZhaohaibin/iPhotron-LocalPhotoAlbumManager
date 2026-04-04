@@ -576,7 +576,7 @@ class VideoArea(QWidget):
                 container_raw_h=self._container_raw_h,
                 linux_180_hint=self._container_linux_180_hint,
             )
-            self._edit_viewer.set_video_source_rotation(resolved_rotation_cw)
+            self._edit_viewer.set_pending_video_source_rotation(resolved_rotation_cw)
             reset_view = self._adjusted_first_frame_pending
             self._adjusted_first_frame_pending = False
             self._edit_viewer.set_video_frame(

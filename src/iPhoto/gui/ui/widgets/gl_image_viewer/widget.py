@@ -118,6 +118,7 @@ class GLImageViewer(QRhiWidget):
         self._fill_viewport_enabled = False
         self._transparent_rounded_clip_enabled = False
         self._rounded_clip_radius = 0.0
+        self._source_rotate90_steps = 0
         self._adjustments: dict[str, Any] = {}
         self._eyedropper_active = False
 
@@ -381,8 +382,7 @@ class GLImageViewer(QRhiWidget):
         if self._crop_controller.is_active():
             # Refresh the crop overlay in logical space so it stays aligned when rotation
             # or perspective adjustments change while the interaction mode is active.
-            logical_values = geometry.logical_crop_mapping_from_texture(mapped_adjustments)
-            self._crop_controller.set_active(True, logical_values)
+            self._crop_controller.set_active(True, self._logical_crop_values(mapped_adjustments))
         if self._auto_crop_view_locked and not self._crop_controller.is_active():
             self._reapply_locked_crop_view()
         elif self._auto_crop_center_locked and not self._crop_controller.is_active():
@@ -460,6 +460,38 @@ class GLImageViewer(QRhiWidget):
         """Return the partial crop-fit strength used outside crop framing mode."""
 
         return self._crop_center_zoom_strength
+
+    def set_video_source_rotation(self, cw_degrees: int) -> None:
+        """Apply the resolved container rotation for streamed video frames."""
+
+        rotate_steps = (int(cw_degrees) // 90) % 4
+        if self._source_rotate90_steps == rotate_steps:
+            return
+        self._source_rotate90_steps = rotate_steps
+        self._update_crop_perspective_state()
+        if self._crop_controller.is_active():
+            self._crop_controller.set_active(True, self._logical_crop_values())
+        if self._auto_crop_view_locked and not self._crop_controller.is_active():
+            self._reapply_locked_crop_view()
+        elif self._auto_crop_center_locked and not self._crop_controller.is_active():
+            self._reapply_locked_crop_center()
+        if self._renderer is not None and self._renderer.has_texture():
+            straighten, rotate_steps, _ = self._rotation_parameters()
+            self._update_cover_scale(straighten, rotate_steps)
+        self.update()
+
+    def _display_rotate_steps(self, values: Mapping[str, Any] | None = None) -> int:
+        mapped_values = values if values is not None else self._adjustments
+        user_steps = geometry.get_rotate_steps(mapped_values)
+        return (user_steps + self._source_rotate90_steps) % 4
+
+    def _display_adjustments(self, values: Mapping[str, Any] | None = None) -> dict[str, Any]:
+        mapped = dict(values if values is not None else self._adjustments)
+        mapped["Crop_Rotate90"] = float(self._display_rotate_steps(mapped))
+        return mapped
+
+    def _logical_crop_values(self, values: Mapping[str, Any] | None = None) -> dict[str, float]:
+        return geometry.logical_crop_mapping_from_texture(self._display_adjustments(values))
 
     def set_viewport_fill_enabled(self, enabled: bool) -> None:
         """Control whether the viewer covers the viewport instead of fitting inside it."""
@@ -754,7 +786,7 @@ class GLImageViewer(QRhiWidget):
 
         effective_adjustments: dict[str, float] | Mapping[str, float]
         if self._crop_controller.is_active():
-            effective_adjustments = dict(self._adjustments)
+            effective_adjustments = dict(self._display_adjustments())
             # During crop interactions we want to preview the entire photo with
             # a translucent overlay.  The fragment shader drives the crop
             # window entirely from the ``Crop_*`` uniforms, therefore we
@@ -772,8 +804,8 @@ class GLImageViewer(QRhiWidget):
             # Convert texture-space crop to logical-space for shader
             # Shader tests crop in pre-rotation space (uv_perspective),
             # so it needs logical-space crop parameters
-            effective_adjustments = dict(self._adjustments)
-            logical_crop = geometry.logical_crop_mapping_from_texture(self._adjustments)
+            effective_adjustments = dict(self._display_adjustments())
+            logical_crop = geometry.logical_crop_mapping_from_texture(effective_adjustments)
             effective_adjustments.update(logical_crop)
 
 
@@ -821,8 +853,7 @@ class GLImageViewer(QRhiWidget):
     def setCropMode(self, enabled: bool, values: Mapping[str, float] | None = None) -> None:
         was_active = self._crop_controller.is_active()
         source_values = values if values is not None else self._adjustments
-        logical_values = geometry.logical_crop_mapping_from_texture(source_values)
-        self._crop_controller.set_active(enabled, logical_values)
+        self._crop_controller.set_active(enabled, self._logical_crop_values(source_values))
         if enabled and not was_active:
             self._cancel_auto_crop_lock()
             self._transform_controller.reset_zoom()
@@ -832,7 +863,7 @@ class GLImageViewer(QRhiWidget):
     def crop_values(self) -> dict[str, float]:
         logical_map = self._crop_controller.get_crop_values()
         logical_tuple = geometry.normalised_crop_from_mapping(logical_map)
-        rotate_steps = geometry.get_rotate_steps(self._adjustments)
+        rotate_steps = self._display_rotate_steps()
 
         tex_cx, tex_cy, tex_w, tex_h = geometry.logical_crop_to_texture(
             logical_tuple, rotate_steps

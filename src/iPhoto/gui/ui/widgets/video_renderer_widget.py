@@ -129,6 +129,66 @@ def _should_assume_linux_180_prerotated(container_hint: bool) -> bool:
     return forced.strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _rotation_value_to_degrees(rotation: object) -> int:
+    """Convert a Qt rotation enum/value into clockwise degrees."""
+
+    try:
+        numeric = rotation.value if hasattr(rotation, "value") else rotation
+        return int(numeric) % 360
+    except (TypeError, ValueError):
+        return 0
+
+
+def _resolve_frame_rotation_cw(
+    fmt: "QVideoFrameFormat",
+    *,
+    container_rotation_cw: int,
+    container_raw_w: int,
+    container_raw_h: int,
+    linux_180_hint: bool = False,
+) -> int:
+    """Resolve the clockwise display rotation for *fmt* using ffprobe metadata.
+
+    The logic mirrors the long-standing ``VideoRendererWidget`` path so both the
+    native QRhi renderer and the GL adjusted-preview path interpret portrait
+    iPhone clips the same way.
+    """
+
+    frame_w = fmt.frameWidth()
+    frame_h = fmt.frameHeight()
+    qt_rotation = _rotation_value_to_degrees(fmt.rotation())
+
+    if container_rotation_cw != 0:
+        pre_rotated = False
+
+        if container_rotation_cw in (90, 270) and container_raw_w > 0 and container_raw_h > 0:
+            if frame_w == container_raw_h and frame_h == container_raw_w:
+                pre_rotated = True
+            elif frame_w != container_raw_w or frame_h != container_raw_h:
+                frame_ar = frame_w / frame_h if frame_h > 0 else 0.0
+                raw_ar = container_raw_w / container_raw_h if container_raw_h > 0 else 0.0
+                rotated_ar = container_raw_h / container_raw_w if container_raw_w > 0 else 0.0
+                if (
+                    rotated_ar > 0
+                    and abs(frame_ar - rotated_ar) < 0.05
+                    and (raw_ar <= 0 or abs(frame_ar - raw_ar) >= 0.05)
+                ):
+                    pre_rotated = True
+        elif container_rotation_cw == 180:
+            if (
+                abs(qt_rotation) % 360 == 180
+                and _should_assume_linux_180_prerotated(linux_180_hint)
+            ):
+                pre_rotated = True
+
+        return 0 if pre_rotated else container_rotation_cw
+
+    if container_raw_w > 0:
+        return 0
+
+    return qt_rotation
+
+
 def _classify_frame_format(fmt: "QVideoFrameFormat") -> tuple[int, int, int, int]:
     """Return (format, colorspace, transfer, range) shader enum values for *fmt*."""
 
@@ -306,90 +366,13 @@ class VideoRendererWidget(QRhiWidget):
         w = fmt.frameWidth()
         h = fmt.frameHeight()
 
-        # ---- Rotation resolution -------------------------------------------
-        # Qt's ``QVideoFrameFormat.rotation()`` value can differ across
-        # platforms: on Windows (Media Foundation) it usually reports the
-        # correct clockwise rotation from the display matrix; on Linux
-        # (FFmpeg / GStreamer backends) the value may be wrong (e.g. negated
-        # sign) or the backend may pre-rotate the pixel data while *still*
-        # reporting the original rotation, causing double rotation.
-        #
-        # The most reliable cross-platform source of truth is the ffprobe
-        # display-matrix metadata stored in ``_container_rotation_cw`` (set
-        # by ``VideoArea`` at load time).  When that information is available
-        # we use it *instead of* Qt's rotation, combined with a dimension
-        # comparison to detect whether the multimedia backend already
-        # pre-rotated the decoded frames:
-        #
-        #   • frame dims match raw stream dims  → NOT pre-rotated → apply
-        #   • frame dims match *rotated* raw    → pre-rotated     → skip
-        #
-        # When ffprobe metadata is unavailable we fall back to Qt's value.
-        container_rot = self._container_rotation_cw
-        raw_w = self._container_raw_w
-        raw_h = self._container_raw_h
-
-        if container_rot != 0:
-            # ffprobe rotation available — use it as the primary source.
-            pre_rotated = False
-
-            if container_rot in (90, 270) and raw_w > 0 and raw_h > 0:
-                # 90°/270° rotation swaps width and height; use that to
-                # detect whether the backend already applied the rotation.
-                # Pre-rotation detection requires raw coded dimensions.
-                if w == raw_h and h == raw_w:
-                    pre_rotated = True
-                elif w != raw_w or h != raw_h:
-                    # Dimensions don't match exactly (e.g. slight crop or
-                    # scaling by the decoder).  Compare aspect ratios.
-                    frame_ar = w / h if h > 0 else 0.0
-                    raw_ar = raw_w / raw_h if raw_h > 0 else 0.0
-                    rotated_ar = raw_h / raw_w if raw_w > 0 else 0.0
-                    # If the frame matches the *rotated* aspect but NOT the
-                    # original, the backend pre-rotated.  For nearly-square
-                    # videos both ratios are close; prefer "not pre-rotated".
-                    if (
-                        rotated_ar > 0
-                        and abs(frame_ar - rotated_ar) < 0.05
-                        and (raw_ar <= 0 or abs(frame_ar - raw_ar) >= 0.05)
-                    ):
-                        pre_rotated = True
-            elif container_rot == 180:
-                # 180° rotation keeps width/height unchanged, so dimension
-                # checks cannot detect pre-rotated frames.  On Linux backends
-                # (FFmpeg/GStreamer), some clips are already decoded upright
-                # while rotation metadata is still reported, which causes a
-                # double 180° flip if we apply container rotation again.
-                #
-                # Heuristic: only when Qt reports 180° *and* the environment
-                # indicates a Linux backend known to pre-rotate pixels (or an
-                # explicit opt-in override), treat the frame as pre-rotated
-                # and skip the extra transform.
-                qt_rot = 0
-                rotation = fmt.rotation()
-                try:
-                    qt_rot = rotation.value if hasattr(rotation, "value") else int(rotation)
-                except (TypeError, ValueError):
-                    qt_rot = 0
-                if (
-                    abs(qt_rot) % 360 == 180
-                    and _should_assume_linux_180_prerotated(self._container_linux_180_hint)
-                ):
-                    pre_rotated = True
-
-            rot_deg = 0 if pre_rotated else container_rot
-        elif raw_w > 0:
-            # ffprobe ran successfully but reported 0° — trust it; do not
-            # fall back to Qt which may report a different value.
-            rot_deg = 0
-        else:
-            # No ffprobe data at all — fall back to Qt's value.
-            rotation = fmt.rotation()
-            try:
-                rot_deg = rotation.value if hasattr(rotation, "value") else int(rotation)
-            except (TypeError, ValueError):
-                rot_deg = 0
-        # ---- end rotation resolution ----------------------------------------
+        rot_deg = _resolve_frame_rotation_cw(
+            fmt,
+            container_rotation_cw=self._container_rotation_cw,
+            container_raw_w=self._container_raw_w,
+            container_raw_h=self._container_raw_h,
+            linux_180_hint=self._container_linux_180_hint,
+        )
 
         self._rotate90_steps = (rot_deg // 90) % 4
         self._mirror = 1 if fmt.isMirrored() else 0

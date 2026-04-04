@@ -55,7 +55,7 @@ from ....utils.ffmpeg import get_linux_180_prerotate_hint, probe_video_rotation
 from ..palette import viewer_surface_color
 from .gl_image_viewer import GLImageViewer
 from .player_bar import PlayerBar
-from .video_renderer_widget import VideoRendererWidget
+from .video_renderer_widget import VideoRendererWidget, _resolve_frame_rotation_cw
 
 _log = logging.getLogger(__name__)
 
@@ -135,6 +135,10 @@ class VideoArea(QWidget):
         self._trim_out_ms = 0
         self._current_duration_ms = 0
         self._current_source: Path | None = None
+        self._container_rotation_cw = 0
+        self._container_raw_w = 0
+        self._container_raw_h = 0
+        self._container_linux_180_hint = False
         self._adjusted_first_frame_pending = False
         self._suppress_trim_pause = False
         self._restart_from_trim_in_on_play = False
@@ -448,6 +452,7 @@ class VideoArea(QWidget):
         if self._adjusted_preview_enabled:
             self._adjusted_first_frame_pending = True
         self._edit_viewer.set_adjustments(self._current_adjustments)
+        self._edit_viewer.set_video_source_rotation(0)
         self._edit_viewer.clear()
         self._renderer.clear_frame()
         self._trim_in_ms = 0
@@ -460,8 +465,13 @@ class VideoArea(QWidget):
         # as the primary rotation source (more reliable across platforms
         # than Qt's ``QVideoFrameFormat.rotation()``).
         cw_deg, raw_w, raw_h = probe_video_rotation(path)
+        linux_180_hint = get_linux_180_prerotate_hint(path)
+        self._container_rotation_cw = cw_deg
+        self._container_raw_w = raw_w
+        self._container_raw_h = raw_h
+        self._container_linux_180_hint = linux_180_hint
         self._renderer.set_container_rotation(cw_deg, raw_w, raw_h)
-        self._renderer.set_linux_180_hint(get_linux_180_prerotate_hint(path))
+        self._renderer.set_linux_180_hint(linux_180_hint)
         if cw_deg:
             _log.debug(
                 "Container rotation for %s: %d° CW (raw %dx%d)",
@@ -544,8 +554,13 @@ class VideoArea(QWidget):
         self._player.setSource(QUrl())
         self._renderer.clear_frame()
         self._edit_viewer.clear()
+        self._edit_viewer.set_video_source_rotation(0)
         self._current_source = None
         self._current_duration_ms = 0
+        self._container_rotation_cw = 0
+        self._container_raw_w = 0
+        self._container_raw_h = 0
+        self._container_linux_180_hint = False
         self._trim_in_ms = 0
         self._trim_out_ms = 0
         self._restart_from_trim_in_on_play = False
@@ -554,6 +569,14 @@ class VideoArea(QWidget):
     def _on_video_frame(self, frame: "QVideoFrame") -> None:
         """Forward each decoded frame to the GPU renderer."""
         if self._adjusted_preview_enabled:
+            resolved_rotation_cw = _resolve_frame_rotation_cw(
+                frame.surfaceFormat(),
+                container_rotation_cw=self._container_rotation_cw,
+                container_raw_w=self._container_raw_w,
+                container_raw_h=self._container_raw_h,
+                linux_180_hint=self._container_linux_180_hint,
+            )
+            self._edit_viewer.set_video_source_rotation(resolved_rotation_cw)
             reset_view = self._adjusted_first_frame_pending
             self._adjusted_first_frame_pending = False
             self._edit_viewer.set_video_frame(

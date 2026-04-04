@@ -37,7 +37,7 @@ def display_texture_dimensions(viewer: GLImageViewer) -> tuple[int, int]:
     tex_w, tex_h = texture_dimensions(viewer)
     if tex_w <= 0 or tex_h <= 0:
         return (tex_w, tex_h)
-    rotate_steps = int(float(viewer._adjustments.get("Crop_Rotate90", 0.0)))
+    rotate_steps = viewer._display_rotate_steps()
     if rotate_steps % 2:
         return (tex_h, tex_w)
     return (tex_w, tex_h)
@@ -48,7 +48,7 @@ def display_texture_dimensions(viewer: GLImageViewer) -> tuple[int, int]:
 def rotation_parameters(viewer: GLImageViewer) -> tuple[float, int, bool]:
     """Return the straighten angle, rotate steps, and flip toggle."""
     straighten = float(viewer._adjustments.get("Crop_Straighten", 0.0))
-    rotate_steps = int(float(viewer._adjustments.get("Crop_Rotate90", 0.0)))
+    rotate_steps = viewer._display_rotate_steps()
     flip = bool(viewer._adjustments.get("Crop_FlipH", False))
     return straighten, rotate_steps, flip
 
@@ -97,7 +97,7 @@ def update_crop_perspective_state(viewer: GLImageViewer) -> None:
     vertical = float(viewer._adjustments.get("Perspective_Vertical", 0.0))
     horizontal = float(viewer._adjustments.get("Perspective_Horizontal", 0.0))
     straighten, rotate_steps, flip = rotation_parameters(viewer)
-    logical_values = geometry.logical_crop_mapping_from_texture(viewer._adjustments)
+    logical_values = viewer._logical_crop_values()
     viewer._crop_controller.update_perspective(
         vertical,
         horizontal,
@@ -115,7 +115,7 @@ def compute_crop_rect_pixels(viewer: GLImageViewer) -> QRectF | None:
     """Return the crop rectangle expressed in texture pixels."""
     tex_w, tex_h = display_texture_dimensions(viewer)
     crop_cx, crop_cy, crop_w, crop_h = geometry.logical_crop_from_texture(
-        viewer._adjustments
+        viewer._display_adjustments()
     )
     return crop_logic.compute_crop_rect_pixels(
         crop_cx, crop_cy, crop_w, crop_h, tex_w, tex_h
@@ -198,7 +198,7 @@ def handle_crop_interaction_changed(
     height: float,
 ) -> None:
     """Convert logical crop updates back to texture space before emitting."""
-    rotate_steps = geometry.get_rotate_steps(viewer._adjustments)
+    rotate_steps = viewer._display_rotate_steps()
     tex_cx, tex_cy, tex_w, tex_h = geometry.logical_crop_to_texture(
         (float(cx), float(cy), float(width), float(height)),
         rotate_steps,
@@ -234,7 +234,7 @@ def handle_eyedropper_pick(viewer: GLImageViewer, position: QPointF) -> bool:
     lx = max(0.0, min(1.0, image_point.x() / float(logical_w)))
     ly = max(0.0, min(1.0, image_point.y() / float(logical_h)))
 
-    rotate_steps = geometry.get_rotate_steps(viewer._adjustments)
+    rotate_steps = viewer._display_rotate_steps()
     if rotate_steps == 1:
         tx, ty = ly, 1.0 - lx
     elif rotate_steps == 2:

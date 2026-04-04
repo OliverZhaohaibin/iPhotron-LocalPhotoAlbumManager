@@ -21,6 +21,7 @@ from iPhoto.gui.ui.widgets.gl_image_viewer import GLImageViewer
 from iPhoto.gui.ui.widgets.video_area import VideoArea
 from iPhoto.gui.ui.widgets.video_renderer_widget import (
     VideoRendererWidget,
+    _resolve_frame_rotation_cw,
     _classify_frame_format,
     _CS_BT601,
     _CS_BT709,
@@ -311,6 +312,20 @@ class TestVideoRendererWidget:
 
         # Container rotation (90° CW) wins → steps = 1
         assert w._rotate90_steps == 1
+
+    def test_resolve_frame_rotation_handles_portrait_iphone_display_matrix(self, qapp):
+        """Portrait iPhone clips should preserve the ffprobe-derived 90Â° rotation."""
+
+        fmt = QVideoFrameFormat(
+            QSize(1920, 1440), QVideoFrameFormat.PixelFormat.Format_RGBA8888
+        )
+
+        assert _resolve_frame_rotation_cw(
+            fmt,
+            container_rotation_cw=90,
+            container_raw_w=1920,
+            container_raw_h=1440,
+        ) == 90
 
     def test_update_frame_sets_has_frame(self, qapp):
         """update_frame should set _has_frame to True when a valid frame arrives."""
@@ -707,6 +722,45 @@ class TestVideoArea:
 
         mock_set_video_frame.assert_called_once()
         mock_to_image.assert_not_called()
+
+    def test_adjusted_preview_forwards_resolved_container_rotation(self, qapp, mocker):
+        """Adjusted preview should keep portrait container rotation on the GL path."""
+
+        va = VideoArea()
+        va.set_adjusted_preview_enabled(True)
+        mocker.patch.object(va._player, "setSource")
+        mocker.patch.object(va._player, "setPosition")
+        mocker.patch.object(va._renderer, "clear_frame")
+        mocker.patch.object(va._renderer, "set_container_rotation")
+        mocker.patch.object(va._renderer, "set_linux_180_hint")
+        mocker.patch.object(va._edit_viewer, "set_adjustments")
+        mocker.patch.object(va._edit_viewer, "clear")
+        mock_set_source_rotation = mocker.patch.object(
+            va._edit_viewer,
+            "set_video_source_rotation",
+        )
+        mock_set_video_frame = mocker.patch.object(va._edit_viewer, "set_video_frame")
+        mocker.patch(
+            "iPhoto.gui.ui.widgets.video_area.probe_video_rotation",
+            return_value=(90, 1920, 1440),
+        )
+        mocker.patch(
+            "iPhoto.gui.ui.widgets.video_area.get_linux_180_prerotate_hint",
+            return_value=False,
+        )
+
+        va.load_video(Path("/fake/IMG_3160.MOV"), adjusted_preview=True)
+
+        frame = QVideoFrame(
+            QVideoFrameFormat(
+                QSize(1920, 1440),
+                QVideoFrameFormat.PixelFormat.Format_RGBA8888,
+            )
+        )
+        va._on_video_frame(frame)
+
+        assert mock_set_source_rotation.call_args_list[-1] == call(90)
+        mock_set_video_frame.assert_called_once()
 
     def test_on_duration_changed_initialises_trim_when_unset(self, qapp, mocker):
         """When no trim range is set, duration change should initialise trim to full range."""

@@ -104,7 +104,8 @@ def _classify_video_frame_format(
 class TextureManager:
     """Manages the main image texture and auxiliary LUT textures."""
 
-    def __init__(self) -> None:
+    def __init__(self, gl_funcs=None) -> None:
+        self._gl_funcs = gl_funcs
         self._texture_id: int = 0
         self._texture_width: int = 0
         self._texture_height: int = 0
@@ -147,10 +148,11 @@ class TextureManager:
 
         self._ensure_source_texture(width, height, use_mipmaps=True)
 
-        gl.glPixelStorei(gl.GL_UNPACK_ALIGNMENT, 1)
+        gf = self._gl_funcs or gl
+        gf.glPixelStorei(gl.GL_UNPACK_ALIGNMENT, 1)
         row_length = qimage.bytesPerLine() // 4
-        gl.glPixelStorei(gl.GL_UNPACK_ROW_LENGTH, row_length)
-        gl.glTexSubImage2D(
+        gf.glPixelStorei(gl.GL_UNPACK_ROW_LENGTH, row_length)
+        gf.glTexSubImage2D(
             gl.GL_TEXTURE_2D,
             0,
             0,
@@ -161,9 +163,9 @@ class TextureManager:
             gl.GL_UNSIGNED_BYTE,
             buffer,
         )
-        gl.glPixelStorei(gl.GL_UNPACK_ROW_LENGTH, 0)
-        gl.glPixelStorei(gl.GL_UNPACK_ALIGNMENT, 4)
-        gl.glGenerateMipmap(gl.GL_TEXTURE_2D)
+        gf.glPixelStorei(gl.GL_UNPACK_ROW_LENGTH, 0)
+        gf.glPixelStorei(gl.GL_UNPACK_ALIGNMENT, 4)
+        gf.glGenerateMipmap(gl.GL_TEXTURE_2D)
 
         error = gl.glGetError()
         if error != gl.GL_NO_ERROR:
@@ -325,7 +327,8 @@ class TextureManager:
     def _delete_image_texture(self) -> None:
         if not self._texture_id:
             return
-        gl.glDeleteTextures(1, np.array([int(self._texture_id)], dtype=np.uint32))
+        gf = self._gl_funcs or gl
+        gf.glDeleteTextures(1, [int(self._texture_id)])
         self._texture_id = 0
         self._texture_width = 0
         self._texture_height = 0
@@ -442,11 +445,12 @@ class TextureManager:
             or self._texture_height != int(height)
             or self._texture_uses_mipmaps != bool(use_mipmaps)
         )
+        gf = self._gl_funcs or gl
         if recreate:
             if self._texture_id:
-                gl.glDeleteTextures(1, np.array([int(self._texture_id)], dtype=np.uint32))
+                gf.glDeleteTextures(1, [int(self._texture_id)])
                 self._texture_id = 0
-            tex_id = gl.glGenTextures(1)
+            tex_id = gf.glGenTextures(1)
             if isinstance(tex_id, (tuple, list)):
                 tex_id = tex_id[0]
             self._texture_id = int(tex_id)
@@ -454,9 +458,9 @@ class TextureManager:
             self._texture_height = int(height)
             self._texture_uses_mipmaps = bool(use_mipmaps)
 
-        gl.glBindTexture(gl.GL_TEXTURE_2D, self._texture_id)
+        gf.glBindTexture(gl.GL_TEXTURE_2D, self._texture_id)
         if recreate:
-            gl.glTexImage2D(
+            gf.glTexImage2D(
                 gl.GL_TEXTURE_2D,
                 0,
                 gl.GL_RGBA8,
@@ -468,10 +472,10 @@ class TextureManager:
                 None,
             )
             min_filter = gl.GL_LINEAR_MIPMAP_LINEAR if use_mipmaps else gl.GL_LINEAR
-            gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MIN_FILTER, min_filter)
-            gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MAG_FILTER, gl.GL_LINEAR)
-            gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_WRAP_S, gl.GL_CLAMP_TO_EDGE)
-            gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_WRAP_T, gl.GL_CLAMP_TO_EDGE)
+            gf.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MIN_FILTER, min_filter)
+            gf.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MAG_FILTER, gl.GL_LINEAR)
+            gf.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_WRAP_S, gl.GL_CLAMP_TO_EDGE)
+            gf.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_WRAP_T, gl.GL_CLAMP_TO_EDGE)
 
     def _upload_packed_texture(
         self,

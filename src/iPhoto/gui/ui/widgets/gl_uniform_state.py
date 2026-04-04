@@ -48,7 +48,7 @@ class UniformState:
         # Keep this path compatible with both desktop GL and GLES contexts.
         # GLES requires transpose=GL_FALSE for glUniformMatrix* calls, so we
         # pre-transpose the row-major numpy matrix before upload.
-        matrix_data = np.ascontiguousarray(matrix.T, dtype=np.float32)
+        matrix_data = np.ascontiguousarray(matrix.T, dtype=np.float32).reshape(9).tolist()
 
         self._gl_funcs.glUniformMatrix3fv(
             location,

@@ -55,7 +55,7 @@ class GLRenderer:
         self._parent = parent
 
         self._shader_mgr = ShaderManager(gl_funcs, parent=parent)
-        self._tex_mgr = TextureManager()
+        self._tex_mgr = TextureManager(gl_funcs)
         # UniformState shares the same dict instance populated by ShaderManager
         self._uniform = UniformState(gl_funcs, self._shader_mgr.uniform_locations)
 

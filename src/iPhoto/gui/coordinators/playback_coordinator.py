@@ -311,7 +311,7 @@ class PlaybackCoordinator(QObject):
         self._info_button.setEnabled(True)
         self._share_button.setEnabled(True)
         self._edit_button.setEnabled(True)
-        self._rotate_button.setEnabled(not is_video)  # Simple logic for now
+        self._rotate_button.setEnabled(True)
 
         self._update_favorite_icon(bool(is_fav))
 
@@ -501,13 +501,17 @@ class PlaybackCoordinator(QObject):
 
         idx = self._asset_vm.index(self._current_row, 0)
         abs_path = self._asset_vm.data(idx, Roles.ABS)
+        is_video = bool(self._asset_vm.data(idx, Roles.IS_VIDEO))
 
         if not abs_path: return
 
         source = Path(abs_path)
 
         # 1. Update UI immediately (Optimistic)
-        updates = self._player_view.image_viewer.rotate_image_ccw()
+        if is_video:
+            updates = self._player_view.video_area.rotate_image_ccw()
+        else:
+            updates = self._player_view.image_viewer.rotate_image_ccw()
 
         # 2. Persist adjustments
         try:

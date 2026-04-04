@@ -155,11 +155,11 @@ class TextureManager:
 
         self._ensure_source_texture(width, height, use_mipmaps=True)
 
-        gl_functions = self._gl_funcs or gl
-        gl_functions.glPixelStorei(gl.GL_UNPACK_ALIGNMENT, 1)
+        gl_funcs = self._gl_funcs or gl
+        gl_funcs.glPixelStorei(gl.GL_UNPACK_ALIGNMENT, 1)
         row_length = qimage.bytesPerLine() // 4
-        gl_functions.glPixelStorei(gl.GL_UNPACK_ROW_LENGTH, row_length)
-        gl_functions.glTexSubImage2D(
+        gl_funcs.glPixelStorei(gl.GL_UNPACK_ROW_LENGTH, row_length)
+        gl_funcs.glTexSubImage2D(
             gl.GL_TEXTURE_2D,
             0,
             0,
@@ -170,9 +170,9 @@ class TextureManager:
             gl.GL_UNSIGNED_BYTE,
             buffer,
         )
-        gl_functions.glPixelStorei(gl.GL_UNPACK_ROW_LENGTH, 0)
-        gl_functions.glPixelStorei(gl.GL_UNPACK_ALIGNMENT, 4)
-        gl_functions.glGenerateMipmap(gl.GL_TEXTURE_2D)
+        gl_funcs.glPixelStorei(gl.GL_UNPACK_ROW_LENGTH, 0)
+        gl_funcs.glPixelStorei(gl.GL_UNPACK_ALIGNMENT, 4)
+        gl_funcs.glGenerateMipmap(gl.GL_TEXTURE_2D)
 
         error = gl.glGetError()
         if error != gl.GL_NO_ERROR:
@@ -334,9 +334,9 @@ class TextureManager:
     def _delete_image_texture(self) -> None:
         if not self._texture_id:
             return
-        gl_functions = self._gl_funcs or gl
+        gl_funcs = self._gl_funcs or gl
         delete_arg = self._delete_textures_arg(self._texture_id)
-        gl_functions.glDeleteTextures(1, delete_arg)
+        gl_funcs.glDeleteTextures(1, delete_arg)
         self._texture_id = 0
         self._texture_width = 0
         self._texture_height = 0
@@ -453,11 +453,11 @@ class TextureManager:
             or self._texture_height != int(height)
             or self._texture_uses_mipmaps != bool(use_mipmaps)
         )
-        gl_functions = self._gl_funcs or gl
+        gl_funcs = self._gl_funcs or gl
         if recreate:
             if self._texture_id:
                 delete_arg = self._delete_textures_arg(self._texture_id)
-                gl_functions.glDeleteTextures(1, delete_arg)
+                gl_funcs.glDeleteTextures(1, delete_arg)
                 self._texture_id = 0
             tex_id = gl.glGenTextures(1)
             if isinstance(tex_id, (tuple, list)):
@@ -467,9 +467,9 @@ class TextureManager:
             self._texture_height = int(height)
             self._texture_uses_mipmaps = bool(use_mipmaps)
 
-        gl_functions.glBindTexture(gl.GL_TEXTURE_2D, self._texture_id)
+        gl_funcs.glBindTexture(gl.GL_TEXTURE_2D, self._texture_id)
         if recreate:
-            gl_functions.glTexImage2D(
+            gl_funcs.glTexImage2D(
                 gl.GL_TEXTURE_2D,
                 0,
                 gl.GL_RGBA8,
@@ -481,13 +481,20 @@ class TextureManager:
                 None,
             )
             min_filter = gl.GL_LINEAR_MIPMAP_LINEAR if use_mipmaps else gl.GL_LINEAR
-            gl_functions.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MIN_FILTER, min_filter)
-            gl_functions.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MAG_FILTER, gl.GL_LINEAR)
-            gl_functions.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_WRAP_S, gl.GL_CLAMP_TO_EDGE)
-            gl_functions.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_WRAP_T, gl.GL_CLAMP_TO_EDGE)
+            gl_funcs.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MIN_FILTER, min_filter)
+            gl_funcs.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MAG_FILTER, gl.GL_LINEAR)
+            gl_funcs.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_WRAP_S, gl.GL_CLAMP_TO_EDGE)
+            gl_funcs.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_WRAP_T, gl.GL_CLAMP_TO_EDGE)
 
     def _delete_textures_arg(self, texture_id: int):
-        """Return Qt/PyOpenGL-compatible argument for glDeleteTextures."""
+        """Return Qt/PyOpenGL-compatible argument for glDeleteTextures.
+
+        Args:
+            texture_id: OpenGL texture id to be deleted.
+
+        Returns:
+            Argument accepted by the active backend `glDeleteTextures` wrapper.
+        """
 
         if self._use_pyopengl:
             return np.array([int(texture_id)], dtype=np.uint32)

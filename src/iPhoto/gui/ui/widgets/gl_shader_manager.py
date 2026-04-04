@@ -4,16 +4,16 @@
 from __future__ import annotations
 
 import logging
+from ctypes import c_uint
 from pathlib import Path
 from typing import Optional
 
-import numpy as np
+from OpenGL import GL as gl
 from PySide6.QtCore import QObject
 from PySide6.QtOpenGL import (
     QOpenGLShader,
     QOpenGLShaderProgram,
 )
-from OpenGL import GL as gl
 
 from ....core.selective_color_resolver import NUM_RANGES
 
@@ -36,7 +36,7 @@ class _RawVertexArrayObject:
     def create(self) -> bool:
         gen_vertex_arrays = getattr(self._gl_funcs, "glGenVertexArrays", None)
         if callable(gen_vertex_arrays):
-            vao_ids = np.zeros(1, dtype=np.uint32)
+            vao_ids = (c_uint * 1)()
             gen_vertex_arrays(1, vao_ids)
             self._vao_id = int(vao_ids[0])
         else:
@@ -60,7 +60,7 @@ class _RawVertexArrayObject:
         if not self._vao_id:
             return
         delete_vertex_arrays = getattr(self._gl_funcs, "glDeleteVertexArrays", None)
-        vao_ids = np.array([int(self._vao_id)], dtype=np.uint32)
+        vao_ids = (c_uint * 1)(int(self._vao_id))
         if callable(delete_vertex_arrays):
             delete_vertex_arrays(1, vao_ids)
         else:
@@ -259,5 +259,5 @@ class ShaderManager:
             self.overlay_program.removeAllShaders()
             self.overlay_program = None
         if self.overlay_vbo:
-            gl.glDeleteBuffers(1, np.array([int(self.overlay_vbo)], dtype=np.uint32))
+            gl.glDeleteBuffers(1, (c_uint * 1)(int(self.overlay_vbo)))
             self.overlay_vbo = 0

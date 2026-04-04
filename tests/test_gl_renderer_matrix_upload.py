@@ -233,3 +233,30 @@ def test_initialize_resources_creates_raw_vertex_array_objects(mock_gl_funcs):
         assert renderer._dummy_vao is not None
         assert renderer._overlay_vao is not None
         assert mock_gl_funcs.glGenVertexArrays.call_count == 2
+
+
+def test_raw_vertex_array_object_falls_back_when_qt_lacks_generator():
+    """Linux-compatible VAO creation should fall back when Qt omits glGenVertexArrays."""
+
+    gl_shader_manager_mod = sys.modules['iPhoto.gui.ui.widgets.gl_shader_manager']
+
+    class _BindOnlyFunctions:
+        def __init__(self) -> None:
+            self.bound: list[int] = []
+
+        def glBindVertexArray(self, value: int) -> None:
+            self.bound.append(int(value))
+
+    bind_only = _BindOnlyFunctions()
+    raw_vao = gl_shader_manager_mod._RawVertexArrayObject(bind_only)
+
+    with patch.object(gl_shader_manager_mod.gl, "glGenVertexArrays", return_value=23) as gen_mock, \
+         patch.object(gl_shader_manager_mod.gl, "glDeleteVertexArrays") as delete_mock:
+        assert raw_vao.create() is True
+        raw_vao.bind()
+        raw_vao.release()
+        raw_vao.destroy()
+
+    gen_mock.assert_called_once_with(1)
+    delete_mock.assert_called_once()
+    assert bind_only.bound == [23, 0]

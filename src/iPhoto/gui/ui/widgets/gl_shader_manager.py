@@ -34,9 +34,16 @@ class _RawVertexArrayObject:
         self._vao_id: int = 0
 
     def create(self) -> bool:
-        vao_ids = np.zeros(1, dtype=np.uint32)
-        self._gl_funcs.glGenVertexArrays(1, vao_ids)
-        self._vao_id = int(vao_ids[0])
+        gen_vertex_arrays = getattr(self._gl_funcs, "glGenVertexArrays", None)
+        if callable(gen_vertex_arrays):
+            vao_ids = np.zeros(1, dtype=np.uint32)
+            gen_vertex_arrays(1, vao_ids)
+            self._vao_id = int(vao_ids[0])
+        else:
+            created = gl.glGenVertexArrays(1)
+            if isinstance(created, (tuple, list)):
+                created = created[0]
+            self._vao_id = int(created)
         return self._vao_id != 0
 
     def isCreated(self) -> bool:
@@ -52,8 +59,12 @@ class _RawVertexArrayObject:
     def destroy(self) -> None:
         if not self._vao_id:
             return
+        delete_vertex_arrays = getattr(self._gl_funcs, "glDeleteVertexArrays", None)
         vao_ids = np.array([int(self._vao_id)], dtype=np.uint32)
-        self._gl_funcs.glDeleteVertexArrays(1, vao_ids)
+        if callable(delete_vertex_arrays):
+            delete_vertex_arrays(1, vao_ids)
+        else:
+            gl.glDeleteVertexArrays(1, vao_ids)
         self._vao_id = 0
 
 

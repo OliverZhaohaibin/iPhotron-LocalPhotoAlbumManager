@@ -634,6 +634,7 @@ class VideoArea(QWidget):
         self._pending_video_frame = queued_frame
         if self._video_frame_dispatch_pending:
             return
+        self._video_frame_dispatch_pending = True
         if sys.platform.startswith("linux") and self._adjusted_preview_enabled:
             # Linux backends commonly deliver zero-copy frame handles (DMA-BUF/
             # EGL-backed) whose readable mapping window can be very short.
@@ -643,7 +644,6 @@ class VideoArea(QWidget):
             # turn, while still preserving latest-frame coalescing semantics.
             self._flush_pending_video_frame()
             return
-        self._video_frame_dispatch_pending = True
         QTimer.singleShot(0, self._flush_pending_video_frame)
 
     def _flush_pending_video_frame(self) -> None:

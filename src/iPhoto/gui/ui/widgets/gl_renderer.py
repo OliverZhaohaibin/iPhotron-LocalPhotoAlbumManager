@@ -18,14 +18,12 @@ from __future__ import annotations
 
 import logging
 import math
-from typing import Mapping, Optional
+import sys
+from typing import Any, Mapping, Optional
 
 import numpy as np
 from PySide6.QtCore import QObject, QPointF, QSize
 from PySide6.QtGui import QImage
-from PySide6.QtOpenGL import (
-    QOpenGLFunctions_3_3_Core,
-)
 from OpenGL import GL as gl
 from shiboken6.Shiboken import VoidPtr
 
@@ -47,7 +45,7 @@ class GLRenderer:
 
     def __init__(
         self,
-        gl_funcs: QOpenGLFunctions_3_3_Core,
+        gl_funcs: Any,
         *,
         parent: Optional[QObject] = None,
     ) -> None:
@@ -238,6 +236,22 @@ class GLRenderer:
             return
 
         gf = self._gl_funcs
+        diagnose_errors = sys.platform.startswith("linux")
+
+        def _drain_gl_errors(stage: str) -> None:
+            if not diagnose_errors:
+                return
+            errors: list[int] = []
+            while True:
+                error = int(gf.glGetError())
+                if error == gl.GL_NO_ERROR:
+                    break
+                errors.append(error)
+            if errors:
+                joined = ", ".join(f"0x{value:04X}" for value in errors)
+                _LOGGER.warning("OpenGL error %s: %s", stage, joined)
+
+        _drain_gl_errors("at render entry")
         if not self._program.bind():
             _LOGGER.error("Failed to bind shader program: %s", self._program.log())
             return
@@ -245,6 +259,7 @@ class GLRenderer:
         try:
             if self._dummy_vao is not None:
                 self._dummy_vao.bind()
+                _drain_gl_errors("after VAO bind")
 
             offset_value = img_offset or QPointF(0.0, 0.0)
 
@@ -476,15 +491,14 @@ class GLRenderer:
             self._set_uniform3f("uPerspectiveRow1", *perspective_matrix[1])
             self._set_uniform3f("uPerspectiveRow2", *perspective_matrix[2])
 
+            _drain_gl_errors("before glDrawArrays")
             gf.glDrawArrays(gl.GL_TRIANGLES, 0, 3)
+            _drain_gl_errors("from glDrawArrays")
         finally:
             if self._dummy_vao is not None:
                 self._dummy_vao.release()
             self._program.release()
-
-        error = gf.glGetError()
-        if error != gl.GL_NO_ERROR:
-            _LOGGER.warning("OpenGL error after draw: 0x%04X", int(error))
+            _drain_gl_errors("during render cleanup")
 
     def draw_crop_overlay(
         self,

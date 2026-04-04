@@ -72,7 +72,9 @@ from iPhoto.core.selective_color_resolver import NUM_RANGES
 
 @pytest.fixture
 def mock_gl_funcs():
-    return MagicMock()
+    funcs = MagicMock()
+    funcs.glGetError.return_value = gl_renderer_mod.gl.GL_NO_ERROR
+    return funcs
 
 @pytest.fixture
 def renderer(mock_gl_funcs):

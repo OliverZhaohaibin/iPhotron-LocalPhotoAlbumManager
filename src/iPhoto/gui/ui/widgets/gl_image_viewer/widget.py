@@ -22,12 +22,11 @@ from PySide6.QtGui import (
     QColor,
     QImage,
     QMouseEvent,
+    QOpenGLContext,
     QPixmap,
+    QRhiCommandBuffer,
     QRhiDepthStencilClearValue,
     QWheelEvent,
-)
-from PySide6.QtOpenGL import (
-    QOpenGLFunctions_3_3_Core,
 )
 from PySide6.QtWidgets import QRhiWidget
 
@@ -103,7 +102,7 @@ class GLImageViewer(QRhiWidget):
         # into this widget and causing transparent first-frame flashes.
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, False)
 
-        self._gl_funcs: QOpenGLFunctions_3_3_Core | None = None
+        self._gl_funcs: Any | None = None
         self._renderer: GLRenderer | None = None
         self._gl_initialized = False
         self._first_render_done = False
@@ -740,9 +739,12 @@ class GLImageViewer(QRhiWidget):
         # Make the underlying OpenGL context current so we can issue raw GL
         # calls (create shaders, VAO, VBO, textures, …).
         rhi.makeThreadLocalNativeContextCurrent()
-        self._gl_funcs = QOpenGLFunctions_3_3_Core()
-        self._gl_funcs.initializeOpenGLFunctions()
-        gf = self._gl_funcs
+        current_context = QOpenGLContext.currentContext()
+        if current_context is None:
+            _LOGGER.warning("Current OpenGL context unavailable â€” image rendering disabled")
+            return
+        gf = current_context.extraFunctions()
+        self._gl_funcs = gf
 
         if self._renderer is not None:
             self._renderer.destroy_resources()
@@ -816,6 +818,7 @@ class GLImageViewer(QRhiWidget):
             self.renderTarget(),
             self._pass_clear_color(),
             QRhiDepthStencilClearValue(),
+            flags=QRhiCommandBuffer.BeginPassFlag.ExternalContent,
         )
         cb.beginExternal()
 

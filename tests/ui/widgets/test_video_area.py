@@ -12,7 +12,7 @@ pytest.importorskip("PySide6.QtMultimedia", reason="QtMultimedia is required")
 from pathlib import Path
 
 from PySide6.QtCore import QRectF, QSize, Qt
-from PySide6.QtGui import QColor, QImage, QShowEvent
+from PySide6.QtGui import QColor, QImage, QRhiCommandBuffer, QShowEvent
 from PySide6.QtMultimedia import QMediaPlayer, QVideoFrame, QVideoFrameFormat
 from PySide6.QtWidgets import QApplication, QRhiWidget
 
@@ -910,6 +910,55 @@ def test_gl_image_viewer_resets_after_first_video_upload(qapp, mocker):
     renderer.upload_video_frame.assert_called_once_with(frame)
     mock_reset_zoom.assert_called_once()
     assert viewer._pending_video_reset_view is False
+
+
+def test_gl_image_viewer_initialize_uses_context_extra_functions(qapp, mocker):
+    """QRhi-backed viewer init should resolve GL calls from the current context."""
+
+    viewer = GLImageViewer()
+    rhi = mocker.Mock()
+    gl_funcs = mocker.Mock()
+    context = mocker.Mock()
+    context.extraFunctions.return_value = gl_funcs
+
+    mocker.patch.object(viewer, "rhi", return_value=rhi)
+    mocker.patch(
+        "iPhoto.gui.ui.widgets.gl_image_viewer.widget.QOpenGLContext.currentContext",
+        return_value=context,
+    )
+    mock_renderer_cls = mocker.patch(
+        "iPhoto.gui.ui.widgets.gl_image_viewer.widget.GLRenderer",
+    )
+    mocker.patch.object(viewer._adjustment_applicator, "invalidate_cache")
+    mocker.patch.object(viewer._adjustment_applicator, "update_curve_lut_if_needed")
+    mocker.patch.object(viewer._adjustment_applicator, "update_levels_lut_if_needed")
+
+    viewer.initialize(mocker.Mock())
+
+    rhi.makeThreadLocalNativeContextCurrent.assert_called_once()
+    context.extraFunctions.assert_called_once_with()
+    mock_renderer_cls.assert_called_once_with(gl_funcs, parent=viewer)
+    assert viewer._gl_funcs is gl_funcs
+
+
+def test_gl_image_viewer_render_declares_external_content_pass(qapp, mocker):
+    """Raw GL rendering must declare ExternalContent before beginExternal()."""
+
+    viewer = GLImageViewer()
+    viewer._gl_initialized = True
+    viewer._gl_funcs = mocker.Mock()
+    viewer._renderer = mocker.Mock()
+    viewer._renderer.has_texture.return_value = False
+
+    target = mocker.Mock()
+    target.pixelSize.return_value = QSize(320, 240)
+    mocker.patch.object(viewer, "renderTarget", return_value=target)
+
+    cb = mocker.Mock()
+
+    viewer.render(cb)
+
+    assert cb.beginPass.call_args.kwargs["flags"] == QRhiCommandBuffer.BeginPassFlag.ExternalContent
 
 
 def test_texture_manager_marks_transposed_toimage_fallback_as_prerotated(qapp, mocker):

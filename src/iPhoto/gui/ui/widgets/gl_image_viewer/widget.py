@@ -17,7 +17,7 @@ from collections.abc import Mapping
 from typing import Any
 
 from OpenGL import GL as gl
-from PySide6.QtCore import QPointF, QSize, Qt, Signal, QRectF
+from PySide6.QtCore import QPointF, QRectF, QSize, Qt, Signal
 from PySide6.QtGui import (
     QColor,
     QImage,
@@ -38,9 +38,7 @@ except (ModuleNotFoundError, ImportError):  # pragma: no cover
 from ..gl_crop_controller import CropInteractionController
 from ..gl_renderer import GLRenderer
 from ..view_transform_controller import ViewTransformController
-
-from . import crop_viewport
-from . import geometry
+from . import crop_viewport, geometry
 from .adjustment_applicator import AdjustmentApplicator
 from .components import LoadingOverlay
 from .fullscreen_handler import FullscreenHandler
@@ -383,7 +381,49 @@ class GLImageViewer(QRhiWidget):
                 self._last_render_target_size.height(),
                 self._diag_video_frame_summary(frame),
             )
+        self._upload_video_frame_immediately_if_possible()
         self.update()
+
+    def _upload_video_frame_immediately_if_possible(self) -> None:
+        """Best-effort immediate Linux upload for edit-preview video frames.
+
+        Some Linux backends expose short-lived mapped frame handles. Uploading
+        only in ``render()`` may happen too late and produce intermittent black
+        output in edit preview while gallery playback remains correct. This
+        helper opportunistically uploads right after ``set_video_frame`` when
+        GL resources are ready, then falls back to normal ``render()`` upload.
+        """
+
+        if not sys.platform.startswith("linux"):
+            return
+        if not self._using_video_frame_source or not self._video_frame_dirty:
+            return
+        if self._video_frame is None or self._renderer is None or not self._gl_initialized:
+            return
+
+        self._make_gl_current()
+        try:
+            self._renderer.upload_video_frame(self._video_frame)
+            pending_rotation = self._pending_source_rotate90_steps
+            if pending_rotation is None:
+                pending_rotation = self._source_rotate90_steps
+            final_rotation = 0 if self._renderer.last_video_upload_pre_rotated() else pending_rotation
+            self._apply_video_source_rotation_steps(
+                final_rotation,
+                request_update=False,
+            )
+            self._pending_source_rotate90_steps = None
+            self._video_frame = None
+            self._video_frame_dirty = False
+            straighten, rotate_steps, _ = self._rotation_parameters()
+            self._update_cover_scale(straighten, rotate_steps)
+            if self._pending_video_reset_view:
+                self._pending_video_reset_view = False
+                self.reset_zoom()
+        except Exception:
+            _LOGGER.exception("Failed immediate Linux video-frame upload in GLImageViewer")
+        finally:
+            self._done_gl_current()
 
     def set_placeholder(self, pixmap: QPixmap | None) -> None:
         """Display *pixmap* without changing the tracked image source."""

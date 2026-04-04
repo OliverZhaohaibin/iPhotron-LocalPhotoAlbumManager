@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import numpy as np
-from OpenGL import GL as gl
 
 
 class UniformState:
@@ -51,7 +50,7 @@ class UniformState:
         # pre-transpose the row-major numpy matrix before upload.
         matrix_data = np.ascontiguousarray(np.asarray(matrix, dtype=np.float32).T)
 
-        gl.glUniformMatrix3fv(
+        self._gl_funcs.glUniformMatrix3fv(
             location,
             1,
             0,  # GL_FALSE for GLES compatibility

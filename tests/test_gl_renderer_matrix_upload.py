@@ -78,7 +78,6 @@ def mock_gl_funcs():
 def renderer(mock_gl_funcs):
     # Patch QOpenGLShaderProgram to avoid needing a real GL context
     with patch('iPhoto.gui.ui.widgets.gl_shader_manager.QOpenGLShaderProgram') as MockProgram, \
-         patch('iPhoto.gui.ui.widgets.gl_shader_manager.QOpenGLVertexArrayObject') as MockVAO, \
          patch('iPhoto.gui.ui.widgets.gl_shader_manager.gl') as MockGL, \
          patch('iPhoto.gui.ui.widgets.gl_shader_manager._load_shader_source', return_value="void main() {}"):
 
@@ -86,10 +85,9 @@ def renderer(mock_gl_funcs):
         MockProgram.return_value.link.return_value = True
         MockProgram.return_value.uniformLocation.return_value = 1
 
-        MockVAO.return_value.isCreated.return_value = True
-
         # Ensure glGenBuffers returns a value compatible with int()
         MockGL.glGenBuffers.return_value = 1
+        MockGL.glGenVertexArrays.return_value = 7
 
         renderer = GLRenderer(mock_gl_funcs)
         renderer.initialize_resources()
@@ -152,15 +150,14 @@ def test_initialize_resources_queries_selective_color_array_elements(mock_gl_fun
     """Selective-color array uniforms should be queried by explicit element name."""
 
     with patch('iPhoto.gui.ui.widgets.gl_shader_manager.QOpenGLShaderProgram') as MockProgram, \
-         patch('iPhoto.gui.ui.widgets.gl_shader_manager.QOpenGLVertexArrayObject') as MockVAO, \
          patch('iPhoto.gui.ui.widgets.gl_shader_manager.gl') as MockGL, \
          patch('iPhoto.gui.ui.widgets.gl_shader_manager._load_shader_source', return_value="void main() {}"):
 
         MockProgram.return_value.addShaderFromSourceCode.return_value = True
         MockProgram.return_value.link.return_value = True
         MockProgram.return_value.uniformLocation.side_effect = lambda name: 1
-        MockVAO.return_value.isCreated.return_value = True
         MockGL.glGenBuffers.return_value = 1
+        MockGL.glGenVertexArrays.return_value = 7
 
         renderer = GLRenderer(mock_gl_funcs)
         renderer.initialize_resources()
@@ -211,3 +208,24 @@ def test_render_uploads_selective_color_ranges_per_element(renderer, mock_gl_fun
         assert 100 + idx in called_locations
         assert 200 + idx in called_locations
     raw_gl_uniform4fv.assert_not_called()
+
+
+def test_initialize_resources_creates_raw_vertex_array_objects(mock_gl_funcs):
+    """Renderer setup should create raw VAOs for QRhi external rendering."""
+
+    with patch('iPhoto.gui.ui.widgets.gl_shader_manager.QOpenGLShaderProgram') as MockProgram, \
+         patch('iPhoto.gui.ui.widgets.gl_shader_manager.gl') as MockGL, \
+         patch('iPhoto.gui.ui.widgets.gl_shader_manager._load_shader_source', return_value="void main() {}"):
+
+        MockProgram.return_value.addShaderFromSourceCode.return_value = True
+        MockProgram.return_value.link.return_value = True
+        MockProgram.return_value.uniformLocation.return_value = 1
+        MockGL.glGenBuffers.return_value = 1
+        MockGL.glGenVertexArrays.side_effect = [11, 12]
+
+        renderer = GLRenderer(mock_gl_funcs)
+        renderer.initialize_resources()
+
+        assert renderer._dummy_vao is not None
+        assert renderer._overlay_vao is not None
+        assert MockGL.glGenVertexArrays.call_count == 2

@@ -911,6 +911,37 @@ def test_texture_manager_marks_transposed_toimage_fallback_as_prerotated(qapp, m
     assert manager.last_video_upload_pre_rotated() is True
 
 
+def test_texture_manager_uses_qimage_fallback_for_linux_nv12_frames(qapp, mocker, monkeypatch):
+    """Linux preview should route NV12 frames through ``toImage()`` for stability."""
+
+    manager = TextureManager()
+    mock_upload_texture = mocker.patch.object(manager, "upload_texture")
+
+    fmt = Mock()
+    fmt.frameWidth.return_value = 1920
+    fmt.frameHeight.return_value = 1080
+    fmt.pixelFormat.return_value = QVideoFrameFormat.PixelFormat.Format_NV12
+    fmt.colorSpace.return_value = Mock()
+    fmt.colorTransfer.return_value = Mock()
+    fmt.colorRange.return_value = Mock()
+
+    frame = Mock()
+    frame.isValid.return_value = True
+    frame.surfaceFormat.return_value = fmt
+    frame.toImage.return_value = QImage(1920, 1080, QImage.Format.Format_RGBA8888)
+    frame.map.side_effect = AssertionError("Linux NV12 fallback should not map plane data")
+
+    monkeypatch.setattr(
+        "iPhoto.gui.ui.widgets.gl_texture_manager.sys.platform",
+        "linux",
+    )
+
+    manager.upload_video_frame(frame)
+
+    mock_upload_texture.assert_called_once()
+    assert manager.last_video_upload_pre_rotated() is False
+
+
 def test_gl_image_viewer_clears_source_rotation_when_qt_fallback_is_prerotated(qapp, mocker):
     """Qt-applied rotation in fallback uploads should not be rotated again by GL."""
 

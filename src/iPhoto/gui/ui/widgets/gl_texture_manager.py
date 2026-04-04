@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import logging
+import sys
 
 import numpy as np
 from OpenGL import GL as gl
@@ -180,6 +181,15 @@ class TextureManager:
 
         self._last_video_upload_pre_rotated = False
         fmt = frame.surfaceFormat()
+        pixel_fmt, color_space, transfer, color_range = _classify_video_frame_format(fmt)
+        if (
+            sys.platform.startswith("linux")
+            and pixel_fmt in (_VIDEO_FMT_NV12, _VIDEO_FMT_P010)
+        ):
+            image = frame.toImage()
+            if not image.isNull():
+                return self._upload_video_frame_as_image(image, fmt)
+
         packed_spec = _packed_frame_upload_spec(fmt)
         if packed_spec is not None:
             width = int(fmt.frameWidth())
@@ -205,20 +215,11 @@ class TextureManager:
                 frame.unmap()
             return self._texture_width, self._texture_height
 
-        pixel_fmt, color_space, transfer, color_range = _classify_video_frame_format(fmt)
-
         if pixel_fmt == _VIDEO_FMT_NONE:
             image = frame.toImage()
             if image.isNull():
                 raise ValueError("Unsupported QVideoFrame could not be converted to QImage")
-            fmt_width = int(fmt.frameWidth())
-            fmt_height = int(fmt.frameHeight())
-            if fmt_width > 0 and fmt_height > 0:
-                self._last_video_upload_pre_rotated = (
-                    image.width() == fmt_height and image.height() == fmt_width
-                )
-            self.upload_texture(image)
-            return self._texture_width, self._texture_height
+            return self._upload_video_frame_as_image(image, fmt)
 
         width = int(fmt.frameWidth())
         height = int(fmt.frameHeight())
@@ -295,6 +296,25 @@ class TextureManager:
         self._video_transfer = transfer
         self._video_range = color_range
         return self._video_width, self._video_height
+
+    def _upload_video_frame_as_image(
+        self,
+        image: QImage,
+        fmt: "QVideoFrameFormat | None",
+    ) -> tuple[int, int]:
+        """Upload a video frame via ``QImage`` conversion."""
+
+        if image.isNull():
+            raise ValueError("Unsupported QVideoFrame could not be converted to QImage")
+
+        fmt_width = int(fmt.frameWidth()) if fmt is not None else 0
+        fmt_height = int(fmt.frameHeight()) if fmt is not None else 0
+        if fmt_width > 0 and fmt_height > 0:
+            self._last_video_upload_pre_rotated = (
+                image.width() == fmt_height and image.height() == fmt_width
+            )
+        self.upload_texture(image)
+        return self._texture_width, self._texture_height
 
     def delete_texture(self) -> None:
         """Delete the currently bound source texture(s), if any."""

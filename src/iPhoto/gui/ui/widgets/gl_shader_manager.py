@@ -16,6 +16,8 @@ from PySide6.QtOpenGL import (
 )
 from OpenGL import GL as gl
 
+from ....core.selective_color_resolver import NUM_RANGES
+
 _LOGGER = logging.getLogger(__name__)
 
 
@@ -36,6 +38,13 @@ void main() {
     FragColor = uColor;
 }
 """
+
+
+_SELECTIVE_COLOR_UNIFORM_NAMES = tuple(
+    f"uSCRange0[{idx}]" for idx in range(NUM_RANGES)
+) + tuple(
+    f"uSCRange1[{idx}]" for idx in range(NUM_RANGES)
+)
 
 
 _UNIFORM_NAMES = (
@@ -82,8 +91,7 @@ _UNIFORM_NAMES = (
     "uCropH",
     "uPerspectiveMatrix",
     "uRotate90",
-    "uSCRange0",
-    "uSCRange1",
+    *_SELECTIVE_COLOR_UNIFORM_NAMES,
     "uSCEnabled",
     "uDefinition",
     "uDenoiseAmount",

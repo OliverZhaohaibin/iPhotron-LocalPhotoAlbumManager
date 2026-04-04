@@ -383,23 +383,36 @@ class GLRenderer:
             self._set_uniform1f("uVignetteRadius", vig_radius)
             self._set_uniform1f("uVignetteSoftness", vig_softness)
             sc_ranges = adjustments.get("SelectiveColor_Ranges")
+            selective_color_u0 = np.zeros((NUM_RANGES, 4), dtype=np.float32)
+            selective_color_u1 = np.zeros((NUM_RANGES, 4), dtype=np.float32)
             if isinstance(sc_ranges, list) and len(sc_ranges) == NUM_RANGES:
-                u0 = np.zeros((NUM_RANGES, 4), dtype=np.float32)
-                u1 = np.zeros((NUM_RANGES, 4), dtype=np.float32)
                 for idx, rng in enumerate(sc_ranges):
                     if isinstance(rng, (list, tuple)) and len(rng) >= 5:
                         center = float(rng[0])
                         range_slider = float(np.clip(rng[1], 0.0, 1.0))
                         deg = 5.0 + (70.0 - 5.0) * range_slider
                         width_hue = float(np.clip(deg / 360.0, 0.001, 0.5))
-                        u0[idx] = [center, width_hue, float(rng[2]), float(rng[3])]
-                        u1[idx] = [float(rng[4]), SAT_GATE_LO, SAT_GATE_HI, 1.0]
-                loc0 = self._uniform_locations.get("uSCRange0", -1)
-                loc1 = self._uniform_locations.get("uSCRange1", -1)
-                if loc0 != -1:
-                    gl.glUniform4fv(loc0, NUM_RANGES, u0)
-                if loc1 != -1:
-                    gl.glUniform4fv(loc1, NUM_RANGES, u1)
+                        selective_color_u0[idx] = [
+                            center,
+                            width_hue,
+                            float(rng[2]),
+                            float(rng[3]),
+                        ]
+                        selective_color_u1[idx] = [
+                            float(rng[4]),
+                            SAT_GATE_LO,
+                            SAT_GATE_HI,
+                            1.0,
+                        ]
+            for idx in range(NUM_RANGES):
+                self._set_uniform4f(
+                    f"uSCRange0[{idx}]",
+                    *selective_color_u0[idx],
+                )
+                self._set_uniform4f(
+                    f"uSCRange1[{idx}]",
+                    *selective_color_u1[idx],
+                )
 
             if time_value is not None:
                 self._set_uniform1f("uTime", time_value)

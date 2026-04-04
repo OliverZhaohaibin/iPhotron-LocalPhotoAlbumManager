@@ -68,6 +68,7 @@ gl_renderer_mod = load_module_from_file('iPhoto.gui.ui.widgets.gl_renderer', gl_
 
 GLRenderer = gl_renderer_mod.GLRenderer
 from PySide6.QtCore import QPointF
+from iPhoto.core.selective_color_resolver import NUM_RANGES
 
 @pytest.fixture
 def mock_gl_funcs():
@@ -129,3 +130,68 @@ def test_render_upload_matrix_transpose_flag(renderer, mock_gl_funcs):
             assert transpose == 1, "Expected transpose=1 (True)"
 
     assert found, "glUniformMatrix3fv was not called for uPerspectiveMatrix"
+
+
+def test_initialize_resources_queries_selective_color_array_elements(mock_gl_funcs):
+    """Selective-color array uniforms should be queried by explicit element name."""
+
+    with patch('iPhoto.gui.ui.widgets.gl_shader_manager.QOpenGLShaderProgram') as MockProgram, \
+         patch('iPhoto.gui.ui.widgets.gl_shader_manager.QOpenGLVertexArrayObject') as MockVAO, \
+         patch('iPhoto.gui.ui.widgets.gl_shader_manager.gl') as MockGL, \
+         patch('iPhoto.gui.ui.widgets.gl_shader_manager._load_shader_source', return_value="void main() {}"):
+
+        MockProgram.return_value.addShaderFromSourceCode.return_value = True
+        MockProgram.return_value.link.return_value = True
+        MockProgram.return_value.uniformLocation.side_effect = lambda name: 1
+        MockVAO.return_value.isCreated.return_value = True
+        MockGL.glGenBuffers.return_value = 1
+
+        renderer = GLRenderer(mock_gl_funcs)
+        renderer.initialize_resources()
+
+        queried_names = {
+            call.args[0] for call in MockProgram.return_value.uniformLocation.call_args_list
+        }
+
+        for idx in range(NUM_RANGES):
+            assert f"uSCRange0[{idx}]" in queried_names
+            assert f"uSCRange1[{idx}]" in queried_names
+        assert "uSCRange0" not in queried_names
+        assert "uSCRange1" not in queried_names
+
+
+def test_render_uploads_selective_color_ranges_per_element(renderer, mock_gl_funcs, monkeypatch):
+    """Selective-color uniforms should be uploaded per element for Mesa compatibility."""
+
+    renderer._texture_id = 1
+    renderer._texture_width = 100
+    renderer._texture_height = 100
+    renderer._uniform_locations.clear()
+    renderer._uniform_locations.update(
+        {
+            **{f"uSCRange0[{idx}]": 100 + idx for idx in range(NUM_RANGES)},
+            **{f"uSCRange1[{idx}]": 200 + idx for idx in range(NUM_RANGES)},
+        }
+    )
+    raw_gl_uniform4fv = MagicMock()
+    monkeypatch.setattr(gl_renderer_mod.gl, "glUniform4fv", raw_gl_uniform4fv)
+
+    renderer.render(
+        view_width=800.0,
+        view_height=600.0,
+        scale=1.0,
+        pan=QPointF(0.0, 0.0),
+        adjustments={
+            "SelectiveColor_Ranges": [
+                [0.0, 0.5, 0.1, 0.2, 0.3]
+                for _ in range(NUM_RANGES)
+            ]
+        },
+    )
+
+    called_locations = {call.args[0] for call in mock_gl_funcs.glUniform4f.call_args_list}
+
+    for idx in range(NUM_RANGES):
+        assert 100 + idx in called_locations
+        assert 200 + idx in called_locations
+    raw_gl_uniform4fv.assert_not_called()

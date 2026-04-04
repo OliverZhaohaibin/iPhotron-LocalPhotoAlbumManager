@@ -96,7 +96,7 @@ def renderer(mock_gl_funcs):
         return renderer
 
 def test_render_upload_matrix_transpose_flag(renderer, mock_gl_funcs):
-    """Verify that matrix uniforms are uploaded via raw OpenGL with GL_TRUE transpose."""
+    """Verify that matrix uniforms are uploaded via raw OpenGL with GL_FALSE transpose."""
 
     view_width = 800.0
     view_height = 600.0
@@ -126,7 +126,7 @@ def test_render_upload_matrix_transpose_flag(renderer, mock_gl_funcs):
         transpose = args[2]
         if location == 1:
             found = True
-            assert transpose == 1, "Expected transpose=1 (GL_TRUE)"
+            assert transpose == 0, "Expected transpose=0 (GL_FALSE)"
 
     assert found, "glUniformMatrix3fv was not called for uPerspectiveMatrix"
     mock_gl_funcs.glUniformMatrix3fv.assert_not_called()

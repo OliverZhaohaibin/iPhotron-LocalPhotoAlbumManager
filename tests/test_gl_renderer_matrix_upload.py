@@ -87,7 +87,7 @@ def renderer(mock_gl_funcs):
 
         # Ensure glGenBuffers returns a value compatible with int()
         MockGL.glGenBuffers.return_value = 1
-        MockGL.glGenVertexArrays.return_value = 7
+        mock_gl_funcs.glGenVertexArrays.side_effect = lambda count, out: out.__setitem__(0, 7)
 
         renderer = GLRenderer(mock_gl_funcs)
         renderer.initialize_resources()
@@ -157,7 +157,7 @@ def test_initialize_resources_queries_selective_color_array_elements(mock_gl_fun
         MockProgram.return_value.link.return_value = True
         MockProgram.return_value.uniformLocation.side_effect = lambda name: 1
         MockGL.glGenBuffers.return_value = 1
-        MockGL.glGenVertexArrays.return_value = 7
+        mock_gl_funcs.glGenVertexArrays.side_effect = lambda count, out: out.__setitem__(0, 7)
 
         renderer = GLRenderer(mock_gl_funcs)
         renderer.initialize_resources()
@@ -221,11 +221,15 @@ def test_initialize_resources_creates_raw_vertex_array_objects(mock_gl_funcs):
         MockProgram.return_value.link.return_value = True
         MockProgram.return_value.uniformLocation.return_value = 1
         MockGL.glGenBuffers.return_value = 1
-        MockGL.glGenVertexArrays.side_effect = [11, 12]
+        created_ids = iter((11, 12))
+        def _gen_vertex_arrays(count, out):
+            value = next(created_ids)
+            out.__setitem__(0, value)
+        mock_gl_funcs.glGenVertexArrays.side_effect = _gen_vertex_arrays
 
         renderer = GLRenderer(mock_gl_funcs)
         renderer.initialize_resources()
 
         assert renderer._dummy_vao is not None
         assert renderer._overlay_vao is not None
-        assert MockGL.glGenVertexArrays.call_count == 2
+        assert mock_gl_funcs.glGenVertexArrays.call_count == 2

@@ -29,15 +29,14 @@ class _RawVertexArrayObject:
     small ``bind()/release()/destroy()`` API used elsewhere in the renderer.
     """
 
-    def __init__(self, gl_module) -> None:
-        self._gl = gl_module
+    def __init__(self, gl_funcs) -> None:
+        self._gl_funcs = gl_funcs
         self._vao_id: int = 0
 
     def create(self) -> bool:
-        created = self._gl.glGenVertexArrays(1)
-        if isinstance(created, (tuple, list)):
-            created = created[0]
-        self._vao_id = int(created)
+        vao_ids = np.zeros(1, dtype=np.uint32)
+        self._gl_funcs.glGenVertexArrays(1, vao_ids)
+        self._vao_id = int(vao_ids[0])
         return self._vao_id != 0
 
     def isCreated(self) -> bool:
@@ -45,15 +44,16 @@ class _RawVertexArrayObject:
 
     def bind(self) -> None:
         if self._vao_id:
-            self._gl.glBindVertexArray(self._vao_id)
+            self._gl_funcs.glBindVertexArray(self._vao_id)
 
     def release(self) -> None:
-        self._gl.glBindVertexArray(0)
+        self._gl_funcs.glBindVertexArray(0)
 
     def destroy(self) -> None:
         if not self._vao_id:
             return
-        self._gl.glDeleteVertexArrays(1, np.array([int(self._vao_id)], dtype=np.uint32))
+        vao_ids = np.array([int(self._vao_id)], dtype=np.uint32)
+        self._gl_funcs.glDeleteVertexArrays(1, vao_ids)
         self._vao_id = 0
 
 
@@ -192,12 +192,12 @@ class ShaderManager:
             raise RuntimeError("Unable to link shader program")
 
         self.program = program
+        gf = self._gl_funcs
 
-        vao = _RawVertexArrayObject(gl)
+        vao = _RawVertexArrayObject(gf)
         vao.create()
         self.dummy_vao = vao if vao.isCreated() else None
 
-        gf = self._gl_funcs
         gf.glDisable(gl.GL_DEPTH_TEST)
         gf.glDisable(gl.GL_CULL_FACE)
         gf.glDisable(gl.GL_BLEND)
@@ -223,7 +223,7 @@ class ShaderManager:
             raise RuntimeError("Unable to link overlay shader program")
         self.overlay_program = overlay_prog
 
-        overlay_vao = _RawVertexArrayObject(gl)
+        overlay_vao = _RawVertexArrayObject(gf)
         overlay_vao.create()
         self.overlay_vao = overlay_vao if overlay_vao.isCreated() else None
         buffer_id = gl.glGenBuffers(1)

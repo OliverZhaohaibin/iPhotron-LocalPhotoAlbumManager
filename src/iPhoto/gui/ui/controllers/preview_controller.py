@@ -138,7 +138,7 @@ class PreviewController(QObject):
         except Exception:  # noqa: BLE001 - preview should gracefully fall back to raw playback
             raw_adjustments = {}
 
-        adjusted_preview = sidecar.has_non_default_adjustments(raw_adjustments)
+        adjusted_preview = sidecar.video_requires_adjusted_preview(raw_adjustments)
         adjustments: dict[str, object] | None = None
         if adjusted_preview:
             try:

@@ -79,7 +79,7 @@ def _build_library() -> bool:
                 return lib_path.exists()
             except (FileNotFoundError, subprocess.CalledProcessError):
                 continue
-    except Exception:
+    except OSError:
         return False
     return False
 

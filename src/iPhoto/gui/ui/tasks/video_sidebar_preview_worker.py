@@ -75,14 +75,14 @@ class VideoSidebarPreviewWorker(QRunnable):
             stats: ColorStats | None
             try:
                 stats = compute_color_statistics(image)
-            except Exception:
+            except Exception:  # noqa: BLE001 - keep sidebar preview worker resilient if stats sampling fails
                 _LOGGER.exception("Failed to compute video sidebar color statistics")
                 stats = None
             self.signals.ready.emit(
                 VideoSidebarPreviewResult(QImage(image), stats),
                 self._generation,
             )
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - prevent unexpected worker failures from escaping QRunnable.run()
             _LOGGER.exception("Failed to prepare video sidebar preview")
             self.signals.error.emit(self._generation, str(exc))
         finally:

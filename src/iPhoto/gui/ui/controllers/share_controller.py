@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import subprocess
 import sys
 import tempfile
@@ -22,7 +23,7 @@ from PySide6.QtCore import (
 from PySide6.QtGui import QAction, QActionGroup, QGuiApplication, QImage, QTransform
 from PySide6.QtWidgets import QPushButton
 
-from ....core.export import _probe_duration_seconds, render_video
+from ....core.export import probe_duration_seconds, render_video
 from ....core.filters.facade import apply_adjustments
 from ....errors import ExternalToolError
 from ....io import sidecar
@@ -33,6 +34,8 @@ from ..media import PlaylistController
 from ..models.roles import Roles
 from ..widgets.notification_toast import NotificationToast
 from .status_bar_controller import StatusBarController
+
+_LOGGER = logging.getLogger(__name__)
 
 
 class RenderClipboardSignals(QObject):
@@ -56,7 +59,8 @@ class RenderClipboardWorker(QRunnable):
     def run(self) -> None:
         try:
             self._do_work()
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - keep worker failures from escaping QRunnable.run()
+            _LOGGER.exception("Failed to render image for clipboard")
             self.signals.failed.emit(str(exc))
 
     def _do_work(self) -> None:
@@ -166,7 +170,8 @@ class RenderVideoClipboardWorker(QRunnable):
                 self.signals.success.emit(str(destination))
             else:
                 self.signals.failed.emit("Failed to render edited video")
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - keep worker failures from escaping QRunnable.run()
+            _LOGGER.exception("Failed to render edited video for sharing")
             self.signals.failed.emit(str(exc))
 
 
@@ -271,7 +276,7 @@ class ShareController(QObject):
                 # treated as an edit even when it equals the clip duration.
                 video_duration: float | None = None
                 try:
-                    video_duration = _probe_duration_seconds(probe_media(path))
+                    video_duration = probe_duration_seconds(probe_media(path))
                 except ExternalToolError:
                     pass
                 if sidecar.video_has_visible_edits(raw_adjustments, video_duration):

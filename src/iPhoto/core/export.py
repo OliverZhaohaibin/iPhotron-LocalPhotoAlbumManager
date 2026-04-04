@@ -23,7 +23,7 @@ from .raw_processor import RAW_EXTENSIONS
 
 try:  # pragma: no cover - optional dependency
     import av  # type: ignore
-except Exception:  # pragma: no cover - optional dependency
+except (ImportError, ModuleNotFoundError):  # pragma: no cover - optional dependency
     av = None  # type: ignore[assignment]
 
 _LOGGER = logging.getLogger(__name__)
@@ -115,7 +115,7 @@ def render_video(path: Path, destination: Path) -> bool:
         _LOGGER.exception("Failed to probe video metadata for %s", path)
         return False
 
-    duration_sec = _probe_duration_seconds(probe)
+    duration_sec = probe_duration_seconds(probe)
     trim_in_sec, trim_out_sec = sidecar.normalise_video_trim(raw_adjustments, duration_sec)
     rotation_cw, _, _ = probe_video_rotation(path)
 
@@ -253,7 +253,7 @@ def export_asset(
         video_duration = None
         if is_video and has_sidecar:
             try:
-                video_duration = _probe_duration_seconds(probe_media(source_path))
+                video_duration = probe_duration_seconds(probe_media(source_path))
             except ExternalToolError:
                 video_duration = None
 
@@ -297,7 +297,7 @@ def export_asset(
         return False
 
 
-def _probe_duration_seconds(metadata: dict) -> float | None:
+def probe_duration_seconds(metadata: dict) -> float | None:
     fmt = metadata.get("format", {}) if isinstance(metadata, dict) else {}
     if isinstance(fmt, dict):
         # Preferred: format.duration is already expressed in seconds.

@@ -12,7 +12,7 @@ from iPhoto.core.export import (
     render_image,
     resolve_export_path,
     _parse_hhmmss_duration,
-    _probe_duration_seconds,
+    probe_duration_seconds,
 )
 
 
@@ -203,21 +203,21 @@ class TestParseHhmmss:
 class TestProbeDurationSeconds:
     def test_returns_format_duration(self):
         meta = {"format": {"duration": "12.5"}, "streams": []}
-        assert _probe_duration_seconds(meta) == pytest.approx(12.5)
+        assert probe_duration_seconds(meta) == pytest.approx(12.5)
 
     def test_format_duration_takes_priority_over_stream(self):
         meta = {
             "format": {"duration": "12.5"},
             "streams": [{"codec_type": "video", "duration": "99.0"}],
         }
-        assert _probe_duration_seconds(meta) == pytest.approx(12.5)
+        assert probe_duration_seconds(meta) == pytest.approx(12.5)
 
     def test_falls_back_to_format_tags_hhmmss(self):
         meta = {
             "format": {"tags": {"DURATION": "00:00:08.500000000"}},
             "streams": [],
         }
-        assert _probe_duration_seconds(meta) == pytest.approx(8.5)
+        assert probe_duration_seconds(meta) == pytest.approx(8.5)
 
     def test_falls_back_to_stream_duration_in_seconds(self):
         meta = {
@@ -225,7 +225,7 @@ class TestProbeDurationSeconds:
             "streams": [{"codec_type": "video", "duration": "30.0"}],
         }
         # stream["duration"] is already seconds — must NOT be multiplied by time_base
-        assert _probe_duration_seconds(meta) == pytest.approx(30.0)
+        assert probe_duration_seconds(meta) == pytest.approx(30.0)
 
     def test_stream_duration_not_multiplied_by_time_base(self):
         meta = {
@@ -235,7 +235,7 @@ class TestProbeDurationSeconds:
             ],
         }
         # If incorrectly multiplied: 10.0 * (1/90000) ≈ 0.000111 — must return 10.0
-        assert _probe_duration_seconds(meta) == pytest.approx(10.0)
+        assert probe_duration_seconds(meta) == pytest.approx(10.0)
 
     def test_falls_back_to_duration_ts_times_time_base(self):
         meta = {
@@ -244,7 +244,7 @@ class TestProbeDurationSeconds:
                 {"codec_type": "video", "duration_ts": "900000", "time_base": "1/90000"}
             ],
         }
-        assert _probe_duration_seconds(meta) == pytest.approx(10.0)
+        assert probe_duration_seconds(meta) == pytest.approx(10.0)
 
     def test_skips_audio_streams(self):
         meta = {
@@ -254,10 +254,10 @@ class TestProbeDurationSeconds:
                 {"codec_type": "video", "duration": "8.0"},
             ],
         }
-        assert _probe_duration_seconds(meta) == pytest.approx(8.0)
+        assert probe_duration_seconds(meta) == pytest.approx(8.0)
 
     def test_returns_none_for_missing_duration(self):
-        assert _probe_duration_seconds({}) is None
+        assert probe_duration_seconds({}) is None
 
     def test_returns_none_for_non_dict(self):
-        assert _probe_duration_seconds(None) is None
+        assert probe_duration_seconds(None) is None

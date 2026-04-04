@@ -3,12 +3,15 @@
 
 from __future__ import annotations
 
+import logging
 import math
 from typing import Callable, Optional
 
 from PySide6.QtCore import QPointF, QRectF, Qt
 from PySide6.QtGui import QMouseEvent, QWheelEvent
 from PySide6.QtWidgets import QWidget
+
+_LOGGER = logging.getLogger(__name__)
 
 
 def compute_fit_to_view_scale(
@@ -139,7 +142,8 @@ class ViewTransformController:
         if self._device_view_size_provider is not None:
             try:
                 provided = self._device_view_size_provider()
-            except Exception:
+            except Exception:  # noqa: BLE001 - log and fall back to widget dimensions if provider raises
+                _LOGGER.exception("device_view_size_provider raised unexpectedly")
                 provided = None
             if provided is not None:
                 width, height = provided

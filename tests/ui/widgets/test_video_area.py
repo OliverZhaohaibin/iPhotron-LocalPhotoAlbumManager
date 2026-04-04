@@ -764,6 +764,30 @@ class TestVideoArea:
         assert mock_set_pending_source_rotation.call_args_list[-1] == call(90)
         mock_set_video_frame.assert_called_once()
 
+    def test_adjusted_preview_requests_stack_redraw_when_frame_arrives(self, qapp, mocker):
+        """Edit preview frames should also invalidate the parent stack on Linux."""
+
+        va = VideoArea()
+        va.set_adjusted_preview_enabled(True)
+        mock_set_video_frame = mocker.patch.object(va._edit_viewer, "set_video_frame")
+        mock_stack_update = mocker.patch.object(va._surface_stack, "update")
+        mock_area_update = mocker.patch.object(va, "update")
+        mocker.patch.object(va._edit_viewer, "set_pending_video_source_rotation")
+
+        frame = mocker.Mock()
+        frame.surfaceFormat.return_value = mocker.Mock()
+
+        mocker.patch(
+            "iPhoto.gui.ui.widgets.video_area._resolve_frame_rotation_cw",
+            return_value=0,
+        )
+
+        va._on_video_frame(frame)
+
+        mock_set_video_frame.assert_called_once()
+        mock_stack_update.assert_called_once()
+        mock_area_update.assert_called_once()
+
     def test_on_duration_changed_initialises_trim_when_unset(self, qapp, mocker):
         """When no trim range is set, duration change should initialise trim to full range."""
         va = VideoArea()
@@ -910,6 +934,35 @@ def test_texture_manager_marks_transposed_toimage_fallback_as_prerotated(qapp, m
     manager.upload_video_frame(frame)
 
     assert manager.last_video_upload_pre_rotated() is True
+
+
+def test_video_area_coalesces_queued_frames_onto_gui_loop(qapp, mocker):
+    """Queued video-sink frames should present only the latest frame once."""
+
+    va = VideoArea()
+    first = mocker.Mock()
+    first.isValid.return_value = True
+    second = mocker.Mock()
+    second.isValid.return_value = True
+
+    scheduled: list[object] = []
+    mocker.patch(
+        "iPhoto.gui.ui.widgets.video_area.QTimer.singleShot",
+        side_effect=lambda _ms, callback: scheduled.append(callback),
+    )
+    mock_present = mocker.patch.object(va, "_present_video_frame")
+
+    va._queue_video_frame(first)
+    va._queue_video_frame(second)
+
+    assert len(scheduled) == 1
+    assert va._video_frame_dispatch_pending is True
+
+    scheduled[0]()
+
+    mock_present.assert_called_once()
+    assert mock_present.call_args[0][0] is second
+    assert va._video_frame_dispatch_pending is False
 
 
 def test_texture_manager_uses_qimage_fallback_for_linux_nv12_frames(qapp, mocker, monkeypatch):

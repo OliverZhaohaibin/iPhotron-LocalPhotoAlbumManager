@@ -144,6 +144,8 @@ class VideoArea(QWidget):
         self._restart_from_trim_in_on_play = False
         self._end_hold_display_ms: int | None = None
         self._transparent_preview_enabled = False
+        self._pending_video_frame: QVideoFrame | None = None
+        self._video_frame_dispatch_pending = False
 
         self._apply_surface(surface_color)
         # --- End Video Renderer Setup ---
@@ -156,7 +158,10 @@ class VideoArea(QWidget):
         # Route decoded frames through QVideoSink → our custom renderer.
         self._video_sink = QVideoSink(self)
         self._player.setVideoOutput(self._video_sink)
-        self._video_sink.videoFrameChanged.connect(self._on_video_frame)
+        self._video_sink.videoFrameChanged.connect(
+            self._queue_video_frame,
+            Qt.ConnectionType.QueuedConnection,
+        )
 
         self._player.positionChanged.connect(self._on_position_changed)
         self._player.durationChanged.connect(self._on_duration_changed)
@@ -552,6 +557,8 @@ class VideoArea(QWidget):
         """
         self._player.stop()
         self._player.setSource(QUrl())
+        self._pending_video_frame = None
+        self._video_frame_dispatch_pending = False
         self._renderer.clear_frame()
         self._edit_viewer.clear()
         self._edit_viewer.set_video_source_rotation(0)
@@ -566,8 +573,41 @@ class VideoArea(QWidget):
         self._restart_from_trim_in_on_play = False
         self._end_hold_display_ms = None
 
+    def _queue_video_frame(self, frame: "QVideoFrame") -> None:
+        """Coalesce video-sink frames back onto the GUI event loop."""
+
+        if frame is None or not frame.isValid():
+            return
+        queued_frame = frame
+        if QVideoFrame is not None:
+            try:
+                queued_frame = QVideoFrame(frame)
+            except Exception:
+                queued_frame = frame
+        self._pending_video_frame = queued_frame
+        if self._video_frame_dispatch_pending:
+            return
+        self._video_frame_dispatch_pending = True
+        QTimer.singleShot(0, self._flush_pending_video_frame)
+
+    def _flush_pending_video_frame(self) -> None:
+        """Present the latest queued frame on the active preview surface."""
+
+        self._video_frame_dispatch_pending = False
+        frame = self._pending_video_frame
+        self._pending_video_frame = None
+        if frame is None or not frame.isValid():
+            return
+        self._present_video_frame(frame)
+
     def _on_video_frame(self, frame: "QVideoFrame") -> None:
-        """Forward each decoded frame to the GPU renderer."""
+        """Test hook that forwards a frame immediately to the preview surface."""
+
+        self._present_video_frame(frame)
+
+    def _present_video_frame(self, frame: "QVideoFrame") -> None:
+        """Forward each decoded frame to the active GPU-backed preview surface."""
+
         if self._adjusted_preview_enabled:
             resolved_rotation_cw = _resolve_frame_rotation_cw(
                 frame.surfaceFormat(),
@@ -584,6 +624,8 @@ class VideoArea(QWidget):
                 self._current_adjustments,
                 reset_view=reset_view,
             )
+            self._surface_stack.update()
+            self.update()
         else:
             self._renderer.update_frame(frame)
 

@@ -1272,6 +1272,35 @@ def test_playback_mode_with_adjustments_routes_frames_through_adjusted_viewer(qa
     assert kwargs["reset_view"] is True
 
 
+def test_rotate_image_ccw_updates_playback_adjustments_and_replays_last_frame(qapp, mocker):
+    """Playback rotation should update current adjustments and refresh the GL frame."""
+
+    va = VideoArea()
+    va._current_adjustments = {"Exposure": 0.25}
+    last_frame = mocker.Mock()
+    last_frame.isValid.return_value = True
+    va._last_presented_video_frame = last_frame
+
+    mock_enable_adjusted = mocker.patch.object(va, "set_adjusted_preview_enabled")
+    mock_rotate = mocker.patch.object(
+        va._edit_viewer,
+        "rotate_image_ccw",
+        return_value={"Crop_Rotate90": 3.0},
+    )
+    mock_present = mocker.patch.object(va, "_present_video_frame")
+
+    updates = va.rotate_image_ccw()
+
+    assert updates == {"Crop_Rotate90": 3.0}
+    assert va._current_adjustments == {
+        "Exposure": 0.25,
+        "Crop_Rotate90": 3.0,
+    }
+    mock_enable_adjusted.assert_called_once_with(True)
+    mock_rotate.assert_called_once_with()
+    mock_present.assert_called_once_with(last_frame)
+
+
 def test_view_transform_controller_prefers_render_target_device_size(mocker):
     """Fit-to-view math should use QRhi render-target pixels when available."""
 

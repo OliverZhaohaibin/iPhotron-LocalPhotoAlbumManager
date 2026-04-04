@@ -146,6 +146,7 @@ class VideoArea(QWidget):
         self._end_hold_display_ms: int | None = None
         self._transparent_preview_enabled = False
         self._pending_video_frame: QVideoFrame | None = None
+        self._last_presented_video_frame: QVideoFrame | None = None
         self._video_frame_dispatch_pending = False
         self._diag_queued_frame_count = 0
         self._diag_presented_frame_count = 0
@@ -348,7 +349,16 @@ class VideoArea(QWidget):
 
     def rotate_image_ccw(self) -> dict[str, float]:
         self.set_adjusted_preview_enabled(True)
-        return self._edit_viewer.rotate_image_ccw()
+        updates = self._edit_viewer.rotate_image_ccw()
+        if updates:
+            self._current_adjustments = {
+                **self._current_adjustments,
+                **updates,
+            }
+        frame = self._last_presented_video_frame
+        if frame is not None and frame.isValid():
+            self._present_video_frame(frame)
+        return updates
 
     def set_zoom(self, factor: float, anchor: QPointF | None = None) -> None:
         self._edit_viewer.set_zoom(factor, anchor=anchor or self.viewport_center())
@@ -489,6 +499,7 @@ class VideoArea(QWidget):
 
         self._current_source = path
         self._current_adjustments = dict(adjustments or {})
+        self._last_presented_video_frame = None
         if adjusted_preview is not None:
             self.set_adjusted_preview_enabled(adjusted_preview)
         if self._adjusted_preview_enabled:
@@ -595,6 +606,7 @@ class VideoArea(QWidget):
         self._player.stop()
         self._player.setSource(QUrl())
         self._pending_video_frame = None
+        self._last_presented_video_frame = None
         self._video_frame_dispatch_pending = False
         self._renderer.clear_frame()
         self._edit_viewer.clear()
@@ -667,6 +679,13 @@ class VideoArea(QWidget):
     def _present_video_frame(self, frame: "QVideoFrame") -> None:
         """Forward each decoded frame to the active GPU-backed preview surface."""
 
+        if QVideoFrame is not None:
+            try:
+                self._last_presented_video_frame = QVideoFrame(frame)
+            except Exception:
+                self._last_presented_video_frame = frame
+        else:
+            self._last_presented_video_frame = frame
         self._diag_presented_frame_count += 1
         if self._adjusted_preview_enabled:
             resolved_rotation_cw = _resolve_frame_rotation_cw(

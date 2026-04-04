@@ -106,6 +106,7 @@ class TextureManager:
 
     def __init__(self, gl_funcs=None) -> None:
         self._gl_funcs = gl_funcs
+        self._use_pyopengl = gl_funcs is None
         self._texture_id: int = 0
         self._texture_width: int = 0
         self._texture_height: int = 0
@@ -328,7 +329,7 @@ class TextureManager:
         if not self._texture_id:
             return
         gf = self._gl_funcs or gl
-        delete_arg = np.array([int(self._texture_id)], dtype=np.uint32) if gf is gl else [int(self._texture_id)]
+        delete_arg = self._delete_textures_arg(self._texture_id)
         gf.glDeleteTextures(1, delete_arg)
         self._texture_id = 0
         self._texture_width = 0
@@ -449,11 +450,7 @@ class TextureManager:
         gf = self._gl_funcs or gl
         if recreate:
             if self._texture_id:
-                delete_arg = (
-                    np.array([int(self._texture_id)], dtype=np.uint32)
-                    if gf is gl
-                    else [int(self._texture_id)]
-                )
+                delete_arg = self._delete_textures_arg(self._texture_id)
                 gf.glDeleteTextures(1, delete_arg)
                 self._texture_id = 0
             tex_id = gf.glGenTextures(1)
@@ -482,6 +479,13 @@ class TextureManager:
             gf.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MAG_FILTER, gl.GL_LINEAR)
             gf.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_WRAP_S, gl.GL_CLAMP_TO_EDGE)
             gf.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_WRAP_T, gl.GL_CLAMP_TO_EDGE)
+
+    def _delete_textures_arg(self, texture_id: int):
+        """Return Qt/PyOpenGL-compatible argument for glDeleteTextures."""
+
+        if self._use_pyopengl:
+            return np.array([int(texture_id)], dtype=np.uint32)
+        return [int(texture_id)]
 
     def _upload_packed_texture(
         self,

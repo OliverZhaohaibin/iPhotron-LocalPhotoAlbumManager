@@ -11,6 +11,7 @@ GPU-accelerated image viewer (pure OpenGL texture upload; pixel-accurate zoom/pa
 from __future__ import annotations
 
 import logging
+import sys
 import time
 from collections.abc import Mapping
 from typing import Any
@@ -121,6 +122,8 @@ class GLImageViewer(QRhiWidget):
         self._source_rotate90_steps = 0
         self._pending_source_rotate90_steps: int | None = None
         self._last_render_target_size = QSize()
+        self._diag_video_frame_set_count = 0
+        self._diag_video_render_count = 0
         self._adjustments: dict[str, Any] = {}
         self._eyedropper_active = False
 
@@ -230,6 +233,30 @@ class GLImageViewer(QRhiWidget):
             float(self._last_render_target_size.width()),
             float(self._last_render_target_size.height()),
         )
+
+    @staticmethod
+    def _should_log_diag_frame(index: int) -> bool:
+        """Throttle noisy Linux playback diagnostics."""
+
+        return index <= 12 or index % 30 == 0
+
+    def _diag_video_frame_summary(self, frame) -> str:
+        """Return a compact summary of a pending QVideoFrame."""
+
+        if QVideoFrame is None or frame is None:
+            return "none"
+        try:
+            size = frame.size()
+            width = size.width()
+            height = size.height()
+        except Exception:  # pragma: no cover - defensive
+            width = -1
+            height = -1
+        try:
+            pixel_format = int(frame.pixelFormat())
+        except Exception:  # pragma: no cover - defensive
+            pixel_format = -1
+        return f"valid={frame.isValid()} size={width}x{height} fmt={pixel_format}"
 
     # --------------------------- Public API ---------------------------
 
@@ -342,6 +369,21 @@ class GLImageViewer(QRhiWidget):
 
         if reset_view:
             self._pending_video_reset_view = True
+        self._diag_video_frame_set_count += 1
+        if sys.platform.startswith("linux") and self._should_log_diag_frame(self._diag_video_frame_set_count):
+            _LOGGER.warning(
+                "[diag][gl_viewer] set_video_frame #%s reset_view=%s visible=%s dirty=%s pending_reset=%s widget=%sx%s rt=%sx%s frame=%s",
+                self._diag_video_frame_set_count,
+                reset_view,
+                self.isVisible(),
+                self._video_frame_dirty,
+                self._pending_video_reset_view,
+                self.width(),
+                self.height(),
+                self._last_render_target_size.width(),
+                self._last_render_target_size.height(),
+                self._diag_video_frame_summary(frame),
+            )
         self.update()
 
     def set_placeholder(self, pixmap: QPixmap | None) -> None:
@@ -755,6 +797,14 @@ class GLImageViewer(QRhiWidget):
 
         output_size = self.renderTarget().pixelSize()
         if output_size.isEmpty():
+            if sys.platform.startswith("linux"):
+                _LOGGER.warning(
+                    "[diag][gl_viewer] render skipped empty target using_video=%s dirty=%s widget=%sx%s",
+                    self._using_video_frame_source,
+                    self._video_frame_dirty,
+                    self.width(),
+                    self.height(),
+                )
             return
         self._last_render_target_size = QSize(output_size)
 
@@ -782,6 +832,20 @@ class GLImageViewer(QRhiWidget):
             and self._video_frame_dirty
             and self._video_frame is not None
         ):
+            self._diag_video_render_count += 1
+            if sys.platform.startswith("linux") and self._should_log_diag_frame(self._diag_video_render_count):
+                _LOGGER.warning(
+                    "[diag][gl_viewer] render #%s pre-upload rt=%sx%s widget=%sx%s pending_rot=%s source_rot=%s has_texture=%s frame=%s",
+                    self._diag_video_render_count,
+                    vw,
+                    vh,
+                    self.width(),
+                    self.height(),
+                    self._pending_source_rotate90_steps,
+                    self._source_rotate90_steps,
+                    self._renderer.has_texture(),
+                    self._diag_video_frame_summary(self._video_frame),
+                )
             try:
                 self._renderer.upload_video_frame(self._video_frame)
                 pending_rotation = self._pending_source_rotate90_steps
@@ -797,6 +861,20 @@ class GLImageViewer(QRhiWidget):
                     request_update=False,
                 )
                 self._pending_source_rotate90_steps = None
+                if sys.platform.startswith("linux") and self._should_log_diag_frame(self._diag_video_render_count):
+                    logical_tex_w, logical_tex_h = self._display_texture_dimensions()
+                    _LOGGER.warning(
+                        "[diag][gl_viewer] render #%s post-upload pre_rotated=%s final_rot=%s logical_tex=%sx%s cover=%.5f zoom=%.5f pan=(%.2f,%.2f)",
+                        self._diag_video_render_count,
+                        self._renderer.last_video_upload_pre_rotated(),
+                        final_rotation,
+                        logical_tex_w,
+                        logical_tex_h,
+                        self._transform_controller.get_image_cover_scale(),
+                        self._transform_controller.get_effective_scale(),
+                        self._transform_controller.get_pan_pixels().x(),
+                        self._transform_controller.get_pan_pixels().y(),
+                    )
             except Exception:
                 _LOGGER.exception("Failed to upload video frame into GLImageViewer")
             self._video_frame = None
@@ -815,6 +893,14 @@ class GLImageViewer(QRhiWidget):
             straighten, rotate_steps, _ = self._rotation_parameters()
             self._update_cover_scale(straighten, rotate_steps)
         if not self._renderer.has_texture():
+            if sys.platform.startswith("linux") and self._using_video_frame_source:
+                _LOGGER.warning(
+                    "[diag][gl_viewer] render no-texture rt=%sx%s dirty=%s pending_reset=%s",
+                    vw,
+                    vh,
+                    self._video_frame_dirty,
+                    self._pending_video_reset_view,
+                )
             cb.endExternal()
             cb.endPass()
             self._emit_first_frame_ready()
@@ -853,6 +939,24 @@ class GLImageViewer(QRhiWidget):
 
 
         logical_tex_w, logical_tex_h = self._display_texture_dimensions()
+        if (
+            sys.platform.startswith("linux")
+            and self._using_video_frame_source
+            and self._should_log_diag_frame(self._diag_video_render_count)
+        ):
+            _LOGGER.warning(
+                "[diag][gl_viewer] draw #%s rt=%sx%s logical_tex=%sx%s cover=%.5f zoom=%.5f pan=(%.2f,%.2f) rounded=%s",
+                self._diag_video_render_count,
+                vw,
+                vh,
+                logical_tex_w,
+                logical_tex_h,
+                cover_scale,
+                effective_scale,
+                view_pan.x(),
+                view_pan.y(),
+                self._transparent_rounded_clip_enabled,
+            )
 
         self._renderer.render(
             view_width=float(vw),
@@ -1002,6 +1106,16 @@ class GLImageViewer(QRhiWidget):
             self._reapply_locked_crop_center()
         straighten, rotate_steps, _ = self._rotation_parameters()
         self._update_cover_scale(straighten, rotate_steps)
+        if sys.platform.startswith("linux"):
+            _LOGGER.warning(
+                "[diag][gl_viewer] resize widget=%sx%s rt=%sx%s using_video=%s dirty=%s",
+                self.width(),
+                self.height(),
+                self._last_render_target_size.width(),
+                self._last_render_target_size.height(),
+                self._using_video_frame_source,
+                self._video_frame_dirty,
+            )
 
     def showEvent(self, event) -> None:  # type: ignore[override]
         super().showEvent(event)

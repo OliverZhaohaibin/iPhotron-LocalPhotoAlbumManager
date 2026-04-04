@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import sys
 from pathlib import Path
 from typing import Mapping, Optional
 
@@ -146,6 +147,8 @@ class VideoArea(QWidget):
         self._transparent_preview_enabled = False
         self._pending_video_frame: QVideoFrame | None = None
         self._video_frame_dispatch_pending = False
+        self._diag_queued_frame_count = 0
+        self._diag_presented_frame_count = 0
 
         self._apply_surface(surface_color)
         # --- End Video Renderer Setup ---
@@ -223,6 +226,40 @@ class VideoArea(QWidget):
         """Return whether decoded frames are routed through the GL edit viewer."""
 
         return self._adjusted_preview_enabled
+
+    @staticmethod
+    def _should_log_diag_frame(index: int) -> bool:
+        """Throttle verbose Linux diagnostics so logs stay readable."""
+
+        return index <= 12 or index % 30 == 0
+
+    def _diag_surface_name(self) -> str:
+        """Return the currently visible surface for diagnostics."""
+
+        return "edit" if self._surface_stack.currentWidget() is self._edit_viewer else "renderer"
+
+    def _frame_summary(self, frame: "QVideoFrame") -> str:
+        """Return a compact frame summary for diagnostics."""
+
+        if frame is None:
+            return "none"
+        try:
+            fmt = frame.surfaceFormat()
+        except Exception:
+            return "invalid-format"
+        try:
+            pixel_format = fmt.pixelFormat()
+            pixel_name = getattr(pixel_format, "name", None) or str(pixel_format)
+        except Exception:
+            pixel_name = "unknown"
+        try:
+            mirrored = bool(fmt.isMirrored())
+        except Exception:
+            mirrored = False
+        return (
+            f"{fmt.frameWidth()}x{fmt.frameHeight()} "
+            f"pf={pixel_name} mirrored={mirrored}"
+        )
 
     def set_adjusted_preview_enabled(self, enabled: bool) -> None:
         """Route decoded frames through the adjusted GL preview when *enabled*."""
@@ -584,6 +621,16 @@ class VideoArea(QWidget):
                 queued_frame = QVideoFrame(frame)
             except Exception:
                 queued_frame = frame
+        self._diag_queued_frame_count += 1
+        if sys.platform.startswith("linux") and self._should_log_diag_frame(self._diag_queued_frame_count):
+            _log.warning(
+                "[diag][video_area] queue #%d adjusted=%s surface=%s dispatch_pending=%s frame=%s",
+                self._diag_queued_frame_count,
+                self._adjusted_preview_enabled,
+                self._diag_surface_name(),
+                self._video_frame_dispatch_pending,
+                self._frame_summary(queued_frame),
+            )
         self._pending_video_frame = queued_frame
         if self._video_frame_dispatch_pending:
             return
@@ -598,6 +645,15 @@ class VideoArea(QWidget):
         self._pending_video_frame = None
         if frame is None or not frame.isValid():
             return
+        if sys.platform.startswith("linux") and self._should_log_diag_frame(self._diag_queued_frame_count):
+            _log.warning(
+                "[diag][video_area] flush queue_count=%d presented=%d adjusted=%s surface=%s frame=%s",
+                self._diag_queued_frame_count,
+                self._diag_presented_frame_count,
+                self._adjusted_preview_enabled,
+                self._diag_surface_name(),
+                self._frame_summary(frame),
+            )
         self._present_video_frame(frame)
 
     def _on_video_frame(self, frame: "QVideoFrame") -> None:
@@ -608,6 +664,7 @@ class VideoArea(QWidget):
     def _present_video_frame(self, frame: "QVideoFrame") -> None:
         """Forward each decoded frame to the active GPU-backed preview surface."""
 
+        self._diag_presented_frame_count += 1
         if self._adjusted_preview_enabled:
             resolved_rotation_cw = _resolve_frame_rotation_cw(
                 frame.surfaceFormat(),
@@ -616,6 +673,15 @@ class VideoArea(QWidget):
                 container_raw_h=self._container_raw_h,
                 linux_180_hint=self._container_linux_180_hint,
             )
+            if sys.platform.startswith("linux") and self._should_log_diag_frame(self._diag_presented_frame_count):
+                _log.warning(
+                    "[diag][video_area] present #%d mode=edit surface=%s reset_view=%s rotation=%d frame=%s",
+                    self._diag_presented_frame_count,
+                    self._diag_surface_name(),
+                    self._adjusted_first_frame_pending,
+                    resolved_rotation_cw,
+                    self._frame_summary(frame),
+                )
             self._edit_viewer.set_pending_video_source_rotation(resolved_rotation_cw)
             reset_view = self._adjusted_first_frame_pending
             self._adjusted_first_frame_pending = False
@@ -669,6 +735,15 @@ class VideoArea(QWidget):
         is_playing = (state == QMediaPlayer.PlaybackState.PlayingState)
         self._player_bar.set_playback_state(is_playing)
         self.playbackStateChanged.emit(is_playing)
+        if sys.platform.startswith("linux"):
+            _log.warning(
+                "[diag][video_area] playback_state=%s adjusted=%s surface=%s pos=%d pending_queue=%s",
+                state,
+                self._adjusted_preview_enabled,
+                self._diag_surface_name(),
+                self._player.position(),
+                self._video_frame_dispatch_pending,
+            )
         if not is_playing and state == QMediaPlayer.PlaybackState.StoppedState:
             self.show_controls()
 
@@ -743,6 +818,16 @@ class VideoArea(QWidget):
         rect = self.rect()
         self._surface_stack.setGeometry(rect)
         self._update_bar_geometry()
+        if sys.platform.startswith("linux"):
+            _log.warning(
+                "[diag][video_area] resize area=%dx%d stack=%dx%d surface=%s adjusted=%s",
+                rect.width(),
+                rect.height(),
+                self._surface_stack.width(),
+                self._surface_stack.height(),
+                self._diag_surface_name(),
+                self._adjusted_preview_enabled,
+            )
 
     def enterEvent(self, event) -> None:  # pragma: no cover - GUI behaviour
         super().enterEvent(event)

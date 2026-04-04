@@ -469,7 +469,7 @@ class TextureManager:
 
         gl_funcs.glBindTexture(gl.GL_TEXTURE_2D, self._texture_id)
         if recreate:
-            gl_funcs.glTexImage2D(
+            gl.glTexImage2D(
                 gl.GL_TEXTURE_2D,
                 0,
                 gl.GL_RGBA8,

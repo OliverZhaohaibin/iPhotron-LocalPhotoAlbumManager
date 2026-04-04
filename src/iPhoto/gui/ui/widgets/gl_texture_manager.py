@@ -328,7 +328,8 @@ class TextureManager:
         if not self._texture_id:
             return
         gf = self._gl_funcs or gl
-        gf.glDeleteTextures(1, [int(self._texture_id)])
+        delete_arg = np.array([int(self._texture_id)], dtype=np.uint32) if gf is gl else [int(self._texture_id)]
+        gf.glDeleteTextures(1, delete_arg)
         self._texture_id = 0
         self._texture_width = 0
         self._texture_height = 0
@@ -448,7 +449,12 @@ class TextureManager:
         gf = self._gl_funcs or gl
         if recreate:
             if self._texture_id:
-                gf.glDeleteTextures(1, [int(self._texture_id)])
+                delete_arg = (
+                    np.array([int(self._texture_id)], dtype=np.uint32)
+                    if gf is gl
+                    else [int(self._texture_id)]
+                )
+                gf.glDeleteTextures(1, delete_arg)
                 self._texture_id = 0
             tex_id = gf.glGenTextures(1)
             if isinstance(tex_id, (tuple, list)):

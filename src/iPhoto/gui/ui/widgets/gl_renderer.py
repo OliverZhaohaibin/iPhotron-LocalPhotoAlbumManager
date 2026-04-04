@@ -472,7 +472,9 @@ class GLRenderer:
                 rotate_steps=0,
                 flip_horizontal=flip_enabled,
             )
-            self._set_uniform_matrix3("uPerspectiveMatrix", perspective_matrix)
+            self._set_uniform3f("uPerspectiveRow0", *perspective_matrix[0])
+            self._set_uniform3f("uPerspectiveRow1", *perspective_matrix[1])
+            self._set_uniform3f("uPerspectiveRow2", *perspective_matrix[2])
 
             gf.glDrawArrays(gl.GL_TRIANGLES, 0, 3)
         finally:

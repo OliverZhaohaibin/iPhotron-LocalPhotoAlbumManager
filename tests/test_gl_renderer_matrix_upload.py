@@ -95,8 +95,8 @@ def renderer(mock_gl_funcs):
         renderer.initialize_resources()
         return renderer
 
-def test_render_upload_matrix_uses_column_major_data_without_transpose(renderer, mock_gl_funcs):
-    """Matrix uniforms should upload pre-transposed data with GL_FALSE transpose."""
+def test_render_uploads_perspective_rows_as_vec3_uniforms(renderer, mock_gl_funcs, monkeypatch):
+    """Perspective transforms should upload through vec3 rows, not matrix uniforms."""
 
     view_width = 800.0
     view_height = 600.0
@@ -116,8 +116,18 @@ def test_render_upload_matrix_uses_column_major_data_without_transpose(renderer,
     renderer._texture_width = 100
     renderer._texture_height = 100
 
-    with patch.object(gl_renderer_mod, "build_perspective_matrix", return_value=perspective_matrix), \
-         patch.object(gl_renderer_mod.gl, "glUniformMatrix3fv") as raw_uniform_matrix3fv:
+    renderer._uniform_locations.clear()
+    renderer._uniform_locations.update(
+        {
+            "uPerspectiveRow0": 301,
+            "uPerspectiveRow1": 302,
+            "uPerspectiveRow2": 303,
+        }
+    )
+    raw_uniform_matrix3fv = MagicMock()
+    monkeypatch.setattr(gl_renderer_mod.gl, "glUniformMatrix3fv", raw_uniform_matrix3fv)
+
+    with patch.object(gl_renderer_mod, "build_perspective_matrix", return_value=perspective_matrix):
         renderer.render(
             view_width=view_width,
             view_height=view_height,
@@ -126,23 +136,16 @@ def test_render_upload_matrix_uses_column_major_data_without_transpose(renderer,
             adjustments=adjustments
         )
 
-    calls = raw_uniform_matrix3fv.call_args_list
+    calls_by_location = {
+        call.args[0]: call.args[1:]
+        for call in mock_gl_funcs.glUniform3f.call_args_list
+        if call.args[0] in {301, 302, 303}
+    }
 
-    found = False
-    for call in calls:
-        args, kwargs = call
-        location = args[0]
-        transpose = args[2]
-        if location == 1:
-            found = True
-            assert transpose == 0, "Expected transpose=0 (GL_FALSE)"
-            gl_renderer_mod.np.testing.assert_allclose(
-                gl_renderer_mod.np.asarray(args[3]),
-                perspective_matrix.T,
-            )
-
-    assert found, "glUniformMatrix3fv was not called for uPerspectiveMatrix"
-    mock_gl_funcs.glUniformMatrix3fv.assert_not_called()
+    assert calls_by_location[301] == pytest.approx(tuple(perspective_matrix[0]))
+    assert calls_by_location[302] == pytest.approx(tuple(perspective_matrix[1]))
+    assert calls_by_location[303] == pytest.approx(tuple(perspective_matrix[2]))
+    raw_uniform_matrix3fv.assert_not_called()
 
 
 def test_initialize_resources_queries_selective_color_array_elements(mock_gl_funcs):

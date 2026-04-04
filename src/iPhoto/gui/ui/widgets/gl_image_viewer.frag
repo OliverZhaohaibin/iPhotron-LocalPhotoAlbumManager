@@ -64,7 +64,9 @@ uniform float uCropCX;
 uniform float uCropCY;
 uniform float uCropW;
 uniform float uCropH;
-uniform mat3  uPerspectiveMatrix;
+uniform vec3  uPerspectiveRow0;
+uniform vec3  uPerspectiveRow1;
+uniform vec3  uPerspectiveRow2;
 uniform int   uRotate90;  // 0, 1, 2, 3 for 0°, 90°, 180°, 270° CCW rotation
 
 const int VIDEO_FMT_NONE = 0;
@@ -309,7 +311,12 @@ vec2 source_texture_size() {
 
 vec2 apply_inverse_perspective(vec2 uv) {
     vec2 centered = uv * 2.0 - 1.0;
-    vec3 warped = uPerspectiveMatrix * vec3(centered, 1.0);
+    vec3 centered3 = vec3(centered, 1.0);
+    vec3 warped = vec3(
+        dot(uPerspectiveRow0, centered3),
+        dot(uPerspectiveRow1, centered3),
+        dot(uPerspectiveRow2, centered3)
+    );
     float denom = warped.z;
     if (abs(denom) < 1e-5) {
         denom = (denom >= 0.0) ? 1e-5 : -1e-5;

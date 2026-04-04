@@ -127,6 +127,7 @@ class ViewTransformController:
         self._pan_start_pos: QPointF = QPointF()
         self._wheel_action: str = "zoom"
         self._image_cover_scale: float = 1.0
+        self._fill_viewport_enabled: bool = False
 
     # ------------------------------------------------------------------
     # Helper methods for getting viewport info
@@ -213,6 +214,11 @@ class ViewTransformController:
         """Switch between wheel zooming and item navigation."""
 
         self._wheel_action = "zoom" if action == "zoom" else "navigate"
+
+    def set_fill_viewport_enabled(self, enabled: bool) -> None:
+        """Control whether framing helpers should cover the viewport instead of fitting."""
+
+        self._fill_viewport_enabled = bool(enabled)
 
     # ------------------------------------------------------------------
     # Zoom utilities
@@ -473,11 +479,17 @@ class ViewTransformController:
         if base_scale <= 0.0:
             return None
 
-        target_scale = compute_fit_to_view_scale(
-            (float(rect.width()), float(rect.height())),
-            view_width,
-            view_height,
-        )
+        if self._fill_viewport_enabled:
+            target_scale = max(
+                view_width / float(rect.width()),
+                view_height / float(rect.height()),
+            )
+        else:
+            target_scale = compute_fit_to_view_scale(
+                (float(rect.width()), float(rect.height())),
+                view_width,
+                view_height,
+            )
         if target_scale <= 0.0:
             return None
         return (target_scale / base_scale, target_scale)

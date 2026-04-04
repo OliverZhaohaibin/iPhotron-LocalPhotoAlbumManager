@@ -75,6 +75,7 @@ _UNIFORM_NAMES = (
     "uPan",
     "uImgScale",
     "uImgOffset",
+    "uCornerRadius",
     "uCropCX",
     "uCropCY",
     "uCropW",

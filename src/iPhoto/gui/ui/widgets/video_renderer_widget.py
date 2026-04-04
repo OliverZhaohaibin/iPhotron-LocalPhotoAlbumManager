@@ -215,6 +215,7 @@ class VideoRendererWidget(QRhiWidget):
         self._native_size = QSizeF()
         self._first_render_done = False
         self._has_frame = False
+        self._viewport_fill_enabled = False
 
         # --- RHI resources (created in initialize()) ---
         self._pipeline: Optional[QRhiGraphicsPipeline] = None
@@ -282,6 +283,15 @@ class VideoRendererWidget(QRhiWidget):
     def set_linux_180_hint(self, enabled: bool) -> None:
         """Set whether Linux 180° pre-rotation workaround is hinted."""
         self._container_linux_180_hint = bool(enabled)
+
+    def set_viewport_fill_enabled(self, enabled: bool) -> None:
+        """Control whether the video covers the viewport instead of letterboxing."""
+
+        target = bool(enabled)
+        if self._viewport_fill_enabled == target:
+            return
+        self._viewport_fill_enabled = target
+        self.update()
 
     def update_frame(self, frame: "QVideoFrame") -> None:
         """Accept a new video frame and schedule a repaint."""
@@ -844,25 +854,37 @@ class VideoRendererWidget(QRhiWidget):
         ow = float(output_size.width())
         oh = float(output_size.height())
 
-        # Compute video rect (aspect-ratio preserving fit)
+        # Compute video rect (either contain/letterbox or cover/crop).
         vx, vy, vw, vh = 0.0, 0.0, 1.0, 1.0
         if not self._native_size.isEmpty() and ow > 0 and oh > 0:
             src_aspect = self._native_size.width() / self._native_size.height()
             dst_aspect = ow / oh
-            if src_aspect > dst_aspect:
-                # Wider than viewport → pillarbox
-                scale = ow / self._native_size.width()
-                vw = 1.0
-                vh = (self._native_size.height() * scale) / oh
-                vx = 0.0
-                vy = (1.0 - vh) / 2.0
+            if self._viewport_fill_enabled:
+                if src_aspect > dst_aspect:
+                    vh = 1.0
+                    vw = src_aspect / dst_aspect
+                    vx = (1.0 - vw) / 2.0
+                    vy = 0.0
+                else:
+                    vw = 1.0
+                    vh = dst_aspect / src_aspect
+                    vx = 0.0
+                    vy = (1.0 - vh) / 2.0
             else:
-                # Taller than viewport → letterbox
-                scale = oh / self._native_size.height()
-                vh = 1.0
-                vw = (self._native_size.width() * scale) / ow
-                vx = (1.0 - vw) / 2.0
-                vy = 0.0
+                if src_aspect > dst_aspect:
+                    # Wider than viewport → pillarbox
+                    scale = ow / self._native_size.width()
+                    vw = 1.0
+                    vh = (self._native_size.height() * scale) / oh
+                    vx = 0.0
+                    vy = (1.0 - vh) / 2.0
+                else:
+                    # Taller than viewport → letterbox
+                    scale = oh / self._native_size.height()
+                    vh = 1.0
+                    vw = (self._native_size.width() * scale) / ow
+                    vx = (1.0 - vw) / 2.0
+                    vy = 0.0
 
         # Letterbox color
         lc = self._letterbox_color

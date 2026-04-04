@@ -25,8 +25,6 @@ from PySide6.QtCore import QObject, QPointF, QSize
 from PySide6.QtGui import QImage
 from PySide6.QtOpenGL import (
     QOpenGLFunctions_3_3_Core,
-    QOpenGLShaderProgram,
-    QOpenGLVertexArrayObject,
 )
 from OpenGL import GL as gl
 from shiboken6.Shiboken import VoidPtr
@@ -36,9 +34,6 @@ from ....core.selective_color_resolver import NUM_RANGES, SAT_GATE_LO, SAT_GATE_
 from .perspective_math import build_perspective_matrix
 from .gl_shader_manager import (
     ShaderManager,
-    _load_shader_source,
-    _OVERLAY_VERTEX_SHADER,
-    _OVERLAY_FRAGMENT_SHADER,
 )
 from .gl_texture_manager import TextureManager
 from .gl_uniform_state import UniformState
@@ -226,6 +221,7 @@ class GLRenderer:
         img_scale: float = 1.0,
         img_offset: Optional[QPointF] = None,
         logical_tex_size: tuple[float, float] | None = None,
+        corner_radius_px: float = 0.0,
     ) -> None:
         """Draw the textured triangle covering the current viewport."""
 
@@ -433,6 +429,7 @@ class GLRenderer:
                 float(offset_value.x()),
                 float(offset_value.y()),
             )
+            self._set_uniform1f("uCornerRadius", max(0.0, float(corner_radius_px)))
 
             # Pass crop parameters to shader
             self._set_uniform1f("uCropCX", adjustment_value("Crop_CX", 0.5))

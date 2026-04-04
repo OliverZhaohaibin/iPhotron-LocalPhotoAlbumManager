@@ -12,6 +12,7 @@ from PySide6.QtCore import (
     QObject,
     QPointF,
     QPropertyAnimation,
+    QSizeF,
     Qt,
     QTimer,
     QUrl,
@@ -20,7 +21,6 @@ from PySide6.QtCore import (
 from PySide6.QtGui import (
     QColor,
     QCursor,
-    QImage,
     QMouseEvent,
     QResizeEvent,
     QWheelEvent,
@@ -88,6 +88,7 @@ class VideoArea(QWidget):
     cropInteractionFinished = Signal()
     colorPicked = Signal(float, float, float)
     firstFrameReady = Signal()
+    displaySizeChanged = Signal(QSizeF)
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
@@ -138,6 +139,7 @@ class VideoArea(QWidget):
         self._suppress_trim_pause = False
         self._restart_from_trim_in_on_play = False
         self._end_hold_display_ms: int | None = None
+        self._transparent_preview_enabled = False
 
         self._apply_surface(surface_color)
         # --- End Video Renderer Setup ---
@@ -185,6 +187,7 @@ class VideoArea(QWidget):
         self._install_activity_filters()
         self._wire_player_bar()
         self._wire_edit_viewer()
+        self._renderer.nativeSizeChanged.connect(self.displaySizeChanged.emit)
 
     # ------------------------------------------------------------------
     # Public API
@@ -335,12 +338,43 @@ class VideoArea(QWidget):
         self._default_surface_color = colour
         self._apply_surface(colour)
 
+    def set_viewport_fill_enabled(self, enabled: bool) -> None:
+        """Control whether preview surfaces cover the viewport instead of fitting inside it."""
+
+        self._renderer.set_viewport_fill_enabled(enabled)
+        self._edit_viewer.set_viewport_fill_enabled(enabled)
+
+    def set_transparent_preview_enabled(
+        self,
+        enabled: bool,
+        *,
+        corner_radius: float = 0.0,
+    ) -> None:
+        """Enable a translucent preview surface with shader-rounded corners."""
+
+        target = bool(enabled)
+        self._transparent_preview_enabled = target
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, target)
+        self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent, not target)
+        self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, target)
+        self.setAutoFillBackground(not target)
+        self._surface_stack.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, target)
+        self._surface_stack.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, target)
+        self._surface_stack.setAutoFillBackground(not target)
+        if target:
+            self._surface_stack.setStyleSheet("background: transparent; border: none;")
+        else:
+            self._surface_stack.setStyleSheet("")
+        self._edit_viewer.set_transparent_rounded_clip(corner_radius if target else 0.0)
+        self._apply_surface(self._default_surface_color)
+
     def _apply_surface(self, colour: str) -> None:
         """Apply *colour* to the renderer letterbox, widget, and stylesheet."""
 
         self._renderer.set_letterbox_color(QColor(colour))
         self._edit_viewer.set_surface_color_override(colour)
-        self.setStyleSheet(f"background-color: {colour}; border: none;")
+        background = "transparent" if self._transparent_preview_enabled else colour
+        self.setStyleSheet(f"background-color: {background}; border: none;")
 
     def show_controls(self, *, animate: bool = True) -> None:
         """Reveal the playback controls and restart the hide timer."""
@@ -433,6 +467,15 @@ class VideoArea(QWidget):
                 "Container rotation for %s: %d° CW (raw %dx%d)",
                 path.name, cw_deg, raw_w, raw_h,
             )
+
+        if raw_w > 0 and raw_h > 0:
+            if cw_deg in (90, 270):
+                display_width = raw_h
+                display_height = raw_w
+            else:
+                display_width = raw_w
+                display_height = raw_h
+            self.displaySizeChanged.emit(QSizeF(float(display_width), float(display_height)))
 
         self._player.setSource(QUrl.fromLocalFile(str(path)))
         # Do not auto-play; let the coordinator decide.

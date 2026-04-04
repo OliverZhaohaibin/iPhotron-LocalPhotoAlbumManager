@@ -4,10 +4,11 @@ from __future__ import annotations
 
 from functools import partial
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 from PySide6.QtCore import QModelIndex, QObject, QRect
 
+from ....io import sidecar
 from ..models.roles import Roles
 from ..widgets.asset_grid import AssetGrid
 from ..widgets.preview_window import PreviewWindow
@@ -61,22 +62,32 @@ class PreviewController(QObject):
         if not preview_raw:
             return
         preview_path = Path(str(preview_raw))
+        adjustment_raw = index.data(Roles.ABS) or preview_raw
+        adjustment_path = Path(str(adjustment_raw))
         rect = view.visualRect(index)
         global_rect = QRect(view.viewport().mapToGlobal(rect.topLeft()), rect.size())
-        aspect_hint = self._extract_aspect_hint(index.data(Roles.INFO))
+        info = index.data(Roles.INFO)
+        aspect_hint = self._extract_aspect_hint(info)
+        adjustments, trim_range_ms, adjusted_preview = self._extract_preview_rendering(
+            adjustment_path,
+            info,
+        )
         self._preview_window.show_preview(
             preview_path,
             global_rect,
             aspect_ratio_hint=aspect_hint,
+            adjustments=adjustments,
+            trim_range_ms=trim_range_ms,
+            adjusted_preview=adjusted_preview,
         )
 
-    def _extract_aspect_hint(self, info: Any) -> Optional[float]:
+    def _extract_aspect_hint(self, info: Any) -> float | None:
         """Return a best-effort display aspect ratio hint from model metadata."""
 
         if not isinstance(info, dict):
             return None
 
-        def _to_float(value: Any) -> Optional[float]:
+        def _to_float(value: Any) -> float | None:
             if isinstance(value, bool):
                 return None
             if isinstance(value, (int, float)):
@@ -113,3 +124,64 @@ class PreviewController(QObject):
         if height <= 0.0:
             return None
         return width / height
+
+    def _extract_preview_rendering(
+        self,
+        preview_path: Path,
+        info: Any,
+    ) -> tuple[dict[str, object] | None, tuple[int, int] | None, bool]:
+        """Return render adjustments, trim range, and preview mode for *preview_path*."""
+
+        duration_sec = self._extract_duration_hint(info)
+        try:
+            raw_adjustments = sidecar.load_adjustments(preview_path)
+        except Exception:  # noqa: BLE001 - preview should gracefully fall back to raw playback
+            raw_adjustments = {}
+
+        adjusted_preview = sidecar.has_non_default_adjustments(raw_adjustments)
+        adjustments: dict[str, object] | None = None
+        if adjusted_preview:
+            try:
+                adjustments = sidecar.resolve_render_adjustments(raw_adjustments)
+            except Exception:  # noqa: BLE001 - preview should gracefully fall back to raw playback
+                adjustments = None
+                adjusted_preview = False
+
+        trim_range_ms: tuple[int, int] | None = None
+        try:
+            has_trim = sidecar.trim_is_non_default(raw_adjustments, duration_sec)
+        except Exception:  # noqa: BLE001 - preview trim is optional metadata
+            has_trim = False
+        if has_trim:
+            try:
+                trim_in_sec, trim_out_sec = sidecar.normalise_video_trim(
+                    raw_adjustments,
+                    duration_sec,
+                )
+            except Exception:  # noqa: BLE001 - preview trim is optional metadata
+                trim_range_ms = None
+            else:
+                trim_range_ms = (
+                    round(trim_in_sec * 1000.0),
+                    round(trim_out_sec * 1000.0),
+                )
+
+        return adjustments, trim_range_ms, adjusted_preview
+
+    def _extract_duration_hint(self, info: Any) -> float | None:
+        """Return a best-effort duration hint from model metadata."""
+
+        if not isinstance(info, dict):
+            return None
+
+        for key in ("dur", "duration"):
+            value = info.get(key)
+            if value is None:
+                continue
+            try:
+                numeric = float(value)
+            except (TypeError, ValueError):
+                continue
+            if numeric > 0.0:
+                return numeric
+        return None

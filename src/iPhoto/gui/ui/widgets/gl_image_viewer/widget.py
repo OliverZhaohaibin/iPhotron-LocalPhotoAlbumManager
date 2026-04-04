@@ -115,6 +115,9 @@ class GLImageViewer(QRhiWidget):
         self._pending_video_reset_view = False
         self._reset_zoom_frames_crop = True
         self._crop_center_zoom_strength = 0.5
+        self._fill_viewport_enabled = False
+        self._transparent_rounded_clip_enabled = False
+        self._rounded_clip_radius = 0.0
         self._adjustments: dict[str, Any] = {}
         self._eyedropper_active = False
 
@@ -458,6 +461,52 @@ class GLImageViewer(QRhiWidget):
 
         return self._crop_center_zoom_strength
 
+    def set_viewport_fill_enabled(self, enabled: bool) -> None:
+        """Control whether the viewer covers the viewport instead of fitting inside it."""
+
+        target = bool(enabled)
+        if self._fill_viewport_enabled == target:
+            return
+        self._fill_viewport_enabled = target
+        self._transform_controller.set_fill_viewport_enabled(target)
+        straighten, rotate_steps, _ = self._rotation_parameters()
+        self._update_cover_scale(straighten, rotate_steps)
+        self.update()
+
+    def set_transparent_rounded_clip(self, radius: float | None) -> None:
+        """Enable a smooth alpha-rounded clip when *radius* is positive."""
+
+        numeric = float(radius or 0.0)
+        enabled = numeric > 0.0
+        if (
+            self._transparent_rounded_clip_enabled == enabled
+            and abs(self._rounded_clip_radius - numeric) <= 1e-4
+        ):
+            return
+        self._transparent_rounded_clip_enabled = enabled
+        self._rounded_clip_radius = max(0.0, numeric)
+        self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent, not enabled)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, enabled)
+        self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, enabled)
+        self.setAutoFillBackground(not enabled)
+        self.update()
+
+    def _pass_clear_color(self) -> QColor:
+        """Return the QRhi clear colour for the current transparency mode."""
+
+        if self._transparent_rounded_clip_enabled:
+            return QColor(0, 0, 0, 0)
+        bg = self._fullscreen_handler.backdrop_color
+        return QColor.fromRgbF(bg.redF(), bg.greenF(), bg.blueF(), 1.0)
+
+    def _gl_clear_rgba(self) -> tuple[float, float, float, float]:
+        """Return the OpenGL clear colour matching the QRhi pass clear."""
+
+        if self._transparent_rounded_clip_enabled:
+            return (0.0, 0.0, 0.0, 0.0)
+        bg = self._fullscreen_handler.backdrop_color
+        return (bg.redF(), bg.greenF(), bg.blueF(), 1.0)
+
     def set_immersive_background(self, immersive: bool) -> None:
         """Toggle the pure black immersive backdrop used in immersive mode."""
         self._fullscreen_handler.set_immersive_background(immersive)
@@ -624,10 +673,9 @@ class GLImageViewer(QRhiWidget):
             # transparent.  An early bare return would leave the texture
             # uninitialised, compositing as transparent under the main
             # window's WA_TranslucentBackground.
-            bg = self._fullscreen_handler.backdrop_color
             cb.beginPass(
                 self.renderTarget(),
-                QColor.fromRgbF(bg.redF(), bg.greenF(), bg.blueF(), 1.0),
+                self._pass_clear_color(),
                 QRhiDepthStencilClearValue(),
             )
             cb.endPass()
@@ -635,10 +683,9 @@ class GLImageViewer(QRhiWidget):
             return
         gf = self._gl_funcs
         if gf is None or self._renderer is None:
-            bg = self._fullscreen_handler.backdrop_color
             cb.beginPass(
                 self.renderTarget(),
-                QColor.fromRgbF(bg.redF(), bg.greenF(), bg.blueF(), 1.0),
+                self._pass_clear_color(),
                 QRhiDepthStencilClearValue(),
             )
             cb.endPass()
@@ -655,7 +702,7 @@ class GLImageViewer(QRhiWidget):
         # widgets share the same QRhi rendering infrastructure.
         cb.beginPass(
             self.renderTarget(),
-            QColor(0, 0, 0, 255),
+            self._pass_clear_color(),
             QRhiDepthStencilClearValue(),
         )
         cb.beginExternal()
@@ -664,8 +711,8 @@ class GLImageViewer(QRhiWidget):
         vw = max(1, output_size.width())
         vh = max(1, output_size.height())
         gf.glViewport(0, 0, vw, vh)
-        bg = self._fullscreen_handler.backdrop_color
-        gf.glClearColor(bg.redF(), bg.greenF(), bg.blueF(), 1.0)
+        clear_r, clear_g, clear_b, clear_a = self._gl_clear_rgba()
+        gf.glClearColor(clear_r, clear_g, clear_b, clear_a)
         gf.glClear(gl.GL_COLOR_BUFFER_BIT)
 
         if (
@@ -741,6 +788,11 @@ class GLImageViewer(QRhiWidget):
             time_value=time_value,
             img_scale=cover_scale,
             logical_tex_size=(float(logical_tex_w), float(logical_tex_h)),
+            corner_radius_px=(
+                self._rounded_clip_radius * self.devicePixelRatioF()
+                if self._transparent_rounded_clip_enabled
+                else 0.0
+            ),
         )
 
         if self._crop_controller.is_active():

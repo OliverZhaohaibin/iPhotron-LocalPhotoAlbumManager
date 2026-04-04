@@ -59,6 +59,7 @@ uniform float uScale;
 uniform vec2  uPan;
 uniform float uImgScale;
 uniform vec2  uImgOffset;
+uniform float uCornerRadius;
 uniform float uCropCX;
 uniform float uCropCY;
 uniform float uCropW;
@@ -658,6 +659,22 @@ vec3 apply_vignette(vec3 c, vec2 uv) {
     return c * darken;
 }
 
+float rounded_rect_alpha(vec2 fragPx) {
+    if (uCornerRadius <= 0.0) {
+        return 1.0;
+    }
+
+    vec2 half_size = max(uViewSize * 0.5 - vec2(0.5), vec2(0.0));
+    float radius = min(uCornerRadius, min(half_size.x, half_size.y));
+    vec2 centered = fragPx - half_size;
+    vec2 q = abs(centered) - (half_size - vec2(radius));
+    float signed_distance = length(max(q, vec2(0.0))) + min(max(q.x, q.y), 0.0) - radius;
+    if (signed_distance >= 0.0) {
+        return 0.0;
+    }
+    return 1.0 - smoothstep(-1.0, 0.0, signed_distance);
+}
+
 void main() {
     if (uScale <= 0.0) {
         discard;
@@ -766,5 +783,10 @@ void main() {
     if (uBWEnabled) {
         c = apply_bw(c, uv_tex);
     }
-    FragColor = vec4(clamp(c, 0.0, 1.0), 1.0);
+    float alpha = rounded_rect_alpha(fragPx);
+    if (alpha <= 0.0) {
+        discard;
+    }
+    vec3 rgb = clamp(c, 0.0, 1.0) * alpha;
+    FragColor = vec4(rgb, alpha);
 }

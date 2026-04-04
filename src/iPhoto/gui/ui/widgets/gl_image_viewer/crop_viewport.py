@@ -77,7 +77,7 @@ def update_cover_scale(
         (display_w, display_h), float(view_width), float(view_height)
     )
 
-    cover_scale = compute_rotation_cover_scale(
+    rotation_cover_scale = compute_rotation_cover_scale(
         (display_w, display_h),
         base_scale,
         straighten_deg,
@@ -85,7 +85,7 @@ def update_cover_scale(
         physical_texture_size=(tex_w, tex_h),
     )
 
-    viewer._transform_controller.set_image_cover_scale(cover_scale)
+    viewer._transform_controller.set_image_cover_scale(rotation_cover_scale)
 
 
 # ── Crop-perspective state ─────────────────────────────────────────────

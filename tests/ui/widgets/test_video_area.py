@@ -22,9 +22,6 @@ from iPhoto.gui.ui.widgets.video_area import VideoArea
 from iPhoto.gui.ui.widgets.video_renderer_widget import (
     VideoRendererWidget,
     _classify_frame_format,
-    _FMT_NV12,
-    _FMT_P010,
-    _FMT_RGBA,
     _CS_BT601,
     _CS_BT709,
     _CS_BT2020,
@@ -883,3 +880,29 @@ def test_gl_image_viewer_center_crop_uses_partial_fit_zoom(qapp, mocker):
     mock_zoom.assert_called_once_with(2.0)
     mock_apply_center.assert_called_once_with(crop_rect.center())
     assert viewer._auto_crop_center_locked is True
+
+
+def test_view_transform_compute_texture_rect_fit_uses_cover_when_fill_enabled(qapp):
+    """Fill-mode framing should scale crop previews with a cover fit."""
+
+    viewer = GLImageViewer()
+    viewer.resize(400, 300)
+
+    controller = viewer._transform_controller
+    controller._texture_size_provider = lambda: (200, 100)
+    controller._display_texture_size_provider = lambda: (200, 100)
+
+    crop_rect = QRectF(50.0, 0.0, 100.0, 100.0)
+    view_width, view_height = controller.get_view_dimensions_device_px()
+    base_scale = min(view_width / 200.0, view_height / 100.0)
+    expected_fit_scale = min(view_width / 100.0, view_height / 100.0)
+    expected_cover_scale = max(view_width / 100.0, view_height / 100.0)
+
+    fit_zoom, fit_scale = controller.compute_texture_rect_fit(crop_rect)
+    assert fit_zoom == pytest.approx(expected_fit_scale / base_scale)
+    assert fit_scale == pytest.approx(expected_fit_scale)
+
+    controller.set_fill_viewport_enabled(True)
+    cover_zoom, cover_scale = controller.compute_texture_rect_fit(crop_rect)
+    assert cover_zoom == pytest.approx(expected_cover_scale / base_scale)
+    assert cover_scale == pytest.approx(expected_cover_scale)

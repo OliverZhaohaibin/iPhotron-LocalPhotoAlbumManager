@@ -96,7 +96,7 @@ def renderer(mock_gl_funcs):
         return renderer
 
 def test_render_upload_matrix_transpose_flag(renderer, mock_gl_funcs):
-    """Verify that glUniformMatrix3fv is called with the correct transpose flag."""
+    """Verify that matrix uniforms are uploaded via raw OpenGL with GL_TRUE transpose."""
 
     view_width = 800.0
     view_height = 600.0
@@ -108,28 +108,28 @@ def test_render_upload_matrix_transpose_flag(renderer, mock_gl_funcs):
     renderer._texture_width = 100
     renderer._texture_height = 100
 
-    renderer.render(
-        view_width=view_width,
-        view_height=view_height,
-        scale=scale,
-        pan=pan,
-        adjustments=adjustments
-    )
+    with patch.object(gl_renderer_mod.gl, "glUniformMatrix3fv") as raw_uniform_matrix3fv:
+        renderer.render(
+            view_width=view_width,
+            view_height=view_height,
+            scale=scale,
+            pan=pan,
+            adjustments=adjustments
+        )
 
-    calls = mock_gl_funcs.glUniformMatrix3fv.call_args_list
+    calls = raw_uniform_matrix3fv.call_args_list
 
     found = False
     for call in calls:
         args, kwargs = call
         location = args[0]
         transpose = args[2]
-
         if location == 1:
             found = True
-            # Expect transpose=1 (True) to confirm the FIX
-            assert transpose == 1, "Expected transpose=1 (True)"
+            assert transpose == 1, "Expected transpose=1 (GL_TRUE)"
 
     assert found, "glUniformMatrix3fv was not called for uPerspectiveMatrix"
+    mock_gl_funcs.glUniformMatrix3fv.assert_not_called()
 
 
 def test_initialize_resources_queries_selective_color_array_elements(mock_gl_funcs):

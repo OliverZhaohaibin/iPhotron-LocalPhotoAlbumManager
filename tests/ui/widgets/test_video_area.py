@@ -12,12 +12,13 @@ pytest.importorskip("PySide6.QtMultimedia", reason="QtMultimedia is required")
 from pathlib import Path
 
 from PySide6.QtCore import QRectF, QSize, Qt
-from PySide6.QtGui import QColor, QShowEvent
+from PySide6.QtGui import QColor, QImage, QShowEvent
 from PySide6.QtMultimedia import QMediaPlayer, QVideoFrame, QVideoFrameFormat
 from PySide6.QtWidgets import QApplication, QRhiWidget
 
 from iPhoto.config import VIDEO_COMPLETE_HOLD_BACKSTEP_MS
 from iPhoto.gui.ui.widgets.gl_image_viewer import GLImageViewer
+from iPhoto.gui.ui.widgets.gl_texture_manager import TextureManager
 from iPhoto.gui.ui.widgets.video_area import VideoArea
 from iPhoto.gui.ui.widgets.video_renderer_widget import (
     VideoRendererWidget,
@@ -884,6 +885,63 @@ def test_gl_image_viewer_resets_after_first_video_upload(qapp, mocker):
     renderer.upload_video_frame.assert_called_once_with(frame)
     mock_reset_zoom.assert_called_once()
     assert viewer._pending_video_reset_view is False
+
+
+def test_texture_manager_marks_transposed_toimage_fallback_as_prerotated(qapp, mocker):
+    """Fallback ``toImage()`` uploads should flag Qt-applied frame rotation."""
+
+    manager = TextureManager()
+    mocker.patch.object(manager, "upload_texture")
+
+    fmt = Mock()
+    fmt.frameWidth.return_value = 1920
+    fmt.frameHeight.return_value = 1440
+    fmt.pixelFormat.return_value = object()
+    fmt.colorSpace.return_value = Mock()
+    fmt.colorTransfer.return_value = Mock()
+    fmt.colorRange.return_value = Mock()
+
+    frame = Mock()
+    frame.isValid.return_value = True
+    frame.surfaceFormat.return_value = fmt
+    frame.toImage.return_value = QImage(1440, 1920, QImage.Format.Format_RGBA8888)
+
+    manager.upload_video_frame(frame)
+
+    assert manager.last_video_upload_pre_rotated() is True
+
+
+def test_gl_image_viewer_clears_source_rotation_when_qt_fallback_is_prerotated(qapp, mocker):
+    """Qt-applied rotation in fallback uploads should not be rotated again by GL."""
+
+    viewer = GLImageViewer()
+    viewer._gl_initialized = True
+    viewer._using_video_frame_source = True
+    viewer._video_frame_dirty = True
+    viewer._source_rotate90_steps = 1
+    frame = mocker.Mock()
+    viewer._video_frame = frame
+
+    gl_funcs = mocker.Mock()
+    viewer._gl_funcs = gl_funcs
+
+    renderer = mocker.Mock()
+    renderer.has_texture.return_value = True
+    renderer.last_video_upload_pre_rotated.return_value = True
+    renderer.texture_size.return_value = (1440, 1920)
+    viewer._renderer = renderer
+
+    mocker.patch.object(viewer, "_update_cover_scale")
+    mocker.patch.object(viewer, "reset_zoom")
+    target = mocker.Mock()
+    target.pixelSize.return_value = QSize(320, 240)
+    mocker.patch.object(viewer, "renderTarget", return_value=target)
+
+    cb = mocker.Mock()
+
+    viewer.render(cb)
+
+    assert viewer._source_rotate90_steps == 0
 
 
 def test_gl_image_viewer_centers_crop_when_framing_disabled(qapp, mocker):

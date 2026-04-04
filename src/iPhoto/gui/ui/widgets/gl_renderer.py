@@ -149,6 +149,11 @@ class GLRenderer:
 
         return self._tex_mgr.upload_video_frame(frame)
 
+    def last_video_upload_pre_rotated(self) -> bool:
+        """Return whether the latest fallback upload already applied rotation."""
+
+        return self._tex_mgr.last_video_upload_pre_rotated()
+
     def delete_texture(self) -> None:
         """Delete the currently bound texture, if any."""
         self._tex_mgr.delete_texture()

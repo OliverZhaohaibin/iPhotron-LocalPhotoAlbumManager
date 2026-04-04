@@ -754,6 +754,8 @@ class GLImageViewer(QRhiWidget):
         ):
             try:
                 self._renderer.upload_video_frame(self._video_frame)
+                if self._renderer.last_video_upload_pre_rotated():
+                    self.set_video_source_rotation(0)
             except Exception:
                 _LOGGER.exception("Failed to upload video frame into GLImageViewer")
             self._video_frame = None

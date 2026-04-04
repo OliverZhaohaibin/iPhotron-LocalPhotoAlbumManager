@@ -108,6 +108,7 @@ class TextureManager:
         self._texture_width: int = 0
         self._texture_height: int = 0
         self._texture_uses_mipmaps: bool = True
+        self._last_video_upload_pre_rotated: bool = False
         self._video_y_texture_id: int = 0
         self._video_uv_texture_id: int = 0
         self._video_y_shape: tuple[int, int, int] | None = None
@@ -177,6 +178,7 @@ class TextureManager:
         if frame is None or not frame.isValid():
             raise ValueError("Cannot upload an invalid QVideoFrame")
 
+        self._last_video_upload_pre_rotated = False
         fmt = frame.surfaceFormat()
         packed_spec = _packed_frame_upload_spec(fmt)
         if packed_spec is not None:
@@ -209,6 +211,12 @@ class TextureManager:
             image = frame.toImage()
             if image.isNull():
                 raise ValueError("Unsupported QVideoFrame could not be converted to QImage")
+            fmt_width = int(fmt.frameWidth())
+            fmt_height = int(fmt.frameHeight())
+            if fmt_width > 0 and fmt_height > 0:
+                self._last_video_upload_pre_rotated = (
+                    image.width() == fmt_height and image.height() == fmt_width
+                )
             self.upload_texture(image)
             return self._texture_width, self._texture_height
 
@@ -615,6 +623,11 @@ class TextureManager:
         """Return whether an uploaded YUV video texture pair is active."""
 
         return self._video_y_texture_id != 0 and self._video_uv_texture_id != 0
+
+    def last_video_upload_pre_rotated(self) -> bool:
+        """Return whether the latest fallback upload already contained rotation."""
+
+        return self._last_video_upload_pre_rotated
 
     def video_texture_ids(self) -> tuple[int, int]:
         """Return ``(y_tex_id, uv_tex_id)`` for the active video texture pair."""

@@ -285,3 +285,59 @@ def test_video_frame_step_shortcut_yields_to_slider_focus(qapp) -> None:
 
     video_area.pause.assert_not_called()
     video_area.seek.assert_not_called()
+
+
+def test_handle_trim_in_ratio_changed_keeps_existing_out_point() -> None:
+    coordinator = EditCoordinator.__new__(EditCoordinator)
+    session = SimpleNamespace(set_values=Mock())
+    trim_bar = Mock()
+    trim_bar.trim_ratios.return_value = (0.3, 0.8)
+    coordinator._ui = SimpleNamespace(video_trim_bar=trim_bar)
+    coordinator._session = session
+    coordinator._is_video_source = Mock(return_value=True)
+    coordinator._video_duration_sec = Mock(return_value=10.0)
+    coordinator._canonical_trim_updates = Mock(
+        return_value={
+            VIDEO_TRIM_IN_KEY: 3.0,
+            VIDEO_TRIM_OUT_KEY: 8.0,
+        }
+    )
+
+    EditCoordinator._handle_trim_in_ratio_changed(coordinator, 0.3)
+
+    coordinator._canonical_trim_updates.assert_called_once_with(3.0, 8.0, 10.0)
+    session.set_values.assert_called_once_with(
+        {
+            VIDEO_TRIM_IN_KEY: 3.0,
+            VIDEO_TRIM_OUT_KEY: 8.0,
+        },
+        emit_individual=False,
+    )
+
+
+def test_handle_trim_out_ratio_changed_uses_ratio_before_seconds() -> None:
+    coordinator = EditCoordinator.__new__(EditCoordinator)
+    session = SimpleNamespace(set_values=Mock())
+    trim_bar = Mock()
+    trim_bar.trim_ratios.return_value = (0.2, 0.7)
+    coordinator._ui = SimpleNamespace(video_trim_bar=trim_bar)
+    coordinator._session = session
+    coordinator._is_video_source = Mock(return_value=True)
+    coordinator._video_duration_sec = Mock(return_value=10.0)
+    coordinator._canonical_trim_updates = Mock(
+        return_value={
+            VIDEO_TRIM_IN_KEY: 2.0,
+            VIDEO_TRIM_OUT_KEY: 7.0,
+        }
+    )
+
+    EditCoordinator._handle_trim_out_ratio_changed(coordinator, 0.7)
+
+    coordinator._canonical_trim_updates.assert_called_once_with(2.0, 7.0, 10.0)
+    session.set_values.assert_called_once_with(
+        {
+            VIDEO_TRIM_IN_KEY: 2.0,
+            VIDEO_TRIM_OUT_KEY: 7.0,
+        },
+        emit_individual=False,
+    )

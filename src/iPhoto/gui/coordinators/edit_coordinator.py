@@ -1072,7 +1072,7 @@ class EditCoordinator(QObject):
             return
         trim_out_ratio = self._ui.video_trim_bar.trim_ratios()[1]
         trim_in_sec = max(0.0, min(1.0, float(ratio))) * duration_sec
-        trim_out_sec = max(trim_in_sec, min(1.0, float(trim_out_ratio))) * duration_sec
+        trim_out_sec = max(trim_in_sec, max(0.0, min(1.0, float(trim_out_ratio))) * duration_sec)
         self._session.set_values(
             self._canonical_trim_updates(trim_in_sec, trim_out_sec, duration_sec),
             emit_individual=False,
@@ -1086,7 +1086,7 @@ class EditCoordinator(QObject):
             return
         trim_in_ratio = self._ui.video_trim_bar.trim_ratios()[0]
         trim_in_sec = max(0.0, min(1.0, float(trim_in_ratio))) * duration_sec
-        trim_out_sec = max(trim_in_sec, min(1.0, float(ratio))) * duration_sec
+        trim_out_sec = max(trim_in_sec, max(0.0, min(1.0, float(ratio))) * duration_sec)
         self._session.set_values(
             self._canonical_trim_updates(trim_in_sec, trim_out_sec, duration_sec),
             emit_individual=False,

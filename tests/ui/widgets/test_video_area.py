@@ -460,7 +460,7 @@ class TestVideoArea:
     def test_show_event_calls_update_bar_geometry(self, qapp, mocker):
         """showEvent should call _update_bar_geometry."""
         va = VideoArea()
-        mock_update = mocker.patch.object(va, "_update_bar_geometry")
+        mock_update = mocker.patch.object(va, '_update_bar_geometry')
         show_event = QShowEvent()
         va.showEvent(show_event)
         mock_update.assert_called_once()
@@ -468,7 +468,7 @@ class TestVideoArea:
     def test_show_event_calls_super(self, qapp, mocker):
         """showEvent should call the parent class's showEvent."""
         va = VideoArea()
-        mock_super_show = mocker.patch("PySide6.QtWidgets.QWidget.showEvent")
+        mock_super_show = mocker.patch('PySide6.QtWidgets.QWidget.showEvent')
         show_event = QShowEvent()
         va.showEvent(show_event)
         mock_super_show.assert_called_once_with(show_event)
@@ -1208,6 +1208,68 @@ def test_gl_image_viewer_immediate_linux_upload_triggers_deferred_reset(mocker):
 
     mock_reset_zoom.assert_called_once()
     assert viewer._pending_video_reset_view is False
+
+
+def test_gl_image_viewer_linux_snapshots_non_packed_frame_to_image(qapp, mocker):
+    """Linux should snapshot non-packed video frames to QImage at set_video_frame time."""
+
+    viewer = GLImageViewer()
+    frame = mocker.Mock()
+    frame.isValid.return_value = True
+    frame.toImage.return_value = QImage(64, 32, QImage.Format.Format_RGBA8888)
+    frame.pixelFormat.return_value = QVideoFrameFormat.PixelFormat.Format_YUV420P
+    fmt = mocker.Mock()
+    fmt.frameWidth.return_value = 32
+    fmt.frameHeight.return_value = 64
+    frame.surfaceFormat.return_value = fmt
+
+    with patch("iPhoto.gui.ui.widgets.gl_image_viewer.widget.sys.platform", "linux"):
+        viewer.set_video_frame(frame, {}, reset_view=False)
+
+    assert viewer._pending_video_image is not None
+    assert viewer._video_frame is None
+    assert viewer._video_frame_dirty is True
+
+
+def test_gl_image_viewer_upload_pending_video_source_prefers_image_snapshot(mocker):
+    """Pending snapshot image should upload via texture path and clear dirty state."""
+
+    viewer = GLImageViewer()
+    viewer._renderer = mocker.Mock()
+    viewer._pending_video_image = QImage(40, 20, QImage.Format.Format_RGBA8888)
+    viewer._pending_video_image_pre_rotated = True
+    viewer._video_frame_dirty = True
+    viewer._using_video_frame_source = True
+
+    mock_update_cover_scale = mocker.patch.object(viewer, "_update_cover_scale")
+
+    uploaded = viewer._upload_pending_video_source()
+
+    assert uploaded is True
+    viewer._renderer.upload_texture.assert_called_once()
+    viewer._renderer.upload_video_frame.assert_not_called()
+    assert viewer._video_frame_dirty is False
+    assert viewer._pending_video_image is None
+    mock_update_cover_scale.assert_called()
+
+
+def test_playback_mode_with_adjustments_routes_frames_through_adjusted_viewer(qapp, mocker):
+    """Playback with non-default adjustments should still feed adjusted preview frames."""
+
+    va = VideoArea()
+    va.set_adjusted_preview_enabled(True)
+    va.set_adjustments({"Exposure": 0.25, "Crop_W": 0.8})
+
+    frame = mocker.Mock()
+    frame.isValid.return_value = True
+    mock_set_video_frame = mocker.patch.object(va._edit_viewer, "set_video_frame")
+
+    va._on_video_frame(frame)
+
+    mock_set_video_frame.assert_called_once()
+    args, kwargs = mock_set_video_frame.call_args
+    assert args[1] == {"Exposure": 0.25, "Crop_W": 0.8}
+    assert kwargs["reset_view"] is True
 
 
 def test_view_transform_controller_prefers_render_target_device_size(mocker):

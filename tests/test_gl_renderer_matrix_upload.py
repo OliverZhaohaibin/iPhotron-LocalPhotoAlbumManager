@@ -120,7 +120,7 @@ def test_render_upload_matrix_transpose_flag(renderer, mock_gl_funcs):
 
     found = False
     for call in calls:
-        args, _kwargs = call
+        args, kwargs = call
         location = args[0]
         transpose = args[2]
         if location == 1:

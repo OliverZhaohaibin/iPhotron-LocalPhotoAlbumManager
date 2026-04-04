@@ -17,6 +17,7 @@ from ..core.adjustment_mapping import (
     resolve_adjustment_mapping,
     trim_is_non_default,
     video_has_visible_edits,
+    video_requires_adjusted_preview,
 )
 from ..core.color_resolver import ColorStats
 from ..core.color_resolver import COLOR_KEYS
@@ -366,6 +367,7 @@ __all__ = [
     "resolve_render_adjustments",
     "save_adjustments",
     "sidecar_path_for_asset",
+    "video_requires_adjusted_preview",
     "trim_is_non_default",
     "video_has_visible_edits",
 ]

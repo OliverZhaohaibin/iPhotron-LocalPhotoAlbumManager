@@ -365,6 +365,26 @@ def has_non_default_adjustments(adjustments: Mapping[str, Any] | None) -> bool:
     return False
 
 
+def video_requires_adjusted_preview(adjustments: Mapping[str, Any] | None) -> bool:
+    """Return ``True`` when video playback must use the GL adjusted preview.
+
+    Pure 90° video rotation can be handled directly by the native
+    ``VideoRendererWidget`` path, which keeps playback framing aligned with the
+    standard video surface across platforms. All other non-default adjustments
+    still require the adjusted GL preview.
+    """
+
+    if not adjustments:
+        return False
+
+    filtered = {
+        key: value
+        for key, value in adjustments.items()
+        if key != "Crop_Rotate90"
+    }
+    return has_non_default_adjustments(filtered)
+
+
 def video_has_visible_edits(
     adjustments: Mapping[str, Any] | None,
     duration_sec: float | None,
@@ -413,6 +433,7 @@ __all__ = [
     "normalise_bw_value",
     "normalise_video_trim",
     "resolve_adjustment_mapping",
+    "video_requires_adjusted_preview",
     "trim_is_non_default",
     "video_has_visible_edits",
 ]

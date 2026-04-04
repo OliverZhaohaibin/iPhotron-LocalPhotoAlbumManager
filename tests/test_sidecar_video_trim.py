@@ -61,3 +61,13 @@ def test_normalise_video_trim_falls_back_to_full_duration() -> None:
 
     assert trim_in == 0.0
     assert trim_out == 9.0
+
+
+def test_video_requires_adjusted_preview_ignores_rotate_only() -> None:
+    assert sidecar.video_requires_adjusted_preview({"Crop_Rotate90": 3.0}) is False
+
+
+def test_video_requires_adjusted_preview_still_flags_other_edits() -> None:
+    assert sidecar.video_requires_adjusted_preview(
+        {"Crop_Rotate90": 3.0, "Exposure": 0.25}
+    ) is True

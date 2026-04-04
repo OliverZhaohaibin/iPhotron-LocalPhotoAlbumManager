@@ -11,7 +11,7 @@ pytest.importorskip("PySide6.QtMultimedia", reason="QtMultimedia is required")
 
 from pathlib import Path
 
-from PySide6.QtCore import QRectF, QSize, Qt
+from PySide6.QtCore import QRectF, QSize, QSizeF, Qt
 from PySide6.QtGui import QColor, QImage, QRhiCommandBuffer, QShowEvent
 from PySide6.QtMultimedia import QMediaPlayer, QVideoFrame, QVideoFrameFormat
 from PySide6.QtWidgets import QApplication, QRhiWidget
@@ -201,6 +201,23 @@ class TestVideoRendererWidget:
 
         # Container rotation 90° CW → steps = 1
         assert w._rotate90_steps == 1
+
+    def test_user_rotation_steps_stack_with_container_rotation(self, qapp):
+        """User playback rotation should compose with container rotation metadata."""
+
+        w = VideoRendererWidget()
+        w.set_container_rotation(90, 1920, 1440)
+        w.set_user_rotate90_steps(3)
+
+        from PySide6.QtCore import QSize
+        fmt = QVideoFrameFormat(
+            QSize(1920, 1440), QVideoFrameFormat.PixelFormat.Format_RGBA8888
+        )
+        frame = QVideoFrame(fmt)
+        w.update_frame(frame)
+
+        assert w._rotate90_steps == 0
+        assert w.native_size() == QSizeF(1920.0, 1440.0)
 
     def test_no_double_rotation_when_prerotated(self, qapp):
         """When GStreamer pre-rotates frames, do not apply container rotation again."""
@@ -1299,6 +1316,65 @@ def test_rotate_image_ccw_updates_playback_adjustments_and_replays_last_frame(qa
     mock_enable_adjusted.assert_called_once_with(True)
     mock_rotate.assert_called_once_with()
     mock_present.assert_called_once_with(last_frame)
+
+
+def test_rotate_image_ccw_keeps_rotate_only_playback_on_native_renderer(qapp, mocker):
+    """Pure playback rotation should stay on the native video renderer path."""
+
+    va = VideoArea()
+    va._current_adjustments = {}
+    va._adjusted_preview_enabled = False
+
+    mock_enable_adjusted = mocker.patch.object(va, "set_adjusted_preview_enabled")
+    mock_set_rotate = mocker.patch.object(va._renderer, "set_user_rotate90_steps")
+    mock_renderer_update = mocker.patch.object(va._renderer, "update")
+    mock_area_update = mocker.patch.object(va, "update")
+    mock_rotate = mocker.patch.object(va._edit_viewer, "rotate_image_ccw")
+
+    updates = va.rotate_image_ccw()
+
+    assert updates == {"Crop_Rotate90": 3.0}
+    assert va._current_adjustments == {"Crop_Rotate90": 3.0}
+    mock_enable_adjusted.assert_not_called()
+    mock_set_rotate.assert_called_once_with(3)
+    mock_renderer_update.assert_called_once_with()
+    mock_area_update.assert_called_once_with()
+    mock_rotate.assert_not_called()
+
+
+def test_load_video_keeps_rotate_only_adjustments_on_native_renderer(qapp, mocker):
+    """Rotate-only sidecars should configure the native renderer instead of GL preview."""
+
+    va = VideoArea()
+
+    mock_clear_frame = mocker.patch.object(va._renderer, "clear_frame")
+    mock_set_container_rotation = mocker.patch.object(va._renderer, "set_container_rotation")
+    mock_set_linux_hint = mocker.patch.object(va._renderer, "set_linux_180_hint")
+    mock_set_user_rotate = mocker.patch.object(va._renderer, "set_user_rotate90_steps")
+    mock_set_source = mocker.patch.object(va._player, "setSource")
+    mock_set_position = mocker.patch.object(va._player, "setPosition")
+    mocker.patch(
+        "iPhoto.gui.ui.widgets.video_area.probe_video_rotation",
+        return_value=(0, 960, 540),
+    )
+    mocker.patch(
+        "iPhoto.gui.ui.widgets.video_area.get_linux_180_prerotate_hint",
+        return_value=False,
+    )
+
+    va.load_video(
+        Path("/fake/video.mp4"),
+        adjustments={"Crop_Rotate90": 3.0},
+        adjusted_preview=False,
+    )
+
+    assert va.adjusted_preview_enabled() is False
+    mock_clear_frame.assert_called_once_with()
+    mock_set_container_rotation.assert_called_once_with(0, 960, 540)
+    mock_set_linux_hint.assert_called_once_with(False)
+    mock_set_user_rotate.assert_called_once_with(3)
+    mock_set_source.assert_called_once()
+    mock_set_position.assert_called_once_with(0)
 
 
 def test_view_transform_controller_prefers_render_target_device_size(mocker):

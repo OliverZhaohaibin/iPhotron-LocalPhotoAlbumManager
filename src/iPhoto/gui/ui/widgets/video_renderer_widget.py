@@ -296,6 +296,7 @@ class VideoRendererWidget(QRhiWidget):
         self._tf_enum = _TF_SDR
         self._range_enum = _RANGE_LIMITED
         self._rotate90_steps = 0
+        self._user_rotate90_steps = 0
         self._mirror = 0
 
         # Container-level rotation obtained from ffprobe.  Used as the
@@ -353,6 +354,16 @@ class VideoRendererWidget(QRhiWidget):
         self._viewport_fill_enabled = target
         self.update()
 
+    def set_user_rotate90_steps(self, rotate_steps: int) -> None:
+        """Apply additional user-driven quarter turns on top of container rotation."""
+
+        normalised = int(rotate_steps) % 4
+        if self._user_rotate90_steps == normalised:
+            return
+        self._user_rotate90_steps = normalised
+        self._refresh_display_rotation()
+        self.update()
+
     def update_frame(self, frame: "QVideoFrame") -> None:
         """Accept a new video frame and schedule a repaint."""
         if frame is None or not frame.isValid():
@@ -374,21 +385,13 @@ class VideoRendererWidget(QRhiWidget):
             linux_180_hint=self._container_linux_180_hint,
         )
 
-        self._rotate90_steps = (rot_deg // 90) % 4
+        self._rotate90_steps = ((rot_deg // 90) + self._user_rotate90_steps) % 4
         self._mirror = 1 if fmt.isMirrored() else 0
 
         # Compute the *display* native size: for 90°/270° rotations the
         # width and height are swapped so that the aspect-ratio letterbox
         # calculation uses the orientation the user sees.
-        if self._rotate90_steps in (1, 3):
-            display_w, display_h = h, w
-        else:
-            display_w, display_h = w, h
-
-        new_size = QSizeF(display_w, display_h)
-        if new_size != self._native_size:
-            self._native_size = new_size
-            self.nativeSizeChanged.emit(new_size)
+        self._update_display_native_size(w, h)
 
         # Classify frame metadata
         self._fmt_enum, self._cs_enum, self._tf_enum, self._range_enum = (
@@ -409,6 +412,7 @@ class VideoRendererWidget(QRhiWidget):
         self._container_raw_h = 0
         self._container_linux_180_hint = False
         self._has_frame = False
+        self._user_rotate90_steps = 0
         # Reset tracked texture formats so that the next video always
         # recreates textures with the correct format, even when the
         # resolution is identical (e.g. switching between an 8-bit NV12
@@ -416,6 +420,36 @@ class VideoRendererWidget(QRhiWidget):
         self._tex_y_fmt = None
         self._tex_uv_fmt = None
         self.update()
+
+    def _update_display_native_size(self, width: int, height: int) -> None:
+        """Refresh the emitted display size using the effective rotation."""
+
+        if width <= 0 or height <= 0:
+            new_size = QSizeF()
+        elif self._rotate90_steps in (1, 3):
+            new_size = QSizeF(height, width)
+        else:
+            new_size = QSizeF(width, height)
+        if new_size != self._native_size:
+            self._native_size = new_size
+            self.nativeSizeChanged.emit(new_size)
+
+    def _refresh_display_rotation(self) -> None:
+        """Re-apply user rotation to the currently loaded frame metadata."""
+
+        if self._current_frame is None or not self._current_frame.isValid():
+            self._rotate90_steps = self._user_rotate90_steps % 4
+            return
+        fmt = self._current_frame.surfaceFormat()
+        base_rotation_cw = _resolve_frame_rotation_cw(
+            fmt,
+            container_rotation_cw=self._container_rotation_cw,
+            container_raw_w=self._container_raw_w,
+            container_raw_h=self._container_raw_h,
+            linux_180_hint=self._container_linux_180_hint,
+        )
+        self._rotate90_steps = ((base_rotation_cw // 90) + self._user_rotate90_steps) % 4
+        self._update_display_native_size(fmt.frameWidth(), fmt.frameHeight())
 
     def set_letterbox_color(self, color: QColor) -> None:
         """Set the colour used for letterbox/pillarbox areas."""

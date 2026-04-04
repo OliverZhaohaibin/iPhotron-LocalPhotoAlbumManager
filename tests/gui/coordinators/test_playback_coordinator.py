@@ -62,7 +62,7 @@ def test_do_play_asset_keeps_rotate_enabled_for_video() -> None:
         "iPhoto.gui.coordinators.playback_coordinator.sidecar.trim_is_non_default",
         return_value=False,
     ), patch(
-        "iPhoto.gui.coordinators.playback_coordinator.sidecar.has_non_default_adjustments",
+        "iPhoto.gui.coordinators.playback_coordinator.sidecar.video_requires_adjusted_preview",
         return_value=False,
     ), patch(
         "iPhoto.gui.coordinators.playback_coordinator.sidecar.normalise_video_trim",
@@ -71,6 +71,71 @@ def test_do_play_asset_keeps_rotate_enabled_for_video() -> None:
         PlaybackCoordinator._do_play_asset(coordinator, 0)
 
     coordinator._rotate_button.setEnabled.assert_called_with(True)
+
+
+def test_do_play_asset_keeps_rotate_only_video_on_native_playback_surface() -> None:
+    coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
+    coordinator._asset_vm = Mock()
+    coordinator._asset_vm.rowCount.return_value = 1
+    coordinator._asset_vm.index.return_value = object()
+
+    source = Path("/fake/video.mp4")
+    info = {"duration": 3.5}
+
+    def _data(_idx, role):
+        if role == Roles.ABS:
+            return str(source)
+        if role == Roles.IS_VIDEO:
+            return True
+        if role == Roles.IS_LIVE:
+            return False
+        if role == Roles.FEATURED:
+            return False
+        if role == Roles.INFO:
+            return info
+        return None
+
+    coordinator._asset_vm.data.side_effect = _data
+    coordinator._player_view = SimpleNamespace(
+        show_video_surface=Mock(),
+        video_area=Mock(),
+        show_live_badge=Mock(),
+        set_live_replay_enabled=Mock(),
+    )
+    coordinator._player_bar = Mock()
+    coordinator._zoom_widget = Mock()
+    coordinator._favorite_button = Mock()
+    coordinator._info_button = Mock()
+    coordinator._share_button = Mock()
+    coordinator._edit_button = Mock()
+    coordinator._rotate_button = Mock()
+    coordinator._update_favorite_icon = Mock()
+    coordinator._info_panel = None
+    coordinator._active_live_motion = None
+    coordinator._active_live_still = None
+    coordinator._is_playing = False
+
+    with patch(
+        "iPhoto.gui.coordinators.playback_coordinator.sidecar.load_adjustments",
+        return_value={"Crop_Rotate90": 3.0},
+    ), patch(
+        "iPhoto.gui.coordinators.playback_coordinator.sidecar.trim_is_non_default",
+        return_value=False,
+    ), patch(
+        "iPhoto.gui.coordinators.playback_coordinator.sidecar.video_requires_adjusted_preview",
+        return_value=False,
+    ), patch(
+        "iPhoto.gui.coordinators.playback_coordinator.sidecar.normalise_video_trim",
+        return_value=(0.0, 3.5),
+    ):
+        PlaybackCoordinator._do_play_asset(coordinator, 0)
+
+    coordinator._player_view.video_area.load_video.assert_called_once_with(
+        source,
+        adjustments={"Crop_Rotate90": 3.0},
+        trim_range_ms=None,
+        adjusted_preview=False,
+    )
 
 
 def test_rotate_current_asset_routes_video_rotation_through_video_area() -> None:

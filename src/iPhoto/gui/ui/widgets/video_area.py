@@ -51,7 +51,7 @@ from ....config import (
     PLAYER_FADE_OUT_MS,
     VIDEO_COMPLETE_HOLD_BACKSTEP_MS,
 )
-from ....core.adjustment_mapping import normalise_video_trim
+from ....core.adjustment_mapping import normalise_video_trim, video_requires_adjusted_preview
 from ....utils.ffmpeg import get_linux_180_prerotate_hint, probe_video_rotation
 from ..palette import viewer_surface_color
 from .gl_image_viewer import GLImageViewer
@@ -348,6 +348,22 @@ class VideoArea(QWidget):
         self._edit_viewer.set_crop_aspect_ratio(ratio)
 
     def rotate_image_ccw(self) -> dict[str, float]:
+        current_steps = int(float(self._current_adjustments.get("Crop_Rotate90", 0.0))) % 4
+        next_steps = (current_steps - 1) % 4
+        updates = {"Crop_Rotate90": float(next_steps)}
+        next_adjustments = {
+            **self._current_adjustments,
+            **updates,
+        }
+        if not video_requires_adjusted_preview(next_adjustments):
+            self._current_adjustments = next_adjustments
+            if self._adjusted_preview_enabled:
+                self.set_adjusted_preview_enabled(False)
+            self._renderer.set_user_rotate90_steps(next_steps)
+            self._renderer.update()
+            self.update()
+            return updates
+
         self.set_adjusted_preview_enabled(True)
         updates = self._edit_viewer.rotate_image_ccw()
         if updates:
@@ -508,6 +524,10 @@ class VideoArea(QWidget):
         self._edit_viewer.set_video_source_rotation(0)
         self._edit_viewer.clear()
         self._renderer.clear_frame()
+        native_rotate90_steps = 0
+        if not self._adjusted_preview_enabled and not video_requires_adjusted_preview(self._current_adjustments):
+            native_rotate90_steps = int(float(self._current_adjustments.get("Crop_Rotate90", 0.0))) % 4
+        self._renderer.set_user_rotate90_steps(native_rotate90_steps)
         self._trim_in_ms = 0
         self._trim_out_ms = 0
         self._current_duration_ms = 0

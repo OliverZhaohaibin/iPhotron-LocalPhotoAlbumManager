@@ -148,6 +148,43 @@ def test_render_uploads_perspective_rows_as_vec3_uniforms(renderer, mock_gl_func
     raw_uniform_matrix3fv.assert_not_called()
 
 
+def test_render_disables_dummy_vao_after_linux_bind_failure(renderer, mock_gl_funcs, monkeypatch):
+    """Linux QRhi rendering should continue even if binding a custom VAO fails."""
+
+    renderer._texture_id = 1
+    renderer._texture_width = 100
+    renderer._texture_height = 100
+
+    error_sequence = iter(
+        [
+            gl_renderer_mod.gl.GL_NO_ERROR,  # at render entry
+            gl_renderer_mod.gl.GL_INVALID_OPERATION,  # after VAO bind
+            gl_renderer_mod.gl.GL_NO_ERROR,
+            gl_renderer_mod.gl.GL_NO_ERROR,  # before draw
+            gl_renderer_mod.gl.GL_NO_ERROR,  # from draw
+            gl_renderer_mod.gl.GL_NO_ERROR,  # cleanup
+        ]
+    )
+    mock_gl_funcs.glGetError.side_effect = lambda: next(error_sequence)
+    dummy_vao = MagicMock()
+    renderer._shader_mgr.dummy_vao = dummy_vao
+
+    monkeypatch.setattr(gl_renderer_mod.sys, "platform", "linux")
+
+    renderer.render(
+        view_width=800.0,
+        view_height=600.0,
+        scale=1.0,
+        pan=QPointF(0.0, 0.0),
+        adjustments={},
+    )
+
+    dummy_vao.bind.assert_called_once_with()
+    dummy_vao.release.assert_not_called()
+    mock_gl_funcs.glDrawArrays.assert_called_once()
+    assert renderer._dummy_vao_disabled is True
+
+
 def test_initialize_resources_queries_selective_color_array_elements(mock_gl_funcs):
     """Selective-color array uniforms should be queried by explicit element name."""
 

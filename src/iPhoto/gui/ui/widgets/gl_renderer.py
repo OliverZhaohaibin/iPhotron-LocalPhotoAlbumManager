@@ -56,6 +56,8 @@ class GLRenderer:
         self._tex_mgr = TextureManager()
         # UniformState shares the same dict instance populated by ShaderManager
         self._uniform = UniformState(gl_funcs, self._shader_mgr.uniform_locations)
+        self._dummy_vao_disabled = False
+        self._overlay_vao_disabled = False
 
     # ------------------------------------------------------------------
     # Backward-compatible attribute access  (used by tests & internals)
@@ -127,6 +129,8 @@ class GLRenderer:
         """Compile the shader program and set up immutable GL state."""
 
         self.destroy_resources()
+        self._dummy_vao_disabled = False
+        self._overlay_vao_disabled = False
         self._shader_mgr.initialize()
 
     def destroy_resources(self) -> None:
@@ -238,28 +242,41 @@ class GLRenderer:
         gf = self._gl_funcs
         diagnose_errors = sys.platform.startswith("linux")
 
-        def _drain_gl_errors(stage: str) -> None:
-            if not diagnose_errors:
-                return
+        def _consume_gl_errors() -> list[int]:
             errors: list[int] = []
             while True:
                 error = int(gf.glGetError())
                 if error == gl.GL_NO_ERROR:
                     break
                 errors.append(error)
+            return errors
+
+        def _drain_gl_errors(stage: str) -> list[int]:
+            if not diagnose_errors:
+                return []
+            errors = _consume_gl_errors()
             if errors:
                 joined = ", ".join(f"0x{value:04X}" for value in errors)
                 _LOGGER.warning("OpenGL error %s: %s", stage, joined)
+            return errors
 
         _drain_gl_errors("at render entry")
         if not self._program.bind():
             _LOGGER.error("Failed to bind shader program: %s", self._program.log())
             return
 
+        dummy_vao_bound = False
         try:
-            if self._dummy_vao is not None:
+            if self._dummy_vao is not None and not self._dummy_vao_disabled:
                 self._dummy_vao.bind()
-                _drain_gl_errors("after VAO bind")
+                bind_errors = _drain_gl_errors("after VAO bind")
+                if bind_errors:
+                    self._dummy_vao_disabled = True
+                    _LOGGER.warning(
+                        "Disabling dummy VAO after bind failure; continuing with default vertex-array state"
+                    )
+                else:
+                    dummy_vao_bound = True
 
             offset_value = img_offset or QPointF(0.0, 0.0)
 
@@ -495,7 +512,7 @@ class GLRenderer:
             gf.glDrawArrays(gl.GL_TRIANGLES, 0, 3)
             _drain_gl_errors("from glDrawArrays")
         finally:
-            if self._dummy_vao is not None:
+            if dummy_vao_bound and self._dummy_vao is not None:
                 self._dummy_vao.release()
             self._program.release()
             _drain_gl_errors("during render cleanup")
@@ -575,8 +592,29 @@ class GLRenderer:
             gf.glDisable(gl.GL_BLEND)
             return
 
+        overlay_vao_bound = False
         try:
-            vao.bind()
+            if not self._overlay_vao_disabled:
+                vao.bind()
+                bind_errors: list[int] = []
+                if sys.platform.startswith("linux"):
+                    bind_errors = []
+                    while True:
+                        error = int(gf.glGetError())
+                        if error == gl.GL_NO_ERROR:
+                            break
+                        bind_errors.append(error)
+                    if bind_errors:
+                        joined = ", ".join(f"0x{value:04X}" for value in bind_errors)
+                        _LOGGER.warning("OpenGL error after overlay VAO bind: %s", joined)
+                        self._overlay_vao_disabled = True
+                        _LOGGER.warning(
+                            "Disabling overlay VAO after bind failure; continuing with default vertex-array state"
+                        )
+                    else:
+                        overlay_vao_bound = True
+                else:
+                    overlay_vao_bound = True
 
             quads = [
                 (0.0, 0.0, vw, top),
@@ -638,7 +676,8 @@ class GLRenderer:
                     vertices = _viewport_rect_to_clip(rect)
                     _draw(vertices, gl.GL_TRIANGLE_FAN, border_colour)
         finally:
-            vao.release()
+            if overlay_vao_bound:
+                vao.release()
             program.release()
             gf.glColorMask(True, True, True, True)
             gf.glDisable(gl.GL_BLEND)

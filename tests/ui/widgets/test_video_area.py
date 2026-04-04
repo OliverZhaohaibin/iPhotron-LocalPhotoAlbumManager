@@ -20,6 +20,7 @@ from iPhoto.config import VIDEO_COMPLETE_HOLD_BACKSTEP_MS
 from iPhoto.gui.ui.widgets.gl_image_viewer import GLImageViewer
 from iPhoto.gui.ui.widgets.gl_texture_manager import TextureManager
 from iPhoto.gui.ui.widgets.video_area import VideoArea
+from iPhoto.gui.ui.widgets.view_transform_controller import ViewTransformController
 from iPhoto.gui.ui.widgets.video_renderer_widget import (
     VideoRendererWidget,
     _resolve_frame_rotation_cw,
@@ -1030,6 +1031,26 @@ def test_gl_image_viewer_applies_pending_rotation_after_video_frame_upload(qapp,
     assert viewer._source_rotate90_steps == 1
     assert viewer._pending_source_rotate90_steps is None
     mock_update_cover_scale.assert_called()
+
+
+def test_view_transform_controller_prefers_render_target_device_size(mocker):
+    """Fit-to-view math should use QRhi render-target pixels when available."""
+
+    viewer = mocker.Mock()
+    viewer.width.return_value = 100
+    viewer.height.return_value = 50
+    viewer.devicePixelRatioF.return_value = 2.0
+
+    controller = ViewTransformController(
+        viewer,
+        texture_size_provider=lambda: (400, 200),
+        display_texture_size_provider=lambda: (400, 200),
+        device_view_size_provider=lambda: (640.0, 360.0),
+        on_zoom_changed=lambda _zoom: None,
+    )
+
+    assert controller.get_view_dimensions_device_px() == (640.0, 360.0)
+    assert controller.get_effective_scale() == pytest.approx(1.6)
 
 
 def test_gl_image_viewer_centers_crop_when_framing_disabled(qapp, mocker):

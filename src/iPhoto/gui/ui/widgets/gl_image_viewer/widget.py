@@ -120,6 +120,7 @@ class GLImageViewer(QRhiWidget):
         self._rounded_clip_radius = 0.0
         self._source_rotate90_steps = 0
         self._pending_source_rotate90_steps: int | None = None
+        self._last_render_target_size = QSize()
         self._adjustments: dict[str, Any] = {}
         self._eyedropper_active = False
 
@@ -158,6 +159,7 @@ class GLImageViewer(QRhiWidget):
             on_next_item=self.nextItemRequested.emit,
             on_prev_item=self.prevItemRequested.emit,
             display_texture_size_provider=self._display_texture_dimensions,
+            device_view_size_provider=self._render_target_device_size,
         )
         self._transform_controller.reset_zoom()
 
@@ -218,6 +220,16 @@ class GLImageViewer(QRhiWidget):
         ``TextureResourceManager``, ``AdjustmentApplicator`` and
         ``OffscreenRenderer``.
         """
+
+    def _render_target_device_size(self) -> tuple[float, float] | None:
+        """Return the latest QRhi render-target size in device pixels."""
+
+        if self._last_render_target_size.isEmpty():
+            return None
+        return (
+            float(self._last_render_target_size.width()),
+            float(self._last_render_target_size.height()),
+        )
 
     # --------------------------- Public API ---------------------------
 
@@ -744,6 +756,7 @@ class GLImageViewer(QRhiWidget):
         output_size = self.renderTarget().pixelSize()
         if output_size.isEmpty():
             return
+        self._last_render_target_size = QSize(output_size)
 
         # Start a QRhi render pass (required by QRhiWidget) then immediately
         # switch to raw OpenGL via beginExternal()/endExternal().  This lets

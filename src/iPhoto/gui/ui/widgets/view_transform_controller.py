@@ -104,6 +104,7 @@ class ViewTransformController:
         on_next_item: Optional[Callable[[], None]] = None,
         on_prev_item: Optional[Callable[[], None]] = None,
         display_texture_size_provider: Callable[[], tuple[int, int]] | None = None,
+        device_view_size_provider: Callable[[], tuple[float, float] | None] | None = None,
     ) -> None:
         self._viewer = viewer
         self._texture_size_provider = texture_size_provider
@@ -115,6 +116,7 @@ class ViewTransformController:
         # zoom (and therefore the shader output) perfectly aligned with the on-screen
         # frame, eliminating the stretched look reported in the demo comparison.
         self._display_texture_size_provider = display_texture_size_provider
+        self._device_view_size_provider = device_view_size_provider
         self._on_zoom_changed = on_zoom_changed
         self._on_next_item = on_next_item
         self._on_prev_item = on_prev_item
@@ -134,6 +136,15 @@ class ViewTransformController:
     # ------------------------------------------------------------------
     def _get_view_dimensions_device_px(self) -> tuple[float, float]:
         """Get viewport dimensions in device pixels."""
+        if self._device_view_size_provider is not None:
+            try:
+                provided = self._device_view_size_provider()
+            except Exception:
+                provided = None
+            if provided is not None:
+                width, height = provided
+                if width > 0.0 and height > 0.0:
+                    return float(width), float(height)
         dpr = self._viewer.devicePixelRatioF()
         vw = max(1.0, float(self._viewer.width()) * dpr)
         vh = max(1.0, float(self._viewer.height()) * dpr)

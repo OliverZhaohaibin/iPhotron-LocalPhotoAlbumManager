@@ -16,7 +16,7 @@ from collections.abc import Mapping
 from typing import Any
 
 from OpenGL import GL as gl
-from PySide6.QtCore import QPointF, QSize, Qt, Signal, QRectF
+from PySide6.QtCore import QPointF, QSize, Qt, Signal, QRectF, QTimer
 from PySide6.QtGui import (
     QColor,
     QImage,
@@ -331,6 +331,8 @@ class GLImageViewer(QRhiWidget):
         if reset_view:
             self._pending_video_reset_view = True
         self.update()
+        if not self._gl_initialized:
+            QTimer.singleShot(0, self.update)
 
     def set_placeholder(self, pixmap: QPixmap | None) -> None:
         """Display *pixmap* without changing the tracked image source."""
@@ -729,6 +731,8 @@ class GLImageViewer(QRhiWidget):
             )
             cb.endPass()
             self._emit_first_frame_ready()
+            if self._using_video_frame_source and self._video_frame_dirty:
+                self.update()
             return
         gf = self._gl_funcs
         if gf is None or self._renderer is None:

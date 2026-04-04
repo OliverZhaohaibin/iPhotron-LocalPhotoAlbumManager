@@ -20,20 +20,20 @@ from iPhoto.config import VIDEO_COMPLETE_HOLD_BACKSTEP_MS
 from iPhoto.gui.ui.widgets.gl_image_viewer import GLImageViewer
 from iPhoto.gui.ui.widgets.gl_texture_manager import TextureManager
 from iPhoto.gui.ui.widgets.video_area import VideoArea
-from iPhoto.gui.ui.widgets.view_transform_controller import ViewTransformController
 from iPhoto.gui.ui.widgets.video_renderer_widget import (
-    VideoRendererWidget,
-    _resolve_frame_rotation_cw,
-    _classify_frame_format,
     _CS_BT601,
     _CS_BT709,
     _CS_BT2020,
-    _TF_SDR,
-    _TF_PQ,
-    _TF_HLG,
-    _RANGE_LIMITED,
     _RANGE_FULL,
+    _RANGE_LIMITED,
+    _TF_HLG,
+    _TF_PQ,
+    _TF_SDR,
+    VideoRendererWidget,
+    _classify_frame_format,
+    _resolve_frame_rotation_cw,
 )
+from iPhoto.gui.ui.widgets.view_transform_controller import ViewTransformController
 
 
 def _set_rotation_180(fmt: QVideoFrameFormat) -> None:
@@ -1133,6 +1133,143 @@ def test_gl_image_viewer_applies_pending_rotation_after_video_frame_upload(qapp,
     assert viewer._source_rotate90_steps == 1
     assert viewer._pending_source_rotate90_steps is None
     mock_update_cover_scale.assert_called()
+
+
+def test_gl_image_viewer_immediate_linux_upload_consumes_pending_frame(qapp, mocker):
+    """Linux immediate-upload path should consume pending frame before render."""
+
+    viewer = GLImageViewer()
+    viewer._gl_initialized = True
+    viewer._using_video_frame_source = True
+    viewer._video_frame_dirty = True
+    viewer._video_frame = mocker.Mock()
+
+    renderer = mocker.Mock()
+    renderer.last_video_upload_pre_rotated.return_value = True
+    viewer._renderer = renderer
+
+    mock_make_current = mocker.patch.object(viewer, "_make_gl_current")
+    mock_done_current = mocker.patch.object(viewer, "_done_gl_current")
+    mock_update_cover_scale = mocker.patch.object(viewer, "_update_cover_scale")
+    mock_reset_zoom = mocker.patch.object(viewer, "reset_zoom")
+
+    with patch("iPhoto.gui.ui.widgets.gl_image_viewer.widget.sys.platform", "linux"):
+        viewer._upload_video_frame_immediately_if_possible()
+
+    renderer.upload_video_frame.assert_called_once()
+    mock_make_current.assert_called_once()
+    mock_done_current.assert_called_once()
+    mock_update_cover_scale.assert_called()
+    mock_reset_zoom.assert_not_called()
+    assert viewer._video_frame is None
+    assert viewer._video_frame_dirty is False
+
+
+def test_gl_image_viewer_set_video_frame_linux_attempts_immediate_upload(qapp, mocker):
+    """set_video_frame should try immediate upload on Linux when GL is ready."""
+
+    viewer = GLImageViewer()
+    viewer._gl_initialized = True
+    viewer._renderer = mocker.Mock()
+    fmt = QVideoFrameFormat(QSize(320, 240), QVideoFrameFormat.PixelFormat.Format_RGBA8888)
+    frame = QVideoFrame(fmt)
+
+    mock_upload_now = mocker.patch.object(viewer, "_upload_video_frame_immediately_if_possible")
+    mock_update = mocker.patch.object(viewer, "update")
+
+    with patch("iPhoto.gui.ui.widgets.gl_image_viewer.widget.sys.platform", "linux"):
+        viewer.set_video_frame(frame, {}, reset_view=False)
+
+    mock_upload_now.assert_called_once()
+    mock_update.assert_called_once()
+
+
+def test_gl_image_viewer_immediate_linux_upload_triggers_deferred_reset(qapp, mocker):
+    """Immediate Linux upload should honor pending first-frame reset semantics."""
+
+    viewer = GLImageViewer()
+    viewer._gl_initialized = True
+    viewer._using_video_frame_source = True
+    viewer._video_frame_dirty = True
+    viewer._video_frame = mocker.Mock()
+    viewer._pending_video_reset_view = True
+
+    renderer = mocker.Mock()
+    renderer.last_video_upload_pre_rotated.return_value = False
+    viewer._renderer = renderer
+
+    mock_reset_zoom = mocker.patch.object(viewer, "reset_zoom")
+    mocker.patch.object(viewer, "_update_cover_scale")
+    mocker.patch.object(viewer, "_make_gl_current")
+    mocker.patch.object(viewer, "_done_gl_current")
+
+    with patch("iPhoto.gui.ui.widgets.gl_image_viewer.widget.sys.platform", "linux"):
+        viewer._upload_video_frame_immediately_if_possible()
+
+    mock_reset_zoom.assert_called_once()
+    assert viewer._pending_video_reset_view is False
+
+
+def test_gl_image_viewer_linux_snapshots_non_packed_frame_to_image(qapp, mocker):
+    """Linux should snapshot non-packed video frames to QImage at set_video_frame time."""
+
+    viewer = GLImageViewer()
+    frame = mocker.Mock()
+    frame.isValid.return_value = True
+    frame.toImage.return_value = QImage(64, 32, QImage.Format.Format_RGBA8888)
+    frame.pixelFormat.return_value = QVideoFrameFormat.PixelFormat.Format_YUV420P
+    fmt = mocker.Mock()
+    fmt.frameWidth.return_value = 32
+    fmt.frameHeight.return_value = 64
+    frame.surfaceFormat.return_value = fmt
+
+    with patch("iPhoto.gui.ui.widgets.gl_image_viewer.widget.sys.platform", "linux"):
+        viewer.set_video_frame(frame, {}, reset_view=False)
+
+    assert viewer._pending_video_image is not None
+    assert viewer._video_frame is None
+    assert viewer._video_frame_dirty is True
+
+
+def test_gl_image_viewer_upload_pending_video_source_prefers_image_snapshot(qapp, mocker):
+    """Pending snapshot image should upload via texture path and clear dirty state."""
+
+    viewer = GLImageViewer()
+    viewer._renderer = mocker.Mock()
+    viewer._pending_video_image = QImage(40, 20, QImage.Format.Format_RGBA8888)
+    viewer._pending_video_image_pre_rotated = True
+    viewer._video_frame_dirty = True
+    viewer._using_video_frame_source = True
+
+    mock_update_cover_scale = mocker.patch.object(viewer, "_update_cover_scale")
+
+    uploaded = viewer._upload_pending_video_source()
+
+    assert uploaded is True
+    viewer._renderer.upload_texture.assert_called_once()
+    viewer._renderer.upload_video_frame.assert_not_called()
+    assert viewer._video_frame_dirty is False
+    assert viewer._pending_video_image is None
+    mock_update_cover_scale.assert_called()
+
+
+def test_playback_mode_with_adjustments_routes_frames_through_adjusted_viewer(qapp, mocker):
+    """Playback with non-default adjustments should still feed adjusted preview frames."""
+
+    va = VideoArea()
+    va.set_adjusted_preview_enabled(True)
+    va.set_adjustments({"Exposure": 0.25, "Crop_W": 0.8})
+
+    frame = mocker.Mock()
+    frame.isValid.return_value = True
+    mock_set_video_frame = mocker.patch.object(va._edit_viewer, "set_video_frame")
+
+    va._on_video_frame(frame)
+
+    mock_set_video_frame.assert_called_once()
+    args, kwargs = mock_set_video_frame.call_args
+    assert args[1] == {"Exposure": 0.25, "Crop_W": 0.8}
+    assert kwargs["reset_view"] is True
 
 
 def test_view_transform_controller_prefers_render_target_device_size(mocker):

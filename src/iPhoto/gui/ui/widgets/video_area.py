@@ -635,6 +635,9 @@ class VideoArea(QWidget):
         if self._video_frame_dispatch_pending:
             return
         self._video_frame_dispatch_pending = True
+        # Keep latest-frame coalescing by deferring the flush to the next GUI
+        # turn. The queued frame wrapper is copied above so Linux backends can
+        # still retain short-lived zero-copy handles until presentation.
         QTimer.singleShot(0, self._flush_pending_video_frame)
 
     def _flush_pending_video_frame(self) -> None:

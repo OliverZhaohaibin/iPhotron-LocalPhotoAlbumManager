@@ -17,7 +17,7 @@ from collections.abc import Mapping
 from typing import Any
 
 from OpenGL import GL as gl
-from PySide6.QtCore import QPointF, QSize, Qt, Signal, QRectF
+from PySide6.QtCore import QPointF, QRectF, QSize, Qt, Signal
 from PySide6.QtGui import (
     QColor,
     QImage,
@@ -31,16 +31,15 @@ from PySide6.QtGui import (
 from PySide6.QtWidgets import QRhiWidget
 
 try:  # pragma: no cover - optional Qt module
-    from PySide6.QtMultimedia import QVideoFrame
+    from PySide6.QtMultimedia import QVideoFrame, QVideoFrameFormat
 except (ModuleNotFoundError, ImportError):  # pragma: no cover
     QVideoFrame = None  # type: ignore[assignment, misc]
+    QVideoFrameFormat = None  # type: ignore[assignment, misc]
 
 from ..gl_crop_controller import CropInteractionController
 from ..gl_renderer import GLRenderer
 from ..view_transform_controller import ViewTransformController
-
-from . import crop_viewport
-from . import geometry
+from . import crop_viewport, geometry
 from .adjustment_applicator import AdjustmentApplicator
 from .components import LoadingOverlay
 from .fullscreen_handler import FullscreenHandler
@@ -110,6 +109,8 @@ class GLImageViewer(QRhiWidget):
         # 状态
         self._image: QImage | None = None
         self._video_frame = None
+        self._pending_video_image: QImage | None = None
+        self._pending_video_image_pre_rotated = False
         self._video_frame_dirty = False
         self._using_video_frame_source = False
         self._pending_video_reset_view = False
@@ -296,6 +297,8 @@ class GLImageViewer(QRhiWidget):
             mode can reuse the detail view framing without a visible jump.
         """
         self._video_frame = None
+        self._pending_video_image = None
+        self._pending_video_image_pre_rotated = False
         self._video_frame_dirty = False
         self._using_video_frame_source = False
         self._pending_video_reset_view = False
@@ -359,7 +362,19 @@ class GLImageViewer(QRhiWidget):
         self._using_video_frame_source = True
         self._image = None
         self._video_frame = frame
+        self._pending_video_image = None
+        self._pending_video_image_pre_rotated = False
         self._video_frame_dirty = True
+        if (
+            sys.platform.startswith("linux")
+            and QVideoFrameFormat is not None
+            and self._should_snapshot_video_frame_as_image(frame)
+        ):
+            snapshot = frame.toImage()
+            if not snapshot.isNull():
+                self._pending_video_image = snapshot
+                self._pending_video_image_pre_rotated = self._is_image_snapshot_prerotated(frame, snapshot)
+                self._video_frame = None
         if adjustments is not None and adjustments != self._adjustments:
             self.set_adjustments(dict(adjustments))
         self._loading_overlay.hide()
@@ -383,7 +398,120 @@ class GLImageViewer(QRhiWidget):
                 self._last_render_target_size.height(),
                 self._diag_video_frame_summary(frame),
             )
+        self._upload_video_frame_immediately_if_possible()
         self.update()
+
+    @staticmethod
+    def _should_snapshot_video_frame_as_image(frame) -> bool:
+        """Return whether Linux should snapshot *frame* into ``QImage`` immediately."""
+
+        if QVideoFrameFormat is None:
+            return False
+        try:
+            pixel_format = frame.pixelFormat()
+            pixel_enum = QVideoFrameFormat.PixelFormat
+        except (AttributeError, RuntimeError, TypeError) as exc:
+            _LOGGER.debug(
+                "Falling back to snapshot upload due to pixel-format probe failure: %s",
+                type(exc).__name__,
+            )
+            return True
+        packed_names = (
+            "Format_RGBA8888",
+            "Format_BGRA8888",
+            "Format_RGBX8888",
+            "Format_BGRX8888",
+        )
+        for name in packed_names:
+            value = getattr(pixel_enum, name, None)
+            if value is not None and pixel_format == value:
+                return False
+        return True
+
+    @staticmethod
+    def _is_image_snapshot_prerotated(frame, image: QImage) -> bool:
+        """Return ``True`` when ``frame.toImage()`` dimensions already include rotation."""
+
+        if image.isNull():
+            return False
+        try:
+            fmt = frame.surfaceFormat()
+        except (AttributeError, RuntimeError, TypeError) as exc:
+            _LOGGER.debug(
+                "Could not determine whether frame snapshot is pre-rotated: %s",
+                type(exc).__name__,
+            )
+            return False
+        width = int(fmt.frameWidth())
+        height = int(fmt.frameHeight())
+        return width > 0 and height > 0 and image.width() == height and image.height() == width
+
+    def _upload_pending_video_source(self) -> bool:
+        """Upload pending video source and return whether snapshot path was pre-rotated."""
+
+        if self._renderer is None:
+            return False
+
+        pending_rotation = self._pending_source_rotate90_steps
+        if pending_rotation is None:
+            pending_rotation = self._source_rotate90_steps
+
+        pre_rotated = False
+        if self._pending_video_image is not None:
+            self._renderer.upload_texture(self._pending_video_image)
+            pre_rotated = self._pending_video_image_pre_rotated
+            self._pending_video_image = None
+            self._pending_video_image_pre_rotated = False
+            self._video_frame = None
+        elif self._video_frame is not None:
+            self._renderer.upload_video_frame(self._video_frame)
+            pre_rotated = self._renderer.last_video_upload_pre_rotated()
+        else:
+            return False
+
+        final_rotation = 0 if pre_rotated else pending_rotation
+        self._apply_video_source_rotation_steps(
+            final_rotation,
+            request_update=False,
+        )
+        self._pending_source_rotate90_steps = None
+        self._video_frame = None
+        self._video_frame_dirty = False
+        straighten, rotate_steps, _ = self._rotation_parameters()
+        self._update_cover_scale(straighten, rotate_steps)
+        if self._pending_video_reset_view:
+            self._pending_video_reset_view = False
+            self.reset_zoom()
+        return pre_rotated
+
+    def _upload_video_frame_immediately_if_possible(self) -> None:
+        """Best-effort immediate Linux upload for edit-preview video frames.
+
+        Some Linux backends expose short-lived mapped frame handles. Uploading
+        only in ``render()`` may happen too late and produce intermittent black
+        output in edit preview while gallery playback remains correct. This
+        helper opportunistically uploads right after ``set_video_frame`` when
+        GL resources are ready, then falls back to normal ``render()`` upload.
+        """
+
+        if not sys.platform.startswith("linux"):
+            return
+        if not self._using_video_frame_source or not self._video_frame_dirty:
+            return
+        if (
+            (self._video_frame is None and self._pending_video_image is None)
+            or self._renderer is None
+            or not self._gl_initialized
+        ):
+            return
+
+        self._make_gl_current()
+        try:
+            self._upload_pending_video_source()
+        except (AttributeError, RuntimeError, ValueError, TypeError):
+            _LOGGER.exception("Failed immediate Linux video-frame upload in GLImageViewer")
+        finally:
+            self._done_gl_current()
 
     def set_placeholder(self, pixmap: QPixmap | None) -> None:
         """Display *pixmap* without changing the tracked image source."""
@@ -833,7 +961,7 @@ class GLImageViewer(QRhiWidget):
         if (
             self._using_video_frame_source
             and self._video_frame_dirty
-            and self._video_frame is not None
+            and (self._video_frame is not None or self._pending_video_image is not None)
         ):
             self._diag_video_render_count += 1
             if sys.platform.startswith("linux") and self._should_log_diag_frame(self._diag_video_render_count):
@@ -850,27 +978,14 @@ class GLImageViewer(QRhiWidget):
                     self._diag_video_frame_summary(self._video_frame),
                 )
             try:
-                self._renderer.upload_video_frame(self._video_frame)
-                pending_rotation = self._pending_source_rotate90_steps
-                if pending_rotation is None:
-                    pending_rotation = self._source_rotate90_steps
-                final_rotation = (
-                    0
-                    if self._renderer.last_video_upload_pre_rotated()
-                    else pending_rotation
-                )
-                self._apply_video_source_rotation_steps(
-                    final_rotation,
-                    request_update=False,
-                )
-                self._pending_source_rotate90_steps = None
+                pre_rotated = self._upload_pending_video_source()
                 if sys.platform.startswith("linux") and self._should_log_diag_frame(self._diag_video_render_count):
                     logical_tex_w, logical_tex_h = self._display_texture_dimensions()
                     _LOGGER.warning(
                         "[diag][gl_viewer] render #%s post-upload pre_rotated=%s final_rot=%s logical_tex=%sx%s cover=%.5f zoom=%.5f pan=(%.2f,%.2f)",
                         self._diag_video_render_count,
-                        self._renderer.last_video_upload_pre_rotated(),
-                        final_rotation,
+                        pre_rotated,
+                        self._source_rotate90_steps,
                         logical_tex_w,
                         logical_tex_h,
                         self._transform_controller.get_image_cover_scale(),
@@ -880,13 +995,6 @@ class GLImageViewer(QRhiWidget):
                     )
             except Exception:
                 _LOGGER.exception("Failed to upload video frame into GLImageViewer")
-            self._video_frame = None
-            self._video_frame_dirty = False
-            straighten, rotate_steps, _ = self._rotation_parameters()
-            self._update_cover_scale(straighten, rotate_steps)
-            if self._pending_video_reset_view:
-                self._pending_video_reset_view = False
-                self.reset_zoom()
         elif (
             self._image is not None
             and not self._image.isNull()

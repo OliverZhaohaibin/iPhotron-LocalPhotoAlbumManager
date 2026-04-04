@@ -105,6 +105,12 @@ class TextureManager:
     """Manages the main image texture and auxiliary LUT textures."""
 
     def __init__(self, gl_funcs=None) -> None:
+        """Create texture manager.
+
+        Args:
+            gl_funcs: Qt OpenGL functions object (for example QOpenGLFunctions_3_3_Core).
+                When ``None``, PyOpenGL calls are used.
+        """
         self._gl_funcs = gl_funcs
         self._use_pyopengl = gl_funcs is None
         self._texture_id: int = 0
@@ -149,11 +155,11 @@ class TextureManager:
 
         self._ensure_source_texture(width, height, use_mipmaps=True)
 
-        gf = self._gl_funcs or gl
-        gf.glPixelStorei(gl.GL_UNPACK_ALIGNMENT, 1)
+        gl_functions = self._gl_funcs or gl
+        gl_functions.glPixelStorei(gl.GL_UNPACK_ALIGNMENT, 1)
         row_length = qimage.bytesPerLine() // 4
-        gf.glPixelStorei(gl.GL_UNPACK_ROW_LENGTH, row_length)
-        gf.glTexSubImage2D(
+        gl_functions.glPixelStorei(gl.GL_UNPACK_ROW_LENGTH, row_length)
+        gl_functions.glTexSubImage2D(
             gl.GL_TEXTURE_2D,
             0,
             0,
@@ -164,9 +170,9 @@ class TextureManager:
             gl.GL_UNSIGNED_BYTE,
             buffer,
         )
-        gf.glPixelStorei(gl.GL_UNPACK_ROW_LENGTH, 0)
-        gf.glPixelStorei(gl.GL_UNPACK_ALIGNMENT, 4)
-        gf.glGenerateMipmap(gl.GL_TEXTURE_2D)
+        gl_functions.glPixelStorei(gl.GL_UNPACK_ROW_LENGTH, 0)
+        gl_functions.glPixelStorei(gl.GL_UNPACK_ALIGNMENT, 4)
+        gl_functions.glGenerateMipmap(gl.GL_TEXTURE_2D)
 
         error = gl.glGetError()
         if error != gl.GL_NO_ERROR:
@@ -328,9 +334,9 @@ class TextureManager:
     def _delete_image_texture(self) -> None:
         if not self._texture_id:
             return
-        gf = self._gl_funcs or gl
+        gl_functions = self._gl_funcs or gl
         delete_arg = self._delete_textures_arg(self._texture_id)
-        gf.glDeleteTextures(1, delete_arg)
+        gl_functions.glDeleteTextures(1, delete_arg)
         self._texture_id = 0
         self._texture_width = 0
         self._texture_height = 0
@@ -447,13 +453,13 @@ class TextureManager:
             or self._texture_height != int(height)
             or self._texture_uses_mipmaps != bool(use_mipmaps)
         )
-        gf = self._gl_funcs or gl
+        gl_functions = self._gl_funcs or gl
         if recreate:
             if self._texture_id:
                 delete_arg = self._delete_textures_arg(self._texture_id)
-                gf.glDeleteTextures(1, delete_arg)
+                gl_functions.glDeleteTextures(1, delete_arg)
                 self._texture_id = 0
-            tex_id = gf.glGenTextures(1)
+            tex_id = gl_functions.glGenTextures(1)
             if isinstance(tex_id, (tuple, list)):
                 tex_id = tex_id[0]
             self._texture_id = int(tex_id)
@@ -461,9 +467,9 @@ class TextureManager:
             self._texture_height = int(height)
             self._texture_uses_mipmaps = bool(use_mipmaps)
 
-        gf.glBindTexture(gl.GL_TEXTURE_2D, self._texture_id)
+        gl_functions.glBindTexture(gl.GL_TEXTURE_2D, self._texture_id)
         if recreate:
-            gf.glTexImage2D(
+            gl_functions.glTexImage2D(
                 gl.GL_TEXTURE_2D,
                 0,
                 gl.GL_RGBA8,
@@ -475,10 +481,10 @@ class TextureManager:
                 None,
             )
             min_filter = gl.GL_LINEAR_MIPMAP_LINEAR if use_mipmaps else gl.GL_LINEAR
-            gf.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MIN_FILTER, min_filter)
-            gf.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MAG_FILTER, gl.GL_LINEAR)
-            gf.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_WRAP_S, gl.GL_CLAMP_TO_EDGE)
-            gf.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_WRAP_T, gl.GL_CLAMP_TO_EDGE)
+            gl_functions.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MIN_FILTER, min_filter)
+            gl_functions.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MAG_FILTER, gl.GL_LINEAR)
+            gl_functions.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_WRAP_S, gl.GL_CLAMP_TO_EDGE)
+            gl_functions.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_WRAP_T, gl.GL_CLAMP_TO_EDGE)
 
     def _delete_textures_arg(self, texture_id: int):
         """Return Qt/PyOpenGL-compatible argument for glDeleteTextures."""

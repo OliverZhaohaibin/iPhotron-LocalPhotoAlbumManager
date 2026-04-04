@@ -156,7 +156,10 @@ class VideoArea(QWidget):
         # Route decoded frames through QVideoSink → our custom renderer.
         self._video_sink = QVideoSink(self)
         self._player.setVideoOutput(self._video_sink)
-        self._video_sink.videoFrameChanged.connect(self._on_video_frame)
+        self._video_sink.videoFrameChanged.connect(
+            self._on_video_frame,
+            Qt.ConnectionType.QueuedConnection,
+        )
 
         self._player.positionChanged.connect(self._on_position_changed)
         self._player.durationChanged.connect(self._on_duration_changed)

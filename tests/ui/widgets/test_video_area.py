@@ -1135,7 +1135,7 @@ def test_gl_image_viewer_applies_pending_rotation_after_video_frame_upload(qapp,
     mock_update_cover_scale.assert_called()
 
 
-def test_gl_image_viewer_immediate_linux_upload_consumes_pending_frame(mocker):
+def test_gl_image_viewer_immediate_linux_upload_consumes_pending_frame(qapp, mocker):
     """Linux immediate-upload path should consume pending frame before render."""
 
     viewer = GLImageViewer()
@@ -1184,7 +1184,7 @@ def test_gl_image_viewer_set_video_frame_linux_attempts_immediate_upload(qapp, m
     mock_update.assert_called_once()
 
 
-def test_gl_image_viewer_immediate_linux_upload_triggers_deferred_reset(mocker):
+def test_gl_image_viewer_immediate_linux_upload_triggers_deferred_reset(qapp, mocker):
     """Immediate Linux upload should honor pending first-frame reset semantics."""
 
     viewer = GLImageViewer()
@@ -1231,7 +1231,7 @@ def test_gl_image_viewer_linux_snapshots_non_packed_frame_to_image(qapp, mocker)
     assert viewer._video_frame_dirty is True
 
 
-def test_gl_image_viewer_upload_pending_video_source_prefers_image_snapshot(mocker):
+def test_gl_image_viewer_upload_pending_video_source_prefers_image_snapshot(qapp, mocker):
     """Pending snapshot image should upload via texture path and clear dirty state."""
 
     viewer = GLImageViewer()

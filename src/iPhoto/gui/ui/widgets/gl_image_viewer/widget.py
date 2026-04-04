@@ -447,7 +447,7 @@ class GLImageViewer(QRhiWidget):
         return width > 0 and height > 0 and image.width() == height and image.height() == width
 
     def _upload_pending_video_source(self) -> bool:
-        """Upload pending video source (frame or snapshot image) into GPU texture."""
+        """Upload pending video source and return whether snapshot path was pre-rotated."""
 
         if self._renderer is None:
             return False
@@ -482,7 +482,7 @@ class GLImageViewer(QRhiWidget):
         if self._pending_video_reset_view:
             self._pending_video_reset_view = False
             self.reset_zoom()
-        return True
+        return pre_rotated
 
     def _upload_video_frame_immediately_if_possible(self) -> None:
         """Best-effort immediate Linux upload for edit-preview video frames.
@@ -978,15 +978,13 @@ class GLImageViewer(QRhiWidget):
                     self._diag_video_frame_summary(self._video_frame),
                 )
             try:
-                self._upload_pending_video_source()
+                pre_rotated = self._upload_pending_video_source()
                 if sys.platform.startswith("linux") and self._should_log_diag_frame(self._diag_video_render_count):
                     logical_tex_w, logical_tex_h = self._display_texture_dimensions()
                     _LOGGER.warning(
                         "[diag][gl_viewer] render #%s post-upload pre_rotated=%s final_rot=%s logical_tex=%sx%s cover=%.5f zoom=%.5f pan=(%.2f,%.2f)",
                         self._diag_video_render_count,
-                        self._renderer.last_video_upload_pre_rotated()
-                        if self._pending_video_image is None
-                        else self._pending_video_image_pre_rotated,
+                        pre_rotated,
                         self._source_rotate90_steps,
                         logical_tex_w,
                         logical_tex_h,

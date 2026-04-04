@@ -459,7 +459,7 @@ class TextureManager:
                 delete_arg = self._delete_textures_arg(self._texture_id)
                 gl_functions.glDeleteTextures(1, delete_arg)
                 self._texture_id = 0
-            tex_id = gl_functions.glGenTextures(1)
+            tex_id = gl.glGenTextures(1)
             if isinstance(tex_id, (tuple, list)):
                 tex_id = tex_id[0]
             self._texture_id = int(tex_id)

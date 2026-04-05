@@ -1214,7 +1214,10 @@ class GLImageViewer(QRhiWidget):
         if self._auto_crop_view_locked and not self._crop_controller.is_active():
             self._reapply_locked_crop_view()
         elif self._auto_crop_center_locked and not self._crop_controller.is_active():
-            self._reapply_locked_crop_center()
+            # Recompute the centered crop fit because the optimal zoom factor
+            # varies depending on the viewport's aspect ratio. If the window
+            # resizes, the zoom factor from the old aspect ratio would be wrong.
+            crop_viewport.center_crop_if_available(self)
         straighten, rotate_steps, _ = self._rotation_parameters()
         self._update_cover_scale(straighten, rotate_steps)
         if sys.platform.startswith("linux"):

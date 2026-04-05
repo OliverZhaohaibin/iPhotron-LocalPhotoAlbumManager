@@ -234,7 +234,8 @@ class PlaybackCoordinator(QObject):
 
     @Slot(int)
     def _on_seek(self, position: int):
-        self._player_view.video_area.seek(position)
+        trim_in, _ = self._player_view.video_area.trim_range_ms()
+        self._player_view.video_area.seek(position + trim_in)
 
     def play_asset(self, row: int):
         """Switch to detail view and play/show the asset at the given row.

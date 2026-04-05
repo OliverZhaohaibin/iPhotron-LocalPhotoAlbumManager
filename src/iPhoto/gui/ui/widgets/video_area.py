@@ -227,6 +227,11 @@ class VideoArea(QWidget):
 
         return self._player_bar
 
+    def current_position_ms(self) -> int:
+        """Return the current playback position in milliseconds (absolute, ignoring trim offset)."""
+
+        return self._player.position()
+
     @property
     def edit_viewer(self) -> GLImageViewer:
         """Expose the GL-based adjusted video preview surface."""
@@ -385,7 +390,9 @@ class VideoArea(QWidget):
             clamped_pos = self._trim_out_ms
         if clamped_pos != current_pos:
             self._player.setPosition(clamped_pos)
-            self._sync_position_display(clamped_pos)
+        if self._current_duration_ms > 0:
+            self._player_bar.set_duration(self._trim_out_ms - self._trim_in_ms)
+        self._sync_position_display(clamped_pos)
 
     def trim_range_ms(self) -> tuple[int, int]:
         """Return the current trim range in milliseconds."""
@@ -905,7 +912,7 @@ class VideoArea(QWidget):
                 current_pos = self._player.position()
                 if current_pos > self._trim_out_ms:
                     self._player.setPosition(self._trim_out_ms)
-        self._player_bar.set_duration(duration)
+        self._player_bar.set_duration(self._trim_out_ms - self._trim_in_ms)
         self.durationChanged.emit(duration)
 
     def _on_playback_state_changed(self, state: QMediaPlayer.PlaybackState) -> None:
@@ -952,7 +959,10 @@ class VideoArea(QWidget):
     def _sync_position_display(self, position: int) -> None:
         """Synchronise the visible timeline position with the current playhead."""
 
-        self._player_bar.set_position(position)
+        bar_position = (
+            position - self._trim_in_ms if self._trim_out_ms > self._trim_in_ms else position
+        )
+        self._player_bar.set_position(bar_position)
         self.positionChanged.emit(position)
 
     def _enter_end_hold(self, *, end_pos: int, hold_pos: int) -> None:

@@ -722,7 +722,7 @@ class EditCoordinator(QObject):
         in_ratio, out_ratio = self._trim_ratios_for_session()
         self._ui.video_trim_bar.set_trim_ratios(in_ratio, out_ratio)
         self._ui.video_trim_bar.set_playhead_ratio(
-            self._safe_video_ratio(self._ui.video_area.current_position_ms())
+            self._safe_video_ratio(self._ui.video_area.player_bar.position())
         )
 
     def _refresh_video_sidebar_preview(self) -> None:
@@ -1062,7 +1062,7 @@ class EditCoordinator(QObject):
         if not self._can_handle_video_edit_transport_shortcut(allow_conflicting_focus=False):
             return
         step_ms = max(int(self._video_frame_step_ms), 1)
-        position_ms = self._ui.video_area.current_position_ms()
+        position_ms = int(self._ui.video_area.player_bar.position())
         self._ui.video_area.pause()
         self._ui.video_area.seek(position_ms + int(direction) * step_ms)
         self._ui.video_area.note_activity()

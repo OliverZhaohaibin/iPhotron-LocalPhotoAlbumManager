@@ -93,6 +93,12 @@ class PlaybackCoordinator(QObject):
         self._active_live_still: Path | None = None
         self._resume_after_transition = False
 
+        # Trim range of the currently-loaded video (in ms).  Used to remap the
+        # player bar so that its slider spans [0, trim_duration] instead of the
+        # video's full duration, making every part of the bar accessible.
+        self._trim_in_ms: int = 0
+        self._trim_out_ms: int = 0
+
         # Debounce rapid play_asset() calls (e.g. holding an arrow key) so that
         # only the *last* requested row is actually loaded.  This prevents the
         # player from being overwhelmed with overlapping load/play cycles that
@@ -160,6 +166,10 @@ class PlaybackCoordinator(QObject):
         self._player_view.liveReplayRequested.connect(self.replay_live_photo)
         self._player_view.video_area.playbackStateChanged.connect(self._sync_playback_state)
         self._player_view.video_area.playbackFinished.connect(self._handle_playback_finished)
+        # Re-map the player bar to show trim-relative duration/position so the
+        # entire bar is accessible and reflects only the playable range.
+        self._player_view.video_area.durationChanged.connect(self._on_video_duration_changed)
+        self._player_view.video_area.positionChanged.connect(self._on_video_position_changed)
 
         # Model -> Coordinator
         self._asset_vm.dataChanged.connect(self._on_data_changed)
@@ -234,8 +244,20 @@ class PlaybackCoordinator(QObject):
 
     @Slot(int)
     def _on_seek(self, position: int):
-        trim_in, _ = self._player_view.video_area.trim_range_ms()
-        self._player_view.video_area.seek(position + trim_in)
+        self._player_view.video_area.seek(position + self._trim_in_ms)
+
+    @Slot(int)
+    def _on_video_duration_changed(self, duration_ms: int) -> None:
+        """Re-map the player bar to show the trimmed playable duration."""
+        if self._trim_out_ms > self._trim_in_ms:
+            self._player_bar.set_duration(self._trim_out_ms - self._trim_in_ms)
+        else:
+            self._player_bar.set_duration(duration_ms)
+
+    @Slot(int)
+    def _on_video_position_changed(self, position_ms: int) -> None:
+        """Re-map the player bar position to be relative to the trim in-point."""
+        self._player_bar.set_position(position_ms - self._trim_in_ms)
 
     def play_asset(self, row: int):
         """Switch to detail view and play/show the asset at the given row.
@@ -335,6 +357,11 @@ class PlaybackCoordinator(QObject):
                     int(round(trim_in_sec * 1000.0)),
                     int(round(trim_out_sec * 1000.0)),
                 )
+            # Store trim range before loading so that _on_video_duration_changed
+            # and _on_video_position_changed remap the player bar correctly even
+            # when the first durationChanged signal fires synchronously.
+            self._trim_in_ms = trim_range_ms[0] if trim_range_ms is not None else 0
+            self._trim_out_ms = trim_range_ms[1] if trim_range_ms is not None else 0
             self._player_view.video_area.load_video(
                 source,
                 adjustments=(
@@ -389,6 +416,8 @@ class PlaybackCoordinator(QObject):
         self._active_live_still = still_source
         self._player_view.defer_still_updates(True)
         self._player_view.show_video_surface(interactive=False)
+        self._trim_in_ms = 0
+        self._trim_out_ms = 0
         self._player_view.video_area.load_video(
             motion_path,
             adjustments=None,

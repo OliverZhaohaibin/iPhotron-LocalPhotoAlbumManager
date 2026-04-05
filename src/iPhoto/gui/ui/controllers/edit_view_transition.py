@@ -386,6 +386,9 @@ class EditViewTransitionManager(QObject):
         self._ui.edit_header_container.hide()
         self._edit_header_opacity.setOpacity(1.0)
 
+        if hasattr(self._ui, "toggle_filmstrip_action") and self._ui.toggle_filmstrip_action.isChecked():
+            self._ui.filmstrip_view.show()
+
         self._splitter_sizes_before_edit = None
 
     def _sanitise_splitter_sizes(

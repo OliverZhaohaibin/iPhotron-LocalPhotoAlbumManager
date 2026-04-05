@@ -1050,8 +1050,6 @@ class GLImageViewer(QRhiWidget):
 
 
         logical_tex_w, logical_tex_h = self._display_texture_dimensions()
-        print(f"DEBUG_VIDEO_SIZE: GLImageViewer rendering. output_size={vw}x{vh}, logical_tex={logical_tex_w}x{logical_tex_h}, effective_scale={effective_scale:.3f}, cover_scale={cover_scale:.3f}, crop_framing_enabled={self._reset_zoom_frames_crop}, is_video={self._using_video_frame_source}")
-
         if (
             sys.platform.startswith("linux")
             and self._using_video_frame_source

@@ -862,6 +862,63 @@ class TestVideoArea:
         assert va._trim_in_ms == 0
         assert va._trim_out_ms == 4000
 
+    def test_space_shortcut_toggles_play_pause_in_playback(self, qapp, mocker):
+        """Space should toggle play/pause while not in edit mode."""
+        va = VideoArea()
+        mock_is_playing = mocker.patch.object(va, "is_playing", return_value=False)
+        mock_play = mocker.patch.object(va, "play")
+        mock_pause = mocker.patch.object(va, "pause")
+
+        from PySide6.QtGui import QKeyEvent
+
+        va.keyPressEvent(
+            QKeyEvent(QKeyEvent.Type.KeyPress, Qt.Key.Key_Space, Qt.KeyboardModifier.NoModifier)
+        )
+        mock_is_playing.assert_called_once()
+        mock_play.assert_called_once()
+        mock_pause.assert_not_called()
+
+    def test_up_down_shortcuts_adjust_volume_in_playback(self, qapp, mocker):
+        """Up/Down should raise/lower volume in 5-step increments."""
+        va = VideoArea()
+        mock_volume = mocker.patch.object(va._audio_output, "volume", return_value=0.4)
+        mock_set_volume = mocker.patch.object(va, "set_volume")
+        mock_activity = mocker.patch.object(va, "_on_mouse_activity")
+
+        from PySide6.QtGui import QKeyEvent
+
+        va.keyPressEvent(
+            QKeyEvent(QKeyEvent.Type.KeyPress, Qt.Key.Key_Up, Qt.KeyboardModifier.NoModifier)
+        )
+        va.keyPressEvent(
+            QKeyEvent(QKeyEvent.Type.KeyPress, Qt.Key.Key_Down, Qt.KeyboardModifier.NoModifier)
+        )
+
+        assert mock_volume.call_count == 2
+        assert mock_set_volume.call_args_list == [call(45), call(35)]
+        assert mock_activity.call_count == 2
+
+    def test_playback_shortcuts_are_ignored_in_edit_mode(self, qapp, mocker):
+        """Playback shortcuts should not trigger video controls during edit mode."""
+        va = VideoArea()
+        va.set_edit_mode_active(True)
+        mock_play = mocker.patch.object(va, "play")
+        mock_pause = mocker.patch.object(va, "pause")
+        mock_set_volume = mocker.patch.object(va, "set_volume")
+
+        from PySide6.QtGui import QKeyEvent
+
+        va.keyPressEvent(
+            QKeyEvent(QKeyEvent.Type.KeyPress, Qt.Key.Key_Space, Qt.KeyboardModifier.NoModifier)
+        )
+        va.keyPressEvent(
+            QKeyEvent(QKeyEvent.Type.KeyPress, Qt.Key.Key_Up, Qt.KeyboardModifier.NoModifier)
+        )
+
+        mock_play.assert_not_called()
+        mock_pause.assert_not_called()
+        mock_set_volume.assert_not_called()
+
 
 
 def test_gl_image_viewer_reuses_adjustments_for_successive_video_frames(qapp, mocker):

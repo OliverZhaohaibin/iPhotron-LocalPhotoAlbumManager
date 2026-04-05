@@ -22,6 +22,7 @@ from PySide6.QtCore import (
 from PySide6.QtGui import (
     QColor,
     QCursor,
+    QKeyEvent,
     QMouseEvent,
     QResizeEvent,
     QWheelEvent,
@@ -1052,6 +1053,31 @@ class VideoArea(QWidget):
         elif step > 0:
             self.prevItemRequested.emit()
         event.accept()
+
+    def keyPressEvent(self, event: QKeyEvent) -> None:
+        """Handle playback shortcuts while the video area has focus."""
+        if self._edit_mode_active:
+            super().keyPressEvent(event)
+            return
+
+        key = event.key()
+        if key == Qt.Key.Key_Space:
+            if self.is_playing():
+                self.pause()
+            else:
+                self.play()
+            event.accept()
+            return
+
+        if key in (Qt.Key.Key_Up, Qt.Key.Key_Down):
+            current_volume = int(round(self._audio_output.volume() * 100))
+            step = 5 if key == Qt.Key.Key_Up else -5
+            self.set_volume(current_volume + step)
+            self._on_mouse_activity()
+            event.accept()
+            return
+
+        super().keyPressEvent(event)
 
     def showEvent(self, event) -> None:  # pragma: no cover - GUI behaviour
         """Force position update when widget becomes visible."""

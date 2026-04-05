@@ -527,11 +527,7 @@ class GLRenderer:
     ) -> None:
         """Render the semi-transparent crop mask and interactive handles."""
 
-        if (
-            self._overlay_program is None
-            or self._overlay_vao is None
-            or self._overlay_vbo == 0
-        ):
+        if self._overlay_program is None or self._overlay_vbo == 0:
             return
 
         vw = max(1.0, float(view_width))
@@ -592,8 +588,36 @@ class GLRenderer:
             gf.glDisable(gl.GL_BLEND)
             return
 
+        overlay_vao_bound = False
         try:
-            vao.bind()
+            if vao is not None and not self._overlay_vao_disabled:
+                # Clear any pre-existing GL errors so we only evaluate errors
+                # caused by this VAO bind operation.
+                if sys.platform.startswith("linux"):
+                    while True:
+                        pre_error = int(gf.glGetError())
+                        if pre_error == gl.GL_NO_ERROR:
+                            break
+                vao.bind()
+                bind_errors: list[int] = []
+                if sys.platform.startswith("linux"):
+                    bind_errors = []
+                    while True:
+                        error = int(gf.glGetError())
+                        if error == gl.GL_NO_ERROR:
+                            break
+                        bind_errors.append(error)
+                    if bind_errors:
+                        joined = ", ".join(f"0x{value:04X}" for value in bind_errors)
+                        _LOGGER.warning("OpenGL error after overlay VAO bind: %s", joined)
+                        self._overlay_vao_disabled = True
+                        _LOGGER.warning(
+                            "Disabling overlay VAO after bind failure; continuing with default vertex-array state"
+                        )
+                    else:
+                        overlay_vao_bound = True
+                else:
+                    overlay_vao_bound = True
 
             quads = [
                 (0.0, 0.0, vw, top),
@@ -605,10 +629,10 @@ class GLRenderer:
                 vertices = _viewport_rect_to_clip(quad)
                 _draw(vertices, gl.GL_TRIANGLE_FAN, overlay_colour)
 
-            if not faded:
-                border_vertices = _viewport_rect_to_clip((left, top, right, bottom))
-                _draw(border_vertices, gl.GL_LINE_LOOP, border_colour)
+            border_vertices = _viewport_rect_to_clip((left, top, right, bottom))
+            _draw(border_vertices, gl.GL_LINE_LOOP, border_colour)
 
+            if not faded:
                 handle_size = 7.0
                 corner_positions = [
                     (left, top),
@@ -655,7 +679,8 @@ class GLRenderer:
                     vertices = _viewport_rect_to_clip(rect)
                     _draw(vertices, gl.GL_TRIANGLE_FAN, border_colour)
         finally:
-            vao.release()
+            if overlay_vao_bound:
+                vao.release()
             program.release()
             gf.glColorMask(True, True, True, True)
             gf.glDisable(gl.GL_BLEND)

@@ -390,6 +390,10 @@ class VideoArea(QWidget):
             clamped_pos = self._trim_out_ms
         if clamped_pos != current_pos:
             self._player.setPosition(clamped_pos)
+        # Always update the bar to reflect the new trim range.  The duration
+        # guard is needed because trim values are only valid once the media has
+        # reported a non-zero duration; the position display is clamped safely
+        # by PlayerBar.set_position and is always worth refreshing.
         if self._current_duration_ms > 0:
             self._player_bar.set_duration(self._trim_out_ms - self._trim_in_ms)
         self._sync_position_display(clamped_pos)
@@ -959,6 +963,8 @@ class VideoArea(QWidget):
     def _sync_position_display(self, position: int) -> None:
         """Synchronise the visible timeline position with the current playhead."""
 
+        # When a non-degenerate trim range is active, offset the bar position so
+        # that the slider spans [0, trim_duration] rather than [0, full_duration].
         bar_position = (
             position - self._trim_in_ms if self._trim_out_ms > self._trim_in_ms else position
         )

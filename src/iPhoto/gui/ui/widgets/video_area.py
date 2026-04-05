@@ -436,10 +436,11 @@ class VideoArea(QWidget):
         return updates
 
     def set_zoom(self, factor: float, anchor: QPointF | None = None) -> None:
+        effective_anchor = anchor or self.viewport_center()
         if self._adjusted_preview_enabled:
-            self._edit_viewer.set_zoom(factor, anchor=anchor or self.viewport_center())
+            self._edit_viewer.set_zoom(factor, anchor=effective_anchor)
         else:
-            self._renderer.set_zoom(factor, anchor=anchor or self.viewport_center())
+            self._renderer.set_zoom(factor, anchor=effective_anchor)
 
     def reset_zoom(self) -> None:
         if self._adjusted_preview_enabled:
@@ -1149,14 +1150,24 @@ class VideoArea(QWidget):
     def _wire_edit_viewer(self) -> None:
         """Forward image-viewer style signals from the adjusted preview surface."""
 
-        self._edit_viewer.zoomChanged.connect(self.zoomChanged.emit)
-        self._renderer.zoomChanged.connect(self.zoomChanged.emit)
+        self._edit_viewer.zoomChanged.connect(self._on_edit_viewer_zoom_changed)
+        self._renderer.zoomChanged.connect(self._on_renderer_zoom_changed)
         self._edit_viewer.cropChanged.connect(self.cropChanged.emit)
         self._edit_viewer.cropInteractionStarted.connect(self.cropInteractionStarted.emit)
         self._edit_viewer.cropInteractionFinished.connect(self.cropInteractionFinished.emit)
         self._edit_viewer.colorPicked.connect(self.colorPicked.emit)
         self._edit_viewer.firstFrameReady.connect(self.firstFrameReady.emit)
         self._renderer.firstFrameReady.connect(self.firstFrameReady.emit)
+
+    def _on_edit_viewer_zoom_changed(self, factor: float) -> None:
+        """Forward zoom changes from _edit_viewer only when it is the active surface."""
+        if self._adjusted_preview_enabled:
+            self.zoomChanged.emit(factor)
+
+    def _on_renderer_zoom_changed(self, factor: float) -> None:
+        """Forward zoom changes from _renderer only when it is the active surface."""
+        if not self._adjusted_preview_enabled:
+            self.zoomChanged.emit(factor)
 
     def _on_mouse_activity(self) -> None:
         if not self._controls_enabled:

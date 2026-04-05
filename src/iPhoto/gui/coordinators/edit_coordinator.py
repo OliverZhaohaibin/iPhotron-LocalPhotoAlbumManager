@@ -748,6 +748,8 @@ class EditCoordinator(QObject):
                 int(round(trim_in_sec * 1000.0)),
                 int(round(trim_out_sec * 1000.0)),
             )
+        print(f"DEBUG_LAYOUT: before_load_video | video_area_size={self._ui.video_area.size().width()}x{self._ui.video_area.size().height()}")
+
         self._ui.video_area.load_video(
             source,
             adjustments=(
@@ -758,6 +760,7 @@ class EditCoordinator(QObject):
             trim_range_ms=trim_range_ms,
             adjusted_preview=needs_adjusted_preview,
         )
+        print(f"DEBUG_LAYOUT: after_load_video | video_area_size={self._ui.video_area.size().width()}x{self._ui.video_area.size().height()}")
         # Mirror the gallery -> detail playback path so the first post-edit
         # frame is decoded immediately. Without restarting playback here the
         # GL preview may remain blank or keep the stale edit framing because no

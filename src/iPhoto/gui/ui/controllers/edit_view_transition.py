@@ -61,6 +61,7 @@ class EditViewTransitionManager(QObject):
             self._edit_sidebar_maximum_width,
         )
         self._splitter_sizes_before_edit: list[int] | None = None
+        self._show_filmstrip_on_exit = True
         self._transition_group: QParallelAnimationGroup | None = None
         self._transition_direction: str | None = None
 
@@ -129,16 +130,10 @@ class EditViewTransitionManager(QObject):
         self._prepare_navigation_sidebar_for_exit()
         self._prepare_edit_sidebar_for_exit()
 
-        self._ui.detail_chrome_container.show()
+        self._show_filmstrip_on_exit = bool(show_filmstrip)
+        self._ui.detail_chrome_container.hide()
         self._ui.edit_header_container.show()
-        if show_filmstrip:
-            self._ui.filmstrip_view.show()
-        else:
-            # Ensure the filmstrip stays hidden when the user's settings request
-            # it.  Calling ``hide`` keeps the widget state consistent even if it
-            # was temporarily shown by other UI interactions while edit mode
-            # was active.
-            self._ui.filmstrip_view.hide()
+        self._ui.filmstrip_view.hide()
         if animate:
             self._detail_header_opacity.setOpacity(0.0)
             self._edit_header_opacity.setOpacity(1.0)
@@ -383,10 +378,13 @@ class EditViewTransitionManager(QObject):
         self._ui.detail_chrome_container.show()
         self._detail_header_opacity.setOpacity(1.0)
 
+        self._ui.filmstrip_view.setVisible(self._show_filmstrip_on_exit)
+
         self._ui.edit_header_container.hide()
         self._edit_header_opacity.setOpacity(1.0)
 
         self._splitter_sizes_before_edit = None
+        self._show_filmstrip_on_exit = True
 
     def _sanitise_splitter_sizes(
         self,

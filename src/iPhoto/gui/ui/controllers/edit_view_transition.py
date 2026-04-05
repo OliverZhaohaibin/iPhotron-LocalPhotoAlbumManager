@@ -106,12 +106,6 @@ class EditViewTransitionManager(QObject):
 
         if self._window is not None and hasattr(self._window, "size"):
             self._window_size_before_edit = self._window.size()
-            print(f"DEBUG_LAYOUT: enter_edit_mode | window_size={self._window.size().width()}x{self._window.size().height()}")
-            print(f"DEBUG_LAYOUT: enter_edit_mode | video_area_size={self._ui.video_area.size().width()}x{self._ui.video_area.size().height()}")
-            print(f"DEBUG_LAYOUT: enter_edit_mode | filmstrip_visible={self._ui.filmstrip_view.isVisible()} | filmstrip_height={self._ui.filmstrip_view.height()}")
-            print(f"DEBUG_LAYOUT: enter_edit_mode | video_trim_bar_visible={self._ui.video_trim_bar.isVisible()} | video_trim_bar_height={self._ui.video_trim_bar.height()}")
-            print(f"DEBUG_LAYOUT: enter_edit_mode | edit_sidebar_visible={self._ui.edit_sidebar.isVisible()} | edit_sidebar_width={self._ui.edit_sidebar.width()}")
-            print(f"DEBUG_LAYOUT: enter_edit_mode | detail_chrome_visible={self._ui.detail_chrome_container.isVisible()} | detail_chrome_height={self._ui.detail_chrome_container.height()}")
 
         self._prepare_navigation_sidebar_for_entry()
         self._prepare_edit_sidebar_for_entry()
@@ -407,14 +401,6 @@ class EditViewTransitionManager(QObject):
             if self._window is not None and hasattr(self._window, "resize"):
                 self._window.resize(self._window_size_before_edit)
             self._window_size_before_edit = None
-
-        if self._window is not None and hasattr(self._window, "size"):
-            print(f"DEBUG_LAYOUT: exit_edit_mode_final | window_size={self._window.size().width()}x{self._window.size().height()}")
-            print(f"DEBUG_LAYOUT: exit_edit_mode_final | video_area_size={self._ui.video_area.size().width()}x{self._ui.video_area.size().height()}")
-            print(f"DEBUG_LAYOUT: exit_edit_mode_final | filmstrip_visible={self._ui.filmstrip_view.isVisible()} | filmstrip_height={self._ui.filmstrip_view.height()}")
-            print(f"DEBUG_LAYOUT: exit_edit_mode_final | video_trim_bar_visible={self._ui.video_trim_bar.isVisible()} | video_trim_bar_height={self._ui.video_trim_bar.height()}")
-            print(f"DEBUG_LAYOUT: exit_edit_mode_final | edit_sidebar_visible={self._ui.edit_sidebar.isVisible()} | edit_sidebar_width={self._ui.edit_sidebar.width()}")
-            print(f"DEBUG_LAYOUT: exit_edit_mode_final | detail_chrome_visible={self._ui.detail_chrome_container.isVisible()} | detail_chrome_height={self._ui.detail_chrome_container.height()}")
 
     def _sanitise_splitter_sizes(
         self,

@@ -629,10 +629,10 @@ class GLRenderer:
                 vertices = _viewport_rect_to_clip(quad)
                 _draw(vertices, gl.GL_TRIANGLE_FAN, overlay_colour)
 
-            border_vertices = _viewport_rect_to_clip((left, top, right, bottom))
-            _draw(border_vertices, gl.GL_LINE_LOOP, border_colour)
-
             if not faded:
+                border_vertices = _viewport_rect_to_clip((left, top, right, bottom))
+                _draw(border_vertices, gl.GL_LINE_LOOP, border_colour)
+
                 handle_size = 7.0
                 corner_positions = [
                     (left, top),

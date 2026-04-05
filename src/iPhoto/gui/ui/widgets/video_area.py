@@ -326,10 +326,10 @@ class VideoArea(QWidget):
         )
         self._edit_mode_active = bool(active)
         self._edit_viewer.set_crop_framing_enabled(self._edit_mode_active)
-        # In detail playback keep crop only as a center hint (no extra zoom-in).
-        # Edit mode uses explicit crop framing, so this strength only matters
-        # when edit mode is inactive.
-        self._edit_viewer.set_crop_center_zoom_strength(0.0 if not self._edit_mode_active else 0.5)
+        # In detail playback, keep crop framing disabled but still use crop-aware
+        # centering with full strength so adjusted-video previews fill the canvas
+        # optimally after crop changes. Edit mode still uses explicit framing.
+        self._edit_viewer.set_crop_center_zoom_strength(1.0 if not self._edit_mode_active else 0.5)
         if self._edit_mode_active:
             self.set_adjusted_preview_enabled(True)
         print(

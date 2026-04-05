@@ -581,7 +581,14 @@ class EditCoordinator(QObject):
         self._ui.edit_sidebar.set_session(None)
         self._ui.edit_sidebar.set_video_edit_mode(False)
         self._router.show_detail()
-        self._transition_manager.leave_edit_mode(animate=True)
+        show_filmstrip = True
+        toggle_filmstrip_action = getattr(self._ui, "toggle_filmstrip_action", None)
+        if toggle_filmstrip_action is not None:
+            show_filmstrip = bool(toggle_filmstrip_action.isChecked())
+        self._transition_manager.leave_edit_mode(
+            animate=True,
+            show_filmstrip=show_filmstrip,
+        )
         print(
             "[trace][edit] leave_edit_mode:after_transition_start",
             {

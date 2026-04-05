@@ -595,6 +595,13 @@ class GLRenderer:
         overlay_vao_bound = False
         try:
             if not self._overlay_vao_disabled:
+                # Clear any pre-existing GL errors so we only evaluate errors
+                # caused by this VAO bind operation.
+                if sys.platform.startswith("linux"):
+                    while True:
+                        pre_error = int(gf.glGetError())
+                        if pre_error == gl.GL_NO_ERROR:
+                            break
                 vao.bind()
                 bind_errors: list[int] = []
                 if sys.platform.startswith("linux"):

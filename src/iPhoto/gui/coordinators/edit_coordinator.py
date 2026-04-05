@@ -336,6 +336,13 @@ class EditCoordinator(QObject):
         """Prepares the edit view for the given asset and switches view."""
         if self._session is not None:
             return
+        _LOGGER.debug(
+            "[trace][edit] enter_edit_mode:start %s",
+            {
+                "asset": str(asset_path),
+                "is_video": asset_path.suffix.lower() in VIDEO_EXTENSIONS,
+            },
+        )
 
         self._current_source = asset_path
         self._emit_video_trim_diag(
@@ -388,6 +395,14 @@ class EditCoordinator(QObject):
         # Switch View
         self._router.show_edit()
         self._transition_manager.enter_edit_mode(animate=True)
+        _LOGGER.debug(
+            "[trace][edit] enter_edit_mode:after_transition_start %s",
+            {
+                "is_video": self._is_video_source(),
+                "surface": self._ui.video_area._diag_surface_name(),
+                "adjusted_preview_enabled": self._ui.video_area.adjusted_preview_enabled(),
+            },
+        )
 
         # Start Loading High-Res Image / Video
         if not self._is_video_source():
@@ -484,6 +499,18 @@ class EditCoordinator(QObject):
     def leave_edit_mode(self):
         """Returns to detail view."""
         source = self._current_source
+        _LOGGER.debug(
+            "[trace][edit] leave_edit_mode:start %s",
+            {
+                "source": str(source) if source is not None else None,
+                "session_exists": self._session is not None,
+                "is_video": (
+                    source is not None and source.suffix.lower() in VIDEO_EXTENSIONS
+                ),
+                "surface_before": self._ui.video_area._diag_surface_name(),
+                "adjusted_preview_before": self._ui.video_area.adjusted_preview_enabled(),
+            },
+        )
         if self._fullscreen_manager.is_in_fullscreen():
             adjustments = None
             if self._session is not None:
@@ -522,7 +549,22 @@ class EditCoordinator(QObject):
         self._ui.edit_sidebar.set_session(None)
         self._ui.edit_sidebar.set_video_edit_mode(False)
         self._router.show_detail()
-        self._transition_manager.leave_edit_mode(animate=True)
+        show_filmstrip = True
+        toggle_filmstrip_action = getattr(self._ui, "toggle_filmstrip_action", None)
+        if toggle_filmstrip_action is not None:
+            show_filmstrip = bool(toggle_filmstrip_action.isChecked())
+        self._transition_manager.leave_edit_mode(
+            animate=True,
+            show_filmstrip=show_filmstrip,
+        )
+        _LOGGER.debug(
+            "[trace][edit] leave_edit_mode:after_transition_start %s",
+            {
+                "source": str(source) if source is not None else None,
+                "surface_now": self._ui.video_area._diag_surface_name(),
+                "adjusted_preview_now": self._ui.video_area.adjusted_preview_enabled(),
+            },
+        )
 
     # --- Actions ---
 
@@ -740,7 +782,7 @@ class EditCoordinator(QObject):
     def _restore_detail_video_preview(self, source: Path) -> None:
         raw_adjustments = sidecar.load_adjustments(source)
         has_trim = sidecar.trim_is_non_default(raw_adjustments, None)
-        needs_adjusted_preview = sidecar.has_non_default_adjustments(raw_adjustments)
+        needs_adjusted_preview = sidecar.video_requires_adjusted_preview(raw_adjustments)
         trim_in_sec, trim_out_sec = sidecar.normalise_video_trim(raw_adjustments, None)
         trim_range_ms = None
         if has_trim:
@@ -748,11 +790,35 @@ class EditCoordinator(QObject):
                 int(round(trim_in_sec * 1000.0)),
                 int(round(trim_out_sec * 1000.0)),
             )
+        _LOGGER.debug(
+            "[trace][edit] restore_detail_video_preview:resolved %s",
+            {
+                "source": str(source),
+                "raw_adjustments_keys": sorted(raw_adjustments.keys()),
+                "has_trim": has_trim,
+                "trim_in_sec": trim_in_sec,
+                "trim_out_sec": trim_out_sec,
+                "trim_range_ms": trim_range_ms,
+                "needs_adjusted_preview": needs_adjusted_preview,
+            },
+        )
         self._ui.video_area.load_video(
             source,
-            adjustments=sidecar.resolve_render_adjustments(raw_adjustments) if needs_adjusted_preview else None,
+            adjustments=(
+                sidecar.resolve_render_adjustments(raw_adjustments)
+                if needs_adjusted_preview
+                else raw_adjustments
+            ),
             trim_range_ms=trim_range_ms,
             adjusted_preview=needs_adjusted_preview,
+        )
+        _LOGGER.debug(
+            "[trace][edit] restore_detail_video_preview:after_load %s",
+            {
+                "source": str(source),
+                "surface": self._ui.video_area._diag_surface_name(),
+                "adjusted_preview_enabled": self._ui.video_area.adjusted_preview_enabled(),
+            },
         )
         # Mirror the gallery -> detail playback path so the first post-edit
         # frame is decoded immediately. Without restarting playback here the
@@ -967,7 +1033,6 @@ class EditCoordinator(QObject):
         message = f"[video-trim] {stage}"
         if parts:
             message += " | " + ", ".join(parts)
-        print(message)
         _APP_LOGGER.warning(message)
 
     def _handle_video_position_changed(self, position_ms: int) -> None:

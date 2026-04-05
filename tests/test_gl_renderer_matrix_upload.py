@@ -299,3 +299,62 @@ def test_raw_vertex_array_object_falls_back_when_qt_lacks_generator():
     gen_mock.assert_called_once_with(1)
     delete_mock.assert_called_once()
     assert bind_only.bound == [23, 0]
+
+
+def test_draw_crop_overlay_faded_hides_border_and_handles(renderer):
+    """Faded crop overlay should draw only the four dark mask quads."""
+
+    program = renderer._overlay_program
+    program.bind.return_value = True
+    colours: list[tuple[float, float, float, float]] = []
+
+    def _capture_uniform(name, *args):
+        if name == "uColor":
+            colours.append(tuple(args))
+
+    program.setUniformValue.side_effect = _capture_uniform
+
+    with patch.object(gl_renderer_mod.gl, "glBindBuffer"), patch.object(
+        gl_renderer_mod.gl, "glBufferData"
+    ):
+        renderer.draw_crop_overlay(
+            view_width=400.0,
+            view_height=300.0,
+            crop_rect={"left": 100.0, "top": 75.0, "right": 300.0, "bottom": 225.0},
+            faded=True,
+        )
+
+    assert len(colours) == 4
+    assert all(c[:3] == pytest.approx((0.0, 0.0, 0.0)) for c in colours)
+    assert all(c[3] == pytest.approx(1.0) for c in colours)
+    assert not any(c == pytest.approx((1.0, 0.85, 0.2, 1.0)) for c in colours)
+
+
+def test_draw_crop_overlay_unfaded_draws_border_and_handles(renderer):
+    """Unfaded crop overlay should include orange border/handle draws."""
+
+    program = renderer._overlay_program
+    program.bind.return_value = True
+    colours: list[tuple[float, float, float, float]] = []
+
+    def _capture_uniform(name, *args):
+        if name == "uColor":
+            colours.append(tuple(args))
+
+    program.setUniformValue.side_effect = _capture_uniform
+
+    with patch.object(gl_renderer_mod.gl, "glBindBuffer"), patch.object(
+        gl_renderer_mod.gl, "glBufferData"
+    ):
+        renderer.draw_crop_overlay(
+            view_width=400.0,
+            view_height=300.0,
+            crop_rect={"left": 100.0, "top": 75.0, "right": 300.0, "bottom": 225.0},
+            faded=False,
+        )
+
+    dark = [c for c in colours if c[:3] == pytest.approx((0.0, 0.0, 0.0))]
+    gold = [c for c in colours if c == pytest.approx((1.0, 0.85, 0.2, 1.0))]
+    assert len(dark) == 4
+    assert all(c[3] == pytest.approx(0.55) for c in dark)
+    assert len(gold) >= 9

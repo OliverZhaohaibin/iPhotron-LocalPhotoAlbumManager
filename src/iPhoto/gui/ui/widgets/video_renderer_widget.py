@@ -471,7 +471,13 @@ class VideoRendererWidget(QRhiWidget):
     # Zoom API
     # ------------------------------------------------------------------
     def set_zoom(self, factor: float, anchor: "QPointF | None" = None) -> None:
-        """Set the zoom level, clamped to [_ZOOM_MIN, _ZOOM_MAX]."""
+        """Set the zoom level, clamped to [_ZOOM_MIN, _ZOOM_MAX].
+
+        ``anchor`` is accepted for API compatibility with ``GLImageViewer`` but
+        is currently unused — the renderer always zooms around the video's
+        natural centre (which coincides with the viewport centre).
+        """
+        _ = anchor  # accepted for API compatibility; centre-zoom only
         clamped = max(self._ZOOM_MIN, min(self._ZOOM_MAX, float(factor)))
         if clamped == self._zoom_factor:
             return

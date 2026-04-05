@@ -442,8 +442,10 @@ class VideoArea(QWidget):
             self._renderer.set_zoom(factor, anchor=anchor or self.viewport_center())
 
     def reset_zoom(self) -> None:
-        self._edit_viewer.reset_zoom()
-        self._renderer.reset_zoom()
+        if self._adjusted_preview_enabled:
+            self._edit_viewer.reset_zoom()
+        else:
+            self._renderer.reset_zoom()
 
     def zoom_in(self) -> None:
         if self._adjusted_preview_enabled:

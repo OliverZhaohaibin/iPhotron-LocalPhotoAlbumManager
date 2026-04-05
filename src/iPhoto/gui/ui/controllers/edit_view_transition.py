@@ -400,13 +400,19 @@ class EditViewTransitionManager(QObject):
 
         if self._window_size_before_edit is not None:
             if self._window is not None and hasattr(self._window, "resize"):
-                # Defer the window resize to the next event loop iteration so that Qt has time
-                # to recalculate layout constraints (e.g. relaxing the edit_sidebar's minimum
-                # height) after the exit transition completes. Without this, the resize request
-                # is ignored or clamped by the stale inflated constraints.
+                # Defer the window resize so that Qt has time to recalculate layout
+                # constraints (e.g. relaxing the edit_sidebar's minimum height)
+                # after the exit transition completes. A delay of 50ms ensures the
+                # layout engine has definitively processed the hidden sidebar.
                 target_size = self._window_size_before_edit
                 window = self._window
-                QTimer.singleShot(0, lambda: window.resize(target_size))
+
+                # Force an immediate layout update on the central widget to clear
+                # any stale constraints before the resize timer fires.
+                if hasattr(self._ui, "centralwidget"):
+                    self._ui.centralwidget.updateGeometry()
+
+                QTimer.singleShot(50, lambda: window.resize(target_size))
             self._window_size_before_edit = None
 
     def _sanitise_splitter_sizes(

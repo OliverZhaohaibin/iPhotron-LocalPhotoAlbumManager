@@ -876,7 +876,6 @@ class VideoRendererWidget(QRhiWidget):
         if not self._native_size.isEmpty() and ow > 0 and oh > 0:
             src_aspect = self._native_size.width() / self._native_size.height()
             dst_aspect = ow / oh
-            print(f"DEBUG_VIDEO_BUG: VideoRendererWidget._update_uniforms | output_size={ow}x{oh} | native_size={self._native_size.width()}x{self._native_size.height()} | src_aspect={src_aspect:.3f} | dst_aspect={dst_aspect:.3f} | rotate90={self._rotate90_steps}")
             if self._viewport_fill_enabled:
                 if src_aspect > dst_aspect:
                     vh = 1.0

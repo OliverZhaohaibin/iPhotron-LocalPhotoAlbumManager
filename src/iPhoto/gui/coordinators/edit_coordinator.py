@@ -741,6 +741,7 @@ class EditCoordinator(QObject):
         raw_adjustments = sidecar.load_adjustments(source)
         has_trim = sidecar.trim_is_non_default(raw_adjustments, None)
         needs_adjusted_preview = sidecar.video_requires_adjusted_preview(raw_adjustments)
+        print(f"DEBUG_VIDEO_SIZE: EditCoordinator._restore_detail_video_preview. has_trim={has_trim}, needs_adjusted_preview={needs_adjusted_preview}, raw_adjustments={raw_adjustments}")
         trim_in_sec, trim_out_sec = sidecar.normalise_video_trim(raw_adjustments, None)
         trim_range_ms = None
         if has_trim:

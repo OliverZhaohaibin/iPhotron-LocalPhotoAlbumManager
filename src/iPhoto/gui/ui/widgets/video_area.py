@@ -266,9 +266,11 @@ class VideoArea(QWidget):
         """Route decoded frames through the adjusted GL preview when *enabled*."""
 
         target = bool(enabled)
+        print(f"DEBUG_VIDEO_SIZE: VideoArea.set_adjusted_preview_enabled(enabled={target}). Current is {self._adjusted_preview_enabled}")
         if self._adjusted_preview_enabled == target:
             return
         self._adjusted_preview_enabled = target
+        print(f"DEBUG_VIDEO_SIZE: VideoArea switching QStackedWidget to {'_edit_viewer' if target else '_renderer'}")
         self._surface_stack.setCurrentWidget(self._edit_viewer if target else self._renderer)
         self.setFocusProxy(self._edit_viewer if target else self._renderer)
         if target:

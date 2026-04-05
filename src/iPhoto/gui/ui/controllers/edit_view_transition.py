@@ -9,6 +9,7 @@ from PySide6.QtCore import (
     QEasingCurve,
     QParallelAnimationGroup,
     QPropertyAnimation,
+    QTimer,
     QVariantAnimation,
     Signal,
 )
@@ -399,7 +400,13 @@ class EditViewTransitionManager(QObject):
 
         if self._window_size_before_edit is not None:
             if self._window is not None and hasattr(self._window, "resize"):
-                self._window.resize(self._window_size_before_edit)
+                # Defer the window resize to the next event loop iteration so that Qt has time
+                # to recalculate layout constraints (e.g. relaxing the edit_sidebar's minimum
+                # height) after the exit transition completes. Without this, the resize request
+                # is ignored or clamped by the stale inflated constraints.
+                target_size = self._window_size_before_edit
+                window = self._window
+                QTimer.singleShot(0, lambda: window.resize(target_size))
             self._window_size_before_edit = None
 
     def _sanitise_splitter_sizes(

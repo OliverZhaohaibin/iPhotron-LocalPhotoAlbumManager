@@ -562,6 +562,14 @@ class VideoArea(QWidget):
         self._audio_output.setMuted(muted)
         self._player_bar.set_muted(muted)
 
+    def is_muted(self) -> bool:
+        """Return whether the audio output is currently muted."""
+        return self._audio_output.isMuted()
+
+    def toggle_mute(self) -> None:
+        """Toggle the audio output mute state."""
+        self.set_muted(not self.is_muted())
+
     def load_video(
         self,
         path: Path,
@@ -1056,20 +1064,18 @@ class VideoArea(QWidget):
         event.accept()
 
     def keyPressEvent(self, event: QKeyEvent) -> None:
-        """Handle playback shortcuts while the video area has focus."""
+        """Handle focus-based playback shortcuts while the video area has focus.
+
+        Only Up/Down (volume) are handled here because they need the video
+        widget to have focus to avoid conflicting with list/slider navigation
+        elsewhere in the window.  Space, M, and other transport shortcuts are
+        handled globally by ``AppShortcutManager``.
+        """
         if self._edit_mode_active:
             super().keyPressEvent(event)
             return
 
         key = event.key()
-        if key == Qt.Key.Key_Space:
-            if self.is_playing():
-                self.pause()
-            else:
-                self.play()
-            event.accept()
-            return
-
         if key in (Qt.Key.Key_Up, Qt.Key.Key_Down):
             current_volume = int(round(self._audio_output.volume() * 100))
             step = self.SHORTCUT_VOLUME_STEP if key == Qt.Key.Key_Up else -self.SHORTCUT_VOLUME_STEP

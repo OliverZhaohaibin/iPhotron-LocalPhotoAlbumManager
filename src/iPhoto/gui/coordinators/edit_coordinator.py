@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Optional
 
 from PySide6.QtCore import QObject, QSize, Qt, QThreadPool, QTimer
-from PySide6.QtGui import QImage, QKeySequence, QPixmap, QShortcut
+from PySide6.QtGui import QImage, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
     QAbstractSlider,
@@ -110,9 +110,6 @@ class EditCoordinator(QObject):
         self._video_trim_diag: dict[int, dict[str, object]] = {}
         self._pending_video_duration_sec: float | None = None
         self._video_frame_step_ms = _DEFAULT_VIDEO_FRAME_STEP_MS
-        self._video_play_pause_shortcut: QShortcut | None = None
-        self._video_prev_frame_shortcut: QShortcut | None = None
-        self._video_next_frame_shortcut: QShortcut | None = None
 
         # Helpers / Sub-controllers (Ported from EditController)
         self._zoom_handler = EditZoomHandler(
@@ -171,25 +168,6 @@ class EditCoordinator(QObject):
         self._eyedropper_target = "curve"
 
         self._connect_signals()
-        if isinstance(window, QWidget):
-            self._setup_video_edit_shortcuts(window)
-
-    def _setup_video_edit_shortcuts(self, host: QWidget) -> None:
-        self._video_play_pause_shortcut = QShortcut(QKeySequence(Qt.Key.Key_Space), host)
-        self._video_play_pause_shortcut.setContext(Qt.ShortcutContext.WindowShortcut)
-        self._video_play_pause_shortcut.activated.connect(self._handle_video_play_pause_shortcut)
-
-        self._video_prev_frame_shortcut = QShortcut(QKeySequence(Qt.Key.Key_Left), host)
-        self._video_prev_frame_shortcut.setContext(Qt.ShortcutContext.WindowShortcut)
-        self._video_prev_frame_shortcut.activated.connect(
-            lambda: self._handle_video_frame_step_shortcut(-1)
-        )
-
-        self._video_next_frame_shortcut = QShortcut(QKeySequence(Qt.Key.Key_Right), host)
-        self._video_next_frame_shortcut.setContext(Qt.ShortcutContext.WindowShortcut)
-        self._video_next_frame_shortcut.activated.connect(
-            lambda: self._handle_video_frame_step_shortcut(1)
-        )
 
     def _connect_signals(self):
         # Pipeline signals
@@ -311,6 +289,27 @@ class EditCoordinator(QObject):
         """Return ``True`` when an edit session is active."""
 
         return self._session is not None
+
+    # ------------------------------------------------------------------
+    # Public transport API (used by AppShortcutManager)
+    # ------------------------------------------------------------------
+
+    def video_is_transport_active(self) -> bool:
+        """Return True when video transport shortcuts should be handled here.
+
+        The shortcut manager calls this to decide whether to route Space /
+        frame-step commands to the edit coordinator rather than the plain
+        detail-view handler.
+        """
+        return self._can_handle_video_edit_transport_shortcut(allow_conflicting_focus=True)
+
+    def toggle_video_playback(self) -> None:
+        """Toggle play / pause for the video currently open in edit mode."""
+        self._handle_video_trim_play_pause_requested()
+
+    def step_video_frame(self, direction: int) -> None:
+        """Advance (direction=+1) or rewind (direction=-1) one frame."""
+        self._handle_video_frame_step_shortcut(direction)
 
     def enter_fullscreen_preview(self) -> bool:
         """Enter immersive full screen preview for the current edit session."""
@@ -1056,21 +1055,6 @@ class EditCoordinator(QObject):
             self._ui.video_area.pause()
         else:
             self._ui.video_area.play()
-
-    def _handle_video_play_pause_shortcut(self) -> None:
-        if self._can_handle_video_edit_transport_shortcut(allow_conflicting_focus=True):
-            self._handle_video_trim_play_pause_requested()
-            self._ui.video_area.note_activity()
-            return
-        # In the detail/gallery view (no active edit session) the WindowShortcut
-        # still intercepts the Space key before VideoArea.keyPressEvent fires, so
-        # we must handle playback toggle here as well.
-        if self._router.is_detail_view_active():
-            if self._ui.video_area.is_playing():
-                self._ui.video_area.pause()
-            else:
-                self._ui.video_area.play()
-            self._ui.video_area.note_activity()
 
     def _handle_video_frame_step_shortcut(self, direction: int) -> None:
         if direction == 0:

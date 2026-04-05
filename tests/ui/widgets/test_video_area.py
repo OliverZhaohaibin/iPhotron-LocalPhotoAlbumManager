@@ -862,18 +862,19 @@ class TestVideoArea:
         assert va._trim_in_ms == 0
         assert va._trim_out_ms == 4000
 
-    def test_space_shortcut_toggles_play_pause_in_playback(self, qapp, mocker):
-        """Space should toggle play/pause while not in edit mode."""
+    def test_space_shortcut_handled_by_shortcut_manager(self, qapp, mocker):
+        """Space key in VideoArea.keyPressEvent is now a no-op; play/pause is
+        handled globally by AppShortcutManager, not the widget's keyPressEvent."""
         va = VideoArea()
-        mock_is_playing = mocker.patch.object(va, "is_playing", return_value=False)
         mock_play = mocker.patch.object(va, "play")
         mock_pause = mocker.patch.object(va, "pause")
 
+        # Space delivered directly to keyPressEvent should NOT trigger playback
+        # (the window shortcut in AppShortcutManager intercepts it first).
         va.keyPressEvent(
             QKeyEvent(QKeyEvent.Type.KeyPress, Qt.Key.Key_Space, Qt.KeyboardModifier.NoModifier)
         )
-        mock_is_playing.assert_called_once()
-        mock_play.assert_called_once()
+        mock_play.assert_not_called()
         mock_pause.assert_not_called()
 
     def test_up_down_shortcuts_adjust_volume_in_playback(self, qapp, mocker):
@@ -895,22 +896,15 @@ class TestVideoArea:
         assert mock_activity.call_count == 2
 
     def test_playback_shortcuts_are_ignored_in_edit_mode(self, qapp, mocker):
-        """Playback shortcuts should not trigger video controls during edit mode."""
+        """Up/Down volume shortcuts should not trigger video controls during edit mode."""
         va = VideoArea()
         va.set_edit_mode_active(True)
-        mock_play = mocker.patch.object(va, "play")
-        mock_pause = mocker.patch.object(va, "pause")
         mock_set_volume = mocker.patch.object(va, "set_volume")
 
-        va.keyPressEvent(
-            QKeyEvent(QKeyEvent.Type.KeyPress, Qt.Key.Key_Space, Qt.KeyboardModifier.NoModifier)
-        )
         va.keyPressEvent(
             QKeyEvent(QKeyEvent.Type.KeyPress, Qt.Key.Key_Up, Qt.KeyboardModifier.NoModifier)
         )
 
-        mock_play.assert_not_called()
-        mock_pause.assert_not_called()
         mock_set_volume.assert_not_called()
 
 

@@ -527,11 +527,7 @@ class GLRenderer:
     ) -> None:
         """Render the semi-transparent crop mask and interactive handles."""
 
-        if (
-            self._overlay_program is None
-            or self._overlay_vao is None
-            or self._overlay_vbo == 0
-        ):
+        if self._overlay_program is None or self._overlay_vbo == 0:
             return
 
         vw = max(1.0, float(view_width))
@@ -594,7 +590,7 @@ class GLRenderer:
 
         overlay_vao_bound = False
         try:
-            if not self._overlay_vao_disabled:
+            if vao is not None and not self._overlay_vao_disabled:
                 # Clear any pre-existing GL errors so we only evaluate errors
                 # caused by this VAO bind operation.
                 if sys.platform.startswith("linux"):

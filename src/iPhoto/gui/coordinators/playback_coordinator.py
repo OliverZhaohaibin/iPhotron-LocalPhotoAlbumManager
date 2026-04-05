@@ -257,7 +257,7 @@ class PlaybackCoordinator(QObject):
     @Slot(int)
     def _on_video_position_changed(self, position_ms: int) -> None:
         """Re-map the player bar position to be relative to the trim in-point."""
-        self._player_bar.set_position(position_ms - self._trim_in_ms)
+        self._player_bar.set_position(max(0, position_ms - self._trim_in_ms))
 
     def play_asset(self, row: int):
         """Switch to detail view and play/show the asset at the given row.
@@ -360,8 +360,11 @@ class PlaybackCoordinator(QObject):
             # Store trim range before loading so that _on_video_duration_changed
             # and _on_video_position_changed remap the player bar correctly even
             # when the first durationChanged signal fires synchronously.
-            self._trim_in_ms = trim_range_ms[0] if trim_range_ms is not None else 0
-            self._trim_out_ms = trim_range_ms[1] if trim_range_ms is not None else 0
+            if trim_range_ms is not None:
+                self._trim_in_ms, self._trim_out_ms = trim_range_ms
+            else:
+                self._trim_in_ms = 0
+                self._trim_out_ms = 0
             self._player_view.video_area.load_video(
                 source,
                 adjustments=(

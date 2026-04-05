@@ -985,6 +985,29 @@ class VideoArea(QWidget):
                 self._diag_surface_name(),
                 self._adjusted_preview_enabled,
             )
+        # Keep adjusted preview framed correctly after layout transitions
+        # (especially edit -> detail), where multiple resizes can happen after
+        # the first adjusted frame already consumed reset_view=True.
+        if self._adjusted_preview_enabled and not self._edit_mode_active:
+            frame = self._last_presented_video_frame
+            if frame is not None and frame.isValid():
+                print(
+                    "[trace][video_area] resize:force_adjusted_refit",
+                    {
+                        "surface": self._diag_surface_name(),
+                        "adjusted_preview": self._adjusted_preview_enabled,
+                        "edit_mode_active": self._edit_mode_active,
+                        "size": (rect.width(), rect.height()),
+                        "stack_size": (
+                            self._surface_stack.width(),
+                            self._surface_stack.height(),
+                        ),
+                        "frame": self._frame_summary(frame),
+                    },
+                    flush=True,
+                )
+                self._adjusted_first_frame_pending = True
+                self._present_video_frame(frame)
 
     def enterEvent(self, event) -> None:  # pragma: no cover - GUI behaviour
         super().enterEvent(event)

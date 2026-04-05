@@ -131,7 +131,7 @@ class EditViewTransitionManager(QObject):
         self._prepare_edit_sidebar_for_exit()
 
         self._show_filmstrip_on_exit = bool(show_filmstrip)
-        self._ui.detail_chrome_container.hide()
+        self._ui.detail_chrome_container.show()
         self._ui.edit_header_container.show()
         self._ui.filmstrip_view.hide()
         if animate:

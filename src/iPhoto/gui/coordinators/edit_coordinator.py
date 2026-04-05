@@ -294,26 +294,6 @@ class EditCoordinator(QObject):
             return self._ui.video_area
         return self._ui.edit_image_viewer
 
-    def _diag_splitter_sizes(self) -> list[int] | None:
-        splitter = getattr(self._ui, "splitter", None)
-        if splitter is None or not hasattr(splitter, "sizes"):
-            return None
-        try:
-            return [int(value) for value in splitter.sizes()]
-        except Exception:
-            return None
-
-    def _diag_widget_size(self, attr_name: str) -> tuple[int, int] | None:
-        widget = getattr(self._ui, attr_name, None)
-        if widget is None:
-            return None
-        if not hasattr(widget, "width") or not hasattr(widget, "height"):
-            return None
-        try:
-            return (int(widget.width()), int(widget.height()))
-        except Exception:
-            return None
-
     def _is_video_source(self) -> bool:
         """Return ``True`` when the active edit source is a video."""
 
@@ -356,16 +336,12 @@ class EditCoordinator(QObject):
         """Prepares the edit view for the given asset and switches view."""
         if self._session is not None:
             return
-        print(
-            "[trace][edit] enter_edit_mode:start",
+        _LOGGER.debug(
+            "[trace][edit] enter_edit_mode:start %s",
             {
                 "asset": str(asset_path),
                 "is_video": asset_path.suffix.lower() in VIDEO_EXTENSIONS,
-                "splitter_sizes_before": self._diag_splitter_sizes(),
-                "video_area_size_before": self._diag_widget_size("video_area"),
-                "player_container_size_before": self._diag_widget_size("player_container"),
             },
-            flush=True,
         )
 
         self._current_source = asset_path
@@ -419,17 +395,13 @@ class EditCoordinator(QObject):
         # Switch View
         self._router.show_edit()
         self._transition_manager.enter_edit_mode(animate=True)
-        print(
-            "[trace][edit] enter_edit_mode:after_transition_start",
+        _LOGGER.debug(
+            "[trace][edit] enter_edit_mode:after_transition_start %s",
             {
                 "is_video": self._is_video_source(),
-                "splitter_sizes_now": self._diag_splitter_sizes(),
-                "video_area_size_now": self._diag_widget_size("video_area"),
-                "player_container_size_now": self._diag_widget_size("player_container"),
                 "surface": self._ui.video_area._diag_surface_name(),
                 "adjusted_preview_enabled": self._ui.video_area.adjusted_preview_enabled(),
             },
-            flush=True,
         )
 
         # Start Loading High-Res Image / Video
@@ -527,21 +499,17 @@ class EditCoordinator(QObject):
     def leave_edit_mode(self):
         """Returns to detail view."""
         source = self._current_source
-        print(
-            "[trace][edit] leave_edit_mode:start",
+        _LOGGER.debug(
+            "[trace][edit] leave_edit_mode:start %s",
             {
                 "source": str(source) if source is not None else None,
                 "session_exists": self._session is not None,
                 "is_video": (
                     source is not None and source.suffix.lower() in VIDEO_EXTENSIONS
                 ),
-                "splitter_sizes_before": self._diag_splitter_sizes(),
-                "video_area_size_before": self._diag_widget_size("video_area"),
-                "player_container_size_before": self._diag_widget_size("player_container"),
                 "surface_before": self._ui.video_area._diag_surface_name(),
                 "adjusted_preview_before": self._ui.video_area.adjusted_preview_enabled(),
             },
-            flush=True,
         )
         if self._fullscreen_manager.is_in_fullscreen():
             adjustments = None
@@ -589,17 +557,13 @@ class EditCoordinator(QObject):
             animate=True,
             show_filmstrip=show_filmstrip,
         )
-        print(
-            "[trace][edit] leave_edit_mode:after_transition_start",
+        _LOGGER.debug(
+            "[trace][edit] leave_edit_mode:after_transition_start %s",
             {
                 "source": str(source) if source is not None else None,
-                "splitter_sizes_now": self._diag_splitter_sizes(),
-                "video_area_size_now": self._diag_widget_size("video_area"),
-                "player_container_size_now": self._diag_widget_size("player_container"),
                 "surface_now": self._ui.video_area._diag_surface_name(),
                 "adjusted_preview_now": self._ui.video_area.adjusted_preview_enabled(),
             },
-            flush=True,
         )
 
     # --- Actions ---
@@ -826,22 +790,17 @@ class EditCoordinator(QObject):
                 int(round(trim_in_sec * 1000.0)),
                 int(round(trim_out_sec * 1000.0)),
             )
-        print(
-            "[trace][edit] restore_detail_video_preview:resolved",
+        _LOGGER.debug(
+            "[trace][edit] restore_detail_video_preview:resolved %s",
             {
                 "source": str(source),
                 "raw_adjustments_keys": sorted(raw_adjustments.keys()),
-                "raw_adjustments": raw_adjustments,
                 "has_trim": has_trim,
                 "trim_in_sec": trim_in_sec,
                 "trim_out_sec": trim_out_sec,
                 "trim_range_ms": trim_range_ms,
                 "needs_adjusted_preview": needs_adjusted_preview,
-                "splitter_sizes_before_load": self._diag_splitter_sizes(),
-                "video_area_size_before_load": self._diag_widget_size("video_area"),
-                "player_container_size_before_load": self._diag_widget_size("player_container"),
             },
-            flush=True,
         )
         self._ui.video_area.load_video(
             source,
@@ -853,17 +812,13 @@ class EditCoordinator(QObject):
             trim_range_ms=trim_range_ms,
             adjusted_preview=needs_adjusted_preview,
         )
-        print(
-            "[trace][edit] restore_detail_video_preview:after_load",
+        _LOGGER.debug(
+            "[trace][edit] restore_detail_video_preview:after_load %s",
             {
                 "source": str(source),
                 "surface": self._ui.video_area._diag_surface_name(),
                 "adjusted_preview_enabled": self._ui.video_area.adjusted_preview_enabled(),
-                "splitter_sizes_after_load": self._diag_splitter_sizes(),
-                "video_area_size_after_load": self._diag_widget_size("video_area"),
-                "player_container_size_after_load": self._diag_widget_size("player_container"),
             },
-            flush=True,
         )
         # Mirror the gallery -> detail playback path so the first post-edit
         # frame is decoded immediately. Without restarting playback here the
@@ -1078,7 +1033,6 @@ class EditCoordinator(QObject):
         message = f"[video-trim] {stage}"
         if parts:
             message += " | " + ", ".join(parts)
-        print(message)
         _APP_LOGGER.warning(message)
 
     def _handle_video_position_changed(self, position_ms: int) -> None:

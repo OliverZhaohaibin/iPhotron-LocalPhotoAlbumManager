@@ -436,19 +436,31 @@ class VideoArea(QWidget):
         return updates
 
     def set_zoom(self, factor: float, anchor: QPointF | None = None) -> None:
-        self._edit_viewer.set_zoom(factor, anchor=anchor or self.viewport_center())
+        if self._adjusted_preview_enabled:
+            self._edit_viewer.set_zoom(factor, anchor=anchor or self.viewport_center())
+        else:
+            self._renderer.set_zoom(factor, anchor=anchor or self.viewport_center())
 
     def reset_zoom(self) -> None:
         self._edit_viewer.reset_zoom()
+        self._renderer.reset_zoom()
 
     def zoom_in(self) -> None:
-        self._edit_viewer.zoom_in()
+        if self._adjusted_preview_enabled:
+            self._edit_viewer.zoom_in()
+        else:
+            self._renderer.zoom_in()
 
     def zoom_out(self) -> None:
-        self._edit_viewer.zoom_out()
+        if self._adjusted_preview_enabled:
+            self._edit_viewer.zoom_out()
+        else:
+            self._renderer.zoom_out()
 
     def viewport_center(self) -> QPointF:
-        return self._edit_viewer.viewport_center()
+        if self._adjusted_preview_enabled:
+            return self._edit_viewer.viewport_center()
+        return self._renderer.viewport_center()
 
     def set_eyedropper_mode(self, active: bool) -> None:
         self._edit_viewer.set_eyedropper_mode(active)
@@ -1136,6 +1148,7 @@ class VideoArea(QWidget):
         """Forward image-viewer style signals from the adjusted preview surface."""
 
         self._edit_viewer.zoomChanged.connect(self.zoomChanged.emit)
+        self._renderer.zoomChanged.connect(self.zoomChanged.emit)
         self._edit_viewer.cropChanged.connect(self.cropChanged.emit)
         self._edit_viewer.cropInteractionStarted.connect(self.cropInteractionStarted.emit)
         self._edit_viewer.cropInteractionFinished.connect(self.cropInteractionFinished.emit)

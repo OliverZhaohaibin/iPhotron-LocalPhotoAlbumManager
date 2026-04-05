@@ -318,7 +318,7 @@ class VideoArea(QWidget):
             },
         )
         # Emit the newly-active surface's zoom so the zoom slider stays in sync.
-        active_zoom = self._edit_viewer_zoom if target else self._renderer_zoom
+        active_zoom = self._edit_viewer_zoom if self._adjusted_preview_enabled else self._renderer_zoom
         self.zoomChanged.emit(active_zoom)
 
     def set_edit_mode_active(self, active: bool) -> None:

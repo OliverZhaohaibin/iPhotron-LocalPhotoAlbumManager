@@ -266,7 +266,27 @@ class VideoArea(QWidget):
         """Route decoded frames through the adjusted GL preview when *enabled*."""
 
         target = bool(enabled)
+        print(
+            "[trace][video_area] set_adjusted_preview_enabled:request",
+            {
+                "target": target,
+                "current": self._adjusted_preview_enabled,
+                "surface_before": self._diag_surface_name(),
+                "size": (self.width(), self.height()),
+                "stack_size": (self._surface_stack.width(), self._surface_stack.height()),
+            },
+            flush=True,
+        )
         if self._adjusted_preview_enabled == target:
+            print(
+                "[trace][video_area] set_adjusted_preview_enabled:noop",
+                {
+                    "target": target,
+                    "surface": self._diag_surface_name(),
+                    "size": (self.width(), self.height()),
+                },
+                flush=True,
+            )
             return
         self._adjusted_preview_enabled = target
         self._surface_stack.setCurrentWidget(self._edit_viewer if target else self._renderer)
@@ -278,14 +298,46 @@ class VideoArea(QWidget):
                 self._edit_viewer.update()
         else:
             self._edit_mode_active = False
+        print(
+            "[trace][video_area] set_adjusted_preview_enabled:applied",
+            {
+                "target": target,
+                "surface_after": self._diag_surface_name(),
+                "edit_mode_active": self._edit_mode_active,
+                "adjusted_first_frame_pending": self._adjusted_first_frame_pending,
+                "size": (self.width(), self.height()),
+                "stack_size": (self._surface_stack.width(), self._surface_stack.height()),
+            },
+            flush=True,
+        )
 
     def set_edit_mode_active(self, active: bool) -> None:
         """Mark whether the video area is currently being used inside Edit mode."""
 
+        print(
+            "[trace][video_area] set_edit_mode_active",
+            {
+                "active": bool(active),
+                "prev_edit_mode_active": self._edit_mode_active,
+                "surface_before": self._diag_surface_name(),
+                "adjusted_preview_before": self._adjusted_preview_enabled,
+            },
+            flush=True,
+        )
         self._edit_mode_active = bool(active)
         self._edit_viewer.set_crop_framing_enabled(self._edit_mode_active)
         if self._edit_mode_active:
             self.set_adjusted_preview_enabled(True)
+        print(
+            "[trace][video_area] set_edit_mode_active:applied",
+            {
+                "edit_mode_active": self._edit_mode_active,
+                "crop_framing_enabled": self._edit_viewer.crop_framing_enabled(),
+                "surface_after": self._diag_surface_name(),
+                "adjusted_preview_after": self._adjusted_preview_enabled,
+            },
+            flush=True,
+        )
 
     def set_adjustments(self, adjustments: Mapping[str, object] | None = None) -> None:
         """Apply GL adjustments to the adjusted preview surface."""
@@ -513,6 +565,22 @@ class VideoArea(QWidget):
     ) -> None:
         """Load a video file for playback."""
 
+        print(
+            "[trace][video_area] load_video:start",
+            {
+                "path": str(path),
+                "adjusted_preview_arg": adjusted_preview,
+                "adjustments_keys": sorted(dict(adjustments or {}).keys()),
+                "adjustments": dict(adjustments or {}),
+                "trim_range_ms": trim_range_ms,
+                "surface_before": self._diag_surface_name(),
+                "adjusted_preview_before": self._adjusted_preview_enabled,
+                "edit_mode_active": self._edit_mode_active,
+                "size": (self.width(), self.height()),
+                "stack_size": (self._surface_stack.width(), self._surface_stack.height()),
+            },
+            flush=True,
+        )
         self._current_source = path
         self._current_adjustments = dict(adjustments or {})
         self._last_presented_video_frame = None
@@ -566,6 +634,21 @@ class VideoArea(QWidget):
         if trim_range_ms is not None:
             self.set_trim_range_ms(*trim_range_ms)
         self._player.setPosition(self._trim_in_ms if self._trim_in_ms > 0 else 0)
+        print(
+            "[trace][video_area] load_video:end",
+            {
+                "path": str(path),
+                "surface_after": self._diag_surface_name(),
+                "adjusted_preview_after": self._adjusted_preview_enabled,
+                "native_rotate90_steps": native_rotate90_steps,
+                "container_rotation_cw": self._container_rotation_cw,
+                "container_raw_size": (self._container_raw_w, self._container_raw_h),
+                "trim_ms": (self._trim_in_ms, self._trim_out_ms),
+                "size": (self.width(), self.height()),
+                "stack_size": (self._surface_stack.width(), self._surface_stack.height()),
+            },
+            flush=True,
+        )
 
     def play(self) -> None:
         """Start or resume playback."""
@@ -707,6 +790,23 @@ class VideoArea(QWidget):
         else:
             self._last_presented_video_frame = frame
         self._diag_presented_frame_count += 1
+        if self._diag_presented_frame_count <= 12 or self._diag_presented_frame_count % 30 == 0:
+            print(
+                "[trace][video_area] present_frame",
+                {
+                    "count": self._diag_presented_frame_count,
+                    "surface": self._diag_surface_name(),
+                    "adjusted_preview": self._adjusted_preview_enabled,
+                    "adjusted_first_frame_pending": self._adjusted_first_frame_pending,
+                    "edit_mode_active": self._edit_mode_active,
+                    "current_adjustments_keys": sorted(self._current_adjustments.keys()),
+                    "current_adjustments": self._current_adjustments,
+                    "size": (self.width(), self.height()),
+                    "stack_size": (self._surface_stack.width(), self._surface_stack.height()),
+                    "frame": self._frame_summary(frame),
+                },
+                flush=True,
+            )
         if self._adjusted_preview_enabled:
             resolved_rotation_cw = _resolve_frame_rotation_cw(
                 frame.surfaceFormat(),
@@ -860,6 +960,21 @@ class VideoArea(QWidget):
         rect = self.rect()
         self._surface_stack.setGeometry(rect)
         self._update_bar_geometry()
+        print(
+            "[trace][video_area] resize",
+            {
+                "area_size": (rect.width(), rect.height()),
+                "stack_size": (self._surface_stack.width(), self._surface_stack.height()),
+                "surface": self._diag_surface_name(),
+                "adjusted_preview": self._adjusted_preview_enabled,
+                "edit_mode_active": self._edit_mode_active,
+                "player_container_size": (
+                    self.parentWidget().width() if self.parentWidget() else None,
+                    self.parentWidget().height() if self.parentWidget() else None,
+                ),
+            },
+            flush=True,
+        )
         if sys.platform.startswith("linux"):
             _log.warning(
                 "[diag][video_area] resize area=%dx%d stack=%dx%d surface=%s adjusted=%s",

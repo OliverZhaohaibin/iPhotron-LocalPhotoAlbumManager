@@ -465,9 +465,11 @@ class TestVideoArea:
         va.set_edit_mode_active(True)
         assert va.edit_viewer.crop_framing_enabled() is True
         assert va.adjusted_preview_enabled() is True
+        assert va.edit_viewer.crop_center_zoom_strength() == pytest.approx(0.5)
 
         va.set_edit_mode_active(False)
         assert va.edit_viewer.crop_framing_enabled() is False
+        assert va.edit_viewer.crop_center_zoom_strength() == pytest.approx(1.0)
 
     def test_player_bar_accessible(self, qapp):
         """player_bar property should return the PlayerBar instance."""

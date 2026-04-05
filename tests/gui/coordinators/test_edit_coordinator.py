@@ -40,7 +40,7 @@ def test_restore_detail_video_preview_reloads_and_restarts_playback() -> None:
         "iPhoto.gui.coordinators.edit_coordinator.sidecar.trim_is_non_default",
         return_value=True,
     ), patch(
-        "iPhoto.gui.coordinators.edit_coordinator.sidecar.has_non_default_adjustments",
+        "iPhoto.gui.coordinators.edit_coordinator.sidecar.video_requires_adjusted_preview",
         return_value=True,
     ), patch(
         "iPhoto.gui.coordinators.edit_coordinator.sidecar.normalise_video_trim",
@@ -56,6 +56,35 @@ def test_restore_detail_video_preview_reloads_and_restarts_playback() -> None:
         adjustments=render_adjustments,
         trim_range_ms=(1250, 4500),
         adjusted_preview=True,
+    )
+    video_area.play.assert_called_once_with()
+
+
+def test_restore_detail_video_preview_uses_native_path_for_rotate_only_edits() -> None:
+    coordinator = EditCoordinator.__new__(EditCoordinator)
+    video_area = Mock()
+    coordinator._ui = SimpleNamespace(video_area=video_area)
+
+    source = Path("/fake/video.mp4")
+    raw_adjustments = {"Crop_Rotate90": 1.0}
+
+    with patch(
+        "iPhoto.gui.coordinators.edit_coordinator.sidecar.load_adjustments",
+        return_value=raw_adjustments,
+    ), patch(
+        "iPhoto.gui.coordinators.edit_coordinator.sidecar.trim_is_non_default",
+        return_value=False,
+    ), patch(
+        "iPhoto.gui.coordinators.edit_coordinator.sidecar.video_requires_adjusted_preview",
+        return_value=False,
+    ):
+        EditCoordinator._restore_detail_video_preview(coordinator, source)
+
+    video_area.load_video.assert_called_once_with(
+        source,
+        adjustments=raw_adjustments,
+        trim_range_ms=None,
+        adjusted_preview=False,
     )
     video_area.play.assert_called_once_with()
 
@@ -340,4 +369,57 @@ def test_handle_trim_out_ratio_changed_uses_ratio_before_seconds() -> None:
             VIDEO_TRIM_OUT_KEY: 7.0,
         },
         emit_individual=False,
+    )
+
+
+def test_leave_edit_mode_restores_transition_height_flow() -> None:
+    """Leaving edit mode should call transition manager with animation and filmstrip flag."""
+
+    coordinator = EditCoordinator.__new__(EditCoordinator)
+    source = Path("/fake/image.jpg")
+    video_area = Mock()
+    video_area.adjusted_preview_enabled.return_value = False
+    video_area._diag_surface_name.return_value = "stub"
+    toggle_action = Mock()
+    toggle_action.isChecked.return_value = False
+
+    coordinator._current_source = source
+    coordinator._session = None
+    coordinator._fullscreen_manager = Mock()
+    coordinator._fullscreen_manager.is_in_fullscreen.return_value = False
+    coordinator._active_edit_viewport = Mock(return_value=Mock())
+    coordinator._preview_manager = Mock()
+    coordinator._zoom_handler = Mock()
+    coordinator._header_controller = Mock()
+    coordinator._theme_controller = None
+    coordinator._router = Mock()
+    coordinator._transition_manager = Mock()
+    coordinator._ui = SimpleNamespace(
+        video_area=video_area,
+        video_trim_bar=Mock(),
+        edit_sidebar=Mock(),
+        edit_image_viewer=Mock(),
+        toggle_filmstrip_action=toggle_action,
+    )
+    coordinator._video_color_stats = None
+    coordinator._pending_video_duration_sec = None
+    coordinator._video_trim_thumbnail_timer = Mock()
+    coordinator._video_sidebar_preview_timer = Mock()
+    coordinator._video_thumbnail_generation = 0
+    coordinator._video_sidebar_generation = 0
+    coordinator._video_trim_worker = None
+    coordinator._video_trim_diag = {}
+    coordinator._video_frame_step_ms = 42
+
+    with patch(
+        "iPhoto.gui.coordinators.edit_coordinator.viewer_surface_color",
+        return_value=None,
+    ):
+        EditCoordinator.leave_edit_mode(coordinator)
+
+    video_area.set_edit_mode_active.assert_called_once_with(False)
+    coordinator._router.show_detail.assert_called_once_with()
+    coordinator._transition_manager.leave_edit_mode.assert_called_once_with(
+        animate=True,
+        show_filmstrip=False,
     )

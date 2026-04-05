@@ -32,7 +32,7 @@ from typing import TYPE_CHECKING, Callable
 
 from PySide6.QtCore import QObject, Qt
 from PySide6.QtGui import QKeySequence, QShortcut
-from PySide6.QtWidgets import QAbstractSpinBox, QApplication, QLineEdit, QTextEdit
+from PySide6.QtWidgets import QAbstractSpinBox, QApplication, QLineEdit, QTextEdit, QWidget
 
 if TYPE_CHECKING:
     from iPhoto.gui.coordinators.edit_coordinator import EditCoordinator
@@ -47,6 +47,7 @@ class AppShortcutManager(QObject):
     ----------
     window:
         The main application window – parent for all ``QShortcut`` objects.
+        Must be a ``QWidget`` so that ``QShortcut`` can be attached to it.
     router:
         The ``ViewRouter`` used to determine which view is currently active.
     toggle_favorite_cb:
@@ -59,7 +60,7 @@ class AppShortcutManager(QObject):
 
     def __init__(
         self,
-        window: QObject,
+        window: QWidget,
         router: ViewRouter,
         *,
         toggle_favorite_cb: Callable[[], None],
@@ -67,6 +68,7 @@ class AppShortcutManager(QObject):
         parent: QObject | None = None,
     ) -> None:
         super().__init__(parent)
+        self._window = window
         self._router = router
         self._toggle_favorite_cb = toggle_favorite_cb
         self._exit_fullscreen_cb = exit_fullscreen_cb
@@ -76,7 +78,7 @@ class AppShortcutManager(QObject):
         self._edit: EditCoordinator | None = None
 
         self._shortcuts: list[QShortcut] = []
-        self._register_all(window)
+        self._register_all()
 
     # ------------------------------------------------------------------
     # Dependency injection
@@ -96,7 +98,7 @@ class AppShortcutManager(QObject):
 
     def _add(self, key: Qt.Key | QKeySequence, handler: Callable[[], None]) -> QShortcut:
         seq = QKeySequence(key) if isinstance(key, Qt.Key) else key
-        sc = QShortcut(seq, self.parent())
+        sc = QShortcut(seq, self._window)
         sc.setContext(Qt.ShortcutContext.WindowShortcut)
         sc.activated.connect(handler)
         self._shortcuts.append(sc)
@@ -104,7 +106,7 @@ class AppShortcutManager(QObject):
 
     def _add_app(self, key: Qt.Key | QKeySequence, handler: Callable[[], None]) -> QShortcut:
         seq = QKeySequence(key) if isinstance(key, Qt.Key) else key
-        sc = QShortcut(seq, self.parent())
+        sc = QShortcut(seq, self._window)
         sc.setContext(Qt.ShortcutContext.ApplicationShortcut)
         sc.activated.connect(handler)
         self._shortcuts.append(sc)
@@ -114,7 +116,7 @@ class AppShortcutManager(QObject):
     # Shortcut registration — single source of truth
     # ------------------------------------------------------------------
 
-    def _register_all(self, _window: QObject) -> None:  # noqa: ARG002 (window arg reserved)
+    def _register_all(self) -> None:
         # fmt: off
         # ── Playback ──────────────────────────────────────────────────────────
         self._add(Qt.Key.Key_Space,  self._on_play_pause)

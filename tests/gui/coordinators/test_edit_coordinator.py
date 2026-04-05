@@ -40,7 +40,7 @@ def test_restore_detail_video_preview_reloads_and_restarts_playback() -> None:
         "iPhoto.gui.coordinators.edit_coordinator.sidecar.trim_is_non_default",
         return_value=True,
     ), patch(
-        "iPhoto.gui.coordinators.edit_coordinator.sidecar.has_non_default_adjustments",
+        "iPhoto.gui.coordinators.edit_coordinator.sidecar.video_requires_adjusted_preview",
         return_value=True,
     ), patch(
         "iPhoto.gui.coordinators.edit_coordinator.sidecar.normalise_video_trim",
@@ -56,6 +56,35 @@ def test_restore_detail_video_preview_reloads_and_restarts_playback() -> None:
         adjustments=render_adjustments,
         trim_range_ms=(1250, 4500),
         adjusted_preview=True,
+    )
+    video_area.play.assert_called_once_with()
+
+
+def test_restore_detail_video_preview_uses_native_path_for_rotate_only_edits() -> None:
+    coordinator = EditCoordinator.__new__(EditCoordinator)
+    video_area = Mock()
+    coordinator._ui = SimpleNamespace(video_area=video_area)
+
+    source = Path("/fake/video.mp4")
+    raw_adjustments = {"Crop_Rotate90": 1.0}
+
+    with patch(
+        "iPhoto.gui.coordinators.edit_coordinator.sidecar.load_adjustments",
+        return_value=raw_adjustments,
+    ), patch(
+        "iPhoto.gui.coordinators.edit_coordinator.sidecar.trim_is_non_default",
+        return_value=False,
+    ), patch(
+        "iPhoto.gui.coordinators.edit_coordinator.sidecar.video_requires_adjusted_preview",
+        return_value=False,
+    ):
+        EditCoordinator._restore_detail_video_preview(coordinator, source)
+
+    video_area.load_video.assert_called_once_with(
+        source,
+        adjustments=raw_adjustments,
+        trim_range_ms=None,
+        adjusted_preview=False,
     )
     video_area.play.assert_called_once_with()
 

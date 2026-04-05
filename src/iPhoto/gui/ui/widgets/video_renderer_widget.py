@@ -470,7 +470,7 @@ class VideoRendererWidget(QRhiWidget):
     # ------------------------------------------------------------------
     # Zoom API
     # ------------------------------------------------------------------
-    def set_zoom(self, factor: float, anchor: "QPointF | None" = None) -> None:
+    def set_zoom(self, factor: float, anchor: QPointF | None = None) -> None:
         """Set the zoom level, clamped to [_ZOOM_MIN, _ZOOM_MAX].
 
         ``anchor`` is accepted for API compatibility with ``GLImageViewer`` but
@@ -497,7 +497,7 @@ class VideoRendererWidget(QRhiWidget):
         """Reset zoom to 1:1 (fit-to-viewport)."""
         self.set_zoom(1.0)
 
-    def viewport_center(self) -> "QPointF":
+    def viewport_center(self) -> QPointF:
         """Return the center point of this widget in local pixel coordinates."""
         return QPointF(self.width() / 2.0, self.height() / 2.0)
 

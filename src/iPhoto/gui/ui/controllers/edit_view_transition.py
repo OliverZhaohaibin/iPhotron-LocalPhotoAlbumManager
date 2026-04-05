@@ -39,7 +39,9 @@ class EditViewTransitionManager(QObject):
 
         super().__init__(parent)
         self._ui = ui
+        self._window = window
         self._theme_controller = theme_controller
+        self._window_size_before_edit = None
 
         preferred_width = ui.edit_sidebar.property("defaultPreferredWidth")
         minimum_width = ui.edit_sidebar.property("defaultMinimumWidth")
@@ -101,6 +103,10 @@ class EditViewTransitionManager(QObject):
 
         splitter_sizes = self._sanitise_splitter_sizes(self._ui.splitter.sizes())
         self._splitter_sizes_before_edit = list(splitter_sizes)
+
+        if self._window is not None and hasattr(self._window, "size"):
+            self._window_size_before_edit = self._window.size()
+
         self._prepare_navigation_sidebar_for_entry()
         self._prepare_edit_sidebar_for_entry()
         self._start_transition_animation(
@@ -390,6 +396,11 @@ class EditViewTransitionManager(QObject):
             self._ui.filmstrip_view.show()
 
         self._splitter_sizes_before_edit = None
+
+        if self._window_size_before_edit is not None:
+            if self._window is not None and hasattr(self._window, "resize"):
+                self._window.resize(self._window_size_before_edit)
+            self._window_size_before_edit = None
 
     def _sanitise_splitter_sizes(
         self,

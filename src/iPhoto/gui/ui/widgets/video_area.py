@@ -91,7 +91,7 @@ class VideoArea(QWidget):
     colorPicked = Signal(float, float, float)
     firstFrameReady = Signal()
     displaySizeChanged = Signal(QSizeF)
-    _SHORTCUT_VOLUME_STEP = 5
+    SHORTCUT_VOLUME_STEP = 5
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
@@ -1072,7 +1072,7 @@ class VideoArea(QWidget):
 
         if key in (Qt.Key.Key_Up, Qt.Key.Key_Down):
             current_volume = int(round(self._audio_output.volume() * 100))
-            step = self._SHORTCUT_VOLUME_STEP if key == Qt.Key.Key_Up else -self._SHORTCUT_VOLUME_STEP
+            step = self.SHORTCUT_VOLUME_STEP if key == Qt.Key.Key_Up else -self.SHORTCUT_VOLUME_STEP
             self.set_volume(current_volume + step)
             self._on_mouse_activity()
             event.accept()

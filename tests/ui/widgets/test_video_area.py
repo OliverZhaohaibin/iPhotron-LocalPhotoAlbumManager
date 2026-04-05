@@ -12,7 +12,7 @@ pytest.importorskip("PySide6.QtMultimedia", reason="QtMultimedia is required")
 from pathlib import Path
 
 from PySide6.QtCore import QRectF, QSize, QSizeF, Qt
-from PySide6.QtGui import QColor, QImage, QRhiCommandBuffer, QShowEvent
+from PySide6.QtGui import QColor, QImage, QKeyEvent, QRhiCommandBuffer, QShowEvent
 from PySide6.QtMultimedia import QMediaPlayer, QVideoFrame, QVideoFrameFormat
 from PySide6.QtWidgets import QApplication, QRhiWidget
 
@@ -869,8 +869,6 @@ class TestVideoArea:
         mock_play = mocker.patch.object(va, "play")
         mock_pause = mocker.patch.object(va, "pause")
 
-        from PySide6.QtGui import QKeyEvent
-
         va.keyPressEvent(
             QKeyEvent(QKeyEvent.Type.KeyPress, Qt.Key.Key_Space, Qt.KeyboardModifier.NoModifier)
         )
@@ -881,11 +879,9 @@ class TestVideoArea:
     def test_up_down_shortcuts_adjust_volume_in_playback(self, qapp, mocker):
         """Up/Down should raise/lower volume in 5-step increments."""
         va = VideoArea()
-        mock_volume = mocker.patch.object(va._audio_output, "volume", return_value=0.4)
+        mock_volume = mocker.patch.object(va._audio_output, "volume", side_effect=[0.4, 0.45])
         mock_set_volume = mocker.patch.object(va, "set_volume")
         mock_activity = mocker.patch.object(va, "_on_mouse_activity")
-
-        from PySide6.QtGui import QKeyEvent
 
         va.keyPressEvent(
             QKeyEvent(QKeyEvent.Type.KeyPress, Qt.Key.Key_Up, Qt.KeyboardModifier.NoModifier)
@@ -895,7 +891,7 @@ class TestVideoArea:
         )
 
         assert mock_volume.call_count == 2
-        assert mock_set_volume.call_args_list == [call(45), call(35)]
+        assert mock_set_volume.call_args_list == [call(45), call(40)]
         assert mock_activity.call_count == 2
 
     def test_playback_shortcuts_are_ignored_in_edit_mode(self, qapp, mocker):
@@ -905,8 +901,6 @@ class TestVideoArea:
         mock_play = mocker.patch.object(va, "play")
         mock_pause = mocker.patch.object(va, "pause")
         mock_set_volume = mocker.patch.object(va, "set_volume")
-
-        from PySide6.QtGui import QKeyEvent
 
         va.keyPressEvent(
             QKeyEvent(QKeyEvent.Type.KeyPress, Qt.Key.Key_Space, Qt.KeyboardModifier.NoModifier)

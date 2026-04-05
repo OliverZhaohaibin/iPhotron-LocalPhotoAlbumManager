@@ -37,7 +37,7 @@ def display_texture_dimensions(viewer: GLImageViewer) -> tuple[int, int]:
     tex_w, tex_h = texture_dimensions(viewer)
     if tex_w <= 0 or tex_h <= 0:
         return (tex_w, tex_h)
-    rotate_steps = int(float(viewer._adjustments.get("Crop_Rotate90", 0.0)))
+    rotate_steps = viewer._display_rotate_steps()
     if rotate_steps % 2:
         return (tex_h, tex_w)
     return (tex_w, tex_h)
@@ -48,7 +48,7 @@ def display_texture_dimensions(viewer: GLImageViewer) -> tuple[int, int]:
 def rotation_parameters(viewer: GLImageViewer) -> tuple[float, int, bool]:
     """Return the straighten angle, rotate steps, and flip toggle."""
     straighten = float(viewer._adjustments.get("Crop_Straighten", 0.0))
-    rotate_steps = int(float(viewer._adjustments.get("Crop_Rotate90", 0.0)))
+    rotate_steps = viewer._display_rotate_steps()
     flip = bool(viewer._adjustments.get("Crop_FlipH", False))
     return straighten, rotate_steps, flip
 
@@ -77,7 +77,7 @@ def update_cover_scale(
         (display_w, display_h), float(view_width), float(view_height)
     )
 
-    cover_scale = compute_rotation_cover_scale(
+    rotation_cover_scale = compute_rotation_cover_scale(
         (display_w, display_h),
         base_scale,
         straighten_deg,
@@ -85,7 +85,7 @@ def update_cover_scale(
         physical_texture_size=(tex_w, tex_h),
     )
 
-    viewer._transform_controller.set_image_cover_scale(cover_scale)
+    viewer._transform_controller.set_image_cover_scale(rotation_cover_scale)
 
 
 # ── Crop-perspective state ─────────────────────────────────────────────
@@ -97,7 +97,7 @@ def update_crop_perspective_state(viewer: GLImageViewer) -> None:
     vertical = float(viewer._adjustments.get("Perspective_Vertical", 0.0))
     horizontal = float(viewer._adjustments.get("Perspective_Horizontal", 0.0))
     straighten, rotate_steps, flip = rotation_parameters(viewer)
-    logical_values = geometry.logical_crop_mapping_from_texture(viewer._adjustments)
+    logical_values = viewer._logical_crop_values()
     viewer._crop_controller.update_perspective(
         vertical,
         horizontal,
@@ -115,7 +115,7 @@ def compute_crop_rect_pixels(viewer: GLImageViewer) -> QRectF | None:
     """Return the crop rectangle expressed in texture pixels."""
     tex_w, tex_h = display_texture_dimensions(viewer)
     crop_cx, crop_cy, crop_w, crop_h = geometry.logical_crop_from_texture(
-        viewer._adjustments
+        viewer._display_adjustments()
     )
     return crop_logic.compute_crop_rect_pixels(
         crop_cx, crop_cy, crop_w, crop_h, tex_w, tex_h
@@ -136,6 +136,32 @@ def frame_crop_if_available(viewer: GLImageViewer) -> bool:
     return False
 
 
+def center_crop_if_available(viewer: GLImageViewer) -> bool:
+    """Recenter the viewport on the stored crop while keeping fit-to-view zoom."""
+    if viewer._crop_controller.is_active():
+        return False
+    crop_rect = compute_crop_rect_pixels(viewer)
+    if crop_rect is None:
+        viewer._auto_crop_center_locked = False
+        return False
+    viewer._transform_controller.reset_zoom()
+    fit_result = viewer._transform_controller.compute_texture_rect_fit(crop_rect)
+    if fit_result is not None:
+        target_zoom, _ = fit_result
+        strength = max(0.0, min(1.0, viewer.crop_center_zoom_strength()))
+        if target_zoom > 1.0 and strength > 0.0:
+            # Interpolate between full-frame fit and crop-fill fit.  Using the
+            # geometric mean keeps playback closer to the v4.6.0 video layout:
+            # the crop is clearly emphasised without jumping all the way to the
+            # edit-mode "fill the crop" presentation.
+            partial_zoom = target_zoom ** strength
+            if partial_zoom > 1.0 + 1e-6:
+                viewer._transform_controller.set_zoom_factor_direct(partial_zoom)
+    viewer._transform_controller.apply_image_center_pixels(crop_rect.center())
+    viewer._auto_crop_center_locked = True
+    return True
+
+
 def reapply_locked_crop_view(viewer: GLImageViewer) -> None:
     """Re-apply the stored crop framing after resizes or adjustment edits."""
     if not viewer._auto_crop_view_locked:
@@ -148,9 +174,18 @@ def reapply_locked_crop_view(viewer: GLImageViewer) -> None:
         viewer._auto_crop_view_locked = False
 
 
+def reapply_locked_crop_center(viewer: GLImageViewer) -> None:
+    """Recenter the crop after resizes without changing the fit baseline."""
+    if not viewer._auto_crop_center_locked:
+        return
+    if not center_crop_if_available(viewer):
+        viewer._auto_crop_center_locked = False
+
+
 def cancel_auto_crop_lock(viewer: GLImageViewer) -> None:
     """Disable auto-crop framing so manual gestures stay respected."""
     viewer._auto_crop_view_locked = False
+    viewer._auto_crop_center_locked = False
 
 
 # ── Crop interaction callback ──────────────────────────────────────────
@@ -163,7 +198,7 @@ def handle_crop_interaction_changed(
     height: float,
 ) -> None:
     """Convert logical crop updates back to texture space before emitting."""
-    rotate_steps = geometry.get_rotate_steps(viewer._adjustments)
+    rotate_steps = viewer._display_rotate_steps()
     tex_cx, tex_cy, tex_w, tex_h = geometry.logical_crop_to_texture(
         (float(cx), float(cy), float(width), float(height)),
         rotate_steps,
@@ -199,7 +234,7 @@ def handle_eyedropper_pick(viewer: GLImageViewer, position: QPointF) -> bool:
     lx = max(0.0, min(1.0, image_point.x() / float(logical_w)))
     ly = max(0.0, min(1.0, image_point.y() / float(logical_h)))
 
-    rotate_steps = geometry.get_rotate_steps(viewer._adjustments)
+    rotate_steps = viewer._display_rotate_steps()
     if rotate_steps == 1:
         tx, ty = ly, 1.0 - lx
     elif rotate_steps == 2:

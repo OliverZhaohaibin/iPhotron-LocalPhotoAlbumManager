@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import numpy as np
+from OpenGL import GL as gl
 
 
 class UniformState:
@@ -39,30 +40,22 @@ class UniformState:
             self._gl_funcs.glUniform4f(location, float(x), float(y), float(z), float(w))
 
     def _set_uniform_matrix3(self, name: str, matrix: np.ndarray) -> None:
-        """Set a 3x3 uniform matrix in the currently bound shader program.
+        """Set a 3x3 uniform matrix in the currently bound shader program."""
 
-        Parameters
-        ----------
-        name : str
-            The name of the uniform variable in the shader.
-        matrix : np.ndarray
-            A 3x3 matrix to upload to the GPU (can be numpy array, will be converted to Python list).
-
-        Notes
-        -----
-        PySide6's glUniformMatrix3fv expects a Python sequence of floats, not a numpy array.
-        The matrix is flattened in row-major order and converted to a Python list.
-        The 'transpose' parameter is set to False (0) as OpenGL expects column-major order by default.
-        """
         location = self._uniform_locations.get(name, -1)
         if location == -1:
             return
 
-        matrix_list = np.asarray(matrix, dtype=np.float32).ravel().tolist()
+        # OpenGL expects column-major matrix data when transpose is GL_FALSE.
+        # Uploading with transpose=GL_TRUE works on our Windows test machines
+        # but is rejected by some Linux/EGL/GLES stacks with GL_INVALID_OPERATION.
+        # Pre-transpose the numpy row-major matrix instead so the upload stays
+        # portable across both desktop GL and GLES-backed QRhi contexts.
+        matrix_data = np.ascontiguousarray(np.asarray(matrix, dtype=np.float32).T)
 
-        self._gl_funcs.glUniformMatrix3fv(
+        gl.glUniformMatrix3fv(
             location,
-            1,  # count = 1 matrix
-            1,  # transpose = GL_TRUE (row-major numpy → column-major OpenGL)
-            matrix_list,
+            1,
+            0,  # GL_FALSE: already converted to column-major layout above
+            matrix_data,
         )

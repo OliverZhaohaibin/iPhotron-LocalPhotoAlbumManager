@@ -297,6 +297,7 @@ class PlaybackCoordinator(QObject):
         is_video = self._asset_vm.data(idx, Roles.IS_VIDEO)
         is_live = self._asset_vm.data(idx, Roles.IS_LIVE)
         is_fav = self._asset_vm.data(idx, Roles.FEATURED)
+        info = self._asset_vm.data(idx, Roles.INFO) or {}
 
         if not abs_path:
             return
@@ -310,14 +311,39 @@ class PlaybackCoordinator(QObject):
         self._info_button.setEnabled(True)
         self._share_button.setEnabled(True)
         self._edit_button.setEnabled(True)
-        self._rotate_button.setEnabled(not is_video)  # Simple logic for now
+        self._rotate_button.setEnabled(True)
 
         self._update_favorite_icon(bool(is_fav))
 
         # Load Media
         if is_video:
             self._player_view.show_video_surface(interactive=True)
-            self._player_view.video_area.load_video(source)
+            raw_adjustments = sidecar.load_adjustments(source)
+            duration_sec = None
+            if isinstance(info, dict):
+                try:
+                    duration_sec = float(info.get("dur") or info.get("duration") or 0.0) or None
+                except (TypeError, ValueError):
+                    duration_sec = None
+            has_trim = sidecar.trim_is_non_default(raw_adjustments, duration_sec)
+            needs_adjusted_preview = sidecar.video_requires_adjusted_preview(raw_adjustments)
+            trim_in_sec, trim_out_sec = sidecar.normalise_video_trim(raw_adjustments, duration_sec)
+            trim_range_ms = None
+            if has_trim:
+                trim_range_ms = (
+                    int(round(trim_in_sec * 1000.0)),
+                    int(round(trim_out_sec * 1000.0)),
+                )
+            self._player_view.video_area.load_video(
+                source,
+                adjustments=(
+                    sidecar.resolve_render_adjustments(raw_adjustments)
+                    if needs_adjusted_preview
+                    else (raw_adjustments or None)
+                ),
+                trim_range_ms=trim_range_ms,
+                adjusted_preview=needs_adjusted_preview,
+            )
             self._player_view.video_area.play()
             self._player_bar.setEnabled(True)
             self._zoom_widget.hide()
@@ -358,7 +384,12 @@ class PlaybackCoordinator(QObject):
         self._active_live_still = still_source
         self._player_view.defer_still_updates(True)
         self._player_view.show_video_surface(interactive=False)
-        self._player_view.video_area.load_video(motion_path)
+        self._player_view.video_area.load_video(
+            motion_path,
+            adjustments=None,
+            trim_range_ms=None,
+            adjusted_preview=False,
+        )
         self._player_view.video_area.play()
         self._player_bar.setEnabled(False)
         self._is_playing = True
@@ -474,13 +505,17 @@ class PlaybackCoordinator(QObject):
 
         idx = self._asset_vm.index(self._current_row, 0)
         abs_path = self._asset_vm.data(idx, Roles.ABS)
+        is_video = bool(self._asset_vm.data(idx, Roles.IS_VIDEO))
 
         if not abs_path: return
 
         source = Path(abs_path)
 
         # 1. Update UI immediately (Optimistic)
-        updates = self._player_view.image_viewer.rotate_image_ccw()
+        if is_video:
+            updates = self._player_view.video_area.rotate_image_ccw()
+        else:
+            updates = self._player_view.image_viewer.rotate_image_ccw()
 
         # 2. Persist adjustments
         try:

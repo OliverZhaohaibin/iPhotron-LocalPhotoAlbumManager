@@ -38,6 +38,7 @@ from .main_window_metrics import (
     HEADER_ICON_GLYPH_SIZE,
 )
 from .video_area import VideoArea
+from .video_trim_bar import VideoTrimBar
 
 
 class DetailPageWidget(QWidget):
@@ -112,6 +113,8 @@ class DetailPageWidget(QWidget):
             self.image_viewer.setParent(None)
         self.video_area = VideoArea()
         self.player_bar = self.video_area.player_bar
+        self.video_trim_bar = VideoTrimBar()
+        self.video_trim_bar.hide()
 
         self.filmstrip_view = FilmstripView()
 
@@ -129,6 +132,7 @@ class DetailPageWidget(QWidget):
         self.detail_chrome_container: QWidget | None = None
         self.detail_header_separator: QFrame | None = None
         self.player_container: QWidget | None = None
+        self.player_column: QWidget | None = None
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -404,7 +408,15 @@ class DetailPageWidget(QWidget):
         edit_body_layout = QHBoxLayout(edit_body)
         edit_body_layout.setContentsMargins(0, 0, 0, 0)
         edit_body_layout.setSpacing(12)
-        edit_body_layout.addWidget(self.player_container, 1)
+
+        self.player_column = QWidget(edit_body)
+        player_column_layout = QVBoxLayout(self.player_column)
+        player_column_layout.setContentsMargins(0, 0, 0, 0)
+        player_column_layout.setSpacing(0)
+        player_column_layout.addWidget(self.player_container, 1)
+        player_column_layout.addWidget(self.video_trim_bar)
+
+        edit_body_layout.addWidget(self.player_column, 1)
         edit_body_layout.addWidget(self.edit_sidebar)
         edit_layout.addWidget(edit_body, 1)
 

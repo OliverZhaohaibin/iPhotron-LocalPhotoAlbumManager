@@ -5,10 +5,10 @@ from __future__ import annotations
 from concurrent.futures import Future, ThreadPoolExecutor
 import importlib.util
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Callable, Mapping, Optional
 
 from PySide6.QtCore import QPoint, QRect, QRectF, QSize, QSizeF, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QPainter, QPainterPath, QPen, QResizeEvent
+from PySide6.QtGui import QColor, QPainter, QPainterPath, QPen, QRegion, QResizeEvent
 from PySide6.QtWidgets import (
     QFrame,
     QGraphicsDropShadowEffect,
@@ -27,6 +27,7 @@ from ....config import (
 )
 from ....utils.ffmpeg import probe_video_rotation
 from ..media import MediaController, require_multimedia
+from .video_area import VideoArea
 
 if importlib.util.find_spec("PySide6.QtMultimediaWidgets") is not None:
     from PySide6.QtMultimediaWidgets import QGraphicsVideoItem
@@ -177,6 +178,101 @@ class _PreviewFrame(QWidget):
         self.update()
 
 
+class _RhiPreviewPopup(VideoArea):
+    """Borderless popup that uses the RHI video surface as the window itself."""
+
+    def __init__(self, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self._corner_radius = PREVIEW_WINDOW_CORNER_RADIUS
+        self._high_quality_rounding_enabled = False
+        flags = (
+            Qt.WindowType.Tool
+            | Qt.WindowType.FramelessWindowHint
+            | Qt.WindowType.NoDropShadowWindowHint
+            | Qt.WindowType.WindowStaysOnTopHint
+            | Qt.WindowType.WindowDoesNotAcceptFocus
+        )
+        self.setWindowFlags(flags)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, False)
+        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
+        self.setAutoFillBackground(True)
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.setStyleSheet("background-color: #121216; border: none;")
+        self.set_controls_enabled(False)
+        self.set_muted(PREVIEW_WINDOW_MUTED)
+        self.hide_controls(animate=False)
+        self.set_surface_color("#121216")
+        self.set_viewport_fill_enabled(True)
+        self.edit_viewer.set_crop_framing_enabled(True)
+        self._update_mask()
+
+    def resize_preview(self, size: QSize) -> None:
+        self.resize(size)
+
+    def show_preview(
+        self,
+        source: Path,
+        *,
+        adjustments: Mapping[str, object] | None,
+        trim_range_ms: tuple[int, int] | None,
+        adjusted_preview: bool,
+    ) -> None:
+        self.stop()
+        self._set_rounding_mode(adjusted_preview)
+        self.load_video(
+            source,
+            adjustments=adjustments,
+            trim_range_ms=trim_range_ms,
+            adjusted_preview=adjusted_preview,
+        )
+        self.show()
+        self.raise_()
+        self.play()
+
+    def close_preview(self) -> None:
+        self.stop()
+        self.hide()
+
+    def resizeEvent(self, event: QResizeEvent) -> None:  # type: ignore[override]
+        super().resizeEvent(event)
+        self._update_mask()
+
+    def _update_mask(self) -> None:
+        if self._high_quality_rounding_enabled:
+            self.clearMask()
+            return
+        if self.width() <= 0 or self.height() <= 0:
+            return
+        radius = max(0.0, min(float(self._corner_radius), min(self.width(), self.height()) / 2.0))
+        if radius <= 0.0:
+            self.clearMask()
+            return
+        path = QPainterPath()
+        path.addRoundedRect(QRectF(self.rect()), radius, radius)
+        self.setMask(QRegion(path.toFillPolygon().toPolygon()))
+
+    def _set_rounding_mode(self, adjusted_preview: bool) -> None:
+        self._high_quality_rounding_enabled = bool(adjusted_preview)
+        self.set_transparent_preview_enabled(
+            self._high_quality_rounding_enabled,
+            corner_radius=float(self._corner_radius),
+        )
+        self.setAttribute(
+            Qt.WidgetAttribute.WA_TranslucentBackground,
+            self._high_quality_rounding_enabled,
+        )
+        self.setAttribute(
+            Qt.WidgetAttribute.WA_NoSystemBackground,
+            self._high_quality_rounding_enabled,
+        )
+        self.setAutoFillBackground(not self._high_quality_rounding_enabled)
+        if self._high_quality_rounding_enabled:
+            self.setStyleSheet("background-color: transparent; border: none;")
+        else:
+            self.setStyleSheet("background-color: #121216; border: none;")
+        self._update_mask()
+
+
 class PreviewWindow(QWidget):
     """Frameless preview surface that reuses the media controller API."""
 
@@ -211,6 +307,7 @@ class PreviewWindow(QWidget):
         self._active_probe_request_id = 0
         self._active_source_key = ""
         self._probe_future: Optional[Future[tuple[float, float]]] = None
+        self._using_rhi_popup = False
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(
@@ -239,6 +336,8 @@ class PreviewWindow(QWidget):
         self._media.set_video_output(self._frame.video_item())
         self._media.set_muted(PREVIEW_WINDOW_MUTED)
         self._frame.video_item().nativeSizeChanged.connect(self._on_native_size_changed)
+        self._rhi_popup = _RhiPreviewPopup(parent)
+        self._rhi_popup.displaySizeChanged.connect(self._on_native_size_changed)
 
         self._close_timer = QTimer(self)
         self._close_timer.setSingleShot(True)
@@ -252,12 +351,16 @@ class PreviewWindow(QWidget):
         at: Optional[QRect | QPoint] = None,
         *,
         aspect_ratio_hint: Optional[float] = None,
+        adjustments: Mapping[str, object] | None = None,
+        trim_range_ms: tuple[int, int] | None = None,
+        adjusted_preview: bool = False,
     ) -> None:
         """Display *source* near *at* and start playback immediately."""
 
         path = Path(source)
         self._close_timer.stop()
         self._media.stop()
+        self._rhi_popup.close_preview()
         self._current_native_size = QSizeF()
         self._native_size_seeded_from_probe = False
         self._native_size_seeded = False
@@ -273,13 +376,23 @@ class PreviewWindow(QWidget):
         self._anchor_rect = at if isinstance(at, QRect) else None
         self._anchor_point = at if isinstance(at, QPoint) else None
         self._prime_native_size_async(path, request_id=self._active_probe_request_id)
-        self._media.load(path)
-
+        self._using_rhi_popup = bool(adjusted_preview or trim_range_ms is not None)
         self._apply_layout_for_anchor()
+        if self._using_rhi_popup:
+            self._rhi_popup.show_preview(
+                path,
+                adjustments=adjustments,
+                trim_range_ms=trim_range_ms,
+                adjusted_preview=adjusted_preview,
+            )
+            self.hide()
+        else:
+            self._media.load(path)
 
-        self.show()
-        self.raise_()
-        self._media.play()
+        if not self._using_rhi_popup:
+            self.show()
+            self.raise_()
+            self._media.play()
 
     def close_preview(self, delayed: bool = True) -> None:
         """Hide the preview window, optionally with a delay."""
@@ -292,17 +405,19 @@ class PreviewWindow(QWidget):
     def _do_close(self) -> None:
         self._close_timer.stop()
         self._media.stop()
+        self._rhi_popup.close_preview()
         self.hide()
 
-    def _clamp_to_screen(self, origin: QPoint) -> QPoint:
-        screen = self.screen()
+    def _clamp_to_screen(self, origin: QPoint, *, size: Optional[QSize] = None) -> QPoint:
+        screen = self._rhi_popup.screen() if self._using_rhi_popup else self.screen()
         if screen is None:
             return origin
         area = screen.availableGeometry()
+        window_size = size if size is not None else self.size()
         min_x = area.x()
         min_y = area.y()
-        max_x = area.x() + max(0, area.width() - self.width())
-        max_y = area.y() + max(0, area.height() - self.height())
+        max_x = area.x() + max(0, area.width() - window_size.width())
+        max_y = area.y() + max(0, area.height() - window_size.height())
         return QPoint(
             max(min_x, min(origin.x(), max_x)),
             max(min_y, min(origin.y(), max_y)),
@@ -328,6 +443,32 @@ class PreviewWindow(QWidget):
             return self._aspect_ratio_hint
         return 16.0 / 9.0
 
+    def _popup_size_for_aspect(self, max_dimension: int, aspect_ratio: float) -> QSize:
+        return self._size_for_aspect(max_dimension, aspect_ratio)
+
+    def _apply_popup_layout(self) -> None:
+        aspect_ratio = self._effective_aspect_ratio()
+        if self._anchor_rect is not None:
+            base_dimension = max(
+                PREVIEW_WINDOW_DEFAULT_WIDTH,
+                self._anchor_rect.width(),
+                self._anchor_rect.height(),
+            )
+            content_size = self._popup_size_for_aspect(base_dimension, aspect_ratio)
+            self._rhi_popup.resize_preview(content_size)
+            center = self._anchor_rect.center()
+            origin = QPoint(
+                center.x() - self._rhi_popup.width() // 2,
+                center.y() - self._rhi_popup.height() // 2,
+            )
+            self._rhi_popup.move(self._clamp_to_screen(origin, size=content_size))
+            return
+
+        content_size = self._popup_size_for_aspect(PREVIEW_WINDOW_DEFAULT_WIDTH, aspect_ratio)
+        self._rhi_popup.resize_preview(content_size)
+        if self._anchor_point is not None:
+            self._rhi_popup.move(self._clamp_to_screen(self._anchor_point, size=content_size))
+
     def _size_for_aspect(self, max_dimension: int, aspect_ratio: float) -> QSize:
         base = max(1, int(max_dimension))
         aspect = max(0.01, float(aspect_ratio))
@@ -340,6 +481,9 @@ class PreviewWindow(QWidget):
         return QSize(width, height)
 
     def _apply_layout_for_anchor(self) -> None:
+        if self._using_rhi_popup:
+            self._apply_popup_layout()
+            return
         aspect_ratio = self._effective_aspect_ratio()
         if self._anchor_rect is not None:
             base_dimension = max(

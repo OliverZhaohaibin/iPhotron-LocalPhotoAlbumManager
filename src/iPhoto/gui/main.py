@@ -14,6 +14,26 @@ from PySide6.QtWidgets import QApplication
 _logger = logging.getLogger(__name__)
 
 
+def _prefer_local_source_tree() -> None:
+    """Ensure direct script runs import the workspace package first.
+
+    When ``main.py`` is launched directly from an IDE, Python may resolve the
+    editable ``iPhoto`` install from another checkout before this repo's
+    ``src`` tree. Prepending the local ``src`` path keeps the GUI aligned with
+    the code being edited.
+    """
+
+    src_root = Path(__file__).resolve().parents[2]
+    src_root_str = str(src_root)
+    if sys.path and sys.path[0] == src_root_str:
+        return
+    try:
+        sys.path.remove(src_root_str)
+    except ValueError:
+        pass
+    sys.path.insert(0, src_root_str)
+
+
 def _configure_qt_opengl_defaults() -> None:
     """Apply the same desktop OpenGL defaults used by the standalone map tool."""
 
@@ -38,6 +58,8 @@ def _configure_qt_opengl_defaults() -> None:
 
 def main(argv: list[str] | None = None) -> int:
     """Launch the Qt application and return the exit code."""
+
+    _prefer_local_source_tree()
 
     # Ensure the ``iPhoto`` root logger is configured before any component
     # creates a child logger.  ``get_logger()`` lazily attaches a StreamHandler

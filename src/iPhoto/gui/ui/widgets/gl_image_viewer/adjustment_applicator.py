@@ -27,6 +27,48 @@ from .....core.levels_resolver import (
 _LOGGER = logging.getLogger(__name__)
 
 
+def _normalise_curve_points(raw: Any) -> tuple[tuple[float, float], ...]:
+    """Return a hashable representation of curve control points."""
+
+    if not isinstance(raw, list):
+        return ()
+    points: list[tuple[float, float]] = []
+    for pt in raw:
+        if (
+            isinstance(pt, (list, tuple))
+            and len(pt) >= 2
+            and isinstance(pt[0], (int, float))
+            and isinstance(pt[1], (int, float))
+        ):
+            points.append((float(pt[0]), float(pt[1])))
+    return tuple(points)
+
+
+def _curve_signature(adjustments: dict[str, Any]) -> tuple:
+    """Return a stable signature for the current curve configuration."""
+
+    if not bool(adjustments.get("Curve_Enabled", False)):
+        return ("disabled",)
+    return (
+        "enabled",
+        _normalise_curve_points(adjustments.get("Curve_RGB")),
+        _normalise_curve_points(adjustments.get("Curve_Red")),
+        _normalise_curve_points(adjustments.get("Curve_Green")),
+        _normalise_curve_points(adjustments.get("Curve_Blue")),
+    )
+
+
+def _levels_signature(adjustments: dict[str, Any]) -> tuple:
+    """Return a stable signature for the current levels configuration."""
+
+    if not bool(adjustments.get("Levels_Enabled", False)):
+        return ("disabled",)
+    handles = adjustments.get("Levels_Handles")
+    if not isinstance(handles, list) or len(handles) != 5:
+        return ("invalid",)
+    return ("enabled", tuple(float(value) for value in handles))
+
+
 class AdjustmentApplicator:
     """Manages curve and levels LUT generation and GPU upload.
 
@@ -50,6 +92,14 @@ class AdjustmentApplicator:
         self._make_current = make_current
         self._done_current = done_current
         self._current_curve_lut: np.ndarray | None = None
+        self._current_curve_signature: tuple | None = None
+        self._current_levels_signature: tuple | None = None
+
+    def invalidate_cache(self) -> None:
+        """Forget cached LUT signatures after renderer/resource recreation."""
+
+        self._current_curve_signature = None
+        self._current_levels_signature = None
 
     # ------------------------------------------------------------------
     # Curve LUT
@@ -59,11 +109,14 @@ class AdjustmentApplicator:
         """Update the curve LUT texture if curve parameters have changed."""
         curve_enabled = bool(adjustments.get("Curve_Enabled", False))
         renderer = self._renderer_provider()
+        signature = _curve_signature(adjustments)
+
+        if renderer is None:
+            return
+        if signature == self._current_curve_signature:
+            return
 
         if not curve_enabled:
-            if renderer is None:
-                return
-
             self._make_current()
             try:
                 try:
@@ -75,6 +128,7 @@ class AdjustmentApplicator:
 
                 renderer.upload_curve_lut(identity_lut)
                 self._current_curve_lut = identity_lut
+                self._current_curve_signature = signature
             finally:
                 self._done_current()
             return
@@ -91,14 +145,8 @@ class AdjustmentApplicator:
             raw = adjustments.get(key)
             if raw and isinstance(raw, list):
                 points: list[CurvePoint] = []
-                for pt in raw:
-                    if (
-                        isinstance(pt, (list, tuple))
-                        and len(pt) >= 2
-                        and isinstance(pt[0], (int, float))
-                        and isinstance(pt[1], (int, float))
-                    ):
-                        points.append(CurvePoint(x=float(pt[0]), y=float(pt[1])))
+                for x_coord, y_coord in _normalise_curve_points(raw):
+                    points.append(CurvePoint(x=x_coord, y=y_coord))
                 if points:
                     setattr(params, attr, CurveChannel(points=points))
 
@@ -108,13 +156,13 @@ class AdjustmentApplicator:
             _LOGGER.warning("Failed to generate curve LUT: %s", e)
             return
 
-        if renderer is not None:
-            self._make_current()
-            try:
-                renderer.upload_curve_lut(lut)
-                self._current_curve_lut = lut
-            finally:
-                self._done_current()
+        self._make_current()
+        try:
+            renderer.upload_curve_lut(lut)
+            self._current_curve_lut = lut
+            self._current_curve_signature = signature
+        finally:
+            self._done_current()
 
     # ------------------------------------------------------------------
     # Levels LUT
@@ -124,10 +172,14 @@ class AdjustmentApplicator:
         """Update the levels LUT texture if levels parameters have changed."""
         levels_enabled = bool(adjustments.get("Levels_Enabled", False))
         renderer = self._renderer_provider()
+        signature = _levels_signature(adjustments)
+
+        if renderer is None:
+            return
+        if signature == self._current_levels_signature:
+            return
 
         if not levels_enabled:
-            if renderer is None:
-                return
             self._make_current()
             try:
                 try:
@@ -136,6 +188,7 @@ class AdjustmentApplicator:
                     _LOGGER.warning("Failed to generate identity levels LUT: %s", e)
                     return
                 renderer.upload_levels_lut(identity_lut)
+                self._current_levels_signature = signature
             finally:
                 self._done_current()
             return
@@ -150,9 +203,9 @@ class AdjustmentApplicator:
             _LOGGER.warning("Failed to generate levels LUT: %s", e)
             return
 
-        if renderer is not None:
-            self._make_current()
-            try:
-                renderer.upload_levels_lut(lut)
-            finally:
-                self._done_current()
+        self._make_current()
+        try:
+            renderer.upload_levels_lut(lut)
+            self._current_levels_signature = signature
+        finally:
+            self._done_current()

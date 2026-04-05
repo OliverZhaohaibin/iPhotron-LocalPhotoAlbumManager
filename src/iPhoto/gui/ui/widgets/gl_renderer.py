@@ -18,16 +18,12 @@ from __future__ import annotations
 
 import logging
 import math
-from typing import Mapping, Optional
+import sys
+from typing import Any, Mapping, Optional
 
 import numpy as np
 from PySide6.QtCore import QObject, QPointF, QSize
 from PySide6.QtGui import QImage
-from PySide6.QtOpenGL import (
-    QOpenGLFunctions_3_3_Core,
-    QOpenGLShaderProgram,
-    QOpenGLVertexArrayObject,
-)
 from OpenGL import GL as gl
 from shiboken6.Shiboken import VoidPtr
 
@@ -36,9 +32,6 @@ from ....core.selective_color_resolver import NUM_RANGES, SAT_GATE_LO, SAT_GATE_
 from .perspective_math import build_perspective_matrix
 from .gl_shader_manager import (
     ShaderManager,
-    _load_shader_source,
-    _OVERLAY_VERTEX_SHADER,
-    _OVERLAY_FRAGMENT_SHADER,
 )
 from .gl_texture_manager import TextureManager
 from .gl_uniform_state import UniformState
@@ -52,7 +45,7 @@ class GLRenderer:
 
     def __init__(
         self,
-        gl_funcs: QOpenGLFunctions_3_3_Core,
+        gl_funcs: Any,
         *,
         parent: Optional[QObject] = None,
     ) -> None:
@@ -63,6 +56,8 @@ class GLRenderer:
         self._tex_mgr = TextureManager()
         # UniformState shares the same dict instance populated by ShaderManager
         self._uniform = UniformState(gl_funcs, self._shader_mgr.uniform_locations)
+        self._dummy_vao_disabled = False
+        self._overlay_vao_disabled = False
 
     # ------------------------------------------------------------------
     # Backward-compatible attribute access  (used by tests & internals)
@@ -134,6 +129,8 @@ class GLRenderer:
         """Compile the shader program and set up immutable GL state."""
 
         self.destroy_resources()
+        self._dummy_vao_disabled = False
+        self._overlay_vao_disabled = False
         self._shader_mgr.initialize()
 
     def destroy_resources(self) -> None:
@@ -148,6 +145,16 @@ class GLRenderer:
     def upload_texture(self, image: QImage) -> tuple[int, int, int]:
         """Upload *image* to the GPU and return ``(id, width, height)``."""
         return self._tex_mgr.upload_texture(image)
+
+    def upload_video_frame(self, frame) -> tuple[int, int]:
+        """Upload a decoded video frame directly as shader-readable textures."""
+
+        return self._tex_mgr.upload_video_frame(frame)
+
+    def last_video_upload_pre_rotated(self) -> bool:
+        """Return whether the latest fallback upload already applied rotation."""
+
+        return self._tex_mgr.last_video_upload_pre_rotated()
 
     def delete_texture(self) -> None:
         """Delete the currently bound texture, if any."""
@@ -170,6 +177,16 @@ class GLRenderer:
     def has_texture(self) -> bool:
         """Return ``True`` if a GPU texture is currently resident."""
         return self._tex_mgr.has_texture()
+
+    def has_video_texture(self) -> bool:
+        """Return ``True`` when a YUV video texture pair is resident."""
+
+        return self._tex_mgr.has_video_texture()
+
+    def video_metadata(self) -> tuple[int, int, int, int]:
+        """Return video metadata for the active texture source."""
+
+        return self._tex_mgr.video_metadata()
 
     def texture_size(self) -> tuple[int, int]:
         """Return the uploaded texture dimensions as ``(width, height)``."""
@@ -211,30 +228,86 @@ class GLRenderer:
         img_scale: float = 1.0,
         img_offset: Optional[QPointF] = None,
         logical_tex_size: tuple[float, float] | None = None,
+        corner_radius_px: float = 0.0,
     ) -> None:
         """Draw the textured triangle covering the current viewport."""
 
         if self._program is None:
             raise RuntimeError("Renderer has not been initialised")
-        if self._texture_id == 0:
+        if not self._tex_mgr.has_texture():
             return
         if scale <= 0.0:
             return
 
         gf = self._gl_funcs
+        diagnose_errors = sys.platform.startswith("linux")
+
+        def _consume_gl_errors() -> list[int]:
+            errors: list[int] = []
+            while True:
+                error = int(gf.glGetError())
+                if error == gl.GL_NO_ERROR:
+                    break
+                errors.append(error)
+            return errors
+
+        def _drain_gl_errors(stage: str) -> list[int]:
+            if not diagnose_errors:
+                return []
+            errors = _consume_gl_errors()
+            if errors:
+                joined = ", ".join(f"0x{value:04X}" for value in errors)
+                _LOGGER.warning("OpenGL error %s: %s", stage, joined)
+            return errors
+
+        _drain_gl_errors("at render entry")
         if not self._program.bind():
             _LOGGER.error("Failed to bind shader program: %s", self._program.log())
             return
 
+        dummy_vao_bound = False
         try:
-            if self._dummy_vao is not None:
+            if self._dummy_vao is not None and not self._dummy_vao_disabled:
                 self._dummy_vao.bind()
+                bind_errors = _drain_gl_errors("after VAO bind")
+                if bind_errors:
+                    self._dummy_vao_disabled = True
+                    _LOGGER.warning(
+                        "Disabling dummy VAO after bind failure; continuing with default vertex-array state"
+                    )
+                else:
+                    dummy_vao_bound = True
 
             offset_value = img_offset or QPointF(0.0, 0.0)
 
             gf.glActiveTexture(gl.GL_TEXTURE0)
             gf.glBindTexture(gl.GL_TEXTURE_2D, int(self._texture_id))
             self._set_uniform1i("uTex", 0)
+            has_video_texture = self._tex_mgr.has_video_texture()
+            self._set_uniform1i("uSourceKind", 1 if has_video_texture else 0)
+
+            if has_video_texture:
+                video_y_tex, video_uv_tex = self._tex_mgr.video_texture_ids()
+                gf.glActiveTexture(gl.GL_TEXTURE3)
+                gf.glBindTexture(gl.GL_TEXTURE_2D, int(video_y_tex))
+                self._set_uniform1i("uVideoYTex", 3)
+                gf.glActiveTexture(gl.GL_TEXTURE4)
+                gf.glBindTexture(gl.GL_TEXTURE_2D, int(video_uv_tex))
+                self._set_uniform1i("uVideoUVTex", 4)
+                video_format, video_colorspace, video_transfer, video_range = self._tex_mgr.video_metadata()
+            else:
+                gf.glActiveTexture(gl.GL_TEXTURE3)
+                gf.glBindTexture(gl.GL_TEXTURE_2D, 0)
+                self._set_uniform1i("uVideoYTex", 3)
+                gf.glActiveTexture(gl.GL_TEXTURE4)
+                gf.glBindTexture(gl.GL_TEXTURE_2D, 0)
+                self._set_uniform1i("uVideoUVTex", 4)
+                video_format, video_colorspace, video_transfer, video_range = (0, 1, 0, 0)
+
+            self._set_uniform1i("uVideoFormat", int(video_format))
+            self._set_uniform1i("uVideoColorSpace", int(video_colorspace))
+            self._set_uniform1i("uVideoTransfer", int(video_transfer))
+            self._set_uniform1i("uVideoRange", int(video_range))
 
             def adjustment_value(key: str, default: float = 0.0) -> float:
                 return float(adjustments.get(key, default))
@@ -342,23 +415,36 @@ class GLRenderer:
             self._set_uniform1f("uVignetteRadius", vig_radius)
             self._set_uniform1f("uVignetteSoftness", vig_softness)
             sc_ranges = adjustments.get("SelectiveColor_Ranges")
+            selective_color_u0 = np.zeros((NUM_RANGES, 4), dtype=np.float32)
+            selective_color_u1 = np.zeros((NUM_RANGES, 4), dtype=np.float32)
             if isinstance(sc_ranges, list) and len(sc_ranges) == NUM_RANGES:
-                u0 = np.zeros((NUM_RANGES, 4), dtype=np.float32)
-                u1 = np.zeros((NUM_RANGES, 4), dtype=np.float32)
                 for idx, rng in enumerate(sc_ranges):
                     if isinstance(rng, (list, tuple)) and len(rng) >= 5:
                         center = float(rng[0])
                         range_slider = float(np.clip(rng[1], 0.0, 1.0))
                         deg = 5.0 + (70.0 - 5.0) * range_slider
                         width_hue = float(np.clip(deg / 360.0, 0.001, 0.5))
-                        u0[idx] = [center, width_hue, float(rng[2]), float(rng[3])]
-                        u1[idx] = [float(rng[4]), SAT_GATE_LO, SAT_GATE_HI, 1.0]
-                loc0 = self._uniform_locations.get("uSCRange0", -1)
-                loc1 = self._uniform_locations.get("uSCRange1", -1)
-                if loc0 != -1:
-                    gl.glUniform4fv(loc0, NUM_RANGES, u0)
-                if loc1 != -1:
-                    gl.glUniform4fv(loc1, NUM_RANGES, u1)
+                        selective_color_u0[idx] = [
+                            center,
+                            width_hue,
+                            float(rng[2]),
+                            float(rng[3]),
+                        ]
+                        selective_color_u1[idx] = [
+                            float(rng[4]),
+                            SAT_GATE_LO,
+                            SAT_GATE_HI,
+                            1.0,
+                        ]
+            for idx in range(NUM_RANGES):
+                self._set_uniform4f(
+                    f"uSCRange0[{idx}]",
+                    *selective_color_u0[idx],
+                )
+                self._set_uniform4f(
+                    f"uSCRange1[{idx}]",
+                    *selective_color_u1[idx],
+                )
 
             if time_value is not None:
                 self._set_uniform1f("uTime", time_value)
@@ -393,6 +479,7 @@ class GLRenderer:
                 float(offset_value.x()),
                 float(offset_value.y()),
             )
+            self._set_uniform1f("uCornerRadius", max(0.0, float(corner_radius_px)))
 
             # Pass crop parameters to shader
             self._set_uniform1f("uCropCX", adjustment_value("Crop_CX", 0.5))
@@ -417,17 +504,18 @@ class GLRenderer:
                 rotate_steps=0,
                 flip_horizontal=flip_enabled,
             )
-            self._set_uniform_matrix3("uPerspectiveMatrix", perspective_matrix)
+            self._set_uniform3f("uPerspectiveRow0", *perspective_matrix[0])
+            self._set_uniform3f("uPerspectiveRow1", *perspective_matrix[1])
+            self._set_uniform3f("uPerspectiveRow2", *perspective_matrix[2])
 
+            _drain_gl_errors("before glDrawArrays")
             gf.glDrawArrays(gl.GL_TRIANGLES, 0, 3)
+            _drain_gl_errors("from glDrawArrays")
         finally:
-            if self._dummy_vao is not None:
+            if dummy_vao_bound and self._dummy_vao is not None:
                 self._dummy_vao.release()
             self._program.release()
-
-        error = gf.glGetError()
-        if error != gl.GL_NO_ERROR:
-            _LOGGER.warning("OpenGL error after draw: 0x%04X", int(error))
+            _drain_gl_errors("during render cleanup")
 
     def draw_crop_overlay(
         self,
@@ -439,11 +527,7 @@ class GLRenderer:
     ) -> None:
         """Render the semi-transparent crop mask and interactive handles."""
 
-        if (
-            self._overlay_program is None
-            or self._overlay_vao is None
-            or self._overlay_vbo == 0
-        ):
+        if self._overlay_program is None or self._overlay_vbo == 0:
             return
 
         vw = max(1.0, float(view_width))
@@ -504,8 +588,36 @@ class GLRenderer:
             gf.glDisable(gl.GL_BLEND)
             return
 
+        overlay_vao_bound = False
         try:
-            vao.bind()
+            if vao is not None and not self._overlay_vao_disabled:
+                # Clear any pre-existing GL errors so we only evaluate errors
+                # caused by this VAO bind operation.
+                if sys.platform.startswith("linux"):
+                    while True:
+                        pre_error = int(gf.glGetError())
+                        if pre_error == gl.GL_NO_ERROR:
+                            break
+                vao.bind()
+                bind_errors: list[int] = []
+                if sys.platform.startswith("linux"):
+                    bind_errors = []
+                    while True:
+                        error = int(gf.glGetError())
+                        if error == gl.GL_NO_ERROR:
+                            break
+                        bind_errors.append(error)
+                    if bind_errors:
+                        joined = ", ".join(f"0x{value:04X}" for value in bind_errors)
+                        _LOGGER.warning("OpenGL error after overlay VAO bind: %s", joined)
+                        self._overlay_vao_disabled = True
+                        _LOGGER.warning(
+                            "Disabling overlay VAO after bind failure; continuing with default vertex-array state"
+                        )
+                    else:
+                        overlay_vao_bound = True
+                else:
+                    overlay_vao_bound = True
 
             quads = [
                 (0.0, 0.0, vw, top),
@@ -567,7 +679,8 @@ class GLRenderer:
                     vertices = _viewport_rect_to_clip(rect)
                     _draw(vertices, gl.GL_TRIANGLE_FAN, border_colour)
         finally:
-            vao.release()
+            if overlay_vao_bound:
+                vao.release()
             program.release()
             gf.glColorMask(True, True, True, True)
             gf.glDisable(gl.GL_BLEND)

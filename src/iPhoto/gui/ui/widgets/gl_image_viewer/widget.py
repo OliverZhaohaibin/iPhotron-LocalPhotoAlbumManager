@@ -11,31 +11,35 @@ GPU-accelerated image viewer (pure OpenGL texture upload; pixel-accurate zoom/pa
 from __future__ import annotations
 
 import logging
+import sys
 import time
 from collections.abc import Mapping
 from typing import Any
 
 from OpenGL import GL as gl
-from PySide6.QtCore import QPointF, QSize, Qt, Signal, QRectF
+from PySide6.QtCore import QPointF, QRectF, QSize, Qt, Signal
 from PySide6.QtGui import (
     QColor,
     QImage,
     QMouseEvent,
+    QOpenGLContext,
     QPixmap,
+    QRhiCommandBuffer,
     QRhiDepthStencilClearValue,
     QWheelEvent,
 )
-from PySide6.QtOpenGL import (
-    QOpenGLFunctions_3_3_Core,
-)
 from PySide6.QtWidgets import QRhiWidget
+
+try:  # pragma: no cover - optional Qt module
+    from PySide6.QtMultimedia import QVideoFrame, QVideoFrameFormat
+except (ModuleNotFoundError, ImportError):  # pragma: no cover
+    QVideoFrame = None  # type: ignore[assignment, misc]
+    QVideoFrameFormat = None  # type: ignore[assignment, misc]
 
 from ..gl_crop_controller import CropInteractionController
 from ..gl_renderer import GLRenderer
 from ..view_transform_controller import ViewTransformController
-
-from . import crop_viewport
-from . import geometry
+from . import crop_viewport, geometry
 from .adjustment_applicator import AdjustmentApplicator
 from .components import LoadingOverlay
 from .fullscreen_handler import FullscreenHandler
@@ -97,13 +101,29 @@ class GLImageViewer(QRhiWidget):
         # into this widget and causing transparent first-frame flashes.
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, False)
 
-        self._gl_funcs: QOpenGLFunctions_3_3_Core | None = None
+        self._gl_funcs: Any | None = None
         self._renderer: GLRenderer | None = None
         self._gl_initialized = False
         self._first_render_done = False
 
         # 状态
         self._image: QImage | None = None
+        self._video_frame = None
+        self._pending_video_image: QImage | None = None
+        self._pending_video_image_pre_rotated = False
+        self._video_frame_dirty = False
+        self._using_video_frame_source = False
+        self._pending_video_reset_view = False
+        self._reset_zoom_frames_crop = True
+        self._crop_center_zoom_strength = 0.5
+        self._fill_viewport_enabled = False
+        self._transparent_rounded_clip_enabled = False
+        self._rounded_clip_radius = 0.0
+        self._source_rotate90_steps = 0
+        self._pending_source_rotate90_steps: int | None = None
+        self._last_render_target_size = QSize()
+        self._diag_video_frame_set_count = 0
+        self._diag_video_render_count = 0
         self._adjustments: dict[str, Any] = {}
         self._eyedropper_active = False
 
@@ -142,6 +162,7 @@ class GLImageViewer(QRhiWidget):
             on_next_item=self.nextItemRequested.emit,
             on_prev_item=self.prevItemRequested.emit,
             display_texture_size_provider=self._display_texture_dimensions,
+            device_view_size_provider=self._render_target_device_size,
         )
         self._transform_controller.reset_zoom()
 
@@ -165,6 +186,7 @@ class GLImageViewer(QRhiWidget):
             on_interaction_finished=self.cropInteractionFinished.emit,
         )
         self._auto_crop_view_locked: bool = False
+        self._auto_crop_center_locked: bool = False
         self._update_crop_perspective_state()
 
         # Input event handler
@@ -202,6 +224,40 @@ class GLImageViewer(QRhiWidget):
         ``OffscreenRenderer``.
         """
 
+    def _render_target_device_size(self) -> tuple[float, float] | None:
+        """Return the latest QRhi render-target size in device pixels."""
+
+        if self._last_render_target_size.isEmpty():
+            return None
+        return (
+            float(self._last_render_target_size.width()),
+            float(self._last_render_target_size.height()),
+        )
+
+    @staticmethod
+    def _should_log_diag_frame(index: int) -> bool:
+        """Throttle noisy Linux playback diagnostics."""
+
+        return index <= 12 or index % 30 == 0
+
+    def _diag_video_frame_summary(self, frame) -> str:
+        """Return a compact summary of a pending QVideoFrame."""
+
+        if QVideoFrame is None or frame is None:
+            return "none"
+        try:
+            size = frame.size()
+            width = size.width()
+            height = size.height()
+        except Exception:  # pragma: no cover - defensive
+            width = -1
+            height = -1
+        try:
+            pixel_format = int(frame.pixelFormat())
+        except Exception:  # pragma: no cover - defensive
+            pixel_format = -1
+        return f"valid={frame.isValid()} size={width}x{height} fmt={pixel_format}"
+
     # --------------------------- Public API ---------------------------
 
     def shutdown(self) -> None:
@@ -220,6 +276,7 @@ class GLImageViewer(QRhiWidget):
         *,
         image_source: object | None = None,
         reset_view: bool = True,
+        force_texture_refresh: bool = False,
     ) -> None:
         """Display *image* together with optional colour *adjustments*.
 
@@ -239,9 +296,19 @@ class GLImageViewer(QRhiWidget):
             pan state.  Passing ``False`` keeps the current transform so edit
             mode can reuse the detail view framing without a visible jump.
         """
+        self._video_frame = None
+        self._pending_video_image = None
+        self._pending_video_image_pre_rotated = False
+        self._video_frame_dirty = False
+        self._using_video_frame_source = False
+        self._pending_video_reset_view = False
+        self._pending_source_rotate90_steps = None
 
         # Check if we can reuse the existing texture
-        if self._texture_manager.should_reuse_texture(image_source):
+        if (
+            not force_texture_refresh
+            and self._texture_manager.should_reuse_texture(image_source)
+        ):
             if image is not None and not image.isNull():
                 # Skip texture re-upload, only update adjustments. Preserve the
                 # current zoom/pan state so adjustment previews stay anchored
@@ -250,7 +317,11 @@ class GLImageViewer(QRhiWidget):
                 return
 
         # Update texture resource tracking
-        self._texture_manager.set_image(image, image_source)
+        self._texture_manager.set_image(
+            image,
+            image_source,
+            force_upload=force_texture_refresh,
+        )
         self._image = image
         self._adjustments = dict(adjustments or {})
         self._update_crop_perspective_state()
@@ -263,6 +334,7 @@ class GLImageViewer(QRhiWidget):
             # Clear resources and reset state
             self._texture_manager.clear_image()
             self._auto_crop_view_locked = False
+            self._auto_crop_center_locked = False
             self._transform_controller.set_image_cover_scale(1.0)
 
         if reset_view:
@@ -271,6 +343,176 @@ class GLImageViewer(QRhiWidget):
             # exposes.  ``reset_view`` lets callers preserve the zoom when the
             # user toggles between detail and edit modes.
             self.reset_zoom()
+
+    def set_video_frame(
+        self,
+        frame,
+        adjustments: Mapping[str, float] | None = None,
+        *,
+        reset_view: bool = True,
+    ) -> None:
+        """Display *frame* directly through the OpenGL shader pipeline."""
+
+        if QVideoFrame is None or frame is None or not frame.isValid():
+            return
+
+        starting_video_source = not self._using_video_frame_source
+        if starting_video_source:
+            self._texture_manager.clear_image()
+        self._using_video_frame_source = True
+        self._image = None
+        self._video_frame = frame
+        self._pending_video_image = None
+        self._pending_video_image_pre_rotated = False
+        self._video_frame_dirty = True
+        if (
+            sys.platform.startswith("linux")
+            and QVideoFrameFormat is not None
+            and self._should_snapshot_video_frame_as_image(frame)
+        ):
+            snapshot = frame.toImage()
+            if not snapshot.isNull():
+                self._pending_video_image = snapshot
+                self._pending_video_image_pre_rotated = self._is_image_snapshot_prerotated(frame, snapshot)
+                self._video_frame = None
+        if adjustments is not None and adjustments != self._adjustments:
+            self.set_adjustments(dict(adjustments))
+        self._loading_overlay.hide()
+        if starting_video_source:
+            self._time_base = time.monotonic()
+
+        if reset_view:
+            self._pending_video_reset_view = True
+        self._diag_video_frame_set_count += 1
+        if sys.platform.startswith("linux") and self._should_log_diag_frame(self._diag_video_frame_set_count):
+            _LOGGER.warning(
+                "[diag][gl_viewer] set_video_frame #%s reset_view=%s visible=%s dirty=%s pending_reset=%s widget=%sx%s rt=%sx%s frame=%s",
+                self._diag_video_frame_set_count,
+                reset_view,
+                self.isVisible(),
+                self._video_frame_dirty,
+                self._pending_video_reset_view,
+                self.width(),
+                self.height(),
+                self._last_render_target_size.width(),
+                self._last_render_target_size.height(),
+                self._diag_video_frame_summary(frame),
+            )
+        self._upload_video_frame_immediately_if_possible()
+        self.update()
+
+    @staticmethod
+    def _should_snapshot_video_frame_as_image(frame) -> bool:
+        """Return whether Linux should snapshot *frame* into ``QImage`` immediately."""
+
+        if QVideoFrameFormat is None:
+            return False
+        try:
+            pixel_format = frame.pixelFormat()
+            pixel_enum = QVideoFrameFormat.PixelFormat
+        except (AttributeError, RuntimeError, TypeError) as exc:
+            _LOGGER.debug(
+                "Falling back to snapshot upload due to pixel-format probe failure: %s",
+                type(exc).__name__,
+            )
+            return True
+        packed_names = (
+            "Format_RGBA8888",
+            "Format_BGRA8888",
+            "Format_RGBX8888",
+            "Format_BGRX8888",
+        )
+        for name in packed_names:
+            value = getattr(pixel_enum, name, None)
+            if value is not None and pixel_format == value:
+                return False
+        return True
+
+    @staticmethod
+    def _is_image_snapshot_prerotated(frame, image: QImage) -> bool:
+        """Return ``True`` when ``frame.toImage()`` dimensions already include rotation."""
+
+        if image.isNull():
+            return False
+        try:
+            fmt = frame.surfaceFormat()
+        except (AttributeError, RuntimeError, TypeError) as exc:
+            _LOGGER.debug(
+                "Could not determine whether frame snapshot is pre-rotated: %s",
+                type(exc).__name__,
+            )
+            return False
+        width = int(fmt.frameWidth())
+        height = int(fmt.frameHeight())
+        return width > 0 and height > 0 and image.width() == height and image.height() == width
+
+    def _upload_pending_video_source(self) -> bool:
+        """Upload pending video source and return whether snapshot path was pre-rotated."""
+
+        if self._renderer is None:
+            return False
+
+        pending_rotation = self._pending_source_rotate90_steps
+        if pending_rotation is None:
+            pending_rotation = self._source_rotate90_steps
+
+        pre_rotated = False
+        if self._pending_video_image is not None:
+            self._renderer.upload_texture(self._pending_video_image)
+            pre_rotated = self._pending_video_image_pre_rotated
+            self._pending_video_image = None
+            self._pending_video_image_pre_rotated = False
+            self._video_frame = None
+        elif self._video_frame is not None:
+            self._renderer.upload_video_frame(self._video_frame)
+            pre_rotated = self._renderer.last_video_upload_pre_rotated()
+        else:
+            return False
+
+        final_rotation = 0 if pre_rotated else pending_rotation
+        self._apply_video_source_rotation_steps(
+            final_rotation,
+            request_update=False,
+        )
+        self._pending_source_rotate90_steps = None
+        self._video_frame = None
+        self._video_frame_dirty = False
+        straighten, rotate_steps, _ = self._rotation_parameters()
+        self._update_cover_scale(straighten, rotate_steps)
+        if self._pending_video_reset_view:
+            self._pending_video_reset_view = False
+            self.reset_zoom()
+        return pre_rotated
+
+    def _upload_video_frame_immediately_if_possible(self) -> None:
+        """Best-effort immediate Linux upload for edit-preview video frames.
+
+        Some Linux backends expose short-lived mapped frame handles. Uploading
+        only in ``render()`` may happen too late and produce intermittent black
+        output in edit preview while gallery playback remains correct. This
+        helper opportunistically uploads right after ``set_video_frame`` when
+        GL resources are ready, then falls back to normal ``render()`` upload.
+        """
+
+        if not sys.platform.startswith("linux"):
+            return
+        if not self._using_video_frame_source or not self._video_frame_dirty:
+            return
+        if (
+            (self._video_frame is None and self._pending_video_image is None)
+            or self._renderer is None
+            or not self._gl_initialized
+        ):
+            return
+
+        self._make_gl_current()
+        try:
+            self._upload_pending_video_source()
+        except (AttributeError, RuntimeError, ValueError, TypeError):
+            _LOGGER.exception("Failed immediate Linux video-frame upload in GLImageViewer")
+        finally:
+            self._done_gl_current()
+
     def set_placeholder(self, pixmap: QPixmap | None) -> None:
         """Display *pixmap* without changing the tracked image source."""
 
@@ -323,10 +565,11 @@ class GLImageViewer(QRhiWidget):
         if self._crop_controller.is_active():
             # Refresh the crop overlay in logical space so it stays aligned when rotation
             # or perspective adjustments change while the interaction mode is active.
-            logical_values = geometry.logical_crop_mapping_from_texture(mapped_adjustments)
-            self._crop_controller.set_active(True, logical_values)
+            self._crop_controller.set_active(True, self._logical_crop_values(mapped_adjustments))
         if self._auto_crop_view_locked and not self._crop_controller.is_active():
             self._reapply_locked_crop_view()
+        elif self._auto_crop_center_locked and not self._crop_controller.is_active():
+            self._reapply_locked_crop_center()
         self.update()
 
     def current_image_source(self) -> object | None:
@@ -373,6 +616,126 @@ class GLImageViewer(QRhiWidget):
     def set_surface_color_override(self, colour: str | None) -> None:
         """Override the viewer backdrop with *colour* or restore the default."""
         self._fullscreen_handler.set_surface_color_override(colour)
+
+    def set_crop_framing_enabled(self, enabled: bool) -> None:
+        """Control whether ``reset_zoom()`` frames the stored crop region."""
+
+        target = bool(enabled)
+        if self._reset_zoom_frames_crop == target:
+            return
+        self._reset_zoom_frames_crop = target
+        if not target:
+            self._auto_crop_view_locked = False
+        else:
+            self._auto_crop_center_locked = False
+
+    def crop_framing_enabled(self) -> bool:
+        """Return whether ``reset_zoom()`` currently frames the crop region."""
+
+        return self._reset_zoom_frames_crop
+
+    def set_crop_center_zoom_strength(self, strength: float) -> None:
+        """Tune how strongly playback follows the crop fit when framing is off."""
+
+        self._crop_center_zoom_strength = max(0.0, min(1.0, float(strength)))
+
+    def crop_center_zoom_strength(self) -> float:
+        """Return the partial crop-fit strength used outside crop framing mode."""
+
+        return self._crop_center_zoom_strength
+
+    def set_video_source_rotation(self, cw_degrees: int) -> None:
+        """Apply the resolved container rotation for streamed video frames."""
+
+        rotate_steps = (int(cw_degrees) // 90) % 4
+        self._pending_source_rotate90_steps = None
+        self._apply_video_source_rotation_steps(rotate_steps)
+
+    def set_pending_video_source_rotation(self, cw_degrees: int) -> None:
+        """Queue the container rotation for the next uploaded video frame."""
+
+        self._pending_source_rotate90_steps = (int(cw_degrees) // 90) % 4
+
+    def _apply_video_source_rotation_steps(
+        self,
+        rotate_steps: int,
+        *,
+        request_update: bool = True,
+    ) -> None:
+        if self._source_rotate90_steps == rotate_steps:
+            return
+        self._source_rotate90_steps = rotate_steps
+        self._update_crop_perspective_state()
+        if self._crop_controller.is_active():
+            self._crop_controller.set_active(True, self._logical_crop_values())
+        if self._auto_crop_view_locked and not self._crop_controller.is_active():
+            self._reapply_locked_crop_view()
+        elif self._auto_crop_center_locked and not self._crop_controller.is_active():
+            self._reapply_locked_crop_center()
+        if self._renderer is not None and self._renderer.has_texture():
+            straighten, rotate_steps, _ = self._rotation_parameters()
+            self._update_cover_scale(straighten, rotate_steps)
+        if request_update:
+            self.update()
+
+    def _display_rotate_steps(self, values: Mapping[str, Any] | None = None) -> int:
+        mapped_values = values if values is not None else self._adjustments
+        user_steps = geometry.get_rotate_steps(mapped_values)
+        return (user_steps + self._source_rotate90_steps) % 4
+
+    def _display_adjustments(self, values: Mapping[str, Any] | None = None) -> dict[str, Any]:
+        mapped = dict(values if values is not None else self._adjustments)
+        mapped["Crop_Rotate90"] = float(self._display_rotate_steps(mapped))
+        return mapped
+
+    def _logical_crop_values(self, values: Mapping[str, Any] | None = None) -> dict[str, float]:
+        return geometry.logical_crop_mapping_from_texture(self._display_adjustments(values))
+
+    def set_viewport_fill_enabled(self, enabled: bool) -> None:
+        """Control whether the viewer covers the viewport instead of fitting inside it."""
+
+        target = bool(enabled)
+        if self._fill_viewport_enabled == target:
+            return
+        self._fill_viewport_enabled = target
+        self._transform_controller.set_fill_viewport_enabled(target)
+        straighten, rotate_steps, _ = self._rotation_parameters()
+        self._update_cover_scale(straighten, rotate_steps)
+        self.update()
+
+    def set_transparent_rounded_clip(self, radius: float | None) -> None:
+        """Enable a smooth alpha-rounded clip when *radius* is positive."""
+
+        numeric = float(radius or 0.0)
+        enabled = numeric > 0.0
+        if (
+            self._transparent_rounded_clip_enabled == enabled
+            and abs(self._rounded_clip_radius - numeric) <= 1e-4
+        ):
+            return
+        self._transparent_rounded_clip_enabled = enabled
+        self._rounded_clip_radius = max(0.0, numeric)
+        self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent, not enabled)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, enabled)
+        self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, enabled)
+        self.setAutoFillBackground(not enabled)
+        self.update()
+
+    def _pass_clear_color(self) -> QColor:
+        """Return the QRhi clear colour for the current transparency mode."""
+
+        if self._transparent_rounded_clip_enabled:
+            return QColor(0, 0, 0, 0)
+        bg = self._fullscreen_handler.backdrop_color
+        return QColor.fromRgbF(bg.redF(), bg.greenF(), bg.blueF(), 1.0)
+
+    def _gl_clear_rgba(self) -> tuple[float, float, float, float]:
+        """Return the OpenGL clear colour matching the QRhi pass clear."""
+
+        if self._transparent_rounded_clip_enabled:
+            return (0.0, 0.0, 0.0, 0.0)
+        bg = self._fullscreen_handler.backdrop_color
+        return (bg.redF(), bg.greenF(), bg.blueF(), 1.0)
 
     def set_immersive_background(self, immersive: bool) -> None:
         """Toggle the pure black immersive backdrop used in immersive mode."""
@@ -430,6 +793,13 @@ class GLImageViewer(QRhiWidget):
         if self._crop_controller.is_active():
             self._transform_controller.reset_zoom()
             return
+        if not self._reset_zoom_frames_crop:
+            self._auto_crop_view_locked = False
+            if not self._center_crop_if_available():
+                self._auto_crop_center_locked = False
+                self._transform_controller.reset_zoom()
+            return
+        self._auto_crop_center_locked = False
         if not self._frame_crop_if_available():
             self._auto_crop_view_locked = False
             self._transform_controller.reset_zoom()
@@ -497,15 +867,19 @@ class GLImageViewer(QRhiWidget):
         # Make the underlying OpenGL context current so we can issue raw GL
         # calls (create shaders, VAO, VBO, textures, …).
         rhi.makeThreadLocalNativeContextCurrent()
-        self._gl_funcs = QOpenGLFunctions_3_3_Core()
-        self._gl_funcs.initializeOpenGLFunctions()
-        gf = self._gl_funcs
+        current_context = QOpenGLContext.currentContext()
+        if current_context is None:
+            _LOGGER.warning("Current OpenGL context unavailable â€” image rendering disabled")
+            return
+        gf = current_context.extraFunctions()
+        self._gl_funcs = gf
 
         if self._renderer is not None:
             self._renderer.destroy_resources()
 
         self._renderer = GLRenderer(gf, parent=self)
         self._renderer.initialize_resources()
+        self._adjustment_applicator.invalidate_cache()
         self._adjustment_applicator.update_curve_lut_if_needed(self._adjustments)
         self._adjustment_applicator.update_levels_lut_if_needed(self._adjustments)
 
@@ -532,10 +906,9 @@ class GLImageViewer(QRhiWidget):
             # transparent.  An early bare return would leave the texture
             # uninitialised, compositing as transparent under the main
             # window's WA_TranslucentBackground.
-            bg = self._fullscreen_handler.backdrop_color
             cb.beginPass(
                 self.renderTarget(),
-                QColor.fromRgbF(bg.redF(), bg.greenF(), bg.blueF(), 1.0),
+                self._pass_clear_color(),
                 QRhiDepthStencilClearValue(),
             )
             cb.endPass()
@@ -543,10 +916,9 @@ class GLImageViewer(QRhiWidget):
             return
         gf = self._gl_funcs
         if gf is None or self._renderer is None:
-            bg = self._fullscreen_handler.backdrop_color
             cb.beginPass(
                 self.renderTarget(),
-                QColor.fromRgbF(bg.redF(), bg.greenF(), bg.blueF(), 1.0),
+                self._pass_clear_color(),
                 QRhiDepthStencilClearValue(),
             )
             cb.endPass()
@@ -555,7 +927,16 @@ class GLImageViewer(QRhiWidget):
 
         output_size = self.renderTarget().pixelSize()
         if output_size.isEmpty():
+            if sys.platform.startswith("linux"):
+                _LOGGER.warning(
+                    "[diag][gl_viewer] render skipped empty target using_video=%s dirty=%s widget=%sx%s",
+                    self._using_video_frame_source,
+                    self._video_frame_dirty,
+                    self.width(),
+                    self.height(),
+                )
             return
+        self._last_render_target_size = QSize(output_size)
 
         # Start a QRhi render pass (required by QRhiWidget) then immediately
         # switch to raw OpenGL via beginExternal()/endExternal().  This lets
@@ -563,8 +944,9 @@ class GLImageViewer(QRhiWidget):
         # widgets share the same QRhi rendering infrastructure.
         cb.beginPass(
             self.renderTarget(),
-            QColor(0, 0, 0, 255),
+            self._pass_clear_color(),
             QRhiDepthStencilClearValue(),
+            flags=QRhiCommandBuffer.BeginPassFlag.ExternalContent,
         )
         cb.beginExternal()
 
@@ -572,19 +954,64 @@ class GLImageViewer(QRhiWidget):
         vw = max(1, output_size.width())
         vh = max(1, output_size.height())
         gf.glViewport(0, 0, vw, vh)
-        bg = self._fullscreen_handler.backdrop_color
-        gf.glClearColor(bg.redF(), bg.greenF(), bg.blueF(), 1.0)
+        clear_r, clear_g, clear_b, clear_a = self._gl_clear_rgba()
+        gf.glClearColor(clear_r, clear_g, clear_b, clear_a)
         gf.glClear(gl.GL_COLOR_BUFFER_BIT)
 
         if (
+            self._using_video_frame_source
+            and self._video_frame_dirty
+            and (self._video_frame is not None or self._pending_video_image is not None)
+        ):
+            self._diag_video_render_count += 1
+            if sys.platform.startswith("linux") and self._should_log_diag_frame(self._diag_video_render_count):
+                _LOGGER.warning(
+                    "[diag][gl_viewer] render #%s pre-upload rt=%sx%s widget=%sx%s pending_rot=%s source_rot=%s has_texture=%s frame=%s",
+                    self._diag_video_render_count,
+                    vw,
+                    vh,
+                    self.width(),
+                    self.height(),
+                    self._pending_source_rotate90_steps,
+                    self._source_rotate90_steps,
+                    self._renderer.has_texture(),
+                    self._diag_video_frame_summary(self._video_frame),
+                )
+            try:
+                pre_rotated = self._upload_pending_video_source()
+                if sys.platform.startswith("linux") and self._should_log_diag_frame(self._diag_video_render_count):
+                    logical_tex_w, logical_tex_h = self._display_texture_dimensions()
+                    _LOGGER.warning(
+                        "[diag][gl_viewer] render #%s post-upload pre_rotated=%s final_rot=%s logical_tex=%sx%s cover=%.5f zoom=%.5f pan=(%.2f,%.2f)",
+                        self._diag_video_render_count,
+                        pre_rotated,
+                        self._source_rotate90_steps,
+                        logical_tex_w,
+                        logical_tex_h,
+                        self._transform_controller.get_image_cover_scale(),
+                        self._transform_controller.get_effective_scale(),
+                        self._transform_controller.get_pan_pixels().x(),
+                        self._transform_controller.get_pan_pixels().y(),
+                    )
+            except Exception:
+                _LOGGER.exception("Failed to upload video frame into GLImageViewer")
+        elif (
             self._image is not None
             and not self._image.isNull()
-            and not self._renderer.has_texture()
+            and self._texture_manager.needs_texture_upload()
         ):
-            self._renderer.upload_texture(self._image)
+            self._texture_manager.upload_texture_if_needed(self._image)
             straighten, rotate_steps, _ = self._rotation_parameters()
             self._update_cover_scale(straighten, rotate_steps)
         if not self._renderer.has_texture():
+            if sys.platform.startswith("linux") and self._using_video_frame_source:
+                _LOGGER.warning(
+                    "[diag][gl_viewer] render no-texture rt=%sx%s dirty=%s pending_reset=%s",
+                    vw,
+                    vh,
+                    self._video_frame_dirty,
+                    self._pending_video_reset_view,
+                )
             cb.endExternal()
             cb.endPass()
             self._emit_first_frame_ready()
@@ -599,7 +1026,7 @@ class GLImageViewer(QRhiWidget):
 
         effective_adjustments: dict[str, float] | Mapping[str, float]
         if self._crop_controller.is_active():
-            effective_adjustments = dict(self._adjustments)
+            effective_adjustments = dict(self._display_adjustments())
             # During crop interactions we want to preview the entire photo with
             # a translucent overlay.  The fragment shader drives the crop
             # window entirely from the ``Crop_*`` uniforms, therefore we
@@ -617,12 +1044,30 @@ class GLImageViewer(QRhiWidget):
             # Convert texture-space crop to logical-space for shader
             # Shader tests crop in pre-rotation space (uv_perspective),
             # so it needs logical-space crop parameters
-            effective_adjustments = dict(self._adjustments)
-            logical_crop = geometry.logical_crop_mapping_from_texture(self._adjustments)
+            effective_adjustments = dict(self._display_adjustments())
+            logical_crop = geometry.logical_crop_mapping_from_texture(effective_adjustments)
             effective_adjustments.update(logical_crop)
 
 
         logical_tex_w, logical_tex_h = self._display_texture_dimensions()
+        if (
+            sys.platform.startswith("linux")
+            and self._using_video_frame_source
+            and self._should_log_diag_frame(self._diag_video_render_count)
+        ):
+            _LOGGER.warning(
+                "[diag][gl_viewer] draw #%s rt=%sx%s logical_tex=%sx%s cover=%.5f zoom=%.5f pan=(%.2f,%.2f) rounded=%s",
+                self._diag_video_render_count,
+                vw,
+                vh,
+                logical_tex_w,
+                logical_tex_h,
+                cover_scale,
+                effective_scale,
+                view_pan.x(),
+                view_pan.y(),
+                self._transparent_rounded_clip_enabled,
+            )
 
         self._renderer.render(
             view_width=float(vw),
@@ -633,6 +1078,11 @@ class GLImageViewer(QRhiWidget):
             time_value=time_value,
             img_scale=cover_scale,
             logical_tex_size=(float(logical_tex_w), float(logical_tex_h)),
+            corner_radius_px=(
+                self._rounded_clip_radius * self.devicePixelRatioF()
+                if self._transparent_rounded_clip_enabled
+                else 0.0
+            ),
         )
 
         if self._crop_controller.is_active():
@@ -661,8 +1111,7 @@ class GLImageViewer(QRhiWidget):
     def setCropMode(self, enabled: bool, values: Mapping[str, float] | None = None) -> None:
         was_active = self._crop_controller.is_active()
         source_values = values if values is not None else self._adjustments
-        logical_values = geometry.logical_crop_mapping_from_texture(source_values)
-        self._crop_controller.set_active(enabled, logical_values)
+        self._crop_controller.set_active(enabled, self._logical_crop_values(source_values))
         if enabled and not was_active:
             self._cancel_auto_crop_lock()
             self._transform_controller.reset_zoom()
@@ -672,7 +1121,7 @@ class GLImageViewer(QRhiWidget):
     def crop_values(self) -> dict[str, float]:
         logical_map = self._crop_controller.get_crop_values()
         logical_tuple = geometry.normalised_crop_from_mapping(logical_map)
-        rotate_steps = geometry.get_rotate_steps(self._adjustments)
+        rotate_steps = self._display_rotate_steps()
 
         tex_cx, tex_cy, tex_w, tex_h = geometry.logical_crop_to_texture(
             logical_tuple, rotate_steps
@@ -764,8 +1213,20 @@ class GLImageViewer(QRhiWidget):
         self._loading_overlay.update_geometry(self.size())
         if self._auto_crop_view_locked and not self._crop_controller.is_active():
             self._reapply_locked_crop_view()
+        elif self._auto_crop_center_locked and not self._crop_controller.is_active():
+            self._reapply_locked_crop_center()
         straighten, rotate_steps, _ = self._rotation_parameters()
         self._update_cover_scale(straighten, rotate_steps)
+        if sys.platform.startswith("linux"):
+            _LOGGER.warning(
+                "[diag][gl_viewer] resize widget=%sx%s rt=%sx%s using_video=%s dirty=%s",
+                self.width(),
+                self.height(),
+                self._last_render_target_size.width(),
+                self._last_render_target_size.height(),
+                self._using_video_frame_source,
+                self._video_frame_dirty,
+            )
 
     def showEvent(self, event) -> None:  # type: ignore[override]
         super().showEvent(event)
@@ -787,8 +1248,14 @@ class GLImageViewer(QRhiWidget):
     def _frame_crop_if_available(self) -> bool:
         return crop_viewport.frame_crop_if_available(self)
 
+    def _center_crop_if_available(self) -> bool:
+        return crop_viewport.center_crop_if_available(self)
+
     def _reapply_locked_crop_view(self) -> None:
         crop_viewport.reapply_locked_crop_view(self)
+
+    def _reapply_locked_crop_center(self) -> None:
+        crop_viewport.reapply_locked_crop_center(self)
 
     def _cancel_auto_crop_lock(self) -> None:
         crop_viewport.cancel_auto_crop_lock(self)

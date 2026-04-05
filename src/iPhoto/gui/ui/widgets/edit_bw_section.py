@@ -54,6 +54,7 @@ class EditBWSection(QWidget):
         self._thread_pool = QThreadPool.globalInstance()
         self._active_thumbnail_workers: list[ThumbnailGeneratorWorker] = []
         self._updating_ui = False
+        self._video_mode = False
 
         # Match the surrounding light/color sections so separators and padding align.
         layout = QVBoxLayout(self)
@@ -112,6 +113,14 @@ class EditBWSection(QWidget):
         layout.addWidget(self.options_section)
         layout.addStretch(1)
 
+    def set_video_mode(self, enabled: bool) -> None:
+        """Flatten the section for video editing while preserving image behaviour."""
+
+        self._video_mode = bool(enabled)
+        self.master_slider.setVisible(not self._video_mode)
+        self.options_section.set_header_visible(not self._video_mode)
+        self.options_section.set_expanded(self._video_mode)
+
     # ------------------------------------------------------------------
     def bind_session(self, session: Optional[EditSession]) -> None:
         """Attach *session* so slider updates are persisted and reflected."""
@@ -139,7 +148,8 @@ class EditBWSection(QWidget):
             self._reset_slider_values()
             self._apply_enabled_state(False)
             self.master_slider.update_from_value(0.5)
-            self.options_section.set_expanded(False)
+            if not self._video_mode:
+                self.options_section.set_expanded(False)
 
     def refresh_from_session(self) -> None:
         """Synchronise the slider positions with the active session state."""
@@ -148,7 +158,8 @@ class EditBWSection(QWidget):
             self._reset_slider_values()
             self._apply_enabled_state(False)
             self.master_slider.update_from_value(0.5)
-            self.options_section.set_expanded(False)
+            if not self._video_mode:
+                self.options_section.set_expanded(False)
             return
 
         enabled = bool(self._session.value("BW_Enabled"))
@@ -168,7 +179,8 @@ class EditBWSection(QWidget):
         """Forward *image* to the master slider so it can refresh thumbnails."""
 
         self.master_slider.setImage(image)
-        self._start_master_thumbnail_generation()
+        if not self._video_mode:
+            self._start_master_thumbnail_generation()
 
     # ------------------------------------------------------------------
     def _reset_slider_values(self) -> None:
@@ -185,7 +197,7 @@ class EditBWSection(QWidget):
         self.master_slider.setEnabled(enabled)
         for row in self._rows.values():
             row.setEnabled(enabled)
-        if not enabled:
+        if not enabled and not self._video_mode:
             self.options_section.set_expanded(False)
 
     def _session_params(self) -> BWParams:

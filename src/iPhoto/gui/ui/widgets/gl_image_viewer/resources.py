@@ -51,6 +51,8 @@ class TextureResourceManager:
         
         self._current_image_source: object | None = None
         self._current_image: QImage | None = None
+        self._current_cache_key: int | None = None
+        self._texture_dirty = False
     
     def get_current_image_source(self) -> object | None:
         """Return the identifier of the currently loaded image source."""
@@ -82,6 +84,8 @@ class TextureResourceManager:
         self,
         image: QImage | None,
         image_source: object | None,
+        *,
+        force_upload: bool = False,
     ) -> bool:
         """Update the current image and source.
         
@@ -101,15 +105,27 @@ class TextureResourceManager:
             True if this is a new image that needs uploading
         """
         old_source = self._current_image_source
+        old_cache_key = self._current_cache_key
         self._current_image_source = image_source
         self._current_image = image
+        self._current_cache_key = None
         
         # Return whether we need a new upload
         if image is None or image.isNull():
+            self._texture_dirty = False
             return old_source is not None  # Need to clear texture
-        
-        # Need upload if source changed or this is first image
-        return image_source != old_source or old_source is None
+
+        cache_key = int(image.cacheKey()) if hasattr(image, "cacheKey") else None
+        self._current_cache_key = cache_key
+        needs_upload = bool(
+            force_upload
+            or image_source is None
+            or image_source != old_source
+            or old_source is None
+            or cache_key != old_cache_key
+        )
+        self._texture_dirty = needs_upload
+        return needs_upload
     
     def clear_image(self) -> None:
         """Clear the current image and delete the GPU texture.
@@ -118,6 +134,8 @@ class TextureResourceManager:
         """
         self._current_image_source = None
         self._current_image = None
+        self._current_cache_key = None
+        self._texture_dirty = False
         
         renderer = self._renderer_provider()
         if renderer is not None:
@@ -129,6 +147,24 @@ class TextureResourceManager:
                     renderer.delete_texture()
                 finally:
                     self._done_current()
+
+    def invalidate_texture(self) -> None:
+        """Delete the currently bound GPU texture without forgetting the image state."""
+
+        renderer = self._renderer_provider()
+        if renderer is None or not renderer.has_texture():
+            self._texture_dirty = self._current_image is not None and not self._current_image.isNull()
+            return
+        gl_context = self._context_provider()
+        if gl_context is None:
+            self._texture_dirty = self._current_image is not None and not self._current_image.isNull()
+            return
+        self._make_current()
+        try:
+            renderer.delete_texture()
+        finally:
+            self._done_current()
+        self._texture_dirty = self._current_image is not None and not self._current_image.isNull()
     
     def upload_texture_if_needed(self, image: QImage) -> bool:
         """Upload texture to GPU if the image is valid.
@@ -149,13 +185,10 @@ class TextureResourceManager:
         renderer = self._renderer_provider()
         if renderer is None:
             return False
-        
-        # Check if renderer already has this texture
-        if renderer.has_texture():
+        if not self._texture_dirty and renderer.has_texture():
             return False
-        
-        # Upload is handled by the renderer during paintGL
-        # This method is mainly for tracking state
+        renderer.upload_texture(image)
+        self._texture_dirty = False
         return True
     
     def needs_texture_upload(self) -> bool:
@@ -173,4 +206,4 @@ class TextureResourceManager:
         if self._current_image is None or self._current_image.isNull():
             return False
         
-        return not renderer.has_texture()
+        return self._texture_dirty or not renderer.has_texture()

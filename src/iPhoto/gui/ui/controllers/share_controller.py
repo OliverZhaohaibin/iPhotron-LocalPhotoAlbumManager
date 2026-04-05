@@ -2,24 +2,40 @@
 
 from __future__ import annotations
 
+import hashlib
+import logging
 import subprocess
 import sys
+import tempfile
+import time
 from pathlib import Path
 from typing import Optional
 
-from PySide6.QtCore import QObject, QMimeData, QUrl, QThreadPool, QRunnable, Signal, QAbstractItemModel
-from PySide6.QtGui import QAction, QGuiApplication, QImage, QTransform
+from PySide6.QtCore import (
+    QAbstractItemModel,
+    QMimeData,
+    QObject,
+    QRunnable,
+    QThreadPool,
+    QUrl,
+    Signal,
+)
+from PySide6.QtGui import QAction, QActionGroup, QGuiApplication, QImage, QTransform
 from PySide6.QtWidgets import QPushButton
-from PySide6.QtGui import QActionGroup
 
-from ....io import sidecar
+from ....core.export import probe_duration_seconds, render_video
 from ....core.filters.facade import apply_adjustments
+from ....errors import ExternalToolError
+from ....io import sidecar
+from ....media_classifier import VIDEO_EXTENSIONS
 from ....utils import image_loader
+from ....utils.ffmpeg import probe_media
 from ..media import PlaylistController
 from ..models.roles import Roles
 from ..widgets.notification_toast import NotificationToast
-
 from .status_bar_controller import StatusBarController
+
+_LOGGER = logging.getLogger(__name__)
 
 
 class RenderClipboardSignals(QObject):
@@ -43,7 +59,8 @@ class RenderClipboardWorker(QRunnable):
     def run(self) -> None:
         try:
             self._do_work()
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - keep worker failures from escaping QRunnable.run()
+            _LOGGER.exception("Failed to render image for clipboard")
             self.signals.failed.emit(str(exc))
 
     def _do_work(self) -> None:
@@ -111,6 +128,51 @@ class RenderClipboardWorker(QRunnable):
 
     def _clamp(self, val: float) -> float:
         return max(0.0, min(1.0, val))
+
+
+class RenderVideoClipboardSignals(QObject):
+    """Signals emitted by :class:`RenderVideoClipboardWorker`."""
+
+    success = Signal(str)
+    failed = Signal(str)
+
+
+_SHARE_DIR_MAX_AGE_SEC = 24 * 3600  # prune temp video files older than 24 hours
+
+
+def _prune_share_dir(directory: Path) -> None:
+    """Remove MP4 files in *directory* that are older than ``_SHARE_DIR_MAX_AGE_SEC``."""
+    cutoff = time.time() - _SHARE_DIR_MAX_AGE_SEC
+    for item in directory.glob("*.mp4"):
+        try:
+            if item.stat().st_mtime < cutoff:
+                item.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+class RenderVideoClipboardWorker(QRunnable):
+    """Render the current video with sidecar edits and expose the exported file."""
+
+    def __init__(self, path: Path) -> None:
+        super().__init__()
+        self._path = path
+        self.signals = RenderVideoClipboardSignals()
+
+    def run(self) -> None:
+        try:
+            output_dir = Path(tempfile.gettempdir()) / "iPhoto-share"
+            output_dir.mkdir(parents=True, exist_ok=True)
+            _prune_share_dir(output_dir)
+            path_hash = hashlib.sha256(str(self._path.resolve()).encode()).hexdigest()[:12]
+            destination = output_dir / f"{self._path.stem}_{path_hash}.mp4"
+            if render_video(self._path, destination):
+                self.signals.success.emit(str(destination))
+            else:
+                self.signals.failed.emit("Failed to render edited video")
+        except Exception as exc:  # noqa: BLE001 - keep worker failures from escaping QRunnable.run()
+            _LOGGER.exception("Failed to render edited video for sharing")
+            self.signals.failed.emit(str(exc))
 
 
 class ShareController(QObject):
@@ -207,6 +269,23 @@ class ShareController(QObject):
         # Check for sidecar adjustments
         sidecar_path = sidecar.sidecar_path_for_asset(path)
         if sidecar_path.exists():
+            if path.suffix.lower() in VIDEO_EXTENSIONS:
+                raw_adjustments = sidecar.load_adjustments(path)
+                # Probe duration so trim_is_non_default can compare against the
+                # full clip length; without it, any stored trimOutSec would be
+                # treated as an edit even when it equals the clip duration.
+                video_duration: float | None = None
+                try:
+                    video_duration = probe_duration_seconds(probe_media(path))
+                except ExternalToolError:
+                    pass
+                if sidecar.video_has_visible_edits(raw_adjustments, video_duration):
+                    self._copy_rendered_video_to_clipboard(path)
+                else:
+                    mime_data = self._build_file_mime_data(path)
+                    QGuiApplication.clipboard().setMimeData(mime_data)
+                    self._toast.show_toast("Copied to Clipboard")
+                return
             self._copy_rendered_image_to_clipboard(path)
             return
 
@@ -224,6 +303,24 @@ class ShareController(QObject):
 
         def _on_failure(message: str):
             # Fallback to file copy if rendering fails
+            mime_data = self._build_file_mime_data(path)
+            QGuiApplication.clipboard().setMimeData(mime_data)
+            self._toast.show_toast("Copied Original File")
+
+        worker.signals.success.connect(_on_success)
+        worker.signals.failed.connect(_on_failure)
+        QThreadPool.globalInstance().start(worker)
+
+    def _copy_rendered_video_to_clipboard(self, path: Path) -> None:
+        self._toast.show_toast("Preparing video...")
+        worker = RenderVideoClipboardWorker(path)
+
+        def _on_success(rendered_path: str):
+            mime_data = self._build_file_mime_data(Path(rendered_path))
+            QGuiApplication.clipboard().setMimeData(mime_data)
+            self._toast.show_toast("Copied to Clipboard")
+
+        def _on_failure(_message: str):
             mime_data = self._build_file_mime_data(path)
             QGuiApplication.clipboard().setMimeData(mime_data)
             self._toast.show_toast("Copied Original File")

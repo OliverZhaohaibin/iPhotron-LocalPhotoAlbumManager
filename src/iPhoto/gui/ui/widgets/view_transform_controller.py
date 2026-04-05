@@ -3,12 +3,15 @@
 
 from __future__ import annotations
 
+import logging
 import math
 from typing import Callable, Optional
 
 from PySide6.QtCore import QPointF, QRectF, Qt
 from PySide6.QtGui import QMouseEvent, QWheelEvent
 from PySide6.QtWidgets import QWidget
+
+_LOGGER = logging.getLogger(__name__)
 
 
 def compute_fit_to_view_scale(
@@ -104,6 +107,7 @@ class ViewTransformController:
         on_next_item: Optional[Callable[[], None]] = None,
         on_prev_item: Optional[Callable[[], None]] = None,
         display_texture_size_provider: Callable[[], tuple[int, int]] | None = None,
+        device_view_size_provider: Callable[[], tuple[float, float] | None] | None = None,
     ) -> None:
         self._viewer = viewer
         self._texture_size_provider = texture_size_provider
@@ -115,6 +119,7 @@ class ViewTransformController:
         # zoom (and therefore the shader output) perfectly aligned with the on-screen
         # frame, eliminating the stretched look reported in the demo comparison.
         self._display_texture_size_provider = display_texture_size_provider
+        self._device_view_size_provider = device_view_size_provider
         self._on_zoom_changed = on_zoom_changed
         self._on_next_item = on_next_item
         self._on_prev_item = on_prev_item
@@ -127,12 +132,23 @@ class ViewTransformController:
         self._pan_start_pos: QPointF = QPointF()
         self._wheel_action: str = "zoom"
         self._image_cover_scale: float = 1.0
+        self._fill_viewport_enabled: bool = False
 
     # ------------------------------------------------------------------
     # Helper methods for getting viewport info
     # ------------------------------------------------------------------
     def _get_view_dimensions_device_px(self) -> tuple[float, float]:
         """Get viewport dimensions in device pixels."""
+        if self._device_view_size_provider is not None:
+            try:
+                provided = self._device_view_size_provider()
+            except Exception:  # noqa: BLE001 - log and fall back to widget dimensions if provider raises
+                _LOGGER.exception("device_view_size_provider raised unexpectedly")
+                provided = None
+            if provided is not None:
+                width, height = provided
+                if width > 0.0 and height > 0.0:
+                    return float(width), float(height)
         dpr = self._viewer.devicePixelRatioF()
         vw = max(1.0, float(self._viewer.width()) * dpr)
         vh = max(1.0, float(self._viewer.height()) * dpr)
@@ -213,6 +229,11 @@ class ViewTransformController:
         """Switch between wheel zooming and item navigation."""
 
         self._wheel_action = "zoom" if action == "zoom" else "navigate"
+
+    def set_fill_viewport_enabled(self, enabled: bool) -> None:
+        """Control whether framing helpers should cover the viewport instead of fitting."""
+
+        self._fill_viewport_enabled = bool(enabled)
 
     # ------------------------------------------------------------------
     # Zoom utilities
@@ -446,22 +467,47 @@ class ViewTransformController:
         if view_width <= 0.0 or view_height <= 0.0:
             return False
 
+        fit_result = self.compute_texture_rect_fit(rect)
+        if fit_result is None:
+            return False
+
+        target_zoom, target_scale = fit_result
+        self.set_zoom_factor_direct(target_zoom)
+        self.apply_image_center_pixels(rect.center(), scale=target_scale)
+        return True
+
+    def compute_texture_rect_fit(self, rect: QRectF) -> tuple[float, float] | None:
+        """Return ``(target_zoom, target_scale)`` needed to fit *rect*."""
+
+        tex_w, tex_h = self._texture_size_provider()
+        if tex_w <= 0 or tex_h <= 0:
+            return None
+        if rect.width() <= 0.0 or rect.height() <= 0.0:
+            return None
+
+        view_width, view_height = self._get_view_dimensions_device_px()
+        if view_width <= 0.0 or view_height <= 0.0:
+            return None
+
         fit_w, fit_h = self._get_fit_texture_size()
         base_scale = compute_fit_to_view_scale((fit_w, fit_h), view_width, view_height)
         if base_scale <= 0.0:
-            return False
+            return None
 
-        target_scale = compute_fit_to_view_scale(
-            (float(rect.width()), float(rect.height())), view_width, view_height
-        )
+        if self._fill_viewport_enabled:
+            target_scale = max(
+                view_width / float(rect.width()),
+                view_height / float(rect.height()),
+            )
+        else:
+            target_scale = compute_fit_to_view_scale(
+                (float(rect.width()), float(rect.height())),
+                view_width,
+                view_height,
+            )
         if target_scale <= 0.0:
-            return False
-
-        target_zoom = target_scale / base_scale
-        self.set_zoom_factor_direct(target_zoom)
-        effective_scale = base_scale * self._zoom_factor
-        self.apply_image_center_pixels(rect.center(), scale=effective_scale)
-        return True
+            return None
+        return (target_scale / base_scale, target_scale)
 
     # ------------------------------------------------------------------
     # Convenience methods that use internal viewport state

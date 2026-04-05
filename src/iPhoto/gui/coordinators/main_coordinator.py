@@ -17,7 +17,7 @@ from PySide6.QtCore import (
     QCoreApplication,
     Qt,
 )
-from PySide6.QtGui import QShortcut, QKeySequence, QAction
+from PySide6.QtGui import QAction
 
 from iPhoto.appctx import AppContext
 from iPhoto.config import DEFAULT_EXCLUDE, DEFAULT_INCLUDE, WORK_DIR_NAME
@@ -253,6 +253,21 @@ class MainCoordinator(QObject):
             parent=self,
         )
 
+        # --- Centralised shortcut manager ---
+        # All window-level shortcuts are owned and dispatched here.
+        # See: src/iPhoto/gui/ui/shortcuts/app_shortcut_manager.py
+        from iPhoto.gui.ui.shortcuts.app_shortcut_manager import AppShortcutManager
+
+        self._shortcut_manager = AppShortcutManager(
+            window,
+            self._view_router,
+            toggle_favorite_cb=self._handle_toggle_favorite,
+            exit_fullscreen_cb=window.exit_fullscreen,
+            parent=self,
+        )
+        self._shortcut_manager.set_video_area(window.ui.video_area)
+        self._shortcut_manager.set_edit_coordinator(self._edit)
+
         self._connect_signals()
 
     def start(self):
@@ -436,15 +451,9 @@ class MainCoordinator(QObject):
         else:
             ui.theme_system.setChecked(True)
 
-        # Shortcuts
-        self._favorite_shortcut = QShortcut(QKeySequence("."), self._window)
-        self._favorite_shortcut.activated.connect(self._handle_toggle_favorite)
-        self._exit_fullscreen_shortcut = QShortcut(
-            QKeySequence(Qt.Key_Escape),
-            self._window,
-        )
-        self._exit_fullscreen_shortcut.setContext(Qt.ShortcutContext.ApplicationShortcut)
-        self._exit_fullscreen_shortcut.activated.connect(self._window.exit_fullscreen)
+        # Note: keyboard shortcuts are now managed centrally by
+        # AppShortcutManager, which is created in __init__ after all
+        # coordinators are initialised.  Do not add QShortcut instances here.
 
     def _on_library_tree_updated(self) -> None:
         root = self._context.library.root()

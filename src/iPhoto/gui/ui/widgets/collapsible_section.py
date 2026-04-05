@@ -112,6 +112,7 @@ class CollapsibleSection(QFrame):
 
 
         self._expanded = True
+        self._header_visible = True
         self._update_header_icon()
         self._update_content_geometry()
 
@@ -141,6 +142,20 @@ class CollapsibleSection(QFrame):
         """Return ``True`` when the section currently displays its content."""
 
         return self._expanded
+
+    def set_header_visible(self, visible: bool) -> None:
+        """Show or hide the section header without altering content state."""
+
+        target = bool(visible)
+        if self._header_visible == target:
+            return
+        self._header_visible = target
+        self._header.setVisible(target)
+
+    def header_visible(self) -> bool:
+        """Return whether the section header row is currently visible."""
+
+        return self._header_visible
 
     def toggle(self) -> None:
         """Invert the expansion state to show or hide the content widget."""

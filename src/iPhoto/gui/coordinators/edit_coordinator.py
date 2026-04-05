@@ -1058,10 +1058,19 @@ class EditCoordinator(QObject):
             self._ui.video_area.play()
 
     def _handle_video_play_pause_shortcut(self) -> None:
-        if not self._can_handle_video_edit_transport_shortcut(allow_conflicting_focus=True):
+        if self._can_handle_video_edit_transport_shortcut(allow_conflicting_focus=True):
+            self._handle_video_trim_play_pause_requested()
+            self._ui.video_area.note_activity()
             return
-        self._handle_video_trim_play_pause_requested()
-        self._ui.video_area.note_activity()
+        # In the detail/gallery view (no active edit session) the WindowShortcut
+        # still intercepts the Space key before VideoArea.keyPressEvent fires, so
+        # we must handle playback toggle here as well.
+        if self._router.is_detail_view_active():
+            if self._ui.video_area.is_playing():
+                self._ui.video_area.pause()
+            else:
+                self._ui.video_area.play()
+            self._ui.video_area.note_activity()
 
     def _handle_video_frame_step_shortcut(self, direction: int) -> None:
         if direction == 0:

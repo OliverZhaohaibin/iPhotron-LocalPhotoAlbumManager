@@ -753,7 +753,7 @@ class EditCoordinator(QObject):
             adjustments=(
                 sidecar.resolve_render_adjustments(raw_adjustments)
                 if needs_adjusted_preview
-                else (raw_adjustments or None)
+                else raw_adjustments
             ),
             trim_range_ms=trim_range_ms,
             adjusted_preview=needs_adjusted_preview,

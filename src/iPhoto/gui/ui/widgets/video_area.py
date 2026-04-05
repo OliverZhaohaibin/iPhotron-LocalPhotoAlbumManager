@@ -157,6 +157,9 @@ class VideoArea(QWidget):
         self._resize_refit_timer.setSingleShot(True)
         self._resize_refit_timer.setInterval(16)
         self._resize_refit_timer.timeout.connect(self._flush_resize_adjusted_refit)
+        # Per-surface zoom tracking so the slider stays in sync when switching surfaces.
+        self._renderer_zoom: float = 1.0
+        self._edit_viewer_zoom: float = 1.0
 
         self._apply_surface(surface_color)
         # --- End Video Renderer Setup ---
@@ -314,6 +317,9 @@ class VideoArea(QWidget):
                 "stack_size": (self._surface_stack.width(), self._surface_stack.height()),
             },
         )
+        # Emit the newly-active surface's zoom so the zoom slider stays in sync.
+        active_zoom = self._edit_viewer_zoom if target else self._renderer_zoom
+        self.zoomChanged.emit(active_zoom)
 
     def set_edit_mode_active(self, active: bool) -> None:
         """Mark whether the video area is currently being used inside Edit mode."""
@@ -1161,11 +1167,13 @@ class VideoArea(QWidget):
 
     def _on_edit_viewer_zoom_changed(self, factor: float) -> None:
         """Forward zoom changes from _edit_viewer only when it is the active surface."""
+        self._edit_viewer_zoom = factor
         if self._adjusted_preview_enabled:
             self.zoomChanged.emit(factor)
 
     def _on_renderer_zoom_changed(self, factor: float) -> None:
         """Forward zoom changes from _renderer only when it is the active surface."""
+        self._renderer_zoom = factor
         if not self._adjusted_preview_enabled:
             self.zoomChanged.emit(factor)
 

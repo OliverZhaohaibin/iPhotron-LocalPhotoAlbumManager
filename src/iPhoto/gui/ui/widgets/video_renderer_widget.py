@@ -419,7 +419,9 @@ class VideoRendererWidget(QRhiWidget):
         self._container_linux_180_hint = False
         self._has_frame = False
         self._user_rotate90_steps = 0
-        self._zoom_factor = 1.0
+        if self._zoom_factor != 1.0:
+            self._zoom_factor = 1.0
+            self.zoomChanged.emit(1.0)
         # Reset tracked texture formats so that the next video always
         # recreates textures with the correct format, even when the
         # resolution is identical (e.g. switching between an 8-bit NV12

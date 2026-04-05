@@ -1024,6 +1024,9 @@ class GLImageViewer(QRhiWidget):
         
         view_pan = self._transform_controller.get_pan_pixels()
 
+        logical_tex_w, logical_tex_h = self._display_texture_dimensions()
+        print(f"DEBUG_VIDEO_BUG: GLImageViewer.render | output_size={vw}x{vh} | logical_tex={logical_tex_w}x{logical_tex_h} | zoom_factor={self._transform_controller.get_zoom_factor():.3f} | effective_scale={effective_scale:.3f} | crop_framing={self._reset_zoom_frames_crop} | is_video={self._using_video_frame_source}")
+
         effective_adjustments: dict[str, float] | Mapping[str, float]
         if self._crop_controller.is_active():
             effective_adjustments = dict(self._display_adjustments())

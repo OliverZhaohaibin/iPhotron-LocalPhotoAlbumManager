@@ -266,9 +266,11 @@ class VideoArea(QWidget):
         """Route decoded frames through the adjusted GL preview when *enabled*."""
 
         target = bool(enabled)
+        print(f"DEBUG_VIDEO_BUG: VideoArea.set_adjusted_preview_enabled(enabled={target}) | Current: {self._adjusted_preview_enabled}")
         if self._adjusted_preview_enabled == target:
             return
         self._adjusted_preview_enabled = target
+        print(f"DEBUG_VIDEO_BUG: VideoArea switching to {'GLImageViewer' if target else 'VideoRendererWidget'}")
         self._surface_stack.setCurrentWidget(self._edit_viewer if target else self._renderer)
         self.setFocusProxy(self._edit_viewer if target else self._renderer)
         if target:
@@ -858,6 +860,7 @@ class VideoArea(QWidget):
 
         super().resizeEvent(event)
         rect = self.rect()
+        print(f"DEBUG_VIDEO_BUG: VideoArea.resizeEvent | rect={rect.width()}x{rect.height()}")
         self._surface_stack.setGeometry(rect)
         self._update_bar_geometry()
         if sys.platform.startswith("linux"):

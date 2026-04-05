@@ -2,30 +2,32 @@
 
 from __future__ import annotations
 
-from pathlib import Path
 import logging
-from typing import TYPE_CHECKING, Any, Optional
+from pathlib import Path
+from typing import TYPE_CHECKING
 
-from PySide6.QtCore import QObject, Slot, QTimer, Signal, QModelIndex, QItemSelectionModel
+from PySide6.QtCore import QItemSelectionModel, QModelIndex, QObject, QTimer, Signal, Slot
 from PySide6.QtGui import QAction, QColor, QPalette
 
+from iPhoto.config import PLAY_ASSET_DEBOUNCE_MS
 from iPhoto.gui.coordinators.view_router import ViewRouter
-from iPhoto.gui.ui.icons import load_icon
+from iPhoto.gui.ui.controllers.edit_zoom_handler import EditZoomHandler
 from iPhoto.gui.ui.controllers.header_controller import HeaderController
+from iPhoto.gui.ui.icons import load_icon
 from iPhoto.gui.ui.models.roles import Roles
 from iPhoto.gui.ui.widgets.info_panel import InfoPanel
-from iPhoto.io.metadata import read_image_meta
 from iPhoto.io import sidecar
-from iPhoto.config import PLAY_ASSET_DEBOUNCE_MS
+from iPhoto.io.metadata import read_image_meta
 
 if TYPE_CHECKING:
-    from iPhoto.gui.ui.widgets.player_bar import PlayerBar
-    from iPhoto.gui.ui.controllers.player_view_controller import PlayerViewController
-    from iPhoto.gui.viewmodels.asset_list_viewmodel import AssetListViewModel
-    from iPhoto.gui.coordinators.navigation_coordinator import NavigationCoordinator
-    from iPhoto.gui.ui.widgets.filmstrip_view import FilmstripView
     from iPhoto.utils.settings import Settings
     from PySide6.QtWidgets import QPushButton, QSlider, QToolButton, QWidget
+
+    from iPhoto.gui.coordinators.navigation_coordinator import NavigationCoordinator
+    from iPhoto.gui.ui.controllers.player_view_controller import PlayerViewController
+    from iPhoto.gui.ui.widgets.filmstrip_view import FilmstripView
+    from iPhoto.gui.ui.widgets.player_bar import PlayerBar
+    from iPhoto.gui.viewmodels.asset_list_viewmodel import AssetListViewModel
 
 LOGGER = logging.getLogger(__name__)
 
@@ -59,7 +61,7 @@ class PlaybackCoordinator(QObject):
         filmstrip_view: FilmstripView,
         toggle_filmstrip_action: QAction,
         settings: Settings,
-        header_controller: Optional[HeaderController] = None,
+        header_controller: HeaderController | None = None,
     ):
         super().__init__()
         self._player_bar = player_bar
@@ -85,10 +87,10 @@ class PlaybackCoordinator(QObject):
 
         self._is_playing = False
         self._current_row = -1
-        self._navigation: Optional[NavigationCoordinator] = None
-        self._info_panel: Optional[InfoPanel] = None
-        self._active_live_motion: Optional[Path] = None
-        self._active_live_still: Optional[Path] = None
+        self._navigation: NavigationCoordinator | None = None
+        self._info_panel: InfoPanel | None = None
+        self._active_live_motion: Path | None = None
+        self._active_live_still: Path | None = None
         self._resume_after_transition = False
 
         # Debounce rapid play_asset() calls (e.g. holding an arrow key) so that
@@ -102,7 +104,7 @@ class PlaybackCoordinator(QObject):
         self._play_debounce.timeout.connect(self._execute_pending_play)
 
         self._connect_signals()
-        self._connect_zoom_controls()
+        self._setup_zoom_handler()
         self._restore_filmstrip_preference()
 
     def set_navigation_coordinator(self, nav: NavigationCoordinator):
@@ -168,12 +170,15 @@ class PlaybackCoordinator(QObject):
         self._filmstrip_view.itemClicked.connect(self._on_filmstrip_clicked)
         self._toggle_filmstrip_action.toggled.connect(self._handle_filmstrip_toggled)
 
-    def _connect_zoom_controls(self):
-        viewer = self._player_view.image_viewer
-        self._zoom_in.clicked.connect(viewer.zoom_in)
-        self._zoom_out.clicked.connect(viewer.zoom_out)
-        self._zoom_slider.valueChanged.connect(self._handle_zoom_slider_changed)
-        viewer.zoomChanged.connect(self._handle_viewer_zoom_changed)
+    def _setup_zoom_handler(self):
+        self._zoom_handler = EditZoomHandler(
+            viewer=self._player_view.image_viewer,
+            zoom_in_button=self._zoom_in,
+            zoom_out_button=self._zoom_out,
+            zoom_slider=self._zoom_slider,
+            parent=self,
+        )
+        self._zoom_handler.connect_controls()
 
     def _restore_filmstrip_preference(self):
         """Restore filmstrip visibility from settings."""
@@ -203,17 +208,6 @@ class PlaybackCoordinator(QObject):
             self.play_asset(index.row())
 
     @Slot(int)
-    def _handle_zoom_slider_changed(self, value: int):
-        target = float(max(1, value)) / 100.0
-        self._player_view.image_viewer.set_zoom(target)
-
-    @Slot(float)
-    def _handle_viewer_zoom_changed(self, factor: float):
-        val = int(round(factor * 100))
-        self._zoom_slider.blockSignals(True)
-        self._zoom_slider.setValue(val)
-        self._zoom_slider.blockSignals(False)
-
     @Slot()
     def toggle_playback(self):
         # Delegate state logic to the player (VideoArea)
@@ -315,6 +309,12 @@ class PlaybackCoordinator(QObject):
 
         self._update_favorite_icon(bool(is_fav))
 
+        # Reset the zoom slider to 100% before loading a new asset so that
+        # stale zoom state from the previous asset does not bleed through.
+        self._zoom_slider.blockSignals(True)
+        self._zoom_slider.setValue(100)
+        self._zoom_slider.blockSignals(False)
+
         # Load Media
         if is_video:
             self._player_view.show_video_surface(interactive=True)
@@ -346,12 +346,16 @@ class PlaybackCoordinator(QObject):
             )
             self._player_view.video_area.play()
             self._player_bar.setEnabled(True)
-            self._zoom_widget.hide()
+            self._zoom_handler.set_viewer(self._player_view.video_area)
+            self._player_view.video_area.reset_zoom()
+            self._zoom_widget.show()
         else:
             # Image or Live Photo
             self._player_view.show_image_surface()
             self._player_view.display_image(source)
             self._player_bar.setEnabled(False)
+            self._zoom_handler.set_viewer(self._player_view.image_viewer)
+            self._player_view.image_viewer.reset_zoom()
             self._zoom_widget.show()
 
             if is_live:
@@ -470,7 +474,7 @@ class PlaybackCoordinator(QObject):
         if self._info_panel:
             self._info_panel.close()
 
-    def _update_header(self, row: Optional[int]) -> None:
+    def _update_header(self, row: int | None) -> None:
         if not self._header_controller:
             return
         if row is None or row < 0:

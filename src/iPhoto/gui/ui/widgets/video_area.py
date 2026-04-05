@@ -157,6 +157,9 @@ class VideoArea(QWidget):
         self._resize_refit_timer.setSingleShot(True)
         self._resize_refit_timer.setInterval(16)
         self._resize_refit_timer.timeout.connect(self._flush_resize_adjusted_refit)
+        # Per-surface zoom tracking so the slider stays in sync when switching surfaces.
+        self._renderer_zoom: float = 1.0
+        self._edit_viewer_zoom: float = 1.0
 
         self._apply_surface(surface_color)
         # --- End Video Renderer Setup ---
@@ -314,6 +317,9 @@ class VideoArea(QWidget):
                 "stack_size": (self._surface_stack.width(), self._surface_stack.height()),
             },
         )
+        # Emit the newly-active surface's zoom so the zoom slider stays in sync.
+        active_zoom = self._edit_viewer_zoom if self._adjusted_preview_enabled else self._renderer_zoom
+        self.zoomChanged.emit(active_zoom)
 
     def set_edit_mode_active(self, active: bool) -> None:
         """Mark whether the video area is currently being used inside Edit mode."""
@@ -436,19 +442,34 @@ class VideoArea(QWidget):
         return updates
 
     def set_zoom(self, factor: float, anchor: QPointF | None = None) -> None:
-        self._edit_viewer.set_zoom(factor, anchor=anchor or self.viewport_center())
+        effective_anchor = anchor or self.viewport_center()
+        if self._adjusted_preview_enabled:
+            self._edit_viewer.set_zoom(factor, anchor=effective_anchor)
+        else:
+            self._renderer.set_zoom(factor, anchor=effective_anchor)
 
     def reset_zoom(self) -> None:
-        self._edit_viewer.reset_zoom()
+        if self._adjusted_preview_enabled:
+            self._edit_viewer.reset_zoom()
+        else:
+            self._renderer.reset_zoom()
 
     def zoom_in(self) -> None:
-        self._edit_viewer.zoom_in()
+        if self._adjusted_preview_enabled:
+            self._edit_viewer.zoom_in()
+        else:
+            self._renderer.zoom_in()
 
     def zoom_out(self) -> None:
-        self._edit_viewer.zoom_out()
+        if self._adjusted_preview_enabled:
+            self._edit_viewer.zoom_out()
+        else:
+            self._renderer.zoom_out()
 
     def viewport_center(self) -> QPointF:
-        return self._edit_viewer.viewport_center()
+        if self._adjusted_preview_enabled:
+            return self._edit_viewer.viewport_center()
+        return self._renderer.viewport_center()
 
     def set_eyedropper_mode(self, active: bool) -> None:
         self._edit_viewer.set_eyedropper_mode(active)
@@ -1135,13 +1156,26 @@ class VideoArea(QWidget):
     def _wire_edit_viewer(self) -> None:
         """Forward image-viewer style signals from the adjusted preview surface."""
 
-        self._edit_viewer.zoomChanged.connect(self.zoomChanged.emit)
+        self._edit_viewer.zoomChanged.connect(self._on_edit_viewer_zoom_changed)
+        self._renderer.zoomChanged.connect(self._on_renderer_zoom_changed)
         self._edit_viewer.cropChanged.connect(self.cropChanged.emit)
         self._edit_viewer.cropInteractionStarted.connect(self.cropInteractionStarted.emit)
         self._edit_viewer.cropInteractionFinished.connect(self.cropInteractionFinished.emit)
         self._edit_viewer.colorPicked.connect(self.colorPicked.emit)
         self._edit_viewer.firstFrameReady.connect(self.firstFrameReady.emit)
         self._renderer.firstFrameReady.connect(self.firstFrameReady.emit)
+
+    def _on_edit_viewer_zoom_changed(self, factor: float) -> None:
+        """Forward zoom changes from _edit_viewer only when it is the active surface."""
+        self._edit_viewer_zoom = factor
+        if self._adjusted_preview_enabled:
+            self.zoomChanged.emit(factor)
+
+    def _on_renderer_zoom_changed(self, factor: float) -> None:
+        """Forward zoom changes from _renderer only when it is the active surface."""
+        self._renderer_zoom = factor
+        if not self._adjusted_preview_enabled:
+            self.zoomChanged.emit(factor)
 
     def _on_mouse_activity(self) -> None:
         if not self._controls_enabled:

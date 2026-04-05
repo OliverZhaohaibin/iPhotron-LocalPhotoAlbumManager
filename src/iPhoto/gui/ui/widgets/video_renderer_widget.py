@@ -24,7 +24,7 @@ import sys
 from pathlib import Path
 from typing import Optional
 
-from PySide6.QtCore import QSize, QSizeF, Qt, Signal
+from PySide6.QtCore import QPointF, QSize, QSizeF, Qt, Signal
 from PySide6.QtGui import (
     QColor,
     QImage,
@@ -249,6 +249,11 @@ class VideoRendererWidget(QRhiWidget):
 
     nativeSizeChanged = Signal(QSizeF)
     firstFrameReady = Signal()
+    zoomChanged = Signal(float)
+
+    _ZOOM_MIN = 0.1
+    _ZOOM_MAX = 4.0
+    _ZOOM_STEP = 1.1
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
@@ -276,6 +281,7 @@ class VideoRendererWidget(QRhiWidget):
         self._first_render_done = False
         self._has_frame = False
         self._viewport_fill_enabled = False
+        self._zoom_factor = 1.0
 
         # --- RHI resources (created in initialize()) ---
         self._pipeline: Optional[QRhiGraphicsPipeline] = None
@@ -413,6 +419,9 @@ class VideoRendererWidget(QRhiWidget):
         self._container_linux_180_hint = False
         self._has_frame = False
         self._user_rotate90_steps = 0
+        if self._zoom_factor != 1.0:
+            self._zoom_factor = 1.0
+            self.zoomChanged.emit(1.0)
         # Reset tracked texture formats so that the next video always
         # recreates textures with the correct format, even when the
         # resolution is identical (e.g. switching between an 8-bit NV12
@@ -459,6 +468,40 @@ class VideoRendererWidget(QRhiWidget):
     def native_size(self) -> QSizeF:
         """Return the native resolution of the current video frame."""
         return self._native_size
+
+    # ------------------------------------------------------------------
+    # Zoom API
+    # ------------------------------------------------------------------
+    def set_zoom(self, factor: float, anchor: QPointF | None = None) -> None:
+        """Set the zoom level, clamped to [_ZOOM_MIN, _ZOOM_MAX].
+
+        ``anchor`` is accepted for API compatibility with ``GLImageViewer`` but
+        is currently unused — the renderer always zooms around the video's
+        natural centre (which coincides with the viewport centre).
+        """
+        _ = anchor  # accepted for API compatibility; centre-zoom only
+        clamped = max(self._ZOOM_MIN, min(self._ZOOM_MAX, float(factor)))
+        if clamped == self._zoom_factor:
+            return
+        self._zoom_factor = clamped
+        self.update()
+        self.zoomChanged.emit(self._zoom_factor)
+
+    def zoom_in(self) -> None:
+        """Increase zoom by one step."""
+        self.set_zoom(self._zoom_factor * self._ZOOM_STEP)
+
+    def zoom_out(self) -> None:
+        """Decrease zoom by one step."""
+        self.set_zoom(self._zoom_factor / self._ZOOM_STEP)
+
+    def reset_zoom(self) -> None:
+        """Reset zoom to 1:1 (fit-to-viewport)."""
+        self.set_zoom(1.0)
+
+    def viewport_center(self) -> QPointF:
+        """Return the center point of this widget in local pixel coordinates."""
+        return QPointF(self.width() / 2.0, self.height() / 2.0)
 
     # ------------------------------------------------------------------
     # QRhiWidget overrides
@@ -902,6 +945,18 @@ class VideoRendererWidget(QRhiWidget):
                     vw = (self._native_size.width() * scale) / ow
                     vx = (1.0 - vw) / 2.0
                     vy = 0.0
+
+        # Apply zoom: scale the video rect around its natural center.
+        # For zoom > 1 the rect grows beyond [0,1] causing the video to overflow
+        # the viewport (only the center portion is visible — effectively a zoom-in).
+        z = self._zoom_factor
+        if z != 1.0:
+            cx = vx + vw * 0.5
+            cy = vy + vh * 0.5
+            vw = vw * z
+            vh = vh * z
+            vx = cx - vw * 0.5
+            vy = cy - vh * 0.5
 
         # Letterbox color
         lc = self._letterbox_color

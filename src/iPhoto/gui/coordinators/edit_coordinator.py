@@ -750,7 +750,11 @@ class EditCoordinator(QObject):
             )
         self._ui.video_area.load_video(
             source,
-            adjustments=sidecar.resolve_render_adjustments(raw_adjustments) if needs_adjusted_preview else None,
+            adjustments=(
+                sidecar.resolve_render_adjustments(raw_adjustments)
+                if needs_adjusted_preview
+                else (raw_adjustments or None)
+            ),
             trim_range_ms=trim_range_ms,
             adjusted_preview=needs_adjusted_preview,
         )

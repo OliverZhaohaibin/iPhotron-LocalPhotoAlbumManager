@@ -570,6 +570,10 @@ class VideoArea(QWidget):
         """Toggle the audio output mute state."""
         self.set_muted(not self.is_muted())
 
+    def has_video(self) -> bool:
+        """Return True when a video source is currently loaded."""
+        return self._current_source is not None
+
     def load_video(
         self,
         path: Path,

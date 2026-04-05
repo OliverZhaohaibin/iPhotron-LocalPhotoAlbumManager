@@ -862,7 +862,7 @@ class TestVideoArea:
         assert va._trim_in_ms == 0
         assert va._trim_out_ms == 4000
 
-    def test_space_shortcut_handled_by_shortcut_manager(self, qapp, mocker):
+    def test_space_key_does_not_trigger_playback_in_widget(self, qapp, mocker):
         """Space key in VideoArea.keyPressEvent is now a no-op; play/pause is
         handled globally by AppShortcutManager, not the widget's keyPressEvent."""
         va = VideoArea()

@@ -142,7 +142,7 @@ class AppShortcutManager(QObject):
         return isinstance(w, (QLineEdit, QTextEdit, QAbstractSpinBox))
 
     def _is_video_visible(self) -> bool:
-        return self._video_area is not None and self._video_area._current_source is not None
+        return self._video_area is not None and self._video_area.has_video()
 
     def _edit_video_transport_active(self) -> bool:
         """Return True when the edit coordinator can handle transport shortcuts."""

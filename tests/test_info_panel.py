@@ -264,5 +264,5 @@ def test_info_panel_named_lens_model_gets_focal_appended(
     # The named model should be present and enriched with focal + aperture info.
     assert "XF23mmF2 R WR" in label_text
     assert "23" in label_text   # focal length must appear
-    assert "f/2" in label_text  # aperture must appear
+    assert "ƒ2" in label_text  # aperture must appear
     panel.close()

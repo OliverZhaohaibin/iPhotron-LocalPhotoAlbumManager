@@ -444,9 +444,11 @@ def test_stream_tags_duration_overrides_exiftool_when_no_other_ffprobe_duration(
 
 def _make_no_ffprobe(monkeypatch: pytest.MonkeyPatch) -> None:
     """Disable ffprobe so tests focus on ExifTool metadata only."""
-    monkeypatch.setattr(
-        metadata, "probe_media", lambda _p: (_ for _ in ()).throw(metadata.ExternalToolError("no ffprobe"))
-    )
+
+    def _raise(path: Path) -> dict:
+        raise metadata.ExternalToolError("no ffprobe")
+
+    monkeypatch.setattr(metadata, "probe_media", _raise)
 
 
 def test_read_video_meta_lens_from_keys_group(
@@ -539,3 +541,116 @@ def test_read_video_meta_full_priority_chain(
     }
     info = metadata.read_video_meta(tmp_path / "clip.mov", exif_payload)
     assert info["lens"] == "iPhone 12 back camera 4.2mm f/1.6"
+
+
+# ── B-level lens spec string fallbacks ────────────────────────────────────────
+
+
+def test_read_video_meta_lens_from_exif_ifd_lens_info(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """B-fallback: ExifIFD:LensInfo (e.g. Fujifilm X-T4 '23mm f/2') is used when
+    no explicit LensModel is present."""
+    _make_no_ffprobe(monkeypatch)
+    exif_payload = {
+        "ExifIFD": {"LensInfo": "23mm f/2"},
+    }
+    info = metadata.read_video_meta(tmp_path / "clip.mov", exif_payload)
+    assert info["lens"] == "23mm f/2"
+
+
+def test_read_video_meta_lens_from_exif_lens_specification(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """B-fallback: EXIF:LensSpecification is used when no LensModel or LensInfo is present."""
+    _make_no_ffprobe(monkeypatch)
+    exif_payload = {
+        "EXIF": {"LensSpecification": "18-55mm f/2.8-4"},
+    }
+    info = metadata.read_video_meta(tmp_path / "clip.mov", exif_payload)
+    assert info["lens"] == "18-55mm f/2.8-4"
+
+
+def test_read_video_meta_lens_name_beats_spec_string(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A-level lens name (ExifIFD:LensModel) wins over B-level LensInfo spec."""
+    _make_no_ffprobe(monkeypatch)
+    exif_payload = {
+        "ExifIFD": {
+            "LensModel": "XF23mmF2 R WR",
+            "LensInfo": "23mm f/2",
+        },
+    }
+    info = metadata.read_video_meta(tmp_path / "clip.mov", exif_payload)
+    assert info["lens"] == "XF23mmF2 R WR"
+
+
+# ── Focal length extraction ────────────────────────────────────────────────────
+
+
+def test_read_video_meta_focal_length_from_video_keys(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """VideoKeys:FocalLengthIn35mmFormat is extracted as focal_length."""
+    _make_no_ffprobe(monkeypatch)
+    exif_payload = {
+        "VideoKeys:FocalLengthIn35mmFormat": 27,
+    }
+    info = metadata.read_video_meta(tmp_path / "clip.mov", exif_payload)
+    assert info["focal_length"] == pytest.approx(27.0)
+
+
+def test_read_video_meta_focal_length_from_exif_ifd(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """ExifIFD:FocalLength is used when VideoKeys is absent."""
+    _make_no_ffprobe(monkeypatch)
+    exif_payload = {
+        "ExifIFD": {"FocalLength": "23"},
+    }
+    info = metadata.read_video_meta(tmp_path / "clip.mov", exif_payload)
+    assert info["focal_length"] == pytest.approx(23.0)
+
+
+def test_read_video_meta_focal_length_35mm_beats_raw(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """ExifIFD:FocalLengthIn35mmFormat is preferred over the raw FocalLength."""
+    _make_no_ffprobe(monkeypatch)
+    exif_payload = {
+        "ExifIFD": {
+            "FocalLengthIn35mmFormat": 27,
+            "FocalLength": "23",
+        },
+    }
+    info = metadata.read_video_meta(tmp_path / "clip.mov", exif_payload)
+    assert info["focal_length"] == pytest.approx(27.0)
+
+
+def test_read_video_meta_fujifilm_xt4_style(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """End-to-end: Fujifilm X-T4 video embedded EXIF metadata is fully parsed."""
+    _make_no_ffprobe(monkeypatch)
+    # Representative subset of X-T4 ExifTool output for a video clip.
+    exif_payload = {
+        "IFD0": {"Make": "FUJIFILM", "Model": "X-T4"},
+        "ExifIFD": {
+            "ExposureTime": "1/2700",
+            "FNumber": 5.6,
+            "ISO": 640,
+            "LensInfo": "23mm f/2",
+            "FocalLength": "23",
+        },
+        "Composite": {"LensID": "XF23mmF2 R WR"},
+    }
+    info = metadata.read_video_meta(tmp_path / "clip.mov", exif_payload)
+
+    assert info["make"] == "FUJIFILM"
+    assert info["model"] == "X-T4"
+    # Composite:LensID is an A-level explicit lens name — it wins over the
+    # B-level ExifIFD:LensInfo spec string.
+    assert info["lens"] == "XF23mmF2 R WR"
+    assert info["focal_length"] == pytest.approx(23.0)
+

@@ -139,15 +139,22 @@ def read_image_meta_with_exiftool(
             info["model"] = model_value
 
         lens_value = _pick_string(
+            # A: explicit lens name sources
             exif_ifd_group.get("LensModel"),
             exif_group.get("LensModel"),
             maker_notes_group.get("LensType"),
             maker_notes_group.get("LensModel"),
             composite_group.get("LensID"),
             composite_group.get("Lens"),
-            composite_group.get("LensInfo"),
             xmp_group.get("Lens"),
             xmp_group.get("LensModel"),
+            # B: lens spec string (e.g. Fujifilm ExifIFD:LensInfo = "23mm f/2")
+            exif_ifd_group.get("LensInfo"),
+            exif_group.get("LensSpecification"),
+            exif_group.get("LensSpec"),
+            maker_notes_group.get("LensSpec"),
+            maker_notes_group.get("LensInfo"),
+            composite_group.get("LensInfo"),
         )
         if lens_value is not None:
             info["lens"] = lens_value
@@ -301,34 +308,67 @@ def read_video_meta(path: Path, metadata: Optional[Dict[str, Any]] = None) -> Di
         if model_value is not None:
             info["model"] = model_value
 
-        # Extract lens from QuickTime Keys/VideoKeys groups (iOS/macOS video).
-        # Priority order requested:
-        #   1. Keys:LensModel or VideoKeys:LensModel (primary)
-        #   2. Language-tagged variant, e.g. VideoKeys:LensModel-eng-DE (fallback 1)
-        #   3. Composite:LensID (fallback 2)
-        #   4. Existing EXIF / MakerNotes / QuickTime sources
+        # Lens extraction — full priority chain for cross-brand compatibility.
+        #
+        # A: explicit lens name (highest priority, closest to user intent)
+        #   1. QuickTime Keys/VideoKeys (iOS/macOS video native tags)
+        #   2. Language-tagged variant, e.g. VideoKeys:LensModel-eng-DE
+        #   3. EXIF/ExifIFD/MakerNotes LensModel, Composite:LensID
+        #
+        # B: lens spec string when no explicit name is available
+        #   ExifIFD:LensInfo (e.g. Fujifilm "23mm f/2"), EXIF:LensSpecification, etc.
         keys_group = _extract_group(metadata, "Keys") or {}
         video_keys_group = _extract_group(metadata, "VideoKeys") or {}
-        video_lens_lang: Optional[str] = None
-        for _grp in (keys_group, video_keys_group):
-            for _k, _v in _grp.items():
-                if _k.startswith("LensModel-") and isinstance(_v, str) and _v.strip():
-                    video_lens_lang = _v.strip()
-                    break
-            if video_lens_lang:
-                break
+        # Scan both groups for the first language-tagged LensModel variant
+        # (e.g. "LensModel-eng-DE") and use it when the bare tag is absent.
+        video_lens_lang: Optional[str] = next(
+            (
+                _v.strip()
+                for _grp in (keys_group, video_keys_group)
+                for _k, _v in _grp.items()
+                if _k.startswith("LensModel-") and isinstance(_v, str) and _v.strip()
+            ),
+            None,
+        )
         lens_value = _pick_string(
+            # A: explicit lens name
             keys_group.get("LensModel"),
             video_keys_group.get("LensModel"),
             video_lens_lang,
-            composite_group.get("LensID"),
             exif_ifd_group.get("LensModel"),
+            exif_group.get("LensModel"),
             maker_notes_group.get("LensModel"),
-            composite_group.get("Lens"),
+            composite_group.get("LensID"),
             quicktime_group.get("LensModel"),
+            # B: lens spec string fallback
+            exif_ifd_group.get("LensInfo"),
+            exif_group.get("LensSpecification"),
+            exif_group.get("LensSpec"),
+            maker_notes_group.get("LensSpec"),
+            maker_notes_group.get("LensInfo"),
+            composite_group.get("Lens"),
+            composite_group.get("LensInfo"),
         )
         if lens_value is not None:
             info["lens"] = lens_value
+
+        # Extract focal length from video-native and EXIF groups.
+        # Prefer the 35mm-equivalent value for consistent cross-brand display.
+        for _fl_candidate in (
+            video_keys_group.get("FocalLengthIn35mmFormat"),
+            keys_group.get("FocalLengthIn35mmFormat"),
+            composite_group.get("FocalLengthIn35mmFormat"),
+            exif_ifd_group.get("FocalLengthIn35mmFormat"),
+            exif_group.get("FocalLengthIn35mmFormat"),
+            exif_ifd_group.get("FocalLength"),
+            exif_group.get("FocalLength"),
+            maker_notes_group.get("FocalLength"),
+            quicktime_group.get("FocalLength"),
+        ):
+            fl = _coerce_fractional(_fl_candidate)
+            if fl is not None:
+                info["focal_length"] = fl
+                break
 
         # Extract duration from ExifTool as an initial estimate.  ffprobe
         # values (parsed below) are generally more precise and will overwrite

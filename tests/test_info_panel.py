@@ -85,7 +85,7 @@ def test_info_panel_video_shows_lens_when_available(qapp: QApplication) -> None:
     panel.close()
 
 
-
+def test_info_panel_video_missing_details_shows_fallback(qapp: QApplication) -> None:
     """When metadata is sparse the video fallback string should be displayed."""
 
     panel = InfoPanel()
@@ -174,4 +174,31 @@ def test_info_panel_has_shadow_margin(qapp: QApplication) -> None:
     assert margins.top() == 0
     assert margins.right() == shadow
     assert margins.bottom() == shadow
+    panel.close()
+
+
+def test_info_panel_video_shows_lens_spec_string_when_no_model_name(qapp: QApplication) -> None:
+    """When only a lens spec string (e.g. Fujifilm LensInfo '23mm f/2') is available,
+    the lens label must be visible with the spec text."""
+
+    panel = InfoPanel()
+    meta = {
+        "rel": "clip.MOV",
+        "name": "clip.MOV",
+        "is_video": True,
+        "make": "FUJIFILM",
+        "model": "X-T4",
+        "lens": "23mm f/2",
+        "w": 1920,
+        "h": 1080,
+        "bytes": 12_000_000,
+        "codec": "h264",
+        "frame_rate": 25.0,
+        "dur": 10.0,
+    }
+
+    panel.set_asset_metadata(meta)
+
+    assert panel._lens_label.isVisible()
+    assert "23mm f/2" in panel._lens_label.text()
     panel.close()

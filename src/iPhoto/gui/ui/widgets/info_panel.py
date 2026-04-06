@@ -24,8 +24,20 @@ from PySide6.QtWidgets import (
 from ..icons import load_icon
 from .main_window_metrics import TITLE_BAR_HEIGHT, WINDOW_CONTROL_BUTTON_SIZE, WINDOW_CONTROL_GLYPH_SIZE
 
-# Matches a numeric focal length embedded in a lens string (e.g. "23mm", "4.2mm").
-_FOCAL_LENGTH_RE = re.compile(r"\d+(?:\.\d+)?mm", re.IGNORECASE)
+# Matches a lens string that is already a self-contained spec with *both* a
+# focal-length component ("23mm", "24-70mm") *and* an aperture component
+# ("f/2", "f/3.5").  A bare lens-model name like "XF23mmF2 R WR" or an iPhone
+# string like "back camera 4.2mm f/1.6" both qualify, but so does a formatted
+# LensInfo spec like "23mm f/2".  When the full pattern matches we skip
+# appending the separate focal/aperture EXIF fields to avoid duplication.
+# Note: requires an explicit "f/" prefix so that "XF23mmF2" alone does NOT
+# trigger the early return — the "F2" token there is not preceded by "f/".
+_LENS_SPEC_RE = re.compile(
+    r"\d+(?:[.\-]\d+)?mm"   # focal length part, e.g. "23mm" or "24-70mm"
+    r".*?"                   # any characters in between
+    r"\bf/\d+(?:\.\d+)?",   # aperture part, e.g. "f/2" or "f/3.5"
+    re.IGNORECASE,
+)
 
 
 @dataclass
@@ -428,10 +440,12 @@ class InfoPanel(QWidget):
         focal_text = self._format_focal_length(info.get("focal_length"))
         aperture_text = self._format_aperture(info.get("f_number"))
         components = [component for component in (focal_text, aperture_text) if component]
-        # If the lens string already encodes focal-length info (e.g. a LensInfo spec
-        # string like "23mm f/2"), do not append the separate focal/aperture fields —
-        # they would merely duplicate values already present in the lens string.
-        if lens and _FOCAL_LENGTH_RE.search(lens):
+        # If the lens string already encodes both focal-length and aperture info
+        # (e.g. a LensInfo spec string like "23mm f/2" or an iPhone model tag
+        # "back camera 4.2mm f/1.6"), do not append the separate focal/aperture
+        # fields — they would merely duplicate values already present in the
+        # lens string.
+        if lens and _LENS_SPEC_RE.search(lens):
             return lens
         if lens and components:
             return f"{lens} — {' '.join(components)}"

@@ -10,6 +10,7 @@ from PySide6.QtCore import QItemSelectionModel, QModelIndex, QObject, QTimer, Si
 from PySide6.QtGui import QAction, QColor, QPalette
 
 from iPhoto.config import PLAY_ASSET_DEBOUNCE_MS
+from iPhoto.errors import ExternalToolError
 from iPhoto.gui.coordinators.view_router import ViewRouter
 from iPhoto.gui.ui.controllers.edit_zoom_handler import EditZoomHandler
 from iPhoto.gui.ui.controllers.header_controller import HeaderController
@@ -620,8 +621,8 @@ class PlaybackCoordinator(QObject):
                         try:
                             exif_batch = get_metadata_batch([Path(abs_path)])
                             exif_payload = exif_batch[0] if exif_batch else None
-                        except Exception:
-                            pass
+                        except (ExternalToolError, OSError) as exc:
+                            LOGGER.debug("ExifTool metadata fetch failed for %s: %s", abs_path, exc)
                         fresh = read_video_meta(Path(abs_path), exif_payload)
                     else:
                         fresh = read_image_meta(Path(abs_path))

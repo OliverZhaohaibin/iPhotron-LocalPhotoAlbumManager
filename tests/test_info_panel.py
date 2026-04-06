@@ -235,3 +235,34 @@ def test_info_panel_lens_spec_string_not_duplicated_when_focal_and_fnumber_also_
     assert panel._lens_label.isVisible()
     assert label_text == "23mm f/2"
     panel.close()
+
+
+def test_info_panel_named_lens_model_gets_focal_appended(
+    qapp: QApplication,
+) -> None:
+    """A named lens model string like 'XF23mmF2 R WR' should have the separate
+    focal_length / f_number fields appended because it is not a complete spec
+    string (no 'f/' prefix in the aperture token).  The old broad _FOCAL_LENGTH_RE
+    would have incorrectly suppressed the append."""
+
+    panel = InfoPanel()
+    meta = {
+        "rel": "img.jpg",
+        "name": "img.jpg",
+        "is_video": False,
+        "make": "FUJIFILM",
+        "model": "X-T4",
+        "lens": "XF23mmF2 R WR",
+        "focal_length": 23.0,
+        "f_number": 2.0,
+    }
+
+    panel.set_asset_metadata(meta)
+
+    label_text = panel._lens_label.text()
+    assert panel._lens_label.isVisible()
+    # The named model should be present and enriched with focal + aperture info.
+    assert "XF23mmF2 R WR" in label_text
+    assert "23" in label_text   # focal length must appear
+    assert "f/2" in label_text  # aperture must appear
+    panel.close()

@@ -254,9 +254,16 @@ class PlaybackCoordinator(QObject):
         # video duration rather than the trim-relative value.
         if self._player_view.video_area.is_edit_mode_active():
             return
+        # Sync trim state from VideoArea so that trim changes applied by
+        # EditCoordinator._restore_detail_video_preview (which bypasses the
+        # normal play_asset path) are reflected in the duration display.
+        trim_in_ms, trim_out_ms = self._player_view.video_area.trim_range_ms()
+        self._trim_in_ms = trim_in_ms
+        self._trim_out_ms = trim_out_ms
         if self._trim_out_ms > self._trim_in_ms:
             self._player_bar.set_duration(self._trim_out_ms - self._trim_in_ms)
         else:
+            # No trim is active (or range is degenerate) — show the full clip duration.
             self._player_bar.set_duration(duration_ms)
 
     @Slot(int)

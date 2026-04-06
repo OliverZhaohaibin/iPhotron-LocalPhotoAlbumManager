@@ -1,4 +1,12 @@
-"""High-level application facade."""
+"""
+Compatibility backend facade.
+
+This module is deprecated as a business entrypoint.
+New business logic must be implemented in application/use_cases/*
+and only bridged here temporarily for backward compatibility.
+
+Do NOT add new business rules to this file.
+"""
 
 from __future__ import annotations
 

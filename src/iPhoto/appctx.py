@@ -1,31 +1,24 @@
-"""Application-wide context helpers for the GUI layer."""
+"""Application-wide context helpers for the GUI layer.
+
+Compatibility shell.
+
+This module retains the ``AppContext`` name and API surface for backward
+compatibility.  New dependency wiring must go into
+``bootstrap/container.py`` and new GUI session state must go into
+``presentation/qt/session/app_session.py``.  This file composes both and
+must not grow further.
+"""
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, TYPE_CHECKING
-import os
 import logging
-import uuid
 from typing import Optional
 
 from .di.container import DependencyContainer
-from .domain.repositories import IAlbumRepository, IAssetRepository
-from .infrastructure.repositories.sqlite_asset_repository import SQLiteAssetRepository
-from .infrastructure.repositories.sqlite_album_repository import SQLiteAlbumRepository
-from .infrastructure.db.pool import ConnectionPool
-from .events.bus import EventBus
-from .application.use_cases.open_album import OpenAlbumUseCase
-from .application.use_cases.scan_album import ScanAlbumUseCase
-from .application.use_cases.pair_live_photos import PairLivePhotosUseCase
-from .application.services.album_service import AlbumService
-from .application.services.asset_service import AssetService
-from .infrastructure.services.metadata_provider import ExifToolMetadataProvider
-from .infrastructure.services.thumbnail_generator import PillowThumbnailGenerator
-from .application.interfaces import IMetadataProvider, IThumbnailGenerator
-
-from .config import DEFAULT_EXCLUDE, DEFAULT_INCLUDE, WORK_DIR_NAME
+from .bootstrap.container import build_container
 
 if TYPE_CHECKING:  # pragma: no cover - only for type checking
     from .gui.facade import AppFacade
@@ -56,73 +49,15 @@ def _create_library_manager():
 
     return LibraryManager()
 
-def _create_di_container() -> DependencyContainer:
-    container = DependencyContainer()
-
-    # Infrastructure
-    db_path = Path.home() / ".iPhoto" / "global_index.db"
-    db_path.parent.mkdir(parents=True, exist_ok=True)
-
-    # Register Connection Pool (Singleton)
-    pool = ConnectionPool(db_path)
-    container.register_instance(ConnectionPool, pool)
-
-    # Event Bus
-    logger = logging.getLogger("EventBus")
-    container.register_factory(EventBus, lambda: EventBus(logger), singleton=True)
-
-    # Infrastructure Services
-    container.register_singleton(IMetadataProvider, ExifToolMetadataProvider)
-    container.register_singleton(IThumbnailGenerator, PillowThumbnailGenerator)
-
-    # Repositories
-    container.register_factory(IAlbumRepository,
-                               lambda: SQLiteAlbumRepository(container.resolve(ConnectionPool)),
-                               singleton=True)
-
-    container.register_factory(IAssetRepository,
-                               lambda: SQLiteAssetRepository(container.resolve(ConnectionPool)),
-                               singleton=True)
-
-    # Use Cases
-    container.register_factory(OpenAlbumUseCase,
-                               lambda: OpenAlbumUseCase(
-                                   album_repo=container.resolve(IAlbumRepository),
-                                   asset_repo=container.resolve(IAssetRepository),
-                                   event_bus=container.resolve(EventBus)
-                               ))
-    container.register_factory(ScanAlbumUseCase,
-                               lambda: ScanAlbumUseCase(
-                                   album_repo=container.resolve(IAlbumRepository),
-                                   asset_repo=container.resolve(IAssetRepository),
-                                   event_bus=container.resolve(EventBus),
-                                   metadata_provider=container.resolve(IMetadataProvider),
-                                   thumbnail_generator=container.resolve(IThumbnailGenerator)
-                               ))
-    container.register_factory(PairLivePhotosUseCase,
-                               lambda: PairLivePhotosUseCase(
-                                   asset_repo=container.resolve(IAssetRepository),
-                                   event_bus=container.resolve(EventBus)
-                               ))
-
-    # Services
-    container.register_factory(AlbumService,
-                               lambda: AlbumService(
-                                   open_album_use_case=container.resolve(OpenAlbumUseCase),
-                                   scan_album_use_case=container.resolve(ScanAlbumUseCase),
-                                   pair_live_photos_use_case=container.resolve(PairLivePhotosUseCase)
-                               ), singleton=True)
-
-    container.register_factory(AssetService,
-                               lambda: AssetService(
-                                   asset_repo=container.resolve(IAssetRepository)
-                               ), singleton=True)
-
-    return container
 
 @dataclass
 class AppContext:
-    """Container object shared across GUI components."""
+    """Compatibility shell: composes the DI container and GUI session state.
+
+    New code must access dependencies via ``context.container`` and session
+    state via ``context.session``.  Direct attributes on this class are
+    preserved for backward compatibility only.
+    """
 
     settings: "SettingsManager" = field(default_factory=_create_settings_manager)
     library: "LibraryManager" = field(default_factory=_create_library_manager)
@@ -130,85 +65,43 @@ class AppContext:
     recent_albums: List[Path] = field(default_factory=list)
     theme: "ThemeManager" = field(init=False)
 
-    # DI Container integration
-    container: DependencyContainer = field(default_factory=_create_di_container)
+    # DI Container – assembled by bootstrap/container.py
+    container: DependencyContainer = field(default_factory=build_container)
     defer_startup_tasks: bool = False
     _pending_basic_library_path: Path | None = field(init=False, default=None, repr=False)
 
     def __post_init__(self) -> None:
         from .errors import LibraryError
         from .gui.ui.theme_manager import ThemeManager
+        from .presentation.qt.session.app_session import AppSession
 
         self.theme = ThemeManager(self.settings)
         self.theme.apply_theme()
 
         # ``AppFacade`` needs to observe the shared library manager so that
         # manifest writes performed while browsing nested albums can keep the
-        # global "Favorites" collection in sync.  The binding is established
-        # eagerly here because both collaborators are constructed via default
-        # factories before ``__post_init__`` runs.
+        # global "Favorites" collection in sync.
         self.facade.bind_library(self.library)
 
-        basic_path = self.settings.get("basic_library_path")
-        if isinstance(basic_path, str) and basic_path:
-            self._pending_basic_library_path = Path(basic_path).expanduser()
-
-        if not self.defer_startup_tasks:
-            self.resume_startup_tasks()
-
-        stored = self.settings.get("last_open_albums", []) or []
-        resolved: list[Path] = []
-        for entry in stored:
-            try:
-                resolved.append(Path(entry))
-            except TypeError:
-                continue
-        if resolved:
-            self.recent_albums = resolved[:10]
+        # Build the canonical session object.  Startup tasks are deferred to
+        # the session so new code can interact with ``context.session`` directly.
+        self.session = AppSession(
+            settings=self.settings,
+            library=self.library,
+            facade=self.facade,
+            defer_startup_tasks=self.defer_startup_tasks,
+        )
+        # Sync recent_albums back from session after it loads persisted history.
+        self.recent_albums = self.session.recent_albums
 
     def resume_startup_tasks(self) -> None:
         """Run deferred startup work such as binding the default library path."""
 
-        from .errors import LibraryError
-
-        candidate = self._pending_basic_library_path
-        self._pending_basic_library_path = None
-        if candidate is None:
-            _logger.info("resume_startup_tasks: no pending library path")
-            return
-        _logger.info("resume_startup_tasks: attempting to bind saved library path %s", candidate)
-        if candidate.exists():
-            try:
-                self.library.bind_path(candidate)
-                _logger.info("resume_startup_tasks: bind_path succeeded, root=%s", self.library.root())
-                self._start_initial_scan_if_needed(candidate)
-            except LibraryError as exc:
-                _logger.error("resume_startup_tasks: bind_path failed: %s", exc)
-                self.library.errorRaised.emit(str(exc))
-        else:
-            _logger.warning("resume_startup_tasks: saved path does not exist: %s", candidate)
-            self.library.errorRaised.emit(
-                f"Basic Library path is unavailable: {candidate}"
-            )
-
-    def _start_initial_scan_if_needed(self, library_root: Path) -> None:
-        work_dir = library_root / WORK_DIR_NAME
-        db_path = work_dir / "global_index.db"
-        if work_dir.exists() and db_path.exists():
-            return
-        if self.library.is_scanning_path(library_root):
-            return
-        self.library.start_scanning(library_root, DEFAULT_INCLUDE, DEFAULT_EXCLUDE)
+        self.session.resume_startup_tasks()
+        self.recent_albums = self.session.recent_albums
 
     def remember_album(self, root: Path) -> None:
         """Track *root* in the recent albums list, keeping the most recent first."""
 
-        normalized = root.resolve()
-        self.recent_albums = [entry for entry in self.recent_albums if entry != normalized]
-        self.recent_albums.insert(0, normalized)
-        # Keep the list short to avoid unbounded growth.
-        del self.recent_albums[10:]
-        self.settings.set(
-            "last_open_albums",
-            [str(path) for path in self.recent_albums],
-        )
+        self.session.remember_album(root)
+        self.recent_albums = self.session.recent_albums

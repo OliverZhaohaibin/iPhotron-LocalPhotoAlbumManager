@@ -9,14 +9,20 @@ from typing import Callable, Dict, Iterable, List, Optional, Sequence, Set, Tupl
 
 from PySide6.QtCore import QObject, QTimer, Signal, Slot
 
-from ... import app as backend
 from ...cache.index_store import get_global_repository
-from ...config import RECENTLY_DELETED_DIR_NAME, WORK_DIR_NAME
+from ...config import RECENTLY_DELETED_DIR_NAME, WORK_DIR_NAME, DEFAULT_INCLUDE, DEFAULT_EXCLUDE
 from ...errors import IPhotoError
 from ..background_task_manager import BackgroundTaskManager
 # Updated imports to new location
 from ...library.workers.rescan_worker import RescanSignals, RescanWorker
 from ...library.workers.scanner_worker import ScannerSignals, ScannerWorker
+from ...index_sync_service import (
+    update_index_snapshot as _update_index_snapshot,
+    ensure_links as _ensure_links,
+)
+
+from ...application.use_cases.scan.rescan_album_use_case import RescanAlbumUseCase
+from ...application.use_cases.scan.pair_live_photos_use_case_v2 import PairLivePhotosUseCaseV2
 
 if TYPE_CHECKING:
     from ...library.manager import LibraryManager
@@ -74,19 +80,21 @@ class LibraryUpdateService(QObject):
         self._album_root_cache: Dict[str, Optional[Path]] = {}
         self._model_loading_due_to_scan = False
 
+        def _get_library_root() -> Optional[Path]:
+            lib = self._library_manager_getter()
+            return lib.root() if lib is not None else None
+
+        self._rescan_use_case = RescanAlbumUseCase(library_root_getter=_get_library_root)
+        self._pair_use_case = PairLivePhotosUseCaseV2(library_root_getter=_get_library_root)
+
     # ------------------------------------------------------------------
     # Public API used by :class:`~iPhoto.gui.facade.AppFacade`
     # ------------------------------------------------------------------
     def rescan_album(self, album: "Album") -> List[dict]:
         """Synchronously rebuild the album index and emit cache updates."""
 
-        library_root = None
-        lib_manager = self._library_manager_getter()
-        if lib_manager:
-            library_root = lib_manager.root()
-
         try:
-            rows = backend.rescan(album.root, library_root=library_root)
+            rows = self._rescan_use_case.execute(album.root)
         except IPhotoError as exc:
             self.errorRaised.emit(str(exc))
             return []
@@ -109,8 +117,8 @@ class LibraryUpdateService(QObject):
             return
 
         filters = album.manifest.get("filters", {}) if isinstance(album.manifest, dict) else {}
-        include: Iterable[str] = filters.get("include", backend.DEFAULT_INCLUDE)
-        exclude: Iterable[str] = filters.get("exclude", backend.DEFAULT_EXCLUDE)
+        include: Iterable[str] = filters.get("include", DEFAULT_INCLUDE)
+        exclude: Iterable[str] = filters.get("exclude", DEFAULT_EXCLUDE)
 
         signals = ScannerSignals()
         signals.progressUpdated.connect(self._relay_scan_progress)
@@ -155,22 +163,16 @@ class LibraryUpdateService(QObject):
 
     def pair_live(self, album: "Album") -> List[dict]:
         """Rebuild Live Photo pairings for *album* and refresh related views."""
-        
-        # Get library root for global database access
-        library_root = None
-        lib_manager = self._library_manager_getter()
-        if lib_manager:
-            library_root = lib_manager.root()
 
         try:
-            groups = backend.pair(album.root, library_root=library_root)
+            groups = self._pair_use_case.execute(album.root)
         except IPhotoError as exc:
             self.errorRaised.emit(str(exc))
             return []
 
         self.linksUpdated.emit(album.root)
         self.assetReloadRequested.emit(album.root, False, False)
-        return [group.__dict__ for group in groups]
+        return groups
 
     def announce_album_refresh(
         self,
@@ -459,8 +461,8 @@ class LibraryUpdateService(QObject):
             # existed before the rescan.  The worker keeps the result in memory,
             # therefore we flush the global index and ``links.json`` here to
             # mirror the historical facade behaviour before notifying listeners.
-            backend._update_index_snapshot(root, materialised_rows, library_root=library_root)
-            backend._ensure_links(root, materialised_rows, library_root=library_root)
+            _update_index_snapshot(root, materialised_rows, library_root=library_root)
+            _ensure_links(root, materialised_rows, library_root=library_root)
         except IPhotoError as exc:
             self.errorRaised.emit(str(exc))
             self.scanFinished.emit(root, False)

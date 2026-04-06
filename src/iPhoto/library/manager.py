@@ -8,6 +8,12 @@ sub-modules extracted during a refactoring pass:
 * :mod:`.filesystem_watcher` – ``QFileSystemWatcher`` wrapper
 * :mod:`.geo_aggregator`     – ``GeotaggedAsset`` dataclass & collection
 * :mod:`.trash_manager`      – Trash / deleted-items management
+
+NOTE:
+    LibraryManager is currently a legacy coordination object.
+    Do not add new business rules here.
+    New behaviour must be implemented in application/use_cases/* or dedicated services.
+    Current responsibility boundary: tree coordination, scan coordination, watch coordination.
 """
 
 from __future__ import annotations

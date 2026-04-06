@@ -667,6 +667,12 @@ class EditCoordinator(QObject):
         return max(int(self._ui.video_area.player_bar.duration()), 0)
 
     def _video_duration_sec(self) -> float | None:
+        # Prefer the probed/player-reported absolute duration tracked by
+        # _pending_video_duration_sec.  player_bar.duration() may reflect a
+        # trim-relative display value set by PlaybackCoordinator before edit
+        # mode was entered, which would cause wrong trim calculations.
+        if self._pending_video_duration_sec is not None and self._pending_video_duration_sec > 0.0:
+            return self._pending_video_duration_sec
         duration_ms = self._video_duration_ms()
         if duration_ms <= 0:
             return None

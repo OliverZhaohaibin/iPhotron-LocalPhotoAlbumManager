@@ -352,6 +352,10 @@ class VideoArea(QWidget):
             },
         )
 
+    def is_edit_mode_active(self) -> bool:
+        """Return whether the video area is currently in edit mode."""
+        return self._edit_mode_active
+
     def set_adjustments(self, adjustments: Mapping[str, object] | None = None) -> None:
         """Apply GL adjustments to the adjusted preview surface."""
 
@@ -619,6 +623,7 @@ class VideoArea(QWidget):
                 "stack_size": (self._surface_stack.width(), self._surface_stack.height()),
             },
         )
+        prev_source = self._current_source
         self._current_source = path
         self._current_adjustments = dict(adjustments or {})
         self._last_presented_video_frame = None
@@ -634,6 +639,9 @@ class VideoArea(QWidget):
         if not self._adjusted_preview_enabled and not video_requires_adjusted_preview(self._current_adjustments):
             native_rotate90_steps = int(float(self._current_adjustments.get("Crop_Rotate90", 0.0))) % 4
         self._renderer.set_user_rotate90_steps(native_rotate90_steps)
+        # Save previous duration before resetting so it can be used as a
+        # fallback if the media backend reports 0 after setSource (see below).
+        prev_duration_ms = self._current_duration_ms
         self._trim_in_ms = 0
         self._trim_out_ms = 0
         self._current_duration_ms = 0
@@ -671,6 +679,24 @@ class VideoArea(QWidget):
         # But ensure we are at start
         if trim_range_ms is not None:
             self.set_trim_range_ms(*trim_range_ms)
+        # Force-propagate the current duration so all observers (e.g.
+        # PlaybackCoordinator) receive a durationChanged event with the new
+        # trim range already applied.  This covers two failure modes:
+        #   (a) Qt does not re-emit durationChanged for same-source reloads
+        #       (common on macOS/AVFoundation when the file is cached).
+        #   (b) durationChanged fired synchronously inside setSource() above,
+        #       before set_trim_range_ms() had a chance to update _trim_in/out.
+        # When the backend reports 0, only fall back to the previously known
+        # duration if we are reloading the *same* source — for a different
+        # source the previous duration is unrelated and must not be used to
+        # clamp/reset the new clip's trim range before the real duration arrives.
+        # In all cases calling _on_duration_changed is safe and idempotent.
+        same_source_reload = path == prev_source
+        effective_duration_ms = self._player.duration()
+        if effective_duration_ms <= 0 and same_source_reload and prev_duration_ms > 0:
+            effective_duration_ms = prev_duration_ms
+        if effective_duration_ms > 0:
+            self._on_duration_changed(effective_duration_ms)
         self._player.setPosition(self._trim_in_ms if self._trim_in_ms > 0 else 0)
         _log.debug(
             "[trace][video_area] load_video:end %s",

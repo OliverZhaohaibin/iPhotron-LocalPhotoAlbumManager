@@ -524,6 +524,7 @@ class EditCoordinator(QObject):
         self._zoom_handler.disconnect_controls()
         self._header_controller.restore_detail_mode()
         self._video_color_stats = None
+        pending_duration_sec = self._pending_video_duration_sec
         self._pending_video_duration_sec = None
         self._video_trim_thumbnail_timer.stop()
         self._video_sidebar_preview_timer.stop()
@@ -543,7 +544,7 @@ class EditCoordinator(QObject):
         self._ui.video_area.set_controls_enabled(True)
         self._ui.video_trim_bar.hide()
         if source is not None and source.suffix.lower() in VIDEO_EXTENSIONS:
-            self._restore_detail_video_preview(source)
+            self._restore_detail_video_preview(source, pending_duration_sec)
 
         self._ui.edit_sidebar.set_session(None)
         self._ui.edit_sidebar.set_video_edit_mode(False)
@@ -667,6 +668,12 @@ class EditCoordinator(QObject):
         return max(int(self._ui.video_area.player_bar.duration()), 0)
 
     def _video_duration_sec(self) -> float | None:
+        # Prefer the probed/player-reported absolute duration tracked by
+        # _pending_video_duration_sec.  player_bar.duration() may reflect a
+        # trim-relative display value set by PlaybackCoordinator before edit
+        # mode was entered, which would cause wrong trim calculations.
+        if self._pending_video_duration_sec is not None and self._pending_video_duration_sec > 0.0:
+            return self._pending_video_duration_sec
         duration_ms = self._video_duration_ms()
         if duration_ms <= 0:
             return None
@@ -778,11 +785,11 @@ class EditCoordinator(QObject):
     def _queue_video_sidebar_preview(self) -> None:
         self._refresh_video_sidebar_preview()
 
-    def _restore_detail_video_preview(self, source: Path) -> None:
+    def _restore_detail_video_preview(self, source: Path, duration_sec: float | None = None) -> None:
         raw_adjustments = sidecar.load_adjustments(source)
-        has_trim = sidecar.trim_is_non_default(raw_adjustments, None)
+        has_trim = sidecar.trim_is_non_default(raw_adjustments, duration_sec)
         needs_adjusted_preview = sidecar.video_requires_adjusted_preview(raw_adjustments)
-        trim_in_sec, trim_out_sec = sidecar.normalise_video_trim(raw_adjustments, None)
+        trim_in_sec, trim_out_sec = sidecar.normalise_video_trim(raw_adjustments, duration_sec)
         trim_range_ms = None
         if has_trim:
             trim_range_ms = (

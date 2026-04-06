@@ -302,10 +302,12 @@ def normalise_video_trim(
         0.0,
     )
     trim_out_default = duration if duration is not None else max(trim_in, 0.0)
-    trim_out = _float_or_default(
-        adjustments.get(VIDEO_TRIM_OUT_KEY) if adjustments else None,
-        trim_out_default,
-    )
+    # 0.0 is the in-memory "full duration" sentinel; treat it the same as
+    # a missing value so that persisted sentinel values in old sidecar files
+    # don't corrupt the trim range on reload.
+    _raw_trim_out = adjustments.get(VIDEO_TRIM_OUT_KEY) if adjustments else None
+    _positive_trim_out = _positive_or_none(_raw_trim_out)
+    trim_out = _float_or_default(_positive_trim_out, trim_out_default)
 
     trim_in = max(0.0, trim_in)
     trim_out = max(0.0, trim_out)

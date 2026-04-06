@@ -695,9 +695,9 @@ def _write_video_node(root: ET.Element, values: Mapping[str, Any]) -> None:
         return
 
     node = ET.SubElement(root, _VIDEO_NODE)
-    if trim_in is not None:
+    if trim_in is not None and trim_in > 0.0:
         child = ET.SubElement(node, _VIDEO_TRIM_IN_SEC)
         child.text = f"{trim_in:.6f}"
-    if trim_out is not None:
+    if trim_out is not None and trim_out > 0.0:
         child = ET.SubElement(node, _VIDEO_TRIM_OUT_SEC)
         child.text = f"{trim_out:.6f}"

@@ -712,6 +712,56 @@ class TestVideoArea:
 
         mock_set_rot.assert_called_once_with(0, 0, 0)
 
+    def _setup_load_video_mocks(self, va, mocker, player_duration: int = 0):
+        """Helper: patch common load_video dependencies."""
+        mocker.patch.object(va._player, "setSource")
+        mocker.patch.object(va._player, "setPosition")
+        mocker.patch.object(va._renderer, "clear_frame")
+        mocker.patch.object(va._renderer, "set_container_rotation")
+        mocker.patch(
+            "iPhoto.gui.ui.widgets.video_area.probe_video_rotation",
+            return_value=(0, 0, 0),
+        )
+        mocker.patch(
+            "iPhoto.gui.ui.widgets.video_area.get_linux_180_prerotate_hint",
+            return_value=False,
+        )
+        mocker.patch.object(va._player, "duration", return_value=player_duration)
+
+    def test_load_video_same_source_reload_uses_prev_duration_when_player_reports_zero(
+        self, qapp, mocker
+    ):
+        """Same-source reload: when player.duration() returns 0 _on_duration_changed
+        must be called with the previously known duration so trim stays valid."""
+        va = VideoArea()
+        path = Path("/fake/video.mp4")
+        # Simulate the clip was previously loaded and its duration is known.
+        va._current_source = path
+        va._current_duration_ms = 5000
+        self._setup_load_video_mocks(va, mocker, player_duration=0)
+        mock_on_dur = mocker.patch.object(va, "_on_duration_changed")
+
+        va.load_video(path)
+
+        # The fallback to the previous duration must fire.
+        mock_on_dur.assert_called_once_with(5000)
+
+    def test_load_video_different_source_does_not_use_prev_duration_fallback(
+        self, qapp, mocker
+    ):
+        """Different source: when player.duration() returns 0 do NOT fall back to
+        the previous clip's duration — that would corrupt the new clip's trim range."""
+        va = VideoArea()
+        va._current_source = Path("/fake/old.mp4")
+        va._current_duration_ms = 5000
+        self._setup_load_video_mocks(va, mocker, player_duration=0)
+        mock_on_dur = mocker.patch.object(va, "_on_duration_changed")
+
+        va.load_video(Path("/fake/new.mp4"))
+
+        # No fallback for a different source.
+        mock_on_dur.assert_not_called()
+
     def test_stop_clears_frame_and_source(self, qapp, mocker):
         """stop() should clear the renderer frame and release the media source."""
         va = VideoArea()

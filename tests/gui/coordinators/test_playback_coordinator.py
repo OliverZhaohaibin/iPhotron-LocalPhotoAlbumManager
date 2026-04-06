@@ -176,3 +176,88 @@ def test_rotate_current_asset_routes_video_rotation_through_video_area() -> None
         {"Exposure": 0.2, "Crop_Rotate90": 3.0},
     )
     coordinator._asset_vm.invalidate_thumbnail.assert_called_once_with(str(source))
+
+
+# ---------------------------------------------------------------------------
+# Trim remapping tests for _on_video_duration_changed / _on_video_position_changed
+# and _on_seek
+# ---------------------------------------------------------------------------
+
+def make_playback_coordinator(trim_in_ms: int = 0, trim_out_ms: int = 0) -> PlaybackCoordinator:
+    """Return a partially-constructed PlaybackCoordinator with mocked dependencies."""
+    coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
+    coordinator._player_bar = Mock()
+    coordinator._trim_in_ms = trim_in_ms
+    coordinator._trim_out_ms = trim_out_ms
+    video_area = Mock()
+    video_area.is_edit_mode_active.return_value = False
+    video_area.trim_range_ms.return_value = (trim_in_ms, trim_out_ms)
+    coordinator._player_view = SimpleNamespace(video_area=video_area)
+    return coordinator
+
+
+def test_on_video_duration_changed_with_trim_shows_trimmed_duration() -> None:
+    """When a trim range is active the player bar should show the trimmed duration."""
+    coordinator = make_playback_coordinator(trim_in_ms=2000, trim_out_ms=7000)
+    coordinator._player_view.video_area.trim_range_ms.return_value = (2000, 7000)
+
+    PlaybackCoordinator._on_video_duration_changed(coordinator, 10_000)
+
+    coordinator._player_bar.set_duration.assert_called_once_with(5000)  # 7000 - 2000
+
+
+def test_on_video_duration_changed_without_trim_shows_full_duration() -> None:
+    """When no trim is active (in == out == 0) the full clip duration is displayed."""
+    coordinator = make_playback_coordinator(trim_in_ms=0, trim_out_ms=0)
+    coordinator._player_view.video_area.trim_range_ms.return_value = (0, 0)
+
+    PlaybackCoordinator._on_video_duration_changed(coordinator, 10_000)
+
+    coordinator._player_bar.set_duration.assert_called_once_with(10_000)
+
+
+def test_on_video_duration_changed_skipped_in_edit_mode() -> None:
+    """In edit mode _on_video_duration_changed must return without touching the player bar."""
+    coordinator = make_playback_coordinator()
+    coordinator._player_view.video_area.is_edit_mode_active.return_value = True
+
+    PlaybackCoordinator._on_video_duration_changed(coordinator, 10_000)
+
+    coordinator._player_bar.set_duration.assert_not_called()
+
+
+def test_on_video_position_changed_remaps_position_relative_to_trim_in() -> None:
+    """Position is displayed relative to trim-in so the bar always starts at 0."""
+    coordinator = make_playback_coordinator(trim_in_ms=3000, trim_out_ms=8000)
+
+    PlaybackCoordinator._on_video_position_changed(coordinator, 5000)
+
+    coordinator._player_bar.set_position.assert_called_once_with(2000)  # 5000 - 3000
+
+
+def test_on_video_position_changed_clamps_to_zero_when_before_trim_in() -> None:
+    """Positions before the trim-in point are clamped to 0 (not negative)."""
+    coordinator = make_playback_coordinator(trim_in_ms=3000, trim_out_ms=8000)
+
+    PlaybackCoordinator._on_video_position_changed(coordinator, 1000)
+
+    coordinator._player_bar.set_position.assert_called_once_with(0)
+
+
+def test_on_video_position_changed_skipped_in_edit_mode() -> None:
+    """In edit mode position changes must not propagate to the player bar."""
+    coordinator = make_playback_coordinator(trim_in_ms=1000, trim_out_ms=5000)
+    coordinator._player_view.video_area.is_edit_mode_active.return_value = True
+
+    PlaybackCoordinator._on_video_position_changed(coordinator, 2000)
+
+    coordinator._player_bar.set_position.assert_not_called()
+
+
+def test_on_seek_adds_trim_in_offset_before_forwarding_to_video_area() -> None:
+    """Seeking from the bar's 0-based position must add the trim-in offset."""
+    coordinator = make_playback_coordinator(trim_in_ms=4000, trim_out_ms=9000)
+
+    PlaybackCoordinator._on_seek(coordinator, 1000)
+
+    coordinator._player_view.video_area.seek.assert_called_once_with(5000)  # 1000 + 4000

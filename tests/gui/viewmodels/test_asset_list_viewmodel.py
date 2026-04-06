@@ -177,3 +177,99 @@ def test_changed_paths_triggers_reset(view_model, mock_data_source):
         view_model._on_source_changed()
     begin_reset.assert_called_once()
     end_reset.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# Sidecar-aware duration badge tests
+# ---------------------------------------------------------------------------
+
+def test_size_role_returns_trimmed_duration_for_video(view_model, mock_data_source):
+    """Roles.SIZE duration should reflect sidecar trim when a video has trim values."""
+    mock_data_source.count.return_value = 1
+    dto = _make_dto(
+        abs_path=Path("/videos/clip.mp4"),
+        media_type="video",
+        duration=10.0,
+    )
+    mock_data_source.asset_at.return_value = dto
+
+    with patch(
+        "iPhoto.gui.viewmodels.asset_list_viewmodel._io_sidecar.load_adjustments",
+        return_value={"Video_Trim_In_Sec": 2.0, "Video_Trim_Out_Sec": 7.0},
+    ):
+        index = view_model.index(0, 0)
+        result = view_model.data(index, Roles.SIZE)
+
+    assert result is not None
+    assert result["duration"] == pytest.approx(5.0)  # 7.0 - 2.0
+
+
+def test_size_role_returns_full_duration_for_video_without_sidecar(view_model, mock_data_source):
+    """Roles.SIZE duration should equal the raw container duration when no sidecar trim exists."""
+    mock_data_source.count.return_value = 1
+    dto = _make_dto(
+        abs_path=Path("/videos/clip.mp4"),
+        media_type="video",
+        duration=10.0,
+    )
+    mock_data_source.asset_at.return_value = dto
+
+    with patch(
+        "iPhoto.gui.viewmodels.asset_list_viewmodel._io_sidecar.load_adjustments",
+        return_value={},
+    ):
+        index = view_model.index(0, 0)
+        result = view_model.data(index, Roles.SIZE)
+
+    assert result is not None
+    assert result["duration"] == pytest.approx(10.0)
+
+
+def test_size_role_serves_trimmed_duration_from_cache_without_repeated_sidecar_reads(
+    view_model, mock_data_source
+):
+    """Sidecar is only read once per path; subsequent calls use the cache."""
+    mock_data_source.count.return_value = 1
+    dto = _make_dto(
+        abs_path=Path("/videos/clip.mp4"),
+        media_type="video",
+        duration=10.0,
+    )
+    mock_data_source.asset_at.return_value = dto
+
+    with patch(
+        "iPhoto.gui.viewmodels.asset_list_viewmodel._io_sidecar.load_adjustments",
+        return_value={"Video_Trim_In_Sec": 1.0, "Video_Trim_Out_Sec": 6.0},
+    ) as mock_load:
+        index = view_model.index(0, 0)
+        view_model.data(index, Roles.SIZE)
+        view_model.data(index, Roles.SIZE)
+
+    assert mock_load.call_count == 1
+
+
+def test_invalidate_thumbnail_clears_duration_cache_and_emits_size_role(
+    view_model, mock_data_source
+):
+    """invalidate_thumbnail() must clear the cached effective duration and emit
+    dataChanged with Roles.SIZE so the gallery badge re-reads the sidecar."""
+    path = Path("/videos/clip.mp4")
+    # Pre-populate the cache so we can verify it's cleared.
+    view_model._duration_cache[path] = 8.0
+
+    mock_data_source.count.return_value = 1
+    mock_data_source.row_for_path = MagicMock(return_value=0)
+
+    emitted_roles: list = []
+
+    def on_data_changed(top_left, bottom_right, roles):
+        emitted_roles.extend(roles)
+
+    view_model.dataChanged.connect(on_data_changed)
+
+    with patch.object(view_model._thumbnails, "invalidate"):
+        view_model.invalidate_thumbnail(str(path))
+
+    assert path not in view_model._duration_cache
+    assert Roles.SIZE in emitted_roles
+

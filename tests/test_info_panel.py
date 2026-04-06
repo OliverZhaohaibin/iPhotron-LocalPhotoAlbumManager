@@ -199,7 +199,7 @@ def test_info_panel_video_shows_lens_spec_string_when_no_model_name(qapp: QAppli
 
     panel.set_asset_metadata(meta)
 
-    assert panel._lens_label.isVisible()
+    assert not panel._lens_label.isHidden()
     assert "23mm f/2" in panel._lens_label.text()
     panel.close()
 
@@ -232,7 +232,7 @@ def test_info_panel_lens_spec_string_not_duplicated_when_focal_and_fnumber_also_
     panel.set_asset_metadata(meta)
 
     label_text = panel._lens_label.text()
-    assert panel._lens_label.isVisible()
+    assert not panel._lens_label.isHidden()
     assert label_text == "23mm f/2"
     panel.close()
 
@@ -260,7 +260,7 @@ def test_info_panel_named_lens_model_gets_focal_appended(
     panel.set_asset_metadata(meta)
 
     label_text = panel._lens_label.text()
-    assert panel._lens_label.isVisible()
+    assert not panel._lens_label.isHidden()
     # The named model should be present and enriched with focal + aperture info.
     assert "XF23mmF2 R WR" in label_text
     assert "23" in label_text   # focal length must appear

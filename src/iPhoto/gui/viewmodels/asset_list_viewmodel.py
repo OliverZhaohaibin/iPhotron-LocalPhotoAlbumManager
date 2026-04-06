@@ -12,10 +12,12 @@ from PySide6.QtCore import (
     Slot,
 )
 from iPhoto.application.dtos import AssetDTO
+from iPhoto.core.adjustment_mapping import normalise_video_trim
 from iPhoto.domain.models.query import AssetQuery
 from iPhoto.gui.ui.models.roles import Roles
 from iPhoto.gui.viewmodels.asset_data_source import AssetDataSource
 from iPhoto.infrastructure.services.thumbnail_cache_service import ThumbnailCacheService
+from iPhoto.io import sidecar as _io_sidecar
 from iPhoto.utils.geocoding import resolve_location_name
 
 
@@ -46,6 +48,10 @@ class AssetListViewModel(QAbstractListModel):
         self._thumbnails.thumbnailReady.connect(self._on_thumbnail_ready)
         # Track the last observed asset signature; None means no prior snapshot yet.
         self._last_snapshot: Optional[tuple[int, bytes]] = None
+        # Cache of effective (sidecar-trimmed) durations keyed by asset abs_path.
+        # Populated lazily in _effective_video_duration(); invalidated on thumbnail
+        # invalidation (post-edit save) and model reset (album switch).
+        self._duration_cache: dict[Path, float] = {}
 
     def load_query(self, query: AssetQuery):
         """Triggers data loading for a new query."""
@@ -159,7 +165,7 @@ class AssetListViewModel(QAbstractListModel):
             # Delegate expects a dict with 'duration', 'width', 'height' etc.
             # or just for duration extraction.
             return {
-                "duration": asset.duration,
+                "duration": self._effective_video_duration(asset),
                 "width": asset.width,
                 "height": asset.height,
                 "bytes": asset.size_bytes
@@ -252,6 +258,7 @@ class AssetListViewModel(QAbstractListModel):
         if self._last_snapshot == current_snapshot:
             # No changes detected; avoid unnecessary model reset to prevent full filmstrip refresh.
             return
+        self._duration_cache.clear()
         self.beginResetModel()
         self.endResetModel()
         self._last_snapshot = current_snapshot
@@ -273,6 +280,7 @@ class AssetListViewModel(QAbstractListModel):
         if self._current_row >= new_count:
             self._current_row = -1
         self._last_snapshot = None
+        self._duration_cache.clear()
         self.beginResetModel()
         self.endResetModel()
 
@@ -313,16 +321,43 @@ class AssetListViewModel(QAbstractListModel):
         """Forces a thumbnail refresh for the given path."""
         path = Path(path_str)
         self._thumbnails.invalidate(path, size=self._thumb_size)
+        # Clear any cached effective duration so the gallery badge re-reads the
+        # sidecar the next time this cell is painted (picks up trim edits).
+        self._duration_cache.pop(path, None)
         row_for_path = getattr(self._data_source, "row_for_path", None)
         row = row_for_path(path) if callable(row_for_path) else None
         if row is None:
             return
         idx = self.index(row, 0)
         if idx.isValid():
-            self.dataChanged.emit(idx, idx, [Qt.DecorationRole])
+            self.dataChanged.emit(idx, idx, [Qt.DecorationRole, Roles.SIZE])
 
     def thumbnail_loader(self):
         pass
+
+    def _effective_video_duration(self, asset: AssetDTO) -> float:
+        """Return the effective playable duration for *asset*, respecting sidecar trim.
+
+        For non-video assets the raw file duration is returned unchanged.  For
+        video assets the sidecar is consulted once per path (result is cached)
+        to apply any saved trim in/out points, so the gallery badge reflects the
+        trimmed clip length rather than the full container duration.
+
+        The sidecar read is performed only on first access per path; subsequent
+        calls are served from ``_duration_cache`` with no I/O overhead.
+        """
+        if not asset.is_video:
+            return asset.duration
+        if asset.abs_path in self._duration_cache:
+            return self._duration_cache[asset.abs_path]
+        adjustments = _io_sidecar.load_adjustments(asset.abs_path)
+        if adjustments:
+            trim_in, trim_out = normalise_video_trim(adjustments, asset.duration)
+            effective = trim_out - trim_in
+        else:
+            effective = asset.duration
+        self._duration_cache[asset.abs_path] = effective
+        return effective
 
     def prioritize_rows(self, first: int, last: int):
         prioritize = getattr(self._data_source, "prioritize_rows", None)

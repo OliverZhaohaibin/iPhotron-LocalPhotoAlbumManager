@@ -354,7 +354,6 @@ class VideoArea(QWidget):
 
     def is_edit_mode_active(self) -> bool:
         """Return whether the video area is currently in edit mode."""
-
         return self._edit_mode_active
 
     def set_adjustments(self, adjustments: Mapping[str, object] | None = None) -> None:

@@ -48,6 +48,90 @@ def _make_dto(**overrides) -> AssetDTO:
 def test_viewmodel_init(view_model):
     assert view_model.rowCount() == 0
 
+
+# ---------------------------------------------------------------------------
+# Regression tests: Roles.INFO must include is_video and name
+# ---------------------------------------------------------------------------
+
+def test_info_role_includes_is_video_false_for_photo(view_model, mock_data_source):
+    """Roles.INFO dict must carry is_video=False for photo assets (regression guard)."""
+    mock_data_source.count.return_value = 1
+    dto = _make_dto(rel_path=Path("photo.jpg"), media_type="image")
+    mock_data_source.asset_at.return_value = dto
+
+    index = view_model.index(0, 0)
+    info = view_model.data(index, Roles.INFO)
+
+    assert isinstance(info, dict)
+    assert "is_video" in info, "Roles.INFO must contain 'is_video' key"
+    assert info["is_video"] is False
+
+
+def test_info_role_includes_is_video_true_for_video(view_model, mock_data_source):
+    """Roles.INFO dict must carry is_video=True for video assets (regression guard)."""
+    mock_data_source.count.return_value = 1
+    dto = _make_dto(
+        rel_path=Path("clip.mp4"),
+        abs_path=Path("/videos/clip.mp4"),
+        media_type="video",
+        duration=5.0,
+    )
+    mock_data_source.asset_at.return_value = dto
+
+    index = view_model.index(0, 0)
+    info = view_model.data(index, Roles.INFO)
+
+    assert isinstance(info, dict)
+    assert "is_video" in info, "Roles.INFO must contain 'is_video' key"
+    assert info["is_video"] is True
+
+
+def test_info_role_includes_name_for_photo(view_model, mock_data_source):
+    """Roles.INFO dict must carry the filename in 'name' for photo assets."""
+    mock_data_source.count.return_value = 1
+    dto = _make_dto(rel_path=Path("subdir/IMG_0001.jpg"), media_type="image")
+    mock_data_source.asset_at.return_value = dto
+
+    index = view_model.index(0, 0)
+    info = view_model.data(index, Roles.INFO)
+
+    assert isinstance(info, dict)
+    assert info.get("name") == "IMG_0001.jpg"
+
+
+def test_info_role_includes_name_for_video(view_model, mock_data_source):
+    """Roles.INFO dict must carry the filename in 'name' for video assets."""
+    mock_data_source.count.return_value = 1
+    dto = _make_dto(rel_path=Path("subdir/IMG_3160.MOV"), media_type="video")
+    mock_data_source.asset_at.return_value = dto
+
+    index = view_model.index(0, 0)
+    info = view_model.data(index, Roles.INFO)
+
+    assert isinstance(info, dict)
+    assert info.get("name") == "IMG_3160.MOV"
+
+
+def test_info_role_contains_required_keys(view_model, mock_data_source):
+    """Roles.INFO dict must always contain the full set of keys InfoPanel depends on."""
+    mock_data_source.count.return_value = 1
+    dto = _make_dto(
+        rel_path=Path("clip.mov"),
+        abs_path=Path("/lib/clip.mov"),
+        media_type="video",
+        width=1920,
+        height=1080,
+        duration=8.5,
+        size_bytes=1_000_000,
+    )
+    mock_data_source.asset_at.return_value = dto
+
+    index = view_model.index(0, 0)
+    info = view_model.data(index, Roles.INFO)
+
+    for key in ("rel", "abs", "name", "is_video", "w", "h", "dur", "bytes"):
+        assert key in info, f"Roles.INFO is missing required key '{key}'"
+
 def test_load_query(view_model, mock_data_source):
     query = AssetQuery(album_path="test")
     view_model.load_query(query)

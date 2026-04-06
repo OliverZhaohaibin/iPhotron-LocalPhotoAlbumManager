@@ -207,6 +207,8 @@ class AssetListViewModel(QAbstractListModel):
             info.update({
                 "rel": str(asset.rel_path),
                 "abs": str(asset.abs_path),
+                "name": asset.rel_path.name,
+                "is_video": asset.is_video,
                 "w": asset.width,
                 "h": asset.height,
                 "dur": asset.duration,

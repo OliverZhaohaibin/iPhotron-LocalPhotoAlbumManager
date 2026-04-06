@@ -424,6 +424,11 @@ class InfoPanel(QWidget):
         focal_text = self._format_focal_length(info.get("focal_length"))
         aperture_text = self._format_aperture(info.get("f_number"))
         components = [component for component in (focal_text, aperture_text) if component]
+        # If the lens string already encodes focal-length info (e.g. a LensInfo spec
+        # string like "23mm f/2"), do not append the separate focal/aperture fields —
+        # they would merely duplicate values already present in the lens string.
+        if lens and "mm" in lens:
+            return lens
         if lens and components:
             return f"{lens} — {' '.join(components)}"
         if lens:

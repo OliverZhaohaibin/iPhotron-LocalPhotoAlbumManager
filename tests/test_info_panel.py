@@ -202,3 +202,36 @@ def test_info_panel_video_shows_lens_spec_string_when_no_model_name(qapp: QAppli
     assert panel._lens_label.isVisible()
     assert "23mm f/2" in panel._lens_label.text()
     panel.close()
+
+
+def test_info_panel_lens_spec_string_not_duplicated_when_focal_and_fnumber_also_present(
+    qapp: QApplication,
+) -> None:
+    """When the lens string is a spec string (e.g. '23mm f/2') AND separate
+    focal_length / f_number fields are also present, the label must show
+    the lens string exactly once — not a garbled duplication like '2323 22'."""
+
+    panel = InfoPanel()
+    meta = {
+        "rel": "clip.MOV",
+        "name": "clip.MOV",
+        "is_video": True,
+        "make": "FUJIFILM",
+        "model": "X-T4",
+        "lens": "23mm f/2",
+        "focal_length": 23.0,
+        "f_number": 2.0,
+        "w": 1920,
+        "h": 1080,
+        "bytes": 12_000_000,
+        "codec": "h264",
+        "frame_rate": 25.0,
+        "dur": 10.0,
+    }
+
+    panel.set_asset_metadata(meta)
+
+    label_text = panel._lens_label.text()
+    assert panel._lens_label.isVisible()
+    assert label_text == "23mm f/2"
+    panel.close()

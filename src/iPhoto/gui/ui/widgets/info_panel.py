@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from datetime import datetime
 from fractions import Fraction
@@ -22,6 +23,9 @@ from PySide6.QtWidgets import (
 
 from ..icons import load_icon
 from .main_window_metrics import TITLE_BAR_HEIGHT, WINDOW_CONTROL_BUTTON_SIZE, WINDOW_CONTROL_GLYPH_SIZE
+
+# Matches a numeric focal length embedded in a lens string (e.g. "23mm", "4.2mm").
+_FOCAL_LENGTH_RE = re.compile(r"\d+(?:\.\d+)?mm", re.IGNORECASE)
 
 
 @dataclass
@@ -427,7 +431,7 @@ class InfoPanel(QWidget):
         # If the lens string already encodes focal-length info (e.g. a LensInfo spec
         # string like "23mm f/2"), do not append the separate focal/aperture fields —
         # they would merely duplicate values already present in the lens string.
-        if lens and "mm" in lens:
+        if lens and _FOCAL_LENGTH_RE.search(lens):
             return lens
         if lens and components:
             return f"{lens} — {' '.join(components)}"

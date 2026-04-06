@@ -306,10 +306,8 @@ def normalise_video_trim(
     # a missing value so that persisted sentinel values in old sidecar files
     # don't corrupt the trim range on reload.
     _raw_trim_out = adjustments.get(VIDEO_TRIM_OUT_KEY) if adjustments else None
-    trim_out = _float_or_default(
-        _raw_trim_out if _positive_or_none(_raw_trim_out) is not None else None,
-        trim_out_default,
-    )
+    _positive_trim_out = _positive_or_none(_raw_trim_out)
+    trim_out = _float_or_default(_positive_trim_out, trim_out_default)
 
     trim_in = max(0.0, trim_in)
     trim_out = max(0.0, trim_out)

@@ -675,6 +675,18 @@ class VideoArea(QWidget):
         # But ensure we are at start
         if trim_range_ms is not None:
             self.set_trim_range_ms(*trim_range_ms)
+        # Force-propagate the current duration so all observers (e.g.
+        # PlaybackCoordinator) receive a durationChanged event with the new
+        # trim range already applied.  This covers two failure modes:
+        #   (a) Qt does not re-emit durationChanged for same-source reloads
+        #       (common on macOS/AVFoundation when the file is cached).
+        #   (b) durationChanged fired synchronously inside setSource() above,
+        #       before set_trim_range_ms() had a chance to update _trim_in/out.
+        # In both cases the player already holds the correct duration value, so
+        # calling _on_duration_changed here is safe and idempotent.
+        cached_duration = self._player.duration()
+        if cached_duration > 0:
+            self._on_duration_changed(cached_duration)
         self._player.setPosition(self._trim_in_ms if self._trim_in_ms > 0 else 0)
         _log.debug(
             "[trace][video_area] load_video:end %s",

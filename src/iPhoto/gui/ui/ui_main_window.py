@@ -180,6 +180,7 @@ class Ui_MainWindow(object):
         self.image_viewer = shared_image_viewer
         self.video_area = self.detail_page.video_area
         self.player_bar = self.detail_page.player_bar
+        self.video_trim_bar = self.detail_page.video_trim_bar
         self.filmstrip_view = self.detail_page.filmstrip_view
         self.live_badge = self.detail_page.live_badge
         self.badge_host = self.detail_page.badge_host

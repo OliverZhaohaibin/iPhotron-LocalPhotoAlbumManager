@@ -24,7 +24,7 @@ import sys
 from pathlib import Path
 from typing import Optional
 
-from PySide6.QtCore import QSize, QSizeF, Qt, Signal
+from PySide6.QtCore import QPointF, QSize, QSizeF, Qt, Signal
 from PySide6.QtGui import (
     QColor,
     QImage,
@@ -129,6 +129,66 @@ def _should_assume_linux_180_prerotated(container_hint: bool) -> bool:
     return forced.strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _rotation_value_to_degrees(rotation: object) -> int:
+    """Convert a Qt rotation enum/value into clockwise degrees."""
+
+    try:
+        numeric = rotation.value if hasattr(rotation, "value") else rotation
+        return int(numeric) % 360
+    except (TypeError, ValueError):
+        return 0
+
+
+def _resolve_frame_rotation_cw(
+    fmt: "QVideoFrameFormat",
+    *,
+    container_rotation_cw: int,
+    container_raw_w: int,
+    container_raw_h: int,
+    linux_180_hint: bool = False,
+) -> int:
+    """Resolve the clockwise display rotation for *fmt* using ffprobe metadata.
+
+    The logic mirrors the long-standing ``VideoRendererWidget`` path so both the
+    native QRhi renderer and the GL adjusted-preview path interpret portrait
+    iPhone clips the same way.
+    """
+
+    frame_w = fmt.frameWidth()
+    frame_h = fmt.frameHeight()
+    qt_rotation = _rotation_value_to_degrees(fmt.rotation())
+
+    if container_rotation_cw != 0:
+        pre_rotated = False
+
+        if container_rotation_cw in (90, 270) and container_raw_w > 0 and container_raw_h > 0:
+            if frame_w == container_raw_h and frame_h == container_raw_w:
+                pre_rotated = True
+            elif frame_w != container_raw_w or frame_h != container_raw_h:
+                frame_ar = frame_w / frame_h if frame_h > 0 else 0.0
+                raw_ar = container_raw_w / container_raw_h if container_raw_h > 0 else 0.0
+                rotated_ar = container_raw_h / container_raw_w if container_raw_w > 0 else 0.0
+                if (
+                    rotated_ar > 0
+                    and abs(frame_ar - rotated_ar) < 0.05
+                    and (raw_ar <= 0 or abs(frame_ar - raw_ar) >= 0.05)
+                ):
+                    pre_rotated = True
+        elif container_rotation_cw == 180:
+            if (
+                abs(qt_rotation) % 360 == 180
+                and _should_assume_linux_180_prerotated(linux_180_hint)
+            ):
+                pre_rotated = True
+
+        return 0 if pre_rotated else container_rotation_cw
+
+    if container_raw_w > 0:
+        return 0
+
+    return qt_rotation
+
+
 def _classify_frame_format(fmt: "QVideoFrameFormat") -> tuple[int, int, int, int]:
     """Return (format, colorspace, transfer, range) shader enum values for *fmt*."""
 
@@ -189,6 +249,11 @@ class VideoRendererWidget(QRhiWidget):
 
     nativeSizeChanged = Signal(QSizeF)
     firstFrameReady = Signal()
+    zoomChanged = Signal(float)
+
+    _ZOOM_MIN = 0.1
+    _ZOOM_MAX = 4.0
+    _ZOOM_STEP = 1.1
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
@@ -215,6 +280,8 @@ class VideoRendererWidget(QRhiWidget):
         self._native_size = QSizeF()
         self._first_render_done = False
         self._has_frame = False
+        self._viewport_fill_enabled = False
+        self._zoom_factor = 1.0
 
         # --- RHI resources (created in initialize()) ---
         self._pipeline: Optional[QRhiGraphicsPipeline] = None
@@ -235,6 +302,7 @@ class VideoRendererWidget(QRhiWidget):
         self._tf_enum = _TF_SDR
         self._range_enum = _RANGE_LIMITED
         self._rotate90_steps = 0
+        self._user_rotate90_steps = 0
         self._mirror = 0
 
         # Container-level rotation obtained from ffprobe.  Used as the
@@ -283,6 +351,25 @@ class VideoRendererWidget(QRhiWidget):
         """Set whether Linux 180° pre-rotation workaround is hinted."""
         self._container_linux_180_hint = bool(enabled)
 
+    def set_viewport_fill_enabled(self, enabled: bool) -> None:
+        """Control whether the video covers the viewport instead of letterboxing."""
+
+        target = bool(enabled)
+        if self._viewport_fill_enabled == target:
+            return
+        self._viewport_fill_enabled = target
+        self.update()
+
+    def set_user_rotate90_steps(self, rotate_steps: int) -> None:
+        """Apply additional user-driven quarter turns on top of container rotation."""
+
+        normalised = int(rotate_steps) % 4
+        if self._user_rotate90_steps == normalised:
+            return
+        self._user_rotate90_steps = normalised
+        self._refresh_display_rotation()
+        self.update()
+
     def update_frame(self, frame: "QVideoFrame") -> None:
         """Accept a new video frame and schedule a repaint."""
         if frame is None or not frame.isValid():
@@ -296,106 +383,21 @@ class VideoRendererWidget(QRhiWidget):
         w = fmt.frameWidth()
         h = fmt.frameHeight()
 
-        # ---- Rotation resolution -------------------------------------------
-        # Qt's ``QVideoFrameFormat.rotation()`` value can differ across
-        # platforms: on Windows (Media Foundation) it usually reports the
-        # correct clockwise rotation from the display matrix; on Linux
-        # (FFmpeg / GStreamer backends) the value may be wrong (e.g. negated
-        # sign) or the backend may pre-rotate the pixel data while *still*
-        # reporting the original rotation, causing double rotation.
-        #
-        # The most reliable cross-platform source of truth is the ffprobe
-        # display-matrix metadata stored in ``_container_rotation_cw`` (set
-        # by ``VideoArea`` at load time).  When that information is available
-        # we use it *instead of* Qt's rotation, combined with a dimension
-        # comparison to detect whether the multimedia backend already
-        # pre-rotated the decoded frames:
-        #
-        #   • frame dims match raw stream dims  → NOT pre-rotated → apply
-        #   • frame dims match *rotated* raw    → pre-rotated     → skip
-        #
-        # When ffprobe metadata is unavailable we fall back to Qt's value.
-        container_rot = self._container_rotation_cw
-        raw_w = self._container_raw_w
-        raw_h = self._container_raw_h
+        rot_deg = _resolve_frame_rotation_cw(
+            fmt,
+            container_rotation_cw=self._container_rotation_cw,
+            container_raw_w=self._container_raw_w,
+            container_raw_h=self._container_raw_h,
+            linux_180_hint=self._container_linux_180_hint,
+        )
 
-        if container_rot != 0:
-            # ffprobe rotation available — use it as the primary source.
-            pre_rotated = False
-
-            if container_rot in (90, 270) and raw_w > 0 and raw_h > 0:
-                # 90°/270° rotation swaps width and height; use that to
-                # detect whether the backend already applied the rotation.
-                # Pre-rotation detection requires raw coded dimensions.
-                if w == raw_h and h == raw_w:
-                    pre_rotated = True
-                elif w != raw_w or h != raw_h:
-                    # Dimensions don't match exactly (e.g. slight crop or
-                    # scaling by the decoder).  Compare aspect ratios.
-                    frame_ar = w / h if h > 0 else 0.0
-                    raw_ar = raw_w / raw_h if raw_h > 0 else 0.0
-                    rotated_ar = raw_h / raw_w if raw_w > 0 else 0.0
-                    # If the frame matches the *rotated* aspect but NOT the
-                    # original, the backend pre-rotated.  For nearly-square
-                    # videos both ratios are close; prefer "not pre-rotated".
-                    if (
-                        rotated_ar > 0
-                        and abs(frame_ar - rotated_ar) < 0.05
-                        and (raw_ar <= 0 or abs(frame_ar - raw_ar) >= 0.05)
-                    ):
-                        pre_rotated = True
-            elif container_rot == 180:
-                # 180° rotation keeps width/height unchanged, so dimension
-                # checks cannot detect pre-rotated frames.  On Linux backends
-                # (FFmpeg/GStreamer), some clips are already decoded upright
-                # while rotation metadata is still reported, which causes a
-                # double 180° flip if we apply container rotation again.
-                #
-                # Heuristic: only when Qt reports 180° *and* the environment
-                # indicates a Linux backend known to pre-rotate pixels (or an
-                # explicit opt-in override), treat the frame as pre-rotated
-                # and skip the extra transform.
-                qt_rot = 0
-                rotation = fmt.rotation()
-                try:
-                    qt_rot = rotation.value if hasattr(rotation, "value") else int(rotation)
-                except (TypeError, ValueError):
-                    qt_rot = 0
-                if (
-                    abs(qt_rot) % 360 == 180
-                    and _should_assume_linux_180_prerotated(self._container_linux_180_hint)
-                ):
-                    pre_rotated = True
-
-            rot_deg = 0 if pre_rotated else container_rot
-        elif raw_w > 0:
-            # ffprobe ran successfully but reported 0° — trust it; do not
-            # fall back to Qt which may report a different value.
-            rot_deg = 0
-        else:
-            # No ffprobe data at all — fall back to Qt's value.
-            rotation = fmt.rotation()
-            try:
-                rot_deg = rotation.value if hasattr(rotation, "value") else int(rotation)
-            except (TypeError, ValueError):
-                rot_deg = 0
-        # ---- end rotation resolution ----------------------------------------
-
-        self._rotate90_steps = (rot_deg // 90) % 4
+        self._rotate90_steps = ((rot_deg // 90) + self._user_rotate90_steps) % 4
         self._mirror = 1 if fmt.isMirrored() else 0
 
         # Compute the *display* native size: for 90°/270° rotations the
         # width and height are swapped so that the aspect-ratio letterbox
         # calculation uses the orientation the user sees.
-        if self._rotate90_steps in (1, 3):
-            display_w, display_h = h, w
-        else:
-            display_w, display_h = w, h
-
-        new_size = QSizeF(display_w, display_h)
-        if new_size != self._native_size:
-            self._native_size = new_size
-            self.nativeSizeChanged.emit(new_size)
+        self._update_display_native_size(w, h)
 
         # Classify frame metadata
         self._fmt_enum, self._cs_enum, self._tf_enum, self._range_enum = (
@@ -416,6 +418,10 @@ class VideoRendererWidget(QRhiWidget):
         self._container_raw_h = 0
         self._container_linux_180_hint = False
         self._has_frame = False
+        self._user_rotate90_steps = 0
+        if self._zoom_factor != 1.0:
+            self._zoom_factor = 1.0
+            self.zoomChanged.emit(1.0)
         # Reset tracked texture formats so that the next video always
         # recreates textures with the correct format, even when the
         # resolution is identical (e.g. switching between an 8-bit NV12
@@ -423,6 +429,36 @@ class VideoRendererWidget(QRhiWidget):
         self._tex_y_fmt = None
         self._tex_uv_fmt = None
         self.update()
+
+    def _update_display_native_size(self, width: int, height: int) -> None:
+        """Refresh the emitted display size using the effective rotation."""
+
+        if width <= 0 or height <= 0:
+            new_size = QSizeF()
+        elif self._rotate90_steps in (1, 3):
+            new_size = QSizeF(height, width)
+        else:
+            new_size = QSizeF(width, height)
+        if new_size != self._native_size:
+            self._native_size = new_size
+            self.nativeSizeChanged.emit(new_size)
+
+    def _refresh_display_rotation(self) -> None:
+        """Re-apply user rotation to the currently loaded frame metadata."""
+
+        if self._current_frame is None or not self._current_frame.isValid():
+            self._rotate90_steps = self._user_rotate90_steps % 4
+            return
+        fmt = self._current_frame.surfaceFormat()
+        base_rotation_cw = _resolve_frame_rotation_cw(
+            fmt,
+            container_rotation_cw=self._container_rotation_cw,
+            container_raw_w=self._container_raw_w,
+            container_raw_h=self._container_raw_h,
+            linux_180_hint=self._container_linux_180_hint,
+        )
+        self._rotate90_steps = ((base_rotation_cw // 90) + self._user_rotate90_steps) % 4
+        self._update_display_native_size(fmt.frameWidth(), fmt.frameHeight())
 
     def set_letterbox_color(self, color: QColor) -> None:
         """Set the colour used for letterbox/pillarbox areas."""
@@ -432,6 +468,40 @@ class VideoRendererWidget(QRhiWidget):
     def native_size(self) -> QSizeF:
         """Return the native resolution of the current video frame."""
         return self._native_size
+
+    # ------------------------------------------------------------------
+    # Zoom API
+    # ------------------------------------------------------------------
+    def set_zoom(self, factor: float, anchor: QPointF | None = None) -> None:
+        """Set the zoom level, clamped to [_ZOOM_MIN, _ZOOM_MAX].
+
+        ``anchor`` is accepted for API compatibility with ``GLImageViewer`` but
+        is currently unused — the renderer always zooms around the video's
+        natural centre (which coincides with the viewport centre).
+        """
+        _ = anchor  # accepted for API compatibility; centre-zoom only
+        clamped = max(self._ZOOM_MIN, min(self._ZOOM_MAX, float(factor)))
+        if clamped == self._zoom_factor:
+            return
+        self._zoom_factor = clamped
+        self.update()
+        self.zoomChanged.emit(self._zoom_factor)
+
+    def zoom_in(self) -> None:
+        """Increase zoom by one step."""
+        self.set_zoom(self._zoom_factor * self._ZOOM_STEP)
+
+    def zoom_out(self) -> None:
+        """Decrease zoom by one step."""
+        self.set_zoom(self._zoom_factor / self._ZOOM_STEP)
+
+    def reset_zoom(self) -> None:
+        """Reset zoom to 1:1 (fit-to-viewport)."""
+        self.set_zoom(1.0)
+
+    def viewport_center(self) -> QPointF:
+        """Return the center point of this widget in local pixel coordinates."""
+        return QPointF(self.width() / 2.0, self.height() / 2.0)
 
     # ------------------------------------------------------------------
     # QRhiWidget overrides
@@ -844,25 +914,49 @@ class VideoRendererWidget(QRhiWidget):
         ow = float(output_size.width())
         oh = float(output_size.height())
 
-        # Compute video rect (aspect-ratio preserving fit)
+        # Compute video rect (either contain/letterbox or cover/crop).
         vx, vy, vw, vh = 0.0, 0.0, 1.0, 1.0
         if not self._native_size.isEmpty() and ow > 0 and oh > 0:
             src_aspect = self._native_size.width() / self._native_size.height()
             dst_aspect = ow / oh
-            if src_aspect > dst_aspect:
-                # Wider than viewport → pillarbox
-                scale = ow / self._native_size.width()
-                vw = 1.0
-                vh = (self._native_size.height() * scale) / oh
-                vx = 0.0
-                vy = (1.0 - vh) / 2.0
+            if self._viewport_fill_enabled:
+                if src_aspect > dst_aspect:
+                    vh = 1.0
+                    vw = src_aspect / dst_aspect
+                    vx = (1.0 - vw) / 2.0
+                    vy = 0.0
+                else:
+                    vw = 1.0
+                    vh = dst_aspect / src_aspect
+                    vx = 0.0
+                    vy = (1.0 - vh) / 2.0
             else:
-                # Taller than viewport → letterbox
-                scale = oh / self._native_size.height()
-                vh = 1.0
-                vw = (self._native_size.width() * scale) / ow
-                vx = (1.0 - vw) / 2.0
-                vy = 0.0
+                if src_aspect > dst_aspect:
+                    # Wider than viewport → pillarbox
+                    scale = ow / self._native_size.width()
+                    vw = 1.0
+                    vh = (self._native_size.height() * scale) / oh
+                    vx = 0.0
+                    vy = (1.0 - vh) / 2.0
+                else:
+                    # Taller than viewport → letterbox
+                    scale = oh / self._native_size.height()
+                    vh = 1.0
+                    vw = (self._native_size.width() * scale) / ow
+                    vx = (1.0 - vw) / 2.0
+                    vy = 0.0
+
+        # Apply zoom: scale the video rect around its natural center.
+        # For zoom > 1 the rect grows beyond [0,1] causing the video to overflow
+        # the viewport (only the center portion is visible — effectively a zoom-in).
+        z = self._zoom_factor
+        if z != 1.0:
+            cx = vx + vw * 0.5
+            cy = vy + vh * 0.5
+            vw = vw * z
+            vh = vh * z
+            vx = cx - vw * 0.5
+            vy = cy - vh * 0.5
 
         # Letterbox color
         lc = self._letterbox_color

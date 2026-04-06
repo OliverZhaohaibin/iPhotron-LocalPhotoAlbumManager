@@ -11,11 +11,12 @@ if TYPE_CHECKING:
 class EditModeState(QObject):
     """Abstract base state for edit modes."""
 
-    def __init__(self, ui: Ui_MainWindow, session_provider, parent: Optional[QObject] = None) -> None:
+    def __init__(self, ui: Ui_MainWindow, session_provider, viewport_provider, parent: Optional[QObject] = None) -> None:
         super().__init__(parent)
         self._ui = ui
         # session_provider is a callable that returns the current EditSession or None
         self._session_provider = session_provider
+        self._viewport_provider = viewport_provider
 
     @property
     def mode_name(self) -> str:
@@ -42,7 +43,7 @@ class AdjustModeState(EditModeState):
         self._ui.edit_adjust_action.setChecked(True)
         self._ui.edit_crop_action.setChecked(False)
         self._ui.edit_sidebar.set_mode("adjust")
-        self._ui.edit_image_viewer.setCropMode(False)
+        self._viewport_provider().setCropMode(False)
 
         # Block signals to prevent recursion if the control emits signal on same index
         was_blocked = self._ui.edit_mode_control.blockSignals(True)
@@ -73,7 +74,7 @@ class CropModeState(EditModeState):
                 "Crop_Rotate90": float(session.value("Crop_Rotate90")),
                 "Crop_FlipH": float(session.value("Crop_FlipH")),
             }
-        self._ui.edit_image_viewer.setCropMode(True, crop_values)
+        self._viewport_provider().setCropMode(True, crop_values)
 
         # Block signals to prevent recursion if the control emits signal on same index
         was_blocked = self._ui.edit_mode_control.blockSignals(True)

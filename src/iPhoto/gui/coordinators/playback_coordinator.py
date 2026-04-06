@@ -2,30 +2,32 @@
 
 from __future__ import annotations
 
-from pathlib import Path
 import logging
-from typing import TYPE_CHECKING, Any, Optional
+from pathlib import Path
+from typing import TYPE_CHECKING
 
-from PySide6.QtCore import QObject, Slot, QTimer, Signal, QModelIndex, QItemSelectionModel
+from PySide6.QtCore import QItemSelectionModel, QModelIndex, QObject, QTimer, Signal, Slot
 from PySide6.QtGui import QAction, QColor, QPalette
 
+from iPhoto.config import PLAY_ASSET_DEBOUNCE_MS
 from iPhoto.gui.coordinators.view_router import ViewRouter
-from iPhoto.gui.ui.icons import load_icon
+from iPhoto.gui.ui.controllers.edit_zoom_handler import EditZoomHandler
 from iPhoto.gui.ui.controllers.header_controller import HeaderController
+from iPhoto.gui.ui.icons import load_icon
 from iPhoto.gui.ui.models.roles import Roles
 from iPhoto.gui.ui.widgets.info_panel import InfoPanel
-from iPhoto.io.metadata import read_image_meta
 from iPhoto.io import sidecar
-from iPhoto.config import PLAY_ASSET_DEBOUNCE_MS
+from iPhoto.io.metadata import read_image_meta
 
 if TYPE_CHECKING:
-    from iPhoto.gui.ui.widgets.player_bar import PlayerBar
-    from iPhoto.gui.ui.controllers.player_view_controller import PlayerViewController
-    from iPhoto.gui.viewmodels.asset_list_viewmodel import AssetListViewModel
-    from iPhoto.gui.coordinators.navigation_coordinator import NavigationCoordinator
-    from iPhoto.gui.ui.widgets.filmstrip_view import FilmstripView
     from iPhoto.utils.settings import Settings
     from PySide6.QtWidgets import QPushButton, QSlider, QToolButton, QWidget
+
+    from iPhoto.gui.coordinators.navigation_coordinator import NavigationCoordinator
+    from iPhoto.gui.ui.controllers.player_view_controller import PlayerViewController
+    from iPhoto.gui.ui.widgets.filmstrip_view import FilmstripView
+    from iPhoto.gui.ui.widgets.player_bar import PlayerBar
+    from iPhoto.gui.viewmodels.asset_list_viewmodel import AssetListViewModel
 
 LOGGER = logging.getLogger(__name__)
 
@@ -59,7 +61,7 @@ class PlaybackCoordinator(QObject):
         filmstrip_view: FilmstripView,
         toggle_filmstrip_action: QAction,
         settings: Settings,
-        header_controller: Optional[HeaderController] = None,
+        header_controller: HeaderController | None = None,
     ):
         super().__init__()
         self._player_bar = player_bar
@@ -85,11 +87,17 @@ class PlaybackCoordinator(QObject):
 
         self._is_playing = False
         self._current_row = -1
-        self._navigation: Optional[NavigationCoordinator] = None
-        self._info_panel: Optional[InfoPanel] = None
-        self._active_live_motion: Optional[Path] = None
-        self._active_live_still: Optional[Path] = None
+        self._navigation: NavigationCoordinator | None = None
+        self._info_panel: InfoPanel | None = None
+        self._active_live_motion: Path | None = None
+        self._active_live_still: Path | None = None
         self._resume_after_transition = False
+
+        # Trim range of the currently-loaded video (in ms).  Used to remap the
+        # player bar so that its slider spans [0, trim_duration] instead of the
+        # video's full duration, making every part of the bar accessible.
+        self._trim_in_ms: int = 0
+        self._trim_out_ms: int = 0
 
         # Debounce rapid play_asset() calls (e.g. holding an arrow key) so that
         # only the *last* requested row is actually loaded.  This prevents the
@@ -102,7 +110,7 @@ class PlaybackCoordinator(QObject):
         self._play_debounce.timeout.connect(self._execute_pending_play)
 
         self._connect_signals()
-        self._connect_zoom_controls()
+        self._setup_zoom_handler()
         self._restore_filmstrip_preference()
 
     def set_navigation_coordinator(self, nav: NavigationCoordinator):
@@ -158,6 +166,10 @@ class PlaybackCoordinator(QObject):
         self._player_view.liveReplayRequested.connect(self.replay_live_photo)
         self._player_view.video_area.playbackStateChanged.connect(self._sync_playback_state)
         self._player_view.video_area.playbackFinished.connect(self._handle_playback_finished)
+        # Re-map the player bar to show trim-relative duration/position so the
+        # entire bar is accessible and reflects only the playable range.
+        self._player_view.video_area.durationChanged.connect(self._on_video_duration_changed)
+        self._player_view.video_area.positionChanged.connect(self._on_video_position_changed)
 
         # Model -> Coordinator
         self._asset_vm.dataChanged.connect(self._on_data_changed)
@@ -168,12 +180,15 @@ class PlaybackCoordinator(QObject):
         self._filmstrip_view.itemClicked.connect(self._on_filmstrip_clicked)
         self._toggle_filmstrip_action.toggled.connect(self._handle_filmstrip_toggled)
 
-    def _connect_zoom_controls(self):
-        viewer = self._player_view.image_viewer
-        self._zoom_in.clicked.connect(viewer.zoom_in)
-        self._zoom_out.clicked.connect(viewer.zoom_out)
-        self._zoom_slider.valueChanged.connect(self._handle_zoom_slider_changed)
-        viewer.zoomChanged.connect(self._handle_viewer_zoom_changed)
+    def _setup_zoom_handler(self):
+        self._zoom_handler = EditZoomHandler(
+            viewer=self._player_view.image_viewer,
+            zoom_in_button=self._zoom_in,
+            zoom_out_button=self._zoom_out,
+            zoom_slider=self._zoom_slider,
+            parent=self,
+        )
+        self._zoom_handler.connect_controls()
 
     def _restore_filmstrip_preference(self):
         """Restore filmstrip visibility from settings."""
@@ -203,17 +218,6 @@ class PlaybackCoordinator(QObject):
             self.play_asset(index.row())
 
     @Slot(int)
-    def _handle_zoom_slider_changed(self, value: int):
-        target = float(max(1, value)) / 100.0
-        self._player_view.image_viewer.set_zoom(target)
-
-    @Slot(float)
-    def _handle_viewer_zoom_changed(self, factor: float):
-        val = int(round(factor * 100))
-        self._zoom_slider.blockSignals(True)
-        self._zoom_slider.setValue(val)
-        self._zoom_slider.blockSignals(False)
-
     @Slot()
     def toggle_playback(self):
         # Delegate state logic to the player (VideoArea)
@@ -240,7 +244,37 @@ class PlaybackCoordinator(QObject):
 
     @Slot(int)
     def _on_seek(self, position: int):
-        self._player_view.video_area.seek(position)
+        self._player_view.video_area.seek(position + self._trim_in_ms)
+
+    @Slot(int)
+    def _on_video_duration_changed(self, duration_ms: int) -> None:
+        """Re-map the player bar to show the trimmed playable duration."""
+        # Skip remapping while the video area is in edit mode: EditCoordinator
+        # owns the video area at that point and manages its own trim bar.
+        # We avoid touching the detail-view player bar (PlaybackCoordinator's
+        # _player_bar) until edit mode exits so it stays at the last known
+        # valid state and doesn't flicker with intermediate edit-mode durations.
+        if self._player_view.video_area.is_edit_mode_active():
+            return
+        # Sync trim state from VideoArea so that trim changes applied by
+        # EditCoordinator._restore_detail_video_preview (which bypasses the
+        # normal play_asset path) are reflected in the duration display.
+        trim_in_ms, trim_out_ms = self._player_view.video_area.trim_range_ms()
+        self._trim_in_ms = trim_in_ms
+        self._trim_out_ms = trim_out_ms
+        if self._trim_out_ms > self._trim_in_ms:
+            self._player_bar.set_duration(self._trim_out_ms - self._trim_in_ms)
+        else:
+            # No trim is active (or range is degenerate) — show the full clip duration.
+            self._player_bar.set_duration(duration_ms)
+
+    @Slot(int)
+    def _on_video_position_changed(self, position_ms: int) -> None:
+        """Re-map the player bar position to be relative to the trim in-point."""
+        # Skip remapping during edit mode for the same reason as above.
+        if self._player_view.video_area.is_edit_mode_active():
+            return
+        self._player_bar.set_position(max(0, position_ms - self._trim_in_ms))
 
     def play_asset(self, row: int):
         """Switch to detail view and play/show the asset at the given row.
@@ -297,6 +331,7 @@ class PlaybackCoordinator(QObject):
         is_video = self._asset_vm.data(idx, Roles.IS_VIDEO)
         is_live = self._asset_vm.data(idx, Roles.IS_LIVE)
         is_fav = self._asset_vm.data(idx, Roles.FEATURED)
+        info = self._asset_vm.data(idx, Roles.INFO) or {}
 
         if not abs_path:
             return
@@ -310,22 +345,65 @@ class PlaybackCoordinator(QObject):
         self._info_button.setEnabled(True)
         self._share_button.setEnabled(True)
         self._edit_button.setEnabled(True)
-        self._rotate_button.setEnabled(not is_video)  # Simple logic for now
+        self._rotate_button.setEnabled(True)
 
         self._update_favorite_icon(bool(is_fav))
+
+        # Reset the zoom slider to 100% before loading a new asset so that
+        # stale zoom state from the previous asset does not bleed through.
+        self._zoom_slider.blockSignals(True)
+        self._zoom_slider.setValue(100)
+        self._zoom_slider.blockSignals(False)
 
         # Load Media
         if is_video:
             self._player_view.show_video_surface(interactive=True)
-            self._player_view.video_area.load_video(source)
+            raw_adjustments = sidecar.load_adjustments(source)
+            duration_sec = None
+            if isinstance(info, dict):
+                try:
+                    duration_sec = float(info.get("dur") or info.get("duration") or 0.0) or None
+                except (TypeError, ValueError):
+                    duration_sec = None
+            has_trim = sidecar.trim_is_non_default(raw_adjustments, duration_sec)
+            needs_adjusted_preview = sidecar.video_requires_adjusted_preview(raw_adjustments)
+            trim_in_sec, trim_out_sec = sidecar.normalise_video_trim(raw_adjustments, duration_sec)
+            trim_range_ms = None
+            if has_trim:
+                trim_range_ms = (
+                    int(round(trim_in_sec * 1000.0)),
+                    int(round(trim_out_sec * 1000.0)),
+                )
+            # Store trim range before loading so that _on_video_duration_changed
+            # and _on_video_position_changed remap the player bar correctly even
+            # when the first durationChanged signal fires synchronously.
+            if trim_range_ms is not None:
+                self._trim_in_ms, self._trim_out_ms = trim_range_ms
+            else:
+                self._trim_in_ms = 0
+                self._trim_out_ms = 0
+            self._player_view.video_area.load_video(
+                source,
+                adjustments=(
+                    sidecar.resolve_render_adjustments(raw_adjustments)
+                    if needs_adjusted_preview
+                    else (raw_adjustments or None)
+                ),
+                trim_range_ms=trim_range_ms,
+                adjusted_preview=needs_adjusted_preview,
+            )
             self._player_view.video_area.play()
             self._player_bar.setEnabled(True)
-            self._zoom_widget.hide()
+            self._zoom_handler.set_viewer(self._player_view.video_area)
+            self._player_view.video_area.reset_zoom()
+            self._zoom_widget.show()
         else:
             # Image or Live Photo
             self._player_view.show_image_surface()
             self._player_view.display_image(source)
             self._player_bar.setEnabled(False)
+            self._zoom_handler.set_viewer(self._player_view.image_viewer)
+            self._player_view.image_viewer.reset_zoom()
             self._zoom_widget.show()
 
             if is_live:
@@ -358,7 +436,14 @@ class PlaybackCoordinator(QObject):
         self._active_live_still = still_source
         self._player_view.defer_still_updates(True)
         self._player_view.show_video_surface(interactive=False)
-        self._player_view.video_area.load_video(motion_path)
+        self._trim_in_ms = 0
+        self._trim_out_ms = 0
+        self._player_view.video_area.load_video(
+            motion_path,
+            adjustments=None,
+            trim_range_ms=None,
+            adjusted_preview=False,
+        )
         self._player_view.video_area.play()
         self._player_bar.setEnabled(False)
         self._is_playing = True
@@ -439,7 +524,7 @@ class PlaybackCoordinator(QObject):
         if self._info_panel:
             self._info_panel.close()
 
-    def _update_header(self, row: Optional[int]) -> None:
+    def _update_header(self, row: int | None) -> None:
         if not self._header_controller:
             return
         if row is None or row < 0:
@@ -474,13 +559,17 @@ class PlaybackCoordinator(QObject):
 
         idx = self._asset_vm.index(self._current_row, 0)
         abs_path = self._asset_vm.data(idx, Roles.ABS)
+        is_video = bool(self._asset_vm.data(idx, Roles.IS_VIDEO))
 
         if not abs_path: return
 
         source = Path(abs_path)
 
         # 1. Update UI immediately (Optimistic)
-        updates = self._player_view.image_viewer.rotate_image_ccw()
+        if is_video:
+            updates = self._player_view.video_area.rotate_image_ccw()
+        else:
+            updates = self._player_view.image_viewer.rotate_image_ccw()
 
         # 2. Persist adjustments
         try:

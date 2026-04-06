@@ -122,9 +122,7 @@ class PlayerViewController(QObject):
         self._video_renderer_rendered = False
 
         self._image_viewer.firstFrameReady.connect(self._on_image_first_render)
-        self._video_area.renderer.firstFrameReady.connect(
-            self._on_video_first_render,
-        )
+        self._video_area.firstFrameReady.connect(self._on_video_first_render)
 
     # ------------------------------------------------------------------
     # High-level surface selection helpers

@@ -1,4 +1,4 @@
-"""Read/write helpers for crop, curve, levels, and selective-color XML sections."""
+"""Read/write helpers for crop, curve, levels, selective-color, and video XML sections."""
 
 from __future__ import annotations
 
@@ -646,3 +646,58 @@ def _write_vignette_node(root: ET.Element, values: Mapping[str, Any]) -> None:
     node.set(_VIGNETTE_STRENGTH, f"{vig_strength:.6f}")
     node.set(_VIGNETTE_RADIUS, f"{float(values.get('Vignette_Radius', 0.50)):.6f}")
     node.set(_VIGNETTE_SOFTNESS, f"{float(values.get('Vignette_Softness', 0.0)):.6f}")
+
+
+# ---------------------------------------------------------------------------
+# Video trim constants
+# ---------------------------------------------------------------------------
+
+_VIDEO_NODE = "video"
+_VIDEO_TRIM_IN_SEC = "trimInSec"
+_VIDEO_TRIM_OUT_SEC = "trimOutSec"
+
+
+def _read_video_from_node(node: ET.Element) -> Dict[str, Any]:
+    """Return video trim adjustments described by the ``<video>`` *node*."""
+
+    result: Dict[str, Any] = {}
+    from ..core.adjustment_mapping import VIDEO_TRIM_IN_KEY, VIDEO_TRIM_OUT_KEY
+
+    trim_in = _find_child_case_insensitive(node, _VIDEO_TRIM_IN_SEC)
+    trim_out = _find_child_case_insensitive(node, _VIDEO_TRIM_OUT_SEC)
+    if trim_in is not None and trim_in.text is not None:
+        try:
+            result[VIDEO_TRIM_IN_KEY] = max(0.0, float(trim_in.text.strip()))
+        except (TypeError, ValueError):
+            pass
+    if trim_out is not None and trim_out.text is not None:
+        try:
+            result[VIDEO_TRIM_OUT_KEY] = max(0.0, float(trim_out.text.strip()))
+        except (TypeError, ValueError):
+            pass
+    return result
+
+
+def _write_video_node(root: ET.Element, values: Mapping[str, Any]) -> None:
+    """Insert/replace the ``<video>`` section under *root* using *values*."""
+
+    from ..core.adjustment_mapping import VIDEO_TRIM_IN_KEY, VIDEO_TRIM_OUT_KEY
+
+    _remove_children_case_insensitive(root, _VIDEO_NODE)
+
+    raw_trim_in = values.get(VIDEO_TRIM_IN_KEY)
+    raw_trim_out = values.get(VIDEO_TRIM_OUT_KEY)
+
+    trim_in = None if raw_trim_in is None else max(0.0, _float_or_default(raw_trim_in, 0.0))
+    trim_out = None if raw_trim_out is None else max(0.0, _float_or_default(raw_trim_out, 0.0))
+
+    if (trim_in is None or trim_in <= 0.0) and (trim_out is None or trim_out <= 0.0):
+        return
+
+    node = ET.SubElement(root, _VIDEO_NODE)
+    if trim_in is not None and trim_in > 0.0:
+        child = ET.SubElement(node, _VIDEO_TRIM_IN_SEC)
+        child.text = f"{trim_in:.6f}"
+    if trim_out is not None and trim_out > 0.0:
+        child = ET.SubElement(node, _VIDEO_TRIM_OUT_SEC)
+        child.text = f"{trim_out:.6f}"

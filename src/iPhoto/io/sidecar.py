@@ -6,10 +6,23 @@ from pathlib import Path
 from typing import Any, Dict, Mapping
 import xml.etree.ElementTree as ET
 
-from ..core.light_resolver import LIGHT_KEYS, resolve_light_vector
-from ..core.color_resolver import COLOR_KEYS, ColorResolver, ColorStats
-from ..core.selective_color_resolver import NUM_RANGES
-from ..core.wb_resolver import WB_KEYS, WB_DEFAULTS
+from ..core.adjustment_mapping import (
+    BW_DEFAULTS,
+    BW_KEYS,
+    VIDEO_TRIM_IN_KEY,
+    VIDEO_TRIM_OUT_KEY,
+    has_non_default_adjustments,
+    normalise_bw_value,
+    normalise_video_trim,
+    resolve_adjustment_mapping,
+    trim_is_non_default,
+    video_has_visible_edits,
+    video_requires_adjusted_preview,
+)
+from ..core.color_resolver import ColorStats
+from ..core.color_resolver import COLOR_KEYS
+from ..core.light_resolver import LIGHT_KEYS
+from ..core.wb_resolver import WB_DEFAULTS, WB_KEYS
 
 from .sidecar_sections import (
     _find_child_case_insensitive,
@@ -31,6 +44,8 @@ from .sidecar_sections import (
     _write_sharpen_node,
     _read_vignette_from_node,
     _write_vignette_node,
+    _read_video_from_node,
+    _write_video_node,
     _CROP_NODE,
     _CROP_CHILD_X,
     _LEGACY_CROP_NODE,
@@ -41,34 +56,8 @@ from .sidecar_sections import (
     _DENOISE_NODE,
     _SHARPEN_NODE,
     _VIGNETTE_NODE,
+    _VIDEO_NODE,
 )
-
-BW_KEYS = (
-    "BW_Master",
-    "BW_Intensity",
-    "BW_Neutrals",
-    "BW_Tone",
-    "BW_Grain",
-)
-
-BW_DEFAULTS = {
-    "BW_Master": 0.5,
-    "BW_Intensity": 0.5,
-    "BW_Neutrals": 0.0,
-    "BW_Tone": 0.0,
-    "BW_Grain": 0.0,
-}
-
-_BW_RANGE_KEYS = {"BW_Master", "BW_Intensity", "BW_Neutrals", "BW_Tone"}
-
-
-def _normalise_bw_value(key: str, value: float) -> float:
-    """Return *value* mapped to the modern ``[0, 1]`` range for B&W controls."""
-
-    numeric = float(value)
-    if key in _BW_RANGE_KEYS and (numeric < 0.0 or numeric > 1.0):
-        numeric = (numeric + 1.0) * 0.5
-    return max(0.0, min(1.0, numeric))
 
 _SIDE_CAR_ROOT = "iPhotoAdjustments"
 _LIGHT_NODE = "Light"
@@ -246,6 +235,10 @@ def load_adjustments(asset_path: Path) -> Dict[str, Any]:
     if vig_node is not None:
         result.update(_read_vignette_from_node(vig_node))
 
+    video_node = _find_child_case_insensitive(root, _VIDEO_NODE)
+    if video_node is not None:
+        result.update(_read_video_from_node(video_node))
+
     return result
 
 
@@ -293,7 +286,7 @@ def save_adjustments(asset_path: Path, adjustments: Mapping[str, Any]) -> Path:
         # Grain uses [0, 1] but doesn't need legacy normalization.
         raw = float(adjustments.get(key, BW_DEFAULTS.get(key, 0.0)))
         if key in ("BW_Master", "BW_Intensity"):
-            value = _normalise_bw_value(key, raw)
+            value = normalise_bw_value(key, raw)
         elif key == "BW_Grain":
             value = max(0.0, min(1.0, raw))
         else:
@@ -335,6 +328,9 @@ def save_adjustments(asset_path: Path, adjustments: Mapping[str, Any]) -> Path:
     # Write Vignette adjustments
     _write_vignette_node(root, adjustments)
 
+    # Write video trim adjustments
+    _write_video_node(root, adjustments)
+
     tmp_path = sidecar_path.with_suffix(sidecar_path.suffix + ".tmp")
     tree = ET.ElementTree(root)
     tree.write(tmp_path, encoding="utf-8", xml_declaration=True)
@@ -352,155 +348,26 @@ def resolve_render_adjustments(
     *,
     color_stats: ColorStats | None = None,
 ) -> Dict[str, Any]:
-    """Return Light adjustments suitable for rendering pipelines.
+    """Return session adjustments resolved into render/export semantics."""
 
-    ``load_adjustments`` exposes the raw session values, which now contain the master slider
-    (`Light_Master`) and enable toggle (`Light_Enabled`) alongside the seven per-control deltas.
-    Rendering helpers expect the final per-slider values rather than the stored deltas, so the
-    helpers outside the edit session must resolve the vector before handing it to
-    :func:`apply_adjustments`.
-    """
+    return resolve_adjustment_mapping(
+        adjustments,
+        stats=color_stats,
+        bool_as_float=False,
+        normalize_bw_for_render=True,
+    )
 
-    if not adjustments:
-        return {}
 
-    try:
-        master_value = float(adjustments.get("Light_Master", 0.0))
-    except (TypeError, ValueError):
-        master_value = 0.0
-
-    light_enabled = bool(adjustments.get("Light_Enabled", True))
-
-    resolved: Dict[str, Any] = {}
-    overrides: Dict[str, float] = {}
-    color_overrides: Dict[str, float] = {}
-    for key, value in adjustments.items():
-        if key in ("Light_Master", "Light_Enabled"):
-            continue
-        if value is None:
-            continue
-        try:
-            numeric_value = float(value)
-        except (TypeError, ValueError):
-            continue
-        if key in LIGHT_KEYS:
-            overrides[key] = numeric_value
-        elif key in COLOR_KEYS:
-            color_overrides[key] = numeric_value
-        elif key == "BW_Master":
-            continue
-        else:
-            resolved[key] = numeric_value
-
-    if light_enabled:
-        light_values = resolve_light_vector(master_value, overrides, mode="delta")
-    else:
-        light_values = {key: 0.0 for key in LIGHT_KEYS}
-    resolved.update(light_values)
-    stats = color_stats or ColorStats()
-    color_master = float(adjustments.get("Color_Master", 0.0))
-    color_enabled = bool(adjustments.get("Color_Enabled", True))
-    if color_enabled:
-        color_values = ColorResolver.resolve_color_vector(
-            color_master,
-            color_overrides,
-            stats=stats,
-            mode="delta",
-        )
-    else:
-        color_values = {key: 0.0 for key in COLOR_KEYS}
-    gain_r, gain_g, gain_b = stats.white_balance_gain
-    resolved.update(color_values)
-    resolved["Color_Gain_R"] = gain_r
-    resolved["Color_Gain_G"] = gain_g
-    resolved["Color_Gain_B"] = gain_b
-
-    bw_enabled = bool(adjustments.get("BW_Enabled", False))
-    if bw_enabled:
-        # BWIntensity is stored as [0, 1] (0.5 Neutral) but Shader expects [-1, 1] (0.0 Neutral).
-        norm_intensity = _normalise_bw_value("BW_Intensity", float(adjustments.get("BW_Intensity", 0.5)))
-        resolved["BWIntensity"] = norm_intensity * 2.0 - 1.0
-
-        # BWNeutrals/Tone are stored as [-1, 1]. Shader expects [-1, 1].
-        resolved["BWNeutrals"] = float(adjustments.get("BW_Neutrals", 0.0))
-        resolved["BWTone"] = float(adjustments.get("BW_Tone", 0.0))
-
-        # BWGrain is stored as [0, 1]. Shader expects [0, 1].
-        resolved["BWGrain"] = max(0.0, min(1.0, float(adjustments.get("BW_Grain", 0.0))))
-    else:
-        # Defaults mapped to shader range:
-        # Intensity 0.5 (Neutral) -> 0.0
-        # Neutrals 0.0 (Neutral) -> 0.0
-        # Tone 0.0 (Neutral) -> 0.0
-        resolved["BWIntensity"] = 0.0
-        resolved["BWNeutrals"] = 0.0
-        resolved["BWTone"] = 0.0
-        resolved["BWGrain"] = 0.0
-
-    # White Balance adjustments
-    wb_enabled = bool(adjustments.get("WB_Enabled", False))
-    resolved["WB_Enabled"] = wb_enabled
-    if wb_enabled:
-        resolved["WBWarmth"] = max(-1.0, min(1.0, float(adjustments.get("WB_Warmth", 0.0))))
-        resolved["WBTemperature"] = max(-1.0, min(1.0, float(adjustments.get("WB_Temperature", 0.0))))
-        resolved["WBTint"] = max(-1.0, min(1.0, float(adjustments.get("WB_Tint", 0.0))))
-    else:
-        resolved["WBWarmth"] = 0.0
-        resolved["WBTemperature"] = 0.0
-        resolved["WBTint"] = 0.0
-
-    # Curve adjustments - pass through to renderer as-is
-    curve_enabled = bool(adjustments.get("Curve_Enabled", False))
-    resolved["Curve_Enabled"] = curve_enabled
-    if curve_enabled:
-        # Pass curve data for LUT generation
-        for key in ("Curve_RGB", "Curve_Red", "Curve_Green", "Curve_Blue"):
-            curve_data = adjustments.get(key)
-            if curve_data and isinstance(curve_data, list):
-                resolved[key] = curve_data
-
-    # Levels adjustments - pass through to renderer as-is
-    levels_enabled = bool(adjustments.get("Levels_Enabled", False))
-    resolved["Levels_Enabled"] = levels_enabled
-    if levels_enabled:
-        handles = adjustments.get("Levels_Handles")
-        if isinstance(handles, list) and len(handles) == 5:
-            resolved["Levels_Handles"] = handles
-
-    # Selective Color adjustments - pass through to renderer as-is
-    sc_enabled = bool(adjustments.get("SelectiveColor_Enabled", False))
-    resolved["SelectiveColor_Enabled"] = sc_enabled
-    if sc_enabled:
-        sc_ranges = adjustments.get("SelectiveColor_Ranges")
-        if isinstance(sc_ranges, list) and len(sc_ranges) == NUM_RANGES:
-            resolved["SelectiveColor_Ranges"] = sc_ranges
-
-    # Definition adjustments - pass through to renderer as-is
-    def_enabled = bool(adjustments.get("Definition_Enabled", False))
-    resolved["Definition_Enabled"] = def_enabled
-    if def_enabled:
-        resolved["Definition_Value"] = max(0.0, min(1.0, float(adjustments.get("Definition_Value", 0.0))))
-
-    # Denoise adjustments - pass through to renderer as-is
-    dn_enabled = bool(adjustments.get("Denoise_Enabled", False))
-    resolved["Denoise_Enabled"] = dn_enabled
-    if dn_enabled:
-        resolved["Denoise_Amount"] = max(0.0, min(5.0, float(adjustments.get("Denoise_Amount", 0.0))))
-
-    # Sharpen adjustments - pass through to renderer as-is
-    sh_enabled = bool(adjustments.get("Sharpen_Enabled", False))
-    resolved["Sharpen_Enabled"] = sh_enabled
-    if sh_enabled:
-        resolved["Sharpen_Intensity"] = max(0.0, min(1.0, float(adjustments.get("Sharpen_Intensity", 0.0))))
-        resolved["Sharpen_Edges"] = max(0.0, min(1.0, float(adjustments.get("Sharpen_Edges", 0.0))))
-        resolved["Sharpen_Falloff"] = max(0.0, min(1.0, float(adjustments.get("Sharpen_Falloff", 0.0))))
-
-    # Vignette adjustments - pass through to renderer as-is
-    vig_enabled = bool(adjustments.get("Vignette_Enabled", False))
-    resolved["Vignette_Enabled"] = vig_enabled
-    if vig_enabled:
-        resolved["Vignette_Strength"] = max(0.0, min(1.0, float(adjustments.get("Vignette_Strength", 0.0))))
-        resolved["Vignette_Radius"] = max(0.0, min(1.0, float(adjustments.get("Vignette_Radius", 0.50))))
-        resolved["Vignette_Softness"] = max(0.0, min(1.0, float(adjustments.get("Vignette_Softness", 0.0))))
-
-    return resolved
+__all__ = [
+    "VIDEO_TRIM_IN_KEY",
+    "VIDEO_TRIM_OUT_KEY",
+    "has_non_default_adjustments",
+    "load_adjustments",
+    "normalise_video_trim",
+    "resolve_render_adjustments",
+    "save_adjustments",
+    "sidecar_path_for_asset",
+    "video_requires_adjusted_preview",
+    "trim_is_non_default",
+    "video_has_visible_edits",
+]

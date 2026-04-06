@@ -43,6 +43,7 @@ class EditColorSection(QWidget):
         self._color_stats: ColorStats = ColorStats()
         self._thread_pool = QThreadPool.globalInstance()
         self._active_thumbnail_workers: list[ThumbnailGeneratorWorker] = []
+        self._video_mode = False
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -94,6 +95,14 @@ class EditColorSection(QWidget):
         self.options_section.set_expanded(False)
         layout.addWidget(self.options_section)
         layout.addStretch(1)
+
+    def set_video_mode(self, enabled: bool) -> None:
+        """Flatten the section for video editing while preserving image behaviour."""
+
+        self._video_mode = bool(enabled)
+        self.master_slider.setVisible(not self._video_mode)
+        self.options_section.set_header_visible(not self._video_mode)
+        self.options_section.set_expanded(self._video_mode)
 
     # ------------------------------------------------------------------
     def bind_session(self, session: Optional[EditSession]) -> None:
@@ -223,7 +232,8 @@ class EditColorSection(QWidget):
             if self._session is not None:
                 self._session.set_color_stats(stats)
         self.master_slider.setImage(image)
-        self._start_master_thumbnail_generation()
+        if not self._video_mode:
+            self._start_master_thumbnail_generation()
 
     # ------------------------------------------------------------------
     def _start_master_thumbnail_generation(self) -> None:

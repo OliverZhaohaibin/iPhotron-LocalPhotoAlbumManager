@@ -4,19 +4,68 @@
 from __future__ import annotations
 
 import logging
+from ctypes import c_uint
 from pathlib import Path
 from typing import Optional
 
-import numpy as np
+from OpenGL import GL as gl
 from PySide6.QtCore import QObject
 from PySide6.QtOpenGL import (
     QOpenGLShader,
     QOpenGLShaderProgram,
-    QOpenGLVertexArrayObject,
 )
-from OpenGL import GL as gl
+
+from ....core.selective_color_resolver import NUM_RANGES
 
 _LOGGER = logging.getLogger(__name__)
+
+
+class _RawVertexArrayObject:
+    """Minimal VAO wrapper backed by raw OpenGL calls.
+
+    ``QOpenGLVertexArrayObject`` can be unreliable inside ``QRhiWidget``
+    ``beginExternal()`` rendering on some Linux drivers. A raw VAO keeps the
+    core-profile full-screen triangle path portable while preserving the
+    small ``bind()/release()/destroy()`` API used elsewhere in the renderer.
+    """
+
+    def __init__(self, gl_funcs) -> None:
+        self._gl_funcs = gl_funcs
+        self._vao_id: int = 0
+
+    def create(self) -> bool:
+        gen_vertex_arrays = getattr(self._gl_funcs, "glGenVertexArrays", None)
+        if callable(gen_vertex_arrays):
+            vao_ids = (c_uint * 1)()
+            gen_vertex_arrays(1, vao_ids)
+            self._vao_id = int(vao_ids[0])
+        else:
+            created = gl.glGenVertexArrays(1)
+            if isinstance(created, (tuple, list)):
+                created = created[0]
+            self._vao_id = int(created)
+        return self._vao_id != 0
+
+    def isCreated(self) -> bool:
+        return self._vao_id != 0
+
+    def bind(self) -> None:
+        if self._vao_id:
+            self._gl_funcs.glBindVertexArray(self._vao_id)
+
+    def release(self) -> None:
+        self._gl_funcs.glBindVertexArray(0)
+
+    def destroy(self) -> None:
+        if not self._vao_id:
+            return
+        delete_vertex_arrays = getattr(self._gl_funcs, "glDeleteVertexArrays", None)
+        vao_ids = (c_uint * 1)(int(self._vao_id))
+        if callable(delete_vertex_arrays):
+            delete_vertex_arrays(1, vao_ids)
+        else:
+            gl.glDeleteVertexArrays(1, vao_ids)
+        self._vao_id = 0
 
 
 _OVERLAY_VERTEX_SHADER = """
@@ -38,8 +87,22 @@ void main() {
 """
 
 
+_SELECTIVE_COLOR_UNIFORM_NAMES = tuple(
+    f"uSCRange0[{idx}]" for idx in range(NUM_RANGES)
+) + tuple(
+    f"uSCRange1[{idx}]" for idx in range(NUM_RANGES)
+)
+
+
 _UNIFORM_NAMES = (
     "uTex",
+    "uSourceKind",
+    "uVideoYTex",
+    "uVideoUVTex",
+    "uVideoFormat",
+    "uVideoColorSpace",
+    "uVideoTransfer",
+    "uVideoRange",
     "uBrilliance",
     "uExposure",
     "uHighlights",
@@ -68,14 +131,16 @@ _UNIFORM_NAMES = (
     "uPan",
     "uImgScale",
     "uImgOffset",
+    "uCornerRadius",
     "uCropCX",
     "uCropCY",
     "uCropW",
     "uCropH",
-    "uPerspectiveMatrix",
+    "uPerspectiveRow0",
+    "uPerspectiveRow1",
+    "uPerspectiveRow2",
     "uRotate90",
-    "uSCRange0",
-    "uSCRange1",
+    *_SELECTIVE_COLOR_UNIFORM_NAMES,
     "uSCEnabled",
     "uDefinition",
     "uDenoiseAmount",
@@ -110,10 +175,10 @@ class ShaderManager:
         self._gl_funcs = gl_funcs
         self._parent = parent
         self.program: Optional[QOpenGLShaderProgram] = None
-        self.dummy_vao: Optional[QOpenGLVertexArrayObject] = None
+        self.dummy_vao: Optional[_RawVertexArrayObject] = None
         self.uniform_locations: dict[str, int] = {}
         self.overlay_program: Optional[QOpenGLShaderProgram] = None
-        self.overlay_vao: Optional[QOpenGLVertexArrayObject] = None
+        self.overlay_vao: Optional[_RawVertexArrayObject] = None
         self.overlay_vbo: int = 0
 
     def initialize(self) -> None:
@@ -138,12 +203,12 @@ class ShaderManager:
             raise RuntimeError("Unable to link shader program")
 
         self.program = program
+        gf = self._gl_funcs
 
-        vao = QOpenGLVertexArrayObject(self._parent)
+        vao = _RawVertexArrayObject(gf)
         vao.create()
         self.dummy_vao = vao if vao.isCreated() else None
 
-        gf = self._gl_funcs
         gf.glDisable(gl.GL_DEPTH_TEST)
         gf.glDisable(gl.GL_CULL_FACE)
         gf.glDisable(gl.GL_BLEND)
@@ -169,7 +234,7 @@ class ShaderManager:
             raise RuntimeError("Unable to link overlay shader program")
         self.overlay_program = overlay_prog
 
-        overlay_vao = QOpenGLVertexArrayObject(self._parent)
+        overlay_vao = _RawVertexArrayObject(gf)
         overlay_vao.create()
         self.overlay_vao = overlay_vao if overlay_vao.isCreated() else None
         buffer_id = gl.glGenBuffers(1)
@@ -194,5 +259,5 @@ class ShaderManager:
             self.overlay_program.removeAllShaders()
             self.overlay_program = None
         if self.overlay_vbo:
-            gl.glDeleteBuffers(1, np.array([int(self.overlay_vbo)], dtype=np.uint32))
+            gl.glDeleteBuffers(1, (c_uint * 1)(int(self.overlay_vbo)))
             self.overlay_vbo = 0

@@ -107,6 +107,8 @@ class EditSidebar(QWidget):
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
+        self._video_edit_mode = False
+        self._pre_video_expand_state: dict[str, bool] = {}
 
         # Match the classic sidebar chrome so the edit tools retain the soft blue
         # background the rest of the application uses for navigation panes.
@@ -253,6 +255,35 @@ class EditSidebar(QWidget):
     def set_session(self, session: Optional[EditSession]) -> None:
         """Attach *session* to every tool section."""
         self._coordinator.set_session(session)
+
+    def set_video_edit_mode(self, enabled: bool) -> None:
+        """Switch the first three adjust sections into the video-specific layout."""
+
+        target = bool(enabled)
+        if self._video_edit_mode == target:
+            return
+
+        first_three = ("light", "color", "bw")
+        if target:
+            self._pre_video_expand_state = {
+                key: self._registry.bundles[key].container.is_expanded()
+                for key in first_three
+            }
+        self._video_edit_mode = target
+
+        for key in first_three:
+            bundle = self._registry.bundles[key]
+            section = bundle.section
+            if hasattr(section, "set_video_mode"):
+                section.set_video_mode(target)
+            if target:
+                bundle.container.set_expanded(False)
+            else:
+                bundle.container.set_expanded(
+                    self._pre_video_expand_state.get(key, True)
+                )
+        if not target:
+            self._pre_video_expand_state = {}
 
     def session(self) -> Optional[EditSession]:
         return self._coordinator.session()

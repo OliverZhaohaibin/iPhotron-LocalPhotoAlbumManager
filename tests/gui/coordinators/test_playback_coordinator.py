@@ -50,6 +50,7 @@ def test_do_play_asset_keeps_rotate_enabled_for_video() -> None:
     coordinator._share_button = Mock()
     coordinator._edit_button = Mock()
     coordinator._rotate_button = Mock()
+    coordinator._zoom_handler = Mock()
     coordinator._update_favorite_icon = Mock()
     coordinator._info_panel = None
     coordinator._active_live_motion = None
@@ -111,6 +112,7 @@ def test_do_play_asset_keeps_rotate_only_video_on_native_playback_surface() -> N
     coordinator._share_button = Mock()
     coordinator._edit_button = Mock()
     coordinator._rotate_button = Mock()
+    coordinator._zoom_handler = Mock()
     coordinator._update_favorite_icon = Mock()
     coordinator._info_panel = None
     coordinator._active_live_motion = None

@@ -691,11 +691,12 @@ class VideoArea(QWidget):
         # source the previous duration is unrelated and must not be used to
         # clamp/reset the new clip's trim range before the real duration arrives.
         # In all cases calling _on_duration_changed is safe and idempotent.
-        cached_duration = self._player.duration()
-        if cached_duration <= 0 and path == prev_source:
-            cached_duration = prev_duration_ms
-        if cached_duration > 0:
-            self._on_duration_changed(cached_duration)
+        same_source_reload = path == prev_source
+        effective_duration_ms = self._player.duration()
+        if effective_duration_ms <= 0 and same_source_reload and prev_duration_ms > 0:
+            effective_duration_ms = prev_duration_ms
+        if effective_duration_ms > 0:
+            self._on_duration_changed(effective_duration_ms)
         self._player.setPosition(self._trim_in_ms if self._trim_in_ms > 0 else 0)
         _log.debug(
             "[trace][video_area] load_video:end %s",

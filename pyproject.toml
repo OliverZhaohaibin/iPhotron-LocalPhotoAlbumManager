@@ -35,12 +35,14 @@ dependencies = [
 test = [
     "pytest",
     "pytest-mock",
-    "pytest-qt"
+    "pytest-qt",
+    "pytest-timeout",
 ]
 dev = [
     "pytest",
     "pytest-mock",
     "pytest-qt",
+    "pytest-timeout",
     "ruff",
     "black",
     "mypy",

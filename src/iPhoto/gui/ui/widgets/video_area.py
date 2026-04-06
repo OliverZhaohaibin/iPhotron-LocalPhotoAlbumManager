@@ -638,6 +638,9 @@ class VideoArea(QWidget):
         if not self._adjusted_preview_enabled and not video_requires_adjusted_preview(self._current_adjustments):
             native_rotate90_steps = int(float(self._current_adjustments.get("Crop_Rotate90", 0.0))) % 4
         self._renderer.set_user_rotate90_steps(native_rotate90_steps)
+        # Save previous duration before resetting so it can be used as a
+        # fallback if the media backend reports 0 after setSource (see below).
+        prev_duration_ms = self._current_duration_ms
         self._trim_in_ms = 0
         self._trim_out_ms = 0
         self._current_duration_ms = 0
@@ -677,14 +680,19 @@ class VideoArea(QWidget):
             self.set_trim_range_ms(*trim_range_ms)
         # Force-propagate the current duration so all observers (e.g.
         # PlaybackCoordinator) receive a durationChanged event with the new
-        # trim range already applied.  This covers two failure modes:
+        # trim range already applied.  This covers three failure modes:
         #   (a) Qt does not re-emit durationChanged for same-source reloads
         #       (common on macOS/AVFoundation when the file is cached).
         #   (b) durationChanged fired synchronously inside setSource() above,
         #       before set_trim_range_ms() had a chance to update _trim_in/out.
-        # In both cases the player already holds the correct duration value, so
-        # calling _on_duration_changed here is safe and idempotent.
+        #   (c) Some backends reset duration() to 0 on same-source reload and
+        #       also suppress the durationChanged signal, so player.duration()
+        #       returns 0 even though the duration was already known.  In this
+        #       case we fall back to the previous duration captured above.
+        # In all cases calling _on_duration_changed is safe and idempotent.
         cached_duration = self._player.duration()
+        if cached_duration <= 0:
+            cached_duration = prev_duration_ms
         if cached_duration > 0:
             self._on_duration_changed(cached_duration)
         self._player.setPosition(self._trim_in_ms if self._trim_in_ms > 0 else 0)

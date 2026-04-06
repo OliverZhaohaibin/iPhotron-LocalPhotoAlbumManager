@@ -10,6 +10,7 @@ from PySide6.QtCore import QItemSelectionModel, QModelIndex, QObject, QTimer, Si
 from PySide6.QtGui import QAction, QColor, QPalette
 
 from iPhoto.config import PLAY_ASSET_DEBOUNCE_MS
+from iPhoto.errors import ExternalToolError
 from iPhoto.gui.coordinators.view_router import ViewRouter
 from iPhoto.gui.ui.controllers.edit_zoom_handler import EditZoomHandler
 from iPhoto.gui.ui.controllers.header_controller import HeaderController
@@ -17,7 +18,8 @@ from iPhoto.gui.ui.icons import load_icon
 from iPhoto.gui.ui.models.roles import Roles
 from iPhoto.gui.ui.widgets.info_panel import InfoPanel
 from iPhoto.io import sidecar
-from iPhoto.io.metadata import read_image_meta
+from iPhoto.io.metadata import read_image_meta, read_video_meta
+from iPhoto.utils.exiftool import get_metadata_batch
 
 if TYPE_CHECKING:
     from iPhoto.utils.settings import Settings
@@ -593,19 +595,43 @@ class PlaybackCoordinator(QObject):
     # --- Detail UI Logic Ported ---
 
     def _refresh_info_panel(self, row: int):
-        if not self._info_panel: return
+        if not self._info_panel:
+            return
 
         idx = self._asset_vm.index(row, 0)
         info = self._asset_vm.data(idx, Roles.INFO)
 
-        if info and not info.get("iso"):
-             abs_path = info.get("abs")
-             if abs_path:
-                 try:
-                     fresh = read_image_meta(Path(abs_path))
-                     info.update(fresh)
-                 except Exception as e:
-                     LOGGER.debug(f"Failed enrichment: {e}")
+        is_video = bool(info.get("is_video")) if info else False
+        # Trigger enrichment when technical fields are absent.  For video we
+        # also re-fetch when lens is missing because the stored metadata may
+        # have been scanned before ExifTool lens extraction was in place.
+        needs_enrichment = info and (
+            (not info.get("frame_rate") or not info.get("lens")) if is_video
+            else not info.get("iso")
+        )
+        if needs_enrichment:
+            abs_path = info.get("abs")
+            if abs_path:
+                try:
+                    if is_video:
+                        # Pass ExifTool data so that lens/focal-length fields
+                        # (which only come from ExifTool, not ffprobe) are
+                        # included in the fresh metadata.
+                        exif_payload = None
+                        try:
+                            exif_batch = get_metadata_batch([Path(abs_path)])
+                            exif_payload = exif_batch[0] if exif_batch else None
+                        except (ExternalToolError, OSError) as exc:
+                            LOGGER.debug("ExifTool metadata fetch failed for %s: %s", abs_path, exc)
+                        fresh = read_video_meta(Path(abs_path), exif_payload)
+                    else:
+                        fresh = read_image_meta(Path(abs_path))
+                    # Only merge keys that have a real value so that existing
+                    # metadata (e.g. lens stored in the DB) is never replaced
+                    # by None from a call that could not retrieve the field.
+                    info.update({k: v for k, v in fresh.items() if v is not None})
+                except Exception as e:
+                    LOGGER.debug("Failed enrichment: %s", e)
 
         self._info_panel.set_asset_metadata(info)
 

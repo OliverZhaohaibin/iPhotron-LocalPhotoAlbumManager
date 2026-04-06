@@ -437,3 +437,220 @@ def test_stream_tags_duration_overrides_exiftool_when_no_other_ffprobe_duration(
 
     # ffprobe stream.tags.DURATION (120.0) should override ExifTool (118.0)
     assert info["dur"] == pytest.approx(120.0, rel=1e-3)
+
+
+# ── Video lens extraction priority tests ──────────────────────────────────────
+
+
+def _make_no_ffprobe(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Disable ffprobe so tests focus on ExifTool metadata only."""
+
+    def _raise(path: Path) -> dict:
+        raise metadata.ExternalToolError("no ffprobe")
+
+    monkeypatch.setattr(metadata, "probe_media", _raise)
+
+
+def test_read_video_meta_lens_from_keys_group(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Primary: Keys:LensModel should be extracted as the video lens."""
+    _make_no_ffprobe(monkeypatch)
+    exif_payload = {
+        "Keys": {"LensModel": "iPhone 12 back camera 4.2mm f/1.6"},
+    }
+    info = metadata.read_video_meta(tmp_path / "clip.mov", exif_payload)
+    assert info["lens"] == "iPhone 12 back camera 4.2mm f/1.6"
+
+
+def test_read_video_meta_lens_from_video_keys_group(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Primary: VideoKeys:LensModel (flat key) should be extracted as the video lens."""
+    _make_no_ffprobe(monkeypatch)
+    exif_payload = {
+        "VideoKeys:LensModel": "iPhone 12 back camera 4.2mm f/1.6",
+    }
+    info = metadata.read_video_meta(tmp_path / "clip.mov", exif_payload)
+    assert info["lens"] == "iPhone 12 back camera 4.2mm f/1.6"
+
+
+def test_read_video_meta_lens_language_variant_fallback(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Fallback 1: language-tagged variant (e.g. VideoKeys:LensModel-eng-DE) is used
+    when the bare LensModel key is absent."""
+    _make_no_ffprobe(monkeypatch)
+    exif_payload = {
+        "VideoKeys:LensModel-eng-DE": "iPhone 12 back camera 4.2mm f/1.6",
+    }
+    info = metadata.read_video_meta(tmp_path / "clip.mov", exif_payload)
+    assert info["lens"] == "iPhone 12 back camera 4.2mm f/1.6"
+
+
+def test_read_video_meta_lens_composite_lens_id_fallback(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Fallback 2: Composite:LensID is used when VideoKeys sources are absent."""
+    _make_no_ffprobe(monkeypatch)
+    exif_payload = {
+        "Composite": {"LensID": "iPhone 12 back camera 4.2mm f/1.6"},
+    }
+    info = metadata.read_video_meta(tmp_path / "clip.mov", exif_payload)
+    assert info["lens"] == "iPhone 12 back camera 4.2mm f/1.6"
+
+
+def test_read_video_meta_lens_priority_keys_beats_language_variant(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """When both VideoKeys:LensModel and a language variant are present, the
+    bare LensModel (primary) wins."""
+    _make_no_ffprobe(monkeypatch)
+    exif_payload = {
+        "VideoKeys:LensModel": "primary lens",
+        "VideoKeys:LensModel-eng-DE": "lang variant lens",
+    }
+    info = metadata.read_video_meta(tmp_path / "clip.mov", exif_payload)
+    assert info["lens"] == "primary lens"
+
+
+def test_read_video_meta_lens_priority_lang_variant_beats_composite_lens_id(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Language variant (fallback 1) wins over Composite:LensID (fallback 2)."""
+    _make_no_ffprobe(monkeypatch)
+    exif_payload = {
+        "VideoKeys:LensModel-eng-DE": "lang variant lens",
+        "Composite": {"LensID": "composite lens id"},
+    }
+    info = metadata.read_video_meta(tmp_path / "clip.mov", exif_payload)
+    assert info["lens"] == "lang variant lens"
+
+
+def test_read_video_meta_full_priority_chain(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Full chain from the spec: VideoKeys:LensModel, language variant, Composite:LensID."""
+    _make_no_ffprobe(monkeypatch)
+
+    # All three sources present — only the primary should be returned.
+    exif_payload = {
+        "VideoKeys:LensModel": "iPhone 12 back camera 4.2mm f/1.6",
+        "VideoKeys:LensModel-eng-DE": "iPhone 12 back camera 4.2mm f/1.6",
+        "Composite": {"LensID": "iPhone 12 back camera 4.2mm f/1.6"},
+    }
+    info = metadata.read_video_meta(tmp_path / "clip.mov", exif_payload)
+    assert info["lens"] == "iPhone 12 back camera 4.2mm f/1.6"
+
+
+# ── B-level lens spec string fallbacks ────────────────────────────────────────
+
+
+def test_read_video_meta_lens_from_exif_ifd_lens_info(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """B-fallback: ExifIFD:LensInfo (e.g. Fujifilm X-T4 '23mm f/2') is used when
+    no explicit LensModel is present."""
+    _make_no_ffprobe(monkeypatch)
+    exif_payload = {
+        "ExifIFD": {"LensInfo": "23mm f/2"},
+    }
+    info = metadata.read_video_meta(tmp_path / "clip.mov", exif_payload)
+    assert info["lens"] == "23mm f/2"
+
+
+def test_read_video_meta_lens_from_exif_lens_specification(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """B-fallback: EXIF:LensSpecification is used when no LensModel or LensInfo is present."""
+    _make_no_ffprobe(monkeypatch)
+    exif_payload = {
+        "EXIF": {"LensSpecification": "18-55mm f/2.8-4"},
+    }
+    info = metadata.read_video_meta(tmp_path / "clip.mov", exif_payload)
+    assert info["lens"] == "18-55mm f/2.8-4"
+
+
+def test_read_video_meta_lens_name_beats_spec_string(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A-level lens name (ExifIFD:LensModel) wins over B-level LensInfo spec."""
+    _make_no_ffprobe(monkeypatch)
+    exif_payload = {
+        "ExifIFD": {
+            "LensModel": "XF23mmF2 R WR",
+            "LensInfo": "23mm f/2",
+        },
+    }
+    info = metadata.read_video_meta(tmp_path / "clip.mov", exif_payload)
+    assert info["lens"] == "XF23mmF2 R WR"
+
+
+# ── Focal length extraction ────────────────────────────────────────────────────
+
+
+def test_read_video_meta_focal_length_from_video_keys(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """VideoKeys:FocalLengthIn35mmFormat is extracted as focal_length."""
+    _make_no_ffprobe(monkeypatch)
+    exif_payload = {
+        "VideoKeys:FocalLengthIn35mmFormat": 27,
+    }
+    info = metadata.read_video_meta(tmp_path / "clip.mov", exif_payload)
+    assert info["focal_length"] == pytest.approx(27.0)
+
+
+def test_read_video_meta_focal_length_from_exif_ifd(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """ExifIFD:FocalLength is used when VideoKeys is absent."""
+    _make_no_ffprobe(monkeypatch)
+    exif_payload = {
+        "ExifIFD": {"FocalLength": "23"},
+    }
+    info = metadata.read_video_meta(tmp_path / "clip.mov", exif_payload)
+    assert info["focal_length"] == pytest.approx(23.0)
+
+
+def test_read_video_meta_focal_length_35mm_beats_raw(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """ExifIFD:FocalLengthIn35mmFormat is preferred over the raw FocalLength."""
+    _make_no_ffprobe(monkeypatch)
+    exif_payload = {
+        "ExifIFD": {
+            "FocalLengthIn35mmFormat": 27,
+            "FocalLength": "23",
+        },
+    }
+    info = metadata.read_video_meta(tmp_path / "clip.mov", exif_payload)
+    assert info["focal_length"] == pytest.approx(27.0)
+
+
+def test_read_video_meta_fujifilm_xt4_style(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """End-to-end: Fujifilm X-T4 video embedded EXIF metadata is fully parsed."""
+    _make_no_ffprobe(monkeypatch)
+    # Representative subset of X-T4 ExifTool output for a video clip.
+    exif_payload = {
+        "IFD0": {"Make": "FUJIFILM", "Model": "X-T4"},
+        "ExifIFD": {
+            "ExposureTime": "1/2700",
+            "FNumber": 5.6,
+            "ISO": 640,
+            "LensInfo": "23mm f/2",
+            "FocalLength": "23",
+        },
+        "Composite": {"LensID": "XF23mmF2 R WR"},
+    }
+    info = metadata.read_video_meta(tmp_path / "clip.mov", exif_payload)
+
+    assert info["make"] == "FUJIFILM"
+    assert info["model"] == "X-T4"
+    # Composite:LensID is an A-level explicit lens name — it wins over the
+    # B-level ExifIFD:LensInfo spec string.
+    assert info["lens"] == "XF23mmF2 R WR"
+    assert info["focal_length"] == pytest.approx(23.0)
+

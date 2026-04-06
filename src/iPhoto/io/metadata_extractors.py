@@ -129,6 +129,73 @@ def _pick_string(*candidates: Any) -> Optional[str]:
     return None
 
 
+# Matches the raw EXIF LensInfo / LensSpecification 4-value tuple that ExifTool
+# sometimes emits verbatim as a string, e.g. "23 23 2 2" or "24/1 70/1 28/10 28/10".
+# Format: <min_focal> <max_focal> <min_fnumber> <max_fnumber>
+# Each value is an integer, a decimal, or a rational fraction (N/D).
+_RAW_LENS_INFO_RE = re.compile(
+    r"^(?P<fl_min>\d+(?:/\d+|\.\d+)?)"
+    r"\s+(?P<fl_max>\d+(?:/\d+|\.\d+)?)"
+    r"\s+(?P<fn_min>\d+(?:/\d+|\.\d+)?)"
+    r"\s+(?P<fn_max>\d+(?:/\d+|\.\d+)?)$"
+)
+# A focal-length value is displayed as an integer when it rounds to within this
+# fractional distance of the nearest whole number (e.g. 23.04 → "23", not "23.0").
+_LENS_INT_DISPLAY_THRESHOLD = 0.05
+# Minimum difference in mm between min and max focal length that classifies a
+# lens as a zoom rather than a prime (handles floating-point rounding for primes
+# whose min == max, e.g. "23 23").
+_ZOOM_FOCAL_THRESHOLD = 0.5
+# Minimum difference in f-number between wide-open at the short and long ends
+# that classifies a zoom as variable-aperture (e.g. f/3.5–5.6 vs f/2.8–2.8).
+_VARIABLE_APERTURE_THRESHOLD = 0.1
+
+
+def _normalise_lens_value(value: str) -> str:
+    """Convert a raw EXIF LensInfo spec string to a human-readable form.
+
+    If *value* looks like a raw 4-value LensInfo tuple (e.g. ``"23 23 2 2"``
+    or ``"24/1 70/1 28/10 28/10"``) it is reformatted as ``"23mm f/2"`` or
+    ``"24-70mm f/2.8"``.  Any other string is returned unchanged.
+    """
+
+    m = _RAW_LENS_INFO_RE.match(value.strip())
+    if not m:
+        return value
+
+    def _parse(token: str) -> Optional[float]:
+        try:
+            return float(Fraction(token)) if "/" in token else float(token)
+        except (ValueError, ZeroDivisionError):
+            return None
+
+    fl_min = _parse(m.group("fl_min"))
+    fl_max = _parse(m.group("fl_max"))
+    fn_min = _parse(m.group("fn_min"))
+    fn_max = _parse(m.group("fn_max"))
+
+    if fl_min is None or fl_min <= 0:
+        return value
+
+    def _fmt(v: float) -> str:
+        return str(int(round(v))) if abs(v - round(v)) < _LENS_INT_DISPLAY_THRESHOLD else f"{v:.1f}"
+
+    if fl_max is not None and abs(fl_min - fl_max) > _ZOOM_FOCAL_THRESHOLD:
+        focal_str = f"{_fmt(fl_min)}-{_fmt(fl_max)}mm"
+    else:
+        focal_str = f"{_fmt(fl_min)}mm"
+
+    if fn_min is None or fn_min <= 0:
+        return focal_str
+
+    if fn_max is not None and fn_max > 0 and abs(fn_min - fn_max) > _VARIABLE_APERTURE_THRESHOLD:
+        aperture_str = f"f/{_fmt(fn_min)}-{_fmt(fn_max)}"
+    else:
+        aperture_str = f"f/{_fmt(fn_min)}"
+
+    return f"{focal_str} {aperture_str}"
+
+
 def _extract_group(metadata: Dict[str, Any], group_name: str) -> Optional[Dict[str, Any]]:
     """Return an ExifTool group mapping from either nested or flattened layouts."""
 

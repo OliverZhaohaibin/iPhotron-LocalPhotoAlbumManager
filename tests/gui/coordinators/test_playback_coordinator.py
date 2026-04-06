@@ -265,3 +265,215 @@ def test_on_seek_adds_trim_in_offset_before_forwarding_to_video_area() -> None:
     PlaybackCoordinator._on_seek(coordinator, 1000)
 
     coordinator._player_view.video_area.seek.assert_called_once_with(5000)  # 1000 + 4000
+
+
+# ---------------------------------------------------------------------------
+# Regression tests: _refresh_info_panel must dispatch to read_video_meta for
+# video assets and read_image_meta for photo assets.
+# ---------------------------------------------------------------------------
+
+def _make_info_panel_coordinator(info: dict) -> PlaybackCoordinator:
+    """Return a minimal PlaybackCoordinator wired for _refresh_info_panel tests."""
+    coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
+    coordinator._info_panel = Mock()
+    coordinator._asset_vm = Mock()
+    coordinator._asset_vm.index.return_value = object()
+    coordinator._asset_vm.data.return_value = info
+    return coordinator
+
+
+def test_refresh_info_panel_calls_read_video_meta_for_video() -> None:
+    """When is_video is True and frame_rate is missing, read_video_meta must be called."""
+    info = {
+        "is_video": True,
+        "abs": "/videos/clip.mov",
+    }
+    coordinator = _make_info_panel_coordinator(info)
+
+    with (
+        patch(
+            "iPhoto.gui.coordinators.playback_coordinator.get_metadata_batch",
+            return_value=[{}],
+        ),
+        patch(
+            "iPhoto.gui.coordinators.playback_coordinator.read_video_meta",
+            return_value={"frame_rate": 30.0, "dur": 5.0},
+        ) as mock_video,
+        patch(
+            "iPhoto.gui.coordinators.playback_coordinator.read_image_meta",
+        ) as mock_image,
+    ):
+        PlaybackCoordinator._refresh_info_panel(coordinator, 0)
+
+    mock_video.assert_called_once()
+    mock_image.assert_not_called()
+
+
+def test_refresh_info_panel_calls_read_image_meta_for_photo() -> None:
+    """When is_video is False and iso is missing, read_image_meta must be called."""
+    info = {
+        "is_video": False,
+        "abs": "/photos/img.jpg",
+    }
+    coordinator = _make_info_panel_coordinator(info)
+
+    with (
+        patch(
+            "iPhoto.gui.coordinators.playback_coordinator.read_image_meta",
+            return_value={"iso": 100, "f_number": 2.8},
+        ) as mock_image,
+        patch(
+            "iPhoto.gui.coordinators.playback_coordinator.read_video_meta",
+        ) as mock_video,
+    ):
+        PlaybackCoordinator._refresh_info_panel(coordinator, 0)
+
+    mock_image.assert_called_once()
+    mock_video.assert_not_called()
+
+
+def test_refresh_info_panel_skips_enrichment_when_frame_rate_and_lens_present() -> None:
+    """No metadata read occurs when both frame_rate and lens are already populated."""
+    info = {
+        "is_video": True,
+        "abs": "/videos/clip.mov",
+        "frame_rate": 29.97,
+        "lens": "iPhone 12 back camera 4.2mm f/1.6",
+    }
+    coordinator = _make_info_panel_coordinator(info)
+
+    with (
+        patch("iPhoto.gui.coordinators.playback_coordinator.read_video_meta") as mock_video,
+        patch("iPhoto.gui.coordinators.playback_coordinator.read_image_meta") as mock_image,
+    ):
+        PlaybackCoordinator._refresh_info_panel(coordinator, 0)
+
+    mock_video.assert_not_called()
+    mock_image.assert_not_called()
+
+
+def test_refresh_info_panel_enriches_when_frame_rate_present_but_lens_absent() -> None:
+    """Enrichment must trigger when frame_rate is present but lens is missing."""
+    info = {
+        "is_video": True,
+        "abs": "/videos/clip.mov",
+        "frame_rate": 29.97,
+        # no "lens" key — simulates a video scanned before lens extraction
+    }
+    coordinator = _make_info_panel_coordinator(info)
+
+    with (
+        patch(
+            "iPhoto.gui.coordinators.playback_coordinator.get_metadata_batch",
+            return_value=[{"VideoKeys:LensModel": "iPhone 12 back camera 4.2mm f/1.6"}],
+        ),
+        patch(
+            "iPhoto.gui.coordinators.playback_coordinator.read_video_meta",
+            return_value={"frame_rate": 29.97, "lens": "iPhone 12 back camera 4.2mm f/1.6"},
+        ) as mock_video,
+    ):
+        PlaybackCoordinator._refresh_info_panel(coordinator, 0)
+
+    mock_video.assert_called_once()
+    call_args = coordinator._info_panel.set_asset_metadata.call_args[0][0]
+    assert call_args.get("lens") == "iPhone 12 back camera 4.2mm f/1.6"
+
+
+def test_refresh_info_panel_skips_enrichment_when_iso_present() -> None:
+    """When iso is already populated no metadata read should occur for photos."""
+    info = {
+        "is_video": False,
+        "abs": "/photos/img.jpg",
+        "iso": 400,
+    }
+    coordinator = _make_info_panel_coordinator(info)
+
+    with (
+        patch("iPhoto.gui.coordinators.playback_coordinator.read_video_meta") as mock_video,
+        patch("iPhoto.gui.coordinators.playback_coordinator.read_image_meta") as mock_image,
+    ):
+        PlaybackCoordinator._refresh_info_panel(coordinator, 0)
+
+    mock_video.assert_not_called()
+    mock_image.assert_not_called()
+
+
+def test_refresh_info_panel_merges_enrichment_into_info_passed_to_panel() -> None:
+    """Enriched metadata keys must be present when set_asset_metadata is called."""
+    info = {
+        "is_video": True,
+        "abs": "/videos/clip.mov",
+    }
+    coordinator = _make_info_panel_coordinator(info)
+
+    with (
+        patch(
+            "iPhoto.gui.coordinators.playback_coordinator.get_metadata_batch",
+            return_value=[{}],
+        ),
+        patch(
+            "iPhoto.gui.coordinators.playback_coordinator.read_video_meta",
+            return_value={"frame_rate": 60.0, "dur": 3.5, "codec": "hevc"},
+        ),
+    ):
+        PlaybackCoordinator._refresh_info_panel(coordinator, 0)
+
+    call_args = coordinator._info_panel.set_asset_metadata.call_args[0][0]
+    assert call_args.get("frame_rate") == 60.0
+    assert call_args.get("codec") == "hevc"
+
+
+def test_refresh_info_panel_exception_does_not_propagate() -> None:
+    """A failure inside read_video_meta must be swallowed; set_asset_metadata still called."""
+    info = {
+        "is_video": True,
+        "abs": "/videos/clip.mov",
+    }
+    coordinator = _make_info_panel_coordinator(info)
+
+    with (
+        patch(
+            "iPhoto.gui.coordinators.playback_coordinator.get_metadata_batch",
+            return_value=[{}],
+        ),
+        patch(
+            "iPhoto.gui.coordinators.playback_coordinator.read_video_meta",
+            side_effect=OSError("ffprobe missing"),
+        ),
+    ):
+        # Must not raise
+        PlaybackCoordinator._refresh_info_panel(coordinator, 0)
+
+    coordinator._info_panel.set_asset_metadata.assert_called_once()
+
+
+def test_refresh_info_panel_does_not_overwrite_existing_lens_with_none() -> None:
+    """Enrichment must not overwrite an existing lens value with None.
+
+    Scenario: the DB has ``lens`` from an earlier ExifTool scan, but the fresh
+    ``read_video_meta`` call (e.g. ffprobe-only) returns ``lens=None``.  The
+    existing value must be preserved.
+    """
+    info = {
+        "is_video": True,
+        "abs": "/videos/clip.mov",
+        "lens": "iPhone 12 back camera 4.2mm f/1.6",
+        # frame_rate absent to trigger enrichment
+    }
+    coordinator = _make_info_panel_coordinator(info)
+
+    with (
+        patch(
+            "iPhoto.gui.coordinators.playback_coordinator.get_metadata_batch",
+            return_value=[{}],
+        ),
+        patch(
+            "iPhoto.gui.coordinators.playback_coordinator.read_video_meta",
+            # fresh call has no lens (e.g. ffprobe-only path)
+            return_value={"frame_rate": 30.0, "lens": None},
+        ),
+    ):
+        PlaybackCoordinator._refresh_info_panel(coordinator, 0)
+
+    call_args = coordinator._info_panel.set_asset_metadata.call_args[0][0]
+    assert call_args.get("lens") == "iPhone 12 back camera 4.2mm f/1.6"

@@ -59,6 +59,32 @@ def test_info_panel_formats_video_metadata(qapp: QApplication) -> None:
     panel.close()
 
 
+def test_info_panel_video_shows_lens_when_available(qapp: QApplication) -> None:
+    """When a video asset has lens metadata the lens label must be visible."""
+
+    panel = InfoPanel()
+    metadata = {
+        "rel": "clip.MOV",
+        "name": "clip.MOV",
+        "is_video": True,
+        "make": "Apple",
+        "model": "Apple iPhone 12",
+        "lens": "iPhone 12 back camera 4.2mm f/1.6",
+        "w": 1920,
+        "h": 1080,
+        "bytes": 8_000_000,
+        "codec": "hevc",
+        "frame_rate": 30.0,
+        "dur": 5.0,
+    }
+
+    panel.set_asset_metadata(metadata)
+
+    assert panel._lens_label.isVisible()
+    assert "iPhone 12 back camera 4.2mm f/1.6" in panel._lens_label.text()
+    panel.close()
+
+
 def test_info_panel_video_missing_details_shows_fallback(qapp: QApplication) -> None:
     """When metadata is sparse the video fallback string should be displayed."""
 
@@ -148,4 +174,95 @@ def test_info_panel_has_shadow_margin(qapp: QApplication) -> None:
     assert margins.top() == 0
     assert margins.right() == shadow
     assert margins.bottom() == shadow
+    panel.close()
+
+
+def test_info_panel_video_shows_lens_spec_string_when_no_model_name(qapp: QApplication) -> None:
+    """When only a lens spec string (e.g. Fujifilm LensInfo '23mm f/2') is available,
+    the lens label must be visible with the spec text."""
+
+    panel = InfoPanel()
+    meta = {
+        "rel": "clip.MOV",
+        "name": "clip.MOV",
+        "is_video": True,
+        "make": "FUJIFILM",
+        "model": "X-T4",
+        "lens": "23mm f/2",
+        "w": 1920,
+        "h": 1080,
+        "bytes": 12_000_000,
+        "codec": "h264",
+        "frame_rate": 25.0,
+        "dur": 10.0,
+    }
+
+    panel.set_asset_metadata(meta)
+
+    assert panel._lens_label.isVisible()
+    assert "23mm f/2" in panel._lens_label.text()
+    panel.close()
+
+
+def test_info_panel_lens_spec_string_not_duplicated_when_focal_and_fnumber_also_present(
+    qapp: QApplication,
+) -> None:
+    """When the lens string is a spec string (e.g. '23mm f/2') AND separate
+    focal_length / f_number fields are also present, the label must show
+    the lens string exactly once — not a garbled duplication like '2323 22'."""
+
+    panel = InfoPanel()
+    meta = {
+        "rel": "clip.MOV",
+        "name": "clip.MOV",
+        "is_video": True,
+        "make": "FUJIFILM",
+        "model": "X-T4",
+        "lens": "23mm f/2",
+        "focal_length": 23.0,
+        "f_number": 2.0,
+        "w": 1920,
+        "h": 1080,
+        "bytes": 12_000_000,
+        "codec": "h264",
+        "frame_rate": 25.0,
+        "dur": 10.0,
+    }
+
+    panel.set_asset_metadata(meta)
+
+    label_text = panel._lens_label.text()
+    assert panel._lens_label.isVisible()
+    assert label_text == "23mm f/2"
+    panel.close()
+
+
+def test_info_panel_named_lens_model_gets_focal_appended(
+    qapp: QApplication,
+) -> None:
+    """A named lens model string like 'XF23mmF2 R WR' should have the separate
+    focal_length / f_number fields appended because it is not a complete spec
+    string (no 'f/' prefix in the aperture token).  The old broad _FOCAL_LENGTH_RE
+    would have incorrectly suppressed the append."""
+
+    panel = InfoPanel()
+    meta = {
+        "rel": "img.jpg",
+        "name": "img.jpg",
+        "is_video": False,
+        "make": "FUJIFILM",
+        "model": "X-T4",
+        "lens": "XF23mmF2 R WR",
+        "focal_length": 23.0,
+        "f_number": 2.0,
+    }
+
+    panel.set_asset_metadata(meta)
+
+    label_text = panel._lens_label.text()
+    assert panel._lens_label.isVisible()
+    # The named model should be present and enriched with focal + aperture info.
+    assert "XF23mmF2 R WR" in label_text
+    assert "23" in label_text   # focal length must appear
+    assert "f/2" in label_text  # aperture must appear
     panel.close()

@@ -1063,6 +1063,16 @@ class EditCoordinator(QObject):
         else:
             self._ui.video_area.play()
 
+    def _handle_video_play_pause_shortcut(self) -> None:
+        """Toggle play/pause via keyboard shortcut while in edit mode."""
+        if not self._can_handle_video_edit_transport_shortcut(allow_conflicting_focus=True):
+            return
+        if self._ui.video_area.is_playing():
+            self._ui.video_area.pause()
+        else:
+            self._ui.video_area.play()
+        self._ui.video_area.note_activity()
+
     def _handle_video_frame_step_shortcut(self, direction: int) -> None:
         if direction == 0:
             return

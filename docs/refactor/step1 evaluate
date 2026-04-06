@@ -1,0 +1,122 @@
+评估结论
+
+先说做对的部分：
+
+appctx.py 已经被降级为兼容壳，容器装配挪到了 bootstrap/container.py，会话状态挪到了 presentation/qt/session/app_session.py。这部分基本符合第一阶段目标。
+参考：
+src/iPhoto/appctx.py
+https://github.com/OliverZhaohaibin/iPhotron-LocalPhotoAlbumManager/blob/copilot/refactor-iphotron-first-phase/src/iPhoto/appctx.py
+src/iPhoto/bootstrap/container.py
+https://github.com/OliverZhaohaibin/iPhotron-LocalPhotoAlbumManager/blob/copilot/refactor-iphotron-first-phase/src/iPhoto/bootstrap/container.py
+src/iPhoto/presentation/qt/session/app_session.py
+https://github.com/OliverZhaohaibin/iPhotron-LocalPhotoAlbumManager/blob/copilot/refactor-iphotron-first-phase/src/iPhoto/presentation/qt/session/app_session.py
+library/manager.py 增加了“不要继续加业务规则”的边界说明，这一步是对的。
+参考：
+src/iPhoto/library/manager.py
+https://github.com/OliverZhaohaibin/iPhotron-LocalPhotoAlbumManager/blob/copilot/refactor-iphotron-first-phase/src/iPhoto/library/manager.py
+library_update_service.py 已开始通过新的 use case 调 rescan 和 pair，说明扫描链路已经切出了一点边界。
+参考：
+src/iPhoto/gui/services/library_update_service.py
+https://github.com/OliverZhaohaibin/iPhotron-LocalPhotoAlbumManager/blob/copilot/refactor-iphotron-first-phase/src/iPhoto/gui/services/library_update_service.py
+当前不能签收的核心问题
+1. AppFacade 仍然是原来的重型实现
+
+这是最关键的问题。
+
+第一阶段目标里，src/iPhoto/gui/facade.py 应该变成组合器，把职责分发给：
+
+album_facade.py
+asset_facade.py
+library_facade.py
+
+但目前这个文件仍然直接持有并编排：
+
+current album
+background task manager
+metadata service
+library update service
+import/move/delete/restore service
+open/rescan/pair/toggle 等操作
+
+也就是说，第一阶段最重要的“主路径切换”并没有真正完成。
+参考：
+src/iPhoto/gui/facade.py
+https://github.com/OliverZhaohaibin/iPhotron-LocalPhotoAlbumManager/blob/copilot/refactor-iphotron-first-phase/src/iPhoto/gui/facade.py
+
+2. 新 façade 文件建了，但没有真正接入，而且还有命名/内容对调错误
+
+这不是小问题，是结构性问题。
+
+现在分支里：
+
+asset_facade.py 里面定义的是 LibraryFacade
+library_facade.py 里面定义的是 AssetFacade
+
+参考：
+
+src/iPhoto/presentation/qt/facade/asset_facade.py
+https://github.com/OliverZhaohaibin/iPhotron-LocalPhotoAlbumManager/blob/copilot/refactor-iphotron-first-phase/src/iPhoto/presentation/qt/facade/asset_facade.py
+src/iPhoto/presentation/qt/facade/library_facade.py
+https://github.com/OliverZhaohaibin/iPhotron-LocalPhotoAlbumManager/blob/copilot/refactor-iphotron-first-phase/src/iPhoto/presentation/qt/facade/library_facade.py
+
+这说明新 façade 文件目前更像“占位骨架”，不是可签收的接入结果。
+
+3. album_facade.open_album() 还是 NotImplementedError
+
+这意味着最核心的入口之一并没有迁移完。
+
+参考：
+src/iPhoto/presentation/qt/facade/album_facade.py
+https://github.com/OliverZhaohaibin/iPhotron-LocalPhotoAlbumManager/blob/copilot/refactor-iphotron-first-phase/src/iPhoto/presentation/qt/facade/album_facade.py
+
+只要 open_album 还是未实现，就不能说 façade 拆分已经完成。
+
+4. app.py 只是“加了免责声明”，并没有真正桥接出去
+
+src/iPhoto/app.py 顶部确实加了 compatibility 标记，这一步是对的。
+但实际函数 open_album / rescan / pair / scan_specific_files 仍然还在这个文件里承载真实业务实现，并没有真正转调到新的 use case。
+
+也就是说：
+
+冻结声明做了
+主实现迁移没有做完
+
+参考：
+src/iPhoto/app.py
+https://github.com/OliverZhaohaibin/iPhotron-LocalPhotoAlbumManager/blob/copilot/refactor-iphotron-first-phase/src/iPhoto/app.py
+
+这一步只能算“第一阶段开始了”，不能算“第一阶段完成了”。
+
+5. library_update_service.py 只是部分收口，复杂业务还留在 presentation 层
+
+虽然它已经调用了：
+
+RescanAlbumUseCase
+PairLivePhotosUseCaseV2
+
+但它仍然直接持有和执行这些业务规则：
+
+Recently Deleted 的 preserved metadata merge
+_update_index_snapshot
+_ensure_links
+rescan 完成后的持久化与 reload 编排
+
+这说明扫描子域的边界只是浅切，还没真的实现“presentation 只负责 Qt worker / signal”的目标。
+
+参考：
+src/iPhoto/gui/services/library_update_service.py
+https://github.com/OliverZhaohaibin/iPhotron-LocalPhotoAlbumManager/blob/copilot/refactor-iphotron-first-phase/src/iPhoto/gui/services/library_update_service.py
+
+6. 分支里混入了与第一阶段无关的改动
+
+从分支对比看，这个分支除了重构内容，还混入了：
+
+playback_coordinator.py
+info_panel.py
+metadata.py
+metadata_extractors.py
+多个测试
+scripts/build_nuitka_windows.ps1
+
+这会让第一阶段评审难度变高，也增加回归风险。
+第一阶段应该尽量是纯结构收口提交，不建议夹带 unrelated feature/fix。

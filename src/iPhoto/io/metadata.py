@@ -20,6 +20,7 @@ from .metadata_extractors import (
     _extract_gps_from_exiftool,
     _extract_group,
     _normalise_exif_datetime,
+    _normalise_lens_value,
     _parse_duration_value,
     _pick_string,
 )
@@ -157,7 +158,7 @@ def read_image_meta_with_exiftool(
             composite_group.get("LensInfo"),
         )
         if lens_value is not None:
-            info["lens"] = lens_value
+            info["lens"] = _normalise_lens_value(lens_value)
 
         iso_value = _coerce_decimal(exif_ifd_group.get("ISO"))
         if iso_value is None:
@@ -350,7 +351,7 @@ def read_video_meta(path: Path, metadata: Optional[Dict[str, Any]] = None) -> Di
             composite_group.get("LensInfo"),
         )
         if lens_value is not None:
-            info["lens"] = lens_value
+            info["lens"] = _normalise_lens_value(lens_value)
 
         # Extract focal length from video-native and EXIF groups.
         # Prefer the 35mm-equivalent value for consistent cross-brand display.

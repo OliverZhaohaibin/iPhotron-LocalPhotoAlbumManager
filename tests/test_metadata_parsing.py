@@ -84,3 +84,58 @@ def test_image_fujifilm_xt4_style(tmp_path: Path) -> None:
     assert info["f_number"] == pytest.approx(5.6)
     assert info["focal_length"] == pytest.approx(23.0)
 
+
+from iPhoto.io.metadata_extractors import _normalise_lens_value
+
+
+# ── _normalise_lens_value unit tests ─────────────────────────────────────────
+
+
+def test_normalise_lens_value_fixed_prime() -> None:
+    """'23 23 2 2' (fixed 23mm f/2) is converted to '23mm f/2'."""
+    assert _normalise_lens_value("23 23 2 2") == "23mm f/2"
+
+
+def test_normalise_lens_value_zoom_constant_aperture() -> None:
+    """'24 70 2.8 2.8' is converted to '24-70mm f/2.8'."""
+    assert _normalise_lens_value("24 70 2.8 2.8") == "24-70mm f/2.8"
+
+
+def test_normalise_lens_value_zoom_variable_aperture() -> None:
+    """'18 55 3.5 5.6' is converted to '18-55mm f/3.5-5.6'."""
+    assert _normalise_lens_value("18 55 3.5 5.6") == "18-55mm f/3.5-5.6"
+
+
+def test_normalise_lens_value_rational_fractions() -> None:
+    """Rational-fraction format '24/1 70/1 28/10 28/10' is handled."""
+    assert _normalise_lens_value("24/1 70/1 28/10 28/10") == "24-70mm f/2.8"
+
+
+def test_normalise_lens_value_named_lens_unchanged() -> None:
+    """Named lens strings are returned unchanged."""
+    assert _normalise_lens_value("XF23mmF2 R WR") == "XF23mmF2 R WR"
+    assert _normalise_lens_value("23mm f/2") == "23mm f/2"
+    assert _normalise_lens_value("iPhone 12 back camera 4.2mm f/1.6") == (
+        "iPhone 12 back camera 4.2mm f/1.6"
+    )
+
+
+# ── Raw LensInfo integration tests ───────────────────────────────────────────
+
+
+def test_image_raw_lens_info_integer_tuple_is_formatted(tmp_path: Path) -> None:
+    """ExifIFD:LensInfo = '23 23 2 2' (raw rational tuple) is formatted as '23mm f/2'."""
+    exif_payload = {
+        "ExifIFD": {"LensInfo": "23 23 2 2"},
+    }
+    info = read_image_meta_with_exiftool(tmp_path / "img.jpg", exif_payload)
+    assert info["lens"] == "23mm f/2"
+
+
+def test_image_raw_lens_info_zoom_variable_aperture_is_formatted(tmp_path: Path) -> None:
+    """ExifIFD:LensInfo = '18 55 3.5 5.6' is formatted as '18-55mm f/3.5-5.6'."""
+    exif_payload = {
+        "ExifIFD": {"LensInfo": "18 55 3.5 5.6"},
+    }
+    info = read_image_meta_with_exiftool(tmp_path / "img.jpg", exif_payload)
+    assert info["lens"] == "18-55mm f/3.5-5.6"

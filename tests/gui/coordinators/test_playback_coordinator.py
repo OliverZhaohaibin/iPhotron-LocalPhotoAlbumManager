@@ -43,6 +43,7 @@ def test_do_play_asset_keeps_rotate_enabled_for_video() -> None:
         set_live_replay_enabled=Mock(),
     )
     coordinator._player_bar = Mock()
+    coordinator._zoom_slider = Mock()
     coordinator._zoom_widget = Mock()
     coordinator._favorite_button = Mock()
     coordinator._info_button = Mock()
@@ -103,6 +104,7 @@ def test_do_play_asset_keeps_rotate_only_video_on_native_playback_surface() -> N
         set_live_replay_enabled=Mock(),
     )
     coordinator._player_bar = Mock()
+    coordinator._zoom_slider = Mock()
     coordinator._zoom_widget = Mock()
     coordinator._favorite_button = Mock()
     coordinator._info_button = Mock()

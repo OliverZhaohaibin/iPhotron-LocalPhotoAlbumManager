@@ -29,7 +29,7 @@ class MockUi:
 def test_adjust_mode_enter(qapp):
     ui = MockUi()
     session_provider = Mock(return_value=None)
-    state = AdjustModeState(ui, session_provider)
+    state = AdjustModeState(ui, session_provider, lambda: ui.edit_image_viewer)
 
     assert state.mode_name == "adjust"
 
@@ -56,7 +56,7 @@ def test_crop_mode_enter_with_session(qapp):
     }[k]
 
     session_provider = Mock(return_value=session)
-    state = CropModeState(ui, session_provider)
+    state = CropModeState(ui, session_provider, lambda: ui.edit_image_viewer)
 
     assert state.mode_name == "crop"
 
@@ -80,7 +80,7 @@ def test_crop_mode_enter_with_session(qapp):
 def test_crop_mode_enter_no_session(qapp):
     ui = MockUi()
     session_provider = Mock(return_value=None)
-    state = CropModeState(ui, session_provider)
+    state = CropModeState(ui, session_provider, lambda: ui.edit_image_viewer)
 
     state.enter()
 

@@ -59,7 +59,33 @@ def test_info_panel_formats_video_metadata(qapp: QApplication) -> None:
     panel.close()
 
 
-def test_info_panel_video_missing_details_shows_fallback(qapp: QApplication) -> None:
+def test_info_panel_video_shows_lens_when_available(qapp: QApplication) -> None:
+    """When a video asset has lens metadata the lens label must be visible."""
+
+    panel = InfoPanel()
+    metadata = {
+        "rel": "clip.MOV",
+        "name": "clip.MOV",
+        "is_video": True,
+        "make": "Apple",
+        "model": "Apple iPhone 12",
+        "lens": "iPhone 12 back camera 4.2mm f/1.6",
+        "w": 1920,
+        "h": 1080,
+        "bytes": 8_000_000,
+        "codec": "hevc",
+        "frame_rate": 30.0,
+        "dur": 5.0,
+    }
+
+    panel.set_asset_metadata(metadata)
+
+    assert panel._lens_label.isVisible()
+    assert "iPhone 12 back camera 4.2mm f/1.6" in panel._lens_label.text()
+    panel.close()
+
+
+
     """When metadata is sparse the video fallback string should be displayed."""
 
     panel = InfoPanel()

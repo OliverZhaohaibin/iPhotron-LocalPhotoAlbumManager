@@ -366,7 +366,7 @@ class InfoPanel(QWidget):
             name=name,
             timestamp=timestamp,
             camera=camera,
-            lens=lens if not is_video else "",
+            lens=lens,
             summary=summary,
             exposure_line=exposure_line,
             is_video=is_video,

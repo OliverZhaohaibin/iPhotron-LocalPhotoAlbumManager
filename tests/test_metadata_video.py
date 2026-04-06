@@ -437,3 +437,105 @@ def test_stream_tags_duration_overrides_exiftool_when_no_other_ffprobe_duration(
 
     # ffprobe stream.tags.DURATION (120.0) should override ExifTool (118.0)
     assert info["dur"] == pytest.approx(120.0, rel=1e-3)
+
+
+# ── Video lens extraction priority tests ──────────────────────────────────────
+
+
+def _make_no_ffprobe(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Disable ffprobe so tests focus on ExifTool metadata only."""
+    monkeypatch.setattr(
+        metadata, "probe_media", lambda _p: (_ for _ in ()).throw(metadata.ExternalToolError("no ffprobe"))
+    )
+
+
+def test_read_video_meta_lens_from_keys_group(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Primary: Keys:LensModel should be extracted as the video lens."""
+    _make_no_ffprobe(monkeypatch)
+    exif_payload = {
+        "Keys": {"LensModel": "iPhone 12 back camera 4.2mm f/1.6"},
+    }
+    info = metadata.read_video_meta(tmp_path / "clip.mov", exif_payload)
+    assert info["lens"] == "iPhone 12 back camera 4.2mm f/1.6"
+
+
+def test_read_video_meta_lens_from_video_keys_group(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Primary: VideoKeys:LensModel (flat key) should be extracted as the video lens."""
+    _make_no_ffprobe(monkeypatch)
+    exif_payload = {
+        "VideoKeys:LensModel": "iPhone 12 back camera 4.2mm f/1.6",
+    }
+    info = metadata.read_video_meta(tmp_path / "clip.mov", exif_payload)
+    assert info["lens"] == "iPhone 12 back camera 4.2mm f/1.6"
+
+
+def test_read_video_meta_lens_language_variant_fallback(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Fallback 1: language-tagged variant (e.g. VideoKeys:LensModel-eng-DE) is used
+    when the bare LensModel key is absent."""
+    _make_no_ffprobe(monkeypatch)
+    exif_payload = {
+        "VideoKeys:LensModel-eng-DE": "iPhone 12 back camera 4.2mm f/1.6",
+    }
+    info = metadata.read_video_meta(tmp_path / "clip.mov", exif_payload)
+    assert info["lens"] == "iPhone 12 back camera 4.2mm f/1.6"
+
+
+def test_read_video_meta_lens_composite_lens_id_fallback(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Fallback 2: Composite:LensID is used when VideoKeys sources are absent."""
+    _make_no_ffprobe(monkeypatch)
+    exif_payload = {
+        "Composite": {"LensID": "iPhone 12 back camera 4.2mm f/1.6"},
+    }
+    info = metadata.read_video_meta(tmp_path / "clip.mov", exif_payload)
+    assert info["lens"] == "iPhone 12 back camera 4.2mm f/1.6"
+
+
+def test_read_video_meta_lens_priority_keys_beats_language_variant(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """When both VideoKeys:LensModel and a language variant are present, the
+    bare LensModel (primary) wins."""
+    _make_no_ffprobe(monkeypatch)
+    exif_payload = {
+        "VideoKeys:LensModel": "primary lens",
+        "VideoKeys:LensModel-eng-DE": "lang variant lens",
+    }
+    info = metadata.read_video_meta(tmp_path / "clip.mov", exif_payload)
+    assert info["lens"] == "primary lens"
+
+
+def test_read_video_meta_lens_priority_lang_variant_beats_composite_lens_id(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Language variant (fallback 1) wins over Composite:LensID (fallback 2)."""
+    _make_no_ffprobe(monkeypatch)
+    exif_payload = {
+        "VideoKeys:LensModel-eng-DE": "lang variant lens",
+        "Composite": {"LensID": "composite lens id"},
+    }
+    info = metadata.read_video_meta(tmp_path / "clip.mov", exif_payload)
+    assert info["lens"] == "lang variant lens"
+
+
+def test_read_video_meta_full_priority_chain(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Full chain from the spec: VideoKeys:LensModel, language variant, Composite:LensID."""
+    _make_no_ffprobe(monkeypatch)
+
+    # All three sources present — only the primary should be returned.
+    exif_payload = {
+        "VideoKeys:LensModel": "iPhone 12 back camera 4.2mm f/1.6",
+        "VideoKeys:LensModel-eng-DE": "iPhone 12 back camera 4.2mm f/1.6",
+        "Composite": {"LensID": "iPhone 12 back camera 4.2mm f/1.6"},
+    }
+    info = metadata.read_video_meta(tmp_path / "clip.mov", exif_payload)
+    assert info["lens"] == "iPhone 12 back camera 4.2mm f/1.6"

@@ -301,7 +301,27 @@ def read_video_meta(path: Path, metadata: Optional[Dict[str, Any]] = None) -> Di
         if model_value is not None:
             info["model"] = model_value
 
+        # Extract lens from QuickTime Keys/VideoKeys groups (iOS/macOS video).
+        # Priority order requested:
+        #   1. Keys:LensModel or VideoKeys:LensModel (primary)
+        #   2. Language-tagged variant, e.g. VideoKeys:LensModel-eng-DE (fallback 1)
+        #   3. Composite:LensID (fallback 2)
+        #   4. Existing EXIF / MakerNotes / QuickTime sources
+        keys_group = _extract_group(metadata, "Keys") or {}
+        video_keys_group = _extract_group(metadata, "VideoKeys") or {}
+        video_lens_lang: Optional[str] = None
+        for _grp in (keys_group, video_keys_group):
+            for _k, _v in _grp.items():
+                if _k.startswith("LensModel-") and isinstance(_v, str) and _v.strip():
+                    video_lens_lang = _v.strip()
+                    break
+            if video_lens_lang:
+                break
         lens_value = _pick_string(
+            keys_group.get("LensModel"),
+            video_keys_group.get("LensModel"),
+            video_lens_lang,
+            composite_group.get("LensID"),
             exif_ifd_group.get("LensModel"),
             maker_notes_group.get("LensModel"),
             composite_group.get("Lens"),

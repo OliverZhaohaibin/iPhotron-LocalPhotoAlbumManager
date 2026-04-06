@@ -1,10 +1,10 @@
-"""Asset-oriented operations extracted from the monolithic AppFacade.
+"""Library-oriented operations extracted from the monolithic AppFacade.
 
 Responsibilities:
-- import_files
-- move_assets
-- delete_assets
-- restore_assets
+- rescan_current (sync)
+- rescan_current_async
+- cancel_active_scans
+- announce_album_refresh
 """
 
 from __future__ import annotations

@@ -1,7 +1,11 @@
-from iPhoto.io.metadata import _coerce_fractional
+from __future__ import annotations
+
 from pathlib import Path
-from iPhoto.io.metadata import read_image_meta_with_exiftool
+
 import pytest
+
+from iPhoto.io.metadata import _coerce_fractional, read_image_meta_with_exiftool
+from iPhoto.io.metadata_extractors import _normalise_lens_value
 
 def test_coerce_fractional_duplicate_sum():
     """Test that _coerce_fractional does not sum duplicate values in the string."""
@@ -83,9 +87,6 @@ def test_image_fujifilm_xt4_style(tmp_path: Path) -> None:
     assert info["iso"] == 640
     assert info["f_number"] == pytest.approx(5.6)
     assert info["focal_length"] == pytest.approx(23.0)
-
-
-from iPhoto.io.metadata_extractors import _normalise_lens_value
 
 
 # ── _normalise_lens_value unit tests ─────────────────────────────────────────

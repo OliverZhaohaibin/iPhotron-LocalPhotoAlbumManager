@@ -139,6 +139,16 @@ _RAW_LENS_INFO_RE = re.compile(
     r"\s+(?P<fn_min>\d+(?:/\d+|\.\d+)?)"
     r"\s+(?P<fn_max>\d+(?:/\d+|\.\d+)?)$"
 )
+# A focal-length value is displayed as an integer when it rounds to within this
+# fractional distance of the nearest whole number (e.g. 23.04 → "23", not "23.0").
+_LENS_INT_DISPLAY_THRESHOLD = 0.05
+# Minimum difference in mm between min and max focal length that classifies a
+# lens as a zoom rather than a prime (handles floating-point rounding for primes
+# whose min == max, e.g. "23 23").
+_ZOOM_FOCAL_THRESHOLD = 0.5
+# Minimum difference in f-number between wide-open at the short and long ends
+# that classifies a zoom as variable-aperture (e.g. f/3.5–5.6 vs f/2.8–2.8).
+_VARIABLE_APERTURE_THRESHOLD = 0.1
 
 
 def _normalise_lens_value(value: str) -> str:
@@ -168,9 +178,9 @@ def _normalise_lens_value(value: str) -> str:
         return value
 
     def _fmt(v: float) -> str:
-        return str(int(round(v))) if abs(v - round(v)) < 0.05 else f"{v:.1f}"
+        return str(int(round(v))) if abs(v - round(v)) < _LENS_INT_DISPLAY_THRESHOLD else f"{v:.1f}"
 
-    if fl_max is not None and abs(fl_min - fl_max) > 0.5:
+    if fl_max is not None and abs(fl_min - fl_max) > _ZOOM_FOCAL_THRESHOLD:
         focal_str = f"{_fmt(fl_min)}-{_fmt(fl_max)}mm"
     else:
         focal_str = f"{_fmt(fl_min)}mm"
@@ -178,7 +188,7 @@ def _normalise_lens_value(value: str) -> str:
     if fn_min is None or fn_min <= 0:
         return focal_str
 
-    if fn_max is not None and fn_max > 0 and abs(fn_min - fn_max) > 0.1:
+    if fn_max is not None and fn_max > 0 and abs(fn_min - fn_max) > _VARIABLE_APERTURE_THRESHOLD:
         aperture_str = f"f/{_fmt(fn_min)}-{_fmt(fn_max)}"
     else:
         aperture_str = f"f/{_fmt(fn_min)}"

@@ -623,6 +623,7 @@ class VideoArea(QWidget):
                 "stack_size": (self._surface_stack.width(), self._surface_stack.height()),
             },
         )
+        prev_source = self._current_source
         self._current_source = path
         self._current_adjustments = dict(adjustments or {})
         self._last_presented_video_frame = None
@@ -680,18 +681,18 @@ class VideoArea(QWidget):
             self.set_trim_range_ms(*trim_range_ms)
         # Force-propagate the current duration so all observers (e.g.
         # PlaybackCoordinator) receive a durationChanged event with the new
-        # trim range already applied.  This covers three failure modes:
+        # trim range already applied.  This covers two failure modes:
         #   (a) Qt does not re-emit durationChanged for same-source reloads
         #       (common on macOS/AVFoundation when the file is cached).
         #   (b) durationChanged fired synchronously inside setSource() above,
         #       before set_trim_range_ms() had a chance to update _trim_in/out.
-        #   (c) Some backends reset duration() to 0 on same-source reload and
-        #       also suppress the durationChanged signal, so player.duration()
-        #       returns 0 even though the duration was already known.  In this
-        #       case we fall back to the previous duration captured above.
+        # When the backend reports 0, only fall back to the previously known
+        # duration if we are reloading the *same* source — for a different
+        # source the previous duration is unrelated and must not be used to
+        # clamp/reset the new clip's trim range before the real duration arrives.
         # In all cases calling _on_duration_changed is safe and idempotent.
         cached_duration = self._player.duration()
-        if cached_duration <= 0:
+        if cached_duration <= 0 and path == prev_source:
             cached_duration = prev_duration_ms
         if cached_duration > 0:
             self._on_duration_changed(cached_duration)

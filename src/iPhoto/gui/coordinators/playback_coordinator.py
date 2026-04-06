@@ -249,9 +249,11 @@ class PlaybackCoordinator(QObject):
     @Slot(int)
     def _on_video_duration_changed(self, duration_ms: int) -> None:
         """Re-map the player bar to show the trimmed playable duration."""
-        # Skip remapping while the video area is owned by EditCoordinator, so
-        # that _video_duration_ms() in that coordinator always sees the full
-        # video duration rather than the trim-relative value.
+        # Skip remapping while the video area is in edit mode: EditCoordinator
+        # owns the video area at that point and manages its own trim bar.
+        # We avoid touching the detail-view player bar (PlaybackCoordinator's
+        # _player_bar) until edit mode exits so it stays at the last known
+        # valid state and doesn't flicker with intermediate edit-mode durations.
         if self._player_view.video_area.is_edit_mode_active():
             return
         # Sync trim state from VideoArea so that trim changes applied by

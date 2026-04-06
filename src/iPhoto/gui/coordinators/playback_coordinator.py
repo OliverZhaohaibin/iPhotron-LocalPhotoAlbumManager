@@ -17,7 +17,7 @@ from iPhoto.gui.ui.icons import load_icon
 from iPhoto.gui.ui.models.roles import Roles
 from iPhoto.gui.ui.widgets.info_panel import InfoPanel
 from iPhoto.io import sidecar
-from iPhoto.io.metadata import read_image_meta
+from iPhoto.io.metadata import read_image_meta, read_video_meta
 
 if TYPE_CHECKING:
     from iPhoto.utils.settings import Settings
@@ -598,11 +598,18 @@ class PlaybackCoordinator(QObject):
         idx = self._asset_vm.index(row, 0)
         info = self._asset_vm.data(idx, Roles.INFO)
 
-        if info and not info.get("iso"):
+        is_video = bool(info.get("is_video")) if info else False
+        needs_enrichment = info and (
+            not info.get("frame_rate") if is_video else not info.get("iso")
+        )
+        if needs_enrichment:
              abs_path = info.get("abs")
              if abs_path:
                  try:
-                     fresh = read_image_meta(Path(abs_path))
+                     if is_video:
+                         fresh = read_video_meta(Path(abs_path))
+                     else:
+                         fresh = read_image_meta(Path(abs_path))
                      info.update(fresh)
                  except Exception as e:
                      LOGGER.debug(f"Failed enrichment: {e}")

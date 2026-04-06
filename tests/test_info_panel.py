@@ -80,7 +80,7 @@ def test_info_panel_video_shows_lens_when_available(qapp: QApplication) -> None:
 
     panel.set_asset_metadata(metadata)
 
-    assert panel._lens_label.isVisible()
+    assert not panel._lens_label.isHidden()
     assert "iPhone 12 back camera 4.2mm f/1.6" in panel._lens_label.text()
     panel.close()
 

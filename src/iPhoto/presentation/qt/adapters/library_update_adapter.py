@@ -65,8 +65,9 @@ class LibraryUpdateAdapter(QObject):
     def wire_service(self, service: LibraryUpdateService) -> None:
         """Connect *service* signals to this adapter's relay slots.
 
-        Call once after the service is created.  Subsequent calls replace the
-        previously wired service.
+        This method is intended to be called once, directly after the service
+        is created.  Call it again only if you intend to add another set of
+        signal connections (duplicate emissions will result).
         """
 
         service.indexUpdated.connect(self._on_index_updated)

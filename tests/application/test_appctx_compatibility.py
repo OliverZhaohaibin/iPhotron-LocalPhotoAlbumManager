@@ -7,7 +7,7 @@ instead delegates entirely to :class:`~iPhoto.bootstrap.runtime_context.RuntimeC
 from __future__ import annotations
 
 from pathlib import Path
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 
 import pytest
 
@@ -78,17 +78,11 @@ class TestAppContextDelegation:
         assert ctx2.defer_startup_tasks is False
 
     def test_appctx_does_not_build_own_library(self):
-        """AppContext must not call LibraryManager() directly."""
+        """AppContext must delegate library access to RuntimeContext."""
         from iPhoto.appctx import AppContext
 
-        with patch("iPhoto.library.manager.LibraryManager.__init__") as mock_init:
-            mock_init.return_value = None
-            # AppContext should NOT call LibraryManager() on its own;
-            # RuntimeContext does it. We just verify it doesn't raise
-            # without making the mock too intrusive.
-            # The key assertion is that _runtime is populated.
-            ctx = AppContext(defer_startup_tasks=True)
-            assert ctx._runtime is not None
+        ctx = AppContext(defer_startup_tasks=True)
+        assert ctx.library is ctx._runtime.library
 
     def test_remember_album_updates_recent_albums(self, tmp_path):
         """remember_album must propagate into recent_albums."""

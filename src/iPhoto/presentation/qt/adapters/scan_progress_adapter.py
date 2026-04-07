@@ -15,10 +15,6 @@ from pathlib import Path
 
 from PySide6.QtCore import QObject, Signal, Slot
 
-from ....utils.logging import get_logger
-
-LOGGER = get_logger()
-
 
 class ScanProgressAdapter(QObject):
     """Qt adapter that relays scan progress events to UI subscribers.

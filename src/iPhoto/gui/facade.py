@@ -134,6 +134,7 @@ class AppFacade(QObject):
         self._scan_progress_adapter.scanProgress.connect(self._relay_scan_progress)
         self._scan_progress_adapter.scanChunkReady.connect(self._relay_scan_chunk_ready)
         self._scan_progress_adapter.scanFinished.connect(self._relay_scan_finished)
+        self._scan_progress_adapter.scanBatchFailed.connect(self._relay_scan_batch_failed)
 
         self._import_service = AssetImportService(
             task_manager=self._task_manager,
@@ -337,6 +338,9 @@ class AppFacade(QObject):
                 self._library_manager.scanFinished.disconnect(
                     self._scan_progress_adapter.relay_finished
                 )
+                self._library_manager.scanBatchFailed.disconnect(
+                    self._scan_progress_adapter.relay_batch_failed
+                )
             except (RuntimeError, TypeError):
                 pass
 
@@ -351,7 +355,9 @@ class AppFacade(QObject):
             self._scan_progress_adapter.relay_chunk_ready
         )
         self._library_manager.scanFinished.connect(self._scan_progress_adapter.relay_finished)
-        self._library_manager.scanBatchFailed.connect(self._relay_scan_batch_failed)
+        self._library_manager.scanBatchFailed.connect(
+            self._scan_progress_adapter.relay_batch_failed
+        )
 
         if self._library_manager.root():
             self._on_library_tree_updated()

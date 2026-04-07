@@ -52,10 +52,10 @@ class ScanSpecificFilesUseCase:
         (or *root* when no library root is provided).
         """
 
-        from ...application.policies.album_path_policy import AlbumPathPolicy
-        from ...cache.index_store import get_global_repository
-        from ...io.scanner_adapter import process_media_paths
-        from ...path_normalizer import compute_album_path as _compute_album_path
+        from ...policies.album_path_policy import AlbumPathPolicy
+        from ....cache.index_store import get_global_repository
+        from ....io.scanner_adapter import process_media_paths
+        from ....path_normalizer import compute_album_path as _compute_album_path
 
         image_paths: list[Path] = []
         video_paths: list[Path] = []
@@ -66,6 +66,9 @@ class ScanSpecificFilesUseCase:
                 image_paths.append(f)
             elif suffix in _VIDEO_EXTENSIONS:
                 video_paths.append(f)
+
+        if not image_paths and not video_paths:
+            return
 
         rows = list(process_media_paths(root, image_paths, video_paths))
 

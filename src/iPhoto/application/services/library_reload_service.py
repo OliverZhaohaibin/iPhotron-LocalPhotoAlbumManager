@@ -29,18 +29,12 @@ class ReloadAction:
         The view that is currently showing *root* should reload.
     should_reload_as_library:
         The library-level view (showing *root* as a parent) should reload.
-    force_reload:
-        The reload must bypass any incremental-update optimisation and fetch
-        fresh data from the index.  Populated by consuming a forced-reload
-        marker from :class:`~iPhoto.application.services.move_bookkeeping_service\
-.MoveBookkeepingService`.
     target_root:
         The root path that the UI should reload.  ``None`` means no action.
     """
 
     should_reload_current: bool = False
     should_reload_as_library: bool = False
-    force_reload: bool = False
     target_root: Path | None = None
 
     @property
@@ -57,17 +51,14 @@ class LibraryReloadService:
     a running Qt application.
 
     The service delegates actual reload-decision rules to
-    :class:`~iPhoto.application.services.trash_service.TrashService` and
-    :class:`~iPhoto.application.services.move_bookkeeping_service.MoveBookkeepingService`,
+    :class:`~iPhoto.application.services.trash_service.TrashService`,
     providing a single high-level entry point for presentation code.
     """
 
     def __init__(self) -> None:
-        from .move_bookkeeping_service import MoveBookkeepingService
         from .trash_service import TrashService
 
         self._trash_service = TrashService()
-        self._bookkeeping = MoveBookkeepingService()
 
     # ------------------------------------------------------------------
     # Public API
@@ -98,12 +89,9 @@ class LibraryReloadService:
         if not should_reload and not should_reload_as_lib:
             return ReloadAction()
 
-        force_reload = self._bookkeeping.consume_forced_reload(restored_path)
-
         return ReloadAction(
             should_reload_current=should_reload,
             should_reload_as_library=should_reload_as_lib,
-            force_reload=force_reload,
             target_root=current_root,
         )
 
@@ -133,7 +121,6 @@ class LibraryReloadService:
 
         return ReloadAction(
             should_reload_current=True,
-            force_reload=False,
             target_root=scanned_root,
         )
 

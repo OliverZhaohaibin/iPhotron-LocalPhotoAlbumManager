@@ -49,8 +49,8 @@ class OpenAlbumWorkflowUseCase:
     def __init__(
         self,
         library_root_getter: Callable[[], Path | None] = lambda: None,
-        repository_factory: Callable | None = None,
-        ensure_links_fn: Callable | None = None,
+        repository_factory: Callable[[Path], object] | None = None,
+        ensure_links_fn: Callable[..., None] | None = None,
     ) -> None:
         self._library_root_getter = library_root_getter
         self._repository_factory = repository_factory

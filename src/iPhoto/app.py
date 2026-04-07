@@ -38,7 +38,7 @@ def open_album(
     are forwarded so that tests can inject doubles via ``monkeypatch.setattr``.
     """
 
-    from .application.policies.album_path_policy import AlbumPathPolicy  # noqa: F401 - referenced by use case
+    from .application.policies.album_path_policy import AlbumPathPolicy  # noqa: F401 - satisfies architectural test requiring AlbumPathPolicy in app.py
     from .application.use_cases.scan.open_album_workflow_use_case import OpenAlbumWorkflowUseCase
 
     return OpenAlbumWorkflowUseCase(

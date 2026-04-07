@@ -1,562 +1,278 @@
-# 1. 完成路径策略收口
+结论：**这个分支第二阶段有明显进展，但还不能算完全达标**。
 
-这是第二步里最先要收尾的动作，因为后面 scan 和 restore 都依赖它。
+好的部分：
 
-## 1.1 统一 `album/library/rel` 转换逻辑
+* 分支已经基于 `main` 前进，没有再落后主线，这一点比上一个分支稳。
+* 第二阶段要求的核心目录基本都建了：`application/policies/*`、`application/services/*`、`infrastructure/scan/*`、`infrastructure/watcher/*` 都已落地。
+* 路径策略确实开始集中到 policy 层，`AlbumPathPolicy` 已经承接了 album path 计算、prefix/strip 和 scope 判断这类规则。
+* `RescanAlbumUseCase` 已经从“大而全实现”转成“编排型用例”，把 incremental index、trash merge、scanner、persist 分给了专门组件。
+* `library_update_service.py` 比第二阶段前明显减重：trash metadata merge 已下沉到 `MergeTrashRestoreMetadataUseCase`，move aftermath 也下沉到了 `MoveBookkeepingService`。
+* watcher 方向是实质性下沉，`FileSystemWatcherMixin` 已经主要只剩 Qt 接线，暂停深度和 watch path 计算交给了 `LibraryWatchService`。
 
-### 目标
+但它**还不满足“第二阶段完成”**，关键原因有三个：
 
-把所有以下逻辑都收口到 `AlbumPathPolicy`：
+### 1. `LibraryManager` 只完成了“部分瘦身”，还没有完成“服务化 delegation”
 
-* `compute_album_path`
-* library-relative rel
-* album-relative rel
-* strip/prefix 规则
-* subalbum 范围判断
+虽然 `LibraryManager` 已经实例化了 `LibraryTreeService`、`LibraryScanService`、`LibraryWatchService`、`TrashService` 和 `QtLibraryWatcher`，而且 `_refresh_tree()` 已经委托给 `LibraryTreeService`。
 
-### 具体动作
+但 scan 协调主逻辑仍大量留在 `ScanCoordinatorMixin` 里，包括：
 
-检查并替换这些文件中零散路径转换逻辑：
+* `start_scanning`
+* `stop_scanning`
+* `is_scanning_path`
+* `get_live_scan_results`
+* `_on_scan_finished`
+* `_on_scan_error`
 
-#### 要改的文件
+这些方法仍然直接操作 worker、mutex、buffer、live rows、以及扫描完成后的 `backend.pair(...)`。
 
-* `src/iPhoto/application/use_cases/scan/rescan_album_use_case.py`
-* `src/iPhoto/application/use_cases/scan/pair_live_photos_use_case_v2.py`
-* `src/iPhoto/gui/services/library_update_service.py`
-* `src/iPhoto/app.py`
-* `src/iPhoto/path_normalizer.py`
+这说明：
 
-#### 要做的事
+* `LibraryScanService` 已经建了，但**还没有成为 scan 的真正 owner**
+* `LibraryManager` 目前更像是“挂了几个 service 字段”，不是“主要通过 service delegation 工作”
 
-* 把直接字符串拼接 `f"{album_path}/{rel}"` 的地方改成 policy 调用
-* 把 prefix strip 的地方统一改成 `AlbumPathPolicy.strip_album_prefix(...)`
-* 把 scope 判断改成 `AlbumPathPolicy.is_within_scope(...)`
-* `path_normalizer.py` 只保留底层 path helper，不再保留业务语义函数
-
-### 完成标志
-
-全仓库不再出现散落的 album/library rel 转换逻辑，路径语义都从 policy 走。
+这和第二阶段目标还有差距。
 
 ---
 
-## 1.2 统一 trash restore 路径/元数据规则
+### 2. `library_update_service.py` 仍然偏重，还是没有完全退化成 UI 协调器
 
-### 目标
+它确实比之前轻了，但还保留了不少非 UI 级决策，例如：
 
-把 “Recently Deleted” 的 restore 元数据保留逻辑彻底统一到 `TrashRestorePolicy` + `MergeTrashRestoreMetadataUseCase`
+* restore 后哪些 album 需要 rescan
+* restore 完成后当前 view 如何 reload
+* restore rescan task 的创建与结果分支处理
+* 部分 library scope 判断仍在这里发生
 
-### 具体动作
+虽然 move bookkeeping 已提取，但 `_refresh_restored_album()` 及相关 reload 决策还在这个 Qt service 中。
 
-#### 要改的文件
+所以它现在是：
 
-* `src/iPhoto/application/use_cases/scan/rescan_album_use_case.py`
-* `src/iPhoto/gui/services/library_update_service.py`
-* `src/iPhoto/library/trash_manager.py`
-
-#### 要做的事
-
-* 删除 `library_update_service.py` 中任何残余的 trash metadata merge 细节
-* 让同步 rescan 和异步 scan finished 都只调用：
-
-  * `MergeTrashRestoreMetadataUseCase`
-* `trash_manager.py` 中如果有 restore 元数据规则判断，也下沉到 `TrashRestorePolicy`
-
-### 完成标志
-
-恢复元数据规则只有一套来源，不再出现“同步一套、异步一套”。
+* **比以前好很多**
+* 但还**没有完全达到“只负责 worker / task_manager / signal relay / UI reload 接口”的目标**
 
 ---
 
-## 1.3 完成 library scope 规则集中
+### 3. 第二阶段新增 service 中，有些还是“能力声明”，不是“主路径接管”
 
-### 目标
+`LibraryScanService` 目前只负责 scan state、current root、geo cache invalidation 这类轻状态能力。
 
-将“某个 path 是否属于当前 library”统一走 `LibraryScopePolicy`
+但真正复杂的扫描协调没有迁过去。
+换句话说，当前状态更像：
 
-### 具体动作
-
-#### 要改的文件
-
-* `src/iPhoto/gui/services/library_update_service.py`
-* `src/iPhoto/application/services/move_bookkeeping_service.py`
-* `src/iPhoto/library/manager.py`
-
-#### 要做的事
-
-* 所有 `relative_to(library_root)` / descendant 判断收口到 `LibraryScopePolicy`
-* restore target 是否落在 library 内，不再在多个服务里重复判断
-
-### 完成标志
-
-关于 library 归属的判断不再手写 scattered `relative_to` / `startswith` 风格代码。
+* Tree：基本接管了一部分
+* Watch：基本接管得比较像样
+* Scan：**只接了一小块状态，不是完整接管**
+* Trash：还没有成为 restore/rescan 规则的唯一 owner
 
 ---
 
-# 2. 完成 scan 子域收口
+## 评价
 
-这是第二步最核心的部分。
+我给这个分支的第二阶段结果评价是：
 
-## 2.1 把 `RescanAlbumUseCase` 收尾成“纯编排用例”
+**7/10，方向正确，主要结构已搭起来，但 scan / restore 两条最复杂的主链路还没有完全从 legacy manager 与 Qt service 中剥离，所以不建议直接宣布第二阶段完成。**
 
-### 当前状态
+更准确地说：
 
-已经部分拆分，但还保留：
-
-* scanner 调用
-* index persist
-* links 更新
-* favorites sync
-
-### 具体动作
-
-#### 要改的文件
-
-* `src/iPhoto/application/use_cases/scan/rescan_album_use_case.py`
-
-#### 要做的事
-
-把它改成只做 5 件事：
-
-1. 读取 album manifest filters
-2. 调 incremental index loader
-3. 调 scanner
-4. 调 trash merge use case
-5. 调 persist use case
-
-### 需要补的协作者
-
-* `LoadIncrementalIndexUseCase`
-* `MergeTrashRestoreMetadataUseCase`
-* `PersistScanResultUseCase`
-* `AlbumPathPolicy`
-
-### 完成标志
-
-`rescan_album_use_case.py` 中不再直接出现：
-
-* prefix/strip path 逻辑
-* restore metadata 逻辑
-* links 细节逻辑
-* 复杂 DB 读写细节
+* **第二阶段 70%~80% 已完成**
+* **最难的 20% 还没收尾**
+* 当前状态适合继续做“补完第二阶段”，不适合马上进入第三阶段
 
 ---
 
-## 2.2 把 `PersistScanResultUseCase` 用满
+# 完成第二阶段的具体动作
 
-### 目标
+你要求的是：如果不满足要求，就给出完成第二阶段的具体动作，不给第三步方案。下面就是可直接执行的补完清单。
 
-让 scan 结果落库和 links 更新全部从这个入口走。
+## A. 让 `LibraryScanService` 真正接管 scan 协调
 
-### 具体动作
+### 必做动作 A1
 
-#### 要改的文件
+把 `src/iPhoto/library/scan_coordinator.py` 中以下方法的核心逻辑迁入 `src/iPhoto/application/services/library_scan_service.py`：
 
-* `src/iPhoto/gui/services/library_update_service.py`
-* `src/iPhoto/application/use_cases/scan/rescan_album_use_case.py`
-* `src/iPhoto/app.py`
+* `start_scanning`
+* `stop_scanning`
+* `is_scanning_path`
+* `_on_scan_finished`
+* `_on_scan_error`
 
-#### 要做的事
+当前这些逻辑仍在 mixin 中。
 
-确保以下两种路径都统一使用：
+### 必做动作 A2
 
-* 同步 rescan
-* 异步 scan finished
+`LibraryScanService` 不仅保存 state，还要成为以下职责的 owner：
 
-都走：
+* active scan root
+* scan in progress
+* live scan buffer lifecycle
+* scan worker start/stop decision
+* scan finished bookkeeping
+* geo cache invalidation decision
 
-* `PersistScanResultUseCase.execute(...)`
+### 必做动作 A3
 
-### 完成标志
+`ScanCoordinatorMixin` 最终只保留：
 
-全仓库不存在第二种 scan persist 路径。
+* Qt signal 接线
+* 对 `LibraryScanService` 的委托
+* 与 `QThreadPool` / `ScannerSignals` 的必要适配
 
----
-
-## 2.3 把 live pair 读取逻辑从 use case 中剥出来
-
-### 目标
-
-让 `PairLivePhotosUseCaseV2` 不再直接关心 DB rows 读取与 rel 转换。
-
-### 具体动作
-
-#### 要改的文件
-
-* `src/iPhoto/application/use_cases/scan/pair_live_photos_use_case_v2.py`
-* `src/iPhoto/infrastructure/scan/live_pairing_reader.py`
-
-#### 要做的事
-
-* `live_pairing_reader.py` 负责按 album/library scope 读取 rows
-* `PairLivePhotosUseCaseV2` 只做：
-
-  1. 取 rows
-  2. 计算 groups/payload
-  3. 写 links
-  4. sync live roles
-
-### 完成标志
-
-`pair_live_photos_use_case_v2.py` 中不再有 rel prefix/strip 的细节代码。
+也就是把它降成跟 `FileSystemWatcherMixin` 类似的“薄 Qt mixin”。
 
 ---
 
-## 2.4 把 scanner 调用收口到 infrastructure
+## B. 从 `library_update_service.py` 中继续移出 restore 规则
 
-### 目标
+### 必做动作 B1
 
-应用层不再直接依赖 scanner_adapter 的细碎实现。
+把 `_refresh_restored_album()` 的业务判断拆出去。当前它仍负责：
 
-### 具体动作
+* restore 后是否需要 rescan
+* 当前 view 是否需要 force reload
+* 当前 library root 下是否触发 assetReloadRequested
 
-#### 要改的文件
+这些应迁到：
 
-* `src/iPhoto/application/use_cases/scan/rescan_album_use_case.py`
-* `src/iPhoto/infrastructure/scan/fs_scanner.py`
+* `TrashService`
+* 或新建 `RestoreRefreshService`
 
-#### 要做的事
+当前文件仍承担这些判断。
 
-* `fs_scanner.py` 封装对 `scan_album(...)` 的调用
-* 应用层只依赖 `FsScanner` 或类似适配器
-* scanner worker 仍可保留，但不要让应用层直接依赖 scanner_adapter 的实现细节
+### 必做动作 B2
 
-### 完成标志
+把以下职责从 `library_update_service.py` 中抽成纯 Python 服务：
 
-scanner 调用点集中，不再在多个 use case 里直接 import scanner_adapter。
+* restore 完成后的 target album 集合计算
+* restore 后 rescan 的判定
+* restore 后 UI reload 策略输入值计算
 
----
+`library_update_service.py` 最终只做：
 
-# 3. 完成 `library_update_service.py` 降权
-
-这是第二步必须真正落地的地方。
-
-## 3.1 移走 move aftermath 业务规则
-
-### 当前状态
-
-已经抽出 `MoveBookkeepingService`，但 `library_update_service.py` 仍在主导很多后置逻辑。
-
-### 具体动作
-
-#### 要改的文件
-
-* `src/iPhoto/gui/services/library_update_service.py`
-* `src/iPhoto/application/services/move_bookkeeping_service.py`
-
-#### 要做的事
-
-把以下内容继续从 UI service 挪走：
-
-* stale 目标选择逻辑
-* refresh target 归并逻辑
-* restore rescan target 计算逻辑
-* forced reload 标记语义
-
-让 `library_update_service.py` 只保留：
-
-* 发 signal
-* 调 service
-* 调 task manager
-
-### 完成标志
-
-`handle_move_operation_completed()` 中只剩协调代码，不剩大段业务判断。
+* 提交 task
+* 接 finished/error signal
+* 根据服务返回结果发 Qt signal
 
 ---
 
-## 3.2 移走 `_on_scan_finished()` 中的业务语义
+## C. 让 `TrashService` 成为 trash / restore 的唯一 owner
 
-### 目标
+### 必做动作 C1
 
-让 `_on_scan_finished()` 只处理成功/失败和 UI signal。
+检查 `src/iPhoto/application/services/trash_service.py`，把以下规则统一收进来：
 
-### 具体动作
+* deleted directory 初始化规则
+* restore metadata 使用规则
+* restore fallback 规则
+* restore 后目标 album/root 判定
+* restore 后是否需要 rescan / reload
 
-#### 要改的文件
+### 必做动作 C2
 
-* `src/iPhoto/gui/services/library_update_service.py`
-
-#### 要做的事
-
-将以下步骤外移：
-
-* trash merge
-* persist scan result
-* 是否需要 reload 的业务判断
-
-形成类似：
-
-* `finalize_scan_result(...)`
-* `compute_post_scan_ui_effect(...)`
-
-这些逻辑应在 application service / use case 里完成。
-
-### 完成标志
-
-`_on_scan_finished()` 只像一个回调，不像业务处理器。
+`library_update_service.py` 和 `library/trash_manager.py` 不再各自保留 restore 业务规则，只允许调用 `TrashService`。
 
 ---
 
-# 4. 完成 `LibraryManager` 第二阶段目标
+## D. 收紧 `LibraryManager` 的职责边界
 
-## 4.1 把 tree 逻辑继续交给 `LibraryTreeService`
+### 必做动作 D1
 
-### 具体动作
+`LibraryManager` 中已经开始用 `LibraryTreeService`，下一步要做到：
 
-#### 要改的文件
+* tree 走 `LibraryTreeService`
+* scan 走 `LibraryScanService`
+* watch 走 `LibraryWatchService`
+* trash 走 `TrashService`
 
-* `src/iPhoto/library/manager.py`
-* `src/iPhoto/application/services/library_tree_service.py`
+### 必做动作 D2
 
-#### 要做的事
+检查 `LibraryManager` 与 mixin 的方法实现，凡是以下类型都改为委托：
 
-把这类逻辑尽量转为 service：
+* tree build / iter
+* scan state / worker coordination
+* watcher suspend depth / desired paths
+* restore/trash 判定
 
-* tree build
-* album/child sorting
-* list_albums
-* list_children
-* refresh tree diff 比较
+### 必做动作 D3
 
-### 完成标志
+第二阶段完成的判断标准之一应是：
 
-`LibraryManager._refresh_tree()` 中剩下的是调用，不是实现。
+> `LibraryManager` 中不再新增任何业务判断，只允许：
+>
+> * QObject signal 容器
+> * 服务组合
+> * 兼容 API 委托
 
----
-
-## 4.2 把 watcher 语义继续交给 `LibraryWatchService`
-
-### 具体动作
-
-#### 要改的文件
-
-* `src/iPhoto/library/filesystem_watcher.py`
-* `src/iPhoto/library/manager.py`
-* `src/iPhoto/application/services/library_watch_service.py`
-* `src/iPhoto/infrastructure/watcher/qt_library_watcher.py`
-
-#### 要做的事
-
-统一处理：
-
-* pause/resume
-* watch suspend depth
-* desired watch path computation
-* rebuild_watches
-
-### 完成标志
-
-watcher 相关规则不再留在 manager/mixin 里重复存在。
+目前还没达到这一点。
 
 ---
 
-## 4.3 把 scan state 语义继续交给 `LibraryScanService`
+## E. 继续清理 scan 完成后的 legacy 调用
 
-### 具体动作
+### 必做动作 E1
 
-#### 要改的文件
+`scan_coordinator.py` 里的 `_on_scan_finished()` 目前仍然直接：
 
-* `src/iPhoto/library/manager.py`
-* `src/iPhoto/application/services/library_scan_service.py`
+* 在 scan 完成后调用 `backend.pair(root, library_root=self._root)`
 
-#### 要做的事
+这说明扫描完成后的 live pairing 持久化仍走 legacy backend。
 
-将以下状态尽量迁走：
+这一步应改成：
 
-* `_current_scanner_worker`
-* `_live_scan_buffer`
-* `_live_scan_root`
-* `_scan_buffer_lock`
-* geotagged cache invalidation 规则
+* 调新的 application use case
+* 不再从 mixin 里直连 `backend.pair(...)`
 
-### 完成标志
+### 必做动作 E2
 
-`LibraryManager` 中 scan 状态字段明显减少。
+所有 scan 完成后的后处理都应进入 application 层统一编排，不应再留在 legacy mixin 中。
 
 ---
 
-## 4.4 把 trash 目录规则继续交给 `TrashService`
+## F. 用测试把“第二阶段完成”钉死
 
-### 具体动作
+虽然这个分支已经加了大量 phase2 测试文件，但建议明确补齐这 4 组断言：
 
-#### 要改的文件
+### 必做动作 F1
 
-* `src/iPhoto/library/trash_manager.py`
-* `src/iPhoto/application/services/trash_service.py`
-* `src/iPhoto/library/manager.py`
+新增或强化结构测试，断言：
 
-#### 要做的事
+* `LibraryManager` 的 scan 主路径通过 `LibraryScanService`
+* `FileSystemWatcherMixin` 不再自己维护 suspend depth
+* `library_update_service.py` 不再包含 restore metadata merge 规则
+* `scan_coordinator.py` 不再直接调用 `backend.pair(...)`
 
-统一：
+### 必做动作 F2
 
-* deleted dir 初始化规则
-* restore 目标 album 规则
-* trash 目录保护规则
+新增回归测试覆盖：
 
-### 完成标志
-
-trash 语义集中，不再横跨 manager/mixin/service 多处。
-
----
-
-# 5. 完成 compatibility bridge 收缩
-
-## 5.1 `app.py`
-
-### 具体动作
-
-#### 要改的文件
-
-* `src/iPhoto/app.py`
-
-#### 要做的事
-
-确认它只剩：
-
-* `open_album() -> OpenAlbumLegacyBridge`
-* `rescan() -> RescanAlbumUseCase`
-* `pair() -> PairLivePhotosUseCaseV2`
-* `scan_specific_files()` 如果还存在复杂逻辑，也抽到 asset use case
-
-### 完成标志
-
-`app.py` 中没有真正的业务实现块。
+* restore 后 album refresh
+* nested album + global db
+* scan finish 后 pair live 持久化
+* library bind / rebind 后 watcher rebuild
 
 ---
 
-## 5.2 `appctx.py`
+## 我建议的补完顺序
 
-### 具体动作
+按这个顺序做最稳：
 
-#### 要改的文件
-
-* `src/iPhoto/appctx.py`
-
-#### 要做的事
-
-进一步减少兼容属性上的“真实逻辑”：
-
-* `resume_startup_tasks()` 只转发给 session
-* `remember_album()` 只转发给 session
-* 不再新增 settings/library/theme 的真实处理逻辑
-
-### 完成标志
-
-`AppContext` 变成真正薄壳。
+1. 先把 `scan_coordinator.py` 的 scan 主逻辑迁到 `LibraryScanService`
+2. 再把 restore 后 rescan / reload 规则迁到 `TrashService` 或专门服务
+3. 删除 `library_update_service.py` 中剩余的 restore 业务判断
+4. 干掉 `scan_coordinator.py` 中对 `backend.pair(...)` 的直接依赖
+5. 补结构测试和回归测试
+6. 最后再宣布第二阶段完成
 
 ---
 
-## 5.3 `gui/facade.py`
+## 最终判断
 
-### 具体动作
+**这个 branch 不需要回退，也不需要重做第二阶段。**
+但它**还差最后一轮“主路径接管”收尾**，尤其是：
 
-#### 要改的文件
+* `LibraryScanService` 真接管 scan
+* `TrashService` 真接管 restore 规则
+* `library_update_service.py` 彻底退化为 UI 协调器
+* `scan_coordinator.py` 退出业务实现层
 
-* `src/iPhoto/gui/facade.py`
-
-#### 要做的事
-
-确认它只保留：
-
-* signal
-* sub-facade 实例化
-* forwarding
-
-### 完成标志
-
-`gui/facade.py` 中不再新增任何业务决策语义。
-
----
-
-# 6. 完成第二步的测试动作
-
-第二步如果不补测试，后面第三步会很危险。
-
-## 6.1 必补单元测试
-
-新增或完善：
-
-* `AlbumPathPolicy` 测试
-* `LibraryScopePolicy` 测试
-* `TrashRestorePolicy` 测试
-* `RescanAlbumUseCase` 编排测试
-* `PairLivePhotosUseCaseV2` 测试
-* `MoveBookkeepingService` 测试
-* `LibraryTreeService` 测试
-* `LibraryWatchService` 测试
-* `LibraryScanService` 测试
-
----
-
-## 6.2 必补集成测试
-
-重点补以下链路：
-
-* global db + nested album 扫描
-* recently deleted restore metadata 保留
-* restore 后 rescan 目标正确
-* pair live 在 library_root / album_root 两种模式都不回归
-* library watcher 与 scan 并发时不回归
-* compatibility bridge 入口行为不变
-
----
-
-# 7. 第二步完成判定标准
-
-满足下面这些，才算第二步真正完成：
-
-### 结构上
-
-* 路径规则全部收口到 policy
-* scan 子域形成稳定边界
-* `library_update_service.py` 只剩 UI 协调职责
-* `LibraryManager` 明显瘦身
-* compatibility bridge 没有新增业务
-
-### 行为上
-
-* scan / restore / pair live / move / delete / import 不回归
-* global db / nested album 不回归
-* recently deleted 工作流不回归
-
-### 工程上
-
-* 第二步新增测试通过
-* 新旧入口行为一致
-* 后续第三步可以开始删 legacy 重复逻辑
-
----
-
-# 8. 推荐提交顺序
-
-## Commit 1
-
-* 路径策略收尾
-* 清理 scattered path logic
-
-## Commit 2
-
-* scan use case 收尾
-* persist/live pair 统一入口
-
-## Commit 3
-
-* `library_update_service.py` 继续降权
-* `MoveBookkeepingService` 完成接管
-
-## Commit 4
-
-* `LibraryManager` 继续 service delegation
-* watcher/scan/trash 进一步抽离
-
-## Commit 5
-
-* compatibility bridge 收缩
-* 清理重复逻辑
-
-## Commit 6
-
-* 补齐单元测试与集成测试
-* 验收第二步完成状态
-
-如果你愿意，我下一条可以直接把这份内容整理成 **“第二步完成清单.md” 下载文件**。
+把这几项补齐后，第二阶段才算真正完成。

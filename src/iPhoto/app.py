@@ -36,12 +36,11 @@ def open_album(
 
     from .config import DEFAULT_EXCLUDE, DEFAULT_INCLUDE
     from .errors import IndexCorruptedError, ManifestInvalidError
-    from .path_normalizer import compute_album_path
 
     album = Album.open(root)
     db_root = library_root if library_root else root
     store = get_global_repository(db_root)
-    album_path = compute_album_path(root, library_root)
+    album_path = _compute_album_path(root, library_root)
 
     def _is_recoverable(exc: Exception) -> bool:
         return isinstance(exc, (sqlite3.Error, IndexCorruptedError, ManifestInvalidError))

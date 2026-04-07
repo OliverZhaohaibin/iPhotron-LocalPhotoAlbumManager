@@ -94,11 +94,6 @@ class LibraryManager(
         self._debounce = QTimer(self)
         self._debounce.setSingleShot(True)
         self._debounce.setInterval(500)
-        # ``_watch_suspend_depth`` tracks how many in-flight operations asked us to
-        # ignore file-system notifications. We use a counter instead of a boolean
-        # to correctly handle nested operations that may overlap (e.g., multiple
-        # concurrent file operations that each need to pause/resume the watcher).
-        self._watch_suspend_depth = 0
         self._watcher.directoryChanged.connect(self._on_directory_changed)
         self._debounce.timeout.connect(self._refresh_tree)
 

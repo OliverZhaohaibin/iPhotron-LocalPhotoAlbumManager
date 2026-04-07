@@ -217,7 +217,7 @@ class LibraryUpdateService(QObject):
 
     def consume_forced_reload(self, root: Path) -> bool:
         """Return ``True`` if *root* was marked for a forced reload."""
-        return self._move_aftercare.consume_forced_reload(root)
+        return self._move_bookkeeping.consume_forced_reload(root)
 
     def reset_cache(self) -> None:
         """Drop cached album resolution results after library re-binding."""

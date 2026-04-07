@@ -219,7 +219,7 @@ def read_image_meta_with_exiftool(
     geometry_missing = info["w"] is None or info["h"] is None
     need_dt_fallback = info["dt"] is None
 
-    if (geometry_missing or need_dt_fallback) and Image is not None and UnidentifiedImageError is not None:
+    if (geometry_missing or need_dt_fallback) and Image is not None and UnidentifiedImageError is not None and path.exists():
         LOGGER.debug("Opening %s with Pillow to backfill metadata", path)
         try:
             with Image.open(path) as img:

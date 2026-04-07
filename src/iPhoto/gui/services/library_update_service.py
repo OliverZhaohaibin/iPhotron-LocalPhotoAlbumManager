@@ -3,30 +3,36 @@
 from __future__ import annotations
 
 import uuid
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Dict, Iterable, List, Optional, Sequence, Tuple, TYPE_CHECKING
+from typing import TYPE_CHECKING
 
 from PySide6.QtCore import QObject, QTimer, Signal, Slot
 
-from ...config import DEFAULT_INCLUDE, DEFAULT_EXCLUDE
-from ...errors import IPhotoError
-from ..background_task_manager import BackgroundTaskManager
-# Updated imports to new location
-from ...library.workers.rescan_worker import RescanSignals, RescanWorker
-from ...library.workers.scanner_worker import ScannerSignals, ScannerWorker
-from ...index_sync_service import (
-    update_index_snapshot as _update_index_snapshot,
-    ensure_links as _ensure_links,
-)
-
-from ...application.use_cases.scan.rescan_album_use_case import RescanAlbumUseCase
-from ...application.use_cases.scan.pair_live_photos_use_case_v2 import PairLivePhotosUseCaseV2
-from ...application.use_cases.scan.persist_scan_result_use_case import PersistScanResultUseCase
+from ...application.services.library_reload_service import LibraryReloadService
+from ...application.services.move_aftercare_service import MoveAftercareService
+from ...application.services.move_bookkeeping_service import MoveBookkeepingService
+from ...application.services.restore_aftercare_service import RestoreAftercareService
 from ...application.use_cases.scan.merge_trash_restore_metadata_use_case import (
     MergeTrashRestoreMetadataUseCase,
 )
-from ...application.services.move_bookkeeping_service import MoveBookkeepingService
+from ...application.use_cases.scan.pair_live_photos_use_case_v2 import PairLivePhotosUseCaseV2
+from ...application.use_cases.scan.persist_scan_result_use_case import PersistScanResultUseCase
+from ...application.use_cases.scan.rescan_album_use_case import RescanAlbumUseCase
+from ...config import DEFAULT_EXCLUDE, DEFAULT_INCLUDE
+from ...errors import IPhotoError
+from ...index_sync_service import (
+    ensure_links as _ensure_links,
+)
+from ...index_sync_service import (
+    update_index_snapshot as _update_index_snapshot,
+)
+
+# Updated imports to new location
+from ...library.workers.rescan_worker import RescanSignals, RescanWorker
+from ...library.workers.scanner_worker import ScannerSignals, ScannerWorker
+from ..background_task_manager import BackgroundTaskManager
 
 if TYPE_CHECKING:
     from ...library.manager import LibraryManager
@@ -43,9 +49,9 @@ class MoveOperationResult:
 
     source_root: Path
     destination_root: Path
-    moved_pairs: List[Tuple[Path, Path]] = field(default_factory=list)
-    removed_rels: List[str] = field(default_factory=list)
-    added_rels: List[str] = field(default_factory=list)
+    moved_pairs: list[tuple[Path, Path]] = field(default_factory=list)
+    removed_rels: list[str] = field(default_factory=list)
+    added_rels: list[str] = field(default_factory=list)
     is_delete: bool = False
     is_restore: bool = False
     source_ok: bool = True
@@ -70,19 +76,19 @@ class LibraryUpdateService(QObject):
         self,
         *,
         task_manager: BackgroundTaskManager,
-        current_album_getter: Callable[[], Optional["Album"]],
-        library_manager_getter: Callable[[], Optional["LibraryManager"]],
-        parent: Optional[QObject] = None,
+        current_album_getter: Callable[[], Album | None],
+        library_manager_getter: Callable[[], LibraryManager | None],
+        parent: QObject | None = None,
     ) -> None:
         super().__init__(parent)
         self._task_manager = task_manager
         self._current_album_getter = current_album_getter
         self._library_manager_getter = library_manager_getter
-        self._scanner_worker: Optional[ScannerWorker] = None
+        self._scanner_worker: ScannerWorker | None = None
         self._scan_pending = False
         self._model_loading_due_to_scan = False
 
-        def _get_library_root() -> Optional[Path]:
+        def _get_library_root() -> Path | None:
             lib = self._library_manager_getter()
             return lib.root() if lib is not None else None
 
@@ -101,10 +107,15 @@ class LibraryUpdateService(QObject):
         self._scope_policy = LibraryScopePolicy()
         self._trash_service = TrashService()
 
+        # Phase 3 application services – own business rules extracted from this Qt service.
+        self._move_aftercare = MoveAftercareService()
+        self._restore_aftercare = RestoreAftercareService()
+        self._reload_service = LibraryReloadService()
+
     # ------------------------------------------------------------------
     # Public API used by :class:`~iPhoto.gui.facade.AppFacade`
     # ------------------------------------------------------------------
-    def rescan_album(self, album: "Album") -> List[dict]:
+    def rescan_album(self, album: Album) -> list[dict]:
         """Synchronously rebuild the album index and emit cache updates."""
 
         try:
@@ -117,7 +128,7 @@ class LibraryUpdateService(QObject):
         self.linksUpdated.emit(album.root)
         return rows
 
-    def rescan_album_async(self, album: "Album") -> None:
+    def rescan_album_async(self, album: Album) -> None:
         """Start an asynchronous rescan for *album* using the background pool."""
 
         library_root = None
@@ -175,7 +186,7 @@ class LibraryUpdateService(QObject):
         # Cancelling a scan should not schedule immediate retry attempts.
         self._scan_pending = False
 
-    def pair_live(self, album: "Album") -> List[dict]:
+    def pair_live(self, album: Album) -> list[dict]:
         """Rebuild Live Photo pairings for *album* and refresh related views."""
 
         try:
@@ -206,10 +217,11 @@ class LibraryUpdateService(QObject):
 
     def consume_forced_reload(self, root: Path) -> bool:
         """Return ``True`` if *root* was marked for a forced reload."""
-        return self._move_bookkeeping.consume_forced_reload(root)
+        return self._move_aftercare.consume_forced_reload(root)
 
     def reset_cache(self) -> None:
         """Drop cached album resolution results after library re-binding."""
+        self._move_aftercare.reset()
         self._move_bookkeeping.reset()
 
     # ------------------------------------------------------------------
@@ -228,7 +240,7 @@ class LibraryUpdateService(QObject):
     ) -> None:
         """Refresh impacted album views after assets have been moved."""
 
-        moved_pairs: List[Tuple[Path, Path]] = []
+        moved_pairs: list[tuple[Path, Path]] = []
         for entry in moved_pairs_raw:
             if isinstance(entry, (tuple, list)) and len(entry) == 2:
                 moved_pairs.append((Path(entry[0]), Path(entry[1])))
@@ -242,26 +254,8 @@ class LibraryUpdateService(QObject):
         current_album = self._current_album_getter()
         current_root = current_album.root if current_album is not None else None
 
-        # Compute library-relative rels for the unified result signal.
-        removed_rels, added_rels = self._move_bookkeeping.compute_move_rels(
-            moved_pairs, library_root, source_root, destination_root
-        )
-
-        result = MoveOperationResult(
-            source_root=source_root,
-            destination_root=destination_root,
-            moved_pairs=moved_pairs,
-            removed_rels=removed_rels,
-            added_rels=added_rels,
-            is_delete=bool(_is_trash_destination and not is_restore_operation),
-            is_restore=is_restore_operation,
-            source_ok=source_ok,
-            destination_ok=destination_ok,
-        )
-        self.moveOperationCompleted.emit(result)
-
-        # Determine which albums need index/links refresh via the service.
-        refresh_targets = self._move_bookkeeping.compute_refresh_targets(
+        # Delegate move aftermath computation to the application service.
+        aftermath = self._move_aftercare.compute_aftermath(
             moved_pairs,
             source_root,
             destination_root,
@@ -271,26 +265,37 @@ class LibraryUpdateService(QObject):
             destination_ok=destination_ok,
         )
 
-        for candidate, should_restart in refresh_targets.values():
+        result = MoveOperationResult(
+            source_root=source_root,
+            destination_root=destination_root,
+            moved_pairs=moved_pairs,
+            removed_rels=aftermath.removed_rels,
+            added_rels=aftermath.added_rels,
+            is_delete=bool(_is_trash_destination and not is_restore_operation),
+            is_restore=is_restore_operation,
+            source_ok=source_ok,
+            destination_ok=destination_ok,
+        )
+        self.moveOperationCompleted.emit(result)
+
+        for candidate, should_restart in aftermath.refresh_targets.values():
             self.indexUpdated.emit(candidate)
             self.linksUpdated.emit(candidate)
             if should_restart:
-                force_reload = self._move_bookkeeping.consume_forced_reload(candidate)
+                force_reload = self._move_aftercare.consume_forced_reload(candidate)
                 self.assetReloadRequested.emit(current_root, False, force_reload)
 
-        # Trigger post-restore rescans when files were restored from the trash.
-        if not is_restore_operation or not destination_ok or library is None:
+        # Delegate post-restore rescan eligibility to the application service.
+        trash_root = library.deleted_directory() if library is not None else None
+        if not self._restore_aftercare.should_trigger_restore_rescan(
+            is_restore_operation=is_restore_operation,
+            destination_ok=destination_ok,
+            source_root=source_root,
+            trash_root=trash_root,
+        ):
             return
 
-        trash_root = library.deleted_directory()
-        if trash_root is None:
-            return
-
-        scope = self._scope_policy
-        if not scope.paths_equal(source_root, trash_root):
-            return
-
-        restore_targets = self._move_bookkeeping.compute_restore_rescan_targets(
+        restore_targets = self._restore_aftercare.compute_restore_rescan_targets(
             moved_pairs, library_root
         )
         for album_root in restore_targets:
@@ -304,7 +309,7 @@ class LibraryUpdateService(QObject):
 
         self.scanProgress.emit(root, current, total)
 
-    def _relay_scan_chunk_ready(self, root: Path, chunk: List[dict]) -> None:
+    def _relay_scan_chunk_ready(self, root: Path, chunk: list[dict]) -> None:
         """Forward worker chunks to listeners."""
 
         self.scanChunkReady.emit(root, chunk)
@@ -360,12 +365,15 @@ class LibraryUpdateService(QObject):
         else:
             self.indexUpdated.emit(root)
             self.linksUpdated.emit(root)
-            # Ensure the view reloads if this scan was triggered for the current album
-            # (e.g. initial auto-scan on startup).
-            # Only emit assetReloadRequested if the model is not already loading due to this scan
-            if not self._model_loading_due_to_scan:
-                self.assetReloadRequested.emit(root, False, False)
+            # Delegate scan reload decision to the application-layer reload service.
+            action = self._reload_service.compute_scan_reload_action(
+                root,
+                self._current_album_root(),
+                model_loading_due_to_scan=self._model_loading_due_to_scan,
+            )
             self._model_loading_due_to_scan = False
+            if action.requires_action:
+                self.assetReloadRequested.emit(root, False, False)
             self.scanFinished.emit(root, True)
 
         should_restart = self._scan_pending
@@ -408,14 +416,14 @@ class LibraryUpdateService(QObject):
     # ------------------------------------------------------------------
     # Album bookkeeping helpers
     # ------------------------------------------------------------------
-    def _current_album_root(self) -> Optional[Path]:
+    def _current_album_root(self) -> Path | None:
         album = self._current_album_getter()
         return album.root if album is not None else None
 
-    def _library_manager(self) -> Optional["LibraryManager"]:
+    def _library_manager(self) -> LibraryManager | None:
         return self._library_manager_getter()
 
-    def _refresh_restored_album(self, album_root: Path, library_root: Optional[Path]) -> None:
+    def _refresh_restored_album(self, album_root: Path, library_root: Path | None) -> None:
         album_root = Path(album_root)
         if not album_root.exists():
             return
@@ -434,15 +442,15 @@ class LibraryUpdateService(QObject):
             current_album = self._current_album_getter()
             current_root = current_album.root if current_album is not None else None
 
-            # Delegate reload decision to TrashService.
-            should_reload, should_reload_as_lib, _ = self._trash_service.compute_restore_reload_action(
+            # Delegate reload decision to the application-layer reload service.
+            action = self._reload_service.compute_restore_reload_action(
                 path, current_root, library_root
             )
 
-            if should_reload:
-                force_reload = self._move_bookkeeping.consume_forced_reload(path)
+            if action.should_reload_current:
+                force_reload = self._move_aftercare.consume_forced_reload(path)
                 self.assetReloadRequested.emit(current_root, False, force_reload)
-            elif should_reload_as_lib:
+            elif action.should_reload_as_library:
                 self.assetReloadRequested.emit(current_root, False, False)
 
         def _on_error(path: Path, message: str) -> None:

@@ -22,6 +22,7 @@ from PySide6.QtCore import QObject, Signal, Slot
 from .. import app as backend
 from ..errors import IPhotoError
 from ..models.album import Album
+from ..presentation.qt.adapters import LibraryUpdateAdapter, ScanProgressAdapter
 from ..presentation.qt.facade.album_facade import AlbumFacade
 from ..presentation.qt.facade.asset_facade import AssetFacade
 from ..presentation.qt.facade.library_facade import LibraryFacade
@@ -100,15 +101,40 @@ class AppFacade(QObject):
             parent=self,
         )
 
-        self._library_update_service.scanProgress.connect(self._relay_scan_progress)
-        self._library_update_service.scanChunkReady.connect(self._relay_scan_chunk_ready)
-        self._library_update_service.scanFinished.connect(self._relay_scan_finished)
-        self._library_update_service.indexUpdated.connect(self._relay_index_updated)
-        self._library_update_service.linksUpdated.connect(self._relay_links_updated)
-        self._library_update_service.assetReloadRequested.connect(
-            self._on_asset_reload_requested
+        # ------------------------------------------------------------------
+        # Presentation adapters (Phase 3) – signals from the service layer
+        # are relayed to the facade through stable adapter boundaries instead
+        # of being wired directly.
+        # ------------------------------------------------------------------
+
+        # LibraryUpdateAdapter forwards index/links/reload/error signals.
+        self._library_update_adapter = LibraryUpdateAdapter(
+            update_service_getter=lambda: self._library_update_service,
+            parent=self,
         )
-        self._library_update_service.errorRaised.connect(self._on_service_error)
+        self._library_update_adapter.wire_service(self._library_update_service)
+        self._library_update_adapter.indexUpdated.connect(self._relay_index_updated)
+        self._library_update_adapter.linksUpdated.connect(self._relay_links_updated)
+        self._library_update_adapter.assetReloadRequested.connect(self._on_asset_reload_requested)
+        self._library_update_adapter.errorRaised.connect(self._on_service_error)
+
+        # ScanProgressAdapter aggregates scan-progress signals from both the
+        # LibraryUpdateService (background async rescans) and – after
+        # bind_library() – the LibraryManager (direct scan path).
+        self._scan_progress_adapter = ScanProgressAdapter(parent=self)
+        self._library_update_service.scanProgress.connect(
+            self._scan_progress_adapter.relay_progress
+        )
+        self._library_update_service.scanChunkReady.connect(
+            self._scan_progress_adapter.relay_chunk_ready
+        )
+        self._library_update_service.scanFinished.connect(
+            self._scan_progress_adapter.relay_finished
+        )
+        self._scan_progress_adapter.scanProgress.connect(self._relay_scan_progress)
+        self._scan_progress_adapter.scanChunkReady.connect(self._relay_scan_chunk_ready)
+        self._scan_progress_adapter.scanFinished.connect(self._relay_scan_finished)
+        self._scan_progress_adapter.scanBatchFailed.connect(self._relay_scan_batch_failed)
 
         self._import_service = AssetImportService(
             task_manager=self._task_manager,
@@ -218,6 +244,27 @@ class AppFacade(QObject):
         return self._library_update_service
 
     @property
+    def library_update_adapter(self) -> LibraryUpdateAdapter:
+        """Stable presentation adapter for library-update signals.
+
+        New UI code should connect to this adapter rather than to
+        ``library_updates`` directly so the service layer can evolve without
+        breaking UI consumers.
+        """
+
+        return self._library_update_adapter
+
+    @property
+    def scan_progress_adapter(self) -> ScanProgressAdapter:
+        """Stable presentation adapter for scan-progress signals.
+
+        New UI code should connect to this adapter rather than wiring scan
+        signals directly from the library manager or update service.
+        """
+
+        return self._scan_progress_adapter
+
+    @property
     def library_manager(self) -> LibraryManager | None:
         """Expose the underlying library manager."""
 
@@ -282,9 +329,18 @@ class AppFacade(QObject):
         if self._library_manager is not None:
             try:
                 self._library_manager.treeUpdated.disconnect(self._on_library_tree_updated)
-                self._library_manager.scanProgress.disconnect(self._relay_scan_progress)
-                self._library_manager.scanChunkReady.disconnect(self._relay_scan_chunk_ready)
-                self._library_manager.scanFinished.disconnect(self._relay_scan_finished)
+                self._library_manager.scanProgress.disconnect(
+                    self._scan_progress_adapter.relay_progress
+                )
+                self._library_manager.scanChunkReady.disconnect(
+                    self._scan_progress_adapter.relay_chunk_ready
+                )
+                self._library_manager.scanFinished.disconnect(
+                    self._scan_progress_adapter.relay_finished
+                )
+                self._library_manager.scanBatchFailed.disconnect(
+                    self._scan_progress_adapter.relay_batch_failed
+                )
             except (RuntimeError, TypeError):
                 pass
 
@@ -292,17 +348,16 @@ class AppFacade(QObject):
         self._library_update_service.reset_cache()
         self._library_manager.treeUpdated.connect(self._on_library_tree_updated)
 
-        try:
-            self._library_update_service.scanProgress.disconnect(self._relay_scan_progress)
-            self._library_update_service.scanChunkReady.disconnect(self._relay_scan_chunk_ready)
-            self._library_update_service.scanFinished.disconnect(self._relay_scan_finished)
-        except (RuntimeError, TypeError):
-            pass
-
-        self._library_manager.scanProgress.connect(self._relay_scan_progress)
-        self._library_manager.scanChunkReady.connect(self._relay_scan_chunk_ready)
-        self._library_manager.scanFinished.connect(self._relay_scan_finished)
-        self._library_manager.scanBatchFailed.connect(self._relay_scan_batch_failed)
+        # Route library-manager scan signals through ScanProgressAdapter so
+        # UI consumers see a single, stable scan-progress interface.
+        self._library_manager.scanProgress.connect(self._scan_progress_adapter.relay_progress)
+        self._library_manager.scanChunkReady.connect(
+            self._scan_progress_adapter.relay_chunk_ready
+        )
+        self._library_manager.scanFinished.connect(self._scan_progress_adapter.relay_finished)
+        self._library_manager.scanBatchFailed.connect(
+            self._scan_progress_adapter.relay_batch_failed
+        )
 
         if self._library_manager.root():
             self._on_library_tree_updated()

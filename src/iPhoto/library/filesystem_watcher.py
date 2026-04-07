@@ -23,7 +23,7 @@ class FileSystemWatcherMixin:
         self._watch_service.pause()
         # Stop any pending debounce on the first pause so an earlier
         # notification does not race with the write we are about to perform.
-        if self._watch_service.suspend_depth() == 1 and self._debounce.isActive():
+        if self._watch_service.is_first_pause() and self._debounce.isActive():
             self._debounce.stop()
 
     def resume_watcher(self) -> None:

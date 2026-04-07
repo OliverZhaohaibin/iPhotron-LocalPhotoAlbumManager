@@ -55,6 +55,13 @@ class LibraryScopePolicy:
     # Library-relative helpers
     # ------------------------------------------------------------------
 
+    def paths_equal(self, left: Path, right: Path) -> bool:
+        """Return ``True`` when *left* and *right* resolve to the same filesystem path."""
+        try:
+            return left.resolve() == right.resolve()
+        except OSError:
+            return left == right
+
     def library_relative_path(self, path: Path, library_root: Path) -> Optional[str]:
         """Return the POSIX library-relative path for *path*, or ``None``.
 

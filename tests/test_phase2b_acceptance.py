@@ -499,7 +499,7 @@ class TestNestedAlbumGlobalDb:
         assert "photo.jpg" in rels
         assert "sub/shot.jpg" in rels
         # Rows from sibling album are excluded
-        assert not any("Parent/Other" in r for r in rels)
+        assert not any("Parent/Other" in r["rel"] for r in result)
 
     def test_compute_album_path_deeply_nested(self, tmp_path):
         from iPhoto.application.policies.album_path_policy import AlbumPathPolicy

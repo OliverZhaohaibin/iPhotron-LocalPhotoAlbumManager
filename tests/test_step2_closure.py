@@ -427,8 +427,11 @@ class TestMoveBookkeepingComputeRefreshTargets:
             [], src, dst, None, None,
             source_ok=True, destination_ok=True
         )
-        # Both paths were recorded and should be stale
-        assert svc.consume_forced_reload(src) is True or svc.consume_forced_reload(dst) is True
+        # Both paths were recorded and should be stale (consume in order)
+        src_stale = svc.consume_forced_reload(src)
+        dst_stale = svc.consume_forced_reload(dst)
+        assert src_stale is True
+        assert dst_stale is True
 
 
 # ---------------------------------------------------------------------------

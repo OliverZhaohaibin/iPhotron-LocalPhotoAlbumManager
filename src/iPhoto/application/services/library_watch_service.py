@@ -31,6 +31,14 @@ class LibraryWatchService:
         if self._suspend_depth > 0:
             self._suspend_depth -= 1
 
+    def is_first_pause(self) -> bool:
+        """Return ``True`` when this is the first (outermost) pause call.
+
+        Use this instead of comparing ``suspend_depth() == 1`` in callers
+        to avoid coupling to the internal depth representation.
+        """
+        return self._suspend_depth == 1
+
     def is_suspended(self) -> bool:
         """Return ``True`` when at least one pause call is outstanding."""
         return self._suspend_depth > 0

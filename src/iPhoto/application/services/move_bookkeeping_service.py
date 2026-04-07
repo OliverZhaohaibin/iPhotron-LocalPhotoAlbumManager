@@ -21,6 +21,9 @@ from ...utils.logging import get_logger
 LOGGER = get_logger()
 
 
+_NOT_FOUND: object = object()  # Sentinel for cache misses
+
+
 class MoveBookkeepingService:
     """Track stale albums and locate album roots after move/restore operations.
 
@@ -191,8 +194,8 @@ class MoveBookkeepingService:
             candidate = start
 
         key = str(candidate)
-        cached = self._album_root_cache.get(key, ...)
-        if cached is not ...:
+        cached = self._album_root_cache.get(key, _NOT_FOUND)
+        if cached is not _NOT_FOUND:
             return cached  # type: ignore[return-value]
 
         try:

@@ -250,6 +250,7 @@ class AppFacade(QObject):
             self._library_manager = library_manager
         if library_update_service is not None:
             self._library_update_service = library_update_service
+            self._library_facade._library_update_service = library_update_service
 
     def cancel_active_scans(self) -> None:
         """Request cancellation of any in-flight scan operations."""

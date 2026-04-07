@@ -9,6 +9,20 @@ sub-modules extracted during a refactoring pass:
 * :mod:`.geo_aggregator`     – ``GeotaggedAsset`` dataclass & collection
 * :mod:`.trash_manager`      – Trash / deleted-items management
 
+Phase 2 additions – ``LibraryManager`` now delegates to application/infrastructure
+services for the following concerns:
+
+* :class:`~iPhoto.application.services.library_tree_service.LibraryTreeService`
+  – tree build and album iteration.
+* :class:`~iPhoto.application.services.library_scan_service.LibraryScanService`
+  – scan state tracking.
+* :class:`~iPhoto.application.services.library_watch_service.LibraryWatchService`
+  – watcher pause/resume depth and desired-path computation.
+* :class:`~iPhoto.application.services.trash_service.TrashService`
+  – trash directory rules.
+* :class:`~iPhoto.infrastructure.watcher.qt_library_watcher.QtLibraryWatcher`
+  – Qt ``QFileSystemWatcher`` encapsulation.
+
 NOTE:
     LibraryManager is currently a legacy coordination object.
     Do not add new business rules here.
@@ -39,6 +53,13 @@ from .trash_manager import TrashManagerMixin
 
 # Workers are still needed for type annotations in __init__
 from .workers.scanner_worker import ScannerWorker
+
+# Phase 2 services
+from ..application.services.library_tree_service import LibraryTreeService
+from ..application.services.library_scan_service import LibraryScanService
+from ..application.services.library_watch_service import LibraryWatchService
+from ..application.services.trash_service import TrashService
+from ..infrastructure.watcher.qt_library_watcher import QtLibraryWatcher
 
 LOGGER = get_logger()
 
@@ -73,11 +94,6 @@ class LibraryManager(
         self._debounce = QTimer(self)
         self._debounce.setSingleShot(True)
         self._debounce.setInterval(500)
-        # ``_watch_suspend_depth`` tracks how many in-flight operations asked us to
-        # ignore file-system notifications. We use a counter instead of a boolean
-        # to correctly handle nested operations that may overlap (e.g., multiple
-        # concurrent file operations that each need to pause/resume the watcher).
-        self._watch_suspend_depth = 0
         self._watcher.directoryChanged.connect(self._on_directory_changed)
         self._debounce.timeout.connect(self._refresh_tree)
 
@@ -89,6 +105,13 @@ class LibraryManager(
         self._scan_buffer_lock = QMutex()
         self._geotagged_assets_cache: Optional[List[GeotaggedAsset]] = None
         self._geotagged_assets_cache_root: Optional[Path] = None
+
+        # Phase 2: application/infrastructure services
+        self._tree_service = LibraryTreeService()
+        self._scan_service = LibraryScanService()
+        self._watch_service = LibraryWatchService()
+        self._trash_service = TrashService()
+        self._qt_watcher = QtLibraryWatcher(self._watcher)
 
     # ------------------------------------------------------------------
     # Basic properties
@@ -185,30 +208,22 @@ class LibraryManager(
         previous_albums = self._albums
         previous_children = self._children
         previous_nodes = self._nodes
-        albums: list[AlbumNode] = []
-        children: Dict[Path, list[AlbumNode]] = {}
-        new_nodes: Dict[Path, AlbumNode] = {}
-        for album_dir in self._iter_album_dirs(self._root):
-            node = self._build_node(album_dir, level=1)
-            albums.append(node)
-            new_nodes[album_dir] = node
-            child_nodes = [self._build_node(child, level=2) for child in self._iter_album_dirs(album_dir)]
-            for child in child_nodes:
-                new_nodes[child.path] = child
-            children[album_dir] = child_nodes
-        refreshed_albums = sorted(albums, key=lambda item: item.title.casefold())
-        refreshed_children = {
-            parent: sorted(kids, key=lambda item: item.title.casefold())
-            for parent, kids in children.items()
-        }
+
+        # Delegate tree build to LibraryTreeService.
+        new_albums, new_children, new_nodes = self._tree_service.build_tree(
+            self._root,
+            lambda r: self._tree_service.iter_album_dirs(r, error_emitter=self.errorRaised.emit),
+            lambda path, level: self._build_node(path, level=level),
+        )
+
         if (
             new_nodes == previous_nodes
-            and refreshed_albums == previous_albums
-            and refreshed_children == previous_children
+            and new_albums == previous_albums
+            and new_children == previous_children
         ):
             return
-        self._albums = refreshed_albums
-        self._children = refreshed_children
+        self._albums = new_albums
+        self._children = new_children
         self._nodes = new_nodes
         self._geotagged_assets_cache = None
         self._geotagged_assets_cache_root = None

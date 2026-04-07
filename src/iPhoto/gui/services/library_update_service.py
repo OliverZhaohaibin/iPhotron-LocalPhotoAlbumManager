@@ -5,12 +5,11 @@ from __future__ import annotations
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Dict, Iterable, List, Optional, Sequence, Set, Tuple, TYPE_CHECKING
+from typing import Callable, Dict, Iterable, List, Optional, Sequence, Tuple, TYPE_CHECKING
 
 from PySide6.QtCore import QObject, QTimer, Signal, Slot
 
-from ...cache.index_store import get_global_repository
-from ...config import RECENTLY_DELETED_DIR_NAME, WORK_DIR_NAME, DEFAULT_INCLUDE, DEFAULT_EXCLUDE
+from ...config import DEFAULT_INCLUDE, DEFAULT_EXCLUDE
 from ...errors import IPhotoError
 from ..background_task_manager import BackgroundTaskManager
 # Updated imports to new location
@@ -24,6 +23,10 @@ from ...index_sync_service import (
 from ...application.use_cases.scan.rescan_album_use_case import RescanAlbumUseCase
 from ...application.use_cases.scan.pair_live_photos_use_case_v2 import PairLivePhotosUseCaseV2
 from ...application.use_cases.scan.persist_scan_result_use_case import PersistScanResultUseCase
+from ...application.use_cases.scan.merge_trash_restore_metadata_use_case import (
+    MergeTrashRestoreMetadataUseCase,
+)
+from ...application.services.move_bookkeeping_service import MoveBookkeepingService
 
 if TYPE_CHECKING:
     from ...library.manager import LibraryManager
@@ -77,8 +80,6 @@ class LibraryUpdateService(QObject):
         self._library_manager_getter = library_manager_getter
         self._scanner_worker: Optional[ScannerWorker] = None
         self._scan_pending = False
-        self._stale_album_roots: Dict[str, Path] = {}
-        self._album_root_cache: Dict[str, Optional[Path]] = {}
         self._model_loading_due_to_scan = False
 
         def _get_library_root() -> Optional[Path]:
@@ -92,6 +93,13 @@ class LibraryUpdateService(QObject):
             ensure_links=_ensure_links,
             library_root_getter=_get_library_root,
         )
+        self._merge_trash_uc = MergeTrashRestoreMetadataUseCase()
+        self._move_bookkeeping = MoveBookkeepingService()
+
+        from ...application.policies.library_scope_policy import LibraryScopePolicy
+        from ...application.services.trash_service import TrashService
+        self._scope_policy = LibraryScopePolicy()
+        self._trash_service = TrashService()
 
     # ------------------------------------------------------------------
     # Public API used by :class:`~iPhoto.gui.facade.AppFacade`
@@ -198,14 +206,11 @@ class LibraryUpdateService(QObject):
 
     def consume_forced_reload(self, root: Path) -> bool:
         """Return ``True`` if *root* was marked for a forced reload."""
-
-        return self._consume_forced_reload(root)
+        return self._move_bookkeeping.consume_forced_reload(root)
 
     def reset_cache(self) -> None:
         """Drop cached album resolution results after library re-binding."""
-
-        self._album_root_cache.clear()
-        self._stale_album_roots.clear()
+        self._move_bookkeeping.reset()
 
     # ------------------------------------------------------------------
     # Slots wired from :class:`AssetMoveService`
@@ -234,20 +239,13 @@ class LibraryUpdateService(QObject):
         library = self._library_manager()
         library_root = library.root() if library is not None else None
 
-        # --- Emit unified result signal (Plan 1 §5.2) ---
-        removed_rels: List[str] = []
-        added_rels: List[str] = []
-        base = library_root if library_root else source_root
-        for original, target in moved_pairs:
-            try:
-                removed_rels.append(original.resolve().relative_to(base.resolve()).as_posix())
-            except (OSError, ValueError):
-                pass
-            dest_base = library_root if library_root else destination_root
-            try:
-                added_rels.append(target.resolve().relative_to(dest_base.resolve()).as_posix())
-            except (OSError, ValueError):
-                pass
+        current_album = self._current_album_getter()
+        current_root = current_album.root if current_album is not None else None
+
+        # Compute library-relative rels for the unified result signal.
+        removed_rels, added_rels = self._move_bookkeeping.compute_move_rels(
+            moved_pairs, library_root, source_root, destination_root
+        )
 
         result = MoveOperationResult(
             source_root=source_root,
@@ -262,98 +260,40 @@ class LibraryUpdateService(QObject):
         )
         self.moveOperationCompleted.emit(result)
 
-        # --- Legacy signal cascade (kept for backward compatibility) ---
-        current_album = self._current_album_getter()
-        current_root = current_album.root if current_album is not None else None
-
-        refresh_targets: Dict[str, Tuple[Path, bool]] = {}
-        blocked_restarts: Set[str] = set()
-
-        def _record_refresh(path: Optional[Path], *, allow_restart: bool = True) -> None:
-            if path is None:
-                return
-            try:
-                normalised = self._normalise_path(path)
-            except ValueError:
-                normalised = path
-            key = str(normalised)
-            self._mark_album_stale(path)
-            if not allow_restart:
-                blocked_restarts.add(key)
-            should_restart = bool(
-                allow_restart
-                and key not in blocked_restarts
-                and current_root is not None
-                and self._paths_equal(current_root, path)
-            )
-            existing = refresh_targets.get(key)
-            if existing is None or (not existing[1] and should_restart):
-                refresh_targets[key] = (path, should_restart)
-
-        if source_ok:
-            _record_refresh(source_root, allow_restart=False)
-        if destination_ok:
-            _record_refresh(destination_root)
-
-        additional_roots = self._collect_album_roots_from_pairs(moved_pairs)
-        for extra_root in additional_roots:
-            _record_refresh(extra_root)
-
-        if library_root is not None:
-            touched_library = False
-            if source_ok and self._paths_equal(source_root, library_root):
-                touched_library = True
-            if destination_ok and self._paths_equal(destination_root, library_root):
-                touched_library = True
-            if not touched_library:
-                for original, target in moved_pairs:
-                    if self._path_is_descendant(original, library_root) or self._path_is_descendant(
-                        target, library_root
-                    ):
-                        touched_library = True
-                        break
-            if touched_library:
-                _record_refresh(library_root)
+        # Determine which albums need index/links refresh via the service.
+        refresh_targets = self._move_bookkeeping.compute_refresh_targets(
+            moved_pairs,
+            source_root,
+            destination_root,
+            current_root,
+            library_root,
+            source_ok=source_ok,
+            destination_ok=destination_ok,
+        )
 
         for candidate, should_restart in refresh_targets.values():
             self.indexUpdated.emit(candidate)
             self.linksUpdated.emit(candidate)
             if should_restart:
-                target_root = current_root if current_root and self._paths_equal(current_root, candidate) else candidate
-                force_reload = self._consume_forced_reload(candidate)
-                self.assetReloadRequested.emit(target_root, False, force_reload)
+                force_reload = self._move_bookkeeping.consume_forced_reload(candidate)
+                self.assetReloadRequested.emit(current_root, False, force_reload)
 
-        if not is_restore_operation or not destination_ok:
-            return
-
-        if library is None:
+        # Trigger post-restore rescans when files were restored from the trash.
+        if not is_restore_operation or not destination_ok or library is None:
             return
 
         trash_root = library.deleted_directory()
         if trash_root is None:
             return
 
-        if not self._paths_equal(source_root, trash_root):
+        scope = self._scope_policy
+        if not scope.paths_equal(source_root, trash_root):
             return
 
-        library_root_normalised = (
-            self._normalise_path(library_root) if library_root is not None else None
+        restore_targets = self._move_bookkeeping.compute_restore_rescan_targets(
+            moved_pairs, library_root
         )
-
-        unique_album_roots: Dict[str, Path] = {}
-        for _, destination in moved_pairs:
-            album_root = Path(destination).parent
-            normalised_album = self._normalise_path(album_root)
-            if library_root_normalised is not None:
-                try:
-                    normalised_album.relative_to(library_root_normalised)
-                except ValueError:
-                    continue
-            key = str(normalised_album)
-            if key not in unique_album_roots:
-                unique_album_roots[key] = album_root
-
-        for album_root in unique_album_roots.values():
+        for album_root in restore_targets:
             self._refresh_restored_album(album_root, library_root)
 
     # ------------------------------------------------------------------
@@ -401,65 +341,11 @@ class LibraryUpdateService(QObject):
 
         materialised_rows = list(rows)
 
-        if root.name == RECENTLY_DELETED_DIR_NAME:
-            # When the Recently Deleted album is rescanned we must not lose the
-            # restore metadata that was captured at deletion time.  The
-            # ``original_rel_path`` value powers quick restores, while the
-            # album UUID and subpath pair allows the application to recover from
-            # album renames or deletions.  Merge any of those fields back into
-            # the freshly scanned rows so the trash index remains authoritative.
-            preserved_rows: Dict[str, dict] = {}
-            preserved_fields = (
-                "original_rel_path",
-                "original_album_id",
-                "original_album_subpath",
-            )
-            try:
-                db_root = library_root if library_root else root
-                album_path: str | None = None
-                # Only allow read_all() when we are directly indexing the Recently
-                # Deleted root. If album_path resolution fails relative to a
-                # library_root, we must not fall back to a global read.
-                allow_read_all = not bool(library_root)
-                if library_root:
-                    try:
-                        album_path = root.resolve().relative_to(library_root.resolve()).as_posix()
-                    except (OSError, ValueError):
-                        # Resolution failed: do not attempt a global read_all().
-                        album_path = None
-                        allow_read_all = False
-                store = get_global_repository(db_root)
-                if album_path:
-                    row_iter = store.read_album_assets(album_path, include_subalbums=True)
-                elif allow_read_all:
-                    row_iter = store.read_all()
-                else:
-                    # No safe way to scope the read; skip merging preserved rows.
-                    row_iter = ()
-                for old_row in row_iter:
-                    rel_value = old_row.get("rel")
-                    if rel_value is None:
-                        continue
-                    if not any(field in old_row for field in preserved_fields):
-                        continue
-                    preserved_rows[str(rel_value)] = old_row
-            except IPhotoError:
-                # If the old index is unavailable (missing or corrupted) we have
-                # nothing to merge, therefore the rescan falls back to fresh
-                # metadata produced by the worker.
-                preserved_rows = {}
-
-            if preserved_rows:
-                for new_row in materialised_rows:
-                    rel_value = new_row.get("rel")
-                    if rel_value is None:
-                        continue
-                    cached_row = preserved_rows.get(str(rel_value))
-                    if cached_row is None:
-                        continue
-                    for field in preserved_fields:
-                        if field in cached_row:
-                            new_row[field] = cached_row[field]
+        # Delegate trash-restore metadata merge to the application use case.
+        # This removes the inline business logic from the Qt service layer.
+        materialised_rows = self._merge_trash_uc.execute(
+            materialised_rows, root, library_root
+        )
 
         try:
             # Persist the freshly computed index snapshot immediately so future
@@ -529,74 +415,6 @@ class LibraryUpdateService(QObject):
     def _library_manager(self) -> Optional["LibraryManager"]:
         return self._library_manager_getter()
 
-    def _mark_album_stale(self, path: Path) -> None:
-        try:
-            normalised = self._normalise_path(path)
-        except ValueError:
-            return
-        self._stale_album_roots[str(normalised)] = path
-
-    def _consume_forced_reload(self, path: Path) -> bool:
-        try:
-            normalised = self._normalise_path(path)
-        except ValueError:
-            return False
-        key = str(normalised)
-        if key not in self._stale_album_roots:
-            return False
-        self._stale_album_roots.pop(key, None)
-        return True
-
-    def _collect_album_roots_from_pairs(self, pairs: List[Tuple[Path, Path]]) -> Set[Path]:
-        if not pairs:
-            return set()
-
-        library = self._library_manager()
-        if library is None:
-            return set()
-        library_root = library.root()
-        if library_root is None:
-            return set()
-
-        library_root_norm = self._normalise_path(library_root)
-
-        affected: Set[Path] = set()
-        for original, target in pairs:
-            for candidate in (original, target):
-                album_root = self._locate_album_root(candidate.parent, library_root_norm)
-                if album_root is not None:
-                    affected.add(album_root)
-        return affected
-
-    def _locate_album_root(self, start: Path, library_root: Path) -> Optional[Path]:
-        try:
-            candidate = self._normalise_path(start)
-        except ValueError:
-            candidate = start
-
-        key = str(candidate)
-        cached = self._album_root_cache.get(key, ...)
-        if cached is not ...:
-            return cached
-
-        visited: List[Path] = []
-        current = candidate
-        while True:
-            visited.append(current)
-            work_dir = current / WORK_DIR_NAME
-            if work_dir.exists():
-                album_root = current
-                break
-            if self._paths_equal(current, library_root) or current.parent == current:
-                album_root = None
-                break
-            current = current.parent
-
-        for entry in visited:
-            self._album_root_cache[str(entry)] = album_root
-
-        return album_root
-
     def _refresh_restored_album(self, album_root: Path, library_root: Optional[Path]) -> None:
         album_root = Path(album_root)
         if not album_root.exists():
@@ -616,17 +434,15 @@ class LibraryUpdateService(QObject):
             current_album = self._current_album_getter()
             current_root = current_album.root if current_album is not None else None
 
-            if current_root is not None and self._paths_equal(current_root, path):
-                force_reload = self._consume_forced_reload(path)
-                self.assetReloadRequested.emit(current_root, False, force_reload)
-                return
+            # Delegate reload decision to TrashService.
+            should_reload, should_reload_as_lib, _ = self._trash_service.compute_restore_reload_action(
+                path, current_root, library_root
+            )
 
-            if (
-                library_root is not None
-                and current_root is not None
-                and self._paths_equal(current_root, library_root)
-                and self._path_is_descendant(path, library_root)
-            ):
+            if should_reload:
+                force_reload = self._move_bookkeeping.consume_forced_reload(path)
+                self.assetReloadRequested.emit(current_root, False, force_reload)
+            elif should_reload_as_lib:
                 self.assetReloadRequested.emit(current_root, False, False)
 
         def _on_error(path: Path, message: str) -> None:
@@ -644,37 +460,11 @@ class LibraryUpdateService(QObject):
         )
 
     def _build_restore_rescan_task_id(self, album_root: Path) -> str:
-        normalised = self._normalise_path(album_root)
-        return f"restore-rescan:{normalised}:{uuid.uuid4().hex}"
-
-    def _normalise_path(self, path: Optional[Path]) -> Path:
-        if path is None:
-            raise ValueError("Cannot normalise a null path.")
         try:
-            return path.resolve()
+            normalised = album_root.resolve()
         except OSError:
-            return path
-
-    def _paths_equal(self, left: Path, right: Path) -> bool:
-        if left == right:
-            return True
-        return self._normalise_path(left) == self._normalise_path(right)
-
-    def _path_is_descendant(self, candidate: Path, ancestor: Path) -> bool:
-        try:
-            candidate_norm = self._normalise_path(candidate)
-            ancestor_norm = self._normalise_path(ancestor)
-        except ValueError:
-            return False
-
-        if candidate_norm == ancestor_norm:
-            return True
-
-        try:
-            candidate_norm.relative_to(ancestor_norm)
-        except ValueError:
-            return False
-        return True
+            normalised = album_root
+        return f"restore-rescan:{normalised}:{uuid.uuid4().hex}"
 
 
 __all__ = ["LibraryUpdateService", "MoveOperationResult"]

@@ -18,6 +18,7 @@ from .index_sync_service import ensure_links as _ensure_links
 from .models.album import Album
 from .models.types import LiveGroup
 from .path_normalizer import compute_album_path as _compute_album_path
+from .application.policies.album_path_policy import AlbumPathPolicy as _AlbumPathPolicy
 from .utils.logging import get_logger
 
 LOGGER = get_logger()
@@ -76,23 +77,14 @@ def open_album(
             from .io.scanner_adapter import scan_album
             rows = list(scan_album(root, include, exclude))
             if library_root and album_path:
-                for row in rows:
-                    if "rel" in row:
-                        row["rel"] = f"{album_path}/{row['rel']}"
+                rows = _AlbumPathPolicy().prefix_rows(rows, album_path)
             store.write_rows(rows)
         elif existing_count == 0:
             rows = []
 
     if rows is not None:
         if album_path:
-            prefix = album_path + "/"
-            album_rows = [
-                {**row, "rel": row["rel"][len(prefix):]}
-                if row.get("rel", "").startswith(prefix)
-                else row
-                for row in rows
-                if row.get("rel", "").startswith(prefix) or "/" not in row.get("rel", "")
-            ]
+            album_rows = _AlbumPathPolicy().strip_album_prefix(rows, album_path)
             _ensure_links(root, album_rows, library_root=library_root)
         else:
             _ensure_links(root, rows, library_root=library_root)
@@ -158,9 +150,7 @@ def scan_specific_files(
 
     album_path = _compute_album_path(root, library_root)
     if album_path:
-        for row in rows:
-            if "rel" in row:
-                row["rel"] = f"{album_path}/{row['rel']}"
+        rows = _AlbumPathPolicy().prefix_rows(rows, album_path)
 
     db_root = library_root if library_root else root
     store = get_global_repository(db_root)

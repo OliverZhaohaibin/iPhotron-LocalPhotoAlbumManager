@@ -15,7 +15,6 @@ unit and integration coverage:
 
 from __future__ import annotations
 
-import importlib.util
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 import pytest

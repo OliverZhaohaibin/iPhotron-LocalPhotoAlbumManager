@@ -83,12 +83,13 @@ class AlbumPathPolicy:
         return result
 
     def strip_album_prefix(self, rows: List[dict], album_path: str) -> List[dict]:
-        """Return rows whose ``rel`` starts with *album_path*, with the prefix removed.
+        """Return rows scoped to *album_path* with matching prefixes removed.
 
-        Only rows directly under *album_path* (or at its root) are returned.
-        Rows belonging to deeper nested albums (those whose ``rel`` still contains
-        a ``/`` after stripping the prefix) are preserved as-is so nested-album
-        scenarios continue to work.
+        For rows whose ``rel`` starts with ``<album_path>/``, a copy of the row is
+        returned with that prefix stripped from ``rel``. Rows whose ``rel`` does
+        not start with the prefix are still kept unchanged when they are already
+        leaf-level paths (that is, they contain no ``/``). Unprefixed rows that
+        contain ``/`` are excluded from the result.
         """
         if not album_path:
             return rows

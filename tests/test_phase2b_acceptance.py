@@ -11,8 +11,7 @@ Covers the issues identified in evaluate step2.md:
 
 from __future__ import annotations
 
-from pathlib import Path
-from unittest.mock import MagicMock, call, patch
+from unittest.mock import MagicMock, patch
 import pytest
 
 # ---------------------------------------------------------------------------

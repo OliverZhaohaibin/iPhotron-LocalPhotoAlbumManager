@@ -34,10 +34,8 @@ class PairLivePhotosUseCaseV2:
     ) -> None:
         self._library_root_getter = library_root_getter or (lambda: None)
 
-        from ...policies.album_path_policy import AlbumPathPolicy
         from ....infrastructure.scan.live_pairing_reader import LivePairingReader
 
-        self._path_policy = AlbumPathPolicy()
         self._pairing_reader = LivePairingReader()
 
     def execute(self, album_root: Path) -> "List[LiveGroup]":

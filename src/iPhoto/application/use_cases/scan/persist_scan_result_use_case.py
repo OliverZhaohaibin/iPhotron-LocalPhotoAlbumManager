@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Callable, List, Optional, Sequence
+from typing import Callable, Optional, Sequence
 
 _logger = logging.getLogger(__name__)
 

@@ -39,23 +39,14 @@ class MoveBookkeepingService:
     # ------------------------------------------------------------------
 
     def mark_stale(self, path: Path) -> None:
-        """Record *path* as potentially requiring a forced reload.
-
-        The normalised POSIX string of the resolved path is used as the key so
-        that logically identical paths with different representations are
-        de-duplicated.
-        """
+        """Record *path* as potentially requiring a forced reload."""
         key = self._key(path)
         if key is None:
             return
         self._stale_album_roots[key] = path
 
     def consume_forced_reload(self, path: Path) -> bool:
-        """Return ``True`` and consume the stale marker when *path* is stale.
-
-        After returning ``True`` the marker is removed so subsequent calls for
-        the same path return ``False``.
-        """
+        """Return ``True`` and consume the stale marker when *path* is stale."""
         key = self._key(path)
         if key is None or key not in self._stale_album_roots:
             return False
@@ -68,6 +59,123 @@ class MoveBookkeepingService:
         self._album_root_cache.clear()
 
     # ------------------------------------------------------------------
+    # Move rels computation
+    # ------------------------------------------------------------------
+
+    def compute_move_rels(
+        self,
+        moved_pairs: List[Tuple[Path, Path]],
+        library_root: Optional[Path],
+        source_root: Path,
+        destination_root: Path,
+    ) -> Tuple[List[str], List[str]]:
+        """Return ``(removed_rels, added_rels)`` for a completed move operation.
+
+        Each ``rel`` is the path relative to the library root (or album root
+        when no library root is set).  Pairs that cannot be made relative are
+        silently skipped.
+        """
+        removed: List[str] = []
+        added: List[str] = []
+
+        src_base = library_root if library_root else source_root
+        dst_base = library_root if library_root else destination_root
+
+        try:
+            src_base_norm = src_base.resolve()
+        except OSError:
+            src_base_norm = src_base
+
+        try:
+            dst_base_norm = dst_base.resolve()
+        except OSError:
+            dst_base_norm = dst_base
+
+        for original, target in moved_pairs:
+            try:
+                removed.append(original.resolve().relative_to(src_base_norm).as_posix())
+            except (OSError, ValueError):
+                pass
+            try:
+                added.append(target.resolve().relative_to(dst_base_norm).as_posix())
+            except (OSError, ValueError):
+                pass
+
+        return removed, added
+
+    # ------------------------------------------------------------------
+    # Refresh targets computation
+    # ------------------------------------------------------------------
+
+    def compute_refresh_targets(
+        self,
+        moved_pairs: List[Tuple[Path, Path]],
+        source_root: Path,
+        destination_root: Path,
+        current_root: Optional[Path],
+        library_root: Optional[Path],
+        *,
+        source_ok: bool,
+        destination_ok: bool,
+    ) -> Dict[str, Tuple[Path, bool]]:
+        """Compute which album roots need an index/links refresh after a move.
+
+        Returns a ``{path_key: (path, should_restart)}`` mapping.
+        ``should_restart`` is ``True`` when *path* matches the currently open
+        album so the view should reload.
+        """
+        from ...application.policies.library_scope_policy import LibraryScopePolicy
+
+        scope = LibraryScopePolicy()
+        refresh_targets: Dict[str, Tuple[Path, bool]] = {}
+        blocked_restarts: Set[str] = set()
+
+        def _record(path: Optional[Path], *, allow_restart: bool = True) -> None:
+            if path is None:
+                return
+            k = self._key(path) or str(path)
+            self.mark_stale(path)
+            if not allow_restart:
+                blocked_restarts.add(k)
+            should_restart = bool(
+                allow_restart
+                and k not in blocked_restarts
+                and current_root is not None
+                and scope.paths_equal(current_root, path)
+            )
+            existing = refresh_targets.get(k)
+            if existing is None or (not existing[1] and should_restart):
+                refresh_targets[k] = (path, should_restart)
+
+        if source_ok:
+            _record(source_root, allow_restart=False)
+        if destination_ok:
+            _record(destination_root)
+
+        if library_root is not None:
+            additional_roots = self.collect_album_roots_from_pairs(moved_pairs, library_root)
+            for extra_root in additional_roots:
+                _record(extra_root)
+
+            # Check if the library root itself is touched by this move.
+            touched_library = False
+            if source_ok and scope.paths_equal(source_root, library_root):
+                touched_library = True
+            if destination_ok and scope.paths_equal(destination_root, library_root):
+                touched_library = True
+            if not touched_library:
+                for original, target in moved_pairs:
+                    if scope.is_within_library(original, library_root) or scope.is_within_library(
+                        target, library_root
+                    ):
+                        touched_library = True
+                        break
+            if touched_library:
+                _record(library_root)
+
+        return refresh_targets
+
+    # ------------------------------------------------------------------
     # Album root location
     # ------------------------------------------------------------------
 
@@ -76,14 +184,7 @@ class MoveBookkeepingService:
         start: Path,
         library_root: Path,
     ) -> Optional[Path]:
-        """Walk upwards from *start* to find the nearest album root.
-
-        An album root is identified by the presence of the ``WORK_DIR_NAME``
-        (``.iPhoto``) directory.  The search stops at *library_root*.
-
-        Results are cached so that repeated look-ups for the same starting
-        path are cheap.
-        """
+        """Walk upwards from *start* to find the nearest album root."""
         try:
             candidate = start.resolve()
         except (OSError, ValueError):
@@ -123,12 +224,7 @@ class MoveBookkeepingService:
         pairs: List[Tuple[Path, Path]],
         library_root: Path,
     ) -> Set[Path]:
-        """Return the set of album roots touched by *pairs* within *library_root*.
-
-        For each (original, target) path pair, both the original and target
-        directories are checked.  Only album roots that lie inside
-        *library_root* are included in the result.
-        """
+        """Return the set of album roots touched by *pairs* within *library_root*."""
         if not pairs:
             return set()
 
@@ -154,21 +250,12 @@ class MoveBookkeepingService:
         moved_pairs: List[Tuple[Path, Path]],
         library_root: Optional[Path],
     ) -> List[Path]:
-        """Return album roots that should be rescanned after a restore operation.
+        """Return album roots that should be rescanned after a restore operation."""
+        from ...application.policies.library_scope_policy import LibraryScopePolicy
 
-        Each file restored from the trash lands in ``destination``.  Its
-        *parent* is the album directory that needs to be rescanned.  Only
-        destinations that fall inside *library_root* are included.
-        """
-        if library_root is None:
-            library_root_norm: Optional[Path] = None
-        else:
-            try:
-                library_root_norm = library_root.resolve()
-            except (OSError, ValueError):
-                library_root_norm = library_root
-
+        scope = LibraryScopePolicy()
         unique: Dict[str, Path] = {}
+
         for _, destination in moved_pairs:
             album_root = Path(destination).parent
             try:
@@ -176,15 +263,12 @@ class MoveBookkeepingService:
             except (OSError, ValueError):
                 album_norm = album_root
 
-            if library_root_norm is not None:
-                try:
-                    album_norm.relative_to(library_root_norm)
-                except ValueError:
-                    LOGGER.debug(
-                        "compute_restore_rescan_targets: %s outside library; skipping",
-                        album_norm,
-                    )
-                    continue
+            if library_root is not None and not scope.is_within_library(album_norm, library_root):
+                LOGGER.debug(
+                    "compute_restore_rescan_targets: %s outside library; skipping",
+                    album_norm,
+                )
+                continue
 
             key = str(album_norm)
             if key not in unique:

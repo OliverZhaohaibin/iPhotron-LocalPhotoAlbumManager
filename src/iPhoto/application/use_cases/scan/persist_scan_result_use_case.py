@@ -41,12 +41,25 @@ class PersistScanResultUseCase:
         rows: Sequence[dict],
         *,
         library_root: Optional[Path] = None,
+        album_path: Optional[str] = None,
     ) -> None:
-        """Persist *rows* for *album_root* and refresh associated caches."""
+        """Persist *rows* for *album_root* and refresh associated caches.
+
+        When *album_path* is provided the global-database model is active: rows
+        already carry library-scoped ``rel`` values but ``links.json`` must
+        reference album-relative paths.  The strip is handled here so callers
+        do not need to know about this difference.
+        """
 
         resolved_library_root = library_root or self._library_root_getter()
         _logger.info(
             "PersistScanResultUseCase: persisting %d rows for %s", len(rows), album_root
         )
         self._update_index_snapshot(album_root, rows, resolved_library_root)
-        self._ensure_links(album_root, rows, resolved_library_root)
+
+        if album_path:
+            from ...policies.album_path_policy import AlbumPathPolicy
+            album_rows = AlbumPathPolicy().strip_album_prefix(list(rows), album_path)
+            self._ensure_links(album_root, album_rows, resolved_library_root)
+        else:
+            self._ensure_links(album_root, rows, resolved_library_root)

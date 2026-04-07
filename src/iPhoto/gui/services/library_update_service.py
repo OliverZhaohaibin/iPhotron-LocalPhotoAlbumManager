@@ -5,7 +5,7 @@ from __future__ import annotations
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Dict, Iterable, List, Optional, Sequence, Set, Tuple, TYPE_CHECKING
+from typing import Callable, Dict, Iterable, List, Optional, Sequence, Tuple, TYPE_CHECKING
 
 from PySide6.QtCore import QObject, QTimer, Signal, Slot
 
@@ -95,6 +95,9 @@ class LibraryUpdateService(QObject):
         )
         self._merge_trash_uc = MergeTrashRestoreMetadataUseCase()
         self._move_bookkeeping = MoveBookkeepingService()
+
+        from ...application.policies.library_scope_policy import LibraryScopePolicy
+        self._scope_policy = LibraryScopePolicy()
 
     # ------------------------------------------------------------------
     # Public API used by :class:`~iPhoto.gui.facade.AppFacade`
@@ -234,20 +237,13 @@ class LibraryUpdateService(QObject):
         library = self._library_manager()
         library_root = library.root() if library is not None else None
 
-        # --- Emit unified result signal (Plan 1 §5.2) ---
-        removed_rels: List[str] = []
-        added_rels: List[str] = []
-        base = library_root if library_root else source_root
-        for original, target in moved_pairs:
-            try:
-                removed_rels.append(original.resolve().relative_to(base.resolve()).as_posix())
-            except (OSError, ValueError):
-                pass
-            dest_base = library_root if library_root else destination_root
-            try:
-                added_rels.append(target.resolve().relative_to(dest_base.resolve()).as_posix())
-            except (OSError, ValueError):
-                pass
+        current_album = self._current_album_getter()
+        current_root = current_album.root if current_album is not None else None
+
+        # Compute library-relative rels for the unified result signal.
+        removed_rels, added_rels = self._move_bookkeeping.compute_move_rels(
+            moved_pairs, library_root, source_root, destination_root
+        )
 
         result = MoveOperationResult(
             source_root=source_root,
@@ -262,83 +258,36 @@ class LibraryUpdateService(QObject):
         )
         self.moveOperationCompleted.emit(result)
 
-        # --- Legacy signal cascade (kept for backward compatibility) ---
-        current_album = self._current_album_getter()
-        current_root = current_album.root if current_album is not None else None
-
-        refresh_targets: Dict[str, Tuple[Path, bool]] = {}
-        blocked_restarts: Set[str] = set()
-
-        def _record_refresh(path: Optional[Path], *, allow_restart: bool = True) -> None:
-            if path is None:
-                return
-            try:
-                normalised = self._normalise_path(path)
-            except ValueError:
-                normalised = path
-            key = str(normalised)
-            self._move_bookkeeping.mark_stale(path)
-            if not allow_restart:
-                blocked_restarts.add(key)
-            should_restart = bool(
-                allow_restart
-                and key not in blocked_restarts
-                and current_root is not None
-                and self._paths_equal(current_root, path)
-            )
-            existing = refresh_targets.get(key)
-            if existing is None or (not existing[1] and should_restart):
-                refresh_targets[key] = (path, should_restart)
-
-        if source_ok:
-            _record_refresh(source_root, allow_restart=False)
-        if destination_ok:
-            _record_refresh(destination_root)
-
-        additional_roots = self._move_bookkeeping.collect_album_roots_from_pairs(
-            moved_pairs, library_root
-        ) if library_root is not None else set()
-        for extra_root in additional_roots:
-            _record_refresh(extra_root)
-
-        if library_root is not None:
-            touched_library = False
-            if source_ok and self._paths_equal(source_root, library_root):
-                touched_library = True
-            if destination_ok and self._paths_equal(destination_root, library_root):
-                touched_library = True
-            if not touched_library:
-                for original, target in moved_pairs:
-                    if self._path_is_descendant(original, library_root) or self._path_is_descendant(
-                        target, library_root
-                    ):
-                        touched_library = True
-                        break
-            if touched_library:
-                _record_refresh(library_root)
+        # Determine which albums need index/links refresh via the service.
+        refresh_targets = self._move_bookkeeping.compute_refresh_targets(
+            moved_pairs,
+            source_root,
+            destination_root,
+            current_root,
+            library_root,
+            source_ok=source_ok,
+            destination_ok=destination_ok,
+        )
 
         for candidate, should_restart in refresh_targets.values():
             self.indexUpdated.emit(candidate)
             self.linksUpdated.emit(candidate)
             if should_restart:
-                target_root = current_root if current_root and self._paths_equal(current_root, candidate) else candidate
                 force_reload = self._move_bookkeeping.consume_forced_reload(candidate)
-                self.assetReloadRequested.emit(target_root, False, force_reload)
+                self.assetReloadRequested.emit(current_root, False, force_reload)
 
-        if not is_restore_operation or not destination_ok:
-            return
-
-        if library is None:
+        # Trigger post-restore rescans when files were restored from the trash.
+        if not is_restore_operation or not destination_ok or library is None:
             return
 
         trash_root = library.deleted_directory()
         if trash_root is None:
             return
 
-        if not self._paths_equal(source_root, trash_root):
+        scope = self._scope_policy
+        if not scope.paths_equal(source_root, trash_root):
             return
 
-        # Delegate restore-rescan target computation to the application service.
         restore_targets = self._move_bookkeeping.compute_restore_rescan_targets(
             moved_pairs, library_root
         )
@@ -483,7 +432,7 @@ class LibraryUpdateService(QObject):
             current_album = self._current_album_getter()
             current_root = current_album.root if current_album is not None else None
 
-            if current_root is not None and self._paths_equal(current_root, path):
+            if current_root is not None and self._scope_policy.paths_equal(current_root, path):
                 force_reload = self._move_bookkeeping.consume_forced_reload(path)
                 self.assetReloadRequested.emit(current_root, False, force_reload)
                 return
@@ -491,8 +440,8 @@ class LibraryUpdateService(QObject):
             if (
                 library_root is not None
                 and current_root is not None
-                and self._paths_equal(current_root, library_root)
-                and self._path_is_descendant(path, library_root)
+                and self._scope_policy.paths_equal(current_root, library_root)
+                and self._scope_policy.is_within_library(path, library_root)
             ):
                 self.assetReloadRequested.emit(current_root, False, False)
 
@@ -511,37 +460,11 @@ class LibraryUpdateService(QObject):
         )
 
     def _build_restore_rescan_task_id(self, album_root: Path) -> str:
-        normalised = self._normalise_path(album_root)
-        return f"restore-rescan:{normalised}:{uuid.uuid4().hex}"
-
-    def _normalise_path(self, path: Optional[Path]) -> Path:
-        if path is None:
-            raise ValueError("Cannot normalise a null path.")
         try:
-            return path.resolve()
+            normalised = album_root.resolve()
         except OSError:
-            return path
-
-    def _paths_equal(self, left: Path, right: Path) -> bool:
-        if left == right:
-            return True
-        return self._normalise_path(left) == self._normalise_path(right)
-
-    def _path_is_descendant(self, candidate: Path, ancestor: Path) -> bool:
-        try:
-            candidate_norm = self._normalise_path(candidate)
-            ancestor_norm = self._normalise_path(ancestor)
-        except ValueError:
-            return False
-
-        if candidate_norm == ancestor_norm:
-            return True
-
-        try:
-            candidate_norm.relative_to(ancestor_norm)
-        except ValueError:
-            return False
-        return True
+            normalised = album_root
+        return f"restore-rescan:{normalised}:{uuid.uuid4().hex}"
 
 
 __all__ = ["LibraryUpdateService", "MoveOperationResult"]

@@ -321,6 +321,41 @@ class TestAppShimContract:
         mock_exec.assert_called_once()
         assert result is fake_album
 
+    def test_scan_specific_files_delegates_to_use_case(self, tmp_path):
+        """app.scan_specific_files must delegate to ScanSpecificFilesUseCase."""
+        album_dir = tmp_path / "album"
+        album_dir.mkdir()
+
+        import iPhoto.app as app
+
+        fake_file = album_dir / "photo.jpg"
+        fake_file.touch()
+
+        with patch(
+            "iPhoto.application.use_cases.asset.scan_specific_files_use_case"
+            ".ScanSpecificFilesUseCase.execute"
+        ) as mock_exec:
+            app.scan_specific_files(album_dir, [fake_file])
+
+        mock_exec.assert_called_once_with(album_dir, [fake_file], library_root=None)
+
+    def test_scan_specific_files_forwards_library_root(self, tmp_path):
+        """app.scan_specific_files must pass library_root to the use case."""
+        album_dir = tmp_path / "album"
+        lib_dir = tmp_path / "library"
+        album_dir.mkdir()
+        lib_dir.mkdir()
+
+        import iPhoto.app as app
+
+        with patch(
+            "iPhoto.application.use_cases.asset.scan_specific_files_use_case"
+            ".ScanSpecificFilesUseCase.execute"
+        ) as mock_exec:
+            app.scan_specific_files(album_dir, [], library_root=lib_dir)
+
+        mock_exec.assert_called_once_with(album_dir, [], library_root=lib_dir)
+
 
 # ---------------------------------------------------------------------------
 # RuntimeContext formal entry point
@@ -414,3 +449,120 @@ class TestOpenAlbumWorkflowUseCase:
                         result = uc.execute(album_dir)
 
         assert result is not None
+
+
+# ---------------------------------------------------------------------------
+# ScanSpecificFilesUseCase unit tests
+# ---------------------------------------------------------------------------
+
+
+class TestScanSpecificFilesUseCase:
+    """Unit tests for ScanSpecificFilesUseCase – no Qt required."""
+
+    def test_execute_calls_process_media_paths(self, tmp_path):
+        """execute() must pass classified image/video lists to process_media_paths."""
+        pytest.importorskip("PIL", reason="Pillow required for scanner_adapter")
+        pytest.importorskip("xxhash", reason="xxhash required for scanner_adapter")
+
+        from iPhoto.application.use_cases.asset.scan_specific_files_use_case import (
+            ScanSpecificFilesUseCase,
+        )
+        import iPhoto.io.scanner_adapter  # noqa: F401 - ensure module is loaded before patching
+
+        album = tmp_path / "album"
+        album.mkdir()
+
+        img = album / "photo.jpg"
+        vid = album / "clip.mp4"
+        other = album / "readme.txt"
+        for f in (img, vid, other):
+            f.touch()
+
+        mock_store = MagicMock()
+        mock_store.append_rows = MagicMock()
+
+        with patch(
+            "iPhoto.io.scanner_adapter.process_media_paths",
+            return_value=iter([]),
+        ) as mock_process, patch(
+            "iPhoto.cache.index_store.get_global_repository",
+            return_value=mock_store,
+        ), patch(
+            "iPhoto.path_normalizer.compute_album_path",
+            return_value=None,
+        ):
+            ScanSpecificFilesUseCase().execute(album, [img, vid, other])
+
+        call_args = mock_process.call_args
+        assert img in call_args.args[1]  # image list
+        assert vid in call_args.args[2]  # video list
+        assert other not in call_args.args[1]
+        assert other not in call_args.args[2]
+
+    def test_execute_applies_album_path_prefix(self, tmp_path):
+        """execute() must apply AlbumPathPolicy when album_path is returned."""
+        pytest.importorskip("PIL", reason="Pillow required for scanner_adapter")
+        pytest.importorskip("xxhash", reason="xxhash required for scanner_adapter")
+
+        from iPhoto.application.use_cases.asset.scan_specific_files_use_case import (
+            ScanSpecificFilesUseCase,
+        )
+        import iPhoto.io.scanner_adapter  # noqa: F401
+
+        album = tmp_path / "library" / "MyAlbum"
+        album.mkdir(parents=True)
+        lib = tmp_path / "library"
+
+        fake_rows = [{"rel": "photo.jpg"}]
+        mock_store = MagicMock()
+        mock_store.append_rows = MagicMock()
+
+        with patch(
+            "iPhoto.io.scanner_adapter.process_media_paths",
+            return_value=iter(fake_rows),
+        ), patch(
+            "iPhoto.cache.index_store.get_global_repository",
+            return_value=mock_store,
+        ), patch(
+            "iPhoto.path_normalizer.compute_album_path",
+            return_value="MyAlbum",
+        ), patch(
+            "iPhoto.application.policies.album_path_policy.AlbumPathPolicy.prefix_rows",
+            return_value=[{"rel": "MyAlbum/photo.jpg"}],
+        ) as mock_prefix:
+            ScanSpecificFilesUseCase().execute(album, [], library_root=lib)
+
+        mock_prefix.assert_called_once()
+        # The rows passed to append_rows should be the prefixed rows.
+        mock_store.append_rows.assert_called_once_with([{"rel": "MyAlbum/photo.jpg"}])
+
+    def test_execute_uses_library_root_for_store(self, tmp_path):
+        """execute() must use library_root as the index store key when provided."""
+        pytest.importorskip("PIL", reason="Pillow required for scanner_adapter")
+        pytest.importorskip("xxhash", reason="xxhash required for scanner_adapter")
+
+        from iPhoto.application.use_cases.asset.scan_specific_files_use_case import (
+            ScanSpecificFilesUseCase,
+        )
+        import iPhoto.io.scanner_adapter  # noqa: F401
+
+        album = tmp_path / "library" / "MyAlbum"
+        album.mkdir(parents=True)
+        lib = tmp_path / "library"
+
+        mock_store = MagicMock()
+        mock_store.append_rows = MagicMock()
+
+        with patch(
+            "iPhoto.io.scanner_adapter.process_media_paths",
+            return_value=iter([]),
+        ), patch(
+            "iPhoto.cache.index_store.get_global_repository",
+            return_value=mock_store,
+        ) as mock_repo, patch(
+            "iPhoto.path_normalizer.compute_album_path",
+            return_value=None,
+        ):
+            ScanSpecificFilesUseCase().execute(album, [], library_root=lib)
+
+        mock_repo.assert_called_once_with(lib)

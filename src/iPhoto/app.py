@@ -67,35 +67,15 @@ def scan_specific_files(
 ) -> None:
     """Generate index rows for specific files and merge them into the index.
 
-    This helper avoids a full directory scan, enabling efficient incremental
-    updates during batch import operations.
+    Compatibility shim – delegates to
+    :class:`~iPhoto.application.use_cases.asset.scan_specific_files_use_case.ScanSpecificFilesUseCase`.
     """
-    from .application.policies.album_path_policy import AlbumPathPolicy
-    from .cache.index_store import get_global_repository
-    from .io.scanner_adapter import process_media_paths
-    from .path_normalizer import compute_album_path as _compute_album_path
 
-    image_paths: list[Path] = []
-    video_paths: list[Path] = []
+    from .application.use_cases.asset.scan_specific_files_use_case import (
+        ScanSpecificFilesUseCase,
+    )
 
-    _IMAGE_EXTENSIONS = {".heic", ".heif", ".heifs", ".heicf", ".jpg", ".jpeg", ".png"}
-    _VIDEO_EXTENSIONS = {".mov", ".mp4", ".m4v", ".qt"}
-
-    for f in files:
-        if f.suffix.lower() in _IMAGE_EXTENSIONS:
-            image_paths.append(f)
-        elif f.suffix.lower() in _VIDEO_EXTENSIONS:
-            video_paths.append(f)
-
-    rows = list(process_media_paths(root, image_paths, video_paths))
-
-    album_path = _compute_album_path(root, library_root)
-    if album_path:
-        rows = AlbumPathPolicy().prefix_rows(rows, album_path)
-
-    db_root = library_root if library_root else root
-    store = get_global_repository(db_root)
-    store.append_rows(rows)
+    ScanSpecificFilesUseCase().execute(root, files, library_root=library_root)
 
 
 def pair(root: Path, library_root: Path | None = None) -> list[LiveGroup]:

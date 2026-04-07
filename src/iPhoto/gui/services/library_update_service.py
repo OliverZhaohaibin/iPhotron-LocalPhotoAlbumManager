@@ -23,6 +23,7 @@ from ...index_sync_service import (
 
 from ...application.use_cases.scan.rescan_album_use_case import RescanAlbumUseCase
 from ...application.use_cases.scan.pair_live_photos_use_case_v2 import PairLivePhotosUseCaseV2
+from ...application.use_cases.scan.persist_scan_result_use_case import PersistScanResultUseCase
 
 if TYPE_CHECKING:
     from ...library.manager import LibraryManager
@@ -86,6 +87,11 @@ class LibraryUpdateService(QObject):
 
         self._rescan_use_case = RescanAlbumUseCase(library_root_getter=_get_library_root)
         self._pair_use_case = PairLivePhotosUseCaseV2(library_root_getter=_get_library_root)
+        self._persist_use_case = PersistScanResultUseCase(
+            update_index_snapshot=_update_index_snapshot,
+            ensure_links=_ensure_links,
+            library_root_getter=_get_library_root,
+        )
 
     # ------------------------------------------------------------------
     # Public API used by :class:`~iPhoto.gui.facade.AppFacade`
@@ -172,7 +178,7 @@ class LibraryUpdateService(QObject):
 
         self.linksUpdated.emit(album.root)
         self.assetReloadRequested.emit(album.root, False, False)
-        return groups
+        return [g.__dict__ for g in groups]
 
     def announce_album_refresh(
         self,
@@ -461,8 +467,7 @@ class LibraryUpdateService(QObject):
             # existed before the rescan.  The worker keeps the result in memory,
             # therefore we flush the global index and ``links.json`` here to
             # mirror the historical facade behaviour before notifying listeners.
-            _update_index_snapshot(root, materialised_rows, library_root=library_root)
-            _ensure_links(root, materialised_rows, library_root=library_root)
+            self._persist_use_case.execute(root, materialised_rows, library_root=library_root)
         except IPhotoError as exc:
             self.errorRaised.emit(str(exc))
             self.scanFinished.emit(root, False)

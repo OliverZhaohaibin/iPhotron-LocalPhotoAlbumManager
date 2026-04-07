@@ -9,64 +9,98 @@ Responsibilities:
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
-from typing import Iterable, Optional, TYPE_CHECKING
+from typing import TYPE_CHECKING
+
+from ....config import DEFAULT_EXCLUDE, DEFAULT_INCLUDE
 
 if TYPE_CHECKING:  # pragma: no cover
-    from ....gui.services import (
-        AssetImportService,
-        AssetMoveService,
-        DeletionService,
-        RestorationService,
-    )
+    from ....gui.background_task_manager import BackgroundTaskManager
+    from ....gui.services.library_update_service import LibraryUpdateService
+    from ....library.manager import LibraryManager
+    from ....models.album import Album
 
 
-class AssetFacade:
-    """Encapsulates asset import, move, delete and restore operations."""
+class LibraryFacade:
+    """Encapsulates library scan, refresh and cancellation operations."""
 
     def __init__(
         self,
         *,
-        import_service: "AssetImportService",
-        move_service: "AssetMoveService",
-        deletion_service: "DeletionService",
-        restoration_service: "RestorationService",
+        library_update_service: LibraryUpdateService,
+        task_manager: BackgroundTaskManager,
+        current_album_getter: Callable[[], Album | None],
+        library_manager_getter: Callable[[], LibraryManager | None],
+        error_emitter: Callable[[str], None],
     ) -> None:
-        self._import_service = import_service
-        self._move_service = move_service
-        self._deletion_service = deletion_service
-        self._restoration_service = restoration_service
+        self._library_update_service = library_update_service
+        self._task_manager = task_manager
+        self._current_album_getter = current_album_getter
+        self._library_manager_getter = library_manager_getter
+        self._error = error_emitter
 
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
 
-    def import_files(
+    def replace_library_update_service(self, service: LibraryUpdateService) -> None:
+        """Replace the held update service. Intended for test injection only."""
+
+        self._library_update_service = service
+
+    def rescan_current(self) -> list[dict]:
+        """Synchronously rescan the active album."""
+
+        album = self._current_album_getter()
+        if album is None:
+            self._error("No album is currently open.")
+            return []
+        return self._library_update_service.rescan_album(album)
+
+    def rescan_current_async(self) -> None:
+        """Start a background rescan for the active album."""
+
+        album = self._current_album_getter()
+        if album is None:
+            self._error("No album is currently open.")
+            return
+
+        library_manager = self._library_manager_getter()
+        if library_manager is not None:
+            filters = album.manifest.get("filters", {}) if isinstance(album.manifest, dict) else {}
+            include = filters.get("include", DEFAULT_INCLUDE)
+            exclude = filters.get("exclude", DEFAULT_EXCLUDE)
+            library_manager.start_scanning(album.root, include, exclude)
+        else:
+            self._library_update_service.rescan_album_async(album)
+
+    def cancel_active_scans(self) -> None:
+        """Request cancellation of any in-flight scan operations."""
+
+        library_manager = self._library_manager_getter()
+        if library_manager is not None:
+            try:
+                library_manager.stop_scanning()
+                library_manager.pause_watcher()
+            except RuntimeError:
+                pass
+
+        self._library_update_service.cancel_active_scan()
+
+    def announce_album_refresh(
         self,
-        sources: Iterable[Path],
+        root: Path,
         *,
-        destination: Optional[Path] = None,
-        mark_featured: bool = False,
+        request_reload: bool = True,
+        force_reload: bool = False,
+        announce_index: bool = False,
     ) -> None:
-        """Import *sources* asynchronously and refresh the destination album."""
+        """Emit index refresh signals for *root* and optionally request a reload."""
 
-        self._import_service.import_files(
-            sources,
-            destination=destination,
-            mark_featured=mark_featured,
+        self._library_update_service.announce_album_refresh(
+            root,
+            request_reload=request_reload,
+            force_reload=force_reload,
+            announce_index=announce_index,
         )
-
-    def move_assets(self, sources: Iterable[Path], destination: Path) -> None:
-        """Move *sources* into *destination* and refresh the relevant albums."""
-
-        self._move_service.move_assets(sources, destination)
-
-    def delete_assets(self, sources: Iterable[Path]) -> None:
-        """Move *sources* into the dedicated deleted-items folder."""
-
-        self._deletion_service.delete_assets(sources)
-
-    def restore_assets(self, sources: Iterable[Path]) -> bool:
-        """Return ``True`` when at least one trashed asset restore is scheduled."""
-
-        return self._restoration_service.restore_assets(sources)

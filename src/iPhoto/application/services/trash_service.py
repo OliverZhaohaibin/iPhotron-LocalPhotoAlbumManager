@@ -81,4 +81,56 @@ class TrashService:
             return False
 
 
+    def compute_restore_reload_action(
+        self,
+        restored_path: Path,
+        current_root: Optional[Path],
+        library_root: Optional[Path],
+    ) -> tuple:
+        """Determine what UI reload action is needed after a restore rescan.
+
+        Returns a ``(should_reload_current, should_reload_as_library, force_reload)``
+        tuple:
+
+        * ``should_reload_current`` – ``True`` when *restored_path* is the
+          currently viewed album root and the view should reload.
+        * ``should_reload_as_library`` – ``True`` when the current view is the
+          library root and *restored_path* is a descendant, so the library view
+          should reload.
+        * ``force_reload`` – always ``False`` here; the caller may override it
+          by consuming a forced-reload marker before emitting the signal.
+        """
+        if current_root is None:
+            return False, False, False
+
+        try:
+            path_norm = restored_path.resolve()
+        except OSError:
+            path_norm = restored_path
+
+        try:
+            current_norm = current_root.resolve()
+        except OSError:
+            current_norm = current_root
+
+        # Case 1: the restored album is the currently open album.
+        if path_norm == current_norm:
+            return True, False, False
+
+        # Case 2: the current view is the library root and the restored path
+        # is a descendant of it.
+        if library_root is not None:
+            try:
+                lib_norm = library_root.resolve()
+            except OSError:
+                lib_norm = library_root
+
+            if current_norm == lib_norm and self.restore_origin_is_in_library(
+                restored_path, library_root
+            ):
+                return False, True, False
+
+        return False, False, False
+
+
 __all__ = ["TrashService"]

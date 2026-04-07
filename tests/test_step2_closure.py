@@ -9,14 +9,28 @@ unit and integration coverage:
 - LibraryScopePolicy.paths_equal
 - PersistScanResultUseCase album_path strip behaviour
 - Integration: global db + nested album, restore chain
+- ScanCoordinatorMixin is now a thin Qt adapter delegating to LibraryScanService
+- TrashService.compute_restore_reload_action drives restore reload decision
 """
 
 from __future__ import annotations
 
+import importlib.util
 from pathlib import Path
-from unittest.mock import MagicMock, call, patch
+from unittest.mock import MagicMock, patch
 import pytest
 
+
+# Helper: read source text from a repo module file without importing it
+# (avoids PySide6 dependency for structural/source-inspection tests).
+_REPO_ROOT = Path(__file__).parent.parent / "src"
+
+
+def _read_source(module_dotted_path: str) -> str:
+    """Return the source text of a module by its dotted path, without importing it."""
+    rel = module_dotted_path.replace(".", "/") + ".py"
+    full = _REPO_ROOT / rel
+    return full.read_text(encoding="utf-8")
 
 # ---------------------------------------------------------------------------
 # RescanAlbumUseCase – pure orchestration (mock delegates)
@@ -214,6 +228,8 @@ class TestAppCompatBridgePathPolicy:
 
     def test_open_album_prefix_rows_with_policy(self, tmp_path):
         """open_album should prefix scan rows via AlbumPathPolicy, not manually."""
+        pytest.importorskip("PySide6", reason="requires PySide6")
+
         lib = tmp_path / "lib"
         album = lib / "Photos"
         album.mkdir(parents=True)
@@ -233,6 +249,10 @@ class TestAppCompatBridgePathPolicy:
 
         mock_store.write_rows.side_effect = _write_rows
 
+        # Pre-import scanner_adapter so that mock.patch can locate it as an
+        # attribute of iPhoto.io (required before patching the submodule).
+        import iPhoto.io.scanner_adapter  # noqa: F401
+
         with patch("iPhoto.app.get_global_repository", return_value=mock_store), \
              patch("iPhoto.io.scanner_adapter.scan_album", return_value=iter(scan_rows)), \
              patch("iPhoto.app._ensure_links"):
@@ -247,6 +267,8 @@ class TestAppCompatBridgePathPolicy:
 
     def test_scan_specific_files_prefix_rows_with_policy(self, tmp_path):
         """scan_specific_files should prefix rows via AlbumPathPolicy."""
+        pytest.importorskip("PySide6", reason="requires PySide6")
+
         lib = tmp_path / "lib"
         album = lib / "Portraits"
         album.mkdir(parents=True)
@@ -258,6 +280,9 @@ class TestAppCompatBridgePathPolicy:
         mock_store.append_rows.side_effect = lambda rows: appended.extend(rows)
 
         scan_rows = [{"rel": "shot.jpg"}]
+
+        # Pre-import scanner_adapter so mock.patch can locate process_media_paths.
+        import iPhoto.io.scanner_adapter  # noqa: F401
 
         with patch("iPhoto.app.get_global_repository", return_value=mock_store), \
              patch("iPhoto.io.scanner_adapter.process_media_paths", return_value=iter(scan_rows)):
@@ -525,3 +550,263 @@ class TestRestoreChainIntegration:
         assert merge_called_with, "MergeTrashRestoreMetadataUseCase was not called"
         called_root, _ = merge_called_with[0]
         assert called_root == trash
+
+
+# ---------------------------------------------------------------------------
+# C3 – Structural tests: final step2 closure
+# ---------------------------------------------------------------------------
+
+class TestScanCoordinatorFinalClosure:
+    """Verify ScanCoordinatorMixin is now a thin Qt adapter.
+
+    Source-inspection tests read the file directly to avoid importing
+    scan_coordinator (which pulls in PySide6).
+    """
+
+    @property
+    def _source(self) -> str:
+        return _read_source("iPhoto.library.scan_coordinator")
+
+    def test_no_backend_pair_import_in_scan_coordinator(self):
+        """scan_coordinator.py must not directly call backend.pair(...)."""
+        assert "backend.pair(" not in self._source, (
+            "scan_coordinator must not call backend.pair() directly; "
+            "use LibraryScanService.on_scan_finished with a pair_callback"
+        )
+
+    def test_no_direct_app_backend_import_in_scan_coordinator(self):
+        """scan_coordinator.py must not import the legacy app backend directly."""
+        assert "from .. import app as backend" not in self._source, (
+            "scan_coordinator must not import app as backend"
+        )
+
+    def test_scan_coordinator_delegates_is_scanning_path_to_service(self):
+        """is_scanning_path must delegate to _scan_service."""
+        assert "_scan_service.is_scanning_path" in self._source, (
+            "is_scanning_path must delegate to self._scan_service"
+        )
+
+    def test_scan_coordinator_calls_mark_started(self):
+        """start_scanning must call _scan_service.mark_started."""
+        assert "_scan_service.mark_started" in self._source, (
+            "start_scanning must call self._scan_service.mark_started"
+        )
+
+    def test_scan_coordinator_calls_mark_stopped_on_stop(self):
+        """stop_scanning must call _scan_service.mark_stopped."""
+        assert "_scan_service.mark_stopped" in self._source, (
+            "stop_scanning must call self._scan_service.mark_stopped"
+        )
+
+    def test_scan_coordinator_on_scan_finished_uses_service(self):
+        """_on_scan_finished must call _scan_service.on_scan_finished."""
+        assert "_scan_service.on_scan_finished" in self._source, (
+            "_on_scan_finished must delegate to self._scan_service.on_scan_finished"
+        )
+
+    def test_scan_coordinator_on_scan_error_uses_service(self):
+        """_on_scan_error must call _scan_service.on_scan_error."""
+        assert "_scan_service.on_scan_error" in self._source, (
+            "_on_scan_error must delegate to self._scan_service.on_scan_error"
+        )
+
+
+class TestLibraryScanServiceFinalClosure:
+    """Verify LibraryScanService is the true scan owner."""
+
+    def test_has_on_scan_finished(self):
+        from iPhoto.application.services.library_scan_service import LibraryScanService
+
+        assert hasattr(LibraryScanService, "on_scan_finished")
+
+    def test_has_on_scan_error(self):
+        from iPhoto.application.services.library_scan_service import LibraryScanService
+
+        assert hasattr(LibraryScanService, "on_scan_error")
+
+    def test_has_should_skip_start(self):
+        from iPhoto.application.services.library_scan_service import LibraryScanService
+
+        assert hasattr(LibraryScanService, "should_skip_start")
+
+    def test_has_read_live_rows_from_store(self):
+        from iPhoto.application.services.library_scan_service import LibraryScanService
+
+        assert hasattr(LibraryScanService, "read_live_rows_from_store")
+
+    def test_has_resolve_live_query_root(self):
+        from iPhoto.application.services.library_scan_service import LibraryScanService
+
+        assert hasattr(LibraryScanService, "resolve_live_query_root")
+
+    def test_on_scan_finished_calls_pair_callback(self, tmp_path):
+        from iPhoto.application.services.library_scan_service import LibraryScanService
+
+        svc = LibraryScanService()
+        svc.mark_started(tmp_path)
+
+        pair_calls: list = []
+        svc.on_scan_finished(
+            tmp_path, None,
+            pair_callback=lambda r, lib: pair_calls.append((r, lib))
+        )
+
+        assert pair_calls == [(tmp_path, None)]
+        assert not svc.is_scanning()
+
+    def test_on_scan_finished_no_callback(self, tmp_path):
+        from iPhoto.application.services.library_scan_service import LibraryScanService
+
+        svc = LibraryScanService()
+        svc.mark_started(tmp_path)
+        svc.on_scan_finished(tmp_path, None)  # must not raise
+        assert not svc.is_scanning()
+
+    def test_on_scan_error_clears_state(self, tmp_path):
+        from iPhoto.application.services.library_scan_service import LibraryScanService
+
+        svc = LibraryScanService()
+        svc.mark_started(tmp_path)
+        svc.on_scan_error(tmp_path)
+        assert not svc.is_scanning()
+        assert svc.current_scan_root() is None
+
+    def test_should_skip_start_true_when_same_root(self, tmp_path):
+        from iPhoto.application.services.library_scan_service import LibraryScanService
+
+        svc = LibraryScanService()
+        svc.mark_started(tmp_path)
+        assert svc.should_skip_start(tmp_path) is True
+
+    def test_should_skip_start_false_when_different_root(self, tmp_path):
+        from iPhoto.application.services.library_scan_service import LibraryScanService
+
+        other = tmp_path / "other"
+        other.mkdir()
+        svc = LibraryScanService()
+        svc.mark_started(tmp_path)
+        assert svc.should_skip_start(other) is False
+
+    def test_should_skip_start_false_when_not_scanning(self, tmp_path):
+        from iPhoto.application.services.library_scan_service import LibraryScanService
+
+        svc = LibraryScanService()
+        assert svc.should_skip_start(tmp_path) is False
+
+    def test_pair_callback_exception_does_not_propagate(self, tmp_path):
+        from iPhoto.application.services.library_scan_service import LibraryScanService
+
+        svc = LibraryScanService()
+        svc.mark_started(tmp_path)
+
+        def _bad_callback(r, lib):
+            raise RuntimeError("pairing failed")
+
+        svc.on_scan_finished(tmp_path, None, pair_callback=_bad_callback)  # must not raise
+        assert not svc.is_scanning()
+
+    def test_resolve_live_query_root_none_returns_scan_root(self, tmp_path):
+        from iPhoto.application.services.library_scan_service import LibraryScanService
+
+        svc = LibraryScanService()
+        result = svc.resolve_live_query_root(tmp_path, None)
+        assert result == tmp_path
+
+    def test_resolve_live_query_root_same_path(self, tmp_path):
+        from iPhoto.application.services.library_scan_service import LibraryScanService
+
+        svc = LibraryScanService()
+        result = svc.resolve_live_query_root(tmp_path, tmp_path)
+        assert result == tmp_path
+
+    def test_resolve_live_query_root_descendant(self, tmp_path):
+        from iPhoto.application.services.library_scan_service import LibraryScanService
+
+        sub = tmp_path / "sub"
+        sub.mkdir()
+        svc = LibraryScanService()
+        result = svc.resolve_live_query_root(tmp_path, sub)
+        assert result == sub
+
+    def test_resolve_live_query_root_unrelated_returns_none(self, tmp_path):
+        from iPhoto.application.services.library_scan_service import LibraryScanService
+
+        a = tmp_path / "a"
+        b = tmp_path / "b"
+        a.mkdir()
+        b.mkdir()
+        svc = LibraryScanService()
+        result = svc.resolve_live_query_root(a, b)
+        assert result is None
+
+
+class TestTrashServiceFinalClosure:
+    """Verify TrashService.compute_restore_reload_action drives the reload decision."""
+
+    def test_has_compute_restore_reload_action(self):
+        from iPhoto.application.services.trash_service import TrashService
+
+        assert hasattr(TrashService, "compute_restore_reload_action")
+
+    def test_reload_current_when_path_matches(self, tmp_path):
+        from iPhoto.application.services.trash_service import TrashService
+
+        svc = TrashService()
+        should_reload, as_lib, _ = svc.compute_restore_reload_action(
+            tmp_path, tmp_path, None
+        )
+        assert should_reload is True
+        assert as_lib is False
+
+    def test_reload_as_lib_when_current_is_library_root(self, tmp_path):
+        from iPhoto.application.services.trash_service import TrashService
+
+        lib = tmp_path / "lib"
+        album = lib / "Album"
+        album.mkdir(parents=True)
+        svc = TrashService()
+        should_reload, as_lib, _ = svc.compute_restore_reload_action(
+            album, lib, lib
+        )
+        assert should_reload is False
+        assert as_lib is True
+
+    def test_no_reload_when_current_is_unrelated(self, tmp_path):
+        from iPhoto.application.services.trash_service import TrashService
+
+        lib = tmp_path / "lib"
+        album = lib / "Album"
+        unrelated = tmp_path / "unrelated"
+        album.mkdir(parents=True)
+        unrelated.mkdir()
+        svc = TrashService()
+        should_reload, as_lib, _ = svc.compute_restore_reload_action(
+            album, unrelated, lib
+        )
+        assert should_reload is False
+        assert as_lib is False
+
+    def test_no_reload_when_no_current_root(self, tmp_path):
+        from iPhoto.application.services.trash_service import TrashService
+
+        svc = TrashService()
+        should_reload, as_lib, _ = svc.compute_restore_reload_action(
+            tmp_path, None, None
+        )
+        assert should_reload is False
+        assert as_lib is False
+
+    def test_library_update_service_restore_uses_trash_service(self):
+        """_refresh_restored_album in library_update_service must use TrashService."""
+        source = _read_source("iPhoto.gui.services.library_update_service")
+        assert "_trash_service.compute_restore_reload_action" in source, (
+            "_refresh_restored_album must delegate reload decision to TrashService"
+        )
+
+    def test_library_update_service_no_inline_scope_policy_in_restore(self):
+        """_refresh_restored_album must not use _scope_policy directly for reload."""
+        source = _read_source("iPhoto.gui.services.library_update_service")
+        # Verify TrashService is used instead of inline scope_policy checks
+        assert "_trash_service.compute_restore_reload_action" in source, (
+            "_refresh_restored_album must use TrashService.compute_restore_reload_action"
+        )

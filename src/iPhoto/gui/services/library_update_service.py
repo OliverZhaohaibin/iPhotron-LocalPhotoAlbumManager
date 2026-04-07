@@ -97,7 +97,9 @@ class LibraryUpdateService(QObject):
         self._move_bookkeeping = MoveBookkeepingService()
 
         from ...application.policies.library_scope_policy import LibraryScopePolicy
+        from ...application.services.trash_service import TrashService
         self._scope_policy = LibraryScopePolicy()
+        self._trash_service = TrashService()
 
     # ------------------------------------------------------------------
     # Public API used by :class:`~iPhoto.gui.facade.AppFacade`
@@ -432,17 +434,15 @@ class LibraryUpdateService(QObject):
             current_album = self._current_album_getter()
             current_root = current_album.root if current_album is not None else None
 
-            if current_root is not None and self._scope_policy.paths_equal(current_root, path):
+            # Delegate reload decision to TrashService.
+            should_reload, should_reload_as_lib, _ = self._trash_service.compute_restore_reload_action(
+                path, current_root, library_root
+            )
+
+            if should_reload:
                 force_reload = self._move_bookkeeping.consume_forced_reload(path)
                 self.assetReloadRequested.emit(current_root, False, force_reload)
-                return
-
-            if (
-                library_root is not None
-                and current_root is not None
-                and self._scope_policy.paths_equal(current_root, library_root)
-                and self._scope_policy.is_within_library(path, library_root)
-            ):
+            elif should_reload_as_lib:
                 self.assetReloadRequested.emit(current_root, False, False)
 
         def _on_error(path: Path, message: str) -> None:

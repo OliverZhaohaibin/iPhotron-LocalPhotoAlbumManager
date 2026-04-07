@@ -51,7 +51,7 @@ All notable changes to **iPhotron** are documented in this file.
 - Eliminated duplicated focal-length/aperture suffixes when the lens string already contains mm notation.
 - Fixed the `ƒ` aperture format in the info panel display.
 
-#### 🐛 主要 Bug 修复
+#### 🐛 Fixes of major bugs
 - Fixed video rotation not refreshing immediately when changed in playback mode.
 - Fixed `ExternalToolError` not being caught explicitly during playback metadata enrichment, preventing silent failures.
 - Fixed `_restore_detail_video_preview` to correctly use `video_requires_adjusted_preview` and pass raw adjustments on the native render path.
@@ -60,7 +60,7 @@ All notable changes to **iPhotron** are documented in this file.
 - Fixed GL `glBindTexture` redundancy before `glGenerateMipmap` calls.
 - Used `ctypes c_uint` GL id buffers to avoid numpy dtype warnings on Windows.
 - Fixed `QShortcut` parent widget to use the top-level window instead of a nested widget, preventing shortcuts from silently failing.
-- 修复了若干其他细微 Bug，提升整体稳定性。
+- Fixed several other minor bugs and improved overall stability.
 
 ---
 

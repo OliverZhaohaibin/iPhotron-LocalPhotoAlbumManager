@@ -9,14 +9,20 @@ Responsibilities:
 
 from __future__ import annotations
 
+import logging
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable, List, Optional, TYPE_CHECKING
+from typing import TYPE_CHECKING
+
+from ....errors import IPhotoError
 
 if TYPE_CHECKING:  # pragma: no cover
-    from ....models.album import Album
-    from ....gui.services.library_update_service import LibraryUpdateService
     from ....gui.services.album_metadata_service import AlbumMetadataService
+    from ....gui.services.library_update_service import LibraryUpdateService
     from ....library.manager import LibraryManager
+    from ....models.album import Album
+
+_logger = logging.getLogger(__name__)
 
 
 class AlbumFacade:
@@ -26,34 +32,75 @@ class AlbumFacade:
         self,
         *,
         backend_bridge,
-        metadata_service: "AlbumMetadataService",
-        library_update_service: "LibraryUpdateService",
-        current_album_getter: Callable[[], Optional["Album"]],
-        library_manager_getter: Callable[[], Optional["LibraryManager"]],
+        metadata_service: AlbumMetadataService,
+        library_update_service: LibraryUpdateService,
+        current_album_getter: Callable[[], Album | None],
+        current_album_setter: Callable[[Album | None], None],
+        library_manager_getter: Callable[[], LibraryManager | None],
         error_emitter: Callable[[str], None],
         album_opened_emitter: Callable[[Path], None],
         load_started_emitter: Callable[[Path], None],
         load_finished_emitter: Callable[[Path, bool], None],
+        rescan_trigger: Callable[[], None],
     ) -> None:
         self._backend = backend_bridge
         self._metadata_service = metadata_service
         self._library_update_service = library_update_service
         self._current_album_getter = current_album_getter
+        self._current_album_setter = current_album_setter
         self._library_manager_getter = library_manager_getter
         self._error = error_emitter
         self._album_opened = album_opened_emitter
         self._load_started = load_started_emitter
         self._load_finished = load_finished_emitter
+        self._rescan_trigger = rescan_trigger
 
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
 
-    def open_album(self, root: Path) -> Optional["Album"]:
-        """Delegate to the facade's open_album implementation."""
-        # NOTE: The real implementation lives in AppFacade.open_album and
-        # delegates here.  This method is the hook point for future migration.
-        raise NotImplementedError("Delegate to AppFacade.open_album until migrated")
+    def open_album(self, root: Path) -> Album | None:
+        """Open *root* and trigger background work as needed."""
+
+        from ....cache.index_store import get_global_repository
+
+        library_manager = self._library_manager_getter()
+        library_root = library_manager.root() if library_manager else None
+
+        try:
+            album = self._backend.open_album(
+                root,
+                autoscan=False,
+                library_root=library_root,
+                hydrate_index=False,
+            )
+        except IPhotoError as exc:
+            self._error(str(exc))
+            return None
+
+        self._current_album_setter(album)
+        album_root = album.root
+        self._album_opened(album_root)
+
+        # Check if the index is empty and trigger a background scan if so.
+        index_root = library_root if library_root else album_root
+        has_assets = False
+        try:
+            store = get_global_repository(index_root)
+            next(store.read_all())
+            has_assets = True
+        except (StopIteration, IPhotoError):
+            pass
+
+        is_already_scanning = (
+            library_manager is not None and library_manager.is_scanning_path(album_root)
+        )
+        if not has_assets and not is_already_scanning:
+            self._rescan_trigger()
+
+        self._load_started(album_root)
+        self._load_finished(album_root, True)
+        return album
 
     def set_cover(self, rel: str) -> bool:
         """Set the album cover to *rel* and persist the manifest."""
@@ -73,7 +120,7 @@ class AlbumFacade:
             return False
         return self._metadata_service.toggle_featured(album, ref)
 
-    def pair_live_current(self) -> List[dict]:
+    def pair_live_current(self) -> list[dict]:
         """Rebuild Live Photo pairings for the active album."""
 
         album = self._current_album_getter()

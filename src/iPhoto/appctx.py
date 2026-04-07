@@ -3,105 +3,98 @@
 Compatibility shell.
 
 This module retains the ``AppContext`` name and API surface for backward
-compatibility.  New dependency wiring must go into
-``bootstrap/container.py`` and new GUI session state must go into
-``presentation/qt/session/app_session.py``.  This file composes both and
-must not grow further.
+compatibility.  All dependency wiring is now delegated to
+``bootstrap/runtime_context.py`` (Phase 3).  ``AppContext`` acts as a thin
+proxy that forwards every public attribute to the underlying
+:class:`~iPhoto.bootstrap.runtime_context.RuntimeContext` instance.
+
+Do NOT add business logic or new dependency construction to this file.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from pathlib import Path
-from typing import List, TYPE_CHECKING
 import logging
-from typing import Optional
+from pathlib import Path
+from typing import TYPE_CHECKING, List
 
-from .di.container import DependencyContainer
-from .bootstrap.container import build_container
-
-if TYPE_CHECKING:  # pragma: no cover - only for type checking
+if TYPE_CHECKING:  # pragma: no cover
+    from .bootstrap.runtime_context import RuntimeContext
+    from .di.container import DependencyContainer
     from .gui.facade import AppFacade
+    from .gui.ui.theme_manager import ThemeManager
     from .library.manager import LibraryManager
+    from .presentation.qt.session.app_session import AppSession
     from .settings.manager import SettingsManager
 
 _logger = logging.getLogger(__name__)
 
 
-def _create_facade() -> "AppFacade":
-    """Factory that imports :class:`AppFacade` lazily to avoid circular imports."""
-
-    from .gui.facade import AppFacade  # Local import prevents circular dependency
-
-    return AppFacade()
-
-
-def _create_settings_manager():
-    from .settings.manager import SettingsManager
-
-    manager = SettingsManager()
-    manager.load()
-    return manager
-
-
-def _create_library_manager():
-    from .library.manager import LibraryManager
-
-    return LibraryManager()
-
-
-@dataclass
 class AppContext:
-    """Compatibility shell: composes the DI container and GUI session state.
+    """Compatibility shell: delegates all wiring to :class:`RuntimeContext`.
 
-    New code must access dependencies via ``context.container`` and session
-    state via ``context.session``.  Direct attributes on this class are
-    preserved for backward compatibility only.
+    New code must use :class:`~iPhoto.bootstrap.runtime_context.RuntimeContext`
+    directly.  This class exists solely to preserve the ``AppContext`` API
+    surface for callers written before Phase 3.
     """
 
-    settings: "SettingsManager" = field(default_factory=_create_settings_manager)
-    library: "LibraryManager" = field(default_factory=_create_library_manager)
-    facade: "AppFacade" = field(default_factory=_create_facade)
-    recent_albums: List[Path] = field(default_factory=list)
-    theme: "ThemeManager" = field(init=False)
-
-    # DI Container – assembled by bootstrap/container.py
-    container: DependencyContainer = field(default_factory=build_container)
-    defer_startup_tasks: bool = False
-    _pending_basic_library_path: Path | None = field(init=False, default=None, repr=False)
-
-    def __post_init__(self) -> None:
-        from .errors import LibraryError
+    def __init__(self, defer_startup_tasks: bool = False) -> None:
+        from .bootstrap.runtime_context import RuntimeContext
         from .gui.ui.theme_manager import ThemeManager
-        from .presentation.qt.session.app_session import AppSession
 
-        self.theme = ThemeManager(self.settings)
+        self.defer_startup_tasks = defer_startup_tasks
+        self._pending_basic_library_path: Path | None = None
+
+        # RuntimeContext is the single authoritative dependency-wiring point.
+        self._runtime: RuntimeContext = RuntimeContext.create(defer_startup=defer_startup_tasks)
+
+        # ThemeManager is GUI-layer state and lives here rather than in RuntimeContext.
+        self.theme: ThemeManager = ThemeManager(self._runtime.settings)
         self.theme.apply_theme()
 
-        # ``AppFacade`` needs to observe the shared library manager so that
-        # manifest writes performed while browsing nested albums can keep the
-        # global "Favorites" collection in sync.
-        self.facade.bind_library(self.library)
+        # Mirror recent_albums so existing callers can read / mutate the list.
+        self.recent_albums: List[Path] = list(self._runtime.recent_albums)
 
-        # Build the canonical session object.  Startup tasks are deferred to
-        # the session so new code can interact with ``context.session`` directly.
-        self.session = AppSession(
-            settings=self.settings,
-            library=self.library,
-            facade=self.facade,
-            defer_startup_tasks=self.defer_startup_tasks,
-        )
-        # Sync recent_albums back from session after it loads persisted history.
-        self.recent_albums = self.session.recent_albums
+    # ------------------------------------------------------------------
+    # Dependency proxies – forward to RuntimeContext
+    # ------------------------------------------------------------------
+
+    @property
+    def settings(self) -> "SettingsManager":
+        """Application settings manager."""
+        return self._runtime.settings
+
+    @property
+    def library(self) -> "LibraryManager":
+        """Shared library manager."""
+        return self._runtime.library
+
+    @property
+    def facade(self) -> "AppFacade":
+        """Qt application facade."""
+        return self._runtime.facade
+
+    @property
+    def container(self) -> "DependencyContainer":
+        """DI container assembled by :func:`~iPhoto.bootstrap.container.build_container`."""
+        return self._runtime.container
+
+    @property
+    def session(self) -> "AppSession":
+        """Active application session."""
+        return self._runtime._session
+
+    # ------------------------------------------------------------------
+    # Lifecycle helpers
+    # ------------------------------------------------------------------
 
     def resume_startup_tasks(self) -> None:
         """Run deferred startup work such as binding the default library path."""
 
-        self.session.resume_startup_tasks()
-        self.recent_albums = self.session.recent_albums
+        self._runtime.resume_startup()
+        self.recent_albums = list(self._runtime.recent_albums)
 
     def remember_album(self, root: Path) -> None:
         """Track *root* in the recent albums list, keeping the most recent first."""
 
-        self.session.remember_album(root)
-        self.recent_albums = self.session.recent_albums
+        self._runtime.remember_album(root)
+        self.recent_albums = list(self._runtime.recent_albums)

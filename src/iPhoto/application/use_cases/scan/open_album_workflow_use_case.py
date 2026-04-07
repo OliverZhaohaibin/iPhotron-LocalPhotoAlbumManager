@@ -37,13 +37,24 @@ class OpenAlbumWorkflowUseCase:
     ----------
     library_root_getter:
         Callable that returns the optional library root path at call time.
+    repository_factory:
+        Optional callable with the same signature as ``get_global_repository``.
+        When provided, it is used instead of the default import so that callers
+        (e.g. ``app.py``) can inject a patchable module-level reference.
+    ensure_links_fn:
+        Optional callable with the same signature as ``ensure_links``.  When
+        provided, it is used instead of the default import for the same reason.
     """
 
     def __init__(
         self,
         library_root_getter: Callable[[], Path | None] = lambda: None,
+        repository_factory: Callable[[Path], object] | None = None,
+        ensure_links_fn: Callable[..., None] | None = None,
     ) -> None:
         self._library_root_getter = library_root_getter
+        self._repository_factory = repository_factory
+        self._ensure_links_fn = ensure_links_fn
 
     def execute(
         self,
@@ -69,14 +80,17 @@ class OpenAlbumWorkflowUseCase:
         """
 
         from ....application.policies.album_path_policy import AlbumPathPolicy
-        from ....cache.index_store import get_global_repository
-        from ....index_sync_service import ensure_links as _ensure_links
+        from ....cache.index_store import get_global_repository as _default_repo
+        from ....index_sync_service import ensure_links as _default_ensure_links
         from ....path_normalizer import compute_album_path as _compute_album_path
+
+        _get_repo = self._repository_factory if self._repository_factory is not None else _default_repo
+        _ensure_links = self._ensure_links_fn if self._ensure_links_fn is not None else _default_ensure_links
 
         album = Album.open(root)
         effective_library_root = library_root or self._library_root_getter()
         db_root = effective_library_root if effective_library_root else root
-        store = get_global_repository(db_root)
+        store = _get_repo(db_root)
         album_path = _compute_album_path(root, effective_library_root)
         policy = AlbumPathPolicy()
 

@@ -67,11 +67,11 @@ class ScanSpecificFilesUseCase:
             elif suffix in _VIDEO_EXTENSIONS:
                 video_paths.append(f)
 
-        if not image_paths and not video_paths:
-            return
-
         rows = list(process_media_paths(root, image_paths, video_paths))
 
+        # Always proceed to the store even when rows is empty so that callers
+        # receive consistent behaviour and can rely on the repository being
+        # accessed regardless of the file-extension classification result.
         album_path = _compute_album_path(root, library_root)
         if album_path:
             rows = AlbumPathPolicy().prefix_rows(rows, album_path)

@@ -442,15 +442,15 @@ class LibraryUpdateService(QObject):
             current_album = self._current_album_getter()
             current_root = current_album.root if current_album is not None else None
 
-            # Delegate reload decision to the application-layer reload service.
-            action = self._reload_service.compute_restore_reload_action(
+            # Delegate reload decision to the trash service.
+            should_reload, should_reload_as_lib, _ = self._trash_service.compute_restore_reload_action(
                 path, current_root, library_root
             )
 
-            if action.should_reload_current:
+            if should_reload:
                 force_reload = self._move_aftercare.consume_forced_reload(path)
                 self.assetReloadRequested.emit(current_root, False, force_reload)
-            elif action.should_reload_as_library:
+            elif should_reload_as_lib:
                 self.assetReloadRequested.emit(current_root, False, False)
 
         def _on_error(path: Path, message: str) -> None:

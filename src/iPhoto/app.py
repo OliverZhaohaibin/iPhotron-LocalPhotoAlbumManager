@@ -13,6 +13,9 @@ from __future__ import annotations
 from collections.abc import Callable
 from pathlib import Path
 
+from .cache.index_store import get_global_repository
+from .index_sync_service import ensure_links as _ensure_links
+from .models.album import Album
 from .models.types import LiveGroup
 from .utils.logging import get_logger
 
@@ -25,17 +28,23 @@ def open_album(
     library_root: Path | None = None,
     *,
     hydrate_index: bool = True,
-) -> "Album":
+) -> Album:
     """Open *root* and return the populated :class:`~iPhoto.models.album.Album`.
 
-    Compatibility shim - delegates to
+    Compatibility shim – delegates to
     :class:`~iPhoto.application.use_cases.scan.open_album_workflow_use_case.OpenAlbumWorkflowUseCase`.
+
+    The module-level ``get_global_repository`` and ``_ensure_links`` references
+    are forwarded so that tests can inject doubles via ``monkeypatch.setattr``.
     """
 
+    from .application.policies.album_path_policy import AlbumPathPolicy  # noqa: F401 - referenced by use case
     from .application.use_cases.scan.open_album_workflow_use_case import OpenAlbumWorkflowUseCase
-    from .models.album import Album  # noqa: F401 - re-exported for type hints
 
-    return OpenAlbumWorkflowUseCase().execute(
+    return OpenAlbumWorkflowUseCase(
+        repository_factory=get_global_repository,
+        ensure_links_fn=_ensure_links,
+    ).execute(
         root,
         autoscan=autoscan,
         library_root=library_root,

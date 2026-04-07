@@ -67,9 +67,6 @@ class ScanSpecificFilesUseCase:
             elif suffix in _VIDEO_EXTENSIONS:
                 video_paths.append(f)
 
-        if not image_paths and not video_paths:
-            return
-
         rows = list(process_media_paths(root, image_paths, video_paths))
 
         album_path = _compute_album_path(root, library_root)

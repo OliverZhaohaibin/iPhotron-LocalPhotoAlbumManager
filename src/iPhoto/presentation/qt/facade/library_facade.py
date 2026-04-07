@@ -44,6 +44,11 @@ class LibraryFacade:
     # Public API
     # ------------------------------------------------------------------
 
+    def replace_library_update_service(self, service: LibraryUpdateService) -> None:
+        """Replace the held update service. Intended for test injection only."""
+
+        self._library_update_service = service
+
     def rescan_current(self) -> list[dict]:
         """Synchronously rescan the active album."""
 
@@ -58,6 +63,7 @@ class LibraryFacade:
 
         album = self._current_album_getter()
         if album is None:
+            self._error("No album is currently open.")
             return
 
         library_manager = self._library_manager_getter()

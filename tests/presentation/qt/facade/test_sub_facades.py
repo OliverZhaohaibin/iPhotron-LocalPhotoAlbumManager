@@ -9,8 +9,6 @@ from __future__ import annotations
 from pathlib import Path
 from unittest.mock import MagicMock
 
-import pytest
-
 from iPhoto.presentation.qt.facade.album_facade import AlbumFacade
 from iPhoto.presentation.qt.facade.asset_facade import AssetFacade
 from iPhoto.presentation.qt.facade.library_facade import LibraryFacade
@@ -112,7 +110,7 @@ class TestAlbumFacade:
         assert result == []
         mocks["error"].assert_called_once()
 
-    def test_open_album_sets_current_album_and_emits_signals(self, tmp_path):
+    def test_open_album_sets_current_album_and_emits_signals(self, tmp_path, monkeypatch):
         root = tmp_path / "myalbum"
         root.mkdir()
         mock_album = _make_mock_album(root)
@@ -125,20 +123,11 @@ class TestAlbumFacade:
         mock_store = MagicMock()
         mock_store.read_all.return_value = iter([{"id": "asset1"}])
 
-        import iPhoto.presentation.qt.facade.album_facade as _mod
+        import iPhoto.cache.index_store as _index_mod
 
-        orig_get_global_repository = None
-        try:
-            import importlib
-            import iPhoto.cache.index_store as _index_mod
+        monkeypatch.setattr(_index_mod, "get_global_repository", lambda *args, **kwargs: mock_store)
 
-            orig_get_global_repository = _index_mod.get_global_repository
-            _index_mod.get_global_repository = lambda *args, **kwargs: mock_store
-
-            result = facade.open_album(root)
-        finally:
-            if orig_get_global_repository is not None:
-                _index_mod.get_global_repository = orig_get_global_repository
+        result = facade.open_album(root)
 
         assert result is mock_album
         assert holder["album"] is mock_album
@@ -264,6 +253,14 @@ class TestLibraryFacade:
         facade.rescan_current_async()
 
         mocks["library_update_service"].rescan_album_async.assert_called_once_with(mock_album)
+
+    def test_rescan_current_async_no_album_emits_error(self):
+        facade, mocks = self._make_facade(album=None)
+
+        facade.rescan_current_async()
+
+        mocks["error"].assert_called_once()
+        mocks["library_update_service"].rescan_album_async.assert_not_called()
 
     def test_cancel_active_scans_delegates_to_manager_and_service(self):
         mock_manager = MagicMock()

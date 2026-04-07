@@ -1,5 +1,4 @@
 from pathlib import Path
-from unittest.mock import MagicMock, patch
 
 import iPhoto.gui.services.library_update_service as lus
 

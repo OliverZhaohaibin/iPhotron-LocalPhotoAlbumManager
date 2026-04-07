@@ -59,6 +59,11 @@ class AlbumFacade:
     # Public API
     # ------------------------------------------------------------------
 
+    def replace_library_update_service(self, service: LibraryUpdateService) -> None:
+        """Replace the held update service. Intended for test injection only."""
+
+        self._library_update_service = service
+
     def open_album(self, root: Path) -> Album | None:
         """Open *root* and trigger background work as needed."""
 

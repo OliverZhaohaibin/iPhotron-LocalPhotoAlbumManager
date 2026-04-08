@@ -1,11 +1,17 @@
 """
 Compatibility backend facade.
 
-This module is deprecated as a business entrypoint.
-New business logic must be implemented in application/use_cases/*
-and only bridged here temporarily for backward compatibility.
+.. deprecated::
+    This module is a **deprecated-only shim** (Phase 4 classification: Class B).
+    New code must have **zero dependencies** on this module.
+    Existing callers may continue to use it until the next major cleanup pass.
+
+    - New business logic must be implemented in ``application/use_cases/*``.
+    - New callers must use :class:`~iPhoto.bootstrap.runtime_context.RuntimeContext`
+      as the formal entry point.
 
 Do NOT add new business rules to this file.
+Do NOT add new callers of this module in new code.
 """
 
 from __future__ import annotations

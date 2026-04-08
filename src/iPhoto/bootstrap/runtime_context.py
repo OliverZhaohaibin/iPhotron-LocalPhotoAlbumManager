@@ -4,6 +4,14 @@ This module is the **authoritative** runtime context for code written in and
 after Phase 3.  It replaces ``AppContext`` as the dependency source for all
 *new* code.
 
+Contract
+--------
+``RuntimeContext`` satisfies :class:`~iPhoto.application.contracts.RuntimeEntryContract`
+(a structural Protocol).  Code that depends on the runtime entry point should
+type-annotate its parameter as ``RuntimeEntryContract`` rather than the
+concrete ``RuntimeContext`` class, so that lightweight test doubles can be
+substituted freely.
+
 Migration guide
 ---------------
 Old code (Phase 1/2 compatibility path)::

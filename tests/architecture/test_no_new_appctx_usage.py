@@ -52,14 +52,15 @@ def _runtime_appctx_imports(source: str) -> list[int]:
             if self._in_type_checking:
                 return
             for alias in node.names:
-                if "appctx" in alias.name or alias.name.endswith("AppContext"):
+                name = alias.name
+                if name == "appctx" or name.endswith(".appctx"):
                     violations.append(node.lineno)
 
         def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
             if self._in_type_checking:
                 return
             module = node.module or ""
-            if "appctx" in module:
+            if module == "appctx" or module.endswith(".appctx"):
                 for alias in node.names:
                     if alias.name == "AppContext":
                         violations.append(node.lineno)

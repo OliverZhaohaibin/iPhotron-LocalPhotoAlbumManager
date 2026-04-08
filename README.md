@@ -225,14 +225,39 @@ iPhotron enforces structural boundaries automatically in CI. Key rules for contr
 - **Adapter modules** (`presentation/qt/adapters/`, `gui/services/`) must not directly import from `iPhoto.infrastructure.*`. Route calls through application services.
 - **`app.py`** is a deprecated shim — do not add functions, classes, or loops.
 
-Run all checks locally with:
+### RuntimeContext vs. AppContext
+
+| Need | Use |
+|------|-----|
+| New code that needs a context reference | `RuntimeContext` from `bootstrap/runtime_context.py` |
+| Type annotation only (no runtime import) | `if TYPE_CHECKING: from iPhoto.appctx import AppContext` |
+| Existing GUI-layer code | Keep existing `AppContext` usage; do not add new references |
+
+### Run checks locally
 
 ```bash
+# CLI static checks (AppContext boundary + adapter boundary)
 python tools/check_architecture.py
+
+# Optionally run a single check
+python tools/check_architecture.py --only appctx
+python tools/check_architecture.py --only adapter
+
+# Architecture regression tests
 python -m pytest tests/architecture/ -v
+
+# Full test suite
+QT_QPA_PLATFORM=offscreen python -m pytest tests/ --tb=short
 ```
 
-See [`docs/refactor/iPhotron_compatibility_lifecycle_plan.md`](docs/refactor/iPhotron_compatibility_lifecycle_plan.md) for the full compatibility layer lifecycle plan.
+### Further reading
+
+| Document | Purpose |
+|----------|---------|
+| [`docs/refactor/iPhotron_compatibility_lifecycle_plan.md`](docs/refactor/iPhotron_compatibility_lifecycle_plan.md) | Lifecycle strategy for each compatibility layer |
+| [`docs/refactor/iPhotron_compatibility_cleanup_table.md`](docs/refactor/iPhotron_compatibility_cleanup_table.md) | Migration table: old entry → replacement entry |
+| [`docs/refactor/iPhotron_architecture_troubleshooting.md`](docs/refactor/iPhotron_architecture_troubleshooting.md) | Diagnosis and fix examples for architecture violations |
+| [`CONTRIBUTING.md`](CONTRIBUTING.md) | Full contributor guide including architecture decision table |
 
 ---
 

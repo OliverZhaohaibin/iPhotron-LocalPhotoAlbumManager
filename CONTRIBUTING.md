@@ -72,40 +72,57 @@ These rules are **automatically enforced in CI** via `python tools/check_archite
 
 ### Where to put new code
 
+Use the following decision table when adding a new feature or fixing a bug:
+
 | What you're adding | Where it goes |
 |--------------------|---------------|
 | Business rule / domain logic | `application/use_cases/` or `domain/` |
-| Infrastructure implementation | `infrastructure/` |
-| Qt signal bridge / UI wiring | `gui/services/` or `gui/coordinators/` |
-| New screen or widget | `gui/ui/widgets/` |
+| Infrastructure implementation (DB, filesystem, external API) | `infrastructure/` |
+| Qt signal bridge / UI event coordination | `gui/services/` or `gui/coordinators/` |
+| New screen or widget | `gui/ui/widgets/` or `gui/ui/controllers/` |
+| Pure algorithm / math utility | `core/` or `core/geo_utils.py` |
+| Platform-independent data model | `domain/` or `models/` |
 
-### AppContext boundary
-- **Do not** import `AppContext` at runtime in `application/` or `bootstrap/` modules.
-- If you need a type annotation only, guard it: `if TYPE_CHECKING: from iPhoto.appctx import AppContext`.
-- New code should use `RuntimeContext` instead.
+> **Rule of thumb**: If your code imports PySide6, it belongs in `gui/`. If it doesn't, it probably belongs in `application/`, `domain/`, `core/`, or `infrastructure/`.
+
+### AppContext vs. RuntimeContext
+
+| Scenario | What to use |
+|----------|-------------|
+| Writing new code that needs a context reference | `RuntimeContext` from `bootstrap/runtime_context.py` |
+| Type annotation only (no runtime import) | `if TYPE_CHECKING: from iPhoto.appctx import AppContext` |
+| Existing GUI-layer code that already uses `AppContext` | Keep as-is; do not expand usage |
+
+**Do not** import `AppContext` at runtime in `application/` or `bootstrap/` modules.
 
 ### Adapter → Infrastructure boundary
 - Modules in `presentation/qt/adapters/` and `gui/services/` must **not** import from `iPhoto.infrastructure.*` directly.
 - Route infrastructure calls through `application/services/` or `application/use_cases/`.
 
-### Shim rules (`app.py`)
-- `app.py` is a **deprecated shim** — do not add new function signatures, classes, or loops.
-- Only delegation to existing application use cases is allowed.
+### Compatibility layer — what you must not do
 
-### LibraryManager shell rules
-- `LibraryManager` is a **thin-shell coordinator** — new business logic must not be added directly to this class.
-- New scanning/geo/trash logic goes in the corresponding mixin or application service.
+| Module | Prohibited actions |
+|--------|--------------------|
+| `app.py` | Add new function signatures, classes, or loops |
+| `AppContext` | Add new business methods; only attribute forwarding is allowed |
+| `AppFacade` (`gui/facade.py`) | Add new method signatures; use the split facades in `presentation/qt/facade/` instead |
+| `LibraryManager` class body | Add business logic; place it in the corresponding mixin or application service |
+| `library_update_service.py` | Add inline `open()` file I/O or direct infrastructure imports |
 
-### Compatibility layer lifecycle
-See [`docs/refactor/iPhotron_compatibility_lifecycle_plan.md`](docs/refactor/iPhotron_compatibility_lifecycle_plan.md) for the full strategy on which layers are long-term-stable, bugfix-only, or scheduled for removal.
+See [`docs/refactor/iPhotron_compatibility_lifecycle_plan.md`](docs/refactor/iPhotron_compatibility_lifecycle_plan.md) for the full lifecycle strategy and
+[`docs/refactor/iPhotron_compatibility_cleanup_table.md`](docs/refactor/iPhotron_compatibility_cleanup_table.md) for the migration table.
 
 ### Running checks locally
 
 ```bash
-# Unified architecture check (AppContext boundary + adapter boundary)
+# Unified architecture CLI check (AppContext boundary + adapter boundary)
 python tools/check_architecture.py
 
-# Full architecture test suite
+# Run a single check
+python tools/check_architecture.py --only appctx
+python tools/check_architecture.py --only adapter
+
+# Full architecture regression suite
 python -m pytest tests/architecture/ -v
 
 # Full test suite
@@ -122,6 +139,10 @@ pre-commit install
 ```
 
 After installation, architecture checks run automatically before every commit.
+
+### Troubleshooting architecture violations
+
+See [`docs/refactor/iPhotron_architecture_troubleshooting.md`](docs/refactor/iPhotron_architecture_troubleshooting.md) for diagnosis and fix examples for every common violation type.
 
 ---
 

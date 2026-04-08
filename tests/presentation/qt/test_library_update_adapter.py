@@ -272,9 +272,11 @@ class TestScanProgressAdapterSignalRelay:
             if not name.startswith("_")
         }
         # Signal descriptors and relay methods are the only allowed own members.
+        # staticMetaObject is injected by the PySide6 metaclass into every QObject subclass.
         allowed_signals = {"scanProgress", "scanChunkReady", "scanFinished", "scanBatchFailed"}
         allowed_relay = {name for name in own_public if name.startswith("relay_")}
-        unexpected = own_public - allowed_signals - allowed_relay
+        qt_meta_attrs = {"staticMetaObject"}
+        unexpected = own_public - allowed_signals - allowed_relay - qt_meta_attrs
         assert not unexpected, (
             f"ScanProgressAdapter has unexpected own public members (possible business logic): "
             f"{unexpected}"

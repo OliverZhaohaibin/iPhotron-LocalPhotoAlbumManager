@@ -1,31 +1,17 @@
-"""Qt-aware facade that bridges the CLI backend to the GUI layer.
-
-This module is the presentation-layer combinator.  Business logic lives in
-the three sub-facades:
-
-* :class:`~iPhoto.presentation.qt.facade.album_facade.AlbumFacade`
-* :class:`~iPhoto.presentation.qt.facade.asset_facade.AssetFacade`
-* :class:`~iPhoto.presentation.qt.facade.library_facade.LibraryFacade`
-
-``AppFacade`` only maintains Qt signals, instantiates those facades, and
-forwards every public method call to the appropriate sub-facade.
-"""
+"""Qt-aware facade that bridges the CLI backend to the GUI layer."""
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import Callable, Iterable, List, Optional, Set, TYPE_CHECKING, Any
 
 from PySide6.QtCore import QObject, Signal, Slot
 
 from .. import app as backend
+from ..cache.index_store import get_global_repository
+from ..config import DEFAULT_INCLUDE, DEFAULT_EXCLUDE
 from ..errors import IPhotoError
 from ..models.album import Album
-from ..presentation.qt.adapters import LibraryUpdateAdapter, ScanProgressAdapter
-from ..presentation.qt.facade.album_facade import AlbumFacade
-from ..presentation.qt.facade.asset_facade import AssetFacade
-from ..presentation.qt.facade.library_facade import LibraryFacade
 from ..utils.logging import get_logger
 from .background_task_manager import BackgroundTaskManager
 from .services import (
@@ -41,11 +27,10 @@ if TYPE_CHECKING:
     from ..library.manager import LibraryManager
 
 import logging
-
 logger = logging.getLogger(__name__)
 
 class AppFacade(QObject):
-    """Combinator facade: owns Qt signals and aggregates sub-facades."""
+    """Expose high-level album operations to the GUI layer."""
 
     albumOpened = Signal(Path)
     assetUpdated = Signal(Path)
@@ -64,18 +49,22 @@ class AppFacade(QObject):
     def __init__(self) -> None:
         super().__init__()
         self._logger = get_logger()
-        self._current_album: Album | None = None
-        self._pending_index_announcements: set[Path] = set()
-        self._library_manager: LibraryManager | None = None
-        self._restore_prompt_handler: Callable[[str], bool] | None = None
-        self._model_provider: Callable[[], Any] | None = None
+        self._current_album: Optional[Album] = None
+        self._pending_index_announcements: Set[Path] = set()
+        self._library_manager: Optional["LibraryManager"] = None
+        self._restore_prompt_handler: Optional[Callable[[str], bool]] = None
+        self._model_provider: Optional[Callable[[], Any]] = None
 
         def _pause_watcher() -> None:
+            """Suspend the library watcher while background tasks mutate files."""
+
             manager = self._library_manager
             if manager is not None:
                 manager.pause_watcher()
 
         def _resume_watcher() -> None:
+            """Resume filesystem monitoring after background work completes."""
+
             manager = self._library_manager
             if manager is not None:
                 manager.resume_watcher()
@@ -101,40 +90,15 @@ class AppFacade(QObject):
             parent=self,
         )
 
-        # ------------------------------------------------------------------
-        # Presentation adapters (Phase 3) – signals from the service layer
-        # are relayed to the facade through stable adapter boundaries instead
-        # of being wired directly.
-        # ------------------------------------------------------------------
-
-        # LibraryUpdateAdapter forwards index/links/reload/error signals.
-        self._library_update_adapter = LibraryUpdateAdapter(
-            update_service_getter=lambda: self._library_update_service,
-            parent=self,
+        self._library_update_service.scanProgress.connect(self._relay_scan_progress)
+        self._library_update_service.scanChunkReady.connect(self._relay_scan_chunk_ready)
+        self._library_update_service.scanFinished.connect(self._relay_scan_finished)
+        self._library_update_service.indexUpdated.connect(self._relay_index_updated)
+        self._library_update_service.linksUpdated.connect(self._relay_links_updated)
+        self._library_update_service.assetReloadRequested.connect(
+            self._on_asset_reload_requested
         )
-        self._library_update_adapter.wire_service(self._library_update_service)
-        self._library_update_adapter.indexUpdated.connect(self._relay_index_updated)
-        self._library_update_adapter.linksUpdated.connect(self._relay_links_updated)
-        self._library_update_adapter.assetReloadRequested.connect(self._on_asset_reload_requested)
-        self._library_update_adapter.errorRaised.connect(self._on_service_error)
-
-        # ScanProgressAdapter aggregates scan-progress signals from both the
-        # LibraryUpdateService (background async rescans) and – after
-        # bind_library() – the LibraryManager (direct scan path).
-        self._scan_progress_adapter = ScanProgressAdapter(parent=self)
-        self._library_update_service.scanProgress.connect(
-            self._scan_progress_adapter.relay_progress
-        )
-        self._library_update_service.scanChunkReady.connect(
-            self._scan_progress_adapter.relay_chunk_ready
-        )
-        self._library_update_service.scanFinished.connect(
-            self._scan_progress_adapter.relay_finished
-        )
-        self._scan_progress_adapter.scanProgress.connect(self._relay_scan_progress)
-        self._scan_progress_adapter.scanChunkReady.connect(self._relay_scan_chunk_ready)
-        self._scan_progress_adapter.scanFinished.connect(self._relay_scan_finished)
-        self._scan_progress_adapter.scanBatchFailed.connect(self._relay_scan_batch_failed)
+        self._library_update_service.errorRaised.connect(self._on_service_error)
 
         self._import_service = AssetImportService(
             task_manager=self._task_manager,
@@ -174,38 +138,6 @@ class AppFacade(QObject):
         )
         self._restoration_service.errorRaised.connect(self._on_service_error)
 
-        # ------------------------------------------------------------------
-        # Sub-facades
-        # ------------------------------------------------------------------
-        self._album_facade = AlbumFacade(
-            backend_bridge=backend,
-            metadata_service=self._metadata_service,
-            library_update_service=self._library_update_service,
-            current_album_getter=lambda: self._current_album,
-            current_album_setter=self._set_current_album,
-            library_manager_getter=self._get_library_manager,
-            error_emitter=self.errorRaised.emit,
-            album_opened_emitter=self.albumOpened.emit,
-            load_started_emitter=self.loadStarted.emit,
-            load_finished_emitter=self.loadFinished.emit,
-            rescan_trigger=self.rescan_current_async,
-        )
-
-        self._asset_facade = AssetFacade(
-            import_service=self._import_service,
-            move_service=self._move_service,
-            deletion_service=self._deletion_service,
-            restoration_service=self._restoration_service,
-        )
-
-        self._library_facade = LibraryFacade(
-            library_update_service=self._library_update_service,
-            task_manager=self._task_manager,
-            current_album_getter=lambda: self._current_album,
-            library_manager_getter=self._get_library_manager,
-            error_emitter=self.errorRaised.emit,
-        )
-
     def set_model_provider(self, provider: Callable[[], Any]):
         """Inject the new ViewModel provider for legacy operations."""
         self._model_provider = provider
@@ -214,7 +146,7 @@ class AppFacade(QObject):
     # Album lifecycle
     # ------------------------------------------------------------------
     @property
-    def current_album(self) -> Album | None:
+    def current_album(self) -> Optional[Album]:
         """Return the album currently loaded in the facade."""
 
         return self._current_album
@@ -244,52 +176,86 @@ class AppFacade(QObject):
         return self._library_update_service
 
     @property
-    def library_update_adapter(self) -> LibraryUpdateAdapter:
-        """Stable presentation adapter for library-update signals.
-
-        New UI code should connect to this adapter rather than to
-        ``library_updates`` directly so the service layer can evolve without
-        breaking UI consumers.
-        """
-
-        return self._library_update_adapter
-
-    @property
-    def scan_progress_adapter(self) -> ScanProgressAdapter:
-        """Stable presentation adapter for scan-progress signals.
-
-        New UI code should connect to this adapter rather than wiring scan
-        signals directly from the library manager or update service.
-        """
-
-        return self._scan_progress_adapter
-
-    @property
-    def library_manager(self) -> LibraryManager | None:
+    def library_manager(self) -> Optional["LibraryManager"]:
         """Expose the underlying library manager."""
 
         return self._library_manager
 
-    def open_album(self, root: Path) -> Album | None:
+    def open_album(self, root: Path) -> Optional[Album]:
         """Open *root* and trigger background work as needed."""
 
-        return self._album_facade.open_album(root)
+        # Get library root first for global database access
+        library_root = self._library_manager.root() if self._library_manager else None
+        
+        try:
+            album = backend.open_album(
+                root,
+                autoscan=False,
+                library_root=library_root,
+                hydrate_index=False,
+            )
+        except IPhotoError as exc:
+            self.errorRaised.emit(str(exc))
+            return None
 
-    def rescan_current(self) -> list[dict]:
+        self._current_album = album
+        album_root = album.root
+
+        self.albumOpened.emit(album_root)
+
+        # Check if the index is empty (likely because it's a new or cleaned album)
+        # and trigger a background scan if necessary.
+        index_root = library_root if library_root else album_root
+        has_assets = False
+        try:
+            store = get_global_repository(index_root)
+            next(store.read_all())
+            has_assets = True
+        except (StopIteration, IPhotoError):
+            pass
+
+        is_already_scanning = False
+        if self._library_manager and self._library_manager.is_scanning_path(album_root):
+            is_already_scanning = True
+
+        if not has_assets and not is_already_scanning:
+            self.rescan_current_async()
+
+        # Legacy reload signals - might be needed for status bar
+        self.loadStarted.emit(album_root)
+        self.loadFinished.emit(album_root, True)
+
+        return album
+
+    def rescan_current(self) -> List[dict]:
         """Rescan the active album and emit ``indexUpdated`` when done."""
 
-        return self._library_facade.rescan_current()
+        album = self._require_album()
+        if album is None:
+            return []
+        return self._library_update_service.rescan_album(album)
 
     def rescan_current_async(self) -> None:
         """Start a background rescan for the active album."""
 
-        self._library_facade.rescan_current_async()
+        album = self._require_album()
+        if album is None:
+            return
+
+        if self._library_manager:
+            filters = album.manifest.get("filters", {}) if isinstance(album.manifest, dict) else {}
+            include = filters.get("include", DEFAULT_INCLUDE)
+            exclude = filters.get("exclude", DEFAULT_EXCLUDE)
+
+            self._library_manager.start_scanning(album.root, include, exclude)
+        else:
+            self._library_update_service.rescan_album_async(album)
 
     def _inject_scan_dependencies_for_tests(
         self,
         *,
-        library_manager: LibraryManager | None = None,
-        library_update_service: LibraryUpdateService | None = None,
+        library_manager: Optional["LibraryManager"] = None,
+        library_update_service: Optional[LibraryUpdateService] = None,
     ) -> None:
         """Override scan collaborators during testing."""
 
@@ -297,23 +263,31 @@ class AppFacade(QObject):
             self._library_manager = library_manager
         if library_update_service is not None:
             self._library_update_service = library_update_service
-            self._library_facade.replace_library_update_service(library_update_service)
-            self._album_facade.replace_library_update_service(library_update_service)
 
     def cancel_active_scans(self) -> None:
         """Request cancellation of any in-flight scan operations."""
 
-        self._library_facade.cancel_active_scans()
+        if self._library_manager is not None:
+            try:
+                self._library_manager.stop_scanning()
+                self._library_manager.pause_watcher()
+            except RuntimeError:
+                self._logger.warning("Failed to stop active scan during shutdown", exc_info=True)
+
+        self._library_update_service.cancel_active_scan()
 
     def is_performing_background_operation(self) -> bool:
         """Return ``True`` while imports or moves are still running."""
 
         return self._task_manager.has_watcher_blocking_tasks()
 
-    def pair_live_current(self) -> list[dict]:
+    def pair_live_current(self) -> List[dict]:
         """Rebuild Live Photo pairings for the active album."""
 
-        return self._album_facade.pair_live_current()
+        album = self._require_album()
+        if album is None:
+            return []
+        return self._library_update_service.pair_live(album)
 
     # ------------------------------------------------------------------
     # Manifest helpers
@@ -321,26 +295,20 @@ class AppFacade(QObject):
     def set_cover(self, rel: str) -> bool:
         """Set the album cover to *rel* and persist the manifest."""
 
-        return self._album_facade.set_cover(rel)
+        album = self._require_album()
+        if album is None:
+            return False
+        return self._metadata_service.set_album_cover(album, rel)
 
-    def bind_library(self, library: LibraryManager) -> None:
+    def bind_library(self, library: "LibraryManager") -> None:
         """Remember the library manager so static collections stay in sync."""
 
         if self._library_manager is not None:
             try:
                 self._library_manager.treeUpdated.disconnect(self._on_library_tree_updated)
-                self._library_manager.scanProgress.disconnect(
-                    self._scan_progress_adapter.relay_progress
-                )
-                self._library_manager.scanChunkReady.disconnect(
-                    self._scan_progress_adapter.relay_chunk_ready
-                )
-                self._library_manager.scanFinished.disconnect(
-                    self._scan_progress_adapter.relay_finished
-                )
-                self._library_manager.scanBatchFailed.disconnect(
-                    self._scan_progress_adapter.relay_batch_failed
-                )
+                self._library_manager.scanProgress.disconnect(self._relay_scan_progress)
+                self._library_manager.scanChunkReady.disconnect(self._relay_scan_chunk_ready)
+                self._library_manager.scanFinished.disconnect(self._relay_scan_finished)
             except (RuntimeError, TypeError):
                 pass
 
@@ -348,26 +316,27 @@ class AppFacade(QObject):
         self._library_update_service.reset_cache()
         self._library_manager.treeUpdated.connect(self._on_library_tree_updated)
 
-        # Route library-manager scan signals through ScanProgressAdapter so
-        # UI consumers see a single, stable scan-progress interface.
-        self._library_manager.scanProgress.connect(self._scan_progress_adapter.relay_progress)
-        self._library_manager.scanChunkReady.connect(
-            self._scan_progress_adapter.relay_chunk_ready
-        )
-        self._library_manager.scanFinished.connect(self._scan_progress_adapter.relay_finished)
-        self._library_manager.scanBatchFailed.connect(
-            self._scan_progress_adapter.relay_batch_failed
-        )
+        try:
+            self._library_update_service.scanProgress.disconnect(self._relay_scan_progress)
+            self._library_update_service.scanChunkReady.disconnect(self._relay_scan_chunk_ready)
+            self._library_update_service.scanFinished.disconnect(self._relay_scan_finished)
+        except (RuntimeError, TypeError):
+            pass
+
+        self._library_manager.scanProgress.connect(self._relay_scan_progress)
+        self._library_manager.scanChunkReady.connect(self._relay_scan_chunk_ready)
+        self._library_manager.scanFinished.connect(self._relay_scan_finished)
+        self._library_manager.scanBatchFailed.connect(self._relay_scan_batch_failed)
 
         if self._library_manager.root():
             self._on_library_tree_updated()
 
     def _on_library_tree_updated(self) -> None:
         """Propagate library root updates."""
-        # ViewModels handle this via AssetDataSource now
+        pass # ViewModels handle this via AssetDataSource now
 
     def register_restore_prompt(
-        self, handler: Callable[[str], bool] | None
+        self, handler: Optional[Callable[[str], bool]]
     ) -> None:
         """Register *handler* to confirm restore-to-root fallbacks."""
         self._restore_prompt_handler = handler
@@ -376,41 +345,49 @@ class AppFacade(QObject):
         self,
         sources: Iterable[Path],
         *,
-        destination: Path | None = None,
+        destination: Optional[Path] = None,
         mark_featured: bool = False,
     ) -> None:
         """Import *sources* asynchronously and refresh the destination album."""
 
-        self._asset_facade.import_files(
-            sources, destination=destination, mark_featured=mark_featured
+        self._import_service.import_files(
+            sources,
+            destination=destination,
+            mark_featured=mark_featured,
         )
 
     def move_assets(self, sources: Iterable[Path], destination: Path) -> None:
         """Move *sources* into *destination* and refresh the relevant albums."""
 
-        self._asset_facade.move_assets(sources, destination)
+        self._move_service.move_assets(sources, destination)
 
     def delete_assets(self, sources: Iterable[Path]) -> None:
         """Move *sources* into the dedicated deleted-items folder."""
 
-        self._asset_facade.delete_assets(sources)
+        self._deletion_service.delete_assets(sources)
 
     def restore_assets(self, sources: Iterable[Path]) -> bool:
         """Return ``True`` when at least one trashed asset restore is scheduled."""
 
-        return self._asset_facade.restore_assets(sources)
+        return self._restoration_service.restore_assets(sources)
 
     def toggle_featured(self, ref: str) -> bool:
         """Toggle *ref* in the active album and mirror the change in the library."""
 
-        return self._album_facade.toggle_featured(ref)
+        album = self._require_album()
+        if album is None or not ref:
+            return False
+
+        return self._metadata_service.toggle_featured(album, ref)
 
     # ------------------------------------------------------------------
     # Internal utilities
     # ------------------------------------------------------------------
-    def _set_current_album(self, album: Album | None) -> None:
-        """Update the currently active album (called by AlbumFacade)."""
-        self._current_album = album
+    def _require_album(self) -> Optional[Album]:
+        if self._current_album is None:
+            self.errorRaised.emit("No album is currently open.")
+            return None
+        return self._current_album
 
     def _refresh_view(self, root: Path) -> None:
         """Reload *root* so UI models pick up the latest manifest changes."""
@@ -426,7 +403,7 @@ class AppFacade(QObject):
         self.loadStarted.emit(refreshed.root)
         self.loadFinished.emit(refreshed.root, True)
 
-    def _current_album_root(self) -> Path | None:
+    def _current_album_root(self) -> Optional[Path]:
         if self._current_album is None:
             return None
         return self._current_album.root
@@ -439,7 +416,7 @@ class AppFacade(QObject):
         except OSError:
             return False
 
-    def _get_library_manager(self) -> LibraryManager | None:
+    def _get_library_manager(self) -> Optional["LibraryManager"]:
         return self._library_manager
 
     @Slot(Path, Path, list, bool, bool, bool, bool)
@@ -475,7 +452,7 @@ class AppFacade(QObject):
         self.scanProgress.emit(root, current, total)
 
     @Slot(Path, list)
-    def _relay_scan_chunk_ready(self, root: Path, chunk: list[dict]) -> None:
+    def _relay_scan_chunk_ready(self, root: Path, chunk: List[dict]) -> None:
         self.scanChunkReady.emit(root, chunk)
 
     @Slot(Path, bool)

@@ -63,10 +63,6 @@ def _runtime_appctx_imports(source: str) -> list[int]:
                 for alias in node.names:
                     if alias.name == "AppContext":
                         violations.append(node.lineno)
-            for alias in node.names:
-                if alias.name == "AppContext":
-                    if "appctx" in module:
-                        violations.append(node.lineno)
 
     Visitor().visit(tree)
     return violations

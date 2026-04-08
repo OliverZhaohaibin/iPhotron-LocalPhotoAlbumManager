@@ -31,7 +31,7 @@ def _collect_py_files(directory: Path) -> list[Path]:
     return sorted(directory.rglob("*.py"))
 
 
-def _direct_infra_imports(source: str, file_path: Path) -> list[int]:
+def _direct_infra_imports(source: str) -> list[int]:
     """Return line numbers where the file directly imports from infrastructure."""
     try:
         tree = ast.parse(source)
@@ -43,26 +43,23 @@ def _direct_infra_imports(source: str, file_path: Path) -> list[int]:
     for node in ast.walk(tree):
         if isinstance(node, ast.ImportFrom):
             module = node.module or ""
-            if _is_infra_module(module, file_path):
+            if _is_infra_module(module):
                 violations.append(node.lineno)
         elif isinstance(node, ast.Import):
             for alias in node.names:
-                if INFRA_RELATIVE_MARKER in alias.name and "iPhoto" in alias.name:
+                if alias.name.startswith(INFRA_PACKAGE):
                     violations.append(node.lineno)
 
     return violations
 
 
-def _is_infra_module(module: str, file_path: Path) -> bool:
+def _is_infra_module(module: str) -> bool:
     """Return True when *module* refers to the infrastructure package."""
     if module.startswith(INFRA_PACKAGE):
         return True
-    if module.startswith("." + INFRA_RELATIVE_MARKER) or (
-        "." + INFRA_RELATIVE_MARKER + "." in "." + module
-    ):
-        parts = module.lstrip(".").split(".")
-        if parts and parts[0] == INFRA_RELATIVE_MARKER:
-            return True
+    parts = module.lstrip(".").split(".")
+    if parts and parts[0] == INFRA_RELATIVE_MARKER:
+        return True
     return False
 
 
@@ -75,7 +72,7 @@ def test_adapter_modules_do_not_import_infrastructure() -> None:
             if py_file.name == "__init__.py":
                 continue
             source = py_file.read_text(encoding="utf-8")
-            lines = _direct_infra_imports(source, py_file)
+            lines = _direct_infra_imports(source)
             for lineno in lines:
                 rel = py_file.relative_to(SRC_ROOT.parent.parent)
                 violations.append(f"{rel}:{lineno}")

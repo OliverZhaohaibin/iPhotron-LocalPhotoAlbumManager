@@ -34,7 +34,7 @@ def _collect_py_files(directory: Path) -> list[Path]:
     return sorted(directory.rglob("*.py"))
 
 
-def _is_infra_import(node: ast.ImportFrom | ast.Import, src_root: Path) -> bool:
+def _is_infra_import(node: ast.ImportFrom | ast.Import) -> bool:
     if isinstance(node, ast.ImportFrom):
         module = node.module or ""
         if module.startswith(INFRA_PACKAGE):
@@ -49,7 +49,7 @@ def _is_infra_import(node: ast.ImportFrom | ast.Import, src_root: Path) -> bool:
     return False
 
 
-def _direct_infra_imports(source: str, file_path: Path, src_root: Path) -> list[int]:
+def _direct_infra_imports(source: str) -> list[int]:
     try:
         tree = ast.parse(source)
     except SyntaxError:
@@ -58,7 +58,7 @@ def _direct_infra_imports(source: str, file_path: Path, src_root: Path) -> list[
     violations: list[int] = []
     for node in ast.walk(tree):
         if isinstance(node, (ast.ImportFrom, ast.Import)):
-            if _is_infra_import(node, src_root):
+            if _is_infra_import(node):
                 violations.append(node.lineno)
     return violations
 
@@ -71,7 +71,7 @@ def check(src_root: Path) -> list[str]:
             if py_file.name == "__init__.py":
                 continue
             source = py_file.read_text(encoding="utf-8")
-            lines = _direct_infra_imports(source, py_file, src_root)
+            lines = _direct_infra_imports(source)
             for lineno in lines:
                 violations.append(f"{py_file}:{lineno}")
     return violations

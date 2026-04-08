@@ -1,0 +1,20 @@
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.4.4
+    hooks:
+      - id: ruff
+        args: [--fix]
+      - id: ruff-format
+
+  - repo: local
+    hooks:
+      - id: architecture-checks
+        name: Architecture boundary checks
+        language: python
+        entry: python tools/check_architecture.py
+        pass_filenames: false
+        always_run: true
+        description: >
+          Run all architecture-level static checks (AppContext boundary,
+          adapter→infrastructure boundary). Failures indicate a structural
+          violation that must be fixed before committing.

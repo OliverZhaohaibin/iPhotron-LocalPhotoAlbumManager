@@ -216,6 +216,26 @@ Python dependencies (e.g., `Pillow`, `reverse-geocoder`) are auto-installed via 
 
 ---
 
+## 🏗 Architecture Rules
+
+iPhotron enforces structural boundaries automatically in CI. Key rules for contributors:
+
+- **New business logic** must live in `application/use_cases/` or `domain/` — never in `gui/` or `library/manager.py`.
+- **`AppContext`** must not be imported at runtime in formal layers (`application/`, `bootstrap/`). Guard with `if TYPE_CHECKING:` or use `RuntimeContext`.
+- **Adapter modules** (`presentation/qt/adapters/`, `gui/services/`) must not directly import from `iPhoto.infrastructure.*`. Route calls through application services.
+- **`app.py`** is a deprecated shim — do not add functions, classes, or loops.
+
+Run all checks locally with:
+
+```bash
+python tools/check_architecture.py
+python -m pytest tests/architecture/ -v
+```
+
+See [`docs/refactor/iPhotron_compatibility_lifecycle_plan.md`](docs/refactor/iPhotron_compatibility_lifecycle_plan.md) for the full compatibility layer lifecycle plan.
+
+---
+
 ## 📄 License
 
 **MIT License © 2025**  

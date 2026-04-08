@@ -39,9 +39,15 @@ def _is_infra_import(node: ast.ImportFrom | ast.Import) -> bool:
         module = node.module or ""
         if module.startswith(INFRA_PACKAGE):
             return True
+        # Relative imports: "from . import infrastructure" or relative package refs
         parts = module.lstrip(".").split(".")
         if parts and parts[0] == "infrastructure":
             return True
+        # "from iPhoto import infrastructure"
+        if module in {"iPhoto", ""}:
+            for alias in node.names:
+                if alias.name == "infrastructure":
+                    return True
     elif isinstance(node, ast.Import):
         for alias in node.names:
             if alias.name.startswith(INFRA_PACKAGE):
@@ -50,10 +56,12 @@ def _is_infra_import(node: ast.ImportFrom | ast.Import) -> bool:
 
 
 def _direct_infra_imports(source: str) -> list[int]:
-    try:
-        tree = ast.parse(source)
-    except SyntaxError:
-        return []
+    """Return line numbers where the file directly imports from infrastructure.
+
+    Raises:
+        SyntaxError: if *source* cannot be parsed.
+    """
+    tree = ast.parse(source)
 
     violations: list[int] = []
     for node in ast.walk(tree):
@@ -71,7 +79,11 @@ def check(src_root: Path) -> list[str]:
             if py_file.name == "__init__.py":
                 continue
             source = py_file.read_text(encoding="utf-8")
-            lines = _direct_infra_imports(source)
+            try:
+                lines = _direct_infra_imports(source)
+            except SyntaxError as exc:
+                violations.append(f"{py_file}: PARSE_ERROR – {exc}")
+                continue
             for lineno in lines:
                 violations.append(f"{py_file}:{lineno}")
     return violations

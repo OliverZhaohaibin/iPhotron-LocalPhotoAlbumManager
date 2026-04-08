@@ -12,7 +12,6 @@ Allowed paths (runtime AppContext imports are expected/accepted here):
 - src/iPhoto/appctx.py          (defines the shim)
 - src/iPhoto/app.py             (legacy shim - Class B)
 - src/iPhoto/gui/               (legacy GUI layer)
-- tests/                        (test fixtures may construct AppContext)
 """
 
 from __future__ import annotations
@@ -43,11 +42,12 @@ def _is_type_checking_guard(node: ast.If) -> bool:
 
 
 def _runtime_appctx_imports(source: str) -> list[int]:
-    """Return line numbers of AppContext imports that are NOT type-checking-only."""
-    try:
-        tree = ast.parse(source)
-    except SyntaxError:
-        return []
+    """Return line numbers of AppContext imports that are NOT type-checking-only.
+
+    Raises:
+        SyntaxError: if *source* cannot be parsed.
+    """
+    tree = ast.parse(source)
 
     violations: list[int] = []
 
@@ -56,11 +56,18 @@ def _runtime_appctx_imports(source: str) -> list[int]:
             self._in_type_checking: bool = False
 
         def visit_If(self, node: ast.If) -> None:
-            is_tc = _is_type_checking_guard(node)
             prev = self._in_type_checking
-            self._in_type_checking = self._in_type_checking or is_tc
+            if _is_type_checking_guard(node):
+                # Only the body is excluded from enforcement; the else branch
+                # is still live runtime code.
+                self._in_type_checking = True
+                for child in node.body:
+                    self.visit(child)
+                self._in_type_checking = prev
+                for child in node.orelse:
+                    self.visit(child)
+                return
             self.generic_visit(node)
-            self._in_type_checking = prev
 
         def visit_Import(self, node: ast.Import) -> None:
             if self._in_type_checking:
@@ -74,10 +81,15 @@ def _runtime_appctx_imports(source: str) -> list[int]:
             if self._in_type_checking:
                 return
             module = node.module or ""
-            if module == "appctx" or module.endswith(".appctx"):
-                for alias in node.names:
-                    if alias.name == "AppContext":
-                        violations.append(node.lineno)
+            # "from iPhoto import appctx" or "from . import appctx"
+            imports_appctx_module = module in {"iPhoto", ""}
+            # "from iPhoto.appctx import …" or "from ...appctx import …"
+            imports_from_appctx = module == "appctx" or module.endswith(".appctx")
+            for alias in node.names:
+                if imports_appctx_module and alias.name == "appctx":
+                    violations.append(node.lineno)
+                elif imports_from_appctx and alias.name in {"AppContext", "*"}:
+                    violations.append(node.lineno)
 
     Visitor().visit(tree)
     return violations
@@ -94,8 +106,11 @@ def check(src_root: Path) -> list[str]:
         if _is_allowed(rel):
             continue
         source = py_file.read_text(encoding="utf-8")
-        for lineno in _runtime_appctx_imports(source):
-            violations.append(f"{py_file}:{lineno}")
+        try:
+            for lineno in _runtime_appctx_imports(source):
+                violations.append(f"{py_file}:{lineno}")
+        except SyntaxError as exc:
+            violations.append(f"{py_file}: PARSE_ERROR – {exc}")
     return violations
 
 

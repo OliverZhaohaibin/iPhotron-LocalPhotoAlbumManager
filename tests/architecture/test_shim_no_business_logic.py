@@ -9,10 +9,9 @@ Checked constraints
 -------------------
 1. No ``for`` or ``while`` loop statements at module scope.
 2. No ``while`` loops inside the shim's top-level function bodies.
-3. Functions contain at most one level of ``if`` branching (guard clauses for
-   optional params are acceptable; nested ``if/elif/else`` trees are not).
-4. The module does not define any ``class`` with substantive methods
-   (``__init__``, property accessors or single-line delegators are fine).
+3. No ``for`` loops inside the shim's top-level function bodies.
+4. The module does not define any ``class`` (Phase 5 Rule C: no class
+   definitions are permitted in the deprecated shim).
 """
 
 from __future__ import annotations
@@ -85,8 +84,8 @@ def test_shim_functions_are_single_delegation() -> None:
     )
 
 
-def test_shim_defines_no_classes_with_business_methods() -> None:
-    """app.py must not define classes that contain substantive business logic."""
+def test_shim_defines_no_classes() -> None:
+    """app.py must not define any class (Phase 5 Rule C: no class definitions in shim)."""
     tree = _parse_shim()
     class_names: list[str] = []
 
@@ -96,5 +95,5 @@ def test_shim_defines_no_classes_with_business_methods() -> None:
 
     assert not class_names, (
         f"Classes defined in app.py: {class_names}\n"
-        "app.py is a shim - it must not introduce new class hierarchies."
+        "app.py is a shim - it must not introduce any class definitions."
     )

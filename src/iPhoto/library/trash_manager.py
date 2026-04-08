@@ -127,11 +127,16 @@ class TrashManagerMixin:
         return len(missing)
 
     def _relative_deleted_album_path(self, trash_root: Path, root: Path) -> Optional[str]:
-        """Return the trash path relative to the library root, or ``None``.
+        """Return the trash path relative to the library root, or ``None``."""
 
-        Delegates to :class:`~iPhoto.application.services.trash_service.TrashService`.
-        """
-        return self._trash_service.relative_deleted_album_path(trash_root, root)
+        try:
+            return trash_root.resolve().relative_to(root.resolve()).as_posix()
+        except OSError:
+            pass
+        try:
+            return trash_root.relative_to(root).as_posix()
+        except ValueError:
+            return None
 
     def _initialize_deleted_dir(self) -> None:
         """Prepare the deleted-items directory while swallowing recoverable errors."""

@@ -24,9 +24,12 @@ New code should type-annotate its dependencies as ``RuntimeEntryContract``::
         settings = ctx.settings
         ...
 
-Legacy code that still holds an ``AppContext`` will continue to work because
-``AppContext`` forwards every property to a ``RuntimeContext`` instance, and
-``RuntimeContext`` satisfies this protocol.
+Legacy code that still holds an ``AppContext`` may continue to work for
+attribute access because ``AppContext`` forwards properties to an underlying
+``RuntimeContext`` instance.  However, the structural protocol is satisfied by
+``RuntimeContext`` itself, not by ``AppContext``.  Callers that need a
+``RuntimeEntryContract`` should pass the wrapped runtime object (for example,
+``ctx._runtime``) rather than the ``AppContext`` wrapper.
 
 Rules
 -----

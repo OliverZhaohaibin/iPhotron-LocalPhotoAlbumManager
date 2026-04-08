@@ -10,8 +10,9 @@ These tests verify that the Qt adapters in
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
-from unittest.mock import MagicMock, call, patch
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -24,104 +25,132 @@ except ImportError:
     pass
 
 
+@pytest.fixture(scope="module")
+def qapp():
+    if not _pyside6_available:
+        pytest.skip("PySide6 not installed")
+    from PySide6.QtWidgets import QApplication
+
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    app = QApplication.instance()
+    if app is None:
+        app = QApplication([])
+    yield app
+
+
 @pytest.mark.skipif(not _pyside6_available, reason="PySide6 not installed")
 class TestLibraryUpdateAdapterSignalRelay:
     """LibraryUpdateAdapter must forward service signals with no transformation."""
 
-    @pytest.fixture
-    def adapter_and_service(self, qtbot):
-        """Return a wired (adapter, mock_service) pair."""
-        from iPhoto.presentation.qt.adapters.library_update_adapter import LibraryUpdateAdapter
+    def test_index_updated_is_relayed(self, qapp):
+        from PySide6.QtTest import QSignalSpy
 
-        mock_service = MagicMock()
-        # wire_service connects to the mock's attributes – we need real Qt signals
-        # so we record calls and fire them manually.
-        adapter = LibraryUpdateAdapter(
-            update_service_getter=lambda: mock_service,
-        )
-        return adapter, mock_service
-
-    def test_index_updated_is_relayed(self, adapter_and_service, qtbot):
         from iPhoto.presentation.qt.adapters.library_update_adapter import LibraryUpdateAdapter
 
         root = Path("/tmp/album")
         adapter = LibraryUpdateAdapter(update_service_getter=lambda: None)
 
-        with qtbot.waitSignal(adapter.indexUpdated, timeout=1000) as blocker:
-            adapter._on_index_updated(root)
+        spy = QSignalSpy(adapter.indexUpdated)
+        adapter._on_index_updated(root)
 
-        assert blocker.args == [root]
+        assert spy.count() == 1
+        assert spy[0][0] == root
 
-    def test_links_updated_is_relayed(self, qtbot):
+    def test_links_updated_is_relayed(self, qapp):
+        from PySide6.QtTest import QSignalSpy
+
         from iPhoto.presentation.qt.adapters.library_update_adapter import LibraryUpdateAdapter
 
         root = Path("/tmp/album")
         adapter = LibraryUpdateAdapter(update_service_getter=lambda: None)
 
-        with qtbot.waitSignal(adapter.linksUpdated, timeout=1000) as blocker:
-            adapter._on_links_updated(root)
+        spy = QSignalSpy(adapter.linksUpdated)
+        adapter._on_links_updated(root)
 
-        assert blocker.args == [root]
+        assert spy.count() == 1
+        assert spy[0][0] == root
 
-    def test_asset_reload_requested_is_relayed(self, qtbot):
+    def test_asset_reload_requested_is_relayed(self, qapp):
+        from PySide6.QtTest import QSignalSpy
+
         from iPhoto.presentation.qt.adapters.library_update_adapter import LibraryUpdateAdapter
 
         root = Path("/tmp/album")
         adapter = LibraryUpdateAdapter(update_service_getter=lambda: None)
 
-        with qtbot.waitSignal(adapter.assetReloadRequested, timeout=1000) as blocker:
-            adapter._on_asset_reload_requested(root, False, True)
+        spy = QSignalSpy(adapter.assetReloadRequested)
+        adapter._on_asset_reload_requested(root, False, True)
 
-        assert blocker.args == [root, False, True]
+        assert spy.count() == 1
+        assert spy[0][0] == root
+        assert spy[0][1] is False
+        assert spy[0][2] is True
 
-    def test_error_raised_is_relayed(self, qtbot):
+    def test_error_raised_is_relayed(self, qapp):
+        from PySide6.QtTest import QSignalSpy
+
         from iPhoto.presentation.qt.adapters.library_update_adapter import LibraryUpdateAdapter
 
         adapter = LibraryUpdateAdapter(update_service_getter=lambda: None)
 
-        with qtbot.waitSignal(adapter.errorRaised, timeout=1000) as blocker:
-            adapter._on_error_raised("something went wrong")
+        spy = QSignalSpy(adapter.errorRaised)
+        adapter._on_error_raised("something went wrong")
 
-        assert blocker.args == ["something went wrong"]
+        assert spy.count() == 1
+        assert spy[0][0] == "something went wrong"
 
-    def test_scan_progress_is_relayed(self, qtbot):
+    def test_scan_progress_is_relayed(self, qapp):
+        from PySide6.QtTest import QSignalSpy
+
         from iPhoto.presentation.qt.adapters.library_update_adapter import LibraryUpdateAdapter
 
         root = Path("/tmp/album")
         adapter = LibraryUpdateAdapter(update_service_getter=lambda: None)
 
-        with qtbot.waitSignal(adapter.scanProgress, timeout=1000) as blocker:
-            adapter._on_scan_progress(root, 5, 10)
+        spy = QSignalSpy(adapter.scanProgress)
+        adapter._on_scan_progress(root, 5, 10)
 
-        assert blocker.args == [root, 5, 10]
+        assert spy.count() == 1
+        assert spy[0][0] == root
+        assert spy[0][1] == 5
+        assert spy[0][2] == 10
 
-    def test_scan_chunk_ready_is_relayed(self, qtbot):
+    def test_scan_chunk_ready_is_relayed(self, qapp):
+        from PySide6.QtTest import QSignalSpy
+
         from iPhoto.presentation.qt.adapters.library_update_adapter import LibraryUpdateAdapter
 
         root = Path("/tmp/album")
         chunk = [{"rel": "photo.jpg"}]
         adapter = LibraryUpdateAdapter(update_service_getter=lambda: None)
 
-        with qtbot.waitSignal(adapter.scanChunkReady, timeout=1000) as blocker:
-            adapter._on_scan_chunk_ready(root, chunk)
+        spy = QSignalSpy(adapter.scanChunkReady)
+        adapter._on_scan_chunk_ready(root, chunk)
 
-        assert blocker.args[0] == root
-        assert blocker.args[1] == chunk
+        assert spy.count() == 1
+        assert spy[0][0] == root
+        assert spy[0][1] == chunk
 
-    def test_scan_finished_is_relayed(self, qtbot):
+    def test_scan_finished_is_relayed(self, qapp):
+        from PySide6.QtTest import QSignalSpy
+
         from iPhoto.presentation.qt.adapters.library_update_adapter import LibraryUpdateAdapter
 
         root = Path("/tmp/album")
         adapter = LibraryUpdateAdapter(update_service_getter=lambda: None)
 
-        with qtbot.waitSignal(adapter.scanFinished, timeout=1000) as blocker:
-            adapter._on_scan_finished(root, True)
+        spy = QSignalSpy(adapter.scanFinished)
+        adapter._on_scan_finished(root, True)
 
-        assert blocker.args == [root, True]
+        assert spy.count() == 1
+        assert spy[0][0] == root
+        assert spy[0][1] is True
 
-    def test_wire_service_connects_all_signals(self, qtbot):
+    def test_wire_service_connects_all_signals(self, qapp):
         """wire_service must connect all expected service signals to relay slots."""
         from PySide6.QtCore import QObject, Signal
+        from PySide6.QtTest import QSignalSpy
+
         from iPhoto.presentation.qt.adapters.library_update_adapter import LibraryUpdateAdapter
 
         class FakeService(QObject):
@@ -140,12 +169,13 @@ class TestLibraryUpdateAdapterSignalRelay:
         root = Path("/tmp/album")
 
         # Verify index signal is forwarded end-to-end.
-        with qtbot.waitSignal(adapter.indexUpdated, timeout=1000) as blocker:
-            svc.indexUpdated.emit(root)
+        spy = QSignalSpy(adapter.indexUpdated)
+        svc.indexUpdated.emit(root)
 
-        assert blocker.args == [root]
+        assert spy.count() == 1
+        assert spy[0][0] == root
 
-    def test_announce_refresh_delegates_to_service(self, qtbot):
+    def test_announce_refresh_delegates_to_service(self, qapp):
         """announce_refresh must call service.announce_album_refresh, not own the logic."""
         from iPhoto.presentation.qt.adapters.library_update_adapter import LibraryUpdateAdapter
 
@@ -162,7 +192,7 @@ class TestLibraryUpdateAdapterSignalRelay:
             force_reload=False,
         )
 
-    def test_announce_refresh_does_nothing_when_no_service(self, qtbot):
+    def test_announce_refresh_does_nothing_when_no_service(self, qapp):
         """announce_refresh must not raise when the service getter returns None."""
         from iPhoto.presentation.qt.adapters.library_update_adapter import LibraryUpdateAdapter
 
@@ -176,76 +206,78 @@ class TestScanProgressAdapterSignalRelay:
     """ScanProgressAdapter must forward scan events with no business logic."""
 
     @pytest.fixture
-    def adapter(self, qtbot):
+    def adapter(self, qapp):
         from iPhoto.presentation.qt.adapters.scan_progress_adapter import ScanProgressAdapter
 
         return ScanProgressAdapter()
 
-    def test_relay_progress_emits_scan_progress(self, adapter, qtbot):
+    def test_relay_progress_emits_scan_progress(self, adapter, qapp):
+        from PySide6.QtTest import QSignalSpy
+
         root = Path("/tmp/album")
 
-        with qtbot.waitSignal(adapter.scanProgress, timeout=1000) as blocker:
-            adapter.relay_progress(root, 3, 10)
+        spy = QSignalSpy(adapter.scanProgress)
+        adapter.relay_progress(root, 3, 10)
 
-        assert blocker.args == [root, 3, 10]
+        assert spy.count() == 1
+        assert spy[0][0] == root
+        assert spy[0][1] == 3
+        assert spy[0][2] == 10
 
-    def test_relay_chunk_ready_emits_scan_chunk_ready(self, adapter, qtbot):
+    def test_relay_chunk_ready_emits_scan_chunk_ready(self, adapter, qapp):
+        from PySide6.QtTest import QSignalSpy
+
         root = Path("/tmp/album")
         chunk = [{"rel": "img.jpg"}]
 
-        with qtbot.waitSignal(adapter.scanChunkReady, timeout=1000) as blocker:
-            adapter.relay_chunk_ready(root, chunk)
+        spy = QSignalSpy(adapter.scanChunkReady)
+        adapter.relay_chunk_ready(root, chunk)
 
-        assert blocker.args[0] == root
-        assert blocker.args[1] == chunk
+        assert spy.count() == 1
+        assert spy[0][0] == root
+        assert spy[0][1] == chunk
 
-    def test_relay_finished_emits_scan_finished(self, adapter, qtbot):
+    def test_relay_finished_emits_scan_finished(self, adapter, qapp):
+        from PySide6.QtTest import QSignalSpy
+
         root = Path("/tmp/album")
 
-        with qtbot.waitSignal(adapter.scanFinished, timeout=1000) as blocker:
-            adapter.relay_finished(root, True)
+        spy = QSignalSpy(adapter.scanFinished)
+        adapter.relay_finished(root, True)
 
-        assert blocker.args == [root, True]
+        assert spy.count() == 1
+        assert spy[0][0] == root
+        assert spy[0][1] is True
 
-    def test_relay_batch_failed_emits_scan_batch_failed(self, adapter, qtbot):
+    def test_relay_batch_failed_emits_scan_batch_failed(self, adapter, qapp):
+        from PySide6.QtTest import QSignalSpy
+
         root = Path("/tmp/album")
 
-        with qtbot.waitSignal(adapter.scanBatchFailed, timeout=1000) as blocker:
-            adapter.relay_batch_failed(root, 5)
+        spy = QSignalSpy(adapter.scanBatchFailed)
+        adapter.relay_batch_failed(root, 5)
 
-        assert blocker.args == [root, 5]
+        assert spy.count() == 1
+        assert spy[0][0] == root
+        assert spy[0][1] == 5
 
     def test_adapter_has_no_business_methods(self, adapter):
-        """ScanProgressAdapter must only expose relay and signal methods."""
-        public_methods = [
-            name for name in dir(adapter)
-            if not name.startswith("_") and callable(getattr(type(adapter), name, None))
-        ]
-        # Allowed public methods are Qt lifecycle + explicit relay methods
-        allowed_prefixes = (
-            "relay_", "connect", "disconnect", "emit", "blockSignals",
-            "childEvent", "children", "customEvent", "deleteLater",
-            "destroyed", "dumpObjectInfo", "dumpObjectTree", "dynamicPropertyNames",
-            "event", "eventFilter", "findChild", "findChildren",
-            "inherits", "installEventFilter", "isSignalConnected",
-            "isWidgetType", "isWindowType", "isQmlExposed", "isQuickItemType",
-            "killTimer",
-            "metaObject", "moveToThread", "objectName", "parent",
-            "property", "pyqtConfigure", "receivers", "removeEventFilter",
-            "sender", "senderSignalIndex", "setObjectName", "setParent",
-            "setProperty", "signalsBlocked", "startTimer", "staticMetaObject",
-            "thread", "timerEvent", "tr",
-        )
-        business_methods = [
-            m for m in public_methods
-            if not any(m.startswith(p) or m == p for p in allowed_prefixes)
-            and m not in (
-                "scanProgress", "scanChunkReady", "scanFinished", "scanBatchFailed",
-            )
-        ]
-        assert not business_methods, (
-            f"ScanProgressAdapter has unexpected public methods (possible business logic): "
-            f"{business_methods}"
+        """ScanProgressAdapter must only expose relay and signal methods defined on the class."""
+        from iPhoto.presentation.qt.adapters.scan_progress_adapter import ScanProgressAdapter
+
+        # Only inspect methods/attributes defined directly on ScanProgressAdapter itself,
+        # not inherited Qt/QObject members.  This avoids brittleness across PySide6 versions.
+        own_public = {
+            name for name in type(adapter).__dict__
+            if not name.startswith("_")
+        }
+        # Signal descriptors and relay methods are the only allowed own members.
+        allowed_signals = {"scanProgress", "scanChunkReady", "scanFinished", "scanBatchFailed"}
+        allowed_relay = {name for name in own_public if name.startswith("relay_")}
+        unexpected = own_public - allowed_signals - allowed_relay
+        assert not unexpected, (
+            f"ScanProgressAdapter has unexpected own public members (possible business logic): "
+            f"{unexpected}"
         )
 
 
@@ -253,7 +285,7 @@ class TestScanProgressAdapterSignalRelay:
 class TestAdapterBoundaryContract:
     """Verify adapter architectural boundary: no infrastructure access, no state."""
 
-    def test_library_update_adapter_does_not_hold_worker(self, qtbot):
+    def test_library_update_adapter_does_not_hold_worker(self, qapp):
         """LibraryUpdateAdapter must not own any worker instance."""
         from iPhoto.presentation.qt.adapters.library_update_adapter import LibraryUpdateAdapter
 
@@ -266,7 +298,7 @@ class TestAdapterBoundaryContract:
             f"LibraryUpdateAdapter must not hold worker references: {worker_attrs}"
         )
 
-    def test_scan_progress_adapter_does_not_hold_worker(self, qtbot):
+    def test_scan_progress_adapter_does_not_hold_worker(self, qapp):
         """ScanProgressAdapter must not own any worker instance."""
         from iPhoto.presentation.qt.adapters.scan_progress_adapter import ScanProgressAdapter
 

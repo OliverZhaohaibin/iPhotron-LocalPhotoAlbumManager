@@ -9,8 +9,9 @@ These tests verify that LibraryManager acts as a thin composition shell:
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -23,12 +24,25 @@ except ImportError:
     pass
 
 
+@pytest.fixture(scope="module")
+def qapp():
+    if not _pyside6_available:
+        pytest.skip("PySide6 not installed")
+    from PySide6.QtWidgets import QApplication
+
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    app = QApplication.instance()
+    if app is None:
+        app = QApplication([])
+    yield app
+
+
 @pytest.mark.skipif(not _pyside6_available, reason="PySide6 not installed")
 class TestLibraryManagerIsAShell:
     """LibraryManager must be a thin coordination shell, not a business logic owner."""
 
     @pytest.fixture
-    def manager(self):
+    def manager(self, qapp):
         from iPhoto.library.manager import LibraryManager
 
         return LibraryManager()
@@ -94,10 +108,13 @@ class TestLibraryManagerIsAShell:
         with pytest.raises(LibraryUnavailableError):
             manager.bind_path(missing)
 
-    def test_manager_bind_path_emits_tree_updated(self, manager, tmp_path, qtbot):
+    def test_manager_bind_path_emits_tree_updated(self, manager, tmp_path, qapp):
         """bind_path must emit treeUpdated after successfully binding."""
-        with qtbot.waitSignal(manager.treeUpdated, timeout=2000):
-            manager.bind_path(tmp_path)
+        from PySide6.QtTest import QSignalSpy
+
+        spy = QSignalSpy(manager.treeUpdated)
+        manager.bind_path(tmp_path)
+        assert spy.count() >= 1
 
     def test_manager_bind_path_sets_root(self, manager, tmp_path):
         """bind_path must set the internal root to the resolved path."""
@@ -169,7 +186,7 @@ class TestLibraryManagerMixinDelegation:
     """Verify mixin methods delegate to application services."""
 
     @pytest.fixture
-    def manager_with_root(self, tmp_path):
+    def manager_with_root(self, tmp_path, qapp):
         from iPhoto.library.manager import LibraryManager
 
         mgr = LibraryManager()

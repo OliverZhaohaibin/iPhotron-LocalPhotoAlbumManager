@@ -45,7 +45,7 @@ Adapters must **not** become a second façade or a second service layer.
 | File | Responsibility |
 |---|---|
 | `library_update_adapter.py` | Forwards index/links/reload/error signals from `LibraryUpdateService` to UI |
-| `scan_progress_adapter.py` | Aggregates scan-progress signals from background workers |
+| `scan_progress_adapter.py` | Relays scan-progress signals from background workers to UI |
 
 ---
 

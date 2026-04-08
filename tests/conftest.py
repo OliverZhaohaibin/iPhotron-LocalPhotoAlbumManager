@@ -1,5 +1,6 @@
 import sys
 import os
+import time
 from types import ModuleType
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -182,8 +183,6 @@ if HAS_PYSIDE6:
             return self[index]
 
         def wait(self, ms: int = 1000) -> bool:
-            import time
-
             try:
                 from PySide6.QtCore import QEventLoop
                 from PySide6.QtWidgets import QApplication
@@ -194,7 +193,7 @@ if HAS_PYSIDE6:
                     if len(self) > 0:
                         return True
                     time.sleep(0.005)
-            except Exception:
+            except ImportError:
                 pass
             return len(self) > 0
 

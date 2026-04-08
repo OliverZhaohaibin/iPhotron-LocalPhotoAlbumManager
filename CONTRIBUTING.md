@@ -66,7 +66,66 @@ The project follows a layered architecture to separate core logic from the GUI.
 *   `gui/coordinators/`: MVVM coordinators managing view navigation and business flow.
 *   `gui/viewmodels/`: View models for data binding and presentation logic.
 
-## 5. Coding Standards
+## 5. Architecture Rules & Boundaries
+
+These rules are **automatically enforced in CI** via `python tools/check_architecture.py` and `pytest tests/architecture/`. Violations will block merges.
+
+### Where to put new code
+
+| What you're adding | Where it goes |
+|--------------------|---------------|
+| Business rule / domain logic | `application/use_cases/` or `domain/` |
+| Infrastructure implementation | `infrastructure/` |
+| Qt signal bridge / UI wiring | `gui/services/` or `gui/coordinators/` |
+| New screen or widget | `gui/ui/widgets/` |
+
+### AppContext boundary
+- **Do not** import `AppContext` at runtime in `application/` or `bootstrap/` modules.
+- If you need a type annotation only, guard it: `if TYPE_CHECKING: from iPhoto.appctx import AppContext`.
+- New code should use `RuntimeContext` instead.
+
+### Adapter → Infrastructure boundary
+- Modules in `presentation/qt/adapters/` and `gui/services/` must **not** import from `iPhoto.infrastructure.*` directly.
+- Route infrastructure calls through `application/services/` or `application/use_cases/`.
+
+### Shim rules (`app.py`)
+- `app.py` is a **deprecated shim** — do not add new function signatures, classes, or loops.
+- Only delegation to existing application use cases is allowed.
+
+### LibraryManager shell rules
+- `LibraryManager` is a **thin-shell coordinator** — new business logic must not be added directly to this class.
+- New scanning/geo/trash logic goes in the corresponding mixin or application service.
+
+### Compatibility layer lifecycle
+See [`docs/refactor/iPhotron_compatibility_lifecycle_plan.md`](docs/refactor/iPhotron_compatibility_lifecycle_plan.md) for the full strategy on which layers are long-term-stable, bugfix-only, or scheduled for removal.
+
+### Running checks locally
+
+```bash
+# Unified architecture check (AppContext boundary + adapter boundary)
+python tools/check_architecture.py
+
+# Full architecture test suite
+python -m pytest tests/architecture/ -v
+
+# Full test suite
+QT_QPA_PLATFORM=offscreen python -m pytest tests/ --tb=short
+```
+
+### pre-commit
+
+Install hooks (one-time):
+
+```bash
+pip install pre-commit
+pre-commit install
+```
+
+After installation, architecture checks run automatically before every commit.
+
+---
+
+## 7. Coding Standards
 
 ### Style Guide
 *   **Linting & Formatting**: We use `ruff` for linting and `black` for formatting.
@@ -86,7 +145,7 @@ The project follows a layered architecture to separate core logic from the GUI.
 *   **Locking**: Before writing to manifests or index files, check `.lexiphoto/locks/` (or equivalent) to avoid race conditions.
 *   **Cross-Platform**: Use `pathlib.Path` for all file path manipulations to ensure compatibility with Windows, macOS, and Linux.
 
-## 6. Performance & Optimization Guidelines
+## 8. Performance & Optimization Guidelines
 
 Performance is critical for handling large photo libraries.
 
@@ -101,7 +160,7 @@ Performance is critical for handling large photo libraries.
 ### Benchmarks
 *   Always measure performance before and after optimization to ensure your changes actually provide a benefit.
 
-## 7. OpenGL & Graphics Guidelines
+## 9. OpenGL & Graphics Guidelines
 
 The detail view and map components use OpenGL for high-performance rendering.
 
@@ -121,7 +180,7 @@ We define four distinct coordinate spaces. **Do not mix them up.**
 *   Use **OpenGL 3.3 Core Profile**.
 *   Use `QSurfaceFormat` to request the correct version.
 
-## 8. Testing Strategy
+## 10. Testing Strategy
 
 ### Running Tests
 Run the test suite using `pytest`:
@@ -133,7 +192,7 @@ pytest
 *   Tests must simulate missing or corrupt files to ensure the application handles them gracefully without crashing.
 *   **Rebuildability**: Verify that deleting `global_index.db` or `links.json` results in them being correctly rebuilt by the system through re-scanning.
 
-## 9. Submitting Issues
+## 11. Submitting Issues
 
 We use GitHub issues to track bugs and features.
 
@@ -148,7 +207,7 @@ When reporting a bug, please include:
 ### Feature Requests
 Please describe the feature you would like to see, why you need it, and how it should work.
 
-## 10. Commit Message Guidelines
+## 12. Commit Message Guidelines
 
 We follow a standard commit message format to ensure history is readable.
 
@@ -166,7 +225,7 @@ We follow a standard commit message format to ensure history is readable.
     *   Wrap lines at 72 characters.
     *   Explain *what* and *why*, not *how*.
 
-## 11. Code Review Guidelines
+## 13. Code Review Guidelines
 
 All submissions will be reviewed by maintainers. We look for:
 
@@ -175,7 +234,7 @@ All submissions will be reviewed by maintainers. We look for:
 *   **Test Coverage**: New features must include unit tests; bug fixes must include regression tests.
 *   **Readability**: Clean, typed, and well-documented code following our style guide.
 
-## 12. Contribution Areas
+## 14. Contribution Areas
 
 We welcome contributions across the entire stack:
 
@@ -184,7 +243,7 @@ We welcome contributions across the entire stack:
 *   **OpenGL/Maps**: Shader development, map rendering, and high-performance image viewers.
 *   **Documentation & Tooling**: Improving guides, adding docstrings, and enhancing CI/CD scripts.
 
-## 13. Pull Request Process
+## 15. Pull Request Process
 
 ### Branching Strategy
 Please use the following naming convention for your branches:

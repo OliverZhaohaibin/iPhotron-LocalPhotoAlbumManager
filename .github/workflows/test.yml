@@ -35,6 +35,11 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e ".[test]"
 
+      - name: Run architecture checks
+        run: |
+          python tools/check_architecture.py
+          python -m pytest tests/architecture/ -v
+
       - name: Run tests
         env:
           QT_QPA_PLATFORM: offscreen

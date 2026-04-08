@@ -59,7 +59,7 @@
 ```python
 # 旧写法（现有代码保留，新代码禁止）
 from iPhoto.appctx import AppContext
-ctx = AppContext.get()
+ctx = AppContext()
 
 # 新写法（所有新代码必须使用）
 from iPhoto.bootstrap.runtime_context import RuntimeContext

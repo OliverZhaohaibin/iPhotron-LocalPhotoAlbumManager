@@ -51,7 +51,7 @@
 ```python
 # 旧写法（仅允许在 GUI 层的现有调用点使用）
 from iPhoto.appctx import AppContext
-ctx = AppContext.get()
+ctx = AppContext()
 
 # 新写法（所有新代码必须使用）
 from iPhoto.bootstrap.runtime_context import RuntimeContext

@@ -54,7 +54,7 @@ from iPhoto.appctx import AppContext
 
 class MyService:
     def do_something(self):
-        ctx = AppContext.get()
+        ctx = AppContext()
         ...
 
 # ✅ 方案 A：改用 RuntimeContext（推荐）
@@ -231,9 +231,9 @@ pre-commit run --all-files
 - repo: local
   hooks:
     - id: architecture-checks
-      name: Architecture checks
+      name: Architecture boundary checks
       entry: python tools/check_architecture.py
-      language: system
+      language: python
       always_run: true
       pass_filenames: false
 ```

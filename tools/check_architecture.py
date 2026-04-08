@@ -18,7 +18,6 @@ Options
 -------
 --only <id>     Run only the check identified by <id>.
                 Accepted values: ``appctx``, ``adapter``.
---verbose       Show full per-file detail even when checks pass.
 --src <path>    Override the source root (default: src/iPhoto relative to repo
                 root).  Passed through to each individual check.
 
@@ -97,12 +96,6 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Run only the specified check (%(choices)s).",
     )
     parser.add_argument(
-        "--verbose",
-        action="store_true",
-        default=False,
-        help="Show full per-file detail even when checks pass.",
-    )
-    parser.add_argument(
         "--src",
         metavar="PATH",
         default=None,
@@ -152,7 +145,7 @@ def main(argv: list[str] | None = None) -> int:
     print()
     print("  Next steps:")
     print("    pytest architecture suite  →  python -m pytest tests/architecture/ -v")
-    print("    full test suite            →  python -m pytest tests/ --tb=short")
+    print("    full test suite            →  QT_QPA_PLATFORM=offscreen NUMBA_DISABLE_JIT=1 python -m pytest tests/ --tb=short")
     print(f"{'═' * _SECTION_WIDTH}\n")
 
     if any_internal_error:

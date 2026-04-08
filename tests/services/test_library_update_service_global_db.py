@@ -33,11 +33,11 @@ def test_rescan_album_uses_library_root(monkeypatch, tmp_path: Path) -> None:
 
     calls: list[tuple[Path, Path | None]] = []
 
-    def fake_rescan(root: Path, progress_callback=None, library_root=None):
-        calls.append((Path(root), library_root))
+    def fake_execute(self, root: Path) -> list:
+        calls.append((Path(root), self._library_root_getter()))
         return []
 
-    monkeypatch.setattr(lus.backend, "rescan", fake_rescan)
+    monkeypatch.setattr(lus.RescanAlbumUseCase, "execute", fake_execute)
 
     service = lus.LibraryUpdateService(
         task_manager=DummyTaskManager(),

@@ -153,37 +153,39 @@ if HAS_PYSIDE6:
 
     ensure_module("PySide6.QtSvg")
 
-    # Provide QtTest shim if unavailable
+    # Provide QtTest shim if unavailable; always replace QSignalSpy with a
+    # list-based version so that spy[index][arg] subscripting works across all
+    # PySide6 versions (newer versions removed __getitem__ from QSignalSpy).
     try:
         import PySide6.QtTest  # type: ignore  # noqa: F401
+        qt_test_module = sys.modules["PySide6.QtTest"]
     except ImportError:
         qt_test_module = ModuleType("PySide6.QtTest")
-
-        class QSignalSpy(list):
-            def __init__(self, signal):
-                super().__init__()
-                self._signal = signal
-                if hasattr(signal, "connect"):
-                    signal.connect(self._capture)
-
-            def _capture(self, *args):
-                self.append(args)
-
-            def count(self):
-                return len(self)
-
-        class QTest:
-            @staticmethod
-            def qWait(_ms: int) -> None:
-                return None
-
-        qt_test_module.QSignalSpy = QSignalSpy
-        qt_test_module.QTest = QTest
         sys.modules["PySide6.QtTest"] = qt_test_module
         if "PySide6" in sys.modules:
             setattr(sys.modules["PySide6"], "QtTest", qt_test_module)
-    else:
-        ensure_module("PySide6.QtTest")
+
+    class QSignalSpy(list):
+        def __init__(self, signal):
+            super().__init__()
+            self._signal = signal
+            if hasattr(signal, "connect"):
+                signal.connect(self._capture)
+
+        def _capture(self, *args):
+            self.append(args)
+
+        def count(self):
+            return len(self)
+
+    class QTest:
+        @staticmethod
+        def qWait(_ms: int) -> None:
+            return None
+
+    qt_test_module.QSignalSpy = QSignalSpy
+    if not hasattr(qt_test_module, "QTest"):
+        qt_test_module.QTest = QTest
 
     # Mock OpenGL to avoid display dependency
     ensure_module("OpenGL")

@@ -47,6 +47,13 @@ from __future__ import annotations
 import argparse
 import sys
 from pathlib import Path
+from typing import Protocol
+
+
+class _CheckModule(Protocol):
+    """Interface satisfied by each individual check module."""
+
+    def main(self, argv: list[str] | None = None) -> int: ...
 
 # Allow running this script from any working directory.
 _TOOLS_DIR = Path(__file__).parent
@@ -58,8 +65,8 @@ import check_runtime_entry_usage  # noqa: E402
 _SECTION_WIDTH = 60
 
 # Registry of all available CLI checks.
-# Each entry: (id, display_name, callable)
-_ALL_CHECKS: list[tuple[str, str, object]] = [
+# Each entry: (id, display_name, module)
+_ALL_CHECKS: list[tuple[str, str, _CheckModule]] = [
     ("appctx", "AppContext runtime import boundary", check_runtime_entry_usage),
     ("adapter", "Adapter → Infrastructure boundary", check_adapter_boundary),
 ]
@@ -121,7 +128,7 @@ def main(argv: list[str] | None = None) -> int:
     for idx, (cid, display_name, module) in enumerate(checks_to_run, start=1):
         _banner(display_name, idx, total)
         check_argv = ["--src", src_root]
-        code = module.main(check_argv)  # type: ignore[attr-defined]
+        code = module.main(check_argv)
         results.append((display_name, code))
 
     print(f"\n{'═' * _SECTION_WIDTH}")

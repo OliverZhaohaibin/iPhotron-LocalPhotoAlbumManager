@@ -12,10 +12,10 @@
 
 | 编号 | 文档 | 内容概述 |
 |------|------|---------|
-| **01** | [现有架构分析](./01-current-architecture-analysis.md) | 当前架构全景、层次结构、核心问题诊断（含 Mermaid 图） |
-| **02** | [行业对标分析](./02-industry-benchmarks.md) | 开源相册（digiKam、Shotwell）与大型 Python GUI 工程（Calibre、Anki、Frescobaldi）对标 |
-| **03** | [目标架构设计](./03-target-architecture.md) | 目标 MVVM + Clean Architecture 设计（含 Mermaid 图）、优势对比 |
-| **04** | [重构路线图](./04-refactoring-roadmap.md) | 5 阶段分步实施计划、里程碑、风险管理 |
+| **01** | [现有架构分析](01-current-architecture-analysis.md) | 当前架构全景、层次结构、核心问题诊断（含 Mermaid 图） |
+| **02** | [行业对标分析](02-industry-benchmarks.md) | 开源相册（digiKam、Shotwell）与大型 Python GUI 工程（Calibre、Anki、Frescobaldi）对标 |
+| **03** | [目标架构设计](03-target-architecture.md) | 目标 MVVM + Clean Architecture 设计（含 Mermaid 图）、优势对比 |
+| **04** | [重构路线图](04-refactoring-roadmap.md) | 5 阶段分步实施计划、里程碑、风险管理 |
 | **05** | [阶段一：基础设施层](./05-phase1-infrastructure.md) | DI 容器增强、EventBus 重建、连接池优化 |
 | **06** | [阶段二：领域与应用层](./06-phase2-domain-application.md) | 领域模型统一、Use Case 补全、Service 层整合 |
 | **07** | [阶段三：GUI MVVM 重构](./07-phase3-gui-mvvm.md) | Coordinator 精简、ViewModel 拆分、View 解耦 |

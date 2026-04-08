@@ -1,6 +1,6 @@
 """Application-wide context helpers for the GUI layer.
 
-Compatibility shell.
+Compatibility shell (Phase 4 classification: Class A – long-term keep).
 
 This module retains the ``AppContext`` name and API surface for backward
 compatibility.  All dependency wiring is now delegated to
@@ -8,7 +8,20 @@ compatibility.  All dependency wiring is now delegated to
 proxy that forwards every public attribute to the underlying
 :class:`~iPhoto.bootstrap.runtime_context.RuntimeContext` instance.
 
+Migration guide
+---------------
+New code must **not** import ``AppContext``::
+
+    # Old (legacy path – do not use in new code)
+    from iPhoto.appctx import AppContext
+    ctx = AppContext()
+
+    # New (Phase 3+ formal path)
+    from iPhoto.bootstrap.runtime_context import RuntimeContext
+    ctx = RuntimeContext.create()
+
 Do NOT add business logic or new dependency construction to this file.
+Do NOT add new callers of ``AppContext`` in new code.
 """
 
 from __future__ import annotations

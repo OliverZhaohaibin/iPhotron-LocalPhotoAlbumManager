@@ -178,6 +178,26 @@ if HAS_PYSIDE6:
         def count(self):
             return len(self)
 
+        def at(self, index: int):
+            return self[index]
+
+        def wait(self, ms: int = 1000) -> bool:
+            import time
+
+            try:
+                from PySide6.QtCore import QEventLoop
+                from PySide6.QtWidgets import QApplication
+
+                deadline = time.monotonic() + ms / 1000.0
+                while time.monotonic() < deadline:
+                    QApplication.processEvents(QEventLoop.ProcessEventsFlag.AllEvents, 20)
+                    if len(self) > 0:
+                        return True
+                    time.sleep(0.005)
+            except Exception:
+                pass
+            return len(self) > 0
+
     class QTest:
         @staticmethod
         def qWait(_ms: int) -> None:

@@ -61,16 +61,26 @@ def main(argv: list[str] | None = None) -> int:
     print("  Architecture check summary")
     print(f"{'═' * _SECTION_WIDTH}")
 
-    any_failed = False
+    any_violation = False
+    any_internal_error = False
     for name, rc in results:
-        status = "PASS ✓" if rc == 0 else "FAIL ✗"
+        if rc == 2:
+            status = "ERROR !"
+            any_internal_error = True
+        elif rc != 0:
+            status = "FAIL ✗"
+            any_violation = True
+        else:
+            status = "PASS ✓"
         print(f"  [{status}]  {name}")
-        if rc != 0:
-            any_failed = True
 
     print(f"{'═' * _SECTION_WIDTH}\n")
 
-    if any_failed:
+    if any_internal_error:
+        print("Architecture checks encountered internal errors — see details above.", file=sys.stderr)
+        return 2
+
+    if any_violation:
         print("Architecture checks FAILED — see details above.", file=sys.stderr)
         return 1
 

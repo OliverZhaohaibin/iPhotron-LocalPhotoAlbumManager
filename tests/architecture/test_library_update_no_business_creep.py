@@ -16,7 +16,9 @@ Checked constraints
 3. The class must keep delegating to the application services that were
    extracted during Phase 3/4 (they must still be referenced in the source).
 4. No inline file-I/O calls (``open(…)``) outside a ``TYPE_CHECKING`` guard –
-   all I/O must go through use cases.
+   all I/O must go through use cases.  ``open()`` calls are flagged regardless
+   of whether they appear inside a ``TYPE_CHECKING`` guard, since such calls
+   would never be valid in a Qt coordinator file.
 """
 
 from __future__ import annotations
@@ -103,9 +105,10 @@ def test_library_update_service_still_delegates_to_application_services() -> Non
 
 
 def test_library_update_service_has_no_inline_file_open() -> None:
-    """LibraryUpdateService must not contain inline open() file I/O calls.
+    """LibraryUpdateService must not contain inline open() file I/O calls anywhere.
 
-    All file access must go through application use cases.
+    All file access must go through application use cases.  open() calls are
+    not valid in a Qt coordinator file regardless of guard context.
     """
     tree = _parse()
     violations: list[int] = []

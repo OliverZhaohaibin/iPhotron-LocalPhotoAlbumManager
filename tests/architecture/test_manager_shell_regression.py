@@ -49,8 +49,68 @@ PROHIBITED_DIRECT_METHODS = {
 }
 
 
+DOMAIN_PACKAGE = "iPhoto.domain"
+
+
 def _parse() -> ast.Module:
     return ast.parse(MANAGER_FILE.read_text(encoding="utf-8"))
+
+
+def _runtime_domain_imports(tree: ast.Module) -> list[int]:
+    """Return line numbers of iPhoto.domain imports outside TYPE_CHECKING guards."""
+    violations: list[int] = []
+
+    class Visitor(ast.NodeVisitor):
+        def __init__(self) -> None:
+            self._in_type_checking: bool = False
+
+        def visit_If(self, node: ast.If) -> None:
+            prev = self._in_type_checking
+            test = node.test
+            is_tc = (isinstance(test, ast.Name) and test.id == "TYPE_CHECKING") or (
+                isinstance(test, ast.Attribute) and test.attr == "TYPE_CHECKING"
+            )
+            if is_tc:
+                self._in_type_checking = True
+                for child in node.body:
+                    self.visit(child)
+                self._in_type_checking = prev
+                for child in node.orelse:
+                    self.visit(child)
+            else:
+                self.generic_visit(node)
+
+        def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
+            if self._in_type_checking:
+                return
+            module = node.module or ""
+            if module == DOMAIN_PACKAGE or module.startswith(DOMAIN_PACKAGE + "."):
+                violations.append(node.lineno)
+
+        def visit_Import(self, node: ast.Import) -> None:
+            if self._in_type_checking:
+                return
+            for alias in node.names:
+                if alias.name == DOMAIN_PACKAGE or alias.name.startswith(DOMAIN_PACKAGE + "."):
+                    violations.append(node.lineno)
+
+    Visitor().visit(tree)
+    return violations
+
+
+def test_manager_module_does_not_import_domain_at_runtime() -> None:
+    """LibraryManager must not import from iPhoto.domain at runtime.
+
+    Domain models should only be accessed through application services, not
+    imported directly into the manager shell.  TYPE_CHECKING-guarded imports
+    are allowed for type annotations.
+    """
+    tree = _parse()
+    violations = _runtime_domain_imports(tree)
+    assert not violations, (
+        f"library/manager.py imports from iPhoto.domain at runtime at lines: {violations}\n"
+        "Guard with 'if TYPE_CHECKING:' or access domain models through application services."
+    )
 
 
 def test_manager_module_defines_at_most_one_class() -> None:

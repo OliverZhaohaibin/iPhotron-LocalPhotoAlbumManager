@@ -7,7 +7,7 @@ import importlib.util
 from pathlib import Path
 from typing import Callable, Mapping, Optional
 
-from PySide6.QtCore import QPoint, QRect, QRectF, QSize, QSizeF, Qt, QTimer, Signal
+from PySide6.QtCore import QEvent, QObject, QPoint, QRect, QRectF, QSize, QSizeF, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QPainter, QPainterPath, QPen, QRegion, QResizeEvent
 from PySide6.QtWidgets import (
     QFrame,
@@ -33,6 +33,22 @@ if importlib.util.find_spec("PySide6.QtMultimediaWidgets") is not None:
     from PySide6.QtMultimediaWidgets import QGraphicsVideoItem
 else:  # pragma: no cover - requires optional Qt module
     QGraphicsVideoItem = None  # type: ignore[assignment]
+
+
+class _PreviewWheelGuard(QObject):
+    """Block wheel gestures inside long-press preview popups.
+
+    Gallery long-press previews are intentionally read-only. Swallowing wheel
+    events here prevents the embedded renderers from interpreting the gesture
+    as zoom input while the preview is visible.
+    """
+
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:  # type: ignore[override]
+        del watched
+        if event.type() == QEvent.Type.Wheel:
+            event.accept()
+            return True
+        return False
 
 
 class _RoundedVideoItem(QGraphicsVideoItem):
@@ -90,6 +106,9 @@ class _VideoView(QGraphicsView):
         self.viewport().setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self.setStyleSheet("background: transparent; border: none;")
+        self._wheel_guard = _PreviewWheelGuard(self)
+        self.installEventFilter(self._wheel_guard)
+        self.viewport().installEventFilter(self._wheel_guard)
 
     def video_item(self) -> _RoundedVideoItem:
         return self._video_item
@@ -137,6 +156,9 @@ class _PreviewFrame(QWidget):
 
     def video_item(self) -> _RoundedVideoItem:
         return self._video_view.video_item()
+
+    def video_view(self) -> _VideoView:
+        return self._video_view
 
     def set_corner_radius(self, corner_radius: int) -> None:
         radius = max(0, corner_radius)
@@ -204,6 +226,14 @@ class _RhiPreviewPopup(VideoArea):
         self.set_surface_color("#121216")
         self.set_viewport_fill_enabled(True)
         self.edit_viewer.set_crop_framing_enabled(True)
+        self._wheel_guard = _PreviewWheelGuard(self)
+        for target in (
+            self,
+            self._surface_stack,
+            self._renderer,
+            self._edit_viewer,
+        ):
+            target.installEventFilter(self._wheel_guard)
         self._update_mask()
 
     def resize_preview(self, size: QSize) -> None:
@@ -320,6 +350,14 @@ class PreviewWindow(QWidget):
 
         self._frame = _PreviewFrame(self._corner_radius, self)
         layout.addWidget(self._frame)
+        self._wheel_guard = _PreviewWheelGuard(self)
+        for target in (
+            self,
+            self._frame,
+            self._frame.video_view(),
+            self._frame.video_view().viewport(),
+        ):
+            target.installEventFilter(self._wheel_guard)
 
         shadow = QGraphicsDropShadowEffect(self)
         shadow.setBlurRadius(48.0)

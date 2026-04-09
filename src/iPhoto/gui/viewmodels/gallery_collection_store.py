@@ -185,15 +185,22 @@ class GalleryCollectionStore:
         dto = self._row_cache.get(index)
         if dto is not None or self._direct_mode:
             return dto
+        if index < 0 or index >= self._total_count:
+            return None
         if self._visible_range is not None:
             visible_first, visible_last = self._visible_range
             if visible_first <= index <= visible_last:
-                self._ensure_pinned_row_loaded(index, emit_signals=False)
+                self._ensure_row_loaded(index, emit_signals=False)
                 return self._row_cache.get(index)
         if self._pinned_row == index:
-            self._ensure_pinned_row_loaded(index, emit_signals=False)
+            self._ensure_row_loaded(index, emit_signals=False)
             return self._row_cache.get(index)
-        return None
+        # Broad queries like All Photos may request rows outside the initial
+        # paging window before the view emits a new visible-range signal.
+        # Fetching on demand keeps those items interactive instead of
+        # rendering as inert black cells.
+        self._ensure_row_loaded(index, emit_signals=False)
+        return self._row_cache.get(index)
 
     def find_dto_by_path(self, path: Path) -> Optional[AssetDTO]:
         target = self._normalize_abs_key(path)
@@ -386,7 +393,7 @@ class GalleryCollectionStore:
             self._pinned_row = None
             return
         self._pinned_row = row
-        self._ensure_pinned_row_loaded(row, emit_signals=True)
+        self._ensure_row_loaded(row, emit_signals=True)
 
     def handle_scan_chunk(self, scan_root: Path, chunk: List[dict]) -> None:
         if not chunk or self._current_query is None or self._active_root is None:
@@ -554,7 +561,7 @@ class GalleryCollectionStore:
         fetched = self._fetch_rows(row, row)
         return fetched.get(row)
 
-    def _ensure_pinned_row_loaded(self, row: int, *, emit_signals: bool) -> None:
+    def _ensure_row_loaded(self, row: int, *, emit_signals: bool) -> None:
         if row in self._row_cache:
             return
         dto = self._fetch_single_row(row)

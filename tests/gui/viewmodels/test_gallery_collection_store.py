@@ -69,6 +69,31 @@ def test_prioritize_rows_replaces_old_window_with_new_window() -> None:
     assert initial_keys != updated_keys
 
 
+def test_asset_at_lazily_fetches_row_outside_initial_window() -> None:
+    assets = [
+        Asset(
+            id=str(i),
+            album_id="a",
+            path=Path(f"asset_{i}.jpg"),
+            media_type=MediaType.IMAGE,
+            size_bytes=1,
+        )
+        for i in range(600)
+    ]
+    store = GalleryCollectionStore(_FakeRepo(assets), library_root=Path("."))
+    store._path_cache.exists_cached = lambda path: True  # type: ignore[method-assign]
+
+    store.load_selection(Path("."), query=AssetQuery())
+
+    assert store._window_range == (0, 319)
+    assert 360 not in store._row_cache
+    dto = store.asset_at(360)
+
+    assert dto is not None
+    assert dto.rel_path == Path("asset_360.jpg")
+    assert 360 in store._row_cache
+
+
 def test_reload_current_selection_replays_query_after_repository_rebind(tmp_path: Path) -> None:
     first_repo = _FakeRepo(
         [

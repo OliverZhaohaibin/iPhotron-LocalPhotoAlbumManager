@@ -4,7 +4,10 @@ import sys
 
 from PySide6.QtWidgets import QApplication
 
-from ui import FaceClusterWindow
+from local_imports import import_sibling
+
+
+FaceClusterWindow = import_sibling("ui").FaceClusterWindow
 
 
 def main() -> int:

@@ -5,8 +5,17 @@ from pathlib import Path
 
 from PySide6.QtCore import QThread, Signal
 
-from db import FaceClusterRepository, PersonSummary, RuntimeWorkspace, prepare_runtime_workspace
-from pipeline import FaceClusterPipeline
+from local_imports import import_sibling
+
+
+_db = import_sibling("db")
+_pipeline = import_sibling("pipeline")
+
+FaceClusterRepository = _db.FaceClusterRepository
+PersonSummary = _db.PersonSummary
+RuntimeWorkspace = _db.RuntimeWorkspace
+prepare_runtime_workspace = _db.prepare_runtime_workspace
+FaceClusterPipeline = _pipeline.FaceClusterPipeline
 
 
 @dataclass(frozen=True)

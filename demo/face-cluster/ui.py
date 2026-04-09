@@ -23,9 +23,18 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from db import FaceClusterRepository, PersonSummary
-from image_utils import render_round_pixmap
-from worker import FaceClusterWorker, WorkerResult
+from local_imports import import_sibling
+
+
+_db = import_sibling("db")
+_image_utils = import_sibling("image_utils")
+_worker = import_sibling("worker")
+
+FaceClusterRepository = _db.FaceClusterRepository
+PersonSummary = _db.PersonSummary
+render_round_pixmap = _image_utils.render_round_pixmap
+FaceClusterWorker = _worker.FaceClusterWorker
+WorkerResult = _worker.WorkerResult
 
 
 TABLE_COLUMNS = [

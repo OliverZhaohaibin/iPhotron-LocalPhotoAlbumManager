@@ -8,8 +8,17 @@ import uuid
 
 import numpy as np
 
-from db import FaceRecord, PersonRecord
-from image_utils import load_image_rgb, pil_image_to_bgr, save_face_thumbnail
+from local_imports import import_sibling
+
+
+_db = import_sibling("db")
+_image_utils = import_sibling("image_utils")
+
+FaceRecord = _db.FaceRecord
+PersonRecord = _db.PersonRecord
+load_image_rgb = _image_utils.load_image_rgb
+pil_image_to_bgr = _image_utils.pil_image_to_bgr
+save_face_thumbnail = _image_utils.save_face_thumbnail
 
 
 SUPPORTED_IMAGE_SUFFIXES = {

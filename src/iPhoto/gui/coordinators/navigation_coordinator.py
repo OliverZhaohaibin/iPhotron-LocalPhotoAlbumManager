@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Literal, Optional
 from PySide6.QtCore import QObject, QRunnable, QThreadPool, QTimer, Signal
 
 from iPhoto.application.contracts.runtime_entry_contract import RuntimeEntryContract
+from iPhoto.gui.coordinators.location_selection_session import LocationSelectionSession
 from iPhoto.gui.coordinators.view_router import ViewRouter
 from iPhoto.gui.ui.widgets.album_sidebar import AlbumSidebar
 from iPhoto.gui.viewmodels.asset_list_viewmodel import AssetListViewModel
@@ -86,8 +87,7 @@ class NavigationCoordinator(QObject):
 
         self._static_selection: Optional[str] = None
         self._playback_coordinator: Optional[PlaybackCoordinator] = None
-        self._in_cluster_gallery: bool = False  # Tracks if we're viewing a cluster gallery from map
-        self._location_request_serial = 0
+        self._location_session = LocationSelectionSession()
         self._location_assets_pool = QThreadPool.globalInstance()
         self._location_assets_worker: _LocationAssetsWorker | None = None
 
@@ -121,6 +121,7 @@ class NavigationCoordinator(QObject):
 
         self._reset_playback()
         self._clear_cluster_gallery_mode()
+        self._location_session.set_mode("inactive")
         self._static_selection = None
         self._router.show_gallery()
 
@@ -146,6 +147,7 @@ class NavigationCoordinator(QObject):
         LOGGER.debug("open_all_photos: library_root=%s", self._context.library.root())
         self._reset_playback()
         self._clear_cluster_gallery_mode()
+        self._location_session.set_mode("inactive")
         self._router.show_gallery()
         self._static_selection = AlbumSidebar.ALL_PHOTOS_TITLE
 
@@ -162,6 +164,7 @@ class NavigationCoordinator(QObject):
         elif normalized == "albums":
             self._reset_playback()
             self._clear_cluster_gallery_mode()
+            self._location_session.set_mode("inactive")
             self._router.show_albums_dashboard()
             self._static_selection = "Albums"
         elif normalized == "favorites":
@@ -191,6 +194,7 @@ class NavigationCoordinator(QObject):
 
         self._reset_playback()
         self._clear_cluster_gallery_mode()
+        self._location_session.set_mode("inactive")
         self._router.show_gallery()
         self._static_selection = "Recently Deleted"
 
@@ -203,6 +207,7 @@ class NavigationCoordinator(QObject):
     def _open_filtered_collection(self, title: str, is_favorite=None, media_types=None):
         self._reset_playback()
         self._clear_cluster_gallery_mode()
+        self._location_session.set_mode("inactive")
         self._router.show_gallery()
         self._static_selection = title
 
@@ -226,13 +231,20 @@ class NavigationCoordinator(QObject):
         self._reset_playback()
         self._clear_cluster_gallery_mode()
         self._static_selection = "Location"
+        self._location_session.set_mode("map")
         self._asset_vm.set_active_root(root)
         self._router.show_map()
-        self._location_request_serial += 1
-        request_serial = self._location_request_serial
         map_view = self._router.map_view()
         if map_view is not None:
+            if (
+                self._location_session.root == root
+                and self._location_session.has_snapshot
+                and not self._location_session.invalidated
+            ):
+                map_view.set_assets(self._location_session.full_assets(), root)
+                return
             map_view.clear()
+        request_serial = self._location_session.begin_load(root)
         QTimer.singleShot(
             0,
             lambda root=root, request_serial=request_serial: self._populate_location_view(root, request_serial),
@@ -260,7 +272,7 @@ class NavigationCoordinator(QObject):
         # Keep the static selection as "Location" so the sidebar stays highlighted
         # on the Location section even when showing the gallery
         self._static_selection = "Location"
-        self._in_cluster_gallery = True
+        self._location_session.set_mode("cluster_gallery")
 
         # Load the cluster assets directly - O(1) operation
         self._asset_vm.load_selection(root, direct_assets=assets, library_root=root)
@@ -279,23 +291,74 @@ class NavigationCoordinator(QObject):
         Called when the back button in the cluster gallery is clicked.
         Restores the map view while keeping the Location section selected.
         """
-        if not self._in_cluster_gallery:
+        if not self._location_session.is_cluster_gallery():
             return
 
         self._clear_cluster_gallery_mode()
-        self._router.show_map()
-        self._location_request_serial += 1
-        request_serial = self._location_request_serial
         root = self._context.library.root()
-        if root is not None:
-            QTimer.singleShot(
-                0,
-                lambda root=root, request_serial=request_serial: self._populate_location_view(root, request_serial),
-            )
+        if root is None:
+            return
+
+        self._static_selection = "Location"
+        self._location_session.set_mode("map")
+        self._asset_vm.set_active_root(root)
+        self._router.show_map()
+
+        map_view = self._router.map_view()
+        if map_view is not None:
+            if (
+                self._location_session.root == root
+                and self._location_session.has_snapshot
+                and not self._location_session.invalidated
+            ):
+                map_view.set_assets(self._location_session.full_assets(), root)
+                return
+            map_view.clear()
+
+        request_serial = self._location_session.begin_load(root)
+        QTimer.singleShot(
+            0,
+            lambda root=root, request_serial=request_serial: self._populate_location_view(root, request_serial),
+        )
 
     def is_in_cluster_gallery(self) -> bool:
         """Return True if currently viewing a cluster gallery from the map."""
-        return self._in_cluster_gallery
+        return self._location_session.is_cluster_gallery()
+
+    def open_location_asset(self, rel: str) -> None:
+        """Open a single marker inside the full Location gallery context."""
+
+        root = self._context.library.root()
+        if root is None:
+            self._handle_bind_library()
+            return
+
+        if (
+            self._location_session.root != root
+            or not self._location_session.has_snapshot
+            or self._location_session.invalidated
+        ):
+            LOGGER.warning("Location asset requested without an active geotagged snapshot: %s", rel)
+            return
+
+        resolved_path = self._location_session.resolve_relative(rel)
+        if resolved_path is None:
+            LOGGER.warning("Unable to resolve Location asset from current snapshot: %s", rel)
+            return
+
+        full_assets = self._location_session.full_assets()
+        self._static_selection = "Location"
+        self._location_session.set_mode("gallery")
+        self._asset_vm.load_selection(root, direct_assets=full_assets, library_root=root)
+
+        row = self._asset_vm.row_for_path(resolved_path)
+        if row is None:
+            LOGGER.warning("Resolved Location asset is missing from gallery selection: %s", resolved_path)
+            return
+        if self._playback_coordinator is None:
+            LOGGER.warning("Playback coordinator unavailable for Location asset: %s", resolved_path)
+            return
+        self._playback_coordinator.play_asset(row)
 
     def _album_path_for_query(self, path: Path) -> Optional[str]:
         library_root = self._context.library.root()
@@ -336,11 +399,13 @@ class NavigationCoordinator(QObject):
     def _populate_location_view(self, root: Path, request_serial: int) -> None:
         """Start background loading of geotagged assets for the visible map view."""
 
-        if request_serial != self._location_request_serial:
+        if request_serial != self._location_session.request_serial:
             return
         if self._static_selection != "Location":
             return
         if self._context.library.root() != root:
+            return
+        if self._location_session.root != root:
             return
 
         map_view = self._router.map_view()
@@ -362,10 +427,7 @@ class NavigationCoordinator(QObject):
         _fetch_elapsed_ms: float,
     ) -> None:
         root_path = Path(root)
-        if request_serial != self._location_request_serial:
-            self._location_assets_worker = None
-            return
-        if self._static_selection != "Location":
+        if not self._location_session.accept_loaded(request_serial, root_path, assets):
             self._location_assets_worker = None
             return
         if self._context.library.root() != root_path:
@@ -377,12 +439,15 @@ class NavigationCoordinator(QObject):
             self._location_assets_worker = None
             return
 
-        map_view.set_assets(assets, root_path)
+        map_view.set_assets(self._location_session.full_assets(), root_path)
         self._location_assets_worker = None
 
     def _handle_location_assets_failed(self, request_serial: int, root: object, message: str) -> None:
         root_path = Path(root)
-        if request_serial != self._location_request_serial:
+        if request_serial != self._location_session.request_serial:
+            self._location_assets_worker = None
+            return
+        if self._location_session.root != root_path:
             self._location_assets_worker = None
             return
         LOGGER.warning(
@@ -399,9 +464,10 @@ class NavigationCoordinator(QObject):
         the header with the back button does not remain visible when the user
         switches to another view (e.g. All Photos, Favorites, Albums, …).
         """
-        if not self._in_cluster_gallery:
+        if not self._location_session.is_cluster_gallery():
             return
-        self._in_cluster_gallery = False
+        next_mode: Literal["inactive", "map"] = "map" if self._static_selection == "Location" else "inactive"
+        self._location_session.set_mode(next_mode)
         gallery_page = self._router.gallery_page()
         if gallery_page is not None:
             gallery_page.set_cluster_gallery_mode(False)
@@ -430,6 +496,7 @@ class NavigationCoordinator(QObject):
     # --- Tree Suppression Logic ---
 
     def handle_tree_updated(self):
+        self._location_session.invalidate()
         if self._router.is_edit_view_active():
             self._suppress_tree_refresh = True
             self._tree_refresh_suppression_reason = "edit"
@@ -457,6 +524,12 @@ class NavigationCoordinator(QObject):
     def clear_tree_refresh_suppression(self):
         self._suppress_tree_refresh = False
         self._tree_refresh_suppression_reason = None
+
+    def invalidate_location_session(self) -> None:
+        self._location_session.invalidate()
+
+    def is_location_context_active(self) -> bool:
+        return self._location_session.mode != "inactive"
 
     def suspend_library_watcher(self, duration: int = 250):
         manager = self._context.library

@@ -383,6 +383,7 @@ class MainCoordinator(QObject):
 
         # Map view cluster interactions
         if hasattr(ui, 'map_view') and ui.map_view is not None:
+            ui.map_view.assetActivated.connect(self._on_map_asset_activated)
             ui.map_view.clusterActivated.connect(self._on_cluster_activated)
 
         # Menus
@@ -465,9 +466,12 @@ class MainCoordinator(QObject):
     def _on_library_tree_updated(self) -> None:
         root = self._context.library.root()
         self._logger.debug("_on_library_tree_updated: root=%s", root)
+        self._navigation.invalidate_location_session()
         self._context.asset_runtime.bind_library_root(root)
         self._asset_service.set_repository(self._context.asset_runtime.repository)
         self._asset_list_vm.rebind_repository(self._context.asset_runtime.repository, root)
+        if self._navigation.is_location_context_active():
+            return
         self._asset_list_vm.reload_current_selection()
 
     def _on_asset_clicked(self, index: QModelIndex):
@@ -559,6 +563,11 @@ class MainCoordinator(QObject):
         on the map. Opens a gallery showing all assets in the cluster.
         """
         self._navigation.open_cluster_gallery(assets)
+
+    def _on_map_asset_activated(self, rel: str) -> None:
+        """Handle single-asset map activation inside the Location context."""
+
+        self._navigation.open_location_asset(rel)
 
     def _handle_toggle_favorite(self):
         """Toggles favorite status for selected assets."""

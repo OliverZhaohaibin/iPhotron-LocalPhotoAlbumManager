@@ -378,6 +378,10 @@ class AssetListViewModel(QAbstractListModel):
         if idx.isValid():
             self.dataChanged.emit(idx, idx, [Qt.DecorationRole, Roles.SIZE])
 
+    def row_for_path(self, path: Path) -> int | None:
+        """Return the visible-model row for *path* when the current selection contains it."""
+        return self._data_source.row_for_path(path)
+
     def thumbnail_loader(self):
         pass
 

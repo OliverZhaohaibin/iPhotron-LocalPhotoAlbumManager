@@ -289,6 +289,14 @@ def test_handle_scan_finished_delegates_to_data_source(view_model, mock_data_sou
     mock_data_source.handle_scan_finished.assert_called_once_with(root, True)
 
 
+def test_row_for_path_delegates_to_data_source(view_model, mock_data_source):
+    path = Path("/library/photo.jpg")
+    mock_data_source.row_for_path.return_value = 7
+
+    assert view_model.row_for_path(path) == 7
+    mock_data_source.row_for_path.assert_called_once_with(path)
+
+
 def test_unchanged_count_skips_reset(view_model, mock_data_source):
     mock_data_source.count.return_value = 2
     view_model._last_snapshot = (2, b"sig")

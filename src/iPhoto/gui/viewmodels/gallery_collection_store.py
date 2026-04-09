@@ -1,50 +1,38 @@
+"""Pure Python collection store backing gallery and filmstrip selection."""
+
+from __future__ import annotations
+
 import copy
 import os
 from pathlib import Path
 from typing import Dict, List, Optional
 
-from PySide6.QtCore import QCoreApplication, QObject, QTimer, Signal
-
 from iPhoto.application.dtos import AssetDTO
 from iPhoto.domain.models import Asset
 from iPhoto.domain.models.query import AssetQuery
 from iPhoto.domain.repositories import IAssetRepository
+from iPhoto.gui.viewmodels.signal import Signal
 
-# Re-exports from extracted modules (backward compatibility)
-from iPhoto.gui.viewmodels.path_cache import (  # noqa: F401
-    PATH_EXISTS_CACHE_LIMIT,
-    PathExistsCache,
+from iPhoto.gui.viewmodels.asset_dto_converter import (
+    geotagged_asset_to_dto as _geotagged_asset_to_dto_fn,
+    is_legacy_thumb_path as _is_legacy_thumb_path_fn,
+    is_thumbnail_asset as _is_thumbnail_asset_fn,
+    resolve_abs_path as _resolve_abs_path_fn,
+    scan_row_is_thumbnail as _scan_row_is_thumbnail_fn,
+    to_dto as _to_dto_fn,
 )
-from iPhoto.gui.viewmodels.pending_move_buffer import (  # noqa: F401
+from iPhoto.gui.viewmodels.asset_paging import (
+    should_validate_paths as _should_validate_paths_fn,
+)
+from iPhoto.gui.viewmodels.path_cache import PathExistsCache
+from iPhoto.gui.viewmodels.pending_move_buffer import (
     _PendingMove,
     should_include_pending as _should_include_pending_fn,
 )
-from iPhoto.gui.viewmodels.asset_dto_converter import (  # noqa: F401
-    THUMBNAIL_SUFFIX_RE,
-    THUMBNAIL_MAX_DIMENSION,
-    THUMBNAIL_MAX_BYTES,
-    LEGACY_THUMB_DIRS,
-    resolve_abs_path as _resolve_abs_path_fn,
-    to_dto as _to_dto_fn,
-    geotagged_asset_to_dto as _geotagged_asset_to_dto_fn,
-    scan_row_to_dto as _scan_row_to_dto_fn,
-    scan_row_matches_query as _scan_row_matches_query_fn,
-    is_thumbnail_asset as _is_thumbnail_asset_fn,
-    scan_row_is_thumbnail as _scan_row_is_thumbnail_fn,
-    is_legacy_thumb_path as _is_legacy_thumb_path_fn,
-)
-from iPhoto.gui.viewmodels.asset_paging import (  # noqa: F401
-    should_use_paging as _should_use_paging_fn,
-    should_validate_paths as _should_validate_paths_fn,
-)
 
 
-class AssetDataSource(QObject):
-    """Intermediary between Repository and ViewModel with viewport-driven caching."""
-
-    dataChanged = Signal()
-    windowChanged = Signal(int, int)
-    countChanged = Signal(int, int)
+class GalleryCollectionStore:
+    """Pure Python gallery data store with viewport-aware caching."""
 
     INITIAL_VISIBLE_ROWS = 80
     MIN_WINDOW_SIZE = 300
@@ -53,17 +41,24 @@ class AssetDataSource(QObject):
     LOOKBEHIND_SCREENS = 1
     LOOKAHEAD_SCREENS = 2
     HYSTERESIS_RATIO = 0.25
-    SCAN_REFRESH_DEBOUNCE_MS = 75
 
-    def __init__(self, repository: IAssetRepository, library_root: Optional[Path] = None):
-        super().__init__()
+    def __init__(
+        self,
+        repository: IAssetRepository,
+        library_root: Optional[Path] = None,
+    ) -> None:
+        self.data_changed = Signal()
+        self.window_changed = Signal()
+        self.count_changed = Signal()
+        self.row_changed = Signal()
+
         self._repo = repository
         self._library_root = library_root
         self._current_query: Optional[AssetQuery] = None
         self._selection_query: Optional[AssetQuery] = None
         self._selection_direct_assets: Optional[list] = None
         self._selection_library_root: Optional[Path] = library_root
-        self._total_count: int = 0
+        self._total_count = 0
         self._row_cache: Dict[int, AssetDTO] = {}
         self._window_range: Optional[tuple[int, int]] = None
         self._visible_range: Optional[tuple[int, int]] = None
@@ -75,20 +70,25 @@ class AssetDataSource(QObject):
         self._pending_scan_refresh = False
         self._pending_scan_rels: set[str] = set()
         self._pending_scan_sort_keys: set[tuple[str, str]] = set()
-        self._scan_refresh_scheduled = False
         self._direct_mode = False
 
-    def set_library_root(self, root: Optional[Path]):
+    def set_library_root(self, root: Optional[Path]) -> None:
         if self._library_root == root:
             return
         self._library_root = root
         self._reset_window_state()
+        self.data_changed.emit()
 
     def set_repository(self, repo: IAssetRepository) -> None:
         if self._repo is repo:
             return
         self._repo = repo
         self._reset_window_state()
+        self.data_changed.emit()
+
+    def rebind_repository(self, repo: IAssetRepository, library_root: Optional[Path]) -> None:
+        self.set_repository(repo)
+        self.set_library_root(library_root)
 
     def set_active_root(self, root: Optional[Path]) -> None:
         self._active_root = root
@@ -97,18 +97,13 @@ class AssetDataSource(QObject):
         return self._active_root
 
     def library_root(self) -> Optional[Path]:
-        """Return the configured library root for absolute-path resolution."""
         return self._library_root
 
-    def load(self, query: AssetQuery):
-        """Load data for the given query using a viewport-sized sparse cache."""
-        self._selection_query = self._clone_query(query)
-        self._selection_direct_assets = None
-        self._selection_library_root = self._library_root
-        self._current_query = self._clone_query(query)
-        self._direct_mode = False
-        self._reset_window_state()
-        self._load_initial_window()
+    def current_query(self) -> Optional[AssetQuery]:
+        return self._clone_query(self._selection_query) if self._selection_query is not None else None
+
+    def current_direct_assets(self) -> Optional[list]:
+        return list(self._selection_direct_assets) if self._selection_direct_assets is not None else None
 
     def load_selection(
         self,
@@ -118,7 +113,6 @@ class AssetDataSource(QObject):
         direct_assets: Optional[list] = None,
         library_root: Optional[Path] = None,
     ) -> None:
-        """Load the current gallery selection through one coordinated entrypoint."""
         has_query = query is not None
         has_direct_assets = direct_assets is not None
         if has_query == has_direct_assets:
@@ -126,34 +120,37 @@ class AssetDataSource(QObject):
 
         self.set_active_root(active_root)
         if query is not None:
-            self.load(query)
+            self._load_query(query)
             return
 
         resolved_library_root = library_root or self._library_root or active_root
         if resolved_library_root is None:
             raise ValueError("library_root is required when loading direct assets.")
-        self.load_geotagged_assets(list(direct_assets or []), resolved_library_root)
+        self._load_direct_assets(list(direct_assets or []), resolved_library_root)
 
-    def reload_current_query(self) -> None:
+    def reload_current_selection(self) -> None:
         if self._selection_direct_assets is not None:
-            self.load_geotagged_assets(
+            self._load_direct_assets(
                 list(self._selection_direct_assets),
                 self._selection_library_root or self._library_root,
             )
             return
         if self._selection_query is not None:
-            self.load(self._selection_query)
-            return
-        if self._current_query is None:
-            return
-        self.load(self._current_query)
+            self._load_query(self._selection_query)
 
-    def reload_current_selection(self) -> None:
-        """Reload whichever selection is currently active."""
-        self.reload_current_query()
+    def _load_query(self, query: AssetQuery) -> None:
+        old_total = self._total_count
+        self._selection_query = self._clone_query(query)
+        self._selection_direct_assets = None
+        self._selection_library_root = self._library_root
+        self._current_query = self._clone_query(query)
+        self._direct_mode = False
+        self._reset_window_state()
+        self._load_initial_window()
+        self._emit_refresh(old_total)
 
-    def load_geotagged_assets(self, assets: list, library_root: Path) -> None:
-        """Load a pre-computed list of geotagged assets directly into the cache."""
+    def _load_direct_assets(self, assets: list, library_root: Path) -> None:
+        old_total = self._total_count
         stored_assets = list(assets)
         self._selection_query = None
         self._selection_direct_assets = stored_assets
@@ -175,8 +172,14 @@ class AssetDataSource(QObject):
             self._window_range = (0, self._total_count - 1)
             self._visible_range = self._window_range
 
-    def _geotagged_asset_to_dto(self, asset, library_root: Path) -> Optional[AssetDTO]:
-        return _geotagged_asset_to_dto_fn(asset, library_root)
+        self._emit_refresh(old_total)
+
+    def _emit_refresh(self, old_total: int) -> None:
+        if old_total != self._total_count:
+            self.count_changed.emit(old_total, self._total_count)
+        self.data_changed.emit()
+        if self._window_range is not None:
+            self.window_changed.emit(*self._window_range)
 
     def asset_at(self, index: int) -> Optional[AssetDTO]:
         dto = self._row_cache.get(index)
@@ -193,29 +196,63 @@ class AssetDataSource(QObject):
         return None
 
     def find_dto_by_path(self, path: Path) -> Optional[AssetDTO]:
-        """Find a cached DTO by its absolute path."""
         target = self._normalize_abs_key(path)
         for dto in self._row_cache.values():
             if self._normalize_abs_key(dto.abs_path) == target:
                 return dto
+        if self._selection_direct_assets is not None:
+            for asset in self._selection_direct_assets:
+                dto = self._geotagged_asset_to_dto(
+                    asset,
+                    self._selection_library_root or self._library_root or path.parent,
+                )
+                if dto is not None and self._normalize_abs_key(dto.abs_path) == target:
+                    return dto
         return None
 
     def row_for_path(self, path: Path) -> Optional[int]:
-        """Return the cached row index for *path* when available."""
         target = self._normalize_abs_key(path)
         for row, dto in self._row_cache.items():
             if self._normalize_abs_key(dto.abs_path) == target:
                 return row
+
+        if self._selection_direct_assets is not None:
+            library_root = self._selection_library_root or self._library_root
+            if library_root is None:
+                return None
+            next_index = 0
+            for asset in self._selection_direct_assets:
+                dto = self._geotagged_asset_to_dto(asset, library_root)
+                if dto is None:
+                    continue
+                if self._normalize_abs_key(dto.abs_path) == target:
+                    return next_index
+                next_index += 1
+            return None
+
+        if self._current_query is None or self._total_count <= 0:
+            return None
+
+        batch_size = 200
+        for offset in range(0, self._total_count, batch_size):
+            batch = self._fetch_rows(offset, min(self._total_count - 1, offset + batch_size - 1))
+            for row, dto in batch.items():
+                if self._normalize_abs_key(dto.abs_path) == target:
+                    self._row_cache.setdefault(row, dto)
+                    return row
         return None
 
     def count(self) -> int:
         return self._total_count
 
-    def update_favorite_status(self, row: int, is_favorite: bool):
-        """Update the favorite status of the cached DTO at the given row."""
+    def update_favorite_status(self, row: int, is_favorite: bool) -> None:
         dto = self._row_cache.get(row)
-        if dto is not None:
-            dto.is_favorite = is_favorite
+        if dto is None and row >= 0:
+            dto = self.asset_at(row)
+        if dto is None:
+            return
+        dto.is_favorite = is_favorite
+        self.row_changed.emit(row)
 
     def remove_rows(self, rows: List[int], *, emit: bool = True) -> None:
         if not rows:
@@ -251,10 +288,10 @@ class AssetDataSource(QObject):
                 self._pinned_row -= shift
 
         if emit:
-            self.countChanged.emit(old_total, self._total_count)
+            self.count_changed.emit(old_total, self._total_count)
             if self._total_count > 0:
-                self.windowChanged.emit(max(0, removed[0] - 1), self._total_count - 1)
-            self.dataChanged.emit()
+                self.window_changed.emit(max(0, removed[0] - 1), self._total_count - 1)
+            self.data_changed.emit()
 
     def apply_optimistic_move(
         self,
@@ -319,13 +356,13 @@ class AssetDataSource(QObject):
         start = self._total_count
         for offset, dto in enumerate(dtos):
             self._row_cache[start + offset] = dto
+        old_total = self._total_count
         self._total_count += len(dtos)
+        self.count_changed.emit(old_total, self._total_count)
+        self.data_changed.emit()
 
     def prioritize_rows(self, first: int, last: int) -> None:
-        """Prioritize the viewport range and refill the sparse cache around it."""
-        if self._direct_mode:
-            return
-        if self._current_query is None:
+        if self._direct_mode or self._current_query is None:
             return
         if self._total_count == 0 and self._window_range is None:
             self._load_initial_window()
@@ -345,7 +382,6 @@ class AssetDataSource(QObject):
             self._reload_window_for_visible_range(first, last, emit_signals=True)
 
     def pin_row(self, row: int) -> None:
-        """Pin a row so detail/filmstrip access survives cache eviction."""
         if row < 0 or row >= self._total_count:
             self._pinned_row = None
             return
@@ -355,7 +391,6 @@ class AssetDataSource(QObject):
     def handle_scan_chunk(self, scan_root: Path, chunk: List[dict]) -> None:
         if not chunk or self._current_query is None or self._active_root is None:
             return
-
         mapped_entries = self._map_scan_rows_to_active_entries(scan_root, chunk)
         if not mapped_entries:
             return
@@ -374,7 +409,7 @@ class AssetDataSource(QObject):
 
         visible_first, visible_last = self._visible_range
         if visible_first == 0 or self._pending_scan_affects_visible_window(visible_first, visible_last):
-            self._schedule_scan_refresh()
+            self._flush_pending_scan_refresh()
 
     def handle_scan_finished(self, root: Path, success: bool) -> None:
         if not success or self._current_query is None or self._active_root is None:
@@ -383,24 +418,10 @@ class AssetDataSource(QObject):
             return
         self._pending_scan_refresh = True
         if self._visible_range is not None and self._visible_range[0] == 0:
-            self._schedule_scan_refresh()
-
-    def _schedule_scan_refresh(self) -> None:
-        if self._scan_refresh_scheduled:
-            return
-        app = QCoreApplication.instance()
-        if app is None:
-            self._scan_refresh_scheduled = False
             self._flush_pending_scan_refresh()
-            return
-        self._scan_refresh_scheduled = True
-        QTimer.singleShot(self.SCAN_REFRESH_DEBOUNCE_MS, self._flush_pending_scan_refresh)
 
     def _flush_pending_scan_refresh(self) -> None:
-        self._scan_refresh_scheduled = False
-        if not self._pending_scan_refresh:
-            return
-        if self._current_query is None:
+        if not self._pending_scan_refresh or self._current_query is None:
             self._pending_scan_refresh = False
             self._pending_scan_rels.clear()
             self._pending_scan_sort_keys.clear()
@@ -420,13 +441,7 @@ class AssetDataSource(QObject):
         self._visible_range = (0, visible_last)
         self._reload_window_for_visible_range(0, visible_last, emit_signals=False)
 
-    def _reload_window_for_visible_range(
-        self,
-        first: int,
-        last: int,
-        *,
-        emit_signals: bool,
-    ) -> None:
+    def _reload_window_for_visible_range(self, first: int, last: int, *, emit_signals: bool) -> None:
         if self._current_query is None:
             return
 
@@ -436,8 +451,8 @@ class AssetDataSource(QObject):
             old_total = self._total_count
             self._reset_window_state()
             if emit_signals and old_total != 0:
-                self.countChanged.emit(old_total, 0)
-                self.dataChanged.emit()
+                self.count_changed.emit(old_total, 0)
+                self.data_changed.emit()
             return
 
         first = max(0, min(first, new_total - 1))
@@ -467,18 +482,13 @@ class AssetDataSource(QObject):
 
         if emit_signals:
             if old_total != new_total:
-                self.countChanged.emit(old_total, new_total)
-            self.windowChanged.emit(window_first, window_last)
+                self.count_changed.emit(old_total, new_total)
+            self.window_changed.emit(window_first, window_last)
             if pinned_row is not None and pinned_row not in fetched_rows and pinned_row in self._row_cache:
-                self.windowChanged.emit(pinned_row, pinned_row)
-            self.dataChanged.emit()
+                self.window_changed.emit(pinned_row, pinned_row)
+            self.data_changed.emit()
 
-    def _compute_target_window(
-        self,
-        first: int,
-        last: int,
-        total_count: int,
-    ) -> tuple[int, int]:
+    def _compute_target_window(self, first: int, last: int, total_count: int) -> tuple[int, int]:
         visible_count = max(1, last - first + 1)
         target_size = min(
             self.MAX_WINDOW_SIZE,
@@ -489,7 +499,6 @@ class AssetDataSource(QObject):
 
         window_first = max(0, first - lookbehind)
         window_last = min(total_count - 1, last + lookahead)
-
         current_size = max(0, window_last - window_first + 1)
         deficit = max(0, target_size - current_size)
         if deficit > 0:
@@ -498,7 +507,6 @@ class AssetDataSource(QObject):
             deficit -= extend_ahead
             if deficit > 0:
                 window_first = max(0, window_first - deficit)
-
         return window_first, window_last
 
     def _window_needs_reload(self, first: int, last: int) -> bool:
@@ -521,7 +529,6 @@ class AssetDataSource(QObject):
                 continue
             if row not in self._row_cache:
                 return True
-
         return False
 
     def _fetch_rows(self, first: int, last: int) -> Dict[int, AssetDTO]:
@@ -555,16 +562,11 @@ class AssetDataSource(QObject):
             return
         self._row_cache[row] = dto
         if emit_signals:
-            self.windowChanged.emit(row, row)
+            self.window_changed.emit(row, row)
 
-    def _map_scan_rows_to_active_entries(
-        self,
-        scan_root: Path,
-        chunk: List[dict],
-    ) -> list[tuple[str, dict]]:
+    def _map_scan_rows_to_active_entries(self, scan_root: Path, chunk: List[dict]) -> list[tuple[str, dict]]:
         if self._active_root is None:
             return []
-
         try:
             scan_root_resolved = scan_root.resolve()
             view_root_resolved = self._active_root.resolve()
@@ -574,7 +576,6 @@ class AssetDataSource(QObject):
         is_direct_match = scan_root_resolved == view_root_resolved
         is_scan_parent = scan_root_resolved in view_root_resolved.parents
         is_scan_child = view_root_resolved in scan_root_resolved.parents
-
         if not (is_direct_match or is_scan_parent or is_scan_child):
             return []
 
@@ -593,11 +594,6 @@ class AssetDataSource(QObject):
             if view_rel:
                 mapped.append((view_rel, row))
         return mapped
-
-    def _map_scan_rows_to_active_root(self, scan_root: Path, chunk: List[dict]) -> set[str]:
-        return {
-            view_rel for view_rel, _row in self._map_scan_rows_to_active_entries(scan_root, chunk)
-        }
 
     def _pending_scan_affects_visible_window(self, first: int, last: int) -> bool:
         return self._window_rel_intersects_pending_scan(first, last) or self._scan_sort_keys_affect_visible_window(first, last)
@@ -627,11 +623,7 @@ class AssetDataSource(QObject):
                 return True
         return False
 
-    def _visible_window_sort_bounds(
-        self,
-        first: int,
-        last: int,
-    ) -> Optional[tuple[tuple[str, str], tuple[str, str]]]:
+    def _visible_window_sort_bounds(self, first: int, last: int) -> Optional[tuple[tuple[str, str], tuple[str, str]]]:
         top_key: Optional[tuple[str, str]] = None
         bottom_key: Optional[tuple[str, str]] = None
         for row in range(first, last + 1):
@@ -644,7 +636,6 @@ class AssetDataSource(QObject):
             if top_key is None:
                 top_key = sort_key
             bottom_key = sort_key
-
         if top_key is None or bottom_key is None:
             return None
         return top_key, bottom_key
@@ -685,14 +676,12 @@ class AssetDataSource(QObject):
     ) -> Optional[str]:
         if scan_root == view_root:
             return raw_rel
-
         if is_scan_parent:
             full_path = scan_root / raw_rel
             try:
                 return full_path.relative_to(view_root).as_posix()
             except (OSError, ValueError):
                 return None
-
         if is_scan_child:
             try:
                 prefix = scan_root.relative_to(view_root).as_posix()
@@ -700,31 +689,13 @@ class AssetDataSource(QObject):
                 return None
             prefix_slash = f"{prefix}/" if prefix else ""
             return f"{prefix_slash}{raw_rel}" if prefix_slash else raw_rel
-
         return None
+
+    def _geotagged_asset_to_dto(self, asset: object, library_root: Path) -> Optional[AssetDTO]:
+        return _geotagged_asset_to_dto_fn(asset, library_root)
 
     def _to_dto(self, asset: Asset) -> AssetDTO:
         return _to_dto_fn(asset, self._library_root)
-
-    def _apply_pending_moves(self, query: AssetQuery) -> None:
-        if not self._pending_moves:
-            return
-        next_row = self._total_count
-        remaining: List[_PendingMove] = []
-        existing_abs = {self._normalize_abs_key(dto.abs_path) for dto in self._row_cache.values()}
-        for pending in self._pending_moves:
-            if self._normalize_abs_key(pending.destination_abs) in existing_abs:
-                self._pending_paths.discard(str(pending.source_abs))
-                continue
-            if not self._should_include_pending(pending, query):
-                remaining.append(pending)
-                continue
-            self._row_cache[next_row] = pending.dto
-            existing_abs.add(self._normalize_abs_key(pending.destination_abs))
-            next_row += 1
-            remaining.append(pending)
-        self._pending_moves = remaining
-        self._total_count = max(self._total_count, next_row)
 
     def _normalize_abs_key(self, path: Path) -> str:
         try:
@@ -736,20 +707,11 @@ class AssetDataSource(QObject):
     def _resolve_abs_path(self, rel_path: Path) -> Path:
         return _resolve_abs_path_fn(rel_path, self._library_root)
 
-    def _path_exists(self, path: Path) -> bool:
-        return PathExistsCache.path_exists(path)
-
-    def _path_cache_key(self, path: Path) -> str:
-        return PathExistsCache.cache_key(path)
-
     def _path_exists_cached(self, path: Path) -> bool:
         return self._path_cache.exists_cached(path)
 
     def _should_validate_paths(self, query: AssetQuery) -> bool:
         return _should_validate_paths_fn(query, self._library_root)
-
-    def _should_use_paging(self, query: AssetQuery) -> bool:
-        return _should_use_paging_fn(query)
 
     def _is_legacy_thumb_path(self, rel_path: Path) -> bool:
         return _is_legacy_thumb_path_fn(rel_path)
@@ -762,9 +724,6 @@ class AssetDataSource(QObject):
 
     def _should_include_pending(self, pending: _PendingMove, query: AssetQuery) -> bool:
         return _should_include_pending_fn(pending, query)
-
-    def _find_cached_dto(self, path: Path) -> Optional[AssetDTO]:
-        return self.find_dto_by_path(path)
 
     def _album_path_for_root(self, root: Path) -> str:
         if self._library_root is None:
@@ -820,4 +779,3 @@ class AssetDataSource(QObject):
         self._pending_scan_refresh = False
         self._pending_scan_rels.clear()
         self._pending_scan_sort_keys.clear()
-        self._scan_refresh_scheduled = False

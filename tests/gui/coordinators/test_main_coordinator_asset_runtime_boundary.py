@@ -16,13 +16,11 @@ def test_on_library_tree_updated_rebinds_asset_list_vm_and_reloads_selection() -
     coordinator._context.asset_runtime.bind_library_root = MagicMock()
     coordinator._asset_service = MagicMock()
     coordinator._asset_list_vm = MagicMock()
-    coordinator._navigation = MagicMock()
-    coordinator._navigation.is_location_context_active.return_value = False
+    coordinator._gallery_vm = MagicMock()
     coordinator._logger = MagicMock()
 
     coordinator._on_library_tree_updated()
 
-    coordinator._navigation.invalidate_location_session.assert_called_once_with()
     coordinator._context.asset_runtime.bind_library_root.assert_called_once_with(root)
     coordinator._asset_service.set_repository.assert_called_once_with(
         coordinator._context.asset_runtime.repository
@@ -31,7 +29,7 @@ def test_on_library_tree_updated_rebinds_asset_list_vm_and_reloads_selection() -
         coordinator._context.asset_runtime.repository,
         root,
     )
-    coordinator._asset_list_vm.reload_current_selection.assert_called_once_with()
+    coordinator._gallery_vm.on_library_tree_updated.assert_called_once_with()
 
 
 def test_on_library_tree_updated_skips_selection_reload_in_location_context() -> None:
@@ -44,18 +42,16 @@ def test_on_library_tree_updated_skips_selection_reload_in_location_context() ->
     coordinator._context.asset_runtime.bind_library_root = MagicMock()
     coordinator._asset_service = MagicMock()
     coordinator._asset_list_vm = MagicMock()
-    coordinator._navigation = MagicMock()
-    coordinator._navigation.is_location_context_active.return_value = True
+    coordinator._gallery_vm = MagicMock()
     coordinator._logger = MagicMock()
 
     coordinator._on_library_tree_updated()
 
-    coordinator._navigation.invalidate_location_session.assert_called_once_with()
     coordinator._asset_list_vm.rebind_repository.assert_called_once_with(
         coordinator._context.asset_runtime.repository,
         root,
     )
-    coordinator._asset_list_vm.reload_current_selection.assert_not_called()
+    coordinator._gallery_vm.on_library_tree_updated.assert_called_once_with()
 
 
 def test_on_map_asset_activated_delegates_to_navigation() -> None:

@@ -53,10 +53,10 @@ from iPhoto.core.levels_resolver import DEFAULT_LEVELS_HANDLES
 from iPhoto.core.selective_color_resolver import DEFAULT_SELECTIVE_COLOR_RANGES
 
 if TYPE_CHECKING:
-    from iPhoto.gui.viewmodels.asset_list_viewmodel import AssetListViewModel
+    from iPhoto.gui.viewmodels.gallery_list_model_adapter import GalleryListModelAdapter
     from iPhoto.gui.ui.controllers.window_theme_controller import WindowThemeController
     from iPhoto.gui.coordinators.navigation_coordinator import NavigationCoordinator
-    from iPhoto.gui.ui.media import MediaAdjustmentCommitter, MediaPlaybackSession
+    from iPhoto.gui.ui.media import MediaAdjustmentCommitter, MediaSelectionSession
 
 _LOGGER = logging.getLogger(__name__)
 _APP_LOGGER = get_logger().getChild("video_trim")
@@ -74,11 +74,11 @@ class EditCoordinator(QObject):
         edit_page: QObject, # The widget containing edit UI (Ui_MainWindow components)
         router: ViewRouter,
         event_bus: EventBus,
-        asset_vm: AssetListViewModel,
+        asset_vm: GalleryListModelAdapter,
         window: QObject | None = None,
         theme_controller: WindowThemeController | None = None,
         navigation: "NavigationCoordinator | None" = None,
-        media_session: "MediaPlaybackSession | None" = None,
+        media_session: "MediaSelectionSession | None" = None,
         adjustment_committer: "MediaAdjustmentCommitter | None" = None,
     ):
         super().__init__()

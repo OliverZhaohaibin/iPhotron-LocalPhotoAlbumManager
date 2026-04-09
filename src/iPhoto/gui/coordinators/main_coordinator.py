@@ -20,7 +20,6 @@ from PySide6.QtCore import (
 from PySide6.QtGui import QAction
 
 from iPhoto.application.contracts.runtime_entry_contract import RuntimeEntryContract
-from iPhoto.config import DEFAULT_EXCLUDE, DEFAULT_INCLUDE
 from iPhoto.gui.ui.models.roles import Roles
 from iPhoto.gui.ui.models.spacer_proxy_model import SpacerProxyModel
 from iPhoto.gui.ui.controllers.dialog_controller import DialogController
@@ -32,15 +31,16 @@ from iPhoto.gui.ui.controllers.preview_controller import PreviewController
 from iPhoto.gui.ui.controllers.context_menu_controller import ContextMenuController
 from iPhoto.gui.ui.controllers.selection_controller import SelectionController
 from iPhoto.gui.ui.controllers.export_controller import ExportController
-from iPhoto.gui.ui.media import MediaAdjustmentCommitter, MediaPlaybackSession
+from iPhoto.gui.ui.media import MediaAdjustmentCommitter, MediaSelectionSession
 from iPhoto.gui.ui.widgets.asset_delegate import AssetGridDelegate
 
 # New Architecture Imports
-from iPhoto.gui.viewmodels.album_viewmodel import AlbumViewModel
-from iPhoto.gui.viewmodels.asset_list_viewmodel import AssetListViewModel
 from iPhoto.application.services.asset_service import AssetService
 from iPhoto.di.container import DependencyContainer
 from iPhoto.events.bus import EventBus
+from iPhoto.gui.viewmodels.detail_viewmodel import DetailViewModel
+from iPhoto.gui.viewmodels.gallery_list_model_adapter import GalleryListModelAdapter
+from iPhoto.gui.viewmodels.gallery_viewmodel import GalleryViewModel
 
 # New Coordinators
 from iPhoto.gui.coordinators.view_router import ViewRouter
@@ -82,14 +82,15 @@ class MainCoordinator(QObject):
         # --- ViewModels Setup ---
         lib_root = context.library.root()
         self._context.asset_runtime.bind_library_root(lib_root)
-        self._asset_list_vm = AssetListViewModel.create(
+        self._asset_list_vm = GalleryListModelAdapter.create(
             repository=self._context.asset_runtime.repository,
             thumbnail_service=self._context.asset_runtime.thumbnail_service,
             library_root=lib_root,
             parent=window.ui.grid_view,
         )
-        self._media_session = MediaPlaybackSession(self)
-        self._media_session.bind_model(self._asset_list_vm)
+        self._gallery_store = self._asset_list_vm.store
+        self._media_session = MediaSelectionSession()
+        self._media_session.bind_collection(self._gallery_store)
         self._asset_service.set_repository(self._context.asset_runtime.repository)
         self._thumbnail_service = self._context.asset_runtime.thumbnail_service
 
@@ -102,11 +103,18 @@ class MainCoordinator(QObject):
         # 1. View Router
         self._view_router = ViewRouter(window.ui)
 
+        self._gallery_vm = GalleryViewModel(
+            store=self._gallery_store,
+            context=context,
+            facade=context.facade,
+            asset_service=self._asset_service,
+        )
+
         # 2. Navigation Coordinator
         self._navigation = NavigationCoordinator(
             window.ui.sidebar,
             self._view_router,
-            self._asset_list_vm,
+            self._gallery_vm,
             context,
             context.facade,  # Legacy Facade Bridge
         )
@@ -115,6 +123,12 @@ class MainCoordinator(QObject):
             pause_watcher=self._navigation.pause_library_watcher,
             resume_watcher=self._navigation.resume_library_watcher,
             parent=self,
+        )
+        self._detail_vm = DetailViewModel(
+            collection_store=self._gallery_store,
+            media_session=self._media_session,
+            asset_service=self._asset_service,
+            adjustment_commit_port=self._adjustment_committer,
         )
 
         # 3. Playback Coordinator
@@ -135,7 +149,8 @@ class MainCoordinator(QObject):
             player_bar=window.ui.player_bar,
             player_view=self._player_view_controller,
             router=self._view_router,
-            asset_vm=self._asset_list_vm,
+            asset_model=self._asset_list_vm,
+            detail_vm=self._detail_vm,
             media_session=self._media_session,
             adjustment_committer=self._adjustment_committer,
             zoom_slider=window.ui.zoom_slider,
@@ -188,8 +203,7 @@ class MainCoordinator(QObject):
 
         self._share_controller = ShareController(
             settings=context.settings,
-            media_session=self._media_session,
-            asset_model=self._asset_list_vm,
+            current_path_provider=self._detail_vm.current_asset_path,
             status_bar=self._status_bar,
             notification_toast=window.ui.notification_toast,
             share_button=window.ui.share_button,
@@ -252,6 +266,7 @@ class MainCoordinator(QObject):
         self._context_menu = ContextMenuController(
             grid_view=window.ui.grid_view,
             asset_model=self._asset_list_vm,
+            selected_paths_provider=self._gallery_vm.paths_for_rows,
             facade=self._facade,
             status_bar=self._status_bar,
             notification_toast=window.ui.notification_toast,
@@ -269,7 +284,7 @@ class MainCoordinator(QObject):
         self._shortcut_manager = AppShortcutManager(
             window,
             self._view_router,
-            toggle_favorite_cb=self._handle_toggle_favorite,
+            toggle_favorite_cb=self._detail_vm.toggle_favorite,
             exit_fullscreen_cb=window.exit_fullscreen,
             parent=self,
         )
@@ -359,8 +374,9 @@ class MainCoordinator(QObject):
         """Connect application signals."""
         ui = self._window.ui
         self._context.library.treeUpdated.connect(self._on_library_tree_updated)
-        self._facade.scanChunkReady.connect(self._asset_list_vm.handle_scan_chunk)
-        self._facade.scanFinished.connect(self._asset_list_vm.handle_scan_finished)
+        self._facade.scanChunkReady.connect(self._gallery_store.handle_scan_chunk)
+        self._facade.scanFinished.connect(self._gallery_store.handle_scan_finished)
+        self._gallery_vm.message_requested.connect(self._status_bar.show_message)
 
         # Grid interactions
         ui.grid_view.itemClicked.connect(self._on_asset_clicked)
@@ -388,11 +404,12 @@ class MainCoordinator(QObject):
 
         # Menus
         ui.open_album_action.triggered.connect(self._handle_open_album_dialog)
-        ui.rescan_action.triggered.connect(self._handle_rescan_clicked)
-        ui.edit_button.clicked.connect(self._handle_edit_clicked)
+        ui.rescan_action.triggered.connect(self._status_bar.begin_scan)
+        ui.rescan_action.triggered.connect(self._gallery_vm.rescan_current)
+        ui.edit_button.clicked.connect(self._detail_vm.request_edit)
         # ui.edit_rotate_left_button is handled by EditCoordinator in Edit Mode
         ui.rotate_left_button.clicked.connect(self._playback.rotate_current_asset)
-        ui.favorite_button.clicked.connect(self._handle_toggle_favorite)
+        ui.favorite_button.clicked.connect(self._detail_vm.toggle_favorite)
 
         # Info Button
         if hasattr(ui, 'info_button'):
@@ -400,11 +417,12 @@ class MainCoordinator(QObject):
 
         # Back Button (detail page)
         if hasattr(ui, 'back_button'):
-            ui.back_button.clicked.connect(self._handle_back_button)
+            ui.back_button.clicked.connect(self._playback.reset_for_gallery)
+            ui.back_button.clicked.connect(self._detail_vm.back_to_gallery)
 
         # Gallery page back button for cluster gallery mode
         if hasattr(ui, 'gallery_page') and hasattr(ui.gallery_page, 'backRequested'):
-            ui.gallery_page.backRequested.connect(self._handle_back_button)
+            ui.gallery_page.backRequested.connect(self._gallery_vm.return_to_map_from_cluster_gallery)
 
         # Dashboard Click
         if hasattr(ui, 'albums_dashboard_page'):
@@ -413,6 +431,7 @@ class MainCoordinator(QObject):
         # Navigation
         self._navigation.bindLibraryRequested.connect(self._dialog.bind_library_dialog)
         ui.bind_library_action.triggered.connect(self._dialog.bind_library_dialog)
+        self._detail_vm.edit_requested.connect(self._edit.enter_edit_mode)
 
         # Preferences (Wheel, Volume) - Filmstrip handled in PlaybackCoordinator
         self._restore_preferences()
@@ -466,25 +485,18 @@ class MainCoordinator(QObject):
     def _on_library_tree_updated(self) -> None:
         root = self._context.library.root()
         self._logger.debug("_on_library_tree_updated: root=%s", root)
-        self._navigation.invalidate_location_session()
         self._context.asset_runtime.bind_library_root(root)
         self._asset_service.set_repository(self._context.asset_runtime.repository)
         self._asset_list_vm.rebind_repository(self._context.asset_runtime.repository, root)
-        if self._navigation.is_location_context_active():
-            return
-        self._asset_list_vm.reload_current_selection()
+        self._gallery_vm.on_library_tree_updated()
 
     def _on_asset_clicked(self, index: QModelIndex):
         if self._selection_controller and self._selection_controller.is_active():
             return
-        self._playback.play_asset(index.row())
+        self._gallery_vm.open_row(index.row())
 
     def _on_favorite_clicked(self, index: QModelIndex):
-        """Handle favorite badge click from grid view."""
-        path_str = self._asset_list_vm.data(index, Roles.REL) or self._asset_list_vm.data(index, Roles.ABS)
-        if path_str:
-            new_state = self._asset_service.toggle_favorite_by_path(Path(path_str))
-            self._asset_list_vm.update_favorite(index.row(), new_state)
+        self._gallery_vm.toggle_favorite_row(index.row())
 
     def _sync_selection(self, row: int):
         """Syncs grid view selection when playback asset changes."""
@@ -499,63 +511,6 @@ class MainCoordinator(QObject):
         if path:
             self.open_album_from_path(path)
 
-    def _handle_rescan_clicked(self) -> None:
-        """Trigger a background rescan and surface progress feedback."""
-
-        self._status_bar.begin_scan()
-
-        if self._facade.current_album is not None:
-            self._facade.rescan_current_async()
-            return
-
-        library_root = self._context.library.root()
-        if library_root is None:
-            self._status_bar.show_message("No album is currently open.", 3000)
-            return
-
-        self._context.library.start_scanning(
-            library_root, DEFAULT_INCLUDE, DEFAULT_EXCLUDE
-        )
-
-    def _handle_edit_clicked(self):
-        # Trigger Edit Mode from Detail View context
-        indexes = self._window.ui.grid_view.selectionModel().selectedIndexes()
-
-        # Fallback: If no selection in grid, but we have a playback row?
-        current_row = self._media_session.current_row()
-        if not indexes and current_row >= 0:
-            idx = self._asset_list_vm.index(current_row, 0)
-            if idx.isValid():
-                indexes = [idx]
-
-        if indexes:
-            idx = indexes[0]
-            path_str = self._asset_list_vm.data(idx, Roles.ABS)
-            if path_str:
-                self._edit.enter_edit_mode(Path(path_str))
-
-    def _handle_back_button(self):
-        """Handle back navigation for detail and cluster-gallery contexts."""
-
-        # In Location -> cluster flow, the same handler is used by both:
-        # 1) detail/playback back button, and
-        # 2) cluster gallery header back button.
-        #
-        # Only the gallery header back should return to map. From detail/playback
-        # we should always step back to the gallery first.
-        #
-        # Note: `is_in_cluster_gallery()` is conceptually tied to the cluster gallery
-        # state, but we also assert that the gallery view is currently active.
-        # This extra guard ensures we only navigate back to the map when the user
-        # is actually in the cluster gallery UI (header back), and not from a
-        # detail/playback context or any intermediate state during view transitions.
-        if self._navigation.is_in_cluster_gallery() and self._view_router.is_gallery_view_active():
-            self._navigation.return_to_map_from_cluster_gallery()
-            return
-
-        self._playback.reset_for_gallery()
-        self._view_router.show_gallery()
-
     def _on_cluster_activated(self, assets: list):
         """Handle cluster click from map view to open cluster gallery.
 
@@ -568,29 +523,6 @@ class MainCoordinator(QObject):
         """Handle single-asset map activation inside the Location context."""
 
         self._navigation.open_location_asset(rel)
-
-    def _handle_toggle_favorite(self):
-        """Toggles favorite status for selected assets."""
-        indexes = self._window.ui.grid_view.selectionModel().selectedIndexes()
-
-        # Fallback: If no selection in grid, but we have a playback row?
-        # This handles the case where Detail View is active but grid selection sync failed or focus issue.
-        current_row = self._media_session.current_row()
-        if not indexes and current_row >= 0:
-             # Construct an index for the current playback row
-             idx = self._asset_list_vm.index(current_row, 0)
-             if idx.isValid():
-                 indexes = [idx]
-
-        if not indexes:
-            # Try filmstrip if grid has no selection
-            indexes = self._window.ui.filmstrip_view.selectionModel().selectedIndexes()
-
-        for idx in indexes:
-            path_str = self._asset_list_vm.data(idx, Roles.REL) or self._asset_list_vm.data(idx, Roles.ABS)
-            if path_str:
-                new_state = self._asset_service.toggle_favorite_by_path(Path(path_str))
-                self._asset_list_vm.update_favorite(idx.row(), new_state)
 
     def open_album_from_path(self, path: Path):
         self._navigation.open_album(path)

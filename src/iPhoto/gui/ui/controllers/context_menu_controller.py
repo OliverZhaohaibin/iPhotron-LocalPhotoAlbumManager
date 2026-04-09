@@ -22,7 +22,6 @@ from PySide6.QtGui import QGuiApplication, QPalette
 from PySide6.QtWidgets import QMenu
 
 from ...facade import AppFacade
-from ..models.roles import Roles
 from ..widgets.asset_grid import AssetGrid
 from ..widgets.notification_toast import NotificationToast
 from .selection_controller import SelectionController
@@ -40,6 +39,7 @@ class ContextMenuController(QObject):
         *,
         grid_view: AssetGrid,
         asset_model: QAbstractItemModel,
+        selected_paths_provider: Callable[[list[int]], list[Path]],
         facade: AppFacade,
         status_bar: StatusBarController,
         notification_toast: NotificationToast,
@@ -51,6 +51,7 @@ class ContextMenuController(QObject):
         super().__init__(parent)
         self._grid_view = grid_view
         self._asset_model = asset_model
+        self._selected_paths_provider = selected_paths_provider
         self._facade = facade
         self._status_bar = status_bar
         self._toast = notification_toast
@@ -362,18 +363,8 @@ class ContextMenuController(QObject):
         selection_model = self._grid_view.selectionModel()
         if selection_model is None:
             return []
-        seen: set[Path] = set()
-        paths: list[Path] = []
-        for index in selection_model.selectedIndexes():
-            raw_path = index.data(Roles.ABS)
-            if not raw_path:
-                continue
-            path = Path(str(raw_path))
-            if path in seen:
-                continue
-            seen.add(path)
-            paths.append(path)
-        return paths
+        rows = sorted({index.row() for index in selection_model.selectedIndexes() if index.isValid()})
+        return self._selected_paths_provider(rows)
 
     def _collect_move_targets(self) -> list[tuple[str, Path]]:
         """Build a list of (label, path) destinations excluding the currently open album."""

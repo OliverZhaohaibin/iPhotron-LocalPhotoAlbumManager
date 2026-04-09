@@ -13,6 +13,7 @@ def mock_dependencies():
     return {
         "grid_view": MagicMock(),
         "asset_model": MagicMock(),
+        "selected_paths_provider": MagicMock(return_value=[]),
         "facade": MagicMock(),
         "navigation": MagicMock(),
         "status_bar": MagicMock(),
@@ -28,6 +29,7 @@ def test_init_accepts_callback(mock_dependencies):
     ContextMenuController(
         grid_view=mock_dependencies["grid_view"],
         asset_model=mock_dependencies["asset_model"],
+        selected_paths_provider=mock_dependencies["selected_paths_provider"],
         facade=mock_dependencies["facade"],
         navigation=mock_dependencies["navigation"],
         status_bar=mock_dependencies["status_bar"],
@@ -54,6 +56,7 @@ def test_export_action_present_when_selected(mock_qmenu_cls, mock_dependencies):
     controller = ContextMenuController(
         grid_view=mock_dependencies["grid_view"],
         asset_model=mock_dependencies["asset_model"],
+        selected_paths_provider=mock_dependencies["selected_paths_provider"],
         facade=mock_dependencies["facade"],
         navigation=mock_dependencies["navigation"],
         status_bar=mock_dependencies["status_bar"],
@@ -90,6 +93,7 @@ def test_export_action_absent_when_no_selection(mock_qmenu_cls, mock_dependencie
     controller = ContextMenuController(
         grid_view=mock_dependencies["grid_view"],
         asset_model=mock_dependencies["asset_model"],
+        selected_paths_provider=mock_dependencies["selected_paths_provider"],
         facade=mock_dependencies["facade"],
         navigation=mock_dependencies["navigation"],
         status_bar=mock_dependencies["status_bar"],
@@ -103,3 +107,34 @@ def test_export_action_absent_when_no_selection(mock_qmenu_cls, mock_dependencie
 
     actions_added = [args[0] for args, _ in mock_menu.addAction.call_args_list]
     assert "Export" not in actions_added, f"Export action found in {actions_added} but shouldn't be"
+
+
+def test_selected_asset_paths_are_resolved_via_provider(mock_dependencies):
+    controller = ContextMenuController(
+        grid_view=mock_dependencies["grid_view"],
+        asset_model=mock_dependencies["asset_model"],
+        selected_paths_provider=mock_dependencies["selected_paths_provider"],
+        facade=mock_dependencies["facade"],
+        navigation=mock_dependencies["navigation"],
+        status_bar=mock_dependencies["status_bar"],
+        notification_toast=mock_dependencies["notification_toast"],
+        selection_controller=mock_dependencies["selection_controller"],
+        export_callback=mock_dependencies["export_callback"],
+    )
+
+    selection_model = MagicMock()
+    first = MagicMock()
+    first.isValid.return_value = True
+    first.row.return_value = 7
+    duplicate = MagicMock()
+    duplicate.isValid.return_value = True
+    duplicate.row.return_value = 7
+    second = MagicMock()
+    second.isValid.return_value = True
+    second.row.return_value = 9
+    selection_model.selectedIndexes.return_value = [first, duplicate, second]
+    mock_dependencies["grid_view"].selectionModel.return_value = selection_model
+
+    controller._selected_asset_paths()
+
+    mock_dependencies["selected_paths_provider"].assert_called_once_with([7, 9])

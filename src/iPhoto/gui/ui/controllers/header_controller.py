@@ -93,6 +93,15 @@ class HeaderController(QObject):
         timestamp_text = self._format_timestamp(index.data(Roles.DT))
         self._apply_header_text(location_text, timestamp_text)
 
+    def update_from_values(
+        self,
+        location: Optional[str],
+        timestamp: object,
+    ) -> None:
+        """Populate labels from already-resolved presentation values."""
+
+        self._apply_header_text(location, self._format_timestamp(timestamp))
+
     def _apply_header_text(
         self, location: Optional[str], timestamp: Optional[str]
     ) -> None:

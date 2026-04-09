@@ -28,14 +28,20 @@ class EditZoomHandler(QObject):
         self._zoom_out_button = zoom_out_button
         self._zoom_slider = zoom_slider
         self._connected = False
+        self._zoom_in_slot = None
+        self._zoom_out_slot = None
 
     def connect_controls(self) -> None:
         """Connect the shared zoom toolbar to the edit image viewer."""
         if self._connected:
             return
 
-        self._zoom_in_button.clicked.connect(self._viewer.zoom_in)
-        self._zoom_out_button.clicked.connect(self._viewer.zoom_out)
+        # Cache the bound methods we connect so disconnect uses the exact same
+        # callable object when the active viewer changes.
+        self._zoom_in_slot = self._viewer.zoom_in
+        self._zoom_out_slot = self._viewer.zoom_out
+        self._zoom_in_button.clicked.connect(self._zoom_in_slot)
+        self._zoom_out_button.clicked.connect(self._zoom_out_slot)
         self._zoom_slider.valueChanged.connect(self._handle_slider_changed)
         self._viewer.zoomChanged.connect(self._handle_viewer_zoom_changed)
         self._connected = True
@@ -46,12 +52,16 @@ class EditZoomHandler(QObject):
             return
 
         try:
-            self._zoom_in_button.clicked.disconnect(self._viewer.zoom_in)
-            self._zoom_out_button.clicked.disconnect(self._viewer.zoom_out)
+            if self._zoom_in_slot is not None:
+                self._zoom_in_button.clicked.disconnect(self._zoom_in_slot)
+            if self._zoom_out_slot is not None:
+                self._zoom_out_button.clicked.disconnect(self._zoom_out_slot)
             self._zoom_slider.valueChanged.disconnect(self._handle_slider_changed)
             self._viewer.zoomChanged.disconnect(self._handle_viewer_zoom_changed)
         finally:
             self._connected = False
+            self._zoom_in_slot = None
+            self._zoom_out_slot = None
 
     def _handle_slider_changed(self, value: int) -> None:
         """Translate slider *value* percentages into edit viewer zoom factors."""

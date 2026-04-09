@@ -346,7 +346,7 @@ class GalleryGridView(AssetGrid):
         # model might be AssetModel (proxy)
         # We need the source model to call update_favorite, or add it to proxy.
         # Let's check if model has toggle_favorite or similar.
-        # In previous steps, I added update_favorite to AssetListViewModel.
+        # The active gallery model adapter exposes update_favorite(row, is_favorite).
         # And MainCoordinator calls it.
         # Here we are deep in the view.
         # Ideally, we emit a signal 'favoriteToggled(index)'.
@@ -362,7 +362,7 @@ class GalleryGridView(AssetGrid):
             is_fav = bool(index.data(Roles.FEATURED))
             # Toggle
             # We need the row in the source model?
-            # AssetListViewModel.update_favorite takes (row, is_favorite).
+            # The gallery adapter update_favorite takes (row, is_favorite).
             # If 'model' is proxy, we need to map index.
             if hasattr(model, "mapToSource"):
                 source_index = model.mapToSource(index)

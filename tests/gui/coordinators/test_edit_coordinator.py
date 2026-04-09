@@ -89,6 +89,89 @@ def test_restore_detail_video_preview_uses_native_path_for_rotate_only_edits() -
     video_area.play.assert_called_once_with()
 
 
+def test_handle_done_clicked_delegates_to_adjustment_committer() -> None:
+    coordinator = EditCoordinator.__new__(EditCoordinator)
+    session = SimpleNamespace(
+        set_values=Mock(),
+        values=Mock(return_value={"Crop_W": 0.8}),
+    )
+    viewport = Mock(crop_values=Mock(return_value={"Crop_W": 0.8}))
+    coordinator._session = session
+    coordinator._current_source = Path("/fake/photo.jpg")
+    coordinator._active_edit_viewport = Mock(return_value=viewport)
+    coordinator._adjustment_committer = Mock(commit=Mock(return_value=True))
+    coordinator._suppress_exit_restore = False
+    coordinator.leave_edit_mode = Mock()
+
+    EditCoordinator._handle_done_clicked(coordinator)
+
+    session.set_values.assert_called_once_with({"Crop_W": 0.8}, emit_individual=False)
+    coordinator._adjustment_committer.commit.assert_called_once_with(
+        Path("/fake/photo.jpg"),
+        {"Crop_W": 0.8},
+        reason="edit_done",
+    )
+    assert coordinator._suppress_exit_restore is True
+    coordinator.leave_edit_mode.assert_called_once_with()
+
+
+def test_leave_edit_mode_requests_playback_restore_instead_of_direct_video_reload() -> None:
+    coordinator = EditCoordinator.__new__(EditCoordinator)
+    source = Path("/fake/video.mp4")
+    viewport = Mock()
+    viewport.setCropMode = Mock()
+    viewport.set_eyedropper_mode = Mock()
+    coordinator._active_edit_viewport = Mock(return_value=viewport)
+    coordinator._session = SimpleNamespace(values=lambda: {"Crop_W": 0.8})
+    coordinator._current_source = source
+    coordinator._media_session = SimpleNamespace(
+        restoreRequested=SimpleNamespace(emit=Mock())
+    )
+    coordinator._suppress_exit_restore = False
+    coordinator._fullscreen_manager = SimpleNamespace(is_in_fullscreen=lambda: False)
+    coordinator._preview_manager = Mock(stop_session=Mock())
+    coordinator._zoom_handler = Mock(disconnect_controls=Mock())
+    coordinator._header_controller = Mock(restore_detail_mode=Mock())
+    coordinator._theme_controller = None
+    coordinator._router = Mock(show_detail=Mock())
+    coordinator._transition_manager = Mock(leave_edit_mode=Mock())
+    coordinator._pending_video_duration_sec = 4.5
+    coordinator._video_trim_thumbnail_timer = Mock(stop=Mock())
+    coordinator._video_sidebar_preview_timer = Mock(stop=Mock())
+    coordinator._video_thumbnail_generation = 0
+    coordinator._video_sidebar_generation = 0
+    coordinator._video_trim_worker = None
+    coordinator._video_trim_diag = {}
+    coordinator._video_frame_step_ms = 33
+    coordinator._video_color_stats = None
+    coordinator._restore_detail_video_preview = Mock()
+    coordinator._ui = SimpleNamespace(
+        video_area=Mock(
+            _diag_surface_name=Mock(return_value="video"),
+            adjusted_preview_enabled=Mock(return_value=False),
+            set_edit_mode_active=Mock(),
+            set_controls_enabled=Mock(),
+        ),
+        edit_image_viewer=Mock(set_surface_color_override=Mock()),
+        edit_sidebar=Mock(set_session=Mock(), set_video_edit_mode=Mock()),
+        video_trim_bar=Mock(hide=Mock()),
+        toggle_filmstrip_action=SimpleNamespace(isChecked=lambda: True),
+    )
+
+    with patch(
+        "iPhoto.gui.coordinators.edit_coordinator.viewer_surface_color",
+        return_value=None,
+    ):
+        EditCoordinator.leave_edit_mode(coordinator)
+
+    coordinator._media_session.restoreRequested.emit.assert_called_once_with(
+        source,
+        "edit_exit",
+    )
+    coordinator._restore_detail_video_preview.assert_not_called()
+    coordinator._router.show_detail.assert_called_once_with()
+
+
 def test_queue_video_trim_thumbnails_accepts_missing_duration() -> None:
     coordinator = EditCoordinator.__new__(EditCoordinator)
     trim_bar = Mock()
@@ -392,6 +475,8 @@ def test_leave_edit_mode_restores_transition_height_flow() -> None:
     coordinator._zoom_handler = Mock()
     coordinator._header_controller = Mock()
     coordinator._theme_controller = None
+    coordinator._media_session = None
+    coordinator._suppress_exit_restore = False
     coordinator._router = Mock()
     coordinator._transition_manager = Mock()
     coordinator._ui = SimpleNamespace(

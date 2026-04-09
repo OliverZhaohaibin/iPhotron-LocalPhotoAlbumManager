@@ -8,10 +8,7 @@ from PySide6.QtCore import QEvent, Qt
 from PySide6.QtGui import QCloseEvent, QResizeEvent
 from PySide6.QtWidgets import QMainWindow, QMenuBar
 
-try:  # pragma: no cover - exercised in packaging scenarios
-    from ...appctx import AppContext
-except ImportError:  # pragma: no cover - script execution fallback
-    from iPhoto.appctx import AppContext
+from ...application.contracts.runtime_entry_contract import RuntimeEntryContract
 
 from .media import require_multimedia
 from .ui_main_window import ChromeStatusBar, Ui_MainWindow
@@ -22,7 +19,7 @@ from .window_manager import FramelessWindowManager
 class MainWindow(QMainWindow):
     """Primary window for the desktop experience."""
 
-    def __init__(self, context: AppContext) -> None:
+    def __init__(self, context: RuntimeEntryContract) -> None:
         super().__init__()
         require_multimedia()
 

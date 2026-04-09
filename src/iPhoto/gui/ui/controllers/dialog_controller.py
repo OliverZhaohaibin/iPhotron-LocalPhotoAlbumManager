@@ -8,12 +8,8 @@ from typing import Optional
 
 from PySide6.QtWidgets import QWidget
 
-# Allow both ``iPhoto.gui`` and legacy ``iPhoto.gui`` import paths.
-try:  # pragma: no cover - depends on runtime packaging
-    from ...appctx import AppContext
-except ImportError:  # pragma: no cover - fallback for script execution
-    from iPhoto.appctx import AppContext
 from typing import TYPE_CHECKING
+from ....application.contracts.runtime_entry_contract import RuntimeEntryContract
 from ....errors import LibraryError
 from ....config import DEFAULT_EXCLUDE, DEFAULT_INCLUDE, WORK_DIR_NAME
 from ..widgets import dialogs
@@ -27,7 +23,12 @@ _logger = logging.getLogger(__name__)
 class DialogController:
     """Centralise dialog and message interactions."""
 
-    def __init__(self, parent: QWidget, context: AppContext, status_bar: ChromeStatusBar) -> None:
+    def __init__(
+        self,
+        parent: QWidget,
+        context: RuntimeEntryContract,
+        status_bar: ChromeStatusBar,
+    ) -> None:
         self._parent = parent
         self._context = context
         self._status = status_bar

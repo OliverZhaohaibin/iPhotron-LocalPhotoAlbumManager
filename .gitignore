@@ -224,3 +224,4 @@ __marimo__/
 /.codex_staging/
 /src/maps/tiles/World_basemap_2.obf
 /src/maps/tiles/extension/
+/demo/face-cluster/runtime/

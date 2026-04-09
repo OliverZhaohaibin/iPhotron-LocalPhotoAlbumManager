@@ -4,6 +4,66 @@ All notable changes to **iPhotron** are documented in this file.
 
 ---
 
+## 🚀 v5.0.0 — Video Editing, Trim System & Platform Stability
+
+🎬 *Full non-destructive video editing, a visual trim timeline, centralized keyboard shortcuts, and a sweeping round of Linux/GL stability fixes.*
+
+### Key Updates
+
+#### ✂️ Video Editing Workflow
+- Introduced a **complete non-destructive video editing suite** powered by a smooth OpenGL-accelerated preview pipeline.
+- Added a **visual trim timeline** with thumbnail strip, draggable in/out handles, and real-time playhead clamping inside the trim range.
+- Trim in/out points are saved to the sidecar file and **persist across app restarts**; the gallery duration badge now reflects the trimmed length.
+- **Playback progress bar** is remapped to the active trim range so the scrubber always tracks the visible portion of the clip.
+- Fixed stale progress bar after returning from edit mode — duration is force-synced when the video is reloaded.
+- Added **video transport keyboard shortcuts** (seek, play/pause, frame-step) inside the video edit panel.
+- Simplified the video edit sidebar section layout for a cleaner editing experience.
+
+#### ⌨️ Centralized Keyboard Shortcuts
+- Introduced **`AppShortcutManager`** — a single class that owns all application-level keyboard bindings, eliminating duplicated shortcut setup across components.
+- **Space bar** play/pause now works reliably in both gallery view and detail view.
+- Added full **gallery-mode video shortcuts**: volume up/down, mute toggle (M key), and playback controls.
+- Fixed M-key mute shortcut registration; renamed shortcut volume constant for clarity.
+
+#### 🔍 Zoom Handle in Gallery / Detail View
+- Added a **resize/zoom handle** in the video header bar so users can adjust the preview size directly from the gallery and detail view without entering edit mode.
+- Zoom state is emitted via `zoomChanged` and properly synced when switching renderer surfaces or clearing a frame.
+
+#### 🐧 Linux GL Playback Stability
+- Fixed a **critical black-screen bug** in adjusted (edited) video playback on Linux caused by Qt's QRhi context not owning the OpenGL state needed by the custom GL renderer.
+- Aligned the Linux QRhi GL viewer with the Qt GL context; used Qt GL functions for VAO creation with an automatic fallback when QRhi rejects VAO binds.
+- Hardened GL matrix uniform uploads and stabilized video frame dispatch on the GUI thread to eliminate flicker and rotation artifacts on Linux.
+- Snapshots non-packed video frames before uploading to prevent intermittent corruption.
+- Fixed Linux edit-preview viewport sizing and queuing of frames to avoid dropped frames during playback.
+
+#### 🖼️ Crop Overlay & Edit Transition Fixes
+- Fixed **crop overlay disappearing** when the overlay VAO was unavailable — the renderer now falls back to default vertex-array state so the orange crop frame always renders.
+- Cleared stale pre-existing GL errors before binding the overlay VAO; those errors were silently disabling the overlay on Linux.
+- Restored correct **crop-frame fade behavior**: the orange border always remains visible; only handles and guides are suppressed in faded state.
+- Deferred restoration of the detail chrome and filmstrip until the edit-exit animation fully completes, preventing layout jumps.
+- Respected the user's filmstrip visibility preference when leaving edit mode.
+- Fixed video canvas proportions after exiting edit mode by using `crop_center_zoom_strength=1.0` in detail/non-edit mode.
+
+#### 🎞️ Video Metadata & Info Panel
+- Implemented **multi-level cross-brand lens extraction** for both video and image assets — the info panel now resolves lens model, focal length, and aperture from multiple ExifTool fields across all major camera brands.
+- ExifTool is invoked during video playback enrichment to populate lens/focal-length fields that are absent from the media container.
+- Fixed normalization of raw `LensInfo` tuples (e.g. `"23 23 2 2"`) into human-readable strings (`"23mm f/2"`).
+- Eliminated duplicated focal-length/aperture suffixes when the lens string already contains mm notation.
+- Fixed the `ƒ` aperture format in the info panel display.
+
+#### 🐛 Fixes of major bugs
+- Fixed video rotation not refreshing immediately when changed in playback mode.
+- Fixed `ExternalToolError` not being caught explicitly during playback metadata enrichment, preventing silent failures.
+- Fixed `_restore_detail_video_preview` to correctly use `video_requires_adjusted_preview` and pass raw adjustments on the native render path.
+- Fixed out-point reset when re-entering edit mode — `PlaybackCoordinator` now guards trim remapping in edit mode.
+- Fixed SHA-1 usage in temp file naming replaced with **SHA-256** for stronger stability guarantees.
+- Fixed GL `glBindTexture` redundancy before `glGenerateMipmap` calls.
+- Used `ctypes c_uint` GL id buffers to avoid numpy dtype warnings on Windows.
+- Fixed `QShortcut` parent widget to use the top-level window instead of a nested widget, preventing shortcuts from silently failing.
+- Fixed several other minor bugs and improved overall stability.
+
+---
+
 ## 🚀 v4.6.0 — Windows Maps Extension & Offline OsmAnd Runtime
 
 🗺️ *A new Windows-only maps extension brings the offline OsmAnd/OBF runtime into iPhotron, with clearer packaging, installer integration, and a documented upstream build workflow.*

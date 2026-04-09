@@ -333,7 +333,7 @@ class AppFacade(QObject):
 
     def _on_library_tree_updated(self) -> None:
         """Propagate library root updates."""
-        pass # ViewModels handle this via AssetDataSource now
+        pass  # Gallery state now lives behind the collection store + VM adapter path.
 
     def register_restore_prompt(
         self, handler: Optional[Callable[[str], bool]]

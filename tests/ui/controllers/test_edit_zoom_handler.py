@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import warnings
 from unittest.mock import Mock
 
 import pytest
@@ -90,3 +91,46 @@ def test_disconnect_controls(zoom_handler_setup):
     viewer.zoom_in.reset_mock()
     btn_in.clicked.emit()
     viewer.zoom_in.assert_not_called()
+
+
+class ConcreteViewer(QObject):
+    zoomChanged = Signal(float)
+
+    def __init__(self):
+        super().__init__()
+        self.zoom_in_calls = 0
+        self.zoom_out_calls = 0
+        self.set_zoom = Mock()
+        self.viewport_center = Mock()
+
+    def zoom_in(self):
+        self.zoom_in_calls += 1
+
+    def zoom_out(self):
+        self.zoom_out_calls += 1
+
+
+def test_set_viewer_retargets_controls_without_disconnect_warning(qapp):
+    first = ConcreteViewer()
+    second = ConcreteViewer()
+    btn_in = MockButton()
+    btn_out = MockButton()
+    slider = MockSlider()
+
+    handler = EditZoomHandler(first, btn_in, btn_out, slider)
+    handler.connect_controls()
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        handler.set_viewer(second)
+
+    runtime_warnings = [w for w in caught if issubclass(w.category, RuntimeWarning)]
+    assert runtime_warnings == []
+
+    btn_in.clicked.emit()
+    btn_out.clicked.emit()
+
+    assert first.zoom_in_calls == 0
+    assert first.zoom_out_calls == 0
+    assert second.zoom_in_calls == 1
+    assert second.zoom_out_calls == 1

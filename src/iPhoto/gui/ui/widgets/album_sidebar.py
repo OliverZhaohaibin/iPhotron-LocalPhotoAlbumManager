@@ -33,6 +33,7 @@ from PySide6.QtWidgets import (
 )
 
 from ....library.manager import LibraryManager
+from ....config import ALL_PHOTOS_TITLE as _ALL_PHOTOS_TITLE
 from ..models.album_tree_model import AlbumTreeModel, NodeType
 from ..delegates.album_sidebar_delegate import (
     AlbumSidebarDelegate,
@@ -165,11 +166,7 @@ class AlbumSidebar(QWidget):
     bindLibraryRequested = Signal()
     filesDropped = Signal(Path, object)
 
-    ALL_PHOTOS_TITLE = (
-        AlbumTreeModel.STATIC_NODES[0]
-        if AlbumTreeModel.STATIC_NODES
-        else "All Photos"
-    )
+    ALL_PHOTOS_TITLE = _ALL_PHOTOS_TITLE
 
     def __init__(self, library: LibraryManager, parent: QWidget | None = None) -> None:
         super().__init__(parent)

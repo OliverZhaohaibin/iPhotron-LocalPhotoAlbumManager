@@ -53,9 +53,10 @@ from iPhoto.core.levels_resolver import DEFAULT_LEVELS_HANDLES
 from iPhoto.core.selective_color_resolver import DEFAULT_SELECTIVE_COLOR_RANGES
 
 if TYPE_CHECKING:
-    from iPhoto.gui.viewmodels.asset_list_viewmodel import AssetListViewModel
+    from iPhoto.gui.viewmodels.gallery_list_model_adapter import GalleryListModelAdapter
     from iPhoto.gui.ui.controllers.window_theme_controller import WindowThemeController
     from iPhoto.gui.coordinators.navigation_coordinator import NavigationCoordinator
+    from iPhoto.gui.ui.media import MediaAdjustmentCommitter, MediaSelectionSession
 
 _LOGGER = logging.getLogger(__name__)
 _APP_LOGGER = get_logger().getChild("video_trim")
@@ -73,10 +74,12 @@ class EditCoordinator(QObject):
         edit_page: QObject, # The widget containing edit UI (Ui_MainWindow components)
         router: ViewRouter,
         event_bus: EventBus,
-        asset_vm: AssetListViewModel,
+        asset_vm: GalleryListModelAdapter,
         window: QObject | None = None,
         theme_controller: WindowThemeController | None = None,
         navigation: "NavigationCoordinator | None" = None,
+        media_session: "MediaSelectionSession | None" = None,
+        adjustment_committer: "MediaAdjustmentCommitter | None" = None,
     ):
         super().__init__()
         # We need access to specific UI elements within edit_page (which is likely MainWindow.ui)
@@ -86,6 +89,8 @@ class EditCoordinator(QObject):
         self._asset_vm = asset_vm
         self._theme_controller = theme_controller
         self._navigation = navigation
+        self._media_session = media_session
+        self._adjustment_committer = adjustment_committer
 
         self._transition_manager = EditViewTransitionManager(
             self._ui,
@@ -166,6 +171,7 @@ class EditCoordinator(QObject):
         self._preview_updates_suspended = False
         self._interaction_depth = 0
         self._eyedropper_target = "curve"
+        self._suppress_exit_restore = False
 
         self._connect_signals()
 
@@ -335,6 +341,7 @@ class EditCoordinator(QObject):
         """Prepares the edit view for the given asset and switches view."""
         if self._session is not None:
             return
+        self._suppress_exit_restore = False
         _LOGGER.debug(
             "[trace][edit] enter_edit_mode:start %s",
             {
@@ -498,6 +505,11 @@ class EditCoordinator(QObject):
     def leave_edit_mode(self):
         """Returns to detail view."""
         source = self._current_source
+        should_restore_detail = (
+            source is not None
+            and self._media_session is not None
+            and not self._suppress_exit_restore
+        )
         _LOGGER.debug(
             "[trace][edit] leave_edit_mode:start %s",
             {
@@ -515,6 +527,8 @@ class EditCoordinator(QObject):
             if self._session is not None:
                 adjustments = self._resolve_session_adjustments()
             self._fullscreen_manager.exit_fullscreen_preview(source, adjustments)
+        if should_restore_detail:
+            self._media_session.restoreRequested.emit(source, "edit_exit")
         if self._session is not None:
             self._active_edit_viewport().setCropMode(False, self._session.values())
         self._active_edit_viewport().set_eyedropper_mode(False)
@@ -543,8 +557,7 @@ class EditCoordinator(QObject):
         self._ui.video_area.set_edit_mode_active(False)
         self._ui.video_area.set_controls_enabled(True)
         self._ui.video_trim_bar.hide()
-        if source is not None and source.suffix.lower() in VIDEO_EXTENSIONS:
-            self._restore_detail_video_preview(source, pending_duration_sec)
+        self._suppress_exit_restore = False
 
         self._ui.edit_sidebar.set_session(None)
         self._ui.edit_sidebar.set_video_edit_mode(False)
@@ -573,22 +586,27 @@ class EditCoordinator(QObject):
             self.leave_edit_mode()
             return
 
-        # Save
         source = self._current_source
-        navigation = self._navigation
-        if navigation:
-            navigation.pause_library_watcher()
-        try:
-            self._session.set_values(self._active_edit_viewport().crop_values(), emit_individual=False)
-            sidecar.save_adjustments(source, self._session.values())
-
-            # Update thumbnails via ViewModel
-            self._asset_vm.invalidate_thumbnail(str(source))
-        finally:
+        self._session.set_values(
+            self._active_edit_viewport().crop_values(),
+            emit_individual=False,
+        )
+        if self._adjustment_committer is None:
+            navigation = self._navigation
             if navigation:
-                navigation.resume_library_watcher()
-
-        self.leave_edit_mode()
+                navigation.pause_library_watcher()
+            try:
+                sidecar.save_adjustments(source, self._session.values())
+                self._asset_vm.invalidate_thumbnail(str(source))
+            finally:
+                if navigation:
+                    navigation.resume_library_watcher()
+            self._suppress_exit_restore = True
+            self.leave_edit_mode()
+            return
+        if self._adjustment_committer.commit(source, self._session.values(), reason="edit_done"):
+            self._suppress_exit_restore = True
+            self.leave_edit_mode()
 
     def _handle_reset_clicked(self):
         if self._session:

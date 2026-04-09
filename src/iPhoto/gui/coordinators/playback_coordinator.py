@@ -19,14 +19,17 @@ from iPhoto.gui.ui.models.roles import Roles
 from iPhoto.gui.ui.widgets.info_panel import InfoPanel
 from iPhoto.io import sidecar
 from iPhoto.io.metadata import read_image_meta, read_video_meta
+from iPhoto.utils.pathutils import normalise_for_compare
 from iPhoto.utils.exiftool import get_metadata_batch
 
 if TYPE_CHECKING:
     from iPhoto.utils.settings import Settings
     from PySide6.QtWidgets import QPushButton, QSlider, QToolButton, QWidget
 
+    from iPhoto.gui.coordinators.edit_coordinator import EditCoordinator
     from iPhoto.gui.coordinators.navigation_coordinator import NavigationCoordinator
     from iPhoto.gui.ui.controllers.player_view_controller import PlayerViewController
+    from iPhoto.gui.ui.media import MediaAdjustmentCommitter, MediaPlaybackSession
     from iPhoto.gui.ui.widgets.filmstrip_view import FilmstripView
     from iPhoto.gui.ui.widgets.player_bar import PlayerBar
     from iPhoto.gui.viewmodels.asset_list_viewmodel import AssetListViewModel
@@ -48,6 +51,8 @@ class PlaybackCoordinator(QObject):
         player_view: PlayerViewController,
         router: ViewRouter,
         asset_vm: AssetListViewModel,
+        media_session: MediaPlaybackSession,
+        adjustment_committer: MediaAdjustmentCommitter,
         # Zoom Controls
         zoom_slider: QSlider,
         zoom_in_button: QToolButton,
@@ -70,6 +75,8 @@ class PlaybackCoordinator(QObject):
         self._player_view = player_view
         self._router = router
         self._asset_vm = asset_vm
+        self._media_session = media_session
+        self._adjustment_committer = adjustment_committer
 
         self._zoom_slider = zoom_slider
         self._zoom_in = zoom_in_button
@@ -88,12 +95,14 @@ class PlaybackCoordinator(QObject):
         self._header_controller = header_controller
 
         self._is_playing = False
-        self._current_row = -1
         self._navigation: NavigationCoordinator | None = None
+        self._edit_coordinator: EditCoordinator | None = None
         self._info_panel: InfoPanel | None = None
         self._active_live_motion: Path | None = None
         self._active_live_still: Path | None = None
         self._resume_after_transition = False
+        self._pending_restore_path: Path | None = None
+        self._pending_restore_reason: str | None = None
 
         # Trim range of the currently-loaded video (in ms).  Used to remap the
         # player bar so that its slider spans [0, trim_duration] instead of the
@@ -118,12 +127,15 @@ class PlaybackCoordinator(QObject):
     def set_navigation_coordinator(self, nav: NavigationCoordinator):
         self._navigation = nav
 
+    def set_edit_coordinator(self, edit: EditCoordinator) -> None:
+        self._edit_coordinator = edit
+
     def set_info_panel(self, panel: InfoPanel):
         self._info_panel = panel
 
     def current_row(self) -> int:
         """Expose current row index for external controllers (e.g. Share)."""
-        return self._current_row
+        return self._media_session.current_row()
 
     def suspend_playback_for_transition(self) -> bool:
         """Pause active video/live playback before a window transition."""
@@ -147,8 +159,9 @@ class PlaybackCoordinator(QObject):
 
         if self._asset_vm.rowCount() <= 0:
             return False
-        target_row = self._current_row if self._current_row >= 0 else 0
-        if self._current_row < 0 or not self._router.is_detail_view_active():
+        current_row = self._media_session.current_row()
+        target_row = current_row if current_row >= 0 else 0
+        if current_row < 0 or not self._router.is_detail_view_active():
             self.play_asset(target_row)
         return True
 
@@ -175,6 +188,10 @@ class PlaybackCoordinator(QObject):
 
         # Model -> Coordinator
         self._asset_vm.dataChanged.connect(self._on_data_changed)
+        self._media_session.currentChanged.connect(self._handle_session_current_changed)
+        self._media_session.restoreRequested.connect(self._handle_restore_requested)
+        self._adjustment_committer.adjustmentsCommitted.connect(self._handle_adjustments_committed)
+        self._router.detailViewShown.connect(self._handle_detail_view_shown)
 
         # Filmstrip -> Coordinator
         self._filmstrip_view.nextItemRequested.connect(self.select_next)
@@ -292,11 +309,8 @@ class PlaybackCoordinator(QObject):
         # Show detail view and update lightweight UI immediately so the user
         # sees a responsive reaction even while the debounce timer is running.
         self._router.show_detail()
-        self._current_row = row
-        self.assetChanged.emit(row)
-        self._asset_vm.set_current_row(row)
-        self._update_header(row)
-        self._sync_filmstrip_selection(row)
+        if self._media_session.set_current_row(row) is None:
+            return
 
         # Stop any active video / live-motion playback so the decoder releases
         # its resources before the next asset attempts to use the same sink.
@@ -424,6 +438,39 @@ class PlaybackCoordinator(QObject):
         if self._info_panel and self._info_panel.isVisible():
             self._refresh_info_panel(row)
 
+    @Slot(int, object)
+    def _handle_session_current_changed(self, row: int, path: object) -> None:
+        if row < 0:
+            self._update_header(None)
+            return
+        self._asset_vm.set_current_row(row)
+        self.assetChanged.emit(row)
+        self._update_header(row)
+        self._sync_filmstrip_selection(row)
+
+    @Slot(object, str)
+    def _handle_restore_requested(self, path: object, reason: str) -> None:
+        if not isinstance(path, Path):
+            return
+        if self._is_edit_session_active():
+            self._pending_restore_path = path
+            self._pending_restore_reason = reason
+            return
+        self._restore_detail_for_path(path)
+
+    @Slot(object, str)
+    def _handle_adjustments_committed(self, path: object, reason: str) -> None:
+        self._handle_restore_requested(path, reason)
+
+    @Slot()
+    def _handle_detail_view_shown(self) -> None:
+        if self._pending_restore_path is None:
+            return
+        path = self._pending_restore_path
+        self._pending_restore_path = None
+        self._pending_restore_reason = None
+        self._restore_detail_for_path(path)
+
     def _autoplay_live_motion(self, row: int, still_source: Path) -> None:
         idx = self._asset_vm.index(row, 0)
         motion_abs = self._asset_vm.data(idx, Roles.LIVE_MOTION_ABS)
@@ -493,7 +540,8 @@ class PlaybackCoordinator(QObject):
         return color.name(QColor.NameFormat.HexArgb)
 
     def _on_data_changed(self, top, bottom, roles):
-        if self._current_row < 0:
+        current_row = self._media_session.current_row()
+        if current_row < 0:
             return
 
         # Check if the current asset is affected
@@ -501,19 +549,21 @@ class PlaybackCoordinator(QObject):
         # Note: Qt models can emit ranges.
 
         # Check if current row is in the range
-        if top.row() <= self._current_row <= bottom.row():
+        if top.row() <= current_row <= bottom.row():
             if not roles or Roles.FEATURED in roles:
-                idx = self._asset_vm.index(self._current_row, 0)
+                idx = self._asset_vm.index(current_row, 0)
                 is_fav = self._asset_vm.data(idx, Roles.FEATURED)
                 self._update_favorite_icon(bool(is_fav))
             if not roles or Roles.DT in roles or Roles.LOCATION in roles:
-                self._update_header(self._current_row)
+                self._update_header(current_row)
 
     def reset_for_gallery(self):
         self._player_view.video_area.stop()
         self._player_view.show_placeholder()
         self._player_bar.setEnabled(False)
         self._is_playing = False
+        self._pending_restore_path = None
+        self._pending_restore_reason = None
         self._update_header(None)
         if self._info_panel:
             self._info_panel.close()
@@ -522,6 +572,8 @@ class PlaybackCoordinator(QObject):
         """Stop any active media playback and release resources."""
         self._player_view.video_area.stop()
         self._is_playing = False
+        self._pending_restore_path = None
+        self._pending_restore_reason = None
         self._update_header(None)
         if self._info_panel:
             self._info_panel.close()
@@ -536,34 +588,38 @@ class PlaybackCoordinator(QObject):
 
     def select_next(self):
         """Move to the next asset."""
-        next_row = self._current_row + 1
-        if next_row < self._asset_vm.rowCount():
+        next_row = self._media_session.next_row()
+        if next_row is not None:
             self.play_asset(next_row)
 
     def select_previous(self):
         """Move to the previous asset."""
-        prev_row = self._current_row - 1
-        if prev_row >= 0:
+        prev_row = self._media_session.previous_row()
+        if prev_row is not None:
             self.play_asset(prev_row)
 
     def replay_live_photo(self):
-        if self._current_row < 0:
+        current_row = self._media_session.current_row()
+        if current_row < 0:
             return
-        idx = self._asset_vm.index(self._current_row, 0)
+        idx = self._asset_vm.index(current_row, 0)
         abs_path = self._asset_vm.data(idx, Roles.ABS)
         is_live = self._asset_vm.data(idx, Roles.IS_LIVE)
         if not abs_path or not is_live:
             return
-        self._autoplay_live_motion(self._current_row, Path(abs_path))
+        self._autoplay_live_motion(current_row, Path(abs_path))
 
     def rotate_current_asset(self):
-        if self._current_row < 0: return
+        current_row = self._media_session.current_row()
+        if current_row < 0:
+            return
 
-        idx = self._asset_vm.index(self._current_row, 0)
+        idx = self._asset_vm.index(current_row, 0)
         abs_path = self._asset_vm.data(idx, Roles.ABS)
         is_video = bool(self._asset_vm.data(idx, Roles.IS_VIDEO))
 
-        if not abs_path: return
+        if not abs_path:
+            return
 
         source = Path(abs_path)
 
@@ -575,20 +631,13 @@ class PlaybackCoordinator(QObject):
 
         # 2. Persist adjustments
         try:
-            navigation = self._navigation
-            if navigation:
-                navigation.pause_library_watcher()
-            try:
-                current_adjustments = sidecar.load_adjustments(source)
-                current_adjustments.update(updates)
-                sidecar.save_adjustments(source, current_adjustments)
-
-                # 3. Invalidate thumbnails
-                self._asset_vm.invalidate_thumbnail(str(source))
-            finally:
-                if navigation:
-                    navigation.resume_library_watcher()
-
+            current_adjustments = sidecar.load_adjustments(source)
+            current_adjustments.update(updates)
+            self._adjustment_committer.commit(
+                source,
+                current_adjustments,
+                reason="rotate",
+            )
         except Exception as e:
             LOGGER.error(f"Failed to rotate: {e}")
 
@@ -640,6 +689,35 @@ class PlaybackCoordinator(QObject):
         if self._info_panel.isVisible():
             self._info_panel.close()
         else:
-            if self._current_row >= 0:
-                self._refresh_info_panel(self._current_row)
+            current_row = self._media_session.current_row()
+            if current_row >= 0:
+                self._refresh_info_panel(current_row)
                 self._info_panel.show()
+
+    def _is_edit_session_active(self) -> bool:
+        return bool(self._edit_coordinator and self._edit_coordinator.is_editing())
+
+    def _restore_detail_for_path(self, path: Path) -> None:
+        current_source = self._media_session.current_source()
+        if current_source is None or not self._paths_match(current_source, path):
+            if not self._media_session.set_current_by_path(path):
+                return
+
+        row = self._media_session.current_row()
+        if row < 0:
+            return
+
+        if not self._router.is_detail_view_active():
+            self._router.show_detail()
+
+        self._asset_vm.set_current_row(row)
+        self.assetChanged.emit(row)
+        self._update_header(row)
+        self._sync_filmstrip_selection(row)
+        self._do_play_asset(row)
+
+    def _paths_match(self, left: Path, right: Path) -> bool:
+        try:
+            return normalise_for_compare(left) == normalise_for_compare(right)
+        except (OSError, TypeError, ValueError):
+            return left == right

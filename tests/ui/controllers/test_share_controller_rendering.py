@@ -29,7 +29,7 @@ class StubSettings:
     def set(self, key: str, value: str) -> None:
         self._value = value
 
-class StubPlaylist:
+class StubMediaSession:
     def __init__(self, row: int) -> None:
         self._row = row
     def current_row(self) -> int:
@@ -66,7 +66,7 @@ class StubToast:
 
 @pytest.fixture()
 def controller_factory(qapp: QApplication):
-    def factory(*, settings: StubSettings, playlist: StubPlaylist, asset_model: StubAssetModel) -> ShareController:
+    def factory(*, settings: StubSettings, media_session: StubMediaSession, asset_model: StubAssetModel) -> ShareController:
         status_bar = StubStatusBar()
         toast = StubToast()
         share_button = QPushButton("Share")
@@ -77,7 +77,7 @@ def controller_factory(qapp: QApplication):
 
         controller = ShareController(
             settings=settings,
-            playlist=playlist,
+            media_session=media_session,
             asset_model=asset_model,
             status_bar=status_bar,
             notification_toast=toast,
@@ -99,9 +99,9 @@ def test_copy_file_no_sidecar(controller_factory, mocker, tmp_path):
     # Ensure sidecar does not exist
 
     settings = StubSettings("copy_file")
-    playlist = StubPlaylist(0)
+    media_session = StubMediaSession(0)
     model = StubAssetModel(str(path))
-    controller = controller_factory(settings=settings, playlist=playlist, asset_model=model)
+    controller = controller_factory(settings=settings, media_session=media_session, asset_model=model)
 
     # Mock clipboard
     clipboard_mock = mocker.patch.object(QGuiApplication, "clipboard")
@@ -122,9 +122,9 @@ def test_copy_file_with_sidecar_success(controller_factory, mocker, tmp_path, qa
     mocker.patch("iPhoto.io.sidecar.sidecar_path_for_asset", return_value=sidecar_path)
 
     settings = StubSettings("copy_file")
-    playlist = StubPlaylist(0)
+    media_session = StubMediaSession(0)
     model = StubAssetModel(str(path))
-    controller = controller_factory(settings=settings, playlist=playlist, asset_model=model)
+    controller = controller_factory(settings=settings, media_session=media_session, asset_model=model)
 
     clipboard_mock = mocker.patch.object(QGuiApplication, "clipboard")
     mock_clipboard_inst = clipboard_mock.return_value
@@ -163,9 +163,9 @@ def test_copy_file_with_sidecar_failure(controller_factory, mocker, tmp_path, qa
     mocker.patch("iPhoto.io.sidecar.sidecar_path_for_asset", return_value=sidecar_path)
 
     settings = StubSettings("copy_file")
-    playlist = StubPlaylist(0)
+    media_session = StubMediaSession(0)
     model = StubAssetModel(str(path))
-    controller = controller_factory(settings=settings, playlist=playlist, asset_model=model)
+    controller = controller_factory(settings=settings, media_session=media_session, asset_model=model)
 
     clipboard_mock = mocker.patch.object(QGuiApplication, "clipboard")
     mock_clipboard_inst = clipboard_mock.return_value
@@ -196,9 +196,9 @@ def test_copy_file_with_video_sidecar_uses_video_render(controller_factory, mock
     mocker.patch("iPhoto.io.sidecar.video_has_visible_edits", return_value=True)
 
     settings = StubSettings("copy_file")
-    playlist = StubPlaylist(0)
+    media_session = StubMediaSession(0)
     model = StubAssetModel(str(path))
-    controller = controller_factory(settings=settings, playlist=playlist, asset_model=model)
+    controller = controller_factory(settings=settings, media_session=media_session, asset_model=model)
 
     render_spy = mocker.patch.object(controller, "_copy_rendered_video_to_clipboard")
 

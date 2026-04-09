@@ -144,9 +144,10 @@ def test_do_play_asset_keeps_rotate_only_video_on_native_playback_surface() -> N
 
 def test_rotate_current_asset_routes_video_rotation_through_video_area() -> None:
     coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
-    coordinator._current_row = 0
+    coordinator._media_session = Mock(current_row=Mock(return_value=0))
     coordinator._asset_vm = Mock()
     coordinator._asset_vm.index.return_value = object()
+    coordinator._adjustment_committer = Mock(commit=Mock(return_value=True))
 
     source = Path("/fake/video.mp4")
 
@@ -158,28 +159,44 @@ def test_rotate_current_asset_routes_video_rotation_through_video_area() -> None
         return None
 
     coordinator._asset_vm.data.side_effect = _data
-    coordinator._asset_vm.invalidate_thumbnail = Mock()
     coordinator._player_view = SimpleNamespace(
         video_area=Mock(rotate_image_ccw=Mock(return_value={"Crop_Rotate90": 3.0})),
         image_viewer=Mock(rotate_image_ccw=Mock()),
     )
-    coordinator._navigation = None
 
     with patch(
         "iPhoto.gui.coordinators.playback_coordinator.sidecar.load_adjustments",
         return_value={"Exposure": 0.2},
-    ), patch(
-        "iPhoto.gui.coordinators.playback_coordinator.sidecar.save_adjustments",
-    ) as save_mock:
+    ):
         PlaybackCoordinator.rotate_current_asset(coordinator)
 
     coordinator._player_view.video_area.rotate_image_ccw.assert_called_once_with()
     coordinator._player_view.image_viewer.rotate_image_ccw.assert_not_called()
-    save_mock.assert_called_once_with(
+    coordinator._adjustment_committer.commit.assert_called_once_with(
         source,
         {"Exposure": 0.2, "Crop_Rotate90": 3.0},
+        reason="rotate",
     )
-    coordinator._asset_vm.invalidate_thumbnail.assert_called_once_with(str(source))
+
+
+def test_adjustment_restore_is_deferred_while_edit_session_is_active() -> None:
+    coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
+    coordinator._pending_restore_path = None
+    coordinator._pending_restore_reason = None
+    coordinator._restore_detail_for_path = Mock()
+    coordinator._is_edit_session_active = Mock(return_value=True)
+
+    source = Path("/fake/video.mp4")
+
+    PlaybackCoordinator._handle_restore_requested(coordinator, source, "edit_done")
+
+    assert coordinator._pending_restore_path == source
+    assert coordinator._pending_restore_reason == "edit_done"
+    coordinator._restore_detail_for_path.assert_not_called()
+
+    PlaybackCoordinator._handle_detail_view_shown(coordinator)
+
+    coordinator._restore_detail_for_path.assert_called_once_with(source)
 
 
 # ---------------------------------------------------------------------------

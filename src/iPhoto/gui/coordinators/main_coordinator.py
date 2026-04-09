@@ -32,6 +32,7 @@ from iPhoto.gui.ui.controllers.preview_controller import PreviewController
 from iPhoto.gui.ui.controllers.context_menu_controller import ContextMenuController
 from iPhoto.gui.ui.controllers.selection_controller import SelectionController
 from iPhoto.gui.ui.controllers.export_controller import ExportController
+from iPhoto.gui.ui.media import MediaAdjustmentCommitter, MediaPlaybackSession
 from iPhoto.gui.ui.widgets.asset_delegate import AssetGridDelegate
 
 # New Architecture Imports
@@ -87,6 +88,8 @@ class MainCoordinator(QObject):
             library_root=lib_root,
             parent=window.ui.grid_view,
         )
+        self._media_session = MediaPlaybackSession(self)
+        self._media_session.bind_model(self._asset_list_vm)
         self._asset_service.set_repository(self._context.asset_runtime.repository)
         self._thumbnail_service = self._context.asset_runtime.thumbnail_service
 
@@ -106,6 +109,12 @@ class MainCoordinator(QObject):
             self._asset_list_vm,
             context,
             context.facade,  # Legacy Facade Bridge
+        )
+        self._adjustment_committer = MediaAdjustmentCommitter(
+            asset_vm=self._asset_list_vm,
+            pause_watcher=self._navigation.pause_library_watcher,
+            resume_watcher=self._navigation.resume_library_watcher,
+            parent=self,
         )
 
         # 3. Playback Coordinator
@@ -127,6 +136,8 @@ class MainCoordinator(QObject):
             player_view=self._player_view_controller,
             router=self._view_router,
             asset_vm=self._asset_list_vm,
+            media_session=self._media_session,
+            adjustment_committer=self._adjustment_committer,
             zoom_slider=window.ui.zoom_slider,
             zoom_in_button=window.ui.zoom_in_button,
             zoom_out_button=window.ui.zoom_out_button,
@@ -161,7 +172,10 @@ class MainCoordinator(QObject):
             window,
             self._theme_controller,
             self._navigation,
+            self._media_session,
+            self._adjustment_committer,
         )
+        self._playback.set_edit_coordinator(self._edit)
 
         # --- Legacy Controllers ---
         self._dialog = DialogController(window, context, window.ui.status_bar)
@@ -174,7 +188,7 @@ class MainCoordinator(QObject):
 
         self._share_controller = ShareController(
             settings=context.settings,
-            playlist=self._playback,  # Acts as playlist controller (provides current_row)
+            media_session=self._media_session,
             asset_model=self._asset_list_vm,
             status_bar=self._status_bar,
             notification_toast=window.ui.notification_toast,
@@ -504,8 +518,9 @@ class MainCoordinator(QObject):
         indexes = self._window.ui.grid_view.selectionModel().selectedIndexes()
 
         # Fallback: If no selection in grid, but we have a playback row?
-        if not indexes and self._playback.current_row() >= 0:
-            idx = self._asset_list_vm.index(self._playback.current_row(), 0)
+        current_row = self._media_session.current_row()
+        if not indexes and current_row >= 0:
+            idx = self._asset_list_vm.index(current_row, 0)
             if idx.isValid():
                 indexes = [idx]
 
@@ -551,9 +566,10 @@ class MainCoordinator(QObject):
 
         # Fallback: If no selection in grid, but we have a playback row?
         # This handles the case where Detail View is active but grid selection sync failed or focus issue.
-        if not indexes and self._playback.current_row() >= 0:
+        current_row = self._media_session.current_row()
+        if not indexes and current_row >= 0:
              # Construct an index for the current playback row
-             idx = self._asset_list_vm.index(self._playback.current_row(), 0)
+             idx = self._asset_list_vm.index(current_row, 0)
              if idx.isValid():
                  indexes = [idx]
 

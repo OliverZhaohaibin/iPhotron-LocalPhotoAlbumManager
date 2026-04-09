@@ -30,7 +30,6 @@ from ....io import sidecar
 from ....media_classifier import VIDEO_EXTENSIONS
 from ....utils import image_loader
 from ....utils.ffmpeg import probe_media
-from ..media import PlaylistController
 from ..models.roles import Roles
 from ..widgets.notification_toast import NotificationToast
 from .status_bar_controller import StatusBarController
@@ -182,7 +181,7 @@ class ShareController(QObject):
         self,
         *,
         settings,
-        playlist: PlaylistController,
+        media_session,
         asset_model: QAbstractItemModel,
         status_bar: StatusBarController,
         notification_toast: NotificationToast,
@@ -195,7 +194,7 @@ class ShareController(QObject):
     ) -> None:
         super().__init__(parent)
         self._settings = settings
-        self._playlist = playlist
+        self._media_session = media_session
         self._asset_model = asset_model
         self._status_bar = status_bar
         self._toast = notification_toast
@@ -235,7 +234,7 @@ class ShareController(QObject):
             self._settings.set("ui.share_action", "reveal_file")
 
     def _handle_share_requested(self) -> None:
-        current_row = self._playlist.current_row()
+        current_row = self._media_session.current_row()
         if current_row < 0:
             self._status_bar.show_message("No item selected to share.", 3000)
             return

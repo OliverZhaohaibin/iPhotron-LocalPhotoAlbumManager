@@ -59,8 +59,8 @@ class StubSettings:
         self._value = value
 
 
-class StubPlaylist:
-    """Playlist stub exposing just the ``current_row`` accessor."""
+class StubMediaSession:
+    """Media session stub exposing just the ``current_row`` accessor."""
 
     def __init__(self, row: int) -> None:
         self._row = row
@@ -132,7 +132,7 @@ def controller_factory(qapp: QApplication):
     def factory(
         *,
         settings: StubSettings,
-        playlist: StubPlaylist,
+        media_session: StubMediaSession,
         asset_model: StubAssetModel,
     ) -> ShareController:
         status_bar = StubStatusBar()
@@ -151,7 +151,7 @@ def controller_factory(qapp: QApplication):
 
         controller = ShareController(
             settings=settings,
-            playlist=playlist,
+            media_session=media_session,
             asset_model=asset_model,
             status_bar=status_bar,
             notification_toast=toast,
@@ -170,9 +170,13 @@ def test_restore_preference_checks_expected_action(controller_factory, qapp: QAp
     """Restoring the preference should check the matching QAction."""
 
     settings = StubSettings("copy_path")
-    playlist = StubPlaylist(-1)
+    media_session = StubMediaSession(-1)
     model = StubAssetModel(None)
-    controller = controller_factory(settings=settings, playlist=playlist, asset_model=model)
+    controller = controller_factory(
+        settings=settings,
+        media_session=media_session,
+        asset_model=model,
+    )
 
     controller.restore_preference()
 
@@ -183,9 +187,13 @@ def test_share_without_selection_shows_status_message(controller_factory, qapp: 
     """Clicking the share button without a selection should inform the user."""
 
     settings = StubSettings("reveal_file")
-    playlist = StubPlaylist(-1)
+    media_session = StubMediaSession(-1)
     model = StubAssetModel(None)
-    controller = controller_factory(settings=settings, playlist=playlist, asset_model=model)
+    controller = controller_factory(
+        settings=settings,
+        media_session=media_session,
+        asset_model=model,
+    )
 
     controller._share_button.click()
 
@@ -199,9 +207,13 @@ def test_share_uses_preferred_action(
 
     target = tmp_path / "photo.jpg"
     settings = StubSettings("copy_file")
-    playlist = StubPlaylist(0)
+    media_session = StubMediaSession(0)
     model = StubAssetModel(str(target))
-    controller = controller_factory(settings=settings, playlist=playlist, asset_model=model)
+    controller = controller_factory(
+        settings=settings,
+        media_session=media_session,
+        asset_model=model,
+    )
 
     copy_file = mocker.patch.object(controller, "_copy_file_to_clipboard")
     copy_path = mocker.patch.object(controller, "_copy_path_to_clipboard")
@@ -218,9 +230,13 @@ def test_action_group_updates_preference(controller_factory, qapp: QApplication)
     """Switching the QAction selection must persist the new preference."""
 
     settings = StubSettings("reveal_file")
-    playlist = StubPlaylist(0)
+    media_session = StubMediaSession(0)
     model = StubAssetModel("/tmp/photo.jpg")
-    controller = controller_factory(settings=settings, playlist=playlist, asset_model=model)
+    controller = controller_factory(
+        settings=settings,
+        media_session=media_session,
+        asset_model=model,
+    )
 
     controller._share_action_group.triggered.emit(controller._copy_path_action)
 

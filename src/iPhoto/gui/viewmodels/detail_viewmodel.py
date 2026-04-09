@@ -80,6 +80,7 @@ class DetailViewModel(BaseViewModel):
         source = self._media_session.set_current_row(row)
         if source is None:
             return
+        self._store.pin_row(row)
         dto = self._store.asset_at(row)
         if dto is None:
             return

@@ -6,14 +6,12 @@ from pathlib import Path
 from typing import Any, Iterable, Optional
 
 from iPhoto.application.services.asset_service import AssetService
-from iPhoto.config import DEFAULT_EXCLUDE, DEFAULT_INCLUDE
 from iPhoto.application.contracts.runtime_entry_contract import RuntimeEntryContract
-from iPhoto.config import RECENTLY_DELETED_DIR_NAME
+from iPhoto.config import ALL_PHOTOS_TITLE, DEFAULT_EXCLUDE, DEFAULT_INCLUDE, RECENTLY_DELETED_DIR_NAME
 from iPhoto.domain.models.core import MediaType
 from iPhoto.domain.models.query import AssetQuery
 from iPhoto.gui.coordinators.location_selection_session import LocationSelectionSession
 from iPhoto.gui.facade import AppFacade
-from iPhoto.gui.ui.widgets.album_sidebar import AlbumSidebar
 
 from .base import BaseViewModel
 from .gallery_collection_store import GalleryCollectionStore
@@ -86,7 +84,7 @@ class GalleryViewModel(BaseViewModel):
         self._clear_location_context()
         self._load_query(
             section="all_photos",
-            static_selection=AlbumSidebar.ALL_PHOTOS_TITLE,
+            static_selection=ALL_PHOTOS_TITLE,
             root=root,
             query=AssetQuery(),
         )

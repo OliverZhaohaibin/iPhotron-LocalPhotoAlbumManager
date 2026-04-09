@@ -58,5 +58,5 @@ class LibraryAssetRuntime:
 
     def _cache_root(self, library_root: Path | None) -> Path:
         if library_root is None:
-            return Path.home() / ".iPhoto" / "cache" / "thumbs"
-        return library_root / ".iPhoto" / "cache" / "thumbs"
+            return Path.home() / WORK_DIR_NAME / "cache" / "thumbs"
+        return library_root / WORK_DIR_NAME / "cache" / "thumbs"

@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Literal, Optional
 from PySide6.QtCore import QObject, QTimer, Signal
 
 from iPhoto.application.contracts.runtime_entry_contract import RuntimeEntryContract
+from iPhoto.config import ALL_PHOTOS_TITLE
 from iPhoto.gui.coordinators.view_router import ViewRouter
 from iPhoto.gui.facade import AppFacade
 from iPhoto.gui.ui.widgets.album_sidebar import AlbumSidebar
@@ -223,7 +224,7 @@ class NavigationCoordinator(QObject):
 
     def is_all_photos_view(self) -> bool:
         value = self.static_selection()
-        return bool(value) and value.casefold() == AlbumSidebar.ALL_PHOTOS_TITLE.casefold()
+        return bool(value) and value.casefold() == ALL_PHOTOS_TITLE.casefold()
 
     def is_recently_deleted_view(self) -> bool:
         value = self.static_selection()

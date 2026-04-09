@@ -5,6 +5,7 @@ from pathlib import Path
 from iPhoto.domain.models import Asset, MediaType
 from iPhoto.domain.models.query import AssetQuery
 from iPhoto.gui.viewmodels.asset_data_source import AssetDataSource
+from iPhoto.library.geo_aggregator import GeotaggedAsset
 
 
 class _FakeRepo:
@@ -265,3 +266,81 @@ def test_load_clears_pending_move_state():
 
     assert source._pending_moves == []
     assert source._pending_paths == set()
+
+
+def test_reload_current_selection_replays_query_after_repository_rebind(tmp_path):
+    first_repo = _FakeRepo([
+        Asset(
+            id="1",
+            album_id="a",
+            path=Path("first.jpg"),
+            media_type=MediaType.IMAGE,
+            size_bytes=1,
+        )
+    ])
+    second_repo = _FakeRepo([
+        Asset(
+            id="1",
+            album_id="a",
+            path=Path("first.jpg"),
+            media_type=MediaType.IMAGE,
+            size_bytes=1,
+        ),
+        Asset(
+            id="2",
+            album_id="a",
+            path=Path("second.jpg"),
+            media_type=MediaType.IMAGE,
+            size_bytes=1,
+        ),
+    ])
+    source = AssetDataSource(first_repo, library_root=tmp_path)
+    source._path_cache.exists_cached = lambda path: True  # type: ignore[method-assign]
+
+    source.load_selection(tmp_path, query=AssetQuery())
+    assert source.count() == 1
+    assert source.active_root() == tmp_path
+
+    source.set_repository(second_repo)
+    source.reload_current_selection()
+
+    assert source.count() == 2
+
+
+def test_reload_current_selection_replays_direct_assets_after_reset(tmp_path):
+    library_root = tmp_path / "Library"
+    library_root.mkdir()
+    asset_path = library_root / "cluster.jpg"
+    asset_path.write_bytes(b"cluster")
+    source = AssetDataSource(_FakeRepo([]), library_root=library_root)
+
+    direct_assets = [
+        GeotaggedAsset(
+            library_relative="cluster.jpg",
+            album_relative="cluster.jpg",
+            absolute_path=asset_path,
+            album_path=library_root,
+            asset_id="cluster-1",
+            latitude=48.0,
+            longitude=2.0,
+            is_image=True,
+            is_video=False,
+            still_image_time=None,
+            duration=None,
+            location_name="Paris",
+            live_photo_group_id=None,
+            live_partner_rel=None,
+        )
+    ]
+
+    source.load_selection(library_root, direct_assets=direct_assets, library_root=library_root)
+    assert source.count() == 1
+    assert source.active_root() == library_root
+
+    next_library_root = tmp_path / "OtherLibrary"
+    source.set_library_root(next_library_root)
+    assert source.count() == 0
+
+    source.reload_current_selection()
+
+    assert source.count() == 1

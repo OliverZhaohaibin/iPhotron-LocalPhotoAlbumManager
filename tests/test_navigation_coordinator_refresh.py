@@ -7,6 +7,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from iPhoto.config import RECENTLY_DELETED_DIR_NAME
 from iPhoto.gui.coordinators.navigation_coordinator import NavigationCoordinator
 
 
@@ -97,4 +98,42 @@ def test_open_album_uses_single_facade_path(tmp_path: Path) -> None:
 
     coord._facade.open_album.assert_called_once_with(album)
     coord._context.remember_album.assert_called_once_with(album)
-    coord._asset_vm.load_query.assert_called_once()
+    coord._asset_vm.load_selection.assert_called_once()
+    active_root = coord._asset_vm.load_selection.call_args.args[0]
+    query = coord._asset_vm.load_selection.call_args.kwargs["query"]
+    assert active_root == album
+    assert query.album_path == "Paris"
+    assert query.include_subalbums is True
+
+
+def test_open_all_photos_uses_single_selection_entry(tmp_path: Path) -> None:
+    coord = _make_coordinator(current_album_root=None, gallery_active=True)
+    coord._context.library.root.return_value = tmp_path
+
+    coord.open_all_photos()
+
+    coord._asset_vm.load_selection.assert_called_once()
+    active_root = coord._asset_vm.load_selection.call_args.args[0]
+    query = coord._asset_vm.load_selection.call_args.kwargs["query"]
+    assert active_root == tmp_path
+    assert query.album_path is None
+    assert query.is_favorite is None
+    assert query.media_types == []
+
+
+def test_open_recently_deleted_uses_single_selection_entry(tmp_path: Path) -> None:
+    library_root = tmp_path / "Library"
+    deleted_root = library_root / RECENTLY_DELETED_DIR_NAME
+    deleted_root.mkdir(parents=True)
+
+    coord = _make_coordinator(current_album_root=None, gallery_active=True)
+    coord._context.library.root.return_value = library_root
+    coord._context.library.ensure_deleted_directory.return_value = deleted_root
+
+    coord.open_recently_deleted()
+
+    coord._asset_vm.load_selection.assert_called_once()
+    active_root = coord._asset_vm.load_selection.call_args.args[0]
+    query = coord._asset_vm.load_selection.call_args.kwargs["query"]
+    assert active_root == deleted_root
+    assert query.album_path == RECENTLY_DELETED_DIR_NAME

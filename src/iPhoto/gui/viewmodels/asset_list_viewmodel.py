@@ -53,14 +53,43 @@ class AssetListViewModel(QAbstractListModel):
         # invalidation (post-edit save) and model reset (album switch).
         self._duration_cache: dict[Path, float] = {}
 
-    def load_query(self, query: AssetQuery):
-        """Triggers data loading for a new query."""
+    @classmethod
+    def create(
+        cls,
+        *,
+        repository,
+        thumbnail_service: ThumbnailCacheService,
+        library_root: Optional[Path] = None,
+        parent=None,
+    ) -> "AssetListViewModel":
+        """Build the Qt view model with its private data source."""
+        data_source = AssetDataSource(repository, library_root)
+        return cls(data_source, thumbnail_service, parent=parent)
+
+    def load_selection(
+        self,
+        active_root: Optional[Path],
+        *,
+        query: Optional[AssetQuery] = None,
+        direct_assets: Optional[list] = None,
+        library_root: Optional[Path] = None,
+    ) -> None:
+        """Load a gallery selection through the single public loading entrypoint."""
         self._last_snapshot = None
         self.beginResetModel()
         try:
-            self._data_source.load(query)
+            self._data_source.load_selection(
+                active_root,
+                query=query,
+                direct_assets=direct_assets,
+                library_root=library_root,
+            )
         finally:
             self.endResetModel()
+
+    def load_query(self, query: AssetQuery):
+        """Triggers data loading for a new query."""
+        self.load_selection(self._data_source.active_root(), query=query)
 
     def load_geotagged_assets(self, assets: list, library_root: Path) -> None:
         """Load a pre-computed list of geotagged assets for cluster gallery view.
@@ -72,12 +101,7 @@ class AssetListViewModel(QAbstractListModel):
             assets: List of GeotaggedAsset objects from the clicked map cluster.
             library_root: The library root path for resolving absolute paths.
         """
-        self._last_snapshot = None
-        self.beginResetModel()
-        try:
-            self._data_source.load_geotagged_assets(assets, library_root)
-        finally:
-            self.endResetModel()
+        self.load_selection(library_root, direct_assets=assets, library_root=library_root)
 
     def reload_current_query(self) -> None:
         """Reload the active query with a controlled model reset."""
@@ -88,9 +112,29 @@ class AssetListViewModel(QAbstractListModel):
         finally:
             self.endResetModel()
 
+    def reload_current_selection(self) -> None:
+        """Reload whichever selection is currently active."""
+        self._last_snapshot = None
+        self.beginResetModel()
+        try:
+            self._data_source.reload_current_selection()
+        finally:
+            self.endResetModel()
+
     def set_active_root(self, root: Optional[Path]) -> None:
         """Update the active root so scan chunks map to the current view."""
         self._data_source.set_active_root(root)
+
+    def rebind_repository(self, repo, library_root: Optional[Path]) -> None:
+        """Rebind the view model to a new repository and library root."""
+        self._data_source.set_repository(repo)
+        self._data_source.set_library_root(library_root)
+
+    def handle_scan_chunk(self, scan_root: Path, chunk: list[dict]) -> None:
+        self._data_source.handle_scan_chunk(scan_root, chunk)
+
+    def handle_scan_finished(self, root: Path, success: bool) -> None:
+        self._data_source.handle_scan_finished(root, success)
 
     def rowCount(self, parent=QModelIndex()) -> int:
         return self._data_source.count()

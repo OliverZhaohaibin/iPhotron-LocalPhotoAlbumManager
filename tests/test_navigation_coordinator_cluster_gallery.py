@@ -105,3 +105,28 @@ class TestNavigationClearsClusterGallery:
 
         assert coord._in_cluster_gallery is False
         coord._router.gallery_page().set_cluster_gallery_mode.assert_called_with(False)
+
+
+def test_open_cluster_gallery_uses_single_selection_entry(tmp_path: Path) -> None:
+    coord = _make_coordinator(library_root=tmp_path)
+    assets = [MagicMock(name="asset-1"), MagicMock(name="asset-2")]
+
+    coord.open_cluster_gallery(assets)
+
+    coord._asset_vm.load_selection.assert_called_once_with(
+        tmp_path,
+        direct_assets=assets,
+        library_root=tmp_path,
+    )
+
+
+def test_open_filtered_collection_uses_single_selection_entry(tmp_path: Path) -> None:
+    coord = _make_coordinator(library_root=tmp_path)
+
+    coord._open_filtered_collection("Favorites", is_favorite=True)
+
+    coord._asset_vm.load_selection.assert_called_once()
+    active_root = coord._asset_vm.load_selection.call_args.args[0]
+    query = coord._asset_vm.load_selection.call_args.kwargs["query"]
+    assert active_root == tmp_path
+    assert query.is_favorite is True

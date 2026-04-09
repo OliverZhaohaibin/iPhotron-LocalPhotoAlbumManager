@@ -37,7 +37,6 @@ from iPhoto.gui.ui.widgets.asset_delegate import AssetGridDelegate
 # New Architecture Imports
 from iPhoto.gui.viewmodels.album_viewmodel import AlbumViewModel
 from iPhoto.gui.viewmodels.asset_list_viewmodel import AssetListViewModel
-from iPhoto.gui.viewmodels.asset_data_source import AssetDataSource
 from iPhoto.application.services.asset_service import AssetService
 from iPhoto.di.container import DependencyContainer
 from iPhoto.events.bus import EventBus
@@ -82,13 +81,14 @@ class MainCoordinator(QObject):
         # --- ViewModels Setup ---
         lib_root = context.library.root()
         self._context.asset_runtime.bind_library_root(lib_root)
-        self._asset_data_source = AssetDataSource(
-            self._context.asset_runtime.repository,
-            lib_root,
+        self._asset_list_vm = AssetListViewModel.create(
+            repository=self._context.asset_runtime.repository,
+            thumbnail_service=self._context.asset_runtime.thumbnail_service,
+            library_root=lib_root,
+            parent=window.ui.grid_view,
         )
         self._asset_service.set_repository(self._context.asset_runtime.repository)
         self._thumbnail_service = self._context.asset_runtime.thumbnail_service
-        self._asset_list_vm = AssetListViewModel(self._asset_data_source, self._thumbnail_service)
 
         # Inject ViewModel provider into Facade for legacy operations (restore/delete)
         if self._facade:
@@ -345,8 +345,8 @@ class MainCoordinator(QObject):
         """Connect application signals."""
         ui = self._window.ui
         self._context.library.treeUpdated.connect(self._on_library_tree_updated)
-        self._facade.scanChunkReady.connect(self._asset_data_source.handle_scan_chunk)
-        self._facade.scanFinished.connect(self._asset_data_source.handle_scan_finished)
+        self._facade.scanChunkReady.connect(self._asset_list_vm.handle_scan_chunk)
+        self._facade.scanFinished.connect(self._asset_list_vm.handle_scan_finished)
 
         # Grid interactions
         ui.grid_view.itemClicked.connect(self._on_asset_clicked)
@@ -452,10 +452,9 @@ class MainCoordinator(QObject):
         root = self._context.library.root()
         self._logger.debug("_on_library_tree_updated: root=%s", root)
         self._context.asset_runtime.bind_library_root(root)
-        self._asset_data_source.set_repository(self._context.asset_runtime.repository)
         self._asset_service.set_repository(self._context.asset_runtime.repository)
-        self._asset_data_source.set_library_root(root)
-        self._asset_list_vm.reload_current_query()
+        self._asset_list_vm.rebind_repository(self._context.asset_runtime.repository, root)
+        self._asset_list_vm.reload_current_selection()
 
     def _on_asset_clicked(self, index: QModelIndex):
         if self._selection_controller and self._selection_controller.is_active():

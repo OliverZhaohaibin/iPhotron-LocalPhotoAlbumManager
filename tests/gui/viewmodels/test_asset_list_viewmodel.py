@@ -134,17 +134,55 @@ def test_info_role_contains_required_keys(view_model, mock_data_source):
 
 def test_load_query(view_model, mock_data_source):
     query = AssetQuery(album_path="test")
+    mock_data_source.active_root.return_value = Path("/library/test")
     view_model.load_query(query)
-    mock_data_source.load.assert_called_with(query)
+    mock_data_source.load_selection.assert_called_once_with(
+        Path("/library/test"),
+        query=query,
+        direct_assets=None,
+        library_root=None,
+    )
+
+
+def test_load_selection_with_query(view_model, mock_data_source):
+    query = AssetQuery(album_path="favorites")
+
+    view_model.load_selection(Path("/library"), query=query)
+
+    mock_data_source.load_selection.assert_called_once_with(
+        Path("/library"),
+        query=query,
+        direct_assets=None,
+        library_root=None,
+    )
+
+
+def test_load_selection_with_direct_assets(view_model, mock_data_source):
+    assets = [MagicMock()]
+
+    view_model.load_selection(Path("/library"), direct_assets=assets, library_root=Path("/library"))
+
+    mock_data_source.load_selection.assert_called_once_with(
+        Path("/library"),
+        query=None,
+        direct_assets=assets,
+        library_root=Path("/library"),
+    )
 
 def test_reload_current_query(view_model, mock_data_source):
     view_model.reload_current_query()
     mock_data_source.reload_current_query.assert_called_once()
 
 
+def test_reload_current_selection(view_model, mock_data_source):
+    view_model.reload_current_selection()
+    mock_data_source.reload_current_selection.assert_called_once()
+
+
 def test_load_query_balances_model_reset_on_error(view_model, mock_data_source):
-    mock_data_source.load.side_effect = RuntimeError("boom")
+    mock_data_source.load_selection.side_effect = RuntimeError("boom")
     query = AssetQuery(album_path="test")
+    mock_data_source.active_root.return_value = Path("/library/test")
 
     with (
         pytest.raises(RuntimeError, match="boom"),
@@ -222,6 +260,33 @@ def test_current_role_without_loaded_asset(view_model, mock_data_source):
 def test_prioritize_rows_delegates_to_data_source(view_model, mock_data_source):
     view_model.prioritize_rows(10, 25)
     mock_data_source.prioritize_rows.assert_called_once_with(10, 25)
+
+
+def test_rebind_repository_updates_data_source(view_model, mock_data_source):
+    repo = MagicMock()
+    root = Path("/library")
+
+    view_model.rebind_repository(repo, root)
+
+    mock_data_source.set_repository.assert_called_once_with(repo)
+    mock_data_source.set_library_root.assert_called_once_with(root)
+
+
+def test_handle_scan_chunk_delegates_to_data_source(view_model, mock_data_source):
+    root = Path("/library")
+    chunk = [{"rel": "foo.jpg"}]
+
+    view_model.handle_scan_chunk(root, chunk)
+
+    mock_data_source.handle_scan_chunk.assert_called_once_with(root, chunk)
+
+
+def test_handle_scan_finished_delegates_to_data_source(view_model, mock_data_source):
+    root = Path("/library")
+
+    view_model.handle_scan_finished(root, True)
+
+    mock_data_source.handle_scan_finished.assert_called_once_with(root, True)
 
 
 def test_unchanged_count_skips_reset(view_model, mock_data_source):

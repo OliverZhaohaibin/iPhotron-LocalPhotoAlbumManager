@@ -123,7 +123,6 @@ class NavigationCoordinator(QObject):
         self._clear_cluster_gallery_mode()
         self._static_selection = None
         self._router.show_gallery()
-        self._asset_vm.set_active_root(path)
 
         album = self._facade.open_album(path)
         if album:
@@ -137,9 +136,10 @@ class NavigationCoordinator(QObject):
         # SQLiteAssetRepository logic for album_path usually implies parent_album_path match.
         # For legacy behavior, we often want subalbums if it's a folder structure.
         # Let's set include_subalbums=True implicitly for file-system browsing behavior.
-        query = AssetQuery(album_path=self._album_path_for_query(album.root if album else path))
+        active_root = album.root if album else path
+        query = AssetQuery(album_path=self._album_path_for_query(active_root))
         query.include_subalbums = True  # Ensure recursive view by default
-        self._asset_vm.load_query(query)
+        self._asset_vm.load_selection(active_root, query=query)
 
     def open_all_photos(self):
         """Loads all photos."""
@@ -148,10 +148,9 @@ class NavigationCoordinator(QObject):
         self._clear_cluster_gallery_mode()
         self._router.show_gallery()
         self._static_selection = AlbumSidebar.ALL_PHOTOS_TITLE
-        self._asset_vm.set_active_root(self._context.library.root())
 
         query = AssetQuery()  # No filters = All Photos
-        self._asset_vm.load_query(query)
+        self._asset_vm.load_selection(self._context.library.root(), query=query)
 
     def _handle_static_node(self, name: str):
         normalized = name.casefold()
@@ -194,20 +193,18 @@ class NavigationCoordinator(QObject):
         self._clear_cluster_gallery_mode()
         self._router.show_gallery()
         self._static_selection = "Recently Deleted"
-        self._asset_vm.set_active_root(deleted_root)
 
         self._facade.open_album(deleted_root)
 
         # ViewModel Update
         query = AssetQuery(album_path=RECENTLY_DELETED_DIR_NAME)
-        self._asset_vm.load_query(query)
+        self._asset_vm.load_selection(deleted_root, query=query)
 
     def _open_filtered_collection(self, title: str, is_favorite=None, media_types=None):
         self._reset_playback()
         self._clear_cluster_gallery_mode()
         self._router.show_gallery()
         self._static_selection = title
-        self._asset_vm.set_active_root(self._context.library.root())
 
         query = AssetQuery()
         if is_favorite:
@@ -216,7 +213,7 @@ class NavigationCoordinator(QObject):
         if media_types:
             query.media_types = media_types
 
-        self._asset_vm.load_query(query)
+        self._asset_vm.load_selection(self._context.library.root(), query=query)
 
     def open_location_view(self) -> None:
         """Display the map view populated with geotagged assets."""
@@ -264,10 +261,9 @@ class NavigationCoordinator(QObject):
         # on the Location section even when showing the gallery
         self._static_selection = "Location"
         self._in_cluster_gallery = True
-        self._asset_vm.set_active_root(root)
 
         # Load the cluster assets directly - O(1) operation
-        self._asset_vm.load_geotagged_assets(assets, root)
+        self._asset_vm.load_selection(root, direct_assets=assets, library_root=root)
 
         # Enable cluster gallery mode on gallery page (shows back button)
         gallery_page = self._router.gallery_page()

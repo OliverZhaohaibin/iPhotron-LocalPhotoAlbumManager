@@ -60,6 +60,9 @@ class AssetDataSource(QObject):
         self._repo = repository
         self._library_root = library_root
         self._current_query: Optional[AssetQuery] = None
+        self._selection_query: Optional[AssetQuery] = None
+        self._selection_direct_assets: Optional[list] = None
+        self._selection_library_root: Optional[Path] = library_root
         self._total_count: int = 0
         self._row_cache: Dict[int, AssetDTO] = {}
         self._window_range: Optional[tuple[int, int]] = None
@@ -90,31 +93,78 @@ class AssetDataSource(QObject):
     def set_active_root(self, root: Optional[Path]) -> None:
         self._active_root = root
 
+    def active_root(self) -> Optional[Path]:
+        return self._active_root
+
     def library_root(self) -> Optional[Path]:
         """Return the configured library root for absolute-path resolution."""
         return self._library_root
 
     def load(self, query: AssetQuery):
         """Load data for the given query using a viewport-sized sparse cache."""
+        self._selection_query = self._clone_query(query)
+        self._selection_direct_assets = None
+        self._selection_library_root = self._library_root
         self._current_query = self._clone_query(query)
         self._direct_mode = False
         self._reset_window_state()
         self._load_initial_window()
 
+    def load_selection(
+        self,
+        active_root: Optional[Path],
+        *,
+        query: Optional[AssetQuery] = None,
+        direct_assets: Optional[list] = None,
+        library_root: Optional[Path] = None,
+    ) -> None:
+        """Load the current gallery selection through one coordinated entrypoint."""
+        has_query = query is not None
+        has_direct_assets = direct_assets is not None
+        if has_query == has_direct_assets:
+            raise ValueError("Exactly one of query or direct_assets must be provided.")
+
+        self.set_active_root(active_root)
+        if query is not None:
+            self.load(query)
+            return
+
+        resolved_library_root = library_root or self._library_root or active_root
+        if resolved_library_root is None:
+            raise ValueError("library_root is required when loading direct assets.")
+        self.load_geotagged_assets(list(direct_assets or []), resolved_library_root)
+
     def reload_current_query(self) -> None:
+        if self._selection_direct_assets is not None:
+            self.load_geotagged_assets(
+                list(self._selection_direct_assets),
+                self._selection_library_root or self._library_root,
+            )
+            return
+        if self._selection_query is not None:
+            self.load(self._selection_query)
+            return
         if self._current_query is None:
             return
         self.load(self._current_query)
 
+    def reload_current_selection(self) -> None:
+        """Reload whichever selection is currently active."""
+        self.reload_current_query()
+
     def load_geotagged_assets(self, assets: list, library_root: Path) -> None:
         """Load a pre-computed list of geotagged assets directly into the cache."""
+        stored_assets = list(assets)
+        self._selection_query = None
+        self._selection_direct_assets = stored_assets
+        self._selection_library_root = library_root
         self._current_query = None
         self._library_root = library_root
         self._direct_mode = True
         self._reset_window_state()
 
         next_index = 0
-        for asset in assets:
+        for asset in stored_assets:
             dto = self._geotagged_asset_to_dto(asset, library_root)
             if dto is not None:
                 self._row_cache[next_index] = dto

@@ -11,7 +11,14 @@ from PySide6.QtCore import QTimer, Qt
 from PySide6.QtGui import QColor, QPalette, QSurfaceFormat
 from PySide6.QtWidgets import QApplication
 
+from iPhoto.bootstrap.qt_shader_cache import configure_shader_cache_environment
+
 _logger = logging.getLogger(__name__)
+
+
+def _configure_qt_shader_disk_cache() -> None:
+    """Route shader/program caches into a managed ``.iPhoto`` work directory."""
+    configure_shader_cache_environment()
 
 
 def _prefer_local_source_tree() -> None:
@@ -36,6 +43,8 @@ def _prefer_local_source_tree() -> None:
 
 def _configure_qt_opengl_defaults() -> None:
     """Apply the same desktop OpenGL defaults used by the standalone map tool."""
+
+    _configure_qt_shader_disk_cache()
 
     if os.environ.get("IPHOTO_DISABLE_OPENGL", "").strip().lower() in {"1", "true", "yes", "on"}:
         return

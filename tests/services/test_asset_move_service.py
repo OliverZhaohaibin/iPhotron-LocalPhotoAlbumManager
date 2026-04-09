@@ -133,17 +133,17 @@ def test_move_assets_submits_worker_and_emits_completion(
     kwargs["on_finished"](source_root, destination_root, moved_pairs, True, True)
 
     assert results == [(source_root, destination_root, True, "Moved 1 item.")]
-    assert detailed_results == [
-        (
-            source_root,
-            destination_root,
-            [[asset, destination_root / asset.name]],
-            True,
-            True,
-            False,
-            False,
-        )
-    ]
+    assert len(detailed_results) == 1
+    src, dest, raw_pairs, source_ok, destination_ok, is_trash, is_restore = detailed_results[0]
+    normalized_pairs = [(Path(src_path), Path(dest_path)) for src_path, dest_path in raw_pairs]
+
+    assert src == source_root
+    assert dest == destination_root
+    assert normalized_pairs == [(asset, destination_root / asset.name)]
+    assert source_ok is True
+    assert destination_ok is True
+    assert is_trash is False
+    assert is_restore is False
 
 
 def test_restore_repopulates_library_index(

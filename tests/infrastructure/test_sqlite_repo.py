@@ -68,6 +68,50 @@ def test_update_asset(repo, sample_asset):
     retrieved = repo.get(sample_asset.id)
     assert retrieved.is_favorite is True
 
+
+def test_get_by_absolute_path_prefers_longest_matching_relative_suffix(repo, tmp_path):
+    top_level = Asset(
+        id="top-level",
+        album_id="album_1",
+        path=Path("photo.jpg"),
+        media_type=MediaType.IMAGE,
+        size_bytes=1,
+        created_at=datetime(2023, 1, 1, 12, 0, 0),
+    )
+    nested = Asset(
+        id="nested",
+        album_id="album_1",
+        path=Path("album_1/photo.jpg"),
+        media_type=MediaType.IMAGE,
+        size_bytes=1,
+        created_at=datetime(2023, 1, 1, 12, 0, 1),
+    )
+    repo.save_batch([top_level, nested])
+
+    absolute_path = tmp_path / "Library" / "album_1" / "photo.jpg"
+    retrieved = repo.get_by_path(absolute_path)
+
+    assert retrieved is not None
+    assert retrieved.id == "nested"
+
+
+def test_get_by_windows_absolute_path_matches_relative_suffix(repo):
+    nested = Asset(
+        id="nested",
+        album_id="album_1",
+        path=Path("album_1/photo.jpg"),
+        media_type=MediaType.IMAGE,
+        size_bytes=1,
+        created_at=datetime(2023, 1, 1, 12, 0, 1),
+    )
+    repo.save(nested)
+
+    absolute_path = Path(r"C:\Library\album_1\photo.jpg")
+    retrieved = repo.get_by_path(absolute_path)
+
+    assert retrieved is not None
+    assert retrieved.id == "nested"
+
 def test_find_by_query_album(repo, sample_asset):
     repo.save(sample_asset)
 

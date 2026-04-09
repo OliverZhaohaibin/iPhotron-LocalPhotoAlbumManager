@@ -273,6 +273,7 @@ class MainCoordinator(QObject):
             selection_controller=self._selection_controller,
             navigation=self._navigation,
             export_callback=window.ui.export_selected_action.trigger,
+            prepare_paths_for_mutation=self._prepare_paths_for_mutation,
             parent=self,
         )
 
@@ -569,6 +570,33 @@ class MainCoordinator(QObject):
             self._context.settings.set("ui.wheel_action", selected)
 
         ui.image_viewer.set_wheel_action(selected)
+
+    def _prepare_paths_for_mutation(self, paths: list[Path]) -> None:
+        """Release preview/player handles before mutating files on disk."""
+
+        self._preview_controller.close_preview(False)
+
+        current_path = self._detail_vm.current_asset_path()
+        if current_path is None:
+            return
+
+        current_key = self._normalise_path_key(current_path)
+        selected_keys = {
+            key
+            for key in (self._normalise_path_key(path) for path in paths)
+            if key is not None
+        }
+        if current_key is not None and current_key in selected_keys:
+            self._playback.reset_for_gallery()
+
+    def _normalise_path_key(self, path: Path) -> str | None:
+        try:
+            return str(path.resolve())
+        except OSError:
+            try:
+                return str(Path(path))
+            except Exception:
+                return None
 
     # --- Public Accessors for Window ---
     def toggle_playback(self):

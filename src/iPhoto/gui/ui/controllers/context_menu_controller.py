@@ -46,6 +46,7 @@ class ContextMenuController(QObject):
         selection_controller: SelectionController | None,
         navigation: "NavigationCoordinator" | None,
         export_callback: Callable[[], None],
+        prepare_paths_for_mutation: Callable[[list[Path]], None] | None = None,
         parent: Optional[QObject] = None,
     ) -> None:
         super().__init__(parent)
@@ -58,6 +59,7 @@ class ContextMenuController(QObject):
         self._selection_controller = selection_controller
         self._navigation = navigation
         self._export_callback = export_callback
+        self._prepare_paths_for_mutation = prepare_paths_for_mutation
 
         self._grid_view.customContextMenuRequested.connect(self._handle_context_menu)
 
@@ -201,6 +203,7 @@ class ContextMenuController(QObject):
             self._remove_selection_rows(selected_indexes)
 
         try:
+            self._prepare_file_mutation(paths)
             self._facade.delete_assets(paths)
         except Exception:
             # Rescanning the album restores the rows we removed optimistically.
@@ -226,6 +229,7 @@ class ContextMenuController(QObject):
             return
 
         try:
+            self._prepare_file_mutation(paths)
             queued_restore = self._facade.restore_assets(paths)
         except Exception:
             self._facade.rescan_current()
@@ -344,6 +348,7 @@ class ContextMenuController(QObject):
         self._apply_optimistic_move(paths, destination_root=target)
 
         try:
+            self._prepare_file_mutation(paths)
             self._facade.move_assets(paths, target)
         except Exception:
             rollback = getattr(self._asset_model, "rollback_pending_moves", None)
@@ -431,3 +436,8 @@ class ContextMenuController(QObject):
         if destination_root is None:
             return False
         return bool(handler(paths, destination_root, is_delete=is_delete))
+
+    def _prepare_file_mutation(self, paths: list[Path]) -> None:
+        if self._prepare_paths_for_mutation is None or not paths:
+            return
+        self._prepare_paths_for_mutation(paths)

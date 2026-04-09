@@ -137,7 +137,7 @@ def test_move_assets_submits_worker_and_emits_completion(
         (
             source_root,
             destination_root,
-            [(asset, destination_root / asset.name)],
+            [[asset, destination_root / asset.name]],
             True,
             True,
             False,
@@ -361,3 +361,36 @@ def test_delete_collision_assigns_unique_trash_paths(
     # Ensure filesystem paths exist for both rels
     for rel in rel_values:
         assert (library_root / rel).exists()
+
+
+def test_move_worker_cleans_up_partially_copied_target_on_move_failure(
+    tmp_path: Path,
+    qapp: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_root = tmp_path / "Source"
+    destination_root = tmp_path / "RecentlyDeleted"
+    source_root.mkdir()
+    destination_root.mkdir()
+
+    source = source_root / "locked.mp4"
+    source.write_bytes(b"video")
+
+    def _copy_then_fail(src: str, dest: str) -> str:
+        Path(dest).write_bytes(Path(src).read_bytes())
+        raise PermissionError(32, "The process cannot access the file because it is being used by another process", src)
+
+    monkeypatch.setattr(move_worker_module.shutil, "move", _copy_then_fail)
+
+    worker = MoveWorker(
+        [source],
+        source_root,
+        destination_root,
+        MoveSignals(),
+    )
+
+    with pytest.raises(PermissionError):
+        worker._move_into_destination(source)
+
+    assert source.exists()
+    assert not (destination_root / source.name).exists()

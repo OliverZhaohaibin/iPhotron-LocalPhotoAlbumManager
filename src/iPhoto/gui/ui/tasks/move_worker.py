@@ -191,7 +191,15 @@ class MoveWorker(QRunnable):
             target = target_dir / f"{stem} ({counter}){suffix}"
             counter += 1
         target.parent.mkdir(parents=True, exist_ok=True)
-        moved_path = shutil.move(str(source), str(target))
+        try:
+            moved_path = shutil.move(str(source), str(target))
+        except OSError:
+            if source.exists() and target.exists():
+                try:
+                    target.unlink()
+                except OSError:
+                    LOGGER.warning("Failed to clean up partially moved target %s", target, exc_info=True)
+            raise
         return Path(moved_path).resolve()
 
     def _update_source_index(self, moved: List[Tuple[Path, Path]]) -> Dict[str, Dict]:

@@ -199,12 +199,12 @@ class SQLiteAssetRepository(IAssetRepository):
                 FROM assets
                 WHERE rel = ?
                    OR rel = ?
-                   OR ? LIKE '%/' || rel
-                   OR ? LIKE '%' || REPLACE(rel, '/', '\\')
+                   OR (length(?) > length(rel) AND substr(?, -(length(rel) + 1)) = '/' || rel)
+                   OR (length(?) > length(rel) AND substr(?, -(length(rel) + 1)) = '\\' || REPLACE(rel, '/', '\\'))
                 ORDER BY LENGTH(rel) DESC
                 LIMIT 1
                 """,
-                (path_str, path_posix, path_posix, path_windows),
+                (path_str, path_posix, path_posix, path_posix, path_windows, path_windows),
             ).fetchone()
             if row:
                 return self._map_row_to_asset(row)

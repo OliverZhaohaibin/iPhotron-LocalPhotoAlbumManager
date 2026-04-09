@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from unittest.mock import Mock
 
 import pytest
@@ -15,6 +16,7 @@ from iPhoto.gui.ui.widgets.preview_window import PreviewWindow, _PreviewWheelGua
 
 @pytest.fixture
 def qapp():
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
     app = QApplication.instance()
     if app is None:
         app = QApplication([])

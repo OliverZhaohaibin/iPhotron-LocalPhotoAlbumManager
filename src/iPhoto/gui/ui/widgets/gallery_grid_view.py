@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import QEvent, QRect, QSize, Qt, Signal, QPoint
+from PySide6.QtCore import QEvent, QModelIndex, QPoint, QRect, QSize, Qt, Signal
 from PySide6.QtGui import QMouseEvent, QPainter, QPaintEvent, QPalette, QColor, QGuiApplication
 from PySide6.QtWidgets import QAbstractItemView, QListView, QLabel, QStyleOptionViewItem
 
@@ -296,12 +296,13 @@ class GalleryGridView(AssetGrid):
     # ------------------------------------------------------------------
     def mousePressEvent(self, event: QMouseEvent) -> None:
         if event.button() == Qt.MouseButton.LeftButton:
+            viewport_pos = self._viewport_pos(event)
             # Check for favorite badge click
-            index = self.indexAt(event.pos())
+            index = self.indexAt(viewport_pos)
             if index.isValid():
-                if self._is_favorite_badge_click(index, event.pos()):
+                if self._is_favorite_badge_click(index, viewport_pos):
                     self._toggle_favorite(index)
-                    return # Don't propagate (avoids selection/play)
+                    return  # Don't propagate (avoids selection/play)
 
         super().mousePressEvent(event)
 
@@ -337,48 +338,7 @@ class GalleryGridView(AssetGrid):
 
         return badge_rect.contains(pos)
 
-    def _toggle_favorite(self, index):
-        # We need access to the ViewModel to toggle.
-        # But this is a View. It shouldn't depend on VM logic directly if possible.
-        # However, we can use the model interface.
-        # AssetModel (proxy) -> AssetListModel -> update_favorite
-        model = self.model()
-        # model might be AssetModel (proxy)
-        # We need the source model to call update_favorite, or add it to proxy.
-        # Let's check if model has toggle_favorite or similar.
-        # The active gallery model adapter exposes update_favorite(row, is_favorite).
-        # And MainCoordinator calls it.
-        # Here we are deep in the view.
-        # Ideally, we emit a signal 'favoriteToggled(index)'.
-        # But for now, let's try to access the model method if available.
-
-        # The cleanest way is to emit a signal from the view, and have coordinator listen.
-        # But GalleryGridView is instantiated inside MainWindow UI setup, wiring is tricky.
-        # Alternatively, rely on the delegate or model.
-
-        # Let's assume the model has the method or we can map to source.
-        source_model = getattr(model, "source_model", lambda: model)()
-        if hasattr(source_model, "update_favorite"):
-            is_fav = bool(index.data(Roles.FEATURED))
-            # Toggle
-            # We need the row in the source model?
-            # The gallery adapter update_favorite takes (row, is_favorite).
-            # If 'model' is proxy, we need to map index.
-            if hasattr(model, "mapToSource"):
-                source_index = model.mapToSource(index)
-                if hasattr(source_model, "update_favorite"):
-                    # We also need to call the service?
-                    # The ViewModel update_favorite updates LOCAL state.
-                    # The Service call is needed to persist DB.
-                    # The View shouldn't call Service.
-                    # So View -> Signal -> Coordinator -> Service -> ViewModel.
-
-                    # Given constraints, I'll emit a custom signal on the View?
-                    pass
-
-        # Since I cannot easily wire a new signal up to MainCoordinator without changing MainCoordinator (which I can do),
-        # I will add a signal 'favoriteClicked' to GalleryGridView.
-        # And in MainCoordinator, connect it.
+    def _toggle_favorite(self, index: QModelIndex) -> None:
         self.favoriteClicked.emit(index)
 
-    favoriteClicked = Signal(object) # QModelIndex
+    favoriteClicked = Signal(QModelIndex)

@@ -1,8 +1,10 @@
 import pytest
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QPoint, QPointF, Qt
 from PySide6.QtGui import QStandardItem, QStandardItemModel, QPixmap
+from PySide6.QtTest import QSignalSpy
 from PySide6.QtWidgets import QApplication
 
+from iPhoto.gui.ui.widgets.asset_grid import AssetGrid
 from iPhoto.gui.ui.widgets.gallery_grid_view import GalleryGridView
 from iPhoto.gui.ui.widgets.asset_delegate import AssetGridDelegate
 from iPhoto.gui.ui.models.roles import Roles
@@ -148,3 +150,53 @@ def test_gallery_responsive_layout(qapp_instance, monkeypatch):
     assert cols == 2
     assert view.gridSize().width() == cell
     assert view.iconSize().width() == item
+
+
+def test_favorite_badge_click_uses_viewport_coordinates(qapp_instance, monkeypatch):
+    patch_delegate_icons(monkeypatch)
+
+    view = GalleryGridView()
+    delegate = AssetGridDelegate(view)
+    view.setItemDelegate(delegate)
+
+    model = QStandardItemModel()
+    item = QStandardItem()
+    item.setData(False, Roles.IS_SPACER)
+    item.setData(True, Roles.FEATURED)
+    pix = QPixmap(100, 100)
+    pix.fill(Qt.red)
+    item.setData(pix, Qt.DecorationRole)
+    model.appendRow(item)
+
+    view.setModel(model)
+    view.resize(400, 400)
+    view.show()
+    qapp_instance.processEvents()
+    view.doItemsLayout()
+    qapp_instance.processEvents()
+
+    index = model.index(0, 0)
+    rect = view.visualRect(index)
+    badge_pos = QPoint(rect.left() + 16, rect.bottom() - 16)
+    badge_global = view.viewport().mapToGlobal(badge_pos)
+
+    class FakeMouseEvent:
+        def button(self):
+            return Qt.MouseButton.LeftButton
+
+        def position(self):
+            return QPointF(-999.0, -999.0)
+
+        def pos(self):
+            return QPoint(-999, -999)
+
+        def globalPosition(self):
+            return QPointF(float(badge_global.x()), float(badge_global.y()))
+
+    monkeypatch.setattr(AssetGrid, "mousePressEvent", lambda self, event: None)
+
+    spy = QSignalSpy(view.favoriteClicked)
+    view.mousePressEvent(FakeMouseEvent())
+
+    assert spy.count() == 1
+    assert spy.at(0)[0].row() == 0

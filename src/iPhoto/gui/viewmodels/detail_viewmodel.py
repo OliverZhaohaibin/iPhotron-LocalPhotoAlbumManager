@@ -108,10 +108,12 @@ class DetailViewModel(BaseViewModel):
 
     def toggle_favorite(self) -> None:
         row = self.current_row.value
-        path = self.current_path.value
-        if row is None or row < 0 or not isinstance(path, Path):
+        if row is None or row < 0:
             return
-        new_state = self._asset_service.toggle_favorite_by_path(path)
+        dto = self._store.asset_at(row)
+        if dto is None:
+            return
+        new_state = self._asset_service.toggle_favorite_by_path(dto.abs_path)
         self._store.update_favorite_status(row, new_state)
         self._refresh_presentation()
 

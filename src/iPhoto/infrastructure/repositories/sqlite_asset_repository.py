@@ -185,17 +185,27 @@ class SQLiteAssetRepository(IAssetRepository):
             return None
 
     def get_by_path(self, path: Path) -> Optional[Asset]:
-        # Find by 'rel' column which stores the path
-        # Try exact string match first (OS specific separator)
+        # ``rel`` stores library-relative paths, but several UI workflows pass
+        # absolute paths. Support both and prefer the longest matching suffix so
+        # ``/folder/photo.jpg`` resolves to ``folder/photo.jpg`` rather than a
+        # root-level ``photo.jpg`` row when both exist.
         path_str = str(path)
+        path_posix = path.as_posix()
+        path_windows = path_str.replace("/", "\\")
         with self._pool.connection() as conn:
-            row = conn.execute("SELECT * FROM assets WHERE rel = ?", (path_str,)).fetchone()
-
-            # Fallback: Try POSIX style (forward slashes) if not found
-            # This handles Windows where Path('a/b') becomes 'a\b' but DB has 'a/b'
-            if not row and path_str != path.as_posix():
-                row = conn.execute("SELECT * FROM assets WHERE rel = ?", (path.as_posix(),)).fetchone()
-
+            row = conn.execute(
+                """
+                SELECT *
+                FROM assets
+                WHERE rel = ?
+                   OR rel = ?
+                   OR ? LIKE '%/' || rel
+                   OR ? LIKE '%' || REPLACE(rel, '/', '\\')
+                ORDER BY LENGTH(rel) DESC
+                LIMIT 1
+                """,
+                (path_str, path_posix, path_posix, path_windows),
+            ).fetchone()
             if row:
                 return self._map_row_to_asset(row)
             return None

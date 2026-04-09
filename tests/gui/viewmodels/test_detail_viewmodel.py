@@ -86,6 +86,20 @@ def test_toggle_favorite_updates_store_and_presentation():
     store.update_favorite_status.assert_called_once_with(0, True)
 
 
+def test_toggle_favorite_uses_visible_asset_path_not_playback_source():
+    vm, store, session, asset_service = _make_vm()
+    dto = _make_dto("/tmp/photo.jpg")
+    store.asset_at.return_value = dto
+    session.set_current_row.return_value = Path("/tmp/photo.mov")
+    vm.show_row(0)
+    asset_service.toggle_favorite_by_path.return_value = True
+
+    vm.toggle_favorite()
+
+    asset_service.toggle_favorite_by_path.assert_called_once_with(dto.abs_path)
+    store.update_favorite_status.assert_called_once_with(0, True)
+
+
 def test_toggle_info_flips_presentation_flag():
     vm, store, session, _ = _make_vm()
     dto = _make_dto("/tmp/photo.jpg")

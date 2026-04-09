@@ -35,16 +35,12 @@ def _make_coordinator(
     context = MagicMock()
     context.library.root.return_value = library_root
 
-    album_service = MagicMock()
     asset_vm = MagicMock()
-    event_bus = MagicMock()
 
     coord = NavigationCoordinator(
         sidebar=sidebar,
         router=router,
-        album_service=album_service,
         asset_vm=asset_vm,
-        event_bus=event_bus,
         context=context,
         facade=facade,
     )
@@ -90,6 +86,11 @@ class TestNavigationClearsClusterGallery:
         album.mkdir()
         coord = _make_coordinator(library_root=tmp_path)
         coord._in_cluster_gallery = True
+        coord._album_path_for_query = MagicMock(return_value="TestAlbum")
+
+        opened_album = MagicMock()
+        opened_album.root = album
+        coord._facade.open_album.return_value = opened_album
 
         coord.open_album(album)
 

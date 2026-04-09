@@ -114,14 +114,12 @@ def main(argv: list[str] | None = None) -> int:
     tooltip_palette.setColor(QPalette.ColorRole.ToolTipText, text_colour)
     app.setPalette(tooltip_palette, "QToolTip")
 
-    from iPhoto.appctx import AppContext
+    from iPhoto.bootstrap.runtime_context import RuntimeContext
     from iPhoto.gui.coordinators.main_coordinator import MainCoordinator
     from iPhoto.gui.ui.main_window import MainWindow
 
     # Defer heavy library binding + initial scan until the event loop is running.
-    context = AppContext(defer_startup_tasks=True)
-    container = context.container
-
+    context = RuntimeContext.create(defer_startup=True)
     # --- Phase 4: Coordinator Wiring ---
     window = MainWindow(context)
 
@@ -130,7 +128,7 @@ def main(argv: list[str] | None = None) -> int:
 
     def _initialize_after_show() -> None:
         _logger.info("_initialize_after_show: creating MainCoordinator")
-        coordinator = MainCoordinator(window, context, container)
+        coordinator = MainCoordinator(window, context)
         window.set_coordinator(coordinator)
         coordinator.start()
         _logger.info("_initialize_after_show: coordinator started, resuming startup tasks")

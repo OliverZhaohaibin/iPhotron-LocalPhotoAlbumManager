@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import TYPE_CHECKING, Iterable, Optional
+from typing import TYPE_CHECKING, Iterable
 
 from PySide6.QtCore import (
     QObject,
@@ -19,8 +19,8 @@ from PySide6.QtCore import (
 )
 from PySide6.QtGui import QAction
 
-from iPhoto.appctx import AppContext
-from iPhoto.config import DEFAULT_EXCLUDE, DEFAULT_INCLUDE, WORK_DIR_NAME
+from iPhoto.application.contracts.runtime_entry_contract import RuntimeEntryContract
+from iPhoto.config import DEFAULT_EXCLUDE, DEFAULT_INCLUDE
 from iPhoto.gui.ui.models.roles import Roles
 from iPhoto.gui.ui.models.spacer_proxy_model import SpacerProxyModel
 from iPhoto.gui.ui.controllers.dialog_controller import DialogController
@@ -38,14 +38,9 @@ from iPhoto.gui.ui.widgets.asset_delegate import AssetGridDelegate
 from iPhoto.gui.viewmodels.album_viewmodel import AlbumViewModel
 from iPhoto.gui.viewmodels.asset_list_viewmodel import AssetListViewModel
 from iPhoto.gui.viewmodels.asset_data_source import AssetDataSource
-from iPhoto.application.services.album_service import AlbumService
 from iPhoto.application.services.asset_service import AssetService
 from iPhoto.di.container import DependencyContainer
 from iPhoto.events.bus import EventBus
-from iPhoto.domain.repositories import IAssetRepository
-from iPhoto.infrastructure.db.pool import ConnectionPool
-from iPhoto.infrastructure.repositories.sqlite_asset_repository import SQLiteAssetRepository
-from iPhoto.infrastructure.services.thumbnail_cache_service import ThumbnailCacheService
 
 # New Coordinators
 from iPhoto.gui.coordinators.view_router import ViewRouter
@@ -63,11 +58,16 @@ class MainCoordinator(QObject):
     legacy controllers and bridging them with the new architecture.
     """
 
-    def __init__(self, window: MainWindow, context: AppContext, container: DependencyContainer = None) -> None:
+    def __init__(
+        self,
+        window: MainWindow,
+        context: RuntimeEntryContract,
+        container: DependencyContainer | None = None,
+    ) -> None:
         super().__init__(window)
         self._window = window
         self._context = context
-        self._container = container
+        self._container = container if container is not None else context.container
         # facade reference kept for signal wiring as some systems still emit through it
         self._facade = context.facade
         self._logger = logging.getLogger(__name__)
@@ -75,23 +75,19 @@ class MainCoordinator(QObject):
         # Resolve Services
         if self._container:
             self._event_bus = self._container.resolve(EventBus)
-            self._album_service = self._container.resolve(AlbumService)
             self._asset_service = self._container.resolve(AssetService)
-            self._asset_repo = self._container.resolve(IAssetRepository)
         else:
             raise RuntimeError("DependencyContainer is required for MainCoordinator")
-        self._asset_pool: Optional[ConnectionPool] = None
 
         # --- ViewModels Setup ---
         lib_root = context.library.root()
-        self._asset_data_source = AssetDataSource(self._asset_repo, lib_root)
-
-        # Thumbnail Service
-        cache_root = Path.home() / ".iPhoto" / "cache" / "thumbs"
-        if lib_root:
-            cache_root = lib_root / ".iPhoto" / "cache" / "thumbs"
-
-        self._thumbnail_service = ThumbnailCacheService(cache_root)
+        self._context.asset_runtime.bind_library_root(lib_root)
+        self._asset_data_source = AssetDataSource(
+            self._context.asset_runtime.repository,
+            lib_root,
+        )
+        self._asset_service.set_repository(self._context.asset_runtime.repository)
+        self._thumbnail_service = self._context.asset_runtime.thumbnail_service
         self._asset_list_vm = AssetListViewModel(self._asset_data_source, self._thumbnail_service)
 
         # Inject ViewModel provider into Facade for legacy operations (restore/delete)
@@ -107,9 +103,7 @@ class MainCoordinator(QObject):
         self._navigation = NavigationCoordinator(
             window.ui.sidebar,
             self._view_router,
-            self._album_service,
             self._asset_list_vm,
-            self._event_bus,
             context,
             context.facade,  # Legacy Facade Bridge
         )
@@ -324,8 +318,7 @@ class MainCoordinator(QObject):
         if self._edit:
             self._edit.shutdown()
 
-        if self._thumbnail_service:
-            self._thumbnail_service.shutdown()
+        self._context.asset_runtime.shutdown()
 
         if hasattr(self._window.ui, "preview_window"):
             try:
@@ -458,35 +451,11 @@ class MainCoordinator(QObject):
     def _on_library_tree_updated(self) -> None:
         root = self._context.library.root()
         self._logger.debug("_on_library_tree_updated: root=%s", root)
-        if root is not None:
-            repo, pool = self._build_asset_repository(root)
-            self._replace_asset_repository(repo, pool)
+        self._context.asset_runtime.bind_library_root(root)
+        self._asset_data_source.set_repository(self._context.asset_runtime.repository)
+        self._asset_service.set_repository(self._context.asset_runtime.repository)
         self._asset_data_source.set_library_root(root)
-        if root is not None:
-            cache_root = root / ".iPhoto" / "cache" / "thumbs"
-        else:
-            cache_root = Path.home() / ".iPhoto" / "cache" / "thumbs"
-        self._thumbnail_service.set_disk_cache_path(cache_root)
         self._asset_list_vm.reload_current_query()
-
-    def _build_asset_repository(
-        self, root: Path
-    ) -> tuple[SQLiteAssetRepository, ConnectionPool]:
-        db_path = root / WORK_DIR_NAME / "global_index.db"
-        db_path.parent.mkdir(parents=True, exist_ok=True)
-        pool = ConnectionPool(db_path)
-        return SQLiteAssetRepository(pool), pool
-
-    def _replace_asset_repository(
-        self, repo: SQLiteAssetRepository, pool: ConnectionPool
-    ) -> None:
-        previous_pool = self._asset_pool
-        self._asset_pool = pool
-        self._asset_repo = repo
-        self._asset_data_source.set_repository(repo)
-        self._asset_service.set_repository(repo)
-        if previous_pool is not None:
-            previous_pool.close_all()
 
     def _on_asset_clicked(self, index: QModelIndex):
         if self._selection_controller and self._selection_controller.is_active():

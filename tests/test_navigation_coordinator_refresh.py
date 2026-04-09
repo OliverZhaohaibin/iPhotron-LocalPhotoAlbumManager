@@ -1,4 +1,4 @@
-"""Tests for NavigationCoordinator._should_treat_as_refresh."""
+"""Tests for NavigationCoordinator refresh and open-path behavior."""
 
 from __future__ import annotations
 
@@ -24,16 +24,12 @@ def _make_coordinator(*, current_album_root: Path | None = None, gallery_active:
         facade.current_album = None
 
     context = MagicMock()
-    album_service = MagicMock()
     asset_vm = MagicMock()
-    event_bus = MagicMock()
 
     coord = NavigationCoordinator(
         sidebar=sidebar,
         router=router,
-        album_service=album_service,
         asset_vm=asset_vm,
-        event_bus=event_bus,
         context=context,
         facade=facade,
     )
@@ -85,3 +81,20 @@ class TestShouldTreatAsRefresh:
         coord._static_selection = None
 
         assert coord._should_treat_as_refresh(album) is False
+
+
+def test_open_album_uses_single_facade_path(tmp_path: Path) -> None:
+    album = tmp_path / "Paris"
+    album.mkdir()
+    coord = _make_coordinator(current_album_root=None, gallery_active=True)
+    coord._album_path_for_query = MagicMock(return_value="Paris")
+
+    opened_album = MagicMock()
+    opened_album.root = album
+    coord._facade.open_album.return_value = opened_album
+
+    coord.open_album(album)
+
+    coord._facade.open_album.assert_called_once_with(album)
+    coord._context.remember_album.assert_called_once_with(album)
+    coord._asset_vm.load_query.assert_called_once()

@@ -10,18 +10,14 @@ from typing import TYPE_CHECKING, Literal, Optional
 
 from PySide6.QtCore import QObject, QRunnable, QThreadPool, QTimer, Signal
 
-from iPhoto.events.bus import EventBus
-from iPhoto.application.services.album_service import AlbumService
+from iPhoto.application.contracts.runtime_entry_contract import RuntimeEntryContract
 from iPhoto.gui.coordinators.view_router import ViewRouter
 from iPhoto.gui.ui.widgets.album_sidebar import AlbumSidebar
 from iPhoto.gui.viewmodels.asset_list_viewmodel import AssetListViewModel
 from iPhoto.config import RECENTLY_DELETED_DIR_NAME
 from iPhoto.domain.models.query import AssetQuery
 from iPhoto.domain.models.core import MediaType
-from iPhoto.errors import AlbumOperationError, IPhotoError
-
-# Use legacy imports for context/facade compatibility until full migration
-from iPhoto.appctx import AppContext
+from iPhoto.errors import AlbumOperationError
 from iPhoto.gui.facade import AppFacade
 
 if TYPE_CHECKING:
@@ -77,19 +73,14 @@ class NavigationCoordinator(QObject):
         self,
         sidebar: AlbumSidebar,
         router: ViewRouter,
-        album_service: AlbumService,
         asset_vm: AssetListViewModel,
-        event_bus: EventBus,
-        # Legacy Dependencies
-        context: AppContext,
+        context: RuntimeEntryContract,
         facade: AppFacade
     ):
         super().__init__()
         self._sidebar = sidebar
         self._router = router
-        self._album_service = album_service
         self._asset_vm = asset_vm
-        self._event_bus = event_bus
         self._context = context
         self._facade = facade
 
@@ -134,13 +125,6 @@ class NavigationCoordinator(QObject):
         self._router.show_gallery()
         self._asset_vm.set_active_root(path)
 
-        # Application Service call to maintain domain/application state.
-        try:
-            self._album_service.open_album(path)
-        except (AlbumOperationError, IPhotoError) as exc:
-            LOGGER.error("Failed to open album via application service: %s", exc)
-
-        # Legacy Facade call to maintain backend state synchronization
         album = self._facade.open_album(path)
         if album:
             self._context.remember_album(album.root)
@@ -212,13 +196,6 @@ class NavigationCoordinator(QObject):
         self._static_selection = "Recently Deleted"
         self._asset_vm.set_active_root(deleted_root)
 
-        # Application Service call to maintain domain/application state.
-        try:
-            self._album_service.open_album(deleted_root)
-        except (AlbumOperationError, IPhotoError) as exc:
-            LOGGER.error("Failed to open trash via application service: %s", exc)
-
-        # Legacy open for GUI synchronization
         self._facade.open_album(deleted_root)
 
         # ViewModel Update

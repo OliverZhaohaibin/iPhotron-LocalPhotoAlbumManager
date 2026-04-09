@@ -96,31 +96,8 @@ class FaceClusterRepository:
     def replace_all(self, faces: list[FaceRecord], persons: list[PersonRecord]) -> None:
         self.initialize()
         with closing(self._connect()) as conn:
-            conn.execute("DELETE FROM faces")
             conn.execute("DELETE FROM persons")
-            conn.executemany(
-                """
-                INSERT INTO persons (
-                    person_id,
-                    key_face_id,
-                    face_count,
-                    center_embedding,
-                    created_at,
-                    updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?)
-                """,
-                [
-                    (
-                        person.person_id,
-                        person.key_face_id,
-                        person.face_count,
-                        person.center_embedding.astype(np.float32).tobytes(),
-                        person.created_at,
-                        person.updated_at,
-                    )
-                    for person in persons
-                ],
-            )
+            conn.execute("DELETE FROM faces")
             conn.executemany(
                 """
                 INSERT INTO faces (
@@ -158,6 +135,29 @@ class FaceClusterRepository:
                         face.image_height,
                     )
                     for face in faces
+                ],
+            )
+            conn.executemany(
+                """
+                INSERT INTO persons (
+                    person_id,
+                    key_face_id,
+                    face_count,
+                    center_embedding,
+                    created_at,
+                    updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    (
+                        person.person_id,
+                        person.key_face_id,
+                        person.face_count,
+                        person.center_embedding.astype(np.float32).tobytes(),
+                        person.created_at,
+                        person.updated_at,
+                    )
+                    for person in persons
                 ],
             )
             conn.commit()
@@ -231,6 +231,7 @@ class FaceClusterRepository:
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self._db_path, check_same_thread=False)
         conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA foreign_keys=ON")
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA synchronous=NORMAL")
         return conn
@@ -250,7 +251,9 @@ class FaceClusterRepository:
                 embedding BLOB NOT NULL,
                 embedding_dim INTEGER NOT NULL,
                 thumbnail_path TEXT,
-                person_id TEXT REFERENCES persons(person_id),
+                -- person_id is a denormalized back-reference; no FK declared here
+                -- to avoid a circular dependency with persons.key_face_id REFERENCES faces.
+                person_id TEXT,
                 detected_at TEXT NOT NULL,
                 image_width INTEGER NOT NULL,
                 image_height INTEGER NOT NULL

@@ -11,7 +11,14 @@ from PySide6.QtCore import QTimer, Qt
 from PySide6.QtGui import QColor, QPalette, QSurfaceFormat
 from PySide6.QtWidgets import QApplication
 
+from iPhoto.bootstrap.qt_shader_cache import configure_shader_cache_environment
+
 _logger = logging.getLogger(__name__)
+
+
+def _configure_qt_shader_disk_cache() -> None:
+    """Route shader/program caches into a managed ``.iPhoto`` work directory."""
+    configure_shader_cache_environment()
 
 
 def _prefer_local_source_tree() -> None:
@@ -36,6 +43,8 @@ def _prefer_local_source_tree() -> None:
 
 def _configure_qt_opengl_defaults() -> None:
     """Apply the same desktop OpenGL defaults used by the standalone map tool."""
+
+    _configure_qt_shader_disk_cache()
 
     if os.environ.get("IPHOTO_DISABLE_OPENGL", "").strip().lower() in {"1", "true", "yes", "on"}:
         return
@@ -114,14 +123,12 @@ def main(argv: list[str] | None = None) -> int:
     tooltip_palette.setColor(QPalette.ColorRole.ToolTipText, text_colour)
     app.setPalette(tooltip_palette, "QToolTip")
 
-    from iPhoto.appctx import AppContext
+    from iPhoto.bootstrap.runtime_context import RuntimeContext
     from iPhoto.gui.coordinators.main_coordinator import MainCoordinator
     from iPhoto.gui.ui.main_window import MainWindow
 
     # Defer heavy library binding + initial scan until the event loop is running.
-    context = AppContext(defer_startup_tasks=True)
-    container = context.container
-
+    context = RuntimeContext.create(defer_startup=True)
     # --- Phase 4: Coordinator Wiring ---
     window = MainWindow(context)
 
@@ -130,7 +137,7 @@ def main(argv: list[str] | None = None) -> int:
 
     def _initialize_after_show() -> None:
         _logger.info("_initialize_after_show: creating MainCoordinator")
-        coordinator = MainCoordinator(window, context, container)
+        coordinator = MainCoordinator(window, context)
         window.set_coordinator(coordinator)
         coordinator.start()
         _logger.info("_initialize_after_show: coordinator started, resuming startup tasks")

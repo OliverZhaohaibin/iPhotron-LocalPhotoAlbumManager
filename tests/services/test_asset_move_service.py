@@ -133,17 +133,17 @@ def test_move_assets_submits_worker_and_emits_completion(
     kwargs["on_finished"](source_root, destination_root, moved_pairs, True, True)
 
     assert results == [(source_root, destination_root, True, "Moved 1 item.")]
-    assert detailed_results == [
-        (
-            source_root,
-            destination_root,
-            [(asset, destination_root / asset.name)],
-            True,
-            True,
-            False,
-            False,
-        )
-    ]
+    assert len(detailed_results) == 1
+    src, dest, raw_pairs, source_ok, destination_ok, is_trash, is_restore = detailed_results[0]
+    normalized_pairs = [(Path(src_path), Path(dest_path)) for src_path, dest_path in raw_pairs]
+
+    assert src == source_root
+    assert dest == destination_root
+    assert normalized_pairs == [(asset, destination_root / asset.name)]
+    assert source_ok is True
+    assert destination_ok is True
+    assert is_trash is False
+    assert is_restore is False
 
 
 def test_restore_repopulates_library_index(
@@ -361,3 +361,36 @@ def test_delete_collision_assigns_unique_trash_paths(
     # Ensure filesystem paths exist for both rels
     for rel in rel_values:
         assert (library_root / rel).exists()
+
+
+def test_move_worker_cleans_up_partially_copied_target_on_move_failure(
+    tmp_path: Path,
+    qapp: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_root = tmp_path / "Source"
+    destination_root = tmp_path / "RecentlyDeleted"
+    source_root.mkdir()
+    destination_root.mkdir()
+
+    source = source_root / "locked.mp4"
+    source.write_bytes(b"video")
+
+    def _copy_then_fail(src: str, dest: str) -> str:
+        Path(dest).write_bytes(Path(src).read_bytes())
+        raise PermissionError(32, "The process cannot access the file because it is being used by another process", src)
+
+    monkeypatch.setattr(move_worker_module.shutil, "move", _copy_then_fail)
+
+    worker = MoveWorker(
+        [source],
+        source_root,
+        destination_root,
+        MoveSignals(),
+    )
+
+    with pytest.raises(PermissionError):
+        worker._move_into_destination(source)
+
+    assert source.exists()
+    assert not (destination_root / source.name).exists()

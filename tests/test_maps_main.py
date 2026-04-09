@@ -200,18 +200,36 @@ def test_check_opengl_support_accepts_valid_context_when_offscreen_make_current_
 
 
 def test_configure_qt_opengl_defaults_prefers_desktop_opengl(monkeypatch) -> None:
+    helper_calls: list[bool] = []
     attributes: list[tuple[object, bool]] = []
     default_formats: list[object] = []
 
+    monkeypatch.setattr("maps.main.configure_shader_cache_environment", lambda: helper_calls.append(True))
     monkeypatch.setattr("maps.main.QApplication.setAttribute", lambda attr, enabled=True: attributes.append((attr, enabled)))
     monkeypatch.setattr("maps.main.QSurfaceFormat.setDefaultFormat", lambda fmt: default_formats.append(fmt))
     monkeypatch.delenv("IPHOTO_DISABLE_OPENGL", raising=False)
 
     configure_qt_opengl_defaults()
 
+    assert helper_calls == [True]
     assert len(attributes) == 2
     assert all(enabled is True for _, enabled in attributes)
     assert len(default_formats) == 1
+
+
+def test_configure_qt_opengl_defaults_still_routes_shader_cache_when_opengl_is_disabled(monkeypatch) -> None:
+    helper_calls: list[bool] = []
+    attributes: list[tuple[object, bool]] = []
+
+    monkeypatch.setattr("maps.main.configure_shader_cache_environment", lambda: helper_calls.append(True))
+    monkeypatch.setattr("maps.main.QApplication.setAttribute", lambda attr, enabled=True: attributes.append((attr, enabled)))
+    monkeypatch.setattr("maps.main.QSurfaceFormat.setDefaultFormat", lambda _fmt: None)
+    monkeypatch.setenv("IPHOTO_DISABLE_OPENGL", "1")
+
+    configure_qt_opengl_defaults()
+
+    assert helper_calls == [True]
+    assert attributes == []
 
 
 def test_choose_launch_configuration_can_force_native_backend(tmp_path, monkeypatch) -> None:

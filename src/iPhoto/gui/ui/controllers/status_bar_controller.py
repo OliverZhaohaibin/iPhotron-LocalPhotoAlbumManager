@@ -10,7 +10,7 @@ from PySide6.QtCore import QObject
 from PySide6.QtGui import QAction
 from PySide6.QtWidgets import QProgressBar
 
-from ....appctx import AppContext
+from ....application.contracts.runtime_entry_contract import RuntimeEntryContract
 from ....config import RECENTLY_DELETED_DIR_NAME
 
 if TYPE_CHECKING:
@@ -24,7 +24,7 @@ class StatusBarController(QObject):
         status_bar: ChromeStatusBar,
         progress_bar: QProgressBar,
         rescan_action: QAction | None,
-        context: AppContext,
+        context: RuntimeEntryContract,
     ) -> None:
         super().__init__(status_bar)
         self._status_bar = status_bar

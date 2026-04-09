@@ -21,6 +21,7 @@ from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QAction, QKeySequence, QOffscreenSurface, QOpenGLContext, QSurfaceFormat
 from PySide6.QtWidgets import QApplication, QFileDialog, QMainWindow, QMessageBox
 
+from iPhoto.bootstrap.qt_shader_cache import configure_shader_cache_environment
 from maps.map_sources import (
     MapBackendMetadata,
     MapSourceSpec,
@@ -46,6 +47,12 @@ class PreviewLaunchConfig:
     widget_class: type[MapWidgetBase]
     native_widget_class: type[MapWidgetBase] | None
     startup_message: str
+
+
+def _configure_qt_shader_disk_cache() -> None:
+    """Route shader/program disk caches into a managed ``.iPhoto`` directory."""
+
+    configure_shader_cache_environment()
 
 
 def check_opengl_support() -> bool:
@@ -188,6 +195,8 @@ def build_argument_parser() -> argparse.ArgumentParser:
 
 def configure_qt_opengl_defaults() -> None:
     """Prefer desktop OpenGL for the standalone preview before app creation."""
+
+    _configure_qt_shader_disk_cache()
 
     if os.environ.get("IPHOTO_DISABLE_OPENGL", "").strip().lower() in {"1", "true", "yes", "on"}:
         return

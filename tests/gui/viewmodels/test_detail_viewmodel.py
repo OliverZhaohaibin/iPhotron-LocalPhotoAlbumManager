@@ -1,122 +1,143 @@
-"""Tests for DetailViewModel — pure Python, no Qt dependency."""
+from __future__ import annotations
 
+from pathlib import Path
 from unittest.mock import Mock
 
-from iPhoto.events.bus import EventBus
+from iPhoto.application.dtos import AssetDTO
 from iPhoto.gui.viewmodels.detail_viewmodel import DetailViewModel
 
 
+def _make_dto(path: str, *, is_video: bool = False, is_favorite: bool = False) -> AssetDTO:
+    return AssetDTO(
+        id=path,
+        abs_path=Path(path),
+        rel_path=Path(Path(path).name),
+        media_type="video" if is_video else "image",
+        created_at=None,
+        width=100,
+        height=100,
+        duration=5.0 if is_video else 0.0,
+        size_bytes=100,
+        metadata={},
+        is_favorite=is_favorite,
+    )
+
+
 def _make_vm():
+    store = Mock()
+    session = Mock()
     asset_service = Mock()
-    bus = EventBus()
-    vm = DetailViewModel(asset_service=asset_service, event_bus=bus)
-    return vm, asset_service, bus
+    vm = DetailViewModel(
+        collection_store=store,
+        media_session=session,
+        asset_service=asset_service,
+        adjustment_commit_port=None,
+    )
+    return vm, store, session, asset_service
 
 
-class TestDetailViewModel:
-    def test_load_asset(self):
-        vm, svc, _ = _make_vm()
-        asset = Mock(id="a1", is_favorite=True, metadata={"key": "val"})
-        svc.get_asset.return_value = asset
+def test_show_row_builds_presentation_and_requests_detail_route():
+    vm, store, session, _ = _make_vm()
+    dto = _make_dto("/tmp/photo.jpg", is_favorite=True)
+    store.asset_at.return_value = dto
+    session.set_current_row.return_value = dto.abs_path
 
-        vm.load_asset("a1")
+    requested = []
+    received = []
+    vm.route_requested.connect(requested.append)
+    vm.presentation_changed.connect(received.append)
 
-        assert vm.current_asset.value is asset
-        assert vm.is_favorite.value is True
-        assert vm.metadata.value == {"key": "val"}
-        assert vm.loading.value is False
+    vm.show_row(0)
 
-    def test_load_asset_not_found(self):
-        vm, svc, _ = _make_vm()
-        svc.get_asset.return_value = None
-        errors = []
-        vm.error_occurred.connect(lambda msg: errors.append(msg))
+    assert vm.current_row.value == 0
+    assert vm.current_path.value == dto.abs_path
+    assert requested == ["detail"]
+    assert received[0].path == dto.abs_path
+    assert received[0].is_favorite is True
 
-        vm.load_asset("missing")
 
-        assert len(errors) == 1
-        assert "not found" in errors[0].lower()
+def test_next_and_previous_delegate_to_session():
+    vm, store, session, _ = _make_vm()
+    dto = _make_dto("/tmp/photo.jpg")
+    store.asset_at.return_value = dto
+    session.set_current_row.return_value = dto.abs_path
+    session.next_row.return_value = 3
+    session.previous_row.return_value = 1
 
-    def test_load_asset_error(self):
-        vm, svc, _ = _make_vm()
-        svc.get_asset.side_effect = RuntimeError("db error")
-        errors = []
-        vm.error_occurred.connect(lambda msg: errors.append(msg))
+    vm.next()
+    session.set_current_row.assert_called_with(3)
 
-        vm.load_asset("a1")
+    session.set_current_row.reset_mock()
+    vm.previous()
+    session.set_current_row.assert_called_with(1)
 
-        assert len(errors) == 1
-        assert "db error" in errors[0]
-        assert vm.loading.value is False
 
-    def test_toggle_favorite(self):
-        vm, svc, _ = _make_vm()
-        asset = Mock(id="a1", is_favorite=False, metadata={})
-        svc.get_asset.return_value = asset
-        svc.toggle_favorite.return_value = True
-        vm.load_asset("a1")
+def test_toggle_favorite_updates_store_and_presentation():
+    vm, store, session, asset_service = _make_vm()
+    dto = _make_dto("/tmp/photo.jpg")
+    store.asset_at.return_value = dto
+    session.set_current_row.return_value = dto.abs_path
+    vm.show_row(0)
+    asset_service.toggle_favorite_by_path.return_value = True
 
-        toggled = []
-        vm.favorite_toggled.connect(lambda v: toggled.append(v))
-        vm.toggle_favorite()
+    vm.toggle_favorite()
 
-        assert vm.is_favorite.value is True
-        assert toggled == [True]
+    asset_service.toggle_favorite_by_path.assert_called_once_with(dto.abs_path)
+    store.update_favorite_status.assert_called_once_with(0, True)
 
-    def test_toggle_favorite_no_asset(self):
-        vm, svc, _ = _make_vm()
-        vm.toggle_favorite()  # should not raise
-        svc.toggle_favorite.assert_not_called()
 
-    def test_update_metadata(self):
-        vm, svc, _ = _make_vm()
-        asset = Mock(id="a1", is_favorite=False, metadata={"a": 1})
-        svc.get_asset.return_value = asset
-        vm.load_asset("a1")
+def test_toggle_info_flips_presentation_flag():
+    vm, store, session, _ = _make_vm()
+    dto = _make_dto("/tmp/photo.jpg")
+    store.asset_at.return_value = dto
+    session.set_current_row.return_value = dto.abs_path
+    vm.show_row(0)
 
-        vm.update_metadata({"b": 2})
+    vm.toggle_info()
+    assert vm.presentation.value.info_panel_visible is True
+    vm.toggle_info()
+    assert vm.presentation.value.info_panel_visible is False
 
-        svc.update_metadata.assert_called_once_with("a1", {"b": 2})
-        assert vm.metadata.value == {"a": 1, "b": 2}
 
-    def test_update_metadata_no_asset(self):
-        vm, svc, _ = _make_vm()
-        vm.update_metadata({"b": 2})  # should not raise
-        svc.update_metadata.assert_not_called()
+def test_request_edit_emits_current_path():
+    vm, store, session, _ = _make_vm()
+    dto = _make_dto("/tmp/photo.jpg")
+    store.asset_at.return_value = dto
+    session.set_current_row.return_value = dto.abs_path
+    vm.show_row(0)
 
-    def test_set_editing(self):
-        vm, _, _ = _make_vm()
-        assert vm.editing.value is False
-        vm.set_editing(True)
-        assert vm.editing.value is True
+    emitted = []
+    vm.edit_requested.connect(emitted.append)
+    vm.request_edit()
 
-    def test_clear_resets_state(self):
-        vm, svc, _ = _make_vm()
-        asset = Mock(id="a1", is_favorite=True, metadata={"x": 1})
-        svc.get_asset.return_value = asset
-        vm.load_asset("a1")
-        vm.set_editing(True)
+    assert emitted == [dto.abs_path]
+    assert vm.current_asset_path() == dto.abs_path
 
-        vm.clear()
 
-        assert vm.current_asset.value is None
-        assert vm.metadata.value == {}
-        assert vm.is_favorite.value is False
-        assert vm.editing.value is False
+def test_restore_after_adjustment_rebinds_current_path():
+    vm, store, session, _ = _make_vm()
+    dto = _make_dto("/tmp/photo.jpg")
+    store.asset_at.return_value = dto
+    session.set_current_row.return_value = dto.abs_path
+    session.set_current_by_path.return_value = True
+    session.current_row.return_value = 0
 
-    def test_asset_changed_signal(self):
-        vm, svc, _ = _make_vm()
-        asset = Mock(id="a1", is_favorite=False, metadata={})
-        svc.get_asset.return_value = asset
-        received = []
-        vm.asset_changed.connect(lambda a: received.append(a))
+    received = []
+    vm.presentation_changed.connect(received.append)
+    vm.restore_after_adjustment(dto.abs_path, "edit_done")
 
-        vm.load_asset("a1")
+    session.set_current_by_path.assert_called_once_with(dto.abs_path)
+    assert received[0].path == dto.abs_path
 
-        assert len(received) == 1
-        assert received[0] is asset
 
-    def test_dispose(self):
-        vm, _, bus = _make_vm()
-        vm.dispose()
-        assert len(vm._subscriptions) == 0
+def test_store_row_change_refreshes_current_presentation():
+    vm, store, session, _ = _make_vm()
+    first = _make_dto("/tmp/photo.jpg", is_favorite=False)
+    updated = _make_dto("/tmp/photo.jpg", is_favorite=True)
+    store.asset_at.side_effect = [first, updated]
+    session.set_current_row.return_value = first.abs_path
+
+    vm.show_row(0)
+    vm._handle_row_changed(0)
+
+    assert vm.presentation.value.is_favorite is True

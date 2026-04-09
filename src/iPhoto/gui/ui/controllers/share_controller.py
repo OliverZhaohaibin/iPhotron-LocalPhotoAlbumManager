@@ -9,10 +9,9 @@ import sys
 import tempfile
 import time
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 from PySide6.QtCore import (
-    QAbstractItemModel,
     QMimeData,
     QObject,
     QRunnable,
@@ -30,8 +29,6 @@ from ....io import sidecar
 from ....media_classifier import VIDEO_EXTENSIONS
 from ....utils import image_loader
 from ....utils.ffmpeg import probe_media
-from ..media import PlaylistController
-from ..models.roles import Roles
 from ..widgets.notification_toast import NotificationToast
 from .status_bar_controller import StatusBarController
 
@@ -182,8 +179,7 @@ class ShareController(QObject):
         self,
         *,
         settings,
-        playlist: PlaylistController,
-        asset_model: QAbstractItemModel,
+        current_path_provider: Callable[[], Optional[Path]],
         status_bar: StatusBarController,
         notification_toast: NotificationToast,
         share_button: QPushButton,
@@ -195,8 +191,7 @@ class ShareController(QObject):
     ) -> None:
         super().__init__(parent)
         self._settings = settings
-        self._playlist = playlist
-        self._asset_model = asset_model
+        self._current_path_provider = current_path_provider
         self._status_bar = status_bar
         self._toast = notification_toast
         self._share_button = share_button
@@ -235,20 +230,11 @@ class ShareController(QObject):
             self._settings.set("ui.share_action", "reveal_file")
 
     def _handle_share_requested(self) -> None:
-        current_row = self._playlist.current_row()
-        if current_row < 0:
+        file_path = self._current_path_provider()
+        if file_path is None:
             self._status_bar.show_message("No item selected to share.", 3000)
             return
 
-        index = self._asset_model.index(current_row, 0)
-        if not index.isValid():
-            return
-
-        file_path_str = index.data(Roles.ABS)
-        if not file_path_str:
-            return
-
-        file_path = Path(file_path_str)
         share_action = self._settings.get("ui.share_action", "reveal_file")
 
         if share_action == "copy_file":

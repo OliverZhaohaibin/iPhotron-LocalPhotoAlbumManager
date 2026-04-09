@@ -1,4 +1,4 @@
-"""Stateless paging-strategy helpers for AssetDataSource."""
+"""Stateless paging-strategy helpers for GalleryCollectionStore."""
 
 from pathlib import Path
 from typing import Optional

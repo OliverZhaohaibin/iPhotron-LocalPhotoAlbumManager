@@ -359,7 +359,7 @@ class PreviewWindow(QWidget):
 
         path = Path(source)
         self._close_timer.stop()
-        self._media.stop()
+        self._media.unload()
         self._rhi_popup.close_preview()
         self._current_native_size = QSizeF()
         self._native_size_seeded_from_probe = False
@@ -404,7 +404,7 @@ class PreviewWindow(QWidget):
 
     def _do_close(self) -> None:
         self._close_timer.stop()
-        self._media.stop()
+        self._media.unload()
         self._rhi_popup.close_preview()
         self.hide()
 

@@ -156,6 +156,7 @@ class FaceClusterPipeline:
                 "缺少 insightface 依赖。请先安装 demo 需要的 AI 依赖后再运行。"
             ) from exc
 
+        _patch_insightface_alignment_estimate()
         providers = _resolve_execution_providers()
         ctx_id = 0 if "CUDAExecutionProvider" in providers else -1
         app = FaceAnalysis(name=self._model_pack, providers=providers)
@@ -336,6 +337,41 @@ def _resolve_execution_providers() -> list[str]:
     if "CPUExecutionProvider" in available:
         providers.append("CPUExecutionProvider")
     return providers or ["CPUExecutionProvider"]
+
+
+def _patch_insightface_alignment_estimate() -> None:
+    try:
+        from insightface.utils import face_align
+        from skimage import transform as trans
+    except ImportError:
+        return
+
+    if getattr(face_align, "_iphoto_from_estimate_patch", False):
+        return
+
+    similarity_transform_cls = getattr(trans, "SimilarityTransform", None)
+    from_estimate = getattr(similarity_transform_cls, "from_estimate", None)
+    if from_estimate is None:
+        return
+
+    def estimate_norm(lmk, image_size=112, mode="arcface"):
+        del mode
+        assert lmk.shape == (5, 2)
+        assert image_size % 112 == 0 or image_size % 128 == 0
+        if image_size % 112 == 0:
+            ratio = float(image_size) / 112.0
+            diff_x = 0.0
+        else:
+            ratio = float(image_size) / 128.0
+            diff_x = 8.0 * ratio
+
+        dst = face_align.arcface_dst * ratio
+        dst[:, 0] += diff_x
+        tform = similarity_transform_cls.from_estimate(lmk, dst)
+        return tform.params[0:2, :]
+
+    face_align.estimate_norm = estimate_norm
+    face_align._iphoto_from_estimate_patch = True
 
 
 def _utc_now_iso() -> str:

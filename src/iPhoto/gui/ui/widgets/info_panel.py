@@ -285,6 +285,9 @@ class InfoPanel(QWidget):
             self.resize(w, h)
         else:
             self.adjustSize()
+            target_size = self.sizeHint().expandedTo(self.minimumSize())
+            if target_size.isValid():
+                self.resize(target_size)
         if recenter:
             self._center_over_parent()
 

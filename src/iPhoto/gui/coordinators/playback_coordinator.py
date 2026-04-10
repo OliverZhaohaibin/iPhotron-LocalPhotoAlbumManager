@@ -689,6 +689,7 @@ class PlaybackCoordinator(QObject):
         try:
             QThreadPool.globalInstance().start(worker, -1)
         except Exception:  # noqa: BLE001
+            LOGGER.warning("Failed to start metadata enrichment worker for %s", path_key, exc_info=True)
             self._info_panel_metadata_inflight.discard(path_key)
             self._info_panel_metadata_attempted.discard(path_key)
 

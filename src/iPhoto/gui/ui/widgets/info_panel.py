@@ -9,7 +9,7 @@ from fractions import Fraction
 from pathlib import Path
 from typing import Any, Mapping, Optional
 
-from PySide6.QtCore import QDateTime, QEvent, QLocale, QRectF, Qt
+from PySide6.QtCore import QDateTime, QEvent, QLocale, QRectF, Qt, Signal
 from PySide6.QtGui import QColor, QMouseEvent, QPainter, QPainterPath, QPalette, QShowEvent
 from PySide6.QtWidgets import (
     QFrame,
@@ -65,6 +65,7 @@ class InfoPanel(QWidget):
     _SHADOW_SIZE = 16
     _SHADOW_MAX_ALPHA = 18
     _SHADOW_RADIUS_GROWTH = 0.5
+    dismissed = Signal()
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(
@@ -200,8 +201,13 @@ class InfoPanel(QWidget):
         if formatted.exposure_line:
             self._exposure_label.setText(formatted.exposure_line)
         else:
+            is_loading = bool(metadata.get("_metadata_loading"))
             fallback = (
-                "Detailed video information is unavailable."
+                "Loading detailed video information..."
+                if formatted.is_video and is_loading
+                else "Loading detailed exposure information..."
+                if is_loading
+                else "Detailed video information is unavailable."
                 if formatted.is_video
                 else "Detailed exposure information is unavailable."
             )
@@ -272,6 +278,12 @@ class InfoPanel(QWidget):
                     center.x() - hint.width() // 2,
                     center.y() - hint.height() // 2,
                 )
+
+    def closeEvent(self, event) -> None:  # type: ignore[override]
+        """Emit a dismissal signal so the detail state stays in sync."""
+
+        self.dismissed.emit()
+        super().closeEvent(event)
 
     def paintEvent(self, event) -> None:  # type: ignore[override]
         """Draw drop shadow and an anti-aliased rounded rectangle."""

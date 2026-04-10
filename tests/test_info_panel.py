@@ -102,6 +102,23 @@ def test_info_panel_video_missing_details_shows_fallback(qapp: QApplication) -> 
     panel.close()
 
 
+def test_info_panel_loading_state_shows_loading_message(qapp: QApplication) -> None:
+    """Sparse metadata should show a loading hint while enrichment is pending."""
+
+    panel = InfoPanel()
+    metadata = {
+        "rel": "clip.MOV",
+        "name": "clip.MOV",
+        "is_video": True,
+        "_metadata_loading": True,
+    }
+
+    panel.set_asset_metadata(metadata)
+
+    assert panel._exposure_label.text() == "Loading detailed video information..."
+    panel.close()
+
+
 def test_info_panel_frameless_window_flags(qapp: QApplication) -> None:
     """The info panel should use a frameless window hint."""
 
@@ -138,6 +155,20 @@ def test_info_panel_close_button_closes(qapp: QApplication) -> None:
     assert panel.isVisible()
     panel.close_button.click()
     assert not panel.isVisible()
+
+
+def test_info_panel_emits_dismissed_when_closed(qapp: QApplication) -> None:
+    """Closing the panel should emit the dismissed signal exactly once."""
+
+    panel = InfoPanel()
+    dismissed = []
+    panel.dismissed.connect(lambda: dismissed.append(True))
+
+    panel.show()
+    panel.close_button.click()
+    qapp.processEvents()
+
+    assert dismissed == [True]
 
 
 def test_info_panel_centers_on_parent(qapp: QApplication) -> None:

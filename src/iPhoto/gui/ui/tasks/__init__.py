@@ -5,6 +5,7 @@ from __future__ import annotations
 from .asset_loader_worker import AssetLoaderWorker
 from .edit_sidebar_preview_worker import EditSidebarPreviewWorker
 from .image_load_worker import ImageLoadWorker
+from .info_panel_metadata_worker import InfoPanelMetadataWorker
 from .import_worker import ImportSignals, ImportWorker
 from .incremental_refresh_worker import IncrementalRefreshSignals, IncrementalRefreshWorker
 from .move_worker import MoveSignals, MoveWorker
@@ -16,6 +17,7 @@ __all__ = [
     "AssetLoaderWorker",
     "EditSidebarPreviewWorker",
     "ImageLoadWorker",
+    "InfoPanelMetadataWorker",
     "ImportSignals",
     "ImportWorker",
     "IncrementalRefreshSignals",

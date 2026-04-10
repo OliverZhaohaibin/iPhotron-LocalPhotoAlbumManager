@@ -121,6 +121,15 @@ class DetailViewModel(BaseViewModel):
         self._info_panel_visible = not self._info_panel_visible
         self._refresh_presentation()
 
+    def hide_info_panel(self, *, refresh_presentation: bool = True) -> None:
+        """Ensure the floating info panel is not considered visible anymore."""
+
+        if not self._info_panel_visible:
+            return
+        self._info_panel_visible = False
+        if refresh_presentation:
+            self._refresh_presentation()
+
     def rotate_current(self) -> None:
         presentation = self.presentation.value
         if presentation is None:
@@ -130,9 +139,11 @@ class DetailViewModel(BaseViewModel):
     def request_edit(self) -> None:
         path = self.current_path.value
         if isinstance(path, Path):
+            self.hide_info_panel(refresh_presentation=False)
             self.edit_requested.emit(path)
 
     def back_to_gallery(self) -> None:
+        self.hide_info_panel(refresh_presentation=False)
         self.route_requested.emit("gallery")
 
     def restore_after_adjustment(self, path: Path, reason: str) -> None:

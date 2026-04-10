@@ -4,22 +4,23 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
-from PySide6.QtCore import QItemSelectionModel, QModelIndex, QObject, QTimer, Signal, Slot
+from PySide6.QtCore import QItemSelectionModel, QModelIndex, QObject, QThreadPool, QTimer, Signal, Slot
 from PySide6.QtGui import QAction, QColor, QPalette
 
 from iPhoto.config import PLAY_ASSET_DEBOUNCE_MS
-from iPhoto.errors import ExternalToolError
 from iPhoto.gui.coordinators.view_router import ViewRouter
 from iPhoto.gui.ui.controllers.edit_zoom_handler import EditZoomHandler
 from iPhoto.gui.ui.controllers.header_controller import HeaderController
 from iPhoto.gui.ui.icons import load_icon
+from iPhoto.gui.ui.tasks.info_panel_metadata_worker import (
+    InfoPanelMetadataResult,
+    InfoPanelMetadataWorker,
+)
 from iPhoto.gui.ui.widgets.info_panel import InfoPanel
 from iPhoto.gui.viewmodels.detail_viewmodel import DetailPresentation, DetailViewModel
 from iPhoto.io import sidecar
-from iPhoto.io.metadata import read_image_meta, read_video_meta
-from iPhoto.utils.exiftool import get_metadata_batch
 
 if TYPE_CHECKING:
     from iPhoto.utils.settings import Settings
@@ -101,6 +102,9 @@ class PlaybackCoordinator(QObject):
         self._trim_in_ms = 0
         self._trim_out_ms = 0
         self._current_presentation: DetailPresentation | None = None
+        self._info_panel_metadata_cache: dict[str, dict[str, Any]] = {}
+        self._info_panel_metadata_inflight: set[str] = set()
+        self._info_panel_metadata_attempted: set[str] = set()
 
         self._pending_play_row: int | None = None
         self._play_debounce = QTimer(self)
@@ -120,6 +124,7 @@ class PlaybackCoordinator(QObject):
 
     def set_info_panel(self, panel: InfoPanel) -> None:
         self._info_panel = panel
+        panel.dismissed.connect(self._handle_info_panel_dismissed)
 
     def current_row(self) -> int:
         return self._media_session.current_row()
@@ -440,6 +445,7 @@ class PlaybackCoordinator(QObject):
         self._pending_restore_path = None
         self._pending_restore_reason = None
         self._current_presentation = None
+        self._detail_vm.hide_info_panel(refresh_presentation=False)
         self._update_header(None)
         if self._info_panel:
             self._info_panel.close()
@@ -450,6 +456,7 @@ class PlaybackCoordinator(QObject):
         self._pending_restore_path = None
         self._pending_restore_reason = None
         self._current_presentation = None
+        self._detail_vm.hide_info_panel(refresh_presentation=False)
         self._update_header(None)
         if self._info_panel:
             self._info_panel.close()
@@ -495,34 +502,120 @@ class PlaybackCoordinator(QObject):
     def _refresh_info_panel(self, info: dict) -> None:
         if not self._info_panel:
             return
+        self._ensure_info_panel_metadata_state()
         local_info = dict(info)
-        is_video = bool(local_info.get("is_video"))
-        needs_enrichment = (
-            (not local_info.get("frame_rate") or not local_info.get("lens"))
-            if is_video
-            else not local_info.get("iso")
+        abs_path = local_info.get("abs")
+        path_key = self._info_panel_path_key(abs_path)
+        if path_key is not None:
+            cached = self._info_panel_metadata_cache.get(path_key)
+            if cached:
+                local_info = self._merge_info_panel_metadata(local_info, cached)
+        needs_enrichment = self._info_panel_metadata_needs_enrichment(local_info)
+        should_queue_enrichment = bool(
+            path_key is not None
+            and needs_enrichment
+            and path_key not in self._info_panel_metadata_attempted
+            and path_key not in self._info_panel_metadata_inflight
         )
-        if needs_enrichment:
-            abs_path = local_info.get("abs")
-            if abs_path:
-                try:
-                    if is_video:
-                        exif_payload = None
-                        try:
-                            exif_batch = get_metadata_batch([Path(abs_path)])
-                            exif_payload = exif_batch[0] if exif_batch else None
-                        except (ExternalToolError, OSError):
-                            LOGGER.debug("ExifTool metadata fetch failed for %s", abs_path, exc_info=True)
-                        fresh = read_video_meta(Path(abs_path), exif_payload)
-                    else:
-                        fresh = read_image_meta(Path(abs_path))
-                    local_info.update({k: v for k, v in fresh.items() if v is not None})
-                except Exception:
-                    LOGGER.debug("Failed enrichment for %s", abs_path, exc_info=True)
+        is_loading = bool(
+            path_key is not None
+            and needs_enrichment
+            and (
+                should_queue_enrichment
+                or path_key in self._info_panel_metadata_inflight
+            )
+        )
+        if is_loading:
+            local_info["_metadata_loading"] = True
+        else:
+            local_info.pop("_metadata_loading", None)
         self._info_panel.set_asset_metadata(local_info)
+        if should_queue_enrichment:
+            self._queue_info_panel_metadata_enrichment(
+                Path(path_key),
+                is_video=bool(local_info.get("is_video")),
+            )
 
     def toggle_info_panel(self) -> None:
         self._detail_vm.toggle_info()
+
+    @Slot()
+    def _handle_info_panel_dismissed(self) -> None:
+        self._detail_vm.hide_info_panel(refresh_presentation=False)
+
+    def _ensure_info_panel_metadata_state(self) -> None:
+        if not hasattr(self, "_info_panel_metadata_cache"):
+            self._info_panel_metadata_cache = {}
+        if not hasattr(self, "_info_panel_metadata_inflight"):
+            self._info_panel_metadata_inflight = set()
+        if not hasattr(self, "_info_panel_metadata_attempted"):
+            self._info_panel_metadata_attempted = set()
+
+    def _info_panel_path_key(self, path: object) -> str | None:
+        if isinstance(path, Path):
+            return str(path)
+        if isinstance(path, str) and path.strip():
+            return str(Path(path))
+        return None
+
+    def _info_panel_metadata_needs_enrichment(self, info: dict[str, Any]) -> bool:
+        is_video = bool(info.get("is_video"))
+        return (
+            (not info.get("frame_rate") or not info.get("lens"))
+            if is_video
+            else not info.get("iso")
+        )
+
+    def _merge_info_panel_metadata(
+        self,
+        base_info: dict[str, Any],
+        extra_info: dict[str, Any],
+    ) -> dict[str, Any]:
+        merged = dict(base_info)
+        merged.update({key: value for key, value in extra_info.items() if value is not None})
+        merged.pop("_metadata_loading", None)
+        return merged
+
+    def _queue_info_panel_metadata_enrichment(self, path: Path, *, is_video: bool) -> None:
+        self._ensure_info_panel_metadata_state()
+        path_key = str(path)
+        if path_key in self._info_panel_metadata_inflight:
+            return
+        self._info_panel_metadata_inflight.add(path_key)
+
+        worker = InfoPanelMetadataWorker(path, is_video=is_video)
+        worker.signals.ready.connect(self._handle_info_panel_metadata_ready)
+        worker.signals.error.connect(self._handle_info_panel_metadata_error)
+        worker.signals.finished.connect(self._handle_info_panel_metadata_finished)
+        QThreadPool.globalInstance().start(worker, -1)
+
+    @Slot(object)
+    def _handle_info_panel_metadata_ready(self, result: InfoPanelMetadataResult) -> None:
+        self._ensure_info_panel_metadata_state()
+        path_key = str(result.path)
+        self._info_panel_metadata_cache[path_key] = dict(result.metadata)
+
+        if not self._info_panel or not self._info_panel.isVisible():
+            return
+        presentation = self._current_presentation
+        if presentation is None or presentation.path != result.path:
+            return
+        local_info = self._merge_info_panel_metadata(presentation.info, result.metadata)
+        self._info_panel.set_asset_metadata(local_info)
+
+    @Slot(str, str)
+    def _handle_info_panel_metadata_error(self, path_key: str, message: str) -> None:
+        LOGGER.debug(
+            "Failed to enrich info-panel metadata for %s: %s",
+            path_key,
+            message,
+        )
+
+    @Slot(str)
+    def _handle_info_panel_metadata_finished(self, path_key: str) -> None:
+        self._ensure_info_panel_metadata_state()
+        self._info_panel_metadata_inflight.discard(path_key)
+        self._info_panel_metadata_attempted.add(path_key)
 
     def _is_edit_session_active(self) -> bool:
         return bool(self._edit_coordinator and self._edit_coordinator.is_editing())

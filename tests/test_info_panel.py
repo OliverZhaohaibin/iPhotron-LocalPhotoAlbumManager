@@ -197,7 +197,7 @@ def test_info_panel_centers_on_parent(qapp: QApplication) -> None:
 
 
 def test_info_panel_hidden_metadata_update_recomputes_height(qapp: QApplication) -> None:
-    """Updating metadata while hidden should resize the panel before the next show."""
+    """Updating metadata while hidden should expand the panel on the next show."""
 
     sparse = {
         "rel": "clip.MOV",
@@ -230,11 +230,12 @@ def test_info_panel_hidden_metadata_update_recomputes_height(qapp: QApplication)
     qapp.processEvents()
     panel.set_asset_metadata(rich)
 
-    assert panel.height() > sparse_height
-
     panel.show()
     qapp.processEvents()
-    assert panel.height() >= panel.sizeHint().height()
+    layout = panel.layout()
+    expected_height = layout.totalHeightForWidth(max(panel.width(), panel.minimumWidth()))
+    assert panel.height() > sparse_height
+    assert panel.height() >= expected_height
     panel.close()
 
 

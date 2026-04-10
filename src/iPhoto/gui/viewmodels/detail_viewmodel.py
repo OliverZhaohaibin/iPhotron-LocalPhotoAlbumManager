@@ -139,11 +139,11 @@ class DetailViewModel(BaseViewModel):
     def request_edit(self) -> None:
         path = self.current_path.value
         if isinstance(path, Path):
-            self.hide_info_panel(refresh_presentation=False)
+            self.hide_info_panel(refresh_presentation=True)
             self.edit_requested.emit(path)
 
     def back_to_gallery(self) -> None:
-        self.hide_info_panel(refresh_presentation=False)
+        self.hide_info_panel(refresh_presentation=True)
         self.route_requested.emit("gallery")
 
     def restore_after_adjustment(self, path: Path, reason: str) -> None:

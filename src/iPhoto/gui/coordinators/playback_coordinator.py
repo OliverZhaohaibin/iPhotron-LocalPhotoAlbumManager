@@ -686,7 +686,11 @@ class PlaybackCoordinator(QObject):
         worker.signals.ready.connect(self._handle_info_panel_metadata_ready)
         worker.signals.error.connect(self._handle_info_panel_metadata_error)
         worker.signals.finished.connect(self._handle_info_panel_metadata_finished)
-        QThreadPool.globalInstance().start(worker, -1)
+        try:
+            QThreadPool.globalInstance().start(worker, -1)
+        except Exception:  # noqa: BLE001
+            self._info_panel_metadata_inflight.discard(path_key)
+            self._info_panel_metadata_attempted.discard(path_key)
 
     @Slot(object)
     def _handle_info_panel_metadata_ready(self, result: InfoPanelMetadataResult) -> None:

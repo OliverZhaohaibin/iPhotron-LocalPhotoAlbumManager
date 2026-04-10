@@ -38,6 +38,8 @@ if TYPE_CHECKING:
 
 LOGGER = logging.getLogger(__name__)
 
+_INFO_PANEL_METADATA_CACHE_MAX = 200
+
 
 class PlaybackCoordinator(QObject):
     """Bind detail widgets to the current presentation from DetailViewModel."""
@@ -537,6 +539,7 @@ class PlaybackCoordinator(QObject):
         self._update_header(None)
         if self._info_panel:
             self._info_panel.close()
+        self._clear_info_panel_metadata_state()
 
     def shutdown(self) -> None:
         self._clear_play_request_state()
@@ -549,6 +552,7 @@ class PlaybackCoordinator(QObject):
         self._update_header(None)
         if self._info_panel:
             self._info_panel.close()
+        self._clear_info_panel_metadata_state()
 
     def _update_header(self, presentation: DetailPresentation | None) -> None:
         if not self._header_controller:
@@ -640,6 +644,11 @@ class PlaybackCoordinator(QObject):
         if not hasattr(self, "_info_panel_metadata_attempted"):
             self._info_panel_metadata_attempted = set()
 
+    def _clear_info_panel_metadata_state(self) -> None:
+        self._info_panel_metadata_cache.clear()
+        self._info_panel_metadata_inflight.clear()
+        self._info_panel_metadata_attempted.clear()
+
     def _info_panel_path_key(self, path: object) -> str | None:
         if isinstance(path, Path):
             return str(path)
@@ -682,6 +691,12 @@ class PlaybackCoordinator(QObject):
     def _handle_info_panel_metadata_ready(self, result: InfoPanelMetadataResult) -> None:
         self._ensure_info_panel_metadata_state()
         path_key = str(result.path)
+        # Evict oldest entry (insertion-order FIFO, Python 3.7+) before inserting
+        # so the cache never grows beyond _INFO_PANEL_METADATA_CACHE_MAX entries.
+        if len(self._info_panel_metadata_cache) >= _INFO_PANEL_METADATA_CACHE_MAX:
+            evict_key = next(iter(self._info_panel_metadata_cache))
+            del self._info_panel_metadata_cache[evict_key]
+            self._info_panel_metadata_attempted.discard(evict_key)
         self._info_panel_metadata_cache[path_key] = dict(result.metadata)
 
         if not self._info_panel or not self._info_panel.isVisible():

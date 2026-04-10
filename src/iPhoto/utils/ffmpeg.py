@@ -407,7 +407,7 @@ def _probe_video_rotation_info_cached(
 
 
 def probe_video_rotation_info(source: Path) -> tuple[int, int, int, bool]:
-    """Return rotation/raw dimensions and Linux 180Â° pre-rotation hint."""
+    """Return rotation/raw dimensions and Linux 180° pre-rotation hint."""
 
     cache_key = _probe_video_rotation_cache_key(source)
     if cache_key is None:

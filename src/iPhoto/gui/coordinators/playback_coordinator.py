@@ -3,23 +3,26 @@
 from __future__ import annotations
 
 import logging
+import time
 from pathlib import Path
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
-from PySide6.QtCore import QItemSelectionModel, QModelIndex, QObject, QTimer, Signal, Slot
+from PySide6.QtCore import QItemSelectionModel, QModelIndex, QObject, QThreadPool, QTimer, Signal, Slot
 from PySide6.QtGui import QAction, QColor, QPalette
 
 from iPhoto.config import PLAY_ASSET_DEBOUNCE_MS
-from iPhoto.errors import ExternalToolError
+from iPhoto.gui.detail_profile import log_detail_profile
 from iPhoto.gui.coordinators.view_router import ViewRouter
 from iPhoto.gui.ui.controllers.edit_zoom_handler import EditZoomHandler
 from iPhoto.gui.ui.controllers.header_controller import HeaderController
 from iPhoto.gui.ui.icons import load_icon
+from iPhoto.gui.ui.tasks.info_panel_metadata_worker import (
+    InfoPanelMetadataResult,
+    InfoPanelMetadataWorker,
+)
 from iPhoto.gui.ui.widgets.info_panel import InfoPanel
 from iPhoto.gui.viewmodels.detail_viewmodel import DetailPresentation, DetailViewModel
 from iPhoto.io import sidecar
-from iPhoto.io.metadata import read_image_meta, read_video_meta
-from iPhoto.utils.exiftool import get_metadata_batch
 
 if TYPE_CHECKING:
     from iPhoto.utils.settings import Settings
@@ -34,6 +37,8 @@ if TYPE_CHECKING:
     from iPhoto.gui.viewmodels.gallery_list_model_adapter import GalleryListModelAdapter
 
 LOGGER = logging.getLogger(__name__)
+
+_INFO_PANEL_METADATA_CACHE_MAX = 200
 
 
 class PlaybackCoordinator(QObject):
@@ -101,6 +106,11 @@ class PlaybackCoordinator(QObject):
         self._trim_in_ms = 0
         self._trim_out_ms = 0
         self._current_presentation: DetailPresentation | None = None
+        self._info_panel_metadata_cache: dict[str, dict[str, Any]] = {}
+        self._info_panel_metadata_inflight: set[str] = set()
+        self._info_panel_metadata_attempted: set[str] = set()
+        self._play_profile_started_at: float | None = None
+        self._play_profile_row: int | None = None
 
         self._pending_play_row: int | None = None
         self._play_debounce = QTimer(self)
@@ -120,6 +130,7 @@ class PlaybackCoordinator(QObject):
 
     def set_info_panel(self, panel: InfoPanel) -> None:
         self._info_panel = panel
+        panel.dismissed.connect(self._handle_info_panel_dismissed)
 
     def current_row(self) -> int:
         return self._media_session.current_row()
@@ -254,14 +265,50 @@ class PlaybackCoordinator(QObject):
     def play_asset(self, row: int) -> None:
         if row < 0 or row >= self._asset_model.rowCount():
             return
+        self._play_profile_started_at = time.perf_counter()
+        self._play_profile_row = row
+        if not self._play_debounce.isActive() and self._pending_play_row is None:
+            self._dispatch_play_row(row, reason="immediate")
+            self._play_debounce.start()
+            return
         self._pending_play_row = row
-        self._play_debounce.start()
+        if not self._play_debounce.isActive():
+            self._play_debounce.start()
 
     def _execute_pending_play(self) -> None:
         row = self._pending_play_row
         self._pending_play_row = None
         if row is None:
             return
+        self._dispatch_play_row(row, reason="debounced")
+        self._play_debounce.start()
+
+    def _clear_play_profile(self, row: int | None = None) -> None:
+        if row is not None and getattr(self, "_play_profile_row", None) != row:
+            return
+        self._play_profile_started_at = None
+        self._play_profile_row = None
+
+    def _clear_play_request_state(self) -> None:
+        self._pending_play_row = None
+        self._clear_play_profile()
+        play_debounce = getattr(self, "_play_debounce", None)
+        if play_debounce is not None:
+            play_debounce.stop()
+
+    def _dispatch_play_row(self, row: int, *, reason: str) -> None:
+        if (
+            getattr(self, "_play_profile_started_at", None) is not None
+            and getattr(self, "_play_profile_row", None) == row
+        ):
+            elapsed_ms = (time.perf_counter() - self._play_profile_started_at) * 1000.0
+            log_detail_profile(
+                "playback",
+                "play_asset.dispatch",
+                elapsed_ms,
+                row=row,
+                reason=reason,
+            )
         self._detail_vm.show_row(row)
 
     @Slot(str)
@@ -272,6 +319,19 @@ class PlaybackCoordinator(QObject):
             self._router.show_gallery()
 
     def _handle_presentation_changed(self, presentation: DetailPresentation) -> None:
+        if (
+            getattr(self, "_play_profile_started_at", None) is not None
+            and getattr(self, "_play_profile_row", None) == presentation.row
+        ):
+            elapsed_ms = (time.perf_counter() - self._play_profile_started_at) * 1000.0
+            log_detail_profile(
+                "playback",
+                "presentation_changed",
+                elapsed_ms,
+                row=presentation.row,
+                path=presentation.path.name,
+                is_video=presentation.is_video,
+            )
         previous = self._current_presentation
         self._current_presentation = presentation
         row = presentation.row
@@ -291,10 +351,12 @@ class PlaybackCoordinator(QObject):
                 self._info_panel.show()
             elif self._info_panel and self._info_panel.isVisible() and not presentation.info_panel_visible:
                 self._info_panel.close()
+            self._clear_play_profile(presentation.row)
             return
         self._render_presentation(presentation)
 
     def _render_presentation(self, presentation: DetailPresentation) -> None:
+        render_started = time.perf_counter()
         source = presentation.path
         self._active_live_motion = None
         self._active_live_still = None
@@ -312,7 +374,15 @@ class PlaybackCoordinator(QObject):
 
         if presentation.is_video:
             self._player_view.show_video_surface(interactive=True)
+            sidecar_started = time.perf_counter()
             raw_adjustments = sidecar.load_adjustments(source)
+            log_detail_profile(
+                "playback",
+                "video.sidecar_load",
+                (time.perf_counter() - sidecar_started) * 1000.0,
+                path=source.name,
+                adjustments=len(raw_adjustments),
+            )
             info = presentation.info
             duration_sec = None
             try:
@@ -333,6 +403,7 @@ class PlaybackCoordinator(QObject):
             else:
                 self._trim_in_ms = 0
                 self._trim_out_ms = 0
+            load_started = time.perf_counter()
             self._player_view.video_area.load_video(
                 source,
                 adjustments=(
@@ -343,6 +414,14 @@ class PlaybackCoordinator(QObject):
                 trim_range_ms=trim_range_ms,
                 adjusted_preview=needs_adjusted_preview,
             )
+            log_detail_profile(
+                "playback",
+                "video.load_video",
+                (time.perf_counter() - load_started) * 1000.0,
+                path=source.name,
+                adjusted_preview=needs_adjusted_preview,
+                has_trim=has_trim,
+            )
             self._player_view.video_area.play()
             self._player_bar.setEnabled(True)
             self._zoom_handler.set_viewer(self._player_view.video_area)
@@ -350,7 +429,14 @@ class PlaybackCoordinator(QObject):
             self._zoom_widget.show()
         else:
             self._player_view.show_image_surface()
+            display_started = time.perf_counter()
             self._player_view.display_image(source)
+            log_detail_profile(
+                "playback",
+                "image.display_image",
+                (time.perf_counter() - display_started) * 1000.0,
+                path=source.name,
+            )
             self._player_bar.setEnabled(False)
             self._zoom_handler.set_viewer(self._player_view.image_viewer)
             self._player_view.image_viewer.reset_zoom()
@@ -373,6 +459,14 @@ class PlaybackCoordinator(QObject):
             self._info_panel.show()
         elif self._info_panel and self._info_panel.isVisible() and not presentation.info_panel_visible:
             self._info_panel.close()
+        log_detail_profile(
+            "playback",
+            "render_presentation.total",
+            (time.perf_counter() - render_started) * 1000.0,
+            path=source.name,
+            is_video=presentation.is_video,
+        )
+        self._clear_play_profile(presentation.row)
 
     def _autoplay_live_motion(self, presentation: DetailPresentation) -> None:
         motion_path = presentation.live_motion_abs
@@ -433,6 +527,7 @@ class PlaybackCoordinator(QObject):
         return color.name(QColor.NameFormat.HexArgb)
 
     def reset_for_gallery(self) -> None:
+        self._clear_play_request_state()
         self._player_view.video_area.stop()
         self._player_view.show_placeholder()
         self._player_bar.setEnabled(False)
@@ -440,19 +535,24 @@ class PlaybackCoordinator(QObject):
         self._pending_restore_path = None
         self._pending_restore_reason = None
         self._current_presentation = None
+        self._detail_vm.hide_info_panel(refresh_presentation=False)
         self._update_header(None)
         if self._info_panel:
             self._info_panel.close()
+        self._clear_info_panel_metadata_state()
 
     def shutdown(self) -> None:
+        self._clear_play_request_state()
         self._player_view.video_area.stop()
         self._is_playing = False
         self._pending_restore_path = None
         self._pending_restore_reason = None
         self._current_presentation = None
+        self._detail_vm.hide_info_panel(refresh_presentation=False)
         self._update_header(None)
         if self._info_panel:
             self._info_panel.close()
+        self._clear_info_panel_metadata_state()
 
     def _update_header(self, presentation: DetailPresentation | None) -> None:
         if not self._header_controller:
@@ -495,34 +595,137 @@ class PlaybackCoordinator(QObject):
     def _refresh_info_panel(self, info: dict) -> None:
         if not self._info_panel:
             return
+        self._ensure_info_panel_metadata_state()
         local_info = dict(info)
-        is_video = bool(local_info.get("is_video"))
-        needs_enrichment = (
-            (not local_info.get("frame_rate") or not local_info.get("lens"))
-            if is_video
-            else not local_info.get("iso")
+        abs_path = local_info.get("abs")
+        path_key = self._info_panel_path_key(abs_path)
+        if path_key is not None:
+            cached = self._info_panel_metadata_cache.get(path_key)
+            if cached:
+                local_info = self._merge_info_panel_metadata(local_info, cached)
+        needs_enrichment = self._info_panel_metadata_needs_enrichment(local_info)
+        should_queue_enrichment = bool(
+            path_key is not None
+            and needs_enrichment
+            and path_key not in self._info_panel_metadata_attempted
+            and path_key not in self._info_panel_metadata_inflight
         )
-        if needs_enrichment:
-            abs_path = local_info.get("abs")
-            if abs_path:
-                try:
-                    if is_video:
-                        exif_payload = None
-                        try:
-                            exif_batch = get_metadata_batch([Path(abs_path)])
-                            exif_payload = exif_batch[0] if exif_batch else None
-                        except (ExternalToolError, OSError):
-                            LOGGER.debug("ExifTool metadata fetch failed for %s", abs_path, exc_info=True)
-                        fresh = read_video_meta(Path(abs_path), exif_payload)
-                    else:
-                        fresh = read_image_meta(Path(abs_path))
-                    local_info.update({k: v for k, v in fresh.items() if v is not None})
-                except Exception:
-                    LOGGER.debug("Failed enrichment for %s", abs_path, exc_info=True)
+        is_loading = bool(
+            path_key is not None
+            and needs_enrichment
+            and (
+                should_queue_enrichment
+                or path_key in self._info_panel_metadata_inflight
+            )
+        )
+        if is_loading:
+            local_info["_metadata_loading"] = True
+        else:
+            local_info.pop("_metadata_loading", None)
         self._info_panel.set_asset_metadata(local_info)
+        if should_queue_enrichment:
+            self._queue_info_panel_metadata_enrichment(
+                Path(path_key),
+                is_video=bool(local_info.get("is_video")),
+            )
 
     def toggle_info_panel(self) -> None:
         self._detail_vm.toggle_info()
+
+    @Slot()
+    def _handle_info_panel_dismissed(self) -> None:
+        self._detail_vm.hide_info_panel(refresh_presentation=False)
+
+    def _ensure_info_panel_metadata_state(self) -> None:
+        if not hasattr(self, "_info_panel_metadata_cache"):
+            self._info_panel_metadata_cache = {}
+        if not hasattr(self, "_info_panel_metadata_inflight"):
+            self._info_panel_metadata_inflight = set()
+        if not hasattr(self, "_info_panel_metadata_attempted"):
+            self._info_panel_metadata_attempted = set()
+
+    def _clear_info_panel_metadata_state(self) -> None:
+        self._ensure_info_panel_metadata_state()
+        self._info_panel_metadata_cache.clear()
+        self._info_panel_metadata_inflight.clear()
+        self._info_panel_metadata_attempted.clear()
+
+    def _info_panel_path_key(self, path: object) -> str | None:
+        if isinstance(path, Path):
+            return str(path)
+        if isinstance(path, str) and path.strip():
+            return str(Path(path))
+        return None
+
+    def _info_panel_metadata_needs_enrichment(self, info: dict[str, Any]) -> bool:
+        is_video = bool(info.get("is_video"))
+        return (
+            (not info.get("frame_rate") or not info.get("lens"))
+            if is_video
+            else not info.get("iso")
+        )
+
+    def _merge_info_panel_metadata(
+        self,
+        base_info: dict[str, Any],
+        extra_info: dict[str, Any],
+    ) -> dict[str, Any]:
+        merged = dict(base_info)
+        merged.update({key: value for key, value in extra_info.items() if value is not None})
+        merged.pop("_metadata_loading", None)
+        return merged
+
+    def _queue_info_panel_metadata_enrichment(self, path: Path, *, is_video: bool) -> None:
+        self._ensure_info_panel_metadata_state()
+        path_key = str(path)
+        if path_key in self._info_panel_metadata_inflight:
+            return
+        self._info_panel_metadata_inflight.add(path_key)
+
+        worker = InfoPanelMetadataWorker(path, is_video=is_video)
+        worker.signals.ready.connect(self._handle_info_panel_metadata_ready)
+        worker.signals.error.connect(self._handle_info_panel_metadata_error)
+        worker.signals.finished.connect(self._handle_info_panel_metadata_finished)
+        try:
+            QThreadPool.globalInstance().start(worker, -1)
+        except Exception:  # noqa: BLE001
+            LOGGER.warning("Failed to start metadata enrichment worker for %s", path_key, exc_info=True)
+            self._info_panel_metadata_inflight.discard(path_key)
+            self._info_panel_metadata_attempted.discard(path_key)
+
+    @Slot(object)
+    def _handle_info_panel_metadata_ready(self, result: InfoPanelMetadataResult) -> None:
+        self._ensure_info_panel_metadata_state()
+        path_key = str(result.path)
+        # Evict oldest entry (insertion-order FIFO, Python 3.7+) before inserting
+        # so the cache never grows beyond _INFO_PANEL_METADATA_CACHE_MAX entries.
+        if len(self._info_panel_metadata_cache) >= _INFO_PANEL_METADATA_CACHE_MAX:
+            evict_key = next(iter(self._info_panel_metadata_cache))
+            del self._info_panel_metadata_cache[evict_key]
+            self._info_panel_metadata_attempted.discard(evict_key)
+        self._info_panel_metadata_cache[path_key] = dict(result.metadata)
+
+        if not self._info_panel or not self._info_panel.isVisible():
+            return
+        presentation = self._current_presentation
+        if presentation is None or presentation.path != result.path:
+            return
+        local_info = self._merge_info_panel_metadata(presentation.info, result.metadata)
+        self._info_panel.set_asset_metadata(local_info)
+
+    @Slot(str, str)
+    def _handle_info_panel_metadata_error(self, path_key: str, message: str) -> None:
+        LOGGER.debug(
+            "Failed to enrich info-panel metadata for %s: %s",
+            path_key,
+            message,
+        )
+
+    @Slot(str)
+    def _handle_info_panel_metadata_finished(self, path_key: str) -> None:
+        self._ensure_info_panel_metadata_state()
+        self._info_panel_metadata_inflight.discard(path_key)
+        self._info_panel_metadata_attempted.add(path_key)
 
     def _is_edit_session_active(self) -> bool:
         return bool(self._edit_coordinator and self._edit_coordinator.is_editing())

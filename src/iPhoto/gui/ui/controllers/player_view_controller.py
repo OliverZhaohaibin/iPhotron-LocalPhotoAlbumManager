@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from pathlib import Path
 from typing import Optional, Set
 
@@ -9,6 +10,7 @@ from PySide6.QtCore import QObject, QRunnable, QThreadPool, Signal
 from PySide6.QtGui import QImage, QPixmap
 from PySide6.QtWidgets import QStackedWidget, QWidget
 
+from ....gui.detail_profile import log_detail_profile
 from ....utils import image_loader
 from ....core.color_resolver import compute_color_statistics
 from ....io import sidecar
@@ -46,12 +48,20 @@ class _AdjustedImageWorker(QRunnable):
     def run(self) -> None:  # pragma: no cover - executed on a worker thread
         """Perform the expensive image work outside the GUI thread."""
 
+        started = time.perf_counter()
         try:
             # Requesting ``None`` as the target size forces ``QImageReader`` to
             # decode the full-resolution frame.  The detail view later scales
             # the resulting pixmap to fit the viewport while maintaining the
             # original aspect ratio, ensuring sharp results without distortion.
+            decode_started = time.perf_counter()
             image = image_loader.load_qimage(self._source, None)
+            log_detail_profile(
+                "still_worker",
+                "decode",
+                (time.perf_counter() - decode_started) * 1000.0,
+                path=self._source.name,
+            )
         except Exception as exc:  # pragma: no cover - Qt loader errors are rare
             self._signals.failed.emit(self._source, str(exc))
             return
@@ -61,11 +71,19 @@ class _AdjustedImageWorker(QRunnable):
             return
 
         try:
+            adjustments_started = time.perf_counter()
             raw_adjustments = sidecar.load_adjustments(self._source)
             stats = compute_color_statistics(image) if raw_adjustments else None
             adjustments = sidecar.resolve_render_adjustments(
                 raw_adjustments,
                 color_stats=stats,
+            )
+            log_detail_profile(
+                "still_worker",
+                "adjustments",
+                (time.perf_counter() - adjustments_started) * 1000.0,
+                path=self._source.name,
+                adjustments=len(raw_adjustments),
             )
         except Exception as exc:  # pragma: no cover - filesystem errors are rare
             self._signals.failed.emit(self._source, str(exc))
@@ -74,6 +92,13 @@ class _AdjustedImageWorker(QRunnable):
         # Pass the raw image and adjustments to the main thread. The GL viewer
         # Pass the raw image and adjustments to the main thread. The GL viewer
         # will apply the adjustments on the GPU.
+        log_detail_profile(
+            "still_worker",
+            "total",
+            (time.perf_counter() - started) * 1000.0,
+            path=self._source.name,
+            has_adjustments=bool(adjustments),
+        )
         self._signals.completed.emit(self._source, image, adjustments or {})
 
 
@@ -108,6 +133,7 @@ class PlayerViewController(QObject):
         self._pool = QThreadPool.globalInstance()
         self._active_workers: Set[_AdjustedImageWorker] = set()
         self._loading_source: Optional[Path] = None
+        self._loading_started_at: float | None = None
         self._defer_still_updates = False
         self._pending_still: Optional[tuple[Path, QImage, dict]] = None
 
@@ -239,6 +265,7 @@ class PlayerViewController(QObject):
     def display_image(self, source: Path, *, placeholder: Optional[QPixmap] = None) -> bool:
         """Begin loading ``source`` asynchronously, returning scheduling success."""
         self._loading_source = source
+        self._loading_started_at = time.perf_counter()
 
         # 1) 先切到 GL 视图，保证有有效的 GL 上下文
         self.show_image_surface()
@@ -272,6 +299,7 @@ class PlayerViewController(QObject):
         except RuntimeError as exc:  # 线程池满极少见
             self._release_worker(worker)
             self._loading_source = None
+            self._loading_started_at = None
             self.imageLoadingFailed.emit(source, str(exc))
             return False
         return True
@@ -358,9 +386,19 @@ class PlayerViewController(QObject):
         if self._loading_source != source:
             return
 
+        if self._loading_started_at is not None:
+            log_detail_profile(
+                "player_view",
+                "still.worker_ready",
+                (time.perf_counter() - self._loading_started_at) * 1000.0,
+                path=source.name,
+                has_adjustments=bool(adjustments),
+            )
+
         if image.isNull():
             if self._loading_source == source:
                 self._loading_source = None
+                self._loading_started_at = None
             self._image_viewer.set_image(None, {})
             self.imageLoadingFailed.emit(source, "Image decoder returned an empty frame")
             return
@@ -372,6 +410,7 @@ class PlayerViewController(QObject):
 
         if self._loading_source == source:
             self._loading_source = None
+            self._loading_started_at = None
 
     def _on_adjusted_image_failed(self, source: Path, message: str) -> None:
         """Propagate worker failures while ensuring stale results are ignored."""
@@ -381,11 +420,13 @@ class PlayerViewController(QObject):
 
         if self._loading_source == source:
             self._loading_source = None
+            self._loading_started_at = None
         self._image_viewer.set_image(None)
         self.imageLoadingFailed.emit(source, message)
 
     def _apply_still_frame(self, source: Path, image: QImage, adjustments: dict) -> None:
         """Render the still image on the GL viewer."""
+        apply_started = time.perf_counter()
         self.show_image_surface()
         self._image_viewer.set_image(
             image,
@@ -394,6 +435,13 @@ class PlayerViewController(QObject):
             reset_view=True,
         )
         self._image_viewer.update()
+        log_detail_profile(
+            "player_view",
+            "still.apply_frame",
+            (time.perf_counter() - apply_started) * 1000.0,
+            path=source.name,
+            has_adjustments=bool(adjustments),
+        )
 
     def _release_worker(self, worker: _AdjustedImageWorker) -> None:
         """Drop completed workers so the thread pool can reclaim resources."""

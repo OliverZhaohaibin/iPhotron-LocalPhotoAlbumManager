@@ -15,6 +15,12 @@ def _fake_completed_process(command: list[str], stdout: bytes = b"") -> subproce
     return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr=b"")
 
 
+@pytest.fixture(autouse=True)
+def _clear_rotation_probe_cache() -> None:
+    ffmpeg._probe_video_rotation_info_cached.cache_clear()
+    ffmpeg._LINUX_180_HINT_CACHE.clear()
+
+
 # -----------------------------------------------------------------------
 # probe_video_rotation
 # -----------------------------------------------------------------------
@@ -290,6 +296,75 @@ class TestProbeVideoRotation:
         cw, raw_w, raw_h, linux_180_hint = ffmpeg.probe_video_rotation_info(video)
         assert (cw, raw_w, raw_h) == (180, 1920, 1080)
         assert linux_180_hint is False
+
+    def test_probe_video_rotation_info_reuses_cached_result_for_unchanged_file(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Repeated probes for the same file should avoid extra ffprobe calls."""
+
+        video = tmp_path / "cached.mov"
+        video.write_bytes(b"one")
+        calls: list[Path] = []
+
+        def fake_probe(src: Path) -> dict:
+            calls.append(src)
+            return {
+                "streams": [
+                    {
+                        "codec_type": "video",
+                        "width": 1920,
+                        "height": 1080,
+                        "side_data_list": [
+                            {
+                                "side_data_type": "Display Matrix",
+                                "rotation": -90,
+                            }
+                        ],
+                    }
+                ]
+            }
+
+        monkeypatch.setattr(ffmpeg, "probe_media", fake_probe)
+
+        assert ffmpeg.probe_video_rotation_info(video) == (90, 1920, 1080, False)
+        assert ffmpeg.probe_video_rotation_info(video) == (90, 1920, 1080, False)
+        assert calls == [video.resolve()]
+
+    def test_probe_video_rotation_info_cache_invalidates_after_file_change(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Changing file metadata should force a fresh ffprobe inspection."""
+
+        video = tmp_path / "updated.mov"
+        video.write_bytes(b"one")
+        call_count = 0
+
+        def fake_probe(src: Path) -> dict:
+            nonlocal call_count
+            call_count += 1
+            rotation = -90 if call_count == 1 else 180
+            return {
+                "streams": [
+                    {
+                        "codec_type": "video",
+                        "width": 1920,
+                        "height": 1080,
+                        "side_data_list": [
+                            {
+                                "side_data_type": "Display Matrix",
+                                "rotation": rotation,
+                            }
+                        ],
+                    }
+                ]
+            }
+
+        monkeypatch.setattr(ffmpeg, "probe_media", fake_probe)
+
+        assert ffmpeg.probe_video_rotation_info(video) == (90, 1920, 1080, False)
+        video.write_bytes(b"updated-content")
+        assert ffmpeg.probe_video_rotation_info(video) == (180, 1920, 1080, False)
+        assert call_count == 2
 
 
 def test_extract_video_frame_uses_yuv_format_for_jpeg(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Dict, Optional, Sequence, TYPE_CHECKING
 
@@ -376,7 +377,45 @@ def _orient_opencv_frame_from_metadata(source: Path, frame: Any) -> Any:
         return frame
 
 
+def _probe_video_rotation_cache_key(source: Path) -> tuple[str, int, int] | None:
+    """Return a cache key that invalidates when the file metadata changes."""
+
+    try:
+        resolved = source.resolve()
+    except OSError:
+        resolved = source
+
+    try:
+        stat = resolved.stat()
+    except OSError:
+        return None
+
+    mtime_ns = getattr(stat, "st_mtime_ns", None)
+    if mtime_ns is None:
+        mtime_ns = int(stat.st_mtime * 1_000_000_000)
+    return (str(resolved), int(mtime_ns), int(stat.st_size))
+
+
+@lru_cache(maxsize=512)
+def _probe_video_rotation_info_cached(
+    resolved_path: str,
+    mtime_ns: int,
+    size: int,
+) -> tuple[int, int, int, bool]:
+    del mtime_ns, size
+    return _probe_video_rotation_info_uncached(Path(resolved_path))
+
+
 def probe_video_rotation_info(source: Path) -> tuple[int, int, int, bool]:
+    """Return rotation/raw dimensions and Linux 180° pre-rotation hint."""
+
+    cache_key = _probe_video_rotation_cache_key(source)
+    if cache_key is None:
+        return _probe_video_rotation_info_uncached(source)
+    return _probe_video_rotation_info_cached(*cache_key)
+
+
+def _probe_video_rotation_info_uncached(source: Path) -> tuple[int, int, int, bool]:
     """Return rotation/raw dimensions and Linux 180° pre-rotation hint.
 
     Returns a tuple ``(cw_degrees, raw_width, raw_height, linux_180_hint)`` where

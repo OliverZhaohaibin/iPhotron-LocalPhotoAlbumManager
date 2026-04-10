@@ -128,6 +128,48 @@ def test_request_edit_emits_current_path():
     assert vm.current_asset_path() == dto.abs_path
 
 
+def test_back_to_gallery_clears_info_panel_state_for_next_detail_entry():
+    vm, store, session, _ = _make_vm()
+    dto = _make_dto("/tmp/photo.jpg")
+    store.asset_at.return_value = dto
+    session.set_current_row.return_value = dto.abs_path
+
+    requested = []
+    vm.route_requested.connect(requested.append)
+
+    vm.show_row(0)
+    vm.toggle_info()
+
+    assert vm.presentation.value.info_panel_visible is True
+
+    vm.back_to_gallery()
+    vm.show_row(0)
+
+    assert requested == ["detail", "gallery", "detail"]
+    assert vm.presentation.value.info_panel_visible is False
+
+
+def test_request_edit_clears_info_panel_state_before_returning_to_detail():
+    vm, store, session, _ = _make_vm()
+    dto = _make_dto("/tmp/photo.jpg")
+    store.asset_at.return_value = dto
+    session.set_current_row.return_value = dto.abs_path
+
+    emitted = []
+    vm.edit_requested.connect(emitted.append)
+
+    vm.show_row(0)
+    vm.toggle_info()
+
+    assert vm.presentation.value.info_panel_visible is True
+
+    vm.request_edit()
+    vm.show_row(0)
+
+    assert emitted == [dto.abs_path]
+    assert vm.presentation.value.info_panel_visible is False
+
+
 def test_restore_after_adjustment_rebinds_current_path():
     vm, store, session, _ = _make_vm()
     dto = _make_dto("/tmp/photo.jpg")

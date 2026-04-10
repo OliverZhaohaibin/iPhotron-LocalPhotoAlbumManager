@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from unittest.mock import Mock
 
 import pytest
 
@@ -11,6 +12,7 @@ pytest.importorskip("PySide6.QtWidgets", reason="Qt widgets not available", exc_
 
 from PySide6.QtWidgets import QApplication
 
+from iPhoto.gui.ui.widgets import info_panel as info_panel_module
 from iPhoto.gui.ui.widgets.info_panel import InfoPanel
 
 
@@ -102,6 +104,23 @@ def test_info_panel_video_missing_details_shows_fallback(qapp: QApplication) -> 
     panel.close()
 
 
+def test_info_panel_loading_state_shows_loading_message(qapp: QApplication) -> None:
+    """Sparse metadata should show a loading hint while enrichment is pending."""
+
+    panel = InfoPanel()
+    metadata = {
+        "rel": "clip.MOV",
+        "name": "clip.MOV",
+        "is_video": True,
+        "_metadata_loading": True,
+    }
+
+    panel.set_asset_metadata(metadata)
+
+    assert panel._exposure_label.text() == "Loading detailed video information..."
+    panel.close()
+
+
 def test_info_panel_frameless_window_flags(qapp: QApplication) -> None:
     """The info panel should use a frameless window hint."""
 
@@ -140,6 +159,20 @@ def test_info_panel_close_button_closes(qapp: QApplication) -> None:
     assert not panel.isVisible()
 
 
+def test_info_panel_emits_dismissed_when_closed(qapp: QApplication) -> None:
+    """Closing the panel should emit the dismissed signal exactly once."""
+
+    panel = InfoPanel()
+    dismissed = []
+    panel.dismissed.connect(lambda: dismissed.append(True))
+
+    panel.show()
+    panel.close_button.click()
+    qapp.processEvents()
+
+    assert dismissed == [True]
+
+
 def test_info_panel_centers_on_parent(qapp: QApplication) -> None:
     """The panel should center itself over its parent on first show."""
 
@@ -161,6 +194,68 @@ def test_info_panel_centers_on_parent(qapp: QApplication) -> None:
 
     panel.close()
     parent.close()
+
+
+def test_info_panel_hidden_metadata_update_recomputes_height(qapp: QApplication) -> None:
+    """Updating metadata while hidden should expand the panel on the next show."""
+
+    sparse = {
+        "rel": "clip.MOV",
+        "name": "clip.MOV",
+        "is_video": True,
+    }
+    rich = {
+        "rel": "IMG_3686.HEIC",
+        "name": "IMG_3686.HEIC",
+        "dt": "2025-09-16T12:08:36Z",
+        "make": "Apple",
+        "model": "Apple iPhone 12",
+        "lens": "iPhone 12 back dual wide camera",
+        "w": 4032,
+        "h": 3024,
+        "iso": 250,
+        "focal_length": 1.6,
+        "exposure_compensation": 0,
+        "f_number": 2.4,
+        "exposure_time": "1/99",
+    }
+
+    panel = InfoPanel()
+    panel.set_asset_metadata(sparse)
+    panel.show()
+    qapp.processEvents()
+    sparse_height = panel.height()
+
+    panel.hide()
+    qapp.processEvents()
+    panel.set_asset_metadata(rich)
+
+    panel.show()
+    qapp.processEvents()
+    layout = panel.layout()
+    expected_height = layout.totalHeightForWidth(max(panel.width(), panel.minimumWidth()))
+    assert panel.height() > sparse_height
+    assert panel.height() >= expected_height
+    panel.close()
+
+
+def test_info_panel_linux_first_show_schedules_post_show_reflow(
+    qapp: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Linux should queue a follow-up geometry pass on the first show."""
+
+    panel = InfoPanel()
+    schedule = Mock()
+
+    monkeypatch.setattr(info_panel_module, "_IS_LINUX", True)
+    monkeypatch.setattr(panel, "_schedule_post_show_reflow", schedule)
+
+    panel.show()
+    qapp.processEvents()
+
+    schedule.assert_called_once_with(recenter=True)
+    panel.close()
 
 
 def test_info_panel_has_shadow_margin(qapp: QApplication) -> None:

@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import re
+import sys
 from dataclasses import dataclass
 from datetime import datetime
 from fractions import Fraction
 from pathlib import Path
 from typing import Any, Mapping, Optional
 
-from PySide6.QtCore import QDateTime, QEvent, QLocale, QRectF, Qt
+from PySide6.QtCore import QDateTime, QEvent, QLocale, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QMouseEvent, QPainter, QPainterPath, QPalette, QShowEvent
 from PySide6.QtWidgets import (
     QFrame,
@@ -39,6 +40,8 @@ _LENS_SPEC_RE = re.compile(
     re.IGNORECASE,
 )
 
+_IS_LINUX = sys.platform.startswith("linux")
+
 
 @dataclass
 class _FormattedMetadata:
@@ -65,6 +68,7 @@ class InfoPanel(QWidget):
     _SHADOW_SIZE = 16
     _SHADOW_MAX_ALPHA = 18
     _SHADOW_RADIUS_GROWTH = 0.5
+    dismissed = Signal()
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(
@@ -83,6 +87,8 @@ class InfoPanel(QWidget):
         self._drag_active = False
         self._drag_offset = None
         self._centered = False
+        self._post_show_reflow_queued = False
+        self._post_show_reflow_recenter = False
 
         # -- title bar -----------------------------------------------------
         self._title_bar = QWidget(self)
@@ -200,12 +206,18 @@ class InfoPanel(QWidget):
         if formatted.exposure_line:
             self._exposure_label.setText(formatted.exposure_line)
         else:
+            is_loading = bool(metadata.get("_metadata_loading"))
             fallback = (
-                "Detailed video information is unavailable."
+                "Loading detailed video information..."
+                if formatted.is_video and is_loading
+                else "Loading detailed exposure information..."
+                if is_loading
+                else "Detailed video information is unavailable."
                 if formatted.is_video
                 else "Detailed exposure information is unavailable."
             )
             self._exposure_label.setText(fallback)
+        self._refresh_panel_geometry()
 
     def clear(self) -> None:
         """Reset the panel to an empty state without hiding the window."""
@@ -222,6 +234,7 @@ class InfoPanel(QWidget):
         ):
             label.clear()
         self._exposure_label.setText("No metadata available for this item.")
+        self._refresh_panel_geometry()
 
     def current_rel(self) -> Optional[str]:
         """Return the relative path associated with the displayed asset."""
@@ -250,6 +263,67 @@ class InfoPanel(QWidget):
             f"QToolButton:pressed {{ background-color: {pressed.name(QColor.NameFormat.HexArgb)}; border-radius: 6px; }}"
         )
 
+    def _refresh_panel_geometry(self, *, recenter: bool = False) -> None:
+        """Recompute the preferred panel geometry after content changes."""
+
+        self.ensurePolished()
+        layout = self.layout()
+        if layout is not None:
+            layout.invalidate()
+            layout.activate()
+        self.updateGeometry()
+        # Qt's adjustSize() for top-level windows passes sizeHint().width() into
+        # totalHeightForWidth().  That width varies with text content, so sparse
+        # and rich metadata can accidentally produce the same total height.
+        # QLabel.updateGeometry() also skips parent-layout invalidation when the
+        # panel is hidden (isVisible() is False), leaving child layout caches
+        # stale.  Use the actual widget width instead — totalHeightForWidth()
+        # calls label.heightForWidth() directly, which is always fresh.
+        w = max(self.width(), self.minimumWidth())
+        if layout is not None and layout.hasHeightForWidth():
+            h = layout.totalHeightForWidth(w)
+            self.resize(w, h)
+        else:
+            self.adjustSize()
+            target_size = self.sizeHint().expandedTo(self.minimumSize())
+            if target_size.isValid():
+                self.resize(target_size)
+        if recenter:
+            self._center_over_parent()
+
+    def _center_over_parent(self) -> None:
+        """Center the panel over its parent using the current widget size."""
+
+        parent = self.parentWidget()
+        if parent is None or not parent.isVisible():
+            return
+        center = parent.geometry().center()
+        self.move(
+            center.x() - self.width() // 2,
+            center.y() - self.height() // 2,
+        )
+
+    def _schedule_post_show_reflow(self, *, recenter: bool) -> None:
+        """Queue a follow-up geometry pass for Linux first-show layout quirks."""
+
+        self._post_show_reflow_recenter = self._post_show_reflow_recenter or recenter
+        if self._post_show_reflow_queued:
+            return
+        self._post_show_reflow_queued = True
+        QTimer.singleShot(0, self._run_post_show_reflow)
+
+    def _run_post_show_reflow(self) -> None:
+        """Finalize the layout once the initial show event has fully settled."""
+
+        self._post_show_reflow_queued = False
+        recenter = self._post_show_reflow_recenter
+        self._post_show_reflow_recenter = False
+        if not self.isVisible():
+            return
+        self._refresh_panel_geometry(recenter=recenter)
+        if _IS_LINUX:
+            self.repaint()
+
     # ------------------------------------------------------------------
     # QWidget overrides
     # ------------------------------------------------------------------
@@ -262,16 +336,18 @@ class InfoPanel(QWidget):
         """Centre the panel over its parent window the first time it appears."""
 
         super().showEvent(event)
-        if not self._centered:
+        first_show = not self._centered
+        if first_show:
             self._centered = True
-            parent = self.parentWidget()
-            if parent is not None and parent.isVisible():
-                center = parent.geometry().center()
-                hint = self.sizeHint()
-                self.move(
-                    center.x() - hint.width() // 2,
-                    center.y() - hint.height() // 2,
-                )
+        self._refresh_panel_geometry(recenter=first_show)
+        if _IS_LINUX and first_show:
+            self._schedule_post_show_reflow(recenter=True)
+
+    def closeEvent(self, event) -> None:  # type: ignore[override]
+        """Emit a dismissal signal so the detail state stays in sync."""
+
+        self.dismissed.emit()
+        super().closeEvent(event)
 
     def paintEvent(self, event) -> None:  # type: ignore[override]
         """Draw drop shadow and an anti-aliased rounded rectangle."""

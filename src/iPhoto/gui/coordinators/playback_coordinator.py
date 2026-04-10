@@ -645,6 +645,7 @@ class PlaybackCoordinator(QObject):
             self._info_panel_metadata_attempted = set()
 
     def _clear_info_panel_metadata_state(self) -> None:
+        self._ensure_info_panel_metadata_state()
         self._info_panel_metadata_cache.clear()
         self._info_panel_metadata_inflight.clear()
         self._info_panel_metadata_attempted.clear()

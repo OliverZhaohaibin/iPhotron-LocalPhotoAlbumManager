@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Optional
 
@@ -10,6 +11,7 @@ from PySide6.QtCore import QItemSelectionModel, QModelIndex, QObject, QThreadPoo
 from PySide6.QtGui import QAction, QColor, QPalette
 
 from iPhoto.config import PLAY_ASSET_DEBOUNCE_MS
+from iPhoto.gui.detail_profile import log_detail_profile
 from iPhoto.gui.coordinators.view_router import ViewRouter
 from iPhoto.gui.ui.controllers.edit_zoom_handler import EditZoomHandler
 from iPhoto.gui.ui.controllers.header_controller import HeaderController
@@ -105,6 +107,8 @@ class PlaybackCoordinator(QObject):
         self._info_panel_metadata_cache: dict[str, dict[str, Any]] = {}
         self._info_panel_metadata_inflight: set[str] = set()
         self._info_panel_metadata_attempted: set[str] = set()
+        self._play_profile_started_at: float | None = None
+        self._play_profile_row: int | None = None
 
         self._pending_play_row: int | None = None
         self._play_debounce = QTimer(self)
@@ -259,14 +263,50 @@ class PlaybackCoordinator(QObject):
     def play_asset(self, row: int) -> None:
         if row < 0 or row >= self._asset_model.rowCount():
             return
+        self._play_profile_started_at = time.perf_counter()
+        self._play_profile_row = row
+        if not self._play_debounce.isActive() and self._pending_play_row is None:
+            self._dispatch_play_row(row, reason="immediate")
+            self._play_debounce.start()
+            return
         self._pending_play_row = row
-        self._play_debounce.start()
+        if not self._play_debounce.isActive():
+            self._play_debounce.start()
 
     def _execute_pending_play(self) -> None:
         row = self._pending_play_row
         self._pending_play_row = None
         if row is None:
             return
+        self._dispatch_play_row(row, reason="debounced")
+        self._play_debounce.start()
+
+    def _clear_play_profile(self, row: int | None = None) -> None:
+        if row is not None and getattr(self, "_play_profile_row", None) != row:
+            return
+        self._play_profile_started_at = None
+        self._play_profile_row = None
+
+    def _clear_play_request_state(self) -> None:
+        self._pending_play_row = None
+        self._clear_play_profile()
+        play_debounce = getattr(self, "_play_debounce", None)
+        if play_debounce is not None:
+            play_debounce.stop()
+
+    def _dispatch_play_row(self, row: int, *, reason: str) -> None:
+        if (
+            getattr(self, "_play_profile_started_at", None) is not None
+            and getattr(self, "_play_profile_row", None) == row
+        ):
+            elapsed_ms = (time.perf_counter() - self._play_profile_started_at) * 1000.0
+            log_detail_profile(
+                "playback",
+                "play_asset.dispatch",
+                elapsed_ms,
+                row=row,
+                reason=reason,
+            )
         self._detail_vm.show_row(row)
 
     @Slot(str)
@@ -277,6 +317,19 @@ class PlaybackCoordinator(QObject):
             self._router.show_gallery()
 
     def _handle_presentation_changed(self, presentation: DetailPresentation) -> None:
+        if (
+            getattr(self, "_play_profile_started_at", None) is not None
+            and getattr(self, "_play_profile_row", None) == presentation.row
+        ):
+            elapsed_ms = (time.perf_counter() - self._play_profile_started_at) * 1000.0
+            log_detail_profile(
+                "playback",
+                "presentation_changed",
+                elapsed_ms,
+                row=presentation.row,
+                path=presentation.path.name,
+                is_video=presentation.is_video,
+            )
         previous = self._current_presentation
         self._current_presentation = presentation
         row = presentation.row
@@ -296,10 +349,12 @@ class PlaybackCoordinator(QObject):
                 self._info_panel.show()
             elif self._info_panel and self._info_panel.isVisible() and not presentation.info_panel_visible:
                 self._info_panel.close()
+            self._clear_play_profile(presentation.row)
             return
         self._render_presentation(presentation)
 
     def _render_presentation(self, presentation: DetailPresentation) -> None:
+        render_started = time.perf_counter()
         source = presentation.path
         self._active_live_motion = None
         self._active_live_still = None
@@ -317,7 +372,15 @@ class PlaybackCoordinator(QObject):
 
         if presentation.is_video:
             self._player_view.show_video_surface(interactive=True)
+            sidecar_started = time.perf_counter()
             raw_adjustments = sidecar.load_adjustments(source)
+            log_detail_profile(
+                "playback",
+                "video.sidecar_load",
+                (time.perf_counter() - sidecar_started) * 1000.0,
+                path=source.name,
+                adjustments=len(raw_adjustments),
+            )
             info = presentation.info
             duration_sec = None
             try:
@@ -338,6 +401,7 @@ class PlaybackCoordinator(QObject):
             else:
                 self._trim_in_ms = 0
                 self._trim_out_ms = 0
+            load_started = time.perf_counter()
             self._player_view.video_area.load_video(
                 source,
                 adjustments=(
@@ -348,6 +412,14 @@ class PlaybackCoordinator(QObject):
                 trim_range_ms=trim_range_ms,
                 adjusted_preview=needs_adjusted_preview,
             )
+            log_detail_profile(
+                "playback",
+                "video.load_video",
+                (time.perf_counter() - load_started) * 1000.0,
+                path=source.name,
+                adjusted_preview=needs_adjusted_preview,
+                has_trim=has_trim,
+            )
             self._player_view.video_area.play()
             self._player_bar.setEnabled(True)
             self._zoom_handler.set_viewer(self._player_view.video_area)
@@ -355,7 +427,14 @@ class PlaybackCoordinator(QObject):
             self._zoom_widget.show()
         else:
             self._player_view.show_image_surface()
+            display_started = time.perf_counter()
             self._player_view.display_image(source)
+            log_detail_profile(
+                "playback",
+                "image.display_image",
+                (time.perf_counter() - display_started) * 1000.0,
+                path=source.name,
+            )
             self._player_bar.setEnabled(False)
             self._zoom_handler.set_viewer(self._player_view.image_viewer)
             self._player_view.image_viewer.reset_zoom()
@@ -378,6 +457,14 @@ class PlaybackCoordinator(QObject):
             self._info_panel.show()
         elif self._info_panel and self._info_panel.isVisible() and not presentation.info_panel_visible:
             self._info_panel.close()
+        log_detail_profile(
+            "playback",
+            "render_presentation.total",
+            (time.perf_counter() - render_started) * 1000.0,
+            path=source.name,
+            is_video=presentation.is_video,
+        )
+        self._clear_play_profile(presentation.row)
 
     def _autoplay_live_motion(self, presentation: DetailPresentation) -> None:
         motion_path = presentation.live_motion_abs
@@ -438,6 +525,7 @@ class PlaybackCoordinator(QObject):
         return color.name(QColor.NameFormat.HexArgb)
 
     def reset_for_gallery(self) -> None:
+        self._clear_play_request_state()
         self._player_view.video_area.stop()
         self._player_view.show_placeholder()
         self._player_bar.setEnabled(False)
@@ -451,6 +539,7 @@ class PlaybackCoordinator(QObject):
             self._info_panel.close()
 
     def shutdown(self) -> None:
+        self._clear_play_request_state()
         self._player_view.video_area.stop()
         self._is_playing = False
         self._pending_restore_path = None

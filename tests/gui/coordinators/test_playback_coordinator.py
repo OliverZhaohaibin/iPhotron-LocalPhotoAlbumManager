@@ -33,16 +33,50 @@ def _make_presentation(*, path: str = "/fake/video.mp4", is_video: bool = True, 
     )
 
 
-def test_play_asset_delegates_to_detail_vm() -> None:
+def test_play_asset_dispatches_immediately_when_idle() -> None:
     coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
     coordinator._asset_model = Mock(rowCount=Mock(return_value=3))
     coordinator._detail_vm = Mock()
     coordinator._pending_play_row = None
-    coordinator._play_debounce = Mock(start=Mock())
+    coordinator._play_debounce = Mock(isActive=Mock(return_value=False), start=Mock())
+    coordinator._dispatch_play_row = Mock()
+    coordinator._play_profile_started_at = None
+    coordinator._play_profile_row = None
 
     PlaybackCoordinator.play_asset(coordinator, 2)
 
-    assert coordinator._pending_play_row == 2
+    assert coordinator._pending_play_row is None
+    coordinator._dispatch_play_row.assert_called_once_with(2, reason="immediate")
+    coordinator._play_debounce.start.assert_called_once_with()
+
+
+def test_play_asset_queues_latest_row_while_cooldown_is_active() -> None:
+    coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
+    coordinator._asset_model = Mock(rowCount=Mock(return_value=3))
+    coordinator._detail_vm = Mock()
+    coordinator._pending_play_row = None
+    coordinator._play_debounce = Mock(isActive=Mock(return_value=True), start=Mock())
+    coordinator._dispatch_play_row = Mock()
+    coordinator._play_profile_started_at = None
+    coordinator._play_profile_row = None
+
+    PlaybackCoordinator.play_asset(coordinator, 1)
+
+    assert coordinator._pending_play_row == 1
+    coordinator._dispatch_play_row.assert_not_called()
+    coordinator._play_debounce.start.assert_not_called()
+
+
+def test_execute_pending_play_flushes_row_and_restarts_cooldown() -> None:
+    coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
+    coordinator._pending_play_row = 2
+    coordinator._play_debounce = Mock(start=Mock())
+    coordinator._dispatch_play_row = Mock()
+
+    PlaybackCoordinator._execute_pending_play(coordinator)
+
+    assert coordinator._pending_play_row is None
+    coordinator._dispatch_play_row.assert_called_once_with(2, reason="debounced")
     coordinator._play_debounce.start.assert_called_once_with()
 
 

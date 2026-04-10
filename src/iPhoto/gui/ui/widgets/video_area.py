@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import sys
+import time
 from pathlib import Path
 from typing import Mapping, Optional
 
@@ -53,6 +54,7 @@ from ....config import (
     VIDEO_COMPLETE_HOLD_BACKSTEP_MS,
 )
 from ....core.adjustment_mapping import normalise_video_trim, video_requires_adjusted_preview
+from ....gui.detail_profile import log_detail_profile
 from ....utils.ffmpeg import get_linux_180_prerotate_hint, probe_video_rotation
 from ..palette import viewer_surface_color
 from .gl_image_viewer import GLImageViewer
@@ -152,6 +154,9 @@ class VideoArea(QWidget):
         self._video_frame_dispatch_pending = False
         self._diag_queued_frame_count = 0
         self._diag_presented_frame_count = 0
+        self._profile_load_started_at: float | None = None
+        self._profile_load_source: Path | None = None
+        self._profile_first_frame_logged = False
         self._resize_refit_pending = False
         self._resize_refit_timer = QTimer(self)
         self._resize_refit_timer.setSingleShot(True)
@@ -609,6 +614,7 @@ class VideoArea(QWidget):
     ) -> None:
         """Load a video file for playback."""
 
+        load_started = time.perf_counter()
         _log.debug(
             "[trace][video_area] load_video:start %s",
             {
@@ -624,8 +630,13 @@ class VideoArea(QWidget):
             },
         )
         prev_source = self._current_source
+        self._profile_load_started_at = load_started
+        self._profile_load_source = path
+        self._profile_first_frame_logged = False
         self._current_source = path
         self._current_adjustments = dict(adjustments or {})
+        self._pending_video_frame = None
+        self._video_frame_dispatch_pending = False
         self._last_presented_video_frame = None
         if adjusted_preview is not None:
             self.set_adjusted_preview_enabled(adjusted_preview)
@@ -651,8 +662,19 @@ class VideoArea(QWidget):
         # *before* setting the source.  The renderer uses the probed value
         # as the primary rotation source (more reliable across platforms
         # than Qt's ``QVideoFrameFormat.rotation()``).
+        probe_started = time.perf_counter()
         cw_deg, raw_w, raw_h = probe_video_rotation(path)
         linux_180_hint = get_linux_180_prerotate_hint(path)
+        log_detail_profile(
+            "video_area",
+            "rotation_probe",
+            (time.perf_counter() - probe_started) * 1000.0,
+            path=path.name,
+            rotation_cw=cw_deg,
+            raw_width=raw_w,
+            raw_height=raw_h,
+            linux_180_hint=linux_180_hint,
+        )
         self._container_rotation_cw = cw_deg
         self._container_raw_w = raw_w
         self._container_raw_h = raw_h
@@ -674,7 +696,14 @@ class VideoArea(QWidget):
                 display_height = raw_h
             self.displaySizeChanged.emit(QSizeF(float(display_width), float(display_height)))
 
+        set_source_started = time.perf_counter()
         self._player.setSource(QUrl.fromLocalFile(str(path)))
+        log_detail_profile(
+            "video_area",
+            "set_source",
+            (time.perf_counter() - set_source_started) * 1000.0,
+            path=path.name,
+        )
         # Do not auto-play; let the coordinator decide.
         # But ensure we are at start
         if trim_range_ms is not None:
@@ -711,6 +740,13 @@ class VideoArea(QWidget):
                 "size": (self.width(), self.height()),
                 "stack_size": (self._surface_stack.width(), self._surface_stack.height()),
             },
+        )
+        log_detail_profile(
+            "video_area",
+            "load_video.total",
+            (time.perf_counter() - load_started) * 1000.0,
+            path=path.name,
+            adjusted_preview=self._adjusted_preview_enabled,
         )
 
     def play(self) -> None:
@@ -783,6 +819,9 @@ class VideoArea(QWidget):
         self._container_raw_w = 0
         self._container_raw_h = 0
         self._container_linux_180_hint = False
+        self._profile_load_started_at = None
+        self._profile_load_source = None
+        self._profile_first_frame_logged = False
         self._trim_in_ms = 0
         self._trim_out_ms = 0
         self._restart_from_trim_in_on_play = False
@@ -844,6 +883,22 @@ class VideoArea(QWidget):
 
     def _present_video_frame(self, frame: "QVideoFrame") -> None:
         """Forward each decoded frame to the active GPU-backed preview surface."""
+
+        if (
+            not self._profile_first_frame_logged
+            and self._profile_load_started_at is not None
+            and self._profile_load_source == self._current_source
+            and self._current_source is not None
+        ):
+            self._profile_first_frame_logged = True
+            log_detail_profile(
+                "video_area",
+                "first_frame",
+                (time.perf_counter() - self._profile_load_started_at) * 1000.0,
+                path=self._current_source.name,
+                adjusted_preview=self._adjusted_preview_enabled,
+                surface=self._diag_surface_name(),
+            )
 
         if QVideoFrame is not None:
             try:

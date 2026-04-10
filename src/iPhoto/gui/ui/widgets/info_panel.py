@@ -272,7 +272,19 @@ class InfoPanel(QWidget):
             layout.invalidate()
             layout.activate()
         self.updateGeometry()
-        self.adjustSize()
+        # Qt's adjustSize() for top-level windows passes sizeHint().width() into
+        # totalHeightForWidth().  That width varies with text content, so sparse
+        # and rich metadata can accidentally produce the same total height.
+        # QLabel.updateGeometry() also skips parent-layout invalidation when the
+        # panel is hidden (isVisible() is False), leaving child layout caches
+        # stale.  Use the actual widget width instead — totalHeightForWidth()
+        # calls label.heightForWidth() directly, which is always fresh.
+        w = max(self.width(), self.minimumWidth())
+        if layout is not None and layout.hasHeightForWidth():
+            h = layout.totalHeightForWidth(w)
+            self.resize(w, h)
+        else:
+            self.adjustSize()
         if recenter:
             self._center_over_parent()
 

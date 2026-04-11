@@ -72,6 +72,7 @@ class DetailViewModel(BaseViewModel):
         self._info_panel_visible = False
         self._presentation_reload_token = 0
         self._pending_restore_requests: dict[Path, MediaRestoreRequest] = {}
+        self._video_presentation_cache: dict | None = None
         self._store.data_changed.connect(self._handle_store_changed)
         self._store.row_changed.connect(self._handle_row_changed)
         restore_signal = getattr(self._media_session, "restoreRequested", None)
@@ -168,15 +169,17 @@ class DetailViewModel(BaseViewModel):
     ) -> None:
         request = restore_request or MediaRestoreRequest(path=path, reason=reason)
         self._presentation_reload_token += 1
-        self._pending_restore_requests[path] = request
         current_path = self.current_path.value
         if isinstance(current_path, Path) and current_path == path:
+            self._pending_restore_requests[current_path] = request
             self.show_current()
             return
         if self._media_session.set_current_by_path(path):
+            current_source = self._media_session.current_source()
+            restore_key = current_source if isinstance(current_source, Path) else path
+            self._pending_restore_requests[restore_key] = request
             self.show_current()
             return
-        self._pending_restore_requests.pop(path, None)
 
     def info_for_current(self) -> Optional[dict[str, Any]]:
         presentation = self.presentation.value
@@ -248,21 +251,42 @@ class DetailViewModel(BaseViewModel):
         video_adjusted_preview = False
         restore_request = self._pending_restore_requests.pop(dto.abs_path, None)
         if dto.is_video:
-            raw_adjustments = sidecar.load_adjustments(dto.abs_path)
-            duration_sec = self._resolve_video_duration(dto, restore_request)
-            video_adjusted_preview = sidecar.video_requires_adjusted_preview(raw_adjustments)
-            has_trim = sidecar.trim_is_non_default(raw_adjustments, duration_sec)
-            trim_in_sec, trim_out_sec = sidecar.normalise_video_trim(raw_adjustments, duration_sec)
-            if has_trim:
-                video_trim_range_ms = (
-                    int(round(trim_in_sec * 1000.0)),
-                    int(round(trim_out_sec * 1000.0)),
+            cache = self._video_presentation_cache
+            if (
+                isinstance(cache, dict)
+                and cache.get("path") == dto.abs_path
+                and cache.get("reload_token") == self._presentation_reload_token
+            ):
+                video_adjustments = cache.get("video_adjustments")
+                video_trim_range_ms = cache.get("video_trim_range_ms")
+                video_adjusted_preview = bool(cache.get("video_adjusted_preview", False))
+            else:
+                raw_adjustments = sidecar.load_adjustments(dto.abs_path)
+                duration_sec = self._resolve_video_duration(dto, restore_request)
+                video_adjusted_preview = sidecar.video_requires_adjusted_preview(
+                    raw_adjustments
                 )
-            video_adjustments = (
-                sidecar.resolve_render_adjustments(raw_adjustments)
-                if video_adjusted_preview
-                else (raw_adjustments or None)
-            )
+                has_trim = sidecar.trim_is_non_default(raw_adjustments, duration_sec)
+                trim_in_sec, trim_out_sec = sidecar.normalise_video_trim(
+                    raw_adjustments, duration_sec
+                )
+                if has_trim:
+                    video_trim_range_ms = (
+                        int(round(trim_in_sec * 1000.0)),
+                        int(round(trim_out_sec * 1000.0)),
+                    )
+                video_adjustments = (
+                    sidecar.resolve_render_adjustments(raw_adjustments)
+                    if video_adjusted_preview
+                    else (raw_adjustments or None)
+                )
+                self._video_presentation_cache = {
+                    "path": dto.abs_path,
+                    "reload_token": self._presentation_reload_token,
+                    "video_adjustments": video_adjustments,
+                    "video_trim_range_ms": video_trim_range_ms,
+                    "video_adjusted_preview": video_adjusted_preview,
+                }
         return DetailPresentation(
             row=row,
             path=dto.abs_path,

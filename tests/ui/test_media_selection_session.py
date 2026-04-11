@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from iPhoto.application.dtos import AssetDTO
-from iPhoto.gui.ui.media import MediaSelectionSession
+from iPhoto.gui.ui.media import MediaRestoreRequest, MediaSelectionSession
 from iPhoto.gui.viewmodels.signal import Signal
 
 
@@ -84,3 +84,14 @@ def test_session_can_restore_current_item_by_path_after_reload() -> None:
     assert session.set_current_by_path(current) is True
     assert session.current_row() == 0
     assert session.current_source() == current
+
+
+def test_session_emits_restore_request_payload() -> None:
+    session = MediaSelectionSession()
+    emitted: list[MediaRestoreRequest] = []
+    session.restoreRequested.connect(emitted.append)
+
+    request = MediaRestoreRequest(path=Path("/fake/video.mp4"), reason="edit_done", duration_sec=7.25)
+    session.request_restore(request)
+
+    assert emitted == [request]

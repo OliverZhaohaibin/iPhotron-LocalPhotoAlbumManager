@@ -151,7 +151,6 @@ class MainCoordinator(QObject):
             router=self._view_router,
             asset_model=self._asset_list_vm,
             detail_vm=self._detail_vm,
-            media_session=self._media_session,
             adjustment_committer=self._adjustment_committer,
             zoom_slider=window.ui.zoom_slider,
             zoom_in_button=window.ui.zoom_in_button,
@@ -190,7 +189,6 @@ class MainCoordinator(QObject):
             self._media_session,
             self._adjustment_committer,
         )
-        self._playback.set_edit_coordinator(self._edit)
 
         # --- Legacy Controllers ---
         self._dialog = DialogController(window, context, window.ui.status_bar)

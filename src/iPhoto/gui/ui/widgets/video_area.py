@@ -124,10 +124,12 @@ class VideoArea(QWidget):
         self._renderer.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self._edit_viewer = GLImageViewer(self._surface_stack)
         self._edit_viewer.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
-        # Playback should keep the legacy detail-page proportions: the crop is
-        # centered, but we do not zoom it to fill the viewport. Edit mode opts
-        # back into crop framing on the same shared GL surface.
+        # In detail playback, crop framing is disabled but the crop region fills
+        # the canvas (strength=1.0) so that crop-edited videos look the same as
+        # non-crop videos (both fill the viewport).  Edit mode uses a lower
+        # strength (0.5) for the interactive editing experience.
         self._edit_viewer.set_crop_framing_enabled(False)
+        self._edit_viewer.set_crop_center_zoom_strength(1.0)
         self._surface_stack.addWidget(self._renderer)
         self._surface_stack.addWidget(self._edit_viewer)
         self._surface_stack.setCurrentWidget(self._renderer)
@@ -340,9 +342,9 @@ class VideoArea(QWidget):
         )
         self._edit_mode_active = bool(active)
         self._edit_viewer.set_crop_framing_enabled(self._edit_mode_active)
-        # In detail playback, keep crop framing disabled but still use crop-aware
-        # centering with full strength so adjusted-video previews fill the canvas
-        # optimally after crop changes. Edit mode still uses explicit framing.
+        # In detail playback, keep crop framing disabled but use strength=1.0 so
+        # the crop region fills the canvas, matching non-crop video behaviour.
+        # Edit mode uses strength=0.5 for its interactive partial-zoom UX.
         self._edit_viewer.set_crop_center_zoom_strength(1.0 if not self._edit_mode_active else 0.5)
         if self._edit_mode_active:
             self.set_adjusted_preview_enabled(True)
@@ -715,15 +717,18 @@ class VideoArea(QWidget):
         #       (common on macOS/AVFoundation when the file is cached).
         #   (b) durationChanged fired synchronously inside setSource() above,
         #       before set_trim_range_ms() had a chance to update _trim_in/out.
-        # When the backend reports 0, only fall back to the previously known
-        # duration if we are reloading the *same* source — for a different
-        # source the previous duration is unrelated and must not be used to
-        # clamp/reset the new clip's trim range before the real duration arrives.
+        # For same-source reloads, prefer the previously confirmed full duration
+        # over the immediate post-setSource() value. Some backends momentarily
+        # return 0 or a slightly stale non-zero duration during reload, which
+        # would leave the progress bar a little longer than the actual
+        # seekable range. For a different source, the previous duration is
+        # unrelated and must not be reused.
         # In all cases calling _on_duration_changed is safe and idempotent.
         same_source_reload = path == prev_source
-        effective_duration_ms = self._player.duration()
-        if effective_duration_ms <= 0 and same_source_reload and prev_duration_ms > 0:
+        if same_source_reload and prev_duration_ms > 0:
             effective_duration_ms = prev_duration_ms
+        else:
+            effective_duration_ms = self._player.duration()
         if effective_duration_ms > 0:
             self._on_duration_changed(effective_duration_ms)
         self._player.setPosition(self._trim_in_ms if self._trim_in_ms > 0 else 0)

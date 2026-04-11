@@ -19,9 +19,9 @@
 
 ## 📥 下载与安装
 
-[![下载 Windows 版本](https://img.shields.io/badge/⬇️%20下载-Windows%20(.exe)-blue?style=for-the-badge&logo=windows)](https://github.com/OliverZhaohaibin/iPhotron-LocalPhotoAlbumManager/releases/download/v4.6.0/v4.60-x86_64-setup.exe)
-[![下载 Linux 版本](https://img.shields.io/badge/⬇️%20下载-Linux%20(.deb)-orange?style=for-the-badge&logo=linux&logoColor=white)](https://github.com/OliverZhaohaibin/iPhotron-LocalPhotoAlbumManager/releases/download/v4.5.0/iPhotron_4.50_amd64.deb)
-[![Download for Linux (.AppImage)](https://img.shields.io/badge/⬇️%20Download-Linux%20(.AppImage)-brightgreen?style=for-the-badge&logo=linux&logoColor=white)](https://github.com/OliverZhaohaibin/iPhotron-LocalPhotoAlbumManager/releases/download/v4.5.0/iPhotron-x86_64.AppImage)
+[![下载 Windows 版本](https://img.shields.io/badge/⬇️%20下载-Windows%20(.exe)-blue?style=for-the-badge&logo=windows)](https://github.com/OliverZhaohaibin/iPhotron-LocalPhotoAlbumManager/releases/download/v5.0.0/v5.00-alpha-x86-setup.exe)
+[![下载 Linux 版本](https://img.shields.io/badge/⬇️%20下载-Linux%20(.deb)-orange?style=for-the-badge&logo=linux&logoColor=white)](https://github.com/OliverZhaohaibin/iPhotron-LocalPhotoAlbumManager/releases/download/v5.0.0/iPhotron_5.00_amd64.deb)
+[![Download for Linux (.AppImage)](https://img.shields.io/badge/⬇️%20Download-Linux%20(.AppImage)-brightgreen?style=for-the-badge&logo=linux&logoColor=white)](https://github.com/OliverZhaohaibin/iPhotron-LocalPhotoAlbumManager/releases/download/v5.0.0/v5.00-alpha-x86-setup.exe)
 
 **💡 快速安装：** 点击上方按钮直接下载最新安装程序。
 
@@ -29,7 +29,7 @@
 - **Linux：** 安装命令为：
 
 ```bash
-sudo apt install ./iPhotron_4.30_amd64.deb
+sudo apt install ./iPhotron_5.00_amd64.deb
 ```
 
 **开发者安装：**

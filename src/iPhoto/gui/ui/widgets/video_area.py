@@ -715,15 +715,18 @@ class VideoArea(QWidget):
         #       (common on macOS/AVFoundation when the file is cached).
         #   (b) durationChanged fired synchronously inside setSource() above,
         #       before set_trim_range_ms() had a chance to update _trim_in/out.
-        # When the backend reports 0, only fall back to the previously known
-        # duration if we are reloading the *same* source — for a different
-        # source the previous duration is unrelated and must not be used to
-        # clamp/reset the new clip's trim range before the real duration arrives.
+        # For same-source reloads, prefer the previously confirmed full duration
+        # over the immediate post-setSource() value. Some backends momentarily
+        # return 0 or a slightly stale non-zero duration during reload, which
+        # would leave the progress bar a little longer than the actual
+        # seekable range. For a different source, the previous duration is
+        # unrelated and must not be reused.
         # In all cases calling _on_duration_changed is safe and idempotent.
         same_source_reload = path == prev_source
-        effective_duration_ms = self._player.duration()
-        if effective_duration_ms <= 0 and same_source_reload and prev_duration_ms > 0:
+        if same_source_reload and prev_duration_ms > 0:
             effective_duration_ms = prev_duration_ms
+        else:
+            effective_duration_ms = self._player.duration()
         if effective_duration_ms > 0:
             self._on_duration_changed(effective_duration_ms)
         self._player.setPosition(self._trim_in_ms if self._trim_in_ms > 0 else 0)

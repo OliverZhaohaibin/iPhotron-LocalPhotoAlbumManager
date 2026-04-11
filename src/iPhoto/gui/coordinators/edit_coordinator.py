@@ -1,7 +1,6 @@
 """Coordinator for the Edit View workflow."""
 
 from __future__ import annotations
-
 import logging
 import math
 from pathlib import Path
@@ -505,6 +504,10 @@ class EditCoordinator(QObject):
     def leave_edit_mode(self):
         """Returns to detail view."""
         source = self._current_source
+        is_video_source = (
+            source is not None
+            and source.suffix.lower() in VIDEO_EXTENSIONS
+        )
         should_restore_detail = (
             source is not None
             and self._media_session is not None
@@ -515,9 +518,7 @@ class EditCoordinator(QObject):
             {
                 "source": str(source) if source is not None else None,
                 "session_exists": self._session is not None,
-                "is_video": (
-                    source is not None and source.suffix.lower() in VIDEO_EXTENSIONS
-                ),
+                "is_video": is_video_source,
                 "surface_before": self._ui.video_area._diag_surface_name(),
                 "adjusted_preview_before": self._ui.video_area.adjusted_preview_enabled(),
             },
@@ -527,7 +528,7 @@ class EditCoordinator(QObject):
             if self._session is not None:
                 adjustments = self._resolve_session_adjustments()
             self._fullscreen_manager.exit_fullscreen_preview(source, adjustments)
-        if should_restore_detail:
+        if should_restore_detail and not is_video_source:
             self._media_session.restoreRequested.emit(source, "edit_exit")
         if self._session is not None:
             self._active_edit_viewport().setCropMode(False, self._session.values())
@@ -557,6 +558,8 @@ class EditCoordinator(QObject):
         self._ui.video_area.set_edit_mode_active(False)
         self._ui.video_area.set_controls_enabled(True)
         self._ui.video_trim_bar.hide()
+        if source is not None and is_video_source:
+            self._restore_detail_video_preview(source, pending_duration_sec)
         self._suppress_exit_restore = False
 
         self._ui.edit_sidebar.set_session(None)

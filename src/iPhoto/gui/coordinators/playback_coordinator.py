@@ -103,6 +103,7 @@ class PlaybackCoordinator(QObject):
         self._resume_after_transition = False
         self._pending_restore_path: Path | None = None
         self._pending_restore_reason: str | None = None
+        self._force_presentation_reload_path: Path | None = None
         self._trim_in_ms = 0
         self._trim_out_ms = 0
         self._current_presentation: DetailPresentation | None = None
@@ -344,7 +345,12 @@ class PlaybackCoordinator(QObject):
             and previous.row == presentation.row
             and previous.path == presentation.path
         )
-        if same_asset:
+        force_reload_path = getattr(self, "_force_presentation_reload_path", None)
+        force_reload = (
+            force_reload_path is not None
+            and force_reload_path == presentation.path
+        )
+        if same_asset and not force_reload:
             self._update_favorite_icon(presentation.is_favorite)
             if self._info_panel and presentation.info_panel_visible:
                 self._refresh_info_panel(presentation.info)
@@ -353,6 +359,11 @@ class PlaybackCoordinator(QObject):
                 self._info_panel.close()
             self._clear_play_profile(presentation.row)
             return
+        if force_reload:
+            # Restoring the current asset after edit/rotate must bypass the
+            # same-asset fast path so sidecar-backed trim and preview state are
+            # reloaded into the playback widgets.
+            self._force_presentation_reload_path = None
         self._render_presentation(presentation)
 
     def _render_presentation(self, presentation: DetailPresentation) -> None:
@@ -534,6 +545,7 @@ class PlaybackCoordinator(QObject):
         self._is_playing = False
         self._pending_restore_path = None
         self._pending_restore_reason = None
+        self._force_presentation_reload_path = None
         self._current_presentation = None
         self._detail_vm.hide_info_panel(refresh_presentation=False)
         self._update_header(None)
@@ -547,6 +559,7 @@ class PlaybackCoordinator(QObject):
         self._is_playing = False
         self._pending_restore_path = None
         self._pending_restore_reason = None
+        self._force_presentation_reload_path = None
         self._current_presentation = None
         self._detail_vm.hide_info_panel(refresh_presentation=False)
         self._update_header(None)
@@ -737,9 +750,23 @@ class PlaybackCoordinator(QObject):
             self._pending_restore_path = path
             self._pending_restore_reason = reason
             return
-        self._detail_vm.restore_after_adjustment(path, reason)
+        self._restore_after_adjustment(path, reason)
 
     def _handle_adjustments_committed(self, path: object, reason: str) -> None:
+        presentation = self._current_presentation
+        if (
+            reason == "edit_done"
+            and isinstance(path, Path)
+            and presentation is not None
+            and presentation.is_video
+            and presentation.path == path
+        ):
+            # EditCoordinator restores the current video preview directly when
+            # leaving edit mode so it can reuse the probed duration from the
+            # edit session. Replaying the deferred MVVM restore here reloads
+            # the same asset a second time through presentation metadata,
+            # which is the path that regressed the tail dead-zone.
+            return
         self._handle_restore_requested(path, reason)
 
     def _handle_detail_view_shown(self) -> None:
@@ -749,4 +776,12 @@ class PlaybackCoordinator(QObject):
         reason = self._pending_restore_reason or "restore"
         self._pending_restore_path = None
         self._pending_restore_reason = None
+        self._restore_after_adjustment(path, reason)
+
+    def _restore_after_adjustment(self, path: Path, reason: str) -> None:
+        # Force the next presentation refresh for this asset to pass through
+        # the full render path. Without this, same-asset restores triggered by
+        # edit completion skip video reload and leave the progress bar mapped
+        # to the stale pre-edit trim range.
+        self._force_presentation_reload_path = path
         self._detail_vm.restore_after_adjustment(path, reason)

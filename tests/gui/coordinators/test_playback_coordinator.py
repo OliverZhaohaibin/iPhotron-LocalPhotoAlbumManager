@@ -105,6 +105,7 @@ def test_handle_presentation_changed_skips_full_rerender_for_same_asset() -> Non
     presentation = _make_presentation(is_favorite=False)
     updated = _make_presentation(is_favorite=True)
     coordinator._current_presentation = presentation
+    coordinator._force_presentation_reload_path = None
     coordinator._asset_model = Mock()
     coordinator._asset_model.set_current_row = Mock()
     coordinator.assetChanged = Mock(emit=Mock())
@@ -118,6 +119,29 @@ def test_handle_presentation_changed_skips_full_rerender_for_same_asset() -> Non
 
     coordinator._render_presentation.assert_not_called()
     coordinator._update_favorite_icon.assert_called_once_with(True)
+
+
+def test_handle_presentation_changed_rerenders_same_asset_after_adjustment_restore() -> None:
+    coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
+    presentation = _make_presentation(path="/fake/video.mp4")
+    coordinator._current_presentation = presentation
+    coordinator._force_presentation_reload_path = Path("/fake/video.mp4")
+    coordinator._asset_model = Mock()
+    coordinator._asset_model.set_current_row = Mock()
+    coordinator.assetChanged = Mock(emit=Mock())
+    coordinator._update_header = Mock()
+    coordinator._sync_filmstrip_selection = Mock()
+    coordinator._render_presentation = Mock()
+    coordinator._update_favorite_icon = Mock()
+    coordinator._clear_play_profile = Mock()
+    coordinator._info_panel = None
+
+    PlaybackCoordinator._handle_presentation_changed(coordinator, presentation)
+
+    assert coordinator._force_presentation_reload_path is None
+    coordinator._render_presentation.assert_called_once_with(presentation)
+    coordinator._update_favorite_icon.assert_not_called()
+    coordinator._clear_play_profile.assert_not_called()
 
 
 def test_handle_rotate_requested_routes_video_rotation_through_video_area() -> None:
@@ -146,6 +170,7 @@ def test_adjustment_restore_is_deferred_while_edit_session_is_active() -> None:
     coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
     coordinator._pending_restore_path = None
     coordinator._pending_restore_reason = None
+    coordinator._force_presentation_reload_path = None
     coordinator._detail_vm = Mock()
     coordinator._is_edit_session_active = Mock(return_value=True)
     source = Path("/fake/video.mp4")
@@ -159,6 +184,56 @@ def test_adjustment_restore_is_deferred_while_edit_session_is_active() -> None:
     PlaybackCoordinator._handle_detail_view_shown(coordinator)
 
     coordinator._detail_vm.restore_after_adjustment.assert_called_once_with(source, "edit_done")
+
+
+def test_adjustment_restore_for_current_asset_forces_next_presentation_reload() -> None:
+    coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
+    coordinator._force_presentation_reload_path = None
+    coordinator._detail_vm = Mock()
+    coordinator._is_edit_session_active = Mock(return_value=False)
+    source = Path("/fake/video.mp4")
+
+    PlaybackCoordinator._handle_restore_requested(coordinator, source, "edit_done")
+
+    assert coordinator._force_presentation_reload_path == source
+    coordinator._detail_vm.restore_after_adjustment.assert_called_once_with(source, "edit_done")
+
+
+def test_adjustments_committed_skips_duplicate_restore_for_current_video_edit_done() -> None:
+    coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
+    coordinator._current_presentation = _make_presentation(
+        path="/fake/video.mp4",
+        is_video=True,
+    )
+    coordinator._handle_restore_requested = Mock()
+
+    PlaybackCoordinator._handle_adjustments_committed(
+        coordinator,
+        Path("/fake/video.mp4"),
+        "edit_done",
+    )
+
+    coordinator._handle_restore_requested.assert_not_called()
+
+
+def test_adjustments_committed_keeps_restore_for_current_image_edit_done() -> None:
+    coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
+    coordinator._current_presentation = _make_presentation(
+        path="/fake/photo.jpg",
+        is_video=False,
+    )
+    coordinator._handle_restore_requested = Mock()
+
+    PlaybackCoordinator._handle_adjustments_committed(
+        coordinator,
+        Path("/fake/photo.jpg"),
+        "edit_done",
+    )
+
+    coordinator._handle_restore_requested.assert_called_once_with(
+        Path("/fake/photo.jpg"),
+        "edit_done",
+    )
 
 
 def test_reset_for_gallery_closes_info_panel_and_clears_viewmodel_state() -> None:

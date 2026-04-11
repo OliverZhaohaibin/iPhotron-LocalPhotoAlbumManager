@@ -746,6 +746,22 @@ class TestVideoArea:
         # The fallback to the previous duration must fire.
         mock_on_dur.assert_called_once_with(5000)
 
+    def test_load_video_same_source_reload_prefers_prev_duration_over_stale_nonzero_value(
+        self, qapp, mocker
+    ):
+        """Same-source reload should reuse the known duration even when Qt
+        immediately reports a stale non-zero duration."""
+        va = VideoArea()
+        path = Path("/fake/video.mp4")
+        va._current_source = path
+        va._current_duration_ms = 5000
+        self._setup_load_video_mocks(va, mocker, player_duration=5234)
+        mock_on_dur = mocker.patch.object(va, "_on_duration_changed")
+
+        va.load_video(path)
+
+        mock_on_dur.assert_called_once_with(5000)
+
     def test_load_video_different_source_does_not_use_prev_duration_fallback(
         self, qapp, mocker
     ):

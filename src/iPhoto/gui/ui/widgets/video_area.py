@@ -124,11 +124,12 @@ class VideoArea(QWidget):
         self._renderer.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self._edit_viewer = GLImageViewer(self._surface_stack)
         self._edit_viewer.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
-        # Playback should keep the legacy detail-page proportions: the crop is
-        # centered, but we do not zoom it to fill the viewport. Edit mode opts
-        # back into crop framing on the same shared GL surface.
+        # In detail playback, crop framing is disabled but the crop region fills
+        # the canvas (strength=1.0) so that crop-edited videos look the same as
+        # non-crop videos (both fill the viewport).  Edit mode uses a lower
+        # strength (0.5) for the interactive editing experience.
         self._edit_viewer.set_crop_framing_enabled(False)
-        self._edit_viewer.set_crop_center_zoom_strength(0.0)
+        self._edit_viewer.set_crop_center_zoom_strength(1.0)
         self._surface_stack.addWidget(self._renderer)
         self._surface_stack.addWidget(self._edit_viewer)
         self._surface_stack.setCurrentWidget(self._renderer)
@@ -341,11 +342,10 @@ class VideoArea(QWidget):
         )
         self._edit_mode_active = bool(active)
         self._edit_viewer.set_crop_framing_enabled(self._edit_mode_active)
-        # In detail playback, keep crop framing disabled and do not apply any
-        # extra crop-derived zoom (strength=0.0) so that the canvas size matches
-        # non-crop videos (fit-to-view of the full frame, crop region centred).
-        # Edit mode uses explicit framing (strength=0.5 with crop_framing_enabled).
-        self._edit_viewer.set_crop_center_zoom_strength(0.0 if not self._edit_mode_active else 0.5)
+        # In detail playback, keep crop framing disabled but use strength=1.0 so
+        # the crop region fills the canvas, matching non-crop video behaviour.
+        # Edit mode uses strength=0.5 for its interactive partial-zoom UX.
+        self._edit_viewer.set_crop_center_zoom_strength(1.0 if not self._edit_mode_active else 0.5)
         if self._edit_mode_active:
             self.set_adjusted_preview_enabled(True)
         _log.debug(

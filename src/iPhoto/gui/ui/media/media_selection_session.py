@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Optional, Protocol
 
+from .media_restore_request import MediaRestoreRequest
 from iPhoto.gui.viewmodels.signal import Signal
 
 
@@ -65,6 +66,9 @@ class MediaSelectionSession:
 
     def current_source(self) -> Optional[Path]:
         return self._current_source
+
+    def request_restore(self, request: MediaRestoreRequest) -> None:
+        self.restoreRequested.emit(request)
 
     def next_row(self) -> Optional[int]:
         if self._collection is None:

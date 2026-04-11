@@ -37,6 +37,7 @@ from iPhoto.gui.ui.tasks.video_sidebar_preview_worker import (
 )
 from iPhoto.gui.ui.controllers.edit_preview_manager import resolve_adjustment_mapping
 from iPhoto.gui.ui.palette import viewer_surface_color
+from iPhoto.gui.ui.media import MediaRestoreRequest
 from iPhoto.io import sidecar
 from iPhoto.io.metadata import read_video_meta
 from iPhoto.media_classifier import VIDEO_EXTENSIONS
@@ -170,7 +171,6 @@ class EditCoordinator(QObject):
         self._preview_updates_suspended = False
         self._interaction_depth = 0
         self._eyedropper_target = "curve"
-        self._suppress_exit_restore = False
 
         self._connect_signals()
 
@@ -340,7 +340,6 @@ class EditCoordinator(QObject):
         """Prepares the edit view for the given asset and switches view."""
         if self._session is not None:
             return
-        self._suppress_exit_restore = False
         _LOGGER.debug(
             "[trace][edit] enter_edit_mode:start %s",
             {
@@ -501,7 +500,7 @@ class EditCoordinator(QObject):
             self._ui.edit_sidebar.set_light_preview_image(result.image, color_stats=result.stats)
             self._ui.edit_sidebar.refresh()
 
-    def leave_edit_mode(self):
+    def leave_edit_mode(self, *, restore_reason: str = "edit_exit"):
         """Returns to detail view."""
         source = self._current_source
         is_video_source = (
@@ -511,7 +510,6 @@ class EditCoordinator(QObject):
         should_restore_detail = (
             source is not None
             and self._media_session is not None
-            and not self._suppress_exit_restore
         )
         _LOGGER.debug(
             "[trace][edit] leave_edit_mode:start %s",
@@ -528,8 +526,6 @@ class EditCoordinator(QObject):
             if self._session is not None:
                 adjustments = self._resolve_session_adjustments()
             self._fullscreen_manager.exit_fullscreen_preview(source, adjustments)
-        if should_restore_detail and not is_video_source:
-            self._media_session.restoreRequested.emit(source, "edit_exit")
         if self._session is not None:
             self._active_edit_viewport().setCropMode(False, self._session.values())
         self._active_edit_viewport().set_eyedropper_mode(False)
@@ -558,9 +554,6 @@ class EditCoordinator(QObject):
         self._ui.video_area.set_edit_mode_active(False)
         self._ui.video_area.set_controls_enabled(True)
         self._ui.video_trim_bar.hide()
-        if source is not None and is_video_source:
-            self._restore_detail_video_preview(source, pending_duration_sec)
-        self._suppress_exit_restore = False
 
         self._ui.edit_sidebar.set_session(None)
         self._ui.edit_sidebar.set_video_edit_mode(False)
@@ -573,6 +566,14 @@ class EditCoordinator(QObject):
             animate=True,
             show_filmstrip=show_filmstrip,
         )
+        if should_restore_detail:
+            self._media_session.request_restore(
+                MediaRestoreRequest(
+                    path=source,
+                    reason=restore_reason,
+                    duration_sec=pending_duration_sec if is_video_source else None,
+                )
+            )
         _LOGGER.debug(
             "[trace][edit] leave_edit_mode:after_transition_start %s",
             {
@@ -604,12 +605,10 @@ class EditCoordinator(QObject):
             finally:
                 if navigation:
                     navigation.resume_library_watcher()
-            self._suppress_exit_restore = True
-            self.leave_edit_mode()
+            self.leave_edit_mode(restore_reason="edit_done")
             return
         if self._adjustment_committer.commit(source, self._session.values(), reason="edit_done"):
-            self._suppress_exit_restore = True
-            self.leave_edit_mode()
+            self.leave_edit_mode(restore_reason="edit_done")
 
     def _handle_reset_clicked(self):
         if self._session:
@@ -805,53 +804,6 @@ class EditCoordinator(QObject):
 
     def _queue_video_sidebar_preview(self) -> None:
         self._refresh_video_sidebar_preview()
-
-    def _restore_detail_video_preview(self, source: Path, duration_sec: float | None = None) -> None:
-        raw_adjustments = sidecar.load_adjustments(source)
-        has_trim = sidecar.trim_is_non_default(raw_adjustments, duration_sec)
-        needs_adjusted_preview = sidecar.video_requires_adjusted_preview(raw_adjustments)
-        trim_in_sec, trim_out_sec = sidecar.normalise_video_trim(raw_adjustments, duration_sec)
-        trim_range_ms = None
-        if has_trim:
-            trim_range_ms = (
-                int(round(trim_in_sec * 1000.0)),
-                int(round(trim_out_sec * 1000.0)),
-            )
-        _LOGGER.debug(
-            "[trace][edit] restore_detail_video_preview:resolved %s",
-            {
-                "source": str(source),
-                "raw_adjustments_keys": sorted(raw_adjustments.keys()),
-                "has_trim": has_trim,
-                "trim_in_sec": trim_in_sec,
-                "trim_out_sec": trim_out_sec,
-                "trim_range_ms": trim_range_ms,
-                "needs_adjusted_preview": needs_adjusted_preview,
-            },
-        )
-        self._ui.video_area.load_video(
-            source,
-            adjustments=(
-                sidecar.resolve_render_adjustments(raw_adjustments)
-                if needs_adjusted_preview
-                else raw_adjustments
-            ),
-            trim_range_ms=trim_range_ms,
-            adjusted_preview=needs_adjusted_preview,
-        )
-        _LOGGER.debug(
-            "[trace][edit] restore_detail_video_preview:after_load %s",
-            {
-                "source": str(source),
-                "surface": self._ui.video_area._diag_surface_name(),
-                "adjusted_preview_enabled": self._ui.video_area.adjusted_preview_enabled(),
-            },
-        )
-        # Mirror the gallery -> detail playback path so the first post-edit
-        # frame is decoded immediately. Without restarting playback here the
-        # GL preview may remain blank or keep the stale edit framing because no
-        # fresh frame arrives to trigger the deferred reset/centering logic.
-        self._ui.video_area.play()
 
     def _queue_video_trim_thumbnails(self, duration_sec: float | None) -> None:
         if self._current_source is None:

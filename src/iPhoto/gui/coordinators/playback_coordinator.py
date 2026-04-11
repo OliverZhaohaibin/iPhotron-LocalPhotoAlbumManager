@@ -28,10 +28,9 @@ if TYPE_CHECKING:
     from iPhoto.utils.settings import Settings
     from PySide6.QtWidgets import QPushButton, QSlider, QToolButton, QWidget
 
-    from iPhoto.gui.coordinators.edit_coordinator import EditCoordinator
     from iPhoto.gui.coordinators.navigation_coordinator import NavigationCoordinator
     from iPhoto.gui.ui.controllers.player_view_controller import PlayerViewController
-    from iPhoto.gui.ui.media import MediaAdjustmentCommitter, MediaSelectionSession
+    from iPhoto.gui.ui.media import MediaAdjustmentCommitter
     from iPhoto.gui.ui.widgets.filmstrip_view import FilmstripView
     from iPhoto.gui.ui.widgets.player_bar import PlayerBar
     from iPhoto.gui.viewmodels.gallery_list_model_adapter import GalleryListModelAdapter
@@ -53,7 +52,6 @@ class PlaybackCoordinator(QObject):
         router: ViewRouter,
         asset_model: GalleryListModelAdapter,
         detail_vm: DetailViewModel,
-        media_session: MediaSelectionSession,
         adjustment_committer: MediaAdjustmentCommitter,
         zoom_slider: QSlider,
         zoom_in_button: QToolButton,
@@ -75,7 +73,6 @@ class PlaybackCoordinator(QObject):
         self._router = router
         self._asset_model = asset_model
         self._detail_vm = detail_vm
-        self._media_session = media_session
         self._adjustment_committer = adjustment_committer
 
         self._zoom_slider = zoom_slider
@@ -96,14 +93,10 @@ class PlaybackCoordinator(QObject):
 
         self._is_playing = False
         self._navigation: NavigationCoordinator | None = None
-        self._edit_coordinator: EditCoordinator | None = None
         self._info_panel: InfoPanel | None = None
         self._active_live_motion: Path | None = None
         self._active_live_still: Path | None = None
         self._resume_after_transition = False
-        self._pending_restore_path: Path | None = None
-        self._pending_restore_reason: str | None = None
-        self._force_presentation_reload_path: Path | None = None
         self._trim_in_ms = 0
         self._trim_out_ms = 0
         self._current_presentation: DetailPresentation | None = None
@@ -126,15 +119,13 @@ class PlaybackCoordinator(QObject):
     def set_navigation_coordinator(self, nav: NavigationCoordinator) -> None:
         self._navigation = nav
 
-    def set_edit_coordinator(self, edit: EditCoordinator) -> None:
-        self._edit_coordinator = edit
-
     def set_info_panel(self, panel: InfoPanel) -> None:
         self._info_panel = panel
         panel.dismissed.connect(self._handle_info_panel_dismissed)
 
     def current_row(self) -> int:
-        return self._media_session.current_row()
+        row = self._detail_vm.current_row.value
+        return int(row) if isinstance(row, int) else -1
 
     def suspend_playback_for_transition(self) -> bool:
         resume_after = self._is_playing
@@ -152,7 +143,7 @@ class PlaybackCoordinator(QObject):
     def prepare_fullscreen_asset(self) -> bool:
         if self._asset_model.rowCount() <= 0:
             return False
-        current_row = self._media_session.current_row()
+        current_row = self.current_row()
         target_row = current_row if current_row >= 0 else 0
         if current_row < 0 or not self._router.is_detail_view_active():
             self.play_asset(target_row)
@@ -172,10 +163,6 @@ class PlaybackCoordinator(QObject):
         self._player_view.video_area.playbackFinished.connect(self._handle_playback_finished)
         self._player_view.video_area.durationChanged.connect(self._on_video_duration_changed)
         self._player_view.video_area.positionChanged.connect(self._on_video_position_changed)
-
-        self._media_session.restoreRequested.connect(self._handle_restore_requested)
-        self._adjustment_committer.adjustmentsCommitted.connect(self._handle_adjustments_committed)
-        self._router.detailViewShown.connect(self._handle_detail_view_shown)
 
         self._detail_vm.route_requested.connect(self._handle_route_requested)
         self._detail_vm.presentation_changed.connect(self._handle_presentation_changed)
@@ -344,13 +331,9 @@ class PlaybackCoordinator(QObject):
             previous is not None
             and previous.row == presentation.row
             and previous.path == presentation.path
+            and previous.reload_token == presentation.reload_token
         )
-        force_reload_path = getattr(self, "_force_presentation_reload_path", None)
-        force_reload = (
-            force_reload_path is not None
-            and force_reload_path == presentation.path
-        )
-        if same_asset and not force_reload:
+        if same_asset:
             self._update_favorite_icon(presentation.is_favorite)
             if self._info_panel and presentation.info_panel_visible:
                 self._refresh_info_panel(presentation.info)
@@ -359,11 +342,6 @@ class PlaybackCoordinator(QObject):
                 self._info_panel.close()
             self._clear_play_profile(presentation.row)
             return
-        if force_reload:
-            # Restoring the current asset after edit/rotate must bypass the
-            # same-asset fast path so sidecar-backed trim and preview state are
-            # reloaded into the playback widgets.
-            self._force_presentation_reload_path = None
         self._render_presentation(presentation)
 
     def _render_presentation(self, presentation: DetailPresentation) -> None:
@@ -385,52 +363,26 @@ class PlaybackCoordinator(QObject):
 
         if presentation.is_video:
             self._player_view.show_video_surface(interactive=True)
-            sidecar_started = time.perf_counter()
-            raw_adjustments = sidecar.load_adjustments(source)
-            log_detail_profile(
-                "playback",
-                "video.sidecar_load",
-                (time.perf_counter() - sidecar_started) * 1000.0,
-                path=source.name,
-                adjustments=len(raw_adjustments),
-            )
-            info = presentation.info
-            duration_sec = None
-            try:
-                duration_sec = float(info.get("dur") or info.get("duration") or 0.0) or None
-            except (TypeError, ValueError):
-                duration_sec = None
-            has_trim = sidecar.trim_is_non_default(raw_adjustments, duration_sec)
-            needs_adjusted_preview = sidecar.video_requires_adjusted_preview(raw_adjustments)
-            trim_in_sec, trim_out_sec = sidecar.normalise_video_trim(raw_adjustments, duration_sec)
-            trim_range_ms = None
-            if has_trim:
-                trim_range_ms = (
-                    int(round(trim_in_sec * 1000.0)),
-                    int(round(trim_out_sec * 1000.0)),
-                )
+            trim_range_ms = presentation.video_trim_range_ms
             if trim_range_ms is not None:
                 self._trim_in_ms, self._trim_out_ms = trim_range_ms
             else:
                 self._trim_in_ms = 0
                 self._trim_out_ms = 0
+            has_trim = trim_range_ms is not None
             load_started = time.perf_counter()
             self._player_view.video_area.load_video(
                 source,
-                adjustments=(
-                    sidecar.resolve_render_adjustments(raw_adjustments)
-                    if needs_adjusted_preview
-                    else (raw_adjustments or None)
-                ),
+                adjustments=presentation.video_adjustments,
                 trim_range_ms=trim_range_ms,
-                adjusted_preview=needs_adjusted_preview,
+                adjusted_preview=presentation.video_adjusted_preview,
             )
             log_detail_profile(
                 "playback",
                 "video.load_video",
                 (time.perf_counter() - load_started) * 1000.0,
                 path=source.name,
-                adjusted_preview=needs_adjusted_preview,
+                adjusted_preview=presentation.video_adjusted_preview,
                 has_trim=has_trim,
             )
             self._player_view.video_area.play()
@@ -543,9 +495,6 @@ class PlaybackCoordinator(QObject):
         self._player_view.show_placeholder()
         self._player_bar.setEnabled(False)
         self._is_playing = False
-        self._pending_restore_path = None
-        self._pending_restore_reason = None
-        self._force_presentation_reload_path = None
         self._current_presentation = None
         self._detail_vm.hide_info_panel(refresh_presentation=False)
         self._update_header(None)
@@ -557,9 +506,6 @@ class PlaybackCoordinator(QObject):
         self._clear_play_request_state()
         self._player_view.video_area.stop()
         self._is_playing = False
-        self._pending_restore_path = None
-        self._pending_restore_reason = None
-        self._force_presentation_reload_path = None
         self._current_presentation = None
         self._detail_vm.hide_info_panel(refresh_presentation=False)
         self._update_header(None)
@@ -739,49 +685,3 @@ class PlaybackCoordinator(QObject):
         self._ensure_info_panel_metadata_state()
         self._info_panel_metadata_inflight.discard(path_key)
         self._info_panel_metadata_attempted.add(path_key)
-
-    def _is_edit_session_active(self) -> bool:
-        return bool(self._edit_coordinator and self._edit_coordinator.is_editing())
-
-    def _handle_restore_requested(self, path: object, reason: str) -> None:
-        if not isinstance(path, Path):
-            return
-        if self._is_edit_session_active():
-            self._pending_restore_path = path
-            self._pending_restore_reason = reason
-            return
-        self._restore_after_adjustment(path, reason)
-
-    def _handle_adjustments_committed(self, path: object, reason: str) -> None:
-        presentation = self._current_presentation
-        if (
-            reason == "edit_done"
-            and isinstance(path, Path)
-            and presentation is not None
-            and presentation.is_video
-            and presentation.path == path
-        ):
-            # EditCoordinator restores the current video preview directly when
-            # leaving edit mode so it can reuse the probed duration from the
-            # edit session. Replaying the deferred MVVM restore here reloads
-            # the same asset a second time through presentation metadata,
-            # which is the path that regressed the tail dead-zone.
-            return
-        self._handle_restore_requested(path, reason)
-
-    def _handle_detail_view_shown(self) -> None:
-        if self._pending_restore_path is None:
-            return
-        path = self._pending_restore_path
-        reason = self._pending_restore_reason or "restore"
-        self._pending_restore_path = None
-        self._pending_restore_reason = None
-        self._restore_after_adjustment(path, reason)
-
-    def _restore_after_adjustment(self, path: Path, reason: str) -> None:
-        # Force the next presentation refresh for this asset to pass through
-        # the full render path. Without this, same-asset restores triggered by
-        # edit completion skip video reload and leave the progress bar mapped
-        # to the stale pre-edit trim range.
-        self._force_presentation_reload_path = path
-        self._detail_vm.restore_after_adjustment(path, reason)

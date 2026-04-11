@@ -8,6 +8,8 @@ from typing import Any, Optional, Protocol
 
 from iPhoto.application.dtos import AssetDTO
 from iPhoto.application.services.asset_service import AssetService
+from iPhoto.gui.ui.media.media_restore_request import MediaRestoreRequest
+from iPhoto.io import sidecar
 from iPhoto.utils.geocoding import resolve_location_name
 
 from .base import BaseViewModel
@@ -45,6 +47,10 @@ class DetailPresentation:
     info_panel_visible: bool
     live_motion_rel: Optional[Path]
     live_motion_abs: Optional[Path]
+    video_adjustments: Optional[dict[str, Any]]
+    video_trim_range_ms: Optional[tuple[int, int]]
+    video_adjusted_preview: bool
+    reload_token: int
 
 
 class DetailViewModel(BaseViewModel):
@@ -64,8 +70,16 @@ class DetailViewModel(BaseViewModel):
         self._asset_service = asset_service
         self._adjustment_commit_port = adjustment_commit_port
         self._info_panel_visible = False
+        self._presentation_reload_token = 0
+        self._pending_restore_requests: dict[Path, MediaRestoreRequest] = {}
         self._store.data_changed.connect(self._handle_store_changed)
         self._store.row_changed.connect(self._handle_row_changed)
+        restore_signal = getattr(self._media_session, "restoreRequested", None)
+        if restore_signal is not None:
+            restore_signal.connect(self._handle_restore_requested)
+        committed_signal = getattr(self._adjustment_commit_port, "adjustmentsCommitted", None)
+        if committed_signal is not None:
+            committed_signal.connect(self._handle_adjustments_committed)
 
         self.current_row = ObservableProperty(-1)
         self.current_path = ObservableProperty(None)
@@ -146,13 +160,23 @@ class DetailViewModel(BaseViewModel):
         self.hide_info_panel(refresh_presentation=True)
         self.route_requested.emit("gallery")
 
-    def restore_after_adjustment(self, path: Path, reason: str) -> None:
+    def restore_after_adjustment(
+        self,
+        path: Path,
+        reason: str,
+        restore_request: MediaRestoreRequest | None = None,
+    ) -> None:
+        request = restore_request or MediaRestoreRequest(path=path, reason=reason)
+        self._presentation_reload_token += 1
+        self._pending_restore_requests[path] = request
         current_path = self.current_path.value
         if isinstance(current_path, Path) and current_path == path:
             self.show_current()
             return
         if self._media_session.set_current_by_path(path):
             self.show_current()
+            return
+        self._pending_restore_requests.pop(path, None)
 
     def info_for_current(self) -> Optional[dict[str, Any]]:
         presentation = self.presentation.value
@@ -189,6 +213,20 @@ class DetailViewModel(BaseViewModel):
         if current_row == row:
             self._refresh_presentation()
 
+    def _handle_restore_requested(self, request: object) -> None:
+        if not isinstance(request, MediaRestoreRequest):
+            return
+        self.restore_after_adjustment(
+            request.path,
+            request.reason,
+            restore_request=request,
+        )
+
+    def _handle_adjustments_committed(self, path: object, reason: str) -> None:
+        if not isinstance(path, Path) or reason == "edit_done":
+            return
+        self.restore_after_adjustment(path, reason)
+
     def _build_presentation(self, row: int, dto: AssetDTO) -> DetailPresentation:
         info = dto.metadata.copy() if dto.metadata else {}
         info.update(
@@ -205,6 +243,26 @@ class DetailViewModel(BaseViewModel):
         )
         location = self._resolve_location(dto)
         live_motion_rel, live_motion_abs = self._resolve_live_motion(dto)
+        video_adjustments: dict[str, Any] | None = None
+        video_trim_range_ms: tuple[int, int] | None = None
+        video_adjusted_preview = False
+        restore_request = self._pending_restore_requests.pop(dto.abs_path, None)
+        if dto.is_video:
+            raw_adjustments = sidecar.load_adjustments(dto.abs_path)
+            duration_sec = self._resolve_video_duration(dto, restore_request)
+            video_adjusted_preview = sidecar.video_requires_adjusted_preview(raw_adjustments)
+            has_trim = sidecar.trim_is_non_default(raw_adjustments, duration_sec)
+            trim_in_sec, trim_out_sec = sidecar.normalise_video_trim(raw_adjustments, duration_sec)
+            if has_trim:
+                video_trim_range_ms = (
+                    int(round(trim_in_sec * 1000.0)),
+                    int(round(trim_out_sec * 1000.0)),
+                )
+            video_adjustments = (
+                sidecar.resolve_render_adjustments(raw_adjustments)
+                if video_adjusted_preview
+                else (raw_adjustments or None)
+            )
         return DetailPresentation(
             row=row,
             path=dto.abs_path,
@@ -221,7 +279,27 @@ class DetailViewModel(BaseViewModel):
             info_panel_visible=self._info_panel_visible,
             live_motion_rel=live_motion_rel,
             live_motion_abs=live_motion_abs,
+            video_adjustments=video_adjustments,
+            video_trim_range_ms=video_trim_range_ms,
+            video_adjusted_preview=video_adjusted_preview,
+            reload_token=self._presentation_reload_token,
         )
+
+    def _resolve_video_duration(
+        self,
+        dto: AssetDTO,
+        restore_request: MediaRestoreRequest | None,
+    ) -> float | None:
+        duration_hint = restore_request.duration_sec if restore_request is not None else None
+        if duration_hint is not None and duration_hint > 0.0:
+            return float(duration_hint)
+        try:
+            duration_sec = float(dto.duration or 0.0)
+        except (TypeError, ValueError):
+            return None
+        if duration_sec <= 0.0:
+            return None
+        return duration_sec
 
     def _resolve_location(self, dto: AssetDTO) -> Optional[str]:
         metadata = dto.metadata or {}

@@ -46,10 +46,11 @@ class FaceClusterWorker(QThread):
                 self._folder,
                 workspace.root_path,
                 workspace.thumbnail_dir,
+                state_db_path=workspace.state_db_path,
                 progress_callback=self._emit_progress,
                 status_callback=self._emit_status,
             )
-            repository = FaceClusterRepository(workspace.db_path)
+            repository = FaceClusterRepository(workspace.db_path, workspace.state_db_path)
             repository.replace_all(pipeline_result.faces, pipeline_result.persons)
             summaries = repository.get_person_summaries()
         except Exception as exc:

@@ -51,13 +51,14 @@ class GalleryPageWidget(QWidget):
         self.grid_view.setObjectName("galleryGridView")
         layout.addWidget(self.grid_view)
 
-    def set_cluster_gallery_mode(self, enabled: bool) -> None:
+    def set_cluster_gallery_mode(self, enabled: bool, back_tooltip: str = "Return") -> None:
         """Show or hide the header with back button for cluster gallery mode.
 
         Args:
             enabled: True to show the back button header (cluster gallery mode),
                      False to hide it (normal gallery mode).
         """
+        self.back_button.setToolTip(back_tooltip)
         self._header.setVisible(enabled)
 
 

@@ -79,7 +79,8 @@ class SchemaMigrator:
                 media_type INTEGER,
                 is_favorite INTEGER DEFAULT 0,
                 location TEXT,
-                micro_thumbnail BLOB
+                micro_thumbnail BLOB,
+                face_status TEXT
             )
         """)
 
@@ -114,6 +115,7 @@ class SchemaMigrator:
             "is_favorite": "ALTER TABLE assets ADD COLUMN is_favorite INTEGER DEFAULT 0",
             "location": "ALTER TABLE assets ADD COLUMN location TEXT",
             "parent_album_path": "ALTER TABLE assets ADD COLUMN parent_album_path TEXT",
+            "face_status": "ALTER TABLE assets ADD COLUMN face_status TEXT",
         }
 
         # Add missing columns
@@ -121,6 +123,19 @@ class SchemaMigrator:
             if col_name not in existing_columns:
                 logger.info("Adding missing column: %s", col_name)
                 conn.execute(alter_sql)
+
+        conn.execute(
+            """
+            UPDATE assets
+            SET face_status = CASE
+                WHEN CAST(media_type AS TEXT) = '1' THEN 'skipped'
+                WHEN live_role IS NOT NULL AND CAST(live_role AS INTEGER) != 0 THEN 'skipped'
+                WHEN mime LIKE 'video/%' THEN 'skipped'
+                ELSE 'pending'
+            END
+            WHERE face_status IS NULL OR TRIM(face_status) = ''
+            """
+        )
 
     @staticmethod
     def _create_indexes(conn: sqlite3.Connection) -> None:
@@ -153,7 +168,9 @@ class SchemaMigrator:
             # Core index for album-scoped pagination
             ("CREATE INDEX IF NOT EXISTS idx_assets_pagination "
              "ON assets (parent_album_path, dt DESC, id DESC)"),
-            
+
+            "CREATE INDEX IF NOT EXISTS idx_assets_face_status ON assets (face_status)",
+
             # Global view index (all photos sorted by date)
             ("CREATE INDEX IF NOT EXISTS idx_assets_global_sort "
              "ON assets (dt DESC, id DESC)"),

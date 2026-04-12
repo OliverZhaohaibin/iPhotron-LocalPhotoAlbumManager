@@ -87,12 +87,23 @@ class NavigationCoordinator(QObject):
         self._reset_playback()
         self._gallery_vm.open_location_map()
 
+    def open_people_view(self) -> None:
+        self._reset_playback()
+        self._gallery_vm.open_people_dashboard()
+
     def open_cluster_gallery(self, assets: list) -> None:
         self._reset_playback()
         self._gallery_vm.open_cluster_gallery(assets)
 
+    def open_people_cluster_gallery(self, query) -> None:
+        self._reset_playback()
+        self._gallery_vm.open_people_cluster_gallery(query)
+
+    def return_from_cluster_gallery(self) -> None:
+        self._gallery_vm.return_from_cluster_gallery()
+
     def return_to_map_from_cluster_gallery(self) -> None:
-        self._gallery_vm.return_to_map_from_cluster_gallery()
+        self.return_from_cluster_gallery()
 
     def open_location_asset(self, rel: str) -> None:
         self._gallery_vm.open_location_asset(rel)
@@ -119,6 +130,8 @@ class NavigationCoordinator(QObject):
 
             self._reset_playback()
             self._gallery_vm.open_filtered_collection(name, media_types=[MediaType.LIVE_PHOTO])
+        elif normalized == "people":
+            self.open_people_view()
         elif normalized == "location":
             self.open_location_view()
 
@@ -127,6 +140,8 @@ class NavigationCoordinator(QObject):
             self._router.show_gallery()
         elif view == "map":
             self._router.show_map()
+        elif view == "people":
+            self._router.show_people()
         elif view == "albums_dashboard":
             self._router.show_albums_dashboard()
         elif view == "detail":
@@ -144,7 +159,10 @@ class NavigationCoordinator(QObject):
     def _handle_cluster_gallery_mode_changed(self, enabled: bool) -> None:
         gallery_page = self._router.gallery_page()
         if gallery_page is not None:
-            gallery_page.set_cluster_gallery_mode(bool(enabled))
+            gallery_page.set_cluster_gallery_mode(
+                bool(enabled),
+                back_tooltip=self._gallery_vm.cluster_gallery_back_tooltip(),
+            )
 
     def _handle_bind_library(self) -> None:
         self.bindLibraryRequested.emit()

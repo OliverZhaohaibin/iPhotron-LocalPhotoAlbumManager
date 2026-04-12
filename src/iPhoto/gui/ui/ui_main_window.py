@@ -29,6 +29,7 @@ from .widgets import (
     InfoPanel,
     MainHeaderWidget,
     NotificationToast,
+    PeopleDashboardWidget,
     PhotoMapView,
     PreviewWindow,
 )
@@ -152,6 +153,7 @@ class Ui_MainWindow(object):
 
         self.gallery_page = GalleryPageWidget()
         self.grid_view = self.gallery_page.grid_view
+        self.people_page = PeopleDashboardWidget()
 
         shared_image_viewer = GLImageViewer()
         self.detail_page = DetailPageWidget(MainWindow, image_viewer=shared_image_viewer)
@@ -216,6 +218,7 @@ class Ui_MainWindow(object):
         self.map_page = map_page
 
         self.view_stack.addWidget(self.gallery_page)
+        self.view_stack.addWidget(self.people_page)
         self.view_stack.addWidget(self.map_page)
         self.view_stack.addWidget(self.detail_page)
 

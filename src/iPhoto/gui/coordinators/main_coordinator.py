@@ -93,6 +93,9 @@ class MainCoordinator(QObject):
         self._media_session.bind_collection(self._gallery_store)
         self._asset_service.set_repository(self._context.asset_runtime.repository)
         self._thumbnail_service = self._context.asset_runtime.thumbnail_service
+        if hasattr(window.ui, "people_page"):
+            window.ui.people_page.set_library_root(lib_root)
+            window.ui.people_page.set_status_message(context.library.face_scan_status_message())
 
         # Inject ViewModel provider into Facade for legacy operations (restore/delete)
         if self._facade:
@@ -421,11 +424,15 @@ class MainCoordinator(QObject):
 
         # Gallery page back button for cluster gallery mode
         if hasattr(ui, 'gallery_page') and hasattr(ui.gallery_page, 'backRequested'):
-            ui.gallery_page.backRequested.connect(self._gallery_vm.return_to_map_from_cluster_gallery)
+            ui.gallery_page.backRequested.connect(self._gallery_vm.return_from_cluster_gallery)
 
         # Dashboard Click
         if hasattr(ui, 'albums_dashboard_page'):
             ui.albums_dashboard_page.albumSelected.connect(self.open_album_from_path)
+        if hasattr(ui, "people_page"):
+            ui.people_page.clusterActivated.connect(self._on_people_cluster_activated)
+            self._context.library.peopleIndexUpdated.connect(ui.people_page.reload)
+            self._context.library.faceScanStatusChanged.connect(ui.people_page.set_status_message)
 
         # Navigation
         self._navigation.bindLibraryRequested.connect(self._dialog.bind_library_dialog)
@@ -488,6 +495,12 @@ class MainCoordinator(QObject):
         self._asset_service.set_repository(self._context.asset_runtime.repository)
         self._asset_list_vm.rebind_repository(self._context.asset_runtime.repository, root)
         self._gallery_vm.on_library_tree_updated()
+        window = getattr(self, "_window", None)
+        ui = getattr(window, "ui", None)
+        people_page = getattr(ui, "people_page", None)
+        if people_page is not None:
+            people_page.set_library_root(root)
+            people_page.set_status_message(self._context.library.face_scan_status_message())
 
     def _on_asset_clicked(self, index: QModelIndex):
         if self._selection_controller and self._selection_controller.is_active():
@@ -522,6 +535,12 @@ class MainCoordinator(QObject):
         """Handle single-asset map activation inside the Location context."""
 
         self._navigation.open_location_asset(rel)
+
+    def _on_people_cluster_activated(self, person_id: str) -> None:
+        query = self._window.ui.people_page.build_cluster_query(person_id)
+        if not query.asset_ids:
+            return
+        self._navigation.open_people_cluster_gallery(query)
 
     def open_album_from_path(self, path: Path):
         self._navigation.open_album(path)

@@ -9,6 +9,7 @@ from PySide6.QtCore import QMutexLocker
 
 from ..cache.index_store import get_global_repository
 from ..utils.logging import get_logger
+from .workers.face_scan_worker import FaceScanWorker
 from .workers.scanner_worker import ScannerSignals, ScannerWorker
 
 if TYPE_CHECKING:
@@ -42,6 +43,9 @@ class ScanCoordinatorMixin:
             self._current_scanner_worker.cancel()
             self._current_scanner_worker = None
             self._live_scan_root = None
+        if self._current_face_scanner is not None:
+            self._current_face_scanner.cancel()
+            self._current_face_scanner = None
 
         self._live_scan_root = root
         self._live_scan_buffer.clear()
@@ -49,9 +53,18 @@ class ScanCoordinatorMixin:
         # Pass library root to scanner so all assets go to global database
         worker = ScannerWorker(root, include, exclude, signals, library_root=self._root)
         self._current_scanner_worker = worker
+        self._face_scan_status_message = None
+        self.faceScanStatusChanged.emit("")
+        face_library_root = self._root if self._root is not None else root
+        face_worker = FaceScanWorker(face_library_root, self)
+        face_worker.peopleIndexUpdated.connect(self.peopleIndexUpdated.emit)
+        face_worker.statusChanged.connect(self._on_face_scan_status_changed)
+        face_worker.finished.connect(self._on_face_scan_finished)
+        self._current_face_scanner = face_worker
         # Release lock before starting the worker
         del locker
 
+        face_worker.start()
         self._scan_thread_pool.start(worker)
 
     def stop_scanning(self) -> None:
@@ -63,6 +76,9 @@ class ScanCoordinatorMixin:
             # We don't clear the buffer immediately on stop, as the UI might still need it
             # until a new scan starts or the app closes. Setting root to None invalidates it contextually.
             self._live_scan_root = None
+        if self._current_face_scanner is not None:
+            self._current_face_scanner.cancel()
+            self._current_face_scanner = None
 
     def is_scanning_path(self, path: Path) -> bool:
         """Return True if the given path is covered by the active scan."""
@@ -251,6 +267,8 @@ class ScanCoordinatorMixin:
         if not chunk:
             return
 
+        if self._current_face_scanner is not None:
+            self._current_face_scanner.enqueue_rows(chunk)
         self.scanChunkReady.emit(root, chunk)
 
     def _on_scan_finished(self, root: Path, rows: List[dict]) -> None:
@@ -259,6 +277,10 @@ class ScanCoordinatorMixin:
         # Clear worker reference after emitting signal to prevent race conditions
         locker = QMutexLocker(self._scan_buffer_lock)
         self._current_scanner_worker = None
+        face_scanner = self._current_face_scanner
+        del locker
+        if face_scanner is not None:
+            face_scanner.finish_input()
 
         # Persist Live Photo pairings once a scan completes so the database and
         # links.json reflect the latest scan results.
@@ -271,6 +293,10 @@ class ScanCoordinatorMixin:
     def _on_scan_error(self, root: Path, message: str) -> None:
         locker = QMutexLocker(self._scan_buffer_lock)
         self._current_scanner_worker = None
+        face_scanner = self._current_face_scanner
+        del locker
+        if face_scanner is not None:
+            face_scanner.finish_input()
         self.errorRaised.emit(message)
         self.scanFinished.emit(root, False)
 
@@ -283,3 +309,10 @@ class ScanCoordinatorMixin:
             return p1.resolve() == p2.resolve()
         except OSError:
             return p1 == p2
+
+    def _on_face_scan_status_changed(self, message: str) -> None:
+        self._face_scan_status_message = message or None
+        self.faceScanStatusChanged.emit(message)
+
+    def _on_face_scan_finished(self) -> None:
+        self._current_face_scanner = None

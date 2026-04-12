@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, Iterator, List, Optional, Tuple
 
 from ...config import WORK_DIR_NAME
+from ...people.status import normalize_face_status
 from ...utils.logging import get_logger
 from .engine import DatabaseManager
 from .migrations import SchemaMigrator
@@ -217,6 +218,112 @@ class AssetRepository:
             if should_close:
                 conn.close()
 
+    def get_rows_by_ids(self, asset_ids: Iterable[str]) -> Dict[str, Dict[str, Any]]:
+        """Return a mapping of ``asset.id`` to asset rows."""
+
+        ids_list = [str(asset_id) for asset_id in asset_ids if asset_id]
+        if not ids_list:
+            return {}
+
+        conn = self._db_manager.get_connection()
+        should_close = conn != self._db_manager._conn
+
+        try:
+            conn.row_factory = sqlite3.Row
+            placeholders = ", ".join(["?"] * len(ids_list))
+            query = f"SELECT * FROM assets WHERE id IN ({placeholders})"
+            cursor = conn.cursor()
+            cursor.execute(query, ids_list)
+            rows: Dict[str, Dict[str, Any]] = {}
+            for row in cursor:
+                data = self._db_row_to_dict(row)
+                asset_id = data.get("id")
+                if isinstance(asset_id, str) and asset_id and asset_id not in rows:
+                    rows[asset_id] = data
+            return rows
+        finally:
+            if should_close:
+                conn.close()
+
+    def read_rows_by_face_status(
+        self,
+        statuses: Iterable[str],
+        *,
+        limit: int | None = None,
+    ) -> Iterator[Dict[str, Any]]:
+        """Yield rows whose ``face_status`` matches one of *statuses*."""
+
+        normalized_statuses = [
+            status
+            for status in (normalize_face_status(value) for value in statuses)
+            if status is not None
+        ]
+        if not normalized_statuses:
+            return
+
+        conn = self._db_manager.get_connection()
+        should_close = conn != self._db_manager._conn
+
+        try:
+            conn.row_factory = sqlite3.Row
+            placeholders = ", ".join(["?"] * len(normalized_statuses))
+            query = f"SELECT * FROM assets WHERE face_status IN ({placeholders}) ORDER BY dt DESC, id DESC"
+            params: list[Any] = list(normalized_statuses)
+            if limit is not None:
+                query += " LIMIT ?"
+                params.append(int(limit))
+            cursor = conn.cursor()
+            cursor.execute(query, params)
+            for row in cursor:
+                yield self._db_row_to_dict(row)
+        finally:
+            if should_close:
+                conn.close()
+
+    def update_face_status(self, asset_id: str, status: str) -> None:
+        """Update the ``face_status`` for a single asset row."""
+
+        normalized = normalize_face_status(status)
+        if normalized is None or not asset_id:
+            return
+        self._db_manager.execute_in_transaction(
+            "UPDATE assets SET face_status = ? WHERE id = ?",
+            (normalized, asset_id),
+        )
+
+    def update_face_statuses(self, asset_ids: Iterable[str], status: str) -> None:
+        """Update the ``face_status`` for multiple assets."""
+
+        normalized = normalize_face_status(status)
+        ids_list = [str(asset_id) for asset_id in asset_ids if asset_id]
+        if normalized is None or not ids_list:
+            return
+
+        placeholders = ", ".join(["?"] * len(ids_list))
+        query = f"UPDATE assets SET face_status = ? WHERE id IN ({placeholders})"
+        self._db_manager.execute_in_transaction(query, [normalized, *ids_list])
+
+    def count_by_face_status(self) -> Dict[str, int]:
+        """Return a status-to-count mapping for ``assets.face_status``."""
+
+        conn = self._db_manager.get_connection()
+        should_close = conn != self._db_manager._conn
+
+        try:
+            cursor = conn.execute(
+                "SELECT face_status, COUNT(*) AS asset_count FROM assets GROUP BY face_status"
+            )
+            counts: Dict[str, int] = {}
+            for status, asset_count in cursor.fetchall():
+                normalized = normalize_face_status(status)
+                if normalized is None:
+                    continue
+                counts[normalized] = int(asset_count or 0)
+            return counts
+        finally:
+            if should_close:
+                conn.close()
+
     def read_all(
         self,
         sort_by_date: bool = False,
@@ -346,6 +453,7 @@ class AssetRepository:
             "dur", "year", "month", "dt", "ts", "content_id", "bytes",
             "mime", "w", "h", "original_rel_path", "original_album_id",
             "original_album_subpath", "is_favorite", "location", "gps",
+            "face_status",
             "micro_thumbnail"
         ]
 

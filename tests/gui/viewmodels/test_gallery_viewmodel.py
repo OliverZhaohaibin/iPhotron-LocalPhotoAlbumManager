@@ -7,6 +7,7 @@ from unittest.mock import MagicMock
 from iPhoto.config import RECENTLY_DELETED_DIR_NAME
 from iPhoto.domain.models.core import MediaType
 from iPhoto.gui.viewmodels.gallery_viewmodel import GalleryViewModel
+from iPhoto.domain.models.query import AssetQuery
 
 
 def _make_vm(*, library_root: Path | None = None):
@@ -113,6 +114,41 @@ def test_return_to_map_from_cluster_gallery_reuses_snapshot(tmp_path: Path) -> N
 
     assert routes == ["map"]
     assert map_payloads == [(assets, tmp_path)]
+
+
+def test_open_people_dashboard_routes_to_people_view(tmp_path: Path) -> None:
+    vm, store, _context, _facade, _asset_service = _make_vm(library_root=tmp_path)
+    routes = []
+    vm.route_requested.connect(routes.append)
+
+    vm.open_people_dashboard()
+
+    store.load_selection.assert_not_called()
+    assert vm.static_selection.value == "People"
+    assert vm.current_section.value == "people_dashboard"
+    assert routes == ["people"]
+
+
+def test_people_cluster_gallery_loads_query_and_returns_to_people(tmp_path: Path) -> None:
+    vm, store, _context, _facade, _asset_service = _make_vm(library_root=tmp_path)
+    query = AssetQuery(asset_ids=["asset-1", "asset-2"])
+    routes = []
+    vm.route_requested.connect(routes.append)
+
+    vm.open_people_cluster_gallery(query)
+
+    store.load_selection.assert_called_once_with(tmp_path, query=query)
+    assert vm.static_selection.value == "People"
+    assert vm.current_section.value == "people_cluster_gallery"
+    assert vm.cluster_gallery_back_tooltip() == "Return to People"
+    assert vm.is_in_cluster_gallery() is True
+
+    vm.return_from_cluster_gallery()
+
+    assert routes == ["gallery", "people"]
+    assert vm.current_section.value == "people_dashboard"
+    assert vm.static_selection.value == "People"
+    assert vm.is_in_cluster_gallery() is False
 
 
 def test_toggle_favorite_row_updates_store_via_asset_service(tmp_path: Path) -> None:

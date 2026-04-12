@@ -21,6 +21,7 @@ from .preview_window import PreviewWindow
 from .photo_map_view import PhotoMapView
 from .live_badge import LiveBadge
 from .notification_toast import NotificationToast
+from .people_dashboard import PeopleDashboardWidget
 
 __all__ = [
     "AlbumSidebar",
@@ -44,4 +45,5 @@ __all__ = [
     "LiveBadge",
     "PhotoMapView",
     "NotificationToast",
+    "PeopleDashboardWidget",
 ]

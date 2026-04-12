@@ -52,6 +52,14 @@ def test_open_location_view_delegates_to_gallery_vm() -> None:
     coord._gallery_vm.open_location_map.assert_called_once_with()
 
 
+def test_open_people_view_delegates_to_gallery_vm() -> None:
+    coord = _make_coordinator()
+
+    coord.open_people_view()
+
+    coord._gallery_vm.open_people_dashboard.assert_called_once_with()
+
+
 def test_open_cluster_gallery_delegates_to_gallery_vm() -> None:
     coord = _make_coordinator()
     assets = [MagicMock(), MagicMock()]
@@ -73,11 +81,13 @@ def test_route_requested_updates_router() -> None:
     coord = _make_coordinator()
 
     coord._handle_route_requested("gallery")
+    coord._handle_route_requested("people")
     coord._handle_route_requested("map")
     coord._handle_route_requested("albums_dashboard")
     coord._handle_route_requested("detail")
 
     coord._router.show_gallery.assert_called_once_with()
+    coord._router.show_people.assert_called_once_with()
     coord._router.show_map.assert_called_once_with()
     coord._router.show_albums_dashboard.assert_called_once_with()
     coord._router.show_detail.assert_called_once_with()
@@ -95,8 +105,13 @@ def test_detail_requested_uses_playback_coordinator() -> None:
 
 def test_cluster_gallery_mode_signal_updates_header() -> None:
     coord = _make_coordinator()
+    coord._gallery_vm.cluster_gallery_back_tooltip.return_value = "Return to People"
 
     coord._handle_cluster_gallery_mode_changed(True)
     coord._handle_cluster_gallery_mode_changed(False)
 
     assert coord._router.gallery_page().set_cluster_gallery_mode.call_count == 2
+    coord._router.gallery_page().set_cluster_gallery_mode.assert_any_call(
+        True,
+        back_tooltip="Return to People",
+    )

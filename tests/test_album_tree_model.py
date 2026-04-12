@@ -66,6 +66,11 @@ def test_model_populates_albums(tmp_path: Path, qapp: QApplication) -> None:
 
     header_index = model.index(0, 0)
     assert model.data(header_index) == "Basic Library"
+    people_index = _find_child(model, header_index, "People")
+    location_index = _find_child(model, header_index, "Location")
+    assert people_index is not None
+    assert location_index is not None
+    assert people_index.row() < location_index.row()
 
     # Albums is now promoted to a header-level entry, therefore it must be
     # discovered directly under the root model index instead of under the

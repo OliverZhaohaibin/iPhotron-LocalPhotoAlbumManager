@@ -8,6 +8,7 @@ import logging
 from iPhoto.application.interfaces import IMetadataProvider
 from iPhoto.utils.exiftool import get_metadata_batch
 from iPhoto.io.metadata import read_image_meta_with_exiftool, read_video_meta
+from iPhoto.people import initial_face_status
 from iPhoto.utils.hashutils import compute_file_id
 from iPhoto.domain.models import MediaType
 
@@ -102,5 +103,7 @@ class ExifToolMetadataProvider(IMetadataProvider):
                 row["media_type"] = 0
             else:
                 row["media_type"] = None
+
+        row["face_status"] = initial_face_status(row)
 
         return row

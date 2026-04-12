@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Iterable, Optional
+from typing import Any, Iterable, Literal, Optional
 
 from iPhoto.application.services.asset_service import AssetService
 from iPhoto.application.contracts.runtime_entry_contract import RuntimeEntryContract
@@ -36,6 +36,7 @@ class GalleryViewModel(BaseViewModel):
         self._facade = facade
         self._asset_service = asset_service
         self._location_session = location_session or LocationSelectionSession()
+        self._cluster_gallery_origin: Literal["location", "people", None] = None
 
         self.current_section = ObservableProperty("gallery")
         self.static_selection = ObservableProperty(None)
@@ -69,6 +70,7 @@ class GalleryViewModel(BaseViewModel):
         query = AssetQuery(album_path=self._album_path_for_query(active_root))
         query.include_subalbums = True
         self._clear_location_context()
+        self._clear_cluster_gallery_context()
         self._load_query(
             section="album",
             static_selection=None,
@@ -82,6 +84,7 @@ class GalleryViewModel(BaseViewModel):
             self.bind_library_requested.emit()
             return
         self._clear_location_context()
+        self._clear_cluster_gallery_context()
         self._load_query(
             section="all_photos",
             static_selection=ALL_PHOTOS_TITLE,
@@ -97,6 +100,7 @@ class GalleryViewModel(BaseViewModel):
         deleted_root = self._context.library.ensure_deleted_directory()
         self._facade.open_album(deleted_root)
         self._clear_location_context()
+        self._clear_cluster_gallery_context()
         self._load_query(
             section="recently_deleted",
             static_selection="Recently Deleted",
@@ -121,6 +125,7 @@ class GalleryViewModel(BaseViewModel):
         if media_types:
             query.media_types = list(media_types)
         self._clear_location_context()
+        self._clear_cluster_gallery_context()
         self._load_query(
             section=title.casefold().replace(" ", "_"),
             static_selection=title,
@@ -129,11 +134,28 @@ class GalleryViewModel(BaseViewModel):
         )
 
     def open_albums_dashboard(self) -> None:
+        root = self._context.library.root()
         self._clear_location_context()
+        self._clear_cluster_gallery_context()
         self.current_section.value = "dashboard"
         self.static_selection.value = "Albums"
+        self.active_root.value = root
+        self.current_query.value = None
+        self.current_direct_assets.value = None
         self.can_return_to_map.value = False
         self.route_requested.emit("albums_dashboard")
+
+    def open_people_dashboard(self) -> None:
+        root = self._context.library.root()
+        self._clear_location_context()
+        self._clear_cluster_gallery_context()
+        self.current_section.value = "people_dashboard"
+        self.static_selection.value = "People"
+        self.active_root.value = root
+        self.current_query.value = None
+        self.current_direct_assets.value = None
+        self.can_return_to_map.value = False
+        self.route_requested.emit("people")
 
     def open_location_map(self) -> None:
         root = self._context.library.root()
@@ -146,6 +168,7 @@ class GalleryViewModel(BaseViewModel):
         self.current_query.value = None
         self.current_direct_assets.value = None
         self.can_return_to_map.value = False
+        self._clear_cluster_gallery_context()
         self._location_session.set_mode("map")
         self.route_requested.emit("map")
 
@@ -183,6 +206,7 @@ class GalleryViewModel(BaseViewModel):
         self.current_query.value = None
         self.current_direct_assets.value = list(assets)
         self.can_return_to_map.value = False
+        self._clear_cluster_gallery_context()
         self._location_session.set_mode("gallery")
         self.cluster_gallery_mode_changed.emit(False)
         self._store.load_selection(root, direct_assets=assets, library_root=root)
@@ -196,6 +220,7 @@ class GalleryViewModel(BaseViewModel):
         if root is None:
             self.bind_library_requested.emit()
             return
+        self._cluster_gallery_origin = "location"
         self.current_section.value = "cluster_gallery"
         self.static_selection.value = "Location"
         self.active_root.value = root
@@ -207,11 +232,38 @@ class GalleryViewModel(BaseViewModel):
         self.cluster_gallery_mode_changed.emit(True)
         self.route_requested.emit("gallery")
 
-    def return_to_map_from_cluster_gallery(self) -> None:
-        if not self._location_session.is_cluster_gallery():
+    def open_people_cluster_gallery(self, query: AssetQuery) -> None:
+        root = self._context.library.root()
+        if root is None:
+            self.bind_library_requested.emit()
             return
-        self.cluster_gallery_mode_changed.emit(False)
-        self.open_location_map()
+        self._cluster_gallery_origin = "people"
+        self._location_session.set_mode("inactive")
+        self.current_section.value = "people_cluster_gallery"
+        self.static_selection.value = "People"
+        self.active_root.value = root
+        self.current_query.value = query
+        self.current_direct_assets.value = None
+        self.can_return_to_map.value = True
+        self._store.load_selection(root, query=query)
+        self.cluster_gallery_mode_changed.emit(True)
+        self.route_requested.emit("gallery")
+
+    def return_from_cluster_gallery(self) -> None:
+        if self._cluster_gallery_origin == "location" or (
+            self._cluster_gallery_origin is None
+            and self._location_session.mode == "cluster_gallery"
+        ):
+            self.cluster_gallery_mode_changed.emit(False)
+            self.open_location_map()
+            return
+        if self._cluster_gallery_origin == "people":
+            self.cluster_gallery_mode_changed.emit(False)
+            self._clear_cluster_gallery_context()
+            self.open_people_dashboard()
+
+    def return_to_map_from_cluster_gallery(self) -> None:
+        self.return_from_cluster_gallery()
 
     def on_library_tree_updated(self) -> bool:
         self._location_session.invalidate()
@@ -230,7 +282,12 @@ class GalleryViewModel(BaseViewModel):
         return self._location_session.mode != "inactive"
 
     def is_in_cluster_gallery(self) -> bool:
-        return self._location_session.is_cluster_gallery()
+        return self._cluster_gallery_origin is not None or self._location_session.mode == "cluster_gallery"
+
+    def cluster_gallery_back_tooltip(self) -> str:
+        if self._cluster_gallery_origin == "people":
+            return "Return to People"
+        return "Return to Map"
 
     def open_row(self, row: int) -> None:
         if row < 0:
@@ -297,6 +354,9 @@ class GalleryViewModel(BaseViewModel):
     def _clear_location_context(self) -> None:
         self._location_session.set_mode("inactive")
         self.can_return_to_map.value = False
+
+    def _clear_cluster_gallery_context(self) -> None:
+        self._cluster_gallery_origin = None
 
     def _album_path_for_query(self, path: Path) -> Optional[str]:
         library_root = self._context.library.root()

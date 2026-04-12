@@ -1,6 +1,7 @@
 """Tests for the global database singleton pattern."""
 from __future__ import annotations
 
+import sqlite3
 from pathlib import Path
 import pytest
 from iPhoto.cache.index_store import (
@@ -68,6 +69,62 @@ class TestGlobalRepositorySingleton:
         rows = list(repo2.read_all())
         assert len(rows) == 1
         assert rows[0]["rel"] == "test.jpg"
+
+    def test_global_repository_migrates_face_status_on_existing_db(self, tmp_path: Path) -> None:
+        library_root = tmp_path / "Library"
+        db_dir = library_root / WORK_DIR_NAME
+        db_dir.mkdir(parents=True)
+        db_path = db_dir / GLOBAL_INDEX_DB_NAME
+
+        with sqlite3.connect(db_path) as conn:
+            conn.execute(
+                """
+                CREATE TABLE assets (
+                    rel TEXT PRIMARY KEY,
+                    id TEXT,
+                    dt TEXT,
+                    media_type INTEGER,
+                    mime TEXT,
+                    live_role INTEGER DEFAULT 0
+                )
+                """
+            )
+            conn.executemany(
+                """
+                INSERT INTO assets (rel, id, dt, media_type, mime, live_role)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    ("photo.jpg", "asset-photo", "2024-01-01T00:00:00Z", 0, "image/jpeg", 0),
+                    ("clip.mp4", "asset-video", "2024-01-01T00:00:01Z", 1, "video/mp4", 0),
+                ],
+            )
+
+        repo = get_global_repository(library_root)
+        rows = repo.get_rows_by_ids(["asset-photo", "asset-video"])
+
+        assert rows["asset-photo"]["face_status"] == "pending"
+        assert rows["asset-video"]["face_status"] == "skipped"
+
+    def test_face_status_helpers_round_trip(self, tmp_path: Path) -> None:
+        repo = get_global_repository(tmp_path)
+        repo.write_rows(
+            [
+                {"rel": "photo.jpg", "id": "asset-photo", "media_type": 0, "face_status": "pending"},
+                {"rel": "clip.mp4", "id": "asset-video", "media_type": 1, "face_status": "skipped"},
+            ]
+        )
+
+        pending_rows = list(repo.read_rows_by_face_status(["pending"]))
+        assert [row["id"] for row in pending_rows] == ["asset-photo"]
+
+        repo.update_face_status("asset-photo", "retry")
+        repo.update_face_statuses(["asset-video"], "done")
+
+        rows = repo.get_rows_by_ids(["asset-photo", "asset-video"])
+        assert rows["asset-photo"]["face_status"] == "retry"
+        assert rows["asset-video"]["face_status"] == "done"
+        assert repo.count_by_face_status() == {"retry": 1, "done": 1}
 
 
 class TestIdempotentWrites:

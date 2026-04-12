@@ -32,6 +32,7 @@ from .geo_aggregator import GeoAggregatorMixin
 from .trash_manager import TrashManagerMixin
 
 # Workers are still needed for type annotations in __init__
+from .workers.face_scan_worker import FaceScanWorker
 from .workers.scanner_worker import ScannerWorker
 
 LOGGER = get_logger()
@@ -55,6 +56,8 @@ class LibraryManager(
     scanChunkReady = Signal(Path, list)
     scanFinished = Signal(Path, bool)
     scanBatchFailed = Signal(Path, int)
+    peopleIndexUpdated = Signal()
+    faceScanStatusChanged = Signal(str)
 
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
@@ -77,12 +80,14 @@ class LibraryManager(
 
         # Scanner State
         self._current_scanner_worker: Optional[ScannerWorker] = None
+        self._current_face_scanner: Optional[FaceScanWorker] = None
         self._scan_thread_pool = QThreadPool.globalInstance()
         self._live_scan_buffer: List[Dict] = []
         self._live_scan_root: Optional[Path] = None
         self._scan_buffer_lock = QMutex()
         self._geotagged_assets_cache: Optional[List[GeotaggedAsset]] = None
         self._geotagged_assets_cache_root: Optional[Path] = None
+        self._face_scan_status_message: Optional[str] = None
 
     # ------------------------------------------------------------------
     # Basic properties
@@ -104,6 +109,7 @@ class LibraryManager(
         # Cancel any in-flight scan so we do not block UI interactions while
         # rebinding to a new library root.
         self.stop_scanning()
+        self._face_scan_status_message = None
 
         normalized = root.expanduser().resolve()
         if not normalized.exists() or not normalized.is_dir():
@@ -156,6 +162,13 @@ class LibraryManager(
         self._live_scan_root = None
         self._geotagged_assets_cache = None
         self._geotagged_assets_cache_root = None
+        if self._current_face_scanner is not None:
+            self._current_face_scanner.cancel()
+            self._current_face_scanner.wait(1000)
+            self._current_face_scanner = None
+
+    def face_scan_status_message(self) -> str | None:
+        return self._face_scan_status_message
 
     # ------------------------------------------------------------------
     # Internal helpers (coordinator-level)

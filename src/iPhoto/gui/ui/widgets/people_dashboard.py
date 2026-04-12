@@ -589,8 +589,7 @@ class PeopleBoard(QWidget):
         self.check_card_proximity(card)
         if self.proximity_pair is not None:
             source, target = self.proximity_pair
-            if MergeConfirmDialog.confirm(2, self):
-                self.mergeRequested.emit(source.person_id, target.person_id)
+            self.mergeRequested.emit(source.person_id, target.person_id)
 
         self.hide_merge_frame()
         self.proximity_pair = None

@@ -153,7 +153,9 @@ class FaceClusterPipeline:
 
         self._model_root.mkdir(parents=True, exist_ok=True)
         insightface_root = self._model_root.parent.resolve()
-        os.environ.setdefault("INSIGHTFACE_HOME", str(insightface_root))
+        # Keep downloaded models in the shared extension cache instead of
+        # library-specific folders so they are reused across rescans.
+        os.environ["INSIGHTFACE_HOME"] = str(insightface_root)
         _patch_insightface_alignment_estimate()
         providers = _resolve_execution_providers()
         ctx_id = 0 if "CUDAExecutionProvider" in providers else -1

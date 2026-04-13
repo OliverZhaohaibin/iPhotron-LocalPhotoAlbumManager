@@ -9,7 +9,7 @@ import pytest
 from iPhoto.cache.index_store import get_global_repository, reset_global_repository
 from iPhoto.config import WORK_DIR_NAME
 from iPhoto.people.repository import FaceRecord, PersonRecord
-from iPhoto.people.service import PeopleService, face_library_paths
+from iPhoto.people.service import PeopleService, face_library_paths, shared_face_model_dir
 
 
 @pytest.fixture(autouse=True)
@@ -66,7 +66,8 @@ def test_face_library_paths_live_under_dot_iphoto(tmp_path: Path) -> None:
     assert paths.index_db_path == paths.root_dir / "face_index.db"
     assert paths.state_db_path == paths.root_dir / "face_state.db"
     assert paths.thumbnail_dir == paths.root_dir / "thumbnails"
-    assert paths.model_dir == paths.root_dir / "models"
+    assert paths.model_dir == shared_face_model_dir()
+    assert paths.model_dir == Path(__file__).resolve().parents[1] / "src" / "extension" / "models"
 
 
 def test_people_service_rename_merge_and_build_query(tmp_path: Path) -> None:

@@ -385,7 +385,37 @@ class FaceRepository:
             return
 
         with closing(self._connect()) as conn:
-            conn.execute(f"DELETE FROM faces WHERE {' OR '.join(clauses)}", params)
+            matched_faces = conn.execute(
+                f"""
+                SELECT face_id, person_id
+                FROM faces
+                WHERE {' OR '.join(clauses)}
+                """,
+                params,
+            ).fetchall()
+            if not matched_faces:
+                return
+
+            affected_person_ids = [
+                str(row["person_id"])
+                for row in matched_faces
+                if row["person_id"]
+            ]
+            if affected_person_ids:
+                placeholders = ", ".join(["?"] * len(affected_person_ids))
+                # Runtime person rows are fully rebuilt after rescans, so remove
+                # affected clusters first to avoid dangling key_face_id references.
+                conn.execute(
+                    f"DELETE FROM persons WHERE person_id IN ({placeholders})",
+                    affected_person_ids,
+                )
+
+            face_ids = [str(row["face_id"]) for row in matched_faces if row["face_id"]]
+            placeholders = ", ".join(["?"] * len(face_ids))
+            conn.execute(
+                f"DELETE FROM faces WHERE face_id IN ({placeholders})",
+                face_ids,
+            )
             orphaned = {
                 row[0]
                 for row in conn.execute(

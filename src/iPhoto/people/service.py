@@ -13,6 +13,9 @@ from .repository import FaceRepository, PersonSummary
 from .status import FACE_STATUS_RETRY, FACE_STATUS_SKIPPED, normalize_face_status
 
 
+_SHARED_FACE_MODEL_DIR = Path(__file__).resolve().parents[2] / "extension" / "models"
+
+
 @dataclass(frozen=True)
 class FaceLibraryPaths:
     root_dir: Path
@@ -22,6 +25,11 @@ class FaceLibraryPaths:
     model_dir: Path
 
 
+def shared_face_model_dir() -> Path:
+    """Return the shared cache directory for downloaded face models."""
+    return _SHARED_FACE_MODEL_DIR
+
+
 def face_library_paths(library_root: Path) -> FaceLibraryPaths:
     root_dir = library_root / WORK_DIR_NAME / "faces"
     return FaceLibraryPaths(
@@ -29,7 +37,7 @@ def face_library_paths(library_root: Path) -> FaceLibraryPaths:
         index_db_path=root_dir / "face_index.db",
         state_db_path=root_dir / "face_state.db",
         thumbnail_dir=root_dir / "thumbnails",
-        model_dir=root_dir / "models",
+        model_dir=shared_face_model_dir(),
     )
 
 

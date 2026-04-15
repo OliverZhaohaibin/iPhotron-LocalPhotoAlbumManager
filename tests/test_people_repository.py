@@ -34,12 +34,18 @@ def _face_record(*, face_id: str, asset_id: str, asset_rel: str, person_id: str)
     )
 
 
-def _person_record(*, person_id: str, key_face_id: str, face_count: int) -> PersonRecord:
+def _person_record(
+    *,
+    person_id: str,
+    key_face_id: str,
+    face_count: int,
+    name: str | None = "Alice",
+) -> PersonRecord:
     embedding = np.asarray([1.0, 0.0, 0.0], dtype=np.float32)
     timestamp = _now_iso()
     return PersonRecord(
         person_id=person_id,
-        name="Alice",
+        name=name,
         key_face_id=key_face_id,
         face_count=face_count,
         center_embedding=embedding,
@@ -70,3 +76,70 @@ def test_remove_faces_for_assets_deletes_affected_person_rows_first(tmp_path: Pa
     remaining_faces = repository.get_all_faces()
     assert [face.face_id for face in remaining_faces] == ["face-b"]
     assert repository.get_person_summaries() == []
+
+
+def test_people_groups_persist_and_query_common_assets(tmp_path: Path) -> None:
+    repository = FaceRepository(tmp_path / "face_index.db", tmp_path / "face_state.db")
+    faces = [
+        _face_record(
+            face_id="face-a-shared-1",
+            asset_id="asset-shared",
+            asset_rel="album/shared.jpg",
+            person_id="person-a",
+        ),
+        _face_record(
+            face_id="face-a-shared-2",
+            asset_id="asset-shared",
+            asset_rel="album/shared.jpg",
+            person_id="person-a",
+        ),
+        _face_record(
+            face_id="face-b-shared",
+            asset_id="asset-shared",
+            asset_rel="album/shared.jpg",
+            person_id="person-b",
+        ),
+        _face_record(
+            face_id="face-a-only",
+            asset_id="asset-a",
+            asset_rel="album/a.jpg",
+            person_id="person-a",
+        ),
+        _face_record(
+            face_id="face-b-only",
+            asset_id="asset-b",
+            asset_rel="album/b.jpg",
+            person_id="person-b",
+        ),
+    ]
+    persons = [
+        _person_record(
+            person_id="person-a",
+            key_face_id="face-a-shared-1",
+            face_count=3,
+            name="Alice",
+        ),
+        _person_record(
+            person_id="person-b",
+            key_face_id="face-b-shared",
+            face_count=2,
+            name="Bob",
+        ),
+    ]
+    repository.replace_all(faces, persons)
+
+    group = repository.create_group(["person-a", "person-b", "person-a"])
+    assert group is not None
+    assert group.member_person_ids == ("person-a", "person-b")
+
+    duplicate = repository.create_group(["person-b", "person-a"])
+    assert duplicate is not None
+    assert duplicate.group_id == group.group_id
+    assert duplicate.member_person_ids == ("person-a", "person-b")
+
+    assert repository.get_common_asset_ids_for_group(group.group_id) == ["asset-shared"]
+
+    repository.replace_all(faces, persons)
+    persisted = repository.list_groups()
+    assert len(persisted) == 1
+    assert persisted[0].group_id == group.group_id

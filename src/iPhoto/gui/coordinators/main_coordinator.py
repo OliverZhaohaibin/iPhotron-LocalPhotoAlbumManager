@@ -136,12 +136,13 @@ class MainCoordinator(QObject):
 
         # 3. Playback Coordinator
         from iPhoto.gui.ui.controllers.player_view_controller import PlayerViewController
+
         self._player_view_controller = PlayerViewController(
             window.ui.player_stack,
             window.ui.image_viewer,
             window.ui.video_area,
             window.ui.player_placeholder,
-            window.ui.live_badge
+            window.ui.live_badge,
         )
         self._header_controller = HeaderController(
             window.ui.location_label,
@@ -174,7 +175,7 @@ class MainCoordinator(QObject):
         self._playback.set_navigation_coordinator(self._navigation)
         self._navigation.set_playback_coordinator(self._playback)
         # Manually attach info panel if available
-        if hasattr(window.ui, 'info_panel'):
+        if hasattr(window.ui, "info_panel"):
             self._playback.set_info_panel(window.ui.info_panel)
 
         # 4. Theme Controller
@@ -182,10 +183,10 @@ class MainCoordinator(QObject):
 
         # 5. Edit Coordinator
         self._edit = EditCoordinator(
-            window.ui, # Pass UI root for access to sidebar/header/viewer
+            window.ui,  # Pass UI root for access to sidebar/header/viewer
             self._view_router,
             self._event_bus,
-            self._asset_list_vm, # Injected for invalidation
+            self._asset_list_vm,  # Injected for invalidation
             window,
             self._theme_controller,
             self._navigation,
@@ -400,7 +401,7 @@ class MainCoordinator(QObject):
         ui.video_area.prevItemRequested.connect(self._playback.select_previous)
 
         # Map view cluster interactions
-        if hasattr(ui, 'map_view') and ui.map_view is not None:
+        if hasattr(ui, "map_view") and ui.map_view is not None:
             ui.map_view.assetActivated.connect(self._on_map_asset_activated)
             ui.map_view.clusterActivated.connect(self._on_cluster_activated)
 
@@ -414,23 +415,24 @@ class MainCoordinator(QObject):
         ui.favorite_button.clicked.connect(self._detail_vm.toggle_favorite)
 
         # Info Button
-        if hasattr(ui, 'info_button'):
+        if hasattr(ui, "info_button"):
             ui.info_button.clicked.connect(self._playback.toggle_info_panel)
 
         # Back Button (detail page)
-        if hasattr(ui, 'back_button'):
+        if hasattr(ui, "back_button"):
             ui.back_button.clicked.connect(self._playback.reset_for_gallery)
             ui.back_button.clicked.connect(self._detail_vm.back_to_gallery)
 
         # Gallery page back button for cluster gallery mode
-        if hasattr(ui, 'gallery_page') and hasattr(ui.gallery_page, 'backRequested'):
+        if hasattr(ui, "gallery_page") and hasattr(ui.gallery_page, "backRequested"):
             ui.gallery_page.backRequested.connect(self._gallery_vm.return_from_cluster_gallery)
 
         # Dashboard Click
-        if hasattr(ui, 'albums_dashboard_page'):
+        if hasattr(ui, "albums_dashboard_page"):
             ui.albums_dashboard_page.albumSelected.connect(self.open_album_from_path)
         if hasattr(ui, "people_page"):
             ui.people_page.clusterActivated.connect(self._on_people_cluster_activated)
+            ui.people_page.groupActivated.connect(self._on_people_group_activated)
             self._context.library.peopleIndexUpdated.connect(ui.people_page.reload)
             self._context.library.faceScanStatusChanged.connect(ui.people_page.set_status_message)
 
@@ -542,6 +544,12 @@ class MainCoordinator(QObject):
             return
         self._navigation.open_people_cluster_gallery(query)
 
+    def _on_people_group_activated(self, group_id: str) -> None:
+        query = self._window.ui.people_page.build_group_query(group_id)
+        if not query.asset_ids:
+            return
+        self._navigation.open_people_cluster_gallery(query)
+
     def open_album_from_path(self, path: Path):
         self._navigation.open_album(path)
 
@@ -599,9 +607,7 @@ class MainCoordinator(QObject):
 
         current_key = self._normalise_path_key(current_path)
         selected_keys = {
-            key
-            for key in (self._normalise_path_key(path) for path in paths)
-            if key is not None
+            key for key in (self._normalise_path_key(path) for path in paths) if key is not None
         }
         if current_key is not None and current_key in selected_keys:
             self._playback.reset_for_gallery()

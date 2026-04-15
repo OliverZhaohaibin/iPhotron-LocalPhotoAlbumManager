@@ -258,6 +258,11 @@ class GroupAvatarTile(QWidget):
 
 
 class GroupPeopleDialog(QDialog):
+    _PANEL_RADIUS = 24.0
+    _SHADOW_SIZE = 18
+    _SHADOW_MAX_ALPHA = 18
+    _SHADOW_RADIUS_GROWTH = 0.5
+
     def __init__(
         self,
         summaries: list[PersonSummary],
@@ -282,7 +287,8 @@ class GroupPeopleDialog(QDialog):
         self.setMinimumSize(760, 520)
 
         root = QVBoxLayout(self)
-        root.setContentsMargins(34, 34, 34, 34)
+        shadow_margin = self._SHADOW_SIZE + 14
+        root.setContentsMargins(24, 24, shadow_margin, shadow_margin)
         root.setSpacing(0)
 
         self._panel = QFrame(self)
@@ -307,11 +313,6 @@ class GroupPeopleDialog(QDialog):
                 background: transparent;
             }}
             """)
-        shadow = QGraphicsDropShadowEffect(self._panel)
-        shadow.setBlurRadius(76 if self._dark_mode else 68)
-        shadow.setOffset(0, 14 if self._dark_mode else 12)
-        shadow.setColor(QColor(0, 0, 0, 56 if self._dark_mode else 48))
-        self._panel.setGraphicsEffect(shadow)
         root.addWidget(self._panel)
 
         panel_layout = QVBoxLayout(self._panel)
@@ -460,8 +461,31 @@ class GroupPeopleDialog(QDialog):
             tile.set_selected(tile.person_id in self._selected_ids)
         self.add_button.setEnabled(len(self._selected_ids) >= 2)
 
+    def _paint_panel_shadow(self, painter: QPainter) -> None:
+        panel_rect = QRectF(self._panel.geometry())
+        radius = min(
+            self._PANEL_RADIUS,
+            min(panel_rect.width(), panel_rect.height()) / 2.0,
+        )
+        shadow_steps = self._SHADOW_SIZE
+        for index in range(shadow_steps):
+            alpha = int(self._SHADOW_MAX_ALPHA * (1 - index / shadow_steps) ** 2)
+            if alpha <= 0:
+                continue
+            spread = float(index)
+            shadow_rect = panel_rect.adjusted(spread, spread, spread, spread)
+            shadow_path = QPainterPath()
+            shadow_path.addRoundedRect(
+                shadow_rect,
+                radius + spread * self._SHADOW_RADIUS_GROWTH,
+                radius + spread * self._SHADOW_RADIUS_GROWTH,
+            )
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.fillPath(shadow_path, QColor(0, 0, 0, alpha))
+
     def paintEvent(self, _event) -> None:  # noqa: N802
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         overlay = QColor(13, 15, 22, 80) if self._dark_mode else QColor(243, 246, 252, 92)
         painter.fillRect(self.rect(), overlay)
+        self._paint_panel_shadow(painter)

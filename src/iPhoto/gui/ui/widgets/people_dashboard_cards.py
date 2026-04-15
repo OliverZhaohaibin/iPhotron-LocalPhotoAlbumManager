@@ -54,7 +54,7 @@ class PeopleCard(QWidget):
         return self.summary.person_id
 
     def display_name(self) -> str:
-        return self.summary.name or "Unnamed"
+        return (self.summary.name or "").strip()
 
     def begin_drag(self) -> None:
         self._dragging = True
@@ -130,10 +130,11 @@ class PeopleCard(QWidget):
         painter.drawEllipse(QRectF(54, 44, 48, 48))
         painter.drawRoundedRect(QRectF(44, 118, 68, 46), 22, 22)
 
-        initial = self.display_name().strip()[:1].upper() or "?"
-        painter.setPen(_qcolor("#0F172A"))
-        painter.setFont(QFont("Segoe UI", 28, QFont.Weight.Bold))
-        painter.drawText(QRectF(0, 42, CARD_WIDTH, 56), Qt.AlignmentFlag.AlignCenter, initial)
+        initial = self.display_name()[:1].upper()
+        if initial:
+            painter.setPen(_qcolor("#0F172A"))
+            painter.setFont(QFont("Segoe UI", 28, QFont.Weight.Bold))
+            painter.drawText(QRectF(0, 42, CARD_WIDTH, 56), Qt.AlignmentFlag.AlignCenter, initial)
 
         painter.end()
         return pixmap
@@ -161,6 +162,10 @@ class PeopleCard(QWidget):
         painter.drawRoundedRect(card_rect, CARD_RADIUS, CARD_RADIUS)
 
     def _paint_bottom_overlay(self, painter: QPainter, card_rect: QRectF) -> None:
+        display_name = self.display_name()
+        if not display_name:
+            return
+
         gradient = QLinearGradient(
             card_rect.left(), card_rect.bottom() - 82, card_rect.left(), card_rect.bottom()
         )
@@ -171,30 +176,21 @@ class PeopleCard(QWidget):
 
         text_rect = card_rect.adjusted(14, 0, -14, -12)
         title_font = QFont("Segoe UI", 14, QFont.Weight.Bold)
-        subtitle_font = QFont("Segoe UI", 10, QFont.Weight.Medium)
 
         shadow_rect = text_rect.translated(0, 1.5)
         painter.setPen(QColor(0, 0, 0, 150))
         painter.setFont(title_font)
         painter.drawText(
-            shadow_rect.adjusted(0, 0, 0, -16),
+            shadow_rect,
             Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignBottom,
-            self.display_name(),
+            display_name,
         )
 
         painter.setPen(_qcolor("#FFFFFF"))
         painter.drawText(
-            text_rect.adjusted(0, 0, 0, -16),
-            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignBottom,
-            self.display_name(),
-        )
-
-        painter.setFont(subtitle_font)
-        painter.setPen(_qcolor("#E5E7EB"))
-        painter.drawText(
             text_rect,
             Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignBottom,
-            f"{self.summary.face_count} faces",
+            display_name,
         )
 
     def _paint_count_badge(self, painter: QPainter, card_rect: QRectF) -> None:

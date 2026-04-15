@@ -123,6 +123,16 @@ def test_people_card_defers_thumbnail_artwork(
     ]
 
 
+def test_unnamed_people_card_has_no_display_placeholder(qapp: QApplication) -> None:
+    widget = PeopleDashboardWidget()
+    widget._summaries = [PersonSummary("person-a", None, "face-a", 3, None, "2024-01-01T00:00:00Z")]
+    widget._populate_cards()
+
+    card = widget._board.visible_cards()[0]
+
+    assert card.display_name() == ""
+
+
 def test_group_people_dialog_defaults_and_shift_selects_range(qapp: QApplication) -> None:
     summaries = [
         PersonSummary("person-a", "Alice", "face-a", 3, None, "2024-01-01T00:00:00Z"),

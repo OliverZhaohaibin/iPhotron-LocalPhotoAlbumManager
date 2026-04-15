@@ -253,7 +253,7 @@ class PeopleDashboardWidget(QWidget):
 
         self._summaries = list(summaries)
         self._groups = list(groups)
-        status_text = status_message or None
+        status_text = status_message if status_message else None
 
         if self._summaries:
             self._message.setText(

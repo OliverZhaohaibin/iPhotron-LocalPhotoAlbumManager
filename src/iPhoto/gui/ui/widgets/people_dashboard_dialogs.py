@@ -282,20 +282,20 @@ class GroupPeopleDialog(QDialog):
         self.setMinimumSize(760, 520)
 
         root = QVBoxLayout(self)
-        root.setContentsMargins(22, 22, 22, 22)
+        root.setContentsMargins(34, 34, 34, 34)
         root.setSpacing(0)
 
         self._panel = QFrame(self)
         self._panel.setObjectName("GroupPeopleDialogPanel")
-        panel_bg = "#171B27" if self._dark_mode else "rgba(255, 255, 255, 0.98)"
-        panel_border = "rgba(255, 255, 255, 0.08)" if self._dark_mode else "rgba(17, 24, 39, 0.10)"
+        panel_bg = "#171B27" if self._dark_mode else "#FFFFFF"
+        panel_border = "rgba(255, 255, 255, 0.08)" if self._dark_mode else "#E5E7EB"
         text_primary = "#F6F7FB" if self._dark_mode else "#111827"
         text_secondary = "#DDE3F3" if self._dark_mode else "#374151"
-        scroll_handle = "rgba(255, 255, 255, 0.42)" if self._dark_mode else "rgba(17, 24, 39, 0.24)"
-        cancel_bg = "rgba(255, 255, 255, 0.08)" if self._dark_mode else "rgba(17, 24, 39, 0.06)"
-        cancel_hover = "rgba(255, 255, 255, 0.13)" if self._dark_mode else "rgba(17, 24, 39, 0.10)"
+        scroll_handle = "rgba(255, 255, 255, 0.42)" if self._dark_mode else "#CBD5E1"
+        cancel_bg = "rgba(255, 255, 255, 0.08)" if self._dark_mode else "#F3F4F6"
+        cancel_hover = "rgba(255, 255, 255, 0.13)" if self._dark_mode else "#E5E7EB"
         cancel_text = "#F4F6FB" if self._dark_mode else "#111827"
-        disabled_text = "rgba(244, 246, 251, 0.34)" if self._dark_mode else "rgba(17, 24, 39, 0.34)"
+        disabled_text = "rgba(244, 246, 251, 0.34)" if self._dark_mode else "#9CA3AF"
 
         self._panel.setStyleSheet(f"""
             #GroupPeopleDialogPanel {{
@@ -308,9 +308,9 @@ class GroupPeopleDialog(QDialog):
             }}
             """)
         shadow = QGraphicsDropShadowEffect(self._panel)
-        shadow.setBlurRadius(46)
-        shadow.setOffset(0, 18)
-        shadow.setColor(QColor(0, 0, 0, 88))
+        shadow.setBlurRadius(76 if self._dark_mode else 68)
+        shadow.setOffset(0, 14 if self._dark_mode else 12)
+        shadow.setColor(QColor(0, 0, 0, 56 if self._dark_mode else 48))
         self._panel.setGraphicsEffect(shadow)
         root.addWidget(self._panel)
 

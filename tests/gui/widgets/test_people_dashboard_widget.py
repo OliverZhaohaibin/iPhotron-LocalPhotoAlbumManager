@@ -12,7 +12,7 @@ pytest.importorskip(
 pytest.importorskip("PySide6.QtWidgets", reason="Qt widgets not available", exc_type=ImportError)
 
 from PySide6.QtGui import QColor, QPixmap
-from PySide6.QtWidgets import QApplication, QWidget
+from PySide6.QtWidgets import QApplication, QGraphicsDropShadowEffect, QWidget
 
 from iPhoto.gui.ui.widgets import people_dashboard_cards
 from iPhoto.gui.ui.widgets.people_dashboard import (
@@ -151,7 +151,15 @@ def test_group_people_dialog_supports_light_and_dark_styles(qapp: QApplication) 
     dark_dialog = GroupPeopleDialog(summaries, dark_mode=True)
 
     assert light_dialog._dark_mode is False
-    assert "rgba(255, 255, 255, 0.98)" in light_dialog._panel.styleSheet()
+    assert "#FFFFFF" in light_dialog._panel.styleSheet()
+    assert "rgba(255, 255, 255, 0.98)" not in light_dialog._panel.styleSheet()
+    light_shadow = light_dialog._panel.graphicsEffect()
+    assert isinstance(light_shadow, QGraphicsDropShadowEffect)
+    assert light_shadow.blurRadius() >= 60
+    assert light_shadow.color().red() == 0
+    assert light_shadow.color().green() == 0
+    assert light_shadow.color().blue() == 0
+    assert light_shadow.color().alpha() >= 40
     assert dark_dialog._dark_mode is True
     assert "#171B27" in dark_dialog._panel.styleSheet()
 

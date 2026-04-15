@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import QPoint, QRectF, Qt, Signal
+from PySide6.QtCore import QPoint, QRect, QRectF, Qt, Signal
 from PySide6.QtGui import QColor, QFont, QLinearGradient, QPainter, QPainterPath, QPen, QPixmap
 from PySide6.QtWidgets import (
     QDialog,
@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
 
 from iPhoto.people.repository import PersonSummary
 
+from ..styles import modern_scrollbar_style
 from .flow_layout import FlowLayout
 from .people_dashboard_shared import (
     AVATAR_SIZE,
@@ -278,6 +279,7 @@ class GroupPeopleDialog(QDialog):
         self._selection_order: list[str] = []
         self._anchor_index: int | None = None
         self._dark_mode = _widget_uses_dark_theme(parent) if dark_mode is None else bool(dark_mode)
+        self._drag_pos: QPoint | None = None
 
         self.setModal(True)
         self.setWindowTitle("People")
@@ -293,15 +295,15 @@ class GroupPeopleDialog(QDialog):
 
         self._panel = QFrame(self)
         self._panel.setObjectName("GroupPeopleDialogPanel")
-        panel_bg = "#171B27" if self._dark_mode else "#FFFFFF"
+        panel_bg = "#171B27" if self._dark_mode else "#F5F6FA"
         panel_border = "rgba(255, 255, 255, 0.08)" if self._dark_mode else "#E5E7EB"
         text_primary = "#F6F7FB" if self._dark_mode else "#111827"
         text_secondary = "#DDE3F3" if self._dark_mode else "#374151"
-        scroll_handle = "rgba(255, 255, 255, 0.42)" if self._dark_mode else "#CBD5E1"
-        cancel_bg = "rgba(255, 255, 255, 0.08)" if self._dark_mode else "#F3F4F6"
-        cancel_hover = "rgba(255, 255, 255, 0.13)" if self._dark_mode else "#E5E7EB"
+        cancel_bg = "rgba(255, 255, 255, 0.08)" if self._dark_mode else "#E8EAF0"
+        cancel_hover = "rgba(255, 255, 255, 0.13)" if self._dark_mode else "#DDE0EA"
         cancel_text = "#F4F6FB" if self._dark_mode else "#111827"
         disabled_text = "rgba(244, 246, 251, 0.34)" if self._dark_mode else "#9CA3AF"
+        scrollbar_base = QColor("#B7C2DD") if self._dark_mode else QColor("#5A6480")
 
         self._panel.setStyleSheet(f"""
             #GroupPeopleDialogPanel {{
@@ -328,26 +330,16 @@ class GroupPeopleDialog(QDialog):
         self._scroll.setFrameShape(QFrame.Shape.NoFrame)
         self._scroll.setWidgetResizable(True)
         self._scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self._scroll.setStyleSheet(f"""
-            QScrollArea {{
-                background: transparent;
-                border: none;
-            }}
-            QScrollBar:vertical {{
-                background: transparent;
-                width: 9px;
-                margin: 0;
-            }}
-            QScrollBar::handle:vertical {{
-                background: {scroll_handle};
-                border-radius: 4px;
-                min-height: 48px;
-            }}
-            QScrollBar::add-line:vertical,
-            QScrollBar::sub-line:vertical {{
-                height: 0;
-            }}
-            """)
+        scroll_style = modern_scrollbar_style(
+            scrollbar_base,
+            handle_alpha=80,
+            handle_hover_alpha=140,
+            radius=4,
+            handle_radius=4,
+        )
+        self._scroll.setStyleSheet(
+            "QScrollArea { background: transparent; border: none; }\n" + scroll_style
+        )
         self._tile_host = QWidget()
         self._tile_host.setStyleSheet("background: transparent;")
         self._tile_layout = FlowLayout(self._tile_host, margin=6, h_spacing=40, v_spacing=20)
@@ -482,6 +474,29 @@ class GroupPeopleDialog(QDialog):
             )
             painter.setPen(Qt.PenStyle.NoPen)
             painter.fillPath(shadow_path, QColor(0, 0, 0, alpha))
+
+    def mousePressEvent(self, event) -> None:  # noqa: N802
+        if event.button() == Qt.MouseButton.LeftButton:
+            global_pos = event.globalPosition().toPoint()
+            scroll_origin = self._scroll.mapToGlobal(QPoint(0, 0))
+            scroll_global_rect = QRect(scroll_origin, self._scroll.size())
+            if not scroll_global_rect.contains(global_pos):
+                self._drag_pos = global_pos - self.frameGeometry().topLeft()
+                event.accept()
+                return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event) -> None:  # noqa: N802
+        if event.buttons() & Qt.MouseButton.LeftButton and self._drag_pos is not None:
+            self.move(event.globalPosition().toPoint() - self._drag_pos)
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:  # noqa: N802
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._drag_pos = None
+        super().mouseReleaseEvent(event)
 
     def paintEvent(self, _event) -> None:  # noqa: N802
         painter = QPainter(self)

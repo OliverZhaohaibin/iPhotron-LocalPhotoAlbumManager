@@ -43,6 +43,7 @@ class PeopleCard(QWidget):
         self._press_pos: QPoint | None = None
         self._drag_offset: QPoint | None = None
         self._artwork: QPixmap | None = None
+        self._placeholder_artwork: QPixmap | None = None
 
         self.setFixedSize(CARD_WIDTH, CARD_HEIGHT)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -76,9 +77,17 @@ class PeopleCard(QWidget):
         self.setGraphicsEffect(shadow)
 
     def _cover_pixmap(self) -> QPixmap:
-        if self._artwork is None:
-            self._artwork = self._render_cover_art()
-        return self._artwork
+        if self._artwork is not None:
+            return self._artwork
+        if self._placeholder_artwork is None:
+            self._placeholder_artwork = self._render_placeholder_art()
+        return self._placeholder_artwork
+
+    def load_cover_artwork(self) -> None:
+        if self._artwork is not None:
+            return
+        self._artwork = self._render_cover_art()
+        self.update()
 
     def _render_cover_art(self) -> QPixmap:
         thumbnail_path = self.summary.thumbnail_path
@@ -269,6 +278,7 @@ class GroupCard(QWidget):
         self.seed_index = seed_index
         self._hovered = False
         self._artwork: QPixmap | None = None
+        self._placeholder_artwork: QPixmap | None = None
         self.setFixedSize(GROUP_CARD_WIDTH, GROUP_CARD_HEIGHT)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         shadow = QGraphicsDropShadowEffect(self)
@@ -282,9 +292,17 @@ class GroupCard(QWidget):
         return self.summary.group_id
 
     def _cover_pixmap(self) -> QPixmap:
-        if self._artwork is None:
-            self._artwork = self._render_cover_art()
-        return self._artwork
+        if self._artwork is not None:
+            return self._artwork
+        if self._placeholder_artwork is None:
+            self._placeholder_artwork = self._render_member_collage(load_member_images=False)
+        return self._placeholder_artwork
+
+    def load_cover_artwork(self) -> None:
+        if self._artwork is not None:
+            return
+        self._artwork = self._render_cover_art()
+        self.update()
 
     def _render_cover_art(self) -> QPixmap:
         cover_path = self.summary.cover_asset_path
@@ -297,7 +315,7 @@ class GroupCard(QWidget):
                 return pixmap
         return self._render_member_collage()
 
-    def _render_member_collage(self) -> QPixmap:
+    def _render_member_collage(self, *, load_member_images: bool = True) -> QPixmap:
         scale = 2
         pixmap = QPixmap(GROUP_CARD_WIDTH * scale, GROUP_CARD_HEIGHT * scale)
         pixmap.fill(Qt.GlobalColor.transparent)
@@ -325,7 +343,7 @@ class GroupCard(QWidget):
                 y = (index // columns) * cell_h
                 target = QRectF(x, y, cell_w, cell_h)
                 member_pixmap = None
-                if member.thumbnail_path is not None:
+                if load_member_images and member.thumbnail_path is not None:
                     member_pixmap = _pixmap_from_image_path(
                         member.thumbnail_path,
                         (int(cell_w * 2), int(cell_h * 2)),

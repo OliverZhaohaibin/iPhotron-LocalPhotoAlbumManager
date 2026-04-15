@@ -131,6 +131,9 @@ def test_people_groups_persist_and_query_common_assets(tmp_path: Path) -> None:
     group = repository.create_group(["person-a", "person-b", "person-a"])
     assert group is not None
     assert group.member_person_ids == ("person-a", "person-b")
+    assert repository.state_repository is not None
+    assert repository.state_repository.has_group_asset_cache(group.group_id) is True
+    assert repository.state_repository.get_group_asset_ids(group.group_id) == ["asset-shared"]
 
     duplicate = repository.create_group(["person-b", "person-a"])
     assert duplicate is not None
@@ -139,7 +142,36 @@ def test_people_groups_persist_and_query_common_assets(tmp_path: Path) -> None:
 
     assert repository.get_common_asset_ids_for_group(group.group_id) == ["asset-shared"]
 
-    repository.replace_all(faces, persons)
+    updated_faces = [
+        _face_record(
+            face_id="face-a-updated-shared",
+            asset_id="asset-updated-shared",
+            asset_rel="album/updated-shared.jpg",
+            person_id="person-a",
+        ),
+        _face_record(
+            face_id="face-b-updated-shared",
+            asset_id="asset-updated-shared",
+            asset_rel="album/updated-shared.jpg",
+            person_id="person-b",
+        ),
+    ]
+    updated_persons = [
+        _person_record(
+            person_id="person-a",
+            key_face_id="face-a-updated-shared",
+            face_count=1,
+            name="Alice",
+        ),
+        _person_record(
+            person_id="person-b",
+            key_face_id="face-b-updated-shared",
+            face_count=1,
+            name="Bob",
+        ),
+    ]
+    repository.replace_all(updated_faces, updated_persons)
     persisted = repository.list_groups()
     assert len(persisted) == 1
     assert persisted[0].group_id == group.group_id
+    assert repository.get_common_asset_ids_for_group(group.group_id) == ["asset-updated-shared"]

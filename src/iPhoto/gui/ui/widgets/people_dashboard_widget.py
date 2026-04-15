@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, Signal, QTimer
 from PySide6.QtGui import QAction, QGuiApplication
 from PySide6.QtWidgets import (
     QDialog,
@@ -41,6 +41,10 @@ class PeopleDashboardWidget(QWidget):
         self._groups: list[PeopleGroupSummary] = []
         self._cards: dict[str, PeopleCard] = {}
         self._group_cards: dict[str, GroupCard] = {}
+        self._artwork_queue: list[PeopleCard | GroupCard] = []
+        self._artwork_timer = QTimer(self)
+        self._artwork_timer.setInterval(18)
+        self._artwork_timer.timeout.connect(self._load_next_artwork)
 
         root = QVBoxLayout(self)
         root.setContentsMargins(24, 18, 24, 18)
@@ -147,6 +151,7 @@ class PeopleDashboardWidget(QWidget):
         self.reload()
 
     def reload(self) -> None:
+        self._cancel_deferred_artwork_loading()
         self._clear_group_cards()
         self._clear_cards()
         if not self._service.is_bound():
@@ -169,6 +174,7 @@ class PeopleDashboardWidget(QWidget):
             self._scroll.show()
             self._populate_groups()
             self._populate_cards()
+            self._start_deferred_artwork_loading()
             return
 
         if self._status_message:
@@ -194,6 +200,7 @@ class PeopleDashboardWidget(QWidget):
             card.activated.connect(self.groupActivated.emit)
             self._group_cards[summary.group_id] = card
             self._groups_layout.addWidget(card)
+            self._queue_artwork_load(card)
             card.show()
         self._groups_host.updateGeometry()
 
@@ -210,6 +217,31 @@ class PeopleDashboardWidget(QWidget):
             self._cards[summary.person_id] = card
             cards.append(card)
         self._board.set_cards(cards)
+        for card in cards:
+            self._queue_artwork_load(card)
+
+    def _queue_artwork_load(self, card: PeopleCard | GroupCard) -> None:
+        self._artwork_queue.append(card)
+
+    def _start_deferred_artwork_loading(self) -> None:
+        if not self._artwork_queue or not self.isVisible():
+            return
+        if not self._artwork_timer.isActive():
+            self._artwork_timer.start()
+
+    def _cancel_deferred_artwork_loading(self) -> None:
+        self._artwork_timer.stop()
+        self._artwork_queue.clear()
+
+    def _load_next_artwork(self) -> None:
+        while self._artwork_queue:
+            card = self._artwork_queue.pop(0)
+            if card.parent() is None:
+                continue
+            card.load_cover_artwork()
+            break
+        if not self._artwork_queue:
+            self._artwork_timer.stop()
 
     def _clear_cards(self) -> None:
         self._board.clear_cards()
@@ -380,3 +412,11 @@ class PeopleDashboardWidget(QWidget):
         super().changeEvent(event)
         if hasattr(self, "_people_title"):
             self._apply_theme_styles()
+
+    def showEvent(self, event) -> None:  # noqa: N802
+        super().showEvent(event)
+        self._start_deferred_artwork_loading()
+
+    def hideEvent(self, event) -> None:  # noqa: N802
+        super().hideEvent(event)
+        self._artwork_timer.stop()

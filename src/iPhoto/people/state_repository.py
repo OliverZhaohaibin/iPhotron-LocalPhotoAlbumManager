@@ -245,6 +245,83 @@ class FaceStateRepository:
         with closing(self._connect()) as conn:
             return self._group_from_id(conn, group_id)
 
+    def has_group_asset_cache(self, group_id: str) -> bool:
+        if not group_id:
+            return False
+        self.initialize()
+        with closing(self._connect()) as conn:
+            row = conn.execute(
+                "SELECT 1 FROM people_group_asset_cache WHERE group_id = ?",
+                (group_id,),
+            ).fetchone()
+        return row is not None
+
+    def get_group_asset_ids(self, group_id: str) -> list[str]:
+        if not group_id:
+            return []
+        self.initialize()
+        with closing(self._connect()) as conn:
+            rows = conn.execute(
+                """
+                SELECT asset_id
+                FROM people_group_assets
+                WHERE group_id = ?
+                ORDER BY position ASC, asset_id ASC
+                """,
+                (group_id,),
+            ).fetchall()
+        return [str(row["asset_id"]) for row in rows if row["asset_id"]]
+
+    def replace_group_assets(
+        self,
+        group_id: str,
+        asset_rows: Iterable[tuple[str, str]],
+    ) -> None:
+        if not group_id:
+            return
+
+        rows = [
+            (str(asset_id), str(last_detected_at), index)
+            for index, (asset_id, last_detected_at) in enumerate(asset_rows)
+            if asset_id
+        ]
+        self.initialize()
+        timestamp = _utc_now_iso()
+        cover_asset_id = rows[0][0] if rows else None
+        with closing(self._connect()) as conn:
+            group_exists = conn.execute(
+                "SELECT 1 FROM people_groups WHERE group_id = ?",
+                (group_id,),
+            ).fetchone()
+            if group_exists is None:
+                return
+
+            conn.execute("DELETE FROM people_group_assets WHERE group_id = ?", (group_id,))
+            conn.executemany(
+                """
+                INSERT INTO people_group_assets (
+                    group_id, asset_id, position, last_detected_at
+                ) VALUES (?, ?, ?, ?)
+                """,
+                [
+                    (group_id, asset_id, position, last_detected_at)
+                    for asset_id, last_detected_at, position in rows
+                ],
+            )
+            conn.execute(
+                """
+                INSERT INTO people_group_asset_cache (
+                    group_id, asset_count, cover_asset_id, updated_at
+                ) VALUES (?, ?, ?, ?)
+                ON CONFLICT(group_id) DO UPDATE SET
+                    asset_count = excluded.asset_count,
+                    cover_asset_id = excluded.cover_asset_id,
+                    updated_at = excluded.updated_at
+                """,
+                (group_id, len(rows), cover_asset_id, timestamp),
+            )
+            conn.commit()
+
     @staticmethod
     def _group_from_id(
         conn: sqlite3.Connection,
@@ -335,4 +412,25 @@ class FaceStateRepository:
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_people_group_members_person_id "
             "ON people_group_members(person_id)"
+        )
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS people_group_asset_cache (
+                group_id TEXT PRIMARY KEY REFERENCES people_groups(group_id) ON DELETE CASCADE,
+                asset_count INTEGER NOT NULL,
+                cover_asset_id TEXT,
+                updated_at TEXT NOT NULL
+            )
+            """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS people_group_assets (
+                group_id TEXT NOT NULL REFERENCES people_groups(group_id) ON DELETE CASCADE,
+                asset_id TEXT NOT NULL,
+                position INTEGER NOT NULL,
+                last_detected_at TEXT NOT NULL,
+                PRIMARY KEY (group_id, asset_id)
+            )
+            """)
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_people_group_assets_group_id "
+            "ON people_group_assets(group_id)"
         )

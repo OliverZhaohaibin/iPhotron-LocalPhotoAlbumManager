@@ -165,9 +165,7 @@ class PeopleService:
         if len(members) < 2:
             return None
 
-        asset_ids = self._valid_asset_ids(
-            repository.get_common_asset_ids_for_persons(member.person_id for member in members)
-        )
+        asset_ids = self._valid_asset_ids(repository.get_common_asset_ids_for_group(group.group_id))
         return PeopleGroupSummary(
             group_id=group.group_id,
             name=_format_group_name(member.name for member in members),

@@ -97,6 +97,8 @@ class FaceRepository:
                 ],
             )
             conn.commit()
+        if self._state_repo is not None:
+            self.refresh_all_group_assets()
 
     def get_all_faces(self) -> list[FaceRecord]:
         self.initialize()
@@ -175,6 +177,8 @@ class FaceRepository:
                     f"DELETE FROM persons WHERE person_id IN ({placeholders})", list(orphaned)
                 )
             conn.commit()
+        if self._state_repo is not None:
+            self.refresh_all_group_assets()
 
     def get_person_summaries(self) -> list[PersonSummary]:
         self.initialize()
@@ -333,13 +337,17 @@ class FaceRepository:
                 target_name=target_name,
                 target_created_at=target_created_at,
             )
+            self.refresh_all_group_assets()
         return True
 
     def create_group(self, member_person_ids: Iterable[str]) -> PeopleGroupRecord | None:
         if self._state_repo is None:
             return None
         self.initialize()
-        return self._state_repo.create_group(member_person_ids)
+        group = self._state_repo.create_group(member_person_ids)
+        if group is not None:
+            self.refresh_group_assets(group.group_id)
+        return group
 
     def list_groups(self) -> list[PeopleGroupRecord]:
         if self._state_repo is None:
@@ -354,6 +362,17 @@ class FaceRepository:
         return self._state_repo.get_group(group_id)
 
     def get_common_asset_ids_for_persons(self, member_person_ids: Iterable[str]) -> list[str]:
+        return [
+            asset_id
+            for asset_id, _last_detected_at in self._common_asset_rows_for_persons(
+                member_person_ids
+            )
+        ]
+
+    def _common_asset_rows_for_persons(
+        self,
+        member_person_ids: Iterable[str],
+    ) -> list[tuple[str, str]]:
         members = _unique_person_ids(member_person_ids)
         if len(members) < 2:
             return []
@@ -372,13 +391,34 @@ class FaceRepository:
                 """,
                 [*members, len(members)],
             ).fetchall()
-        return [str(row["asset_id"]) for row in rows if row["asset_id"]]
+        return [
+            (str(row["asset_id"]), str(row["last_detected_at"])) for row in rows if row["asset_id"]
+        ]
 
     def get_common_asset_ids_for_group(self, group_id: str) -> list[str]:
+        if self._state_repo is None:
+            return []
+        self.initialize()
+        if self._state_repo.has_group_asset_cache(group_id):
+            return self._state_repo.get_group_asset_ids(group_id)
+        return self.refresh_group_assets(group_id)
+
+    def refresh_group_assets(self, group_id: str) -> list[str]:
+        if self._state_repo is None:
+            return []
         group = self.get_group(group_id)
         if group is None:
             return []
-        return self.get_common_asset_ids_for_persons(group.member_person_ids)
+        asset_rows = self._common_asset_rows_for_persons(group.member_person_ids)
+        self._state_repo.replace_group_assets(group.group_id, asset_rows)
+        return [asset_id for asset_id, _last_detected_at in asset_rows]
+
+    def refresh_all_group_assets(self) -> None:
+        if self._state_repo is None:
+            return
+        self.initialize()
+        for group in self._state_repo.list_groups():
+            self.refresh_group_assets(group.group_id)
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self._db_path, check_same_thread=False)

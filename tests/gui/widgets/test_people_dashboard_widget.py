@@ -74,7 +74,7 @@ def test_people_card_menu_contains_new_group(qapp: QApplication) -> None:
     assert action_texts.index("New Group") < action_texts.index("Merge Into...")
 
 
-def test_people_card_uses_thumbnail_artwork(
+def test_people_card_defers_thumbnail_artwork(
     monkeypatch, qapp: QApplication, tmp_path: Path
 ) -> None:
     widget = PeopleDashboardWidget()
@@ -102,9 +102,16 @@ def test_people_card_uses_thumbnail_artwork(
     widget._populate_cards()
 
     card = widget._board.visible_cards()[0]
-    pixmap = card._render_cover_art()
+    placeholder = card._cover_pixmap()
 
-    assert not pixmap.isNull()
+    assert not placeholder.isNull()
+    assert len(widget._artwork_queue) == 1
+    assert calls == []
+
+    widget._load_next_artwork()
+
+    assert not card._cover_pixmap().isNull()
+    assert widget._artwork_queue == []
     assert calls == [
         (
             thumbnail_path,

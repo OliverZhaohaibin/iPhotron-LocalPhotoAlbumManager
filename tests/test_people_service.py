@@ -45,7 +45,9 @@ def _face_record(*, face_id: str, asset_id: str, asset_rel: str, person_id: str)
     )
 
 
-def _person_record(*, person_id: str, key_face_id: str, face_count: int, name: str | None = None) -> PersonRecord:
+def _person_record(
+    *, person_id: str, key_face_id: str, face_count: int, name: str | None = None
+) -> PersonRecord:
     embedding = np.asarray([1.0, 0.0, 0.0], dtype=np.float32)
     timestamp = _now_iso()
     return PersonRecord(
@@ -86,8 +88,12 @@ def test_people_service_rename_merge_and_build_query(tmp_path: Path) -> None:
     repository = service.repository()
     assert repository is not None
 
-    face_a = _face_record(face_id="face-a", asset_id="asset-a", asset_rel="album/a.jpg", person_id="person-a")
-    face_b = _face_record(face_id="face-b", asset_id="asset-b", asset_rel="album/b.jpg", person_id="person-b")
+    face_a = _face_record(
+        face_id="face-a", asset_id="asset-a", asset_rel="album/a.jpg", person_id="person-a"
+    )
+    face_b = _face_record(
+        face_id="face-b", asset_id="asset-b", asset_rel="album/b.jpg", person_id="person-b"
+    )
     person_a = _person_record(person_id="person-a", key_face_id="face-a", face_count=1)
     person_b = _person_record(person_id="person-b", key_face_id="face-b", face_count=1, name="Bob")
     repository.replace_all([face_a, face_b], [person_a, person_b])
@@ -105,6 +111,172 @@ def test_people_service_rename_merge_and_build_query(tmp_path: Path) -> None:
     assert merged[0].person_id == "person-b"
     assert merged[0].face_count == 2
     assert merged[0].name == "Bob"
+
+
+def test_people_service_creates_groups_and_queries_common_assets(tmp_path: Path) -> None:
+    library_root = tmp_path / "Library"
+    library_root.mkdir()
+
+    global_repo = get_global_repository(library_root)
+    global_repo.write_rows(
+        [
+            {
+                "rel": "album/shared.jpg",
+                "id": "asset-shared",
+                "media_type": 0,
+                "face_status": "done",
+            },
+            {
+                "rel": "album/a.jpg",
+                "id": "asset-a",
+                "media_type": 0,
+                "face_status": "done",
+            },
+        ]
+    )
+
+    service = PeopleService(library_root)
+    repository = service.repository()
+    assert repository is not None
+
+    faces = [
+        _face_record(
+            face_id="face-a-shared",
+            asset_id="asset-shared",
+            asset_rel="album/shared.jpg",
+            person_id="person-a",
+        ),
+        _face_record(
+            face_id="face-b-shared",
+            asset_id="asset-shared",
+            asset_rel="album/shared.jpg",
+            person_id="person-b",
+        ),
+        _face_record(
+            face_id="face-a-missing",
+            asset_id="asset-missing",
+            asset_rel="album/missing.jpg",
+            person_id="person-a",
+        ),
+        _face_record(
+            face_id="face-b-missing",
+            asset_id="asset-missing",
+            asset_rel="album/missing.jpg",
+            person_id="person-b",
+        ),
+        _face_record(
+            face_id="face-a-only",
+            asset_id="asset-a",
+            asset_rel="album/a.jpg",
+            person_id="person-a",
+        ),
+    ]
+    persons = [
+        _person_record(
+            person_id="person-a",
+            key_face_id="face-a-shared",
+            face_count=3,
+            name="Alice",
+        ),
+        _person_record(
+            person_id="person-b",
+            key_face_id="face-b-shared",
+            face_count=2,
+            name=None,
+        ),
+    ]
+    repository.replace_all(faces, persons)
+
+    assert service.create_group(["person-a"]) is None
+    group = service.create_group(["person-a", "person-b"])
+    assert group is not None
+    assert group.name == "Alice"
+    assert group.member_person_ids == ("person-a", "person-b")
+    assert group.asset_count == 1
+    assert group.cover_asset_path == library_root / "album/shared.jpg"
+
+    listed = service.list_groups()
+    assert len(listed) == 1
+    assert listed[0].group_id == group.group_id
+
+    query = service.build_group_query(group.group_id)
+    assert query.asset_ids == ["asset-shared"]
+
+
+def test_people_service_uses_persisted_group_cover(tmp_path: Path) -> None:
+    library_root = tmp_path / "Library"
+    library_root.mkdir()
+
+    global_repo = get_global_repository(library_root)
+    global_repo.write_rows(
+        [
+            {
+                "rel": "album/older.jpg",
+                "id": "asset-older",
+                "media_type": 0,
+                "face_status": "done",
+            },
+            {
+                "rel": "album/newer.jpg",
+                "id": "asset-newer",
+                "media_type": 0,
+                "face_status": "done",
+            },
+        ]
+    )
+
+    service = PeopleService(library_root)
+    repository = service.repository()
+    assert repository is not None
+    faces = [
+        _face_record(
+            face_id="face-a-older",
+            asset_id="asset-older",
+            asset_rel="album/older.jpg",
+            person_id="person-a",
+        ),
+        _face_record(
+            face_id="face-b-older",
+            asset_id="asset-older",
+            asset_rel="album/older.jpg",
+            person_id="person-b",
+        ),
+        _face_record(
+            face_id="face-a-newer",
+            asset_id="asset-newer",
+            asset_rel="album/newer.jpg",
+            person_id="person-a",
+        ),
+        _face_record(
+            face_id="face-b-newer",
+            asset_id="asset-newer",
+            asset_rel="album/newer.jpg",
+            person_id="person-b",
+        ),
+    ]
+    persons = [
+        _person_record(
+            person_id="person-a",
+            key_face_id="face-a-newer",
+            face_count=2,
+            name="Alice",
+        ),
+        _person_record(
+            person_id="person-b",
+            key_face_id="face-b-newer",
+            face_count=2,
+            name="Bob",
+        ),
+    ]
+    repository.replace_all(faces, persons)
+
+    group = service.create_group(["person-a", "person-b"])
+    assert group is not None
+    assert group.cover_asset_path == library_root / "album/newer.jpg"
+
+    assert service.set_group_cover(group.group_id, "asset-older") is True
+    listed = service.list_groups()
+    assert listed[0].cover_asset_path == library_root / "album/older.jpg"
 
 
 def test_people_service_can_mark_retry_and_skipped(tmp_path: Path) -> None:

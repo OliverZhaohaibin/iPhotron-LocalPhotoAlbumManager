@@ -330,6 +330,7 @@ class GroupPeopleDialog(QDialog):
         self._scroll.setFrameShape(QFrame.Shape.NoFrame)
         self._scroll.setWidgetResizable(True)
         self._scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._scroll.setStyleSheet("QScrollArea { background: transparent; border: none; }")
         scroll_style = modern_scrollbar_style(
             scrollbar_base,
             handle_alpha=80,
@@ -337,9 +338,7 @@ class GroupPeopleDialog(QDialog):
             radius=4,
             handle_radius=4,
         )
-        self._scroll.setStyleSheet(
-            "QScrollArea { background: transparent; border: none; }\n" + scroll_style
-        )
+        self._scroll.verticalScrollBar().setStyleSheet(scroll_style)
         self._tile_host = QWidget()
         self._tile_host.setStyleSheet("background: transparent;")
         self._tile_layout = FlowLayout(self._tile_host, margin=6, h_spacing=40, v_spacing=20)

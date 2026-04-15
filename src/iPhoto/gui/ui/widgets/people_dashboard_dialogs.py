@@ -330,15 +330,26 @@ class GroupPeopleDialog(QDialog):
         self._scroll.setFrameShape(QFrame.Shape.NoFrame)
         self._scroll.setWidgetResizable(True)
         self._scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        # Name the scroll area so we can target its scrollbars explicitly
+        # from the generated CSS. Applying the CSS to the panel (parent)
+        # ensures the QScrollBar selectors will match the child scrollbar
+        # widgets reliably (this mirrors how other pages apply the style).
+        self._scroll.setObjectName("GroupPeopleDialogScroll")
         self._scroll.setStyleSheet("QScrollArea { background: transparent; border: none; }")
+        extra_selectors = (
+            f", #{self._scroll.objectName()} QScrollBar:vertical, #{self._scroll.objectName()} QScrollBar:horizontal"
+        )
         scroll_style = modern_scrollbar_style(
             scrollbar_base,
             handle_alpha=80,
             handle_hover_alpha=140,
             radius=4,
             handle_radius=4,
+            extra_selectors=extra_selectors,
         )
-        self._scroll.verticalScrollBar().setStyleSheet(scroll_style)
+        # Append the scrollbar CSS to the panel stylesheet so it applies
+        # within the panel's scope (consistent with other UI code).
+        self._panel.setStyleSheet(self._panel.styleSheet() + "\n" + scroll_style)
         self._tile_host = QWidget()
         self._tile_host.setStyleSheet("background: transparent;")
         self._tile_layout = FlowLayout(self._tile_host, margin=6, h_spacing=40, v_spacing=20)

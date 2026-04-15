@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections import deque
 from pathlib import Path
 
-from PySide6.QtCore import Qt, Signal, QTimer
+from PySide6.QtCore import QObject, QRunnable, Qt, QThreadPool, QTimer, Signal
 from PySide6.QtGui import QAction, QGuiApplication
 from PySide6.QtWidgets import (
     QDialog,
@@ -30,9 +30,54 @@ from .people_dashboard_dialogs import GroupPeopleDialog, MergeConfirmDialog
 from .people_dashboard_shared import MENU_STYLE, _widget_uses_dark_theme
 
 
+class _PeopleDashboardLoaderSignals(QObject):
+    loaded = Signal(int, bool, object, object, int, object)
+
+
+class _PeopleDashboardLoaderWorker(QRunnable):
+    def __init__(
+        self,
+        *,
+        generation: int,
+        library_root: Path | None,
+        status_message: str | None,
+        signals: _PeopleDashboardLoaderSignals,
+    ) -> None:
+        super().__init__()
+        self._generation = generation
+        self._library_root = library_root
+        self._status_message = status_message
+        self._signals = signals
+
+    def run(self) -> None:
+        if self._library_root is None:
+            self._signals.loaded.emit(
+                self._generation,
+                False,
+                [],
+                [],
+                0,
+                self._status_message,
+            )
+            return
+        service = PeopleService(self._library_root)
+        summaries = service.list_clusters()
+        groups = service.list_groups()
+        counts = service.face_status_counts()
+        pending = counts.get("pending", 0) + counts.get("retry", 0)
+        self._signals.loaded.emit(
+            self._generation,
+            True,
+            summaries,
+            groups,
+            pending,
+            self._status_message,
+        )
+
+
 class PeopleDashboardWidget(QWidget):
-    clusterActivated = Signal(str)
-    groupActivated = Signal(str)
+    clusterActivated = Signal(str)  # noqa: N815
+    groupActivated = Signal(str)  # noqa: N815
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -46,6 +91,10 @@ class PeopleDashboardWidget(QWidget):
         self._artwork_timer = QTimer(self)
         self._artwork_timer.setInterval(18)
         self._artwork_timer.timeout.connect(self._load_next_artwork)
+        self._load_generation = 0
+        self._load_signals = _PeopleDashboardLoaderSignals()
+        self._load_signals.loaded.connect(self._on_load_completed)
+        self._load_pool = QThreadPool.globalInstance()
 
         root = QVBoxLayout(self)
         root.setContentsMargins(24, 18, 24, 18)
@@ -155,21 +204,59 @@ class PeopleDashboardWidget(QWidget):
         self._cancel_deferred_artwork_loading()
         self._clear_group_cards()
         self._clear_cards()
-        if not self._service.is_bound():
+        self._load_generation += 1
+        generation = self._load_generation
+        library_root = self._service.library_root()
+        if library_root is None:
             self._message.setText("Bind a Basic Library to see People clusters.")
             self._empty.setText("People appears here after a library is bound and scanned.")
             self._empty.show()
             self._scroll.hide()
             return
 
-        self._summaries = self._service.list_clusters()
-        self._groups = self._service.list_groups()
-        counts = self._service.face_status_counts()
-        pending = counts.get("pending", 0) + counts.get("retry", 0)
+        self._message.setText("Loading People dashboard…")
+        self._empty.setText("Loading People dashboard…")
+        self._empty.show()
+        self._scroll.hide()
+
+        worker = _PeopleDashboardLoaderWorker(
+            generation=generation,
+            library_root=library_root,
+            status_message=self._status_message,
+            signals=self._load_signals,
+        )
+        self._load_pool.start(worker)
+
+    def _on_load_completed(
+        self,
+        generation: int,
+        is_bound: bool,
+        summaries: object,
+        groups: object,
+        pending: int,
+        status_message: object,
+    ) -> None:
+        if generation != self._load_generation:
+            return
+        if not is_bound:
+            self._message.setText("Bind a Basic Library to see People clusters.")
+            self._empty.setText("People appears here after a library is bound and scanned.")
+            self._empty.show()
+            self._scroll.hide()
+            return
+
+        self._summaries = list(summaries)
+        self._groups = list(groups)
+        status_text = (
+            str(status_message)
+            if isinstance(status_message, str) and status_message
+            else None
+        )
 
         if self._summaries:
             self._message.setText(
-                "Click a cluster or group card to open matching assets, or drag cards close together to merge clusters."
+                "Click a cluster or group card to open matching assets, "
+                "or drag cards close together to merge clusters."
             )
             self._empty.hide()
             self._scroll.show()
@@ -178,8 +265,8 @@ class PeopleDashboardWidget(QWidget):
             self._start_deferred_artwork_loading()
             return
 
-        if self._status_message:
-            body = self._status_message
+        if status_text:
+            body = status_text
         elif pending > 0:
             body = "Scanning faces in the background. This page will fill in as clusters are ready."
         else:

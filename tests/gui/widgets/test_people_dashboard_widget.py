@@ -11,7 +11,8 @@ pytest.importorskip(
 )
 pytest.importorskip("PySide6.QtWidgets", reason="Qt widgets not available", exc_type=ImportError)
 
-from PySide6.QtGui import QColor, QPixmap
+from PySide6.QtCore import Qt
+from PySide6.QtGui import QColor, QImage, QPixmap
 from PySide6.QtWidgets import QApplication, QWidget
 
 from iPhoto.gui.ui.widgets import people_dashboard_cards
@@ -163,6 +164,23 @@ def test_group_people_dialog_supports_light_and_dark_styles(qapp: QApplication) 
     dark_dialog.close()
 
 
+def test_group_people_dialog_has_no_background_overlay(qapp: QApplication) -> None:
+    summaries = [
+        PersonSummary("person-a", "Alice", "face-a", 3, None, "2024-01-01T00:00:00Z"),
+        PersonSummary("person-b", "Bob", "face-b", 2, None, "2024-01-01T00:00:01Z"),
+    ]
+    dialog = GroupPeopleDialog(summaries, dark_mode=False)
+    dialog.show()
+    qapp.processEvents()
+
+    image = QImage(dialog.size(), QImage.Format.Format_ARGB32_Premultiplied)
+    image.fill(Qt.GlobalColor.transparent)
+    dialog.render(image)
+
+    assert image.pixelColor(2, 2).alpha() == 0
+    dialog.close()
+
+
 def test_people_dashboard_popup_theme_uses_window_context(qapp: QApplication) -> None:
     class Theme:
         def __init__(self, mode: str) -> None:
@@ -178,8 +196,15 @@ def test_people_dashboard_popup_theme_uses_window_context(qapp: QApplication) ->
     widget = PeopleDashboardWidget(parent=shell)
 
     assert widget._uses_dark_theme() is False
+    assert "#111111" in widget._groups_title.styleSheet()
+    assert "#111111" in widget._people_title.styleSheet()
+
     shell.coordinator._context.theme.mode = "dark"
+    widget._apply_theme_styles()
+
     assert widget._uses_dark_theme() is True
+    assert "#F5F5F7" in widget._groups_title.styleSheet()
+    assert "#F5F5F7" in widget._people_title.styleSheet()
 
     widget.close()
     shell.close()

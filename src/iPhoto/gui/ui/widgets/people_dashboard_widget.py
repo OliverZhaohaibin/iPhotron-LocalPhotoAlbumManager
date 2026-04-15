@@ -130,6 +130,7 @@ class PeopleDashboardWidget(QWidget):
         self._content_layout.addWidget(self._board)
         self._content_layout.addStretch(1)
         self._scroll.setWidget(self._content)
+        self._apply_theme_styles()
 
     def set_library_root(self, library_root: Path | None) -> None:
         self._service.set_library_root(library_root)
@@ -321,6 +322,39 @@ class PeopleDashboardWidget(QWidget):
             self.reload()
         return merged
 
+    def _apply_theme_styles(self) -> None:
+        dark_mode = self._uses_dark_theme()
+        title_color = "#F5F5F7" if dark_mode else "#111111"
+        section_color = "#F5F5F7" if dark_mode else "#111111"
+        message_color = "#B7C2DD" if dark_mode else "#63739A"
+        refresh_color = "#65A3FF" if dark_mode else "#356CB4"
+        empty_text = "#C8D0E4" if dark_mode else "#667085"
+        empty_border = "rgba(245, 245, 247, 0.16)" if dark_mode else "rgba(16, 24, 40, 0.14)"
+        empty_bg = "rgba(255, 255, 255, 0.06)" if dark_mode else "rgba(255, 255, 255, 0.72)"
+
+        self._title.setStyleSheet(f"color: {title_color}; font-size: 18px; font-weight: 700;")
+        for label in (self._groups_title, self._people_title):
+            label.setStyleSheet(f"color: {section_color}; font-size: 18px; font-weight: 800;")
+        self._message.setStyleSheet(f"color: {message_color}; font-size: 13px;")
+        self._refresh_button.setStyleSheet(f"""
+            QToolButton {{
+                border: none;
+                color: {refresh_color};
+                font-size: 15px;
+                font-weight: 600;
+                padding: 6px 10px;
+            }}
+            """)
+        self._empty.setStyleSheet(f"""
+            QLabel {{
+                padding: 32px;
+                border: 1px dashed {empty_border};
+                border-radius: 24px;
+                color: {empty_text};
+                background: {empty_bg};
+            }}
+            """)
+
     def _uses_dark_theme(self) -> bool:
         window = self.window()
         coordinator = getattr(window, "coordinator", None)
@@ -341,3 +375,8 @@ class PeopleDashboardWidget(QWidget):
         if app is not None and app.styleHints().colorScheme() == Qt.ColorScheme.Dark:
             return True
         return _widget_uses_dark_theme(self)
+
+    def changeEvent(self, event) -> None:  # noqa: N802
+        super().changeEvent(event)
+        if hasattr(self, "_people_title"):
+            self._apply_theme_styles()

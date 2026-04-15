@@ -486,6 +486,4 @@ class GroupPeopleDialog(QDialog):
     def paintEvent(self, _event) -> None:  # noqa: N802
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        overlay = QColor(13, 15, 22, 80) if self._dark_mode else QColor(243, 246, 252, 92)
-        painter.fillRect(self.rect(), overlay)
         self._paint_panel_shadow(painter)

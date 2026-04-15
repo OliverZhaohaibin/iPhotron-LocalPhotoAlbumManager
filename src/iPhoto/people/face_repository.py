@@ -98,6 +98,7 @@ class FaceRepository:
             )
             conn.commit()
         if self._state_repo is not None:
+            self._sync_person_cover_defaults()
             self.refresh_all_group_assets()
 
     def get_all_faces(self) -> list[FaceRecord]:
@@ -178,6 +179,7 @@ class FaceRepository:
                 )
             conn.commit()
         if self._state_repo is not None:
+            self._sync_person_cover_defaults()
             self.refresh_all_group_assets()
 
     def get_person_summaries(self) -> list[PersonSummary]:
@@ -190,14 +192,34 @@ class FaceRepository:
                     persons.key_face_id,
                     persons.face_count,
                     persons.created_at,
+                    faces.face_id,
+                    faces.face_key,
+                    faces.asset_id,
                     faces.thumbnail_path
                 FROM persons
                 LEFT JOIN faces ON faces.face_id = persons.key_face_id
                 ORDER BY persons.face_count DESC, persons.created_at ASC
                 """).fetchall()
+        cover_paths: dict[str, str] = {}
+        if self._state_repo is not None:
+            self._state_repo.sync_person_cover_defaults(
+                (
+                    (
+                        str(row["person_id"]),
+                        row["face_id"],
+                        row["face_key"],
+                        row["asset_id"],
+                        row["thumbnail_path"],
+                    )
+                    for row in rows
+                )
+            )
+            cover_paths = self._state_repo.get_person_cover_thumbnail_map(
+                str(row["person_id"]) for row in rows
+            )
         summaries: list[PersonSummary] = []
         for row in rows:
-            thumbnail_path = row["thumbnail_path"]
+            thumbnail_path = cover_paths.get(str(row["person_id"])) or row["thumbnail_path"]
             resolved_thumbnail: Path | None = None
             if thumbnail_path:
                 resolved_thumbnail = (self._db_path.parent / thumbnail_path).resolve()
@@ -240,6 +262,30 @@ class FaceRepository:
             conn.commit()
         if self._state_repo is not None:
             self._state_repo.rename_person(person_id, normalized_name)
+
+    def set_person_cover(self, person_id: str, face_id: str) -> bool:
+        if self._state_repo is None or not person_id or not face_id:
+            return False
+        self.initialize()
+        with closing(self._connect()) as conn:
+            row = conn.execute(
+                """
+                SELECT face_id, face_key, asset_id, thumbnail_path
+                FROM faces
+                WHERE person_id = ? AND face_id = ?
+                """,
+                (person_id, face_id),
+            ).fetchone()
+        if row is None:
+            return False
+        self._state_repo.set_person_cover(
+            person_id,
+            face_id=row["face_id"],
+            face_key=row["face_key"],
+            asset_id=row["asset_id"],
+            thumbnail_path=row["thumbnail_path"],
+        )
+        return True
 
     def merge_persons(self, source_person_id: str, target_person_id: str) -> bool:
         if not source_person_id or not target_person_id or source_person_id == target_person_id:
@@ -337,6 +383,7 @@ class FaceRepository:
                 target_name=target_name,
                 target_created_at=target_created_at,
             )
+            self._sync_person_cover_defaults()
             self.refresh_all_group_assets()
         return True
 
@@ -403,6 +450,19 @@ class FaceRepository:
             return self._state_repo.get_group_asset_ids(group_id)
         return self.refresh_group_assets(group_id)
 
+    def get_group_cover_asset_id(self, group_id: str) -> str | None:
+        if self._state_repo is None:
+            return None
+        return self._state_repo.get_group_cover_asset_id(group_id)
+
+    def set_group_cover_asset(self, group_id: str, asset_id: str) -> bool:
+        if self._state_repo is None:
+            return False
+        self.initialize()
+        if not self._state_repo.has_group_asset_cache(group_id):
+            self.refresh_group_assets(group_id)
+        return self._state_repo.set_group_cover_asset(group_id, asset_id)
+
     def refresh_group_assets(self, group_id: str) -> list[str]:
         if self._state_repo is None:
             return []
@@ -419,6 +479,35 @@ class FaceRepository:
         self.initialize()
         for group in self._state_repo.list_groups():
             self.refresh_group_assets(group.group_id)
+
+    def _sync_person_cover_defaults(self) -> None:
+        if self._state_repo is None:
+            return
+        self.initialize()
+        with closing(self._connect()) as conn:
+            rows = conn.execute("""
+                SELECT
+                    persons.person_id,
+                    faces.face_id,
+                    faces.face_key,
+                    faces.asset_id,
+                    faces.thumbnail_path
+                FROM persons
+                LEFT JOIN faces ON faces.face_id = persons.key_face_id
+                ORDER BY persons.created_at ASC, persons.person_id ASC
+                """).fetchall()
+        self._state_repo.sync_person_cover_defaults(
+            (
+                (
+                    str(row["person_id"]),
+                    row["face_id"],
+                    row["face_key"],
+                    row["asset_id"],
+                    row["thumbnail_path"],
+                )
+                for row in rows
+            )
+        )
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self._db_path, check_same_thread=False)

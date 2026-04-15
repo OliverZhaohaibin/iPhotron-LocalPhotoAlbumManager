@@ -103,6 +103,18 @@ class PeopleService:
             return
         repository.rename_person(person_id, new_name)
 
+    def set_cluster_cover(self, person_id: str, face_id: str) -> bool:
+        repository = self.repository()
+        if repository is None:
+            return False
+        return repository.set_person_cover(person_id, face_id)
+
+    def set_group_cover(self, group_id: str, asset_id: str) -> bool:
+        repository = self.repository()
+        if repository is None:
+            return False
+        return repository.set_group_cover_asset(group_id, asset_id)
+
     def merge_clusters(self, source_person_id: str, target_person_id: str) -> bool:
         repository = self.repository()
         if repository is None:
@@ -166,13 +178,19 @@ class PeopleService:
             return None
 
         asset_ids = self._valid_asset_ids(repository.get_common_asset_ids_for_group(group.group_id))
+        cover_asset_id = repository.get_group_cover_asset_id(group.group_id)
+        cover_candidates = []
+        if cover_asset_id is not None:
+            cover_candidates.append(cover_asset_id)
+        cover_candidates.extend(asset_id for asset_id in asset_ids if asset_id != cover_asset_id)
+
         return PeopleGroupSummary(
             group_id=group.group_id,
             name=_format_group_name(member.name for member in members),
             member_person_ids=tuple(member.person_id for member in members),
             members=members,
             asset_count=len(asset_ids),
-            cover_asset_path=self._cover_asset_path(asset_ids),
+            cover_asset_path=self._cover_asset_path(cover_candidates),
             created_at=group.created_at,
         )
 
@@ -185,7 +203,7 @@ class PeopleService:
     def _cover_asset_path(self, asset_ids: list[str]) -> Path | None:
         if self._library_root is None or not asset_ids:
             return None
-        rows_by_id = get_global_repository(self._library_root).get_rows_by_ids(asset_ids[:1])
+        rows_by_id = get_global_repository(self._library_root).get_rows_by_ids(asset_ids)
         for asset_id in asset_ids:
             row = rows_by_id.get(asset_id)
             if row is None:

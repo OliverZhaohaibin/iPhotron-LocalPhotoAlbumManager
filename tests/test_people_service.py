@@ -203,6 +203,82 @@ def test_people_service_creates_groups_and_queries_common_assets(tmp_path: Path)
     assert query.asset_ids == ["asset-shared"]
 
 
+def test_people_service_uses_persisted_group_cover(tmp_path: Path) -> None:
+    library_root = tmp_path / "Library"
+    library_root.mkdir()
+
+    global_repo = get_global_repository(library_root)
+    global_repo.write_rows(
+        [
+            {
+                "rel": "album/older.jpg",
+                "id": "asset-older",
+                "media_type": 0,
+                "face_status": "done",
+            },
+            {
+                "rel": "album/newer.jpg",
+                "id": "asset-newer",
+                "media_type": 0,
+                "face_status": "done",
+            },
+        ]
+    )
+
+    service = PeopleService(library_root)
+    repository = service.repository()
+    assert repository is not None
+    faces = [
+        _face_record(
+            face_id="face-a-older",
+            asset_id="asset-older",
+            asset_rel="album/older.jpg",
+            person_id="person-a",
+        ),
+        _face_record(
+            face_id="face-b-older",
+            asset_id="asset-older",
+            asset_rel="album/older.jpg",
+            person_id="person-b",
+        ),
+        _face_record(
+            face_id="face-a-newer",
+            asset_id="asset-newer",
+            asset_rel="album/newer.jpg",
+            person_id="person-a",
+        ),
+        _face_record(
+            face_id="face-b-newer",
+            asset_id="asset-newer",
+            asset_rel="album/newer.jpg",
+            person_id="person-b",
+        ),
+    ]
+    persons = [
+        _person_record(
+            person_id="person-a",
+            key_face_id="face-a-newer",
+            face_count=2,
+            name="Alice",
+        ),
+        _person_record(
+            person_id="person-b",
+            key_face_id="face-b-newer",
+            face_count=2,
+            name="Bob",
+        ),
+    ]
+    repository.replace_all(faces, persons)
+
+    group = service.create_group(["person-a", "person-b"])
+    assert group is not None
+    assert group.cover_asset_path == library_root / "album/newer.jpg"
+
+    assert service.set_group_cover(group.group_id, "asset-older") is True
+    listed = service.list_groups()
+    assert listed[0].cover_asset_path == library_root / "album/older.jpg"
+
+
 def test_people_service_can_mark_retry_and_skipped(tmp_path: Path) -> None:
     library_root = tmp_path / "Library"
     library_root.mkdir()

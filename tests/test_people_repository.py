@@ -12,7 +12,14 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _face_record(*, face_id: str, asset_id: str, asset_rel: str, person_id: str) -> FaceRecord:
+def _face_record(
+    *,
+    face_id: str,
+    asset_id: str,
+    asset_rel: str,
+    person_id: str,
+    thumbnail_path: str | None = None,
+) -> FaceRecord:
     embedding = np.asarray([1.0, 0.0, 0.0], dtype=np.float32)
     return FaceRecord(
         face_id=face_id,
@@ -26,7 +33,7 @@ def _face_record(*, face_id: str, asset_id: str, asset_rel: str, person_id: str)
         confidence=0.99,
         embedding=embedding,
         embedding_dim=int(embedding.shape[0]),
-        thumbnail_path=None,
+        thumbnail_path=thumbnail_path,
         person_id=person_id,
         detected_at=_now_iso(),
         image_width=400,
@@ -76,6 +83,52 @@ def test_remove_faces_for_assets_deletes_affected_person_rows_first(tmp_path: Pa
     remaining_faces = repository.get_all_faces()
     assert [face.face_id for face in remaining_faces] == ["face-b"]
     assert repository.get_person_summaries() == []
+
+
+def test_person_cover_persists_and_custom_cover_survives_rescan(tmp_path: Path) -> None:
+    repository = FaceRepository(tmp_path / "face_index.db", tmp_path / "face_state.db")
+    faces = [
+        _face_record(
+            face_id="face-default",
+            asset_id="asset-default",
+            asset_rel="album/default.jpg",
+            person_id="person-a",
+            thumbnail_path="thumbnails/default.jpg",
+        ),
+        _face_record(
+            face_id="face-custom",
+            asset_id="asset-custom",
+            asset_rel="album/custom.jpg",
+            person_id="person-a",
+            thumbnail_path="thumbnails/custom.jpg",
+        ),
+    ]
+    person = _person_record(
+        person_id="person-a",
+        key_face_id="face-default",
+        face_count=2,
+        name="Alice",
+    )
+    repository.replace_all(faces, [person])
+
+    summaries = repository.get_person_summaries()
+    assert summaries[0].thumbnail_path == (tmp_path / "thumbnails/default.jpg").resolve()
+    assert repository.state_repository is not None
+    assert repository.state_repository.get_person_cover_thumbnail_map(["person-a"]) == {
+        "person-a": "thumbnails/default.jpg"
+    }
+
+    assert repository.set_person_cover("person-a", "face-custom") is True
+    assert (
+        repository.get_person_summaries()[0].thumbnail_path
+        == (tmp_path / "thumbnails/custom.jpg").resolve()
+    )
+
+    repository.replace_all(faces, [person])
+    assert (
+        repository.get_person_summaries()[0].thumbnail_path
+        == (tmp_path / "thumbnails/custom.jpg").resolve()
+    )
 
 
 def test_people_groups_persist_and_query_common_assets(tmp_path: Path) -> None:
@@ -141,6 +194,7 @@ def test_people_groups_persist_and_query_common_assets(tmp_path: Path) -> None:
     assert duplicate.member_person_ids == ("person-a", "person-b")
 
     assert repository.get_common_asset_ids_for_group(group.group_id) == ["asset-shared"]
+    assert repository.get_group_cover_asset_id(group.group_id) == "asset-shared"
 
     updated_faces = [
         _face_record(
@@ -175,3 +229,62 @@ def test_people_groups_persist_and_query_common_assets(tmp_path: Path) -> None:
     assert len(persisted) == 1
     assert persisted[0].group_id == group.group_id
     assert repository.get_common_asset_ids_for_group(group.group_id) == ["asset-updated-shared"]
+
+
+def test_group_cover_can_be_customized_without_rescan_overwrite(tmp_path: Path) -> None:
+    repository = FaceRepository(tmp_path / "face_index.db", tmp_path / "face_state.db")
+    faces = [
+        _face_record(
+            face_id="face-a-older",
+            asset_id="asset-older",
+            asset_rel="album/older.jpg",
+            person_id="person-a",
+        ),
+        _face_record(
+            face_id="face-b-older",
+            asset_id="asset-older",
+            asset_rel="album/older.jpg",
+            person_id="person-b",
+        ),
+        _face_record(
+            face_id="face-a-newer",
+            asset_id="asset-newer",
+            asset_rel="album/newer.jpg",
+            person_id="person-a",
+        ),
+        _face_record(
+            face_id="face-b-newer",
+            asset_id="asset-newer",
+            asset_rel="album/newer.jpg",
+            person_id="person-b",
+        ),
+    ]
+    persons = [
+        _person_record(
+            person_id="person-a",
+            key_face_id="face-a-newer",
+            face_count=2,
+            name="Alice",
+        ),
+        _person_record(
+            person_id="person-b",
+            key_face_id="face-b-newer",
+            face_count=2,
+            name="Bob",
+        ),
+    ]
+    repository.replace_all(faces, persons)
+
+    group = repository.create_group(["person-a", "person-b"])
+    assert group is not None
+    assert repository.get_common_asset_ids_for_group(group.group_id) == [
+        "asset-newer",
+        "asset-older",
+    ]
+    assert repository.get_group_cover_asset_id(group.group_id) == "asset-newer"
+
+    assert repository.set_group_cover_asset(group.group_id, "asset-older") is True
+    assert repository.get_group_cover_asset_id(group.group_id) == "asset-older"
+
+    repository.replace_all(faces, persons)
+    assert repository.get_group_cover_asset_id(group.group_id) == "asset-older"

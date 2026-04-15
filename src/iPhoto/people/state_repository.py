@@ -186,7 +186,150 @@ class FaceStateRepository:
                 "UPDATE face_keys SET person_id = ?, updated_at = ? WHERE person_id = ?",
                 (target_person_id, updated_at, source_person_id),
             )
+            source_cover = conn.execute(
+                """
+                SELECT face_id, face_key, asset_id, thumbnail_path, is_custom
+                FROM person_covers
+                WHERE person_id = ?
+                """,
+                (source_person_id,),
+            ).fetchone()
+            target_cover = conn.execute(
+                """
+                SELECT is_custom
+                FROM person_covers
+                WHERE person_id = ?
+                """,
+                (target_person_id,),
+            ).fetchone()
+            if (
+                source_cover is not None
+                and int(source_cover["is_custom"]) == 1
+                and (target_cover is None or int(target_cover["is_custom"]) == 0)
+            ):
+                conn.execute(
+                    """
+                    INSERT INTO person_covers (
+                        person_id, face_id, face_key, asset_id, thumbnail_path, is_custom, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, 1, ?)
+                    ON CONFLICT(person_id) DO UPDATE SET
+                        face_id = excluded.face_id,
+                        face_key = excluded.face_key,
+                        asset_id = excluded.asset_id,
+                        thumbnail_path = excluded.thumbnail_path,
+                        is_custom = 1,
+                        updated_at = excluded.updated_at
+                    """,
+                    (
+                        target_person_id,
+                        source_cover["face_id"],
+                        source_cover["face_key"],
+                        source_cover["asset_id"],
+                        source_cover["thumbnail_path"],
+                        updated_at,
+                    ),
+                )
+            conn.execute("DELETE FROM person_covers WHERE person_id = ?", (source_person_id,))
             conn.execute("DELETE FROM person_profiles WHERE person_id = ?", (source_person_id,))
+            conn.commit()
+
+    def get_person_cover_thumbnail_map(self, person_ids: Iterable[str]) -> dict[str, str]:
+        unique_ids = _unique_person_ids(person_ids)
+        if not unique_ids:
+            return {}
+
+        self.initialize()
+        placeholders = ", ".join(["?"] * len(unique_ids))
+        with closing(self._connect()) as conn:
+            rows = conn.execute(
+                f"""
+                SELECT person_id, thumbnail_path
+                FROM person_covers
+                WHERE person_id IN ({placeholders})
+                """,
+                unique_ids,
+            ).fetchall()
+        return {
+            str(row["person_id"]): str(row["thumbnail_path"])
+            for row in rows
+            if row["person_id"] and row["thumbnail_path"]
+        }
+
+    def sync_person_cover_defaults(
+        self,
+        cover_rows: Iterable[tuple[str, str | None, str | None, str | None, str | None]],
+    ) -> None:
+        rows = [
+            (
+                str(person_id),
+                str(face_id) if face_id else None,
+                str(face_key) if face_key else None,
+                str(asset_id) if asset_id else None,
+                str(thumbnail_path) if thumbnail_path else None,
+                _utc_now_iso(),
+            )
+            for person_id, face_id, face_key, asset_id, thumbnail_path in cover_rows
+            if person_id
+        ]
+        if not rows:
+            return
+
+        self.initialize()
+        with closing(self._connect()) as conn:
+            conn.executemany(
+                """
+                INSERT INTO person_covers (
+                    person_id, face_id, face_key, asset_id, thumbnail_path, is_custom, updated_at
+                ) VALUES (?, ?, ?, ?, ?, 0, ?)
+                ON CONFLICT(person_id) DO UPDATE SET
+                    face_id = excluded.face_id,
+                    face_key = excluded.face_key,
+                    asset_id = excluded.asset_id,
+                    thumbnail_path = excluded.thumbnail_path,
+                    updated_at = excluded.updated_at
+                WHERE person_covers.is_custom = 0
+                    AND (
+                        COALESCE(person_covers.face_id, '') != COALESCE(excluded.face_id, '')
+                        OR COALESCE(person_covers.face_key, '') != COALESCE(excluded.face_key, '')
+                        OR COALESCE(person_covers.asset_id, '') != COALESCE(excluded.asset_id, '')
+                        OR COALESCE(person_covers.thumbnail_path, '')
+                            != COALESCE(excluded.thumbnail_path, '')
+                    )
+                """,
+                rows,
+            )
+            conn.commit()
+
+    def set_person_cover(
+        self,
+        person_id: str,
+        *,
+        face_id: str | None,
+        face_key: str | None,
+        asset_id: str | None,
+        thumbnail_path: str | None,
+    ) -> None:
+        if not person_id:
+            return
+
+        self.initialize()
+        updated_at = _utc_now_iso()
+        with closing(self._connect()) as conn:
+            conn.execute(
+                """
+                INSERT INTO person_covers (
+                    person_id, face_id, face_key, asset_id, thumbnail_path, is_custom, updated_at
+                ) VALUES (?, ?, ?, ?, ?, 1, ?)
+                ON CONFLICT(person_id) DO UPDATE SET
+                    face_id = excluded.face_id,
+                    face_key = excluded.face_key,
+                    asset_id = excluded.asset_id,
+                    thumbnail_path = excluded.thumbnail_path,
+                    is_custom = 1,
+                    updated_at = excluded.updated_at
+                """,
+                (person_id, face_id, face_key, asset_id, thumbnail_path, updated_at),
+            )
             conn.commit()
 
     def create_group(self, member_person_ids: Iterable[str]) -> PeopleGroupRecord | None:
@@ -287,7 +430,8 @@ class FaceStateRepository:
         ]
         self.initialize()
         timestamp = _utc_now_iso()
-        cover_asset_id = rows[0][0] if rows else None
+        asset_ids = {asset_id for asset_id, _last_detected_at, _position in rows}
+        fallback_cover_asset_id = rows[0][0] if rows else None
         with closing(self._connect()) as conn:
             group_exists = conn.execute(
                 "SELECT 1 FROM people_groups WHERE group_id = ?",
@@ -295,6 +439,21 @@ class FaceStateRepository:
             ).fetchone()
             if group_exists is None:
                 return
+            existing_cache = conn.execute(
+                """
+                SELECT cover_asset_id, cover_is_custom
+                FROM people_group_asset_cache
+                WHERE group_id = ?
+                """,
+                (group_id,),
+            ).fetchone()
+            cover_asset_id = fallback_cover_asset_id
+            cover_is_custom = 0
+            if existing_cache is not None and int(existing_cache["cover_is_custom"]) == 1:
+                existing_cover_asset_id = str(existing_cache["cover_asset_id"] or "")
+                if existing_cover_asset_id in asset_ids:
+                    cover_asset_id = existing_cover_asset_id
+                    cover_is_custom = 1
 
             conn.execute("DELETE FROM people_group_assets WHERE group_id = ?", (group_id,))
             conn.executemany(
@@ -311,16 +470,76 @@ class FaceStateRepository:
             conn.execute(
                 """
                 INSERT INTO people_group_asset_cache (
-                    group_id, asset_count, cover_asset_id, updated_at
-                ) VALUES (?, ?, ?, ?)
+                    group_id, asset_count, cover_asset_id, cover_is_custom, updated_at
+                ) VALUES (?, ?, ?, ?, ?)
                 ON CONFLICT(group_id) DO UPDATE SET
                     asset_count = excluded.asset_count,
                     cover_asset_id = excluded.cover_asset_id,
+                    cover_is_custom = excluded.cover_is_custom,
                     updated_at = excluded.updated_at
                 """,
-                (group_id, len(rows), cover_asset_id, timestamp),
+                (group_id, len(rows), cover_asset_id, cover_is_custom, timestamp),
             )
             conn.commit()
+
+    def get_group_cover_asset_id(self, group_id: str) -> str | None:
+        if not group_id:
+            return None
+        self.initialize()
+        with closing(self._connect()) as conn:
+            row = conn.execute(
+                """
+                SELECT cover_asset_id
+                FROM people_group_asset_cache
+                WHERE group_id = ?
+                """,
+                (group_id,),
+            ).fetchone()
+        if row is None or not row["cover_asset_id"]:
+            return None
+        return str(row["cover_asset_id"])
+
+    def set_group_cover_asset(self, group_id: str, asset_id: str) -> bool:
+        if not group_id or not asset_id:
+            return False
+
+        self.initialize()
+        updated_at = _utc_now_iso()
+        with closing(self._connect()) as conn:
+            asset_exists = conn.execute(
+                """
+                SELECT 1
+                FROM people_group_assets
+                WHERE group_id = ? AND asset_id = ?
+                """,
+                (group_id, asset_id),
+            ).fetchone()
+            if asset_exists is None:
+                return False
+            count_row = conn.execute(
+                """
+                SELECT COUNT(*) AS asset_count
+                FROM people_group_assets
+                WHERE group_id = ?
+                """,
+                (group_id,),
+            ).fetchone()
+            asset_count = int(count_row["asset_count"]) if count_row is not None else 0
+            conn.execute(
+                """
+                INSERT INTO people_group_asset_cache (
+                    group_id, asset_count, cover_asset_id, cover_is_custom, updated_at
+                ) VALUES (?, ?, ?, 1, ?)
+                ON CONFLICT(group_id) DO UPDATE SET
+                    asset_count = excluded.asset_count,
+                    cover_asset_id = excluded.cover_asset_id,
+                    cover_is_custom = 1,
+                    updated_at = excluded.updated_at
+                """,
+                (group_id, asset_count, asset_id, updated_at),
+            )
+            conn.commit()
+        return True
 
     @staticmethod
     def _group_from_id(
@@ -390,6 +609,23 @@ class FaceStateRepository:
         conn.execute("CREATE INDEX IF NOT EXISTS idx_face_keys_person_id ON face_keys(person_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_face_keys_asset_id ON face_keys(asset_id)")
         conn.execute("""
+            CREATE TABLE IF NOT EXISTS person_covers (
+                person_id TEXT PRIMARY KEY,
+                face_id TEXT,
+                face_key TEXT,
+                asset_id TEXT,
+                thumbnail_path TEXT,
+                is_custom INTEGER NOT NULL DEFAULT 0,
+                updated_at TEXT NOT NULL
+            )
+            """)
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_person_covers_face_key " "ON person_covers(face_key)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_person_covers_asset_id " "ON person_covers(asset_id)"
+        )
+        conn.execute("""
             CREATE TABLE IF NOT EXISTS people_groups (
                 group_id TEXT PRIMARY KEY,
                 member_key TEXT NOT NULL UNIQUE,
@@ -418,9 +654,16 @@ class FaceStateRepository:
                 group_id TEXT PRIMARY KEY REFERENCES people_groups(group_id) ON DELETE CASCADE,
                 asset_count INTEGER NOT NULL,
                 cover_asset_id TEXT,
+                cover_is_custom INTEGER NOT NULL DEFAULT 0,
                 updated_at TEXT NOT NULL
             )
             """)
+        FaceStateRepository._ensure_column(
+            conn,
+            "people_group_asset_cache",
+            "cover_is_custom",
+            "INTEGER NOT NULL DEFAULT 0",
+        )
         conn.execute("""
             CREATE TABLE IF NOT EXISTS people_group_assets (
                 group_id TEXT NOT NULL REFERENCES people_groups(group_id) ON DELETE CASCADE,
@@ -434,3 +677,16 @@ class FaceStateRepository:
             "CREATE INDEX IF NOT EXISTS idx_people_group_assets_group_id "
             "ON people_group_assets(group_id)"
         )
+
+    @staticmethod
+    def _ensure_column(
+        conn: sqlite3.Connection,
+        table_name: str,
+        column_name: str,
+        definition: str,
+    ) -> None:
+        columns = {
+            str(row["name"]) for row in conn.execute(f"PRAGMA table_info({table_name})").fetchall()
+        }
+        if column_name not in columns:
+            conn.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {definition}")

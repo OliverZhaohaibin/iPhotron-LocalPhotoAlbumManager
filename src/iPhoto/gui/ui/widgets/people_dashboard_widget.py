@@ -31,7 +31,7 @@ from .people_dashboard_shared import MENU_STYLE, _widget_uses_dark_theme
 
 
 class _PeopleDashboardLoaderSignals(QObject):
-    loaded = Signal(int, bool, object, object, int, object)
+    loaded = Signal(int, bool, list, list, int, object)
 
 
 class _PeopleDashboardLoaderWorker(QRunnable):
@@ -231,10 +231,10 @@ class PeopleDashboardWidget(QWidget):
         self,
         generation: int,
         is_bound: bool,
-        summaries: object,
-        groups: object,
+        summaries: list[PersonSummary],
+        groups: list[PeopleGroupSummary],
         pending: int,
-        status_message: object,
+        status_message: str | None,
     ) -> None:
         if generation != self._load_generation:
             return
@@ -247,11 +247,7 @@ class PeopleDashboardWidget(QWidget):
 
         self._summaries = list(summaries)
         self._groups = list(groups)
-        status_text = (
-            str(status_message)
-            if isinstance(status_message, str) and status_message
-            else None
-        )
+        status_text = status_message or None
 
         if self._summaries:
             self._message.setText(

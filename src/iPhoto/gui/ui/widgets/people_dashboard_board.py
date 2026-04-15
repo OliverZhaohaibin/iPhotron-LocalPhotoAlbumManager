@@ -86,7 +86,7 @@ class PeopleBoard(QWidget):
     def update_positions(self) -> None:
         positions = self.calculate_positions()
         for card, position in zip(self.visible_cards(), positions):
-            if not card._dragging:
+            if not card.is_dragging:
                 card.move(position)
             card.show()
 

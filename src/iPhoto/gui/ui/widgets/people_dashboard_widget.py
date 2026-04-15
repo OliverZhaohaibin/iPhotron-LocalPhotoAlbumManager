@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import deque
 from pathlib import Path
 
 from PySide6.QtCore import Qt, Signal, QTimer
@@ -41,7 +42,7 @@ class PeopleDashboardWidget(QWidget):
         self._groups: list[PeopleGroupSummary] = []
         self._cards: dict[str, PeopleCard] = {}
         self._group_cards: dict[str, GroupCard] = {}
-        self._artwork_queue: list[PeopleCard | GroupCard] = []
+        self._artwork_queue: deque[PeopleCard | GroupCard] = deque()
         self._artwork_timer = QTimer(self)
         self._artwork_timer.setInterval(18)
         self._artwork_timer.timeout.connect(self._load_next_artwork)
@@ -235,7 +236,7 @@ class PeopleDashboardWidget(QWidget):
 
     def _load_next_artwork(self) -> None:
         while self._artwork_queue:
-            card = self._artwork_queue.pop(0)
+            card = self._artwork_queue.popleft()
             if card.parent() is None:
                 continue
             card.load_cover_artwork()

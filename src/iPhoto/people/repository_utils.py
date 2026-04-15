@@ -9,6 +9,8 @@ from typing import Iterable
 
 import numpy as np
 
+from iPhoto.people.records import FaceRecord
+
 
 def compute_cluster_center(embeddings: np.ndarray) -> np.ndarray:
     if embeddings.size == 0:

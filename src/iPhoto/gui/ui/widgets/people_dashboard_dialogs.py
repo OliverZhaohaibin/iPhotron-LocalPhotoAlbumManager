@@ -473,7 +473,7 @@ class GroupPeopleDialog(QDialog):
             if alpha <= 0:
                 continue
             spread = float(index)
-            shadow_rect = panel_rect.adjusted(spread, spread, spread, spread)
+            shadow_rect = panel_rect.adjusted(-spread, -spread, spread, spread)
             shadow_path = QPainterPath()
             shadow_path.addRoundedRect(
                 shadow_rect,

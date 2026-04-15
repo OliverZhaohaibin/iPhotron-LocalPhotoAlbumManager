@@ -56,6 +56,10 @@ class PeopleCard(QWidget):
     def display_name(self) -> str:
         return (self.summary.name or "").strip()
 
+    @property
+    def is_dragging(self) -> bool:
+        return self._dragging
+
     def begin_drag(self) -> None:
         self._dragging = True
         self._hovered = False

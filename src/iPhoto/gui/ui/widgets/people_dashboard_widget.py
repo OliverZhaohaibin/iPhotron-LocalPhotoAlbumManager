@@ -89,8 +89,13 @@ class PeopleDashboardWidget(QWidget):
         self._group_cards: dict[str, GroupCard] = {}
         self._artwork_queue: deque[PeopleCard | GroupCard] = deque()
         self._artwork_timer = QTimer(self)
-        self._artwork_timer.setInterval(18)
+        self._artwork_timer.setSingleShot(True)
+        self._artwork_timer.setInterval(24)
         self._artwork_timer.timeout.connect(self._load_next_artwork)
+        self._artwork_resume_timer = QTimer(self)
+        self._artwork_resume_timer.setSingleShot(True)
+        self._artwork_resume_timer.setInterval(260)
+        self._artwork_resume_timer.timeout.connect(self._resume_deferred_artwork_loading)
         self._load_generation = 0
         self._load_signals = _PeopleDashboardLoaderSignals()
         self._load_signals.loaded.connect(self._on_load_completed)
@@ -150,6 +155,7 @@ class PeopleDashboardWidget(QWidget):
         self._scroll.setWidgetResizable(True)
         self._scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self._scroll.setStyleSheet("#PeopleScrollArea { background: transparent; border: none; }")
+        self._scroll.verticalScrollBar().valueChanged.connect(self._on_scroll_activity)
         self._scroll.hide()
         root.addWidget(self._scroll, 1)
 
@@ -310,11 +316,24 @@ class PeopleDashboardWidget(QWidget):
     def _start_deferred_artwork_loading(self) -> None:
         if not self._artwork_queue or not self.isVisible():
             return
+        if self._artwork_resume_timer.isActive():
+            return
+        self._artwork_resume_timer.start()
+
+    def _resume_deferred_artwork_loading(self) -> None:
+        if not self._artwork_queue or not self.isVisible():
+            return
         if not self._artwork_timer.isActive():
             self._artwork_timer.start()
 
+    def _on_scroll_activity(self) -> None:
+        self._artwork_timer.stop()
+        if self._artwork_queue and self.isVisible():
+            self._artwork_resume_timer.start()
+
     def _cancel_deferred_artwork_loading(self) -> None:
         self._artwork_timer.stop()
+        self._artwork_resume_timer.stop()
         self._artwork_queue.clear()
 
     def _load_next_artwork(self) -> None:
@@ -324,7 +343,9 @@ class PeopleDashboardWidget(QWidget):
                 continue
             card.load_cover_artwork()
             break
-        if not self._artwork_queue:
+        if self._artwork_queue and self.isVisible():
+            self._artwork_timer.start()
+        else:
             self._artwork_timer.stop()
 
     def _clear_cards(self) -> None:
@@ -504,3 +525,4 @@ class PeopleDashboardWidget(QWidget):
     def hideEvent(self, event) -> None:  # noqa: N802
         super().hideEvent(event)
         self._artwork_timer.stop()
+        self._artwork_resume_timer.stop()

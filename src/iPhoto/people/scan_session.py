@@ -52,20 +52,33 @@ class FaceScanSession:
         *,
         distance_threshold: float,
         min_samples: int,
+        existing_faces: list[FaceRecord] | None = None,
     ) -> tuple[list[FaceRecord], list[PersonRecord]]:
-        """Build the final runtime snapshot for this scan session."""
+        """Build the final runtime snapshot for this scan session.
+
+        Args:
+            repository: The face repository to use for clustering and state lookup.
+            distance_threshold: Clustering distance threshold.
+            min_samples: Minimum cluster samples parameter.
+            existing_faces: Pre-fetched list of all persisted faces.  When
+                provided, no extra DB read is performed; callers that already
+                hold this data (e.g. ``commit()``) should pass it in to avoid
+                a redundant round-trip.
+        """
 
         staged_asset_ids = set(self._faces_by_asset_id)
         staged_asset_rels = {
             asset_rel for asset_rel in self._asset_rel_by_asset_id.values() if asset_rel
         }
 
-        existing_faces = [
+        if existing_faces is None:
+            existing_faces = repository.get_all_faces()
+
+        all_faces = [
             face
-            for face in repository.get_all_faces()
+            for face in existing_faces
             if face.asset_id not in staged_asset_ids and face.asset_rel not in staged_asset_rels
         ]
-        all_faces = list(existing_faces)
         for faces in self._faces_by_asset_id.values():
             all_faces.extend(faces)
 
@@ -99,13 +112,18 @@ class FaceScanSession:
         if not self.has_staged_changes():
             return False
 
+        # Fetch the current state once so it can be passed to
+        # build_runtime_snapshot() (avoiding a second get_all_faces() call
+        # inside that method) and kept for rollback if the commit fails.
+        previous_faces = repository.get_all_faces()
+        previous_persons = repository.get_all_person_records()
+
         clustered_faces, persons = self.build_runtime_snapshot(
             repository,
             distance_threshold=distance_threshold,
             min_samples=min_samples,
+            existing_faces=previous_faces,
         )
-        previous_faces = repository.get_all_faces()
-        previous_persons = repository.get_all_person_records()
         repository.replace_all(clustered_faces, persons, sync_runtime_state=False)
         state_repository = repository.state_repository
         try:

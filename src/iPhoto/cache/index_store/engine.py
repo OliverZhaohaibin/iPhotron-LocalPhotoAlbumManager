@@ -89,6 +89,14 @@ class DatabaseManager:
             ...     conn.execute("INSERT INTO assets ...")
             ...     conn.execute("UPDATE assets ...")
         """
+        _VALID_BEGIN_MODES = {"DEFERRED", "IMMEDIATE", "EXCLUSIVE"}
+        if begin_mode is not None and (
+            not isinstance(begin_mode, str) or begin_mode.upper() not in _VALID_BEGIN_MODES
+        ):
+            raise ValueError(
+                f"Invalid begin_mode {begin_mode!r}. "
+                f"Must be one of: {', '.join(sorted(_VALID_BEGIN_MODES))}."
+            )
         if self._conn:
             # WARNING: Nested transaction - no savepoint, just yields existing connection
             # The nested block shares the outer transaction's fate.

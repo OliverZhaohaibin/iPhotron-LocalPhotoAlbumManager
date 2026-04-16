@@ -198,7 +198,7 @@ class TestGlobalRepositorySingleton:
         assert row["face_status"] == "pending"
         assert row["is_favorite"] == 1
 
-    def test_merge_scan_rows_does_not_reuse_hidden_live_role_for_changed_asset(
+    def test_merge_scan_rows_preserves_live_role_and_partner_rel_for_changed_asset_id(
         self, tmp_path: Path
     ) -> None:
         repo = get_global_repository(tmp_path)

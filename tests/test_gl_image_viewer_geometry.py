@@ -361,9 +361,10 @@ class TestTextureRectToLogical:
             texture_height=300.0,
             rotate_steps=1,
         )
-        # After 90° CW the rect spans the same normalised area but in the rotated canvas;
-        # width and height of the bounding box should be swapped.
-        assert w == pytest.approx(h * (60.0 / 80.0), rel=1e-3) or w != h
+        # After 90° CW, the original 80×60 rect becomes a 60×80 bounding box:
+        # the input width (80) maps to the output height and input height (60) maps to output width.
+        assert w == pytest.approx(60.0)
+        assert h == pytest.approx(80.0)
 
     def test_rotate_180_preserves_size(self):
         """180° rotation preserves width/height of the bounding rect."""

@@ -3,14 +3,13 @@
 from __future__ import annotations
 
 import re
-import sys
 from dataclasses import dataclass
 from datetime import datetime
 from fractions import Fraction
 from pathlib import Path
 from typing import Any, Mapping, Optional
 
-from PySide6.QtCore import QDateTime, QEvent, QLocale, QRectF, Qt, QTimer, Signal
+from PySide6.QtCore import QDateTime, QEvent, QLocale, QObject, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QMouseEvent, QPainter, QPainterPath, QPalette, QShowEvent
 from PySide6.QtWidgets import (
     QFrame,
@@ -40,9 +39,6 @@ _LENS_SPEC_RE = re.compile(
     re.IGNORECASE,
 )
 
-_IS_LINUX = sys.platform.startswith("linux")
-
-
 @dataclass
 class _FormattedMetadata:
     """Pre-formatted strings used to populate the info panel labels."""
@@ -69,6 +65,13 @@ class InfoPanel(QWidget):
     _SHADOW_MAX_ALPHA = 18
     _SHADOW_RADIUS_GROWTH = 0.5
     dismissed = Signal()
+    _DRAG_EVENT_TYPES = frozenset(
+        (
+            QEvent.Type.MouseButtonPress,
+            QEvent.Type.MouseMove,
+            QEvent.Type.MouseButtonRelease,
+        ),
+    )
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(
@@ -107,6 +110,7 @@ class InfoPanel(QWidget):
             QSizePolicy.Policy.Preferred,
         )
         self._title_label.setStyleSheet("font-weight: bold; font-size: 14px;")
+        self._title_label.installEventFilter(self)
         title_layout.addWidget(self._title_label, 1)
 
         self._close_button = QToolButton(self._title_bar)
@@ -122,31 +126,15 @@ class InfoPanel(QWidget):
         title_layout.addWidget(
             self._close_button, 0, Qt.AlignmentFlag.AlignRight,
         )
+        self._title_bar.installEventFilter(self)
 
         # -- content labels ------------------------------------------------
-        self._filename_label = QLabel()
-        self._filename_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        self._filename_label.setWordWrap(True)
-
-        self._timestamp_label = QLabel()
-        self._timestamp_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        self._timestamp_label.setWordWrap(True)
-
-        self._camera_label = QLabel()
-        self._camera_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        self._camera_label.setWordWrap(True)
-
-        self._lens_label = QLabel()
-        self._lens_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        self._lens_label.setWordWrap(True)
-
-        self._summary_label = QLabel()
-        self._summary_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        self._summary_label.setWordWrap(True)
-
-        self._exposure_label = QLabel()
-        self._exposure_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        self._exposure_label.setWordWrap(True)
+        self._filename_label = self._make_content_label()
+        self._timestamp_label = self._make_content_label()
+        self._camera_label = self._make_content_label()
+        self._lens_label = self._make_content_label()
+        self._summary_label = self._make_content_label()
+        self._exposure_label = self._make_content_label()
 
         # -- root layout ---------------------------------------------------
         s = self._SHADOW_SIZE
@@ -218,6 +206,8 @@ class InfoPanel(QWidget):
             )
             self._exposure_label.setText(fallback)
         self._refresh_panel_geometry()
+        if self.isVisible():
+            self._schedule_post_show_reflow(recenter=False)
 
     def clear(self) -> None:
         """Reset the panel to an empty state without hiding the window."""
@@ -235,6 +225,8 @@ class InfoPanel(QWidget):
             label.clear()
         self._exposure_label.setText("No metadata available for this item.")
         self._refresh_panel_geometry()
+        if self.isVisible():
+            self._schedule_post_show_reflow(recenter=False)
 
     def current_rel(self) -> Optional[str]:
         """Return the relative path associated with the displayed asset."""
@@ -262,6 +254,20 @@ class InfoPanel(QWidget):
             f"QToolButton:hover {{ background-color: {hover.name(QColor.NameFormat.HexArgb)}; border-radius: 6px; }}"
             f"QToolButton:pressed {{ background-color: {pressed.name(QColor.NameFormat.HexArgb)}; border-radius: 6px; }}"
         )
+
+    def _make_content_label(self) -> QLabel:
+        """Create a word-wrapped plain-text label with stable vertical sizing."""
+
+        label = QLabel()
+        label.setTextFormat(Qt.TextFormat.PlainText)
+        label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        label.setWordWrap(True)
+        label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+        label.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Minimum,
+        )
+        return label
 
     def _refresh_panel_geometry(self, *, recenter: bool = False) -> None:
         """Recompute the preferred panel geometry after content changes."""
@@ -304,7 +310,7 @@ class InfoPanel(QWidget):
         )
 
     def _schedule_post_show_reflow(self, *, recenter: bool) -> None:
-        """Queue a follow-up geometry pass for Linux first-show layout quirks."""
+        """Queue a deferred geometry reflow after show or visible content updates."""
 
         self._post_show_reflow_recenter = self._post_show_reflow_recenter or recenter
         if self._post_show_reflow_queued:
@@ -318,15 +324,77 @@ class InfoPanel(QWidget):
         self._post_show_reflow_queued = False
         recenter = self._post_show_reflow_recenter
         self._post_show_reflow_recenter = False
-        if not self.isVisible():
-            return
         self._refresh_panel_geometry(recenter=recenter)
-        if _IS_LINUX:
-            self.repaint()
+        self.update()
+
+    def _try_start_system_drag(self) -> bool:
+        """Ask the window manager to move the frameless tool window if possible."""
+
+        handle = self.windowHandle()
+        if handle is None:
+            return False
+        try:
+            return bool(handle.startSystemMove())
+        except RuntimeError:
+            return False
+
+    def _begin_drag(self, event: QMouseEvent) -> bool:
+        """Start a native or manual drag from a title-bar mouse press."""
+
+        if event.button() != Qt.MouseButton.LeftButton:
+            return False
+        if self._try_start_system_drag():
+            self._drag_active = False
+            self._drag_offset = None
+            return True
+        self._drag_active = True
+        self._drag_offset = (
+            event.globalPosition().toPoint() - self.frameGeometry().topLeft()
+        )
+        return True
+
+    def _continue_drag(self, event: QMouseEvent) -> bool:
+        """Advance a manual drag if one is active."""
+
+        if not self._drag_active:
+            return False
+        if not (event.buttons() & Qt.MouseButton.LeftButton):
+            self._drag_active = False
+            self._drag_offset = None
+            return True
+        if self._drag_offset is None:
+            return True
+        self.move(event.globalPosition().toPoint() - self._drag_offset)
+        return True
+
+    def _end_drag(self) -> bool:
+        """Terminate a manual drag session."""
+
+        if not self._drag_active:
+            return False
+        self._drag_active = False
+        self._drag_offset = None
+        return True
 
     # ------------------------------------------------------------------
     # QWidget overrides
     # ------------------------------------------------------------------
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:
+        is_title_target = watched in (self._title_bar, self._title_label)
+        is_drag_event = event.type() in self._DRAG_EVENT_TYPES
+        if is_title_target and is_drag_event:
+            mouse_event = event  # type: ignore[assignment]
+            if event.type() == QEvent.Type.MouseButtonPress and self._begin_drag(mouse_event):
+                mouse_event.accept()
+                return True
+            if event.type() == QEvent.Type.MouseMove and self._continue_drag(mouse_event):
+                mouse_event.accept()
+                return True
+            if event.type() == QEvent.Type.MouseButtonRelease and self._end_drag():
+                mouse_event.accept()
+                return True
+        return super().eventFilter(watched, event)
+
     def changeEvent(self, event: QEvent) -> None:
         if event.type() == QEvent.Type.PaletteChange:
             self._apply_close_button_style()
@@ -340,8 +408,7 @@ class InfoPanel(QWidget):
         if first_show:
             self._centered = True
         self._refresh_panel_geometry(recenter=first_show)
-        if _IS_LINUX and first_show:
-            self._schedule_post_show_reflow(recenter=True)
+        self._schedule_post_show_reflow(recenter=first_show)
 
     def closeEvent(self, event) -> None:  # type: ignore[override]
         """Emit a dismissal signal so the detail state stays in sync."""
@@ -401,34 +468,25 @@ class InfoPanel(QWidget):
         if event.button() == Qt.MouseButton.LeftButton:
             local_pos = event.position().toPoint()
             if self._title_bar.geometry().contains(local_pos):
-                self._drag_active = True
-                self._drag_offset = (
-                    event.globalPosition().toPoint() - self.frameGeometry().topLeft()
-                )
+                if self._begin_drag(event):
+                    event.accept()
+                    return
                 return
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event: QMouseEvent) -> None:  # type: ignore[override]
         """Move the panel when dragging the title bar."""
 
-        if self._drag_active:
-            if not (event.buttons() & Qt.MouseButton.LeftButton):
-                self._drag_active = False
-                self._drag_offset = None
-                return
-
-            if self._drag_offset is not None:
-                new_pos = event.globalPosition().toPoint() - self._drag_offset
-                self.move(new_pos)
-                return
+        if self._continue_drag(event):
+            event.accept()
+            return
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event: QMouseEvent) -> None:  # type: ignore[override]
         """End a title-bar drag."""
 
-        if self._drag_active:
-            self._drag_active = False
-            self._drag_offset = None
+        if self._end_drag():
+            event.accept()
             return
         super().mouseReleaseEvent(event)
 

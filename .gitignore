@@ -227,3 +227,4 @@ __marimo__/
 /src/extension/models/
 /demo/face-cluster/runtime/
 /demo/face-cluster/state/
+/.codex

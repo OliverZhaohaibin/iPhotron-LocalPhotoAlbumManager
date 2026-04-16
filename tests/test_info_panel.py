@@ -10,9 +10,10 @@ import pytest
 pytest.importorskip("PySide6", reason="PySide6 is required for GUI tests", exc_type=ImportError)
 pytest.importorskip("PySide6.QtWidgets", reason="Qt widgets not available", exc_type=ImportError)
 
+from PySide6.QtCore import QEvent, QPointF, Qt
+from PySide6.QtGui import QMouseEvent
 from PySide6.QtWidgets import QApplication
 
-from iPhoto.gui.ui.widgets import info_panel as info_panel_module
 from iPhoto.gui.ui.widgets.info_panel import InfoPanel
 
 
@@ -239,22 +240,97 @@ def test_info_panel_hidden_metadata_update_recomputes_height(qapp: QApplication)
     panel.close()
 
 
-def test_info_panel_linux_first_show_schedules_post_show_reflow(
+def test_info_panel_first_show_schedules_post_show_reflow(
     qapp: QApplication,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Linux should queue a follow-up geometry pass on the first show."""
+    """The panel should queue a deferred geometry reflow on the first show."""
 
     panel = InfoPanel()
     schedule = Mock()
 
-    monkeypatch.setattr(info_panel_module, "_IS_LINUX", True)
     monkeypatch.setattr(panel, "_schedule_post_show_reflow", schedule)
 
     panel.show()
     qapp.processEvents()
 
     schedule.assert_called_once_with(recenter=True)
+    panel.close()
+
+
+def test_info_panel_visible_metadata_update_schedules_post_show_reflow(
+    qapp: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Visible metadata refreshes should queue a deferred reflow."""
+
+    panel = InfoPanel()
+    schedule = Mock()
+    metadata = {
+        "rel": "clip.MOV",
+        "name": "clip.MOV",
+        "is_video": True,
+        "codec": "hevc",
+    }
+
+    panel.show()
+    qapp.processEvents()
+    monkeypatch.setattr(panel, "_schedule_post_show_reflow", schedule)
+
+    panel.set_asset_metadata(metadata)
+
+    schedule.assert_called_once_with(recenter=False)
+    panel.close()
+
+
+def test_info_panel_title_label_drag_moves_panel(
+    qapp: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Dragging from the title label should move the panel, not just blank title-bar space."""
+
+    panel = InfoPanel()
+    monkeypatch.setattr(panel, "_try_start_system_drag", Mock(return_value=False))
+    panel.show()
+    qapp.processEvents()
+    start_pos = panel.pos()
+
+    label = panel._title_label
+    press_local = QPointF(8.0, 8.0)
+    press_global = QPointF(label.mapToGlobal(press_local.toPoint()))
+    move_global = press_global + QPointF(36.0, 24.0)
+
+    press_event = QMouseEvent(
+        QEvent.Type.MouseButtonPress,
+        press_local,
+        press_global,
+        Qt.MouseButton.LeftButton,
+        Qt.MouseButton.LeftButton,
+        Qt.KeyboardModifier.NoModifier,
+    )
+    move_event = QMouseEvent(
+        QEvent.Type.MouseMove,
+        press_local,
+        move_global,
+        Qt.MouseButton.NoButton,
+        Qt.MouseButton.LeftButton,
+        Qt.KeyboardModifier.NoModifier,
+    )
+    release_event = QMouseEvent(
+        QEvent.Type.MouseButtonRelease,
+        press_local,
+        move_global,
+        Qt.MouseButton.LeftButton,
+        Qt.MouseButton.NoButton,
+        Qt.KeyboardModifier.NoModifier,
+    )
+
+    assert panel.eventFilter(label, press_event) is True
+    assert panel._drag_active is True
+    assert panel.eventFilter(label, move_event) is True
+    assert panel.pos() != start_pos
+    assert panel.eventFilter(label, release_event) is True
+    assert panel._drag_active is False
     panel.close()
 
 

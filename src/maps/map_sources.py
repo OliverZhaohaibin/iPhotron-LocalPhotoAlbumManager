@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import shlex
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
@@ -16,14 +17,69 @@ DEFAULT_OSMAND_STYLE_PATH = DEFAULT_OSMAND_RESOURCES_ROOT / "rendering_styles" /
 ENV_OSMAND_HELPER = "IPHOTO_OSMAND_RENDER_HELPER"
 ENV_OSMAND_NATIVE_WIDGET_LIBRARY = "IPHOTO_OSMAND_NATIVE_WIDGET_LIBRARY"
 ENV_PREFER_OSMAND_NATIVE_WIDGET = "IPHOTO_PREFER_OSMAND_NATIVE_WIDGET"
-DEFAULT_HELPER_RELATIVE_PATH = DEFAULT_OSMAND_EXTENSION_RELATIVE_ROOT / "bin" / "osmand_render_helper.exe"
-DEFAULT_NATIVE_WIDGET_RELATIVE_PATH_MSVC = (
-    DEFAULT_OSMAND_EXTENSION_RELATIVE_ROOT / "bin" / "osmand_native_widget.dll"
-)
-DEFAULT_NATIVE_WIDGET_RELATIVE_PATH = DEFAULT_NATIVE_WIDGET_RELATIVE_PATH_MSVC
-DEFAULT_NATIVE_WIDGET_RELATIVE_PATH_MINGW = (
-    DEFAULT_OSMAND_EXTENSION_RELATIVE_ROOT / "bin" / "libosmand_native_widget.dll"
-)
+
+if sys.platform == "win32":
+    DEFAULT_HELPER_RELATIVE_PATH = DEFAULT_OSMAND_EXTENSION_RELATIVE_ROOT / "bin" / "osmand_render_helper.exe"
+    DEFAULT_HELPER_RELATIVE_PATHS = (DEFAULT_HELPER_RELATIVE_PATH,)
+    DEFAULT_NATIVE_WIDGET_RELATIVE_PATH_MSVC = (
+        DEFAULT_OSMAND_EXTENSION_RELATIVE_ROOT / "bin" / "osmand_native_widget.dll"
+    )
+    DEFAULT_NATIVE_WIDGET_RELATIVE_PATH = DEFAULT_NATIVE_WIDGET_RELATIVE_PATH_MSVC
+    DEFAULT_NATIVE_WIDGET_RELATIVE_PATH_MINGW = (
+        DEFAULT_OSMAND_EXTENSION_RELATIVE_ROOT / "bin" / "libosmand_native_widget.dll"
+    )
+    DEFAULT_NATIVE_WIDGET_RELATIVE_PATHS = (
+        DEFAULT_NATIVE_WIDGET_RELATIVE_PATH_MSVC,
+        DEFAULT_NATIVE_WIDGET_RELATIVE_PATH_MINGW,
+    )
+    SDK_HELPER_RELATIVE_PATHS: tuple[Path, ...] = ()
+    SDK_NATIVE_WIDGET_RELATIVE_PATHS: tuple[Path, ...] = ()
+elif sys.platform == "darwin":
+    DEFAULT_HELPER_RELATIVE_PATH = DEFAULT_OSMAND_EXTENSION_RELATIVE_ROOT / "bin" / "osmand_render_helper"
+    DEFAULT_HELPER_RELATIVE_PATHS = (DEFAULT_HELPER_RELATIVE_PATH,)
+    DEFAULT_NATIVE_WIDGET_RELATIVE_PATH = (
+        DEFAULT_OSMAND_EXTENSION_RELATIVE_ROOT / "bin" / "osmand_native_widget.dylib"
+    )
+    DEFAULT_NATIVE_WIDGET_RELATIVE_PATH_MSVC = DEFAULT_NATIVE_WIDGET_RELATIVE_PATH
+    DEFAULT_NATIVE_WIDGET_RELATIVE_PATH_MINGW = (
+        DEFAULT_OSMAND_EXTENSION_RELATIVE_ROOT / "bin" / "libosmand_native_widget.dylib"
+    )
+    DEFAULT_NATIVE_WIDGET_RELATIVE_PATHS = (
+        DEFAULT_NATIVE_WIDGET_RELATIVE_PATH,
+        DEFAULT_NATIVE_WIDGET_RELATIVE_PATH_MINGW,
+    )
+    SDK_HELPER_RELATIVE_PATHS = (
+        Path("tools") / "osmand_render_helper_native" / "dist-macosx" / "osmand_render_helper",
+    )
+    SDK_NATIVE_WIDGET_RELATIVE_PATHS = (
+        Path("tools") / "osmand_render_helper_native" / "dist-macosx" / "osmand_native_widget.dylib",
+        Path("tools") / "osmand_render_helper_native" / "dist-macosx" / "libosmand_native_widget.dylib",
+    )
+else:
+    DEFAULT_HELPER_RELATIVE_PATH = DEFAULT_OSMAND_EXTENSION_RELATIVE_ROOT / "bin" / "osmand_render_helper"
+    DEFAULT_HELPER_RELATIVE_PATHS = (
+        DEFAULT_HELPER_RELATIVE_PATH,
+        DEFAULT_OSMAND_EXTENSION_RELATIVE_ROOT / "bin" / "osmand_render_helper_sdk",
+    )
+    DEFAULT_NATIVE_WIDGET_RELATIVE_PATH = (
+        DEFAULT_OSMAND_EXTENSION_RELATIVE_ROOT / "bin" / "osmand_native_widget.so"
+    )
+    DEFAULT_NATIVE_WIDGET_RELATIVE_PATH_MSVC = DEFAULT_NATIVE_WIDGET_RELATIVE_PATH
+    DEFAULT_NATIVE_WIDGET_RELATIVE_PATH_MINGW = (
+        DEFAULT_OSMAND_EXTENSION_RELATIVE_ROOT / "bin" / "libosmand_native_widget.so"
+    )
+    DEFAULT_NATIVE_WIDGET_RELATIVE_PATHS = (
+        DEFAULT_NATIVE_WIDGET_RELATIVE_PATH,
+        DEFAULT_NATIVE_WIDGET_RELATIVE_PATH_MINGW,
+    )
+    SDK_HELPER_RELATIVE_PATHS = (
+        Path("tools") / "osmand_render_helper_native" / "dist-linux" / "osmand_render_helper",
+    )
+    SDK_NATIVE_WIDGET_RELATIVE_PATHS = (
+        Path("tools") / "osmand_render_helper_native" / "dist-linux" / "osmand_native_widget.so",
+        Path("tools") / "osmand_render_helper_native" / "dist-linux" / "libosmand_native_widget.so",
+    )
+
 _TRUE_ENV_VALUES = {"1", "true", "yes", "on"}
 _FALSE_ENV_VALUES = {"0", "false", "no", "off"}
 
@@ -132,7 +188,7 @@ def resolve_osmand_helper_command(package_root: Path | None = None) -> tuple[str
 
 
 def resolve_osmand_native_widget_library(package_root: Path | None = None) -> Path | None:
-    """Return the native Qt widget DLL path when it is available."""
+    """Return the native Qt widget library path when it is available."""
 
     raw_value = os.environ.get(ENV_OSMAND_NATIVE_WIDGET_LIBRARY, "").strip()
     if raw_value:
@@ -157,7 +213,7 @@ def has_usable_osmand_default(package_root: Path | None = None) -> bool:
 
 
 def has_usable_osmand_native_widget(package_root: Path | None = None) -> bool:
-    """Return ``True`` when the bundled OBF source and native widget DLL are available."""
+    """Return ``True`` when the bundled OBF source and native widget library are available."""
 
     root = package_root or _package_root()
     return _has_osmand_data_assets(root) and resolve_osmand_native_widget_library(root) is not None
@@ -189,6 +245,11 @@ def _package_root() -> Path:
     return Path(__file__).resolve().parent
 
 
+def _repo_root(package_root: Path | None = None) -> Path:
+    root = package_root or _package_root()
+    return Path(root).resolve().parent.parent
+
+
 def default_osmand_extension_root(package_root: Path | None = None) -> Path:
     """Return the self-contained extension directory used for OBF resources."""
 
@@ -196,53 +257,52 @@ def default_osmand_extension_root(package_root: Path | None = None) -> Path:
     return (Path(root) / DEFAULT_OSMAND_EXTENSION_RELATIVE_ROOT).resolve()
 
 
+def _sdk_roots(repo_root: Path) -> tuple[Path, ...]:
+    """Return candidate PySide6-OsmAnd-SDK checkout paths in preference order.
+
+    The SDK may live either inside the repository root (e.g. a git submodule or
+    a manual checkout into the project tree) or as a sibling directory next to
+    the repository.  Both locations are checked so that developers are not
+    required to put the checkout in a specific place.
+    """
+    inner = repo_root / "PySide6-OsmAnd-SDK"
+    sibling = repo_root.parent / "PySide6-OsmAnd-SDK"
+    return tuple(p for p in (inner, sibling) if p.exists())
+
+
 def _default_helper_candidates(package_root: Path) -> tuple[Path, ...]:
     normalized_root = Path(package_root).resolve()
-    return _collect_candidate_paths((normalized_root,), (), DEFAULT_HELPER_RELATIVE_PATH, ())
+    repo_root = _repo_root(normalized_root)
+    sdk_roots = _sdk_roots(repo_root)
+    sdk_candidates = _collect_candidate_paths(sdk_roots, SDK_HELPER_RELATIVE_PATHS) if sdk_roots else ()
+    local_candidates = _collect_candidate_paths((normalized_root,), DEFAULT_HELPER_RELATIVE_PATHS)
+    return _dedupe_candidates(sdk_candidates + local_candidates)
 
 
 def _default_native_widget_candidates(package_root: Path) -> tuple[Path, ...]:
+    repo_root = _repo_root(package_root)
+    sdk_roots = _sdk_roots(repo_root)
+
+    # Prefer the side project's newer Linux/macOS widget builds. The main
+    # project's bundled shared libraries are intentionally skipped there because
+    # they may lag behind the side project artifacts.
+    if sys.platform != "win32" and sdk_roots:
+        return _collect_candidate_paths(sdk_roots, SDK_NATIVE_WIDGET_RELATIVE_PATHS)
+
     normalized_root = Path(package_root).resolve()
-    local_candidates_msvc = _collect_candidate_paths(
-        (normalized_root,),
-        (),
-        DEFAULT_NATIVE_WIDGET_RELATIVE_PATH_MSVC,
-        (),
-    )
-    local_candidates = _collect_candidate_paths(
-        (normalized_root,),
-        (),
-        DEFAULT_NATIVE_WIDGET_RELATIVE_PATH,
-        (),
-    )
-    local_candidates_mingw = _collect_candidate_paths(
-        (normalized_root,),
-        (),
-        DEFAULT_NATIVE_WIDGET_RELATIVE_PATH_MINGW,
-        (),
-    )
-    return local_candidates_msvc + local_candidates + local_candidates_mingw
+    return _collect_candidate_paths((normalized_root,), DEFAULT_NATIVE_WIDGET_RELATIVE_PATHS)
 
 
 def _collect_candidate_paths(
     search_roots: tuple[Path, ...],
-    official_roots: tuple[Path, ...],
-    local_relative_path: Path,
-    official_relatives: tuple[Path, ...],
+    relative_paths: tuple[Path, ...],
 ) -> tuple[Path, ...]:
     seen: set[Path] = set()
     candidates: list[Path] = []
 
     for root in search_roots:
-        candidate = (root / local_relative_path).resolve()
-        if candidate in seen:
-            continue
-        seen.add(candidate)
-        candidates.append(candidate)
-
-    for root in official_roots:
-        for relative in official_relatives:
-            candidate = (root / relative).resolve()
+        for relative_path in relative_paths:
+            candidate = (root / relative_path).resolve()
             if candidate in seen:
                 continue
             seen.add(candidate)
@@ -251,8 +311,20 @@ def _collect_candidate_paths(
     return tuple(candidates)
 
 
+def _dedupe_candidates(candidates: tuple[Path, ...]) -> tuple[Path, ...]:
+    seen: set[Path] = set()
+    deduped: list[Path] = []
+    for candidate in candidates:
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        deduped.append(candidate)
+    return tuple(deduped)
+
+
 __all__ = [
     "DEFAULT_HELPER_RELATIVE_PATH",
+    "DEFAULT_HELPER_RELATIVE_PATHS",
     "DEFAULT_OSMAND_EXTENSION_RELATIVE_ROOT",
     "DEFAULT_NATIVE_WIDGET_RELATIVE_PATH_MSVC",
     "DEFAULT_NATIVE_WIDGET_RELATIVE_PATH",

@@ -222,6 +222,8 @@ __marimo__/
 /CMakeFiles/
 /debug/
 /.codex_staging/
+/.codex
+/PySide6-OsmAnd-SDK/
 /src/maps/tiles/World_basemap_2.obf
 /src/maps/tiles/extension/
 /demo/face-cluster/runtime/

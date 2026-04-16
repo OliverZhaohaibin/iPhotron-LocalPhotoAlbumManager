@@ -2,7 +2,10 @@ from pathlib import Path
 
 from maps import map_sources
 from maps.map_sources import (
+    DEFAULT_HELPER_RELATIVE_PATH,
+    DEFAULT_NATIVE_WIDGET_RELATIVE_PATH,
     MapSourceSpec,
+    _sdk_roots,
     default_osmand_extension_root,
     has_usable_osmand_default,
     resolve_osmand_native_widget_library,
@@ -72,7 +75,7 @@ def test_resolve_osmand_helper_command_prefers_environment(monkeypatch) -> None:
 def test_resolve_osmand_helper_command_discovers_extension_helper(tmp_path, monkeypatch) -> None:
     package_root = tmp_path / "src" / "maps"
     package_root.mkdir(parents=True)
-    helper_path = default_osmand_extension_root(package_root) / "bin" / "osmand_render_helper.exe"
+    helper_path = default_osmand_extension_root(package_root) / "bin" / DEFAULT_HELPER_RELATIVE_PATH.name
     helper_path.parent.mkdir(parents=True)
     helper_path.write_bytes(b"exe")
     monkeypatch.delenv(map_sources.ENV_OSMAND_HELPER, raising=False)
@@ -85,14 +88,14 @@ def test_resolve_osmand_helper_command_discovers_extension_helper(tmp_path, monk
 def test_resolve_osmand_native_widget_library_prefers_extension_bin_output(tmp_path, monkeypatch) -> None:
     package_root = tmp_path / "src" / "maps"
     package_root.mkdir(parents=True)
-    local_dll = default_osmand_extension_root(package_root) / "bin" / "osmand_native_widget.dll"
-    local_dll.parent.mkdir(parents=True)
-    local_dll.write_bytes(b"dll")
+    local_lib = default_osmand_extension_root(package_root) / "bin" / DEFAULT_NATIVE_WIDGET_RELATIVE_PATH.name
+    local_lib.parent.mkdir(parents=True)
+    local_lib.write_bytes(b"dll")
     monkeypatch.delenv(map_sources.ENV_OSMAND_NATIVE_WIDGET_LIBRARY, raising=False)
 
     resolved = resolve_osmand_native_widget_library(package_root)
 
-    assert resolved == local_dll.resolve()
+    assert resolved == local_lib.resolve()
 
 
 def test_has_usable_osmand_default_requires_helper(tmp_path, monkeypatch) -> None:
@@ -104,8 +107,51 @@ def test_has_usable_osmand_default_requires_helper(tmp_path, monkeypatch) -> Non
 
     assert has_usable_osmand_default(package_root) is False
 
-    helper_path = extension_root / "bin" / "osmand_render_helper.exe"
+    helper_path = extension_root / "bin" / DEFAULT_HELPER_RELATIVE_PATH.name
     helper_path.parent.mkdir(parents=True)
     helper_path.write_bytes(b"exe")
 
     assert has_usable_osmand_default(package_root) is True
+
+
+def test_sdk_roots_discovers_inner_checkout(tmp_path) -> None:
+    repo_root = tmp_path / "repo"
+    inner_sdk = repo_root / "PySide6-OsmAnd-SDK"
+    inner_sdk.mkdir(parents=True)
+
+    roots = _sdk_roots(repo_root)
+
+    assert inner_sdk in roots
+
+
+def test_sdk_roots_discovers_sibling_checkout(tmp_path) -> None:
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir(parents=True)
+    sibling_sdk = tmp_path / "PySide6-OsmAnd-SDK"
+    sibling_sdk.mkdir()
+
+    roots = _sdk_roots(repo_root)
+
+    assert sibling_sdk in roots
+
+
+def test_sdk_roots_discovers_both_when_both_exist(tmp_path) -> None:
+    repo_root = tmp_path / "repo"
+    inner_sdk = repo_root / "PySide6-OsmAnd-SDK"
+    inner_sdk.mkdir(parents=True)
+    sibling_sdk = tmp_path / "PySide6-OsmAnd-SDK"
+    sibling_sdk.mkdir()
+
+    roots = _sdk_roots(repo_root)
+
+    assert inner_sdk in roots
+    assert sibling_sdk in roots
+
+
+def test_sdk_roots_returns_empty_when_neither_exists(tmp_path) -> None:
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+
+    roots = _sdk_roots(repo_root)
+
+    assert roots == ()

@@ -6,6 +6,7 @@ import ctypes
 import logging
 import math
 import os
+import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -32,7 +33,7 @@ _LOGGER = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class _BridgeAPI:
-    library: ctypes.WinDLL
+    library: ctypes.CDLL
 
 
 def _startup_profile_enabled() -> bool:
@@ -60,26 +61,36 @@ def _ensure_dll_directory(path: Path) -> None:
         _NATIVE_DLL_DIR_HANDLES.append(os.add_dll_directory(str(path)))
 
 
+def _prepend_library_search_path(path: Path) -> None:
+    if os.name == "nt":
+        _ensure_dll_directory(path)
+        return
+
+    env_key = "DYLD_LIBRARY_PATH" if sys.platform == "darwin" else "LD_LIBRARY_PATH"
+    normalized = str(path.resolve())
+    existing = os.environ.get(env_key, "")
+    existing_entries = [entry for entry in existing.split(os.pathsep) if entry]
+    if normalized not in existing_entries:
+        os.environ[env_key] = normalized + (os.pathsep + existing if existing else "")
+
+
 def _load_bridge(library_path: Path) -> _BridgeAPI:
-    if os.name != "nt":
-        raise TileLoadingError("The native OsmAnd widget is currently only supported on Windows")
-
-    # Register all directories that contain transitive DLL dependencies BEFORE
-    # calling WinDLL. On Windows, add_dll_directory() only works if called prior
-    # to the first LoadLibrary for that DLL.
-    pyside_root = Path(PySide6.__file__).resolve().parent
-    shiboken_root = Path(shiboken6.__file__).resolve().parent
-    _ensure_dll_directory(pyside_root)
-    _ensure_dll_directory(shiboken_root)
-
-    # The extension layout keeps the widget DLL and its transitive runtime
-    # dependencies together in the same directory, so registering the resolved
-    # parent directory is sufficient and avoids accidentally picking up stale
-    # binaries from old build output folders.
-    _ensure_dll_directory(library_path.parent)
+    if os.name == "nt":
+        # Register all directories that contain transitive DLL dependencies
+        # before calling WinDLL. On Windows, add_dll_directory() only works if
+        # called prior to the first LoadLibrary for that DLL.
+        pyside_root = Path(PySide6.__file__).resolve().parent
+        shiboken_root = Path(shiboken6.__file__).resolve().parent
+        _ensure_dll_directory(pyside_root)
+        _ensure_dll_directory(shiboken_root)
+        _ensure_dll_directory(library_path.parent)
+    else:
+        # Prepend the selected binary directory so dlopen can resolve any
+        # colocated runtime libraries that ship with the chosen widget build.
+        _prepend_library_search_path(library_path.parent)
 
     load_started = time.perf_counter()
-    library = ctypes.WinDLL(str(library_path))
+    library = ctypes.WinDLL(str(library_path)) if os.name == "nt" else ctypes.CDLL(str(library_path))
     _log_startup_profile(
         "load_bridge",
         (time.perf_counter() - load_started) * 1000.0,
@@ -135,7 +146,7 @@ def probe_native_widget_runtime(package_root: Path | None = None) -> tuple[bool,
 
     library_path = resolve_osmand_native_widget_library(root)
     if library_path is None:
-        result = (False, "The native OsmAnd widget DLL is not available")
+        result = (False, "The native OsmAnd widget library is not available")
     else:
         try:
             _load_bridge(library_path)
@@ -181,7 +192,7 @@ class NativeOsmAndWidget(QWidget):
         self._map_source = map_source.resolved(package_root)
         library_path = resolve_osmand_native_widget_library(package_root)
         if library_path is None:
-            raise TileLoadingError("The native OsmAnd widget DLL is not available")
+            raise TileLoadingError("The native OsmAnd widget library is not available")
         self._library_path = library_path.resolve()
 
         create_started = time.perf_counter()

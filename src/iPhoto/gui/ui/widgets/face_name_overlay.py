@@ -240,13 +240,13 @@ class FaceNameOverlayWidget(QWidget):
         if callable(has_image_content):
             try:
                 return bool(has_image_content())
-            except Exception:
+            except (AttributeError, RuntimeError, TypeError):
                 return False
         pixmap = getattr(viewer, "pixmap", None)
         if callable(pixmap):
             try:
                 current = pixmap()
-            except Exception:
+            except (AttributeError, RuntimeError, TypeError):
                 return False
             return current is not None and not current.isNull()
         return True

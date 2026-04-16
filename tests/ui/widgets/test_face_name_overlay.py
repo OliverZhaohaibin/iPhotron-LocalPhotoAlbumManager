@@ -1,16 +1,38 @@
 from __future__ import annotations
 
+import time
+
 import pytest
 
 pytest.importorskip("PySide6", reason="PySide6 is required for face overlay tests")
 
+import os
+
 from PySide6.QtCore import QPoint, QRectF, Qt, Signal
 from PySide6.QtGui import QImage, QPixmap
-from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QWidget
+from PySide6.QtTest import QSignalSpy, QTest
+from PySide6.QtWidgets import QApplication, QWidget
 
 from iPhoto.gui.ui.widgets.face_name_overlay import FaceNameOverlayWidget
 from iPhoto.people.repository import AssetFaceAnnotation
+
+
+@pytest.fixture(scope="module")
+def qapp():
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    app = QApplication.instance()
+    if app is None:
+        app = QApplication([])
+    yield app
+
+
+def _wait_until(app: QApplication, condition, timeout_ms: int = 2000) -> None:
+    """Poll condition, processing Qt events, until it's True or timeout elapses."""
+    deadline = time.monotonic() + timeout_ms / 1000.0
+    while not condition():
+        app.processEvents()
+        if time.monotonic() > deadline:
+            raise AssertionError("Condition not met within timeout")
 
 
 class _FakeViewer(QWidget):
@@ -45,7 +67,7 @@ class _FakeViewer(QWidget):
         return QPixmap.fromImage(QImage(1, 1, QImage.Format.Format_ARGB32))
 
 
-def _make_overlay(qtbot):
+def _make_overlay(qapp):
     surface = QWidget()
     surface.resize(420, 320)
     surface.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
@@ -55,11 +77,10 @@ def _make_overlay(qtbot):
     overlay = FaceNameOverlayWidget(surface)
     overlay.setGeometry(surface.rect())
     overlay.set_viewer(viewer)
-    qtbot.addWidget(surface)
     surface.show()
     viewer.show()
     overlay.show()
-    qtbot.waitExposed(surface)
+    qapp.processEvents()
     return surface, viewer, overlay
 
 
@@ -86,8 +107,8 @@ def _annotation(
     )
 
 
-def test_face_name_overlay_shows_fallback_and_clamps_label(qtbot) -> None:
-    _surface, viewer, overlay = _make_overlay(qtbot)
+def test_face_name_overlay_shows_fallback_and_clamps_label(qapp) -> None:
+    _surface, viewer, overlay = _make_overlay(qapp)
     overlay.set_annotations([_annotation(display_name=None)])
     overlay.set_overlay_active(True)
     viewer.viewTransformChanged.emit()
@@ -99,8 +120,8 @@ def test_face_name_overlay_shows_fallback_and_clamps_label(qtbot) -> None:
     assert chip.geometry().bottom() <= viewer.geometry().bottom()
 
 
-def test_face_name_overlay_hover_updates_highlighted_face(qtbot) -> None:
-    surface, viewer, overlay = _make_overlay(qtbot)
+def test_face_name_overlay_hover_updates_highlighted_face(qapp) -> None:
+    surface, viewer, overlay = _make_overlay(qapp)
     overlay.set_annotations(
         [
             _annotation(face_id="face-1", box_x=40, box_y=40),
@@ -112,10 +133,10 @@ def test_face_name_overlay_hover_updates_highlighted_face(qtbot) -> None:
 
     chip = overlay._states["face-2"].chip
     QTest.mouseMove(chip, chip.rect().center())
-    qtbot.waitUntil(lambda: overlay._hovered_face_id == "face-2")
+    _wait_until(qapp, lambda: overlay._hovered_face_id == "face-2")
 
     QTest.mouseMove(surface, QPoint(5, 5))
-    qtbot.waitUntil(lambda: overlay._hovered_face_id is None)
+    _wait_until(qapp, lambda: overlay._hovered_face_id is None)
 
 
 @pytest.mark.parametrize(
@@ -125,26 +146,28 @@ def test_face_name_overlay_hover_updates_highlighted_face(qtbot) -> None:
         ("   ", None),
     ],
 )
-def test_face_name_overlay_commits_entered_name(qtbot, entered_text: str, expected_name: str | None) -> None:
-    _surface, viewer, overlay = _make_overlay(qtbot)
+def test_face_name_overlay_commits_entered_name(qapp, entered_text: str, expected_name: str | None) -> None:
+    _surface, viewer, overlay = _make_overlay(qapp)
     overlay.set_annotations([_annotation(display_name="Bob")])
     overlay.set_overlay_active(True)
     viewer.viewTransformChanged.emit()
 
     chip = overlay._states["face-1"].chip
     QTest.mouseClick(chip, Qt.MouseButton.LeftButton)
-    qtbot.waitUntil(lambda: overlay._editor is not None)
+    _wait_until(qapp, lambda: overlay._editor is not None)
     overlay._editor.setText(entered_text)
 
-    with qtbot.waitSignal(overlay.renameSubmitted) as blocker:
-        QTest.keyClick(overlay._editor, Qt.Key.Key_Return)
+    spy = QSignalSpy(overlay.renameSubmitted)
+    QTest.keyClick(overlay._editor, Qt.Key.Key_Return)
+    qapp.processEvents()
 
-    assert blocker.args == ["person-1", expected_name]
+    assert len(spy) == 1
+    assert list(spy[0]) == ["person-1", expected_name]
     assert overlay._states["face-1"].chip.text() == (expected_name or "unnamed")
 
 
-def test_face_name_overlay_escape_and_focus_loss_cancel_edit(qtbot) -> None:
-    surface, viewer, overlay = _make_overlay(qtbot)
+def test_face_name_overlay_escape_and_focus_loss_cancel_edit(qapp) -> None:
+    surface, viewer, overlay = _make_overlay(qapp)
     overlay.set_annotations([_annotation(display_name="Bob", box_x=60, box_y=70)])
     overlay.set_overlay_active(True)
     viewer.viewTransformChanged.emit()
@@ -152,23 +175,23 @@ def test_face_name_overlay_escape_and_focus_loss_cancel_edit(qtbot) -> None:
     chip = overlay._states["face-1"].chip
 
     QTest.mouseClick(chip, Qt.MouseButton.LeftButton)
-    qtbot.waitUntil(lambda: overlay._editor is not None)
+    _wait_until(qapp, lambda: overlay._editor is not None)
     overlay._editor.setText("Alice")
     QTest.keyClick(overlay._editor, Qt.Key.Key_Escape)
-    qtbot.waitUntil(lambda: overlay._editor is None)
+    _wait_until(qapp, lambda: overlay._editor is None)
     assert chip.text() == "Bob"
 
     QTest.mouseClick(chip, Qt.MouseButton.LeftButton)
-    qtbot.waitUntil(lambda: overlay._editor is not None)
+    _wait_until(qapp, lambda: overlay._editor is not None)
     overlay._editor.setText("Charlie")
     surface.setFocus(Qt.FocusReason.OtherFocusReason)
     QTest.qWait(10)
-    qtbot.waitUntil(lambda: overlay._editor is None)
+    _wait_until(qapp, lambda: overlay._editor is None)
     assert chip.text() == "Bob"
 
 
-def test_face_name_overlay_stays_visible_even_if_viewer_is_hidden_when_activated(qtbot) -> None:
-    _surface, viewer, overlay = _make_overlay(qtbot)
+def test_face_name_overlay_stays_visible_even_if_viewer_is_hidden_when_activated(qapp) -> None:
+    _surface, viewer, overlay = _make_overlay(qapp)
     viewer.hide()
     overlay.set_annotations([_annotation(display_name="Bob")])
     overlay.set_overlay_active(True)
@@ -177,8 +200,8 @@ def test_face_name_overlay_stays_visible_even_if_viewer_is_hidden_when_activated
     assert overlay._states["face-1"].chip.isVisible() is True
 
 
-def test_face_name_overlay_waits_for_loaded_image_before_showing_labels(qtbot) -> None:
-    _surface, viewer, overlay = _make_overlay(qtbot)
+def test_face_name_overlay_waits_for_loaded_image_before_showing_labels(qapp) -> None:
+    _surface, viewer, overlay = _make_overlay(qapp)
     viewer.set_has_image_content(False)
     overlay.set_annotations([_annotation(display_name="Bob", box_x=80, box_y=60)])
     overlay.set_overlay_active(True)
@@ -190,6 +213,6 @@ def test_face_name_overlay_waits_for_loaded_image_before_showing_labels(qtbot) -
     viewer.set_has_image_content(True)
     viewer.viewTransformChanged.emit()
 
-    qtbot.waitUntil(lambda: overlay.isVisible())
+    _wait_until(qapp, lambda: overlay.isVisible())
     assert chip.isVisible() is True
     assert chip.geometry().topLeft() != QPoint(0, 0)

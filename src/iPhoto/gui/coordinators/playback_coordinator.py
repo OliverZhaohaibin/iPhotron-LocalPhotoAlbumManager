@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import sqlite3
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Optional
@@ -549,7 +550,7 @@ class PlaybackCoordinator(QObject):
             return []
         try:
             return people_service.list_asset_face_annotations(asset_id)
-        except Exception:
+        except (sqlite3.Error, OSError):
             LOGGER.exception("Failed to load face annotations for asset %s", asset_id)
             return []
 
@@ -567,7 +568,7 @@ class PlaybackCoordinator(QObject):
         name = new_name.strip() if isinstance(new_name, str) else None
         try:
             people_service.rename_cluster(person_id, name or None)
-        except Exception:
+        except (sqlite3.Error, OSError):
             LOGGER.exception("Failed to rename person %s", person_id)
             return
         self._refresh_face_name_overlay_for_current_presentation()

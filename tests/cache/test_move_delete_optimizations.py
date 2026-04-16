@@ -66,6 +66,11 @@ class TestWALMode:
             mode = conn.execute("PRAGMA journal_mode").fetchone()[0]
             assert mode == "wal"
 
+    def test_begin_mode_starts_transaction_before_first_write(self, tmp_path: Path) -> None:
+        db = DatabaseManager(tmp_path / "test.db")
+        with db.transaction(begin_mode="IMMEDIATE") as conn:
+            assert conn.in_transaction is True
+
 
 # ------------------------------------------------------------------
 # Plan 2 §6.2.1: get_rows_by_rels()

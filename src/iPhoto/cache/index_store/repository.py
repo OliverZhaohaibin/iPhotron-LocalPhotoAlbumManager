@@ -140,7 +140,7 @@ class AssetRepository:
             )
             recovery.recover()
 
-    def transaction(self):
+    def transaction(self, *, begin_mode: str | None = None):
         """Context manager for batching multiple operations.
         
         Example:
@@ -148,7 +148,7 @@ class AssetRepository:
             ...     repo.upsert_row("a.jpg", {...})
             ...     repo.upsert_row("b.jpg", {...})
         """
-        return self._db_manager.transaction()
+        return self._db_manager.transaction(begin_mode=begin_mode)
 
     def close(self) -> None:
         """Close any active database connections.
@@ -201,7 +201,7 @@ class AssetRepository:
             dict.fromkeys(str(row["rel"]) for row in materialized_rows if row.get("rel"))
         )
 
-        with self.transaction() as conn:
+        with self.transaction(begin_mode="IMMEDIATE") as conn:
             existing_rows_by_rel: Dict[str, Dict[str, Any]] = {}
             if unique_rels:
                 conn.row_factory = sqlite3.Row

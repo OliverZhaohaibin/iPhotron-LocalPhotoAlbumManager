@@ -9,6 +9,7 @@ import pytest
 from iPhoto.cache.index_store import get_global_repository, reset_global_repository
 from iPhoto.config import WORK_DIR_NAME
 from iPhoto.library.workers.face_scan_worker import FaceScanWorker
+from iPhoto.library.workers.scanner_worker import ScannerSignals, ScannerWorker
 from iPhoto.people.pipeline import DetectedAssetFaces
 from iPhoto.people.repository import FaceRecord, PersonRecord
 from iPhoto.people.scan_session import FaceScanSession
@@ -557,3 +558,22 @@ def test_face_scan_worker_enqueue_rows_skips_done_assets(tmp_path: Path) -> None
     batch = worker._next_batch()
 
     assert [row["id"] for row in batch] == ["asset-pending", "asset-retry"]
+
+
+def test_scanner_worker_does_not_emit_chunk_ready_for_failed_persist(tmp_path: Path) -> None:
+    class FailingStore:
+        def merge_scan_rows(self, chunk: list[dict]) -> list[dict]:
+            raise RuntimeError("db write failed")
+
+    signals = ScannerSignals()
+    emitted_chunks: list[tuple[Path, list[dict]]] = []
+    failed_batches: list[tuple[Path, int]] = []
+    signals.chunkReady.connect(lambda root, chunk: emitted_chunks.append((root, chunk)))
+    signals.batchFailed.connect(lambda root, count: failed_batches.append((root, count)))
+
+    worker = ScannerWorker(tmp_path, [], [], signals)
+    worker._process_chunk(FailingStore(), [{"id": "asset-1", "rel": "album/a.jpg"}])
+
+    assert emitted_chunks == []
+    assert failed_batches == [(tmp_path, 1)]
+    assert worker.failed_count == 1

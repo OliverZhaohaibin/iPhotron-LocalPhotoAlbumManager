@@ -104,9 +104,17 @@ class FaceScanSession:
             distance_threshold=distance_threshold,
             min_samples=min_samples,
         )
-        repository.replace_all(clustered_faces, persons)
+        previous_faces = repository.get_all_faces()
+        previous_persons = repository.get_all_person_records()
+        repository.replace_all(clustered_faces, persons, sync_runtime_state=False)
         state_repository = repository.state_repository
-        if state_repository is not None and clustered_faces:
-            state_repository.sync_scan_results(persons, clustered_faces)
+        try:
+            repository.sync_runtime_state()
+            if state_repository is not None and clustered_faces:
+                state_repository.sync_scan_results(persons, clustered_faces)
+        except Exception:
+            repository.replace_all(previous_faces, previous_persons, sync_runtime_state=False)
+            repository.sync_runtime_state()
+            raise
         self.clear()
         return True

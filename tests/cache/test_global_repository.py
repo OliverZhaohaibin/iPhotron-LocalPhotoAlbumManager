@@ -198,6 +198,37 @@ class TestGlobalRepositorySingleton:
         assert row["face_status"] == "pending"
         assert row["is_favorite"] == 1
 
+    def test_merge_scan_rows_does_not_reuse_hidden_live_role_for_changed_asset(
+        self, tmp_path: Path
+    ) -> None:
+        repo = get_global_repository(tmp_path)
+        repo.write_rows(
+            [
+                {
+                    "rel": "album/photo.jpg",
+                    "id": "asset-old",
+                    "media_type": 0,
+                    "face_status": "skipped",
+                    "live_role": 1,
+                    "live_partner_rel": "album/photo.mov",
+                }
+            ]
+        )
+
+        merged_rows = repo.merge_scan_rows(
+            [
+                {
+                    "rel": "album/photo.jpg",
+                    "id": "asset-new",
+                    "media_type": 0,
+                }
+            ]
+        )
+
+        assert merged_rows[0]["live_role"] == 1
+        assert merged_rows[0]["live_partner_rel"] == "album/photo.mov"
+        assert merged_rows[0]["face_status"] == "pending"
+
 
 class TestIdempotentWrites:
     """Tests verifying idempotent write behavior (Constraint #3)."""

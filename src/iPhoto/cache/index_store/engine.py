@@ -62,7 +62,7 @@ class DatabaseManager:
         return conn
 
     @contextmanager
-    def transaction(self) -> Iterator[sqlite3.Connection]:
+    def transaction(self, *, begin_mode: str | None = None) -> Iterator[sqlite3.Connection]:
         """Context manager for transactional operations.
         
         This context manager batches multiple updates into a single transaction
@@ -91,14 +91,28 @@ class DatabaseManager:
         """
         if self._conn:
             # WARNING: Nested transaction - no savepoint, just yields existing connection
-            # The nested block shares the outer transaction's fate
+            # The nested block shares the outer transaction's fate.
+            if begin_mode and not self._conn.in_transaction:
+                self._conn.execute(f"BEGIN {begin_mode}")
             yield self._conn
             return
 
         self._conn = self._create_connection()
         try:
-            with self._conn:
-                yield self._conn
+            if begin_mode is None:
+                with self._conn:
+                    yield self._conn
+            else:
+                self._conn.execute(f"BEGIN {begin_mode}")
+                try:
+                    yield self._conn
+                except Exception:
+                    if self._conn.in_transaction:
+                        self._conn.rollback()
+                    raise
+                else:
+                    if self._conn.in_transaction:
+                        self._conn.commit()
         finally:
             self._conn.close()
             self._conn = None

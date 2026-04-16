@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 from iPhoto.people.pipeline import DetectedAssetFaces
 from iPhoto.people.repository import FaceRecord, FaceRepository, PersonRecord
@@ -528,3 +529,195 @@ def test_face_scan_session_preserves_group_id_and_custom_cover_after_commit(tmp_
     assert len(groups) == 1
     assert groups[0].group_id == group.group_id
     assert repository.get_group_cover_asset_id(group.group_id) == "asset-shared"
+
+
+def test_face_scan_session_rolls_back_runtime_snapshot_when_runtime_state_sync_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository = FaceRepository(tmp_path / "face_index.db", tmp_path / "face_state.db")
+    embedding_a = np.asarray([1.0, 0.0, 0.0], dtype=np.float32)
+    embedding_b = np.asarray([0.0, 1.0, 0.0], dtype=np.float32)
+    initial_faces = [
+        _face_record(
+            face_id="face-a-shared",
+            asset_id="asset-shared",
+            asset_rel="album/shared.jpg",
+            person_id="person-a",
+            embedding=embedding_a,
+            face_key="face-key-a-shared",
+        ),
+        _face_record(
+            face_id="face-b-shared",
+            asset_id="asset-shared",
+            asset_rel="album/shared.jpg",
+            person_id="person-b",
+            embedding=embedding_b,
+            face_key="face-key-b-shared",
+        ),
+    ]
+    initial_persons = [
+        _person_record(
+            person_id="person-a",
+            key_face_id="face-a-shared",
+            face_count=1,
+            name="Alice",
+            embedding=embedding_a,
+        ),
+        _person_record(
+            person_id="person-b",
+            key_face_id="face-b-shared",
+            face_count=1,
+            name="Bob",
+            embedding=embedding_b,
+        ),
+    ]
+    repository.replace_all(initial_faces, initial_persons)
+    assert repository.state_repository is not None
+    repository.state_repository.sync_scan_results(initial_persons, initial_faces)
+    group = repository.create_group(["person-a", "person-b"])
+    assert group is not None
+
+    session = FaceScanSession()
+    session.stage_detection_results(
+        [
+            DetectedAssetFaces(
+                asset_id="asset-new-shared",
+                asset_rel="album/new-shared.jpg",
+                faces=[
+                    _face_record(
+                        face_id="face-a-new-shared",
+                        asset_id="asset-new-shared",
+                        asset_rel="album/new-shared.jpg",
+                        person_id=None,
+                        embedding=np.asarray([0.97, 0.03, 0.0], dtype=np.float32),
+                        face_key="face-key-a-new-shared",
+                    ),
+                    _face_record(
+                        face_id="face-b-new-shared",
+                        asset_id="asset-new-shared",
+                        asset_rel="album/new-shared.jpg",
+                        person_id=None,
+                        embedding=np.asarray([0.03, 0.97, 0.0], dtype=np.float32),
+                        face_key="face-key-b-new-shared",
+                    ),
+                ],
+            )
+        ]
+    )
+
+    original_sync_runtime_state = repository.sync_runtime_state
+    call_count = {"value": 0}
+
+    def fail_once() -> None:
+        call_count["value"] += 1
+        if call_count["value"] == 1:
+            raise RuntimeError("cache refresh failed")
+        original_sync_runtime_state()
+
+    monkeypatch.setattr(repository, "sync_runtime_state", fail_once)
+
+    with pytest.raises(RuntimeError, match="cache refresh failed"):
+        session.commit(repository, distance_threshold=0.6, min_samples=2)
+
+    assert [summary.person_id for summary in repository.get_person_summaries()] == [
+        "person-a",
+        "person-b",
+    ]
+    assert repository.get_common_asset_ids_for_group(group.group_id) == ["asset-shared"]
+
+
+def test_face_scan_session_rolls_back_runtime_snapshot_when_profile_sync_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository = FaceRepository(tmp_path / "face_index.db", tmp_path / "face_state.db")
+    embedding_a = np.asarray([1.0, 0.0, 0.0], dtype=np.float32)
+    embedding_b = np.asarray([0.0, 1.0, 0.0], dtype=np.float32)
+    initial_faces = [
+        _face_record(
+            face_id="face-a-shared",
+            asset_id="asset-shared",
+            asset_rel="album/shared.jpg",
+            person_id="person-a",
+            embedding=embedding_a,
+            face_key="face-key-a-shared",
+        ),
+        _face_record(
+            face_id="face-b-shared",
+            asset_id="asset-shared",
+            asset_rel="album/shared.jpg",
+            person_id="person-b",
+            embedding=embedding_b,
+            face_key="face-key-b-shared",
+        ),
+    ]
+    initial_persons = [
+        _person_record(
+            person_id="person-a",
+            key_face_id="face-a-shared",
+            face_count=1,
+            name="Alice",
+            embedding=embedding_a,
+        ),
+        _person_record(
+            person_id="person-b",
+            key_face_id="face-b-shared",
+            face_count=1,
+            name="Bob",
+            embedding=embedding_b,
+        ),
+    ]
+    repository.replace_all(initial_faces, initial_persons)
+    assert repository.state_repository is not None
+    repository.state_repository.sync_scan_results(initial_persons, initial_faces)
+    group = repository.create_group(["person-a", "person-b"])
+    assert group is not None
+
+    session = FaceScanSession()
+    session.stage_detection_results(
+        [
+            DetectedAssetFaces(
+                asset_id="asset-new-shared",
+                asset_rel="album/new-shared.jpg",
+                faces=[
+                    _face_record(
+                        face_id="face-a-new-shared",
+                        asset_id="asset-new-shared",
+                        asset_rel="album/new-shared.jpg",
+                        person_id=None,
+                        embedding=np.asarray([0.96, 0.04, 0.0], dtype=np.float32),
+                        face_key="face-key-a-new-shared",
+                    ),
+                    _face_record(
+                        face_id="face-b-new-shared",
+                        asset_id="asset-new-shared",
+                        asset_rel="album/new-shared.jpg",
+                        person_id=None,
+                        embedding=np.asarray([0.04, 0.96, 0.0], dtype=np.float32),
+                        face_key="face-key-b-new-shared",
+                    ),
+                ],
+            )
+        ]
+    )
+
+    original_sync_scan_results = repository.state_repository.sync_scan_results
+    call_count = {"value": 0}
+
+    def fail_once(persons: list[PersonRecord], faces: list[FaceRecord]) -> None:
+        call_count["value"] += 1
+        if call_count["value"] == 1:
+            raise RuntimeError("profile sync failed")
+        original_sync_scan_results(persons, faces)
+
+    monkeypatch.setattr(repository.state_repository, "sync_scan_results", fail_once)
+
+    with pytest.raises(RuntimeError, match="profile sync failed"):
+        session.commit(repository, distance_threshold=0.6, min_samples=2)
+
+    assert [summary.person_id for summary in repository.get_person_summaries()] == [
+        "person-a",
+        "person-b",
+    ]
+    assert repository.get_common_asset_ids_for_group(group.group_id) == ["asset-shared"]

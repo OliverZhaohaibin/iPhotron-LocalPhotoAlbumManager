@@ -41,14 +41,20 @@ def merge_scan_row(
             if field in existing_row and (field not in merged or merged.get(field) in (None, "")):
                 merged[field] = existing_row.get(field)
 
+    identity_unchanged = existing_row is not None and _asset_identity_unchanged(existing_row, merged)
     existing_face_status = None
     if existing_row is not None:
         existing_face_status = normalize_face_status(existing_row.get("face_status"))
 
-    if existing_face_status is not None and _asset_identity_unchanged(existing_row, merged):
+    if existing_face_status is not None and identity_unchanged:
         merged["face_status"] = existing_face_status
     else:
-        merged["face_status"] = initial_face_status(merged)
+        merged["face_status"] = initial_face_status(
+            _row_for_face_status(
+                merged,
+                preserve_live_state=identity_unchanged,
+            )
+        )
 
     return merged
 
@@ -62,3 +68,17 @@ def _asset_identity_unchanged(
     if existing_id is None or scanned_id is None:
         return False
     return str(existing_id) == str(scanned_id)
+
+
+def _row_for_face_status(
+    merged_row: Dict[str, Any],
+    *,
+    preserve_live_state: bool,
+) -> Dict[str, Any]:
+    if preserve_live_state:
+        return merged_row
+
+    row = dict(merged_row)
+    row.pop("live_role", None)
+    row.pop("live_partner_rel", None)
+    return row

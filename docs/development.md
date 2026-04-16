@@ -89,14 +89,30 @@ following layout:
 | `src/maps/tiles/extension/poi/` | OsmAnd POI resources |
 | `src/maps/tiles/extension/rendering_styles/` | OsmAnd style XML files; the default is `snowmobile.render.xml` |
 | `src/maps/tiles/extension/routing/` | OsmAnd routing resources |
-| `src/maps/tiles/extension/bin/` | Native runtime binaries such as the helper EXE, native widget DLL, and dependent DLLs |
+| `src/maps/tiles/extension/bin/` | Platform-specific helper/native widget binaries and dependent shared libraries (`.exe`/`.dll` on Windows, ELF binaries/`.so` on Linux) |
 
 This directory is the contract used by:
 
 - local source checkouts
 - `iphoto-gui` map startup and `PhotoMapView`
 - `scripts/build_nuitka_windows.ps1`
+- `scripts/build_nuitka_fast.sh` and Linux standalone packaging
 - the Windows installer's optional map-extension package
+
+### Linux runtime notes
+
+On Linux, iPhotron can use both the helper-backed OBF renderer and the native
+OsmAnd widget. The native widget currently expects Qt's XCB desktop OpenGL path,
+so when that backend is selected iPhotron auto-sets:
+
+- `QT_QPA_PLATFORM=xcb`
+- `QT_OPENGL=desktop`
+- `QT_XCB_GL_INTEGRATION=xcb_glx`
+
+That means native maps on Linux currently run best on X11 or XWayland. If a
+sibling `PySide6-OsmAnd-SDK/` checkout exists next to this repository, iPhotron
+prefers its `tools/osmand_render_helper_native/dist-linux/` widget build during
+development.
 
 ### Upstream sub-project: `PySide6-OsmAnd-SDK`
 
@@ -109,7 +125,7 @@ That repository exists specifically to build and validate the OsmAnd runtime
 outside of the main iPhotron application. It contains:
 
 - vendored `OsmAnd-core`, `OsmAnd-core-legacy`, and `OsmAnd-resources`
-- Windows build scripts for helper and native widget runtimes
+- Windows and Linux build scripts/output directories for helper and native widget runtimes
 - the PySide6/OsmAnd preview app used to validate the runtime independently
 - a stable place to iterate on Qt6/PySide6 integration without touching the
   entire iPhotron application
@@ -122,7 +138,7 @@ In practice:
 
 ### Recommended build strategy
 
-For Windows packaging, the recommended path is:
+For Windows and Linux packaging, the recommended path is:
 
 1. build the runtime in `PySide6-OsmAnd-SDK`
 2. copy the resulting map data, OsmAnd resources, and native binaries into
@@ -157,6 +173,12 @@ it produces the complete native widget runtime mirrored under
 powershell -ExecutionPolicy Bypass -File tools\osmand_render_helper_native\build_native_widget_msvc.ps1 -BuildType Release
 ```
 
+For Linux, build the native helper/widget runtime into `dist-linux`:
+
+```bash
+bash tools/osmand_render_helper_native/build_linux.sh
+```
+
 Useful alternatives inside `PySide6-OsmAnd-SDK`:
 
 - `build_helper.ps1`
@@ -166,6 +188,8 @@ Useful alternatives inside `PySide6-OsmAnd-SDK`:
 - `build_native_widget_msvc.ps1`
   Recommended for iPhotron release work because it produces the native widget
   DLL and the `dist-msvc` runtime consumed most directly by the packaging flow.
+- `build_linux.sh`
+  Produces the Linux helper and `.so` widget runtime under `dist-linux`.
 
 The main outputs you need are:
 
@@ -176,6 +200,10 @@ The main outputs you need are:
 | `tools\osmand_render_helper_native\dist-msvc\OsmAndCore_shared.dll` | Native OsmAnd core runtime |
 | `tools\osmand_render_helper_native\dist-msvc\OsmAndCoreTools_shared.dll` | Native OsmAnd tools runtime |
 | `tools\osmand_render_helper_native\dist-msvc\Qt6*.dll` | Required Qt runtime dependencies for the native/helper binaries |
+| `tools/osmand_render_helper_native/dist-linux/osmand_render_helper` | Linux helper-backed Python OBF rendering |
+| `tools/osmand_render_helper_native/dist-linux/osmand_native_widget.so` | Linux native Qt/OpenGL OsmAnd widget |
+| `tools/osmand_render_helper_native/dist-linux/libOsmAndCore_shared.so` | Linux native OsmAnd core runtime |
+| `tools/osmand_render_helper_native/dist-linux/libOsmAndCoreTools_shared.so` | Linux native OsmAnd tools runtime |
 | `vendor\osmand\resources\...` | Rendering styles and supporting OsmAnd resources |
 | `src\maps\tiles\World_basemap_2.obf` | Default demo OBF dataset used by the extension |
 
@@ -206,10 +234,31 @@ Copy-Item -LiteralPath (Join-Path $sdkRoot "tools\osmand_render_helper_native\di
   -Destination $binRoot -Recurse -Force
 ```
 
+Equivalent Linux sync:
+
+```bash
+sdk_root="$HOME/python-code/PySide6-OsmAnd-SDK"
+repo_root="$HOME/python-code/iPhotron-LocalPhotoAlbumManager"
+extension_root="$repo_root/src/maps/tiles/extension"
+bin_root="$extension_root/bin"
+
+mkdir -p "$extension_root" "$bin_root"
+cp -f "$sdk_root/src/maps/tiles/World_basemap_2.obf" "$extension_root/"
+for resource_dir in misc poi rendering_styles routing; do
+  rm -rf "$extension_root/$resource_dir"
+  cp -a "$sdk_root/vendor/osmand/resources/$resource_dir" "$extension_root/"
+done
+cp -a "$sdk_root/tools/osmand_render_helper_native/dist-linux/." "$bin_root/"
+```
+
 If you are intentionally using the MinGW path instead of MSVC, replace
 `dist-msvc` with `dist`. The helper-backed Python renderer only requires the
 helper executable plus its dependent DLLs, but the native widget path also
 requires a usable widget DLL in the same `bin/` directory.
+
+On Linux and macOS, native widget discovery prefers the sibling
+`PySide6-OsmAnd-SDK` build when it exists, so keep that checkout in sync with
+the runtime you actually want to exercise.
 
 ### Step 4: Verify the runtime from the iPhotron checkout
 
@@ -235,8 +284,9 @@ What to look for:
 
 - `--backend auto` chooses the native widget when it is healthy
 - `--backend python` succeeds with the helper-backed OBF renderer
-- `--backend native` loads `osmand_native_widget.dll` without missing DLL errors
+- `--backend native` loads the native widget library without missing runtime errors
 - the GUI Location view starts without falling back unexpectedly
+- on Linux, the native path starts under X11/XWayland rather than failing with missing GLX/XCB support
 
 ### Development-time overrides
 
@@ -249,7 +299,7 @@ without copying files first:
 | `IPHOTO_OSMAND_RESOURCES_ROOT` | Override the OsmAnd resources root |
 | `IPHOTO_OSMAND_STYLE_PATH` | Override the active style XML |
 | `IPHOTO_OSMAND_RENDER_HELPER` | Override the helper executable/command |
-| `IPHOTO_OSMAND_NATIVE_WIDGET_LIBRARY` | Override the native widget DLL path |
+| `IPHOTO_OSMAND_NATIVE_WIDGET_LIBRARY` | Override the native widget library path |
 | `IPHOTO_PREFER_OSMAND_NATIVE_WIDGET` | Set to `0` to force the Python OBF path in auto mode |
 
 Example:
@@ -260,6 +310,17 @@ $env:IPHOTO_OSMAND_RESOURCES_ROOT = "D:\python_code\iPhoto\PySide6-OsmAnd-SDK\ve
 $env:IPHOTO_OSMAND_STYLE_PATH = "D:\python_code\iPhoto\PySide6-OsmAnd-SDK\vendor\osmand\resources\rendering_styles\default.render.xml"
 $env:IPHOTO_OSMAND_RENDER_HELPER = "D:\python_code\iPhoto\PySide6-OsmAnd-SDK\tools\osmand_render_helper_native\dist-msvc\osmand_render_helper.exe"
 $env:IPHOTO_OSMAND_NATIVE_WIDGET_LIBRARY = "D:\python_code\iPhoto\PySide6-OsmAnd-SDK\tools\osmand_render_helper_native\dist-msvc\osmand_native_widget.dll"
+iphoto-gui
+```
+
+Linux example:
+
+```bash
+export IPHOTO_OSMAND_OBF_PATH="$HOME/python-code/PySide6-OsmAnd-SDK/src/maps/tiles/World_basemap_2.obf"
+export IPHOTO_OSMAND_RESOURCES_ROOT="$HOME/python-code/PySide6-OsmAnd-SDK/vendor/osmand/resources"
+export IPHOTO_OSMAND_STYLE_PATH="$HOME/python-code/PySide6-OsmAnd-SDK/vendor/osmand/resources/rendering_styles/default.render.xml"
+export IPHOTO_OSMAND_RENDER_HELPER="$HOME/python-code/PySide6-OsmAnd-SDK/tools/osmand_render_helper_native/dist-linux/osmand_render_helper"
+export IPHOTO_OSMAND_NATIVE_WIDGET_LIBRARY="$HOME/python-code/PySide6-OsmAnd-SDK/tools/osmand_render_helper_native/dist-linux/osmand_native_widget.so"
 iphoto-gui
 ```
 
@@ -297,6 +358,9 @@ bash scripts/build_nuitka_fast.sh
 ```
 
 The script uses a startup-optimized Nuitka profile (`--standalone`, `--python-flag=no_site`, `--lto=yes`, `--clang`) and excludes heavy dev/runtime-only packages from the final bundle.
+It also includes `src/maps/tiles`, so Linux standalone builds keep the bundled
+OBF/resources layout intact as long as `src/maps/tiles/extension/` is staged
+correctly before packaging.
 
 For Windows release work that includes the native maps extension, prefer:
 

@@ -1,6 +1,6 @@
 # Building the Executable with Nuitka and AOT
 
-This document outlines the process for building the iPhoto executable, including the mandatory Ahead-Of-Time (AOT) compilation step for Numba filters.
+This document outlines the process for building the iPhotron executable, including the mandatory Ahead-Of-Time (AOT) compilation step for Numba filters.
 
 ## Overview
 
@@ -33,8 +33,8 @@ installed as long as the AOT module has been built.
 
 ## Maps Extension in Release Builds
 
-Besides the AOT-compiled filter module, Windows release builds also rely on a
-self-contained offline map runtime under `src/maps/tiles/extension/`.
+Besides the AOT-compiled filter module, release builds that include offline
+maps rely on a self-contained runtime under `src/maps/tiles/extension/`.
 
 Expected layout:
 
@@ -45,7 +45,7 @@ Expected layout:
 | `src/maps/tiles/extension/poi/` | OsmAnd POI resources |
 | `src/maps/tiles/extension/rendering_styles/` | OsmAnd style XML files |
 | `src/maps/tiles/extension/routing/` | OsmAnd routing resources |
-| `src/maps/tiles/extension/bin/` | Helper EXE, native widget DLL, OsmAnd DLLs, and dependent Qt DLLs |
+| `src/maps/tiles/extension/bin/` | Platform-specific helper/native widget binaries plus dependent shared libraries (`.exe`/`.dll` on Windows, ELF binaries/`.so` on Linux) |
 
 The upstream source of truth for producing those files is the standalone
 [`PySide6-OsmAnd-SDK`](https://github.com/OliverZhaohaibin/PySide6-OsmAnd-SDK)
@@ -58,13 +58,23 @@ Recommended Windows command in `PySide6-OsmAnd-SDK`:
 powershell -ExecutionPolicy Bypass -File tools\osmand_render_helper_native\build_native_widget_msvc.ps1 -BuildType Release
 ```
 
-That build produces the runtime mirrored under:
+Recommended Linux command in `PySide6-OsmAnd-SDK`:
+
+```bash
+bash tools/osmand_render_helper_native/build_linux.sh
+```
+
+The relevant runtime outputs are mirrored under:
 
 - `tools\osmand_render_helper_native\dist-msvc\osmand_render_helper.exe`
 - `tools\osmand_render_helper_native\dist-msvc\osmand_native_widget.dll`
 - `tools\osmand_render_helper_native\dist-msvc\OsmAndCore_shared.dll`
 - `tools\osmand_render_helper_native\dist-msvc\OsmAndCoreTools_shared.dll`
 - `tools\osmand_render_helper_native\dist-msvc\Qt6*.dll`
+- `tools/osmand_render_helper_native/dist-linux/osmand_render_helper`
+- `tools/osmand_render_helper_native/dist-linux/osmand_native_widget.so`
+- `tools/osmand_render_helper_native/dist-linux/libOsmAndCore_shared.so`
+- `tools/osmand_render_helper_native/dist-linux/libOsmAndCoreTools_shared.so`
 
 You also need:
 
@@ -157,6 +167,19 @@ If you built the runtime in the separate `PySide6-OsmAnd-SDK` checkout, either:
 - stage `src/maps/tiles/extension/bin` yourself and call
   `scripts\build_nuitka_windows.ps1 -SkipNativeRuntimeSync`
 
+### Recommended Linux standalone build script
+
+For Linux packaging, prefer:
+
+```bash
+bash scripts/build_nuitka_fast.sh
+```
+
+That script already includes `src/maps/tiles`, so the offline OBF/resources
+layout is bundled automatically. The Linux maps runtime is picked up from
+`src/maps/tiles/extension/bin`, and the native widget expects Qt's XCB desktop
+OpenGL path when it is selected at runtime.
+
 Example Nuitka command (adjust paths for your platform):
 
 > **Note:** The entry point `src/iPhoto/gui/main.py` is used as an example.
@@ -244,6 +267,12 @@ After building, confirm that:
    Get-ChildItem -Recurse dist\ -Filter "osmand_native_widget.dll"
    ```
 
+   ```bash
+   find dist/ -name "World_basemap_2.obf"
+   find dist/ -name "osmand_render_helper"
+   find dist/ -name "osmand_native_widget.so"
+   ```
+
 5. The packaged application can launch the map preview and the main GUI without
    map-runtime errors.
 
@@ -274,6 +303,7 @@ as `extension` so the install script lands the files in the correct location.
 | `ImportError` referencing `numba` at runtime | A code path still has an unconditional numba import | All numba imports must use `try/except ImportError` guards |
 | Image adjustments produce no visible effect | Kernel not loaded — check logs for error messages | Ensure the AOT module matches the current Python version and platform |
 | `Undesirable import of 'pytest'` warning from Nuitka | `iPhoto.tests` sub-package is being compiled into the build | Add `--nofollow-import-to=pytest` and `--nofollow-import-to=iPhoto.tests` to the Nuitka command |
-| `The native OsmAnd widget DLL is not available` | `src/maps/tiles/extension/bin` was not staged correctly | Rebuild the side-project runtime and resync `dist-msvc`, or rerun `scripts\build_nuitka_windows.ps1` without `-SkipNativeRuntimeSync` |
-| `OsmAnd helper command not configured` | `osmand_render_helper.exe` is missing from the extension `bin/` directory | Ensure the helper exists in the side-project output and is copied into `src/maps/tiles/extension/bin` |
+| `The native OsmAnd widget library is not available` | `src/maps/tiles/extension/bin` was not staged correctly, or the Linux `.so` runtime is missing | Rebuild the side-project runtime and resync `dist-msvc`/`dist-linux`, or restage `src/maps/tiles/extension/bin` before packaging |
+| `OsmAnd helper command not configured` | `osmand_render_helper(.exe)` is missing from the extension `bin/` directory | Ensure the helper exists in the side-project output and is copied into `src/maps/tiles/extension/bin` |
+| Linux native maps fail with GLX/XCB startup errors | The session is Wayland-only or missing XWayland/XCB GL integration | Install/enable XWayland and rerun, or set `IPHOTO_PREFER_OSMAND_NATIVE_WIDGET=0` to force the helper-backed Python OBF path |
 | Installer downloads the optional package but the map is still unavailable | The ZIP root does not contain `extension\...` or the expected OBF file is missing | Recreate the archive with the `extension` root and verify `extension\World_basemap_2.obf` exists before publishing |

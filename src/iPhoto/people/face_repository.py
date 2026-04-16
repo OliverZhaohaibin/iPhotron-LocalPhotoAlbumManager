@@ -201,22 +201,12 @@ class FaceRepository:
                 ORDER BY persons.face_count DESC, persons.created_at ASC
                 """).fetchall()
         cover_paths: dict[str, str] = {}
+        order_map: dict[str, int] = {}
         if self._state_repo is not None:
-            self._state_repo.sync_person_cover_defaults(
-                (
-                    (
-                        str(row["person_id"]),
-                        row["face_id"],
-                        row["face_key"],
-                        row["asset_id"],
-                        row["thumbnail_path"],
-                    )
-                    for row in rows
-                )
-            )
             cover_paths = self._state_repo.get_person_cover_thumbnail_map(
                 str(row["person_id"]) for row in rows
             )
+            order_map = self._state_repo.get_person_order_map(str(row["person_id"]) for row in rows)
         summaries: list[PersonSummary] = []
         for row in rows:
             thumbnail_path = cover_paths.get(str(row["person_id"])) or row["thumbnail_path"]
@@ -231,6 +221,14 @@ class FaceRepository:
                     face_count=int(row["face_count"]),
                     thumbnail_path=resolved_thumbnail,
                     created_at=row["created_at"],
+                )
+            )
+        if order_map:
+            fallback_order = {summary.person_id: index for index, summary in enumerate(summaries)}
+            summaries.sort(
+                key=lambda summary: (
+                    order_map.get(summary.person_id, len(order_map) + fallback_order[summary.person_id]),
+                    fallback_order[summary.person_id],
                 )
             )
         return summaries
@@ -286,6 +284,11 @@ class FaceRepository:
             thumbnail_path=row["thumbnail_path"],
         )
         return True
+
+    def set_person_order(self, person_ids: Iterable[str]) -> None:
+        if self._state_repo is None:
+            return
+        self._state_repo.set_person_order(person_ids)
 
     def merge_persons(self, source_person_id: str, target_person_id: str) -> bool:
         if not source_person_id or not target_person_id or source_person_id == target_person_id:

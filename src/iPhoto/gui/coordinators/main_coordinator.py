@@ -433,7 +433,7 @@ class MainCoordinator(QObject):
         if hasattr(ui, "people_page"):
             ui.people_page.clusterActivated.connect(self._on_people_cluster_activated)
             ui.people_page.groupActivated.connect(self._on_people_group_activated)
-            self._context.library.peopleIndexUpdated.connect(ui.people_page.reload)
+            self._context.library.peopleIndexUpdated.connect(ui.people_page.schedule_index_refresh)
             self._context.library.faceScanStatusChanged.connect(ui.people_page.set_status_message)
 
         # Navigation

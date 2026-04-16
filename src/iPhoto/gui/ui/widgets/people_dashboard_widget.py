@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from collections import deque
 from pathlib import Path
 
 from PySide6.QtCore import QObject, QRunnable, Qt, QThreadPool, QTimer, Signal
@@ -27,11 +26,11 @@ from .flow_layout import FlowLayout
 from .people_dashboard_board import PeopleBoard
 from .people_dashboard_cards import GroupCard, PeopleCard
 from .people_dashboard_dialogs import GroupPeopleDialog, MergeConfirmDialog
-from .people_dashboard_shared import MENU_STYLE, _widget_uses_dark_theme
+from .people_dashboard_shared import MENU_STYLE, _widget_uses_dark_theme, configure_people_cover_cache
 
 
 class _PeopleDashboardLoaderSignals(QObject):
-    loaded = Signal(int, bool, list, list, int, object)
+    loaded = Signal(int, int, bool, list, list, int, object)
 
 
 class _PeopleDashboardLoaderWorker(QRunnable):
@@ -39,12 +38,14 @@ class _PeopleDashboardLoaderWorker(QRunnable):
         self,
         *,
         generation: int,
+        index_version: int,
         library_root: Path | None,
         status_message: str | None,
         signals: _PeopleDashboardLoaderSignals,
     ) -> None:
         super().__init__()
         self._generation = generation
+        self._index_version = index_version
         self._library_root = library_root
         self._status_message = status_message
         self._signals = signals
@@ -53,6 +54,7 @@ class _PeopleDashboardLoaderWorker(QRunnable):
         if self._library_root is None:
             self._signals.loaded.emit(
                 self._generation,
+                self._index_version,
                 False,
                 [],
                 [],
@@ -61,12 +63,10 @@ class _PeopleDashboardLoaderWorker(QRunnable):
             )
             return
         service = PeopleService(self._library_root)
-        summaries = service.list_clusters()
-        groups = service.list_groups()
-        counts = service.face_status_counts()
-        pending = counts.get("pending", 0) + counts.get("retry", 0)
+        summaries, groups, pending = service.load_dashboard()
         self._signals.loaded.emit(
             self._generation,
+            self._index_version,
             True,
             summaries,
             groups,
@@ -87,19 +87,19 @@ class PeopleDashboardWidget(QWidget):
         self._groups: list[PeopleGroupSummary] = []
         self._cards: dict[str, PeopleCard] = {}
         self._group_cards: dict[str, GroupCard] = {}
-        self._artwork_queue: deque[PeopleCard | GroupCard] = deque()
-        self._artwork_timer = QTimer(self)
-        self._artwork_timer.setSingleShot(True)
-        self._artwork_timer.setInterval(24)
-        self._artwork_timer.timeout.connect(self._load_next_artwork)
-        self._artwork_resume_timer = QTimer(self)
-        self._artwork_resume_timer.setSingleShot(True)
-        self._artwork_resume_timer.setInterval(260)
-        self._artwork_resume_timer.timeout.connect(self._resume_deferred_artwork_loading)
         self._load_generation = 0
+        self._loading = False
+        self._index_version = 0
+        self._loaded_index_version = -1
+        self._pending_index_refresh = False
+        self._current_library_root: Path | None = None
         self._load_signals = _PeopleDashboardLoaderSignals()
         self._load_signals.loaded.connect(self._on_load_completed)
         self._load_pool = QThreadPool.globalInstance()
+        self._refresh_timer = QTimer(self)
+        self._refresh_timer.setSingleShot(True)
+        self._refresh_timer.setInterval(500)
+        self._refresh_timer.timeout.connect(self._flush_pending_refresh)
 
         root = QVBoxLayout(self)
         root.setContentsMargins(24, 18, 24, 18)
@@ -187,13 +187,18 @@ class PeopleDashboardWidget(QWidget):
 
         self._board = PeopleBoard()
         self._board.mergeRequested.connect(self._merge_cluster_pair)
+        self._board.orderChanged.connect(self._persist_cluster_order)
         self._content_layout.addWidget(self._board)
         self._content_layout.addStretch(1)
         self._scroll.setWidget(self._content)
         self._apply_theme_styles()
 
     def set_library_root(self, library_root: Path | None) -> None:
+        if self._current_library_root == library_root:
+            return
+        self._current_library_root = library_root
         self._service.set_library_root(library_root)
+        configure_people_cover_cache(library_root)
         self.reload()
 
     def build_cluster_query(self, person_id: str):
@@ -204,29 +209,41 @@ class PeopleDashboardWidget(QWidget):
 
     def set_status_message(self, message: str | None) -> None:
         self._status_message = message or None
-        self.reload()
+        self._update_status_labels()
 
-    def reload(self) -> None:
-        self._cancel_deferred_artwork_loading()
-        self._clear_group_cards()
-        self._clear_cards()
+    def schedule_index_refresh(self) -> None:
+        self._index_version += 1
+        if not self.isVisible():
+            self._pending_index_refresh = True
+            return
+        self._pending_index_refresh = True
+        if not self._refresh_timer.isActive():
+            self._refresh_timer.start()
+
+    def reload(self, *, preserve_content: bool = False) -> None:
         self._load_generation += 1
         generation = self._load_generation
+        index_version = self._index_version
+        self._loading = True
         library_root = self._service.library_root()
         if library_root is None:
+            self._loading = False
+            self._loaded_index_version = index_version
             self._message.setText("Bind a Basic Library to see People clusters.")
             self._empty.setText("People appears here after a library is bound and scanned.")
             self._empty.show()
             self._scroll.hide()
             return
 
-        self._message.setText("Loading People dashboard…")
-        self._empty.setText("Loading People dashboard…")
-        self._empty.show()
-        self._scroll.hide()
+        if not preserve_content or (not self._summaries and not self._groups):
+            self._message.setText("Loading People dashboard…")
+            self._empty.setText("Loading People dashboard…")
+            self._empty.show()
+            self._scroll.hide()
 
         worker = _PeopleDashboardLoaderWorker(
             generation=generation,
+            index_version=index_version,
             library_root=library_root,
             status_message=self._status_message,
             signals=self._load_signals,
@@ -236,6 +253,7 @@ class PeopleDashboardWidget(QWidget):
     def _on_load_completed(
         self,
         generation: int,
+        index_version: int,
         is_bound: bool,
         summaries: list[PersonSummary],
         groups: list[PeopleGroupSummary],
@@ -244,16 +262,23 @@ class PeopleDashboardWidget(QWidget):
     ) -> None:
         if generation != self._load_generation:
             return
+        self._loading = False
         if not is_bound:
+            self._loaded_index_version = index_version
             self._message.setText("Bind a Basic Library to see People clusters.")
             self._empty.setText("People appears here after a library is bound and scanned.")
             self._empty.show()
             self._scroll.hide()
             return
 
-        self._summaries = list(summaries)
-        self._groups = list(groups)
-        status_text = status_message if status_message else None
+        next_summaries = list(summaries)
+        next_groups = list(groups)
+        cards_changed = next_summaries != self._summaries or next_groups != self._groups
+        self._summaries = next_summaries
+        self._groups = next_groups
+        self._loaded_index_version = index_version
+        self._pending_index_refresh = False
+        status_text = status_message if status_message else self._status_message
 
         if self._summaries:
             self._message.setText(
@@ -262,9 +287,9 @@ class PeopleDashboardWidget(QWidget):
             )
             self._empty.hide()
             self._scroll.show()
-            self._populate_groups()
-            self._populate_cards()
-            self._start_deferred_artwork_loading()
+            if cards_changed:
+                self._populate_groups()
+                self._populate_cards()
             return
 
         if status_text:
@@ -277,6 +302,11 @@ class PeopleDashboardWidget(QWidget):
         self._empty.setText(body)
         self._empty.show()
         self._scroll.hide()
+        self._clear_group_cards()
+        self._clear_cards()
+
+        if self._loaded_index_version < self._index_version:
+            self._schedule_visible_refresh()
 
     def _populate_groups(self) -> None:
         self._clear_group_cards()
@@ -290,7 +320,7 @@ class PeopleDashboardWidget(QWidget):
             card.activated.connect(self.groupActivated.emit)
             self._group_cards[summary.group_id] = card
             self._groups_layout.addWidget(card)
-            self._queue_artwork_load(card)
+            card.load_cover_artwork()
             card.show()
         self._groups_host.updateGeometry()
 
@@ -308,45 +338,11 @@ class PeopleDashboardWidget(QWidget):
             cards.append(card)
         self._board.set_cards(cards)
         for card in cards:
-            self._queue_artwork_load(card)
-
-    def _queue_artwork_load(self, card: PeopleCard | GroupCard) -> None:
-        self._artwork_queue.append(card)
-
-    def _start_deferred_artwork_loading(self) -> None:
-        if not self._artwork_queue or not self.isVisible():
-            return
-        if self._artwork_resume_timer.isActive():
-            return
-        self._artwork_resume_timer.start()
-
-    def _resume_deferred_artwork_loading(self) -> None:
-        if not self._artwork_queue or not self.isVisible():
-            return
-        if not self._artwork_timer.isActive():
-            self._artwork_timer.start()
+            card.load_cover_artwork()
 
     def _on_scroll_activity(self) -> None:
-        self._artwork_timer.stop()
-        if self._artwork_queue and self.isVisible():
-            self._artwork_resume_timer.start()
-
-    def _cancel_deferred_artwork_loading(self) -> None:
-        self._artwork_timer.stop()
-        self._artwork_resume_timer.stop()
-        self._artwork_queue.clear()
-
-    def _load_next_artwork(self) -> None:
-        while self._artwork_queue:
-            card = self._artwork_queue.popleft()
-            if card.parent() is None:
-                continue
-            card.load_cover_artwork()
-            break
-        if self._artwork_queue and self.isVisible():
-            self._artwork_timer.start()
-        else:
-            self._artwork_timer.stop()
+        if self._pending_index_refresh and self.isVisible():
+            self._schedule_visible_refresh()
 
     def _clear_cards(self) -> None:
         self._board.clear_cards()
@@ -398,7 +394,7 @@ class PeopleDashboardWidget(QWidget):
         if not accepted:
             return
         self._service.rename_cluster(summary.person_id, text.strip() or None)
-        self.reload()
+        self.reload(preserve_content=bool(self._summaries))
 
     def _merge_person(self, summary: PersonSummary) -> None:
         choices = [
@@ -437,7 +433,7 @@ class PeopleDashboardWidget(QWidget):
             return
         group = self._service.create_group(dialog.selected_person_ids())
         if group is not None:
-            self.reload()
+            self.reload(preserve_content=bool(self._summaries))
 
     def _merge_cluster_pair(self, source_person_id: str, target_person_id: str) -> None:
         self._confirm_merge(source_person_id, target_person_id)
@@ -456,8 +452,49 @@ class PeopleDashboardWidget(QWidget):
 
         merged = self._service.merge_clusters(source_person_id, target_person_id)
         if merged:
-            self.reload()
+            self.reload(preserve_content=bool(self._summaries))
         return merged
+
+    def _persist_cluster_order(self, ordered_person_ids: list[str]) -> None:
+        current_ids = {summary.person_id for summary in self._summaries}
+        filtered = [person_id for person_id in ordered_person_ids if person_id in current_ids]
+        if len(filtered) != len(self._summaries):
+            filtered.extend(
+                summary.person_id
+                for summary in self._summaries
+                if summary.person_id not in set(filtered)
+            )
+        if filtered:
+            self._service.set_cluster_order(filtered)
+
+    def _update_status_labels(self) -> None:
+        if self._loading:
+            return
+        if self._summaries:
+            self._message.setText(
+                "Click a cluster or group card to open matching assets, "
+                "or drag cards close together to merge clusters."
+            )
+            return
+        if self._status_message:
+            self._message.setText(self._status_message)
+            self._empty.setText(self._status_message)
+            return
+
+    def _schedule_visible_refresh(self) -> None:
+        if self._refresh_timer.isActive():
+            return
+        self._refresh_timer.start()
+
+    def _flush_pending_refresh(self) -> None:
+        if not self._pending_index_refresh:
+            return
+        if not self.isVisible():
+            return
+        if self._loading:
+            self._schedule_visible_refresh()
+            return
+        self.reload(preserve_content=bool(self._summaries or self._groups))
 
     def _apply_theme_styles(self) -> None:
         dark_mode = self._uses_dark_theme()
@@ -520,9 +557,9 @@ class PeopleDashboardWidget(QWidget):
 
     def showEvent(self, event) -> None:  # noqa: N802
         super().showEvent(event)
-        self._start_deferred_artwork_loading()
+        if self._pending_index_refresh or self._loaded_index_version < self._index_version:
+            self._schedule_visible_refresh()
 
     def hideEvent(self, event) -> None:  # noqa: N802
         super().hideEvent(event)
-        self._artwork_timer.stop()
-        self._artwork_resume_timer.stop()
+        self._refresh_timer.stop()

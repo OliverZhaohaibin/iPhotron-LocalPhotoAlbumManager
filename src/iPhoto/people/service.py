@@ -70,17 +70,30 @@ class PeopleService:
             return []
         return repository.get_person_summaries()
 
-    def list_groups(self) -> list[PeopleGroupSummary]:
-        repository = self.repository()
-        if repository is None or self._library_root is None:
+    def list_groups(
+        self,
+        *,
+        repository: FaceRepository | None = None,
+        summaries: list[PersonSummary] | None = None,
+    ) -> list[PeopleGroupSummary]:
+        if self._library_root is None:
             return []
-        summaries_by_id = {summary.person_id: summary for summary in self.list_clusters()}
-        groups: list[PeopleGroupSummary] = []
-        for group in repository.list_groups():
-            summary = self._build_group_summary(repository, group, summaries_by_id)
-            if summary is not None:
-                groups.append(summary)
-        return groups
+        repository = repository or self.repository()
+        if repository is None:
+            return []
+        summary_list = summaries if summaries is not None else repository.get_person_summaries()
+        summaries_by_id = {summary.person_id: summary for summary in summary_list}
+        return self._build_group_summaries(repository, repository.list_groups(), summaries_by_id)
+
+    def load_dashboard(self) -> tuple[list[PersonSummary], list[PeopleGroupSummary], int]:
+        repository = self.repository()
+        if repository is None:
+            return [], [], 0
+        summaries = repository.get_person_summaries()
+        groups = self.list_groups(repository=repository, summaries=summaries)
+        counts = self.face_status_counts()
+        pending = counts.get("pending", 0) + counts.get("retry", 0)
+        return summaries, groups, pending
 
     def create_group(
         self, member_person_ids: list[str] | tuple[str, ...]
@@ -114,6 +127,15 @@ class PeopleService:
         if repository is None:
             return False
         return repository.set_group_cover_asset(group_id, asset_id)
+
+    def set_cluster_order(
+        self,
+        person_ids: list[str] | tuple[str, ...],
+    ) -> None:
+        repository = self.repository()
+        if repository is None:
+            return
+        repository.set_person_order(person_ids)
 
     def merge_clusters(self, source_person_id: str, target_person_id: str) -> bool:
         repository = self.repository()
@@ -166,6 +188,7 @@ class PeopleService:
         repository: FaceRepository,
         group: PeopleGroupRecord,
         summaries_by_id: dict[str, PersonSummary],
+        cover_paths_by_asset_id: dict[str, Path] | None = None,
     ) -> PeopleGroupSummary | None:
         if self._library_root is None:
             return None
@@ -190,9 +213,55 @@ class PeopleService:
             member_person_ids=tuple(member.person_id for member in members),
             members=members,
             asset_count=len(asset_ids),
-            cover_asset_path=self._cover_asset_path(cover_candidates),
+            cover_asset_path=self._cover_asset_path(
+                cover_candidates,
+                rows_by_id=cover_paths_by_asset_id,
+            ),
             created_at=group.created_at,
         )
+
+    def _build_group_summaries(
+        self,
+        repository: FaceRepository,
+        groups: list[PeopleGroupRecord],
+        summaries_by_id: dict[str, PersonSummary],
+    ) -> list[PeopleGroupSummary]:
+        prepared: list[tuple[PeopleGroupRecord, tuple[PersonSummary, ...], list[str], list[str]]] = []
+        all_cover_candidate_ids: list[str] = []
+        for group in groups:
+            members = tuple(
+                summaries_by_id[person_id]
+                for person_id in group.member_person_ids
+                if person_id in summaries_by_id
+            )
+            if len(members) < 2:
+                continue
+            asset_ids = self._valid_asset_ids(repository.get_common_asset_ids_for_group(group.group_id))
+            cover_asset_id = repository.get_group_cover_asset_id(group.group_id)
+            cover_candidates = []
+            if cover_asset_id is not None:
+                cover_candidates.append(cover_asset_id)
+            cover_candidates.extend(asset_id for asset_id in asset_ids if asset_id != cover_asset_id)
+            all_cover_candidate_ids.extend(cover_candidates)
+            prepared.append((group, members, asset_ids, cover_candidates))
+
+        cover_paths_by_asset_id = self._cover_asset_paths(all_cover_candidate_ids)
+        summaries: list[PeopleGroupSummary] = []
+        for group, members, asset_ids, cover_candidates in prepared:
+            summary = PeopleGroupSummary(
+                group_id=group.group_id,
+                name=_format_group_name(member.name for member in members),
+                member_person_ids=tuple(member.person_id for member in members),
+                members=members,
+                asset_count=len(asset_ids),
+                cover_asset_path=self._cover_asset_path(
+                    cover_candidates,
+                    rows_by_id=cover_paths_by_asset_id,
+                ),
+                created_at=group.created_at,
+            )
+            summaries.append(summary)
+        return summaries
 
     def _valid_asset_ids(self, asset_ids: list[str]) -> list[str]:
         if self._library_root is None or not asset_ids:
@@ -200,19 +269,32 @@ class PeopleService:
         rows_by_id = get_global_repository(self._library_root).get_rows_by_ids(asset_ids)
         return [asset_id for asset_id in asset_ids if asset_id in rows_by_id]
 
-    def _cover_asset_path(self, asset_ids: list[str]) -> Path | None:
+    def _cover_asset_paths(self, asset_ids: list[str]) -> dict[str, Path]:
         if self._library_root is None or not asset_ids:
-            return None
+            return {}
         rows_by_id = get_global_repository(self._library_root).get_rows_by_ids(asset_ids)
-        for asset_id in asset_ids:
-            row = rows_by_id.get(asset_id)
-            if row is None:
-                continue
+        resolved: dict[str, Path] = {}
+        for asset_id, row in rows_by_id.items():
             rel_value = row.get("rel") or row.get("path")
             if not rel_value:
                 continue
             path = Path(str(rel_value))
-            return path if path.is_absolute() else self._library_root / path
+            resolved[str(asset_id)] = path if path.is_absolute() else self._library_root / path
+        return resolved
+
+    def _cover_asset_path(
+        self,
+        asset_ids: list[str],
+        *,
+        rows_by_id: dict[str, Path] | None = None,
+    ) -> Path | None:
+        if self._library_root is None or not asset_ids:
+            return None
+        resolved_rows = rows_by_id if rows_by_id is not None else self._cover_asset_paths(asset_ids)
+        for asset_id in asset_ids:
+            path = resolved_rows.get(asset_id)
+            if path is not None:
+                return path
         return None
 
 

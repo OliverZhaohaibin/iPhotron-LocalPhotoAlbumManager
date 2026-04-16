@@ -60,6 +60,47 @@ def test_drag_merge_shows_single_confirmation(monkeypatch, qapp: QApplication) -
     assert len(confirm_calls) == 1
 
 
+def test_drag_reorder_persists_cluster_order(monkeypatch, qapp: QApplication) -> None:
+    widget = PeopleDashboardWidget()
+    widget._summaries = [
+        PersonSummary("person-a", "Alice", "face-a", 3, None, "2024-01-01T00:00:00Z"),
+        PersonSummary("person-b", "Bob", "face-b", 2, None, "2024-01-01T00:00:01Z"),
+    ]
+    widget._populate_cards()
+
+    persisted: list[list[str]] = []
+    monkeypatch.setattr(widget._service, "set_cluster_order", lambda person_ids: persisted.append(list(person_ids)))
+    monkeypatch.setattr(widget._board, "check_card_proximity", lambda _card: None)
+    monkeypatch.setattr(widget._board, "animate_to_layout", lambda: None)
+
+    cards = widget._board.visible_cards()
+    widget._board.top_cards = [cards[1], cards[0]]
+    widget._board._drag_start_order = ("person-a", "person-b")
+    widget._board.finish_drag(cards[1])
+
+    assert persisted == [["person-b", "person-a"]]
+
+
+def test_drag_reorder_skips_persist_when_order_is_unchanged(monkeypatch, qapp: QApplication) -> None:
+    widget = PeopleDashboardWidget()
+    widget._summaries = [
+        PersonSummary("person-a", "Alice", "face-a", 3, None, "2024-01-01T00:00:00Z"),
+        PersonSummary("person-b", "Bob", "face-b", 2, None, "2024-01-01T00:00:01Z"),
+    ]
+    widget._populate_cards()
+
+    persisted: list[list[str]] = []
+    monkeypatch.setattr(widget._service, "set_cluster_order", lambda person_ids: persisted.append(list(person_ids)))
+    monkeypatch.setattr(widget._board, "check_card_proximity", lambda _card: None)
+    monkeypatch.setattr(widget._board, "animate_to_layout", lambda: None)
+
+    cards = widget._board.visible_cards()
+    widget._board._drag_start_order = ("person-a", "person-b")
+    widget._board.finish_drag(cards[0])
+
+    assert persisted == []
+
+
 def test_people_card_menu_contains_new_group(qapp: QApplication) -> None:
     widget = PeopleDashboardWidget()
     widget._summaries = [
@@ -74,7 +115,7 @@ def test_people_card_menu_contains_new_group(qapp: QApplication) -> None:
     assert action_texts.index("New Group") < action_texts.index("Merge Into...")
 
 
-def test_people_card_defers_thumbnail_artwork(
+def test_people_card_requests_thumbnail_artwork_immediately(
     monkeypatch, qapp: QApplication, tmp_path: Path
 ) -> None:
     widget = PeopleDashboardWidget()
@@ -92,26 +133,17 @@ def test_people_card_defers_thumbnail_artwork(
 
     calls: list[tuple[Path, tuple[int, int]]] = []
 
-    def _fake_pixmap(path: Path, size: tuple[int, int]) -> QPixmap:
+    def _fake_request(path: Path, size: tuple[int, int]) -> tuple[str, QPixmap]:
         calls.append((path, size))
         pixmap = QPixmap(size[0], size[1])
         pixmap.fill(QColor("#FF0000"))
-        return pixmap
+        return "cache-key", pixmap
 
-    monkeypatch.setattr(people_dashboard_cards, "_pixmap_from_image_path", _fake_pixmap)
+    monkeypatch.setattr(people_dashboard_cards, "request_cover_pixmap", _fake_request)
     widget._populate_cards()
 
     card = widget._board.visible_cards()[0]
-    placeholder = card._cover_pixmap()
-
-    assert not placeholder.isNull()
-    assert len(widget._artwork_queue) == 1
-    assert calls == []
-
-    widget._load_next_artwork()
-
     assert not card._cover_pixmap().isNull()
-    assert widget._artwork_queue == []
     assert calls == [
         (
             thumbnail_path,
@@ -169,7 +201,7 @@ def test_group_people_dialog_supports_light_and_dark_styles(qapp: QApplication) 
     dark_dialog = GroupPeopleDialog(summaries, dark_mode=True)
 
     assert light_dialog._dark_mode is False
-    assert "#FFFFFF" in light_dialog._panel.styleSheet()
+    assert "#F5F6FA" in light_dialog._panel.styleSheet()
     assert "rgba(255, 255, 255, 0.98)" not in light_dialog._panel.styleSheet()
     assert light_dialog._panel.graphicsEffect() is None
     assert light_dialog._SHADOW_MAX_ALPHA == 18
@@ -257,3 +289,18 @@ def test_groups_section_appears_above_people_and_emits_activation(qapp: QApplica
     card = widget._group_cards["group-ab"]
     card.activated.emit(card.group_id)
     assert activated == ["group-ab"]
+
+
+def test_status_message_updates_without_reloading_cards(qapp: QApplication) -> None:
+    widget = PeopleDashboardWidget()
+    widget._summaries = [
+        PersonSummary("person-a", "Alice", "face-a", 3, None, "2024-01-01T00:00:00Z")
+    ]
+    widget._populate_cards()
+
+    original_card = widget._board.visible_cards()[0]
+
+    widget.set_status_message("Scanning...")
+
+    assert widget._board.visible_cards()[0] is original_card
+    assert "Click a cluster or group card" in widget._message.text()

@@ -131,6 +131,38 @@ def test_person_cover_persists_and_custom_cover_survives_rescan(tmp_path: Path) 
     )
 
 
+def test_person_card_order_persists_across_reload(tmp_path: Path) -> None:
+    repository = FaceRepository(tmp_path / "face_index.db", tmp_path / "face_state.db")
+    faces = [
+        _face_record(
+            face_id="face-a",
+            asset_id="asset-a",
+            asset_rel="album/a.jpg",
+            person_id="person-a",
+        ),
+        _face_record(
+            face_id="face-b",
+            asset_id="asset-b",
+            asset_rel="album/b.jpg",
+            person_id="person-b",
+        ),
+    ]
+    persons = [
+        _person_record(person_id="person-a", key_face_id="face-a", face_count=1, name="Alice"),
+        _person_record(person_id="person-b", key_face_id="face-b", face_count=1, name="Bob"),
+    ]
+    repository.replace_all(faces, persons)
+
+    repository.set_person_order(["person-b", "person-a"])
+
+    ordered = repository.get_person_summaries()
+    assert [summary.person_id for summary in ordered] == ["person-b", "person-a"]
+
+    repository.replace_all(faces, persons)
+    persisted = repository.get_person_summaries()
+    assert [summary.person_id for summary in persisted] == ["person-b", "person-a"]
+
+
 def test_people_groups_persist_and_query_common_assets(tmp_path: Path) -> None:
     repository = FaceRepository(tmp_path / "face_index.db", tmp_path / "face_state.db")
     faces = [

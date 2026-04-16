@@ -172,20 +172,43 @@ class AssetRepository:
             self._insert_rows(conn, rows)
 
     def merge_scan_rows(self, rows: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """Merge scanned rows while preserving persisted library-managed state."""
+        """Merge scanned rows while preserving persisted library-managed state.
+
+        The SELECT for existing rows and the subsequent INSERT are performed
+        within the same transaction so the read/write is atomic and cannot
+        lose concurrent updates to ``face_status`` or other library-managed
+        fields.
+        """
 
         materialized_rows = [dict(row) for row in rows]
         if not materialized_rows:
             return []
 
-        existing_rows = self.get_rows_by_rels(
+        rels_to_fetch = [
             str(row["rel"])
             for row in materialized_rows
-            if isinstance(row.get("rel"), str) and row.get("rel")
-        )
-        merged_rows = merge_scan_rows_payload(materialized_rows, existing_rows)
+            if row.get("rel")
+        ]
+
         with self.transaction() as conn:
+            existing_rows_by_rel: Dict[str, Dict[str, Any]] = {}
+            if rels_to_fetch:
+                conn.row_factory = sqlite3.Row
+                placeholders = ", ".join(["?"] * len(rels_to_fetch))
+                cursor = conn.execute(
+                    f"SELECT * FROM assets WHERE rel IN ({placeholders})",
+                    rels_to_fetch,
+                )
+                for db_row in cursor:
+                    d = self._db_row_to_dict(db_row)
+                    rel_value = d.get("rel")
+                    if rel_value is not None:
+                        existing_rows_by_rel[str(rel_value)] = d
+                conn.row_factory = None
+
+            merged_rows = merge_scan_rows_payload(materialized_rows, existing_rows_by_rel)
             self._insert_rows(conn, merged_rows)
+
         return merged_rows
 
     def upsert_row(self, rel: str, row: Dict[str, Any]) -> None:

@@ -72,6 +72,10 @@ class FaceScanWorker(QThread):
         repository = FaceRepository(paths.index_db_path, paths.state_db_path)
         pipeline = FaceClusterPipeline(model_root=paths.model_dir)
         session = FaceScanSession()
+        # Accumulate done IDs across batches; only written to the store after a
+        # successful session.commit() so that a commit failure cannot leave
+        # assets marked "done" without a corresponding People snapshot.
+        pending_done_ids: list[str] = []
 
         while not self._cancelled:
             self._top_up_pending_rows()
@@ -80,28 +84,50 @@ class FaceScanWorker(QThread):
                 if self._input_closed:
                     self._top_up_pending_rows()
                     if self._queue.empty():
-                        if session.commit(
-                            repository,
-                            distance_threshold=pipeline.distance_threshold,
-                            min_samples=pipeline.min_samples,
-                        ):
+                        try:
+                            committed = session.commit(
+                                repository,
+                                distance_threshold=pipeline.distance_threshold,
+                                min_samples=pipeline.min_samples,
+                            )
+                        except Exception as exc:
+                            LOGGER.warning(
+                                "Face scan commit failed: %s", exc, exc_info=True
+                            )
+                            get_global_repository(self._library_root).update_face_statuses(
+                                pending_done_ids, FACE_STATUS_RETRY
+                            )
+                            pending_done_ids.clear()
+                            self.statusChanged.emit(
+                                "Face scanning paused due to a commit error."
+                            )
+                            return
+                        store = get_global_repository(self._library_root)
+                        store.update_face_statuses(pending_done_ids, FACE_STATUS_DONE)
+                        pending_done_ids.clear()
+                        if committed:
                             self.peopleIndexUpdated.emit()
                         return
                 continue
 
             try:
-                self._process_batch(
+                batch_done_ids = self._process_batch(
                     batch,
                     pipeline,
                     session,
                     paths.thumbnail_dir,
                 )
+                pending_done_ids.extend(batch_done_ids)
             except RuntimeError as exc:
                 self._mark_remaining_failed(batch)
                 self.statusChanged.emit(str(exc))
                 return
             except Exception as exc:  # pragma: no cover - defensive runtime guard
                 LOGGER.warning("Face scan batch failed: %s", exc, exc_info=True)
+                # The batch is retried so the assets remain pending/retry in the
+                # store and will be re-detected on the next scan.  We do NOT
+                # extend pending_done_ids here because we cannot guarantee
+                # session.commit() will succeed for partially staged results.
                 self._mark_rows_retry(batch)
                 self.statusChanged.emit("Face scanning paused due to an unexpected error.")
                 if self._input_closed:
@@ -146,7 +172,14 @@ class FaceScanWorker(QThread):
         pipeline: FaceClusterPipeline,
         session: FaceScanSession,
         thumbnail_dir: Path,
-    ) -> None:
+    ) -> list[str]:
+        """Detect faces for *batch*, stage results, and return the done asset IDs.
+
+        ``retry_ids`` are written to the store immediately since they will never
+        reach ``session.commit()``.  ``done_ids`` are returned to the caller so
+        they can be written only after a successful commit, preventing a state
+        where assets are marked ``done`` without a corresponding People snapshot.
+        """
         detected = pipeline.detect_faces_for_rows(
             batch,
             library_root=self._library_root,
@@ -160,10 +193,11 @@ class FaceScanWorker(QThread):
         done_ids, retry_ids = session.stage_detection_results(detected)
 
         store = get_global_repository(self._library_root)
-        store.update_face_statuses(done_ids, FACE_STATUS_DONE)
         store.update_face_statuses(retry_ids, FACE_STATUS_RETRY)
         if retry_ids:
             self.statusChanged.emit("Some assets need a face-scan retry.")
+
+        return done_ids
 
     def _mark_rows_retry(self, rows: Iterable[dict]) -> None:
         ids = [str(row.get("id") or "") for row in rows if row.get("id")]

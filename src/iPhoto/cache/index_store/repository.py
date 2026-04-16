@@ -37,6 +37,12 @@ logger = get_logger()
 # Database filename for the global index
 GLOBAL_INDEX_DB_NAME = "global_index.db"
 
+# SQLite supports at most SQLITE_MAX_VARIABLE_NUMBER bound parameters per query
+# (compile-time default 999, raised to 32766 in SQLite ≥3.32).  Use a
+# conservative chunk size so large scans never hit the limit regardless of
+# the SQLite version in use.
+_SQLITE_PARAM_CHUNK_SIZE = 900
+
 # Global singleton instance and lock for thread-safe access
 _global_instance: Optional["AssetRepository"] = None
 _global_lock = threading.Lock()
@@ -178,32 +184,39 @@ class AssetRepository:
         within the same transaction so the read/write is atomic and cannot
         lose concurrent updates to ``face_status`` or other library-managed
         fields.
+
+        Existing rows are fetched in chunks of at most
+        ``_SQLITE_PARAM_CHUNK_SIZE`` to avoid hitting SQLite's bound-parameter
+        limit when a large snapshot is passed (e.g. from
+        ``index_sync_service.update_index_snapshot``).
         """
 
         materialized_rows = [dict(row) for row in rows]
         if not materialized_rows:
             return []
 
-        rels_to_fetch = [
-            str(row["rel"])
-            for row in materialized_rows
-            if row.get("rel")
-        ]
+        # De-duplicate while preserving insertion order so each rel is queried
+        # at most once.
+        unique_rels: List[str] = list(
+            dict.fromkeys(str(row["rel"]) for row in materialized_rows if row.get("rel"))
+        )
 
         with self.transaction() as conn:
             existing_rows_by_rel: Dict[str, Dict[str, Any]] = {}
-            if rels_to_fetch:
+            if unique_rels:
                 conn.row_factory = sqlite3.Row
-                placeholders = ", ".join(["?"] * len(rels_to_fetch))
-                cursor = conn.execute(
-                    f"SELECT * FROM assets WHERE rel IN ({placeholders})",
-                    rels_to_fetch,
-                )
-                for db_row in cursor:
-                    d = self._db_row_to_dict(db_row)
-                    rel_value = d.get("rel")
-                    if rel_value is not None:
-                        existing_rows_by_rel[str(rel_value)] = d
+                for offset in range(0, len(unique_rels), _SQLITE_PARAM_CHUNK_SIZE):
+                    chunk = unique_rels[offset : offset + _SQLITE_PARAM_CHUNK_SIZE]
+                    placeholders = ", ".join(["?"] * len(chunk))
+                    cursor = conn.execute(
+                        f"SELECT * FROM assets WHERE rel IN ({placeholders})",
+                        chunk,
+                    )
+                    for db_row in cursor:
+                        d = self._db_row_to_dict(db_row)
+                        rel_value = d.get("rel")
+                        if rel_value is not None:
+                            existing_rows_by_rel[str(rel_value)] = d
                 conn.row_factory = None
 
             merged_rows = merge_scan_rows_payload(materialized_rows, existing_rows_by_rel)

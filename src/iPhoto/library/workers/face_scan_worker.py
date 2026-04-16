@@ -97,6 +97,8 @@ class FaceScanWorker(QThread):
                             get_global_repository(self._library_root).update_face_statuses(
                                 pending_done_ids, FACE_STATUS_RETRY
                             )
+                            for asset_id in pending_done_ids:
+                                self._queued_ids.discard(asset_id)
                             pending_done_ids.clear()
                             self.statusChanged.emit(
                                 "Face scanning paused due to a commit error."
@@ -104,6 +106,9 @@ class FaceScanWorker(QThread):
                             return
                         store = get_global_repository(self._library_root)
                         store.update_face_statuses(pending_done_ids, FACE_STATUS_DONE)
+                        # Retire in-flight IDs now that the DB reflects DONE.
+                        for asset_id in pending_done_ids:
+                            self._queued_ids.discard(asset_id)
                         pending_done_ids.clear()
                         if committed:
                             self.peopleIndexUpdated.emit()
@@ -175,27 +180,45 @@ class FaceScanWorker(QThread):
     ) -> list[str]:
         """Detect faces for *batch*, stage results, and return the done asset IDs.
 
-        ``retry_ids`` are written to the store immediately since they will never
-        reach ``session.commit()``.  ``done_ids`` are returned to the caller so
-        they can be written only after a successful commit, preventing a state
-        where assets are marked ``done`` without a corresponding People snapshot.
+        Ordering is deliberate:
+        1. Retry IDs are written to the store *before* done items are staged so
+           that a DB failure cannot leave the session with staged faces for assets
+           that are still ``pending/retry`` in the index.
+        2. Done IDs are **not** removed from ``_queued_ids`` here; they stay in
+           the set until ``run()`` writes ``FACE_STATUS_DONE`` after a successful
+           ``session.commit()``.  This prevents ``_top_up_pending_rows()`` from
+           re-fetching and re-enqueuing those assets while they are still
+           ``pending`` in the DB but already processed in-memory.
         """
-        detected = pipeline.detect_faces_for_rows(
-            batch,
-            library_root=self._library_root,
-            thumbnail_dir=thumbnail_dir,
+        detected = list(
+            pipeline.detect_faces_for_rows(
+                batch,
+                library_root=self._library_root,
+                thumbnail_dir=thumbnail_dir,
+            )
         )
 
-        for item in detected:
-            if item.asset_id:
-                self._queued_ids.discard(item.asset_id)
+        # Split into done / retry items up-front so we can write retry
+        # statuses to the DB before any staging occurs.
+        done_items = [item for item in detected if item.asset_id and not item.error]
+        retry_items = [item for item in detected if item.asset_id and item.error]
+        retry_ids = [str(item.asset_id) for item in retry_items]
 
-        done_ids, retry_ids = session.stage_detection_results(detected)
-
+        # Write retry statuses first; if this raises, the session is still clean.
         store = get_global_repository(self._library_root)
         store.update_face_statuses(retry_ids, FACE_STATUS_RETRY)
+
+        # Retire retry IDs from the in-flight set immediately.
+        for asset_id in retry_ids:
+            self._queued_ids.discard(asset_id)
+
         if retry_ids:
             self.statusChanged.emit("Some assets need a face-scan retry.")
+
+        # Stage done items only after retry DB writes succeed.
+        # The second return value contains retry IDs discovered by the session;
+        # since we pre-filtered to done_items only, it will always be empty.
+        done_ids, _ignored_retry_ids = session.stage_detection_results(done_items)
 
         return done_ids
 

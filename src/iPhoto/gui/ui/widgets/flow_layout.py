@@ -80,26 +80,33 @@ class FlowLayout(QLayout):
         return size
 
     def _do_layout(self, rect: QRect, test_only: bool) -> int:
-        x = rect.x()
-        y = rect.y()
+        margins = self.contentsMargins()
+        effective_rect = rect.adjusted(
+            margins.left(),
+            margins.top(),
+            -margins.right(),
+            -margins.bottom(),
+        )
+        x = effective_rect.x()
+        y = effective_rect.y()
         line_height = 0
         spacing_x = self.horizontalSpacing()
         spacing_y = self.verticalSpacing()
 
         for item in self._items:
-
-
-            next_x = x + item.sizeHint().width() + spacing_x
-            if next_x - spacing_x > rect.right() and line_height > 0:
-                x = rect.x()
+            item_size = item.sizeHint()
+            next_x = x + item_size.width() + spacing_x
+            if next_x - spacing_x > effective_rect.right() and line_height > 0:
+                x = effective_rect.x()
                 y = y + line_height + spacing_y
-                next_x = x + item.sizeHint().width() + spacing_x
+                next_x = x + item_size.width() + spacing_x
                 line_height = 0
 
             if not test_only:
-                item.setGeometry(QRect(QPoint(x, y), item.sizeHint()))
+                item.setGeometry(QRect(QPoint(x, y), item_size))
 
             x = next_x
-            line_height = max(line_height, item.sizeHint().height())
+            line_height = max(line_height, item_size.height())
 
-        return y + line_height - rect.y()
+        used_height = y + line_height - effective_rect.y()
+        return used_height + margins.top() + margins.bottom()

@@ -26,7 +26,12 @@ from .flow_layout import FlowLayout
 from .people_dashboard_board import PeopleBoard
 from .people_dashboard_cards import GroupCard, PeopleCard
 from .people_dashboard_dialogs import GroupPeopleDialog, MergeConfirmDialog
-from .people_dashboard_shared import MENU_STYLE, _widget_uses_dark_theme, configure_people_cover_cache
+from .people_dashboard_shared import (
+    CANVAS_MARGIN,
+    MENU_STYLE,
+    _widget_uses_dark_theme,
+    configure_people_cover_cache,
+)
 
 
 class _PeopleDashboardLoaderSignals(QObject):
@@ -177,7 +182,13 @@ class PeopleDashboardWidget(QWidget):
 
         self._groups_host = QWidget()
         self._groups_host.setStyleSheet("background: transparent;")
-        self._groups_layout = FlowLayout(self._groups_host, margin=0, h_spacing=18, v_spacing=18)
+        self._groups_layout = FlowLayout(
+            self._groups_host,
+            margin=CANVAS_MARGIN,
+            h_spacing=18,
+            v_spacing=18,
+        )
+        self._groups_host.setLayout(self._groups_layout)
         groups_layout.addWidget(self._groups_host)
         self._content_layout.addWidget(self._groups_section)
 

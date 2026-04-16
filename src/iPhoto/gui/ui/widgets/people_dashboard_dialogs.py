@@ -365,6 +365,7 @@ class GroupPeopleDialog(QDialog):
         self._tile_host = QWidget()
         self._tile_host.setStyleSheet("background: transparent;")
         self._tile_layout = FlowLayout(self._tile_host, margin=6, h_spacing=40, v_spacing=20)
+        self._tile_host.setLayout(self._tile_layout)
         self._scroll.setWidget(self._tile_host)
         panel_layout.addWidget(self._scroll, 1)
 

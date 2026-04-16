@@ -565,6 +565,7 @@ class AlbumsDashboard(QWidget):
         self.scroll_content = QWidget()
         self.scroll_content.setStyleSheet("background: transparent;")
         self.flow_layout = FlowLayout(self.scroll_content, margin=0, h_spacing=20, v_spacing=20)
+        self.scroll_content.setLayout(self.flow_layout)
 
         self.scroll_area.setWidget(self.scroll_content)
         self.main_layout.addWidget(self.scroll_area)

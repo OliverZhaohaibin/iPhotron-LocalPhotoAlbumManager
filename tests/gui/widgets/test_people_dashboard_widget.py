@@ -22,6 +22,7 @@ from iPhoto.gui.ui.widgets.people_dashboard import (
     MergeConfirmDialog,
     PeopleDashboardWidget,
 )
+from iPhoto.gui.ui.widgets.people_dashboard_shared import CANVAS_MARGIN
 from iPhoto.people.repository import PeopleGroupSummary, PersonSummary
 
 
@@ -333,6 +334,39 @@ def test_groups_section_appears_above_people_and_emits_activation(qapp: QApplica
     card = widget._group_cards["group-ab"]
     card.activated.emit(card.group_id)
     assert activated == ["group-ab"]
+
+
+def test_group_and_people_cards_share_same_left_alignment(qapp: QApplication) -> None:
+    widget = PeopleDashboardWidget()
+    alice = PersonSummary("person-a", "Alice", "face-a", 3, None, "2024-01-01T00:00:00Z")
+    bob = PersonSummary("person-b", "Bob", "face-b", 2, None, "2024-01-01T00:00:01Z")
+    widget._summaries = [alice, bob]
+    widget._groups = [
+        PeopleGroupSummary(
+            group_id="group-ab",
+            name="Alice and Bob",
+            member_person_ids=("person-a", "person-b"),
+            members=(alice, bob),
+            asset_count=1,
+            cover_asset_path=None,
+            created_at="2024-01-01T00:00:02Z",
+        )
+    ]
+
+    widget.resize(1200, 900)
+    widget._populate_groups()
+    widget._populate_cards()
+    widget._empty.hide()
+    widget._scroll.show()
+    widget.show()
+    qapp.processEvents()
+
+    group_card = widget._group_cards["group-ab"]
+    people_card = widget._board.visible_cards()[0]
+
+    assert group_card.x() == CANVAS_MARGIN
+    assert people_card.x() == CANVAS_MARGIN
+    widget.close()
 
 
 def test_status_message_updates_without_reloading_cards(qapp: QApplication) -> None:

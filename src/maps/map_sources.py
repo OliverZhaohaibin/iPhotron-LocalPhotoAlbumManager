@@ -257,24 +257,37 @@ def default_osmand_extension_root(package_root: Path | None = None) -> Path:
     return (Path(root) / DEFAULT_OSMAND_EXTENSION_RELATIVE_ROOT).resolve()
 
 
+def _sdk_roots(repo_root: Path) -> tuple[Path, ...]:
+    """Return candidate PySide6-OsmAnd-SDK checkout paths in preference order.
+
+    The SDK may live either inside the repository root (e.g. a git submodule or
+    a manual checkout into the project tree) or as a sibling directory next to
+    the repository.  Both locations are checked so that developers are not
+    required to put the checkout in a specific place.
+    """
+    inner = repo_root / "PySide6-OsmAnd-SDK"
+    sibling = repo_root.parent / "PySide6-OsmAnd-SDK"
+    return tuple(p for p in (inner, sibling) if p.exists())
+
+
 def _default_helper_candidates(package_root: Path) -> tuple[Path, ...]:
     normalized_root = Path(package_root).resolve()
     repo_root = _repo_root(normalized_root)
-    sdk_root = repo_root / "PySide6-OsmAnd-SDK"
-    sdk_candidates = _collect_candidate_paths((sdk_root,), SDK_HELPER_RELATIVE_PATHS) if sdk_root.exists() else ()
+    sdk_roots = _sdk_roots(repo_root)
+    sdk_candidates = _collect_candidate_paths(sdk_roots, SDK_HELPER_RELATIVE_PATHS) if sdk_roots else ()
     local_candidates = _collect_candidate_paths((normalized_root,), DEFAULT_HELPER_RELATIVE_PATHS)
     return _dedupe_candidates(sdk_candidates + local_candidates)
 
 
 def _default_native_widget_candidates(package_root: Path) -> tuple[Path, ...]:
     repo_root = _repo_root(package_root)
-    sdk_root = repo_root / "PySide6-OsmAnd-SDK"
+    sdk_roots = _sdk_roots(repo_root)
 
     # Prefer the side project's newer Linux/macOS widget builds. The main
     # project's bundled shared libraries are intentionally skipped there because
     # they may lag behind the side project artifacts.
-    if sys.platform != "win32" and sdk_root.exists():
-        return _collect_candidate_paths((sdk_root,), SDK_NATIVE_WIDGET_RELATIVE_PATHS)
+    if sys.platform != "win32" and sdk_roots:
+        return _collect_candidate_paths(sdk_roots, SDK_NATIVE_WIDGET_RELATIVE_PATHS)
 
     normalized_root = Path(package_root).resolve()
     return _collect_candidate_paths((normalized_root,), DEFAULT_NATIVE_WIDGET_RELATIVE_PATHS)

@@ -110,9 +110,9 @@ so when that backend is selected iPhotron auto-sets:
 - `QT_XCB_GL_INTEGRATION=xcb_glx`
 
 That means native maps on Linux currently run best on X11 or XWayland. If a
-sibling `PySide6-OsmAnd-SDK/` checkout exists next to this repository, iPhotron
-prefers its `tools/osmand_render_helper_native/dist-linux/` widget build during
-development.
+`PySide6-OsmAnd-SDK/` checkout exists either inside this repository root or as a
+sibling directory next to it, iPhotron prefers its
+`tools/osmand_render_helper_native/dist-linux/` widget build during development.
 
 ### Upstream sub-project: `PySide6-OsmAnd-SDK`
 

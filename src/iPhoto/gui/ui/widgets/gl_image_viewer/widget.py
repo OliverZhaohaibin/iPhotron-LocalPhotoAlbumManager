@@ -17,7 +17,7 @@ from collections.abc import Mapping
 from typing import Any
 
 from OpenGL import GL as gl
-from PySide6.QtCore import QPointF, QRectF, QSize, Qt, Signal
+from PySide6.QtCore import QPointF, QRectF, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import (
     QColor,
     QImage,
@@ -106,6 +106,8 @@ class GLImageViewer(QRhiWidget):
         self._renderer: GLRenderer | None = None
         self._gl_initialized = False
         self._first_render_done = False
+        self._pending_post_load_view_transform = False
+        self._post_load_view_transform_scheduled = False
 
         # 状态
         self._image: QImage | None = None
@@ -305,6 +307,7 @@ class GLImageViewer(QRhiWidget):
         self._using_video_frame_source = False
         self._pending_video_reset_view = False
         self._pending_source_rotate90_steps = None
+        self._pending_post_load_view_transform = False
 
         # Check if we can reuse the existing texture
         if (
@@ -338,6 +341,9 @@ class GLImageViewer(QRhiWidget):
             self._auto_crop_view_locked = False
             self._auto_crop_center_locked = False
             self._transform_controller.set_image_cover_scale(1.0)
+            self._pending_post_load_view_transform = False
+        else:
+            self._pending_post_load_view_transform = True
 
         if reset_view:
             # Reset the interactive transform so every new asset begins in the
@@ -367,6 +373,7 @@ class GLImageViewer(QRhiWidget):
         self._pending_video_image = None
         self._pending_video_image_pre_rotated = False
         self._video_frame_dirty = True
+        self._pending_post_load_view_transform = False
         if (
             sys.platform.startswith("linux")
             and QVideoFrameFormat is not None
@@ -579,6 +586,29 @@ class GLImageViewer(QRhiWidget):
         """Return the identifier describing the currently displayed image."""
 
         return self._texture_manager.get_current_image_source()
+
+    def has_image_content(self) -> bool:
+        """Return whether a still image is currently loaded into the viewer."""
+
+        image = self._image
+        return image is not None and not image.isNull()
+
+    def _schedule_post_load_view_transform(self) -> None:
+        """Queue one transform refresh after a new still frame has rendered."""
+
+        if not self._pending_post_load_view_transform or self._post_load_view_transform_scheduled:
+            return
+        self._post_load_view_transform_scheduled = True
+        QTimer.singleShot(0, self._emit_post_load_view_transform)
+
+    def _emit_post_load_view_transform(self) -> None:
+        """Flush the queued transform refresh scheduled after still-frame upload."""
+
+        self._post_load_view_transform_scheduled = False
+        if not self._pending_post_load_view_transform:
+            return
+        self._pending_post_load_view_transform = False
+        self.viewTransformChanged.emit()
 
     def pixmap(self) -> QPixmap | None:
         """Return a defensive copy of the currently displayed frame."""
@@ -1026,6 +1056,7 @@ class GLImageViewer(QRhiWidget):
         gf.glClearColor(clear_r, clear_g, clear_b, clear_a)
         gf.glClear(gl.GL_COLOR_BUFFER_BIT)
 
+        uploaded_new_still_texture = False
         if (
             self._using_video_frame_source
             and self._video_frame_dirty
@@ -1071,6 +1102,7 @@ class GLImageViewer(QRhiWidget):
             self._texture_manager.upload_texture_if_needed(self._image)
             straighten, rotate_steps, _ = self._rotation_parameters()
             self._update_cover_scale(straighten, rotate_steps)
+            uploaded_new_still_texture = True
         if not self._renderer.has_texture():
             if sys.platform.startswith("linux") and self._using_video_frame_source:
                 _LOGGER.warning(
@@ -1167,6 +1199,8 @@ class GLImageViewer(QRhiWidget):
         cb.endExternal()
         cb.endPass()
         self._emit_first_frame_ready()
+        if uploaded_new_still_texture:
+            self._schedule_post_load_view_transform()
 
     def _emit_first_frame_ready(self) -> None:
         """Notify listeners that the first opaque frame has been rendered."""

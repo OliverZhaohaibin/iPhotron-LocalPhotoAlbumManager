@@ -159,10 +159,10 @@ class FaceNameOverlayWidget(QWidget):
         parent = self.parentWidget() or self
         for annotation in self._annotations:
             chip = _FaceNameChip(annotation.face_id, self._display_name(annotation), parent)
+            chip.hide()
             chip.hovered.connect(self._handle_chip_hovered)
             chip.activated.connect(self._start_editing)
             self._states[annotation.face_id] = _OverlayFaceState(annotation=annotation, chip=chip)
-        self._sync_child_visibility()
         self._relayout()
 
     def clear_annotations(self) -> None:
@@ -217,18 +217,39 @@ class FaceNameOverlayWidget(QWidget):
         return name.strip()
 
     def _sync_child_visibility(self) -> None:
-        show_overlay = self._active and bool(self._states) and self._viewer_is_visible()
+        show_overlay = self._active and bool(self._states) and self._viewer_has_image_content()
         self.setVisible(show_overlay)
+        if show_overlay:
+            self.raise_()
         for state in self._states.values():
-            state.chip.setVisible(show_overlay and state.annotation.face_id != self._editing_face_id)
+            state.chip.setVisible(
+                show_overlay
+                and not state.face_rect.isEmpty()
+                and state.annotation.face_id != self._editing_face_id
+            )
         if self._editor is not None:
             self._editor.setVisible(show_overlay and self._editing_face_id is not None)
         if not show_overlay:
             self._hovered_face_id = None
 
-    def _viewer_is_visible(self) -> bool:
+    def _viewer_has_image_content(self) -> bool:
         viewer = self._viewer
-        return bool(viewer and hasattr(viewer, "isVisible") and viewer.isVisible())
+        if viewer is None:
+            return False
+        has_image_content = getattr(viewer, "has_image_content", None)
+        if callable(has_image_content):
+            try:
+                return bool(has_image_content())
+            except Exception:
+                return False
+        pixmap = getattr(viewer, "pixmap", None)
+        if callable(pixmap):
+            try:
+                current = pixmap()
+            except Exception:
+                return False
+            return current is not None and not current.isNull()
+        return True
 
     def _viewer_rect(self) -> QRect:
         viewer = self._viewer
@@ -257,7 +278,11 @@ class FaceNameOverlayWidget(QWidget):
                 continue
             chip_rect = self._chip_rect_for_face(rect, chip.sizeHint().width(), chip.sizeHint().height(), viewer_rect)
             chip.setGeometry(chip_rect)
-            if face_id != self._editing_face_id and self.isVisible():
+            if (
+                face_id != self._editing_face_id
+                and self.isVisible()
+                and self._viewer_has_image_content()
+            ):
                 chip.show()
             chip.raise_()
         if self._editor is not None and self._editing_face_id is not None:
@@ -271,6 +296,8 @@ class FaceNameOverlayWidget(QWidget):
                 )
                 self._editor.setGeometry(editor_rect)
                 self._editor.raise_()
+        if self.isVisible():
+            self.raise_()
         self.update()
 
     def _map_annotation_rect(self, annotation: AssetFaceAnnotation) -> QRectF:

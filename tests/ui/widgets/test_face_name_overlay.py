@@ -5,6 +5,7 @@ import pytest
 pytest.importorskip("PySide6", reason="PySide6 is required for face overlay tests")
 
 from PySide6.QtCore import QPoint, QRectF, Qt, Signal
+from PySide6.QtGui import QImage, QPixmap
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QWidget
 
@@ -14,6 +15,10 @@ from iPhoto.people.repository import AssetFaceAnnotation
 
 class _FakeViewer(QWidget):
     viewTransformChanged = Signal()
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._has_image_content = True
 
     def image_rect_to_viewport(
         self,
@@ -27,6 +32,17 @@ class _FakeViewer(QWidget):
     ) -> QRectF:
         del image_width, image_height
         return QRectF(float(x), float(y), float(width), float(height))
+
+    def has_image_content(self) -> bool:
+        return self._has_image_content
+
+    def set_has_image_content(self, value: bool) -> None:
+        self._has_image_content = bool(value)
+
+    def pixmap(self):
+        if not self._has_image_content:
+            return None
+        return QPixmap.fromImage(QImage(1, 1, QImage.Format.Format_ARGB32))
 
 
 def _make_overlay(qtbot):
@@ -149,3 +165,31 @@ def test_face_name_overlay_escape_and_focus_loss_cancel_edit(qtbot) -> None:
     QTest.qWait(10)
     qtbot.waitUntil(lambda: overlay._editor is None)
     assert chip.text() == "Bob"
+
+
+def test_face_name_overlay_stays_visible_even_if_viewer_is_hidden_when_activated(qtbot) -> None:
+    _surface, viewer, overlay = _make_overlay(qtbot)
+    viewer.hide()
+    overlay.set_annotations([_annotation(display_name="Bob")])
+    overlay.set_overlay_active(True)
+
+    assert overlay.isVisible() is True
+    assert overlay._states["face-1"].chip.isVisible() is True
+
+
+def test_face_name_overlay_waits_for_loaded_image_before_showing_labels(qtbot) -> None:
+    _surface, viewer, overlay = _make_overlay(qtbot)
+    viewer.set_has_image_content(False)
+    overlay.set_annotations([_annotation(display_name="Bob", box_x=80, box_y=60)])
+    overlay.set_overlay_active(True)
+
+    chip = overlay._states["face-1"].chip
+    assert overlay.isVisible() is False
+    assert chip.isVisible() is False
+
+    viewer.set_has_image_content(True)
+    viewer.viewTransformChanged.emit()
+
+    qtbot.waitUntil(lambda: overlay.isVisible())
+    assert chip.isVisible() is True
+    assert chip.geometry().topLeft() != QPoint(0, 0)

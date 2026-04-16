@@ -556,6 +556,8 @@ class DetailPageWidget(QWidget):
             self._rhi_init_cover.hide()
             self._rhi_init_cover.deleteLater()
             self._rhi_init_cover = None
+        self.face_name_overlay.raise_()
+        self.live_badge.raise_()
 
     def show_rhi_init_cover(self) -> None:
         """Re-create and show the opaque init cover.

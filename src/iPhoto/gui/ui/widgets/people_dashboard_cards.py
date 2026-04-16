@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from PySide6.QtCore import QPoint, QRectF, Qt, Signal
 from PySide6.QtGui import QColor, QFont, QLinearGradient, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import QGraphicsDropShadowEffect, QWidget
 
 from iPhoto.people.repository import PeopleGroupSummary, PersonSummary
+from iPhoto.people.image_utils import load_image_rgb
 
 from .people_dashboard_shared import (
     CARD_HEIGHT,
@@ -16,9 +19,12 @@ from .people_dashboard_shared import (
     GROUP_CARD_RADIUS,
     GROUP_CARD_WIDTH,
     PLACEHOLDER_BACKDROPS,
-    _pixmap_from_image_path,
+    people_cover_cache,
+    qimage_from_cover_image,
+    request_cover_pixmap,
+    request_rendered_cover_pixmap,
     _qcolor,
-    _rounded_path,
+    _rounded_path, _pixmap_from_image_path,
 )
 
 
@@ -44,10 +50,12 @@ class PeopleCard(QWidget):
         self._drag_offset: QPoint | None = None
         self._artwork: QPixmap | None = None
         self._placeholder_artwork: QPixmap | None = None
+        self._cover_cache_key: str | None = None
 
         self.setFixedSize(CARD_WIDTH, CARD_HEIGHT)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self._apply_shadow(blur=28, offset_y=7, alpha=36)
+        people_cover_cache().coverReady.connect(self._handle_cover_ready)
 
     @property
     def person_id(self) -> str:
@@ -90,16 +98,24 @@ class PeopleCard(QWidget):
     def load_cover_artwork(self) -> None:
         if self._artwork is not None:
             return
-        self._artwork = self._render_cover_art()
-        self.update()
+        self._cover_cache_key, self._artwork = self._request_cover_art()
+        if self._artwork is not None:
+            self.update()
 
-    def _render_cover_art(self) -> QPixmap:
+    def _request_cover_art(self) -> tuple[str | None, QPixmap | None]:
         thumbnail_path = self.summary.thumbnail_path
         if thumbnail_path is not None:
-            pixmap = _pixmap_from_image_path(thumbnail_path, (CARD_WIDTH * 2, CARD_HEIGHT * 2))
-            if pixmap is not None:
-                return pixmap
-        return self._render_placeholder_art()
+            return request_cover_pixmap(thumbnail_path, (CARD_WIDTH * 2, CARD_HEIGHT * 2))
+        return None, None
+
+    def _handle_cover_ready(self, cache_key: str) -> None:
+        if cache_key != self._cover_cache_key or self._artwork is not None:
+            return
+        pixmap = people_cover_cache().cached_pixmap(cache_key)
+        if pixmap is None:
+            return
+        self._artwork = pixmap
+        self.update()
 
     def _render_placeholder_art(self) -> QPixmap:
         scale = 2
@@ -281,6 +297,7 @@ class GroupCard(QWidget):
         self._hovered = False
         self._artwork: QPixmap | None = None
         self._placeholder_artwork: QPixmap | None = None
+        self._cover_cache_key: str | None = None
         self.setFixedSize(GROUP_CARD_WIDTH, GROUP_CARD_HEIGHT + self._SHADOW_SAFE_BOTTOM)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         shadow = QGraphicsDropShadowEffect(self)
@@ -288,6 +305,7 @@ class GroupCard(QWidget):
         shadow.setOffset(0, 8)
         shadow.setColor(QColor(0, 0, 0, 36))
         self.setGraphicsEffect(shadow)
+        people_cover_cache().coverReady.connect(self._handle_cover_ready)
 
     @property
     def group_id(self) -> str:
@@ -303,19 +321,33 @@ class GroupCard(QWidget):
     def load_cover_artwork(self) -> None:
         if self._artwork is not None:
             return
-        self._artwork = self._render_cover_art()
-        self.update()
+        self._cover_cache_key, self._artwork = self._request_cover_art()
+        if self._artwork is not None:
+            self.update()
 
-    def _render_cover_art(self) -> QPixmap:
+    def _request_cover_art(self) -> tuple[str | None, QPixmap | None]:
         cover_path = self.summary.cover_asset_path
         if cover_path is not None:
-            pixmap = _pixmap_from_image_path(
+            return request_cover_pixmap(
                 cover_path,
                 (GROUP_CARD_WIDTH * 2, GROUP_CARD_HEIGHT * 2),
             )
-            if pixmap is not None:
-                return pixmap
-        return self._render_member_collage()
+        cache_key, pixmap = request_rendered_cover_pixmap(
+            cache_id=f"group-collage:{self.group_id}",
+            signature_parts=self._collage_signature_parts(),
+            size=(GROUP_CARD_WIDTH * 2, GROUP_CARD_HEIGHT * 2),
+            renderer=self._render_member_collage_image,
+        )
+        return cache_key, pixmap
+
+    def _handle_cover_ready(self, cache_key: str) -> None:
+        if cache_key != self._cover_cache_key or self._artwork is not None:
+            return
+        pixmap = people_cover_cache().cached_pixmap(cache_key)
+        if pixmap is None:
+            return
+        self._artwork = pixmap
+        self.update()
 
     def _render_member_collage(self, *, load_member_images: bool = True) -> QPixmap:
         scale = 2
@@ -360,6 +392,56 @@ class GroupCard(QWidget):
 
         painter.end()
         return pixmap
+
+    def _render_member_collage_image(self):
+        from PIL import Image
+
+        width = GROUP_CARD_WIDTH * 2
+        height = GROUP_CARD_HEIGHT * 2
+        members = list(self.summary.members[:4])
+        collage = Image.new("RGBA", (width, height))
+        if not members:
+            return None
+
+        columns = 2 if len(members) > 1 else 1
+        rows = 2 if len(members) > 2 else 1
+        cell_w = max(1, width // columns)
+        cell_h = max(1, height // rows)
+
+        for index, member in enumerate(members):
+            x = (index % columns) * cell_w
+            y = (index // columns) * cell_h
+            member_image = self._member_cover_image(member.thumbnail_path, (cell_w, cell_h))
+            if member_image is None:
+                continue
+            collage.alpha_composite(member_image, (x, y))
+        return qimage_from_cover_image(collage, (width, height))
+
+    def _member_cover_image(self, thumbnail_path: Path | None, size: tuple[int, int]):
+        from PIL import Image
+
+        if thumbnail_path is not None and thumbnail_path.exists():
+            try:
+                image = load_image_rgb(thumbnail_path)
+                return image.convert("RGBA").resize(size, Image.Resampling.LANCZOS)
+            except Exception:
+                return None
+        return None
+
+    def _collage_signature_parts(self) -> list[str]:
+        parts = [self.group_id]
+        for member in self.summary.members[:4]:
+            thumbnail_path = member.thumbnail_path
+            if thumbnail_path is None:
+                parts.append("missing")
+                continue
+            try:
+                stat = thumbnail_path.stat()
+            except OSError:
+                parts.append(str(thumbnail_path))
+                continue
+            parts.append(f"{thumbnail_path}:{stat.st_mtime_ns}:{stat.st_size}")
+        return parts
 
     def paintEvent(self, _event) -> None:  # noqa: N802
         painter = QPainter(self)

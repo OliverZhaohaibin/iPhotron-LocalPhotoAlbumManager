@@ -20,6 +20,7 @@ from .people_dashboard_shared import (
 
 class PeopleBoard(QWidget):
     mergeRequested = Signal(str, str)
+    orderChanged = Signal(list)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -27,6 +28,7 @@ class PeopleBoard(QWidget):
         self.top_cards: list[PeopleCard] = []
         self.proximity_pair: tuple[PeopleCard, PeopleCard] | None = None
         self._active_anim: QParallelAnimationGroup | None = None
+        self._drag_start_order: tuple[str, ...] | None = None
 
         self.merge_frame = HintFrame(
             self,
@@ -97,6 +99,7 @@ class PeopleBoard(QWidget):
 
     def begin_drag(self, card: PeopleCard) -> None:
         del card
+        self._drag_start_order = tuple(item.person_id for item in self.visible_cards())
         if (
             self._active_anim is not None
             and self._active_anim.state() == QAbstractAnimation.State.Running
@@ -105,6 +108,7 @@ class PeopleBoard(QWidget):
 
     def finish_drag(self, card: PeopleCard) -> None:
         self.check_card_proximity(card)
+        should_persist_order = self.proximity_pair is None
         if self.proximity_pair is not None:
             source, target = self.proximity_pair
             self.mergeRequested.emit(source.person_id, target.person_id)
@@ -112,6 +116,11 @@ class PeopleBoard(QWidget):
         self.hide_merge_frame()
         self.proximity_pair = None
         self.animate_to_layout()
+        if should_persist_order:
+            current_order = tuple(item.person_id for item in self.visible_cards())
+            if current_order != (self._drag_start_order or current_order):
+                self.orderChanged.emit(list(current_order))
+        self._drag_start_order = None
 
     def animate_to_layout(self) -> None:
         if (

@@ -56,6 +56,56 @@ class FaceStateRepository:
             for row in rows
         ]
 
+    def get_person_order_map(self, person_ids: Iterable[str]) -> dict[str, int]:
+        unique_ids = _unique_person_ids(person_ids)
+        if not unique_ids:
+            return {}
+
+        self.initialize()
+        placeholders = ", ".join(["?"] * len(unique_ids))
+        with closing(self._connect()) as conn:
+            rows = conn.execute(
+                f"""
+                SELECT person_id, sort_order
+                FROM person_card_orders
+                WHERE person_id IN ({placeholders})
+                """,
+                unique_ids,
+            ).fetchall()
+        return {
+            str(row["person_id"]): int(row["sort_order"])
+            for row in rows
+            if row["person_id"] is not None and row["sort_order"] is not None
+        }
+
+    def set_person_order(self, person_ids: Iterable[str]) -> None:
+        ordered_ids = _unique_person_ids(person_ids)
+        self.initialize()
+        updated_at = _utc_now_iso()
+        with closing(self._connect()) as conn:
+            conn.executemany(
+                """
+                INSERT INTO person_card_orders (person_id, sort_order, updated_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(person_id) DO UPDATE SET
+                    sort_order = excluded.sort_order,
+                    updated_at = excluded.updated_at
+                """,
+                [
+                    (person_id, index, updated_at)
+                    for index, person_id in enumerate(ordered_ids)
+                ],
+            )
+            if ordered_ids:
+                placeholders = ", ".join(["?"] * len(ordered_ids))
+                conn.execute(
+                    f"DELETE FROM person_card_orders WHERE person_id NOT IN ({placeholders})",
+                    ordered_ids,
+                )
+            else:
+                conn.execute("DELETE FROM person_card_orders")
+            conn.commit()
+
     def get_face_key_map(self, face_keys: Iterable[str]) -> dict[str, str]:
         unique_face_keys = [face_key for face_key in dict.fromkeys(face_keys) if face_key]
         if not unique_face_keys:
@@ -124,6 +174,43 @@ class FaceStateRepository:
                     if face.face_key and face.person_id
                 ],
             )
+            ordered_ids = _unique_person_ids(person.person_id for person in persons if person.person_id)
+            if ordered_ids:
+                placeholders = ", ".join(["?"] * len(ordered_ids))
+                rows = conn.execute(
+                    f"""
+                    SELECT person_id, sort_order
+                    FROM person_card_orders
+                    WHERE person_id IN ({placeholders})
+                    """,
+                    ordered_ids,
+                ).fetchall()
+                existing_order = {
+                    str(row["person_id"]): int(row["sort_order"])
+                    for row in rows
+                    if row["person_id"] is not None and row["sort_order"] is not None
+                }
+                next_ids = [person_id for person_id, _order in sorted(existing_order.items(), key=lambda item: item[1])]
+                next_ids.extend(person_id for person_id in ordered_ids if person_id not in existing_order)
+                conn.executemany(
+                    """
+                    INSERT INTO person_card_orders (person_id, sort_order, updated_at)
+                    VALUES (?, ?, ?)
+                    ON CONFLICT(person_id) DO UPDATE SET
+                        sort_order = excluded.sort_order,
+                        updated_at = excluded.updated_at
+                    """,
+                    [
+                        (person_id, index, timestamp)
+                        for index, person_id in enumerate(next_ids)
+                    ],
+                )
+                conn.execute(
+                    f"DELETE FROM person_card_orders WHERE person_id NOT IN ({placeholders})",
+                    ordered_ids,
+                )
+            else:
+                conn.execute("DELETE FROM person_card_orders")
             conn.commit()
 
     def rename_person(self, person_id: str, name_or_none: str | None) -> None:
@@ -230,6 +317,39 @@ class FaceStateRepository:
                     ),
                 )
             conn.execute("DELETE FROM person_covers WHERE person_id = ?", (source_person_id,))
+            source_order = conn.execute(
+                """
+                SELECT sort_order
+                FROM person_card_orders
+                WHERE person_id = ?
+                """,
+                (source_person_id,),
+            ).fetchone()
+            target_order = conn.execute(
+                """
+                SELECT sort_order
+                FROM person_card_orders
+                WHERE person_id = ?
+                """,
+                (target_person_id,),
+            ).fetchone()
+            merged_order = None
+            if target_order is not None:
+                merged_order = int(target_order["sort_order"])
+            elif source_order is not None:
+                merged_order = int(source_order["sort_order"])
+            if merged_order is not None:
+                conn.execute(
+                    """
+                    INSERT INTO person_card_orders (person_id, sort_order, updated_at)
+                    VALUES (?, ?, ?)
+                    ON CONFLICT(person_id) DO UPDATE SET
+                        sort_order = excluded.sort_order,
+                        updated_at = excluded.updated_at
+                    """,
+                    (target_person_id, merged_order, updated_at),
+                )
+            conn.execute("DELETE FROM person_card_orders WHERE person_id = ?", (source_person_id,))
             conn.execute("DELETE FROM person_profiles WHERE person_id = ?", (source_person_id,))
             conn.commit()
 
@@ -624,6 +744,17 @@ class FaceStateRepository:
         )
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_person_covers_asset_id " "ON person_covers(asset_id)"
+        )
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS person_card_orders (
+                person_id TEXT PRIMARY KEY,
+                sort_order INTEGER NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """)
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_person_card_orders_sort_order "
+            "ON person_card_orders(sort_order)"
         )
         conn.execute("""
             CREATE TABLE IF NOT EXISTS people_groups (

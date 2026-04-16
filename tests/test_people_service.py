@@ -279,6 +279,62 @@ def test_people_service_uses_persisted_group_cover(tmp_path: Path) -> None:
     assert listed[0].cover_asset_path == library_root / "album/older.jpg"
 
 
+def test_people_service_load_dashboard_reuses_cluster_snapshot_for_groups(tmp_path: Path) -> None:
+    library_root = tmp_path / "Library"
+    library_root.mkdir()
+
+    global_repo = get_global_repository(library_root)
+    global_repo.write_rows(
+        [
+            {"rel": "album/shared.jpg", "id": "asset-shared", "media_type": 0, "face_status": "done"},
+            {"rel": "album/a.jpg", "id": "asset-a", "media_type": 0, "face_status": "pending"},
+        ]
+    )
+
+    service = PeopleService(library_root)
+    repository = service.repository()
+    assert repository is not None
+    faces = [
+        _face_record(
+            face_id="face-a-shared",
+            asset_id="asset-shared",
+            asset_rel="album/shared.jpg",
+            person_id="person-a",
+        ),
+        _face_record(
+            face_id="face-b-shared",
+            asset_id="asset-shared",
+            asset_rel="album/shared.jpg",
+            person_id="person-b",
+        ),
+    ]
+    persons = [
+        _person_record(
+            person_id="person-a",
+            key_face_id="face-a-shared",
+            face_count=1,
+            name="Alice",
+        ),
+        _person_record(
+            person_id="person-b",
+            key_face_id="face-b-shared",
+            face_count=1,
+            name="Bob",
+        ),
+    ]
+    repository.replace_all(faces, persons)
+    group = service.create_group(["person-a", "person-b"])
+    assert group is not None
+
+    summaries, groups, pending = service.load_dashboard()
+
+    assert [summary.person_id for summary in summaries] == ["person-a", "person-b"]
+    assert len(groups) == 1
+    assert groups[0].group_id == group.group_id
+    assert groups[0].cover_asset_path == library_root / "album/shared.jpg"
+    assert pending == 1
+
+
 def test_people_service_can_mark_retry_and_skipped(tmp_path: Path) -> None:
     library_root = tmp_path / "Library"
     library_root.mkdir()

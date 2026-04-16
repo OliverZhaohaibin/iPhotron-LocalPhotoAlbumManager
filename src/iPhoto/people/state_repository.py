@@ -174,9 +174,22 @@ class FaceStateRepository:
                     if face.face_key and face.person_id
                 ],
             )
-            ordered_ids = [person.person_id for person in persons if person.person_id]
+            ordered_ids = _unique_person_ids(person.person_id for person in persons if person.person_id)
             if ordered_ids:
-                existing_order = self.get_person_order_map(ordered_ids)
+                placeholders = ", ".join(["?"] * len(ordered_ids))
+                rows = conn.execute(
+                    f"""
+                    SELECT person_id, sort_order
+                    FROM person_card_orders
+                    WHERE person_id IN ({placeholders})
+                    """,
+                    ordered_ids,
+                ).fetchall()
+                existing_order = {
+                    str(row["person_id"]): int(row["sort_order"])
+                    for row in rows
+                    if row["person_id"] is not None and row["sort_order"] is not None
+                }
                 next_ids = [person_id for person_id, _order in sorted(existing_order.items(), key=lambda item: item[1])]
                 next_ids.extend(person_id for person_id in ordered_ids if person_id not in existing_order)
                 conn.executemany(
@@ -192,7 +205,6 @@ class FaceStateRepository:
                         for index, person_id in enumerate(next_ids)
                     ],
                 )
-                placeholders = ", ".join(["?"] * len(ordered_ids))
                 conn.execute(
                     f"DELETE FROM person_card_orders WHERE person_id NOT IN ({placeholders})",
                     ordered_ids,

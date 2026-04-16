@@ -109,7 +109,7 @@ def request_rendered_cover_pixmap(
     signature_parts: Iterable[str],
     size: tuple[int, int],
     renderer,
-) -> tuple[str, QPixmap | None]:
+) -> tuple[str | None, QPixmap | None]:
     signature = hashlib.md5("\x00".join(signature_parts).encode("utf-8")).hexdigest()
     return _PEOPLE_COVER_CACHE.get_rendered_cover(
         cache_id=cache_id,

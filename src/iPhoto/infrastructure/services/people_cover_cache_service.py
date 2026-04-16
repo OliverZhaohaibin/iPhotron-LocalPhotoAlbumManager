@@ -32,8 +32,9 @@ class PeopleCoverRenderTask(QRunnable):
             image = self._renderer()
         except Exception:
             image = None
-        if image is not None and not image.isNull():
-            self._signals.result.emit(self._cache_key, image)
+        if image is None or image.isNull():
+            image = QImage()
+        self._signals.result.emit(self._cache_key, image)
 
 
 class PeopleCoverCacheService(QObject):
@@ -83,7 +84,9 @@ class PeopleCoverCacheService(QObject):
         size: tuple[int, int],
         signature: str,
         renderer: Callable[[], Optional[QImage]],
-    ) -> tuple[str, Optional[QPixmap]]:
+    ) -> tuple[str | None, Optional[QPixmap]]:
+        if self._is_shutting_down:
+            return None, None
         key = self._cache_key("rendered", cache_id, signature, self._size_key(size))
         pixmap = self._get_or_start(key, renderer)
         return key, pixmap
@@ -123,6 +126,8 @@ class PeopleCoverCacheService(QObject):
 
     def _handle_render_result(self, cache_key: str, image: QImage) -> None:
         self._pending_tasks.discard(cache_key)
+        if self._is_shutting_down:
+            return
         if image.isNull():
             return
         pixmap = QPixmap.fromImage(image)

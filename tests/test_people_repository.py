@@ -320,3 +320,35 @@ def test_group_cover_can_be_customized_without_rescan_overwrite(tmp_path: Path) 
 
     repository.replace_all(faces, persons)
     assert repository.get_group_cover_asset_id(group.group_id) == "asset-older"
+
+
+def test_list_asset_face_annotations_returns_only_matching_asset(tmp_path: Path) -> None:
+    repository = FaceRepository(tmp_path / "face_index.db", tmp_path / "face_state.db")
+    faces = [
+        _face_record(
+            face_id="face-a",
+            asset_id="asset-a",
+            asset_rel="album/a.jpg",
+            person_id="person-a",
+        ),
+        _face_record(
+            face_id="face-b",
+            asset_id="asset-b",
+            asset_rel="album/b.jpg",
+            person_id="person-b",
+        ),
+    ]
+    persons = [
+        _person_record(person_id="person-a", key_face_id="face-a", face_count=1, name=None),
+        _person_record(person_id="person-b", key_face_id="face-b", face_count=1, name="Bob"),
+    ]
+    repository.replace_all(faces, persons)
+
+    annotations = repository.list_asset_face_annotations("asset-a")
+
+    assert len(annotations) == 1
+    assert annotations[0].face_id == "face-a"
+    assert annotations[0].person_id == "person-a"
+    assert annotations[0].display_name is None
+    assert annotations[0].box_w == 80
+    assert annotations[0].image_width == 400

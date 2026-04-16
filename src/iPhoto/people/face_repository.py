@@ -9,7 +9,13 @@ from typing import Iterable
 
 import numpy as np
 
-from .records import FaceRecord, PeopleGroupRecord, PersonRecord, PersonSummary
+from .records import (
+    AssetFaceAnnotation,
+    FaceRecord,
+    PeopleGroupRecord,
+    PersonRecord,
+    PersonSummary,
+)
 from .repository_utils import (
     _deserialize_embedding,
     _key_face_sort_key,
@@ -247,6 +253,46 @@ class FaceRepository:
                 (person_id,),
             ).fetchall()
         return [str(row["asset_id"]) for row in rows if row["asset_id"]]
+
+    def list_asset_face_annotations(self, asset_id: str) -> list[AssetFaceAnnotation]:
+        if not asset_id:
+            return []
+        self.initialize()
+        with closing(self._connect()) as conn:
+            rows = conn.execute(
+                """
+                SELECT
+                    faces.face_id,
+                    faces.person_id,
+                    persons.name,
+                    faces.box_x,
+                    faces.box_y,
+                    faces.box_w,
+                    faces.box_h,
+                    faces.image_width,
+                    faces.image_height
+                FROM faces
+                LEFT JOIN persons ON persons.person_id = faces.person_id
+                WHERE faces.asset_id = ?
+                ORDER BY faces.box_x ASC, faces.box_y ASC, faces.face_id ASC
+                """,
+                (asset_id,),
+            ).fetchall()
+        return [
+            AssetFaceAnnotation(
+                face_id=str(row["face_id"]),
+                person_id=str(row["person_id"]) if row["person_id"] else None,
+                display_name=row["name"],
+                box_x=int(row["box_x"]),
+                box_y=int(row["box_y"]),
+                box_w=int(row["box_w"]),
+                box_h=int(row["box_h"]),
+                image_width=int(row["image_width"]),
+                image_height=int(row["image_height"]),
+            )
+            for row in rows
+            if row["face_id"]
+        ]
 
     def rename_person(self, person_id: str, name_or_none: str | None) -> None:
         self.initialize()

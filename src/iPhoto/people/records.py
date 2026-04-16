@@ -70,6 +70,19 @@ class PeopleGroupSummary:
 
 
 @dataclass(frozen=True)
+class AssetFaceAnnotation:
+    face_id: str
+    person_id: str | None
+    display_name: str | None
+    box_x: int
+    box_y: int
+    box_w: int
+    box_h: int
+    image_width: int
+    image_height: int
+
+
+@dataclass(frozen=True)
 class PersonProfile:
     person_id: str
     name: str | None

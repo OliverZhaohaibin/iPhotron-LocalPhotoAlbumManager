@@ -9,7 +9,13 @@ from iPhoto.cache.index_store import get_global_repository
 from iPhoto.config import WORK_DIR_NAME
 from iPhoto.domain.models.query import AssetQuery
 
-from .repository import FaceRepository, PeopleGroupRecord, PeopleGroupSummary, PersonSummary
+from .repository import (
+    AssetFaceAnnotation,
+    FaceRepository,
+    PeopleGroupRecord,
+    PeopleGroupSummary,
+    PersonSummary,
+)
 from .status import FACE_STATUS_RETRY, FACE_STATUS_SKIPPED, normalize_face_status
 
 _SHARED_FACE_MODEL_DIR = Path(__file__).resolve().parents[2] / "extension" / "models"
@@ -162,6 +168,16 @@ class PeopleService:
 
     def build_group_query(self, group_id: str) -> AssetQuery:
         return AssetQuery(asset_ids=self.group_asset_ids(group_id))
+
+    def list_asset_face_annotations(self, asset_id: str) -> list[AssetFaceAnnotation]:
+        repository = self.repository()
+        if repository is None or not asset_id:
+            return []
+        if self._library_root is not None:
+            rows_by_id = get_global_repository(self._library_root).get_rows_by_ids([asset_id])
+            if asset_id not in rows_by_id:
+                return []
+        return repository.list_asset_face_annotations(asset_id)
 
     def face_status_counts(self) -> dict[str, int]:
         if self._library_root is None:

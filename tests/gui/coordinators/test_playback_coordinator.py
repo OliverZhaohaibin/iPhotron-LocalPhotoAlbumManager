@@ -16,15 +16,18 @@ from iPhoto.gui.viewmodels.detail_viewmodel import DetailPresentation
 def _make_presentation(
     *,
     path: str = "/fake/video.mp4",
+    asset_id: str = "asset-1",
     is_video: bool = True,
+    is_live: bool = False,
     is_favorite: bool = False,
     reload_token: int = 0,
 ):
     return DetailPresentation(
         row=0,
+        asset_id=asset_id,
         path=Path(path),
         is_video=is_video,
-        is_live=False,
+        is_live=is_live,
         is_favorite=is_favorite,
         info={"dur": 3.5, "abs": path, "is_video": is_video},
         location="Paris",
@@ -225,6 +228,7 @@ def test_reset_for_gallery_closes_info_panel_and_clears_viewmodel_state() -> Non
     coordinator._detail_vm = Mock(hide_info_panel=Mock())
     coordinator._update_header = Mock()
     coordinator._info_panel = Mock(close=Mock())
+    coordinator._hide_face_name_overlay = Mock()
 
     PlaybackCoordinator.reset_for_gallery(coordinator)
 
@@ -234,6 +238,83 @@ def test_reset_for_gallery_closes_info_panel_and_clears_viewmodel_state() -> Non
     coordinator._detail_vm.hide_info_panel.assert_called_once_with(refresh_presentation=False)
     coordinator._update_header.assert_called_once_with(None)
     coordinator._info_panel.close.assert_called_once_with()
+    coordinator._hide_face_name_overlay.assert_called_once_with(clear_annotations=True)
+
+
+def test_set_face_name_display_enabled_refreshes_current_presentation() -> None:
+    coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
+    coordinator._current_presentation = _make_presentation(
+        path="/fake/photo.jpg",
+        asset_id="asset-photo",
+        is_video=False,
+    )
+    coordinator._refresh_face_name_overlay_for_current_presentation = Mock()
+
+    PlaybackCoordinator.set_face_name_display_enabled(coordinator, True)
+
+    assert coordinator._show_face_names is True
+    coordinator._refresh_face_name_overlay_for_current_presentation.assert_called_once_with()
+
+
+def test_refresh_face_name_overlay_loads_annotations_for_still_image() -> None:
+    coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
+    overlay = Mock()
+    coordinator._face_name_overlay = overlay
+    coordinator._show_face_names = True
+    coordinator._active_live_motion = None
+    coordinator._player_view = SimpleNamespace(
+        video_area=SimpleNamespace(is_edit_mode_active=lambda: False),
+    )
+    coordinator._load_face_name_annotations = Mock(return_value=[Mock(face_id="face-1")])
+
+    PlaybackCoordinator._refresh_face_name_overlay_for_presentation(
+        coordinator,
+        _make_presentation(
+            path="/fake/photo.jpg",
+            asset_id="asset-photo",
+            is_video=False,
+        ),
+    )
+
+    coordinator._load_face_name_annotations.assert_called_once_with("asset-photo")
+    overlay.set_annotations.assert_called_once()
+    overlay.set_overlay_active.assert_called_once_with(True)
+
+
+def test_refresh_face_name_overlay_hides_for_video() -> None:
+    coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
+    coordinator._face_name_overlay = Mock()
+    coordinator._hide_face_name_overlay = Mock()
+    coordinator._show_face_names = True
+
+    PlaybackCoordinator._refresh_face_name_overlay_for_presentation(
+        coordinator,
+        _make_presentation(is_video=True),
+    )
+
+    coordinator._hide_face_name_overlay.assert_called_once_with(clear_annotations=True)
+
+
+def test_handle_face_name_rename_submitted_updates_overlay_and_dashboard() -> None:
+    coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
+    coordinator._people_service = Mock(rename_cluster=Mock())
+    coordinator._current_presentation = _make_presentation(
+        path="/fake/photo.jpg",
+        asset_id="asset-photo",
+        is_video=False,
+    )
+    coordinator._refresh_face_name_overlay_for_current_presentation = Mock()
+    coordinator._people_dashboard_refresh_callback = Mock()
+
+    PlaybackCoordinator._handle_face_name_rename_submitted(
+        coordinator,
+        "person-a",
+        "  Alice  ",
+    )
+
+    coordinator._people_service.rename_cluster.assert_called_once_with("person-a", "Alice")
+    coordinator._refresh_face_name_overlay_for_current_presentation.assert_called_once_with()
+    coordinator._people_dashboard_refresh_callback.assert_called_once_with()
 
 
 def test_handle_info_panel_dismissed_clears_viewmodel_state() -> None:

@@ -41,6 +41,7 @@ from iPhoto.events.bus import EventBus
 from iPhoto.gui.viewmodels.detail_viewmodel import DetailViewModel
 from iPhoto.gui.viewmodels.gallery_list_model_adapter import GalleryListModelAdapter
 from iPhoto.gui.viewmodels.gallery_viewmodel import GalleryViewModel
+from iPhoto.people.service import PeopleService
 
 # New Coordinators
 from iPhoto.gui.coordinators.view_router import ViewRouter
@@ -96,6 +97,7 @@ class MainCoordinator(QObject):
         if hasattr(window.ui, "people_page"):
             window.ui.people_page.set_library_root(lib_root)
             window.ui.people_page.set_status_message(context.library.face_scan_status_message())
+        self._playback_people_service = PeopleService(lib_root)
 
         # Inject ViewModel provider into Facade for legacy operations (restore/delete)
         if self._facade:
@@ -169,6 +171,9 @@ class MainCoordinator(QObject):
             toggle_filmstrip_action=window.ui.toggle_filmstrip_action,
             settings=context.settings,
             header_controller=self._header_controller,
+            face_name_overlay=window.ui.face_name_overlay,
+            people_service=self._playback_people_service,
+            people_dashboard_refresh_callback=window.ui.people_page.schedule_index_refresh,
         )
 
         # Inject optional dependencies into Playback
@@ -413,6 +418,7 @@ class MainCoordinator(QObject):
         # ui.edit_rotate_left_button is handled by EditCoordinator in Edit Mode
         ui.rotate_left_button.clicked.connect(self._playback.rotate_current_asset)
         ui.favorite_button.clicked.connect(self._detail_vm.toggle_favorite)
+        ui.toggle_face_names_action.toggled.connect(self._handle_face_name_toggle_changed)
 
         # Info Button
         if hasattr(ui, "info_button"):
@@ -503,6 +509,9 @@ class MainCoordinator(QObject):
         if people_page is not None:
             people_page.set_library_root(root)
             people_page.set_status_message(self._context.library.face_scan_status_message())
+        playback = getattr(self, "_playback", None)
+        if playback is not None:
+            playback.set_people_library_root(root)
 
     def _on_asset_clicked(self, index: QModelIndex):
         if self._selection_controller and self._selection_controller.is_active():
@@ -567,6 +576,14 @@ class MainCoordinator(QObject):
             ui.wheel_action_navigate.setChecked(True)
         ui.image_viewer.set_wheel_action(wheel_action)
 
+        stored_face_names = settings.get("ui.show_face_names_in_detail", False)
+        if isinstance(stored_face_names, str):
+            show_face_names = stored_face_names.strip().lower() in {"1", "true", "yes", "on"}
+        else:
+            show_face_names = bool(stored_face_names)
+        ui.toggle_face_names_action.setChecked(show_face_names)
+        self._playback.set_face_name_display_enabled(show_face_names)
+
         # 2. Volume / Mute
         stored_volume = settings.get("ui.volume", 75)
         try:
@@ -595,6 +612,11 @@ class MainCoordinator(QObject):
             self._context.settings.set("ui.wheel_action", selected)
 
         ui.image_viewer.set_wheel_action(selected)
+
+    def _handle_face_name_toggle_changed(self, checked: bool) -> None:
+        if self._context.settings.get("ui.show_face_names_in_detail") != checked:
+            self._context.settings.set("ui.show_face_names_in_detail", checked)
+        self._playback.set_face_name_display_enabled(checked)
 
     def _prepare_paths_for_mutation(self, paths: list[Path]) -> None:
         """Release preview/player handles before mutating files on disk."""

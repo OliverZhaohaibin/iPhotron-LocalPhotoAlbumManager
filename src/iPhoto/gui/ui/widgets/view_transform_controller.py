@@ -104,6 +104,7 @@ class ViewTransformController:
         *,
         texture_size_provider: Callable[[], tuple[int, int]],
         on_zoom_changed: Callable[[float], None],
+        on_view_transform_changed: Callable[[], None] | None = None,
         on_next_item: Optional[Callable[[], None]] = None,
         on_prev_item: Optional[Callable[[], None]] = None,
         display_texture_size_provider: Callable[[], tuple[int, int]] | None = None,
@@ -121,6 +122,7 @@ class ViewTransformController:
         self._display_texture_size_provider = display_texture_size_provider
         self._device_view_size_provider = device_view_size_provider
         self._on_zoom_changed = on_zoom_changed
+        self._on_view_transform_changed = on_view_transform_changed
         self._on_next_item = on_next_item
         self._on_prev_item = on_prev_item
 
@@ -202,8 +204,14 @@ class ViewTransformController:
         return QPointF(self._pan_px)
 
     def set_pan_pixels(self, pan: QPointF) -> None:
+        if (
+            abs(float(pan.x()) - self._pan_px.x()) < 1e-6
+            and abs(float(pan.y()) - self._pan_px.y()) < 1e-6
+        ):
+            return
         self._pan_px = QPointF(pan)
         self._viewer.update()
+        self._emit_view_transform_changed()
 
     def minimum_zoom(self) -> float:
         return self._min_zoom
@@ -218,6 +226,7 @@ class ViewTransformController:
         self._zoom_factor = clamped
         self._viewer.update()
         self._on_zoom_changed(self._zoom_factor)
+        self._emit_view_transform_changed()
 
     def set_zoom_limits(self, minimum: float, maximum: float) -> None:
         """Clamp the interactive zoom range."""
@@ -233,7 +242,11 @@ class ViewTransformController:
     def set_fill_viewport_enabled(self, enabled: bool) -> None:
         """Control whether framing helpers should cover the viewport instead of fitting."""
 
-        self._fill_viewport_enabled = bool(enabled)
+        target = bool(enabled)
+        if self._fill_viewport_enabled == target:
+            return
+        self._fill_viewport_enabled = target
+        self._emit_view_transform_changed()
 
     # ------------------------------------------------------------------
     # Zoom utilities
@@ -276,6 +289,7 @@ class ViewTransformController:
         self._zoom_factor = clamped
         self._viewer.update()
         self._on_zoom_changed(self._zoom_factor)
+        self._emit_view_transform_changed()
         return True
 
     def reset_zoom(self) -> bool:
@@ -286,6 +300,8 @@ class ViewTransformController:
         self._pan_px = QPointF(0.0, 0.0)
         self._viewer.update()
         self._on_zoom_changed(self._zoom_factor)
+        if changed:
+            self._emit_view_transform_changed()
         return changed
 
     # ------------------------------------------------------------------
@@ -303,8 +319,7 @@ class ViewTransformController:
         delta = event.position() - self._pan_start_pos
         self._pan_start_pos = event.position()
         dpr = self._viewer.devicePixelRatioF()
-        self._pan_px += QPointF(delta.x() * dpr, -delta.y() * dpr)
-        self._viewer.update()
+        self.set_pan_pixels(self._pan_px + QPointF(delta.x() * dpr, -delta.y() * dpr))
 
     def handle_mouse_release(self, event: QMouseEvent) -> None:
         if event.button() == Qt.MouseButton.LeftButton:
@@ -538,6 +553,11 @@ class ViewTransformController:
             return
         self._image_cover_scale = clamped
         self._viewer.update()
+        self._emit_view_transform_changed()
+
+    def _emit_view_transform_changed(self) -> None:
+        if self._on_view_transform_changed is not None:
+            self._on_view_transform_changed()
 
     def get_image_cover_scale(self) -> float:
         """Return the scale multiplier currently applied to cover rotations."""

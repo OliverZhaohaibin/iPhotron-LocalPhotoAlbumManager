@@ -42,6 +42,7 @@ SETTINGS_SCHEMA: dict[str, Any] = {
                     "enum": ["jpg", "png", "tiff"],
                 },
                 "show_filmstrip": {"type": "boolean"},
+                "show_face_names_in_detail": {"type": "boolean"},
                 "wheel_action": {
                     "type": "string",
                     "enum": ["navigate", "zoom"],
@@ -69,6 +70,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         "export_destination": "library",
         "export_format": "jpg",
         "show_filmstrip": True,
+        "show_face_names_in_detail": False,
         "wheel_action": "navigate",
     },
     "last_open_albums": [],

@@ -350,3 +350,34 @@ def test_people_service_can_mark_retry_and_skipped(tmp_path: Path) -> None:
 
     assert service.mark_asset_skipped("asset-a") is True
     assert global_repo.get_rows_by_ids(["asset-a"])["asset-a"]["face_status"] == "skipped"
+
+
+def test_people_service_lists_asset_face_annotations_and_preserves_names(tmp_path: Path) -> None:
+    library_root = tmp_path / "Library"
+    library_root.mkdir()
+    global_repo = get_global_repository(library_root)
+    global_repo.write_rows(
+        [{"rel": "album/a.jpg", "id": "asset-a", "media_type": 0, "face_status": "done"}]
+    )
+
+    service = PeopleService(library_root)
+    repository = service.repository()
+    assert repository is not None
+
+    face = _face_record(
+        face_id="face-a",
+        asset_id="asset-a",
+        asset_rel="album/a.jpg",
+        person_id="person-a",
+    )
+    person = _person_record(person_id="person-a", key_face_id="face-a", face_count=1)
+    repository.replace_all([face], [person])
+
+    initial = service.list_asset_face_annotations("asset-a")
+    assert len(initial) == 1
+    assert initial[0].display_name is None
+    assert initial[0].image_height == 300
+
+    service.rename_cluster("person-a", "Alice")
+    updated = service.list_asset_face_annotations("asset-a")
+    assert updated[0].display_name == "Alice"

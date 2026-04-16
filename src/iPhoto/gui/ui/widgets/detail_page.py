@@ -22,6 +22,7 @@ from PySide6.QtWidgets import (
 from ..icon import load_icon
 from ..palette import SIDEBAR_TEXT_COLOR, viewer_surface_color
 from .edit_sidebar import EditSidebar
+from .face_name_overlay import FaceNameOverlayWidget
 from .edit_topbar import SegmentedTopBar
 from .filmstrip_view import FilmstripView
 from .gl_image_viewer import GLImageViewer
@@ -115,6 +116,7 @@ class DetailPageWidget(QWidget):
         self.player_bar = self.video_area.player_bar
         self.video_trim_bar = VideoTrimBar()
         self.video_trim_bar.hide()
+        self.face_name_overlay = FaceNameOverlayWidget()
 
         self.filmstrip_view = FilmstripView()
 
@@ -364,6 +366,10 @@ class DetailPageWidget(QWidget):
         player_layout.setContentsMargins(0, 0, 0, 0)
         player_layout.setSpacing(0)
         player_layout.addWidget(self.player_stack, 0, 0)
+        self.face_name_overlay.setParent(player_container)
+        self.face_name_overlay.set_viewer(self.image_viewer)
+        player_layout.addWidget(self.face_name_overlay, 0, 0)
+        self.face_name_overlay.hide()
         self.player_container = player_container
 
         # Opaque cover that hides the QRhiWidget area until its first frame

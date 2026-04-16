@@ -33,6 +33,7 @@ class MediaSelectionPort(Protocol):
 @dataclass(frozen=True)
 class DetailPresentation:
     row: int
+    asset_id: str
     path: Path
     is_video: bool
     is_live: bool
@@ -289,6 +290,7 @@ class DetailViewModel(BaseViewModel):
                 }
         return DetailPresentation(
             row=row,
+            asset_id=dto.id,
             path=dto.abs_path,
             is_video=dto.is_video,
             is_live=dto.is_live,

@@ -10,6 +10,7 @@ from .detail_page import DetailPageWidget
 from .filmstrip_view import FilmstripView
 from .image_viewer import ImageViewer
 from .edit_sidebar import EditSidebar
+from .face_name_overlay import FaceNameOverlayWidget
 from .gallery_page import GalleryPageWidget
 from .info_panel import InfoPanel
 from .information_popup import InformationPopup
@@ -35,6 +36,7 @@ __all__ = [
     "ImageViewer",
     "EditSidebar",
     "DetailPageWidget",
+    "FaceNameOverlayWidget",
     "MainHeaderWidget",
     "InfoPanel",
     "InformationPopup",

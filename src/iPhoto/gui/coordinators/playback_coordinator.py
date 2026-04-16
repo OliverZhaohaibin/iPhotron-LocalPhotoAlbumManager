@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any, Callable, Optional
 
 from PySide6.QtCore import QItemSelectionModel, QModelIndex, QObject, QThreadPool, QTimer, Signal, Slot
 from PySide6.QtGui import QAction, QColor, QPalette
@@ -23,6 +23,7 @@ from iPhoto.gui.ui.tasks.info_panel_metadata_worker import (
 from iPhoto.gui.ui.widgets.info_panel import InfoPanel
 from iPhoto.gui.viewmodels.detail_viewmodel import DetailPresentation, DetailViewModel
 from iPhoto.io import sidecar
+from iPhoto.people.service import PeopleService
 
 if TYPE_CHECKING:
     from iPhoto.utils.settings import Settings
@@ -31,6 +32,7 @@ if TYPE_CHECKING:
     from iPhoto.gui.coordinators.navigation_coordinator import NavigationCoordinator
     from iPhoto.gui.ui.controllers.player_view_controller import PlayerViewController
     from iPhoto.gui.ui.media import MediaAdjustmentCommitter
+    from iPhoto.gui.ui.widgets.face_name_overlay import FaceNameOverlayWidget
     from iPhoto.gui.ui.widgets.filmstrip_view import FilmstripView
     from iPhoto.gui.ui.widgets.player_bar import PlayerBar
     from iPhoto.gui.viewmodels.gallery_list_model_adapter import GalleryListModelAdapter
@@ -66,6 +68,9 @@ class PlaybackCoordinator(QObject):
         toggle_filmstrip_action: QAction,
         settings: Settings,
         header_controller: HeaderController | None = None,
+        face_name_overlay: FaceNameOverlayWidget | None = None,
+        people_service: PeopleService | None = None,
+        people_dashboard_refresh_callback: Callable[[], None] | None = None,
     ) -> None:
         super().__init__()
         self._player_bar = player_bar
@@ -90,6 +95,9 @@ class PlaybackCoordinator(QObject):
         self._toggle_filmstrip_action = toggle_filmstrip_action
         self._settings = settings
         self._header_controller = header_controller
+        self._face_name_overlay = face_name_overlay
+        self._people_service = people_service or PeopleService()
+        self._people_dashboard_refresh_callback = people_dashboard_refresh_callback
 
         self._is_playing = False
         self._navigation: NavigationCoordinator | None = None
@@ -107,6 +115,7 @@ class PlaybackCoordinator(QObject):
         self._play_profile_row: int | None = None
 
         self._pending_play_row: int | None = None
+        self._show_face_names = False
         self._play_debounce = QTimer(self)
         self._play_debounce.setSingleShot(True)
         self._play_debounce.setInterval(PLAY_ASSET_DEBOUNCE_MS)
@@ -122,6 +131,17 @@ class PlaybackCoordinator(QObject):
     def set_info_panel(self, panel: InfoPanel) -> None:
         self._info_panel = panel
         panel.dismissed.connect(self._handle_info_panel_dismissed)
+
+    def set_people_library_root(self, library_root: Path | None) -> None:
+        people_service = getattr(self, "_people_service", None)
+        if people_service is None:
+            return
+        people_service.set_library_root(library_root)
+        self._refresh_face_name_overlay_for_current_presentation()
+
+    def set_face_name_display_enabled(self, enabled: bool) -> None:
+        self._show_face_names = bool(enabled)
+        self._refresh_face_name_overlay_for_current_presentation()
 
     def current_row(self) -> int:
         row = self._detail_vm.current_row.value
@@ -151,6 +171,7 @@ class PlaybackCoordinator(QObject):
 
     def show_placeholder_in_viewer(self) -> None:
         self._player_view.show_placeholder()
+        self._hide_face_name_overlay(clear_annotations=True)
 
     def _connect_signals(self) -> None:
         self._player_bar.playPauseRequested.connect(self.toggle_playback)
@@ -167,11 +188,15 @@ class PlaybackCoordinator(QObject):
         self._detail_vm.route_requested.connect(self._handle_route_requested)
         self._detail_vm.presentation_changed.connect(self._handle_presentation_changed)
         self._detail_vm.rotate_requested.connect(self._handle_rotate_requested)
+        self._detail_vm.edit_requested.connect(self._handle_edit_requested)
 
         self._filmstrip_view.nextItemRequested.connect(self.select_next)
         self._filmstrip_view.prevItemRequested.connect(self.select_previous)
         self._filmstrip_view.itemClicked.connect(self._on_filmstrip_clicked)
         self._toggle_filmstrip_action.toggled.connect(self._handle_filmstrip_toggled)
+        rename_signal = getattr(self._face_name_overlay, "renameSubmitted", None)
+        if rename_signal is not None:
+            rename_signal.connect(self._handle_face_name_rename_submitted)
 
     def _setup_zoom_handler(self) -> None:
         self._zoom_handler = EditZoomHandler(
@@ -306,6 +331,10 @@ class PlaybackCoordinator(QObject):
         elif view == "gallery":
             self._router.show_gallery()
 
+    @Slot(object)
+    def _handle_edit_requested(self, _path: object) -> None:
+        self._hide_face_name_overlay(clear_annotations=False)
+
     def _handle_presentation_changed(self, presentation: DetailPresentation) -> None:
         if (
             getattr(self, "_play_profile_started_at", None) is not None
@@ -362,6 +391,7 @@ class PlaybackCoordinator(QObject):
         self._zoom_slider.blockSignals(False)
 
         if presentation.is_video:
+            self._hide_face_name_overlay(clear_annotations=True)
             self._player_view.show_video_surface(interactive=True)
             trim_range_ms = presentation.video_trim_range_ms
             if trim_range_ms is not None:
@@ -406,12 +436,14 @@ class PlaybackCoordinator(QObject):
             self._zoom_widget.show()
 
             if presentation.is_live:
+                self._hide_face_name_overlay(clear_annotations=False)
                 self._player_view.show_live_badge()
                 self._player_view.set_live_replay_enabled(True)
                 self._autoplay_live_motion(presentation)
             else:
                 self._player_view.hide_live_badge()
                 self._player_view.set_live_replay_enabled(False)
+                self._refresh_face_name_overlay_for_presentation(presentation)
 
         self._is_playing = False
         self._player_bar.set_playback_state(False)
@@ -434,9 +466,11 @@ class PlaybackCoordinator(QObject):
     def _autoplay_live_motion(self, presentation: DetailPresentation) -> None:
         motion_path = presentation.live_motion_abs
         if motion_path is None:
+            self._refresh_face_name_overlay_for_presentation(presentation)
             return
         self._active_live_motion = motion_path
         self._active_live_still = presentation.path
+        self._hide_face_name_overlay(clear_annotations=False)
         self._player_view.defer_still_updates(True)
         self._player_view.show_video_surface(interactive=False)
         self._trim_in_ms = 0
@@ -463,6 +497,83 @@ class PlaybackCoordinator(QObject):
         self._player_view.show_live_badge()
         self._player_view.set_live_replay_enabled(True)
         self._is_playing = False
+        self._refresh_face_name_overlay_for_current_presentation()
+
+    def _hide_face_name_overlay(self, *, clear_annotations: bool) -> None:
+        overlay = getattr(self, "_face_name_overlay", None)
+        if overlay is None:
+            return
+        if clear_annotations:
+            overlay.clear_annotations()
+        overlay.set_overlay_active(False)
+
+    def _refresh_face_name_overlay_for_current_presentation(self) -> None:
+        self._refresh_face_name_overlay_for_presentation(
+            getattr(self, "_current_presentation", None)
+        )
+
+    def _refresh_face_name_overlay_for_presentation(
+        self,
+        presentation: DetailPresentation | None,
+    ) -> None:
+        overlay = getattr(self, "_face_name_overlay", None)
+        if overlay is None:
+            return
+        if not self._should_show_face_name_overlay(presentation):
+            self._hide_face_name_overlay(clear_annotations=True)
+            return
+        annotations = self._load_face_name_annotations(presentation.asset_id)
+        overlay.set_annotations(annotations)
+        overlay.set_overlay_active(bool(annotations))
+
+    def _should_show_face_name_overlay(
+        self,
+        presentation: DetailPresentation | None,
+    ) -> bool:
+        if presentation is None or presentation.is_video or not presentation.asset_id:
+            return False
+        if not bool(getattr(self, "_show_face_names", False)):
+            return False
+        if getattr(self, "_active_live_motion", None) is not None:
+            return False
+        player_view = getattr(self, "_player_view", None)
+        video_area = getattr(player_view, "video_area", None)
+        is_edit_mode_active = getattr(video_area, "is_edit_mode_active", None)
+        if callable(is_edit_mode_active) and is_edit_mode_active():
+            return False
+        return True
+
+    def _load_face_name_annotations(self, asset_id: str) -> list:
+        people_service = getattr(self, "_people_service", None)
+        if people_service is None or not asset_id:
+            return []
+        try:
+            return people_service.list_asset_face_annotations(asset_id)
+        except Exception:
+            LOGGER.exception("Failed to load face annotations for asset %s", asset_id)
+            return []
+
+    @Slot(str, object)
+    def _handle_face_name_rename_submitted(
+        self,
+        person_id: str,
+        new_name: object,
+    ) -> None:
+        if not person_id:
+            return
+        people_service = getattr(self, "_people_service", None)
+        if people_service is None:
+            return
+        name = new_name.strip() if isinstance(new_name, str) else None
+        try:
+            people_service.rename_cluster(person_id, name or None)
+        except Exception:
+            LOGGER.exception("Failed to rename person %s", person_id)
+            return
+        self._refresh_face_name_overlay_for_current_presentation()
+        refresh_callback = getattr(self, "_people_dashboard_refresh_callback", None)
+        if callable(refresh_callback):
+            refresh_callback()
 
     def _sync_filmstrip_selection(self, row: int) -> None:
         idx = self._asset_model.index(row, 0)
@@ -493,6 +604,7 @@ class PlaybackCoordinator(QObject):
         self._clear_play_request_state()
         self._player_view.video_area.stop()
         self._player_view.show_placeholder()
+        self._hide_face_name_overlay(clear_annotations=True)
         self._player_bar.setEnabled(False)
         self._is_playing = False
         self._current_presentation = None
@@ -505,6 +617,7 @@ class PlaybackCoordinator(QObject):
     def shutdown(self) -> None:
         self._clear_play_request_state()
         self._player_view.video_area.stop()
+        self._hide_face_name_overlay(clear_annotations=True)
         self._is_playing = False
         self._current_presentation = None
         self._detail_vm.hide_info_panel(refresh_presentation=False)

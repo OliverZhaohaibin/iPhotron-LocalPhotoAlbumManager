@@ -18,6 +18,8 @@ def test_on_library_tree_updated_rebinds_asset_list_vm_and_reloads_selection() -
     coordinator._asset_list_vm = MagicMock()
     coordinator._gallery_vm = MagicMock()
     coordinator._logger = MagicMock()
+    coordinator._playback = MagicMock()
+    coordinator._window = MagicMock(ui=MagicMock(people_page=MagicMock()))
 
     coordinator._on_library_tree_updated()
 
@@ -30,6 +32,7 @@ def test_on_library_tree_updated_rebinds_asset_list_vm_and_reloads_selection() -
         root,
     )
     coordinator._gallery_vm.on_library_tree_updated.assert_called_once_with()
+    coordinator._playback.set_people_library_root.assert_called_once_with(root)
 
 
 def test_on_library_tree_updated_skips_selection_reload_in_location_context() -> None:
@@ -44,6 +47,8 @@ def test_on_library_tree_updated_skips_selection_reload_in_location_context() ->
     coordinator._asset_list_vm = MagicMock()
     coordinator._gallery_vm = MagicMock()
     coordinator._logger = MagicMock()
+    coordinator._playback = MagicMock()
+    coordinator._window = MagicMock(ui=MagicMock(people_page=MagicMock()))
 
     coordinator._on_library_tree_updated()
 
@@ -52,6 +57,19 @@ def test_on_library_tree_updated_skips_selection_reload_in_location_context() ->
         root,
     )
     coordinator._gallery_vm.on_library_tree_updated.assert_called_once_with()
+
+
+def test_handle_face_name_toggle_changed_persists_setting_and_updates_playback() -> None:
+    coordinator = MainCoordinator.__new__(MainCoordinator)
+    coordinator._context = MagicMock()
+    coordinator._context.settings.get.return_value = False
+    coordinator._context.settings.set = MagicMock()
+    coordinator._playback = MagicMock()
+
+    coordinator._handle_face_name_toggle_changed(True)
+
+    coordinator._context.settings.set.assert_called_once_with("ui.show_face_names_in_detail", True)
+    coordinator._playback.set_face_name_display_enabled.assert_called_once_with(True)
 
 
 def test_on_map_asset_activated_delegates_to_navigation() -> None:

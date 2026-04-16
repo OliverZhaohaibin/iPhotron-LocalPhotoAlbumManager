@@ -8,7 +8,10 @@ import pytest
 
 from iPhoto.cache.index_store import get_global_repository, reset_global_repository
 from iPhoto.config import WORK_DIR_NAME
+from iPhoto.library.workers.face_scan_worker import FaceScanWorker
+from iPhoto.people.pipeline import DetectedAssetFaces
 from iPhoto.people.repository import FaceRecord, PersonRecord
+from iPhoto.people.scan_session import FaceScanSession
 from iPhoto.people.service import PeopleService, face_library_paths, shared_face_model_dir
 
 
@@ -49,6 +52,55 @@ def _person_record(
     *, person_id: str, key_face_id: str, face_count: int, name: str | None = None
 ) -> PersonRecord:
     embedding = np.asarray([1.0, 0.0, 0.0], dtype=np.float32)
+    timestamp = _now_iso()
+    return PersonRecord(
+        person_id=person_id,
+        name=name,
+        key_face_id=key_face_id,
+        face_count=face_count,
+        center_embedding=embedding,
+        created_at=timestamp,
+        updated_at=timestamp,
+    )
+
+
+def _face_record_with_embedding(
+    *,
+    face_id: str,
+    face_key: str,
+    asset_id: str,
+    asset_rel: str,
+    person_id: str | None,
+    embedding: np.ndarray,
+) -> FaceRecord:
+    return FaceRecord(
+        face_id=face_id,
+        face_key=face_key,
+        asset_id=asset_id,
+        asset_rel=asset_rel,
+        box_x=10,
+        box_y=12,
+        box_w=80,
+        box_h=80,
+        confidence=0.99,
+        embedding=embedding,
+        embedding_dim=int(embedding.shape[0]),
+        thumbnail_path=None,
+        person_id=person_id,
+        detected_at=_now_iso(),
+        image_width=400,
+        image_height=300,
+    )
+
+
+def _person_record_with_embedding(
+    *,
+    person_id: str,
+    key_face_id: str,
+    face_count: int,
+    name: str | None,
+    embedding: np.ndarray,
+) -> PersonRecord:
     timestamp = _now_iso()
     return PersonRecord(
         person_id=person_id,
@@ -381,3 +433,127 @@ def test_people_service_lists_asset_face_annotations_and_preserves_names(tmp_pat
     service.rename_cluster("person-a", "Alice")
     updated = service.list_asset_face_annotations("asset-a")
     assert updated[0].display_name == "Alice"
+
+
+def test_people_service_dashboard_stays_stable_until_face_scan_session_commits(tmp_path: Path) -> None:
+    library_root = tmp_path / "Library"
+    library_root.mkdir()
+
+    global_repo = get_global_repository(library_root)
+    global_repo.write_rows(
+        [
+            {"rel": "album/shared.jpg", "id": "asset-shared", "media_type": 0, "face_status": "done"},
+            {
+                "rel": "album/new-shared.jpg",
+                "id": "asset-new-shared",
+                "media_type": 0,
+                "face_status": "pending",
+            },
+        ]
+    )
+
+    service = PeopleService(library_root)
+    repository = service.repository()
+    assert repository is not None
+
+    embedding_a = np.asarray([1.0, 0.0, 0.0], dtype=np.float32)
+    embedding_b = np.asarray([0.0, 1.0, 0.0], dtype=np.float32)
+    initial_faces = [
+        _face_record_with_embedding(
+            face_id="face-a-shared",
+            face_key="face-key-a-shared",
+            asset_id="asset-shared",
+            asset_rel="album/shared.jpg",
+            person_id="person-a",
+            embedding=embedding_a,
+        ),
+        _face_record_with_embedding(
+            face_id="face-b-shared",
+            face_key="face-key-b-shared",
+            asset_id="asset-shared",
+            asset_rel="album/shared.jpg",
+            person_id="person-b",
+            embedding=embedding_b,
+        ),
+    ]
+    initial_persons = [
+        _person_record_with_embedding(
+            person_id="person-a",
+            key_face_id="face-a-shared",
+            face_count=1,
+            name="Alice",
+            embedding=embedding_a,
+        ),
+        _person_record_with_embedding(
+            person_id="person-b",
+            key_face_id="face-b-shared",
+            face_count=1,
+            name="Bob",
+            embedding=embedding_b,
+        ),
+    ]
+    repository.replace_all(initial_faces, initial_persons)
+    assert repository.state_repository is not None
+    repository.state_repository.sync_scan_results(initial_persons, initial_faces)
+    group = service.create_group(["person-a", "person-b"])
+    assert group is not None
+
+    session = FaceScanSession()
+    session.stage_detection_results(
+        [
+            DetectedAssetFaces(
+                asset_id="asset-new-shared",
+                asset_rel="album/new-shared.jpg",
+                faces=[
+                    _face_record_with_embedding(
+                        face_id="face-a-new-shared",
+                        face_key="face-key-a-new-shared",
+                        asset_id="asset-new-shared",
+                        asset_rel="album/new-shared.jpg",
+                        person_id=None,
+                        embedding=np.asarray([0.98, 0.02, 0.0], dtype=np.float32),
+                    ),
+                    _face_record_with_embedding(
+                        face_id="face-b-new-shared",
+                        face_key="face-key-b-new-shared",
+                        asset_id="asset-new-shared",
+                        asset_rel="album/new-shared.jpg",
+                        person_id=None,
+                        embedding=np.asarray([0.02, 0.98, 0.0], dtype=np.float32),
+                    ),
+                ],
+            )
+        ]
+    )
+
+    summaries_before, groups_before, pending_before = service.load_dashboard()
+    assert [summary.person_id for summary in summaries_before] == ["person-a", "person-b"]
+    assert groups_before[0].group_id == group.group_id
+    assert groups_before[0].asset_count == 1
+    assert pending_before == 1
+
+    session.commit(repository, distance_threshold=0.6, min_samples=2)
+    global_repo.update_face_status("asset-new-shared", "done")
+
+    summaries_after, groups_after, pending_after = service.load_dashboard()
+    assert [summary.person_id for summary in summaries_after] == ["person-a", "person-b"]
+    assert groups_after[0].group_id == group.group_id
+    assert groups_after[0].asset_count == 2
+    assert pending_after == 0
+
+
+def test_face_scan_worker_enqueue_rows_skips_done_assets(tmp_path: Path) -> None:
+    worker = FaceScanWorker(tmp_path)
+
+    worker.enqueue_rows(
+        [
+            {"id": "asset-done", "media_type": 0, "face_status": "done"},
+            {"id": "asset-pending", "media_type": 0, "face_status": "pending"},
+            {"id": "asset-retry", "media_type": 0, "face_status": "retry"},
+            {"id": "asset-video", "media_type": 1, "face_status": "pending"},
+        ]
+    )
+
+    batch = worker._next_batch()
+
+    assert [row["id"] for row in batch] == ["asset-pending", "asset-retry"]

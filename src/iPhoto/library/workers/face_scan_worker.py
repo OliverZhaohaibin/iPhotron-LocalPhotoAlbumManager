@@ -9,12 +9,9 @@ from typing import Iterable
 from PySide6.QtCore import QThread, Signal
 
 from ...cache.index_store import get_global_repository
-from ...people.pipeline import (
-    FaceClusterPipeline,
-    canonicalize_cluster_identities,
-    cluster_face_records,
-)
-from ...people.repository import FaceRecord, FaceRepository
+from ...people.pipeline import FaceClusterPipeline
+from ...people.repository import FaceRepository
+from ...people.scan_session import FaceScanSession
 from ...people.service import face_library_paths
 from ...people.status import (
     FACE_STATUS_DONE,
@@ -74,6 +71,7 @@ class FaceScanWorker(QThread):
         paths = face_library_paths(self._library_root)
         repository = FaceRepository(paths.index_db_path, paths.state_db_path)
         pipeline = FaceClusterPipeline(model_root=paths.model_dir)
+        session = FaceScanSession()
 
         while not self._cancelled:
             self._top_up_pending_rows()
@@ -82,11 +80,22 @@ class FaceScanWorker(QThread):
                 if self._input_closed:
                     self._top_up_pending_rows()
                     if self._queue.empty():
+                        if session.commit(
+                            repository,
+                            distance_threshold=pipeline.distance_threshold,
+                            min_samples=pipeline.min_samples,
+                        ):
+                            self.peopleIndexUpdated.emit()
                         return
                 continue
 
             try:
-                self._process_batch(batch, pipeline, repository, paths.thumbnail_dir)
+                self._process_batch(
+                    batch,
+                    pipeline,
+                    session,
+                    paths.thumbnail_dir,
+                )
             except RuntimeError as exc:
                 self._mark_remaining_failed(batch)
                 self.statusChanged.emit(str(exc))
@@ -135,56 +144,24 @@ class FaceScanWorker(QThread):
         self,
         batch: list[dict],
         pipeline: FaceClusterPipeline,
-        repository,
+        session: FaceScanSession,
         thumbnail_dir: Path,
     ) -> None:
-        repository.remove_faces_for_assets(
-            [str(row.get("id") or "") for row in batch],
-            [str(row.get("rel") or "") for row in batch],
-        )
-
         detected = pipeline.detect_faces_for_rows(
             batch,
             library_root=self._library_root,
             thumbnail_dir=thumbnail_dir,
         )
 
-        new_faces: list[FaceRecord] = []
-        done_ids: list[str] = []
-        retry_ids: list[str] = []
         for item in detected:
-            self._queued_ids.discard(item.asset_id)
-            if item.error:
-                retry_ids.append(item.asset_id)
-                continue
-            done_ids.append(item.asset_id)
-            new_faces.extend(item.faces)
+            if item.asset_id:
+                self._queued_ids.discard(item.asset_id)
 
-        all_faces = repository.get_all_faces() + new_faces
-        if all_faces:
-            clustered_faces, persons = cluster_face_records(
-                all_faces,
-                distance_threshold=pipeline.distance_threshold,
-                min_samples=pipeline.min_samples,
-            )
-            state_repository = repository.state_repository
-            if state_repository is not None:
-                clustered_faces, persons = canonicalize_cluster_identities(
-                    clustered_faces,
-                    persons,
-                    state_repository,
-                    distance_threshold=pipeline.distance_threshold,
-                )
-            repository.replace_all(clustered_faces, persons)
-            if state_repository is not None:
-                state_repository.sync_scan_results(persons, clustered_faces)
-        else:
-            repository.replace_all([], [])
+        done_ids, retry_ids = session.stage_detection_results(detected)
 
         store = get_global_repository(self._library_root)
         store.update_face_statuses(done_ids, FACE_STATUS_DONE)
         store.update_face_statuses(retry_ids, FACE_STATUS_RETRY)
-        self.peopleIndexUpdated.emit()
         if retry_ids:
             self.statusChanged.emit("Some assets need a face-scan retry.")
 

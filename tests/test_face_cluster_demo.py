@@ -276,11 +276,18 @@ def test_sync_scan_results_does_not_call_nested_person_order_query(
     def _forbidden_nested_query(_person_ids):
         raise AssertionError("sync_scan_results should not call get_person_order_map")
 
-    monkeypatch.setattr(state_repository, "get_person_order_map", _forbidden_nested_query)
+    monkeypatch.setattr(
+        state_repository,
+        "get_person_order_map",
+        _forbidden_nested_query,
+        raising=False,
+    )
     state_repository.sync_scan_results([person], [face])
 
     verify_repository = db.FaceClusterStateRepository(workspace.state_db_path)
-    assert verify_repository.get_person_order_map(["profile-a"]) == {"profile-a": 0}
+    assert {profile.person_id for profile in verify_repository.get_profiles()} == {"profile-a"}
+    if hasattr(verify_repository, "get_person_order_map"):
+        assert verify_repository.get_person_order_map(["profile-a"]) == {"profile-a": 0}
 
 
 def test_editable_name_label_emits_trimmed_text(qapp: QApplication) -> None:

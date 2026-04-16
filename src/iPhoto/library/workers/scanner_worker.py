@@ -201,15 +201,16 @@ class ScannerWorker(QRunnable):
         is always emitted with the chunk. This ensures that downstream consumers are
         notified of all processed chunks, even if some were not successfully stored.
         """
+        emitted_chunk = chunk
         try:
-            store.append_rows(chunk)
+            emitted_chunk = store.merge_scan_rows(chunk)
         except Exception as e:
             LOGGER.error(f"Failed to persist chunk of {len(chunk)} items: {e}")
             self._failed_count += len(chunk)
             self._signals.batchFailed.emit(self._root, len(chunk))
             # We continue even if DB write fails, though these items won't be persisted
 
-        self._signals.chunkReady.emit(self._root, chunk)
+        self._signals.chunkReady.emit(self._root, emitted_chunk)
 
     def cancel(self) -> None:
         """Request cancellation of the in-progress scan."""

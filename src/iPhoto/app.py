@@ -4,13 +4,12 @@ from __future__ import annotations
 
 from pathlib import Path
 import sqlite3
-from typing import Callable, Dict, List, Optional
+from typing import Callable, List, Optional
 
 from .cache.index_store import get_global_repository
 from .config import (
     DEFAULT_EXCLUDE,
     DEFAULT_INCLUDE,
-    RECENTLY_DELETED_DIR_NAME,
 )
 from .errors import IndexCorruptedError, ManifestInvalidError
 from .index_sync_service import (
@@ -168,32 +167,6 @@ def rescan(
     # Compute album path for library-relative paths
     album_path = _compute_album_path(root, library_root)
 
-    # ``original_rel_path`` is only populated for assets in the shared trash
-    # album.  Rescanning that directory must therefore preserve the existing
-    # mapping so the restore feature still knows where each item originated.
-    is_recently_deleted = root.name == RECENTLY_DELETED_DIR_NAME
-    preserved_fields = (
-        "original_rel_path",
-        "original_album_id",
-        "original_album_subpath",
-    )
-    preserved_restore_rows: Dict[str, dict] = {}
-    if is_recently_deleted:
-        try:
-            for row in store.read_all():
-                rel_value = row.get("rel")
-                if not isinstance(rel_value, str):
-                    continue
-                if not any(field in row for field in preserved_fields):
-                    continue
-                rel_key = Path(rel_value).as_posix()
-                preserved_restore_rows[rel_key] = row
-        except IndexCorruptedError:
-            # A corrupted index means we cannot recover historical restore
-            # targets.  Emit a warning and continue with a clean rescan so new
-            # trash entries still receive restore metadata.
-            LOGGER.warning("Unable to read previous trash index for %s", root)
-
     album = Album.open(root)
     include = album.manifest.get("filters", {}).get("include", DEFAULT_INCLUDE)
     exclude = album.manifest.get("filters", {}).get("exclude", DEFAULT_EXCLUDE)
@@ -216,19 +189,6 @@ def rescan(
             if "rel" in row:
                 row["rel"] = f"{album_path}/{row['rel']}"
     
-    if is_recently_deleted and preserved_restore_rows:
-        for new_row in rows:
-            rel_value = new_row.get("rel")
-            if not isinstance(rel_value, str):
-                continue
-            rel_key = Path(rel_value).as_posix()
-            cached = preserved_restore_rows.get(rel_key)
-            if not cached:
-                continue
-            for field in preserved_fields:
-                if field in cached and field not in new_row:
-                    new_row[field] = cached[field]
-
     _update_index_snapshot(root, rows, library_root=library_root)
     
     # For _ensure_links, we need album-relative rows
@@ -306,9 +266,9 @@ def scan_specific_files(
 
     db_root = library_root if library_root else root
     store = get_global_repository(db_root)
-    # We use append_rows which handles merging/updating based on 'rel' key
-    # It also handles locking safely.
-    store.append_rows(rows)
+    # Merge scanned facts while preserving library-managed state such as
+    # face_status and favorites for unchanged assets.
+    store.merge_scan_rows(rows)
 
 
 def pair(root: Path, library_root: Optional[Path] = None) -> List[LiveGroup]:

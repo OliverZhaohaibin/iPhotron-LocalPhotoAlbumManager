@@ -126,6 +126,78 @@ class TestGlobalRepositorySingleton:
         assert rows["asset-video"]["face_status"] == "done"
         assert repo.count_by_face_status() == {"retry": 1, "done": 1}
 
+    def test_merge_scan_rows_preserves_face_status_and_library_state_for_same_asset(
+        self, tmp_path: Path
+    ) -> None:
+        repo = get_global_repository(tmp_path)
+        repo.write_rows(
+            [
+                {
+                    "rel": "album/photo.jpg",
+                    "id": "asset-photo",
+                    "media_type": 0,
+                    "face_status": "done",
+                    "is_favorite": 1,
+                    "original_rel_path": "imports/photo.jpg",
+                    "original_album_id": "trash-album",
+                    "original_album_subpath": "trash/subpath",
+                    "live_role": 1,
+                    "live_partner_rel": "album/photo.mov",
+                }
+            ]
+        )
+
+        merged_rows = repo.merge_scan_rows(
+            [
+                {
+                    "rel": "album/photo.jpg",
+                    "id": "asset-photo",
+                    "media_type": 0,
+                    "bytes": 123,
+                }
+            ]
+        )
+
+        assert merged_rows[0]["face_status"] == "done"
+        row = repo.get_rows_by_ids(["asset-photo"])["asset-photo"]
+        assert row["face_status"] == "done"
+        assert row["is_favorite"] == 1
+        assert row["original_rel_path"] == "imports/photo.jpg"
+        assert row["original_album_id"] == "trash-album"
+        assert row["original_album_subpath"] == "trash/subpath"
+        assert row["live_role"] == 1
+        assert row["live_partner_rel"] == "album/photo.mov"
+
+    def test_merge_scan_rows_resets_face_status_when_asset_id_changes(self, tmp_path: Path) -> None:
+        repo = get_global_repository(tmp_path)
+        repo.write_rows(
+            [
+                {
+                    "rel": "album/photo.jpg",
+                    "id": "asset-old",
+                    "media_type": 0,
+                    "face_status": "done",
+                    "is_favorite": 1,
+                }
+            ]
+        )
+
+        merged_rows = repo.merge_scan_rows(
+            [
+                {
+                    "rel": "album/photo.jpg",
+                    "id": "asset-new",
+                    "media_type": 0,
+                    "bytes": 456,
+                }
+            ]
+        )
+
+        assert merged_rows[0]["face_status"] == "pending"
+        row = repo.get_rows_by_ids(["asset-new"])["asset-new"]
+        assert row["face_status"] == "pending"
+        assert row["is_favorite"] == 1
+
 
 class TestIdempotentWrites:
     """Tests verifying idempotent write behavior (Constraint #3)."""

@@ -30,6 +30,7 @@ from .migrations import SchemaMigrator
 from .queries import QueryBuilder
 from .recovery import RecoveryService
 from .row_mapper import db_row_to_dict, insert_rows, row_to_db_params
+from .scan_merge import merge_scan_rows as merge_scan_rows_payload
 
 logger = get_logger()
 
@@ -169,6 +170,23 @@ class AssetRepository:
         """Merge *rows* into the index, replacing duplicates by ``rel`` key."""
         with self.transaction() as conn:
             self._insert_rows(conn, rows)
+
+    def merge_scan_rows(self, rows: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Merge scanned rows while preserving persisted library-managed state."""
+
+        materialized_rows = [dict(row) for row in rows]
+        if not materialized_rows:
+            return []
+
+        existing_rows = self.get_rows_by_rels(
+            str(row["rel"])
+            for row in materialized_rows
+            if isinstance(row.get("rel"), str) and row.get("rel")
+        )
+        merged_rows = merge_scan_rows_payload(materialized_rows, existing_rows)
+        with self.transaction() as conn:
+            self._insert_rows(conn, merged_rows)
+        return merged_rows
 
     def upsert_row(self, rel: str, row: Dict[str, Any]) -> None:
         """Insert or update a single row identified by *rel*."""

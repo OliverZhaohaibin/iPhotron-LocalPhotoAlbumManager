@@ -5,7 +5,7 @@ import pytest
 
 from PySide6.QtCore import QObject
 from PySide6.QtGui import QPalette
-from PySide6.QtWidgets import QWidget, QToolButton, QLabel, QPushButton
+from PySide6.QtWidgets import QWidget, QToolButton, QLabel, QPushButton, QSlider
 
 from iPhoto.gui.ui.controllers.window_theme_controller import WindowThemeController
 from iPhoto.gui.ui.theme_manager import ThemeManager, LIGHT_THEME, DARK_THEME
@@ -67,6 +67,7 @@ class StubUi(QObject):
         self.video_area.set_surface_color = MagicMock()
 
         self.edit_button = make_widget("editButton", QPushButton)
+        self.zoom_slider = make_widget("zoomSlider", QSlider)
 
         # --- Icons / Toolbar ---
         self.edit_sidebar = make_widget("editSidebar")
@@ -256,6 +257,31 @@ def test_ui_component_styling(window_theme_controller, mock_theme_manager):
     # 5. Video Area Surface
     # In Light Mode, video area should match window background
     ui.video_area.set_surface_color.assert_called_with(bg)
+
+
+def test_zoom_slider_keeps_native_style_off_linux(mock_theme_manager, mock_window_shell, monkeypatch):
+    """Windows/macOS should keep the native header zoom-slider styling."""
+    monkeypatch.setattr(wtc_module.sys, "platform", "win32")
+    ui = StubUi()
+    ui.window_shell.parentWidget.return_value = mock_window_shell
+
+    WindowThemeController(ui, None, mock_theme_manager)
+
+    ui.zoom_slider.setStyleSheet.assert_called_with("")
+
+
+def test_zoom_slider_gets_linux_handle_fix(mock_theme_manager, mock_window_shell, monkeypatch):
+    """Linux should receive the explicit slider-handle stylesheet fix."""
+    monkeypatch.setattr(wtc_module.sys, "platform", "linux")
+    ui = StubUi()
+    ui.window_shell.parentWidget.return_value = mock_window_shell
+
+    WindowThemeController(ui, None, mock_theme_manager)
+
+    style = ui.zoom_slider.setStyleSheet.call_args[0][0]
+    assert "QSlider::handle:horizontal" in style
+    assert "width: 12px" in style
+    assert "margin: -5px 0" in style
 
 
 def test_icon_tinting(window_theme_controller, mock_theme_manager):

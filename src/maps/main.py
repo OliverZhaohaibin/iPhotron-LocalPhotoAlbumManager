@@ -7,8 +7,10 @@ if __package__ in {None, ""}:  # pragma: no cover - direct script bootstrap
     from pathlib import Path
 
     _SRC_ROOT = Path(__file__).resolve().parents[1]
-    if str(_SRC_ROOT) not in sys.path:
-        sys.path.insert(0, str(_SRC_ROOT))
+    _src_root_str = str(_SRC_ROOT)
+    if _src_root_str in sys.path:
+        sys.path.remove(_src_root_str)
+    sys.path.insert(0, _src_root_str)
 
 import argparse
 import os
@@ -130,6 +132,20 @@ def choose_native_widget_class(
 
     detail = f" Native widget disabled: {reason}." if reason else ""
     return None, f"OpenGL support detected.{detail} Using GPU accelerated Python rendering."
+
+
+def prepare_qt_runtime_for_backend(backend: str) -> None:
+    """Apply Linux Qt startup flags needed by the native OsmAnd widget."""
+
+    normalized_backend = backend.strip().lower()
+    if sys.platform != "linux" or normalized_backend == "python":
+        return
+
+    if not os.environ.get("QT_QPA_PLATFORM"):
+        os.environ["QT_QPA_PLATFORM"] = "xcb"
+    if os.environ.get("QT_QPA_PLATFORM") == "xcb":
+        os.environ.setdefault("QT_OPENGL", "desktop")
+        os.environ.setdefault("QT_XCB_GL_INTEGRATION", "xcb_glx")
 
 
 def probe_python_obf_runtime(package_root: Path | None = None) -> tuple[bool, str | None]:
@@ -268,7 +284,7 @@ def choose_launch_configuration(
         if not use_opengl:
             raise TileLoadingError("OpenGL support is unavailable, so the native OsmAnd widget can not be forced")
         if not has_usable_osmand_native_widget(package_root):
-            raise TileLoadingError("The native OsmAnd widget DLL is not available")
+            raise TileLoadingError("The native OsmAnd widget library is not available")
         is_available, reason = probe_native_widget_runtime(package_root)
         if not is_available:
             detail = f": {reason}" if reason else ""
@@ -347,7 +363,7 @@ def format_map_runtime_diagnostics(
     native_library_path = getattr(map_widget, "loaded_library_path", lambda: None)()
     native_library_suffix = ""
     if native_library_path:
-        native_library_suffix = f" native_dll={native_library_path}"
+        native_library_suffix = f" native_library={native_library_path}"
 
     return (
         "[maps.main] "
@@ -732,6 +748,10 @@ def _schedule_screenshot_capture(
     delay_ms = max(0, int(capture_delay_ms))
 
     def _capture_and_exit() -> None:
+        map_widget = window._map_widget
+        if hasattr(map_widget, "shutdown"):
+            map_widget.shutdown()
+
         if window.capture_screenshot(screenshot_path):
             print(f"[maps.main] screenshot={screenshot_path.resolve()}", flush=True)
             app.exit(0)
@@ -750,6 +770,7 @@ def _schedule_screenshot_capture(
 def main(argv: Sequence[str] | None = None) -> int:
     arguments = list(argv if argv is not None else sys.argv[1:])
     parsed_args = build_argument_parser().parse_args(arguments)
+    prepare_qt_runtime_for_backend(parsed_args.backend)
     configure_qt_opengl_defaults()
     app = QApplication([Path(__file__).name, *arguments])
 

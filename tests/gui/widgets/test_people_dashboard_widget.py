@@ -11,11 +11,12 @@ pytest.importorskip(
 )
 pytest.importorskip("PySide6.QtWidgets", reason="Qt widgets not available", exc_type=ImportError)
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QObject, Qt, Signal
 from PySide6.QtGui import QColor, QImage, QPixmap
 from PySide6.QtWidgets import QApplication, QWidget
 
 from iPhoto.gui.ui.widgets import people_dashboard_cards
+from iPhoto.gui.ui.widgets import people_dashboard_dialogs
 from iPhoto.gui.ui.widgets.people_dashboard import (
     GroupPeopleDialog,
     MergeConfirmDialog,
@@ -188,6 +189,47 @@ def test_group_people_dialog_defaults_and_shift_selects_range(qapp: QApplication
         "person-c",
         "person-d",
     }
+    dialog.close()
+
+
+def test_group_people_dialog_tile_updates_avatar_when_cover_ready(
+    monkeypatch, qapp: QApplication, tmp_path: Path
+) -> None:
+    class _FakeCoverCache(QObject):
+        coverReady = Signal(str)
+
+        def __init__(self) -> None:
+            super().__init__()
+            self._pixmaps: dict[str, QPixmap] = {}
+
+        def cached_pixmap(self, cache_key: str) -> QPixmap | None:
+            return self._pixmaps.get(cache_key)
+
+    fake_cache = _FakeCoverCache()
+    thumbnail_path = tmp_path / "face.jpg"
+    summaries = [
+        PersonSummary("person-a", "Alice", "face-a", 3, thumbnail_path, "2024-01-01T00:00:00Z"),
+    ]
+
+    def _fake_request(path: Path, _size: tuple[int, int]) -> tuple[str, QPixmap | None]:
+        assert path == thumbnail_path
+        return "cache-key", None
+
+    monkeypatch.setattr(people_dashboard_dialogs, "request_cover_pixmap", _fake_request)
+    monkeypatch.setattr(people_dashboard_dialogs, "people_cover_cache", lambda: fake_cache)
+
+    dialog = GroupPeopleDialog(summaries, dark_mode=False)
+    tile = dialog._tiles[0]
+    assert tile._avatar_pixmap() is None
+    assert tile._avatar is None
+
+    loaded = QPixmap(64, 64)
+    loaded.fill(QColor("#00AA55"))
+    fake_cache._pixmaps["cache-key"] = loaded
+    fake_cache.coverReady.emit("cache-key")
+    qapp.processEvents()
+
+    assert tile._avatar is loaded
     dialog.close()
 
 

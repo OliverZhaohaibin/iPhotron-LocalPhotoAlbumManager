@@ -26,9 +26,10 @@ from .people_dashboard_shared import (
     AVATAR_TILE_HEIGHT,
     AVATAR_TILE_WIDTH,
     PLACEHOLDER_BACKDROPS,
-    _pixmap_from_image_path,
     _qcolor,
     _widget_uses_dark_theme,
+    people_cover_cache,
+    request_cover_pixmap,
 )
 
 
@@ -187,8 +188,10 @@ class GroupAvatarTile(QWidget):
         self._dark_mode = dark_mode
         self._selected = False
         self._avatar: QPixmap | None = None
+        self._cover_cache_key: str | None = None
         self.setFixedSize(AVATAR_TILE_WIDTH, AVATAR_TILE_HEIGHT)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
+        people_cover_cache().coverReady.connect(self._handle_cover_ready)
 
     @property
     def person_id(self) -> str:
@@ -201,12 +204,21 @@ class GroupAvatarTile(QWidget):
         self.update()
 
     def _avatar_pixmap(self) -> QPixmap | None:
-        if self._avatar is None and self.summary.thumbnail_path is not None:
-            self._avatar = _pixmap_from_image_path(
+        if self._avatar is None and self._cover_cache_key is None and self.summary.thumbnail_path is not None:
+            self._cover_cache_key, self._avatar = request_cover_pixmap(
                 self.summary.thumbnail_path,
                 (AVATAR_SIZE * 2, AVATAR_SIZE * 2),
             )
         return self._avatar
+
+    def _handle_cover_ready(self, cache_key: str) -> None:
+        if cache_key != self._cover_cache_key or self._avatar is not None:
+            return
+        pixmap = people_cover_cache().cached_pixmap(cache_key)
+        if pixmap is None:
+            return
+        self._avatar = pixmap
+        self.update()
 
     def paintEvent(self, _event) -> None:  # noqa: N802
         painter = QPainter(self)

@@ -265,6 +265,8 @@ class PeopleCard(QWidget):
 
 class GroupCard(QWidget):
     activated = Signal(str)
+    _CARD_INSET = 4
+    _SHADOW_SAFE_BOTTOM = 18
 
     def __init__(
         self,
@@ -279,7 +281,7 @@ class GroupCard(QWidget):
         self._hovered = False
         self._artwork: QPixmap | None = None
         self._placeholder_artwork: QPixmap | None = None
-        self.setFixedSize(GROUP_CARD_WIDTH, GROUP_CARD_HEIGHT)
+        self.setFixedSize(GROUP_CARD_WIDTH, GROUP_CARD_HEIGHT + self._SHADOW_SAFE_BOTTOM)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         shadow = QGraphicsDropShadowEffect(self)
         shadow.setBlurRadius(30)
@@ -364,7 +366,12 @@ class GroupCard(QWidget):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
 
-        card_rect = QRectF(4, 4, GROUP_CARD_WIDTH - 8, GROUP_CARD_HEIGHT - 8)
+        card_rect = QRectF(
+            self._CARD_INSET,
+            self._CARD_INSET,
+            GROUP_CARD_WIDTH - self._CARD_INSET * 2,
+            GROUP_CARD_HEIGHT - self._CARD_INSET * 2,
+        )
         card_path = _rounded_path(card_rect, GROUP_CARD_RADIUS)
         painter.save()
         painter.setClipPath(card_path)

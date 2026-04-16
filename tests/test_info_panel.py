@@ -240,11 +240,11 @@ def test_info_panel_hidden_metadata_update_recomputes_height(qapp: QApplication)
     panel.close()
 
 
-def test_info_panel_linux_first_show_schedules_post_show_reflow(
+def test_info_panel_first_show_schedules_post_show_reflow(
     qapp: QApplication,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The panel should queue a follow-up geometry pass on the first show."""
+    """The panel should queue a deferred geometry reflow on the first show."""
 
     panel = InfoPanel()
     schedule = Mock()

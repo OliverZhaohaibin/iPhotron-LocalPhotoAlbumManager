@@ -310,7 +310,7 @@ class InfoPanel(QWidget):
         )
 
     def _schedule_post_show_reflow(self, *, recenter: bool) -> None:
-        """Queue a follow-up geometry pass for Linux first-show layout quirks."""
+        """Queue a deferred geometry reflow after show or visible content updates."""
 
         self._post_show_reflow_recenter = self._post_show_reflow_recenter or recenter
         if self._post_show_reflow_queued:
@@ -380,7 +380,9 @@ class InfoPanel(QWidget):
     # QWidget overrides
     # ------------------------------------------------------------------
     def eventFilter(self, watched: QObject, event: QEvent) -> bool:
-        if watched in (self._title_bar, self._title_label) and event.type() in self._DRAG_EVENT_TYPES:
+        is_title_target = watched in (self._title_bar, self._title_label)
+        is_drag_event = event.type() in self._DRAG_EVENT_TYPES
+        if is_title_target and is_drag_event:
             mouse_event = event  # type: ignore[assignment]
             if event.type() == QEvent.Type.MouseButtonPress and self._begin_drag(mouse_event):
                 mouse_event.accept()

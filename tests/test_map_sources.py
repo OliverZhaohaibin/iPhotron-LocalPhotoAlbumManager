@@ -1,7 +1,5 @@
 from pathlib import Path
 
-import sys
-
 from maps import map_sources
 from maps.map_sources import (
     DEFAULT_HELPER_RELATIVE_PATH,

@@ -65,7 +65,6 @@ def test_handle_render_result_skips_cache_write_during_shutdown(
     qapp: QApplication, tmp_path: Path
 ) -> None:
     service = PeopleCoverCacheService(tmp_path / "people-covers")
-    service._pending_tasks.add("cache-key")
     service.shutdown()
 
     image = QImage(20, 20, QImage.Format.Format_RGBA8888)

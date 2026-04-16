@@ -195,6 +195,8 @@ def test_group_people_dialog_defaults_and_shift_selects_range(qapp: QApplication
 def test_group_people_dialog_tile_updates_avatar_when_cover_ready(
     monkeypatch, qapp: QApplication, tmp_path: Path
 ) -> None:
+    cache_key = "face-a-cache-key"
+
     class _FakeCoverCache(QObject):
         coverReady = Signal(str)
 
@@ -213,7 +215,7 @@ def test_group_people_dialog_tile_updates_avatar_when_cover_ready(
 
     def _fake_request(path: Path, _size: tuple[int, int]) -> tuple[str, QPixmap | None]:
         assert path == thumbnail_path
-        return "cache-key", None
+        return cache_key, None
 
     monkeypatch.setattr(people_dashboard_dialogs, "request_cover_pixmap", _fake_request)
     monkeypatch.setattr(people_dashboard_dialogs, "people_cover_cache", lambda: fake_cache)
@@ -225,8 +227,8 @@ def test_group_people_dialog_tile_updates_avatar_when_cover_ready(
 
     loaded = QPixmap(64, 64)
     loaded.fill(QColor("#00AA55"))
-    fake_cache._pixmaps["cache-key"] = loaded
-    fake_cache.coverReady.emit("cache-key")
+    fake_cache._pixmaps[cache_key] = loaded
+    fake_cache.coverReady.emit(cache_key)
     qapp.processEvents()
 
     assert tile._avatar is loaded

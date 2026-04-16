@@ -48,7 +48,13 @@ class FaceRepository:
         if self._state_repo is not None:
             self._state_repo.initialize()
 
-    def replace_all(self, faces: list[FaceRecord], persons: list[PersonRecord]) -> None:
+    def replace_all(
+        self,
+        faces: list[FaceRecord],
+        persons: list[PersonRecord],
+        *,
+        sync_runtime_state: bool = True,
+    ) -> None:
         self.initialize()
         with closing(self._connect()) as conn:
             conn.execute("DELETE FROM persons")
@@ -103,9 +109,14 @@ class FaceRepository:
                 ],
             )
             conn.commit()
-        if self._state_repo is not None:
-            self._sync_person_cover_defaults()
-            self.refresh_all_group_assets()
+        if sync_runtime_state:
+            self.sync_runtime_state()
+
+    def sync_runtime_state(self) -> None:
+        if self._state_repo is None:
+            return
+        self._sync_person_cover_defaults()
+        self.refresh_all_group_assets()
 
     def get_all_faces(self) -> list[FaceRecord]:
         self.initialize()
@@ -119,6 +130,20 @@ class FaceRepository:
                 ORDER BY detected_at ASC, face_id ASC
                 """).fetchall()
         return [self._face_from_row(row) for row in rows]
+
+    def get_all_person_records(self) -> list[PersonRecord]:
+        self.initialize()
+        with closing(self._connect()) as conn:
+            rows = conn.execute(
+                """
+                SELECT
+                    person_id, name, key_face_id, face_count, center_embedding,
+                    created_at, updated_at
+                FROM persons
+                ORDER BY created_at ASC, person_id ASC
+                """
+            ).fetchall()
+        return [self._person_from_row(row) for row in rows]
 
     def remove_faces_for_assets(
         self,
@@ -623,4 +648,18 @@ class FaceRepository:
             detected_at=row["detected_at"],
             image_width=int(row["image_width"]),
             image_height=int(row["image_height"]),
+        )
+
+    @staticmethod
+    def _person_from_row(row: sqlite3.Row) -> PersonRecord:
+        center_blob = row["center_embedding"]
+        embedding_dim = int(len(center_blob) / 4) if center_blob else 0
+        return PersonRecord(
+            person_id=str(row["person_id"]),
+            name=row["name"],
+            key_face_id=str(row["key_face_id"]),
+            face_count=int(row["face_count"]),
+            center_embedding=_deserialize_embedding(center_blob, embedding_dim),
+            created_at=str(row["created_at"]),
+            updated_at=str(row["updated_at"]),
         )

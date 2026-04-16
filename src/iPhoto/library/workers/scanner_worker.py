@@ -197,19 +197,20 @@ class ScannerWorker(QRunnable):
         persistence fails, it logs the error, increments the failed count, and emits
         the `batchFailed` signal with the number of items in the failed chunk.
 
-        Regardless of whether persistence succeeds or fails, the `chunkReady` signal
-        is always emitted with the chunk. This ensures that downstream consumers are
-        notified of all processed chunks, even if some were not successfully stored.
+        `chunkReady` is emitted only for rows that were durably merged into the
+        repository. Downstream consumers such as `FaceScanWorker` treat the emitted
+        rows as authoritative persisted state, so failed batches must not leak
+        through this signal.
         """
         try:
-            store.append_rows(chunk)
+            emitted_chunk = store.merge_scan_rows(chunk)
         except Exception as e:
             LOGGER.error(f"Failed to persist chunk of {len(chunk)} items: {e}")
             self._failed_count += len(chunk)
             self._signals.batchFailed.emit(self._root, len(chunk))
-            # We continue even if DB write fails, though these items won't be persisted
+            return
 
-        self._signals.chunkReady.emit(self._root, chunk)
+        self._signals.chunkReady.emit(self._root, emitted_chunk)
 
     def cancel(self) -> None:
         """Request cancellation of the in-progress scan."""

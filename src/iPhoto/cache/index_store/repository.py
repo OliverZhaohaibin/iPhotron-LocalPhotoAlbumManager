@@ -30,11 +30,18 @@ from .migrations import SchemaMigrator
 from .queries import QueryBuilder
 from .recovery import RecoveryService
 from .row_mapper import db_row_to_dict, insert_rows, row_to_db_params
+from .scan_merge import merge_scan_rows as merge_scan_rows_payload
 
 logger = get_logger()
 
 # Database filename for the global index
 GLOBAL_INDEX_DB_NAME = "global_index.db"
+
+# SQLite supports at most SQLITE_MAX_VARIABLE_NUMBER bound parameters per query
+# (compile-time default 999, raised to 32766 in SQLite ≥3.32).  Use a
+# conservative chunk size so large scans never hit the limit regardless of
+# the SQLite version in use.
+_SQLITE_PARAM_CHUNK_SIZE = 900
 
 # Global singleton instance and lock for thread-safe access
 _global_instance: Optional["AssetRepository"] = None
@@ -133,7 +140,7 @@ class AssetRepository:
             )
             recovery.recover()
 
-    def transaction(self):
+    def transaction(self, *, begin_mode: str | None = None):
         """Context manager for batching multiple operations.
         
         Example:
@@ -141,7 +148,7 @@ class AssetRepository:
             ...     repo.upsert_row("a.jpg", {...})
             ...     repo.upsert_row("b.jpg", {...})
         """
-        return self._db_manager.transaction()
+        return self._db_manager.transaction(begin_mode=begin_mode)
 
     def close(self) -> None:
         """Close any active database connections.
@@ -169,6 +176,53 @@ class AssetRepository:
         """Merge *rows* into the index, replacing duplicates by ``rel`` key."""
         with self.transaction() as conn:
             self._insert_rows(conn, rows)
+
+    def merge_scan_rows(self, rows: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Merge scanned rows while preserving persisted library-managed state.
+
+        The SELECT for existing rows and the subsequent INSERT are performed
+        within the same transaction so the read/write is atomic and cannot
+        lose concurrent updates to ``face_status`` or other library-managed
+        fields.
+
+        Existing rows are fetched in chunks of at most
+        ``_SQLITE_PARAM_CHUNK_SIZE`` to avoid hitting SQLite's bound-parameter
+        limit when a large snapshot is passed (e.g. from
+        ``index_sync_service.update_index_snapshot``).
+        """
+
+        materialized_rows = [dict(row) for row in rows]
+        if not materialized_rows:
+            return []
+
+        # De-duplicate while preserving insertion order so each rel is queried
+        # at most once.
+        unique_rels: List[str] = list(
+            dict.fromkeys(str(row["rel"]) for row in materialized_rows if row.get("rel"))
+        )
+
+        with self.transaction(begin_mode="IMMEDIATE") as conn:
+            existing_rows_by_rel: Dict[str, Dict[str, Any]] = {}
+            if unique_rels:
+                conn.row_factory = sqlite3.Row
+                for offset in range(0, len(unique_rels), _SQLITE_PARAM_CHUNK_SIZE):
+                    chunk = unique_rels[offset : offset + _SQLITE_PARAM_CHUNK_SIZE]
+                    placeholders = ", ".join(["?"] * len(chunk))
+                    cursor = conn.execute(
+                        f"SELECT * FROM assets WHERE rel IN ({placeholders})",
+                        chunk,
+                    )
+                    for db_row in cursor:
+                        d = self._db_row_to_dict(db_row)
+                        rel_value = d.get("rel")
+                        if rel_value is not None:
+                            existing_rows_by_rel[str(rel_value)] = d
+                conn.row_factory = None
+
+            merged_rows = merge_scan_rows_payload(materialized_rows, existing_rows_by_rel)
+            self._insert_rows(conn, merged_rows)
+
+        return merged_rows
 
     def upsert_row(self, rel: str, row: Dict[str, Any]) -> None:
         """Insert or update a single row identified by *rel*."""

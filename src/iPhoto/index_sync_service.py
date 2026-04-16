@@ -100,10 +100,10 @@ def update_index_snapshot(
     if not fresh_rows:
         return
 
-    # Additive-only: only append new/updated rows, never delete
-    # append_rows uses INSERT OR REPLACE which is idempotent
+    # Additive-only: only append new/updated rows, never delete.
+    # Scan merges preserve persisted state fields such as face_status.
     try:
-        store.append_rows(materialised_snapshot)
+        store.merge_scan_rows(materialised_snapshot)
     except IndexCorruptedError:
         store.write_rows(materialised_snapshot)
 

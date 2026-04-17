@@ -284,12 +284,26 @@ class GalleryViewModel(BaseViewModel):
             return
 
         current_id = self._people_cluster_id
+        current_query = self.current_query.value
+
         if self._people_cluster_kind == "person":
             redirects = getattr(event, "person_redirects", {}) or {}
-            current_id = redirects.get(current_id, current_id)
+            changed_ids = set(getattr(event, "changed_person_ids", ()) or ())
         else:
             redirects = getattr(event, "group_redirects", {}) or {}
-            current_id = redirects.get(current_id, current_id)
+            changed_ids = set(getattr(event, "changed_group_ids", ()) or ())
+
+        changed_asset_ids = set(getattr(event, "changed_asset_ids", ()) or ())
+        asset_ids = getattr(current_query, "asset_ids", ()) if current_query is not None else ()
+        affected = (
+            current_id in changed_ids
+            or current_id in redirects
+            or bool(changed_asset_ids and asset_ids and changed_asset_ids.intersection(asset_ids))
+        )
+        if not affected:
+            return
+
+        current_id = redirects.get(current_id, current_id)
 
         if not current_id:
             self.return_from_cluster_gallery()

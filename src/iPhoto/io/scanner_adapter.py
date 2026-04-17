@@ -94,12 +94,13 @@ def process_media_paths(
             except Exception as exc:
                 try:
                     row = _fallback_row_for_path(root, path)
-                except OSError:
+                except OSError as os_exc:
                     LOGGER.warning(
-                        "Skipping %s because metadata extraction failed and no fallback row could be built: %s",
+                        "Skipping %s because metadata extraction failed (%s) "
+                        "and no fallback row could be built (%s)",
                         path,
                         exc,
-                        exc_info=True,
+                        os_exc,
                     )
                     continue
                 LOGGER.warning(

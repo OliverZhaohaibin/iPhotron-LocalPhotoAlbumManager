@@ -8,7 +8,7 @@ import threading
 import time
 from typing import Iterable
 
-from PySide6.QtCore import QObject, Qt, Signal, Slot
+from PySide6.QtCore import QCoreApplication, QObject, Qt, Signal, Slot
 
 from iPhoto.cache.index_store import get_global_repository
 from iPhoto.config import WORK_DIR_NAME
@@ -114,22 +114,29 @@ class PeopleIndexCoordinator(QObject):
                 clustered_faces=clustered_faces,
                 persons=persons,
             )
-            try:
-                self._mark_done_asset_ids(store, done_ids)
-                return self._emit_snapshot(
-                    changed_asset_ids=tuple(done_ids + retry_ids),
-                    changed_person_ids=changed_person_ids,
-                )
-            except Exception as exc:
-                LOGGER.error(
-                    "People snapshot committed for %s, but post-commit bookkeeping failed: %s",
-                    self._library_root,
-                    exc,
-                    exc_info=True,
-                )
-                raise PeopleSnapshotCommittedError(
-                    "Face scan committed, but updating scan bookkeeping failed."
-                ) from exc
+            # Emit the snapshot (inside the lock to serialise revision numbering)
+            # before releasing so that UI can update while bookkeeping retries.
+            event = self._emit_snapshot(
+                changed_asset_ids=tuple(done_ids + retry_ids),
+                changed_person_ids=changed_person_ids,
+            )
+
+        # Post-commit bookkeeping runs outside the coordinator lock so that
+        # rename/merge/group operations are not blocked during transient DB
+        # retries on the global asset-status store.
+        try:
+            self._mark_done_asset_ids(store, done_ids)
+            return event
+        except Exception as exc:
+            LOGGER.error(
+                "People snapshot committed for %s, but post-commit bookkeeping failed: %s",
+                self._library_root,
+                exc,
+                exc_info=True,
+            )
+            raise PeopleSnapshotCommittedError(
+                "Face scan committed, but updating scan bookkeeping failed."
+            ) from exc
 
     def rename_person(self, person_id: str, name_or_none: str | None) -> PeopleSnapshotEvent | None:
         if not person_id:
@@ -297,6 +304,12 @@ def get_people_index_coordinator(library_root: Path) -> PeopleIndexCoordinator:
         coordinator = _COORDINATORS.get(resolved)
         if coordinator is None:
             coordinator = PeopleIndexCoordinator(resolved)
+            # Ensure the coordinator lives on the Qt main thread so that the
+            # QueuedConnection on _scheduleEmit can deliver events via the GUI
+            # event loop regardless of which thread first calls this function.
+            app = QCoreApplication.instance()
+            if app is not None:
+                coordinator.moveToThread(app.thread())
             _COORDINATORS[resolved] = coordinator
         else:
             coordinator.resume()

@@ -69,7 +69,7 @@ class LocationSelectionSession:
     def full_assets(self) -> list:
         return list(self._full_assets)
 
-    def resolve_asset(self, rel: str):
+    def resolve_asset(self, rel: str) -> object | None:
         target = Path(rel).as_posix()
         for asset in self._full_assets:
             library_relative = getattr(asset, "library_relative", None)

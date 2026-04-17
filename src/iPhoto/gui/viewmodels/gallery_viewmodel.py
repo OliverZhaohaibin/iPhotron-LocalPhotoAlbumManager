@@ -201,18 +201,7 @@ class GalleryViewModel(BaseViewModel):
         asset = self._location_session.resolve_asset(rel)
         if asset is None:
             return
-        self._cluster_gallery_origin = "location"
-        selected_assets = [asset]
-        self.current_section.value = "cluster_gallery"
-        self.static_selection.value = "Location"
-        self.active_root.value = root
-        self.current_query.value = None
-        self.current_direct_assets.value = list(selected_assets)
-        self.can_return_to_map.value = True
-        self._location_session.set_mode("cluster_gallery")
-        self._store.load_selection(root, direct_assets=selected_assets, library_root=root)
-        self.cluster_gallery_mode_changed.emit(True)
-        self.route_requested.emit("gallery")
+        self.open_cluster_gallery([asset])
 
     def open_cluster_gallery(self, assets: list[Any]) -> None:
         root = self._context.library.root()

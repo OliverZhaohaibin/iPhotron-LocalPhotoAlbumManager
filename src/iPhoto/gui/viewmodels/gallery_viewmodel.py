@@ -12,6 +12,7 @@ from iPhoto.domain.models.core import MediaType
 from iPhoto.domain.models.query import AssetQuery
 from iPhoto.gui.coordinators.location_selection_session import LocationSelectionSession
 from iPhoto.gui.facade import AppFacade
+from iPhoto.library.geo_aggregator import _geotagged_asset_from_row
 
 from .base import BaseViewModel
 from .gallery_collection_store import GalleryCollectionStore
@@ -314,6 +315,37 @@ class GalleryViewModel(BaseViewModel):
     def return_to_map_from_cluster_gallery(self) -> None:
         self.return_from_cluster_gallery()
 
+    def handle_location_scan_chunk(self, scan_root: Path, chunk: list[dict]) -> None:
+        if self._location_session.mode == "inactive":
+            return
+        root = self._context.library.root()
+        if root is None or not self._scan_root_matches_location_context(scan_root, root):
+            return
+
+        changed = False
+        for row in chunk:
+            asset = _geotagged_asset_from_row(root, row)
+            if asset is not None:
+                changed = self._location_session.upsert_asset(asset) or changed
+                continue
+            rel = row.get("rel") if isinstance(row, dict) else None
+            if isinstance(rel, str) and rel:
+                changed = self._location_session.remove_asset(rel) or changed
+
+        if changed and self._location_session.mode == "map":
+            self.map_assets_changed.emit(self._location_session.full_assets(), root)
+
+    def handle_location_scan_finished(self, scan_root: Path, success: bool) -> None:
+        if not success or self._location_session.mode == "inactive":
+            return
+        root = self._context.library.root()
+        if root is None or not self._scan_root_matches_location_context(scan_root, root):
+            return
+
+        self._location_session.replace_assets(list(self._context.library.get_geotagged_assets()))
+        if self._location_session.mode == "map":
+            self.map_assets_changed.emit(self._location_session.full_assets(), root)
+
     def on_library_tree_updated(self) -> bool:
         self._location_session.invalidate()
         if self.is_location_context_active():
@@ -424,3 +456,15 @@ class GalleryViewModel(BaseViewModel):
         if rel_str in ("", "."):
             return None
         return rel_str
+
+    def _scan_root_matches_location_context(self, scan_root: Path, root: Path) -> bool:
+        try:
+            scan_root_resolved = scan_root.resolve()
+            root_resolved = root.resolve()
+        except OSError:
+            return False
+        return (
+            scan_root_resolved == root_resolved
+            or scan_root_resolved in root_resolved.parents
+            or root_resolved in scan_root_resolved.parents
+        )

@@ -69,6 +69,58 @@ class LocationSelectionSession:
     def full_assets(self) -> list:
         return list(self._full_assets)
 
+    def replace_assets(self, assets: list) -> None:
+        self._full_assets = sorted(
+            list(assets),
+            key=lambda asset: str(getattr(asset, "library_relative", "")),
+        )
+        self._has_snapshot = True
+        self._invalidated = False
+
+    def upsert_asset(self, asset: object) -> bool:
+        library_relative = getattr(asset, "library_relative", None)
+        if not isinstance(library_relative, str) or not library_relative:
+            return False
+
+        changed = False
+        updated_assets: list[object] = []
+        replaced = False
+        for existing in self._full_assets:
+            existing_rel = getattr(existing, "library_relative", None)
+            if existing_rel == library_relative:
+                updated_assets.append(asset)
+                replaced = True
+                if existing != asset:
+                    changed = True
+            else:
+                updated_assets.append(existing)
+        if not replaced:
+            updated_assets.append(asset)
+            changed = True
+
+        if changed:
+            self._full_assets = sorted(
+                updated_assets,
+                key=lambda current: str(getattr(current, "library_relative", "")),
+            )
+        self._has_snapshot = True
+        self._invalidated = False
+        return changed
+
+    def remove_asset(self, rel: str) -> bool:
+        target = Path(rel).as_posix()
+        filtered_assets = [
+            asset
+            for asset in self._full_assets
+            if Path(str(getattr(asset, "library_relative", ""))).as_posix() != target
+        ]
+        changed = len(filtered_assets) != len(self._full_assets)
+        if changed:
+            self._full_assets = filtered_assets
+        self._has_snapshot = True
+        self._invalidated = False
+        return changed
+
     def resolve_asset(self, rel: str) -> object | None:
         target = Path(rel).as_posix()
         for asset in self._full_assets:

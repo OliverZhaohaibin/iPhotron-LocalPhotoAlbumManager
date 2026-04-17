@@ -266,12 +266,16 @@ class ScanCoordinatorMixin:
         if not chunk:
             return
 
+        self._geotagged_assets_cache = None
+        self._geotagged_assets_cache_root = None
         if self._current_face_scanner is not None:
             self._current_face_scanner.enqueue_rows(chunk)
         self.scanChunkReady.emit(root, chunk)
 
     def _on_scan_finished(self, root: Path, rows: List[dict]) -> None:
         # Emit scanFinished for downstream handling (e.g., updating links or finalizing scan).
+        self._geotagged_assets_cache = None
+        self._geotagged_assets_cache_root = None
         self.scanFinished.emit(root, True)
         # Clear worker reference after emitting signal to prevent race conditions
         locker = QMutexLocker(self._scan_buffer_lock)

@@ -384,6 +384,8 @@ class MainCoordinator(QObject):
         self._context.library.treeUpdated.connect(self._on_library_tree_updated)
         self._facade.scanChunkReady.connect(self._gallery_store.handle_scan_chunk)
         self._facade.scanFinished.connect(self._gallery_store.handle_scan_finished)
+        self._context.library.scanChunkReady.connect(self._gallery_vm.handle_location_scan_chunk)
+        self._context.library.scanFinished.connect(self._gallery_vm.handle_location_scan_finished)
         self._gallery_vm.message_requested.connect(self._status_bar.show_message)
 
         # Grid interactions

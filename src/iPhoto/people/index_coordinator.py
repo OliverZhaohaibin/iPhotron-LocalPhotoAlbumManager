@@ -14,8 +14,8 @@ from iPhoto.cache.index_store import get_global_repository
 from iPhoto.config import WORK_DIR_NAME
 from iPhoto.utils.logging import get_logger
 
-from .pipeline import DetectedAssetFaces
-from .repository import FaceRepository, PeopleGroupRecord
+from .pipeline import DetectedAssetFaces, build_person_records_from_faces
+from .repository import FaceRecord, FaceRepository, PeopleGroupRecord
 from .scan_session import FaceScanSession
 from .status import FACE_STATUS_DONE, FACE_STATUS_RETRY
 
@@ -165,6 +165,58 @@ class PeopleIndexCoordinator(QObject):
                     changed_person_ids=(person_id,),
                 )
             return changed
+
+    def add_manual_face(
+        self,
+        face: FaceRecord,
+        *,
+        person_name: str | None = None,
+    ) -> PeopleSnapshotEvent | None:
+        if not face.face_id or not face.asset_id or not face.person_id:
+            return None
+        with self._lock:
+            if self._shutdown_requested:
+                return None
+            repository = self._repository()
+            state_repository = repository.state_repository
+            if state_repository is None:
+                return None
+
+            previous_faces = repository.get_all_faces()
+            previous_persons = repository.get_all_person_records()
+            try:
+                state_repository.upsert_manual_face(face)
+                all_faces = [*previous_faces, face]
+                names_by_person_id = {
+                    person.person_id: person.name for person in previous_persons
+                }
+                created_at_by_person_id = {
+                    person.person_id: person.created_at for person in previous_persons
+                }
+                for profile in state_repository.get_profiles():
+                    names_by_person_id[profile.person_id] = profile.name
+                    created_at_by_person_id[profile.person_id] = profile.created_at
+                if person_name is not None:
+                    names_by_person_id[str(face.person_id)] = str(person_name).strip() or None
+                    created_at_by_person_id.setdefault(str(face.person_id), face.detected_at)
+
+                persons = build_person_records_from_faces(
+                    all_faces,
+                    names_by_person_id=names_by_person_id,
+                    created_at_by_person_id=created_at_by_person_id,
+                )
+                repository.replace_all(all_faces, persons, sync_runtime_state=False)
+                repository.sync_runtime_state()
+                state_repository.sync_scan_results(persons, all_faces)
+            except Exception:
+                state_repository.delete_manual_face(face.face_id)
+                repository.replace_all(previous_faces, previous_persons, sync_runtime_state=False)
+                repository.sync_runtime_state()
+                raise
+            return self._emit_snapshot(
+                changed_asset_ids=(face.asset_id,),
+                changed_person_ids=(str(face.person_id),),
+            )
 
     def set_person_order(self, person_ids: Iterable[str]) -> PeopleSnapshotEvent | None:
         ordered_ids = tuple(str(person_id) for person_id in person_ids if person_id)

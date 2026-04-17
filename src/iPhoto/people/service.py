@@ -4,12 +4,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+import uuid
 
 from iPhoto.cache.index_store import get_global_repository
 from iPhoto.config import WORK_DIR_NAME
 from iPhoto.domain.models.query import AssetQuery
 
 from .index_coordinator import get_people_index_coordinator
+from .pipeline import FaceClusterPipeline, ManualFaceValidationError
 from .repository import (
     AssetFaceAnnotation,
     FaceRepository,
@@ -29,6 +31,14 @@ class FaceLibraryPaths:
     state_db_path: Path
     thumbnail_dir: Path
     model_dir: Path
+
+
+@dataclass(frozen=True)
+class ManualFaceAddResult:
+    asset_id: str
+    face_id: str
+    person_id: str
+    created_new_person: bool
 
 
 def shared_face_model_dir() -> Path:
@@ -178,6 +188,66 @@ class PeopleService:
                 return []
         return repository.list_asset_face_annotations(asset_id)
 
+    def list_person_name_suggestions(self) -> list[PersonSummary]:
+        return [
+            summary
+            for summary in self.list_clusters()
+            if isinstance(summary.name, str) and summary.name.strip()
+        ]
+
+    def add_manual_face(
+        self,
+        *,
+        asset_id: str,
+        requested_box: tuple[int, int, int, int],
+        name_or_none: str | None,
+        person_id: str | None = None,
+    ) -> ManualFaceAddResult:
+        repository = self.repository()
+        paths = self.paths()
+        library_root = self._library_root
+        if repository is None or paths is None or library_root is None or not asset_id:
+            raise ManualFaceValidationError("Manual face tagging is unavailable right now.")
+
+        row = get_global_repository(library_root).get_rows_by_ids([asset_id]).get(asset_id)
+        if row is None:
+            raise ManualFaceValidationError("The selected photo is no longer available.")
+        asset_rel = str(row.get("rel") or row.get("path") or "").strip()
+        if not asset_rel:
+            raise ManualFaceValidationError("The selected photo path could not be resolved.")
+        image_path = (library_root / asset_rel).resolve()
+        if not image_path.exists():
+            raise ManualFaceValidationError("The selected photo file could not be found.")
+
+        resolved_person_id, preferred_name, created_new_person = self._resolve_manual_face_person(
+            repository,
+            person_id=person_id,
+            name_or_none=name_or_none,
+        )
+        pipeline = FaceClusterPipeline(model_root=paths.model_dir)
+        existing_faces = [
+            face for face in repository.get_all_faces() if face.asset_id == asset_id
+        ]
+        face = pipeline.build_manual_face_record(
+            asset_id=asset_id,
+            asset_rel=asset_rel,
+            image_path=image_path,
+            requested_box=requested_box,
+            thumbnail_dir=paths.thumbnail_dir,
+            target_person_id=resolved_person_id,
+            existing_faces=existing_faces,
+        )
+        get_people_index_coordinator(library_root).add_manual_face(
+            face,
+            person_name=preferred_name,
+        )
+        return ManualFaceAddResult(
+            asset_id=asset_id,
+            face_id=face.face_id,
+            person_id=resolved_person_id,
+            created_new_person=created_new_person,
+        )
+
     def face_status_counts(self) -> dict[str, int]:
         if self._library_root is None:
             return {}
@@ -311,6 +381,32 @@ class PeopleService:
             if path is not None:
                 return path
         return None
+
+    def _resolve_manual_face_person(
+        self,
+        repository: FaceRepository,
+        *,
+        person_id: str | None,
+        name_or_none: str | None,
+    ) -> tuple[str, str | None, bool]:
+        summaries = repository.get_person_summaries()
+        summaries_by_id = {summary.person_id: summary for summary in summaries}
+        if person_id and person_id in summaries_by_id:
+            return str(person_id), None, False
+
+        normalized_name = str(name_or_none or "").strip()
+        if not normalized_name:
+            raise ManualFaceValidationError("Please enter a name before saving the face.")
+
+        matching = [
+            summary
+            for summary in summaries
+            if isinstance(summary.name, str)
+            and summary.name.strip().casefold() == normalized_name.casefold()
+        ]
+        if len(matching) == 1:
+            return matching[0].person_id, None, False
+        return uuid.uuid4().hex, normalized_name, True
 
 
 def _format_group_name(names: object) -> str:

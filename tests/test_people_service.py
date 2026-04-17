@@ -63,6 +63,7 @@ def _person_record(
 ) -> PersonRecord:
     embedding = np.asarray([1.0, 0.0, 0.0], dtype=np.float32)
     timestamp = _now_iso()
+    sample_count = int(face_count)
     return PersonRecord(
         person_id=person_id,
         name=name,
@@ -71,6 +72,8 @@ def _person_record(
         center_embedding=embedding,
         created_at=timestamp,
         updated_at=timestamp,
+        sample_count=sample_count,
+        profile_state="stable" if sample_count >= 3 else "unstable",
     )
 
 
@@ -112,6 +115,7 @@ def _person_record_with_embedding(
     embedding: np.ndarray,
 ) -> PersonRecord:
     timestamp = _now_iso()
+    sample_count = int(face_count)
     return PersonRecord(
         person_id=person_id,
         name=name,
@@ -120,6 +124,8 @@ def _person_record_with_embedding(
         center_embedding=embedding,
         created_at=timestamp,
         updated_at=timestamp,
+        sample_count=sample_count,
+        profile_state="stable" if sample_count >= 3 else "unstable",
     )
 
 
@@ -443,6 +449,46 @@ def test_people_service_lists_asset_face_annotations_and_preserves_names(tmp_pat
     service.rename_cluster("person-a", "Alice")
     updated = service.list_asset_face_annotations("asset-a")
     assert updated[0].display_name == "Alice"
+
+
+def test_people_service_lists_person_name_suggestions_for_named_people_only(tmp_path: Path) -> None:
+    library_root = tmp_path / "Library"
+    library_root.mkdir()
+    global_repo = get_global_repository(library_root)
+    global_repo.write_rows(
+        [
+            {"rel": "album/a.jpg", "id": "asset-a", "media_type": 0, "face_status": "done"},
+            {"rel": "album/b.jpg", "id": "asset-b", "media_type": 0, "face_status": "done"},
+        ]
+    )
+
+    service = PeopleService(library_root)
+    repository = service.repository()
+    assert repository is not None
+
+    faces = [
+        _face_record(
+            face_id="face-a",
+            asset_id="asset-a",
+            asset_rel="album/a.jpg",
+            person_id="person-a",
+        ),
+        _face_record(
+            face_id="face-b",
+            asset_id="asset-b",
+            asset_rel="album/b.jpg",
+            person_id="person-b",
+        ),
+    ]
+    persons = [
+        _person_record(person_id="person-a", key_face_id="face-a", face_count=1, name="Alice"),
+        _person_record(person_id="person-b", key_face_id="face-b", face_count=1, name=None),
+    ]
+    repository.replace_all(faces, persons)
+
+    suggestions = service.list_person_name_suggestions()
+
+    assert [(summary.person_id, summary.name) for summary in suggestions] == [("person-a", "Alice")]
 
 
 def test_people_service_dashboard_stays_stable_until_face_scan_session_commits(tmp_path: Path) -> None:

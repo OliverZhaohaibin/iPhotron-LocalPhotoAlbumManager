@@ -11,6 +11,7 @@ pytest.importorskip("PySide6", reason="PySide6 is required for playback coordina
 from iPhoto.gui.coordinators.playback_coordinator import PlaybackCoordinator
 from iPhoto.gui.ui.tasks.info_panel_metadata_worker import InfoPanelMetadataResult
 from iPhoto.gui.viewmodels.detail_viewmodel import DetailPresentation
+from iPhoto.people.repository import AssetFaceAnnotation
 
 
 def _make_presentation(
@@ -483,3 +484,148 @@ def test_ready_enrichment_is_cached_without_touching_other_asset_panel() -> None
 
     coordinator._info_panel.set_asset_metadata.assert_not_called()
     assert coordinator._info_panel_metadata_cache[str(Path("/fake/video.mp4"))]["frame_rate"] == 59.94
+
+
+def test_handle_manual_face_submitted_queues_background_worker() -> None:
+    coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
+    coordinator._manual_face_add_inflight = False
+    coordinator._pending_manual_face_annotations = {}
+    coordinator._pending_manual_face_sequence = 0
+    coordinator._current_presentation = _make_presentation(
+        path="/fake/photo.jpg",
+        asset_id="asset-photo",
+        is_video=False,
+    )
+    coordinator._face_name_overlay = Mock()
+    coordinator._people_service = Mock(library_root=Mock(return_value=Path("/fake/library")))
+
+    fake_worker = SimpleNamespace(
+        signals=SimpleNamespace(
+            ready=Mock(connect=Mock()),
+            error=Mock(connect=Mock()),
+            finished=Mock(connect=Mock()),
+        )
+    )
+    fake_pool = Mock(start=Mock())
+
+    with patch(
+        "iPhoto.gui.coordinators.playback_coordinator.ManualFaceAddWorker",
+        return_value=fake_worker,
+    ) as worker_cls, patch(
+        "iPhoto.gui.coordinators.playback_coordinator.QThreadPool.globalInstance",
+        return_value=fake_pool,
+    ):
+        PlaybackCoordinator._handle_manual_face_submitted(
+            coordinator,
+            {
+                "requested_box": (10, 20, 30, 40),
+                "name": "Alice",
+                "person_id": "person-a",
+            },
+        )
+
+    coordinator._face_name_overlay.set_manual_face_busy.assert_called_once_with(True)
+    assert coordinator._manual_face_add_inflight is True
+    worker_cls.assert_called_once_with(
+        library_root=Path("/fake/library"),
+        asset_id="asset-photo",
+        requested_box=(10, 20, 30, 40),
+        name_or_none="Alice",
+        person_id="person-a",
+    )
+    fake_pool.start.assert_called_once_with(fake_worker, -1)
+
+
+def test_handle_manual_face_submitted_immediately_refreshes_info_panel_with_pending_face() -> None:
+    coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
+    coordinator._manual_face_add_inflight = False
+    coordinator._pending_manual_face_annotations = {}
+    coordinator._pending_manual_face_sequence = 0
+    coordinator._current_presentation = _make_presentation(
+        path="/fake/photo.jpg",
+        asset_id="asset-photo",
+        is_video=False,
+    )
+    coordinator._face_name_overlay = Mock()
+    coordinator._people_service = Mock(library_root=Mock(return_value=Path("/fake/library")))
+    coordinator._info_panel = Mock()
+    existing_face = AssetFaceAnnotation(
+        face_id="existing-face",
+        person_id="person-existing",
+        display_name="Existing",
+        box_x=1,
+        box_y=2,
+        box_w=3,
+        box_h=4,
+        image_width=100,
+        image_height=80,
+    )
+    coordinator._load_face_name_annotations = Mock(return_value=[existing_face])
+
+    fake_worker = SimpleNamespace(
+        signals=SimpleNamespace(
+            ready=Mock(connect=Mock()),
+            error=Mock(connect=Mock()),
+            finished=Mock(connect=Mock()),
+        )
+    )
+    fake_pool = Mock(start=Mock())
+
+    with patch(
+        "iPhoto.gui.coordinators.playback_coordinator.ManualFaceAddWorker",
+        return_value=fake_worker,
+    ), patch(
+        "iPhoto.gui.coordinators.playback_coordinator.QThreadPool.globalInstance",
+        return_value=fake_pool,
+    ):
+        PlaybackCoordinator._handle_manual_face_submitted(
+            coordinator,
+            {
+                "requested_box": (10, 20, 30, 40),
+                "name": "Alice",
+                "person_id": "person-a",
+            },
+        )
+
+    displayed_faces = coordinator._info_panel.set_asset_faces.call_args.args[0]
+    assert len(displayed_faces) == 2
+    assert displayed_faces[0] == existing_face
+    assert displayed_faces[1].face_id == "pending-manual-1"
+    assert displayed_faces[1].display_name == "Alice"
+    assert displayed_faces[1].person_id == "person-a"
+    assert displayed_faces[1].is_manual is True
+
+
+def test_handle_manual_face_error_removes_pending_info_panel_face() -> None:
+    coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
+    coordinator._current_presentation = _make_presentation(
+        path="/fake/photo.jpg",
+        asset_id="asset-photo",
+        is_video=False,
+    )
+    coordinator._face_name_overlay = Mock()
+    coordinator._info_panel = Mock()
+    coordinator._pending_manual_face_annotations = {
+        "asset-photo": [
+            AssetFaceAnnotation(
+                face_id="pending-manual-1",
+                person_id="person-a",
+                display_name="Alice",
+                box_x=10,
+                box_y=20,
+                box_w=30,
+                box_h=40,
+                image_width=100,
+                image_height=80,
+                is_manual=True,
+            )
+        ]
+    }
+    coordinator._load_face_name_annotations = Mock(return_value=[])
+
+    PlaybackCoordinator._handle_manual_face_error(coordinator, "No face detected")
+
+    coordinator._info_panel.set_asset_faces.assert_called_once_with([])
+    assert coordinator._pending_manual_face_annotations == {}
+    coordinator._face_name_overlay.set_manual_face_busy.assert_called_once_with(False)
+    coordinator._face_name_overlay.show_manual_error.assert_called_once_with("No face detected")

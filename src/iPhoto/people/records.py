@@ -26,6 +26,7 @@ class FaceRecord:
     detected_at: str
     image_width: int
     image_height: int
+    is_manual: bool = False
 
 
 @dataclass(frozen=True)
@@ -37,6 +38,8 @@ class PersonRecord:
     center_embedding: np.ndarray
     created_at: str
     updated_at: str
+    sample_count: int = 0
+    profile_state: str = "unstable"
 
 
 @dataclass(frozen=True)
@@ -80,6 +83,8 @@ class AssetFaceAnnotation:
     box_h: int
     image_width: int
     image_height: int
+    thumbnail_path: Path | None = None
+    is_manual: bool = False
 
 
 @dataclass(frozen=True)
@@ -90,3 +95,5 @@ class PersonProfile:
     embedding_dim: int
     created_at: str
     updated_at: str
+    sample_count: int = 0
+    profile_state: str = "unstable"

@@ -24,6 +24,7 @@ from .repository_utils import (
     _unique_person_ids,
     _utc_now_iso,
     compute_cluster_center,
+    profile_state_for_sample_count,
 )
 from .state_repository import FaceStateRepository
 
@@ -59,13 +60,29 @@ class FaceRepository:
         with closing(self._connect()) as conn:
             conn.execute("DELETE FROM persons")
             conn.execute("DELETE FROM faces")
+            person_rows = []
+            for person in persons:
+                sample_count = max(int(person.sample_count), int(person.face_count))
+                person_rows.append(
+                    (
+                        person.person_id,
+                        _normalize_name(person.name),
+                        person.key_face_id,
+                        person.face_count,
+                        _serialize_embedding(person.center_embedding),
+                        person.created_at,
+                        person.updated_at,
+                        sample_count,
+                        profile_state_for_sample_count(sample_count),
+                    )
+                )
             conn.executemany(
                 """
                 INSERT INTO faces (
                     face_id, face_key, asset_id, asset_rel, box_x, box_y, box_w, box_h,
                     confidence, embedding, embedding_dim, thumbnail_path, person_id,
-                    detected_at, image_width, image_height
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    detected_at, image_width, image_height, is_manual
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 [
                     (
@@ -85,6 +102,7 @@ class FaceRepository:
                         face.detected_at,
                         face.image_width,
                         face.image_height,
+                        1 if face.is_manual else 0,
                     )
                     for face in faces
                 ],
@@ -92,21 +110,11 @@ class FaceRepository:
             conn.executemany(
                 """
                 INSERT INTO persons (
-                    person_id, name, key_face_id, face_count, center_embedding, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    person_id, name, key_face_id, face_count, center_embedding,
+                    created_at, updated_at, sample_count, profile_state
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                [
-                    (
-                        person.person_id,
-                        _normalize_name(person.name),
-                        person.key_face_id,
-                        person.face_count,
-                        _serialize_embedding(person.center_embedding),
-                        person.created_at,
-                        person.updated_at,
-                    )
-                    for person in persons
-                ],
+                person_rows,
             )
             conn.commit()
         if sync_runtime_state:
@@ -125,7 +133,7 @@ class FaceRepository:
                 SELECT
                     face_id, face_key, asset_id, asset_rel, box_x, box_y, box_w, box_h,
                     confidence, embedding, embedding_dim, thumbnail_path, person_id,
-                    detected_at, image_width, image_height
+                    detected_at, image_width, image_height, is_manual
                 FROM faces
                 ORDER BY detected_at ASC, face_id ASC
                 """).fetchall()
@@ -138,7 +146,7 @@ class FaceRepository:
                 """
                 SELECT
                     person_id, name, key_face_id, face_count, center_embedding,
-                    created_at, updated_at
+                    created_at, updated_at, sample_count, profile_state
                 FROM persons
                 ORDER BY created_at ASC, person_id ASC
                 """
@@ -318,7 +326,9 @@ class FaceRepository:
                     faces.box_w,
                     faces.box_h,
                     faces.image_width,
-                    faces.image_height
+                    faces.image_height,
+                    faces.thumbnail_path,
+                    faces.is_manual
                 FROM faces
                 LEFT JOIN persons ON persons.person_id = faces.person_id
                 WHERE faces.asset_id = ?
@@ -337,6 +347,12 @@ class FaceRepository:
                 box_h=int(row["box_h"]),
                 image_width=int(row["image_width"]),
                 image_height=int(row["image_height"]),
+                thumbnail_path=(
+                    (self._db_path.parent / str(row["thumbnail_path"])).resolve()
+                    if row["thumbnail_path"]
+                    else None
+                ),
+                is_manual=bool(int(row["is_manual"] or 0)),
             )
             for row in rows
             if row["face_id"]
@@ -407,7 +423,7 @@ class FaceRepository:
                 SELECT
                     face_id, face_key, asset_id, asset_rel, box_x, box_y, box_w, box_h,
                     confidence, embedding, embedding_dim, thumbnail_path, person_id,
-                    detected_at, image_width, image_height
+                    detected_at, image_width, image_height, is_manual
                 FROM faces
                 WHERE person_id IN (?, ?)
                 ORDER BY detected_at ASC, face_id ASC
@@ -462,14 +478,17 @@ class FaceRepository:
             conn.execute(
                 """
                 INSERT INTO persons (
-                    person_id, name, key_face_id, face_count, center_embedding, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    person_id, name, key_face_id, face_count, center_embedding,
+                    created_at, updated_at, sample_count, profile_state
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(person_id) DO UPDATE SET
                     name = excluded.name,
                     key_face_id = excluded.key_face_id,
                     face_count = excluded.face_count,
                     center_embedding = excluded.center_embedding,
-                    updated_at = excluded.updated_at
+                    updated_at = excluded.updated_at,
+                    sample_count = excluded.sample_count,
+                    profile_state = excluded.profile_state
                 """,
                 (
                     target_person_id,
@@ -479,6 +498,8 @@ class FaceRepository:
                     _serialize_embedding(center_embedding),
                     target_created_at,
                     updated_at,
+                    len(merged_faces),
+                    profile_state_for_sample_count(len(merged_faces)),
                 ),
             )
             conn.execute("DELETE FROM persons WHERE person_id = ?", (source_person_id,))
@@ -491,6 +512,7 @@ class FaceRepository:
                 center_embedding=center_embedding,
                 target_name=target_name,
                 target_created_at=target_created_at,
+                sample_count=len(merged_faces),
             )
             self._sync_person_cover_defaults()
             self.refresh_all_group_assets()
@@ -538,12 +560,12 @@ class FaceRepository:
         with closing(self._connect()) as conn:
             rows = conn.execute(
                 f"""
-                SELECT asset_id, MAX(detected_at) AS last_detected_at
+                SELECT asset_id, MAX(detected_at) AS last_detected_at, MAX(rowid) AS last_face_rowid
                 FROM faces
                 WHERE person_id IN ({placeholders})
                 GROUP BY asset_id
                 HAVING COUNT(DISTINCT person_id) = ?
-                ORDER BY last_detected_at DESC, asset_id ASC
+                ORDER BY last_detected_at DESC, last_face_rowid DESC, asset_id ASC
                 """,
                 [*members, len(members)],
             ).fetchall()
@@ -645,9 +667,16 @@ class FaceRepository:
                 person_id TEXT,
                 detected_at TEXT NOT NULL,
                 image_width INTEGER NOT NULL,
-                image_height INTEGER NOT NULL
+                image_height INTEGER NOT NULL,
+                is_manual INTEGER NOT NULL DEFAULT 0
             )
             """)
+        FaceRepository._ensure_column(
+            conn,
+            "faces",
+            "is_manual",
+            "INTEGER NOT NULL DEFAULT 0",
+        )
         conn.execute("""
             CREATE TABLE IF NOT EXISTS persons (
                 person_id TEXT PRIMARY KEY,
@@ -656,9 +685,23 @@ class FaceRepository:
                 face_count INTEGER NOT NULL,
                 center_embedding BLOB NOT NULL,
                 created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL
+                updated_at TEXT NOT NULL,
+                sample_count INTEGER NOT NULL DEFAULT 0,
+                profile_state TEXT NOT NULL DEFAULT 'unstable'
             )
             """)
+        FaceRepository._ensure_column(
+            conn,
+            "persons",
+            "sample_count",
+            "INTEGER NOT NULL DEFAULT 0",
+        )
+        FaceRepository._ensure_column(
+            conn,
+            "persons",
+            "profile_state",
+            "TEXT NOT NULL DEFAULT 'unstable'",
+        )
         conn.execute("CREATE INDEX IF NOT EXISTS idx_faces_person_id ON faces(person_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_faces_face_key ON faces(face_key)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_faces_asset_id ON faces(asset_id)")
@@ -683,6 +726,7 @@ class FaceRepository:
             detected_at=row["detected_at"],
             image_width=int(row["image_width"]),
             image_height=int(row["image_height"]),
+            is_manual=bool(int(row["is_manual"] or 0)),
         )
 
     @staticmethod
@@ -697,4 +741,22 @@ class FaceRepository:
             center_embedding=_deserialize_embedding(center_blob, embedding_dim),
             created_at=str(row["created_at"]),
             updated_at=str(row["updated_at"]),
+            sample_count=int(row["sample_count"] or row["face_count"] or 0),
+            profile_state=str(
+                row["profile_state"]
+                or profile_state_for_sample_count(int(row["sample_count"] or row["face_count"] or 0))
+            ),
         )
+
+    @staticmethod
+    def _ensure_column(
+        conn: sqlite3.Connection,
+        table_name: str,
+        column_name: str,
+        definition: str,
+    ) -> None:
+        columns = {
+            str(row["name"]) for row in conn.execute(f"PRAGMA table_info({table_name})").fetchall()
+        }
+        if column_name not in columns:
+            conn.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {definition}")

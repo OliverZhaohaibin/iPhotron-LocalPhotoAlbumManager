@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any, Mapping, Optional
 
 from PySide6.QtCore import QDateTime, QEvent, QLocale, QObject, QRectF, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QMouseEvent, QPainter, QPainterPath, QPalette, QShowEvent
+from PySide6.QtGui import QColor, QMouseEvent, QPainter, QPainterPath, QPalette, QPixmap, QShowEvent
 from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
@@ -20,6 +20,8 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+
+from iPhoto.people.repository import AssetFaceAnnotation
 
 from ..icons import load_icon
 from .main_window_metrics import TITLE_BAR_HEIGHT, WINDOW_CONTROL_BUTTON_SIZE, WINDOW_CONTROL_GLYPH_SIZE
@@ -65,6 +67,7 @@ class InfoPanel(QWidget):
     _SHADOW_MAX_ALPHA = 18
     _SHADOW_RADIUS_GROWTH = 0.5
     dismissed = Signal()
+    manualFaceAddRequested = Signal()
     _DRAG_EVENT_TYPES = frozenset(
         (
             QEvent.Type.MouseButtonPress,
@@ -87,6 +90,7 @@ class InfoPanel(QWidget):
 
         self._metadata: Optional[dict[str, Any]] = None
         self._current_rel: Optional[str] = None
+        self._asset_faces: list[AssetFaceAnnotation] = []
         self._drag_active = False
         self._drag_offset = None
         self._centered = False
@@ -170,6 +174,24 @@ class InfoPanel(QWidget):
         exposure_layout.addWidget(self._exposure_label)
         content_layout.addWidget(exposure_container)
 
+        self._face_separator = QFrame(self)
+        self._face_separator.setFrameShape(QFrame.HLine)
+        self._face_separator.setFrameShadow(QFrame.Sunken)
+        content_layout.addWidget(self._face_separator)
+
+        self._face_container = QWidget(self)
+        self._face_layout = QHBoxLayout(self._face_container)
+        self._face_layout.setContentsMargins(0, 0, 0, 0)
+        self._face_layout.setSpacing(8)
+        self._face_layout.addStretch(1)
+        self._face_add_button = QToolButton(self._face_container)
+        self._face_add_button.setIcon(load_icon("plus.circle.svg"))
+        self._face_add_button.setIconSize(WINDOW_CONTROL_GLYPH_SIZE)
+        self._face_add_button.setAutoRaise(True)
+        self._face_add_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._face_add_button.clicked.connect(self.manualFaceAddRequested.emit)
+        content_layout.addWidget(self._face_container)
+
         content_layout.addStretch(1)
         layout.addWidget(content, 1)
 
@@ -209,6 +231,13 @@ class InfoPanel(QWidget):
         if self.isVisible():
             self._schedule_post_show_reflow(recenter=False)
 
+    def set_asset_faces(self, annotations: list[AssetFaceAnnotation]) -> None:
+        self._asset_faces = list(annotations)
+        self._rebuild_face_strip()
+        self._refresh_panel_geometry()
+        if self.isVisible():
+            self._schedule_post_show_reflow(recenter=False)
+
     def clear(self) -> None:
         """Reset the panel to an empty state without hiding the window."""
 
@@ -224,6 +253,7 @@ class InfoPanel(QWidget):
         ):
             label.clear()
         self._exposure_label.setText("No metadata available for this item.")
+        self.set_asset_faces([])
         self._refresh_panel_geometry()
         if self.isVisible():
             self._schedule_post_show_reflow(recenter=False)
@@ -267,6 +297,37 @@ class InfoPanel(QWidget):
             QSizePolicy.Policy.Expanding,
             QSizePolicy.Policy.Minimum,
         )
+        return label
+
+    def _rebuild_face_strip(self) -> None:
+        while self._face_layout.count() > 0:
+            item = self._face_layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                if widget is self._face_add_button:
+                    widget.hide()
+                else:
+                    widget.deleteLater()
+        for annotation in self._asset_faces:
+            self._face_layout.addWidget(self._make_face_avatar(annotation))
+        self._face_add_button.show()
+        self._face_layout.addWidget(self._face_add_button)
+        self._face_layout.addStretch(1)
+        self._face_separator.setVisible(True)
+        self._face_container.setVisible(True)
+
+    def _make_face_avatar(self, annotation: AssetFaceAnnotation) -> QLabel:
+        label = QLabel(self._face_container)
+        label.setFixedSize(34, 34)
+        pixmap = _avatar_pixmap(annotation.thumbnail_path)
+        if pixmap is not None:
+            label.setPixmap(pixmap)
+        else:
+            label.setStyleSheet(
+                "QLabel { background-color: rgba(207, 214, 225, 220); border-radius: 17px; }"
+            )
+            label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            label.setText(" ")
         return label
 
     def _refresh_panel_geometry(self, *, recenter: bool = False) -> None:
@@ -364,7 +425,14 @@ class InfoPanel(QWidget):
             return True
         if self._drag_offset is None:
             return True
-        self.move(event.globalPosition().toPoint() - self._drag_offset)
+        target = event.globalPosition().toPoint() - self._drag_offset
+        self.move(target)
+        handle = self.windowHandle()
+        if handle is not None:
+            try:
+                handle.setPosition(target)
+            except RuntimeError:
+                pass
         return True
 
     def _end_drag(self) -> bool:
@@ -802,3 +870,28 @@ class InfoPanel(QWidget):
             except ValueError:
                 return None
         return None
+
+
+def _avatar_pixmap(path: Path | None) -> QPixmap | None:
+    if path is None or not path.exists():
+        return None
+    source = QPixmap(str(path))
+    if source.isNull():
+        return None
+    size = 34
+    scaled = source.scaled(
+        size,
+        size,
+        Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+        Qt.TransformationMode.SmoothTransformation,
+    )
+    rounded = QPixmap(size, size)
+    rounded.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(rounded)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+    clip = QPainterPath()
+    clip.addEllipse(QRectF(0.0, 0.0, float(size), float(size)))
+    painter.setClipPath(clip)
+    painter.drawPixmap(0, 0, scaled)
+    painter.end()
+    return rounded

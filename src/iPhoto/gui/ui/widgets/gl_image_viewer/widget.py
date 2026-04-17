@@ -671,6 +671,33 @@ class GLImageViewer(QRhiWidget):
         )
         return self._zoom_ctrl.image_to_viewport(logical_x, logical_y)
 
+    def viewport_to_image(
+        self,
+        point: QPointF,
+        *,
+        image_width: float | None = None,
+        image_height: float | None = None,
+    ) -> QPointF:
+        """Map a viewport-space point back into original image coordinates."""
+
+        logical_point = self._zoom_ctrl.viewport_to_image(point)
+        texture_width = float(image_width if image_width is not None else self._texture_dimensions()[0])
+        texture_height = float(
+            image_height if image_height is not None else self._texture_dimensions()[1]
+        )
+        if texture_width <= 0.0 or texture_height <= 0.0:
+            return QPointF()
+        _, rotate_steps, flip_horizontal = self._rotation_parameters()
+        image_x, image_y = geometry.logical_point_to_texture(
+            logical_point.x(),
+            logical_point.y(),
+            texture_width=texture_width,
+            texture_height=texture_height,
+            rotate_steps=rotate_steps,
+            flip_horizontal=flip_horizontal,
+        )
+        return QPointF(image_x, image_y)
+
     def image_rect_to_viewport(
         self,
         x: float,

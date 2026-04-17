@@ -18,6 +18,7 @@ from .repository_utils import (
     _serialize_embedding,
     _unique_person_ids,
     _utc_now_iso,
+    profile_state_for_sample_count,
 )
 
 
@@ -37,24 +38,123 @@ class FaceStateRepository:
     def get_profiles(self) -> list[PersonProfile]:
         self.initialize()
         with closing(self._connect()) as conn:
+            inferred_sample_counts = {
+                str(row["person_id"]): int(row["sample_count"] or 0)
+                for row in conn.execute(
+                    """
+                    SELECT person_id, COUNT(*) AS sample_count
+                    FROM face_keys
+                    GROUP BY person_id
+                    """
+                ).fetchall()
+            }
             rows = conn.execute("""
-                SELECT person_id, name, center_embedding, embedding_dim, created_at, updated_at
+                SELECT
+                    person_id,
+                    name,
+                    center_embedding,
+                    embedding_dim,
+                    created_at,
+                    updated_at,
+                    sample_count,
+                    profile_state
                 FROM person_profiles
                 """).fetchall()
-        return [
-            PersonProfile(
-                person_id=row["person_id"],
-                name=row["name"],
-                center_embedding=_deserialize_embedding(
-                    row["center_embedding"],
-                    int(row["embedding_dim"]),
-                ),
-                embedding_dim=int(row["embedding_dim"]),
-                created_at=row["created_at"],
-                updated_at=row["updated_at"],
+        profiles: list[PersonProfile] = []
+        for row in rows:
+            person_id = str(row["person_id"])
+            sample_count = int(row["sample_count"] or 0)
+            if sample_count <= 0:
+                sample_count = inferred_sample_counts.get(person_id, 0)
+            profiles.append(
+                PersonProfile(
+                    person_id=person_id,
+                    name=row["name"],
+                    center_embedding=_deserialize_embedding(
+                        row["center_embedding"],
+                        int(row["embedding_dim"]),
+                    ),
+                    embedding_dim=int(row["embedding_dim"]),
+                    created_at=row["created_at"],
+                    updated_at=row["updated_at"],
+                    sample_count=sample_count,
+                    profile_state=profile_state_for_sample_count(sample_count),
+                )
             )
-            for row in rows
-        ]
+        return profiles
+
+    def get_manual_faces(self) -> list[FaceRecord]:
+        self.initialize()
+        with closing(self._connect()) as conn:
+            rows = conn.execute(
+                """
+                SELECT
+                    face_id, face_key, asset_id, asset_rel, box_x, box_y, box_w, box_h,
+                    confidence, embedding, embedding_dim, thumbnail_path, person_id,
+                    detected_at, image_width, image_height, is_manual
+                FROM manual_faces
+                ORDER BY detected_at ASC, face_id ASC
+                """
+            ).fetchall()
+        return [self._manual_face_from_row(row) for row in rows]
+
+    def upsert_manual_face(self, face: FaceRecord) -> None:
+        self.initialize()
+        with closing(self._connect()) as conn:
+            conn.execute(
+                """
+                INSERT INTO manual_faces (
+                    face_id, face_key, asset_id, asset_rel, box_x, box_y, box_w, box_h,
+                    confidence, embedding, embedding_dim, thumbnail_path, person_id,
+                    detected_at, image_width, image_height, is_manual
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(face_id) DO UPDATE SET
+                    face_key = excluded.face_key,
+                    asset_id = excluded.asset_id,
+                    asset_rel = excluded.asset_rel,
+                    box_x = excluded.box_x,
+                    box_y = excluded.box_y,
+                    box_w = excluded.box_w,
+                    box_h = excluded.box_h,
+                    confidence = excluded.confidence,
+                    embedding = excluded.embedding,
+                    embedding_dim = excluded.embedding_dim,
+                    thumbnail_path = excluded.thumbnail_path,
+                    person_id = excluded.person_id,
+                    detected_at = excluded.detected_at,
+                    image_width = excluded.image_width,
+                    image_height = excluded.image_height,
+                    is_manual = excluded.is_manual
+                """,
+                (
+                    face.face_id,
+                    face.face_key,
+                    face.asset_id,
+                    face.asset_rel,
+                    face.box_x,
+                    face.box_y,
+                    face.box_w,
+                    face.box_h,
+                    face.confidence,
+                    _serialize_embedding(face.embedding),
+                    face.embedding_dim,
+                    face.thumbnail_path,
+                    face.person_id,
+                    face.detected_at,
+                    face.image_width,
+                    face.image_height,
+                    1 if face.is_manual else 0,
+                ),
+            )
+            conn.commit()
+
+    def delete_manual_face(self, face_id: str) -> None:
+        if not face_id:
+            return
+        self.initialize()
+        with closing(self._connect()) as conn:
+            conn.execute("DELETE FROM manual_faces WHERE face_id = ?", (face_id,))
+            conn.commit()
 
     def get_person_order_map(self, person_ids: Iterable[str]) -> dict[str, int]:
         unique_ids = _unique_person_ids(person_ids)
@@ -126,29 +226,37 @@ class FaceStateRepository:
 
     def sync_scan_results(self, persons: list[PersonRecord], faces: list[FaceRecord]) -> None:
         self.initialize()
+        person_rows = []
+        for person in persons:
+            sample_count = max(int(person.sample_count), int(person.face_count))
+            person_rows.append(
+                (
+                    person.person_id,
+                    _normalize_name(person.name),
+                    _serialize_embedding(person.center_embedding),
+                    int(person.center_embedding.shape[0]),
+                    person.created_at,
+                    person.updated_at,
+                    sample_count,
+                    profile_state_for_sample_count(sample_count),
+                )
+            )
         with closing(self._connect()) as conn:
             conn.executemany(
                 """
                 INSERT INTO person_profiles (
-                    person_id, name, center_embedding, embedding_dim, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?)
+                    person_id, name, center_embedding, embedding_dim,
+                    created_at, updated_at, sample_count, profile_state
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(person_id) DO UPDATE SET
                     name = COALESCE(excluded.name, person_profiles.name),
                     center_embedding = excluded.center_embedding,
                     embedding_dim = excluded.embedding_dim,
-                    updated_at = excluded.updated_at
+                    updated_at = excluded.updated_at,
+                    sample_count = excluded.sample_count,
+                    profile_state = excluded.profile_state
                 """,
-                [
-                    (
-                        person.person_id,
-                        _normalize_name(person.name),
-                        _serialize_embedding(person.center_embedding),
-                        int(person.center_embedding.shape[0]),
-                        person.created_at,
-                        person.updated_at,
-                    )
-                    for person in persons
-                ],
+                person_rows,
             )
             timestamp = _utc_now_iso()
             conn.executemany(
@@ -220,8 +328,9 @@ class FaceStateRepository:
             conn.execute(
                 """
                 INSERT INTO person_profiles (
-                    person_id, name, center_embedding, embedding_dim, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?)
+                    person_id, name, center_embedding, embedding_dim,
+                    created_at, updated_at, sample_count, profile_state
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(person_id) DO UPDATE SET
                     name = excluded.name,
                     updated_at = excluded.updated_at
@@ -233,6 +342,8 @@ class FaceStateRepository:
                     0,
                     updated_at,
                     updated_at,
+                    0,
+                    "unstable",
                 ),
             )
             conn.commit()
@@ -245,6 +356,7 @@ class FaceStateRepository:
         center_embedding: np.ndarray,
         target_name: str | None,
         target_created_at: str,
+        sample_count: int,
     ) -> dict[str, str | None]:
         self.initialize()
         updated_at = _utc_now_iso()
@@ -253,13 +365,16 @@ class FaceStateRepository:
             conn.execute(
                 """
                 INSERT INTO person_profiles (
-                    person_id, name, center_embedding, embedding_dim, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?)
+                    person_id, name, center_embedding, embedding_dim,
+                    created_at, updated_at, sample_count, profile_state
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(person_id) DO UPDATE SET
                     name = COALESCE(excluded.name, person_profiles.name),
                     center_embedding = excluded.center_embedding,
                     embedding_dim = excluded.embedding_dim,
-                    updated_at = excluded.updated_at
+                    updated_at = excluded.updated_at,
+                    sample_count = excluded.sample_count,
+                    profile_state = excluded.profile_state
                 """,
                 (
                     target_person_id,
@@ -268,11 +383,17 @@ class FaceStateRepository:
                     int(center_embedding.shape[0]),
                     target_created_at,
                     updated_at,
+                    int(sample_count),
+                    profile_state_for_sample_count(sample_count),
                 ),
             )
             conn.execute(
                 "UPDATE face_keys SET person_id = ?, updated_at = ? WHERE person_id = ?",
                 (target_person_id, updated_at, source_person_id),
+            )
+            conn.execute(
+                "UPDATE manual_faces SET person_id = ? WHERE person_id = ?",
+                (target_person_id, source_person_id),
             )
             source_cover = conn.execute(
                 """
@@ -349,7 +470,7 @@ class FaceStateRepository:
                         updated_at = excluded.updated_at
                     """,
                     (target_person_id, merged_order, updated_at),
-            )
+                )
             conn.execute("DELETE FROM person_card_orders WHERE person_id = ?", (source_person_id,))
             conn.execute("DELETE FROM person_profiles WHERE person_id = ?", (source_person_id,))
             group_redirects = self._remap_groups_for_merged_person(
@@ -849,9 +970,23 @@ class FaceStateRepository:
                 center_embedding BLOB,
                 embedding_dim INTEGER NOT NULL,
                 created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL
+                updated_at TEXT NOT NULL,
+                sample_count INTEGER NOT NULL DEFAULT 0,
+                profile_state TEXT NOT NULL DEFAULT 'unstable'
             )
             """)
+        FaceStateRepository._ensure_column(
+            conn,
+            "person_profiles",
+            "sample_count",
+            "INTEGER NOT NULL DEFAULT 0",
+        )
+        FaceStateRepository._ensure_column(
+            conn,
+            "person_profiles",
+            "profile_state",
+            "TEXT NOT NULL DEFAULT 'unstable'",
+        )
         conn.execute("""
             CREATE TABLE IF NOT EXISTS face_keys (
                 face_key TEXT PRIMARY KEY,
@@ -890,6 +1025,35 @@ class FaceStateRepository:
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_person_card_orders_sort_order "
             "ON person_card_orders(sort_order)"
+        )
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS manual_faces (
+                face_id TEXT PRIMARY KEY,
+                face_key TEXT NOT NULL,
+                asset_id TEXT NOT NULL,
+                asset_rel TEXT NOT NULL,
+                box_x INTEGER NOT NULL,
+                box_y INTEGER NOT NULL,
+                box_w INTEGER NOT NULL,
+                box_h INTEGER NOT NULL,
+                confidence REAL NOT NULL,
+                embedding BLOB NOT NULL,
+                embedding_dim INTEGER NOT NULL,
+                thumbnail_path TEXT,
+                person_id TEXT NOT NULL,
+                detected_at TEXT NOT NULL,
+                image_width INTEGER NOT NULL,
+                image_height INTEGER NOT NULL,
+                is_manual INTEGER NOT NULL DEFAULT 1
+            )
+            """)
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_manual_faces_asset_id "
+            "ON manual_faces(asset_id)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_manual_faces_person_id "
+            "ON manual_faces(person_id)"
         )
         conn.execute("""
             CREATE TABLE IF NOT EXISTS people_groups (
@@ -956,3 +1120,25 @@ class FaceStateRepository:
         }
         if column_name not in columns:
             conn.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {definition}")
+
+    @staticmethod
+    def _manual_face_from_row(row: sqlite3.Row) -> FaceRecord:
+        return FaceRecord(
+            face_id=str(row["face_id"]),
+            face_key=str(row["face_key"]),
+            asset_id=str(row["asset_id"]),
+            asset_rel=str(row["asset_rel"]),
+            box_x=int(row["box_x"]),
+            box_y=int(row["box_y"]),
+            box_w=int(row["box_w"]),
+            box_h=int(row["box_h"]),
+            confidence=float(row["confidence"]),
+            embedding=_deserialize_embedding(row["embedding"], int(row["embedding_dim"])),
+            embedding_dim=int(row["embedding_dim"]),
+            thumbnail_path=str(row["thumbnail_path"]) if row["thumbnail_path"] else None,
+            person_id=str(row["person_id"]) if row["person_id"] else None,
+            detected_at=str(row["detected_at"]),
+            image_width=int(row["image_width"]),
+            image_height=int(row["image_height"]),
+            is_manual=bool(int(row["is_manual"] or 0)),
+        )

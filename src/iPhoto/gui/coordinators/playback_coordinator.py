@@ -22,9 +22,11 @@ from iPhoto.gui.ui.tasks.info_panel_metadata_worker import (
     InfoPanelMetadataResult,
     InfoPanelMetadataWorker,
 )
+from iPhoto.gui.ui.tasks.manual_face_add_worker import ManualFaceAddWorker
 from iPhoto.gui.ui.widgets.info_panel import InfoPanel
 from iPhoto.gui.viewmodels.detail_viewmodel import DetailPresentation, DetailViewModel
 from iPhoto.io import sidecar
+from iPhoto.people.repository import AssetFaceAnnotation
 from iPhoto.people.service import PeopleService
 
 if TYPE_CHECKING:
@@ -115,6 +117,9 @@ class PlaybackCoordinator(QObject):
         self._info_panel_metadata_attempted: set[str] = set()
         self._play_profile_started_at: float | None = None
         self._play_profile_row: int | None = None
+        self._manual_face_add_inflight = False
+        self._pending_manual_face_annotations: dict[str, list[AssetFaceAnnotation]] = {}
+        self._pending_manual_face_sequence = 0
 
         self._pending_play_row: int | None = None
         self._show_face_names = False
@@ -133,6 +138,7 @@ class PlaybackCoordinator(QObject):
     def set_info_panel(self, panel: InfoPanel) -> None:
         self._info_panel = panel
         panel.dismissed.connect(self._handle_info_panel_dismissed)
+        panel.manualFaceAddRequested.connect(self._handle_manual_face_add_requested)
 
     def set_people_library_root(self, library_root: Path | None) -> None:
         people_service = getattr(self, "_people_service", None)
@@ -199,6 +205,9 @@ class PlaybackCoordinator(QObject):
         rename_signal = getattr(self._face_name_overlay, "renameSubmitted", None)
         if rename_signal is not None:
             rename_signal.connect(self._handle_face_name_rename_submitted)
+        manual_signal = getattr(self._face_name_overlay, "manualFaceSubmitted", None)
+        if manual_signal is not None:
+            manual_signal.connect(self._handle_manual_face_submitted)
 
     def _setup_zoom_handler(self) -> None:
         self._zoom_handler = EditZoomHandler(
@@ -565,6 +574,7 @@ class PlaybackCoordinator(QObject):
         if changed_asset_ids and presentation.asset_id not in changed_asset_ids:
             return
         self._refresh_face_name_overlay_for_presentation(presentation)
+        self._refresh_info_panel_faces(presentation.asset_id)
 
     def _refresh_face_name_overlay_for_presentation(
         self,
@@ -577,6 +587,12 @@ class PlaybackCoordinator(QObject):
             self._hide_face_name_overlay(clear_annotations=True)
             return
         annotations = self._load_face_name_annotations(presentation.asset_id)
+        try:
+            people_service = getattr(self, "_people_service", None)
+            if people_service is not None:
+                overlay.set_name_suggestions(people_service.list_person_name_suggestions())
+        except (sqlite3.Error, OSError):
+            LOGGER.exception("Failed to load person name suggestions")
         overlay.set_annotations(annotations)
         overlay.set_overlay_active(bool(annotations))
 
@@ -625,6 +641,9 @@ class PlaybackCoordinator(QObject):
             LOGGER.exception("Failed to rename person %s", person_id)
             return
         self._refresh_face_name_overlay_for_current_presentation()
+        presentation = getattr(self, "_current_presentation", None)
+        if presentation is not None and presentation.asset_id:
+            self._refresh_info_panel_faces(presentation.asset_id)
         refresh_callback = getattr(self, "_people_dashboard_refresh_callback", None)
         if callable(refresh_callback):
             refresh_callback()
@@ -749,11 +768,74 @@ class PlaybackCoordinator(QObject):
         else:
             local_info.pop("_metadata_loading", None)
         self._info_panel.set_asset_metadata(local_info)
+        presentation = getattr(self, "_current_presentation", None)
+        self._refresh_info_panel_faces(presentation.asset_id if presentation is not None else None)
         if should_queue_enrichment:
             self._queue_info_panel_metadata_enrichment(
                 Path(path_key),
                 is_video=bool(local_info.get("is_video")),
             )
+
+    def _refresh_info_panel_faces(self, asset_id: str | None) -> None:
+        info_panel = getattr(self, "_info_panel", None)
+        if info_panel is None:
+            return
+        if not asset_id:
+            info_panel.set_asset_faces([])
+            return
+        info_panel.set_asset_faces(self._compose_info_panel_faces(asset_id))
+
+    def _compose_info_panel_faces(self, asset_id: str) -> list[AssetFaceAnnotation]:
+        annotations = list(self._load_face_name_annotations(asset_id))
+        pending = getattr(self, "_pending_manual_face_annotations", {}).get(asset_id, [])
+        if pending:
+            annotations.extend(pending)
+        return annotations
+
+    def _queue_pending_manual_face(
+        self,
+        asset_id: str,
+        presentation: DetailPresentation,
+        payload: dict[str, object],
+    ) -> None:
+        requested_box = payload.get("requested_box")
+        if (
+            not isinstance(requested_box, tuple)
+            or len(requested_box) != 4
+            or not all(isinstance(value, int) for value in requested_box)
+        ):
+            return
+        pending_faces = getattr(self, "_pending_manual_face_annotations", None)
+        if not isinstance(pending_faces, dict):
+            pending_faces = {}
+            self._pending_manual_face_annotations = pending_faces
+        sequence = int(getattr(self, "_pending_manual_face_sequence", 0)) + 1
+        self._pending_manual_face_sequence = sequence
+        name = payload.get("name")
+        person_id = payload.get("person_id")
+        image_width = presentation.info.get("w")
+        image_height = presentation.info.get("h")
+        pending_face = AssetFaceAnnotation(
+            face_id=f"pending-manual-{sequence}",
+            person_id=person_id if isinstance(person_id, str) and person_id else None,
+            display_name=name.strip() if isinstance(name, str) and name.strip() else None,
+            box_x=requested_box[0],
+            box_y=requested_box[1],
+            box_w=requested_box[2],
+            box_h=requested_box[3],
+            image_width=image_width if isinstance(image_width, int) and image_width > 0 else max(1, requested_box[0] + requested_box[2]),
+            image_height=image_height if isinstance(image_height, int) and image_height > 0 else max(1, requested_box[1] + requested_box[3]),
+            thumbnail_path=None,
+            is_manual=True,
+        )
+        pending_faces.setdefault(asset_id, []).append(pending_face)
+
+    def _clear_pending_manual_faces(self, asset_id: str | None) -> None:
+        if not asset_id:
+            return
+        pending_faces = getattr(self, "_pending_manual_face_annotations", None)
+        if isinstance(pending_faces, dict):
+            pending_faces.pop(asset_id, None)
 
     def toggle_info_panel(self) -> None:
         self._detail_vm.toggle_info()
@@ -838,6 +920,7 @@ class PlaybackCoordinator(QObject):
             return
         local_info = self._merge_info_panel_metadata(presentation.info, result.metadata)
         self._info_panel.set_asset_metadata(local_info)
+        self._refresh_info_panel_faces(presentation.asset_id)
 
     @Slot(str, str)
     def _handle_info_panel_metadata_error(self, path_key: str, message: str) -> None:
@@ -852,3 +935,86 @@ class PlaybackCoordinator(QObject):
         self._ensure_info_panel_metadata_state()
         self._info_panel_metadata_inflight.discard(path_key)
         self._info_panel_metadata_attempted.add(path_key)
+
+    @Slot()
+    def _handle_manual_face_add_requested(self) -> None:
+        presentation = getattr(self, "_current_presentation", None)
+        overlay = getattr(self, "_face_name_overlay", None)
+        if overlay is None or presentation is None or presentation.is_video or not presentation.asset_id:
+            return
+        try:
+            overlay.set_name_suggestions(self._people_service.list_person_name_suggestions())
+        except (sqlite3.Error, OSError):
+            LOGGER.exception("Failed to load person name suggestions")
+        overlay.set_annotations(self._load_face_name_annotations(presentation.asset_id))
+        overlay.set_overlay_active(True)
+        overlay.start_manual_face()
+
+    @Slot(object)
+    def _handle_manual_face_submitted(self, payload: object) -> None:
+        if self._manual_face_add_inflight:
+            return
+        presentation = getattr(self, "_current_presentation", None)
+        overlay = getattr(self, "_face_name_overlay", None)
+        library_root = self._people_service.library_root()
+        if (
+            presentation is None
+            or overlay is None
+            or library_root is None
+            or not presentation.asset_id
+            or not isinstance(payload, dict)
+        ):
+            return
+        requested_box = payload.get("requested_box")
+        if (
+            not isinstance(requested_box, tuple)
+            or len(requested_box) != 4
+            or not all(isinstance(value, int) for value in requested_box)
+        ):
+            overlay.show_manual_error("The face circle could not be mapped back to the photo.")
+            return
+        self._manual_face_add_inflight = True
+        overlay.set_manual_face_busy(True)
+        self._queue_pending_manual_face(presentation.asset_id, presentation, payload)
+        self._refresh_info_panel_faces(presentation.asset_id)
+        worker = ManualFaceAddWorker(
+            library_root=library_root,
+            asset_id=presentation.asset_id,
+            requested_box=requested_box,
+            name_or_none=payload.get("name") if isinstance(payload.get("name"), str) else None,
+            person_id=payload.get("person_id") if isinstance(payload.get("person_id"), str) else None,
+        )
+        worker.signals.ready.connect(self._handle_manual_face_ready)
+        worker.signals.error.connect(self._handle_manual_face_error)
+        worker.signals.finished.connect(self._handle_manual_face_finished)
+        QThreadPool.globalInstance().start(worker, -1)
+
+    @Slot(object)
+    def _handle_manual_face_ready(self, _result: object) -> None:
+        presentation = getattr(self, "_current_presentation", None)
+        if presentation is not None and presentation.asset_id:
+            self._clear_pending_manual_faces(presentation.asset_id)
+        self._refresh_face_name_overlay_for_current_presentation()
+        if presentation is not None and presentation.asset_id:
+            self._refresh_info_panel_faces(presentation.asset_id)
+        refresh_callback = getattr(self, "_people_dashboard_refresh_callback", None)
+        if callable(refresh_callback):
+            refresh_callback()
+
+    @Slot(str)
+    def _handle_manual_face_error(self, message: str) -> None:
+        presentation = getattr(self, "_current_presentation", None)
+        if presentation is not None and presentation.asset_id:
+            self._clear_pending_manual_faces(presentation.asset_id)
+            self._refresh_info_panel_faces(presentation.asset_id)
+        overlay = getattr(self, "_face_name_overlay", None)
+        if overlay is not None:
+            overlay.set_manual_face_busy(False)
+            overlay.show_manual_error(message)
+
+    @Slot()
+    def _handle_manual_face_finished(self) -> None:
+        self._manual_face_add_inflight = False
+        overlay = getattr(self, "_face_name_overlay", None)
+        if overlay is not None:
+            overlay.set_manual_face_busy(False)

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import uuid
 from collections import Counter, defaultdict, deque
@@ -9,6 +10,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 import hashlib
 from pathlib import Path
+from typing import Sequence
 
 import numpy as np
 
@@ -21,6 +23,18 @@ from .repository import (
     compute_cluster_center,
     normalize_vector,
 )
+from .repository_utils import profile_state_for_sample_count
+
+_LOGGER = logging.getLogger(__name__)
+_MANUAL_FACE_MIN_OVERLAP = 0.12
+_MANUAL_FACE_MIN_FACE_COVERAGE = 0.6
+_MANUAL_FACE_DUPLICATE_OVERLAP = 0.8
+_MANUAL_FACE_DUPLICATE_MIN_OVERLAP = 0.2
+_MANUAL_FACE_DUPLICATE_CENTER_RATIO = 0.28
+
+
+class ManualFaceValidationError(ValueError):
+    """Raised when a manual face selection cannot be validated safely."""
 
 
 @dataclass(frozen=True)
@@ -140,6 +154,276 @@ class FaceClusterPipeline:
             )
         return results
 
+    def build_manual_face_record(
+        self,
+        *,
+        asset_id: str,
+        asset_rel: str,
+        image_path: Path,
+        requested_box: tuple[int, int, int, int],
+        thumbnail_dir: Path,
+        target_person_id: str,
+        existing_faces: Sequence[FaceRecord] = (),
+    ) -> FaceRecord:
+        if not asset_id or not asset_rel or not target_person_id:
+            raise ManualFaceValidationError("Manual face details are incomplete.")
+        face_app = self._ensure_face_analysis()
+        image = load_image_rgb(image_path)
+        image_width, image_height = image.size
+        x, y, width, height = [int(value) for value in requested_box]
+        _LOGGER.info(
+            "Manual face validation started for asset %s with requested_box=%s image_size=%sx%s existing_faces=%d",
+            asset_id,
+            requested_box,
+            image_width,
+            image_height,
+            len(existing_faces),
+        )
+        if (
+            x < 0
+            or y < 0
+            or width <= 0
+            or height <= 0
+            or (x + width) > image_width
+            or (y + height) > image_height
+        ):
+            raise ManualFaceValidationError("Please place the face circle fully inside the photo.")
+        if width < self._min_face_size or height < self._min_face_size:
+            raise ManualFaceValidationError("The selected face is too small to save reliably.")
+
+        image_bgr = pil_image_to_bgr(image)
+        detected_faces = list(face_app.get(image_bgr))
+        candidates = []
+        candidate_debug_lines: list[str] = []
+        self._collect_manual_face_candidates(
+            candidates,
+            candidate_debug_lines,
+            detections=detected_faces,
+            requested_box=(x, y, width, height),
+            image_width=image_width,
+            image_height=image_height,
+            source="global",
+        )
+        crop_detections: list[object] = []
+        crop_image_fn = getattr(image, "crop", None)
+        if callable(crop_image_fn):
+            crop_image = crop_image_fn((x, y, x + width, y + height))
+            crop_bgr = pil_image_to_bgr(crop_image)
+            crop_detections = list(face_app.get(crop_bgr))
+            self._collect_manual_face_candidates(
+                candidates,
+                candidate_debug_lines,
+                detections=crop_detections,
+                requested_box=(x, y, width, height),
+                image_width=image_width,
+                image_height=image_height,
+                source="crop",
+                source_offset=(x, y),
+                source_size=(width, height),
+            )
+        if candidate_debug_lines:
+            _LOGGER.info(
+                "Manual face validation candidates for asset %s: %s",
+                asset_id,
+                " | ".join(candidate_debug_lines),
+            )
+        if not candidates:
+            _LOGGER.warning(
+                "Manual face validation rejected for asset %s: no candidates overlapped requested_box=%s total_detections=%d",
+                asset_id,
+                requested_box,
+                len(detected_faces) + len(crop_detections),
+            )
+            raise ManualFaceValidationError(
+                "No face was detected inside the selected circle. "
+                f"(global_detections={len(detected_faces)}, crop_detections={len(crop_detections)})"
+            )
+
+        (
+            _score,
+            best_face_coverage,
+            best_overlap,
+            _neg_distance,
+            best_confidence,
+            bbox,
+            embedding,
+            best_source,
+        ) = max(candidates)
+        if (
+            best_overlap < _MANUAL_FACE_MIN_OVERLAP
+            and best_face_coverage < _MANUAL_FACE_MIN_FACE_COVERAGE
+        ):
+            _LOGGER.warning(
+                "Manual face validation rejected for asset %s: source=%s best_bbox=%s conf=%.3f overlap=%.3f coverage=%.3f required_overlap=%.3f required_coverage=%.3f requested_box=%s",
+                asset_id,
+                best_source,
+                bbox,
+                best_confidence,
+                best_overlap,
+                best_face_coverage,
+                _MANUAL_FACE_MIN_OVERLAP,
+                _MANUAL_FACE_MIN_FACE_COVERAGE,
+                requested_box,
+            )
+            raise ManualFaceValidationError(
+                "Please place the circle closer to the face before saving. "
+                f"(overlap={best_overlap:.3f}, coverage={best_face_coverage:.3f}, bbox={bbox})"
+            )
+
+        duplicate_match = self._find_duplicate_manual_face(existing_faces, bbox)
+        if duplicate_match is not None:
+            duplicate_overlap, duplicate_center_ratio, duplicate_bbox = duplicate_match
+            _LOGGER.warning(
+                "Manual face validation rejected for asset %s: duplicate overlap %.3f center_ratio %.3f for bbox=%s matched_existing_bbox=%s",
+                asset_id,
+                duplicate_overlap,
+                duplicate_center_ratio,
+                bbox,
+                duplicate_bbox,
+            )
+            raise ManualFaceValidationError(
+                "This face is already tagged nearby. "
+                f"(duplicate_overlap={duplicate_overlap:.3f}, center_ratio={duplicate_center_ratio:.3f}, bbox={bbox})"
+            )
+
+        face_id = uuid.uuid4().hex
+        thumbnail_path = thumbnail_dir / f"{face_id}.png"
+        save_face_thumbnail(image, bbox, thumbnail_path)
+        _LOGGER.info(
+            "Manual face validation accepted for asset %s: face_id=%s source=%s bbox=%s conf=%.3f overlap=%.3f coverage=%.3f",
+            asset_id,
+            face_id,
+            best_source,
+            bbox,
+            best_confidence,
+            best_overlap,
+            best_face_coverage,
+        )
+        return FaceRecord(
+            face_id=face_id,
+            face_key=build_face_key(
+                asset_id=asset_id,
+                bbox=bbox,
+                image_width=image_width,
+                image_height=image_height,
+            ),
+            asset_id=asset_id,
+            asset_rel=asset_rel,
+            box_x=bbox[0],
+            box_y=bbox[1],
+            box_w=bbox[2],
+            box_h=bbox[3],
+            confidence=best_confidence,
+            embedding=embedding,
+            embedding_dim=int(embedding.shape[0]),
+            thumbnail_path=thumbnail_path.relative_to(thumbnail_dir.parent).as_posix(),
+            person_id=target_person_id,
+            detected_at=_utc_now_iso(),
+            image_width=image_width,
+            image_height=image_height,
+            is_manual=True,
+        )
+
+    def _collect_manual_face_candidates(
+        self,
+        candidates: list[tuple[float, float, float, float, float, tuple[int, int, int, int], np.ndarray, str]],
+        candidate_debug_lines: list[str],
+        *,
+        detections: Sequence[object],
+        requested_box: tuple[int, int, int, int],
+        image_width: int,
+        image_height: int,
+        source: str,
+        source_offset: tuple[int, int] = (0, 0),
+        source_size: tuple[int, int] | None = None,
+    ) -> None:
+        source_width = source_size[0] if source_size is not None else image_width
+        source_height = source_size[1] if source_size is not None else image_height
+        offset_x, offset_y = source_offset
+        for index, detected in enumerate(detections, start=1):
+            local_bbox = _normalize_bbox(
+                detected.bbox,
+                image_width=source_width,
+                image_height=source_height,
+            )
+            bbox = (
+                local_bbox[0] + offset_x,
+                local_bbox[1] + offset_y,
+                local_bbox[2],
+                local_bbox[3],
+            )
+            if bbox[2] < self._min_face_size or bbox[3] < self._min_face_size:
+                candidate_debug_lines.append(
+                    f"{source}#{index} bbox={bbox} skipped=min-size"
+                )
+                continue
+            embedding = _extract_embedding(detected)
+            if embedding is None:
+                candidate_debug_lines.append(
+                    f"{source}#{index} bbox={bbox} skipped=no-embedding"
+                )
+                continue
+            overlap = _bbox_iou(requested_box, bbox)
+            face_coverage = _bbox_overlap_ratio(bbox, requested_box)
+            center_distance = _bbox_center_distance(requested_box, bbox)
+            confidence = float(getattr(detected, "det_score", 0.0))
+            candidate_debug_lines.append(
+                "{source}#{index} bbox={bbox} conf={confidence:.3f} overlap={overlap:.3f} "
+                "coverage={face_coverage:.3f} center_dist={center_distance:.1f}".format(
+                    source=source,
+                    index=index,
+                    bbox=bbox,
+                    confidence=confidence,
+                    overlap=overlap,
+                    face_coverage=face_coverage,
+                    center_distance=center_distance,
+                )
+            )
+            if overlap <= 0.0 and face_coverage <= 0.0:
+                continue
+            candidates.append(
+                (
+                    max(face_coverage, overlap),
+                    face_coverage,
+                    overlap,
+                    -center_distance,
+                    confidence,
+                    bbox,
+                    embedding,
+                    source,
+                )
+            )
+
+    def _find_duplicate_manual_face(
+        self,
+        existing_faces: Sequence[FaceRecord],
+        candidate_bbox: tuple[int, int, int, int],
+    ) -> tuple[float, float, tuple[int, int, int, int]] | None:
+        best_match: tuple[float, float, tuple[int, int, int, int]] | None = None
+        for face in existing_faces:
+            existing_bbox = (face.box_x, face.box_y, face.box_w, face.box_h)
+            overlap = _bbox_iou(existing_bbox, candidate_bbox)
+            center_ratio = _bbox_center_distance_ratio(existing_bbox, candidate_bbox)
+            candidate_center = _bbox_center(candidate_bbox)
+            existing_center = _bbox_center(existing_bbox)
+            same_face = (
+                overlap >= _MANUAL_FACE_DUPLICATE_OVERLAP
+                or (
+                    overlap >= _MANUAL_FACE_DUPLICATE_MIN_OVERLAP
+                    and center_ratio <= _MANUAL_FACE_DUPLICATE_CENTER_RATIO
+                )
+                or (
+                    _bbox_contains_point(existing_bbox, candidate_center)
+                    and _bbox_contains_point(candidate_bbox, existing_center)
+                )
+            )
+            if not same_face:
+                continue
+            match = (overlap, center_ratio, existing_bbox)
+            if best_match is None or match > best_match:
+                best_match = match
+        return best_match
+
     def _ensure_face_analysis(self):
         if self._analysis_app is not None:
             return self._analysis_app
@@ -231,12 +515,61 @@ def cluster_face_records(
                 center_embedding=center_embedding,
                 created_at=timestamp,
                 updated_at=timestamp,
+                sample_count=len(members),
+                profile_state=profile_state_for_sample_count(len(members)),
             )
         )
         for index in indices:
             updated_faces[index] = replace(updated_faces[index], person_id=person_id)
     persons.sort(key=lambda person: (-person.face_count, person.created_at))
     return updated_faces, persons
+
+
+def build_person_records_from_faces(
+    faces: Sequence[FaceRecord],
+    *,
+    names_by_person_id: dict[str, str | None] | None = None,
+    created_at_by_person_id: dict[str, str] | None = None,
+) -> list[PersonRecord]:
+    if not faces:
+        return []
+
+    grouped: dict[str, list[FaceRecord]] = defaultdict(list)
+    for face in faces:
+        if face.person_id:
+            grouped[str(face.person_id)].append(face)
+
+    if not grouped:
+        return []
+
+    resolved_names = dict(names_by_person_id or {})
+    resolved_created_at = dict(created_at_by_person_id or {})
+    updated_at = _utc_now_iso()
+    persons: list[PersonRecord] = []
+    for person_id, members in grouped.items():
+        key_face = max(members, key=_key_face_sort_key)
+        center_embedding = compute_cluster_center(
+            np.stack([member.embedding for member in members], axis=0)
+        )
+        sample_count = len(members)
+        persons.append(
+            PersonRecord(
+                person_id=person_id,
+                name=resolved_names.get(person_id),
+                key_face_id=key_face.face_id,
+                face_count=sample_count,
+                center_embedding=center_embedding,
+                created_at=resolved_created_at.get(
+                    person_id,
+                    min((member.detected_at for member in members), default=updated_at),
+                ),
+                updated_at=updated_at,
+                sample_count=sample_count,
+                profile_state=profile_state_for_sample_count(sample_count),
+            )
+        )
+    persons.sort(key=lambda person: (-person.face_count, person.created_at))
+    return persons
 
 
 def canonicalize_cluster_identities(
@@ -280,31 +613,16 @@ def canonicalize_cluster_identities(
 
     updated_faces = list(faces)
     faces_by_face_id = {face.face_id: index for index, face in enumerate(faces)}
-    canonical_persons: list[PersonRecord] = []
     for canonical_id, members in canonical_members.items():
         if not members:
             continue
-        key_face = max(members, key=_key_face_sort_key)
-        center_embedding = compute_cluster_center(
-            np.stack([member.embedding for member in members], axis=0)
-        )
-        profile = profiles.get(canonical_id)
-        updated_at = _utc_now_iso()
-        canonical_persons.append(
-            PersonRecord(
-                person_id=canonical_id,
-                name=profile.name if profile is not None else canonical_names.get(canonical_id),
-                key_face_id=key_face.face_id,
-                face_count=len(members),
-                center_embedding=center_embedding,
-                created_at=profile.created_at if profile is not None else canonical_created_at[canonical_id],
-                updated_at=updated_at,
-            )
-        )
         for member in members:
             updated_faces[faces_by_face_id[member.face_id]] = replace(member, person_id=canonical_id)
-
-    canonical_persons.sort(key=lambda person: (-person.face_count, person.created_at))
+    canonical_persons = build_person_records_from_faces(
+        updated_faces,
+        names_by_person_id=canonical_names,
+        created_at_by_person_id=canonical_created_at,
+    )
     return updated_faces, canonical_persons
 
 
@@ -334,6 +652,8 @@ def resolve_canonical_person_id(
     best_profile_id: str | None = None
     best_distance = float("inf")
     for profile in profiles.values():
+        if str(profile.profile_state or "unstable") != "stable":
+            continue
         if profile.embedding_dim <= 0 or profile.center_embedding.size == 0:
             continue
         if profile.center_embedding.shape != person.center_embedding.shape:
@@ -445,6 +765,92 @@ def _extract_embedding(face) -> np.ndarray | None:
 
 def _key_face_sort_key(face: FaceRecord) -> tuple[float, int]:
     return face.confidence, face.box_w * face.box_h
+
+
+def _bbox_iou(
+    left: tuple[int, int, int, int],
+    right: tuple[int, int, int, int],
+) -> float:
+    inter_area = _bbox_intersection_area(left, right)
+    if inter_area <= 0:
+        return 0.0
+    union = (left[2] * left[3]) + (right[2] * right[3]) - inter_area
+    if union <= 0:
+        return 0.0
+    return float(inter_area / union)
+
+
+def _bbox_overlap_ratio(
+    subject: tuple[int, int, int, int],
+    covering: tuple[int, int, int, int],
+) -> float:
+    inter_area = _bbox_intersection_area(subject, covering)
+    if inter_area <= 0:
+        return 0.0
+    subject_area = subject[2] * subject[3]
+    if subject_area <= 0:
+        return 0.0
+    return float(inter_area / subject_area)
+
+
+def _bbox_intersection_area(
+    left: tuple[int, int, int, int],
+    right: tuple[int, int, int, int],
+) -> int:
+    left_x1, left_y1, left_w, left_h = left
+    right_x1, right_y1, right_w, right_h = right
+    left_x2 = left_x1 + left_w
+    left_y2 = left_y1 + left_h
+    right_x2 = right_x1 + right_w
+    right_y2 = right_y1 + right_h
+    inter_left = max(left_x1, right_x1)
+    inter_top = max(left_y1, right_y1)
+    inter_right = min(left_x2, right_x2)
+    inter_bottom = min(left_y2, right_y2)
+    inter_w = max(0, inter_right - inter_left)
+    inter_h = max(0, inter_bottom - inter_top)
+    return int(inter_w * inter_h)
+
+
+def _bbox_center_distance(
+    left: tuple[int, int, int, int],
+    right: tuple[int, int, int, int],
+) -> float:
+    left_cx, left_cy = _bbox_center(left)
+    right_cx, right_cy = _bbox_center(right)
+    return float(np.hypot(left_cx - right_cx, left_cy - right_cy))
+
+
+def _bbox_center_distance_ratio(
+    left: tuple[int, int, int, int],
+    right: tuple[int, int, int, int],
+) -> float:
+    distance = _bbox_center_distance(left, right)
+    normalizer = min(_bbox_diagonal(left), _bbox_diagonal(right))
+    if normalizer <= 0.0:
+        return float("inf")
+    return float(distance / normalizer)
+
+
+def _bbox_center(bbox: tuple[int, int, int, int]) -> tuple[float, float]:
+    return (
+        float(bbox[0]) + (float(bbox[2]) / 2.0),
+        float(bbox[1]) + (float(bbox[3]) / 2.0),
+    )
+
+
+def _bbox_contains_point(
+    bbox: tuple[int, int, int, int],
+    point: tuple[float, float],
+) -> bool:
+    left, top, width, height = bbox
+    right = left + width
+    bottom = top + height
+    return left <= point[0] <= right and top <= point[1] <= bottom
+
+
+def _bbox_diagonal(bbox: tuple[int, int, int, int]) -> float:
+    return float(np.hypot(float(bbox[2]), float(bbox[3])))
 
 
 def _quantize_value(value: float, step: int) -> int:

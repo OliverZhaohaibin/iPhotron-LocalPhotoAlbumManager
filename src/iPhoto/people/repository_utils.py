@@ -11,6 +11,8 @@ import numpy as np
 
 from iPhoto.people.records import FaceRecord
 
+STABLE_PROFILE_MIN_SAMPLES = 3
+
 
 def compute_cluster_center(embeddings: np.ndarray) -> np.ndarray:
     if embeddings.size == 0:
@@ -74,3 +76,7 @@ def _group_id_for_member_key(member_key: str) -> str:
 
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def profile_state_for_sample_count(sample_count: int) -> str:
+    return "stable" if int(sample_count) >= STABLE_PROFILE_MIN_SAMPLES else "unstable"

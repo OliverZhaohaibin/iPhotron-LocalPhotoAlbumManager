@@ -2,12 +2,13 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from pathlib import Path
+import sqlite3
 
 import numpy as np
 import pytest
 
 from iPhoto.people.pipeline import DetectedAssetFaces
-from iPhoto.people.repository import FaceRecord, FaceRepository, PersonRecord
+from iPhoto.people.repository import FaceRecord, FaceRepository, FaceStateRepository, PersonRecord
 from iPhoto.people.scan_session import FaceScanSession
 
 
@@ -24,6 +25,7 @@ def _face_record(
     thumbnail_path: str | None = None,
     embedding: np.ndarray | None = None,
     face_key: str | None = None,
+    is_manual: bool = False,
 ) -> FaceRecord:
     if embedding is None:
         embedding = np.asarray([1.0, 0.0, 0.0], dtype=np.float32)
@@ -44,6 +46,7 @@ def _face_record(
         detected_at=_now_iso(),
         image_width=400,
         image_height=300,
+        is_manual=is_manual,
     )
 
 
@@ -58,6 +61,7 @@ def _person_record(
     if embedding is None:
         embedding = np.asarray([1.0, 0.0, 0.0], dtype=np.float32)
     timestamp = _now_iso()
+    sample_count = int(face_count)
     return PersonRecord(
         person_id=person_id,
         name=name,
@@ -66,6 +70,8 @@ def _person_record(
         center_embedding=embedding,
         created_at=timestamp,
         updated_at=timestamp,
+        sample_count=sample_count,
+        profile_state="stable" if sample_count >= 3 else "unstable",
     )
 
 
@@ -782,6 +788,102 @@ def test_face_scan_session_rolls_back_runtime_snapshot_when_profile_sync_fails(
         "person-b",
     ]
     assert repository.get_common_asset_ids_for_group(group.group_id) == ["asset-shared"]
+
+
+def test_state_repository_backfills_profile_stability_from_face_keys_for_legacy_rows(
+    tmp_path: Path,
+) -> None:
+    state_repository = FaceStateRepository(tmp_path / "face_state.db")
+    state_repository.initialize()
+    embedding = np.asarray([1.0, 0.0, 0.0], dtype=np.float32)
+    timestamp = _now_iso()
+
+    with sqlite3.connect(state_repository.db_path) as conn:
+        conn.execute(
+            """
+            INSERT INTO person_profiles (
+                person_id, name, center_embedding, embedding_dim,
+                created_at, updated_at, sample_count, profile_state
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "person-a",
+                "Alice",
+                sqlite3.Binary(embedding.tobytes()),
+                int(embedding.shape[0]),
+                timestamp,
+                timestamp,
+                0,
+                "unstable",
+            ),
+        )
+        conn.executemany(
+            """
+            INSERT INTO face_keys (face_key, person_id, asset_id, asset_rel, updated_at)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            [
+                (f"face-key-{index}", "person-a", f"asset-{index}", f"album/{index}.jpg", timestamp)
+                for index in range(3)
+            ],
+        )
+        conn.commit()
+
+    profiles = state_repository.get_profiles()
+
+    assert len(profiles) == 1
+    assert profiles[0].person_id == "person-a"
+    assert profiles[0].sample_count == 3
+    assert profiles[0].profile_state == "stable"
+
+
+def test_face_scan_session_preserves_manual_faces_for_rescanned_asset(tmp_path: Path) -> None:
+    repository = FaceRepository(tmp_path / "face_index.db", tmp_path / "face_state.db")
+    auto_face = _face_record(
+        face_id="face-auto",
+        asset_id="asset-a",
+        asset_rel="album/a.jpg",
+        person_id="person-a",
+        face_key="face-key-auto",
+    )
+    manual_face = _face_record(
+        face_id="face-manual",
+        asset_id="asset-a",
+        asset_rel="album/a.jpg",
+        person_id="person-b",
+        face_key="face-key-manual",
+        thumbnail_path="thumbnails/face-manual.png",
+        is_manual=True,
+    )
+
+    repository.replace_all(
+        [auto_face],
+        [_person_record(person_id="person-a", key_face_id="face-auto", face_count=1, name="Alice")],
+    )
+    assert repository.state_repository is not None
+    repository.state_repository.sync_scan_results(
+        [_person_record(person_id="person-a", key_face_id="face-auto", face_count=1, name="Alice")],
+        [auto_face],
+    )
+    repository.state_repository.upsert_manual_face(manual_face)
+
+    session = FaceScanSession()
+    session.stage_detection_results(
+        [
+            DetectedAssetFaces(
+                asset_id="asset-a",
+                asset_rel="album/a.jpg",
+                faces=[],
+            )
+        ]
+    )
+
+    session.commit(repository, distance_threshold=0.6, min_samples=1)
+
+    faces = {face.face_id: face for face in repository.get_all_faces()}
+    assert set(faces) == {"face-manual"}
+    assert faces["face-manual"].is_manual is True
+    assert faces["face-manual"].asset_id == "asset-a"
 
 
 def test_get_person_ids_for_asset_ids_chunks_large_sqlite_in_queries(tmp_path: Path) -> None:

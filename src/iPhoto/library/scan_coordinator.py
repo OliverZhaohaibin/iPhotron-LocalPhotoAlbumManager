@@ -310,7 +310,7 @@ class ScanCoordinatorMixin:
             face_scanner.finish_input()
 
         if worker.cancelled:
-            self.scanFinished.emit(root, True)a
+            self.scanFinished.emit(root, True)
             return
         if worker.failed:
             self.scanFinished.emit(root, False)

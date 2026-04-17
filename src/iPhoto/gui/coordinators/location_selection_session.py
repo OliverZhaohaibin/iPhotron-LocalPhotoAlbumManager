@@ -18,7 +18,12 @@ class LocationSelectionSession:
         self._mode: LocationSelectionMode = "inactive"
         self._invalidated = False
         self._has_snapshot = False
+        # Keys are POSIX-normalized library_relative strings (Path(rel).as_posix());
+        # values are the corresponding asset objects. Provides O(1) upsert/remove.
+        # The sorted list (_full_assets) is rebuilt lazily via full_assets().
+        self._asset_index: dict[str, object] = {}
         self._full_assets: list = []
+        self._list_dirty: bool = False
 
     @property
     def root(self) -> Path | None:
@@ -43,7 +48,9 @@ class LocationSelectionSession:
     def begin_load(self, root: Path) -> int:
         normalized_root = Path(root)
         if self._root != normalized_root:
+            self._asset_index = {}
             self._full_assets = []
+            self._list_dirty = False
             self._has_snapshot = False
         self._root = normalized_root
         self._invalidated = True
@@ -55,7 +62,12 @@ class LocationSelectionSession:
         if serial != self._request_serial or self._root != normalized_root:
             return False
         self._root = normalized_root
-        self._full_assets = list(assets)
+        self._asset_index = {}
+        for a in assets:
+            rel = getattr(a, "library_relative", None)
+            if isinstance(rel, str) and rel:
+                self._asset_index[Path(rel).as_posix()] = a
+        self._list_dirty = True
         self._has_snapshot = True
         self._invalidated = False
         return True
@@ -67,15 +79,57 @@ class LocationSelectionSession:
         self._invalidated = True
 
     def full_assets(self) -> list:
+        if self._list_dirty:
+            self._full_assets = sorted(
+                list(self._asset_index.values()),
+                key=lambda asset: str(getattr(asset, "library_relative", "")),
+            )
+            self._list_dirty = False
         return list(self._full_assets)
 
-    def resolve_asset(self, rel: str) -> object | None:
+    def replace_assets(self, assets: list) -> None:
+        self._asset_index = {}
+        for a in assets:
+            rel = getattr(a, "library_relative", None)
+            if isinstance(rel, str) and rel:
+                self._asset_index[Path(rel).as_posix()] = a
+        self._list_dirty = True
+        self._has_snapshot = True
+        self._invalidated = False
+
+    def upsert_asset(self, asset: object) -> bool:
+        library_relative = getattr(asset, "library_relative", None)
+        if not isinstance(library_relative, str) or not library_relative:
+            return False
+
+        key = Path(library_relative).as_posix()
+        existing = self._asset_index.get(key)
+        if existing == asset:
+            self._has_snapshot = True
+            self._invalidated = False
+            return False
+
+        self._asset_index[key] = asset
+        self._list_dirty = True
+        self._has_snapshot = True
+        self._invalidated = False
+        return True
+
+    def remove_asset(self, rel: str) -> bool:
         target = Path(rel).as_posix()
-        for asset in self._full_assets:
-            library_relative = getattr(asset, "library_relative", None)
-            if isinstance(library_relative, str) and Path(library_relative).as_posix() == target:
-                return asset
-        return None
+        if target not in self._asset_index:
+            self._has_snapshot = True
+            self._invalidated = False
+            return False
+
+        del self._asset_index[target]
+        self._list_dirty = True
+        self._has_snapshot = True
+        self._invalidated = False
+        return True
+
+    def resolve_asset(self, rel: str) -> object | None:
+        return self._asset_index.get(Path(rel).as_posix())
 
     def resolve_relative(self, rel: str) -> Path | None:
         asset = self.resolve_asset(rel)

@@ -340,6 +340,7 @@ class PlaybackCoordinator(QObject):
         if view == "detail":
             self._router.show_detail()
         elif view == "gallery":
+            self.reset_for_gallery()
             self._router.show_gallery()
 
     @Slot(object)
@@ -363,6 +364,9 @@ class PlaybackCoordinator(QObject):
         previous = self._current_presentation
         if previous is not None:
             presentation = self._preserve_live_presentation(previous, presentation)
+        if not self._router.is_detail_view_active():
+            self._clear_play_profile(presentation.row)
+            return
         self._current_presentation = presentation
         row = presentation.row
         self._asset_model.set_current_row(row)

@@ -429,7 +429,6 @@ class MainCoordinator(QObject):
 
         # Back Button (detail page)
         if hasattr(ui, "back_button"):
-            ui.back_button.clicked.connect(self._playback.reset_for_gallery)
             ui.back_button.clicked.connect(self._detail_vm.back_to_gallery)
 
         # Gallery page back button for cluster gallery mode

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, call, patch
 
 import pytest
 
@@ -97,12 +97,14 @@ def test_execute_pending_play_flushes_row_and_restarts_cooldown() -> None:
 def test_handle_presentation_changed_renders_video_and_updates_header() -> None:
     coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
     coordinator._current_presentation = None
+    coordinator._router = Mock(is_detail_view_active=Mock(return_value=True))
     coordinator._asset_model = Mock(index=Mock(return_value=Mock(isValid=Mock(return_value=True))))
     coordinator._asset_model.set_current_row = Mock()
     coordinator.assetChanged = Mock(emit=Mock())
     coordinator._update_header = Mock()
     coordinator._sync_filmstrip_selection = Mock()
     coordinator._render_presentation = Mock()
+    coordinator._clear_play_profile = Mock()
 
     presentation = _make_presentation()
     PlaybackCoordinator._handle_presentation_changed(coordinator, presentation)
@@ -119,6 +121,7 @@ def test_handle_presentation_changed_skips_full_rerender_for_same_asset() -> Non
     presentation = _make_presentation(is_favorite=False)
     updated = _make_presentation(is_favorite=True)
     coordinator._current_presentation = presentation
+    coordinator._router = Mock(is_detail_view_active=Mock(return_value=True))
     coordinator._asset_model = Mock()
     coordinator._asset_model.set_current_row = Mock()
     coordinator.assetChanged = Mock(emit=Mock())
@@ -126,6 +129,7 @@ def test_handle_presentation_changed_skips_full_rerender_for_same_asset() -> Non
     coordinator._sync_filmstrip_selection = Mock()
     coordinator._render_presentation = Mock()
     coordinator._update_favorite_icon = Mock()
+    coordinator._clear_play_profile = Mock()
     coordinator._info_panel = None
 
     PlaybackCoordinator._handle_presentation_changed(coordinator, updated)
@@ -140,6 +144,7 @@ def test_handle_presentation_changed_rerenders_same_asset_when_reload_token_chan
         path="/fake/video.mp4",
         reload_token=1,
     )
+    coordinator._router = Mock(is_detail_view_active=Mock(return_value=True))
     presentation = _make_presentation(
         path="/fake/video.mp4",
         reload_token=2,
@@ -159,6 +164,70 @@ def test_handle_presentation_changed_rerenders_same_asset_when_reload_token_chan
     coordinator._render_presentation.assert_called_once_with(presentation)
     coordinator._update_favorite_icon.assert_not_called()
     coordinator._clear_play_profile.assert_not_called()
+
+
+def test_handle_presentation_changed_skips_hidden_detail_updates() -> None:
+    coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
+    coordinator._current_presentation = None
+    coordinator._router = Mock(is_detail_view_active=Mock(return_value=False))
+    coordinator._asset_model = Mock()
+    coordinator._asset_model.set_current_row = Mock()
+    coordinator.assetChanged = Mock(emit=Mock())
+    coordinator._update_header = Mock()
+    coordinator._sync_filmstrip_selection = Mock()
+    coordinator._render_presentation = Mock()
+    coordinator._clear_play_profile = Mock()
+
+    presentation = _make_presentation()
+
+    PlaybackCoordinator._handle_presentation_changed(coordinator, presentation)
+
+    assert coordinator._current_presentation is None
+    coordinator._asset_model.set_current_row.assert_not_called()
+    coordinator.assetChanged.emit.assert_not_called()
+    coordinator._update_header.assert_not_called()
+    coordinator._sync_filmstrip_selection.assert_not_called()
+    coordinator._render_presentation.assert_not_called()
+    coordinator._clear_play_profile.assert_called_once_with(presentation.row)
+
+
+def test_handle_route_requested_gallery_resets_before_showing_gallery() -> None:
+    coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
+    parent = Mock()
+    coordinator.reset_for_gallery = Mock()
+    coordinator._router = Mock(show_gallery=Mock(), show_detail=Mock())
+    parent.attach_mock(coordinator.reset_for_gallery, "reset_for_gallery")
+    parent.attach_mock(coordinator._router.show_gallery, "show_gallery")
+
+    PlaybackCoordinator._handle_route_requested(coordinator, "gallery")
+
+    assert parent.mock_calls == [
+        call.reset_for_gallery(),
+        call.show_gallery(),
+    ]
+
+
+def test_hidden_presentation_then_explicit_open_of_same_asset_still_renders() -> None:
+    coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
+    coordinator._current_presentation = None
+    coordinator._router = Mock(is_detail_view_active=Mock(return_value=False))
+    coordinator._asset_model = Mock()
+    coordinator._asset_model.set_current_row = Mock()
+    coordinator.assetChanged = Mock(emit=Mock())
+    coordinator._update_header = Mock()
+    coordinator._sync_filmstrip_selection = Mock()
+    coordinator._render_presentation = Mock()
+    coordinator._clear_play_profile = Mock()
+    coordinator._info_panel = None
+
+    presentation = _make_presentation()
+    PlaybackCoordinator._handle_presentation_changed(coordinator, presentation)
+
+    coordinator._render_presentation.assert_not_called()
+    coordinator._router.is_detail_view_active.return_value = True
+    PlaybackCoordinator._handle_presentation_changed(coordinator, presentation)
+
+    coordinator._render_presentation.assert_called_once_with(presentation)
 
 
 def test_preserve_live_presentation_keeps_existing_motion_during_same_asset_refresh(

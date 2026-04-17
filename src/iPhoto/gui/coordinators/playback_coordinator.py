@@ -118,6 +118,7 @@ class PlaybackCoordinator(QObject):
         self._play_profile_started_at: float | None = None
         self._play_profile_row: int | None = None
         self._manual_face_add_inflight = False
+        self._manual_face_inflight_asset_id: str | None = None
         self._pending_manual_face_annotations: dict[str, list[AssetFaceAnnotation]] = {}
         self._pending_manual_face_sequence = 0
 
@@ -978,6 +979,7 @@ class PlaybackCoordinator(QObject):
             overlay.show_manual_error("The face circle could not be mapped back to the photo.")
             return
         self._manual_face_add_inflight = True
+        self._manual_face_inflight_asset_id = presentation.asset_id
         overlay.set_manual_face_busy(True)
         self._queue_pending_manual_face(presentation.asset_id, presentation, payload)
         self._refresh_info_panel_faces(presentation.asset_id)
@@ -994,12 +996,19 @@ class PlaybackCoordinator(QObject):
         QThreadPool.globalInstance().start(worker, -1)
 
     @Slot(object)
-    def _handle_manual_face_ready(self, _result: object) -> None:
+    def _handle_manual_face_ready(self, result: object) -> None:
+        from iPhoto.people.service import ManualFaceAddResult
+
+        submitted_asset_id = (
+            result.asset_id
+            if isinstance(result, ManualFaceAddResult)
+            else self._manual_face_inflight_asset_id
+        )
+        if submitted_asset_id:
+            self._clear_pending_manual_faces(submitted_asset_id)
         presentation = getattr(self, "_current_presentation", None)
-        if presentation is not None and presentation.asset_id:
-            self._clear_pending_manual_faces(presentation.asset_id)
-        self._refresh_face_name_overlay_for_current_presentation()
-        if presentation is not None and presentation.asset_id:
+        if presentation is not None and presentation.asset_id == submitted_asset_id:
+            self._refresh_face_name_overlay_for_current_presentation()
             self._refresh_info_panel_faces(presentation.asset_id)
         refresh_callback = getattr(self, "_people_dashboard_refresh_callback", None)
         if callable(refresh_callback):
@@ -1007,10 +1016,16 @@ class PlaybackCoordinator(QObject):
 
     @Slot(str)
     def _handle_manual_face_error(self, message: str) -> None:
+        submitted_asset_id = self._manual_face_inflight_asset_id
+        if submitted_asset_id:
+            self._clear_pending_manual_faces(submitted_asset_id)
         presentation = getattr(self, "_current_presentation", None)
-        if presentation is not None and presentation.asset_id:
-            self._clear_pending_manual_faces(presentation.asset_id)
-            self._refresh_info_panel_faces(presentation.asset_id)
+        if (
+            submitted_asset_id
+            and presentation is not None
+            and presentation.asset_id == submitted_asset_id
+        ):
+            self._refresh_info_panel_faces(submitted_asset_id)
         overlay = getattr(self, "_face_name_overlay", None)
         if overlay is not None:
             overlay.set_manual_face_busy(False)
@@ -1019,6 +1034,7 @@ class PlaybackCoordinator(QObject):
     @Slot()
     def _handle_manual_face_finished(self) -> None:
         self._manual_face_add_inflight = False
+        self._manual_face_inflight_asset_id = None
         overlay = getattr(self, "_face_name_overlay", None)
         if overlay is not None:
             overlay.set_manual_face_busy(False)

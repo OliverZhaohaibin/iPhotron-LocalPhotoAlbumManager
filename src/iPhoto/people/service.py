@@ -215,8 +215,13 @@ class PeopleService:
         asset_rel = str(row.get("rel") or row.get("path") or "").strip()
         if not asset_rel:
             raise ManualFaceValidationError("The selected photo path could not be resolved.")
-        image_path = (library_root / asset_rel).resolve()
-        if not image_path.exists():
+        resolved_library_root = library_root.resolve()
+        image_path = (resolved_library_root / asset_rel).resolve()
+        try:
+            image_path.relative_to(resolved_library_root)
+        except ValueError as exc:
+            raise ManualFaceValidationError("The selected photo path is invalid.") from exc
+        if not image_path.is_file():
             raise ManualFaceValidationError("The selected photo file could not be found.")
 
         resolved_person_id, preferred_name, created_new_person = self._resolve_manual_face_person(
@@ -235,10 +240,12 @@ class PeopleService:
             target_person_id=resolved_person_id,
             existing_faces=existing_faces,
         )
-        get_people_index_coordinator(library_root).add_manual_face(
+        add_result = get_people_index_coordinator(library_root).add_manual_face(
             face,
             person_name=preferred_name,
         )
+        if add_result is None:
+            raise ManualFaceValidationError("Manual face tagging is unavailable right now.")
         return ManualFaceAddResult(
             asset_id=asset_id,
             face_id=face.face_id,

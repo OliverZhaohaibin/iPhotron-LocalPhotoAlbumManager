@@ -212,6 +212,13 @@ class PeopleIndexCoordinator(QObject):
                 state_repository.delete_manual_face(face.face_id)
                 repository.replace_all(previous_faces, previous_persons, sync_runtime_state=False)
                 repository.sync_runtime_state()
+                if face.thumbnail_path:
+                    faces_root = self._library_root / WORK_DIR_NAME / "faces"
+                    thumbnail_file = (faces_root / face.thumbnail_path).resolve()
+                    try:
+                        thumbnail_file.unlink(missing_ok=True)
+                    except OSError:
+                        LOGGER.warning("Failed to remove orphaned thumbnail: %s", thumbnail_file)
                 raise
             return self._emit_snapshot(
                 changed_asset_ids=(face.asset_id,),

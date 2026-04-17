@@ -424,8 +424,9 @@ class GalleryCollectionStore:
         if not self._scan_root_matches_active_root(root):
             return
         self._pending_scan_refresh = True
-        if self._visible_range is not None and self._visible_range[0] == 0:
-            self._flush_pending_scan_refresh()
+        if self._visible_range is not None:
+            first, last = self._visible_range
+            self._reload_window_for_visible_range(first, last, emit_signals=True)
 
     def _flush_pending_scan_refresh(self) -> None:
         if not self._pending_scan_refresh or self._current_query is None:

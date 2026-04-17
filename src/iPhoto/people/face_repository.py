@@ -139,6 +139,23 @@ class FaceRepository:
                 """).fetchall()
         return [self._face_from_row(row) for row in rows]
 
+    def get_faces_by_asset_id(self, asset_id: str) -> list[FaceRecord]:
+        self.initialize()
+        with closing(self._connect()) as conn:
+            rows = conn.execute(
+                """
+                SELECT
+                    face_id, face_key, asset_id, asset_rel, box_x, box_y, box_w, box_h,
+                    confidence, embedding, embedding_dim, thumbnail_path, person_id,
+                    detected_at, image_width, image_height, is_manual
+                FROM faces
+                WHERE asset_id = ?
+                ORDER BY detected_at ASC, face_id ASC
+                """,
+                (asset_id,),
+            ).fetchall()
+        return [self._face_from_row(row) for row in rows]
+
     def get_all_person_records(self) -> list[PersonRecord]:
         self.initialize()
         with closing(self._connect()) as conn:

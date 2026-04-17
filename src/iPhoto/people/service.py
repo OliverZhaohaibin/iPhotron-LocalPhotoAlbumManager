@@ -225,9 +225,7 @@ class PeopleService:
             name_or_none=name_or_none,
         )
         pipeline = FaceClusterPipeline(model_root=paths.model_dir)
-        existing_faces = [
-            face for face in repository.get_all_faces() if face.asset_id == asset_id
-        ]
+        existing_faces = list(repository.get_faces_by_asset_id(asset_id))
         face = pipeline.build_manual_face_record(
             asset_id=asset_id,
             asset_rel=asset_rel,

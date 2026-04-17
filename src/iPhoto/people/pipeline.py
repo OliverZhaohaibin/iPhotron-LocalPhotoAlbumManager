@@ -235,8 +235,7 @@ class FaceClusterPipeline:
                 len(detected_faces) + len(crop_detections),
             )
             raise ManualFaceValidationError(
-                "No face was detected inside the selected circle. "
-                f"(global_detections={len(detected_faces)}, crop_detections={len(crop_detections)})"
+                "No face was detected inside the selected circle."
             )
 
         (
@@ -266,8 +265,7 @@ class FaceClusterPipeline:
                 requested_box,
             )
             raise ManualFaceValidationError(
-                "Please place the circle closer to the face before saving. "
-                f"(overlap={best_overlap:.3f}, coverage={best_face_coverage:.3f}, bbox={bbox})"
+                "Please place the circle closer to the face before saving."
             )
 
         duplicate_match = self._find_duplicate_manual_face(existing_faces, bbox)
@@ -282,8 +280,7 @@ class FaceClusterPipeline:
                 duplicate_bbox,
             )
             raise ManualFaceValidationError(
-                "This face is already tagged nearby. "
-                f"(duplicate_overlap={duplicate_overlap:.3f}, center_ratio={duplicate_center_ratio:.3f}, bbox={bbox})"
+                "This face is already tagged nearby."
             )
 
         face_id = uuid.uuid4().hex

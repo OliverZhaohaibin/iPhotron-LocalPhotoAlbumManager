@@ -67,7 +67,7 @@ class ManualFaceAddWorker(QRunnable):
             self.signals.error.emit(str(exc))
         except Exception as exc:  # noqa: BLE001
             _LOGGER.exception("Failed to save manual face for asset %s", self._asset_id)
-            self.signals.error.emit(str(exc) or "Saving the face failed.")
+            self.signals.error.emit("Saving the face failed.")
         finally:
             self.signals.finished.emit()
 

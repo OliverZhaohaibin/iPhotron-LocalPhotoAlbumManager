@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from pathlib import Path
 import sqlite3
-from typing import Callable, List, Optional
+from collections.abc import Callable
+from pathlib import Path
 
 from .cache.index_store import get_global_repository
 from .config import (
@@ -12,18 +12,14 @@ from .config import (
     DEFAULT_INCLUDE,
 )
 from .errors import IndexCorruptedError, ManifestInvalidError
-from .index_sync_service import (
-    compute_links_payload as _compute_links_payload,
-    ensure_links as _ensure_links,
-    load_incremental_index_cache,
-    sync_live_roles_to_db as _sync_live_roles_to_db,
-    update_index_snapshot as _update_index_snapshot,
-    write_links as _write_links,
-)
+from .index_sync_service import ensure_links as _ensure_links
+from .index_sync_service import load_incremental_index_cache
+from .index_sync_service import prune_index_scope as _prune_index_scope
+from .index_sync_service import sync_live_roles_to_db as _sync_live_roles_to_db_impl
+from .index_sync_service import update_index_snapshot as _update_index_snapshot
 from .models.album import Album
 from .models.types import LiveGroup
 from .path_normalizer import compute_album_path as _compute_album_path
-from .path_normalizer import normalise_rel_key as _normalise_rel_key
 from .utils.logging import get_logger
 
 LOGGER = get_logger()
@@ -35,10 +31,20 @@ def _is_index_recoverable_error(exc: Exception) -> bool:
     return isinstance(exc, (sqlite3.Error, IndexCorruptedError, ManifestInvalidError))
 
 
+def _sync_live_roles_to_db(
+    root: Path,
+    groups: list[LiveGroup],
+    library_root: Path | None = None,
+) -> None:
+    """Backward-compatible wrapper around the index sync helper."""
+
+    _sync_live_roles_to_db_impl(root, groups, library_root=library_root)
+
+
 def open_album(
     root: Path,
     autoscan: bool = True,
-    library_root: Optional[Path] = None,
+    library_root: Path | None = None,
     *,
     hydrate_index: bool = True,
 ) -> Album:
@@ -151,9 +157,9 @@ def open_album(
 
 def rescan(
     root: Path,
-    progress_callback: Optional[Callable[[int, int], None]] = None,
-    library_root: Optional[Path] = None,
-) -> List[dict]:
+    progress_callback: Callable[[int, int], None] | None = None,
+    library_root: Path | None = None,
+) -> list[dict]:
     """Rescan the album and return the fresh index rows.
     
     Args:
@@ -190,6 +196,7 @@ def rescan(
                 row["rel"] = f"{album_path}/{row['rel']}"
     
     _update_index_snapshot(root, rows, library_root=library_root)
+    _prune_index_scope(root, rows, library_root=library_root)
     
     # For _ensure_links, we need album-relative rows
     if album_path:
@@ -215,7 +222,7 @@ def rescan(
 
 
 def scan_specific_files(
-    root: Path, files: List[Path], library_root: Optional[Path] = None
+    root: Path, files: list[Path], library_root: Path | None = None
 ) -> None:
     """Generate index rows for specific files and merge them into the index.
 
@@ -241,17 +248,17 @@ def scan_specific_files(
     # Actually, process_media_paths takes image_paths and video_paths.
 
     # We will just categorize them here.
-    image_paths: List[Path] = []
-    video_paths: List[Path] = []
+    image_paths: list[Path] = []
+    video_paths: list[Path] = []
 
     # Minimal set of extensions matching scanner.py
-    _IMAGE_EXTENSIONS = {".heic", ".heif", ".heifs", ".heicf", ".jpg", ".jpeg", ".png"}
-    _VIDEO_EXTENSIONS = {".mov", ".mp4", ".m4v", ".qt"}
+    image_extensions = {".heic", ".heif", ".heifs", ".heicf", ".jpg", ".jpeg", ".png"}
+    video_extensions = {".mov", ".mp4", ".m4v", ".qt"}
 
     for f in files:
-        if f.suffix.lower() in _IMAGE_EXTENSIONS:
+        if f.suffix.lower() in image_extensions:
             image_paths.append(f)
-        elif f.suffix.lower() in _VIDEO_EXTENSIONS:
+        elif f.suffix.lower() in video_extensions:
             video_paths.append(f)
 
     rows = list(process_media_paths(root, image_paths, video_paths))
@@ -271,7 +278,7 @@ def scan_specific_files(
     store.merge_scan_rows(rows)
 
 
-def pair(root: Path, library_root: Optional[Path] = None) -> List[LiveGroup]:
+def pair(root: Path, library_root: Path | None = None) -> list[LiveGroup]:
     """Rebuild live photo pairings from the current index.
     
     Args:
@@ -308,11 +315,5 @@ def pair(root: Path, library_root: Optional[Path] = None) -> List[LiveGroup]:
         rows = album_rows
     else:
         rows = list(get_global_repository(db_root).read_all())
-    
-    groups, payload = _compute_links_payload(rows)
-    _write_links(root, payload)
 
-    # Also sync to DB
-    _sync_live_roles_to_db(root, groups, library_root=library_root)
-
-    return groups
+    return _ensure_links(root, rows, library_root=library_root)

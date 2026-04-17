@@ -160,6 +160,34 @@ def test_handle_presentation_changed_rerenders_same_asset_when_reload_token_chan
     coordinator._clear_play_profile.assert_not_called()
 
 
+def test_preserve_live_presentation_keeps_existing_motion_during_same_asset_refresh(
+    tmp_path: Path,
+) -> None:
+    coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
+    motion_path = tmp_path / "motion.mov"
+    motion_path.write_bytes(b"\x00")
+
+    previous = DetailPresentation(
+        **{
+            **_make_presentation(path="/fake/photo.heic", is_video=False, is_live=True).__dict__,
+            "live_motion_rel": Path("motion.mov"),
+            "live_motion_abs": motion_path,
+        }
+    )
+    current = _make_presentation(path="/fake/photo.heic", is_video=False, is_live=False)
+
+    preserved = PlaybackCoordinator._preserve_live_presentation(
+        coordinator,
+        previous,
+        current,
+    )
+
+    assert preserved.is_live is True
+    assert preserved.live_motion_abs == motion_path
+    assert preserved.live_motion_rel == Path("motion.mov")
+    assert preserved.info["live_partner_rel"] == "motion.mov"
+
+
 def test_handle_rotate_requested_routes_video_rotation_through_video_area() -> None:
     coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
     coordinator._adjustment_committer = Mock(commit=Mock(return_value=True))

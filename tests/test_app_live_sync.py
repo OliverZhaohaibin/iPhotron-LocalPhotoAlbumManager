@@ -1,11 +1,25 @@
 
-import pytest
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
+
+import pytest
+
+from iPhoto import app as backend
 from iPhoto.app import _sync_live_roles_to_db
-from iPhoto.models.types import LiveGroup
-from iPhoto.cache.index_store import IndexStore
+from iPhoto.cache.index_store import (
+    IndexStore,
+    get_global_repository,
+    reset_global_repository,
+)
 from iPhoto.config import WORK_DIR_NAME
+from iPhoto.models.types import LiveGroup
+
+
+@pytest.fixture(autouse=True)
+def _reset_global_repo() -> None:
+    reset_global_repository()
+    yield
+    reset_global_repository()
 
 @pytest.fixture
 def temp_album(tmp_path):
@@ -122,3 +136,44 @@ def test_sync_live_roles_scoped_to_library_prefix(tmp_path):
     assert data["album/photo.jpg"]["live_partner_rel"] == "album/video.mov"
     assert data["album/video.mov"]["live_partner_rel"] == "album/photo.jpg"
     assert data["other/keep.jpg"]["live_role"] == 1
+
+
+def test_pair_keeps_db_live_roles_when_derived_snapshot_write_fails(tmp_path: Path) -> None:
+    album_root = tmp_path / "album"
+    album_root.mkdir()
+    (album_root / WORK_DIR_NAME).mkdir()
+
+    store = get_global_repository(album_root)
+    store.write_rows(
+        [
+            {
+                "rel": "photo.heic",
+                "id": "photo",
+                "mime": "image/heic",
+                "content_id": "CID-1",
+                "dt": "2024-01-01T00:00:00Z",
+            },
+            {
+                "rel": "motion.mov",
+                "id": "motion",
+                "mime": "video/quicktime",
+                "content_id": "CID-1",
+                "dt": "2024-01-01T00:00:00Z",
+                "dur": 1.5,
+            },
+            {"rel": "other.jpg", "id": "other"},
+        ]
+    )
+
+    with patch(
+        "iPhoto.index_sync_service.write_links",
+        side_effect=RuntimeError("disk full"),
+    ):
+        groups = backend.pair(album_root)
+
+    assert len(groups) == 1
+    data = {row["rel"]: row for row in store.read_all(filter_hidden=False)}
+    assert data["photo.heic"]["live_partner_rel"] == "motion.mov"
+    assert data["motion.mov"]["live_partner_rel"] == "photo.heic"
+    assert data["motion.mov"]["live_role"] == 1
+    assert data["other.jpg"]["live_partner_rel"] is None

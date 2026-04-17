@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import sqlite3
 import time
+from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Optional
 
@@ -351,6 +352,8 @@ class PlaybackCoordinator(QObject):
                 is_video=presentation.is_video,
             )
         previous = self._current_presentation
+        if previous is not None:
+            presentation = self._preserve_live_presentation(previous, presentation)
         self._current_presentation = presentation
         row = presentation.row
         self._asset_model.set_current_row(row)
@@ -373,6 +376,43 @@ class PlaybackCoordinator(QObject):
             self._clear_play_profile(presentation.row)
             return
         self._render_presentation(presentation)
+
+    def _preserve_live_presentation(
+        self,
+        previous: DetailPresentation,
+        current: DetailPresentation,
+    ) -> DetailPresentation:
+        """Keep Live replay metadata stable across same-asset refreshes.
+
+        During rescans the same asset may briefly refresh through a partial row
+        that has not yet been re-paired. When the previous Live motion file
+        still exists on disk, preserve that replay state for the currently
+        displayed asset instead of transiently degrading it to a still image.
+        """
+
+        if previous.row != current.row or previous.path != current.path:
+            return current
+        if current.is_live and current.live_motion_abs is not None:
+            return current
+        if not previous.is_live or previous.live_motion_abs is None:
+            return current
+        try:
+            if not previous.live_motion_abs.exists():
+                return current
+        except OSError:
+            return current
+
+        info = dict(current.info)
+        if previous.live_motion_rel is not None:
+            info.setdefault("live_partner_rel", str(previous.live_motion_rel))
+
+        return replace(
+            current,
+            is_live=True,
+            info=info,
+            live_motion_rel=previous.live_motion_rel,
+            live_motion_abs=previous.live_motion_abs,
+        )
 
     def _render_presentation(self, presentation: DetailPresentation) -> None:
         render_started = time.perf_counter()

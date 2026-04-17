@@ -297,11 +297,33 @@ class ScanCoordinatorMixin:
         # Clear worker reference before downstream listeners react so a completed
         # scan does not still appear in-flight while final post-processing runs.
         locker = QMutexLocker(self._scan_buffer_lock)
+        worker = self._current_scanner_worker
         self._current_scanner_worker = None
         face_scanner = self._current_face_scanner
         del locker
+
+        if worker is None:
+            if self._live_scan_root is None:
+                self.scanFinished.emit(root, True)
+            return
         if face_scanner is not None:
             face_scanner.finish_input()
+
+        if worker.cancelled:
+            self.scanFinished.emit(root, True)
+            return
+        if worker.failed:
+            self.scanFinished.emit(root, False)
+            return
+
+        # Persist Live Photo pairings once a scan completes so the database and
+        # links.json reflect the latest scan results.
+        try:
+            from .. import app as backend
+            backend._prune_index_scope(root, rows, library_root=self._root)
+            backend.pair(root, library_root=self._root)
+        except Exception as exc:
+            LOGGER.warning("Failed to persist live photo pairings after scan: %s", exc)
 
         self._geotagged_assets_cache = None
         self._geotagged_assets_cache_root = None

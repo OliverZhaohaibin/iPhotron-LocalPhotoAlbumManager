@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -97,3 +98,29 @@ def test_ensure_manifest_generates_defaults(tmp_path: Path) -> None:
     data = json.loads(manifest_path.read_text(encoding="utf-8"))
     assert data["title"] == "NoManifest"
     assert data["schema"] == "iPhoto/album@1"
+
+
+def test_scan_finished_skips_prune_when_worker_failed(tmp_path: Path, qapp: QApplication) -> None:
+    root = tmp_path / "Library"
+    root.mkdir()
+    manager = LibraryManager()
+    manager.bind_path(root)
+
+    class _Worker:
+        cancelled = False
+        failed = True
+
+    spy = QSignalSpy(manager.scanFinished)
+    manager._current_scanner_worker = _Worker()
+
+    with (
+        patch("iPhoto.app._prune_index_scope") as prune_mock,
+        patch("iPhoto.app.pair") as pair_mock,
+    ):
+        manager._on_scan_finished(root, [])
+        qapp.processEvents()
+
+    prune_mock.assert_not_called()
+    pair_mock.assert_not_called()
+    assert spy.count() == 1
+    assert spy.at(0)[1] is False

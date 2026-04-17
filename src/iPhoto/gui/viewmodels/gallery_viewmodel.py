@@ -12,7 +12,7 @@ from iPhoto.domain.models.core import MediaType
 from iPhoto.domain.models.query import AssetQuery
 from iPhoto.gui.coordinators.location_selection_session import LocationSelectionSession
 from iPhoto.gui.facade import AppFacade
-from iPhoto.library.geo_aggregator import _geotagged_asset_from_row
+from iPhoto.library.geo_aggregator import geotagged_asset_from_row
 
 from .base import BaseViewModel
 from .gallery_collection_store import GalleryCollectionStore
@@ -324,7 +324,7 @@ class GalleryViewModel(BaseViewModel):
 
         changed = False
         for row in chunk:
-            asset = _geotagged_asset_from_row(root, row)
+            asset = geotagged_asset_from_row(root, row)
             if asset is not None:
                 changed = self._location_session.upsert_asset(asset) or changed
                 continue
@@ -465,6 +465,5 @@ class GalleryViewModel(BaseViewModel):
             return False
         return (
             scan_root_resolved == root_resolved
-            or scan_root_resolved in root_resolved.parents
             or root_resolved in scan_root_resolved.parents
         )

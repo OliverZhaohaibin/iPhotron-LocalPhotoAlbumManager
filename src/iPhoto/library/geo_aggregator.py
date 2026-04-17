@@ -52,7 +52,7 @@ class GeotaggedAsset:
     """Library-relative path of the paired motion file when known."""
 
 
-def _geotagged_asset_from_row(root: Path, row: object) -> Optional[GeotaggedAsset]:
+def geotagged_asset_from_row(root: Path, row: object) -> Optional[GeotaggedAsset]:
     """Return a ``GeotaggedAsset`` converted from one index-store row."""
 
     if not isinstance(row, dict):
@@ -172,7 +172,7 @@ class GeoAggregatorMixin:
             return assets
 
         for row in rows:
-            asset = _geotagged_asset_from_row(root, row)
+            asset = geotagged_asset_from_row(root, row)
             if asset is None:
                 continue
             if asset.absolute_path in seen:

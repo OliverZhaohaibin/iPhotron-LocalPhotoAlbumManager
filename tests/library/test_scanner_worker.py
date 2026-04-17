@@ -47,13 +47,12 @@ def _patch_scan_and_repo(fake_rows, repo_side_effect=None):
     """Context manager that patches scan_album and get_global_repository.
     
     ``fake_rows`` is yielded one-by-one from the fake scanner.
-    ``repo_side_effect`` is assigned to ``store.append_rows.side_effect``.
+    ``repo_side_effect`` is assigned to ``store.merge_scan_rows.side_effect``.
     """
     mock_store = Mock()
+    mock_store.merge_scan_rows.side_effect = lambda chunk: list(chunk)
     if repo_side_effect is not None:
-        mock_store.append_rows.side_effect = repo_side_effect
-    else:
-        mock_store.append_rows = Mock()
+        mock_store.merge_scan_rows.side_effect = repo_side_effect
 
     def fake_scan_album(*_args, **_kwargs):
         yield from fake_rows
@@ -108,7 +107,7 @@ def test_scanner_worker_batch_failure_handling(temp_album, qapp):
     
     qapp.processEvents()
     
-    assert chunk_ready_spy.count() > 0
+    assert chunk_ready_spy.count() == 0
     assert batch_failed_spy.count() > 0
     assert worker.failed_count > 0
     assert finished_spy.count() == 1
@@ -124,15 +123,16 @@ def test_scanner_worker_scan_continues_after_partial_failures(temp_album, qapp):
     finished_spy = QSignalSpy(signals.finished)
     
     call_count = 0
-    def mock_append_rows(chunk):
+    def mock_merge_scan_rows(chunk):
         nonlocal call_count
         call_count += 1
         if call_count == 1:
             raise Exception("First chunk failed")
+        return list(chunk)
 
     rows = _fake_rows(25)  # enough for multiple chunks
     p_scan, p_repo, p_cache, mock_store = _patch_scan_and_repo(
-        rows, repo_side_effect=mock_append_rows,
+        rows, repo_side_effect=mock_merge_scan_rows,
     )
 
     with p_scan, p_repo, p_cache:

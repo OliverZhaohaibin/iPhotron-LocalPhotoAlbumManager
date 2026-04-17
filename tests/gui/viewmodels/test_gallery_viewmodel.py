@@ -263,6 +263,49 @@ def test_location_scan_updates_ignore_unrelated_scan_roots(tmp_path: Path) -> No
     assert vm.location_session.full_assets() == []
 
 
+def test_location_scan_chunk_invalidates_cached_snapshot_while_location_is_inactive(tmp_path: Path) -> None:
+    vm, _store, _context, _facade, _asset_service = _make_vm(library_root=tmp_path)
+    existing = SimpleNamespace(library_relative="a.jpg", absolute_path=tmp_path / "a.jpg")
+    serial = vm.location_session.begin_load(tmp_path)
+    assert vm.location_session.accept_loaded(serial, tmp_path, [existing])
+    vm.location_session.set_mode("inactive")
+
+    vm.handle_location_scan_chunk(
+        tmp_path / "Album",
+        [
+            {
+                "rel": "Album/new.jpg",
+                "id": "asset-2",
+                "gps": {"lat": 52.5, "lon": 13.4},
+                "mime": "image/jpeg",
+                "parent_album_path": "Album",
+            }
+        ],
+    )
+
+    assert vm.location_session.invalidated is True
+
+
+def test_open_location_map_reloads_after_inactive_snapshot_was_invalidated_by_scan(tmp_path: Path) -> None:
+    vm, _store, context, _facade, _asset_service = _make_vm(library_root=tmp_path)
+    stale = SimpleNamespace(library_relative="a.jpg", absolute_path=tmp_path / "a.jpg")
+    refreshed = SimpleNamespace(library_relative="Album/new.jpg", absolute_path=tmp_path / "Album" / "new.jpg")
+    serial = vm.location_session.begin_load(tmp_path)
+    assert vm.location_session.accept_loaded(serial, tmp_path, [stale])
+    vm.location_session.set_mode("inactive")
+    context.library.get_geotagged_assets.return_value = [refreshed]
+
+    payloads = []
+    vm.map_assets_changed.connect(lambda loaded_assets, root: payloads.append((loaded_assets, root)))
+
+    vm.handle_location_scan_finished(tmp_path / "Album", True)
+    vm.open_location_map()
+
+    assert vm.location_session.invalidated is False
+    assert vm.location_session.full_assets() == [refreshed]
+    assert payloads[-1] == ([refreshed], tmp_path)
+
+
 def test_open_people_dashboard_routes_to_people_view(tmp_path: Path) -> None:
     vm, store, _context, _facade, _asset_service = _make_vm(library_root=tmp_path)
     routes = []

@@ -316,10 +316,12 @@ class GalleryViewModel(BaseViewModel):
         self.return_from_cluster_gallery()
 
     def handle_location_scan_chunk(self, scan_root: Path, chunk: list[dict]) -> None:
-        if self._location_session.mode == "inactive":
-            return
         root = self._context.library.root()
         if root is None or not self._scan_root_matches_location_context(scan_root, root):
+            return
+        if self._location_session.mode == "inactive":
+            if self._location_session.root == root and self._location_session.has_snapshot:
+                self._location_session.invalidate()
             return
 
         changed = False
@@ -336,10 +338,14 @@ class GalleryViewModel(BaseViewModel):
             self.map_assets_changed.emit(self._location_session.full_assets(), root)
 
     def handle_location_scan_finished(self, scan_root: Path, success: bool) -> None:
-        if not success or self._location_session.mode == "inactive":
+        if not success:
             return
         root = self._context.library.root()
         if root is None or not self._scan_root_matches_location_context(scan_root, root):
+            return
+        if self._location_session.mode == "inactive":
+            if self._location_session.root == root and self._location_session.has_snapshot:
+                self._location_session.invalidate()
             return
 
         self._location_session.replace_assets(list(self._context.library.get_geotagged_assets()))

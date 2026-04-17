@@ -273,11 +273,8 @@ class ScanCoordinatorMixin:
         self.scanChunkReady.emit(root, chunk)
 
     def _on_scan_finished(self, root: Path, rows: List[dict]) -> None:
-        # Emit scanFinished for downstream handling (e.g., updating links or finalizing scan).
-        self._geotagged_assets_cache = None
-        self._geotagged_assets_cache_root = None
-        self.scanFinished.emit(root, True)
-        # Clear worker reference after emitting signal to prevent race conditions
+        # Clear worker reference before downstream listeners react so a completed
+        # scan does not still appear in-flight while final post-processing runs.
         locker = QMutexLocker(self._scan_buffer_lock)
         self._current_scanner_worker = None
         face_scanner = self._current_face_scanner
@@ -292,6 +289,12 @@ class ScanCoordinatorMixin:
             backend.pair(root, library_root=self._root)
         except Exception as exc:
             LOGGER.warning("Failed to persist live photo pairings after scan: %s", exc)
+
+        self._geotagged_assets_cache = None
+        self._geotagged_assets_cache_root = None
+        # Emit scanFinished only after pairing writes so location refreshes use
+        # the authoritative persisted state.
+        self.scanFinished.emit(root, True)
 
     def _on_scan_error(self, root: Path, message: str) -> None:
         locker = QMutexLocker(self._scan_buffer_lock)

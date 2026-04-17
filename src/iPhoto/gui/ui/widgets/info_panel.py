@@ -9,7 +9,7 @@ from fractions import Fraction
 from pathlib import Path
 from typing import Any, Mapping, Optional
 
-from PySide6.QtCore import QDateTime, QEvent, QLocale, QObject, QRectF, Qt, QTimer, Signal
+from PySide6.QtCore import QDateTime, QEvent, QLocale, QObject, QRectF, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QMouseEvent, QPainter, QPainterPath, QPalette, QPixmap, QShowEvent
 from PySide6.QtWidgets import (
     QFrame,
@@ -40,6 +40,58 @@ _LENS_SPEC_RE = re.compile(
     r"\bf/\d+(?:\.\d+)?",   # aperture part, e.g. "f/2" or "f/3.5"
     re.IGNORECASE,
 )
+
+_PLUS_CIRCLE_ICON_PATH = Path(__file__).resolve().parents[1] / "icon" / "plus.circle.svg"
+_FACE_AVATAR_DIAMETER = 48
+
+
+def _parse_svg_dimension(value: str) -> float:
+    match = re.search(r"([0-9]+(?:\.[0-9]+)?)", value)
+    return float(match.group(1)) if match is not None else 0.0
+
+
+def _measure_svg_path_bounds(svg_path: Path) -> tuple[float, float, float, float]:
+    try:
+        text = svg_path.read_text(encoding="utf-8")
+    except OSError:
+        return (0.0, 0.0, 0.0, 0.0)
+    path_match = re.search(r"d='([^']+)'", text, re.DOTALL)
+    if path_match is None:
+        return (0.0, 0.0, 0.0, 0.0)
+    numbers = [float(value) for value in re.findall(r"-?\d+(?:\.\d+)?", path_match.group(1))]
+    if len(numbers) < 2:
+        return (0.0, 0.0, 0.0, 0.0)
+    xs = numbers[0::2]
+    ys = numbers[1::2]
+    return (min(xs), min(ys), max(xs), max(ys))
+
+
+def _face_add_button_metrics() -> tuple[QSize, QSize]:
+    try:
+        text = _PLUS_CIRCLE_ICON_PATH.read_text(encoding="utf-8")
+    except OSError:
+        fallback = QSize(_FACE_AVATAR_DIAMETER, _FACE_AVATAR_DIAMETER)
+        return fallback, fallback
+    width_match = re.search(r"width='([^']+)'", text)
+    height_match = re.search(r"height='([^']+)'", text)
+    svg_width = _parse_svg_dimension(width_match.group(1)) if width_match is not None else 0.0
+    svg_height = _parse_svg_dimension(height_match.group(1)) if height_match is not None else 0.0
+    min_x, min_y, max_x, max_y = _measure_svg_path_bounds(_PLUS_CIRCLE_ICON_PATH)
+    outer_width = max(1.0, max_x - min_x)
+    outer_height = max(1.0, max_y - min_y)
+    if svg_width <= 0.0 or svg_height <= 0.0:
+        fallback = QSize(_FACE_AVATAR_DIAMETER, _FACE_AVATAR_DIAMETER)
+        return fallback, fallback
+    scale = max(_FACE_AVATAR_DIAMETER / outer_width, _FACE_AVATAR_DIAMETER / outer_height)
+    icon_size = QSize(
+        max(_FACE_AVATAR_DIAMETER, int(round(svg_width * scale))),
+        max(_FACE_AVATAR_DIAMETER, int(round(svg_height * scale))),
+    )
+    button_side = max(icon_size.width(), icon_size.height())
+    return icon_size, QSize(button_side, button_side)
+
+
+_FACE_ADD_ICON_SIZE, _FACE_ADD_BUTTON_SIZE = _face_add_button_metrics()
 
 @dataclass
 class _FormattedMetadata:
@@ -185,11 +237,15 @@ class InfoPanel(QWidget):
         self._face_layout.setSpacing(8)
         self._face_layout.addStretch(1)
         self._face_add_button = QToolButton(self._face_container)
-        self._face_add_button.setIcon(load_icon("plus.circle.svg"))
-        self._face_add_button.setIconSize(WINDOW_CONTROL_GLYPH_SIZE)
+        self._face_add_button.setIconSize(_FACE_ADD_ICON_SIZE)
+        self._face_add_button.setFixedSize(_FACE_ADD_BUTTON_SIZE)
         self._face_add_button.setAutoRaise(True)
         self._face_add_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._face_add_button.setStyleSheet(
+            "QToolButton { padding: 0px; margin: 0px; border: none; background: transparent; }"
+        )
         self._face_add_button.clicked.connect(self.manualFaceAddRequested.emit)
+        self._update_face_add_button_icon()
         content_layout.addWidget(self._face_container)
 
         content_layout.addStretch(1)
@@ -285,6 +341,23 @@ class InfoPanel(QWidget):
             f"QToolButton:pressed {{ background-color: {pressed.name(QColor.NameFormat.HexArgb)}; border-radius: 6px; }}"
         )
 
+    def _resolve_action_icon_tint(self) -> str | None:
+        color = self.palette().color(QPalette.ColorRole.ButtonText)
+        if not color.isValid():
+            color = self.palette().color(QPalette.ColorRole.WindowText)
+        if not color.isValid():
+            return None
+        return color.name(QColor.NameFormat.HexArgb)
+
+    def _update_face_add_button_icon(self) -> None:
+        self._face_add_button.setIcon(
+            load_icon(
+                "plus.circle.svg",
+                color=self._resolve_action_icon_tint(),
+                size=(_FACE_ADD_ICON_SIZE.width(), _FACE_ADD_ICON_SIZE.height()),
+            )
+        )
+
     def _make_content_label(self) -> QLabel:
         """Create a word-wrapped plain-text label with stable vertical sizing."""
 
@@ -318,13 +391,13 @@ class InfoPanel(QWidget):
 
     def _make_face_avatar(self, annotation: AssetFaceAnnotation) -> QLabel:
         label = QLabel(self._face_container)
-        label.setFixedSize(34, 34)
+        label.setFixedSize(_FACE_AVATAR_DIAMETER, _FACE_AVATAR_DIAMETER)
         pixmap = _avatar_pixmap(annotation.thumbnail_path)
         if pixmap is not None:
             label.setPixmap(pixmap)
         else:
             label.setStyleSheet(
-                "QLabel { background-color: rgba(207, 214, 225, 220); border-radius: 17px; }"
+                f"QLabel {{ background-color: rgba(207, 214, 225, 220); border-radius: {_FACE_AVATAR_DIAMETER // 2}px; }}"
             )
             label.setAlignment(Qt.AlignmentFlag.AlignCenter)
             label.setText(" ")
@@ -466,6 +539,7 @@ class InfoPanel(QWidget):
     def changeEvent(self, event: QEvent) -> None:
         if event.type() == QEvent.Type.PaletteChange:
             self._apply_close_button_style()
+            self._update_face_add_button_icon()
         super().changeEvent(event)
 
     def showEvent(self, event: QShowEvent) -> None:
@@ -878,7 +952,7 @@ def _avatar_pixmap(path: Path | None) -> QPixmap | None:
     source = QPixmap(str(path))
     if source.isNull():
         return None
-    size = 34
+    size = _FACE_AVATAR_DIAMETER
     scaled = source.scaled(
         size,
         size,

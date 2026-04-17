@@ -10,11 +10,16 @@ import pytest
 pytest.importorskip("PySide6", reason="PySide6 is required for GUI tests", exc_type=ImportError)
 pytest.importorskip("PySide6.QtWidgets", reason="Qt widgets not available", exc_type=ImportError)
 
-from PySide6.QtCore import QEvent, QPointF, Qt
+from PySide6.QtCore import QEvent, QPointF, QSize, Qt
 from PySide6.QtGui import QMouseEvent
 from PySide6.QtWidgets import QApplication
 
-from iPhoto.gui.ui.widgets.info_panel import InfoPanel
+from iPhoto.gui.ui.widgets.info_panel import (
+    InfoPanel,
+    _FACE_ADD_BUTTON_SIZE,
+    _FACE_ADD_ICON_SIZE,
+    _FACE_AVATAR_DIAMETER,
+)
 
 
 @pytest.fixture(scope="module")
@@ -179,6 +184,38 @@ def test_info_panel_face_add_button_stays_visible_across_rebuilds(qapp: QApplica
 
     assert panel._face_add_button.isHidden() is False
     assert panel._face_add_button.parent() is panel._face_container
+    panel.close()
+
+
+def test_info_panel_face_strip_uses_enlarged_avatar_and_matched_plus_button_sizes(
+    qapp: QApplication,
+) -> None:
+    """The face strip should enlarge avatars and size the plus button from the SVG metrics."""
+
+    from iPhoto.people.repository import AssetFaceAnnotation
+
+    panel = InfoPanel()
+    panel.set_asset_faces(
+        [
+            AssetFaceAnnotation(
+                face_id="face-1",
+                person_id="person-1",
+                display_name="Alice",
+                box_x=0,
+                box_y=0,
+                box_w=10,
+                box_h=10,
+                image_width=100,
+                image_height=100,
+            )
+        ]
+    )
+
+    avatar = panel._face_layout.itemAt(0).widget()
+    assert avatar is not None
+    assert avatar.size() == QSize(_FACE_AVATAR_DIAMETER, _FACE_AVATAR_DIAMETER)
+    assert panel._face_add_button.iconSize() == _FACE_ADD_ICON_SIZE
+    assert panel._face_add_button.size() == _FACE_ADD_BUTTON_SIZE
     panel.close()
 
 

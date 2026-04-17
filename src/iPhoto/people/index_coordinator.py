@@ -217,9 +217,13 @@ class PeopleIndexCoordinator(QObject):
                     thumbnail_file = (faces_root / face.thumbnail_path).resolve()
                     try:
                         thumbnail_file.relative_to(faces_root)
-                        thumbnail_file.unlink(missing_ok=True)
-                    except (ValueError, OSError):
-                        LOGGER.warning("Failed to remove orphaned thumbnail: %s", thumbnail_file)
+                    except ValueError:
+                        LOGGER.warning("Orphaned thumbnail path escapes faces root, skipping: %s", thumbnail_file)
+                    else:
+                        try:
+                            thumbnail_file.unlink(missing_ok=True)
+                        except OSError:
+                            LOGGER.warning("Failed to remove orphaned thumbnail: %s", thumbnail_file)
                 raise
             return self._emit_snapshot(
                 changed_asset_ids=(face.asset_id,),

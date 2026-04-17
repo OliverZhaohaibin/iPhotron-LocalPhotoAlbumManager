@@ -15,7 +15,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Dict, List, Optional
 
-from PySide6.QtCore import QFileSystemWatcher, QObject, QTimer, Signal, QThreadPool, QMutex
+from PySide6.QtCore import QFileSystemWatcher, QObject, Qt, QTimer, Signal, QThreadPool, QMutex
 
 from ..errors import LibraryUnavailableError
 from ..people.index_coordinator import PeopleIndexCoordinator, get_people_index_coordinator
@@ -169,10 +169,12 @@ class LibraryManager(
         self._geotagged_assets_cache_root = None
         if self._current_face_scanner is not None:
             self._current_face_scanner.cancel()
-            self._current_face_scanner.wait(250)
+            self._current_face_scanner.wait(2000)
             if self._current_face_scanner.isRunning():
-                self._current_face_scanner.terminate()
-                self._current_face_scanner.wait(250)
+                LOGGER.warning(
+                    "Face scan worker did not exit within 2 s after cancel(); "
+                    "detaching without terminate() to avoid DB corruption."
+                )
             self._current_face_scanner = None
         self._unbind_people_index_coordinator()
 
@@ -182,7 +184,9 @@ class LibraryManager(
     def _bind_people_index_coordinator(self, root: Path) -> None:
         coordinator = get_people_index_coordinator(root)
         coordinator.resume()
-        coordinator.snapshotCommitted.connect(self._on_people_snapshot_committed)
+        coordinator.snapshotCommitted.connect(
+            self._on_people_snapshot_committed, Qt.ConnectionType.QueuedConnection
+        )
         self._people_index_coordinator = coordinator
 
     def _unbind_people_index_coordinator(self) -> None:

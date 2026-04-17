@@ -7,7 +7,7 @@ from pathlib import Path
 import threading
 from typing import Iterable
 
-from PySide6.QtCore import QObject, Signal
+from PySide6.QtCore import QObject, Qt, Signal, Slot
 
 from iPhoto.cache.index_store import get_global_repository
 from iPhoto.config import WORK_DIR_NAME
@@ -33,6 +33,10 @@ class PeopleIndexCoordinator(QObject):
     """Serialize People writes and publish committed snapshot revisions."""
 
     snapshotCommitted = Signal(object)
+    # Internal signal used to marshal snapshot emission back onto the
+    # coordinator's own (main) thread, even when _emit_snapshot() is called
+    # from a background worker thread.
+    _scheduleEmit = Signal(object)
 
     def __init__(self, library_root: Path) -> None:
         super().__init__()
@@ -40,6 +44,13 @@ class PeopleIndexCoordinator(QObject):
         self._lock = threading.RLock()
         self._revision = 0
         self._shutdown_requested = False
+        # QueuedConnection ensures _fire_snapshot() runs on the coordinator's
+        # own thread regardless of which thread calls _emit_snapshot().
+        self._scheduleEmit.connect(self._fire_snapshot, Qt.ConnectionType.QueuedConnection)
+
+    @Slot(object)
+    def _fire_snapshot(self, event: object) -> None:
+        self.snapshotCommitted.emit(event)
 
     @property
     def library_root(self) -> Path:
@@ -218,7 +229,7 @@ class PeopleIndexCoordinator(QObject):
             person_redirects=dict(person_redirects or {}),
             group_redirects=dict(group_redirects or {}),
         )
-        self.snapshotCommitted.emit(event)
+        self._scheduleEmit.emit(event)
         return event
 
 

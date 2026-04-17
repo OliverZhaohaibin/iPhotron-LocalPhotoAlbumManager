@@ -280,6 +280,8 @@ class GalleryViewModel(BaseViewModel):
         root = self._context.library.root()
         if root is None:
             return
+        if getattr(event, "library_root", None) != root:
+            return
 
         current_id = self._people_cluster_id
         if self._people_cluster_kind == "person":

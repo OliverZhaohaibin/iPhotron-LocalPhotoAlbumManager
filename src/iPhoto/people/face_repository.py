@@ -284,18 +284,25 @@ class FaceRepository:
         if not ids:
             return []
         self.initialize()
-        placeholders = ", ".join(["?"] * len(ids))
+        # Chunk the IN clause to stay within SQLite's bound-parameter limit
+        # (commonly 999).  The repo uses 900 as the conservative chunk size.
+        chunk_size = 900
+        person_ids: set[str] = set()
         with closing(self._connect()) as conn:
-            rows = conn.execute(
-                f"""
-                SELECT DISTINCT person_id
-                FROM faces
-                WHERE asset_id IN ({placeholders}) AND person_id IS NOT NULL
-                ORDER BY person_id ASC
-                """,
-                ids,
-            ).fetchall()
-        return [str(row["person_id"]) for row in rows if row["person_id"]]
+            for start in range(0, len(ids), chunk_size):
+                chunk = ids[start : start + chunk_size]
+                placeholders = ", ".join(["?"] * len(chunk))
+                rows = conn.execute(
+                    f"""
+                    SELECT DISTINCT person_id
+                    FROM faces
+                    WHERE asset_id IN ({placeholders}) AND person_id IS NOT NULL
+                    ORDER BY person_id ASC
+                    """,
+                    chunk,
+                ).fetchall()
+                person_ids.update(str(row["person_id"]) for row in rows if row["person_id"])
+        return sorted(person_ids)
 
     def list_asset_face_annotations(self, asset_id: str) -> list[AssetFaceAnnotation]:
         if not asset_id:

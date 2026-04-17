@@ -198,24 +198,10 @@ class GalleryViewModel(BaseViewModel):
             or self._location_session.invalidated
         ):
             return
-        resolved_path = self._location_session.resolve_relative(rel)
-        if resolved_path is None:
+        asset = self._location_session.resolve_asset(rel)
+        if asset is None:
             return
-        assets = self._location_session.full_assets()
-        self.current_section.value = "location_gallery"
-        self.static_selection.value = "Location"
-        self.active_root.value = root
-        self.current_query.value = None
-        self.current_direct_assets.value = list(assets)
-        self.can_return_to_map.value = False
-        self._clear_cluster_gallery_context()
-        self._location_session.set_mode("gallery")
-        self.cluster_gallery_mode_changed.emit(False)
-        self._store.load_selection(root, direct_assets=assets, library_root=root)
-        self.route_requested.emit("gallery")
-        row = self._store.row_for_path(resolved_path)
-        if row is not None:
-            self.open_row(row)
+        self.open_cluster_gallery([asset])
 
     def open_cluster_gallery(self, assets: list[Any]) -> None:
         root = self._context.library.root()

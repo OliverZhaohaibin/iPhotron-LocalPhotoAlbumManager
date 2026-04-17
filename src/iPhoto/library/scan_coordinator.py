@@ -31,7 +31,12 @@ class _PairingWorker(QRunnable):
             from .. import app as backend  # noqa: PLC0415
             backend.pair(self._scan_root, library_root=self._library_root)
         except Exception as exc:  # noqa: BLE001
-            LOGGER.warning("Failed to persist live photo pairings after scan: %s", exc)
+            LOGGER.warning(
+                "Failed to persist live photo pairings after scan of %s "
+                "(re-scanning the library will retry pairing): %s",
+                self._scan_root,
+                exc,
+            )
 
 
 class ScanCoordinatorMixin:

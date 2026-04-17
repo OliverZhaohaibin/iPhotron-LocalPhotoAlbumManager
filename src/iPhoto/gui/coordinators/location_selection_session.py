@@ -18,7 +18,9 @@ class LocationSelectionSession:
         self._mode: LocationSelectionMode = "inactive"
         self._invalidated = False
         self._has_snapshot = False
-        # Dict index for O(1) upsert/remove; sorted list is rebuilt lazily.
+        # Keys are POSIX-normalized library_relative strings (Path(rel).as_posix());
+        # values are the corresponding asset objects. Provides O(1) upsert/remove.
+        # The sorted list (_full_assets) is rebuilt lazily via full_assets().
         self._asset_index: dict[str, object] = {}
         self._full_assets: list = []
         self._list_dirty: bool = False
@@ -60,11 +62,11 @@ class LocationSelectionSession:
         if serial != self._request_serial or self._root != normalized_root:
             return False
         self._root = normalized_root
-        self._asset_index = {
-            Path(rel).as_posix(): a
-            for a in assets
-            if isinstance((rel := getattr(a, "library_relative", None)), str) and rel
-        }
+        self._asset_index = {}
+        for a in assets:
+            rel = getattr(a, "library_relative", None)
+            if isinstance(rel, str) and rel:
+                self._asset_index[Path(rel).as_posix()] = a
         self._list_dirty = True
         self._has_snapshot = True
         self._invalidated = False

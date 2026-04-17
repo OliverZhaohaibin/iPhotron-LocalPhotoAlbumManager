@@ -69,14 +69,20 @@ class LocationSelectionSession:
     def full_assets(self) -> list:
         return list(self._full_assets)
 
-    def resolve_relative(self, rel: str) -> Path | None:
+    def resolve_asset(self, rel: str):
         target = Path(rel).as_posix()
         for asset in self._full_assets:
             library_relative = getattr(asset, "library_relative", None)
             if isinstance(library_relative, str) and Path(library_relative).as_posix() == target:
-                absolute_path = getattr(asset, "absolute_path", None)
-                if isinstance(absolute_path, Path):
-                    return absolute_path
+                return asset
+        return None
+
+    def resolve_relative(self, rel: str) -> Path | None:
+        asset = self.resolve_asset(rel)
+        if asset is not None:
+            absolute_path = getattr(asset, "absolute_path", None)
+            if isinstance(absolute_path, Path):
+                return absolute_path
         return None
 
     def is_cluster_gallery(self) -> bool:

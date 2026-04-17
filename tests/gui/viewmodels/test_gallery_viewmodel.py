@@ -88,32 +88,46 @@ def test_open_filtered_collection_sets_media_types(tmp_path: Path) -> None:
     assert query.media_types == [MediaType.VIDEO]
 
 
-def test_open_location_asset_uses_full_snapshot_and_emits_detail(tmp_path: Path) -> None:
-    vm, store, context, _facade, _asset_service = _make_vm(library_root=tmp_path)
+def test_open_location_asset_opens_singleton_cluster_gallery(tmp_path: Path) -> None:
+    vm, store, _context, _facade, _asset_service = _make_vm(library_root=tmp_path)
     assets = [
         SimpleNamespace(library_relative="a.jpg", absolute_path=tmp_path / "a.jpg"),
         SimpleNamespace(library_relative="nested/b.jpg", absolute_path=tmp_path / "nested" / "b.jpg"),
     ]
     serial = vm.location_session.begin_load(tmp_path)
     assert vm.location_session.accept_loaded(serial, tmp_path, assets)
-    store.row_for_path.return_value = 1
 
     requested = []
+    cluster_mode = []
+    routes = []
     vm.detail_requested.connect(requested.append)
+    vm.cluster_gallery_mode_changed.connect(cluster_mode.append)
+    vm.route_requested.connect(routes.append)
     vm.open_location_asset("nested/b.jpg")
 
-    store.load_selection.assert_called_once_with(tmp_path, direct_assets=assets, library_root=tmp_path)
-    store.row_for_path.assert_called_once_with(tmp_path / "nested" / "b.jpg")
-    assert requested == [1]
-    assert vm.location_session.mode == "gallery"
+    selected_asset = assets[1]
+    store.load_selection.assert_called_once_with(
+        tmp_path,
+        direct_assets=[selected_asset],
+        library_root=tmp_path,
+    )
+    store.row_for_path.assert_not_called()
+    assert requested == []
+    assert routes == ["gallery"]
+    assert cluster_mode == [True]
+    assert vm.current_section.value == "cluster_gallery"
+    assert vm.current_direct_assets.value == [selected_asset]
+    assert vm.can_return_to_map.value is True
+    assert vm.is_in_cluster_gallery() is True
+    assert vm.location_session.mode == "cluster_gallery"
 
 
-def test_return_to_map_from_cluster_gallery_reuses_snapshot(tmp_path: Path) -> None:
+def test_return_to_map_from_singleton_location_cluster_reuses_snapshot(tmp_path: Path) -> None:
     vm, _store, _context, _facade, _asset_service = _make_vm(library_root=tmp_path)
     assets = [SimpleNamespace(library_relative="a.jpg", absolute_path=tmp_path / "a.jpg")]
     serial = vm.location_session.begin_load(tmp_path)
     assert vm.location_session.accept_loaded(serial, tmp_path, assets)
-    vm.location_session.set_mode("cluster_gallery")
+    vm.open_location_asset("a.jpg")
 
     routes = []
     map_payloads = []

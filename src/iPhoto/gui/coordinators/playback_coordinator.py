@@ -513,6 +513,19 @@ class PlaybackCoordinator(QObject):
             getattr(self, "_current_presentation", None)
         )
 
+    @Slot(object)
+    def handle_people_snapshot_committed(self, event: object) -> None:
+        presentation = getattr(self, "_current_presentation", None)
+        if presentation is None or not presentation.asset_id:
+            return
+        # Skip the refresh if the snapshot doesn't touch the current asset.
+        # An absent or empty changed_asset_ids means "all assets potentially
+        # changed" (e.g., a set_person_order event) — in that case always refresh.
+        changed_asset_ids = getattr(event, "changed_asset_ids", None)
+        if changed_asset_ids and presentation.asset_id not in changed_asset_ids:
+            return
+        self._refresh_face_name_overlay_for_presentation(presentation)
+
     def _refresh_face_name_overlay_for_presentation(
         self,
         presentation: DetailPresentation | None,

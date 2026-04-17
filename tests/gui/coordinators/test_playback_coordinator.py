@@ -317,6 +317,22 @@ def test_handle_face_name_rename_submitted_updates_overlay_and_dashboard() -> No
     coordinator._people_dashboard_refresh_callback.assert_called_once_with()
 
 
+def test_handle_people_snapshot_committed_refreshes_current_overlay() -> None:
+    coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
+    coordinator._current_presentation = _make_presentation(
+        path="/fake/photo.jpg",
+        asset_id="asset-photo",
+        is_video=False,
+    )
+    coordinator._refresh_face_name_overlay_for_presentation = Mock()
+
+    PlaybackCoordinator.handle_people_snapshot_committed(coordinator, object())
+
+    coordinator._refresh_face_name_overlay_for_presentation.assert_called_once_with(
+        coordinator._current_presentation
+    )
+
+
 def test_handle_info_panel_dismissed_clears_viewmodel_state() -> None:
     coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
     coordinator._detail_vm = Mock(hide_info_panel=Mock())

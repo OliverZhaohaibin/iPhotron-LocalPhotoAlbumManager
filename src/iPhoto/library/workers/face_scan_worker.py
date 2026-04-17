@@ -9,12 +9,14 @@ from typing import Iterable
 from PySide6.QtCore import QThread, Signal
 
 from ...cache.index_store import get_global_repository
+from ...people.index_coordinator import (
+    PeopleIndexCoordinator,
+    PeopleSnapshotCommittedError,
+    get_people_index_coordinator,
+)
 from ...people.pipeline import FaceClusterPipeline
-from ...people.repository import FaceRepository
-from ...people.scan_session import FaceScanSession
 from ...people.service import face_library_paths
 from ...people.status import (
-    FACE_STATUS_DONE,
     FACE_STATUS_FAILED,
     FACE_STATUS_PENDING,
     FACE_STATUS_RETRY,
@@ -69,13 +71,8 @@ class FaceScanWorker(QThread):
             return
 
         paths = face_library_paths(self._library_root)
-        repository = FaceRepository(paths.index_db_path, paths.state_db_path)
         pipeline = FaceClusterPipeline(model_root=paths.model_dir)
-        session = FaceScanSession()
-        # Accumulate done IDs across batches; only written to the store after a
-        # successful session.commit() so that a commit failure cannot leave
-        # assets marked "done" without a corresponding People snapshot.
-        pending_done_ids: list[str] = []
+        coordinator = get_people_index_coordinator(self._library_root)
 
         while not self._cancelled:
             self._top_up_pending_rows()
@@ -84,45 +81,26 @@ class FaceScanWorker(QThread):
                 if self._input_closed:
                     self._top_up_pending_rows()
                     if self._queue.empty():
-                        try:
-                            committed = session.commit(
-                                repository,
-                                distance_threshold=pipeline.distance_threshold,
-                                min_samples=pipeline.min_samples,
-                            )
-                        except Exception as exc:
-                            LOGGER.warning(
-                                "Face scan commit failed: %s", exc, exc_info=True
-                            )
-                            get_global_repository(self._library_root).update_face_statuses(
-                                pending_done_ids, FACE_STATUS_RETRY
-                            )
-                            for asset_id in pending_done_ids:
-                                self._queued_ids.discard(asset_id)
-                            pending_done_ids.clear()
-                            self.statusChanged.emit(
-                                "Face scanning paused due to a commit error."
-                            )
-                            return
-                        store = get_global_repository(self._library_root)
-                        store.update_face_statuses(pending_done_ids, FACE_STATUS_DONE)
-                        # Retire in-flight IDs now that the DB reflects DONE.
-                        for asset_id in pending_done_ids:
-                            self._queued_ids.discard(asset_id)
-                        pending_done_ids.clear()
-                        if committed:
-                            self.peopleIndexUpdated.emit()
                         return
                 continue
 
             try:
-                batch_done_ids = self._process_batch(
+                committed = self._process_batch(
                     batch,
+                    coordinator,
                     pipeline,
-                    session,
                     paths.thumbnail_dir,
                 )
-                pending_done_ids.extend(batch_done_ids)
+                for asset_id in [str(row.get("id") or "") for row in batch if row.get("id")]:
+                    self._queued_ids.discard(asset_id)
+                if committed:
+                    self.peopleIndexUpdated.emit()
+            except PeopleSnapshotCommittedError as exc:
+                LOGGER.error("Face scan bookkeeping failed after commit: %s", exc, exc_info=True)
+                for asset_id in [str(row.get("id") or "") for row in batch if row.get("id")]:
+                    self._queued_ids.discard(asset_id)
+                self.statusChanged.emit(str(exc))
+                return
             except RuntimeError as exc:
                 self._mark_remaining_failed(batch)
                 self.statusChanged.emit(str(exc))
@@ -174,22 +152,14 @@ class FaceScanWorker(QThread):
     def _process_batch(
         self,
         batch: list[dict],
+        coordinator: PeopleIndexCoordinator,
         pipeline: FaceClusterPipeline,
-        session: FaceScanSession,
         thumbnail_dir: Path,
-    ) -> list[str]:
-        """Detect faces for *batch*, stage results, and return the done asset IDs.
-
-        Ordering is deliberate:
-        1. Retry IDs are written to the store *before* done items are staged so
-           that a DB failure cannot leave the session with staged faces for assets
-           that are still ``pending/retry`` in the index.
-        2. Done IDs are **not** removed from ``_queued_ids`` here; they stay in
-           the set until ``run()`` writes ``FACE_STATUS_DONE`` after a successful
-           ``session.commit()``.  This prevents ``_top_up_pending_rows()`` from
-           re-fetching and re-enqueuing those assets while they are still
-           ``pending`` in the DB but already processed in-memory.
-        """
+    ) -> bool:
+        """Detect faces for *batch* and commit a realtime People snapshot."""
+        if self._cancelled:
+            self._mark_rows_retry(batch)
+            return False
         detected = list(
             pipeline.detect_faces_for_rows(
                 batch,
@@ -198,29 +168,22 @@ class FaceScanWorker(QThread):
             )
         )
 
-        # Split into done / retry items up-front so we can write retry
-        # statuses to the DB before any staging occurs.
-        done_items = [item for item in detected if item.asset_id and not item.error]
+        if self._cancelled:
+            self._mark_rows_retry(batch)
+            return False
+
         retry_items = [item for item in detected if item.asset_id and item.error]
         retry_ids = [str(item.asset_id) for item in retry_items]
-
-        # Write retry statuses first; if this raises, the session is still clean.
-        store = get_global_repository(self._library_root)
-        store.update_face_statuses(retry_ids, FACE_STATUS_RETRY)
-
-        # Retire retry IDs from the in-flight set immediately.
-        for asset_id in retry_ids:
-            self._queued_ids.discard(asset_id)
 
         if retry_ids:
             self.statusChanged.emit("Some assets need a face-scan retry.")
 
-        # Stage done items only after retry DB writes succeed.
-        # The second return value contains retry IDs discovered by the session;
-        # since we pre-filtered to done_items only, it will always be empty.
-        done_ids, _ignored_retry_ids = session.stage_detection_results(done_items)
-
-        return done_ids
+        event = coordinator.submit_detected_batch(
+            detected,
+            distance_threshold=pipeline.distance_threshold,
+            min_samples=pipeline.min_samples,
+        )
+        return event is not None
 
     def _mark_rows_retry(self, rows: Iterable[dict]) -> None:
         ids = [str(row.get("id") or "") for row in rows if row.get("id")]

@@ -106,6 +106,10 @@ class FaceScanSession:
         *,
         distance_threshold: float,
         min_samples: int,
+        previous_faces: list[FaceRecord] | None = None,
+        previous_persons: list[PersonRecord] | None = None,
+        clustered_faces: list[FaceRecord] | None = None,
+        persons: list[PersonRecord] | None = None,
     ) -> bool:
         """Commit one unified People snapshot for this scan session."""
 
@@ -115,15 +119,18 @@ class FaceScanSession:
         # Fetch the current state once so it can be passed to
         # build_runtime_snapshot() (avoiding a second get_all_faces() call
         # inside that method) and kept for rollback if the commit fails.
-        previous_faces = repository.get_all_faces()
-        previous_persons = repository.get_all_person_records()
+        if previous_faces is None:
+            previous_faces = repository.get_all_faces()
+        if previous_persons is None:
+            previous_persons = repository.get_all_person_records()
 
-        clustered_faces, persons = self.build_runtime_snapshot(
-            repository,
-            distance_threshold=distance_threshold,
-            min_samples=min_samples,
-            existing_faces=previous_faces,
-        )
+        if clustered_faces is None or persons is None:
+            clustered_faces, persons = self.build_runtime_snapshot(
+                repository,
+                distance_threshold=distance_threshold,
+                min_samples=min_samples,
+                existing_faces=previous_faces,
+            )
         repository.replace_all(clustered_faces, persons, sync_runtime_state=False)
         state_repository = repository.state_repository
         try:

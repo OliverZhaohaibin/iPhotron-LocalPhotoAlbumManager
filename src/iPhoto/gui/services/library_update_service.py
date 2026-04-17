@@ -460,6 +460,7 @@ class LibraryUpdateService(QObject):
             # therefore we flush the global index and ``links.json`` here to
             # mirror the historical facade behaviour before notifying listeners.
             backend._update_index_snapshot(root, materialised_rows, library_root=library_root)
+            backend._prune_index_scope(root, materialised_rows, library_root=library_root)
             backend._ensure_links(root, materialised_rows, library_root=library_root)
         except IPhotoError as exc:
             self.errorRaised.emit(str(exc))

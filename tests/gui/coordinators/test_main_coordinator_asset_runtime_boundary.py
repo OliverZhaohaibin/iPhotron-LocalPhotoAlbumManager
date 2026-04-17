@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 from pathlib import Path
-from unittest.mock import MagicMock
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
 
 from iPhoto.gui.coordinators.main_coordinator import MainCoordinator
 
@@ -92,6 +93,7 @@ def test_connect_signals_wires_location_scan_updates_from_library() -> None:
     coordinator._status_bar = MagicMock()
     coordinator._asset_list_vm = MagicMock()
     coordinator._playback = MagicMock()
+    coordinator._player_view_controller = MagicMock()
     coordinator._detail_vm = MagicMock()
     coordinator._navigation = MagicMock()
     coordinator._dialog = MagicMock()
@@ -118,3 +120,30 @@ def test_connect_signals_wires_location_scan_updates_from_library() -> None:
     coordinator._context.library.scanFinished.connect.assert_any_call(
         coordinator._gallery_vm.handle_location_scan_finished
     )
+
+
+def test_handle_media_load_failed_prunes_row_and_refreshes_collection(tmp_path: Path) -> None:
+    coordinator = MainCoordinator.__new__(MainCoordinator)
+    library_root = tmp_path / "library"
+    library_root.mkdir()
+    failed_path = library_root / "Album" / "motion.mov"
+    failed_path.parent.mkdir(parents=True)
+
+    repository = MagicMock()
+    repository.get_by_path.return_value = SimpleNamespace(id="asset-1")
+
+    coordinator._media_failure_cleanup_paths = set()
+    coordinator._dialog = MagicMock()
+    coordinator._gallery_store = MagicMock()
+    coordinator._logger = MagicMock()
+    coordinator._context = MagicMock()
+    coordinator._context.asset_runtime.repository = repository
+    coordinator._context.library.root.return_value = library_root
+
+    with patch("iPhoto.gui.coordinators.main_coordinator.backend.pair") as pair_mock:
+        coordinator._handle_media_load_failed(failed_path, "decoder failed")
+
+    coordinator._dialog.show_error.assert_called_once()
+    repository.delete.assert_called_once_with("asset-1")
+    pair_mock.assert_called_once_with(failed_path.parent, library_root=library_root)
+    coordinator._gallery_store.reload_current_selection.assert_called_once_with()

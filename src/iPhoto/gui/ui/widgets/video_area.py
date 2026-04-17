@@ -82,6 +82,7 @@ class VideoArea(QWidget):
     fullscreenExitRequested = Signal()
     playbackStateChanged = Signal(bool)
     playbackFinished = Signal()
+    mediaLoadFailed = Signal(Path, str)
     nextItemRequested = Signal()
     prevItemRequested = Signal()
     positionChanged = Signal(int)
@@ -188,6 +189,7 @@ class VideoArea(QWidget):
         self._player.durationChanged.connect(self._on_duration_changed)
         self._player.playbackStateChanged.connect(self._on_playback_state_changed)
         self._player.mediaStatusChanged.connect(self._on_media_status_changed)
+        self._player.errorOccurred.connect(self._on_error_occurred)
         # --- End Media Player Setup ---
 
         self._overlay_margin = 48
@@ -1024,6 +1026,15 @@ class VideoArea(QWidget):
                 end_pos=int(duration),
                 hold_pos=max(0, int(duration) - VIDEO_COMPLETE_HOLD_BACKSTEP_MS),
             )
+
+    def _on_error_occurred(self, _error: object, message: str) -> None:
+        source = self._current_source
+        if source is None:
+            return
+        detail = message.strip() if isinstance(message, str) and message.strip() else (
+            "An unknown media playback error occurred."
+        )
+        self.mediaLoadFailed.emit(source, detail)
 
     def _display_position(self, position: int) -> int:
         """Return the timeline position that should be exposed to the UI."""

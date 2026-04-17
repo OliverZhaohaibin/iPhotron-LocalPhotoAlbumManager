@@ -6,48 +6,46 @@ This replaces the legacy MainController as the top-level orchestrator.
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterable
 from pathlib import Path
-from typing import TYPE_CHECKING, Iterable
+from typing import TYPE_CHECKING
 
 from PySide6.QtCore import (
-    QObject,
-    QThreadPool,
-    QModelIndex,
-    QItemSelectionModel,
     QCoreApplication,
+    QItemSelectionModel,
+    QModelIndex,
+    QObject,
     Qt,
+    QThreadPool,
 )
 from PySide6.QtGui import QAction
 
+from iPhoto import app as backend
 from iPhoto.application.contracts.runtime_entry_contract import RuntimeEntryContract
-from iPhoto.gui.ui.models.roles import Roles
-from iPhoto.gui.ui.models.spacer_proxy_model import SpacerProxyModel
-from iPhoto.gui.ui.controllers.dialog_controller import DialogController
-from iPhoto.gui.ui.controllers.header_controller import HeaderController
-from iPhoto.gui.ui.controllers.share_controller import ShareController
-from iPhoto.gui.ui.controllers.status_bar_controller import StatusBarController
-from iPhoto.gui.ui.controllers.window_theme_controller import WindowThemeController
-from iPhoto.gui.ui.controllers.preview_controller import PreviewController
-from iPhoto.gui.ui.controllers.context_menu_controller import ContextMenuController
-from iPhoto.gui.ui.controllers.selection_controller import SelectionController
-from iPhoto.gui.ui.controllers.export_controller import ExportController
-from iPhoto.gui.ui.media import MediaAdjustmentCommitter, MediaSelectionSession
-from iPhoto.gui.ui.widgets.asset_delegate import AssetGridDelegate
-
-# New Architecture Imports
 from iPhoto.application.services.asset_service import AssetService
 from iPhoto.di.container import DependencyContainer
 from iPhoto.events.bus import EventBus
+from iPhoto.gui.coordinators.edit_coordinator import EditCoordinator
+from iPhoto.gui.coordinators.navigation_coordinator import NavigationCoordinator
+from iPhoto.gui.coordinators.playback_coordinator import PlaybackCoordinator
+from iPhoto.gui.coordinators.view_router import ViewRouter
+from iPhoto.gui.ui.controllers.context_menu_controller import ContextMenuController
+from iPhoto.gui.ui.controllers.dialog_controller import DialogController
+from iPhoto.gui.ui.controllers.export_controller import ExportController
+from iPhoto.gui.ui.controllers.header_controller import HeaderController
+from iPhoto.gui.ui.controllers.preview_controller import PreviewController
+from iPhoto.gui.ui.controllers.selection_controller import SelectionController
+from iPhoto.gui.ui.controllers.share_controller import ShareController
+from iPhoto.gui.ui.controllers.status_bar_controller import StatusBarController
+from iPhoto.gui.ui.controllers.window_theme_controller import WindowThemeController
+from iPhoto.gui.ui.media import MediaAdjustmentCommitter, MediaSelectionSession
+from iPhoto.gui.ui.models.roles import Roles
+from iPhoto.gui.ui.models.spacer_proxy_model import SpacerProxyModel
+from iPhoto.gui.ui.widgets.asset_delegate import AssetGridDelegate
 from iPhoto.gui.viewmodels.detail_viewmodel import DetailViewModel
 from iPhoto.gui.viewmodels.gallery_list_model_adapter import GalleryListModelAdapter
 from iPhoto.gui.viewmodels.gallery_viewmodel import GalleryViewModel
 from iPhoto.people.service import PeopleService
-
-# New Coordinators
-from iPhoto.gui.coordinators.view_router import ViewRouter
-from iPhoto.gui.coordinators.navigation_coordinator import NavigationCoordinator
-from iPhoto.gui.coordinators.playback_coordinator import PlaybackCoordinator
-from iPhoto.gui.coordinators.edit_coordinator import EditCoordinator
 
 if TYPE_CHECKING:
     from iPhoto.gui.ui.main_window import MainWindow
@@ -72,6 +70,7 @@ class MainCoordinator(QObject):
         # facade reference kept for signal wiring as some systems still emit through it
         self._facade = context.facade
         self._logger = logging.getLogger(__name__)
+        self._media_failure_cleanup_paths: set[str] = set()
 
         # Resolve Services
         if self._container:
@@ -400,6 +399,8 @@ class MainCoordinator(QObject):
 
         # Coordinator Signals
         self._playback.assetChanged.connect(self._sync_selection)
+        self._player_view_controller.imageLoadingFailed.connect(self._handle_media_load_failed)
+        ui.video_area.mediaLoadFailed.connect(self._handle_media_load_failed)
 
         # Viewer Interactions (Wheel Navigation)
         ui.image_viewer.nextItemRequested.connect(self._playback.select_next)
@@ -521,6 +522,45 @@ class MainCoordinator(QObject):
         if playback is not None:
             playback.set_people_library_root(root)
 
+    def _handle_media_load_failed(self, path: Path, message: str) -> None:
+        path_key = str(path)
+        if path_key in self._media_failure_cleanup_paths:
+            return
+
+        self._media_failure_cleanup_paths.add(path_key)
+        try:
+            self._dialog.show_error(f"File not found or unreadable: {path.name}\n\n{message}")
+
+            repository = self._context.asset_runtime.repository
+            asset = repository.get_by_path(path)
+            if asset is None:
+                return
+
+            repository.delete(asset.id)
+
+            library_root = self._context.library.root()
+            pair_root: Path | None = None
+            if library_root is not None:
+                try:
+                    path.resolve().relative_to(library_root.resolve())
+                except (OSError, ValueError):
+                    pair_root = None
+                else:
+                    pair_root = path.parent if path.parent != library_root else library_root
+            if pair_root is not None and library_root is not None:
+                try:
+                    backend.pair(pair_root, library_root=library_root)
+                except Exception:  # noqa: BLE001 - best-effort derived snapshot refresh
+                    self._logger.warning(
+                        "Failed to refresh live pairing after removing %s",
+                        path,
+                        exc_info=True,
+                    )
+
+            self._gallery_store.reload_current_selection()
+        finally:
+            self._media_failure_cleanup_paths.discard(path_key)
+
     def _on_asset_clicked(self, index: QModelIndex):
         if self._selection_controller and self._selection_controller.is_active():
             return
@@ -605,7 +645,7 @@ class MainCoordinator(QObject):
         # 2. Volume / Mute
         stored_volume = settings.get("ui.volume", 75)
         try:
-            initial_volume = int(round(float(stored_volume)))
+            initial_volume = round(float(stored_volume))
         except (TypeError, ValueError):
             initial_volume = 75
         initial_volume = max(0, min(100, initial_volume))
@@ -656,10 +696,7 @@ class MainCoordinator(QObject):
         try:
             return str(path.resolve())
         except OSError:
-            try:
-                return str(Path(path))
-            except Exception:
-                return None
+            return str(path)
 
     # --- Public Accessors for Window ---
     def toggle_playback(self):

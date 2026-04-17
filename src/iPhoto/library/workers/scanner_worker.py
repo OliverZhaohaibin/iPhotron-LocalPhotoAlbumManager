@@ -128,7 +128,10 @@ class ScannerWorker(QRunnable):
             chunk: List[dict] = []
 
             # Load existing index for incremental scanning
-            existing_index = load_incremental_index_cache(self._library_root)
+            existing_index = load_incremental_index_cache(
+                self._root,
+                library_root=self._library_root,
+            )
 
             # The new scan_album implementation handles parallel discovery and processing.
             # We initialize the generator but execution (and thread starting) happens on iteration.

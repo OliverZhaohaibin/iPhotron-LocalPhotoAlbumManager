@@ -997,13 +997,7 @@ class PlaybackCoordinator(QObject):
 
     @Slot(object)
     def _handle_manual_face_ready(self, result: object) -> None:
-        from iPhoto.people.service import ManualFaceAddResult
-
-        submitted_asset_id = (
-            result.asset_id
-            if isinstance(result, ManualFaceAddResult)
-            else self._manual_face_inflight_asset_id
-        )
+        submitted_asset_id = self._manual_face_inflight_asset_id
         if submitted_asset_id:
             self._clear_pending_manual_faces(submitted_asset_id)
         presentation = getattr(self, "_current_presentation", None)

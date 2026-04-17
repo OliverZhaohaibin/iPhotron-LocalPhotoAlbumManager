@@ -513,6 +513,13 @@ class PlaybackCoordinator(QObject):
             getattr(self, "_current_presentation", None)
         )
 
+    @Slot(object)
+    def handle_people_snapshot_committed(self, _event: object) -> None:
+        presentation = getattr(self, "_current_presentation", None)
+        if presentation is None or not presentation.asset_id:
+            return
+        self._refresh_face_name_overlay_for_presentation(presentation)
+
     def _refresh_face_name_overlay_for_presentation(
         self,
         presentation: DetailPresentation | None,

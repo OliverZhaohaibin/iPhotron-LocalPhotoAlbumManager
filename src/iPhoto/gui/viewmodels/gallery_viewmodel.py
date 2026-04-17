@@ -37,6 +37,8 @@ class GalleryViewModel(BaseViewModel):
         self._asset_service = asset_service
         self._location_session = location_session or LocationSelectionSession()
         self._cluster_gallery_origin: Literal["location", "people", None] = None
+        self._people_cluster_kind: Literal["person", "group", None] = None
+        self._people_cluster_id: str | None = None
 
         self.current_section = ObservableProperty("gallery")
         self.static_selection = ObservableProperty(None)
@@ -232,12 +234,20 @@ class GalleryViewModel(BaseViewModel):
         self.cluster_gallery_mode_changed.emit(True)
         self.route_requested.emit("gallery")
 
-    def open_people_cluster_gallery(self, query: AssetQuery) -> None:
+    def open_people_cluster_gallery(
+        self,
+        query: AssetQuery,
+        *,
+        kind: Literal["person", "group", None] = None,
+        entity_id: str | None = None,
+    ) -> None:
         root = self._context.library.root()
         if root is None:
             self.bind_library_requested.emit()
             return
         self._cluster_gallery_origin = "people"
+        self._people_cluster_kind = kind
+        self._people_cluster_id = entity_id if entity_id else None
         self._location_session.set_mode("inactive")
         self.current_section.value = "people_cluster_gallery"
         self.static_selection.value = "People"
@@ -261,6 +271,43 @@ class GalleryViewModel(BaseViewModel):
             self.cluster_gallery_mode_changed.emit(False)
             self._clear_cluster_gallery_context()
             self.open_people_dashboard()
+
+    def handle_people_snapshot_committed(self, event: object) -> None:
+        if self._cluster_gallery_origin != "people":
+            return
+        if self._people_cluster_kind not in {"person", "group"} or not self._people_cluster_id:
+            return
+        root = self._context.library.root()
+        if root is None:
+            return
+
+        current_id = self._people_cluster_id
+        if self._people_cluster_kind == "person":
+            redirects = getattr(event, "person_redirects", {}) or {}
+            current_id = redirects.get(current_id, current_id)
+        else:
+            redirects = getattr(event, "group_redirects", {}) or {}
+            current_id = redirects.get(current_id, current_id)
+
+        if not current_id:
+            self.return_from_cluster_gallery()
+            return
+
+        from iPhoto.people.service import PeopleService
+
+        service = PeopleService(root)
+        if self._people_cluster_kind == "person":
+            query = service.build_cluster_query(current_id)
+        else:
+            query = service.build_group_query(current_id)
+
+        if not query.asset_ids:
+            self.return_from_cluster_gallery()
+            return
+
+        self._people_cluster_id = current_id
+        self.current_query.value = query
+        self._store.load_selection(root, query=query)
 
     def return_to_map_from_cluster_gallery(self) -> None:
         self.return_from_cluster_gallery()
@@ -357,6 +404,8 @@ class GalleryViewModel(BaseViewModel):
 
     def _clear_cluster_gallery_context(self) -> None:
         self._cluster_gallery_origin = None
+        self._people_cluster_kind = None
+        self._people_cluster_id = None
 
     def _album_path_for_query(self, path: Path) -> Optional[str]:
         library_root = self._context.library.root()

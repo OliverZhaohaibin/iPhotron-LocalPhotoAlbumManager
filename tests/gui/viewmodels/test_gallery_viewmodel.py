@@ -4,8 +4,13 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+import numpy as np
+
 from iPhoto.config import RECENTLY_DELETED_DIR_NAME
+from iPhoto.cache.index_store import get_global_repository, reset_global_repository
 from iPhoto.domain.models.core import MediaType
+from iPhoto.people.index_coordinator import PeopleSnapshotEvent, reset_people_index_coordinators
+from iPhoto.people.repository import FaceRecord, FaceRepository, PersonRecord
 from iPhoto.gui.viewmodels.gallery_viewmodel import GalleryViewModel
 from iPhoto.domain.models.query import AssetQuery
 
@@ -23,6 +28,11 @@ def _make_vm(*, library_root: Path | None = None):
         asset_service=asset_service,
     )
     return vm, store, context, facade, asset_service
+
+
+def _face_repository(library_root: Path) -> FaceRepository:
+    faces_root = library_root / ".iPhoto" / "faces"
+    return FaceRepository(faces_root / "face_index.db", faces_root / "face_state.db")
 
 
 def test_open_album_loads_recursive_album_query(tmp_path: Path) -> None:
@@ -149,6 +159,103 @@ def test_people_cluster_gallery_loads_query_and_returns_to_people(tmp_path: Path
     assert vm.current_section.value == "people_dashboard"
     assert vm.static_selection.value == "People"
     assert vm.is_in_cluster_gallery() is False
+
+
+def test_people_cluster_gallery_retargets_after_snapshot_redirect(tmp_path: Path) -> None:
+    reset_global_repository()
+    reset_people_index_coordinators()
+    library_root = tmp_path / "Library"
+    library_root.mkdir()
+    global_repo = get_global_repository(library_root)
+    global_repo.write_rows(
+        [
+            {"rel": "album/a.jpg", "id": "asset-a", "media_type": 0, "face_status": "done"},
+            {"rel": "album/b.jpg", "id": "asset-b", "media_type": 0, "face_status": "done"},
+        ]
+    )
+    repository = _face_repository(library_root)
+    embedding_a = np.asarray([1.0, 0.0, 0.0], dtype=np.float32)
+    embedding_b = np.asarray([0.0, 1.0, 0.0], dtype=np.float32)
+    repository.replace_all(
+        [
+            FaceRecord(
+                face_id="face-a",
+                face_key="face-key-a",
+                asset_id="asset-a",
+                asset_rel="album/a.jpg",
+                box_x=10,
+                box_y=10,
+                box_w=80,
+                box_h=80,
+                confidence=0.99,
+                embedding=embedding_a,
+                embedding_dim=3,
+                thumbnail_path=None,
+                person_id="person-a",
+                detected_at="2024-01-01T00:00:00+00:00",
+                image_width=400,
+                image_height=300,
+            ),
+            FaceRecord(
+                face_id="face-b",
+                face_key="face-key-b",
+                asset_id="asset-b",
+                asset_rel="album/b.jpg",
+                box_x=10,
+                box_y=10,
+                box_w=80,
+                box_h=80,
+                confidence=0.99,
+                embedding=embedding_b,
+                embedding_dim=3,
+                thumbnail_path=None,
+                person_id="person-b",
+                detected_at="2024-01-01T00:00:01+00:00",
+                image_width=400,
+                image_height=300,
+            ),
+        ],
+        [
+            PersonRecord(
+                person_id="person-a",
+                name="Alice",
+                key_face_id="face-a",
+                face_count=1,
+                center_embedding=embedding_a,
+                created_at="2024-01-01T00:00:00+00:00",
+                updated_at="2024-01-01T00:00:00+00:00",
+            ),
+            PersonRecord(
+                person_id="person-b",
+                name="Bob",
+                key_face_id="face-b",
+                face_count=1,
+                center_embedding=embedding_b,
+                created_at="2024-01-01T00:00:01+00:00",
+                updated_at="2024-01-01T00:00:01+00:00",
+            ),
+        ],
+    )
+    vm, store, _context, _facade, _asset_service = _make_vm(library_root=library_root)
+    vm.open_people_cluster_gallery(
+        AssetQuery(asset_ids=["asset-a"]),
+        kind="person",
+        entity_id="person-a",
+    )
+    store.load_selection.reset_mock()
+    repository.merge_persons("person-a", "person-b")
+
+    event = PeopleSnapshotEvent(
+        library_root=library_root,
+        revision=1,
+        person_redirects={"person-a": "person-b"},
+    )
+    vm.handle_people_snapshot_committed(event)
+
+    store.load_selection.assert_called_once()
+    reloaded_query = store.load_selection.call_args.kwargs["query"]
+    assert reloaded_query.asset_ids == ["asset-b", "asset-a"]
+    assert vm.current_query.value.asset_ids == ["asset-b", "asset-a"]
 
 
 def test_toggle_favorite_row_updates_store_via_asset_service(tmp_path: Path) -> None:

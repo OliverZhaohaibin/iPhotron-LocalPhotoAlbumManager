@@ -245,9 +245,10 @@ class FaceStateRepository:
         center_embedding: np.ndarray,
         target_name: str | None,
         target_created_at: str,
-    ) -> None:
+    ) -> dict[str, str | None]:
         self.initialize()
         updated_at = _utc_now_iso()
+        group_redirects: dict[str, str | None] = {}
         with closing(self._connect()) as conn:
             conn.execute(
                 """
@@ -348,10 +349,17 @@ class FaceStateRepository:
                         updated_at = excluded.updated_at
                     """,
                     (target_person_id, merged_order, updated_at),
-                )
+            )
             conn.execute("DELETE FROM person_card_orders WHERE person_id = ?", (source_person_id,))
             conn.execute("DELETE FROM person_profiles WHERE person_id = ?", (source_person_id,))
+            group_redirects = self._remap_groups_for_merged_person(
+                conn,
+                source_person_id=source_person_id,
+                target_person_id=target_person_id,
+                updated_at=updated_at,
+            )
             conn.commit()
+        return group_redirects
 
     def get_person_cover_thumbnail_map(self, person_ids: Iterable[str]) -> dict[str, str]:
         unique_ids = _unique_person_ids(person_ids)
@@ -660,6 +668,133 @@ class FaceStateRepository:
             )
             conn.commit()
         return True
+
+    def _remap_groups_for_merged_person(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        source_person_id: str,
+        target_person_id: str,
+        updated_at: str,
+    ) -> dict[str, str | None]:
+        affected = conn.execute(
+            """
+            SELECT DISTINCT group_id
+            FROM people_group_members
+            WHERE person_id IN (?, ?)
+            ORDER BY group_id ASC
+            """,
+            (source_person_id, target_person_id),
+        ).fetchall()
+        if not affected:
+            return {}
+
+        redirects: dict[str, str | None] = {}
+        for row in affected:
+            group_id = str(row["group_id"])
+            group = self._group_from_id(conn, group_id)
+            if group is None:
+                continue
+            next_members = _unique_person_ids(
+                target_person_id if person_id == source_person_id else person_id
+                for person_id in group.member_person_ids
+            )
+            if len(next_members) < 2:
+                conn.execute("DELETE FROM people_groups WHERE group_id = ?", (group_id,))
+                redirects[group_id] = None
+                continue
+
+            next_member_key = _group_member_key(next_members)
+            if next_member_key == group.member_key:
+                continue
+
+            duplicate = conn.execute(
+                """
+                SELECT group_id
+                FROM people_groups
+                WHERE member_key = ? AND group_id != ?
+                """,
+                (next_member_key, group_id),
+            ).fetchone()
+            if duplicate is not None:
+                target_group_id = str(duplicate["group_id"])
+                self._transfer_group_cover_if_needed(
+                    conn,
+                    source_group_id=group_id,
+                    target_group_id=target_group_id,
+                    updated_at=updated_at,
+                )
+                conn.execute("DELETE FROM people_groups WHERE group_id = ?", (group_id,))
+                redirects[group_id] = target_group_id
+                continue
+
+            conn.execute(
+                """
+                UPDATE people_groups
+                SET member_key = ?, updated_at = ?
+                WHERE group_id = ?
+                """,
+                (next_member_key, updated_at, group_id),
+            )
+            conn.execute("DELETE FROM people_group_members WHERE group_id = ?", (group_id,))
+            conn.executemany(
+                """
+                INSERT INTO people_group_members (group_id, person_id, position)
+                VALUES (?, ?, ?)
+                """,
+                [(group_id, person_id, index) for index, person_id in enumerate(next_members)],
+            )
+        return redirects
+
+    def _transfer_group_cover_if_needed(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        source_group_id: str,
+        target_group_id: str,
+        updated_at: str,
+    ) -> None:
+        source_cache = conn.execute(
+            """
+            SELECT asset_count, cover_asset_id, cover_is_custom
+            FROM people_group_asset_cache
+            WHERE group_id = ?
+            """,
+            (source_group_id,),
+        ).fetchone()
+        if source_cache is None or int(source_cache["cover_is_custom"] or 0) != 1:
+            return
+
+        target_cache = conn.execute(
+            """
+            SELECT asset_count, cover_is_custom
+            FROM people_group_asset_cache
+            WHERE group_id = ?
+            """,
+            (target_group_id,),
+        ).fetchone()
+        if target_cache is not None and int(target_cache["cover_is_custom"] or 0) == 1:
+            return
+
+        asset_count = int(target_cache["asset_count"]) if target_cache is not None else 0
+        conn.execute(
+            """
+            INSERT INTO people_group_asset_cache (
+                group_id, asset_count, cover_asset_id, cover_is_custom, updated_at
+            ) VALUES (?, ?, ?, 1, ?)
+            ON CONFLICT(group_id) DO UPDATE SET
+                asset_count = excluded.asset_count,
+                cover_asset_id = excluded.cover_asset_id,
+                cover_is_custom = 1,
+                updated_at = excluded.updated_at
+            """,
+            (
+                target_group_id,
+                asset_count,
+                source_cache["cover_asset_id"],
+                updated_at,
+            ),
+        )
 
     @staticmethod
     def _group_from_id(

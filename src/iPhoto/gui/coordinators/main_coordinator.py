@@ -370,7 +370,7 @@ class MainCoordinator(QObject):
 
         # 4. Wait briefly for background threads (e.g. thumbnail generation) to finish
         thread_pool = QThreadPool.globalInstance()
-        if not thread_pool.waitForDone(2000):
+        if not thread_pool.waitForDone(500):
             thread_pool.clear()
 
         app = QCoreApplication.instance()
@@ -440,6 +440,12 @@ class MainCoordinator(QObject):
             ui.people_page.clusterActivated.connect(self._on_people_cluster_activated)
             ui.people_page.groupActivated.connect(self._on_people_group_activated)
             self._context.library.peopleIndexUpdated.connect(ui.people_page.schedule_index_refresh)
+            self._context.library.peopleSnapshotCommitted.connect(
+                self._gallery_vm.handle_people_snapshot_committed
+            )
+            self._context.library.peopleSnapshotCommitted.connect(
+                self._playback.handle_people_snapshot_committed
+            )
             self._context.library.faceScanStatusChanged.connect(ui.people_page.set_status_message)
 
         # Navigation
@@ -551,13 +557,23 @@ class MainCoordinator(QObject):
         query = self._window.ui.people_page.build_cluster_query(person_id)
         if not query.asset_ids:
             return
-        self._navigation.open_people_cluster_gallery(query)
+        self._gallery_vm.open_people_cluster_gallery(
+            query,
+            kind="person",
+            entity_id=person_id,
+        )
+        self._view_router.show_gallery()
 
     def _on_people_group_activated(self, group_id: str) -> None:
         query = self._window.ui.people_page.build_group_query(group_id)
         if not query.asset_ids:
             return
-        self._navigation.open_people_cluster_gallery(query)
+        self._gallery_vm.open_people_cluster_gallery(
+            query,
+            kind="group",
+            entity_id=group_id,
+        )
+        self._view_router.show_gallery()
 
     def open_album_from_path(self, path: Path):
         self._navigation.open_album(path)

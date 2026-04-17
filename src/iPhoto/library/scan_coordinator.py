@@ -57,7 +57,6 @@ class ScanCoordinatorMixin:
         self.faceScanStatusChanged.emit("")
         face_library_root = self._root if self._root is not None else root
         face_worker = FaceScanWorker(face_library_root, self)
-        face_worker.peopleIndexUpdated.connect(self.peopleIndexUpdated.emit)
         face_worker.statusChanged.connect(self._on_face_scan_status_changed)
         face_worker.finished.connect(self._on_face_scan_finished)
         self._current_face_scanner = face_worker

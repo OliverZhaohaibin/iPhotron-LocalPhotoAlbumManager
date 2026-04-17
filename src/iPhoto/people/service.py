@@ -9,6 +9,7 @@ from iPhoto.cache.index_store import get_global_repository
 from iPhoto.config import WORK_DIR_NAME
 from iPhoto.domain.models.query import AssetQuery
 
+from .index_coordinator import get_people_index_coordinator
 from .repository import (
     AssetFaceAnnotation,
     FaceRepository,
@@ -111,43 +112,41 @@ class PeopleService:
         valid_member_ids = _ordered_valid_person_ids(member_person_ids, summaries_by_id)
         if len(valid_member_ids) < 2:
             return None
-        group = repository.create_group(valid_member_ids)
+        group = get_people_index_coordinator(self._library_root).create_group(valid_member_ids)
         if group is None:
             return None
         return self._build_group_summary(repository, group, summaries_by_id)
 
     def rename_cluster(self, person_id: str, new_name: str | None) -> None:
-        repository = self.repository()
-        if repository is None:
+        if self._library_root is None:
             return
-        repository.rename_person(person_id, new_name)
+        get_people_index_coordinator(self._library_root).rename_person(person_id, new_name)
 
     def set_cluster_cover(self, person_id: str, face_id: str) -> bool:
-        repository = self.repository()
-        if repository is None:
+        if self._library_root is None:
             return False
-        return repository.set_person_cover(person_id, face_id)
+        return get_people_index_coordinator(self._library_root).set_person_cover(person_id, face_id)
 
     def set_group_cover(self, group_id: str, asset_id: str) -> bool:
-        repository = self.repository()
-        if repository is None:
+        if self._library_root is None:
             return False
-        return repository.set_group_cover_asset(group_id, asset_id)
+        return get_people_index_coordinator(self._library_root).set_group_cover(group_id, asset_id)
 
     def set_cluster_order(
         self,
         person_ids: list[str] | tuple[str, ...],
     ) -> None:
-        repository = self.repository()
-        if repository is None:
+        if self._library_root is None:
             return
-        repository.set_person_order(person_ids)
+        get_people_index_coordinator(self._library_root).set_person_order(person_ids)
 
     def merge_clusters(self, source_person_id: str, target_person_id: str) -> bool:
-        repository = self.repository()
-        if repository is None:
+        if self._library_root is None:
             return False
-        return repository.merge_persons(source_person_id, target_person_id)
+        return get_people_index_coordinator(self._library_root).merge_persons(
+            source_person_id,
+            target_person_id,
+        )
 
     def cluster_asset_ids(self, person_id: str) -> list[str]:
         repository = self.repository()

@@ -330,6 +330,67 @@ def test_group_cover_can_be_customized_without_rescan_overwrite(tmp_path: Path) 
     assert repository.get_group_cover_asset_id(group.group_id) == "asset-older"
 
 
+def test_merge_persons_rewrites_group_memberships_and_deduplicates_groups(tmp_path: Path) -> None:
+    repository = FaceRepository(tmp_path / "face_index.db", tmp_path / "face_state.db")
+    faces = [
+        _face_record(
+            face_id="face-a-ab",
+            asset_id="asset-ab",
+            asset_rel="album/ab.jpg",
+            person_id="person-a",
+        ),
+        _face_record(
+            face_id="face-b-ab",
+            asset_id="asset-ab",
+            asset_rel="album/ab.jpg",
+            person_id="person-b",
+        ),
+        _face_record(
+            face_id="face-b-bc",
+            asset_id="asset-bc",
+            asset_rel="album/bc.jpg",
+            person_id="person-b",
+        ),
+        _face_record(
+            face_id="face-c-bc",
+            asset_id="asset-bc",
+            asset_rel="album/bc.jpg",
+            person_id="person-c",
+            embedding=np.asarray([0.0, 1.0, 0.0], dtype=np.float32),
+        ),
+    ]
+    persons = [
+        _person_record(person_id="person-a", key_face_id="face-a-ab", face_count=1, name="Alice"),
+        _person_record(person_id="person-b", key_face_id="face-b-ab", face_count=2, name="Bob"),
+        _person_record(
+            person_id="person-c",
+            key_face_id="face-c-bc",
+            face_count=1,
+            name="Carol",
+            embedding=np.asarray([0.0, 1.0, 0.0], dtype=np.float32),
+        ),
+    ]
+    repository.replace_all(faces, persons)
+
+    group_ab = repository.create_group(["person-a", "person-b"])
+    group_bc = repository.create_group(["person-b", "person-c"])
+    assert group_ab is not None
+    assert group_bc is not None
+
+    merged, group_redirects = repository.merge_persons_with_redirects("person-a", "person-c")
+
+    assert merged is True
+    assert group_redirects[group_ab.group_id] == group_bc.group_id
+    groups = repository.list_groups()
+    assert len(groups) == 1
+    assert groups[0].group_id == group_bc.group_id
+    assert groups[0].member_person_ids == ("person-b", "person-c")
+    assert repository.get_common_asset_ids_for_group(group_bc.group_id) == [
+        "asset-bc",
+        "asset-ab",
+    ]
+
+
 def test_list_asset_face_annotations_returns_only_matching_asset(tmp_path: Path) -> None:
     repository = FaceRepository(tmp_path / "face_index.db", tmp_path / "face_state.db")
     faces = [

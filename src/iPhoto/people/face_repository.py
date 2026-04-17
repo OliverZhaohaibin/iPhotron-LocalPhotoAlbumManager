@@ -279,6 +279,24 @@ class FaceRepository:
             ).fetchall()
         return [str(row["asset_id"]) for row in rows if row["asset_id"]]
 
+    def get_person_ids_for_asset_ids(self, asset_ids: Iterable[str]) -> list[str]:
+        ids = [str(asset_id) for asset_id in asset_ids if asset_id]
+        if not ids:
+            return []
+        self.initialize()
+        placeholders = ", ".join(["?"] * len(ids))
+        with closing(self._connect()) as conn:
+            rows = conn.execute(
+                f"""
+                SELECT DISTINCT person_id
+                FROM faces
+                WHERE asset_id IN ({placeholders}) AND person_id IS NOT NULL
+                ORDER BY person_id ASC
+                """,
+                ids,
+            ).fetchall()
+        return [str(row["person_id"]) for row in rows if row["person_id"]]
+
     def list_asset_face_annotations(self, asset_id: str) -> list[AssetFaceAnnotation]:
         if not asset_id:
             return []
@@ -362,10 +380,22 @@ class FaceRepository:
         self._state_repo.set_person_order(person_ids)
 
     def merge_persons(self, source_person_id: str, target_person_id: str) -> bool:
+        merged, _group_redirects = self.merge_persons_with_redirects(
+            source_person_id,
+            target_person_id,
+        )
+        return merged
+
+    def merge_persons_with_redirects(
+        self,
+        source_person_id: str,
+        target_person_id: str,
+    ) -> tuple[bool, dict[str, str | None]]:
         if not source_person_id or not target_person_id or source_person_id == target_person_id:
-            return False
+            return False, {}
 
         self.initialize()
+        group_redirects: dict[str, str | None] = {}
         with closing(self._connect()) as conn:
             faces = conn.execute(
                 """
@@ -380,7 +410,7 @@ class FaceRepository:
                 (source_person_id, target_person_id),
             ).fetchall()
             if not faces:
-                return False
+                return False, {}
 
             source_faces = [
                 self._face_from_row(row) for row in faces if row["person_id"] == source_person_id
@@ -389,7 +419,7 @@ class FaceRepository:
                 self._face_from_row(row) for row in faces if row["person_id"] == target_person_id
             ]
             if not source_faces or not target_faces:
-                return False
+                return False, {}
 
             person_rows = conn.execute(
                 """
@@ -450,7 +480,7 @@ class FaceRepository:
             conn.commit()
 
         if self._state_repo is not None:
-            self._state_repo.merge_persons(
+            group_redirects = self._state_repo.merge_persons(
                 source_person_id,
                 target_person_id,
                 center_embedding=center_embedding,
@@ -459,7 +489,7 @@ class FaceRepository:
             )
             self._sync_person_cover_defaults()
             self.refresh_all_group_assets()
-        return True
+        return True, group_redirects
 
     def create_group(self, member_person_ids: Iterable[str]) -> PeopleGroupRecord | None:
         if self._state_repo is None:

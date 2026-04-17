@@ -284,8 +284,7 @@ class FaceRepository:
         if not ids:
             return []
         self.initialize()
-        # Chunk the IN clause to stay within SQLite's bound-parameter limit
-        # (commonly 999).  The repo uses 900 as the conservative chunk size.
+        # Use a set to deduplicate person IDs across chunks before sorting.
         chunk_size = 900
         person_ids: set[str] = set()
         with closing(self._connect()) as conn:
@@ -297,7 +296,6 @@ class FaceRepository:
                     SELECT DISTINCT person_id
                     FROM faces
                     WHERE asset_id IN ({placeholders}) AND person_id IS NOT NULL
-                    ORDER BY person_id ASC
                     """,
                     chunk,
                 ).fetchall()

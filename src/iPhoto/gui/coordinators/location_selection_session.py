@@ -65,8 +65,7 @@ class LocationSelectionSession:
             for a in assets
             if isinstance((rel := getattr(a, "library_relative", None)), str) and rel
         }
-        self._full_assets = list(assets)
-        self._list_dirty = False
+        self._list_dirty = True
         self._has_snapshot = True
         self._invalidated = False
         return True

@@ -21,15 +21,15 @@ LOGGER = get_logger()
 class _PairingWorker(QRunnable):
     """Run live-photo pairing off the main thread after a scan completes."""
 
-    def __init__(self, root: Path, library_root: Optional[Path]) -> None:
+    def __init__(self, scan_root: Path, library_root: Optional[Path]) -> None:
         super().__init__()
-        self._root = root
+        self._scan_root = scan_root
         self._library_root = library_root
 
     def run(self) -> None:
         try:
             from .. import app as backend  # noqa: PLC0415
-            backend.pair(self._root, library_root=self._library_root)
+            backend.pair(self._scan_root, library_root=self._library_root)
         except Exception as exc:  # noqa: BLE001
             LOGGER.warning("Failed to persist live photo pairings after scan: %s", exc)
 

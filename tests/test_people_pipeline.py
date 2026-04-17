@@ -134,6 +134,38 @@ def test_face_pipeline_uses_shared_model_root(monkeypatch, tmp_path: Path) -> No
     assert os.environ["INSIGHTFACE_HOME"] == str((tmp_path / "extension").resolve())
 
 
+def test_face_pipeline_reports_missing_cached_model_with_actionable_message(
+    monkeypatch, tmp_path: Path
+) -> None:
+    class FakeFaceAnalysis:
+        def __init__(self, *, name: str, root: str, providers: list[str]) -> None:
+            raise RuntimeError("network unreachable")
+
+    insightface_module = ModuleType("insightface")
+    app_module = ModuleType("insightface.app")
+    app_module.FaceAnalysis = FakeFaceAnalysis
+    insightface_module.app = app_module
+
+    monkeypatch.setitem(sys.modules, "insightface", insightface_module)
+    monkeypatch.setitem(sys.modules, "insightface.app", app_module)
+    monkeypatch.setattr("iPhoto.people.pipeline._patch_insightface_alignment_estimate", lambda: None)
+    monkeypatch.setattr(
+        "iPhoto.people.pipeline._resolve_execution_providers",
+        lambda: ["CPUExecutionProvider"],
+    )
+
+    model_root = tmp_path / "extension" / "models"
+    pipeline = FaceClusterPipeline(model_root=model_root)
+
+    with pytest.raises(RuntimeError) as excinfo:
+        pipeline._ensure_face_analysis()
+
+    message = str(excinfo.value)
+    assert "not cached" in message
+    assert str(model_root.resolve()) in message
+    assert "github.com" in message
+
+
 def test_build_person_records_marks_profiles_stable_at_three_samples() -> None:
     embedding = np.asarray([1.0, 0.0, 0.0], dtype=np.float32)
     faces = [

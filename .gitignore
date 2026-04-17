@@ -228,3 +228,10 @@ __marimo__/
 /demo/face-cluster/runtime/
 /demo/face-cluster/state/
 /.codex
+
+# --- auto-added untracked files (by assistant) ---
+# These were untracked when the user requested to add them to .gitignore
+PySide6-OsmAnd-SDK/
+src/iPhoto/extension/models/buffalo_s.zip
+src/iPhoto/extension/models/buffalo_s/
+

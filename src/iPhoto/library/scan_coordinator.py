@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING, Dict, Iterable, List, Optional
 
-from PySide6.QtCore import QMutexLocker
+from PySide6.QtCore import QMutexLocker, QRunnable
 
 from ..cache.index_store import get_global_repository
 from ..utils.logging import get_logger
@@ -16,6 +16,27 @@ if TYPE_CHECKING:
     pass
 
 LOGGER = get_logger()
+
+
+class _PairingWorker(QRunnable):
+    """Run live-photo pairing off the main thread after a scan completes."""
+
+    def __init__(self, scan_root: Path, library_root: Optional[Path]) -> None:
+        super().__init__()
+        self._scan_root = scan_root
+        self._library_root = library_root
+
+    def run(self) -> None:
+        try:
+            from .. import app as backend  # noqa: PLC0415
+            backend.pair(self._scan_root, library_root=self._library_root)
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.warning(
+                "Failed to persist live photo pairings after scan of %s "
+                "(re-scanning the library will retry pairing): %s",
+                self._scan_root,
+                exc,
+            )
 
 
 class ScanCoordinatorMixin:
@@ -289,7 +310,7 @@ class ScanCoordinatorMixin:
             face_scanner.finish_input()
 
         if worker.cancelled:
-            self.scanFinished.emit(root, True)
+            self.scanFinished.emit(root, True)a
             return
         if worker.failed:
             self.scanFinished.emit(root, False)
@@ -306,9 +327,13 @@ class ScanCoordinatorMixin:
 
         self._geotagged_assets_cache = None
         self._geotagged_assets_cache_root = None
-        # Emit scanFinished only after pairing writes so location refreshes use
-        # the authoritative persisted state.
+        # Emit immediately so the UI (status bar, map refresh) can react without
+        # waiting for the potentially slow live-photo pairing step.
         self.scanFinished.emit(root, True)
+
+        # Persist live-photo pairings in the background to avoid blocking the
+        # main thread while downstream listeners start refreshing.
+        self._scan_thread_pool.start(_PairingWorker(root, self._root))
 
     def _on_scan_error(self, root: Path, message: str) -> None:
         locker = QMutexLocker(self._scan_buffer_lock)

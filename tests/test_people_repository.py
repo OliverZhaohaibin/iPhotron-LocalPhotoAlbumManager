@@ -782,3 +782,33 @@ def test_face_scan_session_rolls_back_runtime_snapshot_when_profile_sync_fails(
         "person-b",
     ]
     assert repository.get_common_asset_ids_for_group(group.group_id) == ["asset-shared"]
+
+
+def test_get_person_ids_for_asset_ids_chunks_large_sqlite_in_queries(tmp_path: Path) -> None:
+    repository = FaceRepository(tmp_path / "face_index.db")
+    face_count = 1005
+    faces = [
+        _face_record(
+            face_id=f"face-{index}",
+            asset_id=f"asset-{index:04d}",
+            asset_rel=f"album/{index:04d}.jpg",
+            person_id=f"person-{index:04d}",
+        )
+        for index in range(face_count)
+    ]
+    persons = [
+        _person_record(
+            person_id=f"person-{index:04d}",
+            key_face_id=f"face-{index}",
+            face_count=1,
+            name=f"Person {index:04d}",
+        )
+        for index in range(face_count)
+    ]
+    repository.replace_all(faces, persons)
+
+    person_ids = repository.get_person_ids_for_asset_ids(
+        [f"asset-{index:04d}" for index in range(face_count)]
+    )
+
+    assert person_ids == [f"person-{index:04d}" for index in range(face_count)]

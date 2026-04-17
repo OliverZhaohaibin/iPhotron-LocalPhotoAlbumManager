@@ -9,7 +9,11 @@ from typing import Iterable
 from PySide6.QtCore import QThread, Signal
 
 from ...cache.index_store import get_global_repository
-from ...people.index_coordinator import PeopleIndexCoordinator, get_people_index_coordinator
+from ...people.index_coordinator import (
+    PeopleIndexCoordinator,
+    PeopleSnapshotCommittedError,
+    get_people_index_coordinator,
+)
 from ...people.pipeline import FaceClusterPipeline
 from ...people.service import face_library_paths
 from ...people.status import (
@@ -91,6 +95,12 @@ class FaceScanWorker(QThread):
                     self._queued_ids.discard(asset_id)
                 if committed:
                     self.peopleIndexUpdated.emit()
+            except PeopleSnapshotCommittedError as exc:
+                LOGGER.error("Face scan bookkeeping failed after commit: %s", exc, exc_info=True)
+                for asset_id in [str(row.get("id") or "") for row in batch if row.get("id")]:
+                    self._queued_ids.discard(asset_id)
+                self.statusChanged.emit(str(exc))
+                return
             except RuntimeError as exc:
                 self._mark_remaining_failed(batch)
                 self.statusChanged.emit(str(exc))

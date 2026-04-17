@@ -5,17 +5,25 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 import threading
+import time
 from typing import Iterable
 
 from PySide6.QtCore import QObject, Qt, Signal, Slot
 
 from iPhoto.cache.index_store import get_global_repository
 from iPhoto.config import WORK_DIR_NAME
+from iPhoto.utils.logging import get_logger
 
 from .pipeline import DetectedAssetFaces
 from .repository import FaceRepository, PeopleGroupRecord
 from .scan_session import FaceScanSession
 from .status import FACE_STATUS_DONE, FACE_STATUS_RETRY
+
+LOGGER = get_logger()
+
+
+class PeopleSnapshotCommittedError(RuntimeError):
+    """Raised when the People snapshot is committed but follow-up bookkeeping fails."""
 
 
 @dataclass(frozen=True)
@@ -79,19 +87,49 @@ class PeopleIndexCoordinator(QObject):
             if not done_ids:
                 return None
 
+            previous_faces = repository.get_all_faces()
+            previous_persons = repository.get_all_person_records()
+            clustered_faces, persons = session.build_runtime_snapshot(
+                repository,
+                distance_threshold=distance_threshold,
+                min_samples=min_samples,
+                existing_faces=previous_faces,
+            )
+            done_id_set = set(done_ids)
+            changed_person_ids = tuple(
+                sorted(
+                    {
+                        str(face.person_id)
+                        for face in clustered_faces
+                        if face.person_id and face.asset_id in done_id_set
+                    }
+                )
+            )
             session.commit(
                 repository,
                 distance_threshold=distance_threshold,
                 min_samples=min_samples,
+                previous_faces=previous_faces,
+                previous_persons=previous_persons,
+                clustered_faces=clustered_faces,
+                persons=persons,
             )
-            store.update_face_statuses(done_ids, FACE_STATUS_DONE)
-            changed_person_ids = tuple(
-                repository.get_person_ids_for_asset_ids(done_ids)
-            )
-            return self._emit_snapshot(
-                changed_asset_ids=tuple(done_ids + retry_ids),
-                changed_person_ids=changed_person_ids,
-            )
+            try:
+                self._mark_done_asset_ids(store, done_ids)
+                return self._emit_snapshot(
+                    changed_asset_ids=tuple(done_ids + retry_ids),
+                    changed_person_ids=changed_person_ids,
+                )
+            except Exception as exc:
+                LOGGER.error(
+                    "People snapshot committed for %s, but post-commit bookkeeping failed: %s",
+                    self._library_root,
+                    exc,
+                    exc_info=True,
+                )
+                raise PeopleSnapshotCommittedError(
+                    "Face scan committed, but updating scan bookkeeping failed."
+                ) from exc
 
     def rename_person(self, person_id: str, name_or_none: str | None) -> PeopleSnapshotEvent | None:
         if not person_id:
@@ -232,6 +270,22 @@ class PeopleIndexCoordinator(QObject):
         self._scheduleEmit.emit(event)
         return event
 
+    def _mark_done_asset_ids(self, store: object, done_ids: list[str]) -> None:
+        if not done_ids:
+            return
+        last_error: Exception | None = None
+        for attempt in range(3):
+            try:
+                store.update_face_statuses(done_ids, FACE_STATUS_DONE)
+                return
+            except Exception as exc:
+                last_error = exc
+                if attempt == 2:
+                    break
+                time.sleep(0.05 * (attempt + 1))
+        if last_error is not None:
+            raise last_error
+
 
 _COORDINATORS: dict[Path, PeopleIndexCoordinator] = {}
 _COORDINATORS_LOCK = threading.Lock()
@@ -256,6 +310,7 @@ def reset_people_index_coordinators() -> None:
 
 __all__ = [
     "PeopleIndexCoordinator",
+    "PeopleSnapshotCommittedError",
     "PeopleSnapshotEvent",
     "get_people_index_coordinator",
     "reset_people_index_coordinators",

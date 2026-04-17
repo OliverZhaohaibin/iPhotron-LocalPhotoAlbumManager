@@ -11,7 +11,11 @@ import pytest
 from iPhoto.cache.index_store import get_global_repository, reset_global_repository
 from iPhoto.config import WORK_DIR_NAME
 from iPhoto.library.workers.face_scan_worker import FaceScanWorker
-from iPhoto.people.index_coordinator import get_people_index_coordinator, reset_people_index_coordinators
+from iPhoto.people.index_coordinator import (
+    PeopleSnapshotCommittedError,
+    get_people_index_coordinator,
+    reset_people_index_coordinators,
+)
 from iPhoto.library.workers.scanner_worker import ScannerSignals, ScannerWorker
 from iPhoto.people.pipeline import DetectedAssetFaces
 from iPhoto.people.repository import FaceRecord, PersonRecord
@@ -700,6 +704,197 @@ def test_face_scan_worker_skips_commit_when_cancelled_mid_batch(tmp_path: Path) 
     assert committed is False
     coordinator.submit_detected_batch.assert_not_called()
     assert global_repo.get_rows_by_ids(["asset-a"])["asset-a"]["face_status"] == "retry"
+
+
+def test_people_index_coordinator_retries_done_status_bookkeeping(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    library_root = tmp_path / "Library"
+    library_root.mkdir()
+
+    coordinator = get_people_index_coordinator(library_root)
+    calls: list[tuple[tuple[str, ...], str]] = []
+
+    class FlakyStore:
+        def update_face_statuses(self, asset_ids: list[str], status: str) -> None:
+            calls.append((tuple(asset_ids), status))
+            if status == "done" and len(calls) == 1:
+                raise RuntimeError("temporary lock")
+
+    monkeypatch.setattr(
+        "iPhoto.people.index_coordinator.get_global_repository",
+        lambda _root: FlakyStore(),
+    )
+    event = coordinator.submit_detected_batch(
+        [
+            DetectedAssetFaces(
+                asset_id="asset-a",
+                asset_rel="album/a.jpg",
+                faces=[],
+            )
+        ],
+        distance_threshold=0.6,
+        min_samples=2,
+    )
+
+    assert event is not None
+    assert calls == [
+        (("asset-a",), "done"),
+        (("asset-a",), "done"),
+    ]
+
+
+def test_people_index_coordinator_preserves_committed_snapshot_when_done_status_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    library_root = tmp_path / "Library"
+    library_root.mkdir()
+
+    global_repo = get_global_repository(library_root)
+    global_repo.write_rows(
+        [
+            {"rel": "album/shared.jpg", "id": "asset-shared", "media_type": 0, "face_status": "done"},
+            {"rel": "album/new.jpg", "id": "asset-new", "media_type": 0, "face_status": "pending"},
+        ]
+    )
+
+    service = PeopleService(library_root)
+    repository = service.repository()
+    assert repository is not None
+
+    embedding = np.asarray([1.0, 0.0, 0.0], dtype=np.float32)
+    repository.replace_all(
+        [
+            _face_record_with_embedding(
+                face_id="face-a-shared",
+                face_key="face-key-a-shared",
+                asset_id="asset-shared",
+                asset_rel="album/shared.jpg",
+                person_id="person-a",
+                embedding=embedding,
+            ),
+        ],
+        [
+            _person_record_with_embedding(
+                person_id="person-a",
+                key_face_id="face-a-shared",
+                face_count=1,
+                name="Alice",
+                embedding=embedding,
+            )
+        ],
+    )
+
+    original_update_face_statuses = global_repo.update_face_statuses
+    call_count = {"value": 0}
+
+    def fail_done_status_once(asset_ids: list[str], status: str) -> None:
+        call_count["value"] += 1
+        if status == "done":
+            raise RuntimeError("done status locked")
+        original_update_face_statuses(asset_ids, status)
+
+    monkeypatch.setattr(global_repo, "update_face_statuses", fail_done_status_once)
+
+    coordinator = get_people_index_coordinator(library_root)
+    with pytest.raises(
+        PeopleSnapshotCommittedError,
+        match="Face scan committed, but updating scan bookkeeping failed.",
+    ):
+        coordinator.submit_detected_batch(
+            [
+                DetectedAssetFaces(
+                    asset_id="asset-new",
+                    asset_rel="album/new.jpg",
+                    faces=[
+                        _face_record_with_embedding(
+                            face_id="face-a-new",
+                            face_key="face-key-a-new",
+                            asset_id="asset-new",
+                            asset_rel="album/new.jpg",
+                            person_id=None,
+                            embedding=np.asarray([0.99, 0.01, 0.0], dtype=np.float32),
+                        ),
+                    ],
+                )
+            ],
+            distance_threshold=0.6,
+            min_samples=1,
+        )
+
+    assert sorted(face.asset_id for face in repository.get_all_faces()) == [
+        "asset-new",
+        "asset-shared",
+    ]
+    summaries = service.list_clusters()
+    assert len(summaries) == 1
+    assert summaries[0].face_count == 2
+    query = service.build_cluster_query(summaries[0].person_id)
+    assert query.asset_ids == ["asset-new", "asset-shared"]
+    assert global_repo.get_rows_by_ids(["asset-new"])["asset-new"]["face_status"] == "pending"
+    assert call_count["value"] == 3
+
+
+def test_face_scan_worker_does_not_mark_retry_after_committed_snapshot_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    global_repo = get_global_repository(tmp_path)
+    global_repo.write_rows(
+        [
+            {"rel": "album/a.jpg", "id": "asset-a", "media_type": 0, "face_status": "pending"},
+        ]
+    )
+    worker = FaceScanWorker(tmp_path)
+    worker.finish_input()
+    messages: list[str] = []
+    worker.statusChanged.connect(messages.append)
+
+    monkeypatch.setattr(
+        "iPhoto.library.workers.face_scan_worker.face_library_paths",
+        lambda _root: SimpleNamespace(
+            model_dir=tmp_path / "models",
+            thumbnail_dir=tmp_path / "thumbs",
+        ),
+    )
+
+    class FakePipeline:
+        distance_threshold = 0.6
+        min_samples = 2
+
+        def __init__(self, *, model_root: Path) -> None:
+            self.model_root = model_root
+
+        def detect_faces_for_rows(self, batch: list[dict], **_kwargs):
+            return [
+                DetectedAssetFaces(
+                    asset_id=str(batch[0]["id"]),
+                    asset_rel=str(batch[0]["rel"]),
+                    faces=[],
+                )
+            ]
+
+    monkeypatch.setattr(
+        "iPhoto.library.workers.face_scan_worker.FaceClusterPipeline",
+        FakePipeline,
+    )
+    monkeypatch.setattr(
+        "iPhoto.library.workers.face_scan_worker.get_people_index_coordinator",
+        lambda _root: Mock(
+            submit_detected_batch=Mock(
+                side_effect=PeopleSnapshotCommittedError(
+                    "Face scan committed, but updating scan bookkeeping failed."
+                )
+            )
+        ),
+    )
+
+    worker.run()
+
+    assert global_repo.get_rows_by_ids(["asset-a"])["asset-a"]["face_status"] == "pending"
+    assert messages == ["Face scan committed, but updating scan bookkeeping failed."]
 
 
 def test_scanner_worker_does_not_emit_chunk_ready_for_failed_persist(tmp_path: Path) -> None:

@@ -370,7 +370,7 @@ class MainCoordinator(QObject):
 
         # 4. Wait briefly for background threads (e.g. thumbnail generation) to finish
         thread_pool = QThreadPool.globalInstance()
-        if not thread_pool.waitForDone(500):
+        if not thread_pool.waitForDone(2000):
             thread_pool.clear()
 
         app = QCoreApplication.instance()

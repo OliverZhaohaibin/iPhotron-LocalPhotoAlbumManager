@@ -440,8 +440,16 @@ class FaceClusterPipeline:
         _patch_insightface_alignment_estimate()
         providers = _resolve_execution_providers()
         ctx_id = 0 if "CUDAExecutionProvider" in providers else -1
-        app = FaceAnalysis(name=self._model_pack, root=str(insightface_root), providers=providers)
-        app.prepare(ctx_id=ctx_id, det_size=(640, 640))
+        try:
+            app = FaceAnalysis(name=self._model_pack, root=str(insightface_root), providers=providers)
+            app.prepare(ctx_id=ctx_id, det_size=(640, 640))
+        except Exception as exc:
+            raise _build_face_analysis_init_error(
+                feature_name="Face scanning",
+                model_pack=self._model_pack,
+                model_dir=self._model_root.resolve(),
+                exc=exc,
+            ) from exc
         self._analysis_app = app
         return app
 
@@ -852,6 +860,28 @@ def _bbox_diagonal(bbox: tuple[int, int, int, int]) -> float:
 
 def _quantize_value(value: float, step: int) -> int:
     return int(round(float(value) / float(step)) * step)
+
+
+def _build_face_analysis_init_error(
+    *,
+    feature_name: str,
+    model_pack: str,
+    model_dir: Path,
+    exc: Exception,
+) -> RuntimeError:
+    reason = str(exc).strip() or exc.__class__.__name__
+    model_pack_dir = model_dir / model_pack
+    if not model_pack_dir.exists():
+        return RuntimeError(
+            f"{feature_name} unavailable: InsightFace model '{model_pack}' is not cached at "
+            f"'{model_pack_dir}'. Initialization/download failed ({reason}). "
+            f"Allow one download from github.com or copy an existing '{model_pack}' model "
+            f"folder into '{model_dir}', then retry."
+        )
+    return RuntimeError(
+        f"{feature_name} unavailable: failed to initialize InsightFace model "
+        f"'{model_pack}' from '{model_pack_dir}' ({reason})."
+    )
 
 
 def _resolve_execution_providers() -> list[str]:

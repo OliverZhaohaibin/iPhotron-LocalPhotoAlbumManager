@@ -5,6 +5,7 @@ import sys
 from types import ModuleType
 
 import numpy as np
+import pytest
 
 
 _DEMO_FACE_CLUSTER = os.path.abspath(
@@ -24,6 +25,7 @@ from pipeline import (
 def _face(face_id: str, embedding: np.ndarray, confidence: float) -> FaceRecord:
     return FaceRecord(
         face_id=face_id,
+        face_key=face_id,
         asset_rel=f"{face_id}.jpg",
         box_x=0,
         box_y=0,
@@ -38,6 +40,36 @@ def _face(face_id: str, embedding: np.ndarray, confidence: float) -> FaceRecord:
         image_width=200,
         image_height=200,
     )
+
+
+def test_face_cluster_pipeline_reports_missing_cached_model_with_actionable_message(
+    monkeypatch, tmp_path
+) -> None:
+    class FakeFaceAnalysis:
+        def __init__(self, *, name: str, root: str, providers: list[str]) -> None:
+            raise RuntimeError("offline")
+
+    insightface_module = ModuleType("insightface")
+    app_module = ModuleType("insightface.app")
+    app_module.FaceAnalysis = FakeFaceAnalysis
+    insightface_module.app = app_module
+
+    monkeypatch.setitem(sys.modules, "insightface", insightface_module)
+    monkeypatch.setitem(sys.modules, "insightface.app", app_module)
+    monkeypatch.setattr("pipeline._patch_insightface_alignment_estimate", lambda: None)
+    monkeypatch.setattr("pipeline._resolve_execution_providers", lambda: ["CPUExecutionProvider"])
+
+    model_root = tmp_path / "models"
+    pipeline_module = __import__("pipeline")
+    pipeline_instance = pipeline_module.FaceClusterPipeline(model_root=model_root)
+
+    monkeypatch.delenv("INSIGHTFACE_HOME", raising=False)
+    with pytest.raises(RuntimeError) as excinfo:
+        pipeline_instance._ensure_face_analysis()
+
+    message = str(excinfo.value)
+    assert "尚未缓存" in message
+    assert str(model_root.resolve()) in message
 
 
 def test_run_dbscan_finds_two_clusters() -> None:

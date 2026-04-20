@@ -157,6 +157,7 @@ def test_face_pipeline_reports_missing_cached_model_with_actionable_message(
     model_root = tmp_path / "extension" / "models"
     pipeline = FaceClusterPipeline(model_root=model_root)
 
+    monkeypatch.delenv("INSIGHTFACE_HOME", raising=False)
     with pytest.raises(RuntimeError) as excinfo:
         pipeline._ensure_face_analysis()
 

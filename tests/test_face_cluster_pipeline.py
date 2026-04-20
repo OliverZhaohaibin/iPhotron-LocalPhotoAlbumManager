@@ -63,6 +63,7 @@ def test_face_cluster_pipeline_reports_missing_cached_model_with_actionable_mess
     pipeline_module = __import__("pipeline")
     pipeline_instance = pipeline_module.FaceClusterPipeline(model_root=model_root)
 
+    monkeypatch.delenv("INSIGHTFACE_HOME", raising=False)
     with pytest.raises(RuntimeError) as excinfo:
         pipeline_instance._ensure_face_analysis()
 

@@ -10,7 +10,7 @@ pytest.importorskip("PySide6", reason="PySide6 is required for GUI tests", exc_t
 pytest.importorskip("PySide6.QtWidgets", reason="Qt widgets not available", exc_type=ImportError)
 
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QColor
+from PySide6.QtGui import QColor, QImage, QPalette
 from PySide6.QtWidgets import QApplication
 
 from iPhoto.gui.ui.widgets.information_popup import InformationPopup
@@ -245,4 +245,33 @@ def test_popup_resolves_transparent_palette_background_to_opaque(qapp: QApplicat
     assert resolved.red() == transparent_window.red()
     assert resolved.green() == transparent_window.green()
     assert resolved.blue() == transparent_window.blue()
+    popup.close()
+
+
+def test_popup_child_widgets_do_not_paint_black_background_in_light_mode(qapp: QApplication) -> None:
+    """The title bar and body should stay transparent over the painted light background."""
+
+    popup = InformationPopup(title="Notice", message="Blocked merge")
+    palette = QPalette(popup.palette())
+    palette.setColor(QPalette.ColorRole.Window, QColor("#F5F5F5"))
+    palette.setColor(QPalette.ColorRole.WindowText, QColor("#2B2B2B"))
+    palette.setColor(QPalette.ColorRole.Mid, QColor("#808080"))
+    popup.setPalette(palette)
+    popup.resize(360, 140)
+    popup.show()
+    qapp.processEvents()
+
+    image = QImage(popup.size(), QImage.Format.Format_ARGB32_Premultiplied)
+    image.fill(Qt.GlobalColor.transparent)
+    popup.render(image)
+
+    title_bar_pixel = image.pixelColor(24, 16)
+    body_pixel = image.pixelColor(24, 72)
+
+    assert title_bar_pixel.red() > 200
+    assert title_bar_pixel.green() > 200
+    assert title_bar_pixel.blue() > 200
+    assert body_pixel.red() > 200
+    assert body_pixel.green() > 200
+    assert body_pixel.blue() > 200
     popup.close()

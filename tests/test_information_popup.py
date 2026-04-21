@@ -89,6 +89,7 @@ def test_frameless_window_flags(qapp: QApplication) -> None:
     popup = InformationPopup()
     flags = popup.windowFlags()
     assert flags & Qt.WindowType.FramelessWindowHint
+    assert flags & Qt.WindowType.Tool
     popup.close()
 
 

@@ -233,6 +233,37 @@ def test_dissolve_group_reuses_merge_confirm_dialog(monkeypatch, qapp: QApplicat
     ]
 
 
+def test_merge_confirm_dialog_supports_light_and_dark_styles(qapp: QApplication) -> None:
+    class Theme:
+        def __init__(self, mode: str) -> None:
+            self.mode = mode
+
+        def get_effective_theme_mode(self) -> str:
+            return self.mode
+
+    light_shell = QWidget()
+    light_shell.coordinator = SimpleNamespace(
+        _context=SimpleNamespace(theme=Theme("light"), settings=None)
+    )
+    dark_shell = QWidget()
+    dark_shell.coordinator = SimpleNamespace(
+        _context=SimpleNamespace(theme=Theme("dark"), settings=None)
+    )
+
+    light_dialog = MergeConfirmDialog(2, parent=light_shell)
+    dark_dialog = MergeConfirmDialog(2, parent=dark_shell)
+
+    assert light_dialog._dark_mode is False
+    assert "rgba(255, 255, 255, 0.94)" in light_dialog._panel.styleSheet()
+    assert dark_dialog._dark_mode is True
+    assert "rgba(23, 27, 39, 0.98)" in dark_dialog._panel.styleSheet()
+
+    light_dialog.close()
+    dark_dialog.close()
+    light_shell.close()
+    dark_shell.close()
+
+
 def test_rename_person_uses_themed_input_dialog(monkeypatch, qapp: QApplication) -> None:
     widget = PeopleDashboardWidget()
     summary = PersonSummary("person-a", "Alice", "face-a", 3, None, "2024-01-01T00:00:00Z")

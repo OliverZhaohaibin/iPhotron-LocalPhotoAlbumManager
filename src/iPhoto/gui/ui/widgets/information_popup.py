@@ -45,10 +45,13 @@ class InformationPopup(QWidget):
             parent,
             Qt.WindowType.Window
             | Qt.WindowType.FramelessWindowHint
+            | Qt.WindowType.Tool
             | Qt.WindowType.WindowStaysOnTopHint,
         )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, False)
+        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.setMinimumWidth(self._DEFAULT_WIDTH)
 
         self._drag_active = False

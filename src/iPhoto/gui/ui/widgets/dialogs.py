@@ -131,6 +131,9 @@ def show_information(parent: QWidget, message: str, *, title: str = "iPhoto") ->
     loop = QEventLoop()
     popup.destroyed.connect(loop.quit)
     popup.show()
+    # Some Linux/Qt combinations repolish top-level frameless windows during
+    # show(), which can overwrite the palette we set just before display.
+    popup.setPalette(_resolve_popup_palette_source(parent))
     popup.raise_()
     popup.activateWindow()
     loop.exec()

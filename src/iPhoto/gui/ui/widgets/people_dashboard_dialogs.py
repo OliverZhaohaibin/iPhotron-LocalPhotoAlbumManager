@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from PySide6.QtCore import QPoint, QRect, QRectF, Qt, Signal
-from PySide6.QtGui import QColor, QFont, QLinearGradient, QPainter, QPainterPath, QPen, QPixmap
+from PySide6.QtGui import QColor, QFont, QGuiApplication, QLinearGradient, QPainter, QPainterPath, QPen, QPixmap
 from PySide6.QtWidgets import (
     QDialog,
     QFrame,
@@ -45,6 +45,7 @@ class MergeConfirmDialog(QDialog):
     ) -> None:
         super().__init__(parent.window() if parent is not None else None)
         self._people_count = max(2, int(people_count))
+        self._dark_mode = self._resolve_dark_mode(parent)
         self.setModal(True)
         self.setWindowFlags(Qt.WindowType.Dialog | Qt.WindowType.FramelessWindowHint)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
@@ -55,17 +56,21 @@ class MergeConfirmDialog(QDialog):
 
         self._panel = QFrame(self)
         self._panel.setFixedWidth(356)
-        self._panel.setStyleSheet("""
-            QFrame {
-                background: rgba(255, 255, 255, 0.94);
-                border: 1px solid rgba(255, 255, 255, 0.65);
+        panel_bg = "rgba(23, 27, 39, 0.98)" if self._dark_mode else "rgba(255, 255, 255, 0.94)"
+        panel_border = "rgba(255, 255, 255, 0.08)" if self._dark_mode else "rgba(255, 255, 255, 0.65)"
+        self._panel.setStyleSheet(
+            f"""
+            QFrame {{
+                background: {panel_bg};
+                border: 1px solid {panel_border};
                 border-radius: 28px;
-            }
-            """)
+            }}
+            """
+        )
         panel_shadow = QGraphicsDropShadowEffect(self._panel)
         panel_shadow.setBlurRadius(40)
         panel_shadow.setOffset(0, 12)
-        panel_shadow.setColor(QColor(0, 0, 0, 46))
+        panel_shadow.setColor(QColor(0, 0, 0, 86 if self._dark_mode else 46))
         self._panel.setGraphicsEffect(panel_shadow)
 
         panel_layout = QVBoxLayout(self._panel)
@@ -87,7 +92,9 @@ class MergeConfirmDialog(QDialog):
         title_font = QFont("Segoe UI", 17, QFont.Weight.Bold)
         title_label.setFont(title_font)
         title_label.setMinimumHeight(max(56, title_label.heightForWidth(text_width)))
-        title_label.setStyleSheet("color: #111111; background: transparent;")
+        title_label.setStyleSheet(
+            f"color: {'#F6F7FB' if self._dark_mode else '#111111'}; background: transparent;"
+        )
 
         body_label = QLabel(resolved_body)
         body_label.setWordWrap(True)
@@ -97,12 +104,16 @@ class MergeConfirmDialog(QDialog):
         body_font = QFont("Segoe UI", 14, QFont.Weight.Medium)
         body_label.setFont(body_font)
         body_label.setMinimumHeight(max(46, body_label.heightForWidth(text_width)))
-        body_label.setStyleSheet("color: rgba(17, 17, 17, 0.84); background: transparent;")
+        body_label.setStyleSheet(
+            "background: transparent; "
+            f"color: {'#DDE3F3' if self._dark_mode else 'rgba(17, 17, 17, 0.84)'};"
+        )
 
         merge_button = QPushButton(confirm_text)
         merge_button.setCursor(Qt.CursorShape.PointingHandCursor)
         merge_button.setFixedHeight(42)
-        merge_button.setStyleSheet("""
+        merge_button.setStyleSheet(
+            """
             QPushButton {
                 background: #0A84FF;
                 color: white;
@@ -117,27 +128,30 @@ class MergeConfirmDialog(QDialog):
             QPushButton:pressed {
                 background: #006BE3;
             }
-            """)
+            """
+        )
 
         cancel_button = QPushButton("Cancel")
         cancel_button.setCursor(Qt.CursorShape.PointingHandCursor)
         cancel_button.setFixedHeight(40)
-        cancel_button.setStyleSheet("""
-            QPushButton {
-                background: rgba(243, 243, 244, 0.98);
-                color: #2E2E2E;
+        cancel_button.setStyleSheet(
+            f"""
+            QPushButton {{
+                background: {'rgba(255, 255, 255, 0.08)' if self._dark_mode else 'rgba(243, 243, 244, 0.98)'};
+                color: {'#F4F6FB' if self._dark_mode else '#2E2E2E'};
                 border: none;
                 border-radius: 20px;
                 font-size: 15px;
                 font-weight: 500;
-            }
-            QPushButton:hover {
-                background: rgba(235, 235, 236, 0.98);
-            }
-            QPushButton:pressed {
-                background: rgba(224, 224, 226, 0.98);
-            }
-            """)
+            }}
+            QPushButton:hover {{
+                background: {'rgba(255, 255, 255, 0.13)' if self._dark_mode else 'rgba(235, 235, 236, 0.98)'};
+            }}
+            QPushButton:pressed {{
+                background: {'rgba(255, 255, 255, 0.18)' if self._dark_mode else 'rgba(224, 224, 226, 0.98)'};
+            }}
+            """
+        )
 
         merge_button.clicked.connect(self.accept)
         cancel_button.clicked.connect(self.reject)
@@ -150,6 +164,28 @@ class MergeConfirmDialog(QDialog):
 
         root.addWidget(self._panel, 0, Qt.AlignmentFlag.AlignHCenter)
         root.addStretch(1)
+
+    @staticmethod
+    def _resolve_dark_mode(parent: QWidget | None) -> bool:
+        widget = parent.window() if parent is not None and parent.window() is not None else parent
+        coordinator = getattr(widget, "coordinator", None)
+        context = getattr(coordinator, "_context", None)
+        theme_manager = getattr(context, "theme", None)
+        if theme_manager is not None and hasattr(theme_manager, "get_effective_theme_mode"):
+            return theme_manager.get_effective_theme_mode() == "dark"
+
+        settings = getattr(context, "settings", None)
+        if settings is not None and hasattr(settings, "get"):
+            theme_setting = settings.get("ui.theme", "system")
+            if theme_setting == "dark":
+                return True
+            if theme_setting == "light":
+                return False
+
+        app = QGuiApplication.instance()
+        if app is not None and app.styleHints().colorScheme() == Qt.ColorScheme.Dark:
+            return True
+        return _widget_uses_dark_theme(widget)
 
     def _sync_geometry(self) -> None:
         parent = self.parentWidget()
@@ -166,7 +202,10 @@ class MergeConfirmDialog(QDialog):
     def paintEvent(self, _event) -> None:  # noqa: N802
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        painter.fillRect(self.rect(), QColor(22, 24, 29, 78))
+        painter.fillRect(
+            self.rect(),
+            QColor(8, 10, 16, 108) if self._dark_mode else QColor(22, 24, 29, 78),
+        )
 
     def mousePressEvent(self, event) -> None:  # noqa: N802
         if not self._panel.geometry().contains(event.position().toPoint()):

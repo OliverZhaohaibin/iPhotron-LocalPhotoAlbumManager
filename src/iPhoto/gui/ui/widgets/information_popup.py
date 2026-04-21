@@ -45,10 +45,13 @@ class InformationPopup(QWidget):
             parent,
             Qt.WindowType.Window
             | Qt.WindowType.FramelessWindowHint
+            | Qt.WindowType.Tool
             | Qt.WindowType.WindowStaysOnTopHint,
         )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, False)
+        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.setMinimumWidth(self._DEFAULT_WIDTH)
 
         self._drag_active = False
@@ -75,7 +78,6 @@ class InformationPopup(QWidget):
             QSizePolicy.Policy.Expanding,
             QSizePolicy.Policy.Preferred,
         )
-        self._title_label.setStyleSheet("font-weight: bold; font-size: 14px;")
         title_layout.addWidget(self._title_label, 1)
 
         # Close button – reuses the main window's close-button appearance.
@@ -111,6 +113,7 @@ class InformationPopup(QWidget):
         )
         self._message_label.setContentsMargins(16, 8, 16, 16)
         root_layout.addWidget(self._message_label, 1)
+        self._apply_content_style()
 
     # ------------------------------------------------------------------
     # Public API
@@ -144,6 +147,15 @@ class InformationPopup(QWidget):
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+    @staticmethod
+    def _resolve_colour(candidate: QColor, fallback: QColor) -> QColor:
+        """Return an opaque colour derived from ``candidate`` or ``fallback``."""
+
+        colour = QColor(candidate) if candidate.isValid() else QColor(fallback)
+        if colour.alpha() != 255:
+            colour.setAlpha(255)
+        return colour
+
     def _apply_close_button_style(self) -> None:
         """Recompute hover/pressed colours from the current palette."""
         text = self.palette().color(QPalette.ColorRole.WindowText)
@@ -157,12 +169,30 @@ class InformationPopup(QWidget):
             f"QToolButton:pressed {{ background-color: {pressed.name(QColor.NameFormat.HexArgb)}; border-radius: 6px; }}"
         )
 
+    def _apply_content_style(self) -> None:
+        """Keep child widgets transparent and in sync with the popup palette."""
+
+        text = self._resolve_colour(
+            self.palette().color(QPalette.ColorRole.WindowText),
+            QColor("#2B2B2B"),
+        )
+        secondary = QColor(text)
+        secondary.setAlpha(220)
+        self._title_bar.setStyleSheet("background: transparent;")
+        self._title_label.setStyleSheet(
+            f"font-weight: bold; font-size: 14px; color: {text.name()}; background: transparent;"
+        )
+        self._message_label.setStyleSheet(
+            f"color: {secondary.name(QColor.NameFormat.HexArgb)}; background: transparent;"
+        )
+
     # ------------------------------------------------------------------
     # QWidget overrides
     # ------------------------------------------------------------------
     def changeEvent(self, event: QEvent) -> None:
         if event.type() == QEvent.Type.PaletteChange:
             self._apply_close_button_style()
+            self._apply_content_style()
         super().changeEvent(event)
 
     def paintEvent(self, event) -> None:  # type: ignore[override]
@@ -181,11 +211,17 @@ class InformationPopup(QWidget):
         path = QPainterPath()
         path.addRoundedRect(rect, radius, radius)
 
-        bg_color = self.palette().color(QPalette.ColorRole.Window)
+        bg_color = self._resolve_colour(
+            self.palette().color(QPalette.ColorRole.Window),
+            QColor("#EEF3F6"),
+        )
         painter.setPen(Qt.PenStyle.NoPen)
         painter.fillPath(path, bg_color)
 
-        border_color = self.palette().color(QPalette.ColorRole.Mid)
+        border_color = self._resolve_colour(
+            self.palette().color(QPalette.ColorRole.Mid),
+            QColor("#8A8F98"),
+        )
         border_color.setAlpha(80)
         painter.setPen(border_color)
         painter.setBrush(Qt.BrushStyle.NoBrush)

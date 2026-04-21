@@ -98,6 +98,10 @@ class MainHeaderWidget(QWidget):
             "Show face names", main_window, checkable=True
         )
         self.toggle_face_names_action.setChecked(False)
+        self.toggle_hidden_face_album_action = QAction(
+            "Show Hidden Face Album", main_window, checkable=True
+        )
+        self.toggle_hidden_face_album_action.setChecked(False)
 
         self.share_action_group = QActionGroup(main_window)
         self.share_action_copy_file = QAction("Copy File", main_window, checkable=True)
@@ -168,6 +172,7 @@ class MainHeaderWidget(QWidget):
 
         view_menu = self.menu_bar.addMenu("&View")
         view_menu.addAction(self.toggle_face_names_action)
+        view_menu.addAction(self.toggle_hidden_face_album_action)
         view_menu.addSeparator()
         view_menu.addAction(self.toggle_filmstrip_action)
 

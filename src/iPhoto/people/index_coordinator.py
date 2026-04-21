@@ -166,6 +166,21 @@ class PeopleIndexCoordinator(QObject):
                 )
             return changed
 
+    def set_person_cover_from_asset(self, person_id: str, asset_id: str) -> bool:
+        if not person_id or not asset_id:
+            return False
+        with self._lock:
+            if self._shutdown_requested:
+                return False
+            repository = self._repository()
+            changed = repository.set_person_cover_from_asset(person_id, asset_id)
+            if changed:
+                self._emit_snapshot(
+                    changed_asset_ids=(asset_id,),
+                    changed_person_ids=(person_id,),
+                )
+            return changed
+
     def add_manual_face(
         self,
         face: FaceRecord,
@@ -289,6 +304,27 @@ class PeopleIndexCoordinator(QObject):
                 )
             return group
 
+    def delete_group(self, group_id: str) -> bool:
+        if not group_id:
+            return False
+        with self._lock:
+            if self._shutdown_requested:
+                return False
+            repository = self._repository()
+            group = repository.get_group(group_id)
+            if group is None:
+                return False
+            changed_asset_ids = tuple(repository.get_common_asset_ids_for_group(group_id))
+            changed = repository.delete_group(group_id)
+            if changed:
+                self._emit_snapshot(
+                    changed_asset_ids=changed_asset_ids,
+                    changed_person_ids=tuple(group.member_person_ids),
+                    changed_group_ids=(group_id,),
+                    group_redirects={group_id: None},
+                )
+            return changed
+
     def set_group_cover(self, group_id: str, asset_id: str) -> bool:
         if not group_id or not asset_id:
             return False
@@ -302,6 +338,18 @@ class PeopleIndexCoordinator(QObject):
                     changed_asset_ids=(asset_id,),
                     changed_group_ids=(group_id,),
                 )
+            return changed
+
+    def set_person_hidden(self, person_id: str, hidden: bool) -> bool:
+        if not person_id:
+            return False
+        with self._lock:
+            if self._shutdown_requested:
+                return False
+            repository = self._repository()
+            changed = repository.set_person_hidden(person_id, hidden)
+            if changed:
+                self._emit_snapshot(changed_person_ids=(person_id,))
             return changed
 
     def _repository(self) -> FaceRepository:

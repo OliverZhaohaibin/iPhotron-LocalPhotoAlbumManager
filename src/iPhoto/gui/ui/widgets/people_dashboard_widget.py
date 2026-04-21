@@ -10,7 +10,6 @@ from PySide6.QtWidgets import (
     QDialog,
     QFrame,
     QHBoxLayout,
-    QInputDialog,
     QLabel,
     QMenu,
     QScrollArea,
@@ -22,6 +21,7 @@ from PySide6.QtWidgets import (
 from iPhoto.people.repository import PeopleGroupSummary, PersonSummary
 from iPhoto.people.service import PeopleService
 
+from . import dialogs
 from .flow_layout import FlowLayout
 from .people_dashboard_board import PeopleBoard
 from .people_dashboard_cards import GroupCard, PeopleCard
@@ -45,6 +45,7 @@ class _PeopleDashboardLoaderWorker(QRunnable):
         generation: int,
         index_version: int,
         library_root: Path | None,
+        show_hidden_people: bool,
         status_message: str | None,
         signals: _PeopleDashboardLoaderSignals,
     ) -> None:
@@ -52,6 +53,7 @@ class _PeopleDashboardLoaderWorker(QRunnable):
         self._generation = generation
         self._index_version = index_version
         self._library_root = library_root
+        self._show_hidden_people = bool(show_hidden_people)
         self._status_message = status_message
         self._signals = signals
 
@@ -68,7 +70,9 @@ class _PeopleDashboardLoaderWorker(QRunnable):
             )
             return
         service = PeopleService(self._library_root)
-        summaries, groups, pending = service.load_dashboard()
+        summaries, groups, pending = service.load_dashboard(
+            show_hidden_people=self._show_hidden_people
+        )
         self._signals.loaded.emit(
             self._generation,
             self._index_version,
@@ -88,6 +92,7 @@ class PeopleDashboardWidget(QWidget):
         super().__init__(parent)
         self._service = PeopleService()
         self._status_message: str | None = None
+        self._show_hidden_people = False
         self._summaries: list[PersonSummary] = []
         self._groups: list[PeopleGroupSummary] = []
         self._cards: dict[str, PeopleCard] = {}
@@ -222,6 +227,13 @@ class PeopleDashboardWidget(QWidget):
         self._status_message = message or None
         self._update_status_labels()
 
+    def set_show_hidden_people(self, show_hidden_people: bool) -> None:
+        normalized = bool(show_hidden_people)
+        if self._show_hidden_people == normalized:
+            return
+        self._show_hidden_people = normalized
+        self.reload(preserve_content=bool(self._summaries or self._groups))
+
     def schedule_index_refresh(self) -> None:
         self._index_version += 1
         if not self.isVisible():
@@ -256,6 +268,7 @@ class PeopleDashboardWidget(QWidget):
             generation=generation,
             index_version=index_version,
             library_root=library_root,
+            show_hidden_people=self._show_hidden_people,
             status_message=self._status_message,
             signals=self._load_signals,
         )
@@ -291,7 +304,7 @@ class PeopleDashboardWidget(QWidget):
         self._pending_index_refresh = False
         status_text = status_message if status_message else self._status_message
 
-        if self._summaries:
+        if self._summaries or self._groups:
             self._message.setText(
                 "Click a cluster or group card to open matching assets, "
                 "or drag cards close together to merge clusters."
@@ -329,6 +342,7 @@ class PeopleDashboardWidget(QWidget):
         for index, summary in enumerate(self._groups):
             card = GroupCard(summary=summary, seed_index=index, parent=self._groups_host)
             card.activated.connect(self.groupActivated.emit)
+            card.menuRequested.connect(self._show_group_card_menu)
             self._group_cards[summary.group_id] = card
             self._groups_layout.addWidget(card)
             card.load_cover_artwork()
@@ -381,6 +395,16 @@ class PeopleDashboardWidget(QWidget):
         menu = self._build_card_menu(summary)
         menu.exec(global_pos)
 
+    def _group_summary_for_group(self, group_id: str) -> PeopleGroupSummary | None:
+        return next((item for item in self._groups if item.group_id == group_id), None)
+
+    def _show_group_card_menu(self, group_id: str, global_pos) -> None:
+        summary = self._group_summary_for_group(group_id)
+        if summary is None:
+            return
+        menu = self._build_group_card_menu(summary)
+        menu.exec(global_pos)
+
     def _build_card_menu(self, summary: PersonSummary) -> QMenu:
         menu = QMenu(self)
         menu.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
@@ -389,19 +413,43 @@ class PeopleDashboardWidget(QWidget):
         rename_action = QAction(rename_text, menu)
         new_group_action = QAction("New Group", menu)
         merge_action = QAction("Merge Into...", menu)
+        is_hidden = self._show_hidden_people and self._service.is_cluster_card_hidden(summary.person_id)
+        hide_action = QAction(
+            "Unhide This Person" if is_hidden else "Hide This Person",
+            menu,
+        )
         merge_action.setEnabled(len(self._summaries) > 1)
         rename_action.triggered.connect(lambda: self._rename_person(summary))
         new_group_action.triggered.connect(lambda: self._open_group_dialog(summary.person_id))
         merge_action.triggered.connect(lambda: self._merge_person(summary))
+        if is_hidden:
+            hide_action.triggered.connect(lambda: self._unhide_person(summary))
+        else:
+            hide_action.triggered.connect(lambda: self._hide_person(summary))
         menu.addAction(rename_action)
         menu.addAction(new_group_action)
         menu.addSeparator()
         menu.addAction(merge_action)
+        menu.addAction(hide_action)
+        return menu
+
+    def _build_group_card_menu(self, summary: PeopleGroupSummary) -> QMenu:
+        menu = QMenu(self)
+        menu.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        menu.setStyleSheet(MENU_STYLE)
+        dissolve_action = QAction("Dissolve Group", menu)
+        dissolve_action.triggered.connect(lambda: self._dissolve_group(summary))
+        menu.addAction(dissolve_action)
         return menu
 
     def _rename_person(self, summary: PersonSummary) -> None:
         title = "Rename Person" if summary.name else "Name This Person"
-        text, accepted = QInputDialog.getText(self, title, "Name:", text=summary.name or "")
+        text, accepted = dialogs.prompt_text_input(
+            self,
+            title,
+            "Name:",
+            text=summary.name or "",
+        )
         if not accepted:
             return
         self._service.rename_cluster(summary.person_id, text.strip() or None)
@@ -417,12 +465,11 @@ class PeopleDashboardWidget(QWidget):
             return
 
         labels = [label for label, _ in choices]
-        selected, accepted = QInputDialog.getItem(
+        selected, accepted = dialogs.prompt_item_selection(
             self,
             "Merge Person",
             "Merge into:",
             labels,
-            editable=False,
         )
         if not accepted:
             return
@@ -430,6 +477,21 @@ class PeopleDashboardWidget(QWidget):
         if selected_id is None:
             return
         self._confirm_merge(summary.person_id, selected_id)
+
+    def _hide_person(self, summary: PersonSummary) -> None:
+        if not MergeConfirmDialog.confirm_custom(
+            parent=self,
+            title_text="Hide This Person?",
+            body_text="This person will be hidden from the People dashboard until you choose to show hidden face albums.",
+            confirm_text="Hide",
+        ):
+            return
+        if self._service.hide_cluster_card(summary.person_id):
+            self.reload(preserve_content=bool(self._summaries or self._groups))
+
+    def _unhide_person(self, summary: PersonSummary) -> None:
+        if self._service.unhide_cluster_card(summary.person_id):
+            self.reload(preserve_content=bool(self._summaries or self._groups))
 
     def _open_group_dialog(self, initial_person_id: str) -> None:
         if len(self._summaries) < 2:
@@ -446,8 +508,34 @@ class PeopleDashboardWidget(QWidget):
         if group is not None:
             self.reload(preserve_content=bool(self._summaries))
 
+    def _dissolve_group(self, summary: PeopleGroupSummary) -> None:
+        if not MergeConfirmDialog.confirm_custom(
+            parent=self,
+            title_text="Dissolve This Group?",
+            body_text="This will remove the group card. The people inside it will remain unchanged.",
+            confirm_text="Dissolve Group",
+        ):
+            return
+        if self._service.delete_group(summary.group_id):
+            self.reload(preserve_content=bool(self._summaries or self._groups))
+
     def _merge_cluster_pair(self, source_person_id: str, target_person_id: str) -> None:
         self._confirm_merge(source_person_id, target_person_id)
+
+    def _show_merge_hidden_state_warning(self) -> None:
+        dialogs.show_information(
+            self,
+            (
+                "People in hidden and visible states cannot be merged. "
+                "Please make both People cards hidden or visible first."
+            ),
+            title="Cannot Merge People",
+        )
+
+    def _has_mixed_hidden_state(self, source_person_id: str, target_person_id: str) -> bool:
+        source_hidden = self._service.is_cluster_card_hidden(source_person_id)
+        target_hidden = self._service.is_cluster_card_hidden(target_person_id)
+        return source_hidden != target_hidden
 
     def _confirm_merge(self, source_person_id: str, target_person_id: str) -> bool:
         if source_person_id == target_person_id:
@@ -456,6 +544,10 @@ class PeopleDashboardWidget(QWidget):
         source = self._summary_for_person(source_person_id)
         target = self._summary_for_person(target_person_id)
         if source is None or target is None:
+            return False
+
+        if self._has_mixed_hidden_state(source_person_id, target_person_id):
+            self._show_merge_hidden_state_warning()
             return False
 
         if not MergeConfirmDialog.confirm(2, self):
@@ -481,7 +573,7 @@ class PeopleDashboardWidget(QWidget):
     def _update_status_labels(self) -> None:
         if self._loading:
             return
-        if self._summaries:
+        if self._summaries or self._groups:
             self._message.setText(
                 "Click a cluster or group card to open matching assets, "
                 "or drag cards close together to merge clusters."

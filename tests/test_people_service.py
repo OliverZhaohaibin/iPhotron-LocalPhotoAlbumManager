@@ -36,7 +36,14 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _face_record(*, face_id: str, asset_id: str, asset_rel: str, person_id: str) -> FaceRecord:
+def _face_record(
+    *,
+    face_id: str,
+    asset_id: str,
+    asset_rel: str,
+    person_id: str,
+    thumbnail_path: str | None = None,
+) -> FaceRecord:
     embedding = np.asarray([1.0, 0.0, 0.0], dtype=np.float32)
     return FaceRecord(
         face_id=face_id,
@@ -50,7 +57,7 @@ def _face_record(*, face_id: str, asset_id: str, asset_rel: str, person_id: str)
         confidence=0.99,
         embedding=embedding,
         embedding_dim=int(embedding.shape[0]),
-        thumbnail_path=None,
+        thumbnail_path=thumbnail_path,
         person_id=person_id,
         detected_at=_now_iso(),
         image_width=400,
@@ -345,6 +352,108 @@ def test_people_service_uses_persisted_group_cover(tmp_path: Path) -> None:
     assert service.set_group_cover(group.group_id, "asset-older") is True
     listed = service.list_groups()
     assert listed[0].cover_asset_path == library_root / "album/older.jpg"
+
+
+def test_people_service_load_dashboard_hides_hidden_people_cards_only(tmp_path: Path) -> None:
+    library_root = tmp_path / "Library"
+    library_root.mkdir()
+
+    global_repo = get_global_repository(library_root)
+    global_repo.write_rows(
+        [
+            {"rel": "album/shared.jpg", "id": "asset-shared", "media_type": 0, "face_status": "done"},
+        ]
+    )
+
+    service = PeopleService(library_root)
+    repository = service.repository()
+    assert repository is not None
+    faces = [
+        _face_record(
+            face_id="face-a",
+            asset_id="asset-shared",
+            asset_rel="album/shared.jpg",
+            person_id="person-a",
+        ),
+        _face_record(
+            face_id="face-b",
+            asset_id="asset-shared",
+            asset_rel="album/shared.jpg",
+            person_id="person-b",
+        ),
+    ]
+    persons = [
+        _person_record(person_id="person-a", key_face_id="face-a", face_count=1, name="Alice"),
+        _person_record(person_id="person-b", key_face_id="face-b", face_count=1, name="Bob"),
+    ]
+    repository.replace_all(faces, persons)
+    group = service.create_group(["person-a", "person-b"])
+    assert group is not None
+
+    assert service.hide_cluster_card("person-a") is True
+
+    summaries, groups, pending = service.load_dashboard()
+
+    assert [summary.person_id for summary in summaries] == ["person-b"]
+    assert [item.group_id for item in groups] == [group.group_id]
+    assert groups[0].member_person_ids == ("person-a", "person-b")
+    assert pending == 0
+
+    summaries_all, groups_all, pending_all = service.load_dashboard(show_hidden_people=True)
+    assert [summary.person_id for summary in summaries_all] == ["person-a", "person-b"]
+    assert [item.group_id for item in groups_all] == [group.group_id]
+    assert pending_all == 0
+    assert service.is_cluster_card_hidden("person-a") is True
+    assert service.unhide_cluster_card("person-a") is True
+    assert service.is_cluster_card_hidden("person-a") is False
+
+
+def test_people_service_can_set_person_cover_from_asset_and_delete_group(tmp_path: Path) -> None:
+    library_root = tmp_path / "Library"
+    library_root.mkdir()
+
+    global_repo = get_global_repository(library_root)
+    global_repo.write_rows(
+        [
+            {"rel": "album/shared.jpg", "id": "asset-shared", "media_type": 0, "face_status": "done"},
+        ]
+    )
+
+    service = PeopleService(library_root)
+    repository = service.repository()
+    assert repository is not None
+    faces = [
+        _face_record(
+            face_id="face-a",
+            asset_id="asset-shared",
+            asset_rel="album/shared.jpg",
+            person_id="person-a",
+            thumbnail_path="thumbnails/a.jpg",
+        ),
+        _face_record(
+            face_id="face-b",
+            asset_id="asset-shared",
+            asset_rel="album/shared.jpg",
+            person_id="person-b",
+            thumbnail_path="thumbnails/b.jpg",
+        ),
+    ]
+    persons = [
+        _person_record(person_id="person-a", key_face_id="face-a", face_count=1, name="Alice"),
+        _person_record(person_id="person-b", key_face_id="face-b", face_count=1, name="Bob"),
+    ]
+    repository.replace_all(faces, persons)
+
+    assert service.set_cluster_cover_from_asset("person-b", "asset-shared") is True
+    assert repository.state_repository is not None
+    assert repository.state_repository.get_person_cover_thumbnail_map(["person-b"]) == {
+        "person-b": "thumbnails/b.jpg"
+    }
+
+    group = service.create_group(["person-a", "person-b"])
+    assert group is not None
+    assert service.delete_group(group.group_id) is True
+    assert service.list_groups() == []
 
 
 def test_people_service_load_dashboard_reuses_cluster_snapshot_for_groups(tmp_path: Path) -> None:

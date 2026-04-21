@@ -289,6 +289,11 @@ class FaceRepository:
             )
         return summaries
 
+    def get_hidden_person_ids(self, person_ids: Iterable[str]) -> set[str]:
+        if self._state_repo is None:
+            return set()
+        return self._state_repo.get_hidden_person_ids(person_ids)
+
     def get_asset_ids_by_person(self, person_id: str) -> list[str]:
         self.initialize()
         with closing(self._connect()) as conn:
@@ -411,6 +416,26 @@ class FaceRepository:
             thumbnail_path=row["thumbnail_path"],
         )
         return True
+
+    def set_person_cover_from_asset(self, person_id: str, asset_id: str) -> bool:
+        if not person_id or not asset_id:
+            return False
+        annotation = next(
+            (
+                item
+                for item in self.list_asset_face_annotations(asset_id)
+                if item.person_id == person_id and item.face_id
+            ),
+            None,
+        )
+        if annotation is None:
+            return False
+        return self.set_person_cover(person_id, annotation.face_id)
+
+    def set_person_hidden(self, person_id: str, hidden: bool) -> bool:
+        if self._state_repo is None:
+            return False
+        return self._state_repo.set_person_hidden(person_id, hidden)
 
     def set_person_order(self, person_ids: Iterable[str]) -> None:
         if self._state_repo is None:
@@ -543,6 +568,12 @@ class FaceRepository:
         if group is not None:
             self.refresh_group_assets(group.group_id)
         return group
+
+    def delete_group(self, group_id: str) -> bool:
+        if self._state_repo is None:
+            return False
+        self.initialize()
+        return self._state_repo.delete_group(group_id)
 
     def list_groups(self) -> list[PeopleGroupRecord]:
         if self._state_repo is None:

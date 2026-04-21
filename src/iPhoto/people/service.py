@@ -102,12 +102,25 @@ class PeopleService:
         summaries_by_id = {summary.person_id: summary for summary in summary_list}
         return self._build_group_summaries(repository, repository.list_groups(), summaries_by_id)
 
-    def load_dashboard(self) -> tuple[list[PersonSummary], list[PeopleGroupSummary], int]:
+    def load_dashboard(
+        self,
+        *,
+        show_hidden_people: bool = False,
+    ) -> tuple[list[PersonSummary], list[PeopleGroupSummary], int]:
         repository = self.repository()
         if repository is None:
             return [], [], 0
-        summaries = repository.get_person_summaries()
-        groups = self.list_groups(repository=repository, summaries=summaries)
+        all_summaries = repository.get_person_summaries()
+        groups = self.list_groups(repository=repository, summaries=all_summaries)
+        if show_hidden_people:
+            summaries = list(all_summaries)
+        else:
+            hidden_person_ids = repository.get_hidden_person_ids(
+                summary.person_id for summary in all_summaries
+            )
+            summaries = [
+                summary for summary in all_summaries if summary.person_id not in hidden_person_ids
+            ]
         counts = self.face_status_counts()
         pending = counts.get("pending", 0) + counts.get("retry", 0)
         return summaries, groups, pending
@@ -137,10 +150,34 @@ class PeopleService:
             return False
         return get_people_index_coordinator(self._library_root).set_person_cover(person_id, face_id)
 
+    def set_cluster_cover_from_asset(self, person_id: str, asset_id: str) -> bool:
+        if self._library_root is None:
+            return False
+        return get_people_index_coordinator(self._library_root).set_person_cover_from_asset(
+            person_id,
+            asset_id,
+        )
+
     def set_group_cover(self, group_id: str, asset_id: str) -> bool:
         if self._library_root is None:
             return False
         return get_people_index_coordinator(self._library_root).set_group_cover(group_id, asset_id)
+
+    def hide_cluster_card(self, person_id: str) -> bool:
+        if self._library_root is None:
+            return False
+        return get_people_index_coordinator(self._library_root).set_person_hidden(person_id, True)
+
+    def unhide_cluster_card(self, person_id: str) -> bool:
+        if self._library_root is None:
+            return False
+        return get_people_index_coordinator(self._library_root).set_person_hidden(person_id, False)
+
+    def is_cluster_card_hidden(self, person_id: str) -> bool:
+        repository = self.repository()
+        if repository is None or not person_id:
+            return False
+        return person_id in repository.get_hidden_person_ids([person_id])
 
     def set_cluster_order(
         self,
@@ -157,6 +194,11 @@ class PeopleService:
             source_person_id,
             target_person_id,
         )
+
+    def delete_group(self, group_id: str) -> bool:
+        if self._library_root is None:
+            return False
+        return get_people_index_coordinator(self._library_root).delete_group(group_id)
 
     def cluster_asset_ids(self, person_id: str) -> list[str]:
         repository = self.repository()

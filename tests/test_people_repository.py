@@ -99,7 +99,7 @@ def test_remove_faces_for_assets_deletes_affected_person_rows_first(tmp_path: Pa
     assert repository.get_person_summaries() == []
 
 
-def test_person_cover_persists_and_custom_cover_survives_rescan(tmp_path: Path) -> None:
+def test_person_cover_can_be_set_to_custom_face(tmp_path: Path) -> None:
     repository = FaceRepository(tmp_path / "face_index.db", tmp_path / "face_state.db")
     faces = [
         _face_record(
@@ -138,11 +138,68 @@ def test_person_cover_persists_and_custom_cover_survives_rescan(tmp_path: Path) 
         == (tmp_path / "thumbnails/custom.jpg").resolve()
     )
 
-    repository.replace_all(faces, [person])
-    assert (
-        repository.get_person_summaries()[0].thumbnail_path
-        == (tmp_path / "thumbnails/custom.jpg").resolve()
-    )
+
+def test_set_person_cover_from_asset_uses_matching_face_on_asset(tmp_path: Path) -> None:
+    repository = FaceRepository(tmp_path / "face_index.db", tmp_path / "face_state.db")
+    faces = [
+        _face_record(
+            face_id="face-a",
+            asset_id="asset-shared",
+            asset_rel="album/shared.jpg",
+            person_id="person-a",
+            thumbnail_path="thumbnails/a.jpg",
+        ),
+        _face_record(
+            face_id="face-b",
+            asset_id="asset-shared",
+            asset_rel="album/shared.jpg",
+            person_id="person-b",
+            thumbnail_path="thumbnails/b.jpg",
+        ),
+    ]
+    persons = [
+        _person_record(person_id="person-a", key_face_id="face-a", face_count=1, name="Alice"),
+        _person_record(person_id="person-b", key_face_id="face-b", face_count=1, name="Bob"),
+    ]
+    repository.replace_all(faces, persons)
+
+    assert repository.set_person_cover_from_asset("person-b", "asset-shared") is True
+    assert repository.state_repository is not None
+    assert repository.state_repository.get_person_cover_thumbnail_map(["person-b"]) == {
+        "person-b": "thumbnails/b.jpg"
+    }
+    assert repository.set_person_cover_from_asset("person-a", "asset-missing") is False
+
+
+def test_hidden_person_ids_persist_and_follow_merge(tmp_path: Path) -> None:
+    repository = FaceRepository(tmp_path / "face_index.db", tmp_path / "face_state.db")
+    faces = [
+        _face_record(
+            face_id="face-a",
+            asset_id="asset-a",
+            asset_rel="album/a.jpg",
+            person_id="person-a",
+        ),
+        _face_record(
+            face_id="face-b",
+            asset_id="asset-b",
+            asset_rel="album/b.jpg",
+            person_id="person-b",
+        ),
+    ]
+    persons = [
+        _person_record(person_id="person-a", key_face_id="face-a", face_count=1, name="Alice"),
+        _person_record(person_id="person-b", key_face_id="face-b", face_count=1, name="Bob"),
+    ]
+    repository.replace_all(faces, persons)
+
+    assert repository.set_person_hidden("person-a", True) is True
+    assert repository.get_hidden_person_ids(["person-a", "person-b"]) == {"person-a"}
+
+    merged, _group_redirects = repository.merge_persons_with_redirects("person-a", "person-b")
+
+    assert merged is True
+    assert repository.get_hidden_person_ids(["person-a", "person-b"]) == {"person-b"}
 
 
 def test_person_card_order_persists_across_reload(tmp_path: Path) -> None:
@@ -334,6 +391,38 @@ def test_group_cover_can_be_customized_without_rescan_overwrite(tmp_path: Path) 
 
     repository.replace_all(faces, persons)
     assert repository.get_group_cover_asset_id(group.group_id) == "asset-older"
+
+
+def test_delete_group_removes_group_and_cached_assets(tmp_path: Path) -> None:
+    repository = FaceRepository(tmp_path / "face_index.db", tmp_path / "face_state.db")
+    faces = [
+        _face_record(
+            face_id="face-a",
+            asset_id="asset-shared",
+            asset_rel="album/shared.jpg",
+            person_id="person-a",
+        ),
+        _face_record(
+            face_id="face-b",
+            asset_id="asset-shared",
+            asset_rel="album/shared.jpg",
+            person_id="person-b",
+        ),
+    ]
+    persons = [
+        _person_record(person_id="person-a", key_face_id="face-a", face_count=1, name="Alice"),
+        _person_record(person_id="person-b", key_face_id="face-b", face_count=1, name="Bob"),
+    ]
+    repository.replace_all(faces, persons)
+
+    group = repository.create_group(["person-a", "person-b"])
+    assert group is not None
+    assert repository.get_common_asset_ids_for_group(group.group_id) == ["asset-shared"]
+
+    assert repository.delete_group(group.group_id) is True
+    assert repository.get_group(group.group_id) is None
+    assert repository.list_groups() == []
+    assert repository.get_common_asset_ids_for_group(group.group_id) == []
 
 
 def test_merge_persons_rewrites_group_memberships_and_deduplicates_groups(tmp_path: Path) -> None:

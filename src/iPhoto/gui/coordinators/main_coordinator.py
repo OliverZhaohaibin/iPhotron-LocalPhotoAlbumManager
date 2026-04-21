@@ -279,6 +279,8 @@ class MainCoordinator(QObject):
             selection_controller=self._selection_controller,
             navigation=self._navigation,
             export_callback=window.ui.export_selected_action.trigger,
+            people_cover_context_provider=self._gallery_vm.current_people_cluster_context,
+            set_people_cover_callback=self._set_people_cluster_cover,
             prepare_paths_for_mutation=self._prepare_paths_for_mutation,
             parent=self,
         )
@@ -422,6 +424,7 @@ class MainCoordinator(QObject):
         ui.rotate_left_button.clicked.connect(self._playback.rotate_current_asset)
         ui.favorite_button.clicked.connect(self._detail_vm.toggle_favorite)
         ui.toggle_face_names_action.toggled.connect(self._handle_face_name_toggle_changed)
+        ui.toggle_hidden_face_album_action.toggled.connect(self._handle_hidden_face_album_toggle_changed)
 
         # Info Button
         if hasattr(ui, "info_button"):
@@ -616,6 +619,17 @@ class MainCoordinator(QObject):
         )
         self._view_router.show_gallery()
 
+    def _set_people_cluster_cover(self, kind: str, entity_id: str, asset_id: str) -> bool:
+        library_root = self._context.library.root()
+        if library_root is None or not asset_id or not entity_id:
+            return False
+        service = PeopleService(library_root)
+        if kind == "person":
+            return service.set_cluster_cover_from_asset(entity_id, asset_id)
+        if kind == "group":
+            return service.set_group_cover(entity_id, asset_id)
+        return False
+
     def open_album_from_path(self, path: Path):
         self._navigation.open_album(path)
 
@@ -640,6 +654,14 @@ class MainCoordinator(QObject):
             show_face_names = bool(stored_face_names)
         ui.toggle_face_names_action.setChecked(show_face_names)
         self._playback.set_face_name_display_enabled(show_face_names)
+
+        stored_hidden_face_album = settings.get("ui.show_hidden_face_album", False)
+        if isinstance(stored_hidden_face_album, str):
+            show_hidden_face_album = stored_hidden_face_album.strip().lower() in {"1", "true", "yes", "on"}
+        else:
+            show_hidden_face_album = bool(stored_hidden_face_album)
+        ui.toggle_hidden_face_album_action.setChecked(show_hidden_face_album)
+        ui.people_page.set_show_hidden_people(show_hidden_face_album)
 
         # 2. Volume / Mute
         stored_volume = settings.get("ui.volume", 75)
@@ -674,6 +696,11 @@ class MainCoordinator(QObject):
         if self._context.settings.get("ui.show_face_names_in_detail") != checked:
             self._context.settings.set("ui.show_face_names_in_detail", checked)
         self._playback.set_face_name_display_enabled(checked)
+
+    def _handle_hidden_face_album_toggle_changed(self, checked: bool) -> None:
+        if self._context.settings.get("ui.show_hidden_face_album") != checked:
+            self._context.settings.set("ui.show_hidden_face_album", checked)
+        self._window.ui.people_page.set_show_hidden_people(checked)
 
     def _prepare_paths_for_mutation(self, paths: list[Path]) -> None:
         """Release preview/player handles before mutating files on disk."""

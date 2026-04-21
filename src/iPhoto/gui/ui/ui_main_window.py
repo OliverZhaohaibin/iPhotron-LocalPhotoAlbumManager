@@ -124,6 +124,7 @@ class Ui_MainWindow(object):
         self.bind_library_action = self.main_header.bind_library_action
         self.toggle_filmstrip_action = self.main_header.toggle_filmstrip_action
         self.toggle_face_names_action = self.main_header.toggle_face_names_action
+        self.toggle_hidden_face_album_action = self.main_header.toggle_hidden_face_album_action
         self.export_all_edited_action = self.main_header.export_all_edited_action
         self.export_selected_action = self.main_header.export_selected_action
         self.export_destination_group = self.main_header.export_destination_group

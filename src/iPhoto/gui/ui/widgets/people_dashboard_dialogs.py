@@ -34,7 +34,15 @@ from .people_dashboard_shared import (
 
 
 class MergeConfirmDialog(QDialog):
-    def __init__(self, people_count: int, parent: QWidget | None = None) -> None:
+    def __init__(
+        self,
+        people_count: int,
+        parent: QWidget | None = None,
+        *,
+        title_text: str | None = None,
+        body_text: str | None = None,
+        confirm_text: str = "Merge Photos",
+    ) -> None:
         super().__init__(parent.window() if parent is not None else None)
         self._people_count = max(2, int(people_count))
         self.setModal(True)
@@ -65,8 +73,13 @@ class MergeConfirmDialog(QDialog):
         panel_layout.setSpacing(16)
 
         text_width = self._panel.width() - 44
+        resolved_title = title_text or f"Merge All Photos of These\n{self._people_count} People?"
+        resolved_body = body_text or (
+            f"By merging photos of these {self._people_count} people, "
+            "they will be recognized as the same person."
+        )
 
-        title_label = QLabel(f"Merge All Photos of These\n{self._people_count} People?")
+        title_label = QLabel(resolved_title)
         title_label.setWordWrap(True)
         title_label.setTextFormat(Qt.TextFormat.PlainText)
         title_label.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Minimum)
@@ -76,10 +89,7 @@ class MergeConfirmDialog(QDialog):
         title_label.setMinimumHeight(max(56, title_label.heightForWidth(text_width)))
         title_label.setStyleSheet("color: #111111; background: transparent;")
 
-        body_label = QLabel(
-            f"By merging photos of these {self._people_count} people, "
-            "they will be recognized as the same person."
-        )
+        body_label = QLabel(resolved_body)
         body_label.setWordWrap(True)
         body_label.setTextFormat(Qt.TextFormat.PlainText)
         body_label.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Minimum)
@@ -89,7 +99,7 @@ class MergeConfirmDialog(QDialog):
         body_label.setMinimumHeight(max(46, body_label.heightForWidth(text_width)))
         body_label.setStyleSheet("color: rgba(17, 17, 17, 0.84); background: transparent;")
 
-        merge_button = QPushButton("Merge Photos")
+        merge_button = QPushButton(confirm_text)
         merge_button.setCursor(Qt.CursorShape.PointingHandCursor)
         merge_button.setFixedHeight(42)
         merge_button.setStyleSheet("""
@@ -168,6 +178,25 @@ class MergeConfirmDialog(QDialog):
     @classmethod
     def confirm(cls, people_count: int, parent: QWidget | None = None) -> bool:
         dialog = cls(people_count, parent)
+        return dialog.exec() == QDialog.DialogCode.Accepted
+
+    @classmethod
+    def confirm_custom(
+        cls,
+        *,
+        parent: QWidget | None = None,
+        title_text: str,
+        body_text: str,
+        confirm_text: str,
+        people_count: int = 2,
+    ) -> bool:
+        dialog = cls(
+            people_count,
+            parent,
+            title_text=title_text,
+            body_text=body_text,
+            confirm_text=confirm_text,
+        )
         return dialog.exec() == QDialog.DialogCode.Accepted
 
 

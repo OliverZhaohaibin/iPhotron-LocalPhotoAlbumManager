@@ -144,6 +144,15 @@ class InformationPopup(QWidget):
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+    @staticmethod
+    def _resolve_colour(candidate: QColor, fallback: QColor) -> QColor:
+        """Return an opaque colour derived from ``candidate`` or ``fallback``."""
+
+        colour = QColor(candidate) if candidate.isValid() else QColor(fallback)
+        if colour.alpha() != 255:
+            colour.setAlpha(255)
+        return colour
+
     def _apply_close_button_style(self) -> None:
         """Recompute hover/pressed colours from the current palette."""
         text = self.palette().color(QPalette.ColorRole.WindowText)
@@ -181,11 +190,17 @@ class InformationPopup(QWidget):
         path = QPainterPath()
         path.addRoundedRect(rect, radius, radius)
 
-        bg_color = self.palette().color(QPalette.ColorRole.Window)
+        bg_color = self._resolve_colour(
+            self.palette().color(QPalette.ColorRole.Window),
+            QColor("#EEF3F6"),
+        )
         painter.setPen(Qt.PenStyle.NoPen)
         painter.fillPath(path, bg_color)
 
-        border_color = self.palette().color(QPalette.ColorRole.Mid)
+        border_color = self._resolve_colour(
+            self.palette().color(QPalette.ColorRole.Mid),
+            QColor("#8A8F98"),
+        )
         border_color.setAlpha(80)
         painter.setPen(border_color)
         painter.setBrush(Qt.BrushStyle.NoBrush)

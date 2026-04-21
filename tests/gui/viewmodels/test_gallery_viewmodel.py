@@ -330,6 +330,7 @@ def test_people_cluster_gallery_loads_query_and_returns_to_people(tmp_path: Path
     store.load_selection.assert_called_once_with(tmp_path, query=query)
     assert vm.static_selection.value == "People"
     assert vm.current_section.value == "people_cluster_gallery"
+    assert vm.current_people_cluster_context() is None
     assert vm.cluster_gallery_back_tooltip() == "Return to People"
     assert vm.is_in_cluster_gallery() is True
 
@@ -339,6 +340,16 @@ def test_people_cluster_gallery_loads_query_and_returns_to_people(tmp_path: Path
     assert vm.current_section.value == "people_dashboard"
     assert vm.static_selection.value == "People"
     assert vm.is_in_cluster_gallery() is False
+
+
+def test_people_cluster_gallery_exposes_current_context(tmp_path: Path) -> None:
+    vm, store, _context, _facade, _asset_service = _make_vm(library_root=tmp_path)
+    query = AssetQuery(asset_ids=["asset-1"])
+
+    vm.open_people_cluster_gallery(query, kind="group", entity_id="group-1")
+
+    store.load_selection.assert_called_once_with(tmp_path, query=query)
+    assert vm.current_people_cluster_context() == ("group", "group-1")
 
 
 def test_people_cluster_gallery_retargets_after_snapshot_redirect(tmp_path: Path) -> None:
@@ -436,6 +447,31 @@ def test_people_cluster_gallery_retargets_after_snapshot_redirect(tmp_path: Path
     reloaded_query = store.load_selection.call_args.kwargs["query"]
     assert reloaded_query.asset_ids == ["asset-b", "asset-a"]
     assert vm.current_query.value.asset_ids == ["asset-b", "asset-a"]
+
+
+def test_people_group_gallery_returns_to_dashboard_when_group_deleted(tmp_path: Path) -> None:
+    vm, store, _context, _facade, _asset_service = _make_vm(library_root=tmp_path)
+    routes = []
+    vm.route_requested.connect(routes.append)
+
+    vm.open_people_cluster_gallery(
+        AssetQuery(asset_ids=["asset-a"]),
+        kind="group",
+        entity_id="group-a",
+    )
+    store.load_selection.reset_mock()
+
+    event = PeopleSnapshotEvent(
+        library_root=tmp_path,
+        revision=1,
+        changed_group_ids=("group-a",),
+        group_redirects={"group-a": None},
+    )
+    vm.handle_people_snapshot_committed(event)
+
+    store.load_selection.assert_not_called()
+    assert routes == ["gallery", "people"]
+    assert vm.current_section.value == "people_dashboard"
 
 
 def test_toggle_favorite_row_updates_store_via_asset_service(tmp_path: Path) -> None:

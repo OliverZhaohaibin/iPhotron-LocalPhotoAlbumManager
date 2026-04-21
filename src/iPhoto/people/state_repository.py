@@ -321,6 +321,54 @@ class FaceStateRepository:
                 conn.execute("DELETE FROM person_card_orders")
             conn.commit()
 
+    def get_hidden_person_ids(self, person_ids: Iterable[str]) -> set[str]:
+        unique_ids = _unique_person_ids(person_ids)
+        if not unique_ids:
+            return set()
+
+        self.initialize()
+        placeholders = ", ".join(["?"] * len(unique_ids))
+        with closing(self._connect()) as conn:
+            rows = conn.execute(
+                f"""
+                SELECT person_id
+                FROM hidden_person_cards
+                WHERE person_id IN ({placeholders})
+                """,
+                unique_ids,
+            ).fetchall()
+        return {str(row["person_id"]) for row in rows if row["person_id"]}
+
+    def set_person_hidden(self, person_id: str, hidden: bool) -> bool:
+        if not person_id:
+            return False
+
+        self.initialize()
+        updated_at = _utc_now_iso()
+        with closing(self._connect()) as conn:
+            existing = conn.execute(
+                "SELECT 1 FROM hidden_person_cards WHERE person_id = ?",
+                (person_id,),
+            ).fetchone()
+            if hidden:
+                conn.execute(
+                    """
+                    INSERT INTO hidden_person_cards (person_id, updated_at)
+                    VALUES (?, ?)
+                    ON CONFLICT(person_id) DO UPDATE SET
+                        updated_at = excluded.updated_at
+                    """,
+                    (person_id, updated_at),
+                )
+                conn.commit()
+                return existing is None
+
+            if existing is None:
+                return False
+            conn.execute("DELETE FROM hidden_person_cards WHERE person_id = ?", (person_id,))
+            conn.commit()
+            return True
+
     def rename_person(self, person_id: str, name_or_none: str | None) -> None:
         self.initialize()
         updated_at = _utc_now_iso()
@@ -472,6 +520,25 @@ class FaceStateRepository:
                     (target_person_id, merged_order, updated_at),
                 )
             conn.execute("DELETE FROM person_card_orders WHERE person_id = ?", (source_person_id,))
+            source_hidden = conn.execute(
+                "SELECT 1 FROM hidden_person_cards WHERE person_id = ?",
+                (source_person_id,),
+            ).fetchone()
+            target_hidden = conn.execute(
+                "SELECT 1 FROM hidden_person_cards WHERE person_id = ?",
+                (target_person_id,),
+            ).fetchone()
+            if source_hidden is not None or target_hidden is not None:
+                conn.execute(
+                    """
+                    INSERT INTO hidden_person_cards (person_id, updated_at)
+                    VALUES (?, ?)
+                    ON CONFLICT(person_id) DO UPDATE SET
+                        updated_at = excluded.updated_at
+                    """,
+                    (target_person_id, updated_at),
+                )
+            conn.execute("DELETE FROM hidden_person_cards WHERE person_id = ?", (source_person_id,))
             conn.execute("DELETE FROM person_profiles WHERE person_id = ?", (source_person_id,))
             group_redirects = self._remap_groups_for_merged_person(
                 conn,
@@ -636,6 +703,21 @@ class FaceStateRepository:
         self.initialize()
         with closing(self._connect()) as conn:
             return self._group_from_id(conn, group_id)
+
+    def delete_group(self, group_id: str) -> bool:
+        if not group_id:
+            return False
+        self.initialize()
+        with closing(self._connect()) as conn:
+            existing = conn.execute(
+                "SELECT 1 FROM people_groups WHERE group_id = ?",
+                (group_id,),
+            ).fetchone()
+            if existing is None:
+                return False
+            conn.execute("DELETE FROM people_groups WHERE group_id = ?", (group_id,))
+            conn.commit()
+        return True
 
     def has_group_asset_cache(self, group_id: str) -> bool:
         if not group_id:
@@ -1026,6 +1108,12 @@ class FaceStateRepository:
             "CREATE INDEX IF NOT EXISTS idx_person_card_orders_sort_order "
             "ON person_card_orders(sort_order)"
         )
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS hidden_person_cards (
+                person_id TEXT PRIMARY KEY,
+                updated_at TEXT NOT NULL
+            )
+            """)
         conn.execute("""
             CREATE TABLE IF NOT EXISTS manual_faces (
                 face_id TEXT PRIMARY KEY,

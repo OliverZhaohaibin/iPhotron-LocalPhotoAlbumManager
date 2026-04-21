@@ -15,6 +15,7 @@ from PySide6.QtCore import QObject, Qt, Signal
 from PySide6.QtGui import QColor, QImage, QPixmap
 from PySide6.QtWidgets import QApplication, QWidget
 
+from iPhoto.gui.ui.widgets import dialogs as widget_dialogs
 from iPhoto.gui.ui.widgets import people_dashboard_cards
 from iPhoto.gui.ui.widgets import people_dashboard_dialogs
 from iPhoto.gui.ui.widgets.people_dashboard import (
@@ -115,6 +116,268 @@ def test_people_card_menu_contains_new_group(qapp: QApplication) -> None:
 
     assert "New Group" in action_texts
     assert action_texts.index("New Group") < action_texts.index("Merge Into...")
+
+
+def test_people_card_menu_contains_hide_action(qapp: QApplication) -> None:
+    widget = PeopleDashboardWidget()
+    widget._summaries = [
+        PersonSummary("person-a", "Alice", "face-a", 3, None, "2024-01-01T00:00:00Z"),
+        PersonSummary("person-b", "Bob", "face-b", 2, None, "2024-01-01T00:00:01Z"),
+    ]
+
+    menu = widget._build_card_menu(widget._summaries[0])
+    action_texts = [action.text() for action in menu.actions()]
+
+    assert "Hide This People" in action_texts
+
+
+def test_people_card_menu_switches_to_unhide_when_hidden_items_are_shown(monkeypatch, qapp: QApplication) -> None:
+    widget = PeopleDashboardWidget()
+    widget._show_hidden_people = True
+    widget._summaries = [
+        PersonSummary("person-a", "Alice", "face-a", 3, None, "2024-01-01T00:00:00Z"),
+    ]
+    monkeypatch.setattr(widget._service, "is_cluster_card_hidden", lambda person_id: person_id == "person-a")
+
+    menu = widget._build_card_menu(widget._summaries[0])
+    action_texts = [action.text() for action in menu.actions()]
+
+    assert "Unhide This People" in action_texts
+
+
+def test_group_card_menu_contains_dissolve_action(qapp: QApplication) -> None:
+    widget = PeopleDashboardWidget()
+    alice = PersonSummary("person-a", "Alice", "face-a", 3, None, "2024-01-01T00:00:00Z")
+    bob = PersonSummary("person-b", "Bob", "face-b", 2, None, "2024-01-01T00:00:01Z")
+    summary = PeopleGroupSummary(
+        group_id="group-ab",
+        name="Alice and Bob",
+        member_person_ids=("person-a", "person-b"),
+        members=(alice, bob),
+        asset_count=1,
+        cover_asset_path=None,
+        created_at="2024-01-01T00:00:02Z",
+    )
+
+    menu = widget._build_group_card_menu(summary)
+    action_texts = [action.text() for action in menu.actions()]
+
+    assert action_texts == ["Dissolve Group"]
+
+
+def test_hide_person_reuses_merge_confirm_dialog(monkeypatch, qapp: QApplication) -> None:
+    widget = PeopleDashboardWidget()
+    summary = PersonSummary("person-a", "Alice", "face-a", 3, None, "2024-01-01T00:00:00Z")
+    calls: list[tuple[str, str, str]] = []
+
+    monkeypatch.setattr(
+        MergeConfirmDialog,
+        "confirm_custom",
+        staticmethod(
+            lambda **kwargs: calls.append(
+                (kwargs["title_text"], kwargs["body_text"], kwargs["confirm_text"])
+            )
+            or True
+        ),
+    )
+    monkeypatch.setattr(widget._service, "hide_cluster_card", lambda person_id: person_id == "person-a")
+    monkeypatch.setattr(widget, "reload", lambda **_kwargs: None)
+
+    widget._hide_person(summary)
+
+    assert calls == [
+        (
+            "Hide This Person?",
+            "This person will be hidden from the People dashboard until you choose to show hidden face albums.",
+            "Hide",
+        )
+    ]
+
+
+def test_dissolve_group_reuses_merge_confirm_dialog(monkeypatch, qapp: QApplication) -> None:
+    widget = PeopleDashboardWidget()
+    alice = PersonSummary("person-a", "Alice", "face-a", 3, None, "2024-01-01T00:00:00Z")
+    bob = PersonSummary("person-b", "Bob", "face-b", 2, None, "2024-01-01T00:00:01Z")
+    summary = PeopleGroupSummary(
+        group_id="group-ab",
+        name="Alice and Bob",
+        member_person_ids=("person-a", "person-b"),
+        members=(alice, bob),
+        asset_count=1,
+        cover_asset_path=None,
+        created_at="2024-01-01T00:00:02Z",
+    )
+    calls: list[tuple[str, str, str]] = []
+
+    monkeypatch.setattr(
+        MergeConfirmDialog,
+        "confirm_custom",
+        staticmethod(
+            lambda **kwargs: calls.append(
+                (kwargs["title_text"], kwargs["body_text"], kwargs["confirm_text"])
+            )
+            or True
+        ),
+    )
+    monkeypatch.setattr(widget._service, "delete_group", lambda group_id: group_id == "group-ab")
+    monkeypatch.setattr(widget, "reload", lambda **_kwargs: None)
+
+    widget._dissolve_group(summary)
+
+    assert calls == [
+        (
+            "Dissolve This Group?",
+            "This will remove the group card. The people inside it will remain unchanged.",
+            "Dissolve Group",
+        )
+    ]
+
+
+def test_rename_person_uses_themed_input_dialog(monkeypatch, qapp: QApplication) -> None:
+    widget = PeopleDashboardWidget()
+    summary = PersonSummary("person-a", "Alice", "face-a", 3, None, "2024-01-01T00:00:00Z")
+    prompts: list[tuple[str, str, str]] = []
+    rename_calls: list[tuple[str, str | None]] = []
+    reload_calls: list[bool] = []
+
+    monkeypatch.setattr(
+        widget_dialogs,
+        "prompt_text_input",
+        lambda _parent, title, label, *, text="": prompts.append((title, label, text))
+        or ("Alice Cooper", True),
+    )
+    monkeypatch.setattr(
+        widget._service,
+        "rename_cluster",
+        lambda person_id, name: rename_calls.append((person_id, name)),
+    )
+    monkeypatch.setattr(
+        widget,
+        "reload",
+        lambda *, preserve_content=False: reload_calls.append(preserve_content),
+    )
+    widget._summaries = [summary]
+
+    widget._rename_person(summary)
+
+    assert prompts == [("Rename Person", "Name:", "Alice")]
+    assert rename_calls == [("person-a", "Alice Cooper")]
+    assert reload_calls == [True]
+
+
+def test_merge_person_uses_themed_item_dialog(monkeypatch, qapp: QApplication) -> None:
+    widget = PeopleDashboardWidget()
+    source = PersonSummary("person-a", "Alice", "face-a", 3, None, "2024-01-01T00:00:00Z")
+    target = PersonSummary("person-b", "Bob", "face-b", 2, None, "2024-01-01T00:00:01Z")
+    widget._summaries = [source, target]
+    prompts: list[tuple[str, str, tuple[str, ...]]] = []
+    merges: list[tuple[str, str]] = []
+
+    monkeypatch.setattr(
+        widget_dialogs,
+        "prompt_item_selection",
+        lambda _parent, title, label, items: prompts.append((title, label, tuple(items)))
+        or ("Bob (2 faces)", True),
+    )
+    monkeypatch.setattr(
+        widget,
+        "_confirm_merge",
+        lambda source_person_id, target_person_id: merges.append((source_person_id, target_person_id))
+        or True,
+    )
+
+    widget._merge_person(source)
+
+    assert prompts == [("Merge Person", "Merge into:", ("Bob (2 faces)",))]
+    assert merges == [("person-a", "person-b")]
+
+
+def test_merge_is_blocked_when_hidden_state_is_mixed(monkeypatch, qapp: QApplication) -> None:
+    widget = PeopleDashboardWidget()
+    widget._summaries = [
+        PersonSummary("person-a", "Alice", "face-a", 3, None, "2024-01-01T00:00:00Z"),
+        PersonSummary("person-b", "Bob", "face-b", 2, None, "2024-01-01T00:00:01Z"),
+    ]
+
+    popups: list[tuple[str, str]] = []
+    confirm_calls: list[int] = []
+    merge_calls: list[tuple[str, str]] = []
+
+    monkeypatch.setattr(
+        widget._service,
+        "is_cluster_card_hidden",
+        lambda person_id: person_id == "person-a",
+    )
+    monkeypatch.setattr(
+        widget_dialogs,
+        "show_information",
+        lambda _parent, message, *, title="iPhoto": popups.append((title, message)),
+    )
+    monkeypatch.setattr(
+        MergeConfirmDialog,
+        "confirm",
+        staticmethod(lambda _people_count, _parent=None: confirm_calls.append(1) or True),
+    )
+    monkeypatch.setattr(
+        widget._service,
+        "merge_clusters",
+        lambda source_person_id, target_person_id: merge_calls.append(
+            (source_person_id, target_person_id)
+        )
+        or True,
+    )
+
+    merged = widget._confirm_merge("person-a", "person-b")
+
+    assert merged is False
+    assert confirm_calls == []
+    assert merge_calls == []
+    assert popups == [
+        (
+            "Cannot Merge People",
+            "People in hidden and visible states cannot be merged. "
+            "Please make both People cards hidden or visible first.",
+        )
+    ]
+
+
+def test_merge_continues_when_hidden_state_matches(monkeypatch, qapp: QApplication) -> None:
+    widget = PeopleDashboardWidget()
+    widget._summaries = [
+        PersonSummary("person-a", "Alice", "face-a", 3, None, "2024-01-01T00:00:00Z"),
+        PersonSummary("person-b", "Bob", "face-b", 2, None, "2024-01-01T00:00:01Z"),
+    ]
+
+    confirm_calls: list[int] = []
+    merge_calls: list[tuple[str, str]] = []
+    reload_calls: list[bool] = []
+
+    monkeypatch.setattr(widget._service, "is_cluster_card_hidden", lambda _person_id: False)
+    monkeypatch.setattr(
+        MergeConfirmDialog,
+        "confirm",
+        staticmethod(lambda _people_count, _parent=None: confirm_calls.append(1) or True),
+    )
+    monkeypatch.setattr(
+        widget._service,
+        "merge_clusters",
+        lambda source_person_id, target_person_id: merge_calls.append(
+            (source_person_id, target_person_id)
+        )
+        or True,
+    )
+    monkeypatch.setattr(
+        widget,
+        "reload",
+        lambda *, preserve_content=False: reload_calls.append(preserve_content),
+    )
+
+    merged = widget._confirm_merge("person-a", "person-b")
+
+    assert merged is True
+    assert confirm_calls == [1]
+    assert merge_calls == [("person-a", "person-b")]
+    assert reload_calls == [True]
 
 
 def test_people_card_requests_thumbnail_artwork_immediately(
@@ -382,3 +645,50 @@ def test_status_message_updates_without_reloading_cards(qapp: QApplication) -> N
 
     assert widget._board.visible_cards()[0] is original_card
     assert "Click a cluster or group card" in widget._message.text()
+
+
+def test_groups_without_visible_people_still_show_scroll_content(qapp: QApplication) -> None:
+    widget = PeopleDashboardWidget()
+    alice = PersonSummary("person-a", "Alice", "face-a", 3, None, "2024-01-01T00:00:00Z")
+    bob = PersonSummary("person-b", "Bob", "face-b", 2, None, "2024-01-01T00:00:01Z")
+
+    widget._on_load_completed(
+        generation=0,
+        index_version=0,
+        is_bound=True,
+        summaries=[],
+        groups=[
+            PeopleGroupSummary(
+                group_id="group-ab",
+                name="Alice and Bob",
+                member_person_ids=("person-a", "person-b"),
+                members=(alice, bob),
+                asset_count=1,
+                cover_asset_path=None,
+                created_at="2024-01-01T00:00:02Z",
+            )
+        ],
+        pending=0,
+        status_message=None,
+    )
+
+    assert widget._scroll.isHidden() is False
+    assert widget._empty.isHidden() is True
+    assert "group card" in widget._message.text().lower()
+
+
+def test_set_show_hidden_people_triggers_reload_only_on_change(monkeypatch, qapp: QApplication) -> None:
+    widget = PeopleDashboardWidget()
+    calls: list[bool] = []
+    monkeypatch.setattr(
+        widget,
+        "reload",
+        lambda *, preserve_content=False: calls.append(bool(preserve_content)),
+    )
+    widget._summaries = [PersonSummary("person-a", "Alice", "face-a", 3, None, "2024-01-01T00:00:00Z")]
+
+    widget.set_show_hidden_people(True)
+    widget.set_show_hidden_people(True)
+    widget.set_show_hidden_people(False)
+
+    assert calls == [True, True]

@@ -6,8 +6,10 @@ from pathlib import Path
 from typing import Optional
 
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QPalette
-from PySide6.QtWidgets import QApplication, QFileDialog, QMessageBox, QWidget
+from PySide6.QtGui import QGuiApplication, QPalette
+from PySide6.QtWidgets import QApplication, QFileDialog, QInputDialog, QMessageBox, QWidget
+
+from ..theme_manager import DARK_THEME, LIGHT_THEME, ThemeColors
 
 
 def select_directory(parent: QWidget, caption: str, start: Optional[Path] = None) -> Optional[Path]:
@@ -40,6 +42,58 @@ def _apply_theme(box: QMessageBox, parent: Optional[QWidget]) -> None:
     box.setStyleSheet(stylesheet)
 
 
+def _resolve_popup_palette_source(parent: Optional[QWidget]) -> QPalette:
+    """Return the most appropriate palette source for popup surfaces."""
+
+    theme_colors = _resolve_popup_theme_colors(parent)
+    if theme_colors is not None:
+        palette = QPalette(QApplication.palette())
+        palette.setColor(QPalette.ColorRole.Window, theme_colors.window_background)
+        palette.setColor(QPalette.ColorRole.WindowText, theme_colors.text_primary)
+        palette.setColor(QPalette.ColorRole.Base, theme_colors.window_background)
+        palette.setColor(QPalette.ColorRole.AlternateBase, theme_colors.window_background)
+        palette.setColor(QPalette.ColorRole.ToolTipBase, theme_colors.window_background)
+        palette.setColor(QPalette.ColorRole.ToolTipText, theme_colors.text_primary)
+        palette.setColor(QPalette.ColorRole.Text, theme_colors.text_primary)
+        palette.setColor(QPalette.ColorRole.Button, theme_colors.window_background)
+        palette.setColor(QPalette.ColorRole.ButtonText, theme_colors.text_primary)
+        palette.setColor(QPalette.ColorRole.Mid, theme_colors.border_color)
+        return palette
+
+    if parent is not None:
+        main_window = parent.window()
+        if main_window is not None:
+            return QPalette(main_window.palette())
+        return QPalette(parent.palette())
+    return QPalette(QApplication.palette())
+
+
+def _resolve_popup_theme_colors(parent: Optional[QWidget]) -> ThemeColors | None:
+    """Resolve theme colors from the hosting window context when available."""
+
+    widget = parent.window() if parent is not None and parent.window() is not None else parent
+    coordinator = getattr(widget, "coordinator", None)
+    context = getattr(coordinator, "_context", None)
+    theme_manager = getattr(context, "theme", None)
+    if theme_manager is not None and hasattr(theme_manager, "get_effective_theme_mode"):
+        return DARK_THEME if theme_manager.get_effective_theme_mode() == "dark" else LIGHT_THEME
+
+    settings = getattr(context, "settings", None)
+    if settings is not None and hasattr(settings, "get"):
+        theme_setting = settings.get("ui.theme", "system")
+        if theme_setting == "dark":
+            return DARK_THEME
+        if theme_setting == "light":
+            return LIGHT_THEME
+
+    app = QGuiApplication.instance()
+    if app is not None and app.styleHints().colorScheme() == Qt.ColorScheme.Dark:
+        return DARK_THEME
+    if app is not None:
+        return LIGHT_THEME
+    return None
+
+
 def show_error(parent: QWidget, message: str, *, title: str = "iPhoto") -> None:
     """Display a blocking error message."""
 
@@ -64,6 +118,8 @@ def show_information(parent: QWidget, message: str, *, title: str = "iPhoto") ->
 
     popup = InformationPopup(parent, title=title, message=message)
     popup.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
+    popup.setPalette(_resolve_popup_palette_source(parent))
+    popup.setBackgroundRole(QPalette.ColorRole.Window)
 
     if parent is not None:
         center = parent.geometry().center()
@@ -78,6 +134,95 @@ def show_information(parent: QWidget, message: str, *, title: str = "iPhoto") ->
     popup.raise_()
     popup.activateWindow()
     loop.exec()
+
+
+def _apply_input_dialog_theme(dialog: QInputDialog, parent: Optional[QWidget]) -> None:
+    """Apply the active popup theme to ``QInputDialog`` widgets."""
+
+    palette = _resolve_popup_palette_source(parent)
+    dialog.setPalette(palette)
+    dialog.setBackgroundRole(QPalette.ColorRole.Window)
+
+    bg = palette.color(QPalette.ColorRole.Window).name()
+    text_col = palette.color(QPalette.ColorRole.WindowText).name()
+    base = palette.color(QPalette.ColorRole.Base).name()
+    text_input = palette.color(QPalette.ColorRole.Text).name()
+    button = palette.color(QPalette.ColorRole.Button).name()
+    button_text = palette.color(QPalette.ColorRole.ButtonText).name()
+    border = palette.color(QPalette.ColorRole.Mid).name()
+
+    dialog.setStyleSheet(
+        f"""
+        QInputDialog {{
+            background-color: {bg};
+            color: {text_col};
+        }}
+        QLabel {{
+            color: {text_col};
+        }}
+        QLineEdit, QComboBox {{
+            background-color: {base};
+            color: {text_input};
+            border: 1px solid {border};
+            padding: 4px;
+        }}
+        QComboBox QAbstractItemView {{
+            background-color: {base};
+            color: {text_input};
+            border: 1px solid {border};
+            selection-background-color: {button};
+            selection-color: {button_text};
+        }}
+        QPushButton {{
+            background-color: {button};
+            color: {button_text};
+            border: 1px solid {border};
+            padding: 6px 16px;
+            min-width: 60px;
+        }}
+        QPushButton:hover {{
+            background-color: {base};
+        }}
+    """
+    )
+
+
+def prompt_text_input(
+    parent: QWidget | None,
+    title: str,
+    label: str,
+    *,
+    text: str = "",
+) -> tuple[str, bool]:
+    """Show a themed text input dialog."""
+
+    dialog = QInputDialog(parent)
+    dialog.setInputMode(QInputDialog.InputMode.TextInput)
+    dialog.setWindowTitle(title)
+    dialog.setLabelText(label)
+    dialog.setTextValue(text)
+    _apply_input_dialog_theme(dialog, parent)
+    accepted = dialog.exec() == QInputDialog.DialogCode.Accepted
+    return dialog.textValue(), accepted
+
+
+def prompt_item_selection(
+    parent: QWidget | None,
+    title: str,
+    label: str,
+    items: list[str],
+) -> tuple[str, bool]:
+    """Show a themed item-selection dialog."""
+
+    dialog = QInputDialog(parent)
+    dialog.setInputMode(QInputDialog.InputMode.TextInput)
+    dialog.setComboBoxItems(items)
+    dialog.setComboBoxEditable(False)
+    dialog.setWindowTitle(title)
+    dialog.setLabelText(label)
+    _apply_input_dialog_theme(dialog, parent)
+    accepted = dialog.exec() == QInputDialog.DialogCode.Accepted
+    return dialog.textValue(), accepted
 
 
 def show_warning(parent: QWidget, message: str, *, title: str = "iPhoto") -> None:

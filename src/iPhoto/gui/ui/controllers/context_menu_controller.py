@@ -22,6 +22,7 @@ from PySide6.QtGui import QGuiApplication, QPalette
 from PySide6.QtWidgets import QMenu
 
 from ...facade import AppFacade
+from ..models.roles import Roles
 from ..widgets.asset_grid import AssetGrid
 from ..widgets.notification_toast import NotificationToast
 from .selection_controller import SelectionController
@@ -46,6 +47,8 @@ class ContextMenuController(QObject):
         selection_controller: SelectionController | None,
         navigation: "NavigationCoordinator" | None,
         export_callback: Callable[[], None],
+        people_cover_context_provider: Callable[[], tuple[str, str] | None] | None = None,
+        set_people_cover_callback: Callable[[str, str, str], bool] | None = None,
         prepare_paths_for_mutation: Callable[[list[Path]], None] | None = None,
         parent: Optional[QObject] = None,
     ) -> None:
@@ -59,6 +62,8 @@ class ContextMenuController(QObject):
         self._selection_controller = selection_controller
         self._navigation = navigation
         self._export_callback = export_callback
+        self._people_cover_context_provider = people_cover_context_provider
+        self._set_people_cover_callback = set_people_cover_callback
         self._prepare_paths_for_mutation = prepare_paths_for_mutation
 
         self._grid_view.customContextMenuRequested.connect(self._handle_context_menu)
@@ -149,6 +154,21 @@ class ContextMenuController(QObject):
             copy_action.triggered.connect(self._copy_selection_to_clipboard)
             reveal_action.triggered.connect(self._reveal_selection_in_file_manager)
             export_action.triggered.connect(self._export_callback)
+            cover_context = self._current_people_cover_context()
+            asset_id = self._asset_id_for_index(index)
+            if cover_context is not None and asset_id is not None:
+                menu.addSeparator()
+                set_cover_action = menu.addAction(
+                    QCoreApplication.translate("MainWindow", "Set as Cover")
+                )
+                kind, entity_id = cover_context
+                set_cover_action.triggered.connect(
+                    lambda _checked=False, kind=kind, entity_id=entity_id, asset_id=asset_id: self._set_people_cover(
+                        kind,
+                        entity_id,
+                        asset_id,
+                    )
+                )
             is_recently_deleted = (
                 self._navigation.is_recently_deleted_view()
                 if self._navigation is not None
@@ -370,6 +390,37 @@ class ContextMenuController(QObject):
             return []
         rows = sorted({index.row() for index in selection_model.selectedIndexes() if index.isValid()})
         return self._selected_paths_provider(rows)
+
+    def _asset_id_for_index(self, index) -> str | None:
+        if not index.isValid():
+            return None
+        asset_id = index.data(Roles.ASSET_ID)
+        if asset_id is None:
+            return None
+        normalized = str(asset_id).strip()
+        return normalized or None
+
+    def _current_people_cover_context(self) -> tuple[str, str] | None:
+        if self._people_cover_context_provider is None:
+            return None
+        context = self._people_cover_context_provider()
+        if context is None:
+            return None
+        kind, entity_id = context
+        normalized_kind = str(kind).strip()
+        normalized_entity = str(entity_id).strip()
+        if not normalized_kind or not normalized_entity:
+            return None
+        return normalized_kind, normalized_entity
+
+    def _set_people_cover(self, kind: str, entity_id: str, asset_id: str) -> None:
+        if self._set_people_cover_callback is None:
+            return
+        changed = self._set_people_cover_callback(kind, entity_id, asset_id)
+        if changed:
+            self._toast.show_toast("Cover Updated")
+            return
+        self._status_bar.show_message("Unable to set cover for this item.", 3000)
 
     def _collect_move_targets(self) -> list[tuple[str, Path]]:
         """Build a list of (label, path) destinations excluding the currently open album."""

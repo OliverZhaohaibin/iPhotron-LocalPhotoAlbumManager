@@ -371,6 +371,17 @@ class GalleryViewModel(BaseViewModel):
     def is_in_cluster_gallery(self) -> bool:
         return self._cluster_gallery_origin is not None or self._location_session.mode == "cluster_gallery"
 
+    def current_people_cluster_context(
+        self,
+    ) -> tuple[Literal["person", "group"], str] | None:
+        if (
+            self._cluster_gallery_origin != "people"
+            or self._people_cluster_kind not in {"person", "group"}
+            or not self._people_cluster_id
+        ):
+            return None
+        return self._people_cluster_kind, self._people_cluster_id
+
     def cluster_gallery_back_tooltip(self) -> str:
         if self._cluster_gallery_origin == "people":
             return "Return to People"

@@ -73,6 +73,19 @@ def test_handle_face_name_toggle_changed_persists_setting_and_updates_playback()
     coordinator._playback.set_face_name_display_enabled.assert_called_once_with(True)
 
 
+def test_handle_hidden_face_album_toggle_changed_persists_setting_and_updates_people_page() -> None:
+    coordinator = MainCoordinator.__new__(MainCoordinator)
+    coordinator._context = MagicMock()
+    coordinator._context.settings.get.return_value = False
+    coordinator._context.settings.set = MagicMock()
+    coordinator._window = MagicMock(ui=MagicMock(people_page=MagicMock()))
+
+    coordinator._handle_hidden_face_album_toggle_changed(True)
+
+    coordinator._context.settings.set.assert_called_once_with("ui.show_hidden_face_album", True)
+    coordinator._window.ui.people_page.set_show_hidden_people.assert_called_once_with(True)
+
+
 def test_on_map_asset_activated_delegates_to_navigation() -> None:
     coordinator = MainCoordinator.__new__(MainCoordinator)
     coordinator._navigation = MagicMock()

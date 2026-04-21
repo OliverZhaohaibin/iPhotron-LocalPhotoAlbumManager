@@ -128,7 +128,7 @@ def test_people_card_menu_contains_hide_action(qapp: QApplication) -> None:
     menu = widget._build_card_menu(widget._summaries[0])
     action_texts = [action.text() for action in menu.actions()]
 
-    assert "Hide This People" in action_texts
+    assert "Hide This Person" in action_texts
 
 
 def test_people_card_menu_switches_to_unhide_when_hidden_items_are_shown(monkeypatch, qapp: QApplication) -> None:
@@ -142,7 +142,7 @@ def test_people_card_menu_switches_to_unhide_when_hidden_items_are_shown(monkeyp
     menu = widget._build_card_menu(widget._summaries[0])
     action_texts = [action.text() for action in menu.actions()]
 
-    assert "Unhide This People" in action_texts
+    assert "Unhide This Person" in action_texts
 
 
 def test_group_card_menu_contains_dissolve_action(qapp: QApplication) -> None:

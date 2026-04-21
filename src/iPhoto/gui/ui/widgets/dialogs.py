@@ -90,7 +90,8 @@ def _resolve_popup_theme_colors(parent: Optional[QWidget]) -> ThemeColors | None
     if app is not None and app.styleHints().colorScheme() == Qt.ColorScheme.Dark:
         return DARK_THEME
     if app is not None:
-        return LIGHT_THEME
+        window_color = QApplication.palette().color(QPalette.ColorRole.Window)
+        return DARK_THEME if window_color.lightness() < 128 else LIGHT_THEME
     return None
 
 
@@ -135,7 +136,6 @@ def show_information(parent: QWidget, message: str, *, title: str = "iPhoto") ->
     # show(), which can overwrite the palette we set just before display.
     popup.setPalette(_resolve_popup_palette_source(parent))
     popup.raise_()
-    popup.activateWindow()
     loop.exec()
 
 

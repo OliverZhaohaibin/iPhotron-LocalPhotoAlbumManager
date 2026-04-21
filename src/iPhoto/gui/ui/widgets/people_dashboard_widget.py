@@ -415,7 +415,7 @@ class PeopleDashboardWidget(QWidget):
         merge_action = QAction("Merge Into...", menu)
         is_hidden = self._show_hidden_people and self._service.is_cluster_card_hidden(summary.person_id)
         hide_action = QAction(
-            "Unhide This People" if is_hidden else "Hide This People",
+            "Unhide This Person" if is_hidden else "Hide This Person",
             menu,
         )
         merge_action.setEnabled(len(self._summaries) > 1)

@@ -99,7 +99,7 @@ def test_remove_faces_for_assets_deletes_affected_person_rows_first(tmp_path: Pa
     assert repository.get_person_summaries() == []
 
 
-def test_person_cover_persists_and_custom_cover_survives_rescan(tmp_path: Path) -> None:
+def test_person_cover_can_be_set_to_custom_face(tmp_path: Path) -> None:
     repository = FaceRepository(tmp_path / "face_index.db", tmp_path / "face_state.db")
     faces = [
         _face_record(

@@ -5,8 +5,9 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-from PySide6.QtCore import QCoreApplication, QEvent, QPointF, QRect, QSize, Qt, QTimer
-from PySide6.QtGui import QResizeEvent
+from PySide6.QtCore import QCoreApplication, QEvent, QPointF, QRect, QRectF, QSize, Qt, QTimer
+from PySide6.QtGui import QPainter, QPixmap, QResizeEvent
+from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import QLabel, QSizePolicy, QVBoxLayout, QWidget
 
 from maps.map_sources import MapSourceSpec
@@ -14,16 +15,41 @@ from maps.map_widget._map_widget_base import MapWidgetBase
 from maps.map_widget.map_gl_widget import MapGLWidget
 from maps.map_widget.map_widget import MapWidget
 
-from ..icons import load_icon
 from .photo_map_view import check_opengl_support, choose_map_widget_backend
 
 LOGGER = logging.getLogger(__name__)
 
 _MAPS_PACKAGE_ROOT = Path(__file__).resolve().parents[4] / "maps"
+_PIN_ICON_PATH = Path(__file__).resolve().parents[1] / "icon" / "map.pin.svg"
 _PIN_ICON_WIDTH = 90
 _PIN_ICON_HEIGHT = 114
 _PIN_ANCHOR_X_RATIO = 256.0 / 512.0
 _PIN_ANCHOR_Y_RATIO = 418.0 / 512.0
+
+
+def _build_pin_pixmap(width: int, height: int) -> QPixmap:
+    """Render the map pin into a fixed box while preserving its SVG aspect ratio."""
+
+    renderer = QSvgRenderer(str(_PIN_ICON_PATH))
+    target_size = QSize(width, height)
+    pixmap = QPixmap(target_size)
+    pixmap.fill(Qt.GlobalColor.transparent)
+    if not renderer.isValid():
+        return pixmap
+
+    default_size = renderer.defaultSize()
+    if not default_size.isValid() or default_size.width() <= 0 or default_size.height() <= 0:
+        render_rect = QRectF(0.0, 0.0, float(width), float(height))
+    else:
+        scaled = default_size.scaled(target_size, Qt.AspectRatioMode.KeepAspectRatio)
+        x = (width - scaled.width()) / 2.0
+        y = (height - scaled.height()) / 2.0
+        render_rect = QRectF(x, y, float(scaled.width()), float(scaled.height()))
+
+    painter = QPainter(pixmap)
+    renderer.render(painter, render_rect)
+    painter.end()
+    return pixmap
 
 
 class _PinOverlay(QWidget):
@@ -33,10 +59,7 @@ class _PinOverlay(QWidget):
         super().__init__(parent)
         self._owner = owner
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
-        self._pin = load_icon(
-            "map.pin.svg",
-            size=(_PIN_ICON_WIDTH, _PIN_ICON_HEIGHT),
-        ).pixmap(_PIN_ICON_WIDTH, _PIN_ICON_HEIGHT)
+        self._pin = _build_pin_pixmap(_PIN_ICON_WIDTH, _PIN_ICON_HEIGHT)
         self._pin_label = QLabel(self)
         self._pin_label.setPixmap(self._pin)
         self._pin_label.setFixedSize(self._pin.size())

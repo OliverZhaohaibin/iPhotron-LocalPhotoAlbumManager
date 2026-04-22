@@ -8,17 +8,17 @@
       <stop offset="100%" stop-color="#f04814"/>
     </radialGradient>
 
-    <!-- 针杆金属渐变 -->
+    <!-- 更深的针杆金属渐变 -->
     <linearGradient id="shaftGrad" x1="0%" y1="0%" x2="100%" y2="0%">
-      <stop offset="0%" stop-color="#d9d9d0"/>
-      <stop offset="25%" stop-color="#d1d1c7"/>
-      <stop offset="55%" stop-color="#bebeb2"/>
-      <stop offset="100%" stop-color="#a8a997"/>
+      <stop offset="0%" stop-color="#8c8c84"/>
+      <stop offset="22%" stop-color="#7a7a73"/>
+      <stop offset="55%" stop-color="#62625d"/>
+      <stop offset="100%" stop-color="#474742"/>
     </linearGradient>
 
-    <!-- 阴影模糊 -->
+    <!-- 更深的阴影模糊 -->
     <filter id="shadowBlur" x="-60%" y="-60%" width="260%" height="260%">
-      <feGaussianBlur stdDeviation="10"/>
+      <feGaussianBlur stdDeviation="12"/>
     </filter>
 
     <!-- 接地点轻微柔化 -->
@@ -28,17 +28,17 @@
   </defs>
 
   <!-- =========================
-       阴影（按你勾勒的范围微调）
+       阴影（加深）
        ========================= -->
   <g filter="url(#shadowBlur)">
     <!-- 头部阴影：右侧偏椭圆范围 -->
     <ellipse
-      cx="342"
-      cy="230"
-      rx="70"
-      ry="40"
-      fill="#8e8e8e"
-      opacity="0.20"/>
+      cx="344"
+      cy="232"
+      rx="76"
+      ry="44"
+      fill="#555555"
+      opacity="0.34"/>
 
     <!-- 阴影下方左侧那条较窄的拖影 -->
     <path
@@ -50,8 +50,8 @@
         C 278 367, 284 346, 287 327
         C 290 307, 294 289, 300 274
         Z"
-      fill="#8a8a8a"
-      opacity="0.18"/>
+      fill="#4f4f4f"
+      opacity="0.30"/>
 
     <!-- 阴影下方右侧那条较宽的拖影 -->
     <path
@@ -63,18 +63,18 @@
         C 279 372, 288 351, 298 333
         C 309 314, 321 293, 332 276
         Z"
-      fill="#888888"
-      opacity="0.20"/>
+      fill="#474747"
+      opacity="0.32"/>
   </g>
 
   <!-- =========================
        地面深色圆圈（在针杆后）
        ========================= -->
-  <ellipse cx="256" cy="418" rx="18" ry="6" fill="#2d2d2d" opacity="0.92"/>
+  <ellipse cx="256" cy="418" rx="18" ry="6" fill="#1f1f1f" opacity="0.96"/>
   <ellipse cx="256" cy="420" rx="11" ry="3.1" fill="#666666" opacity="0.18" filter="url(#groundBlur)"/>
 
   <!-- =========================
-       针杆
+       针杆（加深 + 黑色描边）
        ========================= -->
   <rect
     x="249"
@@ -83,6 +83,8 @@
     height="213"
     rx="6.5"
     fill="url(#shaftGrad)"
+    stroke="#111111"
+    stroke-width="2.2"
   />
 
   <!-- =========================

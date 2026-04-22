@@ -238,7 +238,7 @@ class FaceRepository:
             self._sync_person_cover_defaults()
             self.refresh_all_group_assets()
 
-    def get_person_summaries(self) -> list[PersonSummary]:
+    def get_person_summaries(self, *, include_hidden: bool = False) -> list[PersonSummary]:
         self.initialize()
         with closing(self._connect()) as conn:
             rows = conn.execute("""
@@ -258,11 +258,13 @@ class FaceRepository:
                 """).fetchall()
         cover_paths: dict[str, str] = {}
         order_map: dict[str, int] = {}
+        hidden_map: dict[str, bool] = {}
         if self._state_repo is not None:
             cover_paths = self._state_repo.get_person_cover_thumbnail_map(
                 str(row["person_id"]) for row in rows
             )
             order_map = self._state_repo.get_person_order_map(str(row["person_id"]) for row in rows)
+            hidden_map = self._state_repo.get_person_hidden_map(str(row["person_id"]) for row in rows)
         summaries: list[PersonSummary] = []
         for row in rows:
             thumbnail_path = cover_paths.get(str(row["person_id"])) or row["thumbnail_path"]
@@ -277,6 +279,7 @@ class FaceRepository:
                     face_count=int(row["face_count"]),
                     thumbnail_path=resolved_thumbnail,
                     created_at=row["created_at"],
+                    is_hidden=bool(hidden_map.get(str(row["person_id"]), False)),
                 )
             )
         if order_map:
@@ -287,7 +290,28 @@ class FaceRepository:
                     fallback_order[summary.person_id],
                 )
             )
+        if not include_hidden:
+            summaries = [summary for summary in summaries if not summary.is_hidden]
         return summaries
+
+    def is_person_hidden(self, person_id: str) -> bool:
+        if self._state_repo is None:
+            return False
+        return self._state_repo.is_person_hidden(person_id)
+
+    def set_person_hidden(self, person_id: str, hidden: bool) -> bool:
+        if self._state_repo is None or not person_id:
+            return False
+        self.initialize()
+        with closing(self._connect()) as conn:
+            row = conn.execute(
+                "SELECT 1 FROM persons WHERE person_id = ?",
+                (person_id,),
+            ).fetchone()
+        if row is None:
+            return False
+        self._state_repo.set_person_hidden(person_id, hidden)
+        return True
 
     def get_asset_ids_by_person(self, person_id: str) -> list[str]:
         self.initialize()
@@ -431,6 +455,14 @@ class FaceRepository:
     ) -> tuple[bool, dict[str, str | None]]:
         if not source_person_id or not target_person_id or source_person_id == target_person_id:
             return False, {}
+        source_hidden = False
+        target_hidden = False
+        if self._state_repo is not None:
+            hidden_map = self._state_repo.get_person_hidden_map((source_person_id, target_person_id))
+            source_hidden = bool(hidden_map.get(source_person_id, False))
+            target_hidden = bool(hidden_map.get(target_person_id, False))
+            if source_hidden != target_hidden:
+                return False, {}
 
         self.initialize()
         group_redirects: dict[str, str | None] = {}
@@ -530,6 +562,7 @@ class FaceRepository:
                 target_name=target_name,
                 target_created_at=target_created_at,
                 sample_count=len(merged_faces),
+                hidden_state=source_hidden,
             )
             self._sync_person_cover_defaults()
             self.refresh_all_group_assets()
@@ -549,6 +582,19 @@ class FaceRepository:
             return []
         self.initialize()
         return self._state_repo.list_groups()
+
+    def delete_group(self, group_id: str) -> tuple[bool, PeopleGroupRecord | None, list[str]]:
+        if self._state_repo is None or not group_id:
+            return False, None, []
+        self.initialize()
+        group = self._state_repo.get_group(group_id)
+        if group is None:
+            return False, None, []
+        asset_ids = self.get_common_asset_ids_for_group(group_id)
+        deleted_group = self._state_repo.delete_group(group_id)
+        if deleted_group is None:
+            return False, None, []
+        return True, deleted_group, asset_ids
 
     def get_group(self, group_id: str) -> PeopleGroupRecord | None:
         if self._state_repo is None:

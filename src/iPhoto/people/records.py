@@ -50,6 +50,7 @@ class PersonSummary:
     face_count: int
     thumbnail_path: Path | None
     created_at: str
+    is_hidden: bool = False
 
 
 @dataclass(frozen=True)

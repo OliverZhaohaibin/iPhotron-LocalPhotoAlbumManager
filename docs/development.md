@@ -355,6 +355,23 @@ iphoto-gui
 
 ---
 
+## People Dashboard Regression Guardrails
+
+The People dashboard has a small set of UI behaviors that are easy to regress
+when popup plumbing, theme detection, or People/group actions are refactored.
+
+- Do not use raw `QMessageBox` for People dashboard warning/info popups; route
+  them through the project's themed popup helpers.
+- Keep `Hide` / `Unhide`, `Show Hidden People`, hidden-state merge blocking,
+  `Disband Group`, and pinned-group disband protection intact.
+- Keep hide/disband confirmations visually aligned with the shared merge
+  confirmation dialog.
+- See
+  [`docs/misc/PEOPLE_DASHBOARD_POPUP_REGRESSIONS.md`](misc/PEOPLE_DASHBOARD_POPUP_REGRESSIONS.md)
+  for the full contract and regression checklist.
+
+---
+
 ## Code Style
 
 ### Linters & Formatters

@@ -347,6 +347,47 @@ def test_people_service_uses_persisted_group_cover(tmp_path: Path) -> None:
     assert listed[0].cover_asset_path == library_root / "album/older.jpg"
 
 
+def test_people_service_can_delete_group(tmp_path: Path) -> None:
+    library_root = tmp_path / "Library"
+    library_root.mkdir()
+
+    global_repo = get_global_repository(library_root)
+    global_repo.write_rows(
+        [
+            {"rel": "album/shared.jpg", "id": "asset-shared", "media_type": 0, "face_status": "done"},
+        ]
+    )
+
+    service = PeopleService(library_root)
+    repository = service.repository()
+    assert repository is not None
+    repository.replace_all(
+        [
+            _face_record(
+                face_id="face-a-shared",
+                asset_id="asset-shared",
+                asset_rel="album/shared.jpg",
+                person_id="person-a",
+            ),
+            _face_record(
+                face_id="face-b-shared",
+                asset_id="asset-shared",
+                asset_rel="album/shared.jpg",
+                person_id="person-b",
+            ),
+        ],
+        [
+            _person_record(person_id="person-a", key_face_id="face-a-shared", face_count=1, name="Alice"),
+            _person_record(person_id="person-b", key_face_id="face-b-shared", face_count=1, name="Bob"),
+        ],
+    )
+    group = service.create_group(["person-a", "person-b"])
+    assert group is not None
+
+    assert service.delete_group(group.group_id) is True
+    assert service.list_groups() == []
+
+
 def test_people_service_load_dashboard_reuses_cluster_snapshot_for_groups(tmp_path: Path) -> None:
     library_root = tmp_path / "Library"
     library_root.mkdir()
@@ -401,6 +442,75 @@ def test_people_service_load_dashboard_reuses_cluster_snapshot_for_groups(tmp_pa
     assert groups[0].group_id == group.group_id
     assert groups[0].cover_asset_path == library_root / "album/shared.jpg"
     assert pending == 1
+
+
+def test_people_service_can_hide_people_and_optionally_include_them(tmp_path: Path) -> None:
+    library_root = tmp_path / "Library"
+    library_root.mkdir()
+
+    global_repo = get_global_repository(library_root)
+    global_repo.write_rows(
+        [
+            {"rel": "album/a.jpg", "id": "asset-a", "media_type": 0, "face_status": "done"},
+            {"rel": "album/b.jpg", "id": "asset-b", "media_type": 0, "face_status": "done"},
+        ]
+    )
+
+    service = PeopleService(library_root)
+    repository = service.repository()
+    assert repository is not None
+    repository.replace_all(
+        [
+            _face_record(face_id="face-a", asset_id="asset-a", asset_rel="album/a.jpg", person_id="person-a"),
+            _face_record(face_id="face-b", asset_id="asset-b", asset_rel="album/b.jpg", person_id="person-b"),
+        ],
+        [
+            _person_record(person_id="person-a", key_face_id="face-a", face_count=1, name="Alice"),
+            _person_record(person_id="person-b", key_face_id="face-b", face_count=1, name="Bob"),
+        ],
+    )
+
+    assert service.set_cluster_hidden("person-b", True) is True
+    assert service.is_cluster_hidden("person-b") is True
+    assert [summary.person_id for summary in service.list_clusters()] == ["person-a"]
+    assert {summary.person_id: summary.is_hidden for summary in service.list_clusters(include_hidden=True)} == {
+        "person-a": False,
+        "person-b": True,
+    }
+
+
+def test_people_service_merge_blocks_when_hidden_state_differs(tmp_path: Path) -> None:
+    library_root = tmp_path / "Library"
+    library_root.mkdir()
+
+    global_repo = get_global_repository(library_root)
+    global_repo.write_rows(
+        [
+            {"rel": "album/a.jpg", "id": "asset-a", "media_type": 0, "face_status": "done"},
+            {"rel": "album/b.jpg", "id": "asset-b", "media_type": 0, "face_status": "done"},
+        ]
+    )
+
+    service = PeopleService(library_root)
+    repository = service.repository()
+    assert repository is not None
+    repository.replace_all(
+        [
+            _face_record(face_id="face-a", asset_id="asset-a", asset_rel="album/a.jpg", person_id="person-a"),
+            _face_record(face_id="face-b", asset_id="asset-b", asset_rel="album/b.jpg", person_id="person-b"),
+        ],
+        [
+            _person_record(person_id="person-a", key_face_id="face-a", face_count=1, name="Alice"),
+            _person_record(person_id="person-b", key_face_id="face-b", face_count=1, name="Bob"),
+        ],
+    )
+    assert service.set_cluster_hidden("person-a", True) is True
+
+    assert service.merge_clusters("person-a", "person-b") is False
+    assert {summary.person_id for summary in service.list_clusters(include_hidden=True)} == {
+        "person-a",
+        "person-b",
+    }
 
 
 def test_people_service_can_mark_retry_and_skipped(tmp_path: Path) -> None:

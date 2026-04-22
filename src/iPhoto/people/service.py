@@ -81,11 +81,11 @@ class PeopleService:
             return None
         return FaceRepository(paths.index_db_path, paths.state_db_path)
 
-    def list_clusters(self) -> list[PersonSummary]:
+    def list_clusters(self, *, include_hidden: bool = False) -> list[PersonSummary]:
         repository = self.repository()
         if repository is None:
             return []
-        return repository.get_person_summaries()
+        return repository.get_person_summaries(include_hidden=include_hidden)
 
     def list_groups(
         self,
@@ -102,11 +102,15 @@ class PeopleService:
         summaries_by_id = {summary.person_id: summary for summary in summary_list}
         return self._build_group_summaries(repository, repository.list_groups(), summaries_by_id)
 
-    def load_dashboard(self) -> tuple[list[PersonSummary], list[PeopleGroupSummary], int]:
+    def load_dashboard(
+        self,
+        *,
+        include_hidden: bool = False,
+    ) -> tuple[list[PersonSummary], list[PeopleGroupSummary], int]:
         repository = self.repository()
         if repository is None:
             return [], [], 0
-        summaries = repository.get_person_summaries()
+        summaries = repository.get_person_summaries(include_hidden=include_hidden)
         groups = self.list_groups(repository=repository, summaries=summaries)
         counts = self.face_status_counts()
         pending = counts.get("pending", 0) + counts.get("retry", 0)
@@ -163,6 +167,11 @@ class PeopleService:
             return False
         return get_people_index_coordinator(self._library_root).set_group_cover(group_id, asset_id)
 
+    def delete_group(self, group_id: str) -> bool:
+        if self._library_root is None:
+            return False
+        return get_people_index_coordinator(self._library_root).delete_group(group_id)
+
     def set_cluster_order(
         self,
         person_ids: list[str] | tuple[str, ...],
@@ -170,6 +179,18 @@ class PeopleService:
         if self._library_root is None:
             return
         get_people_index_coordinator(self._library_root).set_person_order(person_ids)
+
+    def set_cluster_hidden(self, person_id: str, hidden: bool) -> bool:
+        repository = self.repository()
+        if repository is None:
+            return False
+        return repository.set_person_hidden(person_id, hidden)
+
+    def is_cluster_hidden(self, person_id: str) -> bool:
+        repository = self.repository()
+        if repository is None:
+            return False
+        return repository.is_person_hidden(person_id)
 
     def merge_clusters(self, source_person_id: str, target_person_id: str) -> bool:
         if self._library_root is None:

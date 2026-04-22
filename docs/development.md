@@ -355,6 +355,22 @@ iphoto-gui
 
 ---
 
+## Popup Guardrails
+
+The application has shared popup plumbing for information/warning surfaces.
+When popup code is refactored, prefer the project's own popup implementation
+instead of dropping back to native/system-styled `QMessageBox` windows.
+
+- Route routine in-app warning/info popups through the shared themed helpers.
+- Make popup theme resolution follow the active app/window theme before the OS
+  color scheme.
+- Keep popup positioning centered on the hosting top-level window.
+- See
+  [`docs/misc/PROJECT_POPUP_GUARDRAILS.md`](misc/PROJECT_POPUP_GUARDRAILS.md)
+  for the project-wide rule plus the People dashboard regression checklist.
+
+---
+
 ## Code Style
 
 ### Linters & Formatters

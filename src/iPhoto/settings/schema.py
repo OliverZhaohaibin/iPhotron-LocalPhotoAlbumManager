@@ -62,6 +62,7 @@ SETTINGS_SCHEMA: dict[str, Any] = {
                 },
                 "show_filmstrip": {"type": "boolean"},
                 "show_face_names_in_detail": {"type": "boolean"},
+                "show_hidden_people": {"type": "boolean"},
                 "wheel_action": {
                     "type": "string",
                     "enum": ["navigate", "zoom"],
@@ -91,6 +92,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         "export_format": "jpg",
         "show_filmstrip": True,
         "show_face_names_in_detail": False,
+        "show_hidden_people": False,
         "wheel_action": "navigate",
     },
     "last_open_albums": [],

@@ -304,6 +304,24 @@ class PeopleIndexCoordinator(QObject):
                 )
             return changed
 
+    def delete_group(self, group_id: str) -> bool:
+        if not group_id:
+            return False
+        with self._lock:
+            if self._shutdown_requested:
+                return False
+            repository = self._repository()
+            deleted, group, asset_ids = repository.delete_group(group_id)
+            if not deleted or group is None:
+                return False
+            self._emit_snapshot(
+                changed_asset_ids=tuple(asset_ids),
+                changed_person_ids=tuple(group.member_person_ids),
+                changed_group_ids=(group_id,),
+                group_redirects={group_id: None},
+            )
+            return True
+
     def _repository(self) -> FaceRepository:
         faces_root = self._library_root / WORK_DIR_NAME / "faces"
         return FaceRepository(

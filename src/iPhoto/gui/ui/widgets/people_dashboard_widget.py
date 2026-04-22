@@ -48,6 +48,7 @@ class _PeopleDashboardLoaderWorker(QRunnable):
         index_version: int,
         library_root: Path | None,
         status_message: str | None,
+        show_hidden_people: bool,
         signals: _PeopleDashboardLoaderSignals,
     ) -> None:
         super().__init__()
@@ -55,6 +56,7 @@ class _PeopleDashboardLoaderWorker(QRunnable):
         self._index_version = index_version
         self._library_root = library_root
         self._status_message = status_message
+        self._show_hidden_people = bool(show_hidden_people)
         self._signals = signals
 
     def run(self) -> None:
@@ -70,7 +72,9 @@ class _PeopleDashboardLoaderWorker(QRunnable):
             )
             return
         service = PeopleService(self._library_root)
-        summaries, groups, pending = service.load_dashboard()
+        summaries, groups, pending = service.load_dashboard(
+            include_hidden=self._show_hidden_people
+        )
         self._signals.loaded.emit(
             self._generation,
             self._index_version,
@@ -101,6 +105,7 @@ class PeopleDashboardWidget(QWidget):
         self._loaded_index_version = -1
         self._pending_index_refresh = False
         self._current_library_root: Path | None = None
+        self._show_hidden_people = False
         self._load_signals = _PeopleDashboardLoaderSignals()
         self._load_signals.loaded.connect(self._on_load_completed)
         self._load_pool = QThreadPool.globalInstance()
@@ -205,6 +210,7 @@ class PeopleDashboardWidget(QWidget):
         self._content_layout.addWidget(self._board)
         self._content_layout.addStretch(1)
         self._scroll.setWidget(self._content)
+        self._show_hidden_people = self._load_show_hidden_people_setting()
         self._apply_theme_styles()
 
     def set_library_root(self, library_root: Path | None) -> None:
@@ -217,6 +223,13 @@ class PeopleDashboardWidget(QWidget):
 
     def set_pinned_service(self, service: PinnedItemsService | None) -> None:
         self._pinned_service = service
+
+    def set_show_hidden_people(self, enabled: bool) -> None:
+        enabled = bool(enabled)
+        if self._show_hidden_people == enabled:
+            return
+        self._show_hidden_people = enabled
+        self.reload(preserve_content=bool(self._summaries or self._groups))
 
     def build_cluster_query(self, person_id: str):
         return self._service.build_cluster_query(person_id)
@@ -263,6 +276,7 @@ class PeopleDashboardWidget(QWidget):
             index_version=index_version,
             library_root=library_root,
             status_message=self._status_message,
+            show_hidden_people=self._show_hidden_people,
             signals=self._load_signals,
         )
         self._load_pool.start(worker)
@@ -403,19 +417,27 @@ class PeopleDashboardWidget(QWidget):
         rename_text = "Rename" if summary.name else "Name This Person"
         rename_action = QAction(rename_text, menu)
         new_group_action = QAction("New Group", menu)
+        hidden_action = QAction("Unhide" if summary.is_hidden else "Hide", menu)
         pin_action = QAction(
             "Unpin" if self._is_person_pinned(summary.person_id) else "Pin",
             menu,
         )
         merge_action = QAction("Merge Into...", menu)
-        merge_action.setEnabled(len(self._summaries) > 1)
+        merge_action.setEnabled(
+            any(
+                target.person_id != summary.person_id and target.is_hidden == summary.is_hidden
+                for target in self._summaries
+            )
+        )
         rename_action.triggered.connect(lambda: self._rename_person(summary))
         new_group_action.triggered.connect(lambda: self._open_group_dialog(summary.person_id))
+        hidden_action.triggered.connect(lambda: self._toggle_person_hidden(summary))
         pin_action.triggered.connect(lambda: self._toggle_person_pin(summary))
         pin_action.setEnabled(self._pin_actions_available())
         merge_action.triggered.connect(lambda: self._merge_person(summary))
         menu.addAction(rename_action)
         menu.addAction(new_group_action)
+        menu.addAction(hidden_action)
         menu.addAction(pin_action)
         menu.addSeparator()
         menu.addAction(merge_action)
@@ -429,9 +451,13 @@ class PeopleDashboardWidget(QWidget):
             "Unpin" if self._is_group_pinned(summary.group_id) else "Pin",
             menu,
         )
+        disband_action = QAction("Disband Group", menu)
         pin_action.setEnabled(self._pin_actions_available())
         pin_action.triggered.connect(lambda: self._toggle_group_pin(summary))
+        disband_action.triggered.connect(lambda: self._disband_group(summary))
         menu.addAction(pin_action)
+        menu.addSeparator()
+        menu.addAction(disband_action)
         return menu
 
     def _rename_person(self, summary: PersonSummary) -> None:
@@ -478,6 +504,14 @@ class PeopleDashboardWidget(QWidget):
         if renamed:
             self.reload(preserve_content=bool(self._summaries))
 
+    def _toggle_person_hidden(self, summary: PersonSummary) -> None:
+        next_hidden = not summary.is_hidden
+        if next_hidden and not self._confirm_hide_person(summary):
+            return
+        changed = self._service.set_cluster_hidden(summary.person_id, next_hidden)
+        if changed:
+            self.reload(preserve_content=bool(self._summaries or self._groups))
+
     def _toggle_group_pin(self, summary: PeopleGroupSummary) -> None:
         if self._pinned_service is None:
             return
@@ -501,13 +535,35 @@ class PeopleDashboardWidget(QWidget):
             library_root=library_root,
         )
 
+    def _disband_group(self, summary: PeopleGroupSummary) -> None:
+        if self._is_group_pinned(summary.group_id):
+            dialogs.show_warning(
+                self,
+                "Pinned groups can't be disbanded until they are unpinned.",
+            )
+            return
+        if not self._confirm_disband_group(summary):
+            return
+        if self._service.delete_group(summary.group_id):
+            self.reload(preserve_content=bool(self._summaries or self._groups))
+
     def _merge_person(self, summary: PersonSummary) -> None:
+        has_other_people = any(target.person_id != summary.person_id for target in self._summaries)
         choices = [
             (f"{target.name or 'Unnamed'} ({target.face_count} faces)", target.person_id)
             for target in self._summaries
-            if target.person_id != summary.person_id
+            if target.person_id != summary.person_id and target.is_hidden == summary.is_hidden
         ]
         if not choices:
+            if has_other_people:
+                dialogs.show_information(
+                    self,
+                    (
+                        "People in hidden and visible states cannot be merged. "
+                        "Please make both People cards hidden or visible first."
+                    ),
+                    title="Cannot Merge People",
+                )
             return
 
         labels = [label for label, _ in choices]
@@ -551,6 +607,16 @@ class PeopleDashboardWidget(QWidget):
         target = self._summary_for_person(target_person_id)
         if source is None or target is None:
             return False
+        if source.is_hidden != target.is_hidden:
+            dialogs.show_information(
+                self,
+                (
+                    "People in hidden and visible states cannot be merged. "
+                    "Please make both People cards hidden or visible first."
+                ),
+                title="Cannot Merge People",
+            )
+            return False
 
         if not MergeConfirmDialog.confirm(2, self):
             return False
@@ -559,6 +625,26 @@ class PeopleDashboardWidget(QWidget):
         if merged:
             self.reload(preserve_content=bool(self._summaries))
         return merged
+
+    def _confirm_hide_person(self, summary: PersonSummary) -> bool:
+        name = (summary.name or "").strip() or "this person"
+        return MergeConfirmDialog.confirm_action(
+            item_count=1,
+            parent=self,
+            title_text="Hide This Person?",
+            body_text=f"Hiding {name} will remove them from the People view until you choose Show Hidden People or unhide them.",
+            confirm_text="Hide Person",
+        )
+
+    def _confirm_disband_group(self, summary: PeopleGroupSummary) -> bool:
+        label = summary.name.strip() or "this group"
+        return MergeConfirmDialog.confirm_action(
+            item_count=max(2, len(summary.member_person_ids)),
+            parent=self,
+            title_text="Disband This Group?",
+            body_text=f"Disbanding {label} will remove the group but keep all of its people and photos.",
+            confirm_text="Disband Group",
+        )
 
     def _persist_cluster_order(self, ordered_person_ids: list[str]) -> None:
         current_ids = {summary.person_id for summary in self._summaries}
@@ -689,6 +775,18 @@ class PeopleDashboardWidget(QWidget):
         if app is not None and app.styleHints().colorScheme() == Qt.ColorScheme.Dark:
             return True
         return _widget_uses_dark_theme(self)
+
+    def _load_show_hidden_people_setting(self) -> bool:
+        window = self.window()
+        coordinator = getattr(window, "coordinator", None)
+        context = getattr(coordinator, "_context", None)
+        settings = getattr(context, "settings", None)
+        if settings is None or not hasattr(settings, "get"):
+            return False
+        stored = settings.get("ui.show_hidden_people", False)
+        if isinstance(stored, str):
+            return stored.strip().lower() in {"1", "true", "yes", "on"}
+        return bool(stored)
 
     def changeEvent(self, event) -> None:  # noqa: N802
         super().changeEvent(event)

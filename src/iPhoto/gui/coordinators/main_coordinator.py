@@ -435,6 +435,7 @@ class MainCoordinator(QObject):
         ui.rotate_left_button.clicked.connect(self._playback.rotate_current_asset)
         ui.favorite_button.clicked.connect(self._detail_vm.toggle_favorite)
         ui.toggle_face_names_action.toggled.connect(self._handle_face_name_toggle_changed)
+        ui.toggle_hidden_people_action.toggled.connect(self._handle_hidden_people_toggle_changed)
 
         # Info Button
         if hasattr(ui, "info_button"):
@@ -654,6 +655,15 @@ class MainCoordinator(QObject):
         ui.toggle_face_names_action.setChecked(show_face_names)
         self._playback.set_face_name_display_enabled(show_face_names)
 
+        stored_hidden_people = settings.get("ui.show_hidden_people", False)
+        if isinstance(stored_hidden_people, str):
+            show_hidden_people = stored_hidden_people.strip().lower() in {"1", "true", "yes", "on"}
+        else:
+            show_hidden_people = bool(stored_hidden_people)
+        ui.toggle_hidden_people_action.setChecked(show_hidden_people)
+        if hasattr(ui, "people_page"):
+            ui.people_page.set_show_hidden_people(show_hidden_people)
+
         # 2. Volume / Mute
         stored_volume = settings.get("ui.volume", 75)
         try:
@@ -687,6 +697,12 @@ class MainCoordinator(QObject):
         if self._context.settings.get("ui.show_face_names_in_detail") != checked:
             self._context.settings.set("ui.show_face_names_in_detail", checked)
         self._playback.set_face_name_display_enabled(checked)
+
+    def _handle_hidden_people_toggle_changed(self, checked: bool) -> None:
+        if self._context.settings.get("ui.show_hidden_people") != checked:
+            self._context.settings.set("ui.show_hidden_people", checked)
+        if hasattr(self._window.ui, "people_page"):
+            self._window.ui.people_page.set_show_hidden_people(checked)
 
     def _prepare_paths_for_mutation(self, paths: list[Path]) -> None:
         """Release preview/player handles before mutating files on disk."""

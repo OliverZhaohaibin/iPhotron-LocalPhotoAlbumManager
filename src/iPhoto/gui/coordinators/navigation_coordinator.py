@@ -118,14 +118,6 @@ class NavigationCoordinator(QObject):
 
         if pinned_item.kind == "group":
             query = people_service.build_group_query(pinned_item.item_id)
-            if not query.asset_ids:
-                if self._pinned_items_service is not None:
-                    self._pinned_items_service.prune_missing_entity(
-                        kind="group",
-                        item_id=pinned_item.item_id,
-                        library_root=library_root,
-                    )
-                return
             self._gallery_vm.open_pinned_people_query(
                 query,
                 kind="group",

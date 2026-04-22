@@ -63,6 +63,7 @@ class InfoLocationMapView(QWidget):
     DEFAULT_ZOOM = 8.0
     _MINIMUM_SIDE = 156
     _SETTLE_SYNC_DELAY_MS = 24
+    _VIEWPORT_MATCH_EPSILON = 1e-6
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -71,6 +72,8 @@ class InfoLocationMapView(QWidget):
         self._latitude: float | None = None
         self._longitude: float | None = None
         self._screen_point: QPointF | None = None
+        self._requested_zoom = self.DEFAULT_ZOOM
+        self._pending_viewport_sync = False
         self._pin_sync_timer = QTimer(self)
         self._pin_sync_timer.setSingleShot(True)
         self._pin_sync_timer.setInterval(0)
@@ -79,6 +82,14 @@ class InfoLocationMapView(QWidget):
         self._pin_settle_timer.setSingleShot(True)
         self._pin_settle_timer.setInterval(self._SETTLE_SYNC_DELAY_MS)
         self._pin_settle_timer.timeout.connect(self._sync_pin_position_now)
+        self._viewport_sync_timer = QTimer(self)
+        self._viewport_sync_timer.setSingleShot(True)
+        self._viewport_sync_timer.setInterval(0)
+        self._viewport_sync_timer.timeout.connect(self._apply_pending_viewport_now)
+        self._viewport_settle_timer = QTimer(self)
+        self._viewport_settle_timer.setSingleShot(True)
+        self._viewport_settle_timer.setInterval(self._SETTLE_SYNC_DELAY_MS)
+        self._viewport_settle_timer.timeout.connect(self._apply_pending_viewport_now)
 
         self.setMinimumSize(self._MINIMUM_SIDE, self._MINIMUM_SIDE)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
@@ -113,20 +124,20 @@ class InfoLocationMapView(QWidget):
     def set_location(self, latitude: float, longitude: float, *, zoom: float | None = None) -> None:
         self._latitude = float(latitude)
         self._longitude = float(longitude)
+        self._requested_zoom = float(zoom if zoom is not None else self.DEFAULT_ZOOM)
+        self._pending_viewport_sync = True
         if self._map_widget is None:
             self._message_label.setText("Map preview unavailable")
             self._message_label.show()
             self._map_host.hide()
             self._overlay.hide()
+            self._pending_viewport_sync = False
             return
 
         self._message_label.hide()
         self._map_host.show()
-        try:
-            self._map_widget.center_on(self._longitude, self._latitude)
-            self._map_widget.set_zoom(float(zoom if zoom is not None else self.DEFAULT_ZOOM))
-        except Exception:
-            LOGGER.warning("Failed to update info-panel mini-map", exc_info=True)
+        self._apply_pending_viewport_now()
+        self._schedule_viewport_sync()
         self._overlay.show()
         self._overlay.raise_()
         self._schedule_pin_sync()
@@ -135,12 +146,17 @@ class InfoLocationMapView(QWidget):
         self._latitude = None
         self._longitude = None
         self._screen_point = None
+        self._pending_viewport_sync = False
         self._pin_sync_timer.stop()
         self._pin_settle_timer.stop()
+        self._viewport_sync_timer.stop()
+        self._viewport_settle_timer.stop()
         self._overlay.set_screen_point(None)
         self._overlay.hide()
 
     def shutdown(self) -> None:
+        self._viewport_sync_timer.stop()
+        self._viewport_settle_timer.stop()
         if self._map_widget is not None:
             try:
                 self._map_widget.shutdown()
@@ -165,9 +181,14 @@ class InfoLocationMapView(QWidget):
         self._sync_square_height()
         self._sync_overlay_geometry()
 
+    def showEvent(self, event) -> None:  # type: ignore[override]
+        super().showEvent(event)
+        self._schedule_viewport_sync()
+
     def eventFilter(self, watched: object, event: QEvent) -> bool:
         if watched is self._map_widget and event.type() == QEvent.Type.Resize:
             self._sync_overlay_geometry()
+            self._schedule_viewport_sync()
         return super().eventFilter(watched, event)
 
     def _sync_overlay_geometry(self) -> None:
@@ -191,6 +212,57 @@ class InfoLocationMapView(QWidget):
         self.setFixedHeight(target_height)
         self.updateGeometry()
 
+    def _current_view_matches_requested_location(self) -> bool:
+        if self._map_widget is None or self._latitude is None or self._longitude is None:
+            return False
+
+        try:
+            center_lon, center_lat = self._map_widget.center_lonlat()
+        except Exception:
+            return False
+
+        if (
+            abs(float(center_lon) - self._longitude) > self._VIEWPORT_MATCH_EPSILON
+            or abs(float(center_lat) - self._latitude) > self._VIEWPORT_MATCH_EPSILON
+        ):
+            return False
+
+        try:
+            current_zoom = float(getattr(self._map_widget, "zoom"))
+        except Exception:
+            return False
+
+        return abs(current_zoom - self._requested_zoom) <= self._VIEWPORT_MATCH_EPSILON
+
+    def _schedule_viewport_sync(self) -> None:
+        if not self._pending_viewport_sync:
+            return
+        if self._map_widget is None or self._latitude is None or self._longitude is None:
+            return
+        self._viewport_sync_timer.start()
+        self._viewport_settle_timer.start()
+
+    def _apply_pending_viewport_now(self) -> None:
+        if not self._pending_viewport_sync:
+            return
+        if self._map_widget is None or self._latitude is None or self._longitude is None:
+            self._pending_viewport_sync = False
+            return
+
+        try:
+            # Apply zoom first, then re-center once the target scale is known.
+            self._map_widget.set_zoom(self._requested_zoom)
+            self._map_widget.center_on(self._longitude, self._latitude)
+        except Exception:
+            LOGGER.warning("Failed to update info-panel mini-map", exc_info=True)
+            self._pending_viewport_sync = False
+            return
+
+        self._sync_pin_position_now()
+        self._schedule_pin_sync()
+        if self._current_view_matches_requested_location():
+            self._pending_viewport_sync = False
+
     def _connect_map_signals(self) -> None:
         if self._map_widget is None:
             return
@@ -211,11 +283,12 @@ class InfoLocationMapView(QWidget):
         if self._map_widget is None or self._latitude is None or self._longitude is None:
             return None
 
+        visible_rect = self._visible_map_rect()
+        if visible_rect is None:
+            return None
+
         point = self._map_widget.project_lonlat(self._longitude, self._latitude)
         if point is None and center_fallback:
-            visible_rect = self._visible_map_rect()
-            if visible_rect is None:
-                return None
             return QPointF(visible_rect.width() / 2.0, visible_rect.height() / 2.0)
         return point
 
@@ -239,9 +312,12 @@ class InfoLocationMapView(QWidget):
         self._pin_settle_timer.start()
 
     def _handle_map_view_changed(self, _center_x: float, _center_y: float, _zoom: float) -> None:
+        if self._pending_viewport_sync and self._current_view_matches_requested_location():
+            self._pending_viewport_sync = False
         self._schedule_pin_sync()
 
     def _handle_map_panned(self, delta: QPointF) -> None:
+        self._pending_viewport_sync = False
         if self._screen_point is None:
             self._schedule_pin_sync()
             return

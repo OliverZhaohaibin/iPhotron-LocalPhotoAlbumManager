@@ -383,6 +383,13 @@ def test_native_osmand_widget_bridges_drag_release_and_wheel_events(qapp: QAppli
 
     try:
         event_target = cast(QWidget, widget.event_target())
+        widget.resize(180, 140)
+        widget.show()
+        qapp.processEvents()
+
+        assert event_target.minimumWidth() == 0
+        assert event_target.minimumHeight() == 0
+        assert event_target.geometry() == widget.contentsRect()
 
         press_event = QMouseEvent(
             QEvent.Type.MouseButtonPress,

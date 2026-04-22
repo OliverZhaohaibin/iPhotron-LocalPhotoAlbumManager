@@ -15,7 +15,7 @@ from typing import Any, Sequence
 import PySide6
 import shiboken6
 from PySide6.QtCore import QEvent, QObject, QPointF, Qt, QTimer, Signal
-from PySide6.QtWidgets import QVBoxLayout, QWidget
+from PySide6.QtWidgets import QSizePolicy, QVBoxLayout, QWidget
 
 from maps.map_sources import (
     MapBackendMetadata,
@@ -242,10 +242,16 @@ class NativeOsmAndWidget(QWidget):
         self._native_pointer = ctypes.c_void_p(native_pointer)
         self._native_widget = shiboken6.wrapInstance(int(native_pointer), QWidget)
         self._native_widget.setObjectName("NativeOsmAndMapWidget")
+        self._native_widget.setMinimumSize(0, 0)
+        self._native_widget.setSizePolicy(
+            QSizePolicy.Policy.Ignored,
+            QSizePolicy.Policy.Ignored,
+        )
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
         layout.addWidget(self._native_widget)
+        self._layout = layout
         self.setFocusProxy(self._native_widget)
         self.setMouseTracking(True)
         self.setMinimumSize(640, 480)
@@ -273,6 +279,7 @@ class NativeOsmAndWidget(QWidget):
         self._deferred_view_sync_timer.setSingleShot(True)
         self._deferred_view_sync_timer.setInterval(0)
         self._deferred_view_sync_timer.timeout.connect(self._emit_view_change)
+        self._sync_native_widget_geometry()
         self._emit_view_change()
 
     @property
@@ -402,6 +409,16 @@ class NativeOsmAndWidget(QWidget):
 
         return super().eventFilter(watched, event)
 
+    def resizeEvent(self, event) -> None:  # type: ignore[override]
+        super().resizeEvent(event)
+        self._sync_native_widget_geometry()
+        self._schedule_deferred_view_sync()
+
+    def showEvent(self, event) -> None:  # type: ignore[override]
+        super().showEvent(event)
+        self._sync_native_widget_geometry()
+        self._schedule_deferred_view_sync()
+
     def _emit_view_change(self) -> None:
         center_x, center_y, zoom = self._read_view_state()
         self._last_view_state = (center_x, center_y, zoom)
@@ -419,6 +436,15 @@ class NativeOsmAndWidget(QWidget):
     def _schedule_deferred_view_sync(self) -> None:
         if not self._deferred_view_sync_timer.isActive():
             self._deferred_view_sync_timer.start()
+
+    def _sync_native_widget_geometry(self) -> None:
+        target_rect = self.contentsRect()
+        if target_rect.isEmpty():
+            return
+        if self._native_widget.minimumWidth() != 0 or self._native_widget.minimumHeight() != 0:
+            self._native_widget.setMinimumSize(0, 0)
+        if self._native_widget.geometry() != target_rect:
+            self._native_widget.setGeometry(target_rect)
 
     def _read_view_state(self) -> tuple[float, float, float]:
         longitude, latitude = self.center_lonlat()

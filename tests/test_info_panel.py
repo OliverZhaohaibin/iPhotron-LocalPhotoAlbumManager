@@ -102,6 +102,27 @@ class _DelayedProjectionMiniMapWidget(_FakeMiniMapWidget):
         self._projected_point = QPointF(self._pending_projected_point)
 
 
+class _DeferredCenterMiniMapWidget(_FakeMiniMapWidget):
+    def __init__(self, parent: QWidget | None = None, *, map_source: MapSourceSpec | None = None) -> None:
+        super().__init__(parent, map_source=map_source)
+        self._pending_center: tuple[float, float] | None = None
+
+    def center_on(self, lon: float, lat: float) -> None:
+        target = (float(lon), float(lat))
+        if not self.isVisible():
+            self._pending_center = target
+            return
+        self._center = target
+        self._pending_center = None
+        self.viewChanged.emit(0.5, 0.5, self._zoom)
+
+    def project_lonlat(self, lon: float, lat: float) -> QPointF | None:
+        center_lon, center_lat = self._center
+        screen_x = self.width() / 2.0 + ((float(lon) - center_lon) * 100.0)
+        screen_y = self.height() / 2.0 - ((float(lat) - center_lat) * 100.0)
+        return QPointF(screen_x, screen_y)
+
+
 def _fake_choose_map_widget_backend(
     _map_source: MapSourceSpec | None,
     *,
@@ -123,6 +144,19 @@ def _fake_choose_delayed_projection_map_widget_backend(
     del use_opengl
     return (
         _DelayedProjectionMiniMapWidget,
+        MapSourceSpec.legacy_default(Path.cwd()).resolved(Path.cwd()),
+        "legacy_python",
+    )
+
+
+def _fake_choose_deferred_center_map_widget_backend(
+    _map_source: MapSourceSpec | None,
+    *,
+    use_opengl: bool,
+) -> tuple[type[_DeferredCenterMiniMapWidget], MapSourceSpec, str]:
+    del use_opengl
+    return (
+        _DeferredCenterMiniMapWidget,
         MapSourceSpec.legacy_default(Path.cwd()).resolved(Path.cwd()),
         "legacy_python",
     )
@@ -700,6 +734,45 @@ def test_info_panel_location_map_resyncs_pin_after_delayed_zoom_projection(
 
     map_widget.set_zoom(9.0)
     qapp.processEvents()
+
+    screen_point = map_view._screen_point
+    assert screen_point is not None
+    assert abs(screen_point.x() - map_widget.width() / 2.0) <= 1.0
+    assert abs(screen_point.y() - map_widget.height() / 2.0) <= 1.0
+    panel.close()
+
+
+def test_info_panel_location_map_recenters_view_after_widget_becomes_visible(
+    qapp: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(info_location_map_module, "check_opengl_support", lambda: False)
+    monkeypatch.setattr(
+        info_location_map_module,
+        "choose_map_widget_backend",
+        _fake_choose_deferred_center_map_widget_backend,
+    )
+
+    panel = InfoPanel()
+    panel.set_location_capability(enabled=True)
+    panel.set_asset_metadata(
+        {
+            "rel": "map.jpg",
+            "name": "map.jpg",
+            "gps": {"lat": 51.5074, "lon": -0.1278},
+            "location": "London",
+        }
+    )
+    panel.show()
+    qapp.processEvents()
+
+    map_view = panel._location_map
+    map_widget = map_view._map_widget
+    assert isinstance(map_widget, _DeferredCenterMiniMapWidget)
+
+    center_lon, center_lat = map_widget.center_lonlat()
+    assert abs(center_lon - (-0.1278)) <= 1e-6
+    assert abs(center_lat - 51.5074) <= 1e-6
 
     screen_point = map_view._screen_point
     assert screen_point is not None

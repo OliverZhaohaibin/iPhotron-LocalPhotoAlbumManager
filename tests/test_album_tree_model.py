@@ -134,3 +134,18 @@ def test_model_inserts_pinned_section_between_library_and_albums(tmp_path: Path,
     assert trips_index is not None
     assert model.data(alice_index, AlbumTreeRole.NODE_TYPE) == NodeType.PINNED_PERSON
     assert model.data(trips_index, AlbumTreeRole.NODE_TYPE) == NodeType.PINNED_ALBUM
+
+
+def test_model_omits_pinned_section_when_empty(tmp_path: Path, qapp: QApplication) -> None:
+    root = tmp_path / "Library"
+    root.mkdir()
+    _create_album(root, "Trips")
+    manager = LibraryManager()
+    manager.bind_path(root)
+    qapp.processEvents()
+
+    model = AlbumTreeModel(manager)
+    qapp.processEvents()
+
+    pinned_index = _find_child(model, QModelIndex(), "Pinned")
+    assert pinned_index is None

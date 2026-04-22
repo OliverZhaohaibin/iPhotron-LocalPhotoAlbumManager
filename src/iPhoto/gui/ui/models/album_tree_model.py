@@ -230,9 +230,10 @@ class AlbumTreeModel(QAbstractItemModel):
         self._root_item.add_child(AlbumTreeItem("──────────", NodeType.SEPARATOR))
 
         pinned_header = AlbumTreeItem("Pinned", NodeType.HEADER)
-        self._root_item.add_child(pinned_header)
         self._add_pinned_nodes(pinned_header, library_root)
-        self._root_item.add_child(AlbumTreeItem("──────────", NodeType.SEPARATOR))
+        if pinned_header.children:
+            self._root_item.add_child(pinned_header)
+            self._root_item.add_child(AlbumTreeItem("──────────", NodeType.SEPARATOR))
 
         # Promote the Albums section to a header-level entry so that it shares the
         # same visual hierarchy, font weight, and font size as the "Basic Library"

@@ -49,6 +49,7 @@ from ....models.album import Album
 from ..tasks.thumbnail_loader import ThumbnailJob, generate_cache_path, stat_mtime_ns
 from .flow_layout import FlowLayout
 from ..icon import load_icon
+from ..menus.album_sidebar_menu import _apply_main_window_menu_style
 from ..theme_manager import DARK_THEME
 
 if TYPE_CHECKING:
@@ -676,6 +677,7 @@ class AlbumsDashboard(QWidget):
 
     def _build_card_menu(self, card: AlbumCard) -> QMenu:
         menu = QMenu(self)
+        _apply_main_window_menu_style(menu, self)
         pin_action = QAction(
             "Unpin Album" if self._is_album_pinned(card.path) else "Pin Album",
             menu,

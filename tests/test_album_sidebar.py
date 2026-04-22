@@ -11,6 +11,8 @@ pytest.importorskip("PySide6.QtWidgets", reason="Qt widgets not available", exc_
 from PySide6.QtWidgets import QApplication
 
 from iPhoto.gui.services.pinned_items_service import PinnedItemsService
+from iPhoto.gui.ui.menus.album_sidebar_menu import AlbumSidebarContextMenu
+from iPhoto.gui.ui.models.album_tree_model import NodeType
 from iPhoto.gui.ui.widgets.album_sidebar import AlbumSidebar
 from iPhoto.library.manager import LibraryManager
 from iPhoto.settings.manager import SettingsManager
@@ -114,3 +116,91 @@ def test_programmatic_pinned_selection_can_emit_signal(tmp_path: Path, qapp: QAp
     assert len(emitted) == 1
     assert emitted[0].kind == "person"
     assert emitted[0].item_id == "person-a"
+
+
+def test_sidebar_album_context_menu_offers_pin_and_unpin(tmp_path: Path, qapp: QApplication) -> None:
+    root = tmp_path / "Library"
+    album_dir = root / "Trip"
+    album_dir.mkdir(parents=True)
+    _write_manifest(album_dir, "Trip")
+
+    manager = LibraryManager()
+    manager.bind_path(root)
+    qapp.processEvents()
+
+    settings = SettingsManager(path=tmp_path / "settings.json")
+    settings.load()
+    pinned_service = PinnedItemsService(settings)
+
+    sidebar = AlbumSidebar(manager)
+    sidebar.set_pinned_service(pinned_service)
+    qapp.processEvents()
+
+    album_index = sidebar.tree_model().index_for_path(album_dir)
+    item = sidebar.tree_model().item_from_index(album_index)
+    assert item is not None
+    assert item.node_type == NodeType.ALBUM
+
+    menu = AlbumSidebarContextMenu(
+        sidebar,
+        sidebar._tree,
+        sidebar.tree_model(),
+        manager,
+        item,
+        sidebar._set_pending_selection,
+        sidebar.bindLibraryRequested.emit,
+    )
+    assert menu.actions()[0].text() == "Pin Album"
+
+    menu.actions()[0].trigger()
+    qapp.processEvents()
+    assert pinned_service.is_pinned(kind="album", item_id=str(album_dir), library_root=root)
+
+    menu = AlbumSidebarContextMenu(
+        sidebar,
+        sidebar._tree,
+        sidebar.tree_model(),
+        manager,
+        item,
+        sidebar._set_pending_selection,
+        sidebar.bindLibraryRequested.emit,
+    )
+    assert menu.actions()[0].text() == "Unpin Album"
+
+
+def test_sidebar_pinned_item_context_menu_offers_unpin(tmp_path: Path, qapp: QApplication) -> None:
+    root = tmp_path / "Library"
+    root.mkdir()
+    manager = LibraryManager()
+    manager.bind_path(root)
+    qapp.processEvents()
+
+    settings = SettingsManager(path=tmp_path / "settings.json")
+    settings.load()
+    pinned_service = PinnedItemsService(settings)
+    pinned_service.pin_person("person-a", "Alice", library_root=root)
+
+    sidebar = AlbumSidebar(manager)
+    sidebar.set_pinned_service(pinned_service)
+    qapp.processEvents()
+
+    pinned_item = pinned_service.items_for_library(root)[0]
+    pinned_index = sidebar.tree_model().index_for_pinned_item(pinned_item)
+    item = sidebar.tree_model().item_from_index(pinned_index)
+    assert item is not None
+    assert item.node_type == NodeType.PINNED_PERSON
+
+    menu = AlbumSidebarContextMenu(
+        sidebar,
+        sidebar._tree,
+        sidebar.tree_model(),
+        manager,
+        item,
+        sidebar._set_pending_selection,
+        sidebar.bindLibraryRequested.emit,
+    )
+    assert [action.text() for action in menu.actions()] == ["Unpin"]
+
+    menu.actions()[0].trigger()
+    qapp.processEvents()
+    assert not pinned_service.items_for_library(root)

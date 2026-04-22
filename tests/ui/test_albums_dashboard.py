@@ -17,6 +17,8 @@ pytest.importorskip(
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication
 
+from iPhoto.gui.services.pinned_items_service import PinnedItemsService
+from iPhoto.settings.manager import SettingsManager
 from iPhoto.gui.ui.widgets.albums_dashboard import AlbumCard, AlbumsDashboard
 
 @pytest.fixture
@@ -119,3 +121,30 @@ def test_albums_dashboard_relays_signal(qtbot, mock_library):
             card.clicked.emit(album.path)
 
         assert blocker.args == [album.path]
+
+
+def test_albums_dashboard_menu_uses_styled_pin_action(qtbot, mock_library, tmp_path):
+    album = MagicMock()
+    album.title = "Pinned Album"
+    album.path = tmp_path / "album"
+    mock_library.list_albums.return_value = [album]
+    mock_library.root.return_value = tmp_path
+
+    settings = SettingsManager(path=tmp_path / "settings.json")
+    settings.load()
+    pinned_service = PinnedItemsService(settings)
+
+    with patch("PySide6.QtCore.QThreadPool.globalInstance"):
+        dashboard = AlbumsDashboard(mock_library)
+        dashboard.set_pinned_service(pinned_service)
+        qtbot.addWidget(dashboard)
+        card = dashboard._cards[album.path]
+
+        menu = dashboard._build_card_menu(card)
+
+        assert menu.testAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        assert menu.actions()[0].text() == "Pin Album"
+
+        pinned_service.pin_album(album.path, album.title, library_root=tmp_path)
+        menu = dashboard._build_card_menu(card)
+        assert menu.actions()[0].text() == "Unpin Album"

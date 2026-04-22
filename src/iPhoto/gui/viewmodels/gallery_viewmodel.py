@@ -304,7 +304,7 @@ class GalleryViewModel(BaseViewModel):
             self.open_people_dashboard()
 
     def handle_people_snapshot_committed(self, event: object) -> None:
-        if self._cluster_gallery_origin != "people":
+        if self._cluster_gallery_origin != "people" and self.current_section.value != "pinned_people_gallery":
             return
         if self._people_cluster_kind not in {"person", "group"} or not self._people_cluster_id:
             return

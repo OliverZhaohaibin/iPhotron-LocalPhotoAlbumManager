@@ -102,13 +102,14 @@ class NavigationCoordinator(QObject):
         if pinned_item.kind == "person":
             query = people_service.build_cluster_query(pinned_item.item_id)
             if not query.asset_ids:
-                if self._pinned_items_service is not None:
-                    self._pinned_items_service.prune_missing_entity(
-                        kind="person",
-                        item_id=pinned_item.item_id,
-                        library_root=library_root,
-                    )
-                return
+                if not people_service.has_cluster(pinned_item.item_id):
+                    if self._pinned_items_service is not None:
+                        self._pinned_items_service.prune_missing_entity(
+                            kind="person",
+                            item_id=pinned_item.item_id,
+                            library_root=library_root,
+                        )
+                    return
             self._gallery_vm.open_pinned_people_query(
                 query,
                 kind="person",
@@ -118,6 +119,15 @@ class NavigationCoordinator(QObject):
 
         if pinned_item.kind == "group":
             query = people_service.build_group_query(pinned_item.item_id)
+            if not query.asset_ids:
+                if not people_service.has_group(pinned_item.item_id):
+                    if self._pinned_items_service is not None:
+                        self._pinned_items_service.prune_missing_entity(
+                            kind="group",
+                            item_id=pinned_item.item_id,
+                            library_root=library_root,
+                        )
+                    return
             self._gallery_vm.open_pinned_people_query(
                 query,
                 kind="group",

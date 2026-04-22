@@ -15,6 +15,25 @@ SETTINGS_SCHEMA: dict[str, Any] = {
     "properties": {
         "schema": {"const": "iPhoto/settings@1"},
         "basic_library_path": {"type": ["string", "null"]},
+        "pinned_items_by_library": {
+            "type": "object",
+            "additionalProperties": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "required": ["kind", "item_id", "label"],
+                    "properties": {
+                        "kind": {
+                            "type": "string",
+                            "enum": ["album", "person", "group"],
+                        },
+                        "item_id": {"type": "string"},
+                        "label": {"type": "string"},
+                    },
+                    "additionalProperties": False,
+                },
+            },
+        },
         "ui": {
             "type": "object",
             "properties": {
@@ -61,6 +80,7 @@ SETTINGS_SCHEMA: dict[str, Any] = {
 DEFAULT_SETTINGS: dict[str, Any] = {
     "schema": "iPhoto/settings@1",
     "basic_library_path": None,
+    "pinned_items_by_library": {},
     "ui": {
         "theme": "system",
         "sidebar_width": 280,
@@ -109,6 +129,36 @@ def merge_with_defaults(data: dict[str, Any] | None) -> dict[str, Any]:
                     merged[key] = os.fspath(value)
                 except TypeError:
                     continue
+                continue
+            if key == "pinned_items_by_library" and isinstance(value, dict):
+                normalised: dict[str, Any] = {}
+                for library_key, entries in value.items():
+                    try:
+                        resolved_key = os.fspath(library_key)
+                    except TypeError:
+                        continue
+                    if not isinstance(entries, list):
+                        continue
+                    normalised_entries: list[dict[str, str]] = []
+                    for entry in entries:
+                        if not isinstance(entry, dict):
+                            continue
+                        kind = str(entry.get("kind") or "").strip()
+                        item_id = str(entry.get("item_id") or "").strip()
+                        label = str(entry.get("label") or "").strip()
+                        if kind not in {"album", "person", "group"}:
+                            continue
+                        if not item_id or not label:
+                            continue
+                        normalised_entries.append(
+                            {
+                                "kind": kind,
+                                "item_id": item_id,
+                                "label": label,
+                            }
+                        )
+                    normalised[resolved_key] = normalised_entries
+                merged[key] = normalised
                 continue
             merged[key] = value
     _validator.validate(merged)

@@ -10,8 +10,10 @@ pytest.importorskip("PySide6.QtWidgets", reason="Qt widgets not available", exc_
 
 from PySide6.QtWidgets import QApplication
 
+from iPhoto.gui.services.pinned_items_service import PinnedItemsService
 from iPhoto.gui.ui.widgets.album_sidebar import AlbumSidebar
 from iPhoto.library.manager import LibraryManager
+from iPhoto.settings.manager import SettingsManager
 
 
 @pytest.fixture(scope="module")
@@ -84,3 +86,31 @@ def test_programmatic_selection_can_emit_signals(tmp_path: Path, qapp: QApplicat
     sidebar.select_all_photos(emit_signal=True)
     qapp.processEvents()
     assert triggered_all, "Programmatic All Photos selection should emit signal when requested"
+
+
+def test_programmatic_pinned_selection_can_emit_signal(tmp_path: Path, qapp: QApplication) -> None:
+    root = tmp_path / "Library"
+    root.mkdir()
+    manager = LibraryManager()
+    manager.bind_path(root)
+    qapp.processEvents()
+
+    settings = SettingsManager(path=tmp_path / "settings.json")
+    settings.load()
+    pinned_service = PinnedItemsService(settings)
+    pinned_service.pin_person("person-a", "Alice", library_root=root)
+
+    sidebar = AlbumSidebar(manager)
+    sidebar.set_pinned_service(pinned_service)
+    qapp.processEvents()
+
+    emitted: list[object] = []
+    sidebar.pinnedItemSelected.connect(emitted.append)
+
+    item = pinned_service.items_for_library(root)[0]
+    sidebar.select_pinned_item(item, emit_signal=True)
+    qapp.processEvents()
+
+    assert len(emitted) == 1
+    assert emitted[0].kind == "person"
+    assert emitted[0].item_id == "person-a"

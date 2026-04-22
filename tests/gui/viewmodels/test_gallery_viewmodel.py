@@ -319,6 +319,45 @@ def test_open_people_dashboard_routes_to_people_view(tmp_path: Path) -> None:
     assert routes == ["people"]
 
 
+def test_open_pinned_album_keeps_pinned_static_selection(tmp_path: Path) -> None:
+    album = tmp_path / "Trips"
+    album.mkdir()
+    vm, store, context, facade, _asset_service = _make_vm(library_root=tmp_path)
+    facade.open_album.return_value = SimpleNamespace(root=album)
+    routes = []
+    sidebar_paths = []
+    vm.route_requested.connect(routes.append)
+    vm.sidebar_path_requested.connect(sidebar_paths.append)
+
+    vm.open_pinned_album(album)
+
+    store.load_selection.assert_called_once()
+    query = store.load_selection.call_args.kwargs["query"]
+    assert query.album_path == "Trips"
+    assert vm.static_selection.value == "Pinned"
+    assert vm.current_section.value == "pinned_album"
+    assert routes == ["gallery"]
+    assert sidebar_paths == []
+
+
+def test_open_pinned_people_query_hides_cluster_header(tmp_path: Path) -> None:
+    vm, store, _context, _facade, _asset_service = _make_vm(library_root=tmp_path)
+    query = AssetQuery(asset_ids=["asset-1"])
+    cluster_mode = []
+    routes = []
+    vm.cluster_gallery_mode_changed.connect(cluster_mode.append)
+    vm.route_requested.connect(routes.append)
+
+    vm.open_pinned_people_query(query, kind="person", entity_id="person-a")
+
+    store.load_selection.assert_called_once_with(tmp_path, query=query)
+    assert vm.static_selection.value == "Pinned"
+    assert vm.current_section.value == "pinned_people_gallery"
+    assert cluster_mode == [False]
+    assert routes == ["gallery"]
+    assert vm.is_in_cluster_gallery() is False
+
+
 def test_people_cluster_gallery_loads_query_and_returns_to_people(tmp_path: Path) -> None:
     vm, store, _context, _facade, _asset_service = _make_vm(library_root=tmp_path)
     query = AssetQuery(asset_ids=["asset-1", "asset-2"])

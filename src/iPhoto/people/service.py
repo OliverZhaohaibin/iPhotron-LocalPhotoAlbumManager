@@ -132,6 +132,27 @@ class PeopleService:
             return
         get_people_index_coordinator(self._library_root).rename_person(person_id, new_name)
 
+    def pin_block_reason(self, person_id: str) -> str | None:
+        """Return a human-readable reason why *person_id* cannot be pinned."""
+
+        repository = self.repository()
+        if repository is None or not person_id:
+            return None
+
+        block_reason = getattr(repository, "pin_block_reason", None)
+        if callable(block_reason):
+            reason = block_reason(person_id)
+            if isinstance(reason, str):
+                normalized = reason.strip()
+                if normalized:
+                    return normalized
+
+        is_hidden = getattr(repository, "is_person_hidden", None)
+        if callable(is_hidden) and bool(is_hidden(person_id)):
+            return "This person can't be pinned while hidden."
+
+        return None
+
     def set_cluster_cover(self, person_id: str, face_id: str) -> bool:
         if self._library_root is None:
             return False

@@ -11,10 +11,12 @@ from PySide6.QtCore import QObject, QTimer, Signal
 
 from iPhoto.application.contracts.runtime_entry_contract import RuntimeEntryContract
 from iPhoto.config import ALL_PHOTOS_TITLE
+from iPhoto.gui.services.pinned_items_service import PinnedItemsService, PinnedSidebarItem
 from iPhoto.gui.coordinators.view_router import ViewRouter
 from iPhoto.gui.facade import AppFacade
 from iPhoto.gui.ui.widgets.album_sidebar import AlbumSidebar
 from iPhoto.gui.viewmodels.gallery_viewmodel import GalleryViewModel
+from iPhoto.people.service import PeopleService
 
 if TYPE_CHECKING:
     from iPhoto.gui.coordinators.playback_coordinator import PlaybackCoordinator
@@ -34,6 +36,7 @@ class NavigationCoordinator(QObject):
         gallery_vm: GalleryViewModel,
         context: RuntimeEntryContract,
         facade: AppFacade,
+        pinned_items_service: PinnedItemsService | None = None,
     ) -> None:
         super().__init__()
         self._sidebar = sidebar
@@ -41,6 +44,7 @@ class NavigationCoordinator(QObject):
         self._gallery_vm = gallery_vm
         self._context = context
         self._facade = facade
+        self._pinned_items_service = pinned_items_service
 
         self._playback_coordinator: Optional[PlaybackCoordinator] = None
 
@@ -57,6 +61,7 @@ class NavigationCoordinator(QObject):
 
     def _connect_signals(self) -> None:
         self._sidebar.albumSelected.connect(self.open_album)
+        self._sidebar.pinnedItemSelected.connect(self.open_pinned_item)
         self._sidebar.allPhotosSelected.connect(self.open_all_photos)
         self._sidebar.staticNodeSelected.connect(self._handle_static_node)
         self._sidebar.bindLibraryRequested.connect(self._handle_bind_library)
@@ -73,6 +78,59 @@ class NavigationCoordinator(QObject):
             return
         self._reset_playback()
         self._gallery_vm.open_album(path)
+
+    def open_pinned_item(self, pinned_item: PinnedSidebarItem) -> None:
+        self._reset_playback()
+        library_root = self._context.library.root()
+        if pinned_item.kind == "album":
+            target = Path(pinned_item.item_id)
+            if not target.exists():
+                if self._pinned_items_service is not None:
+                    self._pinned_items_service.prune_missing_album(
+                        target,
+                        library_root=library_root,
+                    )
+                return
+            self._gallery_vm.open_pinned_album(target)
+            return
+
+        if library_root is None:
+            self.bindLibraryRequested.emit()
+            return
+
+        people_service = PeopleService(library_root)
+        if pinned_item.kind == "person":
+            query = people_service.build_cluster_query(pinned_item.item_id)
+            if not query.asset_ids:
+                if self._pinned_items_service is not None:
+                    self._pinned_items_service.prune_missing_entity(
+                        kind="person",
+                        item_id=pinned_item.item_id,
+                        library_root=library_root,
+                    )
+                return
+            self._gallery_vm.open_pinned_people_query(
+                query,
+                kind="person",
+                entity_id=pinned_item.item_id,
+            )
+            return
+
+        if pinned_item.kind == "group":
+            query = people_service.build_group_query(pinned_item.item_id)
+            if not query.asset_ids:
+                if self._pinned_items_service is not None:
+                    self._pinned_items_service.prune_missing_entity(
+                        kind="group",
+                        item_id=pinned_item.item_id,
+                        library_root=library_root,
+                    )
+                return
+            self._gallery_vm.open_pinned_people_query(
+                query,
+                kind="group",
+                entity_id=pinned_item.item_id,
+            )
 
     def open_all_photos(self) -> None:
         self._reset_playback()

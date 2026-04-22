@@ -26,18 +26,20 @@ from PySide6.QtGui import (
     QPainterPath,
     QPixmap,
     QPalette,
-    QRadialGradient,
+    QRadialGradient, QAction,
 )
 from PySide6.QtWidgets import (
     QFrame,
     QGraphicsDropShadowEffect,
     QHBoxLayout,
     QLabel,
+    QMenu,
     QScrollArea,
     QVBoxLayout,
     QWidget,
 )
 
+from iPhoto.gui.services.pinned_items_service import PinnedItemsService
 from ....utils.pathutils import ensure_work_dir
 from ....cache.index_store import get_global_repository
 from ....config import WORK_DIR_NAME
@@ -120,6 +122,7 @@ class AlbumCard(QFrame):
     """Card widget representing a single album."""
 
     clicked = Signal(Path)
+    menuRequested = Signal(Path, object)
 
     def __init__(
         self,
@@ -130,6 +133,7 @@ class AlbumCard(QFrame):
     ) -> None:
         super().__init__(parent)
         self.path = path
+        self.title = title
         self.setMouseTracking(True)
         self._cursor_pos: QPoint | None = None
 
@@ -221,6 +225,10 @@ class AlbumCard(QFrame):
         if event.button() == Qt.MouseButton.LeftButton:
             self.clicked.emit(self.path)
         super().mousePressEvent(event)
+
+    def contextMenuEvent(self, event) -> None:  # noqa: N802
+        self.menuRequested.emit(self.path, event.globalPos())
+        event.accept()
 
     def paintEvent(self, event) -> None:
         painter = QPainter(self)
@@ -525,6 +533,7 @@ class AlbumsDashboard(QWidget):
     def __init__(self, library: LibraryManager, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._library = library
+        self._pinned_service: PinnedItemsService | None = None
         self._cards: dict[Path, AlbumCard] = {}
         # Track refresh generation to prevent race conditions
         # Python integers can grow arbitrarily large, so overflow is not a concern
@@ -541,6 +550,9 @@ class AlbumsDashboard(QWidget):
         self._library.treeUpdated.connect(self.refresh)
         self._library.scanFinished.connect(self._on_scan_finished)
         self.refresh()
+
+    def set_pinned_service(self, service: PinnedItemsService | None) -> None:
+        self._pinned_service = service
 
     def _init_ui(self) -> None:
         self.main_layout = QVBoxLayout(self)
@@ -612,6 +624,7 @@ class AlbumsDashboard(QWidget):
             # Create card with "0" count first
             card = AlbumCard(album.path, album.title, 0, self.scroll_content)
             card.clicked.connect(self.albumSelected)
+            card.menuRequested.connect(self._show_card_menu)
             self.flow_layout.addWidget(card)
             self._cards[album.path] = card
 
@@ -652,6 +665,55 @@ class AlbumsDashboard(QWidget):
 
         if scan_root == library_root or library_root in scan_root.parents:
             self.refresh()
+
+    def _show_card_menu(self, album_path: Path, global_pos) -> None:
+        card = self._cards.get(album_path)
+        if card is None:
+            return
+        menu = self._build_card_menu(card)
+        menu.exec(global_pos)
+
+    def _build_card_menu(self, card: AlbumCard) -> QMenu:
+        menu = QMenu(self)
+        pin_action = QAction(
+            "Unpin Album" if self._is_album_pinned(card.path) else "Pin Album",
+            menu,
+        )
+        pin_action.setEnabled(self._pin_actions_available())
+        pin_action.triggered.connect(lambda: self._toggle_album_pin(card))
+        menu.addAction(pin_action)
+        return menu
+
+    def _toggle_album_pin(self, card: AlbumCard) -> None:
+        if self._pinned_service is None:
+            return
+        library_root = self._library.root()
+        if library_root is None:
+            return
+        if self._is_album_pinned(card.path):
+            self._pinned_service.unpin(
+                kind="album",
+                item_id=str(card.path),
+                library_root=library_root,
+            )
+            return
+        self._pinned_service.pin_album(
+            card.path,
+            card.title,
+            library_root=library_root,
+        )
+
+    def _is_album_pinned(self, album_path: Path) -> bool:
+        if self._pinned_service is None:
+            return False
+        return self._pinned_service.is_pinned(
+            kind="album",
+            item_id=str(album_path),
+            library_root=self._library.root(),
+        )
+
+    def _pin_actions_available(self) -> bool:
+        return self._pinned_service is not None and self._library.root() is not None
 
     def _apply_theme(self) -> None:
         app = QGuiApplication.instance()

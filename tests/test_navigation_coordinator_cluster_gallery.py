@@ -6,6 +6,7 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 from iPhoto.gui.coordinators.navigation_coordinator import NavigationCoordinator
+from iPhoto.gui.services.pinned_items_service import PinnedSidebarItem
 
 
 def _make_coordinator(
@@ -75,6 +76,16 @@ def test_open_location_asset_delegates_to_gallery_vm() -> None:
     coord.open_location_asset("nested/b.jpg")
 
     coord._gallery_vm.open_location_asset.assert_called_once_with("nested/b.jpg")
+
+
+def test_open_pinned_album_delegates_to_gallery_vm(tmp_path: Path) -> None:
+    coord = _make_coordinator()
+    target = tmp_path / "Trips"
+    target.mkdir()
+
+    coord.open_pinned_item(PinnedSidebarItem(kind="album", item_id=str(target), label="Trips"))
+
+    coord._gallery_vm.open_pinned_album.assert_called_once_with(target)
 
 
 def test_route_requested_updates_router() -> None:

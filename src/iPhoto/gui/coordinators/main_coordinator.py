@@ -45,6 +45,7 @@ from iPhoto.gui.ui.widgets.asset_delegate import AssetGridDelegate
 from iPhoto.gui.viewmodels.detail_viewmodel import DetailViewModel
 from iPhoto.gui.viewmodels.gallery_list_model_adapter import GalleryListModelAdapter
 from iPhoto.gui.viewmodels.gallery_viewmodel import GalleryViewModel
+from iPhoto.gui.services.pinned_items_service import PinnedItemsService
 from iPhoto.people.service import PeopleService
 
 if TYPE_CHECKING:
@@ -97,6 +98,12 @@ class MainCoordinator(QObject):
             window.ui.people_page.set_library_root(lib_root)
             window.ui.people_page.set_status_message(context.library.face_scan_status_message())
         self._playback_people_service = PeopleService(lib_root)
+        self._pinned_items_service = PinnedItemsService(context.settings, self)
+        window.ui.sidebar.set_pinned_service(self._pinned_items_service)
+        if hasattr(window.ui, "people_page"):
+            window.ui.people_page.set_pinned_service(self._pinned_items_service)
+        if hasattr(window.ui, "albums_dashboard_page"):
+            window.ui.albums_dashboard_page.set_pinned_service(self._pinned_items_service)
 
         # Inject ViewModel provider into Facade for legacy operations (restore/delete)
         if self._facade:
@@ -121,6 +128,7 @@ class MainCoordinator(QObject):
             self._gallery_vm,
             context,
             context.facade,  # Legacy Facade Bridge
+            pinned_items_service=self._pinned_items_service,
         )
         self._adjustment_committer = MediaAdjustmentCommitter(
             asset_vm=self._asset_list_vm,
@@ -180,6 +188,9 @@ class MainCoordinator(QObject):
         # Inject optional dependencies into Playback
         self._playback.set_navigation_coordinator(self._navigation)
         self._navigation.set_playback_coordinator(self._playback)
+        context.library.peopleSnapshotCommitted.connect(
+            lambda _event: window.ui.sidebar.refresh_tree_model()
+        )
         # Manually attach info panel if available
         if hasattr(window.ui, "info_panel"):
             self._playback.set_info_panel(window.ui.info_panel)

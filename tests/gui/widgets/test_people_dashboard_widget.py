@@ -15,8 +15,10 @@ from PySide6.QtCore import QObject, Qt, Signal
 from PySide6.QtGui import QColor, QImage, QPixmap
 from PySide6.QtWidgets import QApplication, QWidget
 
+from iPhoto.gui.services.pinned_items_service import PinnedItemsService
 from iPhoto.gui.ui.widgets import people_dashboard_cards
 from iPhoto.gui.ui.widgets import people_dashboard_dialogs
+from iPhoto.gui.ui.widgets import people_dashboard_widget
 from iPhoto.gui.ui.widgets.people_dashboard import (
     GroupPeopleDialog,
     MergeConfirmDialog,
@@ -24,6 +26,7 @@ from iPhoto.gui.ui.widgets.people_dashboard import (
 )
 from iPhoto.gui.ui.widgets.people_dashboard_shared import CANVAS_MARGIN
 from iPhoto.people.repository import PeopleGroupSummary, PersonSummary
+from iPhoto.settings.manager import SettingsManager
 
 
 @pytest.fixture(scope="module")
@@ -382,3 +385,98 @@ def test_status_message_updates_without_reloading_cards(qapp: QApplication) -> N
 
     assert widget._board.visible_cards()[0] is original_card
     assert "Click a cluster or group card" in widget._message.text()
+
+
+def test_person_menu_shows_pin_action_when_pinned_service_is_available(
+    tmp_path: Path, qapp: QApplication
+) -> None:
+    settings = SettingsManager(path=tmp_path / "settings.json")
+    settings.load()
+    pinned_service = PinnedItemsService(settings)
+    widget = PeopleDashboardWidget()
+    widget._current_library_root = tmp_path
+    widget._service.set_library_root(tmp_path)
+    widget.set_pinned_service(pinned_service)
+    summary = PersonSummary("person-a", "Alice", "face-a", 3, None, "2024-01-01T00:00:00Z")
+
+    menu = widget._build_card_menu(summary)
+
+    assert "Pin" in [action.text() for action in menu.actions()]
+
+
+def test_pin_unnamed_person_prompts_for_name_and_persists_pin(
+    monkeypatch, tmp_path: Path, qapp: QApplication
+) -> None:
+    settings = SettingsManager(path=tmp_path / "settings.json")
+    settings.load()
+    pinned_service = PinnedItemsService(settings)
+    widget = PeopleDashboardWidget()
+    widget._current_library_root = tmp_path
+    widget._service.set_library_root(tmp_path)
+    widget.set_pinned_service(pinned_service)
+    summary = PersonSummary("person-a", None, "face-a", 3, None, "2024-01-01T00:00:00Z")
+
+    renamed: list[tuple[str, str | None]] = []
+    monkeypatch.setattr(widget._service, "rename_cluster", lambda person_id, name: renamed.append((person_id, name)))
+    monkeypatch.setattr(widget, "reload", lambda **_kwargs: None)
+    monkeypatch.setattr(
+        PeopleDashboardWidget,
+        "_prompt_required_person_name",
+        lambda self, _summary: "Alice",
+    )
+
+    widget._toggle_person_pin(summary)
+
+    assert renamed == [("person-a", "Alice")]
+    pinned = pinned_service.items_for_library(tmp_path)
+    assert [(item.kind, item.item_id, item.label) for item in pinned] == [
+        ("person", "person-a", "Alice")
+    ]
+
+
+def test_hidden_person_pin_shows_warning_and_does_not_persist(
+    monkeypatch, tmp_path: Path, qapp: QApplication
+) -> None:
+    settings = SettingsManager(path=tmp_path / "settings.json")
+    settings.load()
+    pinned_service = PinnedItemsService(settings)
+    widget = PeopleDashboardWidget()
+    widget._current_library_root = tmp_path
+    widget._service.set_library_root(tmp_path)
+    widget.set_pinned_service(pinned_service)
+    summary = PersonSummary("person-a", "Alice", "face-a", 3, None, "2024-01-01T00:00:00Z")
+
+    warnings: list[str] = []
+    monkeypatch.setattr(widget._service, "pin_block_reason", lambda _person_id: "Pinned is blocked.")
+    monkeypatch.setattr(people_dashboard_widget.dialogs, "show_warning", lambda _parent, message, title="iPhoto": warnings.append(message))
+
+    widget._toggle_person_pin(summary)
+
+    assert warnings == ["Pinned is blocked."]
+    assert pinned_service.items_for_library(tmp_path) == []
+
+
+def test_pin_unnamed_group_uses_generated_sidebar_label(tmp_path: Path, qapp: QApplication) -> None:
+    settings = SettingsManager(path=tmp_path / "settings.json")
+    settings.load()
+    pinned_service = PinnedItemsService(settings)
+    widget = PeopleDashboardWidget()
+    widget._current_library_root = tmp_path
+    widget._service.set_library_root(tmp_path)
+    widget.set_pinned_service(pinned_service)
+    summary = PeopleGroupSummary(
+        group_id="group-a",
+        name="",
+        member_person_ids=("person-a", "person-b"),
+        members=(),
+        asset_count=1,
+        cover_asset_path=None,
+        created_at="2024-01-01T00:00:00Z",
+    )
+
+    widget._toggle_group_pin(summary)
+
+    pinned = pinned_service.items_for_library(tmp_path)
+    assert len(pinned) == 1
+    assert pinned[0].kind == "group"
+    assert pinned[0].label == "Group 1"

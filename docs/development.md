@@ -355,20 +355,19 @@ iphoto-gui
 
 ---
 
-## People Dashboard Regression Guardrails
+## Popup Guardrails
 
-The People dashboard has a small set of UI behaviors that are easy to regress
-when popup plumbing, theme detection, or People/group actions are refactored.
+The application has shared popup plumbing for information/warning surfaces.
+When popup code is refactored, prefer the project's own popup implementation
+instead of dropping back to native/system-styled `QMessageBox` windows.
 
-- Do not use raw `QMessageBox` for People dashboard warning/info popups; route
-  them through the project's themed popup helpers.
-- Keep `Hide` / `Unhide`, `Show Hidden People`, hidden-state merge blocking,
-  `Disband Group`, and pinned-group disband protection intact.
-- Keep hide/disband confirmations visually aligned with the shared merge
-  confirmation dialog.
+- Route routine in-app warning/info popups through the shared themed helpers.
+- Make popup theme resolution follow the active app/window theme before the OS
+  color scheme.
+- Keep popup positioning centered on the hosting top-level window.
 - See
-  [`docs/misc/PEOPLE_DASHBOARD_POPUP_REGRESSIONS.md`](misc/PEOPLE_DASHBOARD_POPUP_REGRESSIONS.md)
-  for the full contract and regression checklist.
+  [`docs/misc/PROJECT_POPUP_GUARDRAILS.md`](misc/PROJECT_POPUP_GUARDRAILS.md)
+  for the project-wide rule plus the People dashboard regression checklist.
 
 ---
 

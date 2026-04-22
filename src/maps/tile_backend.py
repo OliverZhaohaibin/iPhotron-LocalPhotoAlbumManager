@@ -6,6 +6,7 @@ import hashlib
 import json
 import logging
 import os
+import sys
 import tempfile
 import time
 from dataclasses import dataclass
@@ -20,11 +21,15 @@ from maps.tile_parser import TileAccessError, TileLoadingError, TileParser
 
 LOGGER = logging.getLogger(__name__)
 
-DEFAULT_QT_ROOT = Path(r"C:\Qt\6.10.1\mingw_64")
-DEFAULT_MINGW_ROOT = Path(r"C:\Qt\Tools\mingw1310_64")
+if sys.platform == "win32":
+    DEFAULT_QT_ROOT = Path(r"C:\Qt\6.10.1\mingw_64")
+    DEFAULT_MINGW_ROOT = Path(r"C:\Qt\Tools\mingw1310_64")
+else:
+    DEFAULT_QT_ROOT = Path("/usr")
+    DEFAULT_MINGW_ROOT = Path()
 ENV_QT_ROOT = "IPHOTO_OSMAND_QT_ROOT"
 ENV_MINGW_ROOT = "IPHOTO_OSMAND_MINGW_ROOT"
-DEFAULT_HELPER_INIT_TIMEOUT_MS = 5000
+DEFAULT_HELPER_INIT_TIMEOUT_MS = 30000
 DEFAULT_HELPER_RENDER_TIMEOUT_MS = 30000
 
 
@@ -432,7 +437,7 @@ class OsmAndRasterBackend:
 
 
 def _helper_process_environment(helper_executable: Path) -> QProcessEnvironment:
-    """Return a process environment that can load the helper's native DLLs."""
+    """Return a process environment that can load the helper's native libraries."""
 
     env = QProcessEnvironment.systemEnvironment()
     path_entries = _existing_path_entries(env)
@@ -451,11 +456,27 @@ def _helper_process_environment(helper_executable: Path) -> QProcessEnvironment:
         merged_path.append(normalized)
 
     env.insert("PATH", os.pathsep.join(merged_path))
+    if os.name != "nt":
+        ld_key = "DYLD_LIBRARY_PATH" if sys.platform == "darwin" else "LD_LIBRARY_PATH"
+        existing_ld = env.value(ld_key, "")
+        ld_entries = [entry for entry in existing_ld.split(os.pathsep) if entry]
+        merged_ld: list[str] = []
+        seen_ld: set[str] = set()
+        for entry in (*prepended_entries, *ld_entries):
+            normalized = entry.strip()
+            if not normalized:
+                continue
+            key = normalized.casefold()
+            if key in seen_ld:
+                continue
+            seen_ld.add(key)
+            merged_ld.append(normalized)
+        env.insert(ld_key, os.pathsep.join(merged_ld))
     return env
 
 
 def _helper_runtime_paths(helper_executable: Path) -> tuple[Path, ...]:
-    """Return PATH entries that let the native helper resolve Qt and MinGW DLLs."""
+    """Return runtime search paths for helper-side Qt and toolchain libraries."""
 
     candidates: list[Path] = [helper_executable.resolve().parent]
 
@@ -473,6 +494,16 @@ def _helper_runtime_paths(helper_executable: Path) -> tuple[Path, ...]:
         str(DEFAULT_MINGW_ROOT),
     ):
         candidates.extend(_runtime_bin_candidates(root))
+
+    if os.name != "nt":
+        try:
+            import PySide6
+        except ImportError:  # pragma: no cover - dependency is required in production
+            pass
+        else:
+            pyside_root = Path(PySide6.__file__).resolve().parent
+            candidates.append(pyside_root)
+            candidates.extend(_runtime_bin_candidates(str((pyside_root / "Qt" / "lib").resolve())))
 
     existing: list[Path] = []
     seen: set[Path] = set()

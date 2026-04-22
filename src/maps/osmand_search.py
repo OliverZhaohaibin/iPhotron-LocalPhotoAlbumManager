@@ -247,19 +247,7 @@ def _prepare_library_load(library_path: Path) -> None:
         _ensure_dll_directory(pyside_root)
         _ensure_dll_directory(shiboken_root)
 
-        repo_root = Path(__file__).resolve().parents[2]
-        dist_dir = library_path.parent
-        for candidate_dist in [
-            repo_root / "tools" / "osmand_render_helper_native" / "dist-msvc",
-            repo_root / "tools" / "osmand_render_helper_native" / "dist",
-        ]:
-            if candidate_dist.is_dir():
-                dist_dir = candidate_dist
-                break
-
         _ensure_dll_directory(library_path.parent)
-        if dist_dir != library_path.parent:
-            _ensure_dll_directory(dist_dir)
 
     if os.name != "nt":
         pyside_root = Path(PySide6.__file__).resolve().parent

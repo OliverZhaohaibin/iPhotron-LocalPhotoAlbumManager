@@ -13,6 +13,7 @@ pytest.importorskip("PySide6.QtTest", reason="Qt test helpers not available", ex
 from PySide6.QtTest import QSignalSpy
 from PySide6.QtWidgets import QApplication
 
+from iPhoto.gui.services.pinned_items_service import PinnedItemsService
 from iPhoto.settings.manager import SettingsManager
 
 
@@ -48,3 +49,33 @@ def test_settings_manager_nested_updates_preserve_defaults(tmp_path: Path) -> No
     manager.set("ui.sidebar_width", 320)
     assert manager.get("ui.sidebar_width") == 320
     assert manager.get("ui.theme") == "system"
+
+
+def test_pinned_items_roundtrip_is_scoped_by_library(tmp_path: Path, qapp: QApplication) -> None:
+    settings_path = tmp_path / "settings.json"
+    manager = SettingsManager(path=settings_path)
+    manager.load()
+    service = PinnedItemsService(manager)
+    spy = QSignalSpy(service.changed)
+
+    library_a = tmp_path / "LibraryA"
+    library_b = tmp_path / "LibraryB"
+    library_a.mkdir()
+    library_b.mkdir()
+
+    service.pin_album(library_a / "Trips", "Trips", library_root=library_a)
+    service.pin_person("person-a", "Alice", library_root=library_a)
+    service.pin_group("group-a", "Group 1", library_root=library_b)
+    qapp.processEvents()
+
+    assert spy.count() == 3
+    assert [(item.kind, item.label) for item in service.items_for_library(library_a)] == [
+        ("person", "Alice"),
+        ("album", "Trips"),
+    ]
+    assert [(item.kind, item.label) for item in service.items_for_library(library_b)] == [
+        ("group", "Group 1"),
+    ]
+
+    stored = json.loads(settings_path.read_text(encoding="utf-8"))
+    assert "pinned_items_by_library" in stored

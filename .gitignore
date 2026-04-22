@@ -212,7 +212,7 @@ __marimo__/
 
 # Test artifacts
 /tmp/
-[\\]tmp[\\]**
+
 .idea/
 /tools/osmand_render_helper_native/qt6-msvc-importlibs/
 /tools/osmand_render_helper_native/dist-msvc/
@@ -228,10 +228,5 @@ __marimo__/
 /demo/face-cluster/runtime/
 /demo/face-cluster/state/
 /.codex
-
-# --- auto-added untracked files (by assistant) ---
-# These were untracked when the user requested to add them to .gitignore
-PySide6-OsmAnd-SDK/
-src/iPhoto/extension/models/buffalo_s.zip
-src/iPhoto/extension/models/buffalo_s/
-
+/src/extension/
+/src/iPhoto/extension/

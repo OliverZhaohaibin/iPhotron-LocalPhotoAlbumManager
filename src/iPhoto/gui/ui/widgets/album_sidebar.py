@@ -34,6 +34,7 @@ from PySide6.QtWidgets import (
 
 from ....library.manager import LibraryManager
 from ....config import ALL_PHOTOS_TITLE as _ALL_PHOTOS_TITLE
+from ...services.pinned_items_service import PinnedItemsService, PinnedSidebarItem
 from ..models.album_tree_model import AlbumTreeModel, NodeType
 from ..delegates.album_sidebar_delegate import (
     AlbumSidebarDelegate,
@@ -161,6 +162,7 @@ class AlbumSidebar(QWidget):
     """Composite widget exposing library navigation and actions."""
 
     albumSelected = Signal(Path)
+    pinnedItemSelected = Signal(object)
     allPhotosSelected = Signal()
     staticNodeSelected = Signal(str)
     bindLibraryRequested = Signal()
@@ -176,6 +178,7 @@ class AlbumSidebar(QWidget):
         self._pending_selection: Path | None = None
         self._current_selection: Path | None = None
         self._current_static_selection: str | None = None
+        self._current_pinned_selection: tuple[str, str] | None = None
 
         # Give the widget a stable object name so the stylesheet targets only the
         # sidebar shell and does not bleed into child controls such as the tree view.
@@ -329,16 +332,28 @@ class AlbumSidebar(QWidget):
 
         return self._model
 
+    def set_pinned_service(self, service: PinnedItemsService | None) -> None:
+        """Attach a pinned-items service to the underlying tree model."""
+
+        self._model.set_pinned_service(service)
+
+    def refresh_tree_model(self) -> None:
+        """Force the sidebar model to rebuild its current contents."""
+
+        self._model.refresh()
+
     def _expand_defaults(self) -> None:
         """Expand high-level nodes to match the reference layout."""
 
         if self._model.rowCount() == 0:
             return
-        root_index = self._model.index(0, 0)
-        if root_index.isValid():
+        for row in range(self._model.rowCount()):
+            root_index = self._model.index(row, 0)
+            if not root_index.isValid():
+                continue
             self._tree.expand(root_index)
-            for row in range(self._model.rowCount(root_index)):
-                child = self._model.index(row, 0, root_index)
+            for child_row in range(self._model.rowCount(root_index)):
+                child = self._model.index(child_row, 0, root_index)
                 if child.isValid():
                     self._tree.expand(child)
 
@@ -355,6 +370,12 @@ class AlbumSidebar(QWidget):
         if self._pending_selection is not None:
             self.select_path(self._pending_selection)
             self._pending_selection = None
+        elif self._current_pinned_selection is not None:
+            kind, item_id = self._current_pinned_selection
+            self.select_pinned_item(
+                PinnedSidebarItem(kind=kind, item_id=item_id, label=""),
+                emit_signal=False,
+            )
         elif self._current_selection is not None:
             self.select_path(self._current_selection)
         elif self._current_static_selection:
@@ -389,6 +410,7 @@ class AlbumSidebar(QWidget):
             return
         if node_type == NodeType.HEADER:
             if item.title == "Albums":
+                self._current_pinned_selection = None
                 self.staticNodeSelected.emit("Albums")
             return
         if node_type == NodeType.STATIC:
@@ -407,7 +429,17 @@ class AlbumSidebar(QWidget):
                 _logger.info("_on_selection_changed: emitting staticNodeSelected(%r)", item.title)
                 self.staticNodeSelected.emit(item.title)
             return
+        if node_type in {NodeType.PINNED_ALBUM, NodeType.PINNED_PERSON, NodeType.PINNED_GROUP}:
+            pinned_item = item.pinned_item
+            if pinned_item is None:
+                return
+            self._current_selection = None
+            self._current_static_selection = None
+            self._current_pinned_selection = (pinned_item.kind, pinned_item.item_id)
+            self.pinnedItemSelected.emit(pinned_item)
+            return
         self._current_static_selection = None
+        self._current_pinned_selection = None
         album = item.album
         if album is not None:
             self._current_selection = album.path
@@ -468,6 +500,7 @@ class AlbumSidebar(QWidget):
             return
 
         self._current_static_selection = None
+        self._current_pinned_selection = None
         self._current_selection = path
 
         # When programmatically selecting an album in response to an external event (like
@@ -492,6 +525,30 @@ class AlbumSidebar(QWidget):
 
         self._tree.scrollTo(index)
 
+    def select_pinned_item(self, pinned_item: PinnedSidebarItem, emit_signal: bool = False) -> None:
+        """Select the sidebar row associated with *pinned_item* when present."""
+
+        index = self._model.index_for_pinned_item(pinned_item)
+        if not index.isValid():
+            return
+
+        self._current_selection = None
+        self._current_static_selection = None
+        self._current_pinned_selection = (pinned_item.kind, pinned_item.item_id)
+
+        selection_model = self._tree.selectionModel()
+        already_selected = selection_model is not None and self._tree.currentIndex() == index
+        if selection_model is not None and not emit_signal:
+            selection_model.blockSignals(True)
+        try:
+            self._tree.setCurrentIndex(index)
+        finally:
+            if selection_model is not None and not emit_signal:
+                selection_model.blockSignals(False)
+        self._tree.scrollTo(index)
+        if emit_signal and already_selected:
+            self.pinnedItemSelected.emit(pinned_item)
+
     def select_all_photos(self, emit_signal: bool = False) -> None:
         """Select the "All Photos" static node if it is available."""
 
@@ -508,6 +565,7 @@ class AlbumSidebar(QWidget):
 
         self._current_selection = None
         self._current_static_selection = title
+        self._current_pinned_selection = None
 
         # Check whether the target index is already selected.  When the caller
         # requests signal emission but the selection model considers the index

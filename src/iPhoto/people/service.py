@@ -132,6 +132,27 @@ class PeopleService:
             return
         get_people_index_coordinator(self._library_root).rename_person(person_id, new_name)
 
+    def pin_block_reason(self, person_id: str) -> str | None:
+        """Return a human-readable reason why *person_id* cannot be pinned."""
+
+        repository = self.repository()
+        if repository is None or not person_id:
+            return None
+
+        block_reason = getattr(repository, "pin_block_reason", None)
+        if callable(block_reason):
+            reason = block_reason(person_id)
+            if isinstance(reason, str):
+                normalized = reason.strip()
+                if normalized:
+                    return normalized
+
+        is_hidden = getattr(repository, "is_person_hidden", None)
+        if callable(is_hidden) and bool(is_hidden(person_id)):
+            return "This person can't be pinned while hidden."
+
+        return None
+
     def set_cluster_cover(self, person_id: str, face_id: str) -> bool:
         if self._library_root is None:
             return False
@@ -168,6 +189,12 @@ class PeopleService:
     def build_cluster_query(self, person_id: str) -> AssetQuery:
         return AssetQuery(asset_ids=self.cluster_asset_ids(person_id))
 
+    def has_cluster(self, person_id: str) -> bool:
+        repository = self.repository()
+        if repository is None or not person_id:
+            return False
+        return any(summary.person_id == person_id for summary in repository.get_person_summaries())
+
     def group_asset_ids(self, group_id: str) -> list[str]:
         repository = self.repository()
         if repository is None or self._library_root is None:
@@ -177,6 +204,9 @@ class PeopleService:
 
     def build_group_query(self, group_id: str) -> AssetQuery:
         return AssetQuery(asset_ids=self.group_asset_ids(group_id))
+
+    def has_group(self, group_id: str) -> bool:
+        return self.get_group_summary(group_id) is not None
 
     def list_asset_face_annotations(self, asset_id: str) -> list[AssetFaceAnnotation]:
         repository = self.repository()

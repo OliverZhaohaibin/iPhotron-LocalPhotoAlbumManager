@@ -19,6 +19,7 @@ from ..widgets import dialogs
 from ....errors import LibraryError
 from ....library.manager import LibraryManager
 from ....library.tree import AlbumNode
+from ...services.pinned_items_service import PinnedSidebarItem
 from ..models.album_tree_model import AlbumTreeItem, AlbumTreeModel, NodeType
 
 
@@ -153,6 +154,8 @@ class AlbumSidebarContextMenu(QMenu):
         if self._item.node_type in {NodeType.HEADER, NodeType.SECTION}:
             self.addAction("New Album…", self._prompt_new_album)
         if self._item.node_type == NodeType.ALBUM:
+            self.addAction(self._album_pin_label(), self._toggle_album_pin)
+            self.addSeparator()
             self.addAction(
                 "New Sub-Album…",
                 lambda: self._prompt_new_album(self._item),
@@ -167,6 +170,8 @@ class AlbumSidebarContextMenu(QMenu):
                 lambda: self._reveal_path(self._item.album),
             )
         if self._item.node_type == NodeType.SUBALBUM:
+            self.addAction(self._album_pin_label(), self._toggle_album_pin)
+            self.addSeparator()
             self.addAction(
                 "Rename Album…",
                 lambda: self._prompt_rename_album(self._item),
@@ -176,8 +181,61 @@ class AlbumSidebarContextMenu(QMenu):
                 "Show in File Manager",
                 lambda: self._reveal_path(self._item.album),
             )
+        if self._item.node_type in {
+            NodeType.PINNED_ALBUM,
+            NodeType.PINNED_PERSON,
+            NodeType.PINNED_GROUP,
+        }:
+            self.addAction("Unpin", self._unpin_sidebar_item)
         if self._item.node_type == NodeType.ACTION:
             self.addAction("Set Basic Library…", self._on_bind_library)
+
+    def _album_pin_label(self) -> str:
+        album = self._item.album
+        if album is None:
+            return "Pin Album"
+        return "Unpin Album" if self._is_album_pinned(album.path) else "Pin Album"
+
+    def _toggle_album_pin(self) -> None:
+        pinned_service = self._model._pinned_service
+        album = self._item.album
+        library_root = self._library.root()
+        if pinned_service is None or album is None or library_root is None:
+            return
+        if self._is_album_pinned(album.path):
+            pinned_service.unpin(
+                kind="album",
+                item_id=str(album.path),
+                library_root=library_root,
+            )
+            return
+        pinned_service.pin_album(
+            album.path,
+            album.title,
+            library_root=library_root,
+        )
+
+    def _unpin_sidebar_item(self) -> None:
+        pinned_service = self._model._pinned_service
+        pinned_item = self._item.pinned_item
+        library_root = self._library.root()
+        if pinned_service is None or pinned_item is None or library_root is None:
+            return
+        pinned_service.unpin(
+            kind=pinned_item.kind,
+            item_id=pinned_item.item_id,
+            library_root=library_root,
+        )
+
+    def _is_album_pinned(self, album_path: Path) -> bool:
+        pinned_service = self._model._pinned_service
+        if pinned_service is None:
+            return False
+        return pinned_service.is_pinned(
+            kind="album",
+            item_id=str(album_path),
+            library_root=self._library.root(),
+        )
 
     def _prompt_new_album(self, parent_item: AlbumTreeItem | None = None) -> None:
         base_item = parent_item

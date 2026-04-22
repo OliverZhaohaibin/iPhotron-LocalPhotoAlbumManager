@@ -10,8 +10,10 @@ pytest.importorskip("PySide6.QtWidgets", reason="Qt widgets not available", exc_
 from PySide6.QtCore import QModelIndex
 from PySide6.QtWidgets import QApplication
 
+from iPhoto.gui.services.pinned_items_service import PinnedItemsService
 from iPhoto.gui.ui.models.album_tree_model import AlbumTreeModel, AlbumTreeRole, NodeType
 from iPhoto.library.manager import LibraryManager
+from iPhoto.settings.manager import SettingsManager
 
 
 @pytest.fixture(scope="module")
@@ -99,3 +101,51 @@ def test_model_populates_albums(tmp_path: Path, qapp: QApplication) -> None:
     mapped_index = model.index_for_path(album_dir)
     assert mapped_index.isValid()
     assert model.data(mapped_index) == "Day1"
+
+
+def test_model_inserts_pinned_section_between_library_and_albums(tmp_path: Path, qapp: QApplication) -> None:
+    root = tmp_path / "Library"
+    root.mkdir()
+    album_dir = _create_album(root, "Trips")
+    manager = LibraryManager()
+    manager.bind_path(root)
+    qapp.processEvents()
+
+    settings = SettingsManager(path=tmp_path / "settings.json")
+    settings.load()
+    pinned_service = PinnedItemsService(settings)
+    pinned_service.pin_album(album_dir, "Trips", library_root=root)
+    pinned_service.pin_person("person-a", "Alice", library_root=root)
+
+    model = AlbumTreeModel(manager)
+    model.set_pinned_service(pinned_service)
+    qapp.processEvents()
+
+    pinned_index = _find_child(model, QModelIndex(), "Pinned")
+    albums_index = _find_child(model, QModelIndex(), "Albums")
+    assert pinned_index is not None
+    assert albums_index is not None
+    assert pinned_index.row() < albums_index.row()
+    assert model.data(pinned_index, AlbumTreeRole.NODE_TYPE) == NodeType.HEADER
+
+    alice_index = _find_child(model, pinned_index, "Alice")
+    trips_index = _find_child(model, pinned_index, "Trips")
+    assert alice_index is not None
+    assert trips_index is not None
+    assert model.data(alice_index, AlbumTreeRole.NODE_TYPE) == NodeType.PINNED_PERSON
+    assert model.data(trips_index, AlbumTreeRole.NODE_TYPE) == NodeType.PINNED_ALBUM
+
+
+def test_model_omits_pinned_section_when_empty(tmp_path: Path, qapp: QApplication) -> None:
+    root = tmp_path / "Library"
+    root.mkdir()
+    _create_album(root, "Trips")
+    manager = LibraryManager()
+    manager.bind_path(root)
+    qapp.processEvents()
+
+    model = AlbumTreeModel(manager)
+    qapp.processEvents()
+
+    pinned_index = _find_child(model, QModelIndex(), "Pinned")
+    assert pinned_index is None

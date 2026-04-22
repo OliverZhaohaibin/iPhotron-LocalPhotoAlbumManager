@@ -281,6 +281,7 @@ class PeopleCard(QWidget):
 
 class GroupCard(QWidget):
     activated = Signal(str)
+    menuRequested = Signal(str, object)
     _CARD_INSET = 4
     _SHADOW_SAFE_BOTTOM = 18
 
@@ -507,3 +508,7 @@ class GroupCard(QWidget):
             event.accept()
             return
         super().mouseReleaseEvent(event)
+
+    def contextMenuEvent(self, event) -> None:  # noqa: N802
+        self.menuRequested.emit(self.group_id, event.globalPos())
+        event.accept()

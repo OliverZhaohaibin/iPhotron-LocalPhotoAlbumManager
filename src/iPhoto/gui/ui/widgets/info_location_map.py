@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-from PySide6.QtCore import QEvent, QPointF, QRect, QSize, Qt, QTimer
+from PySide6.QtCore import QCoreApplication, QEvent, QPointF, QRect, QSize, Qt, QTimer
 from PySide6.QtGui import QResizeEvent
 from PySide6.QtWidgets import QLabel, QSizePolicy, QVBoxLayout, QWidget
 
@@ -64,6 +64,8 @@ class InfoLocationMapView(QWidget):
     _MINIMUM_SIDE = 156
     _SETTLE_SYNC_DELAY_MS = 24
     _VIEWPORT_MATCH_EPSILON = 1e-6
+    _PIN_SYNC_EVENT = QEvent.Type(QEvent.registerEventType())
+    _VIEWPORT_SYNC_EVENT = QEvent.Type(QEvent.registerEventType())
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -74,6 +76,8 @@ class InfoLocationMapView(QWidget):
         self._screen_point: QPointF | None = None
         self._requested_zoom = self.DEFAULT_ZOOM
         self._pending_viewport_sync = False
+        self._pending_pin_sync_queue = False
+        self._pending_viewport_sync_queue = False
         self._pin_sync_timer = QTimer(self)
         self._pin_sync_timer.setSingleShot(True)
         self._pin_sync_timer.setInterval(0)
@@ -126,6 +130,7 @@ class InfoLocationMapView(QWidget):
         self._longitude = float(longitude)
         self._requested_zoom = float(zoom if zoom is not None else self.DEFAULT_ZOOM)
         self._pending_viewport_sync = True
+        self._screen_point = None
         if self._map_widget is None:
             self._message_label.setText("Map preview unavailable")
             self._message_label.show()
@@ -136,11 +141,13 @@ class InfoLocationMapView(QWidget):
 
         self._message_label.hide()
         self._map_host.show()
-        self._apply_pending_viewport_now()
-        self._schedule_viewport_sync()
-        self._overlay.show()
-        self._overlay.raise_()
-        self._schedule_pin_sync()
+        self._sync_overlay_geometry()
+        if self._map_widget_ready_for_sync():
+            self._apply_pending_viewport_now()
+        self._queue_viewport_sync()
+        if self._screen_point is None:
+            self._overlay.set_screen_point(None)
+            self._overlay.hide()
 
     def clear_location(self) -> None:
         self._latitude = None
@@ -183,12 +190,25 @@ class InfoLocationMapView(QWidget):
 
     def showEvent(self, event) -> None:  # type: ignore[override]
         super().showEvent(event)
-        self._schedule_viewport_sync()
+        self._sync_overlay_geometry()
+        self._queue_viewport_sync()
+
+    def event(self, event: QEvent) -> bool:  # type: ignore[override]
+        if event.type() == self._PIN_SYNC_EVENT:
+            self._pending_pin_sync_queue = False
+            if self._map_widget_ready_for_sync():
+                self._sync_pin_position_now()
+            return True
+        if event.type() == self._VIEWPORT_SYNC_EVENT:
+            self._pending_viewport_sync_queue = False
+            self._apply_pending_viewport_now()
+            return True
+        return super().event(event)
 
     def eventFilter(self, watched: object, event: QEvent) -> bool:
         if watched is self._map_widget and event.type() == QEvent.Type.Resize:
             self._sync_overlay_geometry()
-            self._schedule_viewport_sync()
+            self._queue_viewport_sync()
         return super().eventFilter(watched, event)
 
     def _sync_overlay_geometry(self) -> None:
@@ -198,6 +218,8 @@ class InfoLocationMapView(QWidget):
         self._overlay.setGeometry(target_rect)
         self._overlay.raise_()
         if self._latitude is not None and self._longitude is not None:
+            if self._map_widget_ready_for_sync():
+                self._sync_pin_position_now()
             self._schedule_pin_sync()
 
     def _visible_map_rect(self) -> QRect | None:
@@ -212,8 +234,25 @@ class InfoLocationMapView(QWidget):
         self.setFixedHeight(target_height)
         self.updateGeometry()
 
+    def _map_widget_ready_for_sync(self) -> bool:
+        if self._map_widget is None:
+            return False
+        visible_rect = self._visible_map_rect()
+        if visible_rect is None or visible_rect.isEmpty():
+            return False
+        if not self._map_host.isVisible():
+            return False
+        if isinstance(self._map_widget, QWidget):
+            if not self._map_widget.isVisible():
+                return False
+            if self._map_widget.width() <= 1 or self._map_widget.height() <= 1:
+                return False
+        return True
+
     def _current_view_matches_requested_location(self) -> bool:
         if self._map_widget is None or self._latitude is None or self._longitude is None:
+            return False
+        if not self._map_widget_ready_for_sync():
             return False
 
         try:
@@ -242,11 +281,23 @@ class InfoLocationMapView(QWidget):
         self._viewport_sync_timer.start()
         self._viewport_settle_timer.start()
 
+    def _queue_viewport_sync(self) -> None:
+        if self._pending_viewport_sync_queue:
+            return
+        self._pending_viewport_sync_queue = True
+        QCoreApplication.postEvent(
+            self,
+            QEvent(self._VIEWPORT_SYNC_EVENT),
+            Qt.EventPriority.LowEventPriority.value,
+        )
+
     def _apply_pending_viewport_now(self) -> None:
         if not self._pending_viewport_sync:
             return
         if self._map_widget is None or self._latitude is None or self._longitude is None:
             self._pending_viewport_sync = False
+            return
+        if not self._map_widget_ready_for_sync():
             return
 
         try:
@@ -311,10 +362,20 @@ class InfoLocationMapView(QWidget):
         self._pin_sync_timer.start()
         self._pin_settle_timer.start()
 
+    def _queue_pin_sync(self) -> None:
+        if self._pending_pin_sync_queue:
+            return
+        self._pending_pin_sync_queue = True
+        QCoreApplication.postEvent(
+            self,
+            QEvent(self._PIN_SYNC_EVENT),
+            Qt.EventPriority.LowEventPriority.value,
+        )
+
     def _handle_map_view_changed(self, _center_x: float, _center_y: float, _zoom: float) -> None:
         if self._pending_viewport_sync and self._current_view_matches_requested_location():
             self._pending_viewport_sync = False
-        self._schedule_pin_sync()
+        self._queue_pin_sync()
 
     def _handle_map_panned(self, delta: QPointF) -> None:
         self._pending_viewport_sync = False
@@ -330,7 +391,7 @@ class InfoLocationMapView(QWidget):
         self._pin_settle_timer.start()
 
     def _handle_map_pan_finished(self) -> None:
-        self._schedule_pin_sync()
+        self._queue_pin_sync()
 
     def _create_map_widget(self) -> None:
         map_source = MapSourceSpec.osmand_default(_MAPS_PACKAGE_ROOT)

@@ -343,12 +343,28 @@ class AlbumTreeModel(QAbstractItemModel):
         if self._pinned_service is None:
             return
 
-        album_lookup = self._album_lookup()
-        people_service = PeopleService(library_root)
-        person_lookup = {summary.person_id: summary for summary in people_service.list_clusters()}
-        group_lookup = {summary.group_id: summary for summary in people_service.list_groups()}
+        pinned_items = list(self._pinned_service.items_for_library(library_root))
+        if not pinned_items:
+            return
 
-        for pinned_item in self._pinned_service.items_for_library(library_root):
+        album_lookup = self._album_lookup()
+        person_lookup: dict[str, object] = {}
+        group_lookup: dict[str, object] = {}
+
+        needs_people = any(pinned_item.kind == "person" for pinned_item in pinned_items)
+        needs_groups = any(pinned_item.kind == "group" for pinned_item in pinned_items)
+        if needs_people or needs_groups:
+            people_service = PeopleService(library_root)
+            cluster_summaries = people_service.list_clusters()
+            if needs_people:
+                person_lookup = {summary.person_id: summary for summary in cluster_summaries}
+            if needs_groups:
+                group_lookup = {
+                    summary.group_id: summary
+                    for summary in people_service.list_groups(summaries=cluster_summaries)
+                }
+
+        for pinned_item in pinned_items:
             item = self._create_pinned_item(
                 pinned_item,
                 album_lookup=album_lookup,

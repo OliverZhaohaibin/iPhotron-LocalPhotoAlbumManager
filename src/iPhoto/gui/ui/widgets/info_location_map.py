@@ -5,9 +5,9 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-from PySide6.QtCore import QPointF, QRect, Qt
+from PySide6.QtCore import QEvent, QPointF, QRect, QSize, Qt, QTimer
 from PySide6.QtGui import QResizeEvent
-from PySide6.QtWidgets import QLabel, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QLabel, QSizePolicy, QVBoxLayout, QWidget
 
 from maps.map_sources import MapSourceSpec
 from maps.map_widget._map_widget_base import MapWidgetBase
@@ -20,6 +20,10 @@ from .photo_map_view import check_opengl_support, choose_map_widget_backend
 LOGGER = logging.getLogger(__name__)
 
 _MAPS_PACKAGE_ROOT = Path(__file__).resolve().parents[4] / "maps"
+_PIN_ICON_WIDTH = 90
+_PIN_ICON_HEIGHT = 114
+_PIN_ANCHOR_X_RATIO = 256.0 / 512.0
+_PIN_ANCHOR_Y_RATIO = 418.0 / 512.0
 
 
 class _PinOverlay(QWidget):
@@ -29,7 +33,10 @@ class _PinOverlay(QWidget):
         super().__init__(parent)
         self._owner = owner
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
-        self._pin = load_icon("map.pin.svg", size=(30, 38)).pixmap(30, 38)
+        self._pin = load_icon(
+            "map.pin.svg",
+            size=(_PIN_ICON_WIDTH, _PIN_ICON_HEIGHT),
+        ).pixmap(_PIN_ICON_WIDTH, _PIN_ICON_HEIGHT)
         self._pin_label = QLabel(self)
         self._pin_label.setPixmap(self._pin)
         self._pin_label.setFixedSize(self._pin.size())
@@ -41,8 +48,10 @@ class _PinOverlay(QWidget):
             self._pin_label.hide()
             return
 
-        x = int(round(point.x() - self._pin.width() / 2.0))
-        y = int(round(point.y() - self._pin.height()))
+        anchor_x = self._pin.width() * _PIN_ANCHOR_X_RATIO
+        anchor_y = self._pin.height() * _PIN_ANCHOR_Y_RATIO
+        x = int(round(point.x() - anchor_x))
+        y = int(round(point.y() - anchor_y))
         self._pin_label.move(x, y)
         self._pin_label.show()
         self._pin_label.raise_()
@@ -52,6 +61,8 @@ class InfoLocationMapView(QWidget):
     """Embed a non-editing map preview centred on a single assigned location."""
 
     DEFAULT_ZOOM = 8.0
+    _MINIMUM_SIDE = 156
+    _SETTLE_SYNC_DELAY_MS = 24
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -60,8 +71,17 @@ class InfoLocationMapView(QWidget):
         self._latitude: float | None = None
         self._longitude: float | None = None
         self._screen_point: QPointF | None = None
+        self._pin_sync_timer = QTimer(self)
+        self._pin_sync_timer.setSingleShot(True)
+        self._pin_sync_timer.setInterval(0)
+        self._pin_sync_timer.timeout.connect(self._sync_pin_position_now)
+        self._pin_settle_timer = QTimer(self)
+        self._pin_settle_timer.setSingleShot(True)
+        self._pin_settle_timer.setInterval(self._SETTLE_SYNC_DELAY_MS)
+        self._pin_settle_timer.timeout.connect(self._sync_pin_position_now)
 
-        self.setMinimumHeight(156)
+        self.setMinimumSize(self._MINIMUM_SIDE, self._MINIMUM_SIDE)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         self._layout = QVBoxLayout(self)
         self._layout.setContentsMargins(0, 0, 0, 0)
         self._layout.setSpacing(0)
@@ -109,12 +129,14 @@ class InfoLocationMapView(QWidget):
             LOGGER.warning("Failed to update info-panel mini-map", exc_info=True)
         self._overlay.show()
         self._overlay.raise_()
-        self._sync_pin_position(center_fallback=True)
+        self._schedule_pin_sync()
 
     def clear_location(self) -> None:
         self._latitude = None
         self._longitude = None
         self._screen_point = None
+        self._pin_sync_timer.stop()
+        self._pin_settle_timer.stop()
         self._overlay.set_screen_point(None)
         self._overlay.hide()
 
@@ -126,17 +148,48 @@ class InfoLocationMapView(QWidget):
                 LOGGER.debug("Mini-map shutdown failed", exc_info=True)
             self._map_widget = None
 
+    def hasHeightForWidth(self) -> bool:  # type: ignore[override]
+        return True
+
+    def heightForWidth(self, width: int) -> int:  # type: ignore[override]
+        return max(self._MINIMUM_SIDE, int(width))
+
+    def sizeHint(self) -> QSize:  # type: ignore[override]
+        return QSize(self._MINIMUM_SIDE, self._MINIMUM_SIDE)
+
+    def minimumSizeHint(self) -> QSize:  # type: ignore[override]
+        return QSize(self._MINIMUM_SIDE, self._MINIMUM_SIDE)
+
     def resizeEvent(self, event: QResizeEvent) -> None:  # type: ignore[override]
         super().resizeEvent(event)
+        self._sync_square_height()
         self._sync_overlay_geometry()
 
+    def eventFilter(self, watched: object, event: QEvent) -> bool:
+        if watched is self._map_widget and event.type() == QEvent.Type.Resize:
+            self._sync_overlay_geometry()
+        return super().eventFilter(watched, event)
+
     def _sync_overlay_geometry(self) -> None:
-        if self._map_widget is None:
+        target_rect = self._visible_map_rect()
+        if target_rect is None:
             return
-        self._overlay.setGeometry(QRect(0, 0, self._map_host.width(), self._map_host.height()))
+        self._overlay.setGeometry(target_rect)
         self._overlay.raise_()
         if self._latitude is not None and self._longitude is not None:
-            self._sync_pin_position(center_fallback=True)
+            self._schedule_pin_sync()
+
+    def _visible_map_rect(self) -> QRect | None:
+        if self._map_widget is None:
+            return None
+        return self._map_widget.geometry()
+
+    def _sync_square_height(self) -> None:
+        target_height = max(self._MINIMUM_SIDE, self.width())
+        if self.minimumHeight() == target_height and self.maximumHeight() == target_height:
+            return
+        self.setFixedHeight(target_height)
+        self.updateGeometry()
 
     def _connect_map_signals(self) -> None:
         if self._map_widget is None:
@@ -160,7 +213,10 @@ class InfoLocationMapView(QWidget):
 
         point = self._map_widget.project_lonlat(self._longitude, self._latitude)
         if point is None and center_fallback:
-            return QPointF(self._map_host.width() / 2.0, self._map_host.height() / 2.0)
+            visible_rect = self._visible_map_rect()
+            if visible_rect is None:
+                return None
+            return QPointF(visible_rect.width() / 2.0, visible_rect.height() / 2.0)
         return point
 
     def _sync_pin_position(self, *, center_fallback: bool) -> None:
@@ -173,12 +229,21 @@ class InfoLocationMapView(QWidget):
             self._overlay.show()
             self._overlay.raise_()
 
-    def _handle_map_view_changed(self, _center_x: float, _center_y: float, _zoom: float) -> None:
+    def _sync_pin_position_now(self) -> None:
         self._sync_pin_position(center_fallback=True)
+
+    def _schedule_pin_sync(self) -> None:
+        if self._latitude is None or self._longitude is None:
+            return
+        self._pin_sync_timer.start()
+        self._pin_settle_timer.start()
+
+    def _handle_map_view_changed(self, _center_x: float, _center_y: float, _zoom: float) -> None:
+        self._schedule_pin_sync()
 
     def _handle_map_panned(self, delta: QPointF) -> None:
         if self._screen_point is None:
-            self._sync_pin_position(center_fallback=True)
+            self._schedule_pin_sync()
             return
 
         self._screen_point = QPointF(
@@ -186,9 +251,10 @@ class InfoLocationMapView(QWidget):
             self._screen_point.y() + float(delta.y()),
         )
         self._overlay.set_screen_point(self._screen_point)
+        self._pin_settle_timer.start()
 
     def _handle_map_pan_finished(self) -> None:
-        self._sync_pin_position(center_fallback=True)
+        self._schedule_pin_sync()
 
     def _create_map_widget(self) -> None:
         map_source = MapSourceSpec.osmand_default(_MAPS_PACKAGE_ROOT)
@@ -228,9 +294,15 @@ class InfoLocationMapView(QWidget):
             self._message_label.show()
             return
 
+        if isinstance(self._map_widget, QWidget):
+            self._map_widget.setMinimumSize(0, 0)
+            self._map_widget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+            self._map_widget.installEventFilter(self)
         self._map_host_layout.addWidget(self._map_widget, 1)
         self._connect_map_signals()
+        self._sync_square_height()
         self._sync_overlay_geometry()
+        QTimer.singleShot(0, self._sync_overlay_geometry)
 
 
 __all__ = ["InfoLocationMapView"]

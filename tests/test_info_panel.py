@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 from unittest.mock import Mock
 
 import pytest
@@ -10,9 +11,9 @@ import pytest
 pytest.importorskip("PySide6", reason="PySide6 is required for GUI tests", exc_type=ImportError)
 pytest.importorskip("PySide6.QtWidgets", reason="Qt widgets not available", exc_type=ImportError)
 
-from PySide6.QtCore import QEvent, QPointF, QSize, Qt
+from PySide6.QtCore import QEvent, QPointF, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QMouseEvent
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QWidget
 
 from iPhoto.gui.ui.widgets.info_panel import (
     InfoPanel,
@@ -20,6 +21,8 @@ from iPhoto.gui.ui.widgets.info_panel import (
     _FACE_ADD_ICON_SIZE,
     _FACE_AVATAR_DIAMETER,
 )
+from iPhoto.gui.ui.widgets import info_location_map as info_location_map_module
+from maps.map_sources import MapBackendMetadata, MapSourceSpec
 
 
 @pytest.fixture(scope="module")
@@ -31,6 +34,98 @@ def qapp() -> QApplication:
     if app is None:
         app = QApplication([])
     return app
+
+
+class _FakeMiniMapWidget(QWidget):
+    viewChanged = Signal(float, float, float)
+    panned = Signal(QPointF)
+    panFinished = Signal()
+
+    def __init__(self, parent: QWidget | None = None, *, map_source: MapSourceSpec | None = None) -> None:
+        super().__init__(parent)
+        self._map_source = map_source
+        self._zoom = 2.0
+        self._center: tuple[float, float] = (0.0, 0.0)
+        self.setMinimumSize(640, 480)
+
+    @property
+    def zoom(self) -> float:
+        return self._zoom
+
+    def set_zoom(self, zoom: float) -> None:
+        self._zoom = float(zoom)
+        self.viewChanged.emit(0.5, 0.5, self._zoom)
+
+    def center_on(self, lon: float, lat: float) -> None:
+        self._center = (float(lon), float(lat))
+        self.viewChanged.emit(0.5, 0.5, self._zoom)
+
+    def center_lonlat(self) -> tuple[float, float]:
+        return self._center
+
+    def reset_view(self) -> None:
+        self._center = (0.0, 0.0)
+        self._zoom = 2.0
+        self.viewChanged.emit(0.5, 0.5, self._zoom)
+
+    def pan_by_pixels(self, delta_x: float, delta_y: float) -> None:
+        self.panned.emit(QPointF(float(delta_x), float(delta_y)))
+
+    def project_lonlat(self, lon: float, lat: float) -> QPointF | None:
+        del lon, lat
+        return QPointF(self.width() / 2.0, self.height() / 2.0)
+
+    def shutdown(self) -> None:
+        return None
+
+    def map_backend_metadata(self) -> MapBackendMetadata:
+        return MapBackendMetadata(2.0, 19.0, True, "raster", "xyz")
+
+
+class _DelayedProjectionMiniMapWidget(_FakeMiniMapWidget):
+    def __init__(self, parent: QWidget | None = None, *, map_source: MapSourceSpec | None = None) -> None:
+        super().__init__(parent, map_source=map_source)
+        self._projected_point = QPointF(80.0, 80.0)
+        self._pending_projected_point = QPointF(self._projected_point)
+
+    def set_zoom(self, zoom: float) -> None:
+        self._zoom = float(zoom)
+        self._pending_projected_point = QPointF(self.width() / 2.0, self.height() / 2.0)
+        self.viewChanged.emit(0.5, 0.5, self._zoom)
+        QTimer.singleShot(0, self._apply_pending_projection)
+
+    def project_lonlat(self, lon: float, lat: float) -> QPointF | None:
+        del lon, lat
+        return QPointF(self._projected_point)
+
+    def _apply_pending_projection(self) -> None:
+        self._projected_point = QPointF(self._pending_projected_point)
+
+
+def _fake_choose_map_widget_backend(
+    _map_source: MapSourceSpec | None,
+    *,
+    use_opengl: bool,
+) -> tuple[type[_FakeMiniMapWidget], MapSourceSpec, str]:
+    del use_opengl
+    return (
+        _FakeMiniMapWidget,
+        MapSourceSpec.legacy_default(Path.cwd()).resolved(Path.cwd()),
+        "legacy_python",
+    )
+
+
+def _fake_choose_delayed_projection_map_widget_backend(
+    _map_source: MapSourceSpec | None,
+    *,
+    use_opengl: bool,
+) -> tuple[type[_DelayedProjectionMiniMapWidget], MapSourceSpec, str]:
+    del use_opengl
+    return (
+        _DelayedProjectionMiniMapWidget,
+        MapSourceSpec.legacy_default(Path.cwd()).resolved(Path.cwd()),
+        "legacy_python",
+    )
 
 
 def test_info_panel_formats_video_metadata(qapp: QApplication) -> None:
@@ -495,4 +590,119 @@ def test_info_panel_named_lens_model_gets_focal_appended(
     assert "XF23mmF2 R WR" in label_text
     assert "23" in label_text   # focal length must appear
     assert "ƒ2" in label_text  # aperture must appear
+    panel.close()
+
+
+def test_info_panel_location_map_stays_square(
+    qapp: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(info_location_map_module, "check_opengl_support", lambda: False)
+    monkeypatch.setattr(
+        info_location_map_module,
+        "choose_map_widget_backend",
+        _fake_choose_map_widget_backend,
+    )
+
+    panel = InfoPanel()
+    panel.set_location_capability(enabled=True)
+    panel.set_asset_metadata(
+        {
+            "rel": "map.jpg",
+            "name": "map.jpg",
+            "gps": {"lat": 37.7749, "lon": -122.4194},
+            "location": "San Francisco",
+        }
+    )
+    panel.show()
+    qapp.processEvents()
+
+    map_view = panel._location_map
+    assert map_view.width() == map_view.height()
+    assert map_view._map_host.size() == map_view.size()
+    panel.close()
+
+
+def test_info_panel_location_map_overlay_tracks_actual_embedded_map_size(
+    qapp: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(info_location_map_module, "check_opengl_support", lambda: False)
+    monkeypatch.setattr(
+        info_location_map_module,
+        "choose_map_widget_backend",
+        _fake_choose_map_widget_backend,
+    )
+
+    panel = InfoPanel()
+    panel.set_location_capability(enabled=True)
+    panel.set_asset_metadata(
+        {
+            "rel": "map.jpg",
+            "name": "map.jpg",
+            "gps": {"lat": 48.137154, "lon": 11.576124},
+            "location": "Munich",
+        }
+    )
+    panel.show()
+    qapp.processEvents()
+
+    map_view = panel._location_map
+    map_widget = map_view._map_widget
+    assert isinstance(map_widget, _FakeMiniMapWidget)
+    assert map_widget.size() == map_view._map_host.size()
+    assert map_view._overlay.size() == map_widget.size()
+
+    screen_point = map_view._screen_point
+    assert screen_point is not None
+    assert abs(screen_point.x() - map_widget.width() / 2.0) <= 1.0
+    assert abs(screen_point.y() - map_widget.height() / 2.0) <= 1.0
+
+    pin_rect = map_view._overlay._pin_label.geometry()
+    pin_tip_x = pin_rect.x() + (
+        pin_rect.width() * info_location_map_module._PIN_ANCHOR_X_RATIO
+    )
+    pin_tip_y = pin_rect.y() + (
+        pin_rect.height() * info_location_map_module._PIN_ANCHOR_Y_RATIO
+    )
+    assert abs(pin_tip_x - screen_point.x()) <= 1.0
+    assert abs(pin_tip_y - screen_point.y()) <= 1.0
+    panel.close()
+
+
+def test_info_panel_location_map_resyncs_pin_after_delayed_zoom_projection(
+    qapp: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(info_location_map_module, "check_opengl_support", lambda: False)
+    monkeypatch.setattr(
+        info_location_map_module,
+        "choose_map_widget_backend",
+        _fake_choose_delayed_projection_map_widget_backend,
+    )
+
+    panel = InfoPanel()
+    panel.set_location_capability(enabled=True)
+    panel.set_asset_metadata(
+        {
+            "rel": "map.jpg",
+            "name": "map.jpg",
+            "gps": {"lat": 35.6764, "lon": 139.6500},
+            "location": "Tokyo",
+        }
+    )
+    panel.show()
+    qapp.processEvents()
+
+    map_view = panel._location_map
+    map_widget = map_view._map_widget
+    assert isinstance(map_widget, _DelayedProjectionMiniMapWidget)
+
+    map_widget.set_zoom(9.0)
+    qapp.processEvents()
+
+    screen_point = map_view._screen_point
+    assert screen_point is not None
+    assert abs(screen_point.x() - map_widget.width() / 2.0) <= 1.0
+    assert abs(screen_point.y() - map_widget.height() / 2.0) <= 1.0
     panel.close()

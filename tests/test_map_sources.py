@@ -2,6 +2,8 @@ from pathlib import Path
 
 from maps import map_sources
 from maps.map_sources import (
+    DEFAULT_HELPER_RELATIVE_PATHS,
+    DEFAULT_NATIVE_WIDGET_RELATIVE_PATHS,
     MapSourceSpec,
     default_osmand_extension_root,
     has_usable_osmand_default,
@@ -72,7 +74,7 @@ def test_resolve_osmand_helper_command_prefers_environment(monkeypatch) -> None:
 def test_resolve_osmand_helper_command_discovers_extension_helper(tmp_path, monkeypatch) -> None:
     package_root = tmp_path / "src" / "maps"
     package_root.mkdir(parents=True)
-    helper_path = default_osmand_extension_root(package_root) / "bin" / "osmand_render_helper.exe"
+    helper_path = package_root / DEFAULT_HELPER_RELATIVE_PATHS[0]
     helper_path.parent.mkdir(parents=True)
     helper_path.write_bytes(b"exe")
     monkeypatch.delenv(map_sources.ENV_OSMAND_HELPER, raising=False)
@@ -85,7 +87,7 @@ def test_resolve_osmand_helper_command_discovers_extension_helper(tmp_path, monk
 def test_resolve_osmand_native_widget_library_prefers_extension_bin_output(tmp_path, monkeypatch) -> None:
     package_root = tmp_path / "src" / "maps"
     package_root.mkdir(parents=True)
-    local_dll = default_osmand_extension_root(package_root) / "bin" / "osmand_native_widget.dll"
+    local_dll = package_root / DEFAULT_NATIVE_WIDGET_RELATIVE_PATHS[0]
     local_dll.parent.mkdir(parents=True)
     local_dll.write_bytes(b"dll")
     monkeypatch.delenv(map_sources.ENV_OSMAND_NATIVE_WIDGET_LIBRARY, raising=False)
@@ -104,7 +106,7 @@ def test_has_usable_osmand_default_requires_helper(tmp_path, monkeypatch) -> Non
 
     assert has_usable_osmand_default(package_root) is False
 
-    helper_path = extension_root / "bin" / "osmand_render_helper.exe"
+    helper_path = package_root / DEFAULT_HELPER_RELATIVE_PATHS[0]
     helper_path.parent.mkdir(parents=True)
     helper_path.write_bytes(b"exe")
 

@@ -5,13 +5,17 @@ from __future__ import annotations
 from pathlib import Path
 from unittest.mock import MagicMock
 
+from iPhoto.domain.models.query import AssetQuery
+import iPhoto.gui.coordinators.navigation_coordinator as navigation_coordinator_module
 from iPhoto.gui.coordinators.navigation_coordinator import NavigationCoordinator
+from iPhoto.gui.services.pinned_items_service import PinnedSidebarItem
 
 
 def _make_coordinator(
     *,
     current_album_root: Path | None = None,
     gallery_active: bool = True,
+    pinned_items_service=None,
 ) -> NavigationCoordinator:
     sidebar = MagicMock()
     router = MagicMock()
@@ -41,6 +45,7 @@ def _make_coordinator(
         gallery_vm=gallery_vm,
         context=context,
         facade=facade,
+        pinned_items_service=pinned_items_service,
     )
 
 
@@ -75,6 +80,70 @@ def test_open_location_asset_delegates_to_gallery_vm() -> None:
     coord.open_location_asset("nested/b.jpg")
 
     coord._gallery_vm.open_location_asset.assert_called_once_with("nested/b.jpg")
+
+
+def test_open_pinned_album_delegates_to_gallery_vm(tmp_path: Path) -> None:
+    coord = _make_coordinator()
+    target = tmp_path / "Trips"
+    target.mkdir()
+
+    coord.open_pinned_item(PinnedSidebarItem(kind="album", item_id=str(target), label="Trips"))
+
+    coord._gallery_vm.open_pinned_album.assert_called_once_with(target)
+
+
+def test_open_pinned_person_keeps_valid_empty_pin(tmp_path: Path, monkeypatch) -> None:
+    pinned_items_service = MagicMock()
+    coord = _make_coordinator(pinned_items_service=pinned_items_service)
+    coord._context.library.root.return_value = tmp_path
+
+    class _StubPeopleService:
+        def __init__(self, library_root: Path) -> None:
+            self.library_root = library_root
+
+        def build_cluster_query(self, person_id: str) -> AssetQuery:
+            return AssetQuery(asset_ids=[])
+
+        def has_cluster(self, person_id: str) -> bool:
+            return True
+
+    monkeypatch.setattr(navigation_coordinator_module, "PeopleService", _StubPeopleService)
+
+    coord.open_pinned_item(PinnedSidebarItem(kind="person", item_id="person-a", label="Alice"))
+
+    coord._gallery_vm.open_pinned_people_query.assert_called_once_with(
+        AssetQuery(asset_ids=[]),
+        kind="person",
+        entity_id="person-a",
+    )
+    pinned_items_service.prune_missing_entity.assert_not_called()
+
+
+def test_open_pinned_missing_person_prunes_invalid_pin(tmp_path: Path, monkeypatch) -> None:
+    pinned_items_service = MagicMock()
+    coord = _make_coordinator(pinned_items_service=pinned_items_service)
+    coord._context.library.root.return_value = tmp_path
+
+    class _StubPeopleService:
+        def __init__(self, library_root: Path) -> None:
+            self.library_root = library_root
+
+        def build_cluster_query(self, person_id: str) -> AssetQuery:
+            return AssetQuery(asset_ids=[])
+
+        def has_cluster(self, person_id: str) -> bool:
+            return False
+
+    monkeypatch.setattr(navigation_coordinator_module, "PeopleService", _StubPeopleService)
+
+    coord.open_pinned_item(PinnedSidebarItem(kind="person", item_id="missing-person", label="Ghost"))
+
+    coord._gallery_vm.open_pinned_people_query.assert_not_called()
+    pinned_items_service.prune_missing_entity.assert_called_once_with(
+        kind="person",
+        item_id="missing-person",
+        library_root=tmp_path,
+    )
 
 
 def test_route_requested_updates_router() -> None:

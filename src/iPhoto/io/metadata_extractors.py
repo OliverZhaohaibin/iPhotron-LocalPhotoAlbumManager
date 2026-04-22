@@ -246,6 +246,16 @@ def _extract_gps_from_exiftool(meta: Dict[str, Any]) -> Optional[Dict[str, float
                 except (TypeError, ValueError):
                     LOGGER.debug("Failed to parse QuickTime ISO6709 string: %s", iso6709)
 
+        quicktime_coordinates = quicktime.get("GPSCoordinates")
+        if isinstance(quicktime_coordinates, str):
+            match = re.match(r"([+-]\d+(?:\.\d+)?)([+-]\d+(?:\.\d+)?)", quicktime_coordinates.strip())
+            if match:
+                try:
+                    lat, lon = (float(component) for component in match.groups())
+                    return {"lat": lat, "lon": lon}
+                except (TypeError, ValueError):
+                    LOGGER.debug("Failed to parse QuickTime GPSCoordinates string: %s", quicktime_coordinates)
+
     iso6709_fallback = meta.get("com.apple.quicktime.location.ISO6709")
     if isinstance(iso6709_fallback, str):
         match = re.match(r"([+-]\d+\.\d+)([+-]\d+\.\d+)", iso6709_fallback)
@@ -255,6 +265,24 @@ def _extract_gps_from_exiftool(meta: Dict[str, Any]) -> Optional[Dict[str, float
                 return {"lat": lat, "lon": lon}
             except (TypeError, ValueError):
                 LOGGER.debug("Failed to parse QuickTime ISO6709 fallback: %s", iso6709_fallback)
+
+    gps_coordinates = meta.get("GPSCoordinates")
+    if isinstance(gps_coordinates, str):
+        stripped = gps_coordinates.strip()
+        match = re.match(r"([+-]\d+(?:\.\d+)?)([+-]\d+(?:\.\d+)?)", stripped)
+        if match:
+            try:
+                lat, lon = (float(component) for component in match.groups())
+                return {"lat": lat, "lon": lon}
+            except (TypeError, ValueError):
+                LOGGER.debug("Failed to parse ISO6709 GPSCoordinates string: %s", gps_coordinates)
+        match = re.match(r"([+-]?\d+(?:\.\d+)?)\s+([+-]?\d+(?:\.\d+)?)", stripped)
+        if match:
+            try:
+                lat, lon = (float(component) for component in match.groups())
+                return {"lat": lat, "lon": lon}
+            except (TypeError, ValueError):
+                LOGGER.debug("Failed to parse GPSCoordinates string: %s", gps_coordinates)
 
     gps_group = _extract_group(meta, "GPS")
     if gps_group:

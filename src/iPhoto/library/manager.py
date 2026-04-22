@@ -98,6 +98,14 @@ class LibraryManager(
     def root(self) -> Path | None:
         return self._root
 
+    def invalidate_geotagged_assets_cache(self, *, emit_tree_updated: bool = False) -> None:
+        """Drop cached map assets and optionally notify the UI to refresh views."""
+
+        self._geotagged_assets_cache = None
+        self._geotagged_assets_cache_root = None
+        if emit_tree_updated:
+            self.treeUpdated.emit()
+
     # ------------------------------------------------------------------
     # Binding and tree coordination
     # ------------------------------------------------------------------

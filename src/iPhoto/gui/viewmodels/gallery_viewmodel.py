@@ -61,14 +61,16 @@ class GalleryViewModel(BaseViewModel):
     def location_session(self) -> LocationSelectionSession:
         return self._location_session
 
-    def open_album(self, path: Path) -> None:
+    def open_album(self, path: Path, *, select_sidebar_path: bool = True) -> None:
         album = self._facade.open_album(path)
         active_root = album.root if album else path
         if album:
             self._context.remember_album(album.root)
-            self.sidebar_path_requested.emit(album.root)
+            if select_sidebar_path:
+                self.sidebar_path_requested.emit(album.root)
         else:
-            self.sidebar_path_requested.emit(path)
+            if select_sidebar_path:
+                self.sidebar_path_requested.emit(path)
 
         query = AssetQuery(album_path=self._album_path_for_query(active_root))
         query.include_subalbums = True
@@ -77,6 +79,23 @@ class GalleryViewModel(BaseViewModel):
         self._load_query(
             section="album",
             static_selection=None,
+            root=active_root,
+            query=query,
+        )
+
+    def open_pinned_album(self, path: Path) -> None:
+        album = self._facade.open_album(path)
+        active_root = album.root if album else path
+        if album:
+            self._context.remember_album(album.root)
+
+        query = AssetQuery(album_path=self._album_path_for_query(active_root))
+        query.include_subalbums = True
+        self._clear_location_context()
+        self._clear_cluster_gallery_context()
+        self._load_query(
+            section="pinned_album",
+            static_selection="Pinned",
             root=active_root,
             query=query,
         )
@@ -246,6 +265,31 @@ class GalleryViewModel(BaseViewModel):
         self.cluster_gallery_mode_changed.emit(True)
         self.route_requested.emit("gallery")
 
+    def open_pinned_people_query(
+        self,
+        query: AssetQuery,
+        *,
+        kind: Literal["person", "group", None] = None,
+        entity_id: str | None = None,
+    ) -> None:
+        root = self._context.library.root()
+        if root is None:
+            self.bind_library_requested.emit()
+            return
+        self._clear_location_context()
+        self._clear_cluster_gallery_context()
+        self._people_cluster_kind = kind
+        self._people_cluster_id = entity_id if entity_id else None
+        self.current_section.value = "pinned_people_gallery"
+        self.static_selection.value = "Pinned"
+        self.active_root.value = root
+        self.current_query.value = query
+        self.current_direct_assets.value = None
+        self.can_return_to_map.value = False
+        self._store.load_selection(root, query=query)
+        self.cluster_gallery_mode_changed.emit(False)
+        self.route_requested.emit("gallery")
+
     def return_from_cluster_gallery(self) -> None:
         if self._cluster_gallery_origin == "location" or (
             self._cluster_gallery_origin is None
@@ -260,7 +304,7 @@ class GalleryViewModel(BaseViewModel):
             self.open_people_dashboard()
 
     def handle_people_snapshot_committed(self, event: object) -> None:
-        if self._cluster_gallery_origin != "people":
+        if self._cluster_gallery_origin != "people" and self.current_section.value != "pinned_people_gallery":
             return
         if self._people_cluster_kind not in {"person", "group"} or not self._people_cluster_id:
             return

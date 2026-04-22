@@ -26,7 +26,8 @@ from PySide6.QtGui import (
     QPainterPath,
     QPixmap,
     QPalette,
-    QRadialGradient, QAction,
+    QRadialGradient,
+    QAction,
 )
 from PySide6.QtWidgets import (
     QFrame,

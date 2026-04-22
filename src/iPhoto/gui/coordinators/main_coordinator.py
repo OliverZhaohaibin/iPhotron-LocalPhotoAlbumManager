@@ -173,6 +173,8 @@ class MainCoordinator(QObject):
             face_name_overlay=window.ui.face_name_overlay,
             people_service=self._playback_people_service,
             people_dashboard_refresh_callback=window.ui.people_page.schedule_index_refresh,
+            library_manager=context.library,
+            location_session_invalidator=self._gallery_vm.invalidate_location_session,
         )
 
         # Inject optional dependencies into Playback

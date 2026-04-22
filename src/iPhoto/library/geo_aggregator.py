@@ -78,7 +78,16 @@ def geotagged_asset_from_row(root: Path, row: object) -> Optional[GeotaggedAsset
         return None
 
     abs_path = (root / rel).resolve()
-    location_name = resolve_location_name(gps)
+    location_raw = row.get("location")
+    if not isinstance(location_raw, str) or not location_raw.strip():
+        metadata = row.get("metadata")
+        if isinstance(metadata, dict):
+            location_raw = metadata.get("location") or metadata.get("location_name")
+    location_name = (
+        str(location_raw).strip()
+        if isinstance(location_raw, str) and location_raw.strip()
+        else resolve_location_name(gps)
+    )
 
     parent_album_path = row.get("parent_album_path")
     if parent_album_path:

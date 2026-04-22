@@ -13,6 +13,7 @@ DEFAULT_OSMAND_OBF_FILENAME = "World_basemap_2.obf"
 DEFAULT_OSMAND_STYLE_FILENAME = "snowmobile.render.xml"
 DEFAULT_OSMAND_RESOURCES_ROOT = DEFAULT_OSMAND_EXTENSION_RELATIVE_ROOT
 DEFAULT_OSMAND_STYLE_PATH = DEFAULT_OSMAND_RESOURCES_ROOT / "rendering_styles" / DEFAULT_OSMAND_STYLE_FILENAME
+DEFAULT_OSMAND_SEARCH_RELATIVE_PATH = DEFAULT_OSMAND_EXTENSION_RELATIVE_ROOT / "search" / "geonames.sqlite3"
 ENV_OSMAND_HELPER = "IPHOTO_OSMAND_RENDER_HELPER"
 ENV_OSMAND_NATIVE_WIDGET_LIBRARY = "IPHOTO_OSMAND_NATIVE_WIDGET_LIBRARY"
 ENV_PREFER_OSMAND_NATIVE_WIDGET = "IPHOTO_PREFER_OSMAND_NATIVE_WIDGET"
@@ -163,6 +164,20 @@ def has_usable_osmand_native_widget(package_root: Path | None = None) -> bool:
     return _has_osmand_data_assets(root) and resolve_osmand_native_widget_library(root) is not None
 
 
+def default_osmand_search_database(package_root: Path | None = None) -> Path:
+    """Return the bundled GeoNames database used by offline place search."""
+
+    root = package_root or _package_root()
+    return (Path(root) / DEFAULT_OSMAND_SEARCH_RELATIVE_PATH).resolve()
+
+
+def has_usable_osmand_search_extension(package_root: Path | None = None) -> bool:
+    """Return ``True`` when both the map assets and search DB are bundled."""
+
+    root = package_root or _package_root()
+    return _has_osmand_data_assets(root) and default_osmand_search_database(root).is_file()
+
+
 def _has_osmand_data_assets(package_root: Path) -> bool:
     source = MapSourceSpec.osmand_default(package_root).resolved(package_root)
     return (
@@ -253,6 +268,7 @@ def _collect_candidate_paths(
 
 __all__ = [
     "DEFAULT_HELPER_RELATIVE_PATH",
+    "DEFAULT_OSMAND_SEARCH_RELATIVE_PATH",
     "DEFAULT_OSMAND_EXTENSION_RELATIVE_ROOT",
     "DEFAULT_NATIVE_WIDGET_RELATIVE_PATH_MSVC",
     "DEFAULT_NATIVE_WIDGET_RELATIVE_PATH",
@@ -264,8 +280,10 @@ __all__ = [
     "MapBackendMetadata",
     "MapSourceSpec",
     "default_osmand_extension_root",
+    "default_osmand_search_database",
     "has_usable_osmand_default",
     "has_usable_osmand_native_widget",
+    "has_usable_osmand_search_extension",
     "prefer_osmand_native_widget",
     "resolve_osmand_helper_command",
     "resolve_osmand_native_widget_library",

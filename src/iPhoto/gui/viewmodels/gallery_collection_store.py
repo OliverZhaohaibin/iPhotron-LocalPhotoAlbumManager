@@ -261,6 +261,27 @@ class GalleryCollectionStore:
         dto.is_favorite = is_favorite
         self.row_changed.emit(row)
 
+    def update_asset_metadata(self, row: int, metadata: Dict[str, object]) -> None:
+        dto = self._row_cache.get(row)
+        if dto is None and row >= 0:
+            dto = self.asset_at(row)
+        if dto is None:
+            return
+        dto.metadata = dict(metadata)
+        width = metadata.get("w")
+        height = metadata.get("h")
+        duration = metadata.get("dur")
+        size_bytes = metadata.get("bytes")
+        if isinstance(width, int) and width > 0:
+            dto.width = width
+        if isinstance(height, int) and height > 0:
+            dto.height = height
+        if isinstance(duration, (int, float)) and float(duration) >= 0.0:
+            dto.duration = float(duration)
+        if isinstance(size_bytes, int) and size_bytes >= 0:
+            dto.size_bytes = size_bytes
+        self.row_changed.emit(row)
+
     def remove_rows(self, rows: List[int], *, emit: bool = True) -> None:
         if not rows:
             return

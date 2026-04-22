@@ -163,7 +163,7 @@ class PinnedItemsService(QObject):
         for library_key, entries in stored.items():
             try:
                 normalized_key = str(Path(str(library_key)).expanduser().resolve())
-            except OSError:
+            except (OSError, ValueError):
                 normalized_key = str(library_key)
             if not isinstance(entries, list):
                 continue

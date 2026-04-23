@@ -1097,7 +1097,7 @@ class FaceRepository:
             changed_group_ids.update(remaining_group_ids)
             changed_group_ids.update(group_redirects)
             changed_group_ids.update(group_id for group_id in group_redirects.values() if group_id)
-            for group_id in remaining_group_ids:
+            for group_id in changed_group_ids:
                 self.refresh_group_assets(group_id)
 
         for person_id in active_person_ids:
@@ -1212,10 +1212,11 @@ class FaceRepository:
         if self._state_repo is None or not person_id:
             return
 
+        manual_faces = self._state_repo.get_manual_faces_for_persons((person_id,))
+        has_auto_faces = self._has_auto_faces(person_id)
         cover = self._state_repo.get_person_cover(person_id)
         if cover is None:
-            manual_faces = self._state_repo.get_manual_faces_for_persons((person_id,))
-            if manual_faces and not self._has_auto_faces(person_id):
+            if manual_faces and not has_auto_faces:
                 first_face = manual_faces[0]
                 self._state_repo.set_person_cover(
                     person_id,
@@ -1225,20 +1226,16 @@ class FaceRepository:
                     thumbnail_path=first_face.thumbnail_path,
                 )
             return
-        if not cover.is_custom:
-            return
 
         valid_auto_faces = {face.face_id: face for face in self.get_faces_by_asset_id(cover.asset_id or "")}
-        valid_manual_faces = {
-            face.face_id: face for face in self._state_repo.get_manual_faces_for_persons((person_id,))
-        }
+        valid_manual_faces = {face.face_id: face for face in manual_faces}
         auto_face = valid_auto_faces.get(cover.face_id or "")
         if auto_face is not None and auto_face.person_id == person_id:
             return
         if cover.face_id in valid_manual_faces:
             return
 
-        if valid_manual_faces and not self._has_auto_faces(person_id):
+        if valid_manual_faces and not has_auto_faces:
             fallback = next(iter(valid_manual_faces.values()))
             self._state_repo.set_person_cover(
                 person_id,

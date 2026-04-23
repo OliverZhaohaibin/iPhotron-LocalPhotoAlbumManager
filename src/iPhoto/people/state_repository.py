@@ -500,17 +500,22 @@ class FaceStateRepository:
             return set()
 
         self.initialize()
-        placeholders = ", ".join(["?"] * len(unique_face_keys))
+        chunk_size = 900
+        rejected: set[str] = set()
         with closing(self._connect()) as conn:
-            rows = conn.execute(
-                f"""
-                SELECT face_key
-                FROM rejected_face_keys
-                WHERE face_key IN ({placeholders})
-                """,
-                unique_face_keys,
-            ).fetchall()
-        return {str(row["face_key"]) for row in rows if row["face_key"]}
+            for start in range(0, len(unique_face_keys), chunk_size):
+                chunk = unique_face_keys[start : start + chunk_size]
+                placeholders = ", ".join(["?"] * len(chunk))
+                rows = conn.execute(
+                    f"""
+                    SELECT face_key
+                    FROM rejected_face_keys
+                    WHERE face_key IN ({placeholders})
+                    """,
+                    chunk,
+                ).fetchall()
+                rejected.update(str(row["face_key"]) for row in rows if row["face_key"])
+        return rejected
 
     def reject_face_key(self, face_key: str, *, asset_id: str, asset_rel: str) -> None:
         if not face_key:

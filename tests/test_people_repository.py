@@ -405,6 +405,70 @@ def test_group_cover_can_be_customized_without_rescan_overwrite(tmp_path: Path) 
     assert repository.get_group_cover_asset_id(group.group_id) == "asset-older"
 
 
+def test_delete_face_refreshes_surviving_group_asset_cache(tmp_path: Path) -> None:
+    repository = FaceRepository(tmp_path / "face_index.db", tmp_path / "face_state.db")
+    faces = [
+        _face_record(
+            face_id="face-a-all",
+            asset_id="asset-all",
+            asset_rel="album/all.jpg",
+            person_id="person-a",
+        ),
+        _face_record(
+            face_id="face-b-all",
+            asset_id="asset-all",
+            asset_rel="album/all.jpg",
+            person_id="person-b",
+        ),
+        _face_record(
+            face_id="face-c-all",
+            asset_id="asset-all",
+            asset_rel="album/all.jpg",
+            person_id="person-c",
+        ),
+        _face_record(
+            face_id="face-b-pair",
+            asset_id="asset-bc",
+            asset_rel="album/bc.jpg",
+            person_id="person-b",
+        ),
+        _face_record(
+            face_id="face-c-pair",
+            asset_id="asset-bc",
+            asset_rel="album/bc.jpg",
+            person_id="person-c",
+        ),
+    ]
+    persons = [
+        _person_record(person_id="person-a", key_face_id="face-a-all", face_count=1, name="Alice"),
+        _person_record(person_id="person-b", key_face_id="face-b-pair", face_count=2, name="Bob"),
+        _person_record(person_id="person-c", key_face_id="face-c-pair", face_count=2, name="Cara"),
+    ]
+    repository.replace_all(faces, persons)
+    assert repository.state_repository is not None
+    repository.state_repository.sync_scan_results(persons, faces)
+
+    group = repository.create_group(["person-a", "person-b", "person-c"])
+
+    assert group is not None
+    assert repository.state_repository.get_group_asset_ids(group.group_id) == ["asset-all"]
+
+    result = repository.delete_face("face-a-all")
+
+    assert result is not None
+    persisted_group = repository.get_group(group.group_id)
+    assert persisted_group is not None
+    assert persisted_group.member_person_ids == ("person-b", "person-c")
+    assert set(repository.state_repository.get_group_asset_ids(group.group_id)) == {
+        "asset-all",
+        "asset-bc",
+    }
+    assert set(repository.get_common_asset_ids_for_group(group.group_id)) == {
+        "asset-all",
+        "asset-bc",
+    }
+
+
 def test_delete_group_removes_group_and_cached_assets(tmp_path: Path) -> None:
     repository = FaceRepository(tmp_path / "face_index.db", tmp_path / "face_state.db")
     faces = [
@@ -1060,6 +1124,63 @@ def test_delete_face_rejects_auto_face_and_removes_it_from_annotations(tmp_path:
     assert repository.list_asset_face_annotations("asset-a") == []
     assert repository.get_person_summaries() == []
     assert repository.state_repository.get_rejected_face_keys([face.face_key]) == {face.face_key}
+
+
+def test_rejected_face_key_lookup_chunks_large_queries(tmp_path: Path) -> None:
+    state_repository = FaceStateRepository(tmp_path / "face_state.db")
+    rejected = {f"face-key-{index}" for index in (0, 450, 901, 1204)}
+    for face_key in rejected:
+        state_repository.reject_face_key(
+            face_key,
+            asset_id=f"asset-{face_key}",
+            asset_rel=f"album/{face_key}.jpg",
+        )
+
+    face_keys = [f"face-key-{index}" for index in range(1205)]
+
+    assert state_repository.get_rejected_face_keys(face_keys) == rejected
+
+
+def test_delete_last_auto_face_repairs_default_cover_for_manual_only_person(tmp_path: Path) -> None:
+    repository = FaceRepository(tmp_path / "face_index.db", tmp_path / "face_state.db")
+    auto_face = _face_record(
+        face_id="face-auto",
+        asset_id="asset-auto",
+        asset_rel="album/auto.jpg",
+        person_id="person-a",
+        thumbnail_path="thumbnails/auto.jpg",
+    )
+    manual_face = _manual_face_record(
+        face_id="face-manual",
+        asset_id="asset-manual",
+        asset_rel="album/manual.jpg",
+        person_id="person-b",
+        thumbnail_path="thumbnails/manual.jpg",
+    )
+    person = _person_record(person_id="person-a", key_face_id="face-auto", face_count=1, name="Alice")
+
+    repository.replace_all([auto_face], [person])
+    assert repository.state_repository is not None
+    repository.state_repository.sync_scan_results([person], [auto_face])
+    repository.state_repository.add_manual_face(manual_face, person_name="Bob")
+
+    assert repository.state_repository.get_person_cover_thumbnail_map(["person-a"]) == {
+        "person-a": "thumbnails/auto.jpg"
+    }
+    moved = repository.move_face_to_person("face-manual", "person-a")
+    assert moved is not None
+
+    result = repository.delete_face("face-auto")
+
+    assert result is not None
+    summaries = repository.get_person_summaries()
+    assert len(summaries) == 1
+    assert summaries[0].person_id == "person-a"
+    assert summaries[0].thumbnail_path == (tmp_path / "thumbnails/manual.jpg").resolve()
+    cover = repository.state_repository.get_person_cover("person-a")
+    assert cover is not None
+    assert cover.face_id == "face-manual"
+    assert cover.thumbnail_path == "thumbnails/manual.jpg"
 
 
 def test_move_face_to_existing_person_updates_membership_and_group_cache(tmp_path: Path) -> None:

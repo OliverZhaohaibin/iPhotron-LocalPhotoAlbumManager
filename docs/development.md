@@ -369,6 +369,23 @@ instead of dropping back to native/system-styled `QMessageBox` windows.
   [`docs/misc/PROJECT_POPUP_GUARDRAILS.md`](misc/PROJECT_POPUP_GUARDRAILS.md)
   for the project-wide rule plus the People dashboard regression checklist.
 
+### Context Menu Guardrails
+
+Qt context menus must use the project menu styling instead of bare `QMenu`
+instances. The main window uses translucent rounded chrome, and unstyled menus
+can inherit that translucency and render with a transparent background.
+
+- For sidebar and album-related menus, call
+  `_apply_main_window_menu_style(menu, parent)` from
+  `iPhoto.gui.ui.menus.album_sidebar_menu` before adding or executing actions.
+- If a menu uses a local stylesheet instead, set
+  `menu.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)` and apply
+  an explicit opaque `QMenu { background-color: ... }` rule.
+- Do not create and execute a naked `QMenu(self)` from widgets such as
+  dashboards, cards, sidebars, or popups.
+- When adding a new right-click surface, add or update a focused GUI test that
+  verifies the menu is styled and that important actions are present.
+
 ---
 
 ## Code Style

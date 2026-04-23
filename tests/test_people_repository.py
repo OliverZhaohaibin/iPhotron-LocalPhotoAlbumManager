@@ -405,6 +405,60 @@ def test_group_cover_can_be_customized_without_rescan_overwrite(tmp_path: Path) 
     assert repository.get_group_cover_asset_id(group.group_id) == "asset-older"
 
 
+def test_group_card_order_persists_across_reload(tmp_path: Path) -> None:
+    repository = FaceRepository(tmp_path / "face_index.db", tmp_path / "face_state.db")
+    faces = [
+        _face_record(
+            face_id="face-a-shared",
+            asset_id="asset-ab",
+            asset_rel="album/ab.jpg",
+            person_id="person-a",
+        ),
+        _face_record(
+            face_id="face-b-shared",
+            asset_id="asset-ab",
+            asset_rel="album/ab.jpg",
+            person_id="person-b",
+        ),
+        _face_record(
+            face_id="face-b-other",
+            asset_id="asset-bc",
+            asset_rel="album/bc.jpg",
+            person_id="person-b",
+        ),
+        _face_record(
+            face_id="face-c-other",
+            asset_id="asset-bc",
+            asset_rel="album/bc.jpg",
+            person_id="person-c",
+        ),
+    ]
+    persons = [
+        _person_record(person_id="person-a", key_face_id="face-a-shared", face_count=1, name="Alice"),
+        _person_record(person_id="person-b", key_face_id="face-b-shared", face_count=2, name="Bob"),
+        _person_record(person_id="person-c", key_face_id="face-c-other", face_count=1, name="Cara"),
+    ]
+    repository.replace_all(faces, persons)
+
+    group_ab = repository.create_group(["person-a", "person-b"])
+    group_bc = repository.create_group(["person-b", "person-c"])
+
+    assert group_ab is not None
+    assert group_bc is not None
+    assert [group.group_id for group in repository.list_groups()] == [
+        group_ab.group_id,
+        group_bc.group_id,
+    ]
+
+    repository.set_group_order([group_bc.group_id, group_ab.group_id])
+
+    reloaded = FaceRepository(tmp_path / "face_index.db", tmp_path / "face_state.db")
+    assert [group.group_id for group in reloaded.list_groups()] == [
+        group_bc.group_id,
+        group_ab.group_id,
+    ]
+
+
 def test_delete_face_refreshes_surviving_group_asset_cache(tmp_path: Path) -> None:
     repository = FaceRepository(tmp_path / "face_index.db", tmp_path / "face_state.db")
     faces = [

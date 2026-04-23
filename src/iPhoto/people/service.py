@@ -180,6 +180,14 @@ class PeopleService:
             return
         get_people_index_coordinator(self._library_root).set_person_order(person_ids)
 
+    def set_group_order(
+        self,
+        group_ids: list[str] | tuple[str, ...],
+    ) -> None:
+        if self._library_root is None:
+            return
+        get_people_index_coordinator(self._library_root).set_group_order(group_ids)
+
     def set_cluster_hidden(self, person_id: str, hidden: bool) -> bool:
         repository = self.repository()
         if repository is None:

@@ -294,6 +294,17 @@ class PeopleIndexCoordinator(QObject):
                 return None
             return self._emit_snapshot(changed_person_ids=ordered_ids)
 
+    def set_group_order(self, group_ids: Iterable[str]) -> PeopleSnapshotEvent | None:
+        ordered_ids = tuple(str(group_id) for group_id in group_ids if group_id)
+        with self._lock:
+            if self._shutdown_requested:
+                return None
+            repository = self._repository()
+            repository.set_group_order(ordered_ids)
+            if not ordered_ids:
+                return None
+            return self._emit_snapshot(changed_group_ids=ordered_ids)
+
     def merge_persons(
         self,
         source_person_id: str,

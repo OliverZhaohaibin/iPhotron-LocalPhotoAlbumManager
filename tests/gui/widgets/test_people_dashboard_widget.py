@@ -106,6 +106,45 @@ def test_drag_reorder_skips_persist_when_order_is_unchanged(monkeypatch, qapp: Q
     assert persisted == []
 
 
+def test_drag_reorder_persists_group_order(monkeypatch, qapp: QApplication) -> None:
+    widget = PeopleDashboardWidget()
+    alice = PersonSummary("person-a", "Alice", "face-a", 3, None, "2024-01-01T00:00:00Z")
+    bob = PersonSummary("person-b", "Bob", "face-b", 2, None, "2024-01-01T00:00:01Z")
+    cara = PersonSummary("person-c", "Cara", "face-c", 1, None, "2024-01-01T00:00:02Z")
+    widget._groups = [
+        PeopleGroupSummary(
+            group_id="group-ab",
+            name="Alice and Bob",
+            member_person_ids=("person-a", "person-b"),
+            members=(alice, bob),
+            asset_count=1,
+            cover_asset_path=None,
+            created_at="2024-01-01T00:00:02Z",
+        ),
+        PeopleGroupSummary(
+            group_id="group-bc",
+            name="Bob and Cara",
+            member_person_ids=("person-b", "person-c"),
+            members=(bob, cara),
+            asset_count=1,
+            cover_asset_path=None,
+            created_at="2024-01-01T00:00:03Z",
+        ),
+    ]
+    widget._populate_groups()
+
+    persisted: list[list[str]] = []
+    monkeypatch.setattr(widget._service, "set_group_order", lambda group_ids: persisted.append(list(group_ids)))
+    monkeypatch.setattr(widget._groups_board, "animate_to_layout", lambda: None)
+
+    cards = widget._groups_board.visible_cards()
+    widget._groups_board.top_cards = [cards[1], cards[0]]
+    widget._groups_board._drag_start_order = ("group-ab", "group-bc")
+    widget._groups_board.finish_drag(cards[1])
+
+    assert persisted == [["group-bc", "group-ab"]]
+
+
 def test_people_card_menu_contains_new_group(qapp: QApplication) -> None:
     widget = PeopleDashboardWidget()
     widget._summaries = [
@@ -203,6 +242,32 @@ def test_group_people_dialog_defaults_and_shift_selects_range(qapp: QApplication
         "person-c",
         "person-d",
     }
+    dialog.close()
+
+
+def test_group_people_dialog_supports_single_selection_mode(qapp: QApplication) -> None:
+    summaries = [
+        PersonSummary("person-a", "Alice", "face-a", 3, None, "2024-01-01T00:00:00Z"),
+        PersonSummary("person-b", "Bob", "face-b", 2, None, "2024-01-01T00:00:01Z"),
+    ]
+    dialog = GroupPeopleDialog(
+        summaries,
+        title_text="Choose Someone Else",
+        prompt_text="Assign this face to",
+        confirm_text="Choose",
+        min_selection=1,
+        max_selection=1,
+    )
+
+    assert dialog.add_button.isEnabled() is False
+
+    dialog._handle_tile_clicked(0, False)
+    assert dialog.selected_person_ids() == ["person-a"]
+    assert dialog.add_button.isEnabled() is True
+
+    dialog._handle_tile_clicked(1, False)
+    assert dialog.selected_person_ids() == ["person-b"]
+
     dialog.close()
 
 
@@ -533,6 +598,47 @@ def test_merge_person_shows_warning_when_hidden_state_differs(
             "People in hidden and visible states cannot be merged. Please make both People cards hidden or visible first.",
         )
     ]
+
+
+def test_merge_person_reuses_group_people_dialog(
+    monkeypatch, qapp: QApplication
+) -> None:
+    widget = PeopleDashboardWidget()
+    widget._summaries = [
+        PersonSummary("person-a", "Alice", "face-a", 3, None, "2024-01-01T00:00:00Z"),
+        PersonSummary("person-b", "Bob", "face-b", 2, None, "2024-01-01T00:00:01Z"),
+    ]
+
+    dialog_calls: list[dict[str, object]] = []
+    confirmed: list[tuple[str, str]] = []
+
+    class _FakeDialog:
+        def __init__(self, summaries, **kwargs) -> None:
+            dialog_calls.append({"summaries": summaries, "kwargs": kwargs})
+
+        def exec(self) -> int:
+            return 1
+
+        def selected_person_ids(self) -> list[str]:
+            return ["person-b"]
+
+    monkeypatch.setattr(people_dashboard_widget, "GroupPeopleDialog", _FakeDialog)
+    monkeypatch.setattr(
+        widget,
+        "_confirm_merge",
+        lambda source_person_id, target_person_id: confirmed.append((source_person_id, target_person_id)) or True,
+    )
+
+    widget._merge_person(widget._summaries[0])
+
+    assert len(dialog_calls) == 1
+    assert [summary.person_id for summary in dialog_calls[0]["summaries"]] == ["person-b"]
+    assert dialog_calls[0]["kwargs"]["title_text"] == "Merge Person"
+    assert dialog_calls[0]["kwargs"]["prompt_text"] == "Merge into"
+    assert dialog_calls[0]["kwargs"]["confirm_text"] == "Choose"
+    assert dialog_calls[0]["kwargs"]["min_selection"] == 1
+    assert dialog_calls[0]["kwargs"]["max_selection"] == 1
+    assert confirmed == [("person-a", "person-b")]
 
 
 def test_toggle_person_hidden_updates_service_and_reloads(

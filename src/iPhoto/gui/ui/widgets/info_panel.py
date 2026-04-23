@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any, Mapping, Optional
 
 from PySide6.QtCore import QDateTime, QEvent, QLocale, QObject, QRectF, QSize, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QKeyEvent, QMouseEvent, QPainter, QPainterPath, QPalette, QPixmap, QShowEvent
+from PySide6.QtGui import QColor, QGuiApplication, QKeyEvent, QMouseEvent, QPainter, QPainterPath, QPalette, QPixmap, QShowEvent
 from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
@@ -33,6 +33,7 @@ from ..icons import load_icon
 from ..menus.album_sidebar_menu import _apply_main_window_menu_style
 from .info_location_map import InfoLocationMapView
 from .main_window_metrics import TITLE_BAR_HEIGHT, WINDOW_CONTROL_BUTTON_SIZE, WINDOW_CONTROL_GLYPH_SIZE
+from .people_dashboard_dialogs import GroupPeopleDialog
 
 # Matches a lens string that is already a self-contained spec with *both* a
 # focal-length component ("23mm", "24-70mm") *and* an aperture component
@@ -139,6 +140,30 @@ def _style_popup_input_dialog(dialog: QInputDialog, parent: QWidget | None) -> N
     )
 
 
+def _uses_dark_theme(widget: QWidget | None) -> bool:
+    host = widget.window() if widget is not None and widget.window() is not None else widget
+    coordinator = getattr(host, "coordinator", None)
+    context = getattr(coordinator, "_context", None)
+    theme_manager = getattr(context, "theme", None)
+    if theme_manager is not None and hasattr(theme_manager, "get_effective_theme_mode"):
+        return theme_manager.get_effective_theme_mode() == "dark"
+
+    settings = getattr(context, "settings", None)
+    if settings is not None and hasattr(settings, "get"):
+        theme_setting = settings.get("ui.theme", "system")
+        if theme_setting == "dark":
+            return True
+        if theme_setting == "light":
+            return False
+
+    app = QGuiApplication.instance()
+    if app is not None and app.styleHints().colorScheme() == Qt.ColorScheme.Dark:
+        return True
+
+    palette_source = host.palette() if host is not None else QPalette()
+    return palette_source.color(QPalette.ColorRole.Window).lightness() < 128
+
+
 class _FaceAvatarWidget(QLabel):
     deleteRequested = Signal(object)
     moveRequested = Signal(object, str)
@@ -177,13 +202,13 @@ class _FaceAvatarWidget(QLabel):
         chosen = menu.exec(event.globalPos())
         if chosen is None:
             return
-        if chosen.text() == "删除":
+        if chosen.text() == "Delete":
             self.deleteRequested.emit(self._annotation)
             return
-        if chosen.text() == "选择其他人…":
+        if chosen.text() == "Choose Someone Else…":
             self._prompt_choose_person()
             return
-        if chosen.text() == "给此人重命名…":
+        if chosen.text() == "Rename Person…":
             self._prompt_rename_person()
 
     def _build_context_menu(self) -> QMenu | None:
@@ -199,11 +224,11 @@ class _FaceAvatarWidget(QLabel):
         return menu
 
     def _menu_action_labels(self) -> tuple[str, str, tuple[str, str]]:
-        return ("删除", self._not_this_label(), ("选择其他人…", "给此人重命名…"))
+        return ("Delete", self._not_this_label(), ("Choose Someone Else…", "Rename Person…"))
 
     def _not_this_label(self) -> str:
         display_name = str(self._annotation.display_name or "").strip()
-        return f"这不是{display_name}" if display_name else "这不是此人"
+        return f"Not {display_name}" if display_name else "Not This Person"
 
     def _prompt_choose_person(self) -> None:
         options = [
@@ -213,31 +238,31 @@ class _FaceAvatarWidget(QLabel):
         ]
         if not options:
             return
-        labels = [_person_choice_label(summary) for summary in options]
-        dialog = QInputDialog(self.window() if isinstance(self.window(), QWidget) else self)
-        dialog.setWindowTitle("选择其他人")
-        dialog.setLabelText("把这张脸归给:")
-        dialog.setComboBoxItems(labels)
-        dialog.setOption(QInputDialog.InputDialogOption.UseListViewForComboBoxItems, True)
-        dialog.setComboBoxEditable(False)
-        _style_popup_input_dialog(dialog, self.window() if isinstance(self.window(), QWidget) else self)
+        host = self.window() if isinstance(self.window(), QWidget) else self
+        dialog = GroupPeopleDialog(
+            options,
+            title_text="Choose Someone Else",
+            prompt_text="Assign this face to",
+            confirm_text="Choose",
+            min_selection=1,
+            max_selection=1,
+            dark_mode=_uses_dark_theme(host),
+            parent=host,
+        )
         if dialog.exec() != QInputDialog.DialogCode.Accepted:
             return
-        selected = dialog.textValue()
-        selected_summary = next(
-            (summary for summary, label in zip(options, labels) if label == selected),
-            None,
-        )
-        if selected_summary is None:
+        selected_ids = dialog.selected_person_ids()
+        if not selected_ids:
             return
-        self.moveRequested.emit(self._annotation, selected_summary.person_id)
+        self.moveRequested.emit(self._annotation, selected_ids[0])
 
     def _prompt_rename_person(self) -> None:
-        dialog = QInputDialog(self.window() if isinstance(self.window(), QWidget) else self)
-        dialog.setWindowTitle("给此人重命名")
-        dialog.setLabelText("新名字:")
+        host = self.window() if isinstance(self.window(), QWidget) else self
+        dialog = QInputDialog(host)
+        dialog.setWindowTitle("Rename Person")
+        dialog.setLabelText("New name:")
         dialog.setTextValue("")
-        _style_popup_input_dialog(dialog, self.window() if isinstance(self.window(), QWidget) else self)
+        _style_popup_input_dialog(dialog, host)
         if dialog.exec() != QInputDialog.DialogCode.Accepted:
             return
         new_name = dialog.textValue().strip()
@@ -274,7 +299,7 @@ class _FaceAvatarWidget(QLabel):
 
 
 def _person_choice_label(summary: PersonSummary) -> str:
-    display_name = str(summary.name or "").strip() or "未命名"
+    display_name = str(summary.name or "").strip() or "Unnamed"
     return f"{display_name} ({summary.face_count})"
 
 @dataclass
@@ -340,7 +365,7 @@ class InfoPanel(QWidget):
         self._post_show_reflow_queued = False
         self._post_show_reflow_recenter = False
         self._location_capability_enabled = False
-        self._location_fallback_text = "如需Assign a Location功能请下载map extension"
+        self._location_fallback_text = "Install the map extension to use Assign a Location."
         self._location_suggestions: list[object] = []
         self._selected_location_suggestion: object | None = None
         self._updating_location_ui = False

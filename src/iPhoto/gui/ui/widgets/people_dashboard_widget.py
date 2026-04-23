@@ -24,8 +24,7 @@ from iPhoto.people.repository import PeopleGroupSummary, PersonSummary
 from iPhoto.people.service import PeopleService
 
 from . import dialogs
-from .flow_layout import FlowLayout
-from .people_dashboard_board import PeopleBoard
+from .people_dashboard_board import GroupBoard, PeopleBoard
 from .people_dashboard_cards import GroupCard, PeopleCard
 from .people_dashboard_dialogs import GroupPeopleDialog, MergeConfirmDialog
 from .people_dashboard_shared import (
@@ -190,13 +189,12 @@ class PeopleDashboardWidget(QWidget):
 
         self._groups_host = QWidget()
         self._groups_host.setStyleSheet("background: transparent;")
-        self._groups_layout = FlowLayout(
-            self._groups_host,
-            margin=CANVAS_MARGIN,
-            h_spacing=18,
-            v_spacing=18,
-        )
-        self._groups_host.setLayout(self._groups_layout)
+        self._groups_layout = QVBoxLayout(self._groups_host)
+        self._groups_layout.setContentsMargins(0, 0, 0, 0)
+        self._groups_layout.setSpacing(0)
+        self._groups_board = GroupBoard()
+        self._groups_board.orderChanged.connect(self._persist_group_order)
+        self._groups_layout.addWidget(self._groups_board)
         groups_layout.addWidget(self._groups_host)
         self._content_layout.addWidget(self._groups_section)
 
@@ -346,14 +344,20 @@ class PeopleDashboardWidget(QWidget):
             return
 
         self._groups_section.show()
+        cards: list[GroupCard] = []
         for index, summary in enumerate(self._groups):
-            card = GroupCard(summary=summary, seed_index=index, parent=self._groups_host)
+            card = GroupCard(
+                board=self._groups_board,
+                summary=summary,
+                seed_index=index,
+            )
             card.activated.connect(self.groupActivated.emit)
             card.menuRequested.connect(self._show_group_menu)
             self._group_cards[summary.group_id] = card
-            self._groups_layout.addWidget(card)
+            cards.append(card)
+        self._groups_board.set_cards(cards)
+        for card in cards:
             card.load_cover_artwork()
-            card.show()
         self._groups_host.updateGeometry()
 
     def _populate_cards(self) -> None:
@@ -381,14 +385,7 @@ class PeopleDashboardWidget(QWidget):
         self._cards.clear()
 
     def _clear_group_cards(self) -> None:
-        while self._groups_layout.count():
-            item = self._groups_layout.takeAt(0)
-            if item is None:
-                continue
-            widget = item.widget()
-            if widget is not None:
-                widget.hide()
-                widget.deleteLater()
+        self._groups_board.clear_cards()
         self._group_cards.clear()
 
     def _summary_for_person(self, person_id: str) -> PersonSummary | None:
@@ -550,7 +547,7 @@ class PeopleDashboardWidget(QWidget):
     def _merge_person(self, summary: PersonSummary) -> None:
         has_other_people = any(target.person_id != summary.person_id for target in self._summaries)
         choices = [
-            (f"{target.name or 'Unnamed'} ({target.face_count} faces)", target.person_id)
+            target
             for target in self._summaries
             if target.person_id != summary.person_id and target.is_hidden == summary.is_hidden
         ]
@@ -566,20 +563,22 @@ class PeopleDashboardWidget(QWidget):
                 )
             return
 
-        labels = [label for label, _ in choices]
-        selected, accepted = QInputDialog.getItem(
-            self,
-            "Merge Person",
-            "Merge into:",
-            labels,
-            editable=False,
+        dialog = GroupPeopleDialog(
+            choices,
+            title_text="Merge Person",
+            prompt_text="Merge into",
+            confirm_text="Choose",
+            min_selection=1,
+            max_selection=1,
+            dark_mode=self._uses_dark_theme(),
+            parent=self,
         )
-        if not accepted:
+        if dialog.exec() != QDialog.DialogCode.Accepted:
             return
-        selected_id = next((person_id for label, person_id in choices if label == selected), None)
-        if selected_id is None:
+        selected_ids = dialog.selected_person_ids()
+        if not selected_ids:
             return
-        self._confirm_merge(summary.person_id, selected_id)
+        self._confirm_merge(summary.person_id, selected_ids[0])
 
     def _open_group_dialog(self, initial_person_id: str) -> None:
         if len(self._summaries) < 2:
@@ -657,6 +656,18 @@ class PeopleDashboardWidget(QWidget):
             )
         if filtered:
             self._service.set_cluster_order(filtered)
+
+    def _persist_group_order(self, ordered_group_ids: list[str]) -> None:
+        current_ids = {summary.group_id for summary in self._groups}
+        filtered = [group_id for group_id in ordered_group_ids if group_id in current_ids]
+        if len(filtered) != len(self._groups):
+            filtered.extend(
+                summary.group_id
+                for summary in self._groups
+                if summary.group_id not in set(filtered)
+            )
+        if filtered:
+            self._service.set_group_order(filtered)
 
     def _group_summary_for_group(self, group_id: str) -> PeopleGroupSummary | None:
         return next((item for item in self._groups if item.group_id == group_id), None)

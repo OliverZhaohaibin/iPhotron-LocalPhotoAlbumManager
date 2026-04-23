@@ -583,6 +583,11 @@ class FaceRepository:
             return
         self._state_repo.set_person_order(person_ids)
 
+    def set_group_order(self, group_ids: Iterable[str]) -> None:
+        if self._state_repo is None:
+            return
+        self._state_repo.set_group_order(group_ids)
+
     def merge_persons(self, source_person_id: str, target_person_id: str) -> bool:
         merged, _group_redirects = self.merge_persons_with_redirects(
             source_person_id,

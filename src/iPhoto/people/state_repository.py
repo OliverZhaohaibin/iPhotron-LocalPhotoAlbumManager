@@ -427,6 +427,34 @@ class FaceStateRepository:
                 conn.execute("DELETE FROM person_card_orders")
             conn.commit()
 
+    def set_group_order(self, group_ids: Iterable[str]) -> None:
+        ordered_ids = [str(group_id) for group_id in dict.fromkeys(group_ids) if group_id]
+        self.initialize()
+        updated_at = _utc_now_iso()
+        with closing(self._connect()) as conn:
+            conn.executemany(
+                """
+                INSERT INTO group_card_orders (group_id, sort_order, updated_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(group_id) DO UPDATE SET
+                    sort_order = excluded.sort_order,
+                    updated_at = excluded.updated_at
+                """,
+                [
+                    (group_id, index, updated_at)
+                    for index, group_id in enumerate(ordered_ids)
+                ],
+            )
+            if ordered_ids:
+                placeholders = ", ".join(["?"] * len(ordered_ids))
+                conn.execute(
+                    f"DELETE FROM group_card_orders WHERE group_id NOT IN ({placeholders})",
+                    ordered_ids,
+                )
+            else:
+                conn.execute("DELETE FROM group_card_orders")
+            conn.commit()
+
     def get_person_hidden_map(self, person_ids: Iterable[str]) -> dict[str, bool]:
         unique_ids = _unique_person_ids(person_ids)
         if not unique_ids:
@@ -1064,6 +1092,7 @@ class FaceStateRepository:
                 """,
                 [(group_id, person_id, index) for index, person_id in enumerate(members)],
             )
+            self._ensure_group_order_row(conn, group_id, timestamp)
             conn.commit()
             return self._group_from_id(conn, group_id)
 
@@ -1073,7 +1102,12 @@ class FaceStateRepository:
             rows = conn.execute("""
                 SELECT group_id
                 FROM people_groups
-                ORDER BY created_at ASC, group_id ASC
+                LEFT JOIN group_card_orders USING (group_id)
+                ORDER BY
+                    CASE WHEN group_card_orders.sort_order IS NULL THEN 1 ELSE 0 END ASC,
+                    group_card_orders.sort_order ASC,
+                    people_groups.created_at ASC,
+                    people_groups.group_id ASC
                 """).fetchall()
             groups: list[PeopleGroupRecord] = []
             for row in rows:
@@ -1116,7 +1150,7 @@ class FaceStateRepository:
             group = self._group_from_id(conn, group_id)
             if group is None:
                 return None
-            conn.execute("DELETE FROM people_groups WHERE group_id = ?", (group_id,))
+            self._delete_group(conn, group_id)
             conn.commit()
             return group
 
@@ -1319,7 +1353,7 @@ class FaceStateRepository:
                 for person_id in group.member_person_ids
             )
             if len(next_members) < 2:
-                conn.execute("DELETE FROM people_groups WHERE group_id = ?", (group_id,))
+                self._delete_group(conn, group_id)
                 redirects[group_id] = None
                 continue
 
@@ -1343,7 +1377,7 @@ class FaceStateRepository:
                     target_group_id=target_group_id,
                     updated_at=updated_at,
                 )
-                conn.execute("DELETE FROM people_groups WHERE group_id = ?", (group_id,))
+                self._delete_group(conn, group_id)
                 redirects[group_id] = target_group_id
                 continue
 
@@ -1446,7 +1480,7 @@ class FaceStateRepository:
                 if member_id != person_id
             )
             if len(next_members) < 2:
-                conn.execute("DELETE FROM people_groups WHERE group_id = ?", (group_id,))
+                self._delete_group(conn, group_id)
                 redirects[group_id] = None
                 continue
 
@@ -1470,7 +1504,7 @@ class FaceStateRepository:
                     target_group_id=target_group_id,
                     updated_at=updated_at,
                 )
-                conn.execute("DELETE FROM people_groups WHERE group_id = ?", (group_id,))
+                self._delete_group(conn, group_id)
                 redirects[group_id] = target_group_id
                 continue
 
@@ -1503,6 +1537,35 @@ class FaceStateRepository:
             conn.execute("DELETE FROM hidden_people WHERE person_id = ?", (person_id,))
             conn.execute("DELETE FROM person_profiles WHERE person_id = ?", (person_id,))
             conn.commit()
+
+    @staticmethod
+    def _ensure_group_order_row(
+        conn: sqlite3.Connection,
+        group_id: str,
+        updated_at: str,
+    ) -> None:
+        row = conn.execute(
+            "SELECT 1 FROM group_card_orders WHERE group_id = ?",
+            (group_id,),
+        ).fetchone()
+        if row is not None:
+            return
+        max_order = conn.execute(
+            "SELECT MAX(sort_order) AS max_order FROM group_card_orders"
+        ).fetchone()
+        next_order = int(max_order["max_order"]) + 1 if max_order and max_order["max_order"] is not None else 0
+        conn.execute(
+            """
+            INSERT INTO group_card_orders (group_id, sort_order, updated_at)
+            VALUES (?, ?, ?)
+            """,
+            (group_id, next_order, updated_at),
+        )
+
+    @staticmethod
+    def _delete_group(conn: sqlite3.Connection, group_id: str) -> None:
+        conn.execute("DELETE FROM group_card_orders WHERE group_id = ?", (group_id,))
+        conn.execute("DELETE FROM people_groups WHERE group_id = ?", (group_id,))
 
     @staticmethod
     def _group_from_id(
@@ -1624,6 +1687,17 @@ class FaceStateRepository:
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_person_card_orders_sort_order "
             "ON person_card_orders(sort_order)"
+        )
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS group_card_orders (
+                group_id TEXT PRIMARY KEY,
+                sort_order INTEGER NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """)
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_group_card_orders_sort_order "
+            "ON group_card_orders(sort_order)"
         )
         conn.execute("""
             CREATE TABLE IF NOT EXISTS hidden_people (

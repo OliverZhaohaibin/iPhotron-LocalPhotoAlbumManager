@@ -415,6 +415,132 @@ def test_handle_face_name_rename_submitted_updates_overlay_and_dashboard() -> No
     coordinator._people_dashboard_refresh_callback.assert_called_once_with()
 
 
+def test_set_info_panel_connects_face_action_signals() -> None:
+    coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
+    panel = SimpleNamespace(
+        dismissed=Mock(connect=Mock()),
+        manualFaceAddRequested=Mock(connect=Mock()),
+        faceDeleteRequested=Mock(connect=Mock()),
+        faceMoveRequested=Mock(connect=Mock()),
+        faceMoveToNewPersonRequested=Mock(connect=Mock()),
+        locationQueryChanged=Mock(connect=Mock()),
+        locationConfirmRequested=Mock(connect=Mock()),
+    )
+
+    PlaybackCoordinator.set_info_panel(coordinator, panel)
+
+    panel.faceDeleteRequested.connect.assert_called_once_with(
+        coordinator._handle_info_panel_face_delete_requested
+    )
+    panel.faceMoveRequested.connect.assert_called_once_with(
+        coordinator._handle_info_panel_face_move_requested
+    )
+    panel.faceMoveToNewPersonRequested.connect.assert_called_once_with(
+        coordinator._handle_info_panel_face_move_to_new_person_requested
+    )
+
+
+def test_handle_info_panel_face_delete_requested_refreshes_views() -> None:
+    coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
+    coordinator._people_service = Mock(delete_face=Mock(return_value=True))
+    coordinator._current_presentation = _make_presentation(
+        path="/fake/photo.jpg",
+        asset_id="asset-photo",
+        is_video=False,
+    )
+    coordinator._refresh_face_name_overlay_for_current_presentation = Mock()
+    coordinator._refresh_info_panel_faces = Mock()
+    coordinator._people_dashboard_refresh_callback = Mock()
+    annotation = AssetFaceAnnotation(
+        face_id="face-1",
+        person_id="person-a",
+        display_name="Alice",
+        box_x=0,
+        box_y=0,
+        box_w=10,
+        box_h=10,
+        image_width=100,
+        image_height=100,
+    )
+
+    PlaybackCoordinator._handle_info_panel_face_delete_requested(coordinator, annotation)
+
+    coordinator._people_service.delete_face.assert_called_once_with("face-1")
+    coordinator._refresh_face_name_overlay_for_current_presentation.assert_called_once_with()
+    coordinator._refresh_info_panel_faces.assert_called_once_with("asset-photo")
+    coordinator._people_dashboard_refresh_callback.assert_called_once_with()
+
+
+def test_handle_info_panel_face_move_requested_refreshes_views() -> None:
+    coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
+    coordinator._people_service = Mock(move_face_to_person=Mock(return_value=True))
+    coordinator._current_presentation = _make_presentation(
+        path="/fake/photo.jpg",
+        asset_id="asset-photo",
+        is_video=False,
+    )
+    coordinator._refresh_face_name_overlay_for_current_presentation = Mock()
+    coordinator._refresh_info_panel_faces = Mock()
+    coordinator._people_dashboard_refresh_callback = Mock()
+    annotation = AssetFaceAnnotation(
+        face_id="face-1",
+        person_id="person-a",
+        display_name="Alice",
+        box_x=0,
+        box_y=0,
+        box_w=10,
+        box_h=10,
+        image_width=100,
+        image_height=100,
+    )
+
+    PlaybackCoordinator._handle_info_panel_face_move_requested(
+        coordinator,
+        annotation,
+        "person-b",
+    )
+
+    coordinator._people_service.move_face_to_person.assert_called_once_with("face-1", "person-b")
+    coordinator._refresh_face_name_overlay_for_current_presentation.assert_called_once_with()
+    coordinator._refresh_info_panel_faces.assert_called_once_with("asset-photo")
+    coordinator._people_dashboard_refresh_callback.assert_called_once_with()
+
+
+def test_handle_info_panel_face_move_to_new_person_requested_refreshes_views() -> None:
+    coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
+    coordinator._people_service = Mock(move_face_to_new_person=Mock(return_value="person-new"))
+    coordinator._current_presentation = _make_presentation(
+        path="/fake/photo.jpg",
+        asset_id="asset-photo",
+        is_video=False,
+    )
+    coordinator._refresh_face_name_overlay_for_current_presentation = Mock()
+    coordinator._refresh_info_panel_faces = Mock()
+    coordinator._people_dashboard_refresh_callback = Mock()
+    annotation = AssetFaceAnnotation(
+        face_id="face-1",
+        person_id="person-a",
+        display_name="Alice",
+        box_x=0,
+        box_y=0,
+        box_w=10,
+        box_h=10,
+        image_width=100,
+        image_height=100,
+    )
+
+    PlaybackCoordinator._handle_info_panel_face_move_to_new_person_requested(
+        coordinator,
+        annotation,
+        "Alice 2",
+    )
+
+    coordinator._people_service.move_face_to_new_person.assert_called_once_with("face-1", "Alice 2")
+    coordinator._refresh_face_name_overlay_for_current_presentation.assert_called_once_with()
+    coordinator._refresh_info_panel_faces.assert_called_once_with("asset-photo")
+    coordinator._people_dashboard_refresh_callback.assert_called_once_with()
+
+
 def test_handle_people_snapshot_committed_refreshes_current_overlay() -> None:
     coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
     coordinator._current_presentation = _make_presentation(

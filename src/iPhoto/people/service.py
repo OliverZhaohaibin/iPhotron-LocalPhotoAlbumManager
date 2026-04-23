@@ -200,6 +200,33 @@ class PeopleService:
             target_person_id,
         )
 
+    def delete_face(self, annotation_face_id: str) -> bool:
+        if self._library_root is None or not annotation_face_id:
+            return False
+        event = get_people_index_coordinator(self._library_root).delete_face(annotation_face_id)
+        return event is not None
+
+    def move_face_to_person(self, annotation_face_id: str, target_person_id: str) -> bool:
+        if self._library_root is None or not annotation_face_id or not target_person_id:
+            return False
+        event = get_people_index_coordinator(self._library_root).move_face_to_person(
+            annotation_face_id,
+            target_person_id,
+        )
+        return event is not None
+
+    def move_face_to_new_person(self, annotation_face_id: str, new_name: str) -> str | None:
+        normalized_name = str(new_name or "").strip()
+        if self._library_root is None or not annotation_face_id or not normalized_name:
+            return None
+        new_person_id = uuid.uuid4().hex
+        event = get_people_index_coordinator(self._library_root).move_face_to_new_person(
+            annotation_face_id,
+            new_person_id,
+            normalized_name,
+        )
+        return new_person_id if event is not None else None
+
     def cluster_asset_ids(self, person_id: str) -> list[str]:
         repository = self.repository()
         if repository is None or self._library_root is None:

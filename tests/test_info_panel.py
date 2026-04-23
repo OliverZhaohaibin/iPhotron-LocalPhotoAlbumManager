@@ -348,6 +348,115 @@ def test_info_panel_face_strip_uses_enlarged_avatar_and_matched_plus_button_size
     panel.close()
 
 
+def test_info_panel_face_avatar_context_menu_labels_and_submenu(qapp: QApplication) -> None:
+    from iPhoto.people.repository import AssetFaceAnnotation, PersonSummary
+
+    panel = InfoPanel()
+    panel.set_face_action_candidates(
+        [
+            PersonSummary(
+                person_id="person-1",
+                name="Alice",
+                key_face_id="face-1",
+                face_count=3,
+                thumbnail_path=None,
+                created_at="2024-01-01T00:00:00+00:00",
+            ),
+            PersonSummary(
+                person_id="person-2",
+                name="Bob",
+                key_face_id="face-2",
+                face_count=2,
+                thumbnail_path=None,
+                created_at="2024-01-02T00:00:00+00:00",
+            ),
+        ]
+    )
+    panel.set_asset_faces(
+        [
+            AssetFaceAnnotation(
+                face_id="face-1",
+                person_id="person-1",
+                display_name="Alice",
+                box_x=0,
+                box_y=0,
+                box_w=10,
+                box_h=10,
+                image_width=100,
+                image_height=100,
+            )
+        ]
+    )
+
+    avatar = panel._face_layout.itemAt(0).widget()
+    assert avatar is not None
+    delete_label, not_this_label, submenu_labels = avatar._menu_action_labels()
+    assert delete_label == "删除"
+    assert not_this_label == "这不是Alice"
+    assert submenu_labels == ("选择其他人…", "给此人重命名…")
+    panel.close()
+
+
+def test_info_panel_face_avatar_context_menu_uses_fallback_name_when_unnamed(
+    qapp: QApplication,
+) -> None:
+    from iPhoto.people.repository import AssetFaceAnnotation
+
+    panel = InfoPanel()
+    panel.set_asset_faces(
+        [
+            AssetFaceAnnotation(
+                face_id="face-1",
+                person_id=None,
+                display_name=None,
+                box_x=0,
+                box_y=0,
+                box_w=10,
+                box_h=10,
+                image_width=100,
+                image_height=100,
+            )
+        ]
+    )
+
+    avatar = panel._face_layout.itemAt(0).widget()
+    assert avatar is not None
+    assert avatar._menu_action_labels()[1] == "这不是此人"
+    panel.close()
+
+
+def test_info_panel_face_avatar_highlight_toggles_with_menu_state(qapp: QApplication) -> None:
+    from iPhoto.people.repository import AssetFaceAnnotation
+
+    panel = InfoPanel()
+    panel.set_asset_faces(
+        [
+            AssetFaceAnnotation(
+                face_id="face-1",
+                person_id="person-1",
+                display_name="Alice",
+                box_x=0,
+                box_y=0,
+                box_w=10,
+                box_h=10,
+                image_width=100,
+                image_height=100,
+            )
+        ]
+    )
+
+    avatar = panel._face_layout.itemAt(0).widget()
+    assert avatar is not None
+    assert "#0A84FF" not in avatar.styleSheet()
+
+    avatar._set_menu_active(True)
+    assert "#0A84FF" in avatar.styleSheet()
+
+    avatar._set_menu_active(False)
+    assert "#0A84FF" not in avatar.styleSheet()
+    panel.close()
+
+
 def test_info_panel_emits_dismissed_when_closed(qapp: QApplication) -> None:
     """Closing the panel should emit the dismissed signal exactly once."""
 

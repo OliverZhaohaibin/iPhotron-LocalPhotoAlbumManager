@@ -14,10 +14,12 @@ from PySide6.QtGui import QColor, QKeyEvent, QMouseEvent, QPainter, QPainterPath
 from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QLineEdit,
     QListWidget,
     QListWidgetItem,
+    QMenu,
     QPushButton,
     QSizePolicy,
     QToolButton,
@@ -25,9 +27,10 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from iPhoto.people.repository import AssetFaceAnnotation
+from iPhoto.people.repository import AssetFaceAnnotation, PersonSummary
 
 from ..icons import load_icon
+from ..menus.album_sidebar_menu import _apply_main_window_menu_style
 from .info_location_map import InfoLocationMapView
 from .main_window_metrics import TITLE_BAR_HEIGHT, WINDOW_CONTROL_BUTTON_SIZE, WINDOW_CONTROL_GLYPH_SIZE
 
@@ -98,6 +101,182 @@ def _face_add_button_metrics() -> tuple[QSize, QSize]:
 
 _FACE_ADD_ICON_SIZE, _FACE_ADD_BUTTON_SIZE = _face_add_button_metrics()
 
+
+def _style_popup_input_dialog(dialog: QInputDialog, parent: QWidget | None) -> None:
+    palette = parent.palette() if parent is not None else QPalette()
+    bg = palette.color(QPalette.ColorRole.Window).name()
+    text_col = palette.color(QPalette.ColorRole.WindowText).name()
+    base = palette.color(QPalette.ColorRole.Base).name()
+    text_input = palette.color(QPalette.ColorRole.Text).name()
+    button = palette.color(QPalette.ColorRole.Button).name()
+    button_text = palette.color(QPalette.ColorRole.ButtonText).name()
+    dialog.setStyleSheet(
+        f"""
+        QInputDialog {{
+            background-color: {bg};
+            color: {text_col};
+        }}
+        QLabel {{
+            color: {text_col};
+        }}
+        QLineEdit, QComboBox, QListView {{
+            background-color: {base};
+            color: {text_input};
+            border: 1px solid {text_col};
+            padding: 4px;
+        }}
+        QPushButton {{
+            background-color: {button};
+            color: {button_text};
+            border: 1px solid {text_col};
+            padding: 6px 16px;
+            min-width: 60px;
+        }}
+        QPushButton:hover {{
+            background-color: {base};
+        }}
+        """
+    )
+
+
+class _FaceAvatarWidget(QLabel):
+    deleteRequested = Signal(object)
+    moveRequested = Signal(object, str)
+    renameRequested = Signal(object, str)
+
+    _ACTIVE_BORDER_COLOR = "#0A84FF"
+    _PLACEHOLDER_STYLE = (
+        f"background-color: rgba(207, 214, 225, 220); border-radius: {_FACE_AVATAR_DIAMETER // 2}px;"
+    )
+
+    def __init__(
+        self,
+        annotation: AssetFaceAnnotation,
+        candidates: list[PersonSummary],
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self._annotation = annotation
+        self._candidates = list(candidates)
+        self._is_menu_active = False
+        self._is_placeholder = False
+        self.setFixedSize(_FACE_AVATAR_DIAMETER, _FACE_AVATAR_DIAMETER)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._refresh_visual_state()
+
+    def set_candidates(self, candidates: list[PersonSummary]) -> None:
+        self._candidates = list(candidates)
+
+    def contextMenuEvent(self, event) -> None:  # type: ignore[override]
+        menu = self._build_context_menu()
+        if menu is None:
+            event.ignore()
+            return
+        self._set_menu_active(True)
+        menu.aboutToHide.connect(lambda: self._set_menu_active(False))
+        chosen = menu.exec(event.globalPos())
+        if chosen is None:
+            return
+        if chosen.text() == "删除":
+            self.deleteRequested.emit(self._annotation)
+            return
+        if chosen.text() == "选择其他人…":
+            self._prompt_choose_person()
+            return
+        if chosen.text() == "给此人重命名…":
+            self._prompt_rename_person()
+
+    def _build_context_menu(self) -> QMenu | None:
+        delete_label, not_this_label, submenu_labels = self._menu_action_labels()
+        menu = QMenu(self)
+        _apply_main_window_menu_style(menu, self)
+        menu.addAction(delete_label)
+        submenu = menu.addMenu(not_this_label)
+        _apply_main_window_menu_style(submenu, self)
+        for submenu_label in submenu_labels:
+            submenu.addAction(submenu_label)
+        menu._face_action_submenu = submenu  # type: ignore[attr-defined]
+        return menu
+
+    def _menu_action_labels(self) -> tuple[str, str, tuple[str, str]]:
+        return ("删除", self._not_this_label(), ("选择其他人…", "给此人重命名…"))
+
+    def _not_this_label(self) -> str:
+        display_name = str(self._annotation.display_name or "").strip()
+        return f"这不是{display_name}" if display_name else "这不是此人"
+
+    def _prompt_choose_person(self) -> None:
+        options = [
+            summary
+            for summary in self._candidates
+            if summary.person_id and summary.person_id != self._annotation.person_id
+        ]
+        if not options:
+            return
+        labels = [_person_choice_label(summary) for summary in options]
+        dialog = QInputDialog(self.window() if isinstance(self.window(), QWidget) else self)
+        dialog.setWindowTitle("选择其他人")
+        dialog.setLabelText("把这张脸归给:")
+        dialog.setComboBoxItems(labels)
+        dialog.setOption(QInputDialog.InputDialogOption.UseListViewForComboBoxItems, True)
+        dialog.setComboBoxEditable(False)
+        _style_popup_input_dialog(dialog, self.window() if isinstance(self.window(), QWidget) else self)
+        if dialog.exec() != QInputDialog.DialogCode.Accepted:
+            return
+        selected = dialog.textValue()
+        selected_summary = next(
+            (summary for summary, label in zip(options, labels) if label == selected),
+            None,
+        )
+        if selected_summary is None:
+            return
+        self.moveRequested.emit(self._annotation, selected_summary.person_id)
+
+    def _prompt_rename_person(self) -> None:
+        dialog = QInputDialog(self.window() if isinstance(self.window(), QWidget) else self)
+        dialog.setWindowTitle("给此人重命名")
+        dialog.setLabelText("新名字:")
+        dialog.setTextValue("")
+        _style_popup_input_dialog(dialog, self.window() if isinstance(self.window(), QWidget) else self)
+        if dialog.exec() != QInputDialog.DialogCode.Accepted:
+            return
+        new_name = dialog.textValue().strip()
+        if not new_name:
+            return
+        self.renameRequested.emit(self._annotation, new_name)
+
+    def _set_menu_active(self, active: bool) -> None:
+        self._is_menu_active = bool(active)
+        self._refresh_visual_state()
+
+    def _refresh_visual_state(self) -> None:
+        pixmap = _avatar_pixmap(self._annotation.thumbnail_path)
+        border = (
+            f"border: 2px solid {self._ACTIVE_BORDER_COLOR};"
+            if self._is_menu_active
+            else "border: none;"
+        )
+        if pixmap is not None:
+            self._is_placeholder = False
+            self.setPixmap(pixmap)
+            self.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            self.setStyleSheet(
+                f"QLabel {{ background: transparent; border-radius: {_FACE_AVATAR_DIAMETER // 2}px; {border} }}"
+            )
+            return
+        self._is_placeholder = True
+        self.clear()
+        self.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.setText(" ")
+        self.setStyleSheet(
+            f"QLabel {{ {self._PLACEHOLDER_STYLE} {border} }}"
+        )
+
+
+def _person_choice_label(summary: PersonSummary) -> str:
+    display_name = str(summary.name or "").strip() or "未命名"
+    return f"{display_name} ({summary.face_count})"
+
 @dataclass
 class _FormattedMetadata:
     """Pre-formatted strings used to populate the info panel labels."""
@@ -125,6 +304,9 @@ class InfoPanel(QWidget):
     _SHADOW_RADIUS_GROWTH = 0.5
     dismissed = Signal()
     manualFaceAddRequested = Signal()
+    faceDeleteRequested = Signal(object)
+    faceMoveRequested = Signal(object, str)
+    faceMoveToNewPersonRequested = Signal(object, str)
     locationQueryChanged = Signal(str)
     locationSuggestionActivated = Signal(object)
     locationConfirmRequested = Signal(str, object)
@@ -151,6 +333,7 @@ class InfoPanel(QWidget):
         self._metadata: Optional[dict[str, Any]] = None
         self._current_rel: Optional[str] = None
         self._asset_faces: list[AssetFaceAnnotation] = []
+        self._face_action_candidates: list[PersonSummary] = []
         self._drag_active = False
         self._drag_offset = None
         self._centered = False
@@ -363,11 +546,16 @@ class InfoPanel(QWidget):
         if self.isVisible():
             self._schedule_post_show_reflow(recenter=False)
 
+    def set_face_action_candidates(self, candidates: list[PersonSummary]) -> None:
+        self._face_action_candidates = list(candidates)
+        self._rebuild_face_strip()
+
     def clear(self) -> None:
         """Reset the panel to an empty state without hiding the window."""
 
         self._metadata = None
         self._current_rel = None
+        self._face_action_candidates = []
         for label in (
             self._filename_label,
             self._timestamp_label,
@@ -718,17 +906,10 @@ class InfoPanel(QWidget):
         self._face_container.setVisible(True)
 
     def _make_face_avatar(self, annotation: AssetFaceAnnotation) -> QLabel:
-        label = QLabel(self._face_container)
-        label.setFixedSize(_FACE_AVATAR_DIAMETER, _FACE_AVATAR_DIAMETER)
-        pixmap = _avatar_pixmap(annotation.thumbnail_path)
-        if pixmap is not None:
-            label.setPixmap(pixmap)
-        else:
-            label.setStyleSheet(
-                f"QLabel {{ background-color: rgba(207, 214, 225, 220); border-radius: {_FACE_AVATAR_DIAMETER // 2}px; }}"
-            )
-            label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            label.setText(" ")
+        label = _FaceAvatarWidget(annotation, self._face_action_candidates, self._face_container)
+        label.deleteRequested.connect(self.faceDeleteRequested.emit)
+        label.moveRequested.connect(self.faceMoveRequested.emit)
+        label.renameRequested.connect(self.faceMoveToNewPersonRequested.emit)
         return label
 
     def _refresh_panel_geometry(self, *, recenter: bool = False) -> None:

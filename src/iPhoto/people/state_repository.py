@@ -9,7 +9,13 @@ from typing import Iterable
 
 import numpy as np
 
-from .records import FaceRecord, PeopleGroupRecord, PersonProfile, PersonRecord
+from .records import (
+    FaceRecord,
+    ManualFaceRecord,
+    PeopleGroupRecord,
+    PersonProfile,
+    PersonRecord,
+)
 from .repository_utils import (
     _deserialize_embedding,
     _group_id_for_member_key,
@@ -83,69 +89,255 @@ class FaceStateRepository:
             )
         return profiles
 
-    def get_manual_faces(self) -> list[FaceRecord]:
+    def get_manual_faces(self) -> list[ManualFaceRecord]:
         self.initialize()
         with closing(self._connect()) as conn:
             rows = conn.execute(
                 """
                 SELECT
-                    face_id, face_key, asset_id, asset_rel, box_x, box_y, box_w, box_h,
-                    confidence, embedding, embedding_dim, thumbnail_path, person_id,
-                    detected_at, image_width, image_height, is_manual
+                    face_id, asset_id, asset_rel, box_x, box_y, box_w, box_h,
+                    thumbnail_path, person_id, created_at, image_width, image_height
                 FROM manual_faces
-                ORDER BY detected_at ASC, face_id ASC
+                ORDER BY created_at ASC, face_id ASC
                 """
             ).fetchall()
         return [self._manual_face_from_row(row) for row in rows]
 
-    def upsert_manual_face(self, face: FaceRecord) -> None:
+    def get_manual_face(self, face_id: str) -> ManualFaceRecord | None:
+        if not face_id:
+            return None
+        self.initialize()
+        with closing(self._connect()) as conn:
+            row = conn.execute(
+                """
+                SELECT
+                    face_id, asset_id, asset_rel, box_x, box_y, box_w, box_h,
+                    thumbnail_path, person_id, created_at, image_width, image_height
+                FROM manual_faces
+                WHERE face_id = ?
+                """,
+                (face_id,),
+            ).fetchone()
+        return self._manual_face_from_row(row) if row is not None else None
+
+    def get_manual_faces_for_asset(self, asset_id: str) -> list[ManualFaceRecord]:
+        if not asset_id:
+            return []
+        self.initialize()
+        with closing(self._connect()) as conn:
+            rows = conn.execute(
+                """
+                SELECT
+                    face_id, asset_id, asset_rel, box_x, box_y, box_w, box_h,
+                    thumbnail_path, person_id, created_at, image_width, image_height
+                FROM manual_faces
+                WHERE asset_id = ?
+                ORDER BY box_x ASC, box_y ASC, face_id ASC
+                """,
+                (asset_id,),
+            ).fetchall()
+        return [self._manual_face_from_row(row) for row in rows]
+
+    def get_manual_faces_for_persons(
+        self,
+        person_ids: Iterable[str],
+    ) -> list[ManualFaceRecord]:
+        unique_ids = _unique_person_ids(person_ids)
+        if not unique_ids:
+            return []
+        self.initialize()
+        placeholders = ", ".join(["?"] * len(unique_ids))
+        with closing(self._connect()) as conn:
+            rows = conn.execute(
+                f"""
+                SELECT
+                    face_id, asset_id, asset_rel, box_x, box_y, box_w, box_h,
+                    thumbnail_path, person_id, created_at, image_width, image_height
+                FROM manual_faces
+                WHERE person_id IN ({placeholders})
+                ORDER BY created_at ASC, face_id ASC
+                """,
+                unique_ids,
+            ).fetchall()
+        return [self._manual_face_from_row(row) for row in rows]
+
+    def get_manual_person_ids_for_asset_ids(self, asset_ids: Iterable[str]) -> set[str]:
+        unique_ids = [str(asset_id) for asset_id in dict.fromkeys(asset_ids) if asset_id]
+        if not unique_ids:
+            return set()
+        self.initialize()
+        chunk_size = 900
+        person_ids: set[str] = set()
+        with closing(self._connect()) as conn:
+            for start in range(0, len(unique_ids), chunk_size):
+                chunk = unique_ids[start : start + chunk_size]
+                placeholders = ", ".join(["?"] * len(chunk))
+                rows = conn.execute(
+                    f"""
+                    SELECT DISTINCT person_id
+                    FROM manual_faces
+                    WHERE asset_id IN ({placeholders})
+                    """,
+                    chunk,
+                ).fetchall()
+                person_ids.update(str(row["person_id"]) for row in rows if row["person_id"])
+        return person_ids
+
+    def get_profile_name_map(self, person_ids: Iterable[str]) -> dict[str, str | None]:
+        unique_ids = _unique_person_ids(person_ids)
+        if not unique_ids:
+            return {}
+        self.initialize()
+        placeholders = ", ".join(["?"] * len(unique_ids))
+        with closing(self._connect()) as conn:
+            rows = conn.execute(
+                f"""
+                SELECT person_id, name
+                FROM person_profiles
+                WHERE person_id IN ({placeholders})
+                """,
+                unique_ids,
+            ).fetchall()
+        return {str(row["person_id"]): row["name"] for row in rows if row["person_id"]}
+
+    def upsert_manual_face(self, face: ManualFaceRecord) -> None:
         self.initialize()
         with closing(self._connect()) as conn:
             conn.execute(
                 """
                 INSERT INTO manual_faces (
-                    face_id, face_key, asset_id, asset_rel, box_x, box_y, box_w, box_h,
-                    confidence, embedding, embedding_dim, thumbnail_path, person_id,
-                    detected_at, image_width, image_height, is_manual
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    face_id, asset_id, asset_rel, box_x, box_y, box_w, box_h,
+                    thumbnail_path, person_id, created_at, image_width, image_height
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(face_id) DO UPDATE SET
-                    face_key = excluded.face_key,
                     asset_id = excluded.asset_id,
                     asset_rel = excluded.asset_rel,
                     box_x = excluded.box_x,
                     box_y = excluded.box_y,
                     box_w = excluded.box_w,
                     box_h = excluded.box_h,
-                    confidence = excluded.confidence,
-                    embedding = excluded.embedding,
-                    embedding_dim = excluded.embedding_dim,
                     thumbnail_path = excluded.thumbnail_path,
                     person_id = excluded.person_id,
-                    detected_at = excluded.detected_at,
+                    created_at = excluded.created_at,
                     image_width = excluded.image_width,
-                    image_height = excluded.image_height,
-                    is_manual = excluded.is_manual
+                    image_height = excluded.image_height
                 """,
                 (
                     face.face_id,
-                    face.face_key,
                     face.asset_id,
                     face.asset_rel,
                     face.box_x,
                     face.box_y,
                     face.box_w,
                     face.box_h,
-                    face.confidence,
-                    _serialize_embedding(face.embedding),
-                    face.embedding_dim,
                     face.thumbnail_path,
                     face.person_id,
-                    face.detected_at,
+                    face.created_at,
                     face.image_width,
                     face.image_height,
-                    1 if face.is_manual else 0,
                 ),
             )
+            conn.commit()
+
+    def add_manual_face(
+        self,
+        face: ManualFaceRecord,
+        *,
+        person_name: str | None = None,
+    ) -> None:
+        self.initialize()
+        timestamp = _utc_now_iso()
+        with closing(self._connect()) as conn:
+            conn.execute(
+                """
+                INSERT INTO manual_faces (
+                    face_id, asset_id, asset_rel, box_x, box_y, box_w, box_h,
+                    thumbnail_path, person_id, created_at, image_width, image_height
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(face_id) DO UPDATE SET
+                    asset_id = excluded.asset_id,
+                    asset_rel = excluded.asset_rel,
+                    box_x = excluded.box_x,
+                    box_y = excluded.box_y,
+                    box_w = excluded.box_w,
+                    box_h = excluded.box_h,
+                    thumbnail_path = excluded.thumbnail_path,
+                    person_id = excluded.person_id,
+                    created_at = excluded.created_at,
+                    image_width = excluded.image_width,
+                    image_height = excluded.image_height
+                """,
+                (
+                    face.face_id,
+                    face.asset_id,
+                    face.asset_rel,
+                    face.box_x,
+                    face.box_y,
+                    face.box_w,
+                    face.box_h,
+                    face.thumbnail_path,
+                    face.person_id,
+                    face.created_at,
+                    face.image_width,
+                    face.image_height,
+                ),
+            )
+            if person_name is not None:
+                conn.execute(
+                    """
+                    INSERT INTO person_profiles (
+                        person_id, name, center_embedding, embedding_dim,
+                        created_at, updated_at, sample_count, profile_state
+                    ) VALUES (?, ?, ?, 0, ?, ?, 0, 'unstable')
+                    ON CONFLICT(person_id) DO UPDATE SET
+                        name = COALESCE(excluded.name, person_profiles.name),
+                        updated_at = excluded.updated_at
+                    """,
+                    (
+                        face.person_id,
+                        _normalize_name(person_name),
+                        sqlite3.Binary(b""),
+                        face.created_at,
+                        timestamp,
+                    ),
+                )
+            conn.execute(
+                """
+                INSERT INTO person_covers (
+                    person_id, face_id, face_key, asset_id, thumbnail_path, is_custom, updated_at
+                ) VALUES (?, ?, NULL, ?, ?, 1, ?)
+                ON CONFLICT(person_id) DO UPDATE SET
+                    face_id = excluded.face_id,
+                    face_key = excluded.face_key,
+                    asset_id = excluded.asset_id,
+                    thumbnail_path = excluded.thumbnail_path,
+                    is_custom = 1,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    face.person_id,
+                    face.face_id,
+                    face.asset_id,
+                    face.thumbnail_path,
+                    timestamp,
+                ),
+            )
+            row = conn.execute(
+                "SELECT sort_order FROM person_card_orders WHERE person_id = ?",
+                (face.person_id,),
+            ).fetchone()
+            if row is None:
+                max_order = conn.execute(
+                    "SELECT MAX(sort_order) AS max_order FROM person_card_orders"
+                ).fetchone()
+                next_order = int(max_order["max_order"]) + 1 if max_order and max_order["max_order"] is not None else 0
+                conn.execute(
+                    """
+                    INSERT INTO person_card_orders (person_id, sort_order, updated_at)
+                    VALUES (?, ?, ?)
+                    """,
+                    (face.person_id, next_order, timestamp),
+                )
             conn.commit()
 
     def delete_manual_face(self, face_id: str) -> None:
@@ -331,7 +523,18 @@ class FaceStateRepository:
                     if face.face_key and face.person_id
                 ],
             )
-            ordered_ids = _unique_person_ids(person.person_id for person in persons if person.person_id)
+            manual_person_rows = conn.execute(
+                """
+                SELECT DISTINCT person_id
+                FROM manual_faces
+                """
+            ).fetchall()
+            ordered_ids = _unique_person_ids(
+                [
+                    *(person.person_id for person in persons if person.person_id),
+                    *(str(row["person_id"]) for row in manual_person_rows if row["person_id"]),
+                ]
+            )
             if ordered_ids:
                 placeholders = ", ".join(["?"] * len(ordered_ids))
                 rows = conn.execute(
@@ -1107,25 +1310,21 @@ class FaceStateRepository:
                 updated_at TEXT NOT NULL
             )
             """)
+        FaceStateRepository._drop_legacy_manual_faces(conn)
         conn.execute("""
             CREATE TABLE IF NOT EXISTS manual_faces (
                 face_id TEXT PRIMARY KEY,
-                face_key TEXT NOT NULL,
                 asset_id TEXT NOT NULL,
                 asset_rel TEXT NOT NULL,
                 box_x INTEGER NOT NULL,
                 box_y INTEGER NOT NULL,
                 box_w INTEGER NOT NULL,
                 box_h INTEGER NOT NULL,
-                confidence REAL NOT NULL,
-                embedding BLOB NOT NULL,
-                embedding_dim INTEGER NOT NULL,
                 thumbnail_path TEXT,
                 person_id TEXT NOT NULL,
-                detected_at TEXT NOT NULL,
+                created_at TEXT NOT NULL,
                 image_width INTEGER NOT NULL,
-                image_height INTEGER NOT NULL,
-                is_manual INTEGER NOT NULL DEFAULT 1
+                image_height INTEGER NOT NULL
             )
             """)
         conn.execute(
@@ -1190,6 +1389,39 @@ class FaceStateRepository:
         )
 
     @staticmethod
+    def _drop_legacy_manual_faces(conn: sqlite3.Connection) -> None:
+        columns = {
+            str(row["name"])
+            for row in conn.execute("PRAGMA table_info(manual_faces)").fetchall()
+        }
+        if not columns:
+            return
+        expected = {
+            "face_id",
+            "asset_id",
+            "asset_rel",
+            "box_x",
+            "box_y",
+            "box_w",
+            "box_h",
+            "thumbnail_path",
+            "person_id",
+            "created_at",
+            "image_width",
+            "image_height",
+        }
+        legacy = {
+            "face_key",
+            "confidence",
+            "embedding",
+            "embedding_dim",
+            "detected_at",
+            "is_manual",
+        }
+        if columns & legacy or not expected.issubset(columns):
+            conn.execute("DROP TABLE manual_faces")
+
+    @staticmethod
     def _ensure_column(
         conn: sqlite3.Connection,
         table_name: str,
@@ -1203,23 +1435,18 @@ class FaceStateRepository:
             conn.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {definition}")
 
     @staticmethod
-    def _manual_face_from_row(row: sqlite3.Row) -> FaceRecord:
-        return FaceRecord(
+    def _manual_face_from_row(row: sqlite3.Row) -> ManualFaceRecord:
+        return ManualFaceRecord(
             face_id=str(row["face_id"]),
-            face_key=str(row["face_key"]),
             asset_id=str(row["asset_id"]),
             asset_rel=str(row["asset_rel"]),
             box_x=int(row["box_x"]),
             box_y=int(row["box_y"]),
             box_w=int(row["box_w"]),
             box_h=int(row["box_h"]),
-            confidence=float(row["confidence"]),
-            embedding=_deserialize_embedding(row["embedding"], int(row["embedding_dim"])),
-            embedding_dim=int(row["embedding_dim"]),
             thumbnail_path=str(row["thumbnail_path"]) if row["thumbnail_path"] else None,
-            person_id=str(row["person_id"]) if row["person_id"] else None,
-            detected_at=str(row["detected_at"]),
+            person_id=str(row["person_id"]),
+            created_at=str(row["created_at"]),
             image_width=int(row["image_width"]),
             image_height=int(row["image_height"]),
-            is_manual=bool(int(row["is_manual"] or 0)),
         )

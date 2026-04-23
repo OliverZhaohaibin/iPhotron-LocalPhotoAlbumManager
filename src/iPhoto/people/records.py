@@ -30,6 +30,22 @@ class FaceRecord:
 
 
 @dataclass(frozen=True)
+class ManualFaceRecord:
+    face_id: str
+    asset_id: str
+    asset_rel: str
+    box_x: int
+    box_y: int
+    box_w: int
+    box_h: int
+    thumbnail_path: str | None
+    person_id: str
+    created_at: str
+    image_width: int
+    image_height: int
+
+
+@dataclass(frozen=True)
 class PersonRecord:
     person_id: str
     name: str | None

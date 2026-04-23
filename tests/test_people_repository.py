@@ -8,7 +8,13 @@ import numpy as np
 import pytest
 
 from iPhoto.people.pipeline import DetectedAssetFaces
-from iPhoto.people.repository import FaceRecord, FaceRepository, FaceStateRepository, PersonRecord
+from iPhoto.people.repository import (
+    FaceRecord,
+    FaceRepository,
+    FaceStateRepository,
+    ManualFaceRecord,
+    PersonRecord,
+)
 from iPhoto.people.scan_session import FaceScanSession
 
 
@@ -25,7 +31,6 @@ def _face_record(
     thumbnail_path: str | None = None,
     embedding: np.ndarray | None = None,
     face_key: str | None = None,
-    is_manual: bool = False,
 ) -> FaceRecord:
     if embedding is None:
         embedding = np.asarray([1.0, 0.0, 0.0], dtype=np.float32)
@@ -46,7 +51,30 @@ def _face_record(
         detected_at=_now_iso(),
         image_width=400,
         image_height=300,
-        is_manual=is_manual,
+    )
+
+
+def _manual_face_record(
+    *,
+    face_id: str,
+    asset_id: str,
+    asset_rel: str,
+    person_id: str,
+    thumbnail_path: str | None = None,
+) -> ManualFaceRecord:
+    return ManualFaceRecord(
+        face_id=face_id,
+        asset_id=asset_id,
+        asset_rel=asset_rel,
+        box_x=10,
+        box_y=12,
+        box_w=80,
+        box_h=80,
+        thumbnail_path=thumbnail_path,
+        person_id=person_id,
+        created_at=_now_iso(),
+        image_width=400,
+        image_height=300,
     )
 
 
@@ -944,7 +972,75 @@ def test_state_repository_backfills_profile_stability_from_face_keys_for_legacy_
     assert profiles[0].profile_state == "stable"
 
 
-def test_face_scan_session_preserves_manual_faces_for_rescanned_asset(tmp_path: Path) -> None:
+def test_state_repository_rebuilds_legacy_manual_faces_schema(tmp_path: Path) -> None:
+    state_repository = FaceStateRepository(tmp_path / "face_state.db")
+    timestamp = _now_iso()
+    embedding = np.asarray([1.0, 0.0, 0.0], dtype=np.float32)
+    with sqlite3.connect(state_repository.db_path) as conn:
+        conn.execute(
+            """
+            CREATE TABLE manual_faces (
+                face_id TEXT PRIMARY KEY,
+                face_key TEXT NOT NULL,
+                asset_id TEXT NOT NULL,
+                asset_rel TEXT NOT NULL,
+                box_x INTEGER NOT NULL,
+                box_y INTEGER NOT NULL,
+                box_w INTEGER NOT NULL,
+                box_h INTEGER NOT NULL,
+                confidence REAL NOT NULL,
+                embedding BLOB NOT NULL,
+                embedding_dim INTEGER NOT NULL,
+                thumbnail_path TEXT,
+                person_id TEXT NOT NULL,
+                detected_at TEXT NOT NULL,
+                image_width INTEGER NOT NULL,
+                image_height INTEGER NOT NULL,
+                is_manual INTEGER NOT NULL DEFAULT 1
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO manual_faces (
+                face_id, face_key, asset_id, asset_rel, box_x, box_y, box_w, box_h,
+                confidence, embedding, embedding_dim, thumbnail_path, person_id,
+                detected_at, image_width, image_height, is_manual
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "face-manual",
+                "face-key-manual",
+                "asset-a",
+                "album/a.jpg",
+                10,
+                12,
+                80,
+                80,
+                0.99,
+                sqlite3.Binary(embedding.tobytes()),
+                3,
+                "thumbnails/face-manual.png",
+                "person-a",
+                timestamp,
+                400,
+                300,
+                1,
+            ),
+        )
+        conn.commit()
+
+    state_repository.initialize()
+
+    with sqlite3.connect(state_repository.db_path) as conn:
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(manual_faces)")}
+        row_count = conn.execute("SELECT COUNT(*) FROM manual_faces").fetchone()[0]
+    assert "embedding" not in columns
+    assert "created_at" in columns
+    assert row_count == 0
+
+
+def test_face_scan_session_keeps_manual_faces_out_of_runtime_rescan(tmp_path: Path) -> None:
     repository = FaceRepository(tmp_path / "face_index.db", tmp_path / "face_state.db")
     auto_face = _face_record(
         face_id="face-auto",
@@ -953,14 +1049,12 @@ def test_face_scan_session_preserves_manual_faces_for_rescanned_asset(tmp_path: 
         person_id="person-a",
         face_key="face-key-auto",
     )
-    manual_face = _face_record(
+    manual_face = _manual_face_record(
         face_id="face-manual",
         asset_id="asset-a",
         asset_rel="album/a.jpg",
         person_id="person-b",
-        face_key="face-key-manual",
         thumbnail_path="thumbnails/face-manual.png",
-        is_manual=True,
     )
 
     repository.replace_all(
@@ -987,10 +1081,10 @@ def test_face_scan_session_preserves_manual_faces_for_rescanned_asset(tmp_path: 
 
     session.commit(repository, distance_threshold=0.6, min_samples=1)
 
-    faces = {face.face_id: face for face in repository.get_all_faces()}
-    assert set(faces) == {"face-manual"}
-    assert faces["face-manual"].is_manual is True
-    assert faces["face-manual"].asset_id == "asset-a"
+    assert repository.get_all_faces() == []
+    manual_faces = {face.face_id: face for face in repository.state_repository.get_manual_faces()}
+    assert set(manual_faces) == {"face-manual"}
+    assert manual_faces["face-manual"].asset_id == "asset-a"
 
 
 def test_get_person_ids_for_asset_ids_chunks_large_sqlite_in_queries(tmp_path: Path) -> None:

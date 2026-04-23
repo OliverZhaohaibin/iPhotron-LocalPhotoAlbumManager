@@ -7,7 +7,7 @@ from pathlib import Path
 
 from PySide6.QtCore import QObject, QRunnable, Signal
 
-from iPhoto.people.pipeline import ManualFaceValidationError
+from iPhoto.people.manual_faces import ManualFaceValidationError
 from iPhoto.people.service import ManualFaceAddResult, PeopleService
 
 _LOGGER = logging.getLogger(__name__)

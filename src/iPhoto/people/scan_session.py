@@ -76,16 +76,9 @@ class FaceScanSession:
             existing_faces = repository.get_all_faces()
 
         state_repository = repository.state_repository
-        persisted_faces_by_id = {face.face_id: face for face in existing_faces}
-        if state_repository is not None:
-            for face in state_repository.get_manual_faces():
-                persisted_faces_by_id[face.face_id] = face
-
-        persisted_faces = list(persisted_faces_by_id.values())
-        manual_faces = [face for face in persisted_faces if face.is_manual]
         auto_faces = [
             face
-            for face in persisted_faces
+            for face in existing_faces
             if (
                 not face.is_manual
                 and face.asset_id not in staged_asset_ids
@@ -95,26 +88,22 @@ class FaceScanSession:
         for faces in self._faces_by_asset_id.values():
             auto_faces.extend(faces)
 
-        if not auto_faces and not manual_faces:
+        if not auto_faces:
             return [], []
 
-        clustered_auto_faces: list[FaceRecord] = []
-        auto_persons: list[PersonRecord] = []
-        if auto_faces:
-            clustered_auto_faces, auto_persons = cluster_face_records(
-                auto_faces,
+        clustered_auto_faces, auto_persons = cluster_face_records(
+            auto_faces,
+            distance_threshold=distance_threshold,
+            min_samples=min_samples,
+        )
+        if state_repository is not None:
+            clustered_auto_faces, auto_persons = canonicalize_cluster_identities(
+                clustered_auto_faces,
+                auto_persons,
+                state_repository,
                 distance_threshold=distance_threshold,
-                min_samples=min_samples,
             )
-            if state_repository is not None:
-                clustered_auto_faces, auto_persons = canonicalize_cluster_identities(
-                    clustered_auto_faces,
-                    auto_persons,
-                    state_repository,
-                    distance_threshold=distance_threshold,
-                )
 
-        all_faces = clustered_auto_faces + manual_faces
         existing_persons_by_id = {
             person.person_id: person for person in repository.get_all_person_records()
         }
@@ -131,11 +120,11 @@ class FaceScanSession:
                 names_by_person_id[profile.person_id] = profile.name
                 created_at_by_person_id[profile.person_id] = profile.created_at
         persons = build_person_records_from_faces(
-            all_faces,
+            clustered_auto_faces,
             names_by_person_id=names_by_person_id,
             created_at_by_person_id=created_at_by_person_id,
         )
-        return all_faces, persons
+        return clustered_auto_faces, persons
 
     def commit(
         self,

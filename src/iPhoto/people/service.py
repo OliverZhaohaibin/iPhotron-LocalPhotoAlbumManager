@@ -11,7 +11,7 @@ from iPhoto.config import WORK_DIR_NAME
 from iPhoto.domain.models.query import AssetQuery
 
 from .index_coordinator import get_people_index_coordinator
-from .pipeline import FaceClusterPipeline, ManualFaceValidationError
+from .manual_faces import ManualFaceValidationError, build_manual_face_record
 from .repository import (
     AssetFaceAnnotation,
     FaceRepository,
@@ -280,16 +280,13 @@ class PeopleService:
             person_id=person_id,
             name_or_none=name_or_none,
         )
-        pipeline = FaceClusterPipeline(model_root=paths.model_dir)
-        existing_faces = list(repository.get_faces_by_asset_id(asset_id))
-        face = pipeline.build_manual_face_record(
+        face = build_manual_face_record(
             asset_id=asset_id,
             asset_rel=asset_rel,
             image_path=image_path,
             requested_box=requested_box,
             thumbnail_dir=paths.thumbnail_dir,
             target_person_id=resolved_person_id,
-            existing_faces=existing_faces,
         )
         add_result = get_people_index_coordinator(library_root).add_manual_face(
             face,

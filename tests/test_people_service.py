@@ -7,6 +7,7 @@ from unittest.mock import Mock
 
 import numpy as np
 import pytest
+from PIL import Image
 
 from iPhoto.cache.index_store import get_global_repository, reset_global_repository
 from iPhoto.config import WORK_DIR_NAME
@@ -18,7 +19,7 @@ from iPhoto.people.index_coordinator import (
 )
 from iPhoto.library.workers.scanner_worker import ScannerSignals, ScannerWorker
 from iPhoto.people.pipeline import DetectedAssetFaces
-from iPhoto.people.repository import FaceRecord, PersonRecord
+from iPhoto.people.repository import FaceRecord, ManualFaceRecord, PersonRecord
 from iPhoto.people.scan_session import FaceScanSession
 from iPhoto.people.service import PeopleService, face_library_paths, shared_face_model_dir
 
@@ -56,6 +57,37 @@ def _face_record(*, face_id: str, asset_id: str, asset_rel: str, person_id: str)
         image_width=400,
         image_height=300,
     )
+
+
+def _manual_face_record(
+    *,
+    face_id: str,
+    asset_id: str,
+    asset_rel: str,
+    person_id: str,
+    thumbnail_path: str | None = None,
+) -> ManualFaceRecord:
+    return ManualFaceRecord(
+        face_id=face_id,
+        asset_id=asset_id,
+        asset_rel=asset_rel,
+        box_x=10,
+        box_y=12,
+        box_w=80,
+        box_h=80,
+        thumbnail_path=thumbnail_path,
+        person_id=person_id,
+        created_at=_now_iso(),
+        image_width=400,
+        image_height=300,
+    )
+
+
+def _write_image(library_root: Path, rel_path: str, size: tuple[int, int] = (400, 300)) -> Path:
+    image_path = library_root / rel_path
+    image_path.parent.mkdir(parents=True, exist_ok=True)
+    Image.new("RGB", size, color=(120, 130, 140)).save(image_path)
+    return image_path
 
 
 def _person_record(
@@ -559,6 +591,209 @@ def test_people_service_lists_asset_face_annotations_and_preserves_names(tmp_pat
     service.rename_cluster("person-a", "Alice")
     updated = service.list_asset_face_annotations("asset-a")
     assert updated[0].display_name == "Alice"
+
+
+def test_add_manual_face_updates_cover_without_changing_ai_profile(tmp_path: Path) -> None:
+    library_root = tmp_path / "Library"
+    library_root.mkdir()
+    _write_image(library_root, "album/a.jpg")
+    get_global_repository(library_root).write_rows(
+        [{"rel": "album/a.jpg", "id": "asset-a", "media_type": 0, "face_status": "done"}]
+    )
+
+    service = PeopleService(library_root)
+    repository = service.repository()
+    assert repository is not None
+    auto_face = _face_record(
+        face_id="face-a",
+        asset_id="asset-a",
+        asset_rel="album/a.jpg",
+        person_id="person-a",
+    )
+    auto_person = _person_record(
+        person_id="person-a",
+        key_face_id="face-a",
+        face_count=1,
+        name="Alice",
+    )
+    repository.replace_all([auto_face], [auto_person])
+    assert repository.state_repository is not None
+    repository.state_repository.sync_scan_results([auto_person], [auto_face])
+
+    result = service.add_manual_face(
+        asset_id="asset-a",
+        requested_box=(100, 80, 90, 90),
+        name_or_none="Alice",
+        person_id="person-a",
+    )
+
+    manual_faces = repository.state_repository.get_manual_faces()
+    assert [face.face_id for face in manual_faces] == [result.face_id]
+    runtime_faces = repository.get_all_faces()
+    assert len(runtime_faces) == 1
+    assert runtime_faces[0].face_id == auto_face.face_id
+    assert runtime_faces[0].person_id == auto_face.person_id
+    summaries = service.list_clusters()
+    assert len(summaries) == 1
+    assert summaries[0].face_count == 2
+    assert summaries[0].thumbnail_path == (
+        library_root / WORK_DIR_NAME / "faces" / manual_faces[0].thumbnail_path
+    ).resolve()
+    profiles = {profile.person_id: profile for profile in repository.state_repository.get_profiles()}
+    assert profiles["person-a"].sample_count == 1
+    assert profiles["person-a"].center_embedding.shape == (3,)
+    assert repository.state_repository.get_face_key_map([auto_face.face_key]) == {
+        auto_face.face_key: "person-a"
+    }
+    annotations = service.list_asset_face_annotations("asset-a")
+    assert [annotation.is_manual for annotation in annotations] == [False, True]
+    assert annotations[1].display_name == "Alice"
+    assert (annotations[1].box_x, annotations[1].box_y, annotations[1].box_w, annotations[1].box_h) == (
+        100,
+        80,
+        90,
+        90,
+    )
+
+
+def test_add_manual_face_creates_manual_only_person(tmp_path: Path) -> None:
+    library_root = tmp_path / "Library"
+    library_root.mkdir()
+    _write_image(library_root, "album/a.jpg")
+    get_global_repository(library_root).write_rows(
+        [{"rel": "album/a.jpg", "id": "asset-a", "media_type": 0, "face_status": "done"}]
+    )
+
+    service = PeopleService(library_root)
+    result = service.add_manual_face(
+        asset_id="asset-a",
+        requested_box=(40, 50, 80, 80),
+        name_or_none="Manual Person",
+        person_id=None,
+    )
+
+    repository = service.repository()
+    assert repository is not None
+    summaries = service.list_clusters()
+    assert len(summaries) == 1
+    assert summaries[0].person_id == result.person_id
+    assert summaries[0].name == "Manual Person"
+    assert summaries[0].face_count == 1
+    assert summaries[0].key_face_id == result.face_id
+    assert service.build_cluster_query(result.person_id).asset_ids == ["asset-a"]
+    assert repository.get_all_faces() == []
+    profile = repository.state_repository.get_profiles()[0]
+    assert profile.person_id == result.person_id
+    assert profile.sample_count == 0
+    assert profile.center_embedding.size == 0
+    annotations = service.list_asset_face_annotations("asset-a")
+    assert len(annotations) == 1
+    assert annotations[0].is_manual is True
+    assert annotations[0].display_name == "Manual Person"
+
+
+def test_merge_manual_only_people_keeps_profiles_embedding_free(tmp_path: Path) -> None:
+    library_root = tmp_path / "Library"
+    library_root.mkdir()
+    _write_image(library_root, "album/a.jpg")
+    _write_image(library_root, "album/b.jpg")
+    get_global_repository(library_root).write_rows(
+        [
+            {"rel": "album/a.jpg", "id": "asset-a", "media_type": 0, "face_status": "done"},
+            {"rel": "album/b.jpg", "id": "asset-b", "media_type": 0, "face_status": "done"},
+        ]
+    )
+
+    service = PeopleService(library_root)
+    source = service.add_manual_face(
+        asset_id="asset-a",
+        requested_box=(40, 50, 80, 80),
+        name_or_none="Source",
+        person_id=None,
+    )
+    target = service.add_manual_face(
+        asset_id="asset-b",
+        requested_box=(60, 70, 80, 80),
+        name_or_none="Target",
+        person_id=None,
+    )
+
+    assert service.merge_clusters(source.person_id, target.person_id) is True
+
+    repository = service.repository()
+    assert repository is not None
+    summaries = service.list_clusters()
+    assert len(summaries) == 1
+    assert summaries[0].person_id == target.person_id
+    assert summaries[0].name == "Target"
+    assert summaries[0].face_count == 2
+    assert service.build_cluster_query(target.person_id).asset_ids == ["asset-b", "asset-a"]
+    assert repository.get_all_faces() == []
+    profiles = {profile.person_id: profile for profile in repository.state_repository.get_profiles()}
+    assert set(profiles) == {target.person_id}
+    assert profiles[target.person_id].sample_count == 0
+    assert profiles[target.person_id].center_embedding.size == 0
+    assert {
+        face.person_id for face in repository.state_repository.get_manual_faces()
+    } == {target.person_id}
+
+
+def test_merge_manual_person_into_auto_person_preserves_auto_profile_decision(
+    tmp_path: Path,
+) -> None:
+    library_root = tmp_path / "Library"
+    library_root.mkdir()
+    _write_image(library_root, "album/auto.jpg")
+    _write_image(library_root, "album/manual.jpg")
+    get_global_repository(library_root).write_rows(
+        [
+            {"rel": "album/auto.jpg", "id": "asset-auto", "media_type": 0, "face_status": "done"},
+            {"rel": "album/manual.jpg", "id": "asset-manual", "media_type": 0, "face_status": "done"},
+        ]
+    )
+
+    service = PeopleService(library_root)
+    repository = service.repository()
+    assert repository is not None
+    auto_face = _face_record(
+        face_id="face-auto",
+        asset_id="asset-auto",
+        asset_rel="album/auto.jpg",
+        person_id="person-auto",
+    )
+    auto_person = _person_record(
+        person_id="person-auto",
+        key_face_id="face-auto",
+        face_count=1,
+        name="Auto",
+    )
+    repository.replace_all([auto_face], [auto_person])
+    assert repository.state_repository is not None
+    repository.state_repository.sync_scan_results([auto_person], [auto_face])
+    manual = service.add_manual_face(
+        asset_id="asset-manual",
+        requested_box=(60, 70, 80, 80),
+        name_or_none="Manual",
+        person_id=None,
+    )
+
+    assert service.merge_clusters(manual.person_id, "person-auto") is True
+
+    summaries = service.list_clusters()
+    assert len(summaries) == 1
+    assert summaries[0].person_id == "person-auto"
+    assert summaries[0].face_count == 2
+    assert service.build_cluster_query("person-auto").asset_ids == [
+        "asset-manual",
+        "asset-auto",
+    ]
+    profiles = {profile.person_id: profile for profile in repository.state_repository.get_profiles()}
+    assert set(profiles) == {"person-auto"}
+    assert profiles["person-auto"].sample_count == 1
+    assert profiles["person-auto"].center_embedding.shape == (3,)
+    assert repository.state_repository.get_face_key_map([auto_face.face_key]) == {
+        auto_face.face_key: "person-auto"
+    }
 
 
 def test_people_service_lists_person_name_suggestions_for_named_people_only(tmp_path: Path) -> None:

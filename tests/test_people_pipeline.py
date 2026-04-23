@@ -9,9 +9,12 @@ from types import ModuleType, SimpleNamespace
 import numpy as np
 import pytest
 
+from iPhoto.people.manual_faces import (
+    ManualFaceValidationError,
+    build_manual_face_record,
+)
 from iPhoto.people.pipeline import (
     FaceClusterPipeline,
-    ManualFaceValidationError,
     build_person_records_from_faces,
     resolve_canonical_person_id,
 )
@@ -248,30 +251,30 @@ def test_resolve_canonical_person_id_uses_stable_profiles_for_embedding_matches(
     assert resolved == "person-a"
 
 
-def test_build_manual_face_record_accepts_larger_enclosing_selection(
+def test_build_manual_face_record_saves_requested_box_without_face_detection(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    pipeline = FaceClusterPipeline(model_root=tmp_path / "models")
     image_path = tmp_path / "photo.jpg"
-    image_path.write_bytes(b"fake")
     thumbnail_dir = tmp_path / "thumbs"
     thumbnail_dir.mkdir()
-
     fake_image = SimpleNamespace(size=(400, 300))
-    fake_detection = SimpleNamespace(
-        bbox=np.asarray([120.0, 80.0, 200.0, 180.0], dtype=np.float32),
-        embedding=np.asarray([1.0, 0.0, 0.0], dtype=np.float32),
-        det_score=0.97,
-    )
-    fake_app = SimpleNamespace(get=lambda _image: [fake_detection])
+    saved: dict[str, object] = {}
 
-    monkeypatch.setattr(pipeline, "_ensure_face_analysis", lambda: fake_app)
-    monkeypatch.setattr("iPhoto.people.pipeline.load_image_rgb", lambda _path: fake_image)
-    monkeypatch.setattr("iPhoto.people.pipeline.pil_image_to_bgr", lambda _image: object())
-    monkeypatch.setattr("iPhoto.people.pipeline.save_face_thumbnail", lambda *_args, **_kwargs: None)
+    def _fail_face_analysis(_self):
+        raise AssertionError("manual faces must not load the AI face analyzer")
 
-    face = pipeline.build_manual_face_record(
+    def _save_thumbnail(image, bbox, output_path):
+        saved["image"] = image
+        saved["bbox"] = bbox
+        saved["output_path"] = output_path
+
+    monkeypatch.setattr(FaceClusterPipeline, "_ensure_face_analysis", _fail_face_analysis)
+    monkeypatch.setattr("iPhoto.people.manual_faces.load_image_rgb", lambda _path: fake_image)
+    monkeypatch.setattr("iPhoto.people.manual_faces.save_face_thumbnail", _save_thumbnail)
+    monkeypatch.setattr("iPhoto.people.manual_faces.uuid.uuid4", lambda: SimpleNamespace(hex="manual-1"))
+
+    face = build_manual_face_record(
         asset_id="asset-1",
         asset_rel="album/photo.jpg",
         image_path=image_path,
@@ -280,171 +283,76 @@ def test_build_manual_face_record_accepts_larger_enclosing_selection(
         target_person_id="person-1",
     )
 
-    assert (face.box_x, face.box_y, face.box_w, face.box_h) == (120, 80, 80, 100)
+    assert (face.box_x, face.box_y, face.box_w, face.box_h) == (90, 50, 180, 180)
     assert face.person_id == "person-1"
-    assert face.is_manual is True
+    assert face.thumbnail_path == "thumbs/manual-1.png"
+    assert saved["bbox"] == (90, 50, 180, 180)
+    assert saved["output_path"] == thumbnail_dir / "manual-1.png"
 
 
-def test_build_manual_face_record_rejects_selection_that_barely_touches_face(
+def test_build_manual_face_record_accepts_non_face_region(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    pipeline = FaceClusterPipeline(model_root=tmp_path / "models")
-    image_path = tmp_path / "photo.jpg"
-    image_path.write_bytes(b"fake")
-    thumbnail_dir = tmp_path / "thumbs"
-    thumbnail_dir.mkdir()
-
-    fake_image = SimpleNamespace(size=(400, 300))
-    fake_detection = SimpleNamespace(
-        bbox=np.asarray([120.0, 80.0, 200.0, 180.0], dtype=np.float32),
-        embedding=np.asarray([1.0, 0.0, 0.0], dtype=np.float32),
-        det_score=0.97,
+    monkeypatch.setattr(
+        "iPhoto.people.manual_faces.load_image_rgb",
+        lambda _path: SimpleNamespace(size=(400, 300)),
     )
-    fake_app = SimpleNamespace(get=lambda _image: [fake_detection])
+    monkeypatch.setattr("iPhoto.people.manual_faces.save_face_thumbnail", lambda *_args, **_kwargs: None)
 
-    monkeypatch.setattr(pipeline, "_ensure_face_analysis", lambda: fake_app)
-    monkeypatch.setattr("iPhoto.people.pipeline.load_image_rgb", lambda _path: fake_image)
-    monkeypatch.setattr("iPhoto.people.pipeline.pil_image_to_bgr", lambda _image: object())
-    monkeypatch.setattr("iPhoto.people.pipeline.save_face_thumbnail", lambda *_args, **_kwargs: None)
+    face = build_manual_face_record(
+        asset_id="asset-1",
+        asset_rel="album/photo.jpg",
+        image_path=tmp_path / "photo.jpg",
+        requested_box=(10, 20, 80, 90),
+        thumbnail_dir=tmp_path / "thumbs",
+        target_person_id="person-1",
+    )
+
+    assert (face.box_x, face.box_y, face.box_w, face.box_h) == (10, 20, 80, 90)
+
+
+def test_build_manual_face_record_rejects_out_of_bounds_selection(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(
+        "iPhoto.people.manual_faces.load_image_rgb",
+        lambda _path: SimpleNamespace(size=(400, 300)),
+    )
 
     with pytest.raises(
         ManualFaceValidationError,
-        match="Please place the circle closer to the face before saving.",
+        match="Please place the face circle fully inside the photo.",
     ):
-        pipeline.build_manual_face_record(
+        build_manual_face_record(
             asset_id="asset-1",
             asset_rel="album/photo.jpg",
-            image_path=image_path,
-            requested_box=(70, 50, 60, 60),
-            thumbnail_dir=thumbnail_dir,
+            image_path=tmp_path / "photo.jpg",
+            requested_box=(350, 250, 80, 80),
+            thumbnail_dir=tmp_path / "thumbs",
             target_person_id="person-1",
         )
 
 
-def test_build_manual_face_record_uses_crop_detection_for_side_face(
+def test_build_manual_face_record_rejects_too_small_selection(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    pipeline = FaceClusterPipeline(model_root=tmp_path / "models")
-    image_path = tmp_path / "photo.jpg"
-    image_path.write_bytes(b"fake")
-    thumbnail_dir = tmp_path / "thumbs"
-    thumbnail_dir.mkdir()
-
-    class _FakeImage:
-        def __init__(self, size: tuple[int, int], *, label: str) -> None:
-            self.size = size
-            self.label = label
-
-        def crop(self, box: tuple[int, int, int, int]):
-            return _FakeImage((box[2] - box[0], box[3] - box[1]), label="crop")
-
-    fake_image = _FakeImage((400, 300), label="global")
-    global_detection = SimpleNamespace(
-        bbox=np.asarray([110.0, 80.0, 190.0, 180.0], dtype=np.float32),
-        embedding=np.asarray([1.0, 0.0, 0.0], dtype=np.float32),
-        det_score=0.92,
-    )
-    crop_detection = SimpleNamespace(
-        bbox=np.asarray([50.0, 25.0, 110.0, 125.0], dtype=np.float32),
-        embedding=np.asarray([0.0, 1.0, 0.0], dtype=np.float32),
-        det_score=0.96,
+    monkeypatch.setattr(
+        "iPhoto.people.manual_faces.load_image_rgb",
+        lambda _path: SimpleNamespace(size=(400, 300)),
     )
 
-    def _fake_get(image_obj):
-        return [crop_detection] if getattr(image_obj, "label", "") == "crop" else [global_detection]
-
-    fake_app = SimpleNamespace(get=_fake_get)
-
-    monkeypatch.setattr(pipeline, "_ensure_face_analysis", lambda: fake_app)
-    monkeypatch.setattr("iPhoto.people.pipeline.load_image_rgb", lambda _path: fake_image)
-    monkeypatch.setattr("iPhoto.people.pipeline.pil_image_to_bgr", lambda image_obj: image_obj)
-    monkeypatch.setattr("iPhoto.people.pipeline.save_face_thumbnail", lambda *_args, **_kwargs: None)
-
-    face = pipeline.build_manual_face_record(
-        asset_id="asset-1",
-        asset_rel="album/photo.jpg",
-        image_path=image_path,
-        requested_box=(180, 80, 120, 140),
-        thumbnail_dir=thumbnail_dir,
-        target_person_id="person-2",
-        existing_faces=[
-            FaceRecord(
-                face_id="existing-left",
-                face_key="key-left",
-                asset_id="asset-1",
-                asset_rel="album/photo.jpg",
-                box_x=110,
-                box_y=80,
-                box_w=80,
-                box_h=100,
-                confidence=0.9,
-                embedding=np.asarray([1.0, 0.0, 0.0], dtype=np.float32),
-                embedding_dim=3,
-                thumbnail_path=None,
-                person_id="person-left",
-                detected_at=_now_iso(),
-                image_width=400,
-                image_height=300,
-            )
-        ],
-    )
-
-    assert (face.box_x, face.box_y, face.box_w, face.box_h) == (230, 105, 60, 100)
-    assert face.person_id == "person-2"
-
-
-def test_build_manual_face_record_duplicate_check_allows_nearby_non_matching_face(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    pipeline = FaceClusterPipeline(model_root=tmp_path / "models")
-    image_path = tmp_path / "photo.jpg"
-    image_path.write_bytes(b"fake")
-    thumbnail_dir = tmp_path / "thumbs"
-    thumbnail_dir.mkdir()
-
-    fake_image = SimpleNamespace(size=(400, 300), crop=lambda box: SimpleNamespace(size=(box[2] - box[0], box[3] - box[1])))
-    detection = SimpleNamespace(
-        bbox=np.asarray([220.0, 90.0, 300.0, 190.0], dtype=np.float32),
-        embedding=np.asarray([0.0, 1.0, 0.0], dtype=np.float32),
-        det_score=0.95,
-    )
-    fake_app = SimpleNamespace(get=lambda _image: [detection])
-
-    monkeypatch.setattr(pipeline, "_ensure_face_analysis", lambda: fake_app)
-    monkeypatch.setattr("iPhoto.people.pipeline.load_image_rgb", lambda _path: fake_image)
-    monkeypatch.setattr("iPhoto.people.pipeline.pil_image_to_bgr", lambda image_obj: image_obj)
-    monkeypatch.setattr("iPhoto.people.pipeline.save_face_thumbnail", lambda *_args, **_kwargs: None)
-
-    face = pipeline.build_manual_face_record(
-        asset_id="asset-1",
-        asset_rel="album/photo.jpg",
-        image_path=image_path,
-        requested_box=(190, 70, 130, 150),
-        thumbnail_dir=thumbnail_dir,
-        target_person_id="person-2",
-        existing_faces=[
-            FaceRecord(
-                face_id="existing-left",
-                face_key="key-left",
-                asset_id="asset-1",
-                asset_rel="album/photo.jpg",
-                box_x=110,
-                box_y=80,
-                box_w=100,
-                box_h=120,
-                confidence=0.9,
-                embedding=np.asarray([1.0, 0.0, 0.0], dtype=np.float32),
-                embedding_dim=3,
-                thumbnail_path=None,
-                person_id="person-left",
-                detected_at=_now_iso(),
-                image_width=400,
-                image_height=300,
-            )
-        ],
-    )
-
-    assert (face.box_x, face.box_y, face.box_w, face.box_h) == (220, 90, 80, 100)
+    with pytest.raises(
+        ManualFaceValidationError,
+        match="The selected face is too small to save reliably.",
+    ):
+        build_manual_face_record(
+            asset_id="asset-1",
+            asset_rel="album/photo.jpg",
+            image_path=tmp_path / "photo.jpg",
+            requested_box=(10, 20, 20, 90),
+            thumbnail_dir=tmp_path / "thumbs",
+            target_person_id="person-1",
+        )

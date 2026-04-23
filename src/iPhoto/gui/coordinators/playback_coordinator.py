@@ -708,11 +708,14 @@ class PlaybackCoordinator(QObject):
 
     def reset_for_gallery(self) -> None:
         self._clear_play_request_state()
-        self._location_search_timer.stop()
+        location_timer = getattr(self, "_location_search_timer", None)
+        if location_timer is not None:
+            location_timer.stop()
         self._pending_location_query = ""
         self._location_search_target_path = None
-        if self._location_search_service is not None:
-            self._location_search_service.shutdown()
+        location_service = getattr(self, "_location_search_service", None)
+        if location_service is not None:
+            location_service.shutdown()
             self._location_search_service = None
         self._player_view.video_area.stop()
         self._player_view.show_placeholder()
@@ -800,13 +803,15 @@ class PlaybackCoordinator(QObject):
             if cached:
                 local_info = self._merge_info_panel_metadata(local_info, cached)
         current_path = Path(path_key) if path_key is not None else None
+        location_preview_path = getattr(self, "_location_preview_path", None)
+        location_preview_metadata = getattr(self, "_location_preview_metadata", None)
         if (
             current_path is not None
-            and self._location_preview_path is not None
-            and self._location_preview_metadata is not None
-            and current_path == self._location_preview_path
+            and location_preview_path is not None
+            and location_preview_metadata is not None
+            and current_path == location_preview_path
         ):
-            local_info = self._merge_info_panel_metadata(local_info, self._location_preview_metadata)
+            local_info = self._merge_info_panel_metadata(local_info, location_preview_metadata)
         needs_enrichment = self._info_panel_metadata_needs_enrichment(local_info)
         should_queue_enrichment = bool(
             path_key is not None
@@ -827,10 +832,11 @@ class PlaybackCoordinator(QObject):
         else:
             local_info.pop("_metadata_loading", None)
         self._info_panel.set_asset_metadata(local_info)
+        location_assign_path = getattr(self, "_location_assign_path", None)
         self._info_panel.set_location_busy(
-            self._location_assign_inflight
-            and self._location_assign_path is not None
-            and current_path == self._location_assign_path
+            bool(getattr(self, "_location_assign_inflight", False))
+            and location_assign_path is not None
+            and current_path == location_assign_path
         )
         presentation = getattr(self, "_current_presentation", None)
         self._refresh_info_panel_faces(presentation.asset_id if presentation is not None else None)
@@ -843,16 +849,21 @@ class PlaybackCoordinator(QObject):
     def _refresh_location_extension_state(self) -> bool:
         enabled = has_usable_osmand_search_extension()
         if not enabled:
-            self._location_search_timer.stop()
+            location_timer = getattr(self, "_location_search_timer", None)
+            if location_timer is not None:
+                location_timer.stop()
             self._pending_location_query = ""
             self._location_search_target_path = None
-            self._location_search_cache.clear()
-            if self._location_search_service is not None:
-                self._location_search_service.shutdown()
+            location_cache = getattr(self, "_location_search_cache", None)
+            if location_cache is not None:
+                location_cache.clear()
+            location_service = getattr(self, "_location_search_service", None)
+            if location_service is not None:
+                location_service.shutdown()
                 self._location_search_service = None
             return False
 
-        if self._location_search_service is not None:
+        if getattr(self, "_location_search_service", None) is not None:
             return True
 
         try:
@@ -1372,7 +1383,10 @@ class PlaybackCoordinator(QObject):
 
     @Slot(str)
     def _handle_manual_face_error(self, message: str) -> None:
-        submitted_asset_id = self._manual_face_inflight_asset_id
+        submitted_asset_id = getattr(self, "_manual_face_inflight_asset_id", None)
+        if not submitted_asset_id:
+            presentation = getattr(self, "_current_presentation", None)
+            submitted_asset_id = presentation.asset_id if presentation is not None else None
         if submitted_asset_id:
             self._clear_pending_manual_faces(submitted_asset_id)
         presentation = getattr(self, "_current_presentation", None)

@@ -397,6 +397,29 @@ class GalleryViewModel(BaseViewModel):
         if self._location_session.mode == "map":
             self.map_assets_changed.emit(self._location_session.full_assets(), root)
 
+    def handle_album_renamed(self, old_path: Path, new_path: Path) -> None:
+        if self.current_section.value not in {"album", "pinned_album"}:
+            return
+        active_root = self.active_root.value
+        if active_root is None or not self._paths_equal(active_root, old_path):
+            return
+
+        section = self.current_section.value
+        static_selection = self.static_selection.value
+        album = self._facade.open_album(new_path)
+        retargeted_root = album.root if album else new_path
+        if album:
+            self._context.remember_album(album.root)
+
+        query = AssetQuery(album_path=self._album_path_for_query(retargeted_root))
+        query.include_subalbums = True
+        self._load_query(
+            section=section,
+            static_selection=static_selection,
+            root=retargeted_root,
+            query=query,
+        )
+
     def on_library_tree_updated(self) -> bool:
         self._location_session.invalidate()
         if self.is_location_context_active():
@@ -557,3 +580,11 @@ class GalleryViewModel(BaseViewModel):
             scan_root_resolved == root_resolved
             or root_resolved in scan_root_resolved.parents
         )
+
+    def _paths_equal(self, first: Path, second: Path) -> bool:
+        if first == second:
+            return True
+        try:
+            return first.resolve() == second.resolve()
+        except OSError:
+            return False

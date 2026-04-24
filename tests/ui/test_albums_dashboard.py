@@ -19,8 +19,10 @@ from PySide6.QtCore import QSize
 from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import QApplication
 
+from iPhoto.errors import AlbumOperationError
 from iPhoto.gui.services.pinned_items_service import PinnedItemsService
 from iPhoto.settings.manager import SettingsManager
+from iPhoto.library.manager import LibraryManager
 from iPhoto.gui.ui.widgets.albums_dashboard import (
     AlbumCard,
     AlbumsDashboard,
@@ -176,6 +178,65 @@ def test_albums_dashboard_rename_album_calls_library(qapp, mock_library, tmp_pat
             dashboard._prompt_rename_album(card)
 
     mock_library.rename_album.assert_called_once_with(album, "Renamed Trips")
+
+
+def test_albums_dashboard_successful_rename_refreshes_card_paths(qapp, tmp_path):
+    root = tmp_path / "Library"
+    root.mkdir()
+    manager = LibraryManager()
+    manager.bind_path(root)
+    album = manager.create_album("Trips")
+
+    with patch("PySide6.QtCore.QThreadPool.globalInstance"):
+        dashboard = AlbumsDashboard(manager)
+        qapp.processEvents()
+        card = dashboard._cards[album.path]
+
+        with patch(
+            "iPhoto.gui.ui.widgets.albums_dashboard._create_styled_input_dialog",
+            return_value=("Renamed Trips", True),
+        ):
+            dashboard._prompt_rename_album(card)
+            qapp.processEvents()
+
+    old_path = root / "Trips"
+    new_path = root / "Renamed Trips"
+    assert not old_path.exists()
+    assert new_path.exists()
+    assert old_path not in dashboard._cards
+    assert new_path in dashboard._cards
+    assert dashboard._cards[new_path].title_label.text() == "Renamed Trips"
+
+
+def test_albums_dashboard_reserved_rename_shows_warning(qapp, mock_library, tmp_path):
+    album = MagicMock()
+    album.title = "Trips"
+    album.path = tmp_path / "Trips"
+    album.path.mkdir()
+    mock_library.list_albums.return_value = [album]
+    mock_library.rename_album.side_effect = AlbumOperationError(
+        "Album name '.Trash' is reserved for internal use."
+    )
+
+    with patch("PySide6.QtCore.QThreadPool.globalInstance"):
+        dashboard = AlbumsDashboard(mock_library)
+        qapp.processEvents()
+        card = dashboard._cards[album.path]
+
+        with (
+            patch(
+                "iPhoto.gui.ui.widgets.albums_dashboard._create_styled_input_dialog",
+                return_value=(".Trash", True),
+            ),
+            patch("iPhoto.gui.ui.widgets.albums_dashboard.dialogs.show_warning") as show_warning,
+        ):
+            dashboard._prompt_rename_album(card)
+
+    mock_library.rename_album.assert_called_once_with(album, ".Trash")
+    show_warning.assert_called_once_with(
+        dashboard, "Album name '.Trash' is reserved for internal use."
+    )
+    assert album.path in dashboard._cards
 
 
 def test_albums_dashboard_updates_cover_preview_immediately(qapp, mock_library, tmp_path):

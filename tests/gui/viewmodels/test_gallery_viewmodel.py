@@ -62,6 +62,31 @@ def test_open_album_loads_recursive_album_query(tmp_path: Path) -> None:
     context.remember_album.assert_called_once_with(album)
 
 
+def test_album_rename_retargets_current_gallery_query(tmp_path: Path) -> None:
+    old_album = tmp_path / "Trips"
+    new_album = tmp_path / "Renamed Trips"
+    old_album.mkdir()
+    new_album.mkdir()
+    vm, store, context, facade, _asset_service = _make_vm(library_root=tmp_path)
+    facade.open_album.return_value = SimpleNamespace(root=old_album)
+    vm.open_album(old_album)
+    store.load_selection.reset_mock()
+    context.remember_album.reset_mock()
+    facade.open_album.return_value = SimpleNamespace(root=new_album)
+
+    vm.handle_album_renamed(old_album, new_album)
+
+    facade.open_album.assert_called_with(new_album)
+    context.remember_album.assert_called_once_with(new_album)
+    store.load_selection.assert_called_once()
+    active_root = store.load_selection.call_args.args[0]
+    query = store.load_selection.call_args.kwargs["query"]
+    assert active_root == new_album
+    assert query.album_path == "Renamed Trips"
+    assert query.include_subalbums is True
+    assert vm.active_root.value == new_album
+
+
 def test_open_all_photos_loads_root_query(tmp_path: Path) -> None:
     vm, store, _context, _facade, _asset_service = _make_vm(library_root=tmp_path)
 

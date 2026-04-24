@@ -398,6 +398,7 @@ class MainCoordinator(QObject):
         """Connect application signals."""
         ui = self._window.ui
         self._context.library.treeUpdated.connect(self._on_library_tree_updated)
+        self._context.library.albumRenamed.connect(self._on_album_renamed)
         self._facade.scanChunkReady.connect(self._gallery_store.handle_scan_chunk)
         self._facade.scanFinished.connect(self._gallery_store.handle_scan_finished)
         self._context.library.scanChunkReady.connect(self._gallery_vm.handle_location_scan_chunk)
@@ -538,6 +539,10 @@ class MainCoordinator(QObject):
         playback = getattr(self, "_playback", None)
         if playback is not None:
             playback.set_people_library_root(root)
+
+    def _on_album_renamed(self, old_path: Path, new_path: Path) -> None:
+        self._thumbnail_service.remap_album_paths(old_path, new_path)
+        self._gallery_vm.handle_album_renamed(old_path, new_path)
 
     def _handle_media_load_failed(self, path: Path, message: str) -> None:
         path_key = str(path)

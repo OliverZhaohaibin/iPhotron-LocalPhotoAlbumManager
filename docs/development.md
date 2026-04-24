@@ -73,6 +73,36 @@ Includes: `pytest`, `pytest-mock`, `pytest-qt`, `ruff`, `black`, `mypy`, `types-
 
 ---
 
+## Album Naming Rules
+
+Album creation and rename flows must reject directory names reserved for
+internal library infrastructure. Today the reserved names are:
+
+- `.iPhoto`
+- `.Trash`
+- `exported`
+
+These names are intentionally hidden by the library scan layer and therefore
+must never be accepted as user album names. If a create/rename flow allows one
+of them, the album can appear to "disappear" because the directory still exists
+on disk but is filtered out of the visible album tree/dashboard.
+
+Implementation rules:
+
+- Keep the validation in the library layer so every entry point stays aligned
+  (`album dashboard`, sidebar menus, and any future CLI/API path).
+- Keep the reserved-name list in a single shared source of truth used by both
+  name validation and album discovery.
+- Raise a normal `LibraryError` path such as `AlbumOperationError` with a clear
+  user-facing message; UI surfaces should only display the warning and should
+  not duplicate the rule locally.
+- Add regression coverage when touching album naming logic:
+  library tests should verify reserved names are rejected and existing albums
+  remain listed, while UI tests should verify reserved-name rename attempts show
+  a warning instead of removing the album from the dashboard.
+
+---
+
 ## Maps Extension Development Workflow
 
 ### What the maps extension is

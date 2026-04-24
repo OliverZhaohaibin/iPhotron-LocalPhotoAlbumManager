@@ -386,6 +386,30 @@ can inherit that translucency and render with a transparent background.
 - When adding a new right-click surface, add or update a focused GUI test that
   verifies the menu is styled and that important actions are present.
 
+#### Unified Right-Click Menu Rules
+
+The app now treats sidebar, dashboard, and gallery context menus as one shared
+interaction system. When you add or change a right-click entry, keep these
+rules aligned across surfaces:
+
+- Use `MenuContext` + `populate_menu()` for declarative menus whenever the
+  surface already participates in the shared menu system.
+- Right-clicking an asset in gallery must first sync selection to the clicked
+  row before computing menu visibility, so selection-scoped actions operate on
+  the intended asset.
+- Album-cover actions must resolve paths relative to the active album root
+  before calling `facade.set_cover(...)`. Do not assume `AssetDTO.rel_path`
+  already matches the current album root.
+- `Rename…` is the canonical label for rename actions. Use the same ellipsis
+  style and the same empty-name validation across sidebar and pinned-item menus.
+- Pinned-item rename is a sidebar-local alias. Persist it through
+  `PinnedItemsService` instead of mutating the underlying album/person/group
+  entity name.
+- `Pin`/`Unpin` and `Rename…` should stay adjacent on sidebar-driven menus so
+  users can manage the same entity without hunting across different surfaces.
+- Any regression around menu visibility or per-surface action parity needs a
+  targeted test in the menu/controller/widget layer that owns that surface.
+
 ### People UI Conventions
 
 #### Reusable person-picker popup

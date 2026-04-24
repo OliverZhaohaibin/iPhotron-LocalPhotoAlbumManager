@@ -20,6 +20,7 @@ class PinnedSidebarItem:
     kind: str
     item_id: str
     label: str
+    custom_label: bool = False
 
 
 class PinnedItemsService(QObject):
@@ -48,9 +49,17 @@ class PinnedItemsService(QObject):
             kind = str(entry.get("kind") or "").strip()
             item_id = str(entry.get("item_id") or "").strip()
             label = str(entry.get("label") or "").strip()
+            custom_label = bool(entry.get("custom_label", False))
             if kind not in {"album", "person", "group"} or not item_id or not label:
                 continue
-            resolved.append(PinnedSidebarItem(kind=kind, item_id=item_id, label=label))
+            resolved.append(
+                PinnedSidebarItem(
+                    kind=kind,
+                    item_id=item_id,
+                    label=label,
+                    custom_label=custom_label,
+                )
+            )
         return resolved
 
     def is_pinned(self, *, kind: str, item_id: str, library_root: Path | None) -> bool:
@@ -67,7 +76,12 @@ class PinnedItemsService(QObject):
         if normalized_id is None:
             return
         self._write_item(
-            PinnedSidebarItem(kind="album", item_id=normalized_id, label=label.strip()),
+            PinnedSidebarItem(
+                kind="album",
+                item_id=normalized_id,
+                label=label.strip(),
+                custom_label=False,
+            ),
             library_root=library_root,
         )
 
@@ -76,7 +90,12 @@ class PinnedItemsService(QObject):
         if normalized_id is None:
             return
         self._write_item(
-            PinnedSidebarItem(kind="person", item_id=normalized_id, label=label.strip()),
+            PinnedSidebarItem(
+                kind="person",
+                item_id=normalized_id,
+                label=label.strip(),
+                custom_label=False,
+            ),
             library_root=library_root,
         )
 
@@ -85,9 +104,53 @@ class PinnedItemsService(QObject):
         if normalized_id is None:
             return
         self._write_item(
-            PinnedSidebarItem(kind="group", item_id=normalized_id, label=label.strip()),
+            PinnedSidebarItem(
+                kind="group",
+                item_id=normalized_id,
+                label=label.strip(),
+                custom_label=False,
+            ),
             library_root=library_root,
         )
+
+    def rename_item(
+        self,
+        *,
+        kind: str,
+        item_id: str | Path,
+        label: str,
+        library_root: Path | None,
+    ) -> bool:
+        normalized_id = self._normalize_item_id(kind, item_id)
+        library_key = self._library_key(library_root)
+        target_label = str(label or "").strip()
+        if normalized_id is None or library_key is None or not target_label:
+            return False
+
+        payload = self._payload()
+        entries = payload.get(library_key, [])
+        updated = False
+        rewritten: list[dict[str, object]] = []
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            entry_kind = str(entry.get("kind") or "").strip()
+            entry_item_id = str(entry.get("item_id") or "").strip()
+            if entry_kind == kind and entry_item_id == normalized_id:
+                next_entry = dict(entry)
+                next_entry["label"] = target_label
+                next_entry["custom_label"] = True
+                rewritten.append(next_entry)
+                updated = True
+                continue
+            rewritten.append(dict(entry))
+
+        if not updated:
+            return False
+
+        payload[library_key] = rewritten
+        self._persist(payload)
+        return True
 
     def unpin(self, *, kind: str, item_id: str, library_root: Path | None) -> None:
         normalized_id = self._normalize_item_id(kind, item_id)
@@ -150,16 +213,17 @@ class PinnedItemsService(QObject):
                 "kind": item.kind,
                 "item_id": item.item_id,
                 "label": item.label,
+                "custom_label": item.custom_label,
             },
         )
         payload[library_key] = filtered
         self._persist(payload)
 
-    def _payload(self) -> dict[str, list[dict[str, str]]]:
+    def _payload(self) -> dict[str, list[dict[str, object]]]:
         stored = self._settings.get(self._SETTINGS_KEY, {}) or {}
         if not isinstance(stored, dict):
             return {}
-        payload: dict[str, list[dict[str, str]]] = {}
+        payload: dict[str, list[dict[str, object]]] = {}
         for library_key, entries in stored.items():
             try:
                 normalized_key = str(Path(str(library_key)).expanduser().resolve())
@@ -170,7 +234,7 @@ class PinnedItemsService(QObject):
             payload[normalized_key] = [entry for entry in entries if isinstance(entry, dict)]
         return payload
 
-    def _persist(self, payload: dict[str, list[dict[str, str]]]) -> None:
+    def _persist(self, payload: dict[str, list[dict[str, object]]]) -> None:
         self._settings.set(self._SETTINGS_KEY, payload)
         self.changed.emit()
 

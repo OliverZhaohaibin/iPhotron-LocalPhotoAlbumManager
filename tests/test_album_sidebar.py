@@ -199,8 +199,60 @@ def test_sidebar_pinned_item_context_menu_offers_unpin(tmp_path: Path, qapp: QAp
         sidebar._set_pending_selection,
         sidebar.bindLibraryRequested.emit,
     )
-    assert [action.text() for action in menu.actions()] == ["Unpin"]
+    assert [action.text() for action in menu.actions() if not action.isSeparator()] == [
+        "Rename…",
+        "Unpin",
+    ]
 
-    menu.actions()[0].trigger()
+    menu.actions()[-1].trigger()
     qapp.processEvents()
     assert not pinned_service.items_for_library(root)
+
+
+def test_sidebar_pinned_item_context_menu_can_rename(tmp_path: Path, qapp: QApplication) -> None:
+    root = tmp_path / "Library"
+    root.mkdir()
+    manager = LibraryManager()
+    manager.bind_path(root)
+    qapp.processEvents()
+
+    settings = SettingsManager(path=tmp_path / "settings.json")
+    settings.load()
+    pinned_service = PinnedItemsService(settings)
+    pinned_service.pin_person("person-a", "Alice", library_root=root)
+
+    sidebar = AlbumSidebar(manager)
+    sidebar.set_pinned_service(pinned_service)
+    qapp.processEvents()
+
+    pinned_item = pinned_service.items_for_library(root)[0]
+    pinned_index = sidebar.tree_model().index_for_pinned_item(pinned_item)
+    item = sidebar.tree_model().item_from_index(pinned_index)
+    assert item is not None
+
+    from unittest.mock import patch
+
+    with patch(
+        "iPhoto.gui.ui.menus.album_sidebar_menu._create_styled_input_dialog",
+        return_value=("VIP Alice", True),
+    ):
+        menu = AlbumSidebarContextMenu(
+            sidebar,
+            sidebar._tree,
+            sidebar.tree_model(),
+            manager,
+            item,
+            sidebar._set_pending_selection,
+            sidebar.bindLibraryRequested.emit,
+        )
+        menu.actions()[0].trigger()
+
+    qapp.processEvents()
+
+    renamed = pinned_service.items_for_library(root)[0]
+    assert renamed.label == "VIP Alice"
+    assert renamed.custom_label is True
+
+    refreshed_index = sidebar.tree_model().index_for_pinned_item(renamed)
+    assert refreshed_index.isValid()
+    assert sidebar.tree_model().data(refreshed_index) == "VIP Alice"

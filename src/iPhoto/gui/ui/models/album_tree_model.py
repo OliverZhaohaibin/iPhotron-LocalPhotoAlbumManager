@@ -390,7 +390,11 @@ class AlbumTreeModel(QAbstractItemModel):
             except (TypeError, ValueError):
                 return None
             album = album_lookup.get(album_path)
-            title = album.title if album is not None else pinned_item.label
+            title = (
+                pinned_item.label
+                if pinned_item.custom_label
+                else (album.title if album is not None else pinned_item.label)
+            )
             return AlbumTreeItem(
                 title,
                 NodeType.PINNED_ALBUM,
@@ -399,7 +403,9 @@ class AlbumTreeModel(QAbstractItemModel):
             )
         if pinned_item.kind == "person":
             summary = person_lookup.get(pinned_item.item_id)
-            title = str(getattr(summary, "name", "") or "").strip() or pinned_item.label
+            title = pinned_item.label if pinned_item.custom_label else (
+                str(getattr(summary, "name", "") or "").strip() or pinned_item.label
+            )
             return AlbumTreeItem(
                 title,
                 NodeType.PINNED_PERSON,
@@ -407,7 +413,9 @@ class AlbumTreeModel(QAbstractItemModel):
             )
         if pinned_item.kind == "group":
             summary = group_lookup.get(pinned_item.item_id)
-            title = str(getattr(summary, "name", "") or "").strip() or pinned_item.label
+            title = pinned_item.label if pinned_item.custom_label else (
+                str(getattr(summary, "name", "") or "").strip() or pinned_item.label
+            )
             return AlbumTreeItem(
                 title,
                 NodeType.PINNED_GROUP,

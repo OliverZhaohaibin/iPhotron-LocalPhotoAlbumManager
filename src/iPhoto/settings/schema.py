@@ -29,6 +29,7 @@ SETTINGS_SCHEMA: dict[str, Any] = {
                         },
                         "item_id": {"type": "string"},
                         "label": {"type": "string"},
+                        "custom_label": {"type": "boolean"},
                     },
                     "additionalProperties": False,
                 },
@@ -148,6 +149,7 @@ def merge_with_defaults(data: dict[str, Any] | None) -> dict[str, Any]:
                         kind = str(entry.get("kind") or "").strip()
                         item_id = str(entry.get("item_id") or "").strip()
                         label = str(entry.get("label") or "").strip()
+                        custom_label = bool(entry.get("custom_label", False))
                         if kind not in {"album", "person", "group"}:
                             continue
                         if not item_id or not label:
@@ -157,6 +159,7 @@ def merge_with_defaults(data: dict[str, Any] | None) -> dict[str, Any]:
                                 "kind": kind,
                                 "item_id": item_id,
                                 "label": label,
+                                "custom_label": custom_label,
                             }
                         )
                     normalised[resolved_key] = normalised_entries

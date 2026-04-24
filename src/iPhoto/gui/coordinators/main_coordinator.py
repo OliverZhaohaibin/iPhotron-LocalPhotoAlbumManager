@@ -104,6 +104,9 @@ class MainCoordinator(QObject):
             window.ui.people_page.set_pinned_service(self._pinned_items_service)
         if hasattr(window.ui, "albums_dashboard_page"):
             window.ui.albums_dashboard_page.set_pinned_service(self._pinned_items_service)
+            self._facade.albumCoverUpdated.connect(
+                window.ui.albums_dashboard_page.update_album_cover
+            )
 
         # Inject ViewModel provider into Facade for legacy operations (restore/delete)
         if self._facade:

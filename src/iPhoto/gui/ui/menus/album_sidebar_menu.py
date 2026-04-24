@@ -19,7 +19,6 @@ from ..widgets import dialogs
 from ....errors import LibraryError
 from ....library.manager import LibraryManager
 from ....library.tree import AlbumNode
-from ...services.pinned_items_service import PinnedSidebarItem
 from ..models.album_tree_model import AlbumTreeItem, AlbumTreeModel, NodeType
 from .style import apply_menu_style
 
@@ -156,6 +155,8 @@ class AlbumSidebarContextMenu(QMenu):
             NodeType.PINNED_PERSON,
             NodeType.PINNED_GROUP,
         }:
+            self.addAction("Rename…", self._prompt_rename_pinned_item)
+            self.addSeparator()
             self.addAction("Unpin", self._unpin_sidebar_item)
         if self._item.node_type == NodeType.ACTION:
             self.addAction("Set Basic Library…", self._on_bind_library)
@@ -194,6 +195,32 @@ class AlbumSidebarContextMenu(QMenu):
         pinned_service.unpin(
             kind=pinned_item.kind,
             item_id=pinned_item.item_id,
+            library_root=library_root,
+        )
+
+    def _prompt_rename_pinned_item(self) -> None:
+        pinned_service = self._model._pinned_service
+        pinned_item = self._item.pinned_item
+        library_root = self._library.root()
+        if pinned_service is None or pinned_item is None or library_root is None:
+            return
+
+        name, ok = _create_styled_input_dialog(
+            self.parentWidget(),
+            "Rename Pinned Item",
+            "New pinned label:",
+            text=self._item.title or pinned_item.label,
+        )
+        if not ok:
+            return
+        target_name = name.strip()
+        if not target_name:
+            dialogs.show_warning(self.parentWidget(), "Pinned label cannot be empty.")
+            return
+        pinned_service.rename_item(
+            kind=pinned_item.kind,
+            item_id=pinned_item.item_id,
+            label=target_name,
             library_root=library_root,
         )
 

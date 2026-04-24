@@ -27,7 +27,6 @@ from PySide6.QtGui import (
     QPixmap,
     QPalette,
     QRadialGradient,
-    QAction,
 )
 from PySide6.QtWidgets import (
     QFrame,
@@ -49,7 +48,8 @@ from ....models.album import Album
 from ..tasks.thumbnail_loader import ThumbnailJob, generate_cache_path, stat_mtime_ns
 from .flow_layout import FlowLayout
 from ..icon import load_icon
-from ..menus.album_sidebar_menu import _apply_main_window_menu_style
+from ..menus.core import MenuActionSpec, MenuContext, populate_menu
+from ..menus.style import apply_menu_style
 from ..theme_manager import DARK_THEME
 
 if TYPE_CHECKING:
@@ -677,14 +677,26 @@ class AlbumsDashboard(QWidget):
 
     def _build_card_menu(self, card: AlbumCard) -> QMenu:
         menu = QMenu(self)
-        _apply_main_window_menu_style(menu, self)
-        pin_action = QAction(
-            "Unpin Album" if self._is_album_pinned(card.path) else "Pin Album",
+        apply_menu_style(menu, self)
+        populate_menu(
             menu,
+            context=MenuContext(
+                surface="albums_dashboard",
+                selection_kind="empty",
+                entity_kind="album",
+                entity_id=str(card.path),
+                active_root=card.path,
+            ),
+            action_specs=[
+                MenuActionSpec(
+                    action_id="toggle_album_pin",
+                    label="Unpin Album" if self._is_album_pinned(card.path) else "Pin Album",
+                    on_trigger=lambda _ctx: self._toggle_album_pin(card),
+                    is_enabled=lambda _ctx: self._pin_actions_available(),
+                ),
+            ],
+            anchor=self,
         )
-        pin_action.setEnabled(self._pin_actions_available())
-        pin_action.triggered.connect(lambda: self._toggle_album_pin(card))
-        menu.addAction(pin_action)
         return menu
 
     def _toggle_album_pin(self, card: AlbumCard) -> None:

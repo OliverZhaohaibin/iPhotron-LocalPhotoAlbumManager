@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 import sqlite3
 from contextlib import closing
 from pathlib import Path
@@ -26,6 +27,16 @@ from .repository_utils import (
     _utc_now_iso,
     profile_state_for_sample_count,
 )
+
+
+@dataclass(frozen=True)
+class PersonCoverRecord:
+    person_id: str
+    face_id: str | None
+    face_key: str | None
+    asset_id: str | None
+    thumbnail_path: str | None
+    is_custom: bool
 
 
 class FaceStateRepository:
@@ -88,6 +99,56 @@ class FaceStateRepository:
                 )
             )
         return profiles
+
+    def get_profile(self, person_id: str) -> PersonProfile | None:
+        """Return the profile for a single person, or None if not found."""
+        if not person_id:
+            return None
+        self.initialize()
+        with closing(self._connect()) as conn:
+            row = conn.execute(
+                """
+                SELECT
+                    person_id,
+                    name,
+                    center_embedding,
+                    embedding_dim,
+                    created_at,
+                    updated_at,
+                    sample_count,
+                    profile_state
+                FROM person_profiles
+                WHERE person_id = ?
+                """,
+                (person_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            sample_count = int(row["sample_count"] or 0)
+            if sample_count <= 0:
+                inferred_row = conn.execute(
+                    """
+                    SELECT COUNT(*) AS sample_count
+                    FROM face_keys
+                    WHERE person_id = ?
+                    """,
+                    (person_id,),
+                ).fetchone()
+                if inferred_row is not None:
+                    sample_count = int(inferred_row["sample_count"] or 0)
+        return PersonProfile(
+            person_id=str(row["person_id"]),
+            name=row["name"],
+            center_embedding=_deserialize_embedding(
+                row["center_embedding"],
+                int(row["embedding_dim"]),
+            ),
+            embedding_dim=int(row["embedding_dim"]),
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
+            sample_count=sample_count,
+            profile_state=profile_state_for_sample_count(sample_count),
+        )
 
     def get_manual_faces(self) -> list[ManualFaceRecord]:
         self.initialize()
@@ -348,6 +409,24 @@ class FaceStateRepository:
             conn.execute("DELETE FROM manual_faces WHERE face_id = ?", (face_id,))
             conn.commit()
 
+    def move_manual_face(self, face_id: str, target_person_id: str) -> bool:
+        if not face_id or not target_person_id:
+            return False
+        self.initialize()
+        with closing(self._connect()) as conn:
+            row = conn.execute(
+                "SELECT 1 FROM manual_faces WHERE face_id = ?",
+                (face_id,),
+            ).fetchone()
+            if row is None:
+                return False
+            conn.execute(
+                "UPDATE manual_faces SET person_id = ? WHERE face_id = ?",
+                (target_person_id, face_id),
+            )
+            conn.commit()
+        return True
+
     def get_person_order_map(self, person_ids: Iterable[str]) -> dict[str, int]:
         unique_ids = _unique_person_ids(person_ids)
         if not unique_ids:
@@ -396,6 +475,34 @@ class FaceStateRepository:
                 )
             else:
                 conn.execute("DELETE FROM person_card_orders")
+            conn.commit()
+
+    def set_group_order(self, group_ids: Iterable[str]) -> None:
+        ordered_ids = [str(group_id) for group_id in dict.fromkeys(group_ids) if group_id]
+        self.initialize()
+        updated_at = _utc_now_iso()
+        with closing(self._connect()) as conn:
+            conn.executemany(
+                """
+                INSERT INTO group_card_orders (group_id, sort_order, updated_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(group_id) DO UPDATE SET
+                    sort_order = excluded.sort_order,
+                    updated_at = excluded.updated_at
+                """,
+                [
+                    (group_id, index, updated_at)
+                    for index, group_id in enumerate(ordered_ids)
+                ],
+            )
+            if ordered_ids:
+                placeholders = ", ".join(["?"] * len(ordered_ids))
+                conn.execute(
+                    f"DELETE FROM group_card_orders WHERE group_id NOT IN ({placeholders})",
+                    ordered_ids,
+                )
+            else:
+                conn.execute("DELETE FROM group_card_orders")
             conn.commit()
 
     def get_person_hidden_map(self, person_ids: Iterable[str]) -> dict[str, bool]:
@@ -464,6 +571,81 @@ class FaceStateRepository:
                 unique_face_keys,
             ).fetchall()
         return {row["face_key"]: row["person_id"] for row in rows}
+
+    def get_rejected_face_keys(self, face_keys: Iterable[str]) -> set[str]:
+        unique_face_keys = [face_key for face_key in dict.fromkeys(face_keys) if face_key]
+        if not unique_face_keys:
+            return set()
+
+        self.initialize()
+        chunk_size = 900
+        rejected: set[str] = set()
+        with closing(self._connect()) as conn:
+            for start in range(0, len(unique_face_keys), chunk_size):
+                chunk = unique_face_keys[start : start + chunk_size]
+                placeholders = ", ".join(["?"] * len(chunk))
+                rows = conn.execute(
+                    f"""
+                    SELECT face_key
+                    FROM rejected_face_keys
+                    WHERE face_key IN ({placeholders})
+                    """,
+                    chunk,
+                ).fetchall()
+                rejected.update(str(row["face_key"]) for row in rows if row["face_key"])
+        return rejected
+
+    def reject_face_key(self, face_key: str, *, asset_id: str, asset_rel: str) -> None:
+        if not face_key:
+            return
+
+        self.initialize()
+        updated_at = _utc_now_iso()
+        with closing(self._connect()) as conn:
+            conn.execute(
+                """
+                INSERT INTO rejected_face_keys (
+                    face_key, asset_id, asset_rel, updated_at
+                ) VALUES (?, ?, ?, ?)
+                ON CONFLICT(face_key) DO UPDATE SET
+                    asset_id = excluded.asset_id,
+                    asset_rel = excluded.asset_rel,
+                    updated_at = excluded.updated_at
+                """,
+                (face_key, asset_id, asset_rel, updated_at),
+            )
+            conn.execute("DELETE FROM face_keys WHERE face_key = ?", (face_key,))
+            conn.commit()
+
+    def assign_face_key(
+        self,
+        face_key: str,
+        person_id: str,
+        *,
+        asset_id: str,
+        asset_rel: str,
+    ) -> None:
+        if not face_key or not person_id:
+            return
+
+        self.initialize()
+        updated_at = _utc_now_iso()
+        with closing(self._connect()) as conn:
+            conn.execute("DELETE FROM rejected_face_keys WHERE face_key = ?", (face_key,))
+            conn.execute(
+                """
+                INSERT INTO face_keys (
+                    face_key, person_id, asset_id, asset_rel, updated_at
+                ) VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(face_key) DO UPDATE SET
+                    person_id = excluded.person_id,
+                    asset_id = excluded.asset_id,
+                    asset_rel = excluded.asset_rel,
+                    updated_at = excluded.updated_at
+                """,
+                (face_key, person_id, asset_id, asset_rel, updated_at),
+            )
+            conn.commit()
 
     def sync_scan_results(self, persons: list[PersonRecord], faces: list[FaceRecord]) -> None:
         self.initialize()
@@ -596,6 +778,56 @@ class FaceStateRepository:
                     updated_at,
                     0,
                     "unstable",
+                ),
+            )
+            conn.commit()
+
+    def upsert_person_profile(
+        self,
+        person_id: str,
+        *,
+        name_or_none: str | None,
+        created_at: str | None = None,
+        center_embedding: np.ndarray | None = None,
+        sample_count: int = 0,
+    ) -> None:
+        if not person_id:
+            return
+
+        self.initialize()
+        timestamp = _utc_now_iso()
+        normalized_name = _normalize_name(name_or_none)
+        embedding = (
+            center_embedding
+            if center_embedding is not None
+            else np.empty((0,), dtype=np.float32)
+        )
+        created_value = str(created_at or timestamp)
+        profile_sample_count = max(int(sample_count), 0)
+        with closing(self._connect()) as conn:
+            conn.execute(
+                """
+                INSERT INTO person_profiles (
+                    person_id, name, center_embedding, embedding_dim,
+                    created_at, updated_at, sample_count, profile_state
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(person_id) DO UPDATE SET
+                    name = COALESCE(excluded.name, person_profiles.name),
+                    center_embedding = excluded.center_embedding,
+                    embedding_dim = excluded.embedding_dim,
+                    updated_at = excluded.updated_at,
+                    sample_count = excluded.sample_count,
+                    profile_state = excluded.profile_state
+                """,
+                (
+                    person_id,
+                    normalized_name,
+                    _serialize_embedding(embedding),
+                    int(embedding.shape[0]),
+                    created_value,
+                    timestamp,
+                    profile_sample_count,
+                    profile_state_for_sample_count(profile_sample_count),
                 ),
             )
             conn.commit()
@@ -770,6 +1002,30 @@ class FaceStateRepository:
             if row["person_id"] and row["thumbnail_path"]
         }
 
+    def get_person_cover(self, person_id: str) -> PersonCoverRecord | None:
+        if not person_id:
+            return None
+        self.initialize()
+        with closing(self._connect()) as conn:
+            row = conn.execute(
+                """
+                SELECT person_id, face_id, face_key, asset_id, thumbnail_path, is_custom
+                FROM person_covers
+                WHERE person_id = ?
+                """,
+                (person_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return PersonCoverRecord(
+            person_id=str(row["person_id"]),
+            face_id=str(row["face_id"]) if row["face_id"] else None,
+            face_key=str(row["face_key"]) if row["face_key"] else None,
+            asset_id=str(row["asset_id"]) if row["asset_id"] else None,
+            thumbnail_path=str(row["thumbnail_path"]) if row["thumbnail_path"] else None,
+            is_custom=bool(int(row["is_custom"] or 0)),
+        )
+
     def sync_person_cover_defaults(
         self,
         cover_rows: Iterable[tuple[str, str | None, str | None, str | None, str | None]],
@@ -847,6 +1103,14 @@ class FaceStateRepository:
             )
             conn.commit()
 
+    def delete_person_cover(self, person_id: str) -> None:
+        if not person_id:
+            return
+        self.initialize()
+        with closing(self._connect()) as conn:
+            conn.execute("DELETE FROM person_covers WHERE person_id = ?", (person_id,))
+            conn.commit()
+
     def create_group(self, member_person_ids: Iterable[str]) -> PeopleGroupRecord | None:
         members = _unique_person_ids(member_person_ids)
         if len(members) < 2:
@@ -878,6 +1142,7 @@ class FaceStateRepository:
                 """,
                 [(group_id, person_id, index) for index, person_id in enumerate(members)],
             )
+            self._ensure_group_order_row(conn, group_id, timestamp)
             conn.commit()
             return self._group_from_id(conn, group_id)
 
@@ -887,7 +1152,12 @@ class FaceStateRepository:
             rows = conn.execute("""
                 SELECT group_id
                 FROM people_groups
-                ORDER BY created_at ASC, group_id ASC
+                LEFT JOIN group_card_orders USING (group_id)
+                ORDER BY
+                    CASE WHEN group_card_orders.sort_order IS NULL THEN 1 ELSE 0 END ASC,
+                    group_card_orders.sort_order ASC,
+                    people_groups.created_at ASC,
+                    people_groups.group_id ASC
                 """).fetchall()
             groups: list[PeopleGroupRecord] = []
             for row in rows:
@@ -895,6 +1165,25 @@ class FaceStateRepository:
                 if group is not None:
                     groups.append(group)
             return groups
+
+    def list_group_ids_for_people(self, person_ids: Iterable[str]) -> list[str]:
+        unique_ids = _unique_person_ids(person_ids)
+        if not unique_ids:
+            return []
+
+        self.initialize()
+        placeholders = ", ".join(["?"] * len(unique_ids))
+        with closing(self._connect()) as conn:
+            rows = conn.execute(
+                f"""
+                SELECT DISTINCT group_id
+                FROM people_group_members
+                WHERE person_id IN ({placeholders})
+                ORDER BY group_id ASC
+                """,
+                unique_ids,
+            ).fetchall()
+        return [str(row["group_id"]) for row in rows if row["group_id"]]
 
     def get_group(self, group_id: str) -> PeopleGroupRecord | None:
         if not group_id:
@@ -911,9 +1200,24 @@ class FaceStateRepository:
             group = self._group_from_id(conn, group_id)
             if group is None:
                 return None
-            conn.execute("DELETE FROM people_groups WHERE group_id = ?", (group_id,))
+            self._delete_group(conn, group_id)
             conn.commit()
             return group
+
+    def remove_person_from_groups(self, person_id: str) -> dict[str, str | None]:
+        if not person_id:
+            return {}
+
+        self.initialize()
+        updated_at = _utc_now_iso()
+        with closing(self._connect()) as conn:
+            redirects = self._remove_person_from_groups(
+                conn,
+                person_id=person_id,
+                updated_at=updated_at,
+            )
+            conn.commit()
+        return redirects
 
     def has_group_asset_cache(self, group_id: str) -> bool:
         if not group_id:
@@ -1099,7 +1403,7 @@ class FaceStateRepository:
                 for person_id in group.member_person_ids
             )
             if len(next_members) < 2:
-                conn.execute("DELETE FROM people_groups WHERE group_id = ?", (group_id,))
+                self._delete_group(conn, group_id)
                 redirects[group_id] = None
                 continue
 
@@ -1123,7 +1427,7 @@ class FaceStateRepository:
                     target_group_id=target_group_id,
                     updated_at=updated_at,
                 )
-                conn.execute("DELETE FROM people_groups WHERE group_id = ?", (group_id,))
+                self._delete_group(conn, group_id)
                 redirects[group_id] = target_group_id
                 continue
 
@@ -1194,6 +1498,124 @@ class FaceStateRepository:
                 updated_at,
             ),
         )
+
+    def _remove_person_from_groups(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        person_id: str,
+        updated_at: str,
+    ) -> dict[str, str | None]:
+        affected = conn.execute(
+            """
+            SELECT DISTINCT group_id
+            FROM people_group_members
+            WHERE person_id = ?
+            ORDER BY group_id ASC
+            """,
+            (person_id,),
+        ).fetchall()
+        if not affected:
+            return {}
+
+        redirects: dict[str, str | None] = {}
+        for row in affected:
+            group_id = str(row["group_id"])
+            group = self._group_from_id(conn, group_id)
+            if group is None:
+                continue
+            next_members = _unique_person_ids(
+                member_id
+                for member_id in group.member_person_ids
+                if member_id != person_id
+            )
+            if len(next_members) < 2:
+                self._delete_group(conn, group_id)
+                redirects[group_id] = None
+                continue
+
+            next_member_key = _group_member_key(next_members)
+            if next_member_key == group.member_key:
+                continue
+
+            duplicate = conn.execute(
+                """
+                SELECT group_id
+                FROM people_groups
+                WHERE member_key = ? AND group_id != ?
+                """,
+                (next_member_key, group_id),
+            ).fetchone()
+            if duplicate is not None:
+                target_group_id = str(duplicate["group_id"])
+                self._transfer_group_cover_if_needed(
+                    conn,
+                    source_group_id=group_id,
+                    target_group_id=target_group_id,
+                    updated_at=updated_at,
+                )
+                self._delete_group(conn, group_id)
+                redirects[group_id] = target_group_id
+                continue
+
+            conn.execute(
+                """
+                UPDATE people_groups
+                SET member_key = ?, updated_at = ?
+                WHERE group_id = ?
+                """,
+                (next_member_key, updated_at, group_id),
+            )
+            conn.execute("DELETE FROM people_group_members WHERE group_id = ?", (group_id,))
+            conn.executemany(
+                """
+                INSERT INTO people_group_members (group_id, person_id, position)
+                VALUES (?, ?, ?)
+                """,
+                [(group_id, member_id, index) for index, member_id in enumerate(next_members)],
+            )
+        return redirects
+
+    def delete_person_state(self, person_id: str) -> None:
+        if not person_id:
+            return
+
+        self.initialize()
+        with closing(self._connect()) as conn:
+            conn.execute("DELETE FROM person_covers WHERE person_id = ?", (person_id,))
+            conn.execute("DELETE FROM person_card_orders WHERE person_id = ?", (person_id,))
+            conn.execute("DELETE FROM hidden_people WHERE person_id = ?", (person_id,))
+            conn.execute("DELETE FROM person_profiles WHERE person_id = ?", (person_id,))
+            conn.commit()
+
+    @staticmethod
+    def _ensure_group_order_row(
+        conn: sqlite3.Connection,
+        group_id: str,
+        updated_at: str,
+    ) -> None:
+        row = conn.execute(
+            "SELECT 1 FROM group_card_orders WHERE group_id = ?",
+            (group_id,),
+        ).fetchone()
+        if row is not None:
+            return
+        max_order = conn.execute(
+            "SELECT MAX(sort_order) AS max_order FROM group_card_orders"
+        ).fetchone()
+        next_order = int(max_order["max_order"]) + 1 if max_order and max_order["max_order"] is not None else 0
+        conn.execute(
+            """
+            INSERT INTO group_card_orders (group_id, sort_order, updated_at)
+            VALUES (?, ?, ?)
+            """,
+            (group_id, next_order, updated_at),
+        )
+
+    @staticmethod
+    def _delete_group(conn: sqlite3.Connection, group_id: str) -> None:
+        conn.execute("DELETE FROM group_card_orders WHERE group_id = ?", (group_id,))
+        conn.execute("DELETE FROM people_groups WHERE group_id = ?", (group_id,))
 
     @staticmethod
     def _group_from_id(
@@ -1277,6 +1699,18 @@ class FaceStateRepository:
         conn.execute("CREATE INDEX IF NOT EXISTS idx_face_keys_person_id ON face_keys(person_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_face_keys_asset_id ON face_keys(asset_id)")
         conn.execute("""
+            CREATE TABLE IF NOT EXISTS rejected_face_keys (
+                face_key TEXT PRIMARY KEY,
+                asset_id TEXT NOT NULL,
+                asset_rel TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """)
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_rejected_face_keys_asset_id "
+            "ON rejected_face_keys(asset_id)"
+        )
+        conn.execute("""
             CREATE TABLE IF NOT EXISTS person_covers (
                 person_id TEXT PRIMARY KEY,
                 face_id TEXT,
@@ -1303,6 +1737,17 @@ class FaceStateRepository:
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_person_card_orders_sort_order "
             "ON person_card_orders(sort_order)"
+        )
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS group_card_orders (
+                group_id TEXT PRIMARY KEY,
+                sort_order INTEGER NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """)
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_group_card_orders_sort_order "
+            "ON group_card_orders(sort_order)"
         )
         conn.execute("""
             CREATE TABLE IF NOT EXISTS hidden_people (

@@ -10,14 +10,17 @@ from pathlib import Path
 from typing import Any, Mapping, Optional
 
 from PySide6.QtCore import QDateTime, QEvent, QLocale, QObject, QRectF, QSize, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QKeyEvent, QMouseEvent, QPainter, QPainterPath, QPalette, QPixmap, QShowEvent
+from PySide6.QtGui import QColor, QGuiApplication, QKeyEvent, QMouseEvent, QPainter, QPainterPath, QPalette, QPixmap, QShowEvent
 from PySide6.QtWidgets import (
+    QDialog,
     QFrame,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QLineEdit,
     QListWidget,
     QListWidgetItem,
+    QMenu,
     QPushButton,
     QSizePolicy,
     QToolButton,
@@ -25,11 +28,14 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from iPhoto.people.repository import AssetFaceAnnotation
+from iPhoto.people.repository import AssetFaceAnnotation, PersonSummary
 
 from ..icons import load_icon
+from ..menus.core import MenuActionSpec, MenuContext, populate_menu
+from ..menus.style import apply_menu_style
 from .info_location_map import InfoLocationMapView
 from .main_window_metrics import TITLE_BAR_HEIGHT, WINDOW_CONTROL_BUTTON_SIZE, WINDOW_CONTROL_GLYPH_SIZE
+from .people_dashboard_dialogs import GroupPeopleDialog
 
 # Matches a lens string that is already a self-contained spec with *both* a
 # focal-length component ("23mm", "24-70mm") *and* an aperture component
@@ -98,6 +104,231 @@ def _face_add_button_metrics() -> tuple[QSize, QSize]:
 
 _FACE_ADD_ICON_SIZE, _FACE_ADD_BUTTON_SIZE = _face_add_button_metrics()
 
+
+def _style_popup_input_dialog(dialog: QInputDialog, parent: QWidget | None) -> None:
+    palette = parent.palette() if parent is not None else QPalette()
+    bg = palette.color(QPalette.ColorRole.Window).name()
+    text_col = palette.color(QPalette.ColorRole.WindowText).name()
+    base = palette.color(QPalette.ColorRole.Base).name()
+    text_input = palette.color(QPalette.ColorRole.Text).name()
+    button = palette.color(QPalette.ColorRole.Button).name()
+    button_text = palette.color(QPalette.ColorRole.ButtonText).name()
+    dialog.setStyleSheet(
+        f"""
+        QInputDialog {{
+            background-color: {bg};
+            color: {text_col};
+        }}
+        QLabel {{
+            color: {text_col};
+        }}
+        QLineEdit, QComboBox, QListView {{
+            background-color: {base};
+            color: {text_input};
+            border: 1px solid {text_col};
+            padding: 4px;
+        }}
+        QPushButton {{
+            background-color: {button};
+            color: {button_text};
+            border: 1px solid {text_col};
+            padding: 6px 16px;
+            min-width: 60px;
+        }}
+        QPushButton:hover {{
+            background-color: {base};
+        }}
+        """
+    )
+
+
+def _uses_dark_theme(widget: QWidget | None) -> bool:
+    host = widget.window() if widget is not None and widget.window() is not None else widget
+    coordinator = getattr(host, "coordinator", None)
+    context = getattr(coordinator, "_context", None)
+    theme_manager = getattr(context, "theme", None)
+    if theme_manager is not None and hasattr(theme_manager, "get_effective_theme_mode"):
+        return theme_manager.get_effective_theme_mode() == "dark"
+
+    settings = getattr(context, "settings", None)
+    if settings is not None and hasattr(settings, "get"):
+        theme_setting = settings.get("ui.theme", "system")
+        if theme_setting == "dark":
+            return True
+        if theme_setting == "light":
+            return False
+
+    app = QGuiApplication.instance()
+    if app is not None and app.styleHints().colorScheme() == Qt.ColorScheme.Dark:
+        return True
+
+    palette_source = host.palette() if host is not None else QPalette()
+    return palette_source.color(QPalette.ColorRole.Window).lightness() < 128
+
+
+class _FaceAvatarWidget(QLabel):
+    deleteRequested = Signal(object)
+    moveRequested = Signal(object, str)
+    newPersonRequested = Signal(object, str)
+
+    _ACTIVE_BORDER_COLOR = "#0A84FF"
+    _PLACEHOLDER_STYLE = (
+        f"background-color: rgba(207, 214, 225, 220); border-radius: {_FACE_AVATAR_DIAMETER // 2}px;"
+    )
+
+    def __init__(
+        self,
+        annotation: AssetFaceAnnotation,
+        candidates: list[PersonSummary],
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self._annotation = annotation
+        self._candidates = list(candidates)
+        self._is_menu_active = False
+        self._is_placeholder = False
+        self.setFixedSize(_FACE_AVATAR_DIAMETER, _FACE_AVATAR_DIAMETER)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._refresh_visual_state()
+
+    def set_candidates(self, candidates: list[PersonSummary]) -> None:
+        self._candidates = list(candidates)
+
+    def contextMenuEvent(self, event) -> None:  # type: ignore[override]
+        menu = self._build_context_menu()
+        if menu is None:
+            event.ignore()
+            return
+        self._set_menu_active(True)
+        menu.aboutToHide.connect(lambda: self._set_menu_active(False))
+        chosen = menu.exec(event.globalPos())
+        if chosen is None:
+            return
+        if chosen.text() == "Delete":
+            self.deleteRequested.emit(self._annotation)
+            return
+        if chosen.text() == "Choose Someone Else…":
+            self._prompt_choose_person()
+            return
+        if chosen.text() == "New Person…":
+            self._prompt_new_person()
+
+    def _build_context_menu(self) -> QMenu | None:
+        delete_label, not_this_label, submenu_labels = self._menu_action_labels()
+        menu = QMenu(self)
+        apply_menu_style(menu, self)
+        context = MenuContext(
+            surface="info_panel",
+            selection_kind="empty",
+            entity_kind="person",
+            entity_id=self._annotation.person_id,
+        )
+        populate_menu(
+            menu,
+            context=context,
+            action_specs=[
+                MenuActionSpec(
+                    action_id="delete_face",
+                    label=delete_label,
+                ),
+                MenuActionSpec(
+                    action_id="not_this_person",
+                    label=not_this_label,
+                    children=tuple(
+                        MenuActionSpec(
+                            action_id=f"not_this_person:{submenu_label}",
+                            label=submenu_label,
+                        )
+                        for submenu_label in submenu_labels
+                    ),
+                ),
+            ],
+            anchor=self,
+        )
+        submenu = menu.actions()[1].menu() if len(menu.actions()) > 1 else None
+        if submenu is not None:
+            menu._face_action_submenu = submenu  # type: ignore[attr-defined]
+        return menu
+
+    def _menu_action_labels(self) -> tuple[str, str, tuple[str, str]]:
+        return ("Delete", self._not_this_label(), ("Choose Someone Else…", "New Person…"))
+
+    def _not_this_label(self) -> str:
+        display_name = str(self._annotation.display_name or "").strip()
+        return f"Not {display_name}" if display_name else "Not This Person"
+
+    def _prompt_choose_person(self) -> None:
+        options = [
+            summary
+            for summary in self._candidates
+            if summary.person_id and summary.person_id != self._annotation.person_id
+        ]
+        if not options:
+            return
+        host = self.window() if isinstance(self.window(), QWidget) else self
+        dialog = GroupPeopleDialog(
+            options,
+            title_text="Choose Someone Else",
+            prompt_text="Assign this face to",
+            confirm_text="Choose",
+            min_selection=1,
+            max_selection=1,
+            dark_mode=_uses_dark_theme(host),
+            parent=host,
+        )
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        selected_ids = dialog.selected_person_ids()
+        if not selected_ids:
+            return
+        self.moveRequested.emit(self._annotation, selected_ids[0])
+
+    def _prompt_new_person(self) -> None:
+        host = self.window() if isinstance(self.window(), QWidget) else self
+        dialog = QInputDialog(host)
+        dialog.setWindowTitle("New Person")
+        dialog.setLabelText("Person name:")
+        dialog.setTextValue("")
+        _style_popup_input_dialog(dialog, host)
+        if dialog.exec() != QInputDialog.DialogCode.Accepted:
+            return
+        new_name = dialog.textValue().strip()
+        if not new_name:
+            return
+        self.newPersonRequested.emit(self._annotation, new_name)
+
+    def _set_menu_active(self, active: bool) -> None:
+        self._is_menu_active = bool(active)
+        self._refresh_visual_state()
+
+    def _refresh_visual_state(self) -> None:
+        pixmap = _avatar_pixmap(self._annotation.thumbnail_path)
+        border = (
+            f"border: 2px solid {self._ACTIVE_BORDER_COLOR};"
+            if self._is_menu_active
+            else "border: none;"
+        )
+        if pixmap is not None:
+            self._is_placeholder = False
+            self.setPixmap(pixmap)
+            self.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            self.setStyleSheet(
+                f"QLabel {{ background: transparent; border-radius: {_FACE_AVATAR_DIAMETER // 2}px; {border} }}"
+            )
+            return
+        self._is_placeholder = True
+        self.clear()
+        self.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.setText(" ")
+        self.setStyleSheet(
+            f"QLabel {{ {self._PLACEHOLDER_STYLE} {border} }}"
+        )
+
+
+def _person_choice_label(summary: PersonSummary) -> str:
+    display_name = str(summary.name or "").strip() or "Unnamed"
+    return f"{display_name} ({summary.face_count})"
+
 @dataclass
 class _FormattedMetadata:
     """Pre-formatted strings used to populate the info panel labels."""
@@ -125,6 +356,9 @@ class InfoPanel(QWidget):
     _SHADOW_RADIUS_GROWTH = 0.5
     dismissed = Signal()
     manualFaceAddRequested = Signal()
+    faceDeleteRequested = Signal(object)
+    faceMoveRequested = Signal(object, str)
+    faceMoveToNewPersonRequested = Signal(object, str)
     locationQueryChanged = Signal(str)
     locationSuggestionActivated = Signal(object)
     locationConfirmRequested = Signal(str, object)
@@ -151,13 +385,14 @@ class InfoPanel(QWidget):
         self._metadata: Optional[dict[str, Any]] = None
         self._current_rel: Optional[str] = None
         self._asset_faces: list[AssetFaceAnnotation] = []
+        self._face_action_candidates: list[PersonSummary] = []
         self._drag_active = False
         self._drag_offset = None
         self._centered = False
         self._post_show_reflow_queued = False
         self._post_show_reflow_recenter = False
         self._location_capability_enabled = False
-        self._location_fallback_text = "如需Assign a Location功能请下载map extension"
+        self._location_fallback_text = "Install the map extension to use Assign a Location."
         self._location_suggestions: list[object] = []
         self._selected_location_suggestion: object | None = None
         self._updating_location_ui = False
@@ -363,11 +598,16 @@ class InfoPanel(QWidget):
         if self.isVisible():
             self._schedule_post_show_reflow(recenter=False)
 
+    def set_face_action_candidates(self, candidates: list[PersonSummary]) -> None:
+        self._face_action_candidates = list(candidates)
+        self._rebuild_face_strip()
+
     def clear(self) -> None:
         """Reset the panel to an empty state without hiding the window."""
 
         self._metadata = None
         self._current_rel = None
+        self._face_action_candidates = []
         for label in (
             self._filename_label,
             self._timestamp_label,
@@ -718,17 +958,10 @@ class InfoPanel(QWidget):
         self._face_container.setVisible(True)
 
     def _make_face_avatar(self, annotation: AssetFaceAnnotation) -> QLabel:
-        label = QLabel(self._face_container)
-        label.setFixedSize(_FACE_AVATAR_DIAMETER, _FACE_AVATAR_DIAMETER)
-        pixmap = _avatar_pixmap(annotation.thumbnail_path)
-        if pixmap is not None:
-            label.setPixmap(pixmap)
-        else:
-            label.setStyleSheet(
-                f"QLabel {{ background-color: rgba(207, 214, 225, 220); border-radius: {_FACE_AVATAR_DIAMETER // 2}px; }}"
-            )
-            label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            label.setText(" ")
+        label = _FaceAvatarWidget(annotation, self._face_action_candidates, self._face_container)
+        label.deleteRequested.connect(self.faceDeleteRequested.emit)
+        label.moveRequested.connect(self.faceMoveRequested.emit)
+        label.newPersonRequested.connect(self.faceMoveToNewPersonRequested.emit)
         return label
 
     def _refresh_panel_geometry(self, *, recenter: bool = False) -> None:

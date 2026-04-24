@@ -1,15 +1,17 @@
-"""Drag/reorder board for People cluster cards."""
+"""Drag/reorder boards for People cluster and group cards."""
 
 from __future__ import annotations
 
 from PySide6.QtCore import QAbstractAnimation, QPoint, QParallelAnimationGroup, Signal
 from PySide6.QtWidgets import QWidget
 
-from .people_dashboard_cards import PeopleCard
+from .people_dashboard_cards import GroupCard, PeopleCard
 from .people_dashboard_shared import (
     CANVAS_MARGIN,
     CARD_HEIGHT,
     CARD_WIDTH,
+    GROUP_CARD_HEIGHT,
+    GROUP_CARD_WIDTH,
     PROXIMITY_THRESHOLD,
     SPACING,
     HintFrame,
@@ -198,6 +200,143 @@ class PeopleBoard(QWidget):
 
     def hide_merge_frame(self) -> None:
         self.merge_frame.hide()
+
+    def resizeEvent(self, event) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        self.update_positions()
+
+
+class GroupBoard(QWidget):
+    orderChanged = Signal(list)
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setObjectName("GroupBoard")
+        self.top_cards: list[GroupCard] = []
+        self._active_anim: QParallelAnimationGroup | None = None
+        self._drag_start_order: tuple[str, ...] | None = None
+
+        self.setStyleSheet("#GroupBoard { background: transparent; }")
+        self.setMinimumHeight(220)
+
+    def set_cards(self, cards: list[GroupCard]) -> None:
+        self.clear_cards()
+        self.top_cards = list(cards)
+        for card in self.top_cards:
+            card.setParent(self)
+            card.show()
+        self.update_positions()
+
+    def clear_cards(self) -> None:
+        if (
+            self._active_anim is not None
+            and self._active_anim.state() == QAbstractAnimation.State.Running
+        ):
+            self._active_anim.stop()
+        for card in self.top_cards:
+            card.hide()
+            card.deleteLater()
+        self.top_cards = []
+        self.setMinimumHeight(220)
+
+    def visible_cards(self) -> list[GroupCard]:
+        return list(self.top_cards)
+
+    def calculate_positions(self, cards: list[GroupCard] | None = None) -> list[QPoint]:
+        visible = list(cards) if cards is not None else self.visible_cards()
+        width = max(self.width(), 360)
+        per_row = max(1, (width - CANVAS_MARGIN * 2 + SPACING) // (GROUP_CARD_WIDTH + SPACING))
+        card_height = visible[0].height() if visible else GROUP_CARD_HEIGHT
+
+        positions: list[QPoint] = []
+        x = CANVAS_MARGIN
+        y = CANVAS_MARGIN
+        for index, _card in enumerate(visible):
+            if index > 0 and index % per_row == 0:
+                x = CANVAS_MARGIN
+                y += card_height + SPACING
+            positions.append(QPoint(int(x), int(y)))
+            x += GROUP_CARD_WIDTH + SPACING
+        return positions
+
+    def update_positions(self) -> None:
+        positions = self.calculate_positions()
+        for card, position in zip(self.visible_cards(), positions):
+            if not card.is_dragging:
+                card.move(position)
+            card.show()
+
+        max_bottom = CANVAS_MARGIN
+        if positions:
+            last_height = self.visible_cards()[0].height() if self.visible_cards() else GROUP_CARD_HEIGHT
+            max_bottom = max(point.y() for point in positions) + last_height + CANVAS_MARGIN
+        self.setMinimumHeight(max_bottom)
+
+    def begin_drag(self, card: GroupCard) -> None:
+        del card
+        self._drag_start_order = tuple(item.group_id for item in self.visible_cards())
+        if (
+            self._active_anim is not None
+            and self._active_anim.state() == QAbstractAnimation.State.Running
+        ):
+            self._active_anim.stop()
+
+    def finish_drag(self, card: GroupCard) -> None:
+        del card
+        self.animate_to_layout()
+        current_order = tuple(item.group_id for item in self.visible_cards())
+        if current_order != (self._drag_start_order or current_order):
+            self.orderChanged.emit(list(current_order))
+        self._drag_start_order = None
+
+    def animate_to_layout(self) -> None:
+        if (
+            self._active_anim is not None
+            and self._active_anim.state() == QAbstractAnimation.State.Running
+        ):
+            self._active_anim.stop()
+
+        targets = self.calculate_positions(self.visible_cards())
+        group = QParallelAnimationGroup(self)
+        for card, target in zip(self.visible_cards(), targets):
+            if card.pos() != target:
+                group.addAnimation(_create_pos_anim(card, target))
+
+        def finalize() -> None:
+            self._active_anim = None
+            self.update_positions()
+
+        if group.animationCount() == 0:
+            finalize()
+            return
+
+        group.finished.connect(finalize)
+        self._active_anim = group
+        group.start()
+
+    def update_card_order(self, dragged: GroupCard) -> None:
+        visible = self.visible_cards()
+        targets = self.calculate_positions(visible)
+        if not targets:
+            return
+
+        center = dragged.pos() + QPoint(GROUP_CARD_WIDTH // 2, dragged.height() // 2)
+        closest_index = min(
+            range(len(targets)),
+            key=lambda index: (
+                targets[index] + QPoint(GROUP_CARD_WIDTH // 2, dragged.height() // 2) - center
+            ).manhattanLength(),
+        )
+
+        if dragged in self.top_cards:
+            self.top_cards.remove(dragged)
+        self.top_cards.insert(closest_index, dragged)
+
+        instant_targets = self.calculate_positions(self.visible_cards())
+        for card, target in zip(self.visible_cards(), instant_targets):
+            if card is dragged or card.is_dragging:
+                continue
+            card.move(target)
 
     def resizeEvent(self, event) -> None:  # noqa: N802
         super().resizeEvent(event)

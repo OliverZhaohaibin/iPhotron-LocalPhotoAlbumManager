@@ -10,6 +10,7 @@ from iPhoto.application.contracts.runtime_entry_contract import RuntimeEntryCont
 from iPhoto.config import ALL_PHOTOS_TITLE, DEFAULT_EXCLUDE, DEFAULT_INCLUDE, RECENTLY_DELETED_DIR_NAME
 from iPhoto.domain.models.core import MediaType
 from iPhoto.domain.models.query import AssetQuery
+from iPhoto.gui.ui.menus.core import MenuContext
 from iPhoto.gui.coordinators.location_selection_session import LocationSelectionSession
 from iPhoto.gui.facade import AppFacade
 from iPhoto.library.geo_aggregator import geotagged_asset_from_row
@@ -455,6 +456,45 @@ class GalleryViewModel(BaseViewModel):
             seen.add(path)
             paths.append(path)
         return paths
+
+    def items_for_rows(self, rows: Iterable[int]) -> list:
+        items: list = []
+        seen_rows: set[int] = set()
+        for row in rows:
+            if row in seen_rows or row < 0:
+                continue
+            seen_rows.add(row)
+            dto = self._store.asset_at(row)
+            if dto is not None:
+                items.append(dto)
+        return items
+
+    def context_menu_state(self) -> MenuContext:
+        section = self.current_section.value
+        entity_kind: str | None = None
+        entity_id: str | None = None
+        if section in {"album", "pinned_album"} and self.active_root.value is not None:
+            entity_kind = "album"
+            entity_id = str(self.active_root.value)
+        elif section in {"people_cluster_gallery", "pinned_people_gallery"}:
+            if self._people_cluster_kind in {"person", "group"}:
+                entity_kind = self._people_cluster_kind
+                entity_id = self._people_cluster_id
+
+        return MenuContext(
+            surface="gallery",
+            selection_kind="empty",
+            gallery_section=section,
+            entity_kind=entity_kind,
+            entity_id=entity_id,
+            active_root=self.active_root.value,
+            is_recently_deleted=section == "recently_deleted",
+            is_cluster_gallery=section in {
+                "cluster_gallery",
+                "people_cluster_gallery",
+                "pinned_people_gallery",
+            },
+        )
 
     def toggle_favorite_row(self, row: int) -> Optional[bool]:
         path = self.path_for_row(row)

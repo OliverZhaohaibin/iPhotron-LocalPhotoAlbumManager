@@ -386,6 +386,30 @@ can inherit that translucency and render with a transparent background.
 - When adding a new right-click surface, add or update a focused GUI test that
   verifies the menu is styled and that important actions are present.
 
+### People UI Conventions
+
+#### Reusable person-picker popup
+
+The canonical picker for choosing one or more People cards is
+`GroupPeopleDialog` in
+`src/iPhoto/gui/ui/widgets/people_dashboard_dialogs.py`.
+
+Use this dialog for all People-selection flows instead of creating ad-hoc
+`QInputDialog` or combo-box popups. Current uses include:
+
+- `New Group` from the People dashboard
+- `Merge Into...` from a People card context menu
+- `Choose Someone Else...` from the Info panel face actions
+
+When reusing it:
+
+- pass `dark_mode=` from the hosting window/theme context explicitly when the
+  caller is not the People dashboard itself
+- use `min_selection=1` and `max_selection=1` for single-target pickers
+- customize `title_text`, `prompt_text`, and `confirm_text` per workflow
+- keep multi-select behavior only for true grouping flows
+
+
 ---
 
 ## Code Style

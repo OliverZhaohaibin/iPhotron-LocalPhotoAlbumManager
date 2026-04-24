@@ -87,6 +87,14 @@ class FaceScanSession:
         ]
         for faces in self._faces_by_asset_id.values():
             auto_faces.extend(faces)
+        if state_repository is not None and auto_faces:
+            rejected_face_keys = state_repository.get_rejected_face_keys(
+                face.face_key for face in auto_faces if face.face_key
+            )
+            if rejected_face_keys:
+                auto_faces = [
+                    face for face in auto_faces if face.face_key not in rejected_face_keys
+                ]
 
         if not auto_faces:
             return [], []

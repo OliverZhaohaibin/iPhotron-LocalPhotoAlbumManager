@@ -166,6 +166,11 @@ class PlaybackCoordinator(QObject):
         self._info_panel = panel
         panel.dismissed.connect(self._handle_info_panel_dismissed)
         panel.manualFaceAddRequested.connect(self._handle_manual_face_add_requested)
+        panel.faceDeleteRequested.connect(self._handle_info_panel_face_delete_requested)
+        panel.faceMoveRequested.connect(self._handle_info_panel_face_move_requested)
+        panel.faceMoveToNewPersonRequested.connect(
+            self._handle_info_panel_face_move_to_new_person_requested
+        )
         panel.locationQueryChanged.connect(self._handle_location_query_changed)
         panel.locationConfirmRequested.connect(self._handle_location_confirm_requested)
 
@@ -681,6 +686,84 @@ class PlaybackCoordinator(QObject):
         if callable(refresh_callback):
             refresh_callback()
 
+    @Slot(object)
+    def _handle_info_panel_face_delete_requested(self, annotation: object) -> None:
+        if not isinstance(annotation, AssetFaceAnnotation):
+            return
+        people_service = getattr(self, "_people_service", None)
+        if people_service is None:
+            return
+        try:
+            changed = people_service.delete_face(annotation.face_id)
+        except (sqlite3.Error, OSError):
+            LOGGER.exception("Failed to delete face %s", annotation.face_id)
+            return
+        if not changed:
+            return
+        self._refresh_face_name_overlay_for_current_presentation()
+        presentation = getattr(self, "_current_presentation", None)
+        if presentation is not None and presentation.asset_id:
+            self._refresh_info_panel_faces(presentation.asset_id)
+        refresh_callback = getattr(self, "_people_dashboard_refresh_callback", None)
+        if callable(refresh_callback):
+            refresh_callback()
+
+    @Slot(object, str)
+    def _handle_info_panel_face_move_requested(
+        self,
+        annotation: object,
+        target_person_id: str,
+    ) -> None:
+        if not isinstance(annotation, AssetFaceAnnotation) or not target_person_id:
+            return
+        people_service = getattr(self, "_people_service", None)
+        if people_service is None:
+            return
+        try:
+            changed = people_service.move_face_to_person(annotation.face_id, target_person_id)
+        except (sqlite3.Error, OSError):
+            LOGGER.exception(
+                "Failed to move face %s to person %s",
+                annotation.face_id,
+                target_person_id,
+            )
+            return
+        if not changed:
+            return
+        self._refresh_face_name_overlay_for_current_presentation()
+        presentation = getattr(self, "_current_presentation", None)
+        if presentation is not None and presentation.asset_id:
+            self._refresh_info_panel_faces(presentation.asset_id)
+        refresh_callback = getattr(self, "_people_dashboard_refresh_callback", None)
+        if callable(refresh_callback):
+            refresh_callback()
+
+    @Slot(object, str)
+    def _handle_info_panel_face_move_to_new_person_requested(
+        self,
+        annotation: object,
+        new_name: str,
+    ) -> None:
+        if not isinstance(annotation, AssetFaceAnnotation):
+            return
+        people_service = getattr(self, "_people_service", None)
+        if people_service is None:
+            return
+        try:
+            created_person_id = people_service.move_face_to_new_person(annotation.face_id, new_name)
+        except (sqlite3.Error, OSError):
+            LOGGER.exception("Failed to move face %s into a new person", annotation.face_id)
+            return
+        if not created_person_id:
+            return
+        self._refresh_face_name_overlay_for_current_presentation()
+        presentation = getattr(self, "_current_presentation", None)
+        if presentation is not None and presentation.asset_id:
+            self._refresh_info_panel_faces(presentation.asset_id)
+        refresh_callback = getattr(self, "_people_dashboard_refresh_callback", None)
+        if callable(refresh_callback):
+            refresh_callback()
+
     def _sync_filmstrip_selection(self, row: int) -> None:
         idx = self._asset_model.index(row, 0)
         model = self._filmstrip_view.model()
@@ -1158,6 +1241,15 @@ class PlaybackCoordinator(QObject):
         info_panel = getattr(self, "_info_panel", None)
         if info_panel is None:
             return
+        people_service = getattr(self, "_people_service", None)
+        if people_service is not None:
+            try:
+                info_panel.set_face_action_candidates(
+                    people_service.list_clusters(include_hidden=True)
+                )
+            except (sqlite3.Error, OSError):
+                LOGGER.exception("Failed to load face action candidates")
+                info_panel.set_face_action_candidates([])
         if not asset_id:
             info_panel.set_asset_faces([])
             return

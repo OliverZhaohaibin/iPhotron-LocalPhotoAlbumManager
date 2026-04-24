@@ -51,6 +51,8 @@ def test_export_action_present_when_selected(mock_qmenu_cls, mock_dependencies):
 
     selection_model = MagicMock()
     selection_model.isSelected.return_value = True
+    selection_model.selectedIndexes.return_value = [index]
+    index.row.return_value = 0
     grid_view.selectionModel.return_value = selection_model
 
     controller = ContextMenuController(
@@ -74,10 +76,6 @@ def test_export_action_present_when_selected(mock_qmenu_cls, mock_dependencies):
     # Verify "Export" action is added
     actions_added = [args[0] for args, _ in mock_menu.addAction.call_args_list]
     assert "Export" in actions_added, f"Export action not found in {actions_added}"
-
-    # Verify connection
-    mock_action = mock_menu.addAction.return_value
-    mock_action.triggered.connect.assert_any_call(mock_dependencies["export_callback"])
 
 
 @patch("iPhoto.gui.ui.controllers.context_menu_controller.QMenu")
@@ -107,6 +105,40 @@ def test_export_action_absent_when_no_selection(mock_qmenu_cls, mock_dependencie
 
     actions_added = [args[0] for args, _ in mock_menu.addAction.call_args_list]
     assert "Export" not in actions_added, f"Export action found in {actions_added} but shouldn't be"
+
+
+@patch("iPhoto.gui.ui.controllers.context_menu_controller.QMenu")
+def test_blank_area_menu_ignores_existing_selection(mock_qmenu_cls, mock_dependencies):
+    grid_view = mock_dependencies["grid_view"]
+    clicked_index = MagicMock(spec=QModelIndex)
+    clicked_index.isValid.return_value = False
+    grid_view.indexAt.return_value = clicked_index
+
+    selection_model = MagicMock()
+    selected_index = MagicMock(spec=QModelIndex)
+    selected_index.isValid.return_value = True
+    selected_index.row.return_value = 0
+    selection_model.selectedIndexes.return_value = [selected_index]
+    grid_view.selectionModel.return_value = selection_model
+
+    controller = ContextMenuController(
+        grid_view=mock_dependencies["grid_view"],
+        asset_model=mock_dependencies["asset_model"],
+        selected_paths_provider=mock_dependencies["selected_paths_provider"],
+        facade=mock_dependencies["facade"],
+        navigation=mock_dependencies["navigation"],
+        status_bar=mock_dependencies["status_bar"],
+        notification_toast=mock_dependencies["notification_toast"],
+        selection_controller=mock_dependencies["selection_controller"],
+        export_callback=mock_dependencies["export_callback"],
+    )
+
+    mock_menu = mock_qmenu_cls.return_value
+    controller._handle_context_menu(QPoint(10, 10))
+
+    actions_added = [args[0] for args, _ in mock_menu.addAction.call_args_list]
+    assert "Paste" in actions_added, f"Paste action not found in {actions_added}"
+    assert "Copy" not in actions_added, f"Copy action found in {actions_added} but shouldn't be"
 
 
 def test_selected_asset_paths_are_resolved_via_provider(mock_dependencies):

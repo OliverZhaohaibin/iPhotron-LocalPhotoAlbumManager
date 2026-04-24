@@ -293,6 +293,7 @@ class MainCoordinator(QObject):
             navigation=self._navigation,
             export_callback=window.ui.export_selected_action.trigger,
             prepare_paths_for_mutation=self._prepare_paths_for_mutation,
+            gallery_viewmodel=self._gallery_vm,
             parent=self,
         )
 

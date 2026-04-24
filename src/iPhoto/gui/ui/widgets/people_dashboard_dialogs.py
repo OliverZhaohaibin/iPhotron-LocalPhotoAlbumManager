@@ -357,6 +357,11 @@ class GroupPeopleDialog(QDialog):
         *,
         initial_selected_ids: list[str] | tuple[str, ...] = (),
         dark_mode: bool | None = None,
+        title_text: str = "People",
+        prompt_text: str = "Select People",
+        confirm_text: str = "Add",
+        min_selection: int = 2,
+        max_selection: int | None = None,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent.window() if parent is not None else None)
@@ -367,9 +372,13 @@ class GroupPeopleDialog(QDialog):
         self._anchor_index: int | None = None
         self._dark_mode = _widget_uses_dark_theme(parent) if dark_mode is None else bool(dark_mode)
         self._drag_pos: QPoint | None = None
+        self._min_selection = max(1, int(min_selection))
+        self._max_selection = None if max_selection is None else max(1, int(max_selection))
+        if self._max_selection is not None:
+            self._min_selection = min(self._min_selection, self._max_selection)
 
         self.setModal(True)
-        self.setWindowTitle("People")
+        self.setWindowTitle(title_text)
         self.setWindowFlags(Qt.WindowType.Dialog | Qt.WindowType.FramelessWindowHint)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.resize(920, 640)
@@ -408,7 +417,7 @@ class GroupPeopleDialog(QDialog):
         panel_layout.setContentsMargins(20, 12, 20, 16)
         panel_layout.setSpacing(14)
 
-        title = QLabel("People")
+        title = QLabel(title_text)
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         title.setStyleSheet(f"color: {text_primary}; font-size: 14px; font-weight: 800;")
         panel_layout.addWidget(title)
@@ -449,14 +458,14 @@ class GroupPeopleDialog(QDialog):
         footer.setSpacing(12)
         footer.addStretch(1)
 
-        prompt = QLabel("Select People")
+        prompt = QLabel(prompt_text)
         prompt.setAlignment(Qt.AlignmentFlag.AlignCenter)
         prompt.setStyleSheet(f"color: {text_secondary}; font-size: 13px; font-weight: 700;")
         footer.addWidget(prompt)
         footer.addStretch(1)
 
         self.cancel_button = QPushButton("Cancel")
-        self.add_button = QPushButton("Add")
+        self.add_button = QPushButton(confirm_text)
         for button in (self.cancel_button, self.add_button):
             button.setCursor(Qt.CursorShape.PointingHandCursor)
             button.setFixedHeight(38)
@@ -524,7 +533,15 @@ class GroupPeopleDialog(QDialog):
     def _handle_tile_clicked(self, index: int, shift_pressed: bool) -> None:
         if not (0 <= index < len(self._summaries)):
             return
-        if shift_pressed and self._anchor_index is not None:
+        if self._max_selection == 1:
+            person_id = self._summaries[index].person_id
+            if person_id in self._selected_ids:
+                self._selected_ids.clear()
+                self._selection_order.clear()
+            else:
+                self._selected_ids = {person_id}
+                self._selection_order = [person_id]
+        elif shift_pressed and self._anchor_index is not None:
             start, end = sorted((self._anchor_index, index))
             for range_index in range(start, end + 1):
                 self._select_person_id(self._summaries[range_index].person_id)
@@ -543,13 +560,24 @@ class GroupPeopleDialog(QDialog):
     def _select_person_id(self, person_id: str) -> None:
         if person_id in self._selected_ids:
             return
+        if self._max_selection == 1:
+            self._selected_ids = {person_id}
+            self._selection_order = [person_id]
+            return
         self._selected_ids.add(person_id)
         self._selection_order.append(person_id)
+        if self._max_selection is not None and len(self._selection_order) > self._max_selection:
+            while len(self._selection_order) > self._max_selection:
+                removed_id = self._selection_order.pop(0)
+                self._selected_ids.discard(removed_id)
 
     def _sync_tiles(self) -> None:
         for tile in self._tiles:
             tile.set_selected(tile.person_id in self._selected_ids)
-        self.add_button.setEnabled(len(self._selected_ids) >= 2)
+        selected_count = len(self._selected_ids)
+        meets_min = selected_count >= self._min_selection
+        meets_max = self._max_selection is None or selected_count <= self._max_selection
+        self.add_button.setEnabled(meets_min and meets_max)
 
     def _paint_panel_shadow(self, painter: QPainter) -> None:
         panel_rect = QRectF(self._panel.geometry())

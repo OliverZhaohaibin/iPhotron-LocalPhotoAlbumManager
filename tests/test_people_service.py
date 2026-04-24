@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import numpy as np
 import pytest
@@ -19,6 +19,7 @@ from iPhoto.people.index_coordinator import (
 )
 from iPhoto.library.workers.scanner_worker import ScannerSignals, ScannerWorker
 from iPhoto.people.pipeline import DetectedAssetFaces
+from iPhoto.people.records import AssetFaceAnnotation
 from iPhoto.people.repository import FaceRecord, ManualFaceRecord, PersonRecord
 from iPhoto.people.scan_session import FaceScanSession
 from iPhoto.people.service import PeopleService, face_library_paths, shared_face_model_dir
@@ -941,6 +942,70 @@ def test_people_service_dashboard_stays_stable_until_face_scan_session_commits(t
     assert groups_after[0].group_id == group.group_id
     assert groups_after[0].asset_count == 2
     assert pending_after == 0
+
+
+def test_people_service_face_mutation_methods_delegate_to_coordinator(tmp_path: Path) -> None:
+    service = PeopleService(tmp_path)
+    coordinator = Mock(
+        delete_face=Mock(return_value=object()),
+        move_face_to_person=Mock(return_value=object()),
+        move_face_to_new_person=Mock(return_value=object()),
+    )
+
+    with (
+        patch("iPhoto.people.service.get_people_index_coordinator", return_value=coordinator),
+        patch("iPhoto.people.service.uuid.uuid4", return_value=SimpleNamespace(hex="person-new")),
+    ):
+        assert service.delete_face("face-1") is True
+        assert service.move_face_to_person("face-1", "person-b") is True
+        assert service.move_face_to_new_person("face-1", "Alice 2") == "person-new"
+
+    coordinator.delete_face.assert_called_once_with("face-1")
+    coordinator.move_face_to_person.assert_called_once_with("face-1", "person-b")
+    coordinator.move_face_to_new_person.assert_called_once_with("face-1", "person-new", "Alice 2")
+
+
+def test_resolve_cluster_cover_face_returns_matching_face_id(tmp_path: Path) -> None:
+    service = PeopleService(tmp_path)
+
+    with patch.object(
+        service,
+        "list_asset_face_annotations",
+        return_value=[
+            AssetFaceAnnotation(
+                face_id="face-other",
+                person_id="person-b",
+                display_name="Bob",
+                box_x=0,
+                box_y=0,
+                box_w=10,
+                box_h=10,
+                image_width=100,
+                image_height=100,
+            ),
+            AssetFaceAnnotation(
+                face_id="face-match",
+                person_id="person-a",
+                display_name="Alice",
+                box_x=0,
+                box_y=0,
+                box_w=10,
+                box_h=10,
+                image_width=100,
+                image_height=100,
+            ),
+        ],
+    ):
+        assert service.resolve_cluster_cover_face("person-a", "asset-1") == "face-match"
+        assert service.resolve_cluster_cover_face("person-c", "asset-1") is None
+
+
+def test_resolve_group_cover_asset_validates_group_membership(tmp_path: Path) -> None:
+    service = PeopleService(tmp_path)
+
+    with patch.object(service, "group_asset_ids", return_value=["asset-1", "asset-2"]):
+        assert service.resolve_group_cover_asset("group-a", "asset-1") == "asset-1"
+        assert service.resolve_group_cover_asset("group-a", "asset-3") is None
 
 
 def test_face_scan_worker_enqueue_rows_skips_done_assets(tmp_path: Path) -> None:

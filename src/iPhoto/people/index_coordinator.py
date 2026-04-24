@@ -220,6 +220,69 @@ class PeopleIndexCoordinator(QObject):
                 changed_group_ids=changed_group_ids,
             )
 
+    def delete_face(self, face_id: str) -> PeopleSnapshotEvent | None:
+        if not face_id:
+            return None
+        with self._lock:
+            if self._shutdown_requested:
+                return None
+            repository = self._repository()
+            result = repository.delete_face(face_id)
+            if result is None:
+                return None
+            return self._emit_snapshot(
+                changed_asset_ids=result.changed_asset_ids,
+                changed_person_ids=result.changed_person_ids,
+                changed_group_ids=result.changed_group_ids,
+                person_redirects=result.person_redirects,
+                group_redirects=result.group_redirects,
+            )
+
+    def move_face_to_person(
+        self,
+        face_id: str,
+        target_person_id: str,
+    ) -> PeopleSnapshotEvent | None:
+        if not face_id or not target_person_id:
+            return None
+        with self._lock:
+            if self._shutdown_requested:
+                return None
+            repository = self._repository()
+            result = repository.move_face_to_person(face_id, target_person_id)
+            if result is None:
+                return None
+            return self._emit_snapshot(
+                changed_asset_ids=result.changed_asset_ids,
+                changed_person_ids=result.changed_person_ids,
+                changed_group_ids=result.changed_group_ids,
+                person_redirects=result.person_redirects,
+                group_redirects=result.group_redirects,
+            )
+
+    def move_face_to_new_person(
+        self,
+        face_id: str,
+        new_person_id: str,
+        new_name: str,
+    ) -> PeopleSnapshotEvent | None:
+        if not face_id or not new_person_id:
+            return None
+        with self._lock:
+            if self._shutdown_requested:
+                return None
+            repository = self._repository()
+            result = repository.move_face_to_new_person(face_id, new_person_id, new_name)
+            if result is None:
+                return None
+            return self._emit_snapshot(
+                changed_asset_ids=result.changed_asset_ids,
+                changed_person_ids=result.changed_person_ids,
+                changed_group_ids=result.changed_group_ids,
+                person_redirects=result.person_redirects,
+                group_redirects=result.group_redirects,
+            )
+
     def set_person_order(self, person_ids: Iterable[str]) -> PeopleSnapshotEvent | None:
         ordered_ids = tuple(str(person_id) for person_id in person_ids if person_id)
         with self._lock:
@@ -230,6 +293,17 @@ class PeopleIndexCoordinator(QObject):
             if not ordered_ids:
                 return None
             return self._emit_snapshot(changed_person_ids=ordered_ids)
+
+    def set_group_order(self, group_ids: Iterable[str]) -> PeopleSnapshotEvent | None:
+        ordered_ids = tuple(str(group_id) for group_id in group_ids if group_id)
+        with self._lock:
+            if self._shutdown_requested:
+                return None
+            repository = self._repository()
+            repository.set_group_order(ordered_ids)
+            if not ordered_ids:
+                return None
+            return self._emit_snapshot(changed_group_ids=ordered_ids)
 
     def merge_persons(
         self,

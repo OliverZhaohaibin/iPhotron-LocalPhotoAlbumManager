@@ -168,6 +168,51 @@ def test_sidebar_album_context_menu_offers_pin_and_unpin(tmp_path: Path, qapp: Q
     assert menu.actions()[0].text() == "Unpin Album"
 
 
+def test_sidebar_pinned_album_survives_album_rename(tmp_path: Path, qapp: QApplication) -> None:
+    root = tmp_path / "Library"
+    album_dir = root / "Trip"
+    album_dir.mkdir(parents=True)
+    _write_manifest(album_dir, "Trip")
+
+    manager = LibraryManager()
+    manager.bind_path(root)
+    qapp.processEvents()
+
+    settings = SettingsManager(path=tmp_path / "settings.json")
+    settings.load()
+    pinned_service = PinnedItemsService(settings)
+    pinned_service.pin_album(album_dir, "Trip", library_root=root)
+
+    sidebar = AlbumSidebar(manager)
+    sidebar.set_pinned_service(pinned_service)
+    manager.albumRenamed.connect(
+        lambda old, new: pinned_service.remap_album_path(
+            old,
+            new,
+            library_root=root,
+            fallback_label=new.name,
+        )
+    )
+    qapp.processEvents()
+
+    album = next(node for node in manager.list_albums() if node.path == album_dir)
+    manager.rename_album(album, "Renamed Trip")
+    qapp.processEvents()
+
+    new_album = root / "Renamed Trip"
+    pinned = pinned_service.items_for_library(root)
+    assert len(pinned) == 1
+    assert pinned[0].item_id == str(new_album.resolve())
+
+    refreshed_index = sidebar.tree_model().index_for_pinned_item(pinned[0])
+    refreshed_item = sidebar.tree_model().item_from_index(refreshed_index)
+    assert refreshed_item is not None
+    assert refreshed_item.node_type == NodeType.PINNED_ALBUM
+    assert refreshed_item.album is not None
+    assert refreshed_item.album.path == new_album
+    assert sidebar.tree_model().data(refreshed_index) == "Renamed Trip"
+
+
 def test_sidebar_pinned_item_context_menu_offers_unpin(tmp_path: Path, qapp: QApplication) -> None:
     root = tmp_path / "Library"
     root.mkdir()

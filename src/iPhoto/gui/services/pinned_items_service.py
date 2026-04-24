@@ -187,6 +187,63 @@ class PinnedItemsService(QObject):
     def prune_missing_album(self, album_path: Path, *, library_root: Path | None) -> None:
         self.unpin(kind="album", item_id=str(album_path), library_root=library_root)
 
+    def remap_album_path(
+        self,
+        old_path: Path,
+        new_path: Path,
+        *,
+        library_root: Path | None,
+        fallback_label: str | None = None,
+    ) -> bool:
+        old_id = self._normalize_item_id("album", old_path)
+        new_id = self._normalize_item_id("album", new_path)
+        library_key = self._library_key(library_root)
+        if old_id is None or new_id is None or library_key is None:
+            return False
+
+        payload = self._payload()
+        entries = payload.get(library_key, [])
+        rewritten: list[dict[str, object]] = []
+        updated = False
+        has_new_id = False
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            entry_kind = str(entry.get("kind") or "").strip()
+            entry_item_id = str(entry.get("item_id") or "").strip()
+            next_entry = dict(entry)
+            if entry_kind == "album" and entry_item_id == new_id:
+                has_new_id = True
+            if entry_kind == "album" and entry_item_id == old_id:
+                next_entry["item_id"] = new_id
+                if not bool(next_entry.get("custom_label", False)):
+                    label = str(fallback_label or new_path.name).strip()
+                    if label:
+                        next_entry["label"] = label
+                updated = True
+            rewritten.append(next_entry)
+
+        if not updated:
+            return False
+
+        if has_new_id:
+            deduped: list[dict[str, object]] = []
+            seen_new = False
+            for entry in rewritten:
+                if (
+                    str(entry.get("kind") or "").strip() == "album"
+                    and str(entry.get("item_id") or "").strip() == new_id
+                ):
+                    if seen_new:
+                        continue
+                    seen_new = True
+                deduped.append(entry)
+            rewritten = deduped
+
+        payload[library_key] = rewritten
+        self._persist(payload)
+        return True
+
     def prune_missing_entity(self, *, kind: str, item_id: str, library_root: Path | None) -> None:
         self.unpin(kind=kind, item_id=item_id, library_root=library_root)
 

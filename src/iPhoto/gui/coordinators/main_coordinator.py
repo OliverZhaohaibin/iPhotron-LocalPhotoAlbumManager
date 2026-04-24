@@ -541,6 +541,12 @@ class MainCoordinator(QObject):
             playback.set_people_library_root(root)
 
     def _on_album_renamed(self, old_path: Path, new_path: Path) -> None:
+        self._pinned_items_service.remap_album_path(
+            old_path,
+            new_path,
+            library_root=self._context.library.root(),
+            fallback_label=new_path.name,
+        )
         self._thumbnail_service.remap_album_paths(old_path, new_path)
         self._gallery_vm.handle_album_renamed(old_path, new_path)
 

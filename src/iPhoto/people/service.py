@@ -167,6 +167,19 @@ class PeopleService:
             return False
         return get_people_index_coordinator(self._library_root).set_group_cover(group_id, asset_id)
 
+    def resolve_cluster_cover_face(self, person_id: str, asset_id: str) -> str | None:
+        if not person_id or not asset_id:
+            return None
+        for annotation in self.list_asset_face_annotations(asset_id):
+            if annotation.person_id == person_id and annotation.face_id:
+                return annotation.face_id
+        return None
+
+    def resolve_group_cover_asset(self, group_id: str, asset_id: str) -> str | None:
+        if not group_id or not asset_id:
+            return None
+        return asset_id if asset_id in self.group_asset_ids(group_id) else None
+
     def delete_group(self, group_id: str) -> bool:
         if self._library_root is None:
             return False

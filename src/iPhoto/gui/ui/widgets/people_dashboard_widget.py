@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from PySide6.QtCore import QObject, QRunnable, Qt, QThreadPool, QTimer, Signal
-from PySide6.QtGui import QAction, QGuiApplication
+from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import (
     QDialog,
     QFrame,
@@ -29,10 +29,11 @@ from .people_dashboard_cards import GroupCard, PeopleCard
 from .people_dashboard_dialogs import GroupPeopleDialog, MergeConfirmDialog
 from .people_dashboard_shared import (
     CANVAS_MARGIN,
-    MENU_STYLE,
     _widget_uses_dark_theme,
     configure_people_cover_cache,
 )
+from ..menus.core import MenuActionSpec, MenuContext, populate_menu
+from ..menus.style import apply_menu_style
 
 
 class _PeopleDashboardLoaderSignals(QObject):
@@ -409,52 +410,82 @@ class PeopleDashboardWidget(QWidget):
 
     def _build_card_menu(self, summary: PersonSummary) -> QMenu:
         menu = QMenu(self)
-        menu.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
-        menu.setStyleSheet(MENU_STYLE)
-        rename_text = "Rename" if summary.name else "Name This Person"
-        rename_action = QAction(rename_text, menu)
-        new_group_action = QAction("New Group", menu)
-        hidden_action = QAction("Unhide" if summary.is_hidden else "Hide", menu)
-        pin_action = QAction(
-            "Unpin" if self._is_person_pinned(summary.person_id) else "Pin",
+        apply_menu_style(menu, self)
+        merge_enabled = any(
+            target.person_id != summary.person_id and target.is_hidden == summary.is_hidden
+            for target in self._summaries
+        )
+        context = MenuContext(
+            surface="people_dashboard",
+            selection_kind="empty",
+            entity_kind="person",
+            entity_id=summary.person_id,
+        )
+        populate_menu(
             menu,
+            context=context,
+            action_specs=[
+                MenuActionSpec(
+                    action_id="rename_person",
+                    label="Rename" if summary.name else "Name This Person",
+                    on_trigger=lambda _ctx: self._rename_person(summary),
+                ),
+                MenuActionSpec(
+                    action_id="new_group",
+                    label="New Group",
+                    on_trigger=lambda _ctx: self._open_group_dialog(summary.person_id),
+                ),
+                MenuActionSpec(
+                    action_id="toggle_hidden",
+                    label="Unhide" if summary.is_hidden else "Hide",
+                    on_trigger=lambda _ctx: self._toggle_person_hidden(summary),
+                ),
+                MenuActionSpec(
+                    action_id="toggle_pin",
+                    label="Unpin" if self._is_person_pinned(summary.person_id) else "Pin",
+                    on_trigger=lambda _ctx: self._toggle_person_pin(summary),
+                    is_enabled=lambda _ctx: self._pin_actions_available(),
+                ),
+                MenuActionSpec(
+                    action_id="merge",
+                    label="Merge Into...",
+                    on_trigger=lambda _ctx: self._merge_person(summary),
+                    is_enabled=lambda _ctx: merge_enabled,
+                    separator_before=True,
+                ),
+            ],
+            anchor=self,
         )
-        merge_action = QAction("Merge Into...", menu)
-        merge_action.setEnabled(
-            any(
-                target.person_id != summary.person_id and target.is_hidden == summary.is_hidden
-                for target in self._summaries
-            )
-        )
-        rename_action.triggered.connect(lambda: self._rename_person(summary))
-        new_group_action.triggered.connect(lambda: self._open_group_dialog(summary.person_id))
-        hidden_action.triggered.connect(lambda: self._toggle_person_hidden(summary))
-        pin_action.triggered.connect(lambda: self._toggle_person_pin(summary))
-        pin_action.setEnabled(self._pin_actions_available())
-        merge_action.triggered.connect(lambda: self._merge_person(summary))
-        menu.addAction(rename_action)
-        menu.addAction(new_group_action)
-        menu.addAction(hidden_action)
-        menu.addAction(pin_action)
-        menu.addSeparator()
-        menu.addAction(merge_action)
         return menu
 
     def _build_group_menu(self, summary: PeopleGroupSummary) -> QMenu:
         menu = QMenu(self)
-        menu.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
-        menu.setStyleSheet(MENU_STYLE)
-        pin_action = QAction(
-            "Unpin" if self._is_group_pinned(summary.group_id) else "Pin",
-            menu,
+        apply_menu_style(menu, self)
+        context = MenuContext(
+            surface="people_dashboard",
+            selection_kind="empty",
+            entity_kind="group",
+            entity_id=summary.group_id,
         )
-        disband_action = QAction("Disband Group", menu)
-        pin_action.setEnabled(self._pin_actions_available())
-        pin_action.triggered.connect(lambda: self._toggle_group_pin(summary))
-        disband_action.triggered.connect(lambda: self._disband_group(summary))
-        menu.addAction(pin_action)
-        menu.addSeparator()
-        menu.addAction(disband_action)
+        populate_menu(
+            menu,
+            context=context,
+            action_specs=[
+                MenuActionSpec(
+                    action_id="toggle_group_pin",
+                    label="Unpin" if self._is_group_pinned(summary.group_id) else "Pin",
+                    on_trigger=lambda _ctx: self._toggle_group_pin(summary),
+                    is_enabled=lambda _ctx: self._pin_actions_available(),
+                ),
+                MenuActionSpec(
+                    action_id="disband_group",
+                    label="Disband Group",
+                    on_trigger=lambda _ctx: self._disband_group(summary),
+                    separator_before=True,
+                ),
+            ],
+            anchor=self,
+        )
         return menu
 
     def _rename_person(self, summary: PersonSummary) -> None:

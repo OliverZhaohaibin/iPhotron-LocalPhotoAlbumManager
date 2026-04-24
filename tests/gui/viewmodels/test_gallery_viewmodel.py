@@ -358,6 +358,71 @@ def test_open_pinned_people_query_hides_cluster_header(tmp_path: Path) -> None:
     assert vm.is_in_cluster_gallery() is False
 
 
+def test_album_context_menu_state_exposes_album_semantics(tmp_path: Path) -> None:
+    album = tmp_path / "Trips"
+    album.mkdir()
+    vm, _store, _context, facade, _asset_service = _make_vm(library_root=tmp_path)
+    facade.open_album.return_value = SimpleNamespace(root=album)
+
+    vm.open_album(album)
+
+    context = vm.context_menu_state()
+    assert context.gallery_section == "album"
+    assert context.entity_kind == "album"
+    assert context.entity_id == str(album)
+    assert context.active_root == album
+    assert context.is_recently_deleted is False
+
+
+def test_people_context_menu_state_exposes_person_gallery_semantics(tmp_path: Path) -> None:
+    vm, _store, _context, _facade, _asset_service = _make_vm(library_root=tmp_path)
+
+    vm.open_people_cluster_gallery(
+        AssetQuery(asset_ids=["asset-1"]),
+        kind="person",
+        entity_id="person-a",
+    )
+
+    context = vm.context_menu_state()
+    assert context.gallery_section == "people_cluster_gallery"
+    assert context.entity_kind == "person"
+    assert context.entity_id == "person-a"
+    assert context.active_root == tmp_path
+    assert context.is_cluster_gallery is True
+
+
+def test_pinned_group_context_menu_state_exposes_group_gallery_semantics(tmp_path: Path) -> None:
+    vm, _store, _context, _facade, _asset_service = _make_vm(library_root=tmp_path)
+
+    vm.open_pinned_people_query(
+        AssetQuery(asset_ids=["asset-1"]),
+        kind="group",
+        entity_id="group-a",
+    )
+
+    context = vm.context_menu_state()
+    assert context.gallery_section == "pinned_people_gallery"
+    assert context.entity_kind == "group"
+    assert context.entity_id == "group-a"
+    assert context.active_root == tmp_path
+    assert context.is_cluster_gallery is True
+
+
+def test_recently_deleted_context_menu_state_marks_deleted_surface(tmp_path: Path) -> None:
+    library_root = tmp_path / "Library"
+    deleted_root = library_root / RECENTLY_DELETED_DIR_NAME
+    vm, _store, context, _facade, _asset_service = _make_vm(library_root=library_root)
+    context.library.ensure_deleted_directory.return_value = deleted_root
+
+    vm.open_recently_deleted()
+
+    menu_context = vm.context_menu_state()
+    assert menu_context.gallery_section == "recently_deleted"
+    assert menu_context.entity_kind is None
+    assert menu_context.active_root == deleted_root
+    assert menu_context.is_recently_deleted is True
+
+
 def test_people_cluster_gallery_loads_query_and_returns_to_people(tmp_path: Path) -> None:
     vm, store, _context, _facade, _asset_service = _make_vm(library_root=tmp_path)
     query = AssetQuery(asset_ids=["asset-1", "asset-2"])

@@ -30,7 +30,8 @@ from PySide6.QtWidgets import (
 from iPhoto.people.repository import AssetFaceAnnotation, PersonSummary
 
 from ..icons import load_icon
-from ..menus.album_sidebar_menu import _apply_main_window_menu_style
+from ..menus.core import MenuActionSpec, MenuContext, populate_menu
+from ..menus.style import apply_menu_style
 from .info_location_map import InfoLocationMapView
 from .main_window_metrics import TITLE_BAR_HEIGHT, WINDOW_CONTROL_BUTTON_SIZE, WINDOW_CONTROL_GLYPH_SIZE
 from .people_dashboard_dialogs import GroupPeopleDialog
@@ -214,13 +215,38 @@ class _FaceAvatarWidget(QLabel):
     def _build_context_menu(self) -> QMenu | None:
         delete_label, not_this_label, submenu_labels = self._menu_action_labels()
         menu = QMenu(self)
-        _apply_main_window_menu_style(menu, self)
-        menu.addAction(delete_label)
-        submenu = menu.addMenu(not_this_label)
-        _apply_main_window_menu_style(submenu, self)
-        for submenu_label in submenu_labels:
-            submenu.addAction(submenu_label)
-        menu._face_action_submenu = submenu  # type: ignore[attr-defined]
+        apply_menu_style(menu, self)
+        context = MenuContext(
+            surface="info_panel",
+            selection_kind="empty",
+            entity_kind="person",
+            entity_id=self._annotation.person_id,
+        )
+        populate_menu(
+            menu,
+            context=context,
+            action_specs=[
+                MenuActionSpec(
+                    action_id="delete_face",
+                    label=delete_label,
+                ),
+                MenuActionSpec(
+                    action_id="not_this_person",
+                    label=not_this_label,
+                    children=tuple(
+                        MenuActionSpec(
+                            action_id=f"not_this_person:{submenu_label}",
+                            label=submenu_label,
+                        )
+                        for submenu_label in submenu_labels
+                    ),
+                ),
+            ],
+            anchor=self,
+        )
+        submenu = menu.actions()[1].menu() if len(menu.actions()) > 1 else None
+        if submenu is not None:
+            menu._face_action_submenu = submenu  # type: ignore[attr-defined]
         return menu
 
     def _menu_action_labels(self) -> tuple[str, str, tuple[str, str]]:

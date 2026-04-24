@@ -205,18 +205,20 @@ class PinnedItemsService(QObject):
         entries = payload.get(library_key, [])
         rewritten: list[dict[str, object]] = []
         updated = False
-        has_new_id = False
         for entry in entries:
             if not isinstance(entry, dict):
                 continue
             entry_kind = str(entry.get("kind") or "").strip()
             entry_item_id = str(entry.get("item_id") or "").strip()
             next_entry = dict(entry)
-            if entry_kind == "album" and entry_item_id == new_id:
-                has_new_id = True
-            if entry_kind == "album" and entry_item_id == old_id:
-                next_entry["item_id"] = new_id
-                if not bool(next_entry.get("custom_label", False)):
+            remapped_id = (
+                self._remap_album_item_id(entry_item_id, old_id, new_id)
+                if entry_kind == "album"
+                else None
+            )
+            if remapped_id is not None:
+                next_entry["item_id"] = remapped_id
+                if remapped_id == new_id and not bool(next_entry.get("custom_label", False)):
                     label = str(fallback_label or new_path.name).strip()
                     if label:
                         next_entry["label"] = label
@@ -226,23 +228,48 @@ class PinnedItemsService(QObject):
         if not updated:
             return False
 
-        if has_new_id:
-            deduped: list[dict[str, object]] = []
-            seen_new = False
-            for entry in rewritten:
-                if (
-                    str(entry.get("kind") or "").strip() == "album"
-                    and str(entry.get("item_id") or "").strip() == new_id
-                ):
-                    if seen_new:
-                        continue
-                    seen_new = True
-                deduped.append(entry)
-            rewritten = deduped
+        rewritten = self._dedupe_entries(rewritten)
 
         payload[library_key] = rewritten
         self._persist(payload)
         return True
+
+    def _remap_album_item_id(
+        self,
+        item_id: str,
+        old_id: str,
+        new_id: str,
+    ) -> str | None:
+        if item_id == old_id:
+            return new_id
+        try:
+            rel = Path(item_id).resolve().relative_to(Path(old_id).resolve())
+        except (OSError, ValueError):
+            try:
+                rel = Path(item_id).relative_to(Path(old_id))
+            except ValueError:
+                return None
+        if rel.as_posix() in ("", "."):
+            return new_id
+        try:
+            return str((Path(new_id) / rel).resolve())
+        except OSError:
+            return str(Path(new_id) / rel)
+
+    @staticmethod
+    def _dedupe_entries(entries: list[dict[str, object]]) -> list[dict[str, object]]:
+        deduped: list[dict[str, object]] = []
+        seen: set[tuple[str, str]] = set()
+        for entry in entries:
+            kind = str(entry.get("kind") or "").strip()
+            item_id = str(entry.get("item_id") or "").strip()
+            if kind and item_id:
+                key = (kind, item_id)
+                if key in seen:
+                    continue
+                seen.add(key)
+            deduped.append(entry)
+        return deduped
 
     def prune_missing_entity(self, *, kind: str, item_id: str, library_root: Path | None) -> None:
         self.unpin(kind=kind, item_id=item_id, library_root=library_root)

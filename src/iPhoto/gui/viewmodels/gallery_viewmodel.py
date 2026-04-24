@@ -401,13 +401,16 @@ class GalleryViewModel(BaseViewModel):
         if self.current_section.value not in {"album", "pinned_album"}:
             return
         active_root = self.active_root.value
-        if active_root is None or not self._paths_equal(active_root, old_path):
+        if active_root is None:
+            return
+        retargeted_path = self._retarget_renamed_path(active_root, old_path, new_path)
+        if retargeted_path is None:
             return
 
         section = self.current_section.value
         static_selection = self.static_selection.value
-        album = self._facade.open_album(new_path)
-        retargeted_root = album.root if album else new_path
+        album = self._facade.open_album(retargeted_path)
+        retargeted_root = album.root if album else retargeted_path
         if album:
             self._context.remember_album(album.root)
 
@@ -588,3 +591,24 @@ class GalleryViewModel(BaseViewModel):
             return first.resolve() == second.resolve()
         except OSError:
             return False
+
+    def _retarget_renamed_path(
+        self,
+        active_root: Path,
+        old_path: Path,
+        new_path: Path,
+    ) -> Path | None:
+        if self._paths_equal(active_root, old_path):
+            return new_path
+
+        for use_resolve in (True, False):
+            try:
+                active_candidate = active_root.resolve() if use_resolve else active_root
+                old_candidate = old_path.resolve() if use_resolve else old_path
+                rel = active_candidate.relative_to(old_candidate)
+            except (OSError, ValueError):
+                continue
+            if rel.as_posix() in ("", "."):
+                return new_path
+            return new_path / rel
+        return None

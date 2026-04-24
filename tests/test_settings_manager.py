@@ -141,3 +141,34 @@ def test_pinned_album_path_remap_preserves_custom_label(tmp_path: Path) -> None:
     assert items[0].item_id == str(new_album.resolve())
     assert items[0].label == "Best Trips"
     assert items[0].custom_label is True
+
+
+def test_pinned_child_album_path_remaps_when_parent_is_renamed(tmp_path: Path) -> None:
+    settings_path = tmp_path / "settings.json"
+    manager = SettingsManager(path=settings_path)
+    manager.load()
+    service = PinnedItemsService(manager)
+
+    library_root = tmp_path / "Library"
+    old_parent = library_root / "Trips"
+    old_child = old_parent / "Paris"
+    new_parent = library_root / "Renamed Trips"
+    new_child = new_parent / "Paris"
+    old_child.mkdir(parents=True)
+    new_child.mkdir(parents=True)
+
+    service.pin_album(old_child, "Paris", library_root=library_root)
+
+    assert service.remap_album_path(
+        old_parent,
+        new_parent,
+        library_root=library_root,
+        fallback_label="Renamed Trips",
+    )
+
+    items = service.items_for_library(library_root)
+    assert len(items) == 1
+    assert items[0].kind == "album"
+    assert items[0].item_id == str(new_child.resolve())
+    assert items[0].label == "Paris"
+    assert items[0].custom_label is False

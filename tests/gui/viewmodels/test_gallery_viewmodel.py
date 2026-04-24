@@ -87,6 +87,33 @@ def test_album_rename_retargets_current_gallery_query(tmp_path: Path) -> None:
     assert vm.active_root.value == new_album
 
 
+def test_parent_album_rename_retargets_open_child_album(tmp_path: Path) -> None:
+    old_parent = tmp_path / "Trips"
+    old_child = old_parent / "Paris"
+    new_parent = tmp_path / "Renamed Trips"
+    new_child = new_parent / "Paris"
+    old_child.mkdir(parents=True)
+    new_child.mkdir(parents=True)
+    vm, store, context, facade, _asset_service = _make_vm(library_root=tmp_path)
+    facade.open_album.return_value = SimpleNamespace(root=old_child)
+    vm.open_album(old_child)
+    store.load_selection.reset_mock()
+    context.remember_album.reset_mock()
+    facade.open_album.return_value = SimpleNamespace(root=new_child)
+
+    vm.handle_album_renamed(old_parent, new_parent)
+
+    facade.open_album.assert_called_with(new_child)
+    context.remember_album.assert_called_once_with(new_child)
+    store.load_selection.assert_called_once()
+    active_root = store.load_selection.call_args.args[0]
+    query = store.load_selection.call_args.kwargs["query"]
+    assert active_root == new_child
+    assert query.album_path == "Renamed Trips/Paris"
+    assert query.include_subalbums is True
+    assert vm.active_root.value == new_child
+
+
 def test_open_all_photos_loads_root_query(tmp_path: Path) -> None:
     vm, store, _context, _facade, _asset_service = _make_vm(library_root=tmp_path)
 

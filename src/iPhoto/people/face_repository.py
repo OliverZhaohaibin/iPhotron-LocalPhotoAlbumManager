@@ -1124,10 +1124,7 @@ class FaceRepository:
         manual_faces: list[ManualFaceRecord] = []
         if self._state_repo is not None:
             manual_faces = self._state_repo.get_manual_faces_for_persons((person_id,))
-            profile = next(
-                (candidate for candidate in self._state_repo.get_profiles() if candidate.person_id == person_id),
-                None,
-            )
+            profile = self._state_repo.get_profile(person_id)
 
         with closing(self._connect()) as conn:
             rows = conn.execute(

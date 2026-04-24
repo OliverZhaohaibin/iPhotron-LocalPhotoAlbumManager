@@ -12,6 +12,7 @@ from typing import Any, Mapping, Optional
 from PySide6.QtCore import QDateTime, QEvent, QLocale, QObject, QRectF, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QGuiApplication, QKeyEvent, QMouseEvent, QPainter, QPainterPath, QPalette, QPixmap, QShowEvent
 from PySide6.QtWidgets import (
+    QDialog,
     QFrame,
     QHBoxLayout,
     QInputDialog,
@@ -168,7 +169,7 @@ def _uses_dark_theme(widget: QWidget | None) -> bool:
 class _FaceAvatarWidget(QLabel):
     deleteRequested = Signal(object)
     moveRequested = Signal(object, str)
-    renameRequested = Signal(object, str)
+    newPersonRequested = Signal(object, str)
 
     _ACTIVE_BORDER_COLOR = "#0A84FF"
     _PLACEHOLDER_STYLE = (
@@ -209,8 +210,8 @@ class _FaceAvatarWidget(QLabel):
         if chosen.text() == "Choose Someone Else…":
             self._prompt_choose_person()
             return
-        if chosen.text() == "Rename Person…":
-            self._prompt_rename_person()
+        if chosen.text() == "New Person…":
+            self._prompt_new_person()
 
     def _build_context_menu(self) -> QMenu | None:
         delete_label, not_this_label, submenu_labels = self._menu_action_labels()
@@ -250,7 +251,7 @@ class _FaceAvatarWidget(QLabel):
         return menu
 
     def _menu_action_labels(self) -> tuple[str, str, tuple[str, str]]:
-        return ("Delete", self._not_this_label(), ("Choose Someone Else…", "Rename Person…"))
+        return ("Delete", self._not_this_label(), ("Choose Someone Else…", "New Person…"))
 
     def _not_this_label(self) -> str:
         display_name = str(self._annotation.display_name or "").strip()
@@ -275,18 +276,18 @@ class _FaceAvatarWidget(QLabel):
             dark_mode=_uses_dark_theme(host),
             parent=host,
         )
-        if dialog.exec() != QInputDialog.DialogCode.Accepted:
+        if dialog.exec() != QDialog.DialogCode.Accepted:
             return
         selected_ids = dialog.selected_person_ids()
         if not selected_ids:
             return
         self.moveRequested.emit(self._annotation, selected_ids[0])
 
-    def _prompt_rename_person(self) -> None:
+    def _prompt_new_person(self) -> None:
         host = self.window() if isinstance(self.window(), QWidget) else self
         dialog = QInputDialog(host)
-        dialog.setWindowTitle("Rename Person")
-        dialog.setLabelText("New name:")
+        dialog.setWindowTitle("New Person")
+        dialog.setLabelText("Person name:")
         dialog.setTextValue("")
         _style_popup_input_dialog(dialog, host)
         if dialog.exec() != QInputDialog.DialogCode.Accepted:
@@ -294,7 +295,7 @@ class _FaceAvatarWidget(QLabel):
         new_name = dialog.textValue().strip()
         if not new_name:
             return
-        self.renameRequested.emit(self._annotation, new_name)
+        self.newPersonRequested.emit(self._annotation, new_name)
 
     def _set_menu_active(self, active: bool) -> None:
         self._is_menu_active = bool(active)
@@ -960,7 +961,7 @@ class InfoPanel(QWidget):
         label = _FaceAvatarWidget(annotation, self._face_action_candidates, self._face_container)
         label.deleteRequested.connect(self.faceDeleteRequested.emit)
         label.moveRequested.connect(self.faceMoveRequested.emit)
-        label.renameRequested.connect(self.faceMoveToNewPersonRequested.emit)
+        label.newPersonRequested.connect(self.faceMoveToNewPersonRequested.emit)
         return label
 
     def _refresh_panel_geometry(self, *, recenter: bool = False) -> None:

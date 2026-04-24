@@ -100,6 +100,56 @@ class FaceStateRepository:
             )
         return profiles
 
+    def get_profile(self, person_id: str) -> PersonProfile | None:
+        """Return the profile for a single person, or None if not found."""
+        if not person_id:
+            return None
+        self.initialize()
+        with closing(self._connect()) as conn:
+            row = conn.execute(
+                """
+                SELECT
+                    person_id,
+                    name,
+                    center_embedding,
+                    embedding_dim,
+                    created_at,
+                    updated_at,
+                    sample_count,
+                    profile_state
+                FROM person_profiles
+                WHERE person_id = ?
+                """,
+                (person_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            sample_count = int(row["sample_count"] or 0)
+            if sample_count <= 0:
+                inferred_row = conn.execute(
+                    """
+                    SELECT COUNT(*) AS sample_count
+                    FROM face_keys
+                    WHERE person_id = ?
+                    """,
+                    (person_id,),
+                ).fetchone()
+                if inferred_row is not None:
+                    sample_count = int(inferred_row["sample_count"] or 0)
+        return PersonProfile(
+            person_id=str(row["person_id"]),
+            name=row["name"],
+            center_embedding=_deserialize_embedding(
+                row["center_embedding"],
+                int(row["embedding_dim"]),
+            ),
+            embedding_dim=int(row["embedding_dim"]),
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
+            sample_count=sample_count,
+            profile_state=profile_state_for_sample_count(sample_count),
+        )
+
     def get_manual_faces(self) -> list[ManualFaceRecord]:
         self.initialize()
         with closing(self._connect()) as conn:

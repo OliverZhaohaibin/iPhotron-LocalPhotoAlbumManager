@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from PySide6.QtCore import QPoint, QRect, QRectF, Qt, Signal
-from PySide6.QtGui import QColor, QFont, QLinearGradient, QPainter, QPainterPath, QPen, QPixmap
+from PySide6.QtGui import QColor, QFont, QGuiApplication, QLinearGradient, QPainter, QPainterPath, QPen, QPixmap
 from PySide6.QtWidgets import (
     QDialog,
     QFrame,
@@ -34,9 +34,18 @@ from .people_dashboard_shared import (
 
 
 class MergeConfirmDialog(QDialog):
-    def __init__(self, people_count: int, parent: QWidget | None = None) -> None:
+    def __init__(
+        self,
+        people_count: int,
+        parent: QWidget | None = None,
+        *,
+        title_text: str | None = None,
+        body_text: str | None = None,
+        confirm_text: str = "Merge Photos",
+    ) -> None:
         super().__init__(parent.window() if parent is not None else None)
         self._people_count = max(2, int(people_count))
+        self._dark_mode = self._resolve_dark_mode(parent)
         self.setModal(True)
         self.setWindowFlags(Qt.WindowType.Dialog | Qt.WindowType.FramelessWindowHint)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
@@ -47,17 +56,21 @@ class MergeConfirmDialog(QDialog):
 
         self._panel = QFrame(self)
         self._panel.setFixedWidth(356)
-        self._panel.setStyleSheet("""
-            QFrame {
-                background: rgba(255, 255, 255, 0.94);
-                border: 1px solid rgba(255, 255, 255, 0.65);
+        panel_bg = "rgba(23, 27, 39, 0.98)" if self._dark_mode else "rgba(255, 255, 255, 0.94)"
+        panel_border = "rgba(255, 255, 255, 0.08)" if self._dark_mode else "rgba(255, 255, 255, 0.65)"
+        self._panel.setStyleSheet(
+            f"""
+            QFrame {{
+                background: {panel_bg};
+                border: 1px solid {panel_border};
                 border-radius: 28px;
-            }
-            """)
+            }}
+            """
+        )
         panel_shadow = QGraphicsDropShadowEffect(self._panel)
         panel_shadow.setBlurRadius(40)
         panel_shadow.setOffset(0, 12)
-        panel_shadow.setColor(QColor(0, 0, 0, 46))
+        panel_shadow.setColor(QColor(0, 0, 0, 86 if self._dark_mode else 46))
         self._panel.setGraphicsEffect(panel_shadow)
 
         panel_layout = QVBoxLayout(self._panel)
@@ -65,8 +78,13 @@ class MergeConfirmDialog(QDialog):
         panel_layout.setSpacing(16)
 
         text_width = self._panel.width() - 44
+        resolved_title = title_text or f"Merge All Photos of These\n{self._people_count} People?"
+        resolved_body = body_text or (
+            f"By merging photos of these {self._people_count} people, "
+            "they will be recognized as the same person."
+        )
 
-        title_label = QLabel(f"Merge All Photos of These\n{self._people_count} People?")
+        title_label = QLabel(resolved_title)
         title_label.setWordWrap(True)
         title_label.setTextFormat(Qt.TextFormat.PlainText)
         title_label.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Minimum)
@@ -74,12 +92,11 @@ class MergeConfirmDialog(QDialog):
         title_font = QFont("Segoe UI", 17, QFont.Weight.Bold)
         title_label.setFont(title_font)
         title_label.setMinimumHeight(max(56, title_label.heightForWidth(text_width)))
-        title_label.setStyleSheet("color: #111111; background: transparent;")
-
-        body_label = QLabel(
-            f"By merging photos of these {self._people_count} people, "
-            "they will be recognized as the same person."
+        title_label.setStyleSheet(
+            f"color: {'#F6F7FB' if self._dark_mode else '#111111'}; background: transparent;"
         )
+
+        body_label = QLabel(resolved_body)
         body_label.setWordWrap(True)
         body_label.setTextFormat(Qt.TextFormat.PlainText)
         body_label.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Minimum)
@@ -87,12 +104,16 @@ class MergeConfirmDialog(QDialog):
         body_font = QFont("Segoe UI", 14, QFont.Weight.Medium)
         body_label.setFont(body_font)
         body_label.setMinimumHeight(max(46, body_label.heightForWidth(text_width)))
-        body_label.setStyleSheet("color: rgba(17, 17, 17, 0.84); background: transparent;")
+        body_label.setStyleSheet(
+            "background: transparent; "
+            f"color: {'#DDE3F3' if self._dark_mode else 'rgba(17, 17, 17, 0.84)'};"
+        )
 
-        merge_button = QPushButton("Merge Photos")
+        merge_button = QPushButton(confirm_text)
         merge_button.setCursor(Qt.CursorShape.PointingHandCursor)
         merge_button.setFixedHeight(42)
-        merge_button.setStyleSheet("""
+        merge_button.setStyleSheet(
+            """
             QPushButton {
                 background: #0A84FF;
                 color: white;
@@ -107,27 +128,30 @@ class MergeConfirmDialog(QDialog):
             QPushButton:pressed {
                 background: #006BE3;
             }
-            """)
+            """
+        )
 
         cancel_button = QPushButton("Cancel")
         cancel_button.setCursor(Qt.CursorShape.PointingHandCursor)
         cancel_button.setFixedHeight(40)
-        cancel_button.setStyleSheet("""
-            QPushButton {
-                background: rgba(243, 243, 244, 0.98);
-                color: #2E2E2E;
+        cancel_button.setStyleSheet(
+            f"""
+            QPushButton {{
+                background: {'rgba(255, 255, 255, 0.08)' if self._dark_mode else 'rgba(243, 243, 244, 0.98)'};
+                color: {'#F4F6FB' if self._dark_mode else '#2E2E2E'};
                 border: none;
                 border-radius: 20px;
                 font-size: 15px;
                 font-weight: 500;
-            }
-            QPushButton:hover {
-                background: rgba(235, 235, 236, 0.98);
-            }
-            QPushButton:pressed {
-                background: rgba(224, 224, 226, 0.98);
-            }
-            """)
+            }}
+            QPushButton:hover {{
+                background: {'rgba(255, 255, 255, 0.13)' if self._dark_mode else 'rgba(235, 235, 236, 0.98)'};
+            }}
+            QPushButton:pressed {{
+                background: {'rgba(255, 255, 255, 0.18)' if self._dark_mode else 'rgba(224, 224, 226, 0.98)'};
+            }}
+            """
+        )
 
         merge_button.clicked.connect(self.accept)
         cancel_button.clicked.connect(self.reject)
@@ -140,6 +164,35 @@ class MergeConfirmDialog(QDialog):
 
         root.addWidget(self._panel, 0, Qt.AlignmentFlag.AlignHCenter)
         root.addStretch(1)
+
+    @staticmethod
+    def _resolve_dark_mode(parent: QWidget | None) -> bool:
+        widget = parent.window() if parent is not None and parent.window() is not None else parent
+        coordinator = getattr(widget, "coordinator", None)
+        context = getattr(coordinator, "_context", None)
+        theme_manager = getattr(context, "theme", None)
+        if theme_manager is not None and hasattr(theme_manager, "get_effective_theme_mode"):
+            return theme_manager.get_effective_theme_mode() == "dark"
+
+        settings = getattr(context, "settings", None)
+        if settings is not None and hasattr(settings, "get"):
+            theme_setting = settings.get("ui.theme", "system")
+            if theme_setting == "dark":
+                return True
+            if theme_setting == "light":
+                return False
+
+        # Prefer the actual widget palette before falling back to the global
+        # OS color scheme; the app can be in Light Mode while the system stays dark.
+        if _widget_uses_dark_theme(widget):
+            return True
+        if parent is not None and _widget_uses_dark_theme(parent):
+            return True
+
+        app = QGuiApplication.instance()
+        if app is not None and app.styleHints().colorScheme() == Qt.ColorScheme.Dark:
+            return True
+        return False
 
     def _sync_geometry(self) -> None:
         parent = self.parentWidget()
@@ -156,7 +209,10 @@ class MergeConfirmDialog(QDialog):
     def paintEvent(self, _event) -> None:  # noqa: N802
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        painter.fillRect(self.rect(), QColor(22, 24, 29, 78))
+        painter.fillRect(
+            self.rect(),
+            QColor(8, 10, 16, 108) if self._dark_mode else QColor(22, 24, 29, 78),
+        )
 
     def mousePressEvent(self, event) -> None:  # noqa: N802
         if not self._panel.geometry().contains(event.position().toPoint()):
@@ -168,6 +224,25 @@ class MergeConfirmDialog(QDialog):
     @classmethod
     def confirm(cls, people_count: int, parent: QWidget | None = None) -> bool:
         dialog = cls(people_count, parent)
+        return dialog.exec() == QDialog.DialogCode.Accepted
+
+    @classmethod
+    def confirm_action(
+        cls,
+        *,
+        item_count: int,
+        parent: QWidget | None = None,
+        title_text: str,
+        body_text: str,
+        confirm_text: str,
+    ) -> bool:
+        dialog = cls(
+            item_count,
+            parent,
+            title_text=title_text,
+            body_text=body_text,
+            confirm_text=confirm_text,
+        )
         return dialog.exec() == QDialog.DialogCode.Accepted
 
 
@@ -282,6 +357,11 @@ class GroupPeopleDialog(QDialog):
         *,
         initial_selected_ids: list[str] | tuple[str, ...] = (),
         dark_mode: bool | None = None,
+        title_text: str = "People",
+        prompt_text: str = "Select People",
+        confirm_text: str = "Add",
+        min_selection: int = 2,
+        max_selection: int | None = None,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent.window() if parent is not None else None)
@@ -292,9 +372,13 @@ class GroupPeopleDialog(QDialog):
         self._anchor_index: int | None = None
         self._dark_mode = _widget_uses_dark_theme(parent) if dark_mode is None else bool(dark_mode)
         self._drag_pos: QPoint | None = None
+        self._min_selection = max(1, int(min_selection))
+        self._max_selection = None if max_selection is None else max(1, int(max_selection))
+        if self._max_selection is not None:
+            self._min_selection = min(self._min_selection, self._max_selection)
 
         self.setModal(True)
-        self.setWindowTitle("People")
+        self.setWindowTitle(title_text)
         self.setWindowFlags(Qt.WindowType.Dialog | Qt.WindowType.FramelessWindowHint)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.resize(920, 640)
@@ -333,7 +417,7 @@ class GroupPeopleDialog(QDialog):
         panel_layout.setContentsMargins(20, 12, 20, 16)
         panel_layout.setSpacing(14)
 
-        title = QLabel("People")
+        title = QLabel(title_text)
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         title.setStyleSheet(f"color: {text_primary}; font-size: 14px; font-weight: 800;")
         panel_layout.addWidget(title)
@@ -374,14 +458,14 @@ class GroupPeopleDialog(QDialog):
         footer.setSpacing(12)
         footer.addStretch(1)
 
-        prompt = QLabel("Select People")
+        prompt = QLabel(prompt_text)
         prompt.setAlignment(Qt.AlignmentFlag.AlignCenter)
         prompt.setStyleSheet(f"color: {text_secondary}; font-size: 13px; font-weight: 700;")
         footer.addWidget(prompt)
         footer.addStretch(1)
 
         self.cancel_button = QPushButton("Cancel")
-        self.add_button = QPushButton("Add")
+        self.add_button = QPushButton(confirm_text)
         for button in (self.cancel_button, self.add_button):
             button.setCursor(Qt.CursorShape.PointingHandCursor)
             button.setFixedHeight(38)
@@ -449,7 +533,15 @@ class GroupPeopleDialog(QDialog):
     def _handle_tile_clicked(self, index: int, shift_pressed: bool) -> None:
         if not (0 <= index < len(self._summaries)):
             return
-        if shift_pressed and self._anchor_index is not None:
+        if self._max_selection == 1:
+            person_id = self._summaries[index].person_id
+            if person_id in self._selected_ids:
+                self._selected_ids.clear()
+                self._selection_order.clear()
+            else:
+                self._selected_ids = {person_id}
+                self._selection_order = [person_id]
+        elif shift_pressed and self._anchor_index is not None:
             start, end = sorted((self._anchor_index, index))
             for range_index in range(start, end + 1):
                 self._select_person_id(self._summaries[range_index].person_id)
@@ -468,13 +560,24 @@ class GroupPeopleDialog(QDialog):
     def _select_person_id(self, person_id: str) -> None:
         if person_id in self._selected_ids:
             return
+        if self._max_selection == 1:
+            self._selected_ids = {person_id}
+            self._selection_order = [person_id]
+            return
         self._selected_ids.add(person_id)
         self._selection_order.append(person_id)
+        if self._max_selection is not None and len(self._selection_order) > self._max_selection:
+            while len(self._selection_order) > self._max_selection:
+                removed_id = self._selection_order.pop(0)
+                self._selected_ids.discard(removed_id)
 
     def _sync_tiles(self) -> None:
         for tile in self._tiles:
             tile.set_selected(tile.person_id in self._selected_ids)
-        self.add_button.setEnabled(len(self._selected_ids) >= 2)
+        selected_count = len(self._selected_ids)
+        meets_min = selected_count >= self._min_selection
+        meets_max = self._max_selection is None or selected_count <= self._max_selection
+        self.add_button.setEnabled(meets_min and meets_max)
 
     def _paint_panel_shadow(self, painter: QPainter) -> None:
         panel_rect = QRectF(self._panel.geometry())

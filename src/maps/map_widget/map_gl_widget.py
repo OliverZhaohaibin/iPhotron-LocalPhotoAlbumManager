@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import os
+import sys
 from pathlib import Path
 from typing import Sequence
 
-from PySide6.QtCore import QPointF, Signal
-from PySide6.QtGui import QCloseEvent, QPainter, QResizeEvent
+from PySide6.QtCore import QPointF, Signal, Qt
+from PySide6.QtGui import QCloseEvent, QPainter, QResizeEvent, QShowEvent
 from PySide6.QtOpenGLWidgets import QOpenGLWidget
 from PySide6.QtWidgets import QWidget
 
@@ -27,6 +29,10 @@ class MapGLWidget(QOpenGLWidget):
     panFinished = Signal()
     """Signal emitted once the current pan gesture completes."""
 
+    _GL_COLOR_BUFFER_BIT = 0x00004000
+    _GL_DEPTH_BUFFER_BIT = 0x00000100
+    _GL_SCISSOR_TEST = 0x0C11
+
     def __init__(
         self,
         parent: QWidget | None = None,
@@ -36,6 +42,13 @@ class MapGLWidget(QOpenGLWidget):
         style_path: Path | str = "style.json",
     ) -> None:
         super().__init__(parent)
+
+        if sys.platform == "linux" and os.environ.get("IPHOTO_OSMAND_GL_PARTIAL_UPDATE", "0") != "1":
+            self.setUpdateBehavior(QOpenGLWidget.UpdateBehavior.NoPartialUpdate)
+        else:
+            self.setUpdateBehavior(QOpenGLWidget.UpdateBehavior.PartialUpdate)
+        self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent, True)
+        self.setAutoFillBackground(False)
 
         # ``MapWidgetController`` mirrors the logic used by the QWidget variant,
         # keeping rendering, tile loading, and input handling identical between
@@ -136,8 +149,37 @@ class MapGLWidget(QOpenGLWidget):
         return self
 
     # ------------------------------------------------------------------
+    def initializeGL(self) -> None:  # type: ignore[override]
+        """Initialize the GL clear color to match the map background."""
+
+        from PySide6.QtGui import QOpenGLContext
+
+        ctx = QOpenGLContext.currentContext()
+        if ctx is None:
+            return
+        try:
+            gl = ctx.functions()
+            if gl is not None:
+                gl.glClearColor(0.576, 0.706, 0.788, 1.0)
+        except Exception:
+            return
+
+    # ------------------------------------------------------------------
     def paintGL(self) -> None:  # type: ignore[override]
         """Render the current frame inside the active OpenGL context."""
+
+        from PySide6.QtGui import QOpenGLContext
+
+        ctx = QOpenGLContext.currentContext()
+        if ctx is not None:
+            gl = ctx.functions()
+            if gl is not None:
+                had_scissor = bool(gl.glIsEnabled(self._GL_SCISSOR_TEST))
+                if had_scissor:
+                    gl.glDisable(self._GL_SCISSOR_TEST)
+                gl.glClear(self._GL_COLOR_BUFFER_BIT | self._GL_DEPTH_BUFFER_BIT)
+                if had_scissor:
+                    gl.glEnable(self._GL_SCISSOR_TEST)
 
         painter = QPainter()
         if not painter.begin(self):
@@ -156,7 +198,21 @@ class MapGLWidget(QOpenGLWidget):
         """Propagate resize events and notify listeners about the new viewport."""
 
         super().resizeEvent(event)
+        self.request_full_update()
         self._emit_view_change(*self._controller.view_state())
+
+    # ------------------------------------------------------------------
+    def showEvent(self, event: QShowEvent) -> None:  # type: ignore[override]
+        """Request a full repaint when the widget becomes visible."""
+
+        super().showEvent(event)
+        self.request_full_update()
+
+    # ------------------------------------------------------------------
+    def request_full_update(self) -> None:
+        """Invalidate the entire widget rect even when partial updates are enabled."""
+
+        super().update(self.rect())
 
     # ------------------------------------------------------------------
     def closeEvent(self, event: QCloseEvent) -> None:  # type: ignore[override]

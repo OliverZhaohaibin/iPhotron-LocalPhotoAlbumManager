@@ -26,6 +26,23 @@ class FaceRecord:
     detected_at: str
     image_width: int
     image_height: int
+    is_manual: bool = False
+
+
+@dataclass(frozen=True)
+class ManualFaceRecord:
+    face_id: str
+    asset_id: str
+    asset_rel: str
+    box_x: int
+    box_y: int
+    box_w: int
+    box_h: int
+    thumbnail_path: str | None
+    person_id: str
+    created_at: str
+    image_width: int
+    image_height: int
 
 
 @dataclass(frozen=True)
@@ -37,6 +54,8 @@ class PersonRecord:
     center_embedding: np.ndarray
     created_at: str
     updated_at: str
+    sample_count: int = 0
+    profile_state: str = "unstable"
 
 
 @dataclass(frozen=True)
@@ -47,6 +66,7 @@ class PersonSummary:
     face_count: int
     thumbnail_path: Path | None
     created_at: str
+    is_hidden: bool = False
 
 
 @dataclass(frozen=True)
@@ -80,6 +100,8 @@ class AssetFaceAnnotation:
     box_h: int
     image_width: int
     image_height: int
+    thumbnail_path: Path | None = None
+    is_manual: bool = False
 
 
 @dataclass(frozen=True)
@@ -90,3 +112,5 @@ class PersonProfile:
     embedding_dim: int
     created_at: str
     updated_at: str
+    sample_count: int = 0
+    profile_state: str = "unstable"

@@ -15,7 +15,7 @@ from iPhoto.config import WORK_DIR_NAME
 from iPhoto.utils.logging import get_logger
 
 from .pipeline import DetectedAssetFaces
-from .repository import FaceRepository, PeopleGroupRecord
+from .repository import FaceRepository, ManualFaceRecord, PeopleGroupRecord
 from .scan_session import FaceScanSession
 from .status import FACE_STATUS_DONE, FACE_STATUS_RETRY
 
@@ -166,6 +166,123 @@ class PeopleIndexCoordinator(QObject):
                 )
             return changed
 
+    def add_manual_face(
+        self,
+        face: ManualFaceRecord,
+        *,
+        person_name: str | None = None,
+    ) -> PeopleSnapshotEvent | None:
+        """Persist a user-created annotation without feeding it into AI clustering.
+
+        Manual faces deliberately use ``ManualFaceRecord`` instead of ``FaceRecord``:
+        they have no embedding, no face key, and must not rebuild the automatic
+        runtime snapshot. The state repository owns their profile/cover bookkeeping;
+        this coordinator only serializes the write and emits the UI refresh event.
+        """
+
+        if not face.face_id or not face.asset_id or not face.person_id:
+            return None
+        with self._lock:
+            if self._shutdown_requested:
+                return None
+            repository = self._repository()
+            state_repository = repository.state_repository
+            if state_repository is None:
+                return None
+
+            try:
+                state_repository.add_manual_face(face, person_name=person_name)
+                repository.sync_runtime_state()
+            except Exception:
+                state_repository.delete_manual_face(face.face_id)
+                repository.sync_runtime_state()
+                if face.thumbnail_path:
+                    faces_root = (self._library_root / WORK_DIR_NAME / "faces").resolve()
+                    thumbnail_file = (faces_root / face.thumbnail_path).resolve()
+                    try:
+                        thumbnail_file.relative_to(faces_root)
+                    except ValueError:
+                        LOGGER.warning("Orphaned thumbnail path escapes faces root, skipping: %s", thumbnail_file)
+                    else:
+                        try:
+                            thumbnail_file.unlink(missing_ok=True)
+                        except OSError:
+                            LOGGER.warning("Failed to remove orphaned thumbnail: %s", thumbnail_file)
+                raise
+            changed_group_ids = tuple(
+                group.group_id
+                for group in state_repository.list_groups()
+                if face.person_id in group.member_person_ids
+            )
+            return self._emit_snapshot(
+                changed_asset_ids=(face.asset_id,),
+                changed_person_ids=(str(face.person_id),),
+                changed_group_ids=changed_group_ids,
+            )
+
+    def delete_face(self, face_id: str) -> PeopleSnapshotEvent | None:
+        if not face_id:
+            return None
+        with self._lock:
+            if self._shutdown_requested:
+                return None
+            repository = self._repository()
+            result = repository.delete_face(face_id)
+            if result is None:
+                return None
+            return self._emit_snapshot(
+                changed_asset_ids=result.changed_asset_ids,
+                changed_person_ids=result.changed_person_ids,
+                changed_group_ids=result.changed_group_ids,
+                person_redirects=result.person_redirects,
+                group_redirects=result.group_redirects,
+            )
+
+    def move_face_to_person(
+        self,
+        face_id: str,
+        target_person_id: str,
+    ) -> PeopleSnapshotEvent | None:
+        if not face_id or not target_person_id:
+            return None
+        with self._lock:
+            if self._shutdown_requested:
+                return None
+            repository = self._repository()
+            result = repository.move_face_to_person(face_id, target_person_id)
+            if result is None:
+                return None
+            return self._emit_snapshot(
+                changed_asset_ids=result.changed_asset_ids,
+                changed_person_ids=result.changed_person_ids,
+                changed_group_ids=result.changed_group_ids,
+                person_redirects=result.person_redirects,
+                group_redirects=result.group_redirects,
+            )
+
+    def move_face_to_new_person(
+        self,
+        face_id: str,
+        new_person_id: str,
+        new_name: str,
+    ) -> PeopleSnapshotEvent | None:
+        if not face_id or not new_person_id:
+            return None
+        with self._lock:
+            if self._shutdown_requested:
+                return None
+            repository = self._repository()
+            result = repository.move_face_to_new_person(face_id, new_person_id, new_name)
+            if result is None:
+                return None
+            return self._emit_snapshot(
+                changed_asset_ids=result.changed_asset_ids,
+                changed_person_ids=result.changed_person_ids,
+                changed_group_ids=result.changed_group_ids,
+                person_redirects=result.person_redirects,
+                group_redirects=result.group_redirects,
+            )
+
     def set_person_order(self, person_ids: Iterable[str]) -> PeopleSnapshotEvent | None:
         ordered_ids = tuple(str(person_id) for person_id in person_ids if person_id)
         with self._lock:
@@ -176,6 +293,17 @@ class PeopleIndexCoordinator(QObject):
             if not ordered_ids:
                 return None
             return self._emit_snapshot(changed_person_ids=ordered_ids)
+
+    def set_group_order(self, group_ids: Iterable[str]) -> PeopleSnapshotEvent | None:
+        ordered_ids = tuple(str(group_id) for group_id in group_ids if group_id)
+        with self._lock:
+            if self._shutdown_requested:
+                return None
+            repository = self._repository()
+            repository.set_group_order(ordered_ids)
+            if not ordered_ids:
+                return None
+            return self._emit_snapshot(changed_group_ids=ordered_ids)
 
     def merge_persons(
         self,
@@ -239,6 +367,24 @@ class PeopleIndexCoordinator(QObject):
                     changed_group_ids=(group_id,),
                 )
             return changed
+
+    def delete_group(self, group_id: str) -> bool:
+        if not group_id:
+            return False
+        with self._lock:
+            if self._shutdown_requested:
+                return False
+            repository = self._repository()
+            deleted, group, asset_ids = repository.delete_group(group_id)
+            if not deleted or group is None:
+                return False
+            self._emit_snapshot(
+                changed_asset_ids=tuple(asset_ids),
+                changed_person_ids=tuple(group.member_person_ids),
+                changed_group_ids=(group_id,),
+                group_redirects={group_id: None},
+            )
+            return True
 
     def _repository(self) -> FaceRepository:
         faces_root = self._library_root / WORK_DIR_NAME / "faces"

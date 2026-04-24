@@ -24,6 +24,16 @@ if TYPE_CHECKING:
     pass
 
 
+_RESERVED_LIBRARY_DIR_NAMES = frozenset(
+    name.casefold()
+    for name in (
+        WORK_DIR_NAME,
+        RECENTLY_DELETED_DIR_NAME,
+        EXPORT_DIR_NAME,
+    )
+)
+
+
 class AlbumOperationsMixin:
     """Mixin providing album CRUD operations for LibraryManager."""
 
@@ -54,8 +64,9 @@ class AlbumOperationsMixin:
     def rename_album(self, node: AlbumNode, new_name: str) -> None:
         parent = node.path.parent
         target = self._validate_new_name(parent, new_name)
+        original_path = node.path
         try:
-            node.path.rename(target)
+            original_path.rename(target)
         except FileExistsError as exc:
             raise AlbumNameConflictError(f"An album named '{new_name}' already exists.") from exc
         except OSError as exc:  # pragma: no cover - defensive guard
@@ -63,6 +74,7 @@ class AlbumOperationsMixin:
         # ``Album.open`` now normalises and persists manifest updates so the
         # metadata stays aligned with the renamed directory immediately.
         Album.open(target)
+        self.albumRenamed.emit(original_path, target)
         self._refresh_tree()
 
     def ensure_manifest(self, node: AlbumNode) -> Path:
@@ -145,10 +157,16 @@ class AlbumOperationsMixin:
             raise AlbumOperationError("Album name cannot be empty.")
         if Path(candidate).name != candidate:
             raise AlbumOperationError("Album name must not contain path separators.")
+        if self._is_reserved_album_dir_name(candidate):
+            raise AlbumOperationError(f"Album name '{candidate}' is reserved for internal use.")
         target = parent / candidate
         if target.exists():
             raise AlbumNameConflictError(f"An album named '{candidate}' already exists.")
         return target
+
+    @staticmethod
+    def _is_reserved_album_dir_name(name: str) -> bool:
+        return str(name or "").strip().casefold() in _RESERVED_LIBRARY_DIR_NAMES
 
     def _find_manifest(self, path: Path) -> Path | None:
         for name in ALBUM_MANIFEST_NAMES:
@@ -196,13 +214,9 @@ class AlbumOperationsMixin:
         for entry in entries:
             if not entry.is_dir():
                 continue
-            if entry.name == WORK_DIR_NAME:
-                continue
-            if entry.name == RECENTLY_DELETED_DIR_NAME:
+            if self._is_reserved_album_dir_name(entry.name):
                 # The trash folder should stay hidden from the regular album list
-                # so that it only appears through the dedicated "Recently Deleted"
-                # entry in the sidebar.
-                continue
-            if entry.name == EXPORT_DIR_NAME:
+                # so that it only appears through the dedicated sidebar route, and
+                # internal/export folders never show up as user albums.
                 continue
             yield entry

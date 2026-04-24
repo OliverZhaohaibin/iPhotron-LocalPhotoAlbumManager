@@ -132,6 +132,24 @@ def choose_native_widget_class(
     return None, f"OpenGL support detected.{detail} Using GPU accelerated Python rendering."
 
 
+def prepare_qt_runtime_for_backend(backend: str) -> None:
+    """Adjust Qt startup on Linux before ``QApplication`` is constructed."""
+
+    normalized_backend = backend.strip().lower()
+    if sys.platform != "linux" or normalized_backend == "python":
+        return
+
+    if not os.environ.get("QT_QPA_PLATFORM"):
+        os.environ["QT_QPA_PLATFORM"] = "xcb"
+    if os.environ.get("QT_QPA_PLATFORM") == "xcb":
+        os.environ.setdefault("QT_OPENGL", "desktop")
+        os.environ.setdefault("QT_XCB_GL_INTEGRATION", "xcb_glx")
+        try:
+            QApplication.setAttribute(Qt.ApplicationAttribute.AA_UseDesktopOpenGL, True)
+        except Exception:
+            return
+
+
 def probe_python_obf_runtime(package_root: Path | None = None) -> tuple[bool, str | None]:
     """Return whether the bundled Python OBF helper can initialize quickly."""
 
@@ -268,7 +286,7 @@ def choose_launch_configuration(
         if not use_opengl:
             raise TileLoadingError("OpenGL support is unavailable, so the native OsmAnd widget can not be forced")
         if not has_usable_osmand_native_widget(package_root):
-            raise TileLoadingError("The native OsmAnd widget DLL is not available")
+            raise TileLoadingError("The native OsmAnd widget library is not available")
         is_available, reason = probe_native_widget_runtime(package_root)
         if not is_available:
             detail = f": {reason}" if reason else ""
@@ -750,6 +768,7 @@ def _schedule_screenshot_capture(
 def main(argv: Sequence[str] | None = None) -> int:
     arguments = list(argv if argv is not None else sys.argv[1:])
     parsed_args = build_argument_parser().parse_args(arguments)
+    prepare_qt_runtime_for_backend(parsed_args.backend)
     configure_qt_opengl_defaults()
     app = QApplication([Path(__file__).name, *arguments])
 

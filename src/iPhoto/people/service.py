@@ -4,12 +4,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+import uuid
 
 from iPhoto.cache.index_store import get_global_repository
 from iPhoto.config import WORK_DIR_NAME
 from iPhoto.domain.models.query import AssetQuery
 
 from .index_coordinator import get_people_index_coordinator
+from .manual_faces import ManualFaceValidationError, build_manual_face_record
 from .repository import (
     AssetFaceAnnotation,
     FaceRepository,
@@ -29,6 +31,14 @@ class FaceLibraryPaths:
     state_db_path: Path
     thumbnail_dir: Path
     model_dir: Path
+
+
+@dataclass(frozen=True)
+class ManualFaceAddResult:
+    asset_id: str
+    face_id: str
+    person_id: str
+    created_new_person: bool
 
 
 def shared_face_model_dir() -> Path:
@@ -71,11 +81,11 @@ class PeopleService:
             return None
         return FaceRepository(paths.index_db_path, paths.state_db_path)
 
-    def list_clusters(self) -> list[PersonSummary]:
+    def list_clusters(self, *, include_hidden: bool = False) -> list[PersonSummary]:
         repository = self.repository()
         if repository is None:
             return []
-        return repository.get_person_summaries()
+        return repository.get_person_summaries(include_hidden=include_hidden)
 
     def list_groups(
         self,
@@ -92,11 +102,15 @@ class PeopleService:
         summaries_by_id = {summary.person_id: summary for summary in summary_list}
         return self._build_group_summaries(repository, repository.list_groups(), summaries_by_id)
 
-    def load_dashboard(self) -> tuple[list[PersonSummary], list[PeopleGroupSummary], int]:
+    def load_dashboard(
+        self,
+        *,
+        include_hidden: bool = False,
+    ) -> tuple[list[PersonSummary], list[PeopleGroupSummary], int]:
         repository = self.repository()
         if repository is None:
             return [], [], 0
-        summaries = repository.get_person_summaries()
+        summaries = repository.get_person_summaries(include_hidden=include_hidden)
         groups = self.list_groups(repository=repository, summaries=summaries)
         counts = self.face_status_counts()
         pending = counts.get("pending", 0) + counts.get("retry", 0)
@@ -122,6 +136,27 @@ class PeopleService:
             return
         get_people_index_coordinator(self._library_root).rename_person(person_id, new_name)
 
+    def pin_block_reason(self, person_id: str) -> str | None:
+        """Return a human-readable reason why *person_id* cannot be pinned."""
+
+        repository = self.repository()
+        if repository is None or not person_id:
+            return None
+
+        block_reason = getattr(repository, "pin_block_reason", None)
+        if callable(block_reason):
+            reason = block_reason(person_id)
+            if isinstance(reason, str):
+                normalized = reason.strip()
+                if normalized:
+                    return normalized
+
+        is_hidden = getattr(repository, "is_person_hidden", None)
+        if callable(is_hidden) and bool(is_hidden(person_id)):
+            return "This person can't be pinned while hidden."
+
+        return None
+
     def set_cluster_cover(self, person_id: str, face_id: str) -> bool:
         if self._library_root is None:
             return False
@@ -132,6 +167,24 @@ class PeopleService:
             return False
         return get_people_index_coordinator(self._library_root).set_group_cover(group_id, asset_id)
 
+    def resolve_cluster_cover_face(self, person_id: str, asset_id: str) -> str | None:
+        if not person_id or not asset_id:
+            return None
+        for annotation in self.list_asset_face_annotations(asset_id):
+            if annotation.person_id == person_id and annotation.face_id:
+                return annotation.face_id
+        return None
+
+    def resolve_group_cover_asset(self, group_id: str, asset_id: str) -> str | None:
+        if not group_id or not asset_id:
+            return None
+        return asset_id if asset_id in self.group_asset_ids(group_id) else None
+
+    def delete_group(self, group_id: str) -> bool:
+        if self._library_root is None:
+            return False
+        return get_people_index_coordinator(self._library_root).delete_group(group_id)
+
     def set_cluster_order(
         self,
         person_ids: list[str] | tuple[str, ...],
@@ -140,6 +193,26 @@ class PeopleService:
             return
         get_people_index_coordinator(self._library_root).set_person_order(person_ids)
 
+    def set_group_order(
+        self,
+        group_ids: list[str] | tuple[str, ...],
+    ) -> None:
+        if self._library_root is None:
+            return
+        get_people_index_coordinator(self._library_root).set_group_order(group_ids)
+
+    def set_cluster_hidden(self, person_id: str, hidden: bool) -> bool:
+        repository = self.repository()
+        if repository is None:
+            return False
+        return repository.set_person_hidden(person_id, hidden)
+
+    def is_cluster_hidden(self, person_id: str) -> bool:
+        repository = self.repository()
+        if repository is None:
+            return False
+        return repository.is_person_hidden(person_id)
+
     def merge_clusters(self, source_person_id: str, target_person_id: str) -> bool:
         if self._library_root is None:
             return False
@@ -147,6 +220,33 @@ class PeopleService:
             source_person_id,
             target_person_id,
         )
+
+    def delete_face(self, annotation_face_id: str) -> bool:
+        if self._library_root is None or not annotation_face_id:
+            return False
+        event = get_people_index_coordinator(self._library_root).delete_face(annotation_face_id)
+        return event is not None
+
+    def move_face_to_person(self, annotation_face_id: str, target_person_id: str) -> bool:
+        if self._library_root is None or not annotation_face_id or not target_person_id:
+            return False
+        event = get_people_index_coordinator(self._library_root).move_face_to_person(
+            annotation_face_id,
+            target_person_id,
+        )
+        return event is not None
+
+    def move_face_to_new_person(self, annotation_face_id: str, new_name: str) -> str | None:
+        normalized_name = str(new_name or "").strip()
+        if self._library_root is None or not annotation_face_id or not normalized_name:
+            return None
+        new_person_id = uuid.uuid4().hex
+        event = get_people_index_coordinator(self._library_root).move_face_to_new_person(
+            annotation_face_id,
+            new_person_id,
+            normalized_name,
+        )
+        return new_person_id if event is not None else None
 
     def cluster_asset_ids(self, person_id: str) -> list[str]:
         repository = self.repository()
@@ -158,6 +258,12 @@ class PeopleService:
     def build_cluster_query(self, person_id: str) -> AssetQuery:
         return AssetQuery(asset_ids=self.cluster_asset_ids(person_id))
 
+    def has_cluster(self, person_id: str) -> bool:
+        repository = self.repository()
+        if repository is None or not person_id:
+            return False
+        return any(summary.person_id == person_id for summary in repository.get_person_summaries())
+
     def group_asset_ids(self, group_id: str) -> list[str]:
         repository = self.repository()
         if repository is None or self._library_root is None:
@@ -168,6 +274,9 @@ class PeopleService:
     def build_group_query(self, group_id: str) -> AssetQuery:
         return AssetQuery(asset_ids=self.group_asset_ids(group_id))
 
+    def has_group(self, group_id: str) -> bool:
+        return self.get_group_summary(group_id) is not None
+
     def list_asset_face_annotations(self, asset_id: str) -> list[AssetFaceAnnotation]:
         repository = self.repository()
         if repository is None or not asset_id:
@@ -177,6 +286,68 @@ class PeopleService:
             if asset_id not in rows_by_id:
                 return []
         return repository.list_asset_face_annotations(asset_id)
+
+    def list_person_name_suggestions(self) -> list[PersonSummary]:
+        return [
+            summary
+            for summary in self.list_clusters()
+            if isinstance(summary.name, str) and summary.name.strip()
+        ]
+
+    def add_manual_face(
+        self,
+        *,
+        asset_id: str,
+        requested_box: tuple[int, int, int, int],
+        name_or_none: str | None,
+        person_id: str | None = None,
+    ) -> ManualFaceAddResult:
+        repository = self.repository()
+        paths = self.paths()
+        library_root = self._library_root
+        if repository is None or paths is None or library_root is None or not asset_id:
+            raise ManualFaceValidationError("Manual face tagging is unavailable right now.")
+
+        row = get_global_repository(library_root).get_rows_by_ids([asset_id]).get(asset_id)
+        if row is None:
+            raise ManualFaceValidationError("The selected photo is no longer available.")
+        asset_rel = str(row.get("rel") or row.get("path") or "").strip()
+        if not asset_rel:
+            raise ManualFaceValidationError("The selected photo path could not be resolved.")
+        resolved_library_root = library_root.resolve()
+        image_path = (resolved_library_root / asset_rel).resolve()
+        try:
+            image_path.relative_to(resolved_library_root)
+        except ValueError as exc:
+            raise ManualFaceValidationError("The selected photo path is invalid.") from exc
+        if not image_path.is_file():
+            raise ManualFaceValidationError("The selected photo file could not be found.")
+
+        resolved_person_id, preferred_name, created_new_person = self._resolve_manual_face_person(
+            repository,
+            person_id=person_id,
+            name_or_none=name_or_none,
+        )
+        face = build_manual_face_record(
+            asset_id=asset_id,
+            asset_rel=asset_rel,
+            image_path=image_path,
+            requested_box=requested_box,
+            thumbnail_dir=paths.thumbnail_dir,
+            target_person_id=resolved_person_id,
+        )
+        add_result = get_people_index_coordinator(library_root).add_manual_face(
+            face,
+            person_name=preferred_name,
+        )
+        if add_result is None:
+            raise ManualFaceValidationError("Manual face tagging is unavailable right now.")
+        return ManualFaceAddResult(
+            asset_id=asset_id,
+            face_id=face.face_id,
+            person_id=resolved_person_id,
+            created_new_person=created_new_person,
+        )
 
     def face_status_counts(self) -> dict[str, int]:
         if self._library_root is None:
@@ -311,6 +482,32 @@ class PeopleService:
             if path is not None:
                 return path
         return None
+
+    def _resolve_manual_face_person(
+        self,
+        repository: FaceRepository,
+        *,
+        person_id: str | None,
+        name_or_none: str | None,
+    ) -> tuple[str, str | None, bool]:
+        summaries = repository.get_person_summaries()
+        summaries_by_id = {summary.person_id: summary for summary in summaries}
+        if person_id and person_id in summaries_by_id:
+            return str(person_id), None, False
+
+        normalized_name = str(name_or_none or "").strip()
+        if not normalized_name:
+            raise ManualFaceValidationError("Please enter a name before saving the face.")
+
+        matching = [
+            summary
+            for summary in summaries
+            if isinstance(summary.name, str)
+            and summary.name.strip().casefold() == normalized_name.casefold()
+        ]
+        if len(matching) == 1:
+            return matching[0].person_id, None, False
+        return uuid.uuid4().hex, normalized_name, True
 
 
 def _format_group_name(names: object) -> str:

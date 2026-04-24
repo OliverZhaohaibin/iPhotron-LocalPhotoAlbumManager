@@ -9,10 +9,14 @@ from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Optional
 
-from PySide6.QtCore import QItemSelectionModel, QModelIndex, QObject, QThreadPool, QTimer, Signal, Slot
+from PySide6.QtCore import QItemSelectionModel, QModelIndex, QObject, QLocale, QThreadPool, QTimer, Signal, Slot
 from PySide6.QtGui import QAction, QColor, QPalette
 
 from iPhoto.config import PLAY_ASSET_DEBOUNCE_MS
+from iPhoto.gui.ui.tasks.assign_location_worker import (
+    AssignLocationRequest,
+    AssignLocationWorker,
+)
 from iPhoto.gui.detail_profile import log_detail_profile
 from iPhoto.gui.coordinators.view_router import ViewRouter
 from iPhoto.gui.ui.controllers.edit_zoom_handler import EditZoomHandler
@@ -22,10 +26,15 @@ from iPhoto.gui.ui.tasks.info_panel_metadata_worker import (
     InfoPanelMetadataResult,
     InfoPanelMetadataWorker,
 )
+from iPhoto.gui.ui.tasks.manual_face_add_worker import ManualFaceAddWorker
 from iPhoto.gui.ui.widgets.info_panel import InfoPanel
 from iPhoto.gui.viewmodels.detail_viewmodel import DetailPresentation, DetailViewModel
 from iPhoto.io import sidecar
+from iPhoto.library.manager import LibraryManager
+from iPhoto.people.repository import AssetFaceAnnotation
 from iPhoto.people.service import PeopleService
+from maps.map_sources import has_usable_osmand_search_extension
+from maps.osmand_search import OsmAndSearchService, SearchSuggestion
 
 if TYPE_CHECKING:
     from iPhoto.utils.settings import Settings
@@ -42,6 +51,9 @@ if TYPE_CHECKING:
 LOGGER = logging.getLogger(__name__)
 
 _INFO_PANEL_METADATA_CACHE_MAX = 200
+_LOCATION_SEARCH_RESULT_LIMIT = 5
+_LOCATION_SEARCH_DEBOUNCE_MS = 80
+_LOCATION_EXTENSION_PROMPT = "如需Assign a Location功能请下载map extension"
 
 
 class PlaybackCoordinator(QObject):
@@ -73,6 +85,8 @@ class PlaybackCoordinator(QObject):
         face_name_overlay: FaceNameOverlayWidget | None = None,
         people_service: PeopleService | None = None,
         people_dashboard_refresh_callback: Callable[[], None] | None = None,
+        library_manager: LibraryManager | None = None,
+        location_session_invalidator: Callable[[], None] | None = None,
     ) -> None:
         super().__init__()
         self._player_bar = player_bar
@@ -100,6 +114,8 @@ class PlaybackCoordinator(QObject):
         self._face_name_overlay = face_name_overlay
         self._people_service = people_service or PeopleService()
         self._people_dashboard_refresh_callback = people_dashboard_refresh_callback
+        self._library_manager = library_manager
+        self._location_session_invalidator = location_session_invalidator
 
         self._is_playing = False
         self._navigation: NavigationCoordinator | None = None
@@ -115,6 +131,18 @@ class PlaybackCoordinator(QObject):
         self._info_panel_metadata_attempted: set[str] = set()
         self._play_profile_started_at: float | None = None
         self._play_profile_row: int | None = None
+        self._manual_face_add_inflight = False
+        self._manual_face_inflight_asset_id: str | None = None
+        self._pending_manual_face_annotations: dict[str, list[AssetFaceAnnotation]] = {}
+        self._pending_manual_face_sequence = 0
+        self._location_search_service: OsmAndSearchService | None = None
+        self._location_search_cache: dict[str, list[SearchSuggestion]] = {}
+        self._location_assign_inflight = False
+        self._location_assign_path: Path | None = None
+        self._location_preview_path: Path | None = None
+        self._location_preview_metadata: dict[str, Any] | None = None
+        self._pending_location_query = ""
+        self._location_search_target_path: Path | None = None
 
         self._pending_play_row: int | None = None
         self._show_face_names = False
@@ -122,6 +150,10 @@ class PlaybackCoordinator(QObject):
         self._play_debounce.setSingleShot(True)
         self._play_debounce.setInterval(PLAY_ASSET_DEBOUNCE_MS)
         self._play_debounce.timeout.connect(self._execute_pending_play)
+        self._location_search_timer = QTimer(self)
+        self._location_search_timer.setSingleShot(True)
+        self._location_search_timer.setInterval(_LOCATION_SEARCH_DEBOUNCE_MS)
+        self._location_search_timer.timeout.connect(self._perform_location_search)
 
         self._connect_signals()
         self._setup_zoom_handler()
@@ -133,6 +165,14 @@ class PlaybackCoordinator(QObject):
     def set_info_panel(self, panel: InfoPanel) -> None:
         self._info_panel = panel
         panel.dismissed.connect(self._handle_info_panel_dismissed)
+        panel.manualFaceAddRequested.connect(self._handle_manual_face_add_requested)
+        panel.faceDeleteRequested.connect(self._handle_info_panel_face_delete_requested)
+        panel.faceMoveRequested.connect(self._handle_info_panel_face_move_requested)
+        panel.faceMoveToNewPersonRequested.connect(
+            self._handle_info_panel_face_move_to_new_person_requested
+        )
+        panel.locationQueryChanged.connect(self._handle_location_query_changed)
+        panel.locationConfirmRequested.connect(self._handle_location_confirm_requested)
 
     def set_people_library_root(self, library_root: Path | None) -> None:
         people_service = getattr(self, "_people_service", None)
@@ -199,6 +239,9 @@ class PlaybackCoordinator(QObject):
         rename_signal = getattr(self._face_name_overlay, "renameSubmitted", None)
         if rename_signal is not None:
             rename_signal.connect(self._handle_face_name_rename_submitted)
+        manual_signal = getattr(self._face_name_overlay, "manualFaceSubmitted", None)
+        if manual_signal is not None:
+            manual_signal.connect(self._handle_manual_face_submitted)
 
     def _setup_zoom_handler(self) -> None:
         self._zoom_handler = EditZoomHandler(
@@ -331,6 +374,7 @@ class PlaybackCoordinator(QObject):
         if view == "detail":
             self._router.show_detail()
         elif view == "gallery":
+            self.reset_for_gallery()
             self._router.show_gallery()
 
     @Slot(object)
@@ -354,6 +398,9 @@ class PlaybackCoordinator(QObject):
         previous = self._current_presentation
         if previous is not None:
             presentation = self._preserve_live_presentation(previous, presentation)
+        if not self._router.is_detail_view_active():
+            self._clear_play_profile(presentation.row)
+            return
         self._current_presentation = presentation
         row = presentation.row
         self._asset_model.set_current_row(row)
@@ -565,6 +612,7 @@ class PlaybackCoordinator(QObject):
         if changed_asset_ids and presentation.asset_id not in changed_asset_ids:
             return
         self._refresh_face_name_overlay_for_presentation(presentation)
+        self._refresh_info_panel_faces(presentation.asset_id)
 
     def _refresh_face_name_overlay_for_presentation(
         self,
@@ -577,6 +625,12 @@ class PlaybackCoordinator(QObject):
             self._hide_face_name_overlay(clear_annotations=True)
             return
         annotations = self._load_face_name_annotations(presentation.asset_id)
+        try:
+            people_service = getattr(self, "_people_service", None)
+            if people_service is not None:
+                overlay.set_name_suggestions(people_service.list_person_name_suggestions())
+        except (sqlite3.Error, OSError):
+            LOGGER.exception("Failed to load person name suggestions")
         overlay.set_annotations(annotations)
         overlay.set_overlay_active(bool(annotations))
 
@@ -625,6 +679,87 @@ class PlaybackCoordinator(QObject):
             LOGGER.exception("Failed to rename person %s", person_id)
             return
         self._refresh_face_name_overlay_for_current_presentation()
+        presentation = getattr(self, "_current_presentation", None)
+        if presentation is not None and presentation.asset_id:
+            self._refresh_info_panel_faces(presentation.asset_id)
+        refresh_callback = getattr(self, "_people_dashboard_refresh_callback", None)
+        if callable(refresh_callback):
+            refresh_callback()
+
+    @Slot(object)
+    def _handle_info_panel_face_delete_requested(self, annotation: object) -> None:
+        if not isinstance(annotation, AssetFaceAnnotation):
+            return
+        people_service = getattr(self, "_people_service", None)
+        if people_service is None:
+            return
+        try:
+            changed = people_service.delete_face(annotation.face_id)
+        except (sqlite3.Error, OSError):
+            LOGGER.exception("Failed to delete face %s", annotation.face_id)
+            return
+        if not changed:
+            return
+        self._refresh_face_name_overlay_for_current_presentation()
+        presentation = getattr(self, "_current_presentation", None)
+        if presentation is not None and presentation.asset_id:
+            self._refresh_info_panel_faces(presentation.asset_id)
+        refresh_callback = getattr(self, "_people_dashboard_refresh_callback", None)
+        if callable(refresh_callback):
+            refresh_callback()
+
+    @Slot(object, str)
+    def _handle_info_panel_face_move_requested(
+        self,
+        annotation: object,
+        target_person_id: str,
+    ) -> None:
+        if not isinstance(annotation, AssetFaceAnnotation) or not target_person_id:
+            return
+        people_service = getattr(self, "_people_service", None)
+        if people_service is None:
+            return
+        try:
+            changed = people_service.move_face_to_person(annotation.face_id, target_person_id)
+        except (sqlite3.Error, OSError):
+            LOGGER.exception(
+                "Failed to move face %s to person %s",
+                annotation.face_id,
+                target_person_id,
+            )
+            return
+        if not changed:
+            return
+        self._refresh_face_name_overlay_for_current_presentation()
+        presentation = getattr(self, "_current_presentation", None)
+        if presentation is not None and presentation.asset_id:
+            self._refresh_info_panel_faces(presentation.asset_id)
+        refresh_callback = getattr(self, "_people_dashboard_refresh_callback", None)
+        if callable(refresh_callback):
+            refresh_callback()
+
+    @Slot(object, str)
+    def _handle_info_panel_face_move_to_new_person_requested(
+        self,
+        annotation: object,
+        new_name: str,
+    ) -> None:
+        if not isinstance(annotation, AssetFaceAnnotation):
+            return
+        people_service = getattr(self, "_people_service", None)
+        if people_service is None:
+            return
+        try:
+            created_person_id = people_service.move_face_to_new_person(annotation.face_id, new_name)
+        except (sqlite3.Error, OSError):
+            LOGGER.exception("Failed to move face %s into a new person", annotation.face_id)
+            return
+        if not created_person_id:
+            return
+        self._refresh_face_name_overlay_for_current_presentation()
+        presentation = getattr(self, "_current_presentation", None)
+        if presentation is not None and presentation.asset_id:
+            self._refresh_info_panel_faces(presentation.asset_id)
         refresh_callback = getattr(self, "_people_dashboard_refresh_callback", None)
         if callable(refresh_callback):
             refresh_callback()
@@ -656,6 +791,15 @@ class PlaybackCoordinator(QObject):
 
     def reset_for_gallery(self) -> None:
         self._clear_play_request_state()
+        location_timer = getattr(self, "_location_search_timer", None)
+        if location_timer is not None:
+            location_timer.stop()
+        self._pending_location_query = ""
+        self._location_search_target_path = None
+        location_service = getattr(self, "_location_search_service", None)
+        if location_service is not None:
+            location_service.shutdown()
+            self._location_search_service = None
         self._player_view.video_area.stop()
         self._player_view.show_placeholder()
         self._hide_face_name_overlay(clear_annotations=True)
@@ -670,6 +814,12 @@ class PlaybackCoordinator(QObject):
 
     def shutdown(self) -> None:
         self._clear_play_request_state()
+        self._location_search_timer.stop()
+        self._pending_location_query = ""
+        self._location_search_target_path = None
+        if self._location_search_service is not None:
+            self._location_search_service.shutdown()
+            self._location_search_service = None
         self._player_view.video_area.stop()
         self._hide_face_name_overlay(clear_annotations=True)
         self._is_playing = False
@@ -677,6 +827,7 @@ class PlaybackCoordinator(QObject):
         self._detail_vm.hide_info_panel(refresh_presentation=False)
         self._update_header(None)
         if self._info_panel:
+            self._info_panel.shutdown()
             self._info_panel.close()
         self._clear_info_panel_metadata_state()
 
@@ -722,6 +873,11 @@ class PlaybackCoordinator(QObject):
         if not self._info_panel:
             return
         self._ensure_info_panel_metadata_state()
+        location_enabled = self._refresh_location_extension_state()
+        self._info_panel.set_location_capability(
+            enabled=location_enabled,
+            fallback_text=_LOCATION_EXTENSION_PROMPT,
+        )
         local_info = dict(info)
         abs_path = local_info.get("abs")
         path_key = self._info_panel_path_key(abs_path)
@@ -729,6 +885,16 @@ class PlaybackCoordinator(QObject):
             cached = self._info_panel_metadata_cache.get(path_key)
             if cached:
                 local_info = self._merge_info_panel_metadata(local_info, cached)
+        current_path = Path(path_key) if path_key is not None else None
+        location_preview_path = getattr(self, "_location_preview_path", None)
+        location_preview_metadata = getattr(self, "_location_preview_metadata", None)
+        if (
+            current_path is not None
+            and location_preview_path is not None
+            and location_preview_metadata is not None
+            and current_path == location_preview_path
+        ):
+            local_info = self._merge_info_panel_metadata(local_info, location_preview_metadata)
         needs_enrichment = self._info_panel_metadata_needs_enrichment(local_info)
         should_queue_enrichment = bool(
             path_key is not None
@@ -749,11 +915,397 @@ class PlaybackCoordinator(QObject):
         else:
             local_info.pop("_metadata_loading", None)
         self._info_panel.set_asset_metadata(local_info)
+        location_assign_path = getattr(self, "_location_assign_path", None)
+        self._info_panel.set_location_busy(
+            bool(getattr(self, "_location_assign_inflight", False))
+            and location_assign_path is not None
+            and current_path == location_assign_path
+        )
+        presentation = getattr(self, "_current_presentation", None)
+        self._refresh_info_panel_faces(presentation.asset_id if presentation is not None else None)
         if should_queue_enrichment:
             self._queue_info_panel_metadata_enrichment(
                 Path(path_key),
                 is_video=bool(local_info.get("is_video")),
             )
+
+    def _refresh_location_extension_state(self) -> bool:
+        enabled = has_usable_osmand_search_extension()
+        if not enabled:
+            location_timer = getattr(self, "_location_search_timer", None)
+            if location_timer is not None:
+                location_timer.stop()
+            self._pending_location_query = ""
+            self._location_search_target_path = None
+            location_cache = getattr(self, "_location_search_cache", None)
+            if location_cache is not None:
+                location_cache.clear()
+            location_service = getattr(self, "_location_search_service", None)
+            if location_service is not None:
+                location_service.shutdown()
+                self._location_search_service = None
+            return False
+
+        if getattr(self, "_location_search_service", None) is not None:
+            return True
+
+        try:
+            self._location_search_service = OsmAndSearchService()
+        except Exception:  # noqa: BLE001
+            LOGGER.warning("Failed to initialize offline location search", exc_info=True)
+            self._location_search_service = None
+            return False
+        return True
+
+    def _normalize_location_query(self, query: str) -> str:
+        return " ".join(query.split()).casefold()
+
+    def _should_search_location_query(self, query: str) -> bool:
+        trimmed = " ".join(query.split())
+        if not trimmed:
+            return False
+        if len(trimmed) >= 2:
+            return True
+        return any(ord(character) >= 128 for character in trimmed)
+
+    def _preview_cached_location_suggestions(
+        self,
+        query: str,
+    ) -> tuple[list[SearchSuggestion] | None, bool]:
+        normalized_query = self._normalize_location_query(query)
+        if not normalized_query:
+            return None, False
+        exact = self._location_search_cache.get(normalized_query)
+        if exact is not None:
+            return list(exact), True
+
+        for cached_query, cached_results in sorted(
+            self._location_search_cache.items(),
+            key=lambda item: len(item[0]),
+            reverse=True,
+        ):
+            if not normalized_query.startswith(cached_query):
+                continue
+            filtered = [
+                suggestion
+                for suggestion in cached_results
+                if normalized_query in self._normalize_location_query(
+                    " ".join(
+                        part
+                        for part in (
+                            suggestion.display_name,
+                            suggestion.secondary_text,
+                        )
+                        if part
+                    )
+                )
+            ]
+            if filtered:
+                return filtered[:_LOCATION_SEARCH_RESULT_LIMIT], False
+        return None, False
+
+    @Slot(str)
+    def _handle_location_query_changed(self, query: str) -> None:
+        info_panel = getattr(self, "_info_panel", None)
+        if info_panel is None:
+            return
+
+        self._location_search_timer.stop()
+        self._pending_location_query = ""
+        self._location_search_target_path = None
+        if self._location_search_service is not None:
+            self._location_search_service.abort()
+
+        if not self._refresh_location_extension_state():
+            info_panel.set_location_suggestions([])
+            return
+        if self._location_assign_inflight:
+            info_panel.set_location_suggestions([])
+            return
+        if not self._should_search_location_query(query):
+            info_panel.set_location_suggestions([])
+            return
+
+        preview, is_exact = self._preview_cached_location_suggestions(query)
+        if preview is not None:
+            info_panel.set_location_suggestions(preview)
+            if is_exact:
+                return
+        else:
+            info_panel.set_location_suggestions([])
+
+        presentation = getattr(self, "_current_presentation", None)
+        if presentation is None:
+            return
+        self._pending_location_query = query.strip()
+        self._location_search_target_path = presentation.path
+        self._location_search_timer.start()
+
+    @Slot()
+    def _perform_location_search(self) -> None:
+        info_panel = getattr(self, "_info_panel", None)
+        presentation = getattr(self, "_current_presentation", None)
+        query = self._pending_location_query.strip()
+        target_path = self._location_search_target_path
+        self._pending_location_query = ""
+        if (
+            info_panel is None
+            or presentation is None
+            or not query
+            or target_path is None
+            or presentation.path != target_path
+        ):
+            return
+
+        if not self._refresh_location_extension_state():
+            info_panel.set_location_suggestions([])
+            return
+        service = self._location_search_service
+        if service is None:
+            info_panel.set_location_suggestions([])
+            return
+
+        locale = QLocale.system().bcp47Name()
+        try:
+            suggestions = service.search(
+                query,
+                limit=_LOCATION_SEARCH_RESULT_LIMIT,
+                locale=locale,
+            )
+        except Exception:  # noqa: BLE001
+            LOGGER.warning("Offline location search failed for query %r", query, exc_info=True)
+            suggestions = []
+
+        normalized_query = self._normalize_location_query(query)
+        self._location_search_cache[normalized_query] = list(suggestions)
+        if len(self._location_search_cache) > 64:
+            oldest_key = next(iter(self._location_search_cache))
+            self._location_search_cache.pop(oldest_key, None)
+
+        current_presentation = getattr(self, "_current_presentation", None)
+        if (
+            current_presentation is None
+            or current_presentation.path != target_path
+            or self._location_assign_inflight
+        ):
+            return
+        info_panel.set_location_suggestions(suggestions)
+
+    @Slot(str, object)
+    def _handle_location_confirm_requested(self, query: str, suggestion_obj: object) -> None:
+        if self._location_assign_inflight or not self._refresh_location_extension_state():
+            return
+        if not isinstance(suggestion_obj, SearchSuggestion):
+            return
+        presentation = getattr(self, "_current_presentation", None)
+        if presentation is None:
+            return
+
+        rel_value = presentation.info.get("rel")
+        if not isinstance(rel_value, str) or not rel_value.strip():
+            return
+
+        library_root = None
+        library_manager = getattr(self, "_library_manager", None)
+        if library_manager is not None:
+            library_root = library_manager.root()
+        if library_root is None:
+            library_root = self._asset_model.store.library_root()
+        if library_root is None:
+            return
+
+        self._location_search_timer.stop()
+        self._pending_location_query = ""
+        self._location_search_target_path = None
+        if self._location_search_service is not None:
+            self._location_search_service.abort()
+
+        display_name = suggestion_obj.display_name.strip() or query.strip()
+        self._location_assign_inflight = True
+        self._location_assign_path = presentation.path
+        self._location_preview_path = presentation.path
+        self._location_preview_metadata = {
+            "location": display_name,
+            "place": display_name,
+            "gps": {
+                "lat": float(suggestion_obj.latitude),
+                "lon": float(suggestion_obj.longitude),
+            },
+        }
+        if self._info_panel is not None:
+            self._info_panel.preview_location(
+                display_name,
+                float(suggestion_obj.latitude),
+                float(suggestion_obj.longitude),
+            )
+            self._info_panel.set_location_busy(True)
+            self._info_panel.set_location_suggestions([])
+
+        existing_metadata = self._asset_model.metadata_for_path(presentation.path) or dict(presentation.info)
+        worker = AssignLocationWorker(
+            AssignLocationRequest(
+                library_root=Path(library_root),
+                asset_path=presentation.path,
+                asset_rel=rel_value,
+                display_name=display_name,
+                latitude=float(suggestion_obj.latitude),
+                longitude=float(suggestion_obj.longitude),
+                is_video=bool(presentation.is_video),
+                existing_metadata=existing_metadata,
+            )
+        )
+        worker.signals.ready.connect(self._handle_location_assignment_ready)
+        worker.signals.error.connect(self._handle_location_assignment_error)
+        worker.signals.finished.connect(self._handle_location_assignment_finished)
+        try:
+            QThreadPool.globalInstance().start(worker, -1)
+        except Exception:  # noqa: BLE001
+            LOGGER.warning("Failed to start location assignment worker", exc_info=True)
+            self._location_assign_inflight = False
+            self._location_assign_path = None
+            if self._info_panel is not None:
+                self._info_panel.set_location_busy(False)
+
+    @Slot(object)
+    def _handle_location_assignment_ready(self, result: object) -> None:
+        asset_path = getattr(result, "asset_path", None)
+        metadata = getattr(result, "metadata", None)
+        if not isinstance(asset_path, Path) or not isinstance(metadata, dict):
+            return
+
+        row = self._asset_model.row_for_path(asset_path)
+        if row is not None:
+            self._asset_model.store.update_asset_metadata(row, dict(metadata))
+
+        path_key = str(asset_path)
+        if len(self._info_panel_metadata_cache) >= _INFO_PANEL_METADATA_CACHE_MAX:
+            evict_key = next(iter(self._info_panel_metadata_cache))
+            del self._info_panel_metadata_cache[evict_key]
+            self._info_panel_metadata_attempted.discard(evict_key)
+        self._info_panel_metadata_cache[path_key] = dict(metadata)
+        self._info_panel_metadata_attempted.add(path_key)
+        self._info_panel_metadata_inflight.discard(path_key)
+        if self._location_preview_path == asset_path:
+            self._location_preview_path = None
+            self._location_preview_metadata = None
+
+        self._detail_vm.refresh_current()
+
+        library_manager = getattr(self, "_library_manager", None)
+        invalidate = getattr(library_manager, "invalidate_geotagged_assets_cache", None)
+        if callable(invalidate):
+            try:
+                invalidate(emit_tree_updated=False)
+            except Exception:  # noqa: BLE001
+                LOGGER.warning("Failed to refresh geotagged asset caches", exc_info=True)
+        invalidate_location_session = getattr(self, "_location_session_invalidator", None)
+        if callable(invalidate_location_session):
+            try:
+                invalidate_location_session()
+            except Exception:  # noqa: BLE001
+                LOGGER.warning("Failed to invalidate cached location-session data", exc_info=True)
+
+    @Slot(str)
+    def _handle_location_assignment_error(self, message: str) -> None:
+        LOGGER.warning("Failed to assign location: %s", message)
+        if self._location_preview_path == self._location_assign_path:
+            self._location_preview_path = None
+            self._location_preview_metadata = None
+        info_panel = getattr(self, "_info_panel", None)
+        presentation = getattr(self, "_current_presentation", None)
+        if (
+            info_panel is not None
+            and presentation is not None
+            and info_panel.isVisible()
+            and self._location_assign_path is not None
+            and presentation.path == self._location_assign_path
+        ):
+            self._refresh_info_panel(presentation.info)
+        elif info_panel is not None:
+            info_panel.set_location_busy(False)
+
+    @Slot()
+    def _handle_location_assignment_finished(self) -> None:
+        self._location_assign_inflight = False
+        self._location_assign_path = None
+        info_panel = getattr(self, "_info_panel", None)
+        presentation = getattr(self, "_current_presentation", None)
+        if info_panel is None:
+            return
+        if presentation is not None and info_panel.isVisible():
+            self._refresh_info_panel(presentation.info)
+            return
+        info_panel.set_location_busy(False)
+
+    def _refresh_info_panel_faces(self, asset_id: str | None) -> None:
+        info_panel = getattr(self, "_info_panel", None)
+        if info_panel is None:
+            return
+        people_service = getattr(self, "_people_service", None)
+        if people_service is not None:
+            try:
+                info_panel.set_face_action_candidates(
+                    people_service.list_clusters(include_hidden=True)
+                )
+            except (sqlite3.Error, OSError):
+                LOGGER.exception("Failed to load face action candidates")
+                info_panel.set_face_action_candidates([])
+        if not asset_id:
+            info_panel.set_asset_faces([])
+            return
+        info_panel.set_asset_faces(self._compose_info_panel_faces(asset_id))
+
+    def _compose_info_panel_faces(self, asset_id: str) -> list[AssetFaceAnnotation]:
+        annotations = list(self._load_face_name_annotations(asset_id))
+        pending = getattr(self, "_pending_manual_face_annotations", {}).get(asset_id, [])
+        if pending:
+            annotations.extend(pending)
+        return annotations
+
+    def _queue_pending_manual_face(
+        self,
+        asset_id: str,
+        presentation: DetailPresentation,
+        payload: dict[str, object],
+    ) -> None:
+        requested_box = payload.get("requested_box")
+        if (
+            not isinstance(requested_box, tuple)
+            or len(requested_box) != 4
+            or not all(isinstance(value, int) for value in requested_box)
+        ):
+            return
+        pending_faces = getattr(self, "_pending_manual_face_annotations", None)
+        if not isinstance(pending_faces, dict):
+            pending_faces = {}
+            self._pending_manual_face_annotations = pending_faces
+        sequence = int(getattr(self, "_pending_manual_face_sequence", 0)) + 1
+        self._pending_manual_face_sequence = sequence
+        name = payload.get("name")
+        person_id = payload.get("person_id")
+        image_width = presentation.info.get("w")
+        image_height = presentation.info.get("h")
+        pending_face = AssetFaceAnnotation(
+            face_id=f"pending-manual-{sequence}",
+            person_id=person_id if isinstance(person_id, str) and person_id else None,
+            display_name=name.strip() if isinstance(name, str) and name.strip() else None,
+            box_x=requested_box[0],
+            box_y=requested_box[1],
+            box_w=requested_box[2],
+            box_h=requested_box[3],
+            image_width=image_width if isinstance(image_width, int) and image_width > 0 else max(1, requested_box[0] + requested_box[2]),
+            image_height=image_height if isinstance(image_height, int) and image_height > 0 else max(1, requested_box[1] + requested_box[3]),
+            thumbnail_path=None,
+            is_manual=True,
+        )
+        pending_faces.setdefault(asset_id, []).append(pending_face)
+
+    def _clear_pending_manual_faces(self, asset_id: str | None) -> None:
+        if not asset_id:
+            return
+        pending_faces = getattr(self, "_pending_manual_face_annotations", None)
+        if isinstance(pending_faces, dict):
+            pending_faces.pop(asset_id, None)
 
     def toggle_info_panel(self) -> None:
         self._detail_vm.toggle_info()
@@ -838,6 +1390,7 @@ class PlaybackCoordinator(QObject):
             return
         local_info = self._merge_info_panel_metadata(presentation.info, result.metadata)
         self._info_panel.set_asset_metadata(local_info)
+        self._refresh_info_panel_faces(presentation.asset_id)
 
     @Slot(str, str)
     def _handle_info_panel_metadata_error(self, path_key: str, message: str) -> None:
@@ -852,3 +1405,98 @@ class PlaybackCoordinator(QObject):
         self._ensure_info_panel_metadata_state()
         self._info_panel_metadata_inflight.discard(path_key)
         self._info_panel_metadata_attempted.add(path_key)
+
+    @Slot()
+    def _handle_manual_face_add_requested(self) -> None:
+        presentation = getattr(self, "_current_presentation", None)
+        overlay = getattr(self, "_face_name_overlay", None)
+        if overlay is None or presentation is None or presentation.is_video or not presentation.asset_id:
+            return
+        try:
+            overlay.set_name_suggestions(self._people_service.list_person_name_suggestions())
+        except (sqlite3.Error, OSError):
+            LOGGER.exception("Failed to load person name suggestions")
+        overlay.set_annotations(self._load_face_name_annotations(presentation.asset_id))
+        overlay.set_overlay_active(True)
+        overlay.start_manual_face()
+
+    @Slot(object)
+    def _handle_manual_face_submitted(self, payload: object) -> None:
+        if self._manual_face_add_inflight:
+            return
+        presentation = getattr(self, "_current_presentation", None)
+        overlay = getattr(self, "_face_name_overlay", None)
+        library_root = self._people_service.library_root()
+        if (
+            presentation is None
+            or overlay is None
+            or library_root is None
+            or not presentation.asset_id
+            or not isinstance(payload, dict)
+        ):
+            return
+        requested_box = payload.get("requested_box")
+        if (
+            not isinstance(requested_box, tuple)
+            or len(requested_box) != 4
+            or not all(isinstance(value, int) for value in requested_box)
+        ):
+            overlay.show_manual_error("The face circle could not be mapped back to the photo.")
+            return
+        self._manual_face_add_inflight = True
+        self._manual_face_inflight_asset_id = presentation.asset_id
+        overlay.set_manual_face_busy(True)
+        self._queue_pending_manual_face(presentation.asset_id, presentation, payload)
+        self._refresh_info_panel_faces(presentation.asset_id)
+        worker = ManualFaceAddWorker(
+            library_root=library_root,
+            asset_id=presentation.asset_id,
+            requested_box=requested_box,
+            name_or_none=payload.get("name") if isinstance(payload.get("name"), str) else None,
+            person_id=payload.get("person_id") if isinstance(payload.get("person_id"), str) else None,
+        )
+        worker.signals.ready.connect(self._handle_manual_face_ready)
+        worker.signals.error.connect(self._handle_manual_face_error)
+        worker.signals.finished.connect(self._handle_manual_face_finished)
+        QThreadPool.globalInstance().start(worker, -1)
+
+    @Slot(object)
+    def _handle_manual_face_ready(self, result: object) -> None:
+        submitted_asset_id = self._manual_face_inflight_asset_id
+        if submitted_asset_id:
+            self._clear_pending_manual_faces(submitted_asset_id)
+        presentation = getattr(self, "_current_presentation", None)
+        if presentation is not None and presentation.asset_id == submitted_asset_id:
+            self._refresh_face_name_overlay_for_current_presentation()
+            self._refresh_info_panel_faces(presentation.asset_id)
+        refresh_callback = getattr(self, "_people_dashboard_refresh_callback", None)
+        if callable(refresh_callback):
+            refresh_callback()
+
+    @Slot(str)
+    def _handle_manual_face_error(self, message: str) -> None:
+        submitted_asset_id = getattr(self, "_manual_face_inflight_asset_id", None)
+        if not submitted_asset_id:
+            presentation = getattr(self, "_current_presentation", None)
+            submitted_asset_id = presentation.asset_id if presentation is not None else None
+        if submitted_asset_id:
+            self._clear_pending_manual_faces(submitted_asset_id)
+        presentation = getattr(self, "_current_presentation", None)
+        if (
+            submitted_asset_id
+            and presentation is not None
+            and presentation.asset_id == submitted_asset_id
+        ):
+            self._refresh_info_panel_faces(submitted_asset_id)
+        overlay = getattr(self, "_face_name_overlay", None)
+        if overlay is not None:
+            overlay.set_manual_face_busy(False)
+            overlay.show_manual_error(message)
+
+    @Slot()
+    def _handle_manual_face_finished(self) -> None:
+        self._manual_face_add_inflight = False
+        self._manual_face_inflight_asset_id = None
+        overlay = getattr(self, "_face_name_overlay", None)
+        if overlay is not None:
+            overlay.set_manual_face_busy(False)

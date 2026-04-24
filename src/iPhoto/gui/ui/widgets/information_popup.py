@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import QEvent, QRectF, Qt
+from PySide6.QtCore import QEvent, QRect, QRectF, Qt
 from PySide6.QtGui import QColor, QMouseEvent, QPainter, QPainterPath, QPalette
 from PySide6.QtWidgets import (
     QHBoxLayout,
@@ -45,10 +45,13 @@ class InformationPopup(QWidget):
             parent,
             Qt.WindowType.Window
             | Qt.WindowType.FramelessWindowHint
+            | Qt.WindowType.Tool
             | Qt.WindowType.WindowStaysOnTopHint,
         )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, False)
+        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.setMinimumWidth(self._DEFAULT_WIDTH)
 
         self._drag_active = False
@@ -75,7 +78,6 @@ class InformationPopup(QWidget):
             QSizePolicy.Policy.Expanding,
             QSizePolicy.Policy.Preferred,
         )
-        self._title_label.setStyleSheet("font-weight: bold; font-size: 14px;")
         title_layout.addWidget(self._title_label, 1)
 
         # Close button – reuses the main window's close-button appearance.
@@ -111,6 +113,7 @@ class InformationPopup(QWidget):
         )
         self._message_label.setContentsMargins(16, 8, 16, 16)
         root_layout.addWidget(self._message_label, 1)
+        self._apply_content_style()
 
     # ------------------------------------------------------------------
     # Public API
@@ -141,6 +144,21 @@ class InformationPopup(QWidget):
 
         return self._message_label.text()
 
+    def center_on(self, widget: QWidget | None) -> None:
+        """Move the popup to the centre of the hosting top-level window."""
+
+        host = widget.window() if widget is not None and widget.window() is not None else widget
+        if host is None:
+            return
+
+        self.adjustSize()
+        host_rect = QRect(host.frameGeometry())
+        popup_rect = QRect(self.frameGeometry())
+        if popup_rect.width() <= 0 or popup_rect.height() <= 0:
+            popup_rect.setSize(self.sizeHint())
+        popup_rect.moveCenter(host_rect.center())
+        self.move(popup_rect.topLeft())
+
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
@@ -157,12 +175,35 @@ class InformationPopup(QWidget):
             f"QToolButton:pressed {{ background-color: {pressed.name(QColor.NameFormat.HexArgb)}; border-radius: 6px; }}"
         )
 
+    def _resolve_colour(self, colour: QColor, fallback: QColor) -> QColor:
+        if colour.isValid():
+            return QColor(colour)
+        return QColor(fallback)
+
+    def _apply_content_style(self) -> None:
+        """Keep child widgets transparent and in sync with the popup palette."""
+
+        text = self._resolve_colour(
+            self.palette().color(QPalette.ColorRole.WindowText),
+            QColor("#2B2B2B"),
+        )
+        secondary = QColor(text)
+        secondary.setAlpha(220)
+        self._title_bar.setStyleSheet("background: transparent;")
+        self._title_label.setStyleSheet(
+            f"font-weight: bold; font-size: 14px; color: {text.name()}; background: transparent;"
+        )
+        self._message_label.setStyleSheet(
+            f"color: {secondary.name(QColor.NameFormat.HexArgb)}; background: transparent;"
+        )
+
     # ------------------------------------------------------------------
     # QWidget overrides
     # ------------------------------------------------------------------
     def changeEvent(self, event: QEvent) -> None:
         if event.type() == QEvent.Type.PaletteChange:
             self._apply_close_button_style()
+            self._apply_content_style()
         super().changeEvent(event)
 
     def paintEvent(self, event) -> None:  # type: ignore[override]

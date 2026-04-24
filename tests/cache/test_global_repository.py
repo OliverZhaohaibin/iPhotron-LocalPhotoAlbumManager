@@ -200,6 +200,34 @@ class TestGlobalRepositorySingleton:
         assert row["face_status"] == "pending"
         assert row["is_favorite"] == 1
 
+    def test_merge_scan_rows_resets_failed_face_status_for_same_asset(self, tmp_path: Path) -> None:
+        repo = get_global_repository(tmp_path)
+        repo.write_rows(
+            [
+                {
+                    "rel": "album/photo.jpg",
+                    "id": "asset-photo",
+                    "media_type": 0,
+                    "face_status": "failed",
+                }
+            ]
+        )
+
+        merged_rows = repo.merge_scan_rows(
+            [
+                {
+                    "rel": "album/photo.jpg",
+                    "id": "asset-photo",
+                    "media_type": 0,
+                    "bytes": 456,
+                }
+            ]
+        )
+
+        assert merged_rows[0]["face_status"] == "pending"
+        row = repo.get_rows_by_ids(["asset-photo"])["asset-photo"]
+        assert row["face_status"] == "pending"
+
     def test_merge_scan_rows_preserves_live_role_and_partner_rel_for_changed_asset_id(
         self, tmp_path: Path
     ) -> None:

@@ -45,6 +45,7 @@ from iPhoto.gui.ui.widgets.asset_delegate import AssetGridDelegate
 from iPhoto.gui.viewmodels.detail_viewmodel import DetailViewModel
 from iPhoto.gui.viewmodels.gallery_list_model_adapter import GalleryListModelAdapter
 from iPhoto.gui.viewmodels.gallery_viewmodel import GalleryViewModel
+from iPhoto.gui.services.pinned_items_service import PinnedItemsService
 from iPhoto.people.service import PeopleService
 
 if TYPE_CHECKING:
@@ -97,6 +98,15 @@ class MainCoordinator(QObject):
             window.ui.people_page.set_library_root(lib_root)
             window.ui.people_page.set_status_message(context.library.face_scan_status_message())
         self._playback_people_service = PeopleService(lib_root)
+        self._pinned_items_service = PinnedItemsService(context.settings, self)
+        window.ui.sidebar.set_pinned_service(self._pinned_items_service)
+        if hasattr(window.ui, "people_page"):
+            window.ui.people_page.set_pinned_service(self._pinned_items_service)
+        if hasattr(window.ui, "albums_dashboard_page"):
+            window.ui.albums_dashboard_page.set_pinned_service(self._pinned_items_service)
+            self._facade.albumCoverUpdated.connect(
+                window.ui.albums_dashboard_page.update_album_cover
+            )
 
         # Inject ViewModel provider into Facade for legacy operations (restore/delete)
         if self._facade:
@@ -121,6 +131,7 @@ class MainCoordinator(QObject):
             self._gallery_vm,
             context,
             context.facade,  # Legacy Facade Bridge
+            pinned_items_service=self._pinned_items_service,
         )
         self._adjustment_committer = MediaAdjustmentCommitter(
             asset_vm=self._asset_list_vm,
@@ -173,11 +184,16 @@ class MainCoordinator(QObject):
             face_name_overlay=window.ui.face_name_overlay,
             people_service=self._playback_people_service,
             people_dashboard_refresh_callback=window.ui.people_page.schedule_index_refresh,
+            library_manager=context.library,
+            location_session_invalidator=self._gallery_vm.invalidate_location_session,
         )
 
         # Inject optional dependencies into Playback
         self._playback.set_navigation_coordinator(self._navigation)
         self._navigation.set_playback_coordinator(self._playback)
+        context.library.peopleSnapshotCommitted.connect(
+            lambda _event: window.ui.sidebar.refresh_tree_model()
+        )
         # Manually attach info panel if available
         if hasattr(window.ui, "info_panel"):
             self._playback.set_info_panel(window.ui.info_panel)
@@ -280,6 +296,7 @@ class MainCoordinator(QObject):
             navigation=self._navigation,
             export_callback=window.ui.export_selected_action.trigger,
             prepare_paths_for_mutation=self._prepare_paths_for_mutation,
+            gallery_viewmodel=self._gallery_vm,
             parent=self,
         )
 
@@ -381,6 +398,7 @@ class MainCoordinator(QObject):
         """Connect application signals."""
         ui = self._window.ui
         self._context.library.treeUpdated.connect(self._on_library_tree_updated)
+        self._context.library.albumRenamed.connect(self._on_album_renamed)
         self._facade.scanChunkReady.connect(self._gallery_store.handle_scan_chunk)
         self._facade.scanFinished.connect(self._gallery_store.handle_scan_finished)
         self._context.library.scanChunkReady.connect(self._gallery_vm.handle_location_scan_chunk)
@@ -422,6 +440,7 @@ class MainCoordinator(QObject):
         ui.rotate_left_button.clicked.connect(self._playback.rotate_current_asset)
         ui.favorite_button.clicked.connect(self._detail_vm.toggle_favorite)
         ui.toggle_face_names_action.toggled.connect(self._handle_face_name_toggle_changed)
+        ui.toggle_hidden_people_action.toggled.connect(self._handle_hidden_people_toggle_changed)
 
         # Info Button
         if hasattr(ui, "info_button"):
@@ -429,7 +448,6 @@ class MainCoordinator(QObject):
 
         # Back Button (detail page)
         if hasattr(ui, "back_button"):
-            ui.back_button.clicked.connect(self._playback.reset_for_gallery)
             ui.back_button.clicked.connect(self._detail_vm.back_to_gallery)
 
         # Gallery page back button for cluster gallery mode
@@ -521,6 +539,16 @@ class MainCoordinator(QObject):
         playback = getattr(self, "_playback", None)
         if playback is not None:
             playback.set_people_library_root(root)
+
+    def _on_album_renamed(self, old_path: Path, new_path: Path) -> None:
+        self._pinned_items_service.remap_album_path(
+            old_path,
+            new_path,
+            library_root=self._context.library.root(),
+            fallback_label=new_path.name,
+        )
+        self._thumbnail_service.remap_album_paths(old_path, new_path)
+        self._gallery_vm.handle_album_renamed(old_path, new_path)
 
     def _handle_media_load_failed(self, path: Path, message: str) -> None:
         path_key = str(path)
@@ -642,6 +670,15 @@ class MainCoordinator(QObject):
         ui.toggle_face_names_action.setChecked(show_face_names)
         self._playback.set_face_name_display_enabled(show_face_names)
 
+        stored_hidden_people = settings.get("ui.show_hidden_people", False)
+        if isinstance(stored_hidden_people, str):
+            show_hidden_people = stored_hidden_people.strip().lower() in {"1", "true", "yes", "on"}
+        else:
+            show_hidden_people = bool(stored_hidden_people)
+        ui.toggle_hidden_people_action.setChecked(show_hidden_people)
+        if hasattr(ui, "people_page"):
+            ui.people_page.set_show_hidden_people(show_hidden_people)
+
         # 2. Volume / Mute
         stored_volume = settings.get("ui.volume", 75)
         try:
@@ -675,6 +712,12 @@ class MainCoordinator(QObject):
         if self._context.settings.get("ui.show_face_names_in_detail") != checked:
             self._context.settings.set("ui.show_face_names_in_detail", checked)
         self._playback.set_face_name_display_enabled(checked)
+
+    def _handle_hidden_people_toggle_changed(self, checked: bool) -> None:
+        if self._context.settings.get("ui.show_hidden_people") != checked:
+            self._context.settings.set("ui.show_hidden_people", checked)
+        if hasattr(self._window.ui, "people_page"):
+            self._window.ui.people_page.set_show_hidden_people(checked)
 
     def _prepare_paths_for_mutation(self, paths: list[Path]) -> None:
         """Release preview/player handles before mutating files on disk."""

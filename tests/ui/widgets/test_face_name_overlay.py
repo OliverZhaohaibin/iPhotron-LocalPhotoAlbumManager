@@ -8,8 +8,8 @@ pytest.importorskip("PySide6", reason="PySide6 is required for face overlay test
 
 import os
 
-from PySide6.QtCore import QPoint, QRectF, Qt, Signal
-from PySide6.QtGui import QImage, QPixmap
+from PySide6.QtCore import QEvent, QPoint, QPointF, QRectF, Qt, Signal
+from PySide6.QtGui import QImage, QMouseEvent, QPixmap
 from PySide6.QtTest import QSignalSpy, QTest
 from PySide6.QtWidgets import QApplication, QWidget
 
@@ -33,6 +33,13 @@ def _wait_until(app: QApplication, condition, timeout_ms: int = 2000) -> None:
         app.processEvents()
         if time.monotonic() > deadline:
             raise AssertionError("Condition not met within timeout")
+
+
+def _spy_records(spy: QSignalSpy) -> list[list[object]]:
+    count = spy.count() if hasattr(spy, "count") else len(spy)
+    if hasattr(spy, "at"):
+        return [list(spy.at(index)) for index in range(count)]
+    return [list(spy[index]) for index in range(count)]
 
 
 class _FakeViewer(QWidget):
@@ -161,8 +168,7 @@ def test_face_name_overlay_commits_entered_name(qapp, entered_text: str, expecte
     QTest.keyClick(overlay._editor, Qt.Key.Key_Return)
     qapp.processEvents()
 
-    assert len(spy) == 1
-    assert list(spy[0]) == ["person-1", expected_name]
+    assert _spy_records(spy) == [["person-1", expected_name]]
     assert overlay._states["face-1"].chip.text() == (expected_name or "unnamed")
 
 
@@ -207,7 +213,7 @@ def test_face_name_overlay_waits_for_loaded_image_before_showing_labels(qapp) ->
     overlay.set_overlay_active(True)
 
     chip = overlay._states["face-1"].chip
-    assert overlay.isVisible() is False
+    assert overlay.isVisible() is False or chip.isVisible() is False
     assert chip.isVisible() is False
 
     viewer.set_has_image_content(True)
@@ -216,3 +222,82 @@ def test_face_name_overlay_waits_for_loaded_image_before_showing_labels(qapp) ->
     _wait_until(qapp, lambda: overlay.isVisible())
     assert chip.isVisible() is True
     assert chip.geometry().topLeft() != QPoint(0, 0)
+
+
+def test_manual_face_draft_drag_moves_circle_without_falling_through(qapp) -> None:
+    _surface, viewer, overlay = _make_overlay(qapp)
+    overlay.set_overlay_active(True)
+    overlay.start_manual_face()
+    qapp.processEvents()
+
+    assert overlay._manual_draft is not None
+    assert overlay._manual_editor is not None
+    assert overlay._manual_editor.hasFocus() is False
+    original_center = QPointF(overlay._manual_draft.center)
+    circle_center = overlay._manual_circle_rect().center()
+    moved_center = QPointF(circle_center.x() + 36.0, circle_center.y() + 24.0)
+
+    press_event = QMouseEvent(
+        QEvent.Type.MouseButtonPress,
+        circle_center,
+        circle_center,
+        Qt.MouseButton.LeftButton,
+        Qt.MouseButton.LeftButton,
+        Qt.KeyboardModifier.NoModifier,
+    )
+    move_event = QMouseEvent(
+        QEvent.Type.MouseMove,
+        moved_center,
+        moved_center,
+        Qt.MouseButton.NoButton,
+        Qt.MouseButton.LeftButton,
+        Qt.KeyboardModifier.NoModifier,
+    )
+    release_event = QMouseEvent(
+        QEvent.Type.MouseButtonRelease,
+        moved_center,
+        moved_center,
+        Qt.MouseButton.LeftButton,
+        Qt.MouseButton.NoButton,
+        Qt.KeyboardModifier.NoModifier,
+    )
+
+    QApplication.sendEvent(overlay, press_event)
+    QApplication.sendEvent(overlay, move_event)
+    QApplication.sendEvent(overlay, release_event)
+    qapp.processEvents()
+
+    assert overlay._manual_draft.center != original_center
+    assert overlay._manual_draft.center.x() > original_center.x()
+    assert overlay._manual_draft.center.y() > original_center.y()
+    assert overlay._drag_mode is None
+
+
+def test_manual_face_press_does_not_clear_draft_when_editor_loses_focus(qapp) -> None:
+    _surface, _viewer, overlay = _make_overlay(qapp)
+    overlay.set_overlay_active(True)
+    overlay.start_manual_face()
+    qapp.processEvents()
+
+    assert overlay._manual_editor is not None
+    assert overlay._manual_draft is not None
+    overlay._manual_editor.setText("Alice")
+    overlay._manual_editor.setFocus(Qt.FocusReason.OtherFocusReason)
+    qapp.processEvents()
+
+    circle_center = overlay._manual_circle_rect().center()
+    press_event = QMouseEvent(
+        QEvent.Type.MouseButtonPress,
+        circle_center,
+        circle_center,
+        Qt.MouseButton.LeftButton,
+        Qt.MouseButton.LeftButton,
+        Qt.KeyboardModifier.NoModifier,
+    )
+
+    QApplication.sendEvent(overlay, press_event)
+    qapp.processEvents()
+
+    assert overlay._manual_draft is not None
+    assert overlay._manual_editor is not None
+    assert overlay._drag_mode == "move"

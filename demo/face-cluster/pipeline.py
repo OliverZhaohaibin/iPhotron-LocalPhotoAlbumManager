@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from collections import Counter, defaultdict, deque
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
@@ -57,11 +58,17 @@ class FaceClusterPipeline:
     def __init__(
         self,
         *,
+        model_root: Path | None = None,
         model_pack: str = "buffalo_s",
         distance_threshold: float = 0.6,
         min_samples: int = 2,
         min_face_size: int = 40,
     ) -> None:
+        self._model_root = (
+            Path(model_root)
+            if model_root is not None
+            else Path(__file__).resolve().parents[2] / "src" / "extension" / "models"
+        )
         self._model_pack = model_pack
         self._distance_threshold = float(distance_threshold)
         self._min_samples = int(min_samples)
@@ -192,11 +199,21 @@ class FaceClusterPipeline:
                 "缺少 insightface 依赖。请先安装 demo 需要的 AI 依赖后再运行。"
             ) from exc
 
+        self._model_root.mkdir(parents=True, exist_ok=True)
+        insightface_root = self._model_root.parent.resolve()
+        os.environ["INSIGHTFACE_HOME"] = str(insightface_root)
         _patch_insightface_alignment_estimate()
         providers = _resolve_execution_providers()
         ctx_id = 0 if "CUDAExecutionProvider" in providers else -1
-        app = FaceAnalysis(name=self._model_pack, providers=providers)
-        app.prepare(ctx_id=ctx_id, det_size=(640, 640))
+        try:
+            app = FaceAnalysis(name=self._model_pack, root=str(insightface_root), providers=providers)
+            app.prepare(ctx_id=ctx_id, det_size=(640, 640))
+        except Exception as exc:
+            raise _build_face_analysis_init_error(
+                model_pack=self._model_pack,
+                model_dir=self._model_root.resolve(),
+                exc=exc,
+            ) from exc
         self._analysis_app = app
         return app
 
@@ -493,6 +510,26 @@ def _key_face_sort_key(face: FaceRecord) -> tuple[float, int]:
 
 def _quantize_value(value: float, step: int) -> int:
     return int(round(float(value) / float(step)) * step)
+
+
+def _build_face_analysis_init_error(
+    *,
+    model_pack: str,
+    model_dir: Path,
+    exc: Exception,
+) -> RuntimeError:
+    reason = str(exc).strip() or exc.__class__.__name__
+    model_pack_dir = model_dir / model_pack
+    if not model_pack_dir.exists():
+        return RuntimeError(
+            f"人脸聚类不可用：InsightFace 模型 '{model_pack}' 尚未缓存到 '{model_pack_dir}'，"
+            f"初始化/下载失败（{reason}）。请先让环境联网下载一次，或把已有的 "
+            f"'{model_pack}' 模型目录复制到这里后重试。"
+        )
+    return RuntimeError(
+        f"人脸聚类不可用：无法从 '{model_pack_dir}' 初始化 InsightFace 模型 "
+        f"'{model_pack}'（{reason}）。"
+    )
 
 
 def _resolve_execution_providers() -> list[str]:

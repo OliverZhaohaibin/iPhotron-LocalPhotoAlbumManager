@@ -1,4 +1,5 @@
 from pathlib import Path
+import shutil
 from typing import Dict, Optional, Set
 
 import numpy as np
@@ -155,6 +156,37 @@ class ThumbnailCacheService(QObject):
                 disk_file.unlink()
             except OSError:
                 pass
+
+    def remap_album_paths(self, old_root: Path, new_root: Path, *, size: QSize | None = None) -> None:
+        """Copy cached thumbnails from an album's old path to its renamed path."""
+
+        if size is None:
+            size = QSize(512, 512)
+        if not new_root.exists():
+            return
+        try:
+            paths = [path for path in new_root.rglob("*") if path.is_file()]
+        except OSError:
+            return
+
+        for new_path in paths:
+            try:
+                rel = new_path.relative_to(new_root)
+            except ValueError:
+                continue
+            old_path = old_root / rel
+            old_key = self._cache_key(old_path, size)
+            new_key = self._cache_key(new_path, size)
+            if old_key in self._memory_cache and new_key not in self._memory_cache:
+                self._memory_cache[new_key] = self._memory_cache[old_key]
+
+            old_disk_file = self._disk_cache_path / f"{old_key}.jpg"
+            new_disk_file = self._disk_cache_path / f"{new_key}.jpg"
+            if old_disk_file.exists() and not new_disk_file.exists():
+                try:
+                    shutil.copy2(old_disk_file, new_disk_file)
+                except OSError:
+                    pass
 
     def _cache_key(self, path: Path, size: QSize) -> str:
         # Simple hash of path + size

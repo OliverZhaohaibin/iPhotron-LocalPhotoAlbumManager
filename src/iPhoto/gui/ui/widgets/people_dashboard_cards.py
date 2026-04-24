@@ -281,35 +281,61 @@ class PeopleCard(QWidget):
 
 class GroupCard(QWidget):
     activated = Signal(str)
+    menuRequested = Signal(str, object)
     _CARD_INSET = 4
     _SHADOW_SAFE_BOTTOM = 18
 
     def __init__(
         self,
         *,
+        board: "GroupBoard",
         summary: PeopleGroupSummary,
         seed_index: int,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
+        self.board = board
         self.summary = summary
         self.seed_index = seed_index
         self._hovered = False
+        self._dragging = False
+        self._press_pos: QPoint | None = None
+        self._drag_offset: QPoint | None = None
         self._artwork: QPixmap | None = None
         self._placeholder_artwork: QPixmap | None = None
         self._cover_cache_key: str | None = None
         self.setFixedSize(GROUP_CARD_WIDTH, GROUP_CARD_HEIGHT + self._SHADOW_SAFE_BOTTOM)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
-        shadow = QGraphicsDropShadowEffect(self)
-        shadow.setBlurRadius(30)
-        shadow.setOffset(0, 8)
-        shadow.setColor(QColor(0, 0, 0, 36))
-        self.setGraphicsEffect(shadow)
+        self._apply_shadow(blur=30, offset_y=8, alpha=36)
         people_cover_cache().coverReady.connect(self._handle_cover_ready)
 
     @property
     def group_id(self) -> str:
         return self.summary.group_id
+
+    @property
+    def is_dragging(self) -> bool:
+        return self._dragging
+
+    def begin_drag(self) -> None:
+        self._dragging = True
+        self._hovered = False
+        self._apply_shadow(blur=42, offset_y=12, alpha=64)
+        self.raise_()
+        self.board.begin_drag(self)
+        self.update()
+
+    def end_drag(self) -> None:
+        self._dragging = False
+        self._apply_shadow(blur=30, offset_y=8, alpha=36)
+        self.update()
+
+    def _apply_shadow(self, *, blur: int, offset_y: int, alpha: int) -> None:
+        shadow = QGraphicsDropShadowEffect(self)
+        shadow.setBlurRadius(blur)
+        shadow.setOffset(0, offset_y)
+        shadow.setColor(QColor(0, 0, 0, alpha))
+        self.setGraphicsEffect(shadow)
 
     def _cover_pixmap(self) -> QPixmap:
         if self._artwork is not None:
@@ -461,8 +487,8 @@ class GroupCard(QWidget):
         self._paint_bottom_overlay(painter, card_rect)
         painter.restore()
 
-        border_color = QColor("#2272F2") if self._hovered else QColor(255, 255, 255, 120)
-        border_width = 2.6 if self._hovered else 1.2
+        border_color = QColor("#2272F2") if (self._hovered or self._dragging) else QColor(255, 255, 255, 120)
+        border_width = 2.6 if (self._hovered or self._dragging) else 1.2
         painter.setPen(QPen(border_color, border_width))
         painter.setBrush(Qt.BrushStyle.NoBrush)
         painter.drawRoundedRect(card_rect, GROUP_CARD_RADIUS, GROUP_CARD_RADIUS)
@@ -494,16 +520,56 @@ class GroupCard(QWidget):
         )
 
     def enterEvent(self, _event) -> None:  # noqa: N802
-        self._hovered = True
-        self.update()
+        if not self._dragging:
+            self._hovered = True
+            self.update()
 
     def leaveEvent(self, _event) -> None:  # noqa: N802
         self._hovered = False
         self.update()
 
+    def mousePressEvent(self, event) -> None:  # noqa: N802
+        if event.button() == Qt.MouseButton.LeftButton:
+            local_pos = event.position().toPoint()
+            self._press_pos = local_pos
+            self._drag_offset = local_pos
+            self.raise_()
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event) -> None:  # noqa: N802
+        if not (event.buttons() & Qt.MouseButton.LeftButton) or self._drag_offset is None:
+            super().mouseMoveEvent(event)
+            return
+
+        local_pos = event.position().toPoint()
+        if not self._dragging and self._press_pos is not None:
+            if (local_pos - self._press_pos).manhattanLength() > 4:
+                self.begin_drag()
+
+        if self._dragging:
+            new_pos = self.mapToParent(local_pos - self._drag_offset)
+            self.move(new_pos)
+            self.board.update_card_order(self)
+            event.accept()
+            return
+
+        super().mouseMoveEvent(event)
+
     def mouseReleaseEvent(self, event) -> None:  # noqa: N802
         if event.button() == Qt.MouseButton.LeftButton:
-            self.activated.emit(self.group_id)
+            if self._dragging:
+                self.board.finish_drag(self)
+                self.end_drag()
+            else:
+                self.activated.emit(self.group_id)
+            self._press_pos = None
+            self._drag_offset = None
             event.accept()
             return
         super().mouseReleaseEvent(event)
+
+    def contextMenuEvent(self, event) -> None:  # noqa: N802
+        self.menuRequested.emit(self.group_id, event.globalPos())
+        event.accept()

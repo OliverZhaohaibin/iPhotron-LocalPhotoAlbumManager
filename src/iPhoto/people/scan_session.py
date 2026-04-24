@@ -6,6 +6,7 @@ from typing import Iterable
 
 from .pipeline import (
     DetectedAssetFaces,
+    build_person_records_from_faces,
     canonicalize_cluster_identities,
     cluster_face_records,
 )
@@ -74,31 +75,64 @@ class FaceScanSession:
         if existing_faces is None:
             existing_faces = repository.get_all_faces()
 
-        all_faces = [
+        state_repository = repository.state_repository
+        auto_faces = [
             face
             for face in existing_faces
-            if face.asset_id not in staged_asset_ids and face.asset_rel not in staged_asset_rels
+            if (
+                not face.is_manual
+                and face.asset_id not in staged_asset_ids
+                and face.asset_rel not in staged_asset_rels
+            )
         ]
         for faces in self._faces_by_asset_id.values():
-            all_faces.extend(faces)
+            auto_faces.extend(faces)
+        if state_repository is not None and auto_faces:
+            rejected_face_keys = state_repository.get_rejected_face_keys(
+                face.face_key for face in auto_faces if face.face_key
+            )
+            if rejected_face_keys:
+                auto_faces = [
+                    face for face in auto_faces if face.face_key not in rejected_face_keys
+                ]
 
-        if not all_faces:
+        if not auto_faces:
             return [], []
 
-        clustered_faces, persons = cluster_face_records(
-            all_faces,
+        clustered_auto_faces, auto_persons = cluster_face_records(
+            auto_faces,
             distance_threshold=distance_threshold,
             min_samples=min_samples,
         )
-        state_repository = repository.state_repository
         if state_repository is not None:
-            clustered_faces, persons = canonicalize_cluster_identities(
-                clustered_faces,
-                persons,
+            clustered_auto_faces, auto_persons = canonicalize_cluster_identities(
+                clustered_auto_faces,
+                auto_persons,
                 state_repository,
                 distance_threshold=distance_threshold,
             )
-        return clustered_faces, persons
+
+        existing_persons_by_id = {
+            person.person_id: person for person in repository.get_all_person_records()
+        }
+        names_by_person_id = {
+            person_id: person.name
+            for person_id, person in existing_persons_by_id.items()
+        }
+        created_at_by_person_id = {
+            person_id: person.created_at
+            for person_id, person in existing_persons_by_id.items()
+        }
+        if state_repository is not None:
+            for profile in state_repository.get_profiles():
+                names_by_person_id[profile.person_id] = profile.name
+                created_at_by_person_id[profile.person_id] = profile.created_at
+        persons = build_person_records_from_faces(
+            clustered_auto_faces,
+            names_by_person_id=names_by_person_id,
+            created_at_by_person_id=created_at_by_person_id,
+        )
+        return clustered_auto_faces, persons
 
     def commit(
         self,

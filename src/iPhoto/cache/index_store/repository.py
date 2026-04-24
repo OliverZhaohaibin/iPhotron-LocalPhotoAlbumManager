@@ -691,6 +691,59 @@ class AssetRepository:
             (location, rel),
         )
 
+    def update_asset_geodata(
+        self,
+        rel: str,
+        *,
+        gps: Dict[str, float] | None,
+        location: str | None,
+        metadata_updates: Dict[str, Any] | None = None,
+    ) -> None:
+        """Atomically update GPS/location columns and JSON metadata for one asset."""
+
+        gps_payload = json.dumps(gps) if gps is not None else None
+        with self.transaction() as conn:
+            update_parts = ["gps = ?", "location = ?"]
+            params: list[Any] = [gps_payload, location]
+
+            columns = {
+                str(row[1])
+                for row in conn.execute("PRAGMA table_info(assets)")
+            }
+            if "metadata" in columns:
+                existing_metadata: Dict[str, Any] = {}
+                row = conn.execute(
+                    "SELECT metadata FROM assets WHERE rel = ?",
+                    (rel,),
+                ).fetchone()
+                if row is not None and row[0]:
+                    try:
+                        decoded = json.loads(row[0])
+                    except (json.JSONDecodeError, TypeError):
+                        decoded = {}
+                    if isinstance(decoded, dict):
+                        existing_metadata = decoded
+                if metadata_updates:
+                    existing_metadata.update(
+                        {key: value for key, value in metadata_updates.items() if value is not None}
+                    )
+                if gps is not None:
+                    existing_metadata["gps"] = dict(gps)
+                else:
+                    existing_metadata.pop("gps", None)
+                if isinstance(location, str) and location.strip():
+                    existing_metadata["location"] = location.strip()
+                else:
+                    existing_metadata.pop("location", None)
+                update_parts.append("metadata = ?")
+                params.append(json.dumps(existing_metadata, ensure_ascii=False))
+
+            params.append(rel)
+            conn.execute(
+                f"UPDATE assets SET {', '.join(update_parts)} WHERE rel = ?",
+                params,
+            )
+
     def apply_live_role_updates(
         self,
         updates: List[Tuple[str, int, Optional[str]]],

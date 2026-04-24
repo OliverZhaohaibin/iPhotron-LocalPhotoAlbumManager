@@ -50,6 +50,7 @@ class LibraryManager(
     """Manage the Basic Library tree, file-system helpers, and scanning state."""
 
     treeUpdated = Signal()
+    albumRenamed = Signal(Path, Path)
     errorRaised = Signal(str)
 
     # Scanner signals exposed for the facade

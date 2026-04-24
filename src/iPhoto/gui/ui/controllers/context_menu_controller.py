@@ -4,20 +4,18 @@ from __future__ import annotations
 
 import subprocess
 import sys
-from functools import partial
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable, Optional, TYPE_CHECKING
+from typing import TYPE_CHECKING
 
 from PySide6.QtCore import (
     QAbstractItemModel,
-    QCoreApplication,
     QMimeData,
+    QItemSelectionModel,
     QModelIndex,
     QObject,
     QPoint,
     QUrl,
-    Qt,
-    QItemSelectionModel,
 )
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import QMenu
@@ -51,11 +49,11 @@ class ContextMenuController(QObject):
         status_bar: StatusBarController,
         notification_toast: NotificationToast,
         selection_controller: SelectionController | None,
-        navigation: "NavigationCoordinator | None",
+        navigation: NavigationCoordinator | None,
         export_callback: Callable[[], None],
         prepare_paths_for_mutation: Callable[[list[Path]], None] | None = None,
-        gallery_viewmodel: "GalleryViewModel | None" = None,
-        parent: Optional[QObject] = None,
+        gallery_viewmodel: GalleryViewModel | None = None,
+        parent: QObject | None = None,
     ) -> None:
         super().__init__(parent)
         self._grid_view = grid_view
@@ -425,7 +423,7 @@ class ContextMenuController(QObject):
 
         success = False
         if context.entity_kind == "album":
-            success = self._facade.set_cover(asset.rel_path.as_posix())
+            success = self._facade.set_cover(self._album_cover_rel_path(context, asset))
         elif context.entity_kind == "person" and context.entity_id:
             service = self._people_service_for_context(context)
             face_id = service.resolve_cluster_cover_face(context.entity_id, asset.id)
@@ -433,7 +431,10 @@ class ContextMenuController(QObject):
         elif context.entity_kind == "group" and context.entity_id:
             service = self._people_service_for_context(context)
             group_asset_id = service.resolve_group_cover_asset(context.entity_id, asset.id)
-            success = bool(group_asset_id) and service.set_group_cover(context.entity_id, group_asset_id)
+            success = bool(group_asset_id) and service.set_group_cover(
+                context.entity_id,
+                group_asset_id,
+            )
 
         if success:
             self._toast.show_toast("Cover Updated")
@@ -442,6 +443,15 @@ class ContextMenuController(QObject):
             "Unable to set cover for the selected item.",
             3000,
         )
+
+    def _album_cover_rel_path(self, context: MenuContext, asset) -> str:
+        album_root = context.active_root
+        if album_root is not None:
+            try:
+                return asset.abs_path.relative_to(album_root).as_posix()
+            except (OSError, ValueError):
+                pass
+        return asset.rel_path.as_posix()
 
     def _people_service_for_context(self, context: MenuContext) -> PeopleService:
         return PeopleService(context.active_root)

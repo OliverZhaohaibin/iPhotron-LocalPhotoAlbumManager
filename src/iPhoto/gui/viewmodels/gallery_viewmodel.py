@@ -397,6 +397,32 @@ class GalleryViewModel(BaseViewModel):
         if self._location_session.mode == "map":
             self.map_assets_changed.emit(self._location_session.full_assets(), root)
 
+    def handle_album_renamed(self, old_path: Path, new_path: Path) -> None:
+        if self.current_section.value not in {"album", "pinned_album"}:
+            return
+        active_root = self.active_root.value
+        if active_root is None:
+            return
+        retargeted_path = self._retarget_renamed_path(active_root, old_path, new_path)
+        if retargeted_path is None:
+            return
+
+        section = self.current_section.value
+        static_selection = self.static_selection.value
+        album = self._facade.open_album(retargeted_path)
+        retargeted_root = album.root if album else retargeted_path
+        if album:
+            self._context.remember_album(album.root)
+
+        query = AssetQuery(album_path=self._album_path_for_query(retargeted_root))
+        query.include_subalbums = True
+        self._load_query(
+            section=section,
+            static_selection=static_selection,
+            root=retargeted_root,
+            query=query,
+        )
+
     def on_library_tree_updated(self) -> bool:
         self._location_session.invalidate()
         if self.is_location_context_active():
@@ -557,3 +583,32 @@ class GalleryViewModel(BaseViewModel):
             scan_root_resolved == root_resolved
             or root_resolved in scan_root_resolved.parents
         )
+
+    def _paths_equal(self, first: Path, second: Path) -> bool:
+        if first == second:
+            return True
+        try:
+            return first.resolve() == second.resolve()
+        except OSError:
+            return False
+
+    def _retarget_renamed_path(
+        self,
+        active_root: Path,
+        old_path: Path,
+        new_path: Path,
+    ) -> Path | None:
+        if self._paths_equal(active_root, old_path):
+            return new_path
+
+        for use_resolve in (True, False):
+            try:
+                active_candidate = active_root.resolve() if use_resolve else active_root
+                old_candidate = old_path.resolve() if use_resolve else old_path
+                rel = active_candidate.relative_to(old_candidate)
+            except (OSError, ValueError):
+                continue
+            if rel.as_posix() in ("", "."):
+                return new_path
+            return new_path / rel
+        return None

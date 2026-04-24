@@ -168,6 +168,51 @@ def test_sidebar_album_context_menu_offers_pin_and_unpin(tmp_path: Path, qapp: Q
     assert menu.actions()[0].text() == "Unpin Album"
 
 
+def test_sidebar_pinned_album_survives_album_rename(tmp_path: Path, qapp: QApplication) -> None:
+    root = tmp_path / "Library"
+    album_dir = root / "Trip"
+    album_dir.mkdir(parents=True)
+    _write_manifest(album_dir, "Trip")
+
+    manager = LibraryManager()
+    manager.bind_path(root)
+    qapp.processEvents()
+
+    settings = SettingsManager(path=tmp_path / "settings.json")
+    settings.load()
+    pinned_service = PinnedItemsService(settings)
+    pinned_service.pin_album(album_dir, "Trip", library_root=root)
+
+    sidebar = AlbumSidebar(manager)
+    sidebar.set_pinned_service(pinned_service)
+    manager.albumRenamed.connect(
+        lambda old, new: pinned_service.remap_album_path(
+            old,
+            new,
+            library_root=root,
+            fallback_label=new.name,
+        )
+    )
+    qapp.processEvents()
+
+    album = next(node for node in manager.list_albums() if node.path == album_dir)
+    manager.rename_album(album, "Renamed Trip")
+    qapp.processEvents()
+
+    new_album = root / "Renamed Trip"
+    pinned = pinned_service.items_for_library(root)
+    assert len(pinned) == 1
+    assert pinned[0].item_id == str(new_album.resolve())
+
+    refreshed_index = sidebar.tree_model().index_for_pinned_item(pinned[0])
+    refreshed_item = sidebar.tree_model().item_from_index(refreshed_index)
+    assert refreshed_item is not None
+    assert refreshed_item.node_type == NodeType.PINNED_ALBUM
+    assert refreshed_item.album is not None
+    assert refreshed_item.album.path == new_album
+    assert sidebar.tree_model().data(refreshed_index) == "Renamed Trip"
+
+
 def test_sidebar_pinned_item_context_menu_offers_unpin(tmp_path: Path, qapp: QApplication) -> None:
     root = tmp_path / "Library"
     root.mkdir()
@@ -199,8 +244,60 @@ def test_sidebar_pinned_item_context_menu_offers_unpin(tmp_path: Path, qapp: QAp
         sidebar._set_pending_selection,
         sidebar.bindLibraryRequested.emit,
     )
-    assert [action.text() for action in menu.actions()] == ["Unpin"]
+    assert [action.text() for action in menu.actions() if not action.isSeparator()] == [
+        "Rename…",
+        "Unpin",
+    ]
 
-    menu.actions()[0].trigger()
+    menu.actions()[-1].trigger()
     qapp.processEvents()
     assert not pinned_service.items_for_library(root)
+
+
+def test_sidebar_pinned_item_context_menu_can_rename(tmp_path: Path, qapp: QApplication) -> None:
+    root = tmp_path / "Library"
+    root.mkdir()
+    manager = LibraryManager()
+    manager.bind_path(root)
+    qapp.processEvents()
+
+    settings = SettingsManager(path=tmp_path / "settings.json")
+    settings.load()
+    pinned_service = PinnedItemsService(settings)
+    pinned_service.pin_person("person-a", "Alice", library_root=root)
+
+    sidebar = AlbumSidebar(manager)
+    sidebar.set_pinned_service(pinned_service)
+    qapp.processEvents()
+
+    pinned_item = pinned_service.items_for_library(root)[0]
+    pinned_index = sidebar.tree_model().index_for_pinned_item(pinned_item)
+    item = sidebar.tree_model().item_from_index(pinned_index)
+    assert item is not None
+
+    from unittest.mock import patch
+
+    with patch(
+        "iPhoto.gui.ui.menus.album_sidebar_menu._create_styled_input_dialog",
+        return_value=("VIP Alice", True),
+    ):
+        menu = AlbumSidebarContextMenu(
+            sidebar,
+            sidebar._tree,
+            sidebar.tree_model(),
+            manager,
+            item,
+            sidebar._set_pending_selection,
+            sidebar.bindLibraryRequested.emit,
+        )
+        menu.actions()[0].trigger()
+
+    qapp.processEvents()
+
+    renamed = pinned_service.items_for_library(root)[0]
+    assert renamed.label == "VIP Alice"
+    assert renamed.custom_label is True
+
+    refreshed_index = sidebar.tree_model().index_for_pinned_item(renamed)
+    assert refreshed_index.isValid()
+    assert sidebar.tree_model().data(refreshed_index) == "VIP Alice"

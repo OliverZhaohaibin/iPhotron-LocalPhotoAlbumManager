@@ -152,3 +152,33 @@ def test_non_cover_gallery_menu_hides_set_as_cover(
 
     actions_added = [args[0] for args, _ in mock_qmenu_cls.return_value.addAction.call_args_list]
     assert "Set as Cover" not in actions_added
+
+
+def test_album_cover_uses_active_album_relative_path() -> None:
+    asset = _make_asset("asset-1", "Trips/day1/a.jpg")
+    album_root = Path("/library/Trips")
+    controller, deps = _make_controller(
+        context=MenuContext(
+            surface="gallery",
+            selection_kind="assets",
+            gallery_section="album",
+            entity_kind="album",
+            entity_id=str(album_root),
+            active_root=album_root,
+        ),
+        selected_assets=[asset],
+    )
+
+    controller._set_as_cover(
+        MenuContext(
+            surface="gallery",
+            selection_kind="assets",
+            selected_assets=(asset,),
+            gallery_section="album",
+            entity_kind="album",
+            entity_id=str(album_root),
+            active_root=album_root,
+        )
+    )
+
+    deps["facade"].set_cover.assert_called_once_with("day1/a.jpg")

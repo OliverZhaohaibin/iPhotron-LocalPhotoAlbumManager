@@ -234,3 +234,177 @@ class TestLogicalCropMappingFromTexture:
         assert result["Crop_CY"] == 0.7
         assert result["Crop_W"] == 0.5
         assert result["Crop_H"] == 0.6
+
+
+texture_point_to_logical = geometry.texture_point_to_logical
+texture_rect_to_logical = geometry.texture_rect_to_logical
+
+
+class TestTexturePointToLogical:
+    """Tests for texture_point_to_logical helper (rotation + flip + clamping)."""
+
+    def test_no_rotation_identity(self):
+        """Without rotation the point maps straight to pixel coordinates."""
+        lx, ly = texture_point_to_logical(
+            100.0, 80.0, texture_width=400.0, texture_height=300.0, rotate_steps=0
+        )
+        assert lx == pytest.approx(100.0)
+        assert ly == pytest.approx(80.0)
+
+    def test_rotate_90_cw(self):
+        """Clockwise 90° (rotate_steps=1): point (x, y) → (H-y, x) in logical pixels."""
+        # For a 400×300 texture, rotate_steps=1 yields a 300×400 logical canvas.
+        lx, ly = texture_point_to_logical(
+            100.0, 60.0, texture_width=400.0, texture_height=300.0, rotate_steps=1
+        )
+        # nx=0.25, ny=0.2 → lx=1-0.2=0.8, ly=0.25; logical 300×400 → (240, 100)
+        assert lx == pytest.approx(0.8 * 300.0)
+        assert ly == pytest.approx(0.25 * 400.0)
+
+    def test_rotate_180(self):
+        """180° rotation (rotate_steps=2): point (x,y) → (W-x, H-y) in logical pixels."""
+        lx, ly = texture_point_to_logical(
+            100.0, 60.0, texture_width=400.0, texture_height=300.0, rotate_steps=2
+        )
+        # nx=0.25, ny=0.2 → lx=0.75, ly=0.8; logical 400×300 → (300, 240)
+        assert lx == pytest.approx(0.75 * 400.0)
+        assert ly == pytest.approx(0.8 * 300.0)
+
+    def test_rotate_270_cw(self):
+        """Clockwise 270° (rotate_steps=3): point (x,y) → (y, W-x) in logical pixels."""
+        lx, ly = texture_point_to_logical(
+            100.0, 60.0, texture_width=400.0, texture_height=300.0, rotate_steps=3
+        )
+        # nx=0.25, ny=0.2 → lx=ny=0.2, ly=1-nx=0.75; logical 300×400 → (60, 300)
+        assert lx == pytest.approx(0.2 * 300.0)
+        assert ly == pytest.approx(0.75 * 400.0)
+
+    def test_flip_horizontal_no_rotation(self):
+        """Horizontal flip (no rotation) mirrors lx around the centre."""
+        lx, ly = texture_point_to_logical(
+            100.0, 80.0,
+            texture_width=400.0,
+            texture_height=300.0,
+            rotate_steps=0,
+            flip_horizontal=True,
+        )
+        # nx=0.25 → lx=1-0.25=0.75 → 300.0
+        assert lx == pytest.approx(300.0)
+        assert ly == pytest.approx(80.0)
+
+    def test_flip_horizontal_with_rotate_90(self):
+        """Flip after rotate_steps=1 mirrors lx of the already-rotated frame."""
+        lx_no_flip, _ = texture_point_to_logical(
+            100.0, 60.0, texture_width=400.0, texture_height=300.0, rotate_steps=1
+        )
+        lx_flip, ly_flip = texture_point_to_logical(
+            100.0, 60.0,
+            texture_width=400.0,
+            texture_height=300.0,
+            rotate_steps=1,
+            flip_horizontal=True,
+        )
+        assert lx_flip == pytest.approx(300.0 - lx_no_flip)
+
+    def test_invalid_texture_dimensions_returns_zero(self):
+        """Zero or negative texture dimensions must return (0, 0)."""
+        assert texture_point_to_logical(50.0, 50.0, texture_width=0.0, texture_height=100.0, rotate_steps=0) == (0.0, 0.0)
+        assert texture_point_to_logical(50.0, 50.0, texture_width=100.0, texture_height=0.0, rotate_steps=0) == (0.0, 0.0)
+        assert texture_point_to_logical(50.0, 50.0, texture_width=-1.0, texture_height=100.0, rotate_steps=0) == (0.0, 0.0)
+
+    def test_clamping_beyond_texture_boundary(self):
+        """Points outside the texture boundary are clamped to [0, logical_size]."""
+        lx, ly = texture_point_to_logical(
+            500.0, 400.0, texture_width=400.0, texture_height=300.0, rotate_steps=0
+        )
+        assert lx == pytest.approx(400.0)
+        assert ly == pytest.approx(300.0)
+
+    def test_clamping_negative_coords(self):
+        """Negative coordinates clamp to 0."""
+        lx, ly = texture_point_to_logical(
+            -10.0, -5.0, texture_width=400.0, texture_height=300.0, rotate_steps=0
+        )
+        assert lx == pytest.approx(0.0)
+        assert ly == pytest.approx(0.0)
+
+    def test_unknown_rotate_steps_treated_as_zero(self):
+        """rotate_steps values other than 1/2/3 fall through to identity."""
+        lx, ly = texture_point_to_logical(
+            100.0, 80.0, texture_width=400.0, texture_height=300.0, rotate_steps=4
+        )
+        assert lx == pytest.approx(100.0)
+        assert ly == pytest.approx(80.0)
+
+
+class TestTextureRectToLogical:
+    """Tests for texture_rect_to_logical helper."""
+
+    def test_no_rotation_passthrough(self):
+        """Without rotation the rect dimensions are preserved."""
+        x, y, w, h = texture_rect_to_logical(
+            40.0, 30.0, 80.0, 60.0,
+            texture_width=400.0,
+            texture_height=300.0,
+            rotate_steps=0,
+        )
+        assert x == pytest.approx(40.0)
+        assert y == pytest.approx(30.0)
+        assert w == pytest.approx(80.0)
+        assert h == pytest.approx(60.0)
+
+    def test_rotate_90_swaps_width_height(self):
+        """Clockwise 90° rotation should swap width and height of the bounding box."""
+        x, y, w, h = texture_rect_to_logical(
+            40.0, 30.0, 80.0, 60.0,
+            texture_width=400.0,
+            texture_height=300.0,
+            rotate_steps=1,
+        )
+        # After 90° CW, the original 80×60 rect becomes a 60×80 bounding box:
+        # the input width (80) maps to the output height and input height (60) maps to output width.
+        assert w == pytest.approx(60.0)
+        assert h == pytest.approx(80.0)
+
+    def test_rotate_180_preserves_size(self):
+        """180° rotation preserves width/height of the bounding rect."""
+        x, y, w, h = texture_rect_to_logical(
+            40.0, 30.0, 80.0, 60.0,
+            texture_width=400.0,
+            texture_height=300.0,
+            rotate_steps=2,
+        )
+        assert w == pytest.approx(80.0)
+        assert h == pytest.approx(60.0)
+
+    def test_invalid_dimensions_return_zeros(self):
+        """Invalid input dimensions must all return 0."""
+        assert texture_rect_to_logical(
+            0.0, 0.0, 0.0, 60.0, texture_width=400.0, texture_height=300.0, rotate_steps=0
+        ) == (0.0, 0.0, 0.0, 0.0)
+        assert texture_rect_to_logical(
+            0.0, 0.0, 80.0, 0.0, texture_width=400.0, texture_height=300.0, rotate_steps=0
+        ) == (0.0, 0.0, 0.0, 0.0)
+        assert texture_rect_to_logical(
+            0.0, 0.0, 80.0, 60.0, texture_width=0.0, texture_height=300.0, rotate_steps=0
+        ) == (0.0, 0.0, 0.0, 0.0)
+
+    def test_flip_horizontal_mirrors_x(self):
+        """Horizontal flip should mirror the rect's x origin."""
+        x_no_flip, _, w_no_flip, _ = texture_rect_to_logical(
+            40.0, 30.0, 80.0, 60.0,
+            texture_width=400.0,
+            texture_height=300.0,
+            rotate_steps=0,
+        )
+        x_flip, _, w_flip, _ = texture_rect_to_logical(
+            40.0, 30.0, 80.0, 60.0,
+            texture_width=400.0,
+            texture_height=300.0,
+            rotate_steps=0,
+            flip_horizontal=True,
+        )
+        # Width is unchanged; x origin is mirrored
+        assert w_flip == pytest.approx(w_no_flip)
+        assert x_flip == pytest.approx(400.0 - x_no_flip - w_no_flip)
+

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import uuid
 from collections import Counter, defaultdict, deque
@@ -9,6 +10,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 import hashlib
 from pathlib import Path
+from typing import Sequence
 
 import numpy as np
 
@@ -21,6 +23,9 @@ from .repository import (
     compute_cluster_center,
     normalize_vector,
 )
+from .repository_utils import profile_state_for_sample_count
+
+_LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -159,8 +164,16 @@ class FaceClusterPipeline:
         _patch_insightface_alignment_estimate()
         providers = _resolve_execution_providers()
         ctx_id = 0 if "CUDAExecutionProvider" in providers else -1
-        app = FaceAnalysis(name=self._model_pack, root=str(insightface_root), providers=providers)
-        app.prepare(ctx_id=ctx_id, det_size=(640, 640))
+        try:
+            app = FaceAnalysis(name=self._model_pack, root=str(insightface_root), providers=providers)
+            app.prepare(ctx_id=ctx_id, det_size=(640, 640))
+        except Exception as exc:
+            raise _build_face_analysis_init_error(
+                feature_name="Face scanning",
+                model_pack=self._model_pack,
+                model_dir=self._model_root.resolve(),
+                exc=exc,
+            ) from exc
         self._analysis_app = app
         return app
 
@@ -231,12 +244,61 @@ def cluster_face_records(
                 center_embedding=center_embedding,
                 created_at=timestamp,
                 updated_at=timestamp,
+                sample_count=len(members),
+                profile_state=profile_state_for_sample_count(len(members)),
             )
         )
         for index in indices:
             updated_faces[index] = replace(updated_faces[index], person_id=person_id)
     persons.sort(key=lambda person: (-person.face_count, person.created_at))
     return updated_faces, persons
+
+
+def build_person_records_from_faces(
+    faces: Sequence[FaceRecord],
+    *,
+    names_by_person_id: dict[str, str | None] | None = None,
+    created_at_by_person_id: dict[str, str] | None = None,
+) -> list[PersonRecord]:
+    if not faces:
+        return []
+
+    grouped: dict[str, list[FaceRecord]] = defaultdict(list)
+    for face in faces:
+        if face.person_id:
+            grouped[str(face.person_id)].append(face)
+
+    if not grouped:
+        return []
+
+    resolved_names = dict(names_by_person_id or {})
+    resolved_created_at = dict(created_at_by_person_id or {})
+    updated_at = _utc_now_iso()
+    persons: list[PersonRecord] = []
+    for person_id, members in grouped.items():
+        key_face = max(members, key=_key_face_sort_key)
+        center_embedding = compute_cluster_center(
+            np.stack([member.embedding for member in members], axis=0)
+        )
+        sample_count = len(members)
+        persons.append(
+            PersonRecord(
+                person_id=person_id,
+                name=resolved_names.get(person_id),
+                key_face_id=key_face.face_id,
+                face_count=sample_count,
+                center_embedding=center_embedding,
+                created_at=resolved_created_at.get(
+                    person_id,
+                    min((member.detected_at for member in members), default=updated_at),
+                ),
+                updated_at=updated_at,
+                sample_count=sample_count,
+                profile_state=profile_state_for_sample_count(sample_count),
+            )
+        )
+    persons.sort(key=lambda person: (-person.face_count, person.created_at))
+    return persons
 
 
 def canonicalize_cluster_identities(
@@ -280,31 +342,16 @@ def canonicalize_cluster_identities(
 
     updated_faces = list(faces)
     faces_by_face_id = {face.face_id: index for index, face in enumerate(faces)}
-    canonical_persons: list[PersonRecord] = []
     for canonical_id, members in canonical_members.items():
         if not members:
             continue
-        key_face = max(members, key=_key_face_sort_key)
-        center_embedding = compute_cluster_center(
-            np.stack([member.embedding for member in members], axis=0)
-        )
-        profile = profiles.get(canonical_id)
-        updated_at = _utc_now_iso()
-        canonical_persons.append(
-            PersonRecord(
-                person_id=canonical_id,
-                name=profile.name if profile is not None else canonical_names.get(canonical_id),
-                key_face_id=key_face.face_id,
-                face_count=len(members),
-                center_embedding=center_embedding,
-                created_at=profile.created_at if profile is not None else canonical_created_at[canonical_id],
-                updated_at=updated_at,
-            )
-        )
         for member in members:
             updated_faces[faces_by_face_id[member.face_id]] = replace(member, person_id=canonical_id)
-
-    canonical_persons.sort(key=lambda person: (-person.face_count, person.created_at))
+    canonical_persons = build_person_records_from_faces(
+        updated_faces,
+        names_by_person_id=canonical_names,
+        created_at_by_person_id=canonical_created_at,
+    )
     return updated_faces, canonical_persons
 
 
@@ -334,6 +381,8 @@ def resolve_canonical_person_id(
     best_profile_id: str | None = None
     best_distance = float("inf")
     for profile in profiles.values():
+        if str(profile.profile_state or "unstable") != "stable":
+            continue
         if profile.embedding_dim <= 0 or profile.center_embedding.size == 0:
             continue
         if profile.center_embedding.shape != person.center_embedding.shape:
@@ -449,6 +498,28 @@ def _key_face_sort_key(face: FaceRecord) -> tuple[float, int]:
 
 def _quantize_value(value: float, step: int) -> int:
     return int(round(float(value) / float(step)) * step)
+
+
+def _build_face_analysis_init_error(
+    *,
+    feature_name: str,
+    model_pack: str,
+    model_dir: Path,
+    exc: Exception,
+) -> RuntimeError:
+    reason = str(exc).strip() or exc.__class__.__name__
+    model_pack_dir = model_dir / model_pack
+    if not model_pack_dir.exists():
+        return RuntimeError(
+            f"{feature_name} unavailable: InsightFace model '{model_pack}' is not cached at "
+            f"'{model_pack_dir}'. Initialization/download failed ({reason}). "
+            f"Allow one download from github.com or copy an existing '{model_pack}' model "
+            f"folder into '{model_dir}', then retry."
+        )
+    return RuntimeError(
+        f"{feature_name} unavailable: failed to initialize InsightFace model "
+        f"'{model_pack}' from '{model_pack_dir}' ({reason})."
+    )
 
 
 def _resolve_execution_providers() -> list[str]:

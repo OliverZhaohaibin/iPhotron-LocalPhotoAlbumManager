@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import sqlite3
+import threading
+import time
 from pathlib import Path
 import pytest
 from iPhoto.cache.index_store import (
@@ -125,6 +127,274 @@ class TestGlobalRepositorySingleton:
         assert rows["asset-photo"]["face_status"] == "retry"
         assert rows["asset-video"]["face_status"] == "done"
         assert repo.count_by_face_status() == {"retry": 1, "done": 1}
+
+    def test_merge_scan_rows_preserves_face_status_and_library_state_for_same_asset(
+        self, tmp_path: Path
+    ) -> None:
+        repo = get_global_repository(tmp_path)
+        repo.write_rows(
+            [
+                {
+                    "rel": "album/photo.jpg",
+                    "id": "asset-photo",
+                    "media_type": 0,
+                    "face_status": "done",
+                    "is_favorite": 1,
+                    "original_rel_path": "imports/photo.jpg",
+                    "original_album_id": "trash-album",
+                    "original_album_subpath": "trash/subpath",
+                    "live_role": 1,
+                    "live_partner_rel": "album/photo.mov",
+                }
+            ]
+        )
+
+        merged_rows = repo.merge_scan_rows(
+            [
+                {
+                    "rel": "album/photo.jpg",
+                    "id": "asset-photo",
+                    "media_type": 0,
+                    "bytes": 123,
+                }
+            ]
+        )
+
+        assert merged_rows[0]["face_status"] == "done"
+        row = repo.get_rows_by_ids(["asset-photo"])["asset-photo"]
+        assert row["face_status"] == "done"
+        assert row["is_favorite"] == 1
+        assert row["original_rel_path"] == "imports/photo.jpg"
+        assert row["original_album_id"] == "trash-album"
+        assert row["original_album_subpath"] == "trash/subpath"
+        assert row["live_role"] == 1
+        assert row["live_partner_rel"] == "album/photo.mov"
+
+    def test_merge_scan_rows_resets_face_status_when_asset_id_changes(self, tmp_path: Path) -> None:
+        repo = get_global_repository(tmp_path)
+        repo.write_rows(
+            [
+                {
+                    "rel": "album/photo.jpg",
+                    "id": "asset-old",
+                    "media_type": 0,
+                    "face_status": "done",
+                    "is_favorite": 1,
+                }
+            ]
+        )
+
+        merged_rows = repo.merge_scan_rows(
+            [
+                {
+                    "rel": "album/photo.jpg",
+                    "id": "asset-new",
+                    "media_type": 0,
+                    "bytes": 456,
+                }
+            ]
+        )
+
+        assert merged_rows[0]["face_status"] == "pending"
+        row = repo.get_rows_by_ids(["asset-new"])["asset-new"]
+        assert row["face_status"] == "pending"
+        assert row["is_favorite"] == 1
+
+    def test_merge_scan_rows_resets_failed_face_status_for_same_asset(self, tmp_path: Path) -> None:
+        repo = get_global_repository(tmp_path)
+        repo.write_rows(
+            [
+                {
+                    "rel": "album/photo.jpg",
+                    "id": "asset-photo",
+                    "media_type": 0,
+                    "face_status": "failed",
+                }
+            ]
+        )
+
+        merged_rows = repo.merge_scan_rows(
+            [
+                {
+                    "rel": "album/photo.jpg",
+                    "id": "asset-photo",
+                    "media_type": 0,
+                    "bytes": 456,
+                }
+            ]
+        )
+
+        assert merged_rows[0]["face_status"] == "pending"
+        row = repo.get_rows_by_ids(["asset-photo"])["asset-photo"]
+        assert row["face_status"] == "pending"
+
+    def test_merge_scan_rows_preserves_live_role_and_partner_rel_for_changed_asset_id(
+        self, tmp_path: Path
+    ) -> None:
+        repo = get_global_repository(tmp_path)
+        repo.write_rows(
+            [
+                {
+                    "rel": "album/photo.jpg",
+                    "id": "asset-old",
+                    "media_type": 0,
+                    "face_status": "skipped",
+                    "live_role": 1,
+                    "live_partner_rel": "album/photo.mov",
+                }
+            ]
+        )
+
+        merged_rows = repo.merge_scan_rows(
+            [
+                {
+                    "rel": "album/photo.jpg",
+                    "id": "asset-new",
+                    "media_type": 0,
+                }
+            ]
+        )
+
+        assert merged_rows[0]["live_role"] == 1
+        assert merged_rows[0]["live_partner_rel"] == "album/photo.mov"
+        assert merged_rows[0]["face_status"] == "pending"
+
+    def test_merge_scan_rows_blocks_competing_writer_until_commit(self, tmp_path: Path) -> None:
+        repo = get_global_repository(tmp_path)
+        repo.write_rows(
+            [
+                {
+                    "rel": "album/photo.jpg",
+                    "id": "asset-photo",
+                    "media_type": 0,
+                    "face_status": "done",
+                    "is_favorite": 1,
+                }
+            ]
+        )
+
+        original_insert_rows = repo._insert_rows
+        insert_started = threading.Event()
+        allow_insert = threading.Event()
+        merge_finished = threading.Event()
+        update_finished = threading.Event()
+        merge_error: list[BaseException] = []
+        update_error: list[BaseException] = []
+
+        def blocking_insert(conn, rows):
+            insert_started.set()
+            if not allow_insert.wait(timeout=5):
+                raise TimeoutError("Timed out waiting to release merge_scan_rows insert")
+            return original_insert_rows(conn, rows)
+
+        repo._insert_rows = blocking_insert
+
+        def run_merge() -> None:
+            try:
+                repo.merge_scan_rows(
+                    [
+                        {
+                            "rel": "album/photo.jpg",
+                            "id": "asset-photo",
+                            "media_type": 0,
+                            "bytes": 123,
+                        }
+                    ]
+                )
+            except BaseException as exc:  # pragma: no cover - surfaced in assertions
+                merge_error.append(exc)
+            finally:
+                merge_finished.set()
+
+        def run_update() -> None:
+            try:
+                repo.update_face_status("asset-photo", "retry")
+            except BaseException as exc:  # pragma: no cover - surfaced in assertions
+                update_error.append(exc)
+            finally:
+                update_finished.set()
+
+        merge_thread = threading.Thread(target=run_merge, name="merge-scan-rows")
+        update_thread = threading.Thread(target=run_update, name="update-face-status")
+        merge_thread.start()
+        assert insert_started.wait(timeout=5), "merge_scan_rows never reached the write window"
+
+        update_thread.start()
+        time.sleep(0.2)
+        assert update_finished.is_set() is False
+
+        allow_insert.set()
+        merge_thread.join(timeout=5)
+        update_thread.join(timeout=5)
+
+        repo._insert_rows = original_insert_rows
+
+        assert merge_finished.is_set() is True
+        assert update_finished.is_set() is True
+        assert merge_error == []
+        assert update_error == []
+        row = repo.get_rows_by_ids(["asset-photo"])["asset-photo"]
+        assert row["face_status"] == "retry"
+        assert row["is_favorite"] == 1
+
+    def test_merge_scan_rows_rolls_back_when_interrupted_mid_write(
+        self, tmp_path: Path
+    ) -> None:
+        repo = get_global_repository(tmp_path)
+        repo.write_rows(
+            [
+                {
+                    "rel": "album/photo.jpg",
+                    "id": "asset-photo",
+                    "media_type": 0,
+                    "face_status": "done",
+                    "bytes": 100,
+                },
+                {
+                    "rel": "album/keep.jpg",
+                    "id": "asset-keep",
+                    "media_type": 0,
+                    "face_status": "retry",
+                    "bytes": 200,
+                },
+            ]
+        )
+
+        original_insert_rows = repo._insert_rows
+
+        def interrupted_insert(conn, rows):
+            rows_list = list(rows)
+            original_insert_rows(conn, rows_list[:1])
+            raise InterruptedError("Simulated interruption during merge_scan_rows")
+
+        repo._insert_rows = interrupted_insert
+
+        with pytest.raises(InterruptedError, match="Simulated interruption"):
+            repo.merge_scan_rows(
+                [
+                    {
+                        "rel": "album/photo.jpg",
+                        "id": "asset-photo",
+                        "media_type": 0,
+                        "bytes": 999,
+                    },
+                    {
+                        "rel": "album/new.jpg",
+                        "id": "asset-new",
+                        "media_type": 0,
+                        "bytes": 300,
+                    },
+                ]
+            )
+
+        repo._insert_rows = original_insert_rows
+
+        rows = repo.get_rows_by_ids(["asset-photo", "asset-keep", "asset-new"])
+        assert rows["asset-photo"]["face_status"] == "done"
+        assert rows["asset-photo"]["bytes"] == 100
+        assert rows["asset-keep"]["face_status"] == "retry"
+        assert rows["asset-keep"]["bytes"] == 200
+        assert "asset-new" not in rows
 
 
 class TestIdempotentWrites:

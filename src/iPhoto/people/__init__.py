@@ -27,6 +27,7 @@ __all__ = [
     "PersonSummary",
     "PersonRecord",
     "FaceRecord",
+    "ManualFaceRecord",
     "FaceRepository",
     "FaceStateRepository",
     "face_library_paths",
@@ -36,6 +37,7 @@ __all__ = [
 def __getattr__(name: str):
     if name in {
         "FaceRecord",
+        "ManualFaceRecord",
         "FaceRepository",
         "FaceStateRepository",
         "PersonRecord",
@@ -45,12 +47,14 @@ def __getattr__(name: str):
             FaceRecord,
             FaceRepository,
             FaceStateRepository,
+            ManualFaceRecord,
             PersonRecord,
             PersonSummary,
         )
 
         return {
             "FaceRecord": FaceRecord,
+            "ManualFaceRecord": ManualFaceRecord,
             "FaceRepository": FaceRepository,
             "FaceStateRepository": FaceStateRepository,
             "PersonRecord": PersonRecord,

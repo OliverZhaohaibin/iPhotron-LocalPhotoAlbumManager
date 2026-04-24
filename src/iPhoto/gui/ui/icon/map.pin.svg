@@ -1,0 +1,105 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <!-- 红头渐变 -->
+    <radialGradient id="headGrad" cx="34%" cy="28%" r="75%">
+      <stop offset="0%" stop-color="#ff6a58"/>
+      <stop offset="18%" stop-color="#ff4b31"/>
+      <stop offset="72%" stop-color="#ff2605"/>
+      <stop offset="100%" stop-color="#f04814"/>
+    </radialGradient>
+
+    <!-- 更深的针杆金属渐变 -->
+    <linearGradient id="shaftGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#8c8c84"/>
+      <stop offset="22%" stop-color="#7a7a73"/>
+      <stop offset="55%" stop-color="#62625d"/>
+      <stop offset="100%" stop-color="#474742"/>
+    </linearGradient>
+
+    <!-- 更深的阴影模糊 -->
+    <filter id="shadowBlur" x="-60%" y="-60%" width="260%" height="260%">
+      <feGaussianBlur stdDeviation="12"/>
+    </filter>
+
+    <!-- 接地点轻微柔化 -->
+    <filter id="groundBlur" x="-100%" y="-100%" width="300%" height="300%">
+      <feGaussianBlur stdDeviation="2"/>
+    </filter>
+  </defs>
+
+  <!-- =========================
+       阴影（加深）
+       ========================= -->
+  <g filter="url(#shadowBlur)">
+    <!-- 头部阴影：右侧偏椭圆范围 -->
+    <ellipse
+      cx="344"
+      cy="232"
+      rx="76"
+      ry="44"
+      fill="#555555"
+      opacity="0.34"/>
+
+    <!-- 阴影下方左侧那条较窄的拖影 -->
+    <path
+      d="
+        M 287 272
+        C 283 288, 281 306, 279 326
+        C 277 347, 272 368, 266 387
+        L 270 389
+        C 278 367, 284 346, 287 327
+        C 290 307, 294 289, 300 274
+        Z"
+      fill="#4f4f4f"
+      opacity="0.30"/>
+
+    <!-- 阴影下方右侧那条较宽的拖影 -->
+    <path
+      d="
+        M 309 273
+        C 302 290, 294 309, 287 328
+        C 280 348, 273 370, 264 398
+        L 270 396
+        C 279 372, 288 351, 298 333
+        C 309 314, 321 293, 332 276
+        Z"
+      fill="#474747"
+      opacity="0.32"/>
+  </g>
+
+  <!-- =========================
+       地面深色圆圈（在针杆后）
+       ========================= -->
+  <ellipse cx="256" cy="418" rx="18" ry="6" fill="#1f1f1f" opacity="0.96"/>
+  <ellipse cx="256" cy="420" rx="11" ry="3.1" fill="#666666" opacity="0.18" filter="url(#groundBlur)"/>
+
+  <!-- =========================
+       针杆（加深 + 黑色描边）
+       ========================= -->
+  <rect
+    x="249"
+    y="205"
+    width="14"
+    height="213"
+    rx="6.5"
+    fill="url(#shaftGrad)"
+    stroke="#111111"
+    stroke-width="2.2"
+  />
+
+  <!-- =========================
+       红头
+       ========================= -->
+  <circle
+    cx="256"
+    cy="136"
+    r="74"
+    fill="url(#headGrad)"
+    stroke="#df7b35"
+    stroke-width="2.2"
+  />
+
+  <!-- 高光 -->
+  <circle cx="226" cy="104" r="17.5" fill="#ffffff" opacity="0.96"/>
+  <circle cx="220" cy="97" r="6.2" fill="#ffffff" opacity="0.34"/>
+</svg>

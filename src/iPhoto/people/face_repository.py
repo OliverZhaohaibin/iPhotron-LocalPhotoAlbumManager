@@ -2,14 +2,23 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 import sqlite3
+from collections import defaultdict
 from contextlib import closing
 from pathlib import Path
 from typing import Iterable
 
 import numpy as np
 
-from .records import FaceRecord, PeopleGroupRecord, PersonRecord, PersonSummary
+from .records import (
+    AssetFaceAnnotation,
+    FaceRecord,
+    ManualFaceRecord,
+    PeopleGroupRecord,
+    PersonRecord,
+    PersonSummary,
+)
 from .repository_utils import (
     _deserialize_embedding,
     _key_face_sort_key,
@@ -18,8 +27,18 @@ from .repository_utils import (
     _unique_person_ids,
     _utc_now_iso,
     compute_cluster_center,
+    profile_state_for_sample_count,
 )
 from .state_repository import FaceStateRepository
+
+
+@dataclass(frozen=True)
+class FaceMutationResult:
+    changed_asset_ids: tuple[str, ...] = ()
+    changed_person_ids: tuple[str, ...] = ()
+    changed_group_ids: tuple[str, ...] = ()
+    person_redirects: dict[str, str] = field(default_factory=dict)
+    group_redirects: dict[str, str | None] = field(default_factory=dict)
 
 
 class FaceRepository:
@@ -42,11 +61,33 @@ class FaceRepository:
         if self._state_repo is not None:
             self._state_repo.initialize()
 
-    def replace_all(self, faces: list[FaceRecord], persons: list[PersonRecord]) -> None:
+    def replace_all(
+        self,
+        faces: list[FaceRecord],
+        persons: list[PersonRecord],
+        *,
+        sync_runtime_state: bool = True,
+    ) -> None:
         self.initialize()
         with closing(self._connect()) as conn:
             conn.execute("DELETE FROM persons")
             conn.execute("DELETE FROM faces")
+            person_rows = []
+            for person in persons:
+                sample_count = max(int(person.sample_count), int(person.face_count))
+                person_rows.append(
+                    (
+                        person.person_id,
+                        _normalize_name(person.name),
+                        person.key_face_id,
+                        person.face_count,
+                        _serialize_embedding(person.center_embedding),
+                        person.created_at,
+                        person.updated_at,
+                        sample_count,
+                        profile_state_for_sample_count(sample_count),
+                    )
+                )
             conn.executemany(
                 """
                 INSERT INTO faces (
@@ -80,26 +121,21 @@ class FaceRepository:
             conn.executemany(
                 """
                 INSERT INTO persons (
-                    person_id, name, key_face_id, face_count, center_embedding, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    person_id, name, key_face_id, face_count, center_embedding,
+                    created_at, updated_at, sample_count, profile_state
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                [
-                    (
-                        person.person_id,
-                        _normalize_name(person.name),
-                        person.key_face_id,
-                        person.face_count,
-                        _serialize_embedding(person.center_embedding),
-                        person.created_at,
-                        person.updated_at,
-                    )
-                    for person in persons
-                ],
+                person_rows,
             )
             conn.commit()
-        if self._state_repo is not None:
-            self._sync_person_cover_defaults()
-            self.refresh_all_group_assets()
+        if sync_runtime_state:
+            self.sync_runtime_state()
+
+    def sync_runtime_state(self) -> None:
+        if self._state_repo is None:
+            return
+        self._sync_person_cover_defaults()
+        self.refresh_all_group_assets()
 
     def get_all_faces(self) -> list[FaceRecord]:
         self.initialize()
@@ -112,7 +148,56 @@ class FaceRepository:
                 FROM faces
                 ORDER BY detected_at ASC, face_id ASC
                 """).fetchall()
-        return [self._face_from_row(row) for row in rows]
+        rejected_face_keys: set[str] = set()
+        if self._state_repo is not None:
+            rejected_face_keys = self._state_repo.get_rejected_face_keys(
+                row["face_key"] for row in rows if row["face_key"]
+            )
+        return [
+            self._face_from_row(row)
+            for row in rows
+            if row["face_key"] not in rejected_face_keys
+        ]
+
+    def get_faces_by_asset_id(self, asset_id: str) -> list[FaceRecord]:
+        self.initialize()
+        with closing(self._connect()) as conn:
+            rows = conn.execute(
+                """
+                SELECT
+                    face_id, face_key, asset_id, asset_rel, box_x, box_y, box_w, box_h,
+                    confidence, embedding, embedding_dim, thumbnail_path, person_id,
+                    detected_at, image_width, image_height
+                FROM faces
+                WHERE asset_id = ?
+                ORDER BY detected_at ASC, face_id ASC
+                """,
+                (asset_id,),
+            ).fetchall()
+        rejected_face_keys: set[str] = set()
+        if self._state_repo is not None:
+            rejected_face_keys = self._state_repo.get_rejected_face_keys(
+                row["face_key"] for row in rows if row["face_key"]
+            )
+        return [
+            self._face_from_row(row)
+            for row in rows
+            if row["face_key"] not in rejected_face_keys
+        ]
+
+    def get_all_person_records(self) -> list[PersonRecord]:
+        self.initialize()
+        with closing(self._connect()) as conn:
+            rows = conn.execute(
+                """
+                SELECT
+                    person_id, name, key_face_id, face_count, center_embedding,
+                    created_at, updated_at, sample_count, profile_state
+                FROM persons
+                ORDER BY created_at ASC, person_id ASC
+                """
+            ).fetchall()
+        return [self._person_from_row(row) for row in rows]
 
     def remove_faces_for_assets(
         self,
@@ -182,7 +267,7 @@ class FaceRepository:
             self._sync_person_cover_defaults()
             self.refresh_all_group_assets()
 
-    def get_person_summaries(self) -> list[PersonSummary]:
+    def get_person_summaries(self, *, include_hidden: bool = False) -> list[PersonSummary]:
         self.initialize()
         with closing(self._connect()) as conn:
             rows = conn.execute("""
@@ -200,29 +285,65 @@ class FaceRepository:
                 LEFT JOIN faces ON faces.face_id = persons.key_face_id
                 ORDER BY persons.face_count DESC, persons.created_at ASC
                 """).fetchall()
-        cover_paths: dict[str, str] = {}
+        auto_rows_by_person_id = {str(row["person_id"]): row for row in rows if row["person_id"]}
+        manual_faces_by_person_id: dict[str, list[ManualFaceRecord]] = defaultdict(list)
+        profile_map = {}
         order_map: dict[str, int] = {}
+        hidden_map: dict[str, bool] = {}
         if self._state_repo is not None:
+            for face in self._state_repo.get_manual_faces():
+                manual_faces_by_person_id[face.person_id].append(face)
+            profile_map = {profile.person_id: profile for profile in self._state_repo.get_profiles()}
+        person_ids = set(auto_rows_by_person_id) | set(manual_faces_by_person_id)
+        cover_paths: dict[str, str] = {}
+        if self._state_repo is not None and person_ids:
             cover_paths = self._state_repo.get_person_cover_thumbnail_map(
-                str(row["person_id"]) for row in rows
+                person_ids
             )
-            order_map = self._state_repo.get_person_order_map(str(row["person_id"]) for row in rows)
+            order_map = self._state_repo.get_person_order_map(person_ids)
+            hidden_map = self._state_repo.get_person_hidden_map(person_ids)
         summaries: list[PersonSummary] = []
-        for row in rows:
-            thumbnail_path = cover_paths.get(str(row["person_id"])) or row["thumbnail_path"]
+        for person_id in person_ids:
+            row = auto_rows_by_person_id.get(person_id)
+            manual_faces = manual_faces_by_person_id.get(person_id, [])
+            profile = profile_map.get(person_id)
+            auto_count = int(row["face_count"]) if row is not None else 0
+            face_count = auto_count + len(manual_faces)
+            if face_count <= 0:
+                continue
+            key_face_id = (
+                str(row["key_face_id"])
+                if row is not None and row["key_face_id"]
+                else manual_faces[0].face_id
+            )
+            name = row["name"] if row is not None else None
+            if name is None and profile is not None:
+                name = profile.name
+            created_at = row["created_at"] if row is not None else None
+            if created_at is None and profile is not None:
+                created_at = profile.created_at
+            if created_at is None:
+                created_at = min((face.created_at for face in manual_faces), default=_utc_now_iso())
+            thumbnail_path = cover_paths.get(person_id)
+            if not thumbnail_path and row is not None:
+                thumbnail_path = row["thumbnail_path"]
+            if not thumbnail_path and manual_faces:
+                thumbnail_path = manual_faces[0].thumbnail_path
             resolved_thumbnail: Path | None = None
             if thumbnail_path:
                 resolved_thumbnail = (self._db_path.parent / thumbnail_path).resolve()
             summaries.append(
                 PersonSummary(
-                    person_id=row["person_id"],
-                    name=row["name"],
-                    key_face_id=row["key_face_id"],
-                    face_count=int(row["face_count"]),
+                    person_id=person_id,
+                    name=name,
+                    key_face_id=key_face_id,
+                    face_count=face_count,
                     thumbnail_path=resolved_thumbnail,
-                    created_at=row["created_at"],
+                    created_at=str(created_at),
+                    is_hidden=bool(hidden_map.get(person_id, False)),
                 )
             )
+        summaries.sort(key=lambda summary: (-summary.face_count, summary.created_at, summary.person_id))
         if order_map:
             fallback_order = {summary.person_id: index for index, summary in enumerate(summaries)}
             summaries.sort(
@@ -231,10 +352,34 @@ class FaceRepository:
                     fallback_order[summary.person_id],
                 )
             )
+        if not include_hidden:
+            summaries = [summary for summary in summaries if not summary.is_hidden]
         return summaries
 
-    def get_asset_ids_by_person(self, person_id: str) -> list[str]:
+    def is_person_hidden(self, person_id: str) -> bool:
+        if self._state_repo is None:
+            return False
+        return self._state_repo.is_person_hidden(person_id)
+
+    def set_person_hidden(self, person_id: str, hidden: bool) -> bool:
+        if self._state_repo is None or not person_id:
+            return False
         self.initialize()
+        with closing(self._connect()) as conn:
+            row = conn.execute(
+                "SELECT 1 FROM persons WHERE person_id = ?",
+                (person_id,),
+            ).fetchone()
+        if row is None and not self._state_repo.get_manual_faces_for_persons([person_id]):
+            return False
+        self._state_repo.set_person_hidden(person_id, hidden)
+        return True
+
+    def get_asset_ids_by_person(self, person_id: str) -> list[str]:
+        if not person_id:
+            return []
+        self.initialize()
+        asset_dates: dict[str, str] = {}
         with closing(self._connect()) as conn:
             rows = conn.execute(
                 """
@@ -246,7 +391,145 @@ class FaceRepository:
                 """,
                 (person_id,),
             ).fetchall()
-        return [str(row["asset_id"]) for row in rows if row["asset_id"]]
+        for row in rows:
+            if row["asset_id"]:
+                asset_dates[str(row["asset_id"])] = str(row["last_detected_at"])
+        if self._state_repo is not None:
+            for face in self._state_repo.get_manual_faces_for_persons([person_id]):
+                previous = asset_dates.get(face.asset_id)
+                if previous is None or face.created_at > previous:
+                    asset_dates[face.asset_id] = face.created_at
+        ordered = sorted(asset_dates.items(), key=lambda item: item[0])
+        ordered = sorted(ordered, key=lambda item: item[1], reverse=True)
+        return [asset_id for asset_id, _last_seen in ordered]
+
+    def get_person_ids_for_asset_ids(self, asset_ids: Iterable[str]) -> list[str]:
+        ids = [str(asset_id) for asset_id in asset_ids if asset_id]
+        if not ids:
+            return []
+        self.initialize()
+        # Use a set to deduplicate person IDs across chunks before sorting.
+        chunk_size = 900
+        person_ids: set[str] = set()
+        with closing(self._connect()) as conn:
+            for start in range(0, len(ids), chunk_size):
+                chunk = ids[start : start + chunk_size]
+                placeholders = ", ".join(["?"] * len(chunk))
+                rows = conn.execute(
+                    f"""
+                    SELECT DISTINCT person_id
+                    FROM faces
+                    WHERE asset_id IN ({placeholders}) AND person_id IS NOT NULL
+                    """,
+                    chunk,
+                ).fetchall()
+                person_ids.update(str(row["person_id"]) for row in rows if row["person_id"])
+        if self._state_repo is not None:
+            person_ids.update(self._state_repo.get_manual_person_ids_for_asset_ids(ids))
+        return sorted(person_ids)
+
+    def list_asset_face_annotations(self, asset_id: str) -> list[AssetFaceAnnotation]:
+        if not asset_id:
+            return []
+        self.initialize()
+        with closing(self._connect()) as conn:
+            rows = conn.execute(
+                """
+                SELECT
+                    faces.face_id,
+                    faces.face_key,
+                    faces.person_id,
+                    persons.name,
+                    faces.box_x,
+                    faces.box_y,
+                    faces.box_w,
+                    faces.box_h,
+                    faces.image_width,
+                    faces.image_height,
+                    faces.thumbnail_path
+                FROM faces
+                LEFT JOIN persons ON persons.person_id = faces.person_id
+                WHERE faces.asset_id = ?
+                ORDER BY faces.box_x ASC, faces.box_y ASC, faces.face_id ASC
+                """,
+                (asset_id,),
+            ).fetchall()
+        rejected_face_keys: set[str] = set()
+        if self._state_repo is not None:
+            rejected_face_keys = self._state_repo.get_rejected_face_keys(
+                row["face_key"] for row in rows if row["face_key"]
+            )
+        annotations = [
+            AssetFaceAnnotation(
+                face_id=str(row["face_id"]),
+                person_id=str(row["person_id"]) if row["person_id"] else None,
+                display_name=row["name"],
+                box_x=int(row["box_x"]),
+                box_y=int(row["box_y"]),
+                box_w=int(row["box_w"]),
+                box_h=int(row["box_h"]),
+                image_width=int(row["image_width"]),
+                image_height=int(row["image_height"]),
+                thumbnail_path=(
+                    (self._db_path.parent / str(row["thumbnail_path"])).resolve()
+                    if row["thumbnail_path"]
+                    else None
+                ),
+                is_manual=False,
+            )
+            for row in rows
+            if row["face_id"] and row["face_key"] not in rejected_face_keys
+        ]
+        if self._state_repo is not None:
+            manual_faces = self._state_repo.get_manual_faces_for_asset(asset_id)
+            names = self._state_repo.get_profile_name_map(
+                face.person_id for face in manual_faces
+            )
+            missing_name_ids = [
+                face.person_id
+                for face in manual_faces
+                if face.person_id not in names or names[face.person_id] is None
+            ]
+            if missing_name_ids:
+                placeholders = ", ".join(["?"] * len(set(missing_name_ids)))
+                with closing(self._connect()) as conn:
+                    name_rows = conn.execute(
+                        f"""
+                        SELECT person_id, name
+                        FROM persons
+                        WHERE person_id IN ({placeholders})
+                        """,
+                        list(dict.fromkeys(missing_name_ids)),
+                    ).fetchall()
+                names.update(
+                    {
+                        str(row["person_id"]): row["name"]
+                        for row in name_rows
+                        if row["person_id"] and row["name"] is not None
+                    }
+                )
+            annotations.extend(
+                AssetFaceAnnotation(
+                    face_id=face.face_id,
+                    person_id=face.person_id,
+                    display_name=names.get(face.person_id),
+                    box_x=face.box_x,
+                    box_y=face.box_y,
+                    box_w=face.box_w,
+                    box_h=face.box_h,
+                    image_width=face.image_width,
+                    image_height=face.image_height,
+                    thumbnail_path=(
+                        (self._db_path.parent / face.thumbnail_path).resolve()
+                        if face.thumbnail_path
+                        else None
+                    ),
+                    is_manual=True,
+                )
+                for face in manual_faces
+            )
+        annotations.sort(key=lambda face: (face.box_x, face.box_y, face.face_id))
+        return annotations
 
     def rename_person(self, person_id: str, name_or_none: str | None) -> None:
         self.initialize()
@@ -275,7 +558,17 @@ class FaceRepository:
                 (person_id, face_id),
             ).fetchone()
         if row is None:
-            return False
+            manual_face = self._state_repo.get_manual_face(face_id)
+            if manual_face is None or manual_face.person_id != person_id:
+                return False
+            self._state_repo.set_person_cover(
+                person_id,
+                face_id=manual_face.face_id,
+                face_key=None,
+                asset_id=manual_face.asset_id,
+                thumbnail_path=manual_face.thumbnail_path,
+            )
+            return True
         self._state_repo.set_person_cover(
             person_id,
             face_id=row["face_id"],
@@ -290,11 +583,36 @@ class FaceRepository:
             return
         self._state_repo.set_person_order(person_ids)
 
+    def set_group_order(self, group_ids: Iterable[str]) -> None:
+        if self._state_repo is None:
+            return
+        self._state_repo.set_group_order(group_ids)
+
     def merge_persons(self, source_person_id: str, target_person_id: str) -> bool:
+        merged, _group_redirects = self.merge_persons_with_redirects(
+            source_person_id,
+            target_person_id,
+        )
+        return merged
+
+    def merge_persons_with_redirects(
+        self,
+        source_person_id: str,
+        target_person_id: str,
+    ) -> tuple[bool, dict[str, str | None]]:
         if not source_person_id or not target_person_id or source_person_id == target_person_id:
-            return False
+            return False, {}
+        source_hidden = False
+        target_hidden = False
+        if self._state_repo is not None:
+            hidden_map = self._state_repo.get_person_hidden_map((source_person_id, target_person_id))
+            source_hidden = bool(hidden_map.get(source_person_id, False))
+            target_hidden = bool(hidden_map.get(target_person_id, False))
+            if source_hidden != target_hidden:
+                return False, {}
 
         self.initialize()
+        group_redirects: dict[str, str | None] = {}
         with closing(self._connect()) as conn:
             faces = conn.execute(
                 """
@@ -308,17 +626,34 @@ class FaceRepository:
                 """,
                 (source_person_id, target_person_id),
             ).fetchall()
-            if not faces:
-                return False
-
             source_faces = [
                 self._face_from_row(row) for row in faces if row["person_id"] == source_person_id
             ]
             target_faces = [
                 self._face_from_row(row) for row in faces if row["person_id"] == target_person_id
             ]
-            if not source_faces or not target_faces:
-                return False
+            manual_source_faces: list[ManualFaceRecord] = []
+            manual_target_faces: list[ManualFaceRecord] = []
+            profile_map = {}
+            if self._state_repo is not None:
+                manual_faces = self._state_repo.get_manual_faces_for_persons(
+                    (source_person_id, target_person_id)
+                )
+                manual_source_faces = [
+                    face for face in manual_faces if face.person_id == source_person_id
+                ]
+                manual_target_faces = [
+                    face for face in manual_faces if face.person_id == target_person_id
+                ]
+                profile_map = {
+                    profile.person_id: profile
+                    for profile in self._state_repo.get_profiles()
+                    if profile.person_id in {source_person_id, target_person_id}
+                }
+            if not (source_faces or manual_source_faces) or not (
+                target_faces or manual_target_faces
+            ):
+                return False, {}
 
             person_rows = conn.execute(
                 """
@@ -330,14 +665,26 @@ class FaceRepository:
             person_map = {row["person_id"]: row for row in person_rows}
             target_person = person_map.get(target_person_id)
             source_person = person_map.get(source_person_id)
+            target_profile = profile_map.get(target_person_id)
+            source_profile = profile_map.get(source_person_id)
             target_name = None
             target_created_at = _utc_now_iso()
             if target_person is not None:
                 target_name = target_person["name"]
                 target_created_at = target_person["created_at"]
+            elif target_profile is not None:
+                target_name = target_profile.name
+                target_created_at = target_profile.created_at
+            elif manual_target_faces:
+                target_created_at = min(face.created_at for face in manual_target_faces)
             elif source_person is not None:
                 target_name = source_person["name"]
                 target_created_at = source_person["created_at"]
+            elif source_profile is not None:
+                target_name = source_profile.name
+                target_created_at = source_profile.created_at
+            elif manual_source_faces:
+                target_created_at = min(face.created_at for face in manual_source_faces)
 
             conn.execute(
                 "UPDATE faces SET person_id = ? WHERE person_id = ?",
@@ -348,47 +695,223 @@ class FaceRepository:
                 FaceRecord(**{**face.__dict__, "person_id": target_person_id})
                 for face in (target_faces + source_faces)
             ]
-            key_face = max(merged_faces, key=_key_face_sort_key)
-            center_embedding = compute_cluster_center(
-                np.stack([face.embedding for face in merged_faces], axis=0)
-            )
+            center_embedding = np.empty((0,), dtype=np.float32)
             updated_at = _utc_now_iso()
-            conn.execute(
-                """
-                INSERT INTO persons (
-                    person_id, name, key_face_id, face_count, center_embedding, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(person_id) DO UPDATE SET
-                    name = excluded.name,
-                    key_face_id = excluded.key_face_id,
-                    face_count = excluded.face_count,
-                    center_embedding = excluded.center_embedding,
-                    updated_at = excluded.updated_at
-                """,
-                (
-                    target_person_id,
-                    _normalize_name(target_name),
-                    key_face.face_id,
-                    len(merged_faces),
-                    _serialize_embedding(center_embedding),
-                    target_created_at,
-                    updated_at,
-                ),
-            )
+            if merged_faces:
+                key_face = max(merged_faces, key=_key_face_sort_key)
+                center_embedding = compute_cluster_center(
+                    np.stack([face.embedding for face in merged_faces], axis=0)
+                )
+                conn.execute(
+                    """
+                    INSERT INTO persons (
+                        person_id, name, key_face_id, face_count, center_embedding,
+                        created_at, updated_at, sample_count, profile_state
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(person_id) DO UPDATE SET
+                        name = excluded.name,
+                        key_face_id = excluded.key_face_id,
+                        face_count = excluded.face_count,
+                        center_embedding = excluded.center_embedding,
+                        updated_at = excluded.updated_at,
+                        sample_count = excluded.sample_count,
+                        profile_state = excluded.profile_state
+                    """,
+                    (
+                        target_person_id,
+                        _normalize_name(target_name),
+                        key_face.face_id,
+                        len(merged_faces),
+                        _serialize_embedding(center_embedding),
+                        target_created_at,
+                        updated_at,
+                        len(merged_faces),
+                        profile_state_for_sample_count(len(merged_faces)),
+                    ),
+                )
+            else:
+                conn.execute("DELETE FROM persons WHERE person_id = ?", (target_person_id,))
             conn.execute("DELETE FROM persons WHERE person_id = ?", (source_person_id,))
             conn.commit()
 
         if self._state_repo is not None:
-            self._state_repo.merge_persons(
+            group_redirects = self._state_repo.merge_persons(
                 source_person_id,
                 target_person_id,
                 center_embedding=center_embedding,
                 target_name=target_name,
                 target_created_at=target_created_at,
+                sample_count=len(merged_faces),
+                hidden_state=source_hidden,
             )
             self._sync_person_cover_defaults()
             self.refresh_all_group_assets()
-        return True
+        return True, group_redirects
+
+    def delete_face(self, face_id: str) -> FaceMutationResult | None:
+        if not face_id:
+            return None
+        self.initialize()
+        with closing(self._connect()) as conn:
+            row = conn.execute(
+                """
+                SELECT
+                    face_id, face_key, asset_id, asset_rel, box_x, box_y, box_w, box_h,
+                    confidence, embedding, embedding_dim, thumbnail_path, person_id,
+                    detected_at, image_width, image_height
+                FROM faces
+                WHERE face_id = ?
+                """,
+                (face_id,),
+            ).fetchone()
+            if row is not None:
+                face = self._face_from_row(row)
+                if not face.person_id:
+                    return None
+                conn.execute("UPDATE faces SET person_id = NULL WHERE face_id = ?", (face_id,))
+                conn.commit()
+                if self._state_repo is not None:
+                    self._state_repo.reject_face_key(
+                        face.face_key,
+                        asset_id=face.asset_id,
+                        asset_rel=face.asset_rel,
+                    )
+                return self._finalize_face_mutation(
+                    changed_asset_ids=(face.asset_id,),
+                    changed_person_ids=(face.person_id,),
+                )
+
+        if self._state_repo is None:
+            return None
+        manual_face = self._state_repo.get_manual_face(face_id)
+        if manual_face is None:
+            return None
+        self._state_repo.delete_manual_face(face_id)
+        return self._finalize_face_mutation(
+            changed_asset_ids=(manual_face.asset_id,),
+            changed_person_ids=(manual_face.person_id,),
+        )
+
+    def move_face_to_person(
+        self,
+        face_id: str,
+        target_person_id: str,
+    ) -> FaceMutationResult | None:
+        if not face_id or not target_person_id:
+            return None
+        self.initialize()
+        with closing(self._connect()) as conn:
+            row = conn.execute(
+                """
+                SELECT
+                    face_id, face_key, asset_id, asset_rel, box_x, box_y, box_w, box_h,
+                    confidence, embedding, embedding_dim, thumbnail_path, person_id,
+                    detected_at, image_width, image_height
+                FROM faces
+                WHERE face_id = ?
+                """,
+                (face_id,),
+            ).fetchone()
+            if row is not None:
+                face = self._face_from_row(row)
+                if not face.person_id or face.person_id == target_person_id:
+                    return None
+                conn.execute(
+                    "UPDATE faces SET person_id = ? WHERE face_id = ?",
+                    (target_person_id, face_id),
+                )
+                conn.commit()
+                if self._state_repo is not None:
+                    self._state_repo.assign_face_key(
+                        face.face_key,
+                        target_person_id,
+                        asset_id=face.asset_id,
+                        asset_rel=face.asset_rel,
+                    )
+                return self._finalize_face_mutation(
+                    changed_asset_ids=(face.asset_id,),
+                    changed_person_ids=(face.person_id, target_person_id),
+                )
+
+        if self._state_repo is None:
+            return None
+        manual_face = self._state_repo.get_manual_face(face_id)
+        if manual_face is None or manual_face.person_id == target_person_id:
+            return None
+        if not self._state_repo.move_manual_face(face_id, target_person_id):
+            return None
+        return self._finalize_face_mutation(
+            changed_asset_ids=(manual_face.asset_id,),
+            changed_person_ids=(manual_face.person_id, target_person_id),
+        )
+
+    def move_face_to_new_person(
+        self,
+        face_id: str,
+        new_person_id: str,
+        new_name: str,
+    ) -> FaceMutationResult | None:
+        normalized_name = _normalize_name(new_name)
+        if not face_id or not new_person_id or not normalized_name:
+            return None
+
+        self.initialize()
+        with closing(self._connect()) as conn:
+            row = conn.execute(
+                """
+                SELECT
+                    face_id, face_key, asset_id, asset_rel, box_x, box_y, box_w, box_h,
+                    confidence, embedding, embedding_dim, thumbnail_path, person_id,
+                    detected_at, image_width, image_height
+                FROM faces
+                WHERE face_id = ?
+                """,
+                (face_id,),
+            ).fetchone()
+            if row is not None:
+                face = self._face_from_row(row)
+                if not face.person_id or face.person_id == new_person_id:
+                    return None
+                conn.execute(
+                    "UPDATE faces SET person_id = ? WHERE face_id = ?",
+                    (new_person_id, face_id),
+                )
+                conn.commit()
+                if self._state_repo is not None:
+                    self._state_repo.assign_face_key(
+                        face.face_key,
+                        new_person_id,
+                        asset_id=face.asset_id,
+                        asset_rel=face.asset_rel,
+                    )
+                    self._state_repo.upsert_person_profile(
+                        new_person_id,
+                        name_or_none=normalized_name,
+                        created_at=face.detected_at,
+                        center_embedding=face.embedding,
+                        sample_count=1,
+                    )
+                return self._finalize_face_mutation(
+                    changed_asset_ids=(face.asset_id,),
+                    changed_person_ids=(face.person_id, new_person_id),
+                )
+
+        if self._state_repo is None:
+            return None
+        manual_face = self._state_repo.get_manual_face(face_id)
+        if manual_face is None or manual_face.person_id == new_person_id:
+            return None
+        self._state_repo.upsert_person_profile(
+            new_person_id,
+            name_or_none=normalized_name,
+            created_at=manual_face.created_at,
+        )
+        if not self._state_repo.move_manual_face(face_id, new_person_id):
+            return None
+        return self._finalize_face_mutation(
+            changed_asset_ids=(manual_face.asset_id,),
+            changed_person_ids=(manual_face.person_id, new_person_id),
+        )
 
     def create_group(self, member_person_ids: Iterable[str]) -> PeopleGroupRecord | None:
         if self._state_repo is None:
@@ -404,6 +927,19 @@ class FaceRepository:
             return []
         self.initialize()
         return self._state_repo.list_groups()
+
+    def delete_group(self, group_id: str) -> tuple[bool, PeopleGroupRecord | None, list[str]]:
+        if self._state_repo is None or not group_id:
+            return False, None, []
+        self.initialize()
+        group = self._state_repo.get_group(group_id)
+        if group is None:
+            return False, None, []
+        asset_ids = self.get_common_asset_ids_for_group(group_id)
+        deleted_group = self._state_repo.delete_group(group_id)
+        if deleted_group is None:
+            return False, None, []
+        return True, deleted_group, asset_ids
 
     def get_group(self, group_id: str) -> PeopleGroupRecord | None:
         if self._state_repo is None:
@@ -428,22 +964,45 @@ class FaceRepository:
             return []
 
         self.initialize()
+        hits_by_asset_id: dict[str, dict[str, tuple[str, int]]] = defaultdict(dict)
         placeholders = ", ".join(["?"] * len(members))
         with closing(self._connect()) as conn:
             rows = conn.execute(
                 f"""
-                SELECT asset_id, MAX(detected_at) AS last_detected_at
+                SELECT
+                    person_id,
+                    asset_id,
+                    MAX(detected_at) AS last_detected_at,
+                    MAX(rowid) AS last_face_rowid
                 FROM faces
                 WHERE person_id IN ({placeholders})
-                GROUP BY asset_id
-                HAVING COUNT(DISTINCT person_id) = ?
-                ORDER BY last_detected_at DESC, asset_id ASC
+                GROUP BY person_id, asset_id
                 """,
-                [*members, len(members)],
+                members,
             ).fetchall()
-        return [
-            (str(row["asset_id"]), str(row["last_detected_at"])) for row in rows if row["asset_id"]
+        for row in rows:
+            if row["person_id"] and row["asset_id"]:
+                hits_by_asset_id[str(row["asset_id"])][str(row["person_id"])] = (
+                    str(row["last_detected_at"]),
+                    int(row["last_face_rowid"] or 0),
+                )
+        if self._state_repo is not None:
+            for face in self._state_repo.get_manual_faces_for_persons(members):
+                person_hits = hits_by_asset_id[face.asset_id]
+                previous = person_hits.get(face.person_id)
+                manual_hit = (face.created_at, 0)
+                if previous is None or manual_hit > previous:
+                    person_hits[face.person_id] = manual_hit
+
+        member_set = set(members)
+        common_rows = [
+            (asset_id, *max(person_hits.values()))
+            for asset_id, person_hits in hits_by_asset_id.items()
+            if member_set.issubset(person_hits)
         ]
+        common_rows = sorted(common_rows, key=lambda item: item[0])
+        common_rows = sorted(common_rows, key=lambda item: (item[1], item[2]), reverse=True)
+        return [(asset_id, last_detected_at) for asset_id, last_detected_at, _rowid in common_rows]
 
     def get_common_asset_ids_for_group(self, group_id: str) -> list[str]:
         if self._state_repo is None:
@@ -512,6 +1071,195 @@ class FaceRepository:
             )
         )
 
+    def _finalize_face_mutation(
+        self,
+        *,
+        changed_asset_ids: Iterable[str],
+        changed_person_ids: Iterable[str],
+    ) -> FaceMutationResult:
+        person_ids = tuple(dict.fromkeys(person_id for person_id in changed_person_ids if person_id))
+        asset_ids = set(asset_id for asset_id in changed_asset_ids if asset_id)
+        group_redirects: dict[str, str | None] = {}
+        changed_group_ids: set[str] = set()
+        active_person_ids: list[str] = []
+
+        if self._state_repo is not None and person_ids:
+            changed_group_ids.update(self._state_repo.list_group_ids_for_people(person_ids))
+
+        for person_id in person_ids:
+            if self._rebuild_runtime_person(person_id):
+                active_person_ids.append(person_id)
+                continue
+            if self._state_repo is not None:
+                group_redirects.update(self._state_repo.remove_person_from_groups(person_id))
+                self._state_repo.delete_person_state(person_id)
+
+        if self._state_repo is not None:
+            for person_id in active_person_ids:
+                self._repair_person_cover(person_id)
+            self._sync_person_cover_defaults()
+            remaining_group_ids = set(self._state_repo.list_group_ids_for_people(active_person_ids))
+            changed_group_ids.update(remaining_group_ids)
+            changed_group_ids.update(group_redirects)
+            changed_group_ids.update(group_id for group_id in group_redirects.values() if group_id)
+            for group_id in changed_group_ids:
+                self.refresh_group_assets(group_id)
+
+        for person_id in active_person_ids:
+            asset_ids.update(self.get_asset_ids_by_person(person_id))
+
+        return FaceMutationResult(
+            changed_asset_ids=tuple(sorted(asset_ids)),
+            changed_person_ids=person_ids,
+            changed_group_ids=tuple(sorted(group_id for group_id in changed_group_ids if group_id)),
+            group_redirects=group_redirects,
+        )
+
+    def _rebuild_runtime_person(self, person_id: str) -> bool:
+        if not person_id:
+            return False
+
+        self.initialize()
+        profile = None
+        manual_faces: list[ManualFaceRecord] = []
+        if self._state_repo is not None:
+            manual_faces = self._state_repo.get_manual_faces_for_persons((person_id,))
+            profile = self._state_repo.get_profile(person_id)
+
+        with closing(self._connect()) as conn:
+            rows = conn.execute(
+                """
+                SELECT
+                    face_id, face_key, asset_id, asset_rel, box_x, box_y, box_w, box_h,
+                    confidence, embedding, embedding_dim, thumbnail_path, person_id,
+                    detected_at, image_width, image_height
+                FROM faces
+                WHERE person_id = ?
+                ORDER BY detected_at ASC, face_id ASC
+                """,
+                (person_id,),
+            ).fetchall()
+            auto_faces = [self._face_from_row(row) for row in rows]
+            existing_person = conn.execute(
+                """
+                SELECT person_id, name, created_at
+                FROM persons
+                WHERE person_id = ?
+                """,
+                (person_id,),
+            ).fetchone()
+
+            if not auto_faces:
+                conn.execute("DELETE FROM persons WHERE person_id = ?", (person_id,))
+                conn.commit()
+                return bool(manual_faces)
+
+            name = existing_person["name"] if existing_person is not None else None
+            if name is None and profile is not None:
+                name = profile.name
+            created_at = existing_person["created_at"] if existing_person is not None else None
+            if created_at is None and profile is not None:
+                created_at = profile.created_at
+            if created_at is None and manual_faces:
+                created_at = min(face.created_at for face in manual_faces)
+            if created_at is None:
+                created_at = min(face.detected_at for face in auto_faces)
+
+            key_face = max(auto_faces, key=_key_face_sort_key)
+            center_embedding = compute_cluster_center(
+                np.stack([face.embedding for face in auto_faces], axis=0)
+            )
+            sample_count = len(auto_faces)
+            updated_at = _utc_now_iso()
+            conn.execute(
+                """
+                INSERT INTO persons (
+                    person_id, name, key_face_id, face_count, center_embedding,
+                    created_at, updated_at, sample_count, profile_state
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(person_id) DO UPDATE SET
+                    name = excluded.name,
+                    key_face_id = excluded.key_face_id,
+                    face_count = excluded.face_count,
+                    center_embedding = excluded.center_embedding,
+                    updated_at = excluded.updated_at,
+                    sample_count = excluded.sample_count,
+                    profile_state = excluded.profile_state
+                """,
+                (
+                    person_id,
+                    _normalize_name(name),
+                    key_face.face_id,
+                    sample_count,
+                    _serialize_embedding(center_embedding),
+                    created_at,
+                    updated_at,
+                    sample_count,
+                    profile_state_for_sample_count(sample_count),
+                ),
+            )
+            conn.commit()
+
+        if self._state_repo is not None:
+            self._state_repo.upsert_person_profile(
+                person_id,
+                name_or_none=name,
+                created_at=created_at,
+                center_embedding=center_embedding,
+                sample_count=sample_count,
+            )
+        return True
+
+    def _repair_person_cover(self, person_id: str) -> None:
+        if self._state_repo is None or not person_id:
+            return
+
+        manual_faces = self._state_repo.get_manual_faces_for_persons((person_id,))
+        has_auto_faces = self._has_auto_faces(person_id)
+        cover = self._state_repo.get_person_cover(person_id)
+        if cover is None:
+            if manual_faces and not has_auto_faces:
+                first_face = manual_faces[0]
+                self._state_repo.set_person_cover(
+                    person_id,
+                    face_id=first_face.face_id,
+                    face_key=None,
+                    asset_id=first_face.asset_id,
+                    thumbnail_path=first_face.thumbnail_path,
+                )
+            return
+
+        valid_auto_faces = {face.face_id: face for face in self.get_faces_by_asset_id(cover.asset_id or "")}
+        valid_manual_faces = {face.face_id: face for face in manual_faces}
+        auto_face = valid_auto_faces.get(cover.face_id or "")
+        if auto_face is not None and auto_face.person_id == person_id:
+            return
+        if cover.face_id in valid_manual_faces:
+            return
+
+        if valid_manual_faces and not has_auto_faces:
+            fallback = next(iter(valid_manual_faces.values()))
+            self._state_repo.set_person_cover(
+                person_id,
+                face_id=fallback.face_id,
+                face_key=None,
+                asset_id=fallback.asset_id,
+                thumbnail_path=fallback.thumbnail_path,
+            )
+            return
+        self._state_repo.delete_person_cover(person_id)
+
+    def _has_auto_faces(self, person_id: str) -> bool:
+        if not person_id:
+            return False
+        self.initialize()
+        with closing(self._connect()) as conn:
+            row = conn.execute(
+                "SELECT 1 FROM faces WHERE person_id = ? LIMIT 1",
+                (person_id,),
+            ).fetchone()
+        return row is not None
+
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self._db_path, check_same_thread=False)
         conn.row_factory = sqlite3.Row
@@ -550,9 +1298,23 @@ class FaceRepository:
                 face_count INTEGER NOT NULL,
                 center_embedding BLOB NOT NULL,
                 created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL
+                updated_at TEXT NOT NULL,
+                sample_count INTEGER NOT NULL DEFAULT 0,
+                profile_state TEXT NOT NULL DEFAULT 'unstable'
             )
             """)
+        FaceRepository._ensure_column(
+            conn,
+            "persons",
+            "sample_count",
+            "INTEGER NOT NULL DEFAULT 0",
+        )
+        FaceRepository._ensure_column(
+            conn,
+            "persons",
+            "profile_state",
+            "TEXT NOT NULL DEFAULT 'unstable'",
+        )
         conn.execute("CREATE INDEX IF NOT EXISTS idx_faces_person_id ON faces(person_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_faces_face_key ON faces(face_key)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_faces_asset_id ON faces(asset_id)")
@@ -578,3 +1340,35 @@ class FaceRepository:
             image_width=int(row["image_width"]),
             image_height=int(row["image_height"]),
         )
+
+    @staticmethod
+    def _person_from_row(row: sqlite3.Row) -> PersonRecord:
+        center_blob = row["center_embedding"]
+        embedding_dim = int(len(center_blob) / 4) if center_blob else 0
+        return PersonRecord(
+            person_id=str(row["person_id"]),
+            name=row["name"],
+            key_face_id=str(row["key_face_id"]),
+            face_count=int(row["face_count"]),
+            center_embedding=_deserialize_embedding(center_blob, embedding_dim),
+            created_at=str(row["created_at"]),
+            updated_at=str(row["updated_at"]),
+            sample_count=int(row["sample_count"] or row["face_count"] or 0),
+            profile_state=str(
+                row["profile_state"]
+                or profile_state_for_sample_count(int(row["sample_count"] or row["face_count"] or 0))
+            ),
+        )
+
+    @staticmethod
+    def _ensure_column(
+        conn: sqlite3.Connection,
+        table_name: str,
+        column_name: str,
+        definition: str,
+    ) -> None:
+        columns = {
+            str(row["name"]) for row in conn.execute(f"PRAGMA table_info({table_name})").fetchall()
+        }
+        if column_name not in columns:
+            conn.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {definition}")

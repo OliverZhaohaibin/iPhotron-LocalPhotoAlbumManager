@@ -603,4 +603,3 @@ class PhotoMapView(QWidget):
 
 
 __all__ = ["PhotoMapView"]
-

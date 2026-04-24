@@ -460,7 +460,13 @@ class LibraryUpdateService(QObject):
             # therefore we flush the global index and ``links.json`` here to
             # mirror the historical facade behaviour before notifying listeners.
             backend._update_index_snapshot(root, materialised_rows, library_root=library_root)
-            backend._ensure_links(root, materialised_rows, library_root=library_root)
+            backend._prune_index_scope(root, materialised_rows, library_root=library_root)
+            # Use backend.pair() so that library-relative rows produced by the
+            # worker are converted to album-relative before being passed to
+            # _ensure_links.  Calling _ensure_links directly with library-relative
+            # rows when library_root is set causes sync_live_roles_to_db to
+            # double-prefix the rel paths (e.g. "album/album/photo.heic").
+            backend.pair(root, library_root=library_root)
         except IPhotoError as exc:
             self.errorRaised.emit(str(exc))
             self.scanFinished.emit(root, False)

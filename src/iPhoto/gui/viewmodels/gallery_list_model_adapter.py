@@ -328,7 +328,11 @@ class GalleryListModelAdapter(QAbstractListModel):
     def _on_row_changed(self, row: int) -> None:
         idx = self.index(row, 0)
         if idx.isValid():
-            self.dataChanged.emit(idx, idx, [Roles.FEATURED, Roles.INFO])
+            self.dataChanged.emit(
+                idx,
+                idx,
+                [Roles.FEATURED, Roles.INFO, Roles.LOCATION, Roles.SIZE],
+            )
 
     def _snapshot_hash(self, count: int) -> bytes:
         digest = hashlib.blake2b(digest_size=16)

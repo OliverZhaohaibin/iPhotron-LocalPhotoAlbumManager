@@ -15,8 +15,10 @@ from PySide6.QtCore import QObject, Qt, Signal
 from PySide6.QtGui import QColor, QImage, QPixmap
 from PySide6.QtWidgets import QApplication, QWidget
 
+from iPhoto.gui.services.pinned_items_service import PinnedItemsService
 from iPhoto.gui.ui.widgets import people_dashboard_cards
 from iPhoto.gui.ui.widgets import people_dashboard_dialogs
+from iPhoto.gui.ui.widgets import people_dashboard_widget
 from iPhoto.gui.ui.widgets.people_dashboard import (
     GroupPeopleDialog,
     MergeConfirmDialog,
@@ -24,6 +26,7 @@ from iPhoto.gui.ui.widgets.people_dashboard import (
 )
 from iPhoto.gui.ui.widgets.people_dashboard_shared import CANVAS_MARGIN
 from iPhoto.people.repository import PeopleGroupSummary, PersonSummary
+from iPhoto.settings.manager import SettingsManager
 
 
 @pytest.fixture(scope="module")
@@ -103,6 +106,45 @@ def test_drag_reorder_skips_persist_when_order_is_unchanged(monkeypatch, qapp: Q
     assert persisted == []
 
 
+def test_drag_reorder_persists_group_order(monkeypatch, qapp: QApplication) -> None:
+    widget = PeopleDashboardWidget()
+    alice = PersonSummary("person-a", "Alice", "face-a", 3, None, "2024-01-01T00:00:00Z")
+    bob = PersonSummary("person-b", "Bob", "face-b", 2, None, "2024-01-01T00:00:01Z")
+    cara = PersonSummary("person-c", "Cara", "face-c", 1, None, "2024-01-01T00:00:02Z")
+    widget._groups = [
+        PeopleGroupSummary(
+            group_id="group-ab",
+            name="Alice and Bob",
+            member_person_ids=("person-a", "person-b"),
+            members=(alice, bob),
+            asset_count=1,
+            cover_asset_path=None,
+            created_at="2024-01-01T00:00:02Z",
+        ),
+        PeopleGroupSummary(
+            group_id="group-bc",
+            name="Bob and Cara",
+            member_person_ids=("person-b", "person-c"),
+            members=(bob, cara),
+            asset_count=1,
+            cover_asset_path=None,
+            created_at="2024-01-01T00:00:03Z",
+        ),
+    ]
+    widget._populate_groups()
+
+    persisted: list[list[str]] = []
+    monkeypatch.setattr(widget._service, "set_group_order", lambda group_ids: persisted.append(list(group_ids)))
+    monkeypatch.setattr(widget._groups_board, "animate_to_layout", lambda: None)
+
+    cards = widget._groups_board.visible_cards()
+    widget._groups_board.top_cards = [cards[1], cards[0]]
+    widget._groups_board._drag_start_order = ("group-ab", "group-bc")
+    widget._groups_board.finish_drag(cards[1])
+
+    assert persisted == [["group-bc", "group-ab"]]
+
+
 def test_people_card_menu_contains_new_group(qapp: QApplication) -> None:
     widget = PeopleDashboardWidget()
     widget._summaries = [
@@ -114,7 +156,17 @@ def test_people_card_menu_contains_new_group(qapp: QApplication) -> None:
     action_texts = [action.text() for action in menu.actions()]
 
     assert "New Group" in action_texts
+    assert "Hide" in action_texts
     assert action_texts.index("New Group") < action_texts.index("Merge Into...")
+
+
+def test_people_card_menu_shows_unhide_for_hidden_person(qapp: QApplication) -> None:
+    widget = PeopleDashboardWidget()
+    summary = PersonSummary("person-a", "Alice", "face-a", 3, None, "2024-01-01T00:00:00Z", True)
+
+    menu = widget._build_card_menu(summary)
+
+    assert "Unhide" in [action.text() for action in menu.actions()]
 
 
 def test_people_card_requests_thumbnail_artwork_immediately(
@@ -190,6 +242,32 @@ def test_group_people_dialog_defaults_and_shift_selects_range(qapp: QApplication
         "person-c",
         "person-d",
     }
+    dialog.close()
+
+
+def test_group_people_dialog_supports_single_selection_mode(qapp: QApplication) -> None:
+    summaries = [
+        PersonSummary("person-a", "Alice", "face-a", 3, None, "2024-01-01T00:00:00Z"),
+        PersonSummary("person-b", "Bob", "face-b", 2, None, "2024-01-01T00:00:01Z"),
+    ]
+    dialog = GroupPeopleDialog(
+        summaries,
+        title_text="Choose Someone Else",
+        prompt_text="Assign this face to",
+        confirm_text="Choose",
+        min_selection=1,
+        max_selection=1,
+    )
+
+    assert dialog.add_button.isEnabled() is False
+
+    dialog._handle_tile_clicked(0, False)
+    assert dialog.selected_person_ids() == ["person-a"]
+    assert dialog.add_button.isEnabled() is True
+
+    dialog._handle_tile_clicked(1, False)
+    assert dialog.selected_person_ids() == ["person-b"]
+
     dialog.close()
 
 
@@ -304,6 +382,32 @@ def test_people_dashboard_popup_theme_uses_window_context(qapp: QApplication) ->
     shell.close()
 
 
+def test_merge_confirm_dialog_respects_light_theme_context(qapp: QApplication) -> None:
+    class Theme:
+        def get_effective_theme_mode(self) -> str:
+            return "light"
+
+    shell = QWidget()
+    shell.coordinator = SimpleNamespace(
+        _context=SimpleNamespace(theme=Theme(), settings=None)
+    )
+    widget = PeopleDashboardWidget(parent=shell)
+    dialog = MergeConfirmDialog(
+        1,
+        parent=widget,
+        title_text="Hide This Person?",
+        body_text="Body",
+        confirm_text="Hide Person",
+    )
+
+    assert dialog._dark_mode is False
+    assert "rgba(255, 255, 255, 0.94)" in dialog._panel.styleSheet()
+
+    dialog.close()
+    widget.close()
+    shell.close()
+
+
 def test_groups_section_appears_above_people_and_emits_activation(qapp: QApplication) -> None:
     widget = PeopleDashboardWidget()
     alice = PersonSummary("person-a", "Alice", "face-a", 3, None, "2024-01-01T00:00:00Z")
@@ -382,3 +486,336 @@ def test_status_message_updates_without_reloading_cards(qapp: QApplication) -> N
 
     assert widget._board.visible_cards()[0] is original_card
     assert "Click a cluster or group card" in widget._message.text()
+
+
+def test_person_menu_shows_pin_action_when_pinned_service_is_available(
+    tmp_path: Path, qapp: QApplication
+) -> None:
+    settings = SettingsManager(path=tmp_path / "settings.json")
+    settings.load()
+    pinned_service = PinnedItemsService(settings)
+    widget = PeopleDashboardWidget()
+    widget._current_library_root = tmp_path
+    widget._service.set_library_root(tmp_path)
+    widget.set_pinned_service(pinned_service)
+    summary = PersonSummary("person-a", "Alice", "face-a", 3, None, "2024-01-01T00:00:00Z")
+
+    menu = widget._build_card_menu(summary)
+
+    assert "Pin" in [action.text() for action in menu.actions()]
+
+
+def test_pin_unnamed_person_prompts_for_name_and_persists_pin(
+    monkeypatch, tmp_path: Path, qapp: QApplication
+) -> None:
+    settings = SettingsManager(path=tmp_path / "settings.json")
+    settings.load()
+    pinned_service = PinnedItemsService(settings)
+    widget = PeopleDashboardWidget()
+    widget._current_library_root = tmp_path
+    widget._service.set_library_root(tmp_path)
+    widget.set_pinned_service(pinned_service)
+    summary = PersonSummary("person-a", None, "face-a", 3, None, "2024-01-01T00:00:00Z")
+
+    renamed: list[tuple[str, str | None]] = []
+    monkeypatch.setattr(widget._service, "rename_cluster", lambda person_id, name: renamed.append((person_id, name)))
+    monkeypatch.setattr(widget, "reload", lambda **_kwargs: None)
+    monkeypatch.setattr(
+        PeopleDashboardWidget,
+        "_prompt_required_person_name",
+        lambda self, _summary: "Alice",
+    )
+
+    widget._toggle_person_pin(summary)
+
+    assert renamed == [("person-a", "Alice")]
+    pinned = pinned_service.items_for_library(tmp_path)
+    assert [(item.kind, item.item_id, item.label) for item in pinned] == [
+        ("person", "person-a", "Alice")
+    ]
+
+
+def test_hidden_person_pin_shows_warning_and_does_not_persist(
+    monkeypatch, tmp_path: Path, qapp: QApplication
+) -> None:
+    settings = SettingsManager(path=tmp_path / "settings.json")
+    settings.load()
+    pinned_service = PinnedItemsService(settings)
+    widget = PeopleDashboardWidget()
+    widget._current_library_root = tmp_path
+    widget._service.set_library_root(tmp_path)
+    widget.set_pinned_service(pinned_service)
+    summary = PersonSummary("person-a", "Alice", "face-a", 3, None, "2024-01-01T00:00:00Z")
+
+    warnings: list[str] = []
+    monkeypatch.setattr(widget._service, "pin_block_reason", lambda _person_id: "Pinned is blocked.")
+    monkeypatch.setattr(people_dashboard_widget.dialogs, "show_warning", lambda _parent, message, title="iPhoto": warnings.append(message))
+
+    widget._toggle_person_pin(summary)
+
+    assert warnings == ["Pinned is blocked."]
+    assert pinned_service.items_for_library(tmp_path) == []
+
+
+def test_group_menu_contains_disband_action(qapp: QApplication) -> None:
+    widget = PeopleDashboardWidget()
+    summary = PeopleGroupSummary(
+        group_id="group-a",
+        name="Alice and Bob",
+        member_person_ids=("person-a", "person-b"),
+        members=(),
+        asset_count=1,
+        cover_asset_path=None,
+        created_at="2024-01-01T00:00:00Z",
+    )
+
+    menu = widget._build_group_menu(summary)
+
+    assert "Disband Group" in [action.text() for action in menu.actions()]
+
+
+def test_merge_person_shows_warning_when_hidden_state_differs(
+    monkeypatch, qapp: QApplication
+) -> None:
+    widget = PeopleDashboardWidget()
+    widget._summaries = [
+        PersonSummary("person-a", "Alice", "face-a", 3, None, "2024-01-01T00:00:00Z", True),
+        PersonSummary("person-b", "Bob", "face-b", 2, None, "2024-01-01T00:00:01Z", False),
+    ]
+
+    warnings: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        people_dashboard_widget.dialogs,
+        "show_information",
+        lambda _parent, message, title="iPhoto": warnings.append((title, message)),
+    )
+
+    widget._merge_person(widget._summaries[0])
+
+    assert warnings == [
+        (
+            "Cannot Merge People",
+            "People in hidden and visible states cannot be merged. Please make both People cards hidden or visible first.",
+        )
+    ]
+
+
+def test_merge_person_reuses_group_people_dialog(
+    monkeypatch, qapp: QApplication
+) -> None:
+    widget = PeopleDashboardWidget()
+    widget._summaries = [
+        PersonSummary("person-a", "Alice", "face-a", 3, None, "2024-01-01T00:00:00Z"),
+        PersonSummary("person-b", "Bob", "face-b", 2, None, "2024-01-01T00:00:01Z"),
+    ]
+
+    dialog_calls: list[dict[str, object]] = []
+    confirmed: list[tuple[str, str]] = []
+
+    class _FakeDialog:
+        def __init__(self, summaries, **kwargs) -> None:
+            dialog_calls.append({"summaries": summaries, "kwargs": kwargs})
+
+        def exec(self) -> int:
+            return 1
+
+        def selected_person_ids(self) -> list[str]:
+            return ["person-b"]
+
+    monkeypatch.setattr(people_dashboard_widget, "GroupPeopleDialog", _FakeDialog)
+    monkeypatch.setattr(
+        widget,
+        "_confirm_merge",
+        lambda source_person_id, target_person_id: confirmed.append((source_person_id, target_person_id)) or True,
+    )
+
+    widget._merge_person(widget._summaries[0])
+
+    assert len(dialog_calls) == 1
+    assert [summary.person_id for summary in dialog_calls[0]["summaries"]] == ["person-b"]
+    assert dialog_calls[0]["kwargs"]["title_text"] == "Merge Person"
+    assert dialog_calls[0]["kwargs"]["prompt_text"] == "Merge into"
+    assert dialog_calls[0]["kwargs"]["confirm_text"] == "Choose"
+    assert dialog_calls[0]["kwargs"]["min_selection"] == 1
+    assert dialog_calls[0]["kwargs"]["max_selection"] == 1
+    assert confirmed == [("person-a", "person-b")]
+
+
+def test_toggle_person_hidden_updates_service_and_reloads(
+    monkeypatch, qapp: QApplication
+) -> None:
+    widget = PeopleDashboardWidget()
+    summary = PersonSummary("person-a", "Alice", "face-a", 3, None, "2024-01-01T00:00:00Z")
+
+    toggles: list[tuple[str, bool]] = []
+    reloads: list[bool] = []
+    monkeypatch.setattr(
+        widget._service,
+        "set_cluster_hidden",
+        lambda person_id, hidden: toggles.append((person_id, hidden)) or True,
+    )
+    monkeypatch.setattr(
+        widget,
+        "reload",
+        lambda *, preserve_content=False: reloads.append(bool(preserve_content)),
+    )
+
+    widget._toggle_person_hidden(summary)
+
+    assert toggles == [("person-a", True)]
+    assert reloads == [False]
+
+
+def test_toggle_person_hidden_uses_confirmation_popup(
+    monkeypatch, qapp: QApplication
+) -> None:
+    widget = PeopleDashboardWidget()
+    summary = PersonSummary("person-a", "Alice", "face-a", 3, None, "2024-01-01T00:00:00Z")
+
+    confirms: list[tuple[str, str, str]] = []
+    toggles: list[tuple[str, bool]] = []
+    monkeypatch.setattr(
+        MergeConfirmDialog,
+        "confirm_action",
+        classmethod(
+            lambda cls, *, item_count, parent=None, title_text, body_text, confirm_text: confirms.append(
+                (title_text, body_text, confirm_text)
+            )
+            or True
+        ),
+    )
+    monkeypatch.setattr(
+        widget._service,
+        "set_cluster_hidden",
+        lambda person_id, hidden: toggles.append((person_id, hidden)) or True,
+    )
+    monkeypatch.setattr(widget, "reload", lambda **_kwargs: None)
+
+    widget._toggle_person_hidden(summary)
+
+    assert confirms == [
+        (
+            "Hide This Person?",
+            "Hiding Alice will remove them from the People view until you choose Show Hidden People or unhide them.",
+            "Hide Person",
+        )
+    ]
+    assert toggles == [("person-a", True)]
+
+
+def test_disband_group_uses_confirmation_popup_and_deletes(
+    monkeypatch, qapp: QApplication
+) -> None:
+    widget = PeopleDashboardWidget()
+    summary = PeopleGroupSummary(
+        group_id="group-a",
+        name="Alice and Bob",
+        member_person_ids=("person-a", "person-b"),
+        members=(),
+        asset_count=1,
+        cover_asset_path=None,
+        created_at="2024-01-01T00:00:00Z",
+    )
+
+    confirms: list[tuple[str, str, str]] = []
+    deletions: list[str] = []
+    reloads: list[bool] = []
+    monkeypatch.setattr(widget, "_is_group_pinned", lambda _group_id: False)
+    monkeypatch.setattr(
+        MergeConfirmDialog,
+        "confirm_action",
+        classmethod(
+            lambda cls, *, item_count, parent=None, title_text, body_text, confirm_text: confirms.append(
+                (title_text, body_text, confirm_text)
+            )
+            or True
+        ),
+    )
+    monkeypatch.setattr(
+        widget._service,
+        "delete_group",
+        lambda group_id: deletions.append(group_id) or True,
+    )
+    monkeypatch.setattr(
+        widget,
+        "reload",
+        lambda *, preserve_content=False: reloads.append(bool(preserve_content)),
+    )
+
+    widget._disband_group(summary)
+
+    assert confirms == [
+        (
+            "Disband This Group?",
+            "Disbanding Alice and Bob will remove the group but keep all of its people and photos.",
+            "Disband Group",
+        )
+    ]
+    assert deletions == ["group-a"]
+    assert reloads == [False]
+
+
+def test_pinned_group_disband_shows_warning_and_does_not_delete(
+    monkeypatch, tmp_path: Path, qapp: QApplication
+) -> None:
+    settings = SettingsManager(path=tmp_path / "settings.json")
+    settings.load()
+    pinned_service = PinnedItemsService(settings)
+    widget = PeopleDashboardWidget()
+    widget._current_library_root = tmp_path
+    widget._service.set_library_root(tmp_path)
+    widget.set_pinned_service(pinned_service)
+    pinned_service.pin_group("group-a", "Group 1", library_root=tmp_path)
+    summary = PeopleGroupSummary(
+        group_id="group-a",
+        name="Alice and Bob",
+        member_person_ids=("person-a", "person-b"),
+        members=(),
+        asset_count=1,
+        cover_asset_path=None,
+        created_at="2024-01-01T00:00:00Z",
+    )
+
+    warnings: list[str] = []
+    deletions: list[str] = []
+    monkeypatch.setattr(
+        people_dashboard_widget.dialogs,
+        "show_warning",
+        lambda _parent, message, title="iPhoto": warnings.append(message),
+    )
+    monkeypatch.setattr(
+        widget._service,
+        "delete_group",
+        lambda group_id: deletions.append(group_id) or True,
+    )
+
+    widget._disband_group(summary)
+
+    assert warnings == ["Pinned groups can't be disbanded until they are unpinned."]
+    assert deletions == []
+
+
+def test_pin_unnamed_group_uses_generated_sidebar_label(tmp_path: Path, qapp: QApplication) -> None:
+    settings = SettingsManager(path=tmp_path / "settings.json")
+    settings.load()
+    pinned_service = PinnedItemsService(settings)
+    widget = PeopleDashboardWidget()
+    widget._current_library_root = tmp_path
+    widget._service.set_library_root(tmp_path)
+    widget.set_pinned_service(pinned_service)
+    summary = PeopleGroupSummary(
+        group_id="group-a",
+        name="",
+        member_person_ids=("person-a", "person-b"),
+        members=(),
+        asset_count=1,
+        cover_asset_path=None,
+        created_at="2024-01-01T00:00:00Z",
+    )
+
+    widget._toggle_group_pin(summary)
+
+    pinned = pinned_service.items_for_library(tmp_path)
+    assert len(pinned) == 1
+    assert pinned[0].kind == "group"
+    assert pinned[0].label == "Group 1"

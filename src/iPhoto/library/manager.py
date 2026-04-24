@@ -15,9 +15,10 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Dict, List, Optional
 
-from PySide6.QtCore import QFileSystemWatcher, QObject, QTimer, Signal, QThreadPool, QMutex
+from PySide6.QtCore import QFileSystemWatcher, QObject, Qt, QTimer, Signal, QThreadPool, QMutex
 
 from ..errors import LibraryUnavailableError
+from ..people.index_coordinator import PeopleIndexCoordinator, get_people_index_coordinator
 from ..utils.logging import get_logger
 from .tree import AlbumNode
 
@@ -49,6 +50,7 @@ class LibraryManager(
     """Manage the Basic Library tree, file-system helpers, and scanning state."""
 
     treeUpdated = Signal()
+    albumRenamed = Signal(Path, Path)
     errorRaised = Signal(str)
 
     # Scanner signals exposed for the facade
@@ -57,6 +59,7 @@ class LibraryManager(
     scanFinished = Signal(Path, bool)
     scanBatchFailed = Signal(Path, int)
     peopleIndexUpdated = Signal()
+    peopleSnapshotCommitted = Signal(object)
     faceScanStatusChanged = Signal(str)
 
     def __init__(self, parent: QObject | None = None) -> None:
@@ -88,12 +91,21 @@ class LibraryManager(
         self._geotagged_assets_cache: Optional[List[GeotaggedAsset]] = None
         self._geotagged_assets_cache_root: Optional[Path] = None
         self._face_scan_status_message: Optional[str] = None
+        self._people_index_coordinator: PeopleIndexCoordinator | None = None
 
     # ------------------------------------------------------------------
     # Basic properties
     # ------------------------------------------------------------------
     def root(self) -> Path | None:
         return self._root
+
+    def invalidate_geotagged_assets_cache(self, *, emit_tree_updated: bool = False) -> None:
+        """Drop cached map assets and optionally notify the UI to refresh views."""
+
+        self._geotagged_assets_cache = None
+        self._geotagged_assets_cache_root = None
+        if emit_tree_updated:
+            self.treeUpdated.emit()
 
     # ------------------------------------------------------------------
     # Binding and tree coordination
@@ -110,11 +122,13 @@ class LibraryManager(
         # rebinding to a new library root.
         self.stop_scanning()
         self._face_scan_status_message = None
+        self._unbind_people_index_coordinator()
 
         normalized = root.expanduser().resolve()
         if not normalized.exists() or not normalized.is_dir():
             raise LibraryUnavailableError(f"Library path does not exist: {root}")
         self._root = normalized
+        self._bind_people_index_coordinator(normalized)
         self._geotagged_assets_cache = None
         self._geotagged_assets_cache_root = None
         LOGGER.info("bind_path: normalized root=%s", normalized)
@@ -164,11 +178,41 @@ class LibraryManager(
         self._geotagged_assets_cache_root = None
         if self._current_face_scanner is not None:
             self._current_face_scanner.cancel()
-            self._current_face_scanner.wait(1000)
+            self._current_face_scanner.wait(2000)
+            if self._current_face_scanner.isRunning():
+                LOGGER.warning(
+                    "Face scan worker did not exit within 2 s after cancel(); "
+                    "detaching without terminate() to avoid DB corruption."
+                )
             self._current_face_scanner = None
+        self._unbind_people_index_coordinator()
 
     def face_scan_status_message(self) -> str | None:
         return self._face_scan_status_message
+
+    def _bind_people_index_coordinator(self, root: Path) -> None:
+        coordinator = get_people_index_coordinator(root)
+        coordinator.resume()
+        coordinator.snapshotCommitted.connect(
+            self._on_people_snapshot_committed, Qt.ConnectionType.QueuedConnection
+        )
+        self._people_index_coordinator = coordinator
+
+    def _unbind_people_index_coordinator(self) -> None:
+        if self._people_index_coordinator is None:
+            return
+        self._people_index_coordinator.begin_shutdown()
+        try:
+            self._people_index_coordinator.snapshotCommitted.disconnect(
+                self._on_people_snapshot_committed
+            )
+        except (RuntimeError, TypeError):
+            pass
+        self._people_index_coordinator = None
+
+    def _on_people_snapshot_committed(self, event: object) -> None:
+        self.peopleIndexUpdated.emit()
+        self.peopleSnapshotCommitted.emit(event)
 
     # ------------------------------------------------------------------
     # Internal helpers (coordinator-level)

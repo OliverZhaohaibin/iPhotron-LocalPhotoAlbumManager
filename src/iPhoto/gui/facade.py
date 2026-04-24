@@ -33,6 +33,7 @@ class AppFacade(QObject):
     """Expose high-level album operations to the GUI layer."""
 
     albumOpened = Signal(Path)
+    albumCoverUpdated = Signal(Path, Path)
     assetUpdated = Signal(Path)
     indexUpdated = Signal(Path)
     linksUpdated = Signal(Path)
@@ -298,7 +299,10 @@ class AppFacade(QObject):
         album = self._require_album()
         if album is None:
             return False
-        return self._metadata_service.set_album_cover(album, rel)
+        success = self._metadata_service.set_album_cover(album, rel)
+        if success:
+            self.albumCoverUpdated.emit(album.root, album.root / rel)
+        return success
 
     def bind_library(self, library: "LibraryManager") -> None:
         """Remember the library manager so static collections stay in sync."""

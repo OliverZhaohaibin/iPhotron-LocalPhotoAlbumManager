@@ -4,12 +4,15 @@ from pathlib import Path
 from typing import Iterator, Dict, Any, List, Optional, Callable, Iterable
 import queue
 import unicodedata
-from datetime import datetime
+from datetime import datetime, timezone
+import logging
 import mimetypes
 
 from ..application.interfaces import IMetadataProvider, IThumbnailGenerator
 from ..infrastructure.services.metadata_provider import ExifToolMetadataProvider
 from ..infrastructure.services.thumbnail_generator import PillowThumbnailGenerator
+from ..people import initial_face_status
+from ..utils.hashutils import compute_file_id
 from ..utils.pathutils import should_include
 from ..config import DEFAULT_INCLUDE, DEFAULT_EXCLUDE
 from ..application.use_cases.scan_album import FileDiscoveryThread
@@ -17,6 +20,40 @@ from ..application.use_cases.scan_album import FileDiscoveryThread
 # Instantiate services directly for the adapter (stateless)
 _metadata_provider = ExifToolMetadataProvider()
 _thumbnail_generator = PillowThumbnailGenerator()
+_IMAGE_EXTENSIONS = set(getattr(ExifToolMetadataProvider, "_IMAGE_EXTENSIONS", ()))
+_VIDEO_EXTENSIONS = set(getattr(ExifToolMetadataProvider, "_VIDEO_EXTENSIONS", ()))
+LOGGER = logging.getLogger(__name__)
+
+
+def _fallback_row_for_path(root: Path, path: Path) -> Dict[str, Any]:
+    """Build a minimal index row when rich metadata extraction fails."""
+
+    stat = path.stat()
+    dt_obj = datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc)
+    mime = mimetypes.guess_type(path.name)[0]
+    suffix = path.suffix.lower()
+
+    if suffix in _VIDEO_EXTENSIONS or (mime and mime.startswith("video/")):
+        media_type = 1
+    elif suffix in _IMAGE_EXTENSIONS or (mime and mime.startswith("image/")):
+        media_type = 0
+    else:
+        media_type = None
+
+    row: Dict[str, Any] = {
+        "rel": path.relative_to(root).as_posix(),
+        "bytes": stat.st_size,
+        "dt": dt_obj.isoformat().replace("+00:00", "Z"),
+        "ts": int(stat.st_mtime * 1_000_000),
+        "id": f"as_{compute_file_id(path)}",
+        "mime": mime,
+        "media_type": media_type,
+        "aspect_ratio": None,
+        "year": dt_obj.year,
+        "month": dt_obj.month,
+    }
+    row["face_status"] = initial_face_status(row)
+    return row
 
 def process_media_paths(
     root: Path, image_paths: List[Path], video_paths: List[Path]
@@ -49,19 +86,44 @@ def process_media_paths(
                 raw_meta = meta_lookup.get(path.as_posix())
                 if not raw_meta:
                     raw_meta = meta_lookup.get(unicodedata.normalize('NFC', path.as_posix()))
+                if not raw_meta:
+                    raw_meta = meta_lookup.get(unicodedata.normalize('NFD', path.as_posix()))
 
                 # Normalize
                 row = _metadata_provider.normalize_metadata(root, path, raw_meta or {})
+            except Exception as exc:
+                try:
+                    row = _fallback_row_for_path(root, path)
+                except OSError as os_exc:
+                    LOGGER.warning(
+                        "Skipping %s because metadata extraction failed (%s) and no fallback row could be built (%s)",
+                        path,
+                        exc,
+                        os_exc,
+                    )
+                    continue
+                LOGGER.warning(
+                    "Metadata extraction failed for %s; indexing with fallback metadata: %s",
+                    path,
+                    exc,
+                    exc_info=True,
+                )
 
-                # Micro-thumbnail for images
-                if row.get("media_type") == 0:
+            if row.get("media_type") == 0:
+                try:
                     mt = _thumbnail_generator.generate_micro_thumbnail(path)
+                except Exception as exc:
+                    LOGGER.warning(
+                        "Micro-thumbnail generation failed for %s; keeping asset indexed without thumbnail: %s",
+                        path,
+                        exc,
+                        exc_info=True,
+                    )
+                else:
                     if mt:
                         row["micro_thumbnail"] = mt
 
-                yield row
-            except Exception:
-                continue
+            yield row
 
 def scan_album(
     root: Path,

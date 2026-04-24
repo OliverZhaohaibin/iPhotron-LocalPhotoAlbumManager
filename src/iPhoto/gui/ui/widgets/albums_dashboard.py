@@ -33,20 +33,27 @@ from PySide6.QtWidgets import (
     QGraphicsDropShadowEffect,
     QHBoxLayout,
     QLabel,
+    QMenu,
     QScrollArea,
     QVBoxLayout,
     QWidget,
 )
 
-from ....utils.pathutils import ensure_work_dir
+from iPhoto.gui.services.pinned_items_service import PinnedItemsService
 from ....cache.index_store import get_global_repository
 from ....config import WORK_DIR_NAME
+from ....errors import LibraryError
 from ....media_classifier import get_media_type, MediaType
 from ....models.album import Album
+from ....utils.pathutils import ensure_work_dir
+from ..menus.album_sidebar_menu import _create_styled_input_dialog
 from ..tasks.thumbnail_loader import ThumbnailJob, generate_cache_path, stat_mtime_ns
-from .flow_layout import FlowLayout
 from ..icon import load_icon
+from ..menus.core import MenuActionSpec, MenuContext, populate_menu
+from ..menus.style import apply_menu_style
 from ..theme_manager import DARK_THEME
+from . import dialogs
+from .flow_layout import FlowLayout
 
 if TYPE_CHECKING:
     from ....library.manager import LibraryManager
@@ -120,6 +127,7 @@ class AlbumCard(QFrame):
     """Card widget representing a single album."""
 
     clicked = Signal(Path)
+    menuRequested = Signal(Path, object)
 
     def __init__(
         self,
@@ -130,6 +138,7 @@ class AlbumCard(QFrame):
     ) -> None:
         super().__init__(parent)
         self.path = path
+        self.title = title
         self.setMouseTracking(True)
         self._cursor_pos: QPoint | None = None
 
@@ -221,6 +230,10 @@ class AlbumCard(QFrame):
         if event.button() == Qt.MouseButton.LeftButton:
             self.clicked.emit(self.path)
         super().mousePressEvent(event)
+
+    def contextMenuEvent(self, event) -> None:  # noqa: N802
+        self.menuRequested.emit(self.path, event.globalPos())
+        event.accept()
 
     def paintEvent(self, event) -> None:
         painter = QPainter(self)
@@ -405,7 +418,7 @@ class AlbumDataWorker(QRunnable):
 class DashboardThumbnailLoader(QObject):
     """Simplified thumbnail loader for dashboard cards."""
 
-    thumbnailReady = Signal(Path, QPixmap)  # album_root, pixmap
+    thumbnailReady = Signal(Path, Path, QPixmap)  # album_root, source_path, pixmap
     _delivered = Signal(tuple, QImage, str)  # key (album_root_str, rel, width, height, stamp), image, rel
 
     def __init__(self, parent: QObject | None = None, library_root: Optional[Path] = None) -> None:
@@ -444,7 +457,7 @@ class DashboardThumbnailLoader(QObject):
         if cache_path.exists():
             pixmap = QPixmap(str(cache_path))
             if not pixmap.isNull():
-                self.thumbnailReady.emit(album_root, pixmap)
+                self.thumbnailReady.emit(album_root, image_path, pixmap)
                 return
 
         # Store mapping
@@ -502,7 +515,7 @@ class DashboardThumbnailLoader(QObject):
 
         pixmap = QPixmap.fromImage(image)
         if not pixmap.isNull():
-            self.thumbnailReady.emit(album_root, pixmap)
+            self.thumbnailReady.emit(album_root, Path(rel), pixmap)
 
     def _album_root_str(self, album_root: Path) -> str:
         cached = self._resolved_roots.get(album_root)
@@ -525,7 +538,10 @@ class AlbumsDashboard(QWidget):
     def __init__(self, library: LibraryManager, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._library = library
+        self._pinned_service: PinnedItemsService | None = None
         self._cards: dict[Path, AlbumCard] = {}
+        self._album_nodes: dict[Path, AlbumNode] = {}
+        self._requested_cover_paths: dict[Path, Path] = {}
         # Track refresh generation to prevent race conditions
         # Python integers can grow arbitrarily large, so overflow is not a concern
         self._current_generation = 0
@@ -541,6 +557,9 @@ class AlbumsDashboard(QWidget):
         self._library.treeUpdated.connect(self.refresh)
         self._library.scanFinished.connect(self._on_scan_finished)
         self.refresh()
+
+    def set_pinned_service(self, service: PinnedItemsService | None) -> None:
+        self._pinned_service = service
 
     def _init_ui(self) -> None:
         self.main_layout = QVBoxLayout(self)
@@ -593,6 +612,8 @@ class AlbumsDashboard(QWidget):
                 item.widget().deleteLater()
 
         self._cards.clear()
+        self._album_nodes.clear()
+        self._requested_cover_paths.clear()
 
         albums = self._library.list_albums()
 
@@ -612,8 +633,10 @@ class AlbumsDashboard(QWidget):
             # Create card with "0" count first
             card = AlbumCard(album.path, album.title, 0, self.scroll_content)
             card.clicked.connect(self.albumSelected)
+            card.menuRequested.connect(self._show_card_menu)
             self.flow_layout.addWidget(card)
             self._cards[album.path] = card
+            self._album_nodes[album.path] = album
 
             # Fetch data with current generation, using library root for global DB
             worker = AlbumDataWorker(album, self._loader_signals, current_gen, library_root=library_root)
@@ -634,10 +657,14 @@ class AlbumsDashboard(QWidget):
 
         # Load cover
         if cover_path:
+            self._requested_cover_paths[root] = cover_path
             self._thumb_loader.request_with_absolute_key(root, cover_path, QSize(512, 512))
 
-    def _on_thumbnail_ready(self, album_root: Path, pixmap: QPixmap) -> None:
-        card = self._cards.get(album_root)
+    def _on_thumbnail_ready(self, album_root: Path, source_path: Path, pixmap: QPixmap) -> None:
+        expected = self._requested_cover_paths.get(album_root)
+        if expected is not None and not self._paths_equal(expected, source_path):
+            return
+        card = self._card_for_album_root(album_root)
         if card:
             card.set_cover_image(pixmap)
 
@@ -652,6 +679,130 @@ class AlbumsDashboard(QWidget):
 
         if scan_root == library_root or library_root in scan_root.parents:
             self.refresh()
+
+    def _show_card_menu(self, album_path: Path, global_pos) -> None:
+        card = self._cards.get(album_path)
+        if card is None:
+            return
+        menu = self._build_card_menu(card)
+        menu.exec(global_pos)
+
+    def update_album_cover(self, album_root: Path, cover_path: Path) -> None:
+        card = self._card_for_album_root(album_root)
+        if card is None or not cover_path.exists():
+            return
+        self._requested_cover_paths[card.path] = cover_path
+        pixmap = QPixmap(str(cover_path))
+        if not pixmap.isNull():
+            card.set_cover_image(pixmap)
+        self._thumb_loader.request_with_absolute_key(card.path, cover_path, QSize(512, 512))
+
+    def _build_card_menu(self, card: AlbumCard) -> QMenu:
+        menu = QMenu(self)
+        apply_menu_style(menu, self)
+        populate_menu(
+            menu,
+            context=MenuContext(
+                surface="albums_dashboard",
+                selection_kind="empty",
+                entity_kind="album",
+                entity_id=str(card.path),
+                active_root=card.path,
+            ),
+            action_specs=[
+                MenuActionSpec(
+                    action_id="rename_album",
+                    label="Rename…",
+                    on_trigger=lambda _ctx: self._prompt_rename_album(card),
+                ),
+                MenuActionSpec(
+                    action_id="toggle_album_pin",
+                    label="Unpin Album" if self._is_album_pinned(card.path) else "Pin Album",
+                    on_trigger=lambda _ctx: self._toggle_album_pin(card),
+                    is_enabled=lambda _ctx: self._pin_actions_available(),
+                ),
+            ],
+            anchor=self,
+        )
+        return menu
+
+    def _toggle_album_pin(self, card: AlbumCard) -> None:
+        if self._pinned_service is None:
+            return
+        library_root = self._library.root()
+        if library_root is None:
+            return
+        if self._is_album_pinned(card.path):
+            self._pinned_service.unpin(
+                kind="album",
+                item_id=str(card.path),
+                library_root=library_root,
+            )
+            return
+        self._pinned_service.pin_album(
+            card.path,
+            card.title,
+            library_root=library_root,
+        )
+
+    def _prompt_rename_album(self, card: AlbumCard) -> None:
+        album = self._album_node_for_path(card.path)
+        if album is None:
+            return
+        name, ok = _create_styled_input_dialog(
+            self,
+            "Rename Album",
+            "New album name:",
+            text=card.title,
+        )
+        if not ok:
+            return
+        target_name = name.strip()
+        if not target_name:
+            dialogs.show_warning(self, "Album name cannot be empty.")
+            return
+        try:
+            self._library.rename_album(album, target_name)
+        except LibraryError as exc:  # pragma: no cover - GUI feedback
+            dialogs.show_warning(self, str(exc))
+
+    def _is_album_pinned(self, album_path: Path) -> bool:
+        if self._pinned_service is None:
+            return False
+        return self._pinned_service.is_pinned(
+            kind="album",
+            item_id=str(album_path),
+            library_root=self._library.root(),
+        )
+
+    def _pin_actions_available(self) -> bool:
+        return self._pinned_service is not None and self._library.root() is not None
+
+    def _card_for_album_root(self, album_root: Path) -> AlbumCard | None:
+        card = self._cards.get(album_root)
+        if card is not None:
+            return card
+        for path, existing in self._cards.items():
+            if self._paths_equal(path, album_root):
+                return existing
+        return None
+
+    def _album_node_for_path(self, album_path: Path) -> AlbumNode | None:
+        album = self._album_nodes.get(album_path)
+        if album is not None:
+            return album
+        for path, existing in self._album_nodes.items():
+            if self._paths_equal(path, album_path):
+                return existing
+        return None
+
+    def _paths_equal(self, first: Path, second: Path) -> bool:
+        if first == second:
+            return True
+        try:
+            return first.resolve() == second.resolve()
+        except OSError:
+            return False
 
     def _apply_theme(self) -> None:
         app = QGuiApplication.instance()

@@ -123,6 +123,8 @@ class Ui_MainWindow(object):
         self.rebuild_links_action = self.main_header.rebuild_links_action
         self.bind_library_action = self.main_header.bind_library_action
         self.toggle_filmstrip_action = self.main_header.toggle_filmstrip_action
+        self.toggle_face_names_action = self.main_header.toggle_face_names_action
+        self.toggle_hidden_people_action = self.main_header.toggle_hidden_people_action
         self.export_all_edited_action = self.main_header.export_all_edited_action
         self.export_selected_action = self.main_header.export_selected_action
         self.export_destination_group = self.main_header.export_destination_group
@@ -183,6 +185,7 @@ class Ui_MainWindow(object):
         self.video_area = self.detail_page.video_area
         self.player_bar = self.detail_page.player_bar
         self.video_trim_bar = self.detail_page.video_trim_bar
+        self.face_name_overlay = self.detail_page.face_name_overlay
         self.filmstrip_view = self.detail_page.filmstrip_view
         self.live_badge = self.detail_page.live_badge
         self.badge_host = self.detail_page.badge_host

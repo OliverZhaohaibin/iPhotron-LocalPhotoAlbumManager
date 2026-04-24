@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import asdict
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, Iterable, List, Optional, Tuple
 
 from .cache.index_store import get_global_repository
 from .cache.lock import FileLock
@@ -100,40 +100,43 @@ def update_index_snapshot(
     if not fresh_rows:
         return
 
-    # Additive-only: only append new/updated rows, never delete
-    # append_rows uses INSERT OR REPLACE which is idempotent
+    # Additive-only: only append new/updated rows, never delete.
+    # Scan merges preserve persisted state fields such as face_status.
     try:
-        store.append_rows(materialised_snapshot)
+        store.merge_scan_rows(materialised_snapshot)
     except IndexCorruptedError:
         store.write_rows(materialised_snapshot)
 
 
 def ensure_links(
     root: Path, rows: List[dict], library_root: Optional[Path] = None
-) -> None:
-    """Ensure links.json and DB are synchronized with the given rows.
+) -> List[LiveGroup]:
+    """Ensure DB live-role state is current and refresh the derived links snapshot.
     
     Args:
         root: The album root directory.
         rows: List of asset rows (with album-relative paths).
         library_root: If provided, use this as the database root.
     """
+    groups, payload = compute_links_payload(rows)
+    sync_live_roles_to_db(root, groups, library_root=library_root)
+
     work_dir = root / WORK_DIR_NAME
     links_path = work_dir / "links.json"
-    groups, payload = compute_links_payload(rows)
-
     if links_path.exists():
         try:
             existing: Dict[str, object] = read_json(links_path)
         except ManifestInvalidError:
             existing = {}
         if existing == payload:
-            sync_live_roles_to_db(root, groups, library_root=library_root)
-            return
+            return groups
 
     LOGGER.info("Updating links.json for %s", root)
-    write_links(root, payload)
-    sync_live_roles_to_db(root, groups, library_root=library_root)
+    try:
+        write_links(root, payload)
+    except Exception as exc:  # pragma: no cover - derived snapshot failure must not break runtime state
+        LOGGER.warning("Failed to update derived links.json for %s: %s", root, exc)
+    return groups
 
 
 def compute_links_payload(rows: List[dict]) -> tuple[List[LiveGroup], Dict[str, object]]:
@@ -191,10 +194,61 @@ def sync_live_roles_to_db(
         store.apply_live_role_updates(updates)
 
 
+def prune_index_scope(
+    root: Path,
+    materialised_rows: Iterable[dict],
+    library_root: Optional[Path] = None,
+) -> int:
+    """Delete rows under *root* that were not rediscovered by the completed scan.
+
+    Scans remain additive-only at the low-level merge layer. This helper applies
+    deletion semantics explicitly at the rescan boundary, scoped strictly to the
+    completed scan root so sibling albums remain untouched.
+    """
+
+    db_root = library_root if library_root else root
+    store = get_global_repository(db_root)
+    album_path = compute_album_path(root, library_root)
+
+    fresh_rels = {
+        rel_key
+        for rel_key in (
+            normalise_rel_key(row.get("rel"))
+            for row in materialised_rows
+        )
+        if rel_key is not None
+    }
+
+    if album_path:
+        scoped_rows = store.read_album_assets(
+            album_path,
+            include_subalbums=True,
+            sort_by_date=False,
+            filter_hidden=False,
+        )
+    else:
+        scoped_rows = store.read_all(sort_by_date=False, filter_hidden=False)
+
+    removable: List[str] = []
+    for row in scoped_rows:
+        rel_key = normalise_rel_key(row.get("rel"))
+        if rel_key is None:
+            continue
+        if rel_key not in fresh_rels:
+            removable.append(rel_key)
+
+    if not removable:
+        return 0
+
+    store.remove_rows(removable)
+    return len(removable)
+
+
 __all__ = [
     "compute_links_payload",
     "ensure_links",
     "load_incremental_index_cache",
+    "prune_index_scope",
     "sync_live_roles_to_db",
     "update_index_snapshot",
     "write_links",

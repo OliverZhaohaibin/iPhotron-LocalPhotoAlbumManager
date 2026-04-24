@@ -6,47 +6,47 @@ This replaces the legacy MainController as the top-level orchestrator.
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterable
 from pathlib import Path
-from typing import TYPE_CHECKING, Iterable
+from typing import TYPE_CHECKING
 
 from PySide6.QtCore import (
-    QObject,
-    QThreadPool,
-    QModelIndex,
-    QItemSelectionModel,
     QCoreApplication,
+    QItemSelectionModel,
+    QModelIndex,
+    QObject,
     Qt,
+    QThreadPool,
 )
 from PySide6.QtGui import QAction
 
+from iPhoto import app as backend
 from iPhoto.application.contracts.runtime_entry_contract import RuntimeEntryContract
-from iPhoto.gui.ui.models.roles import Roles
-from iPhoto.gui.ui.models.spacer_proxy_model import SpacerProxyModel
-from iPhoto.gui.ui.controllers.dialog_controller import DialogController
-from iPhoto.gui.ui.controllers.header_controller import HeaderController
-from iPhoto.gui.ui.controllers.share_controller import ShareController
-from iPhoto.gui.ui.controllers.status_bar_controller import StatusBarController
-from iPhoto.gui.ui.controllers.window_theme_controller import WindowThemeController
-from iPhoto.gui.ui.controllers.preview_controller import PreviewController
-from iPhoto.gui.ui.controllers.context_menu_controller import ContextMenuController
-from iPhoto.gui.ui.controllers.selection_controller import SelectionController
-from iPhoto.gui.ui.controllers.export_controller import ExportController
-from iPhoto.gui.ui.media import MediaAdjustmentCommitter, MediaSelectionSession
-from iPhoto.gui.ui.widgets.asset_delegate import AssetGridDelegate
-
-# New Architecture Imports
 from iPhoto.application.services.asset_service import AssetService
 from iPhoto.di.container import DependencyContainer
 from iPhoto.events.bus import EventBus
+from iPhoto.gui.coordinators.edit_coordinator import EditCoordinator
+from iPhoto.gui.coordinators.navigation_coordinator import NavigationCoordinator
+from iPhoto.gui.coordinators.playback_coordinator import PlaybackCoordinator
+from iPhoto.gui.coordinators.view_router import ViewRouter
+from iPhoto.gui.ui.controllers.context_menu_controller import ContextMenuController
+from iPhoto.gui.ui.controllers.dialog_controller import DialogController
+from iPhoto.gui.ui.controllers.export_controller import ExportController
+from iPhoto.gui.ui.controllers.header_controller import HeaderController
+from iPhoto.gui.ui.controllers.preview_controller import PreviewController
+from iPhoto.gui.ui.controllers.selection_controller import SelectionController
+from iPhoto.gui.ui.controllers.share_controller import ShareController
+from iPhoto.gui.ui.controllers.status_bar_controller import StatusBarController
+from iPhoto.gui.ui.controllers.window_theme_controller import WindowThemeController
+from iPhoto.gui.ui.media import MediaAdjustmentCommitter, MediaSelectionSession
+from iPhoto.gui.ui.models.roles import Roles
+from iPhoto.gui.ui.models.spacer_proxy_model import SpacerProxyModel
+from iPhoto.gui.ui.widgets.asset_delegate import AssetGridDelegate
 from iPhoto.gui.viewmodels.detail_viewmodel import DetailViewModel
 from iPhoto.gui.viewmodels.gallery_list_model_adapter import GalleryListModelAdapter
 from iPhoto.gui.viewmodels.gallery_viewmodel import GalleryViewModel
-
-# New Coordinators
-from iPhoto.gui.coordinators.view_router import ViewRouter
-from iPhoto.gui.coordinators.navigation_coordinator import NavigationCoordinator
-from iPhoto.gui.coordinators.playback_coordinator import PlaybackCoordinator
-from iPhoto.gui.coordinators.edit_coordinator import EditCoordinator
+from iPhoto.gui.services.pinned_items_service import PinnedItemsService
+from iPhoto.people.service import PeopleService
 
 if TYPE_CHECKING:
     from iPhoto.gui.ui.main_window import MainWindow
@@ -71,6 +71,7 @@ class MainCoordinator(QObject):
         # facade reference kept for signal wiring as some systems still emit through it
         self._facade = context.facade
         self._logger = logging.getLogger(__name__)
+        self._media_failure_cleanup_paths: set[str] = set()
 
         # Resolve Services
         if self._container:
@@ -96,6 +97,16 @@ class MainCoordinator(QObject):
         if hasattr(window.ui, "people_page"):
             window.ui.people_page.set_library_root(lib_root)
             window.ui.people_page.set_status_message(context.library.face_scan_status_message())
+        self._playback_people_service = PeopleService(lib_root)
+        self._pinned_items_service = PinnedItemsService(context.settings, self)
+        window.ui.sidebar.set_pinned_service(self._pinned_items_service)
+        if hasattr(window.ui, "people_page"):
+            window.ui.people_page.set_pinned_service(self._pinned_items_service)
+        if hasattr(window.ui, "albums_dashboard_page"):
+            window.ui.albums_dashboard_page.set_pinned_service(self._pinned_items_service)
+            self._facade.albumCoverUpdated.connect(
+                window.ui.albums_dashboard_page.update_album_cover
+            )
 
         # Inject ViewModel provider into Facade for legacy operations (restore/delete)
         if self._facade:
@@ -120,6 +131,7 @@ class MainCoordinator(QObject):
             self._gallery_vm,
             context,
             context.facade,  # Legacy Facade Bridge
+            pinned_items_service=self._pinned_items_service,
         )
         self._adjustment_committer = MediaAdjustmentCommitter(
             asset_vm=self._asset_list_vm,
@@ -169,11 +181,19 @@ class MainCoordinator(QObject):
             toggle_filmstrip_action=window.ui.toggle_filmstrip_action,
             settings=context.settings,
             header_controller=self._header_controller,
+            face_name_overlay=window.ui.face_name_overlay,
+            people_service=self._playback_people_service,
+            people_dashboard_refresh_callback=window.ui.people_page.schedule_index_refresh,
+            library_manager=context.library,
+            location_session_invalidator=self._gallery_vm.invalidate_location_session,
         )
 
         # Inject optional dependencies into Playback
         self._playback.set_navigation_coordinator(self._navigation)
         self._navigation.set_playback_coordinator(self._playback)
+        context.library.peopleSnapshotCommitted.connect(
+            lambda _event: window.ui.sidebar.refresh_tree_model()
+        )
         # Manually attach info panel if available
         if hasattr(window.ui, "info_panel"):
             self._playback.set_info_panel(window.ui.info_panel)
@@ -276,6 +296,7 @@ class MainCoordinator(QObject):
             navigation=self._navigation,
             export_callback=window.ui.export_selected_action.trigger,
             prepare_paths_for_mutation=self._prepare_paths_for_mutation,
+            gallery_viewmodel=self._gallery_vm,
             parent=self,
         )
 
@@ -377,8 +398,11 @@ class MainCoordinator(QObject):
         """Connect application signals."""
         ui = self._window.ui
         self._context.library.treeUpdated.connect(self._on_library_tree_updated)
+        self._context.library.albumRenamed.connect(self._on_album_renamed)
         self._facade.scanChunkReady.connect(self._gallery_store.handle_scan_chunk)
         self._facade.scanFinished.connect(self._gallery_store.handle_scan_finished)
+        self._context.library.scanChunkReady.connect(self._gallery_vm.handle_location_scan_chunk)
+        self._context.library.scanFinished.connect(self._gallery_vm.handle_location_scan_finished)
         self._gallery_vm.message_requested.connect(self._status_bar.show_message)
 
         # Grid interactions
@@ -393,6 +417,8 @@ class MainCoordinator(QObject):
 
         # Coordinator Signals
         self._playback.assetChanged.connect(self._sync_selection)
+        self._player_view_controller.imageLoadingFailed.connect(self._handle_media_load_failed)
+        ui.video_area.mediaLoadFailed.connect(self._handle_media_load_failed)
 
         # Viewer Interactions (Wheel Navigation)
         ui.image_viewer.nextItemRequested.connect(self._playback.select_next)
@@ -413,6 +439,8 @@ class MainCoordinator(QObject):
         # ui.edit_rotate_left_button is handled by EditCoordinator in Edit Mode
         ui.rotate_left_button.clicked.connect(self._playback.rotate_current_asset)
         ui.favorite_button.clicked.connect(self._detail_vm.toggle_favorite)
+        ui.toggle_face_names_action.toggled.connect(self._handle_face_name_toggle_changed)
+        ui.toggle_hidden_people_action.toggled.connect(self._handle_hidden_people_toggle_changed)
 
         # Info Button
         if hasattr(ui, "info_button"):
@@ -420,7 +448,6 @@ class MainCoordinator(QObject):
 
         # Back Button (detail page)
         if hasattr(ui, "back_button"):
-            ui.back_button.clicked.connect(self._playback.reset_for_gallery)
             ui.back_button.clicked.connect(self._detail_vm.back_to_gallery)
 
         # Gallery page back button for cluster gallery mode
@@ -434,6 +461,12 @@ class MainCoordinator(QObject):
             ui.people_page.clusterActivated.connect(self._on_people_cluster_activated)
             ui.people_page.groupActivated.connect(self._on_people_group_activated)
             self._context.library.peopleIndexUpdated.connect(ui.people_page.schedule_index_refresh)
+            self._context.library.peopleSnapshotCommitted.connect(
+                self._gallery_vm.handle_people_snapshot_committed
+            )
+            self._context.library.peopleSnapshotCommitted.connect(
+                self._playback.handle_people_snapshot_committed
+            )
             self._context.library.faceScanStatusChanged.connect(ui.people_page.set_status_message)
 
         # Navigation
@@ -503,6 +536,58 @@ class MainCoordinator(QObject):
         if people_page is not None:
             people_page.set_library_root(root)
             people_page.set_status_message(self._context.library.face_scan_status_message())
+        playback = getattr(self, "_playback", None)
+        if playback is not None:
+            playback.set_people_library_root(root)
+
+    def _on_album_renamed(self, old_path: Path, new_path: Path) -> None:
+        self._pinned_items_service.remap_album_path(
+            old_path,
+            new_path,
+            library_root=self._context.library.root(),
+            fallback_label=new_path.name,
+        )
+        self._thumbnail_service.remap_album_paths(old_path, new_path)
+        self._gallery_vm.handle_album_renamed(old_path, new_path)
+
+    def _handle_media_load_failed(self, path: Path, message: str) -> None:
+        path_key = str(path)
+        if path_key in self._media_failure_cleanup_paths:
+            return
+
+        self._media_failure_cleanup_paths.add(path_key)
+        try:
+            self._dialog.show_error(f"File not found or unreadable: {path.name}\n\n{message}")
+
+            repository = self._context.asset_runtime.repository
+            asset = repository.get_by_path(path)
+            if asset is None:
+                return
+
+            repository.delete(asset.id)
+
+            library_root = self._context.library.root()
+            pair_root: Path | None = None
+            if library_root is not None:
+                try:
+                    path.resolve().relative_to(library_root.resolve())
+                except (OSError, ValueError):
+                    pair_root = None
+                else:
+                    pair_root = path.parent if path.parent != library_root else library_root
+            if pair_root is not None and library_root is not None:
+                try:
+                    backend.pair(pair_root, library_root=library_root)
+                except Exception:  # noqa: BLE001 - best-effort derived snapshot refresh
+                    self._logger.warning(
+                        "Failed to refresh live pairing after removing %s",
+                        path,
+                        exc_info=True,
+                    )
+
+            self._gallery_store.reload_current_selection()
+        finally:
+            self._media_failure_cleanup_paths.discard(path_key)
 
     def _on_asset_clicked(self, index: QModelIndex):
         if self._selection_controller and self._selection_controller.is_active():
@@ -542,13 +627,23 @@ class MainCoordinator(QObject):
         query = self._window.ui.people_page.build_cluster_query(person_id)
         if not query.asset_ids:
             return
-        self._navigation.open_people_cluster_gallery(query)
+        self._gallery_vm.open_people_cluster_gallery(
+            query,
+            kind="person",
+            entity_id=person_id,
+        )
+        self._view_router.show_gallery()
 
     def _on_people_group_activated(self, group_id: str) -> None:
         query = self._window.ui.people_page.build_group_query(group_id)
         if not query.asset_ids:
             return
-        self._navigation.open_people_cluster_gallery(query)
+        self._gallery_vm.open_people_cluster_gallery(
+            query,
+            kind="group",
+            entity_id=group_id,
+        )
+        self._view_router.show_gallery()
 
     def open_album_from_path(self, path: Path):
         self._navigation.open_album(path)
@@ -567,10 +662,27 @@ class MainCoordinator(QObject):
             ui.wheel_action_navigate.setChecked(True)
         ui.image_viewer.set_wheel_action(wheel_action)
 
+        stored_face_names = settings.get("ui.show_face_names_in_detail", False)
+        if isinstance(stored_face_names, str):
+            show_face_names = stored_face_names.strip().lower() in {"1", "true", "yes", "on"}
+        else:
+            show_face_names = bool(stored_face_names)
+        ui.toggle_face_names_action.setChecked(show_face_names)
+        self._playback.set_face_name_display_enabled(show_face_names)
+
+        stored_hidden_people = settings.get("ui.show_hidden_people", False)
+        if isinstance(stored_hidden_people, str):
+            show_hidden_people = stored_hidden_people.strip().lower() in {"1", "true", "yes", "on"}
+        else:
+            show_hidden_people = bool(stored_hidden_people)
+        ui.toggle_hidden_people_action.setChecked(show_hidden_people)
+        if hasattr(ui, "people_page"):
+            ui.people_page.set_show_hidden_people(show_hidden_people)
+
         # 2. Volume / Mute
         stored_volume = settings.get("ui.volume", 75)
         try:
-            initial_volume = int(round(float(stored_volume)))
+            initial_volume = round(float(stored_volume))
         except (TypeError, ValueError):
             initial_volume = 75
         initial_volume = max(0, min(100, initial_volume))
@@ -596,6 +708,17 @@ class MainCoordinator(QObject):
 
         ui.image_viewer.set_wheel_action(selected)
 
+    def _handle_face_name_toggle_changed(self, checked: bool) -> None:
+        if self._context.settings.get("ui.show_face_names_in_detail") != checked:
+            self._context.settings.set("ui.show_face_names_in_detail", checked)
+        self._playback.set_face_name_display_enabled(checked)
+
+    def _handle_hidden_people_toggle_changed(self, checked: bool) -> None:
+        if self._context.settings.get("ui.show_hidden_people") != checked:
+            self._context.settings.set("ui.show_hidden_people", checked)
+        if hasattr(self._window.ui, "people_page"):
+            self._window.ui.people_page.set_show_hidden_people(checked)
+
     def _prepare_paths_for_mutation(self, paths: list[Path]) -> None:
         """Release preview/player handles before mutating files on disk."""
 
@@ -616,10 +739,7 @@ class MainCoordinator(QObject):
         try:
             return str(path.resolve())
         except OSError:
-            try:
-                return str(Path(path))
-            except Exception:
-                return None
+            return str(path)
 
     # --- Public Accessors for Window ---
     def toggle_playback(self):

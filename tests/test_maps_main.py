@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 
 from maps.main import (
@@ -10,6 +11,7 @@ from maps.main import (
     describe_active_backend,
     format_map_runtime_diagnostics,
     format_status_message,
+    prepare_qt_runtime_for_backend,
 )
 from maps.map_sources import MapBackendMetadata, MapSourceSpec
 
@@ -229,6 +231,40 @@ def test_configure_qt_opengl_defaults_still_routes_shader_cache_when_opengl_is_d
     configure_qt_opengl_defaults()
 
     assert helper_calls == [True]
+    assert attributes == []
+
+
+def test_prepare_qt_runtime_for_backend_forces_xcb_glx_on_linux(monkeypatch) -> None:
+    attributes: list[tuple[object, bool]] = []
+
+    monkeypatch.setattr("maps.main.sys.platform", "linux")
+    monkeypatch.setattr("maps.main.QApplication.setAttribute", lambda attr, enabled=True: attributes.append((attr, enabled)))
+    monkeypatch.delenv("QT_QPA_PLATFORM", raising=False)
+    monkeypatch.delenv("QT_OPENGL", raising=False)
+    monkeypatch.delenv("QT_XCB_GL_INTEGRATION", raising=False)
+
+    prepare_qt_runtime_for_backend("auto")
+
+    assert os.environ["QT_QPA_PLATFORM"] == "xcb"
+    assert os.environ["QT_OPENGL"] == "desktop"
+    assert os.environ["QT_XCB_GL_INTEGRATION"] == "xcb_glx"
+    assert len(attributes) == 1
+
+
+def test_prepare_qt_runtime_for_backend_skips_linux_override_for_python_backend(monkeypatch) -> None:
+    attributes: list[tuple[object, bool]] = []
+
+    monkeypatch.setattr("maps.main.sys.platform", "linux")
+    monkeypatch.setattr("maps.main.QApplication.setAttribute", lambda attr, enabled=True: attributes.append((attr, enabled)))
+    monkeypatch.delenv("QT_QPA_PLATFORM", raising=False)
+    monkeypatch.delenv("QT_OPENGL", raising=False)
+    monkeypatch.delenv("QT_XCB_GL_INTEGRATION", raising=False)
+
+    prepare_qt_runtime_for_backend("python")
+
+    assert "QT_QPA_PLATFORM" not in os.environ
+    assert "QT_OPENGL" not in os.environ
+    assert "QT_XCB_GL_INTEGRATION" not in os.environ
     assert attributes == []
 
 

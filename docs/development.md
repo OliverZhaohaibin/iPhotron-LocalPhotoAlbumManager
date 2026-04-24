@@ -73,6 +73,36 @@ Includes: `pytest`, `pytest-mock`, `pytest-qt`, `ruff`, `black`, `mypy`, `types-
 
 ---
 
+## Album Naming Rules
+
+Album creation and rename flows must reject directory names reserved for
+internal library infrastructure. Today the reserved names are:
+
+- `.iPhoto`
+- `.Trash`
+- `exported`
+
+These names are intentionally hidden by the library scan layer and therefore
+must never be accepted as user album names. If a create/rename flow allows one
+of them, the album can appear to "disappear" because the directory still exists
+on disk but is filtered out of the visible album tree/dashboard.
+
+Implementation rules:
+
+- Keep the validation in the library layer so every entry point stays aligned
+  (`album dashboard`, sidebar menus, and any future CLI/API path).
+- Keep the reserved-name list in a single shared source of truth used by both
+  name validation and album discovery.
+- Raise a normal `LibraryError` path such as `AlbumOperationError` with a clear
+  user-facing message; UI surfaces should only display the warning and should
+  not duplicate the rule locally.
+- Add regression coverage when touching album naming logic:
+  library tests should verify reserved names are rejected and existing albums
+  remain listed, while UI tests should verify reserved-name rename attempts show
+  a warning instead of removing the album from the dashboard.
+
+---
+
 ## Maps Extension Development Workflow
 
 ### What the maps extension is
@@ -352,6 +382,87 @@ iphoto-gui
 | `FFmpeg not found` | Ensure `ffmpeg` and `ffprobe` are in your `PATH` |
 | OpenGL errors | Update GPU drivers; ensure OpenGL 3.3+ support |
 | `_jit_compiled` module not found | Run AOT compilation step (see Build section) |
+
+---
+
+## Popup Guardrails
+
+The application has shared popup plumbing for information/warning surfaces.
+When popup code is refactored, prefer the project's own popup implementation
+instead of dropping back to native/system-styled `QMessageBox` windows.
+
+- Route routine in-app warning/info popups through the shared themed helpers.
+- Make popup theme resolution follow the active app/window theme before the OS
+  color scheme.
+- Keep popup positioning centered on the hosting top-level window.
+- See
+  [`docs/misc/PROJECT_POPUP_GUARDRAILS.md`](misc/PROJECT_POPUP_GUARDRAILS.md)
+  for the project-wide rule plus the People dashboard regression checklist.
+
+### Context Menu Guardrails
+
+Qt context menus must use the project menu styling instead of bare `QMenu`
+instances. The main window uses translucent rounded chrome, and unstyled menus
+can inherit that translucency and render with a transparent background.
+
+- For sidebar and album-related menus, call
+  `_apply_main_window_menu_style(menu, parent)` from
+  `iPhoto.gui.ui.menus.album_sidebar_menu` before adding or executing actions.
+- If a menu uses a local stylesheet instead, set
+  `menu.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)` and apply
+  an explicit opaque `QMenu { background-color: ... }` rule.
+- Do not create and execute a naked `QMenu(self)` from widgets such as
+  dashboards, cards, sidebars, or popups.
+- When adding a new right-click surface, add or update a focused GUI test that
+  verifies the menu is styled and that important actions are present.
+
+#### Unified Right-Click Menu Rules
+
+The app now treats sidebar, dashboard, and gallery context menus as one shared
+interaction system. When you add or change a right-click entry, keep these
+rules aligned across surfaces:
+
+- Use `MenuContext` + `populate_menu()` for declarative menus whenever the
+  surface already participates in the shared menu system.
+- Right-clicking an asset in gallery must first sync selection to the clicked
+  row before computing menu visibility, so selection-scoped actions operate on
+  the intended asset.
+- Album-cover actions must resolve paths relative to the active album root
+  before calling `facade.set_cover(...)`. Do not assume `AssetDTO.rel_path`
+  already matches the current album root.
+- `Rename…` is the canonical label for rename actions. Use the same ellipsis
+  style and the same empty-name validation across sidebar and pinned-item menus.
+- Pinned-item rename is a sidebar-local alias. Persist it through
+  `PinnedItemsService` instead of mutating the underlying album/person/group
+  entity name.
+- `Pin`/`Unpin` and `Rename…` should stay adjacent on sidebar-driven menus so
+  users can manage the same entity without hunting across different surfaces.
+- Any regression around menu visibility or per-surface action parity needs a
+  targeted test in the menu/controller/widget layer that owns that surface.
+
+### People UI Conventions
+
+#### Reusable person-picker popup
+
+The canonical picker for choosing one or more People cards is
+`GroupPeopleDialog` in
+`src/iPhoto/gui/ui/widgets/people_dashboard_dialogs.py`.
+
+Use this dialog for all People-selection flows instead of creating ad-hoc
+`QInputDialog` or combo-box popups. Current uses include:
+
+- `New Group` from the People dashboard
+- `Merge Into...` from a People card context menu
+- `Choose Someone Else...` from the Info panel face actions
+
+When reusing it:
+
+- pass `dark_mode=` from the hosting window/theme context explicitly when the
+  caller is not the People dashboard itself
+- use `min_selection=1` and `max_selection=1` for single-target pickers
+- customize `title_text`, `prompt_text`, and `confirm_text` per workflow
+- keep multi-select behavior only for true grouping flows
+
 
 ---
 

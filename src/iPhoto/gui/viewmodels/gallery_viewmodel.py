@@ -10,8 +10,10 @@ from iPhoto.application.contracts.runtime_entry_contract import RuntimeEntryCont
 from iPhoto.config import ALL_PHOTOS_TITLE, DEFAULT_EXCLUDE, DEFAULT_INCLUDE, RECENTLY_DELETED_DIR_NAME
 from iPhoto.domain.models.core import MediaType
 from iPhoto.domain.models.query import AssetQuery
+from iPhoto.gui.ui.menus.core import MenuContext
 from iPhoto.gui.coordinators.location_selection_session import LocationSelectionSession
 from iPhoto.gui.facade import AppFacade
+from iPhoto.library.geo_aggregator import geotagged_asset_from_row
 
 from .base import BaseViewModel
 from .gallery_collection_store import GalleryCollectionStore
@@ -37,6 +39,8 @@ class GalleryViewModel(BaseViewModel):
         self._asset_service = asset_service
         self._location_session = location_session or LocationSelectionSession()
         self._cluster_gallery_origin: Literal["location", "people", None] = None
+        self._people_cluster_kind: Literal["person", "group", None] = None
+        self._people_cluster_id: str | None = None
 
         self.current_section = ObservableProperty("gallery")
         self.static_selection = ObservableProperty(None)
@@ -58,14 +62,16 @@ class GalleryViewModel(BaseViewModel):
     def location_session(self) -> LocationSelectionSession:
         return self._location_session
 
-    def open_album(self, path: Path) -> None:
+    def open_album(self, path: Path, *, select_sidebar_path: bool = True) -> None:
         album = self._facade.open_album(path)
         active_root = album.root if album else path
         if album:
             self._context.remember_album(album.root)
-            self.sidebar_path_requested.emit(album.root)
+            if select_sidebar_path:
+                self.sidebar_path_requested.emit(album.root)
         else:
-            self.sidebar_path_requested.emit(path)
+            if select_sidebar_path:
+                self.sidebar_path_requested.emit(path)
 
         query = AssetQuery(album_path=self._album_path_for_query(active_root))
         query.include_subalbums = True
@@ -74,6 +80,23 @@ class GalleryViewModel(BaseViewModel):
         self._load_query(
             section="album",
             static_selection=None,
+            root=active_root,
+            query=query,
+        )
+
+    def open_pinned_album(self, path: Path) -> None:
+        album = self._facade.open_album(path)
+        active_root = album.root if album else path
+        if album:
+            self._context.remember_album(album.root)
+
+        query = AssetQuery(album_path=self._album_path_for_query(active_root))
+        query.include_subalbums = True
+        self._clear_location_context()
+        self._clear_cluster_gallery_context()
+        self._load_query(
+            section="pinned_album",
+            static_selection="Pinned",
             root=active_root,
             query=query,
         )
@@ -196,24 +219,10 @@ class GalleryViewModel(BaseViewModel):
             or self._location_session.invalidated
         ):
             return
-        resolved_path = self._location_session.resolve_relative(rel)
-        if resolved_path is None:
+        asset = self._location_session.resolve_asset(rel)
+        if asset is None:
             return
-        assets = self._location_session.full_assets()
-        self.current_section.value = "location_gallery"
-        self.static_selection.value = "Location"
-        self.active_root.value = root
-        self.current_query.value = None
-        self.current_direct_assets.value = list(assets)
-        self.can_return_to_map.value = False
-        self._clear_cluster_gallery_context()
-        self._location_session.set_mode("gallery")
-        self.cluster_gallery_mode_changed.emit(False)
-        self._store.load_selection(root, direct_assets=assets, library_root=root)
-        self.route_requested.emit("gallery")
-        row = self._store.row_for_path(resolved_path)
-        if row is not None:
-            self.open_row(row)
+        self.open_cluster_gallery([asset])
 
     def open_cluster_gallery(self, assets: list[Any]) -> None:
         root = self._context.library.root()
@@ -232,12 +241,20 @@ class GalleryViewModel(BaseViewModel):
         self.cluster_gallery_mode_changed.emit(True)
         self.route_requested.emit("gallery")
 
-    def open_people_cluster_gallery(self, query: AssetQuery) -> None:
+    def open_people_cluster_gallery(
+        self,
+        query: AssetQuery,
+        *,
+        kind: Literal["person", "group", None] = None,
+        entity_id: str | None = None,
+    ) -> None:
         root = self._context.library.root()
         if root is None:
             self.bind_library_requested.emit()
             return
         self._cluster_gallery_origin = "people"
+        self._people_cluster_kind = kind
+        self._people_cluster_id = entity_id if entity_id else None
         self._location_session.set_mode("inactive")
         self.current_section.value = "people_cluster_gallery"
         self.static_selection.value = "People"
@@ -247,6 +264,31 @@ class GalleryViewModel(BaseViewModel):
         self.can_return_to_map.value = True
         self._store.load_selection(root, query=query)
         self.cluster_gallery_mode_changed.emit(True)
+        self.route_requested.emit("gallery")
+
+    def open_pinned_people_query(
+        self,
+        query: AssetQuery,
+        *,
+        kind: Literal["person", "group", None] = None,
+        entity_id: str | None = None,
+    ) -> None:
+        root = self._context.library.root()
+        if root is None:
+            self.bind_library_requested.emit()
+            return
+        self._clear_location_context()
+        self._clear_cluster_gallery_context()
+        self._people_cluster_kind = kind
+        self._people_cluster_id = entity_id if entity_id else None
+        self.current_section.value = "pinned_people_gallery"
+        self.static_selection.value = "Pinned"
+        self.active_root.value = root
+        self.current_query.value = query
+        self.current_direct_assets.value = None
+        self.can_return_to_map.value = False
+        self._store.load_selection(root, query=query)
+        self.cluster_gallery_mode_changed.emit(False)
         self.route_requested.emit("gallery")
 
     def return_from_cluster_gallery(self) -> None:
@@ -262,8 +304,124 @@ class GalleryViewModel(BaseViewModel):
             self._clear_cluster_gallery_context()
             self.open_people_dashboard()
 
+    def handle_people_snapshot_committed(self, event: object) -> None:
+        if self._cluster_gallery_origin != "people" and self.current_section.value != "pinned_people_gallery":
+            return
+        if self._people_cluster_kind not in {"person", "group"} or not self._people_cluster_id:
+            return
+        root = self._context.library.root()
+        if root is None:
+            return
+        if getattr(event, "library_root", None) != root:
+            return
+
+        current_id = self._people_cluster_id
+        current_query = self.current_query.value
+
+        if self._people_cluster_kind == "person":
+            redirects = getattr(event, "person_redirects", {}) or {}
+            changed_ids = set(getattr(event, "changed_person_ids", ()) or ())
+        else:
+            redirects = getattr(event, "group_redirects", {}) or {}
+            changed_ids = set(getattr(event, "changed_group_ids", ()) or ())
+
+        changed_asset_ids = set(getattr(event, "changed_asset_ids", ()) or ())
+        asset_ids = getattr(current_query, "asset_ids", ()) if current_query is not None else ()
+        affected = (
+            current_id in changed_ids
+            or current_id in redirects
+            or bool(changed_asset_ids and asset_ids and changed_asset_ids.intersection(asset_ids))
+        )
+        if not affected:
+            return
+
+        current_id = redirects.get(current_id, current_id)
+
+        if not current_id:
+            self.return_from_cluster_gallery()
+            return
+
+        from iPhoto.people.service import PeopleService
+
+        service = PeopleService(root)
+        if self._people_cluster_kind == "person":
+            query = service.build_cluster_query(current_id)
+        else:
+            query = service.build_group_query(current_id)
+
+        if not query.asset_ids:
+            self.return_from_cluster_gallery()
+            return
+
+        self._people_cluster_id = current_id
+        self.current_query.value = query
+        self._store.load_selection(root, query=query)
+
     def return_to_map_from_cluster_gallery(self) -> None:
         self.return_from_cluster_gallery()
+
+    def handle_location_scan_chunk(self, scan_root: Path, chunk: list[dict]) -> None:
+        root = self._context.library.root()
+        if root is None or not self._scan_root_matches_location_context(scan_root, root):
+            return
+        if self._location_session.mode == "inactive":
+            if self._location_session.root == root and self._location_session.has_snapshot:
+                self._location_session.invalidate()
+            return
+
+        changed = False
+        for row in chunk:
+            asset = geotagged_asset_from_row(root, row)
+            if asset is not None:
+                changed = self._location_session.upsert_asset(asset) or changed
+                continue
+            rel = row.get("rel") if isinstance(row, dict) else None
+            if isinstance(rel, str) and rel:
+                changed = self._location_session.remove_asset(rel) or changed
+
+        if changed and self._location_session.mode == "map":
+            self.map_assets_changed.emit(self._location_session.full_assets(), root)
+
+    def handle_location_scan_finished(self, scan_root: Path, success: bool) -> None:
+        if not success:
+            return
+        root = self._context.library.root()
+        if root is None or not self._scan_root_matches_location_context(scan_root, root):
+            return
+        if self._location_session.mode == "inactive":
+            if self._location_session.root == root and self._location_session.has_snapshot:
+                self._location_session.invalidate()
+            return
+
+        self._location_session.replace_assets(list(self._context.library.get_geotagged_assets()))
+        if self._location_session.mode == "map":
+            self.map_assets_changed.emit(self._location_session.full_assets(), root)
+
+    def handle_album_renamed(self, old_path: Path, new_path: Path) -> None:
+        if self.current_section.value not in {"album", "pinned_album"}:
+            return
+        active_root = self.active_root.value
+        if active_root is None:
+            return
+        retargeted_path = self._retarget_renamed_path(active_root, old_path, new_path)
+        if retargeted_path is None:
+            return
+
+        section = self.current_section.value
+        static_selection = self.static_selection.value
+        album = self._facade.open_album(retargeted_path)
+        retargeted_root = album.root if album else retargeted_path
+        if album:
+            self._context.remember_album(album.root)
+
+        query = AssetQuery(album_path=self._album_path_for_query(retargeted_root))
+        query.include_subalbums = True
+        self._load_query(
+            section=section,
+            static_selection=static_selection,
+            root=retargeted_root,
+            query=query,
+        )
 
     def on_library_tree_updated(self) -> bool:
         self._location_session.invalidate()
@@ -325,6 +483,45 @@ class GalleryViewModel(BaseViewModel):
             paths.append(path)
         return paths
 
+    def items_for_rows(self, rows: Iterable[int]) -> list:
+        items: list = []
+        seen_rows: set[int] = set()
+        for row in rows:
+            if row in seen_rows or row < 0:
+                continue
+            seen_rows.add(row)
+            dto = self._store.asset_at(row)
+            if dto is not None:
+                items.append(dto)
+        return items
+
+    def context_menu_state(self) -> MenuContext:
+        section = self.current_section.value
+        entity_kind: str | None = None
+        entity_id: str | None = None
+        if section in {"album", "pinned_album"} and self.active_root.value is not None:
+            entity_kind = "album"
+            entity_id = str(self.active_root.value)
+        elif section in {"people_cluster_gallery", "pinned_people_gallery"}:
+            if self._people_cluster_kind in {"person", "group"}:
+                entity_kind = self._people_cluster_kind
+                entity_id = self._people_cluster_id
+
+        return MenuContext(
+            surface="gallery",
+            selection_kind="empty",
+            gallery_section=section,
+            entity_kind=entity_kind,
+            entity_id=entity_id,
+            active_root=self.active_root.value,
+            is_recently_deleted=section == "recently_deleted",
+            is_cluster_gallery=section in {
+                "cluster_gallery",
+                "people_cluster_gallery",
+                "pinned_people_gallery",
+            },
+        )
+
     def toggle_favorite_row(self, row: int) -> Optional[bool]:
         path = self.path_for_row(row)
         if path is None:
@@ -357,6 +554,8 @@ class GalleryViewModel(BaseViewModel):
 
     def _clear_cluster_gallery_context(self) -> None:
         self._cluster_gallery_origin = None
+        self._people_cluster_kind = None
+        self._people_cluster_id = None
 
     def _album_path_for_query(self, path: Path) -> Optional[str]:
         library_root = self._context.library.root()
@@ -373,3 +572,43 @@ class GalleryViewModel(BaseViewModel):
         if rel_str in ("", "."):
             return None
         return rel_str
+
+    def _scan_root_matches_location_context(self, scan_root: Path, root: Path) -> bool:
+        try:
+            scan_root_resolved = scan_root.resolve()
+            root_resolved = root.resolve()
+        except OSError:
+            return False
+        return (
+            scan_root_resolved == root_resolved
+            or root_resolved in scan_root_resolved.parents
+        )
+
+    def _paths_equal(self, first: Path, second: Path) -> bool:
+        if first == second:
+            return True
+        try:
+            return first.resolve() == second.resolve()
+        except OSError:
+            return False
+
+    def _retarget_renamed_path(
+        self,
+        active_root: Path,
+        old_path: Path,
+        new_path: Path,
+    ) -> Path | None:
+        if self._paths_equal(active_root, old_path):
+            return new_path
+
+        for use_resolve in (True, False):
+            try:
+                active_candidate = active_root.resolve() if use_resolve else active_root
+                old_candidate = old_path.resolve() if use_resolve else old_path
+                rel = active_candidate.relative_to(old_candidate)
+            except (OSError, ValueError):
+                continue
+            if rel.as_posix() in ("", "."):
+                return new_path
+            return new_path / rel
+        return None

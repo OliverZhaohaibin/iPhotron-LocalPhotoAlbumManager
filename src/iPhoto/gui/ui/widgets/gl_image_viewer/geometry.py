@@ -233,3 +233,121 @@ def logical_crop_mapping_from_texture(
         "Crop_W": logical_w,
         "Crop_H": logical_h,
     }
+
+
+def texture_point_to_logical(
+    x: float,
+    y: float,
+    *,
+    texture_width: float,
+    texture_height: float,
+    rotate_steps: int,
+    flip_horizontal: bool = False,
+) -> tuple[float, float]:
+    """Convert a texture-space point into logical display pixel coordinates."""
+
+    if texture_width <= 0.0 or texture_height <= 0.0:
+        return (0.0, 0.0)
+    nx = clamp_unit(x / float(texture_width))
+    ny = clamp_unit(y / float(texture_height))
+    if rotate_steps == 1:
+        lx, ly = 1.0 - ny, nx
+    elif rotate_steps == 2:
+        lx, ly = 1.0 - nx, 1.0 - ny
+    elif rotate_steps == 3:
+        lx, ly = ny, 1.0 - nx
+    else:
+        lx, ly = nx, ny
+    if flip_horizontal:
+        lx = 1.0 - lx
+    logical_width = float(texture_height) if rotate_steps % 2 else float(texture_width)
+    logical_height = float(texture_width) if rotate_steps % 2 else float(texture_height)
+    return (clamp_unit(lx) * logical_width, clamp_unit(ly) * logical_height)
+
+
+def logical_point_to_texture(
+    x: float,
+    y: float,
+    *,
+    texture_width: float,
+    texture_height: float,
+    rotate_steps: int,
+    flip_horizontal: bool = False,
+) -> tuple[float, float]:
+    """Convert a logical display-space point back into original texture pixels."""
+
+    if texture_width <= 0.0 or texture_height <= 0.0:
+        return (0.0, 0.0)
+    logical_width = float(texture_height) if rotate_steps % 2 else float(texture_width)
+    logical_height = float(texture_width) if rotate_steps % 2 else float(texture_height)
+    lx = clamp_unit(x / logical_width)
+    ly = clamp_unit(y / logical_height)
+    if flip_horizontal:
+        lx = 1.0 - lx
+    if rotate_steps == 1:
+        nx, ny = ly, 1.0 - lx
+    elif rotate_steps == 2:
+        nx, ny = 1.0 - lx, 1.0 - ly
+    elif rotate_steps == 3:
+        nx, ny = 1.0 - ly, lx
+    else:
+        nx, ny = lx, ly
+    return (clamp_unit(nx) * float(texture_width), clamp_unit(ny) * float(texture_height))
+
+
+def texture_rect_to_logical(
+    x: float,
+    y: float,
+    width: float,
+    height: float,
+    *,
+    texture_width: float,
+    texture_height: float,
+    rotate_steps: int,
+    flip_horizontal: bool = False,
+) -> tuple[float, float, float, float]:
+    """Convert a texture-space rect into logical display pixel coordinates."""
+
+    if texture_width <= 0.0 or texture_height <= 0.0 or width <= 0.0 or height <= 0.0:
+        return (0.0, 0.0, 0.0, 0.0)
+    points = (
+        texture_point_to_logical(
+            x,
+            y,
+            texture_width=texture_width,
+            texture_height=texture_height,
+            rotate_steps=rotate_steps,
+            flip_horizontal=flip_horizontal,
+        ),
+        texture_point_to_logical(
+            x + width,
+            y,
+            texture_width=texture_width,
+            texture_height=texture_height,
+            rotate_steps=rotate_steps,
+            flip_horizontal=flip_horizontal,
+        ),
+        texture_point_to_logical(
+            x + width,
+            y + height,
+            texture_width=texture_width,
+            texture_height=texture_height,
+            rotate_steps=rotate_steps,
+            flip_horizontal=flip_horizontal,
+        ),
+        texture_point_to_logical(
+            x,
+            y + height,
+            texture_width=texture_width,
+            texture_height=texture_height,
+            rotate_steps=rotate_steps,
+            flip_horizontal=flip_horizontal,
+        ),
+    )
+    xs = [point[0] for point in points]
+    ys = [point[1] for point in points]
+    left = min(xs)
+    top = min(ys)
+    right = max(xs)
+    bottom = max(ys)
+    return (left, top, right - left, bottom - top)

@@ -9,15 +9,14 @@ from typing import Iterable
 from PySide6.QtCore import QThread, Signal
 
 from ...cache.index_store import get_global_repository
-from ...people.pipeline import (
-    FaceClusterPipeline,
-    canonicalize_cluster_identities,
-    cluster_face_records,
+from ...people.index_coordinator import (
+    PeopleIndexCoordinator,
+    PeopleSnapshotCommittedError,
+    get_people_index_coordinator,
 )
-from ...people.repository import FaceRecord, FaceRepository
+from ...people.pipeline import FaceClusterPipeline
 from ...people.service import face_library_paths
 from ...people.status import (
-    FACE_STATUS_DONE,
     FACE_STATUS_FAILED,
     FACE_STATUS_PENDING,
     FACE_STATUS_RETRY,
@@ -72,8 +71,8 @@ class FaceScanWorker(QThread):
             return
 
         paths = face_library_paths(self._library_root)
-        repository = FaceRepository(paths.index_db_path, paths.state_db_path)
         pipeline = FaceClusterPipeline(model_root=paths.model_dir)
+        coordinator = get_people_index_coordinator(self._library_root)
 
         while not self._cancelled:
             self._top_up_pending_rows()
@@ -86,13 +85,32 @@ class FaceScanWorker(QThread):
                 continue
 
             try:
-                self._process_batch(batch, pipeline, repository, paths.thumbnail_dir)
+                committed = self._process_batch(
+                    batch,
+                    coordinator,
+                    pipeline,
+                    paths.thumbnail_dir,
+                )
+                for asset_id in [str(row.get("id") or "") for row in batch if row.get("id")]:
+                    self._queued_ids.discard(asset_id)
+                if committed:
+                    self.peopleIndexUpdated.emit()
+            except PeopleSnapshotCommittedError as exc:
+                LOGGER.error("Face scan bookkeeping failed after commit: %s", exc, exc_info=True)
+                for asset_id in [str(row.get("id") or "") for row in batch if row.get("id")]:
+                    self._queued_ids.discard(asset_id)
+                self.statusChanged.emit(str(exc))
+                return
             except RuntimeError as exc:
                 self._mark_remaining_failed(batch)
                 self.statusChanged.emit(str(exc))
                 return
             except Exception as exc:  # pragma: no cover - defensive runtime guard
                 LOGGER.warning("Face scan batch failed: %s", exc, exc_info=True)
+                # The batch is retried so the assets remain pending/retry in the
+                # store and will be re-detected on the next scan.  We do NOT
+                # extend pending_done_ids here because we cannot guarantee
+                # session.commit() will succeed for partially staged results.
                 self._mark_rows_retry(batch)
                 self.statusChanged.emit("Face scanning paused due to an unexpected error.")
                 if self._input_closed:
@@ -134,59 +152,38 @@ class FaceScanWorker(QThread):
     def _process_batch(
         self,
         batch: list[dict],
+        coordinator: PeopleIndexCoordinator,
         pipeline: FaceClusterPipeline,
-        repository,
         thumbnail_dir: Path,
-    ) -> None:
-        repository.remove_faces_for_assets(
-            [str(row.get("id") or "") for row in batch],
-            [str(row.get("rel") or "") for row in batch],
-        )
-
-        detected = pipeline.detect_faces_for_rows(
-            batch,
-            library_root=self._library_root,
-            thumbnail_dir=thumbnail_dir,
-        )
-
-        new_faces: list[FaceRecord] = []
-        done_ids: list[str] = []
-        retry_ids: list[str] = []
-        for item in detected:
-            self._queued_ids.discard(item.asset_id)
-            if item.error:
-                retry_ids.append(item.asset_id)
-                continue
-            done_ids.append(item.asset_id)
-            new_faces.extend(item.faces)
-
-        all_faces = repository.get_all_faces() + new_faces
-        if all_faces:
-            clustered_faces, persons = cluster_face_records(
-                all_faces,
-                distance_threshold=pipeline.distance_threshold,
-                min_samples=pipeline.min_samples,
+    ) -> bool:
+        """Detect faces for *batch* and commit a realtime People snapshot."""
+        if self._cancelled:
+            self._mark_rows_retry(batch)
+            return False
+        detected = list(
+            pipeline.detect_faces_for_rows(
+                batch,
+                library_root=self._library_root,
+                thumbnail_dir=thumbnail_dir,
             )
-            state_repository = repository.state_repository
-            if state_repository is not None:
-                clustered_faces, persons = canonicalize_cluster_identities(
-                    clustered_faces,
-                    persons,
-                    state_repository,
-                    distance_threshold=pipeline.distance_threshold,
-                )
-            repository.replace_all(clustered_faces, persons)
-            if state_repository is not None:
-                state_repository.sync_scan_results(persons, clustered_faces)
-        else:
-            repository.replace_all([], [])
+        )
 
-        store = get_global_repository(self._library_root)
-        store.update_face_statuses(done_ids, FACE_STATUS_DONE)
-        store.update_face_statuses(retry_ids, FACE_STATUS_RETRY)
-        self.peopleIndexUpdated.emit()
+        if self._cancelled:
+            self._mark_rows_retry(batch)
+            return False
+
+        retry_items = [item for item in detected if item.asset_id and item.error]
+        retry_ids = [str(item.asset_id) for item in retry_items]
+
         if retry_ids:
             self.statusChanged.emit("Some assets need a face-scan retry.")
+
+        event = coordinator.submit_detected_batch(
+            detected,
+            distance_threshold=pipeline.distance_threshold,
+            min_samples=pipeline.min_samples,
+        )
+        return event is not None
 
     def _mark_rows_retry(self, rows: Iterable[dict]) -> None:
         ids = [str(row.get("id") or "") for row in rows if row.get("id")]

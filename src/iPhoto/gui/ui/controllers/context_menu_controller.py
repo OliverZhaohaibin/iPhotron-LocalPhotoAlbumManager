@@ -12,6 +12,7 @@ from PySide6.QtCore import (
     QAbstractItemModel,
     QCoreApplication,
     QMimeData,
+    QModelIndex,
     QObject,
     QPoint,
     QUrl,
@@ -50,10 +51,10 @@ class ContextMenuController(QObject):
         status_bar: StatusBarController,
         notification_toast: NotificationToast,
         selection_controller: SelectionController | None,
-        navigation: "NavigationCoordinator" | None,
+        navigation: "NavigationCoordinator | None",
         export_callback: Callable[[], None],
         prepare_paths_for_mutation: Callable[[list[Path]], None] | None = None,
-        gallery_viewmodel: "GalleryViewModel" | None = None,
+        gallery_viewmodel: "GalleryViewModel | None" = None,
         parent: Optional[QObject] = None,
     ) -> None:
         super().__init__(parent)
@@ -89,7 +90,7 @@ class ContextMenuController(QObject):
                 QItemSelectionModel.ClearAndSelect | QItemSelectionModel.Rows,
             )
 
-        context = self._menu_context()
+        context = self._menu_context(index=index)
         handlers = GalleryMenuHandlers(
             copy_selection=lambda _ctx: self._copy_selection_to_clipboard(),
             reveal_selection=lambda _ctx: self._reveal_selection_in_file_manager(),
@@ -322,13 +323,19 @@ class ContextMenuController(QObject):
             return []
         return list(items_for_rows(rows))
 
-    def _menu_context(self) -> MenuContext:
+    def _menu_context(self, *, index: QModelIndex | None = None) -> MenuContext:
         base_context = self._base_menu_context()
+        if index is not None and not index.isValid():
+            return base_context.with_selection(
+                selection_kind="empty",
+                selected_assets=[],
+            )
+
         rows = self._selected_rows()
         selection_kind = "assets" if rows else "empty"
         return base_context.with_selection(
             selection_kind=selection_kind,
-            selected_assets=self._selected_assets(rows),
+            selected_assets=self._selected_assets(rows) if rows else [],
         )
 
     def _base_menu_context(self) -> MenuContext:

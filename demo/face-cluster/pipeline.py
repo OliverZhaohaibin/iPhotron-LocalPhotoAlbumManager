@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 import os
+import sys
+import builtins
+import typing
 from collections import Counter, defaultdict, deque
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 import hashlib
 from pathlib import Path
+from types import ModuleType
 import uuid
 
 import numpy as np
@@ -36,6 +40,7 @@ SUPPORTED_IMAGE_SUFFIXES = {
     ".heic",
     ".heif",
 }
+_REQUIRED_FACE_MODULES = ("detection", "recognition")
 
 
 @dataclass(frozen=True)
@@ -193,7 +198,9 @@ class FaceClusterPipeline:
             return self._analysis_app
 
         try:
-            from insightface.app import FaceAnalysis
+            _install_runtime_typing_compat()
+            _install_insightface_mask_renderer_stubs()
+            from insightface.app.face_analysis import FaceAnalysis
         except ImportError as exc:
             raise RuntimeError(
                 "缺少 insightface 依赖。请先安装 demo 需要的 AI 依赖后再运行。"
@@ -206,7 +213,12 @@ class FaceClusterPipeline:
         providers = _resolve_execution_providers()
         ctx_id = 0 if "CUDAExecutionProvider" in providers else -1
         try:
-            app = FaceAnalysis(name=self._model_pack, root=str(insightface_root), providers=providers)
+            app = FaceAnalysis(
+                name=self._model_pack,
+                root=str(insightface_root),
+                allowed_modules=list(_REQUIRED_FACE_MODULES),
+                providers=providers,
+            )
             app.prepare(ctx_id=ctx_id, det_size=(640, 640))
         except Exception as exc:
             raise _build_face_analysis_init_error(
@@ -580,6 +592,72 @@ def _patch_insightface_alignment_estimate() -> None:
 
     face_align.estimate_norm = estimate_norm
     face_align._iphoto_from_estimate_patch = True
+
+
+def _install_insightface_mask_renderer_stubs() -> None:
+    """Avoid importing albumentations for InsightFace mask rendering we do not use."""
+    if "albumentations" in sys.modules:
+        return
+
+    albumentations_module = ModuleType("albumentations")
+    core_module = ModuleType("albumentations.core")
+    transforms_module = ModuleType("albumentations.core.transforms_interface")
+
+    class ImageOnlyTransform:
+        def __init__(self, *args, **kwargs) -> None:
+            del args, kwargs
+
+    transforms_module.ImageOnlyTransform = ImageOnlyTransform
+    core_module.transforms_interface = transforms_module
+    albumentations_module.core = core_module
+
+    sys.modules["albumentations"] = albumentations_module
+    sys.modules["albumentations.core"] = core_module
+    sys.modules["albumentations.core.transforms_interface"] = transforms_module
+
+
+def _install_runtime_typing_compat() -> None:
+    """Provide typing names some third-party annotations expect at runtime."""
+    import numpy.typing as npt
+
+    compat_names = {
+        "Any": typing.Any,
+        "Callable": typing.Callable,
+        "ClassVar": typing.ClassVar,
+        "Concatenate": typing.Concatenate,
+        "Dict": typing.Dict,
+        "Final": typing.Final,
+        "Generic": typing.Generic,
+        "Iterable": typing.Iterable,
+        "List": typing.List,
+        "Literal": typing.Literal,
+        "LiteralString": typing.LiteralString,
+        "Mapping": typing.Mapping,
+        "MutableMapping": typing.MutableMapping,
+        "Never": typing.Never,
+        "NoReturn": typing.NoReturn,
+        "NotRequired": typing.NotRequired,
+        "Optional": typing.Optional,
+        "ParamSpec": typing.ParamSpec,
+        "Protocol": typing.Protocol,
+        "Required": typing.Required,
+        "Self": typing.Self,
+        "Sequence": typing.Sequence,
+        "Set": typing.Set,
+        "TypedDict": typing.TypedDict,
+        "Tuple": typing.Tuple,
+        "TypeAlias": typing.TypeAlias,
+        "TypeGuard": typing.TypeGuard,
+        "TypeVar": typing.TypeVar,
+        "Union": typing.Union,
+        "ArrayLike": npt.ArrayLike,
+        "DTypeLike": npt.DTypeLike,
+        "NDArray": npt.NDArray,
+        "ndarray": np.ndarray,
+    }
+    for name, value in compat_names.items():
+        if not hasattr(builtins, name):
+            setattr(builtins, name, value)
 
 
 def _utc_now_iso() -> str:

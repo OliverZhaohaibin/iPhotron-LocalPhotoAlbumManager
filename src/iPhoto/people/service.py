@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import os
 from pathlib import Path
 import uuid
 
@@ -21,7 +22,16 @@ from .repository import (
 )
 from .status import FACE_STATUS_RETRY, FACE_STATUS_SKIPPED, normalize_face_status
 
-_SHARED_FACE_MODEL_DIR = Path(__file__).resolve().parents[2] / "extension" / "models"
+def _default_shared_face_model_dir() -> Path:
+    override = os.environ.get("IPHOTO_FACE_MODEL_DIR")
+    if override:
+        return Path(override).expanduser()
+
+    package_root = Path(__file__).resolve().parents[2]
+    return package_root / "extension" / "models"
+
+
+_SHARED_FACE_MODEL_DIR = _default_shared_face_model_dir()
 
 
 @dataclass(frozen=True)

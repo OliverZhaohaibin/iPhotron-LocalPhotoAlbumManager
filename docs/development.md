@@ -63,6 +63,26 @@ Managed in `pyproject.toml`:
 | `av` | Video decoding |
 | `PyOpenGL` / `PyOpenGL_accelerate` | OpenGL rendering |
 
+### Optional Face Recognition Dependencies
+
+The People face-scanning pipeline is installed through the optional `ai-demo`
+extra:
+
+```bash
+pip install -e ".[ai-demo]"
+```
+
+That extra intentionally stays small:
+
+| Package | Purpose |
+|---------|---------|
+| `insightface>=0.7.3,<1.0` | Face detection and face embeddings |
+| `onnxruntime>=1.18,<2` | ONNX model execution backend |
+
+Do not add InsightFace's unused mask-rendering dependency chain to the runtime
+unless the product starts using it directly. The app does not need
+`albumentations` or `pydantic` for People clustering.
+
 ### Dev Dependencies
 
 ```bash
@@ -296,6 +316,161 @@ iphoto-gui
 This is convenient for debugging, but release builds should still copy the
 runtime into `src/maps/tiles/extension/` so the repository and packaged app stay
 self-contained.
+
+---
+
+## Face Recognition Development Workflow
+
+### Runtime contract
+
+The People feature scans assets in the background, detects faces with
+InsightFace, stores face embeddings, and clusters those embeddings into people.
+The runtime model cache is shared at:
+
+| Path | Purpose |
+|------|---------|
+| `src/extension/models/buffalo_s/` | Checked-in InsightFace model cache |
+| `src/extension/models/buffalo_s/det_500m.onnx` | Face detector |
+| `src/extension/models/buffalo_s/w600k_mbf.onnx` | Face recognition embedding model |
+
+The default packaged path is resolved from the installed package as
+`extension/models`. For local debugging, override it with:
+
+```powershell
+$env:IPHOTO_FACE_MODEL_DIR = "D:\python_code\iPhoto\iPhotos\src\extension\models"
+```
+
+The model directory may be absent in a packaged build. In that case
+InsightFace can download the model pack on first use, but release builds should
+still bundle the model cache when an offline-ready distribution is required.
+
+### InsightFace import rules
+
+Always import the concrete FaceAnalysis module through the People pipeline's
+compatibility path:
+
+```python
+from insightface.app.face_analysis import FaceAnalysis
+```
+
+Do not switch back to:
+
+```python
+from insightface.app import FaceAnalysis
+```
+
+The package-level import pulls in InsightFace's mask-rendering path, which can
+drag in `albumentations` and `pydantic`. In Nuitka builds this has produced
+runtime annotation failures such as `name 'Literal' is not defined` and
+`name 'NDArray' is not defined`.
+
+The pipeline intentionally installs two compatibility shims before importing
+InsightFace:
+
+- runtime typing names in `builtins`, for third-party annotations evaluated at
+  runtime inside packaged apps
+- a lightweight `albumentations` stub, because iPhotron does not use
+  InsightFace mask rendering
+
+Keep these shims in place unless the packaging strategy changes and the
+replacement has been verified in a Nuitka build.
+
+### Required InsightFace modules
+
+People clustering only needs bounding boxes and embeddings. Keep
+`FaceAnalysis` constrained to:
+
+```python
+allowed_modules=["detection", "recognition"]
+```
+
+Do not load `landmark_2d_106`, `landmark_3d_68`, or `genderage` for the People
+scan. Those models are not used for clustering and have caused packaged
+asset-level failures such as:
+
+```text
+'NoneType' object has no attribute 'shape'
+```
+
+If a future feature needs landmarks or gender/age attributes, add that feature
+behind a separate tested path and validate it in a Nuitka package before
+enabling it for background scanning.
+
+### Scan status and retry rules
+
+Face scan state is stored per asset. The intended behavior is:
+
+- `pending`: asset has not been scanned yet
+- `done`: scan completed, with or without detected faces
+- `skipped`: asset is not eligible for face scanning
+- `retry`: asset failed once and should be attempted again
+- `failed`: asset failed after a retry and should not block the whole queue
+
+Important rules:
+
+- A batch-level exception should pause scanning and surface the real exception
+  text in the People page.
+- An asset-level exception should be logged, then marked `retry` on the first
+  failure.
+- If the same asset fails again while already in `retry`, mark it `failed` so
+  the queue can continue.
+- A full library rescan must reset `retry` and `failed` face statuses back to
+  the initial status. It should preserve only stable completed states such as
+  `done` and `skipped` when the asset identity is unchanged.
+
+This prevents a broken image or transient packaged-runtime issue from
+deadlocking People scanning until the user deletes the database manually.
+
+### Debugging packaged face scan failures
+
+The app writes rotating logs to:
+
+```powershell
+%LOCALAPPDATA%\iPhoto\iPhoto.log
+```
+
+For custom locations:
+
+```powershell
+$env:IPHOTO_LOG_DIR = "D:\tmp\iphoto-logs"
+```
+
+Useful log messages:
+
+- `Face scanning paused: ...`
+  Batch-level failure; the message should include the actual exception.
+- `Face detection failed for ...`
+  Full traceback for an asset-level detection failure.
+- `Face scan failed for asset ...`
+  The worker marked a specific asset for retry or failure.
+
+When a packaged build says `Some assets could not be face scanned and will be
+retried after a rescan`, inspect the log before changing model paths. That
+message means model initialization succeeded far enough to process assets, but
+at least one asset failed during detection/embedding.
+
+### Verification checklist
+
+After changing People scanning, run the focused tests:
+
+```powershell
+pytest tests\test_people_pipeline.py tests\test_people_service.py tests\cache\test_global_repository.py tests\test_face_cluster_pipeline.py
+```
+
+For a local smoke test against a real image:
+
+```powershell
+python -c "from pathlib import Path; from iPhoto.people.pipeline import FaceClusterPipeline; p=FaceClusterPipeline(model_root=Path('src/extension/models')); out=p.detect_faces_for_rows([{'id':'test','rel':'DSCF5586.JPG'}], library_root=Path(r'C:\Users\Olive\Downloads\face'), thumbnail_dir=Path(r'C:\Users\Olive\Downloads\face\.iPhoto\faces')); print([(x.asset_rel, x.error, len(x.faces)) for x in out]); print(sorted(p._ensure_face_analysis().models.keys()))"
+```
+
+The loaded InsightFace models should be only:
+
+```text
+['detection', 'recognition']
+```
+
+For release verification, rebuild with Nuitka and test the People page from the
+packaged executable, not from the editable source checkout.
 
 ---
 

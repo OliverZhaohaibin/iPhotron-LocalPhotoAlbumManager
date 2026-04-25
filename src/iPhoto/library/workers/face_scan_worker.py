@@ -112,7 +112,8 @@ class FaceScanWorker(QThread):
                 # extend pending_done_ids here because we cannot guarantee
                 # session.commit() will succeed for partially staged results.
                 self._mark_rows_retry(batch)
-                self.statusChanged.emit("Face scanning paused due to an unexpected error.")
+                reason = str(exc).strip() or exc.__class__.__name__
+                self.statusChanged.emit(f"Face scanning paused: {reason}")
                 if self._input_closed:
                     return
 
@@ -173,13 +174,41 @@ class FaceScanWorker(QThread):
             return False
 
         retry_items = [item for item in detected if item.asset_id and item.error]
-        retry_ids = [str(item.asset_id) for item in retry_items]
+        for item in retry_items:
+            LOGGER.warning(
+                "Face scan failed for asset %s (%s): %s",
+                item.asset_id,
+                item.asset_rel,
+                item.error,
+            )
+        retry_id_set = {str(item.asset_id) for item in retry_items}
+        retry_source_ids = {
+            str(row.get("id") or "")
+            for row in batch
+            if str(row.get("id") or "") in retry_id_set
+            and normalize_face_status(row.get("face_status")) == FACE_STATUS_RETRY
+        }
+        first_retry_ids = [asset_id for asset_id in retry_id_set if asset_id not in retry_source_ids]
+        failed_ids = [asset_id for asset_id in retry_id_set if asset_id in retry_source_ids]
 
-        if retry_ids:
+        if first_retry_ids:
             self.statusChanged.emit("Some assets need a face-scan retry.")
+        if failed_ids:
+            get_global_repository(self._library_root).update_face_statuses(
+                failed_ids,
+                FACE_STATUS_FAILED,
+            )
+            self.statusChanged.emit(
+                "Some assets could not be face scanned and will be retried after a rescan."
+            )
+        retry_detected = [
+            item
+            for item in detected
+            if not item.asset_id or str(item.asset_id) not in failed_ids
+        ]
 
         event = coordinator.submit_detected_batch(
-            detected,
+            retry_detected,
             distance_threshold=pipeline.distance_threshold,
             min_samples=pipeline.min_samples,
         )

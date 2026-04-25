@@ -4,7 +4,12 @@ from __future__ import annotations
 
 from typing import Any, Dict, Iterable, Mapping
 
-from ...people import FACE_STATUS_FAILED, initial_face_status, normalize_face_status
+from ...people import (
+    FACE_STATUS_DONE,
+    FACE_STATUS_SKIPPED,
+    initial_face_status,
+    normalize_face_status,
+)
 
 _PRESERVED_SCAN_STATE_FIELDS = (
     "is_favorite",
@@ -48,7 +53,7 @@ def merge_scan_row(
 
     if (
         existing_face_status is not None
-        and existing_face_status != FACE_STATUS_FAILED
+        and existing_face_status in {FACE_STATUS_DONE, FACE_STATUS_SKIPPED}
         and identity_unchanged
     ):
         merged["face_status"] = existing_face_status

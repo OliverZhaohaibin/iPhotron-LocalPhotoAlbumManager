@@ -22,6 +22,7 @@ from iPhoto.people.pipeline import DetectedAssetFaces
 from iPhoto.people.records import AssetFaceAnnotation
 from iPhoto.people.repository import FaceRecord, ManualFaceRecord, PersonRecord
 from iPhoto.people.scan_session import FaceScanSession
+from iPhoto.people import service as people_service
 from iPhoto.people.service import PeopleService, face_library_paths, shared_face_model_dir
 
 
@@ -171,6 +172,16 @@ def test_face_library_paths_live_under_dot_iphoto(tmp_path: Path) -> None:
     assert paths.thumbnail_dir == paths.root_dir / "thumbnails"
     assert paths.model_dir == shared_face_model_dir()
     assert paths.model_dir == Path(__file__).resolve().parents[1] / "src" / "extension" / "models"
+
+
+def test_default_shared_face_model_dir_can_be_overridden(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    model_dir = tmp_path / "face-models"
+
+    monkeypatch.setenv("IPHOTO_FACE_MODEL_DIR", str(model_dir))
+
+    assert people_service._default_shared_face_model_dir() == model_dir
 
 
 def test_people_service_rename_merge_and_build_query(tmp_path: Path) -> None:
@@ -1162,6 +1173,83 @@ def test_face_scan_worker_skips_commit_when_cancelled_mid_batch(tmp_path: Path) 
     assert global_repo.get_rows_by_ids(["asset-a"])["asset-a"]["face_status"] == "retry"
 
 
+def test_face_scan_worker_marks_retry_error_failed_on_second_attempt(tmp_path: Path) -> None:
+    global_repo = get_global_repository(tmp_path)
+    global_repo.write_rows(
+        [
+            {"rel": "album/a.jpg", "id": "asset-a", "media_type": 0, "face_status": "retry"},
+        ]
+    )
+    worker = FaceScanWorker(tmp_path)
+    messages: list[str] = []
+    worker.statusChanged.connect(messages.append)
+    coordinator = Mock(submit_detected_batch=Mock(return_value=None))
+    pipeline = SimpleNamespace(
+        detect_faces_for_rows=Mock(
+            return_value=[
+                DetectedAssetFaces(
+                    asset_id="asset-a",
+                    asset_rel="album/a.jpg",
+                    faces=[],
+                    error="image decode failed",
+                )
+            ]
+        ),
+        distance_threshold=0.6,
+        min_samples=2,
+    )
+
+    committed = worker._process_batch(
+        [{"id": "asset-a", "rel": "album/a.jpg", "media_type": 0, "face_status": "retry"}],
+        coordinator,
+        pipeline,
+        tmp_path / "thumbs",
+    )
+
+    assert committed is False
+    assert global_repo.get_rows_by_ids(["asset-a"])["asset-a"]["face_status"] == "failed"
+    assert messages == [
+        "Some assets could not be face scanned and will be retried after a rescan."
+    ]
+    coordinator.submit_detected_batch.assert_called_once()
+    assert coordinator.submit_detected_batch.call_args.args[0] == []
+
+
+def test_face_scan_worker_logs_asset_retry_reason(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    global_repo = get_global_repository(tmp_path)
+    global_repo.write_rows(
+        [
+            {"rel": "album/a.jpg", "id": "asset-a", "media_type": 0, "face_status": "pending"},
+        ]
+    )
+    worker = FaceScanWorker(tmp_path)
+    coordinator = Mock(submit_detected_batch=Mock(return_value=None))
+    pipeline = SimpleNamespace(
+        detect_faces_for_rows=Mock(
+            return_value=[
+                DetectedAssetFaces(
+                    asset_id="asset-a",
+                    asset_rel="album/a.jpg",
+                    faces=[],
+                    error="name 'Literal' is not defined",
+                )
+            ]
+        ),
+        distance_threshold=0.6,
+        min_samples=2,
+    )
+
+    with caplog.at_level("WARNING", logger="iPhoto"):
+        worker._process_batch(
+            [{"id": "asset-a", "rel": "album/a.jpg", "media_type": 0, "face_status": "pending"}],
+            coordinator,
+            pipeline,
+            tmp_path / "thumbs",
+        )
+
+    assert "Face scan failed for asset asset-a (album/a.jpg): name 'Literal' is not defined" in caplog.text
+
+
 def test_people_index_coordinator_retries_done_status_bookkeeping(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1351,6 +1439,50 @@ def test_face_scan_worker_does_not_mark_retry_after_committed_snapshot_error(
 
     assert global_repo.get_rows_by_ids(["asset-a"])["asset-a"]["face_status"] == "pending"
     assert messages == ["Face scan committed, but updating scan bookkeeping failed."]
+
+
+def test_face_scan_worker_reports_unexpected_batch_error_reason(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    global_repo = get_global_repository(tmp_path)
+    global_repo.write_rows(
+        [
+            {"rel": "album/a.jpg", "id": "asset-a", "media_type": 0, "face_status": "pending"},
+        ]
+    )
+    worker = FaceScanWorker(tmp_path)
+    worker.finish_input()
+    messages: list[str] = []
+    worker.statusChanged.connect(messages.append)
+
+    monkeypatch.setattr(
+        "iPhoto.library.workers.face_scan_worker.face_library_paths",
+        lambda _root: SimpleNamespace(
+            model_dir=tmp_path / "models",
+            thumbnail_dir=tmp_path / "thumbs",
+        ),
+    )
+
+    class FakePipeline:
+        distance_threshold = 0.6
+        min_samples = 2
+
+        def __init__(self, *, model_root: Path) -> None:
+            self.model_root = model_root
+
+        def detect_faces_for_rows(self, *_args, **_kwargs):
+            raise ValueError("compiled dependency missing")
+
+    monkeypatch.setattr(
+        "iPhoto.library.workers.face_scan_worker.FaceClusterPipeline",
+        FakePipeline,
+    )
+
+    worker.run()
+
+    assert global_repo.get_rows_by_ids(["asset-a"])["asset-a"]["face_status"] == "retry"
+    assert messages == ["Face scanning paused: compiled dependency missing"]
 
 
 def test_scanner_worker_does_not_emit_chunk_ready_for_failed_persist(tmp_path: Path) -> None:

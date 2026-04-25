@@ -76,6 +76,73 @@ You also need:
 
 For the full end-to-end sync workflow, see [docs/development.md](../development.md).
 
+## Face Recognition in Release Builds
+
+The People feature uses InsightFace for face detection and embeddings. Release
+builds must treat this as a small AI runtime rather than as a normal optional
+import, because Nuitka's standalone/no-site output will not read packages from
+the user's Python environment after packaging.
+
+Required Python packages for the face runtime are:
+
+```toml
+ai-demo = [
+  "insightface>=0.7.3,<1.0",
+  "onnxruntime>=1.18,<2",
+]
+```
+
+Install them into the build environment before running Nuitka:
+
+```powershell
+python -m pip install -e ".[ai-demo]"
+```
+
+The app may download InsightFace models at runtime when the model cache is
+missing, but release builds should still bundle the checked-in model cache when
+available. The expected source layout is:
+
+| Path | Purpose |
+|---|---|
+| `src/extension/models/buffalo_s/` | InsightFace `buffalo_s` ONNX model files |
+| `src/extension/models/buffalo_s.zip` | Optional upstream model pack archive |
+
+At runtime the default model root is resolved from the installed package as
+`extension/models`. It can be overridden for debugging with:
+
+```powershell
+$env:IPHOTO_FACE_MODEL_DIR = "D:\path\to\models"
+```
+
+Important packaging rules:
+
+- Include `insightface` and `onnxruntime` in the Nuitka bundle.
+- Include `src/extension/models` as `extension/models`.
+- Do not rely on installing `insightface` or `onnxruntime` next to an already
+  built executable; standalone/no-site builds will not load those packages.
+- Exclude `albumentations`, `albucore`, `pydantic`, `pydantic_core`, and
+  `typing_inspection`. The People pipeline installs a lightweight
+  albumentations stub because InsightFace's mask-rendering import path is not
+  used by iPhotron.
+- Keep InsightFace limited to `allowed_modules=["detection", "recognition"]`.
+  People clustering needs only bounding boxes and embeddings. Loading
+  landmark/gender-age models in packaged builds has caused asset-level
+  failures such as `'NoneType' object has no attribute 'shape'`.
+
+The Windows build script already applies these rules. If writing a manual
+Nuitka command, include the equivalent flags:
+
+```bash
+--include-package=insightface
+--include-package=onnxruntime
+--include-data-dir=src/extension/models=extension/models
+--nofollow-import-to=albumentations
+--nofollow-import-to=albucore
+--nofollow-import-to=pydantic
+--nofollow-import-to=pydantic_core
+--nofollow-import-to=typing_inspection
+```
+
 ## Step 1: AOT Compilation
 
 Before packaging with Nuitka, you **must** compile the Numba JIT filters into
@@ -167,9 +234,17 @@ Example Nuitka command (adjust paths for your platform):
 nuitka --standalone \
     --nofollow-import-to=numba \
     --nofollow-import-to=llvmlite \
+    --nofollow-import-to=albumentations \
+    --nofollow-import-to=albucore \
+    --nofollow-import-to=pydantic \
+    --nofollow-import-to=pydantic_core \
+    --nofollow-import-to=typing_inspection \
     --nofollow-import-to=pytest \
     --nofollow-import-to=iPhoto.tests \
     --include-package=iPhoto \
+    --include-package=insightface \
+    --include-package=onnxruntime \
+    --include-data-dir=src/extension/models=extension/models \
     --output-dir=dist \
     src/iPhoto/gui/main.py
 ```
@@ -188,9 +263,17 @@ nuitka --standalone \
     --follow-imports \
     --nofollow-import-to=numba \
     --nofollow-import-to=llvmlite \
+    --nofollow-import-to=albumentations \
+    --nofollow-import-to=albucore \
+    --nofollow-import-to=pydantic \
+    --nofollow-import-to=pydantic_core \
+    --nofollow-import-to=typing_inspection \
     --nofollow-import-to=pytest \
     --nofollow-import-to=iPhoto.tests \
     --include-package=iPhoto \
+    --include-package=insightface \
+    --include-package=onnxruntime \
+    --include-data-dir=src/extension/models=extension/models \
     --assume-yes-for-downloads \
     --output-dir=dist \
     src/iPhoto/gui/main.py
@@ -211,6 +294,10 @@ Notes:
 | `--nofollow-import-to=pytest` | Prevents Nuitka from bundling `pytest` (only needed for development) |
 | `--nofollow-import-to=iPhoto.tests` | Excludes the in-tree test sub-package from the build |
 | `--include-package=iPhoto` | Ensures all iPhoto sub-packages (including the AOT `.so`/`.pyd`) are included |
+| `--include-package=insightface` | Bundles the InsightFace runtime used by People scanning |
+| `--include-package=onnxruntime` | Bundles the ONNX runtime used by InsightFace models |
+| `--include-data-dir=src/extension/models=extension/models` | Bundles the shared face model cache |
+| `--nofollow-import-to=albumentations` and related pydantic packages | Avoids unused InsightFace mask-rendering dependencies that are not needed for People clustering |
 
 ## Step 3: Verify the Distribution
 
@@ -247,6 +334,19 @@ After building, confirm that:
 5. The packaged application can launch the map preview and the main GUI without
    map-runtime errors.
 
+6. The packaged output includes the face model cache when it is intended to be
+   shipped offline:
+
+   ```powershell
+   Get-ChildItem -Recurse dist\ -Filter "det_500m.onnx"
+   Get-ChildItem -Recurse dist\ -Filter "w600k_mbf.onnx"
+   ```
+
+7. The People page can scan a small image folder and create face clusters.
+   During a diagnostic run, check the app log at
+   `%LOCALAPPDATA%\iPhoto\iPhoto.log` for messages such as `Face detection
+   failed for ...` or `Face scan failed for asset ...`.
+
 ## Windows Installer Notes
 
 The Inno Setup script `tools/v4.50.iss` supports an **optional downloadable map
@@ -277,3 +377,7 @@ as `extension` so the install script lands the files in the correct location.
 | `The native OsmAnd widget DLL is not available` | `src/maps/tiles/extension/bin` was not staged correctly | Rebuild the side-project runtime and resync `dist-msvc`, or rerun `scripts\build_nuitka_windows.ps1` without `-SkipNativeRuntimeSync` |
 | `OsmAnd helper command not configured` | `osmand_render_helper.exe` is missing from the extension `bin/` directory | Ensure the helper exists in the side-project output and is copied into `src/maps/tiles/extension/bin` |
 | Installer downloads the optional package but the map is still unavailable | The ZIP root does not contain `extension\...` or the expected OBF file is missing | Recreate the archive with the `extension` root and verify `extension\World_basemap_2.obf` exists before publishing |
+| `Face scanning paused: name 'Literal' is not defined` | A third-party annotation was evaluated at runtime inside the packaged app | Rebuild with the current People pipeline, which installs runtime typing compatibility before importing InsightFace |
+| `Face scanning paused: name 'NDArray' is not defined` | Same runtime annotation issue, usually from numpy typing annotations | Rebuild with the current People pipeline; do not remove the runtime typing compatibility helper |
+| `Some assets could not be face scanned and will be retried after a rescan` | Asset-level face detection failed twice; check `%LOCALAPPDATA%\iPhoto\iPhoto.log` for the real traceback | Confirm the packaged build uses `allowed_modules=["detection", "recognition"]`, then rescan. Full library rescan resets `retry`/`failed` face statuses |
+| Packaged People scan downloads models but never clusters faces | The model cache is available, but an InsightFace submodel or dependency failed during scan | Ensure Nuitka includes `insightface`, `onnxruntime`, and `extension/models`; exclude unused albumentations/pydantic packages; keep InsightFace limited to detection and recognition |

@@ -46,16 +46,27 @@ def test_face_cluster_pipeline_reports_missing_cached_model_with_actionable_mess
     monkeypatch, tmp_path
 ) -> None:
     class FakeFaceAnalysis:
-        def __init__(self, *, name: str, root: str, providers: list[str]) -> None:
+        def __init__(
+            self,
+            *,
+            name: str,
+            root: str,
+            allowed_modules: list[str],
+            providers: list[str],
+        ) -> None:
+            del allowed_modules
             raise RuntimeError("offline")
 
     insightface_module = ModuleType("insightface")
     app_module = ModuleType("insightface.app")
-    app_module.FaceAnalysis = FakeFaceAnalysis
+    face_analysis_module = ModuleType("insightface.app.face_analysis")
+    face_analysis_module.FaceAnalysis = FakeFaceAnalysis
+    app_module.face_analysis = face_analysis_module
     insightface_module.app = app_module
 
     monkeypatch.setitem(sys.modules, "insightface", insightface_module)
     monkeypatch.setitem(sys.modules, "insightface.app", app_module)
+    monkeypatch.setitem(sys.modules, "insightface.app.face_analysis", face_analysis_module)
     monkeypatch.setattr("pipeline._patch_insightface_alignment_estimate", lambda: None)
     monkeypatch.setattr("pipeline._resolve_execution_providers", lambda: ["CPUExecutionProvider"])
 

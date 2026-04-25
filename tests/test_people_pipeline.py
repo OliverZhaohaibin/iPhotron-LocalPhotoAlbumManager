@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import sys
+import builtins
 from datetime import datetime, timezone
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
@@ -16,6 +17,8 @@ from iPhoto.people.manual_faces import (
 from iPhoto.people.pipeline import (
     FaceClusterPipeline,
     build_person_records_from_faces,
+    _install_insightface_mask_renderer_stubs,
+    _install_runtime_typing_compat,
     resolve_canonical_person_id,
 )
 from iPhoto.people.repository import FaceRecord, PersonProfile, PersonRecord
@@ -96,9 +99,17 @@ def test_face_pipeline_uses_shared_model_root(monkeypatch, tmp_path: Path) -> No
     calls: dict[str, object] = {}
 
     class FakeFaceAnalysis:
-        def __init__(self, *, name: str, root: str, providers: list[str]) -> None:
+        def __init__(
+            self,
+            *,
+            name: str,
+            root: str,
+            allowed_modules: list[str],
+            providers: list[str],
+        ) -> None:
             calls["name"] = name
             calls["root"] = root
+            calls["allowed_modules"] = allowed_modules
             calls["providers"] = providers
 
         def prepare(self, *, ctx_id: int, det_size: tuple[int, int]) -> None:
@@ -107,11 +118,14 @@ def test_face_pipeline_uses_shared_model_root(monkeypatch, tmp_path: Path) -> No
 
     insightface_module = ModuleType("insightface")
     app_module = ModuleType("insightface.app")
-    app_module.FaceAnalysis = FakeFaceAnalysis
+    face_analysis_module = ModuleType("insightface.app.face_analysis")
+    face_analysis_module.FaceAnalysis = FakeFaceAnalysis
+    app_module.face_analysis = face_analysis_module
     insightface_module.app = app_module
 
     monkeypatch.setitem(sys.modules, "insightface", insightface_module)
     monkeypatch.setitem(sys.modules, "insightface.app", app_module)
+    monkeypatch.setitem(sys.modules, "insightface.app.face_analysis", face_analysis_module)
     monkeypatch.setattr("iPhoto.people.pipeline._patch_insightface_alignment_estimate", lambda: None)
     monkeypatch.setattr(
         "iPhoto.people.pipeline._resolve_execution_providers",
@@ -130,6 +144,7 @@ def test_face_pipeline_uses_shared_model_root(monkeypatch, tmp_path: Path) -> No
     assert calls == {
         "name": "buffalo_s",
         "root": str((tmp_path / "extension").resolve()),
+        "allowed_modules": ["detection", "recognition"],
         "providers": ["CPUExecutionProvider"],
         "ctx_id": -1,
         "det_size": (640, 640),
@@ -141,16 +156,27 @@ def test_face_pipeline_reports_missing_cached_model_with_actionable_message(
     monkeypatch, tmp_path: Path
 ) -> None:
     class FakeFaceAnalysis:
-        def __init__(self, *, name: str, root: str, providers: list[str]) -> None:
+        def __init__(
+            self,
+            *,
+            name: str,
+            root: str,
+            allowed_modules: list[str],
+            providers: list[str],
+        ) -> None:
+            del allowed_modules
             raise RuntimeError("network unreachable")
 
     insightface_module = ModuleType("insightface")
     app_module = ModuleType("insightface.app")
-    app_module.FaceAnalysis = FakeFaceAnalysis
+    face_analysis_module = ModuleType("insightface.app.face_analysis")
+    face_analysis_module.FaceAnalysis = FakeFaceAnalysis
+    app_module.face_analysis = face_analysis_module
     insightface_module.app = app_module
 
     monkeypatch.setitem(sys.modules, "insightface", insightface_module)
     monkeypatch.setitem(sys.modules, "insightface.app", app_module)
+    monkeypatch.setitem(sys.modules, "insightface.app.face_analysis", face_analysis_module)
     monkeypatch.setattr("iPhoto.people.pipeline._patch_insightface_alignment_estimate", lambda: None)
     monkeypatch.setattr(
         "iPhoto.people.pipeline._resolve_execution_providers",
@@ -168,6 +194,42 @@ def test_face_pipeline_reports_missing_cached_model_with_actionable_message(
     assert "not cached" in message
     assert str(model_root.resolve()) in message
     assert "github.com" in message
+
+
+def test_face_pipeline_installs_lightweight_albumentations_stub(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for module_name in [
+        "albumentations",
+        "albumentations.core",
+        "albumentations.core.transforms_interface",
+    ]:
+        monkeypatch.delitem(sys.modules, module_name, raising=False)
+
+    _install_insightface_mask_renderer_stubs()
+
+    transform_module = sys.modules["albumentations.core.transforms_interface"]
+    transform = transform_module.ImageOnlyTransform(always_apply=False, p=1.0)
+
+    assert transform.__class__.__name__ == "ImageOnlyTransform"
+    assert sys.modules["albumentations"].core is sys.modules["albumentations.core"]
+
+
+def test_face_pipeline_installs_runtime_annotation_compat(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for name in ["Literal", "NDArray", "ArrayLike", "DTypeLike", "List", "TypedDict", "ndarray"]:
+        monkeypatch.delattr(builtins, name, raising=False)
+
+    _install_runtime_typing_compat()
+
+    assert builtins.Literal is not None
+    assert builtins.NDArray is not None
+    assert builtins.ArrayLike is not None
+    assert builtins.DTypeLike is not None
+    assert builtins.List is not None
+    assert builtins.TypedDict is not None
+    assert builtins.ndarray is not None
 
 
 def test_build_person_records_marks_profiles_stable_at_three_samples() -> None:

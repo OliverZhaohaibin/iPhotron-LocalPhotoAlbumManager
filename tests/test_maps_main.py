@@ -93,6 +93,18 @@ def test_choose_native_widget_class_uses_native_only_when_runtime_probe_succeeds
     assert "native OsmAnd widget" in message
 
 
+def test_choose_native_widget_class_still_uses_native_when_generic_opengl_probe_failed(tmp_path, monkeypatch) -> None:
+    package_root = tmp_path / "maps"
+    monkeypatch.setattr("maps.main.has_usable_osmand_native_widget", lambda root: root == package_root)
+    monkeypatch.setattr("maps.main.probe_native_widget_runtime", lambda root: (True, None))
+    monkeypatch.delenv("IPHOTO_DISABLE_OPENGL", raising=False)
+
+    widget_cls, message = choose_native_widget_class(package_root, use_opengl=False)
+
+    assert widget_cls is not None
+    assert "native OsmAnd widget" in message
+
+
 def test_choose_native_widget_class_falls_back_when_runtime_probe_fails(tmp_path, monkeypatch) -> None:
     package_root = tmp_path / "maps"
     monkeypatch.setattr("maps.main.has_usable_osmand_native_widget", lambda root: root == package_root)
@@ -238,6 +250,7 @@ def test_prepare_qt_runtime_for_backend_forces_xcb_glx_on_linux(monkeypatch) -> 
     attributes: list[tuple[object, bool]] = []
 
     monkeypatch.setattr("maps.main.sys.platform", "linux")
+    monkeypatch.setattr("maps.main._is_packaged_runtime", lambda: False)
     monkeypatch.setattr("maps.main.QApplication.setAttribute", lambda attr, enabled=True: attributes.append((attr, enabled)))
     monkeypatch.delenv("QT_QPA_PLATFORM", raising=False)
     monkeypatch.delenv("QT_OPENGL", raising=False)
@@ -255,12 +268,51 @@ def test_prepare_qt_runtime_for_backend_skips_linux_override_for_python_backend(
     attributes: list[tuple[object, bool]] = []
 
     monkeypatch.setattr("maps.main.sys.platform", "linux")
+    monkeypatch.setattr("maps.main._is_packaged_runtime", lambda: False)
     monkeypatch.setattr("maps.main.QApplication.setAttribute", lambda attr, enabled=True: attributes.append((attr, enabled)))
     monkeypatch.delenv("QT_QPA_PLATFORM", raising=False)
     monkeypatch.delenv("QT_OPENGL", raising=False)
     monkeypatch.delenv("QT_XCB_GL_INTEGRATION", raising=False)
 
     prepare_qt_runtime_for_backend("python")
+
+    assert "QT_QPA_PLATFORM" not in os.environ
+    assert "QT_OPENGL" not in os.environ
+    assert "QT_XCB_GL_INTEGRATION" not in os.environ
+    assert attributes == []
+
+
+def test_prepare_qt_runtime_for_backend_forces_xcb_glx_in_packaged_linux_builds(monkeypatch) -> None:
+    attributes: list[tuple[object, bool]] = []
+
+    monkeypatch.setattr("maps.main.sys.platform", "linux")
+    monkeypatch.setattr("maps.main._is_packaged_runtime", lambda: True)
+    monkeypatch.setattr("maps.main.QApplication.setAttribute", lambda attr, enabled=True: attributes.append((attr, enabled)))
+    monkeypatch.delenv("IPHOTO_ALLOW_PACKAGED_LINUX_WAYLAND", raising=False)
+    monkeypatch.delenv("QT_QPA_PLATFORM", raising=False)
+    monkeypatch.delenv("QT_OPENGL", raising=False)
+    monkeypatch.delenv("QT_XCB_GL_INTEGRATION", raising=False)
+
+    prepare_qt_runtime_for_backend("auto")
+
+    assert os.environ["QT_QPA_PLATFORM"] == "xcb"
+    assert os.environ["QT_OPENGL"] == "desktop"
+    assert os.environ["QT_XCB_GL_INTEGRATION"] == "xcb_glx"
+    assert len(attributes) == 1
+
+
+def test_prepare_qt_runtime_for_backend_allows_packaged_linux_wayland_opt_out(monkeypatch) -> None:
+    attributes: list[tuple[object, bool]] = []
+
+    monkeypatch.setattr("maps.main.sys.platform", "linux")
+    monkeypatch.setattr("maps.main._is_packaged_runtime", lambda: True)
+    monkeypatch.setattr("maps.main.QApplication.setAttribute", lambda attr, enabled=True: attributes.append((attr, enabled)))
+    monkeypatch.setenv("IPHOTO_ALLOW_PACKAGED_LINUX_WAYLAND", "1")
+    monkeypatch.delenv("QT_QPA_PLATFORM", raising=False)
+    monkeypatch.delenv("QT_OPENGL", raising=False)
+    monkeypatch.delenv("QT_XCB_GL_INTEGRATION", raising=False)
+
+    prepare_qt_runtime_for_backend("auto")
 
     assert "QT_QPA_PLATFORM" not in os.environ
     assert "QT_OPENGL" not in os.environ

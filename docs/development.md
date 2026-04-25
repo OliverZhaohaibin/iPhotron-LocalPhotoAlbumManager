@@ -317,6 +317,55 @@ This is convenient for debugging, but release builds should still copy the
 runtime into `src/maps/tiles/extension/` so the repository and packaged app stay
 self-contained.
 
+### Linux packaged native-widget guardrails
+
+The Linux source checkout and the Linux Nuitka bundle must be treated as two
+separate runtime targets. A map preview that works from `python src/maps/main.py`
+does **not** prove that the packaged GUI will survive opening the map section.
+The failure mode that triggered this guidance was:
+
+```text
+ERROR: Failed to initialize GLEW: GLX 1.2 and up are not supported
+```
+
+That error appeared only after entering the map section in a packaged build,
+even though the unfrozen source checkout already had Linux X11 forcing in the
+main entry point.
+
+When touching Linux map packaging, keep these rules in place:
+
+- Treat packaged/frozen Linux runs as a dedicated code path. Before
+  `QApplication` is created, force `QT_QPA_PLATFORM=xcb` for packaged builds
+  unless `IPHOTO_ALLOW_PACKAGED_LINUX_WAYLAND=1` is set explicitly for
+  debugging.
+- When `QT_QPA_PLATFORM=xcb`, keep `QT_OPENGL=desktop` and
+  `QT_XCB_GL_INTEGRATION=xcb_glx` aligned so the native OsmAnd widget gets the
+  GLX-backed desktop OpenGL context expected by GLEW.
+- Do not use the generic OpenGL probe as the only gate for the native widget.
+  Backend selection must still run `probe_native_widget_runtime(...)`; if the
+  native library loads cleanly, prefer it even when the generic Qt OpenGL probe
+  failed, and if the runtime probe fails, log the reason and fall back to the
+  Python OBF path.
+- Keep the Linux/Nuitka packaging inputs explicit. The current fast build
+  script needs `--enable-plugin=pyside6`,
+  `--include-qt-plugins=qml,multimedia`, `--include-package=OpenGL`, and
+  `--include-package=OpenGL_accelerate` so the packaged runtime matches the
+  editable environment more closely.
+- After a Linux Nuitka build, verify the packaged OsmAnd binaries can still
+  resolve Qt at runtime. If the packaged `maps/tiles/extension/bin` runtime can
+  not find the bundled PySide6 Qt libraries, repair its RUNPATH before treating
+  the build as releasable.
+- Regressions must be tested from the packaged executable, not only from the
+  source checkout. The minimum smoke test is: start the packaged app on Linux,
+  switch into the map section, confirm no GLEW/GLX error is emitted, and verify
+  the view uses the native widget only when `probe_native_widget_runtime(...)`
+  succeeds.
+
+For future work, do not remove the packaged-Linux override just because
+development mode works under Wayland/XWayland. If you want to relax that rule,
+first prove the packaged map section is stable from a fresh Nuitka bundle and
+keep the opt-out behind a documented environment variable.
+
 ---
 
 ## Face Recognition Development Workflow

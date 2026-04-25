@@ -14,11 +14,25 @@ from PySide6.QtWidgets import QApplication
 from iPhoto.bootstrap.qt_shader_cache import configure_shader_cache_environment
 
 _logger = logging.getLogger(__name__)
+_TRUE_ENV_VALUES = {"1", "true", "yes", "on"}
 
 
 def _configure_qt_shader_disk_cache() -> None:
     """Route shader/program caches into a managed ``.iPhoto`` work directory."""
     configure_shader_cache_environment()
+
+
+def _is_packaged_runtime() -> bool:
+    """Return ``True`` when the app is running from a compiled/frozen bundle."""
+
+    return "__compiled__" in globals() or getattr(sys, "frozen", False)
+
+
+def _allow_packaged_linux_wayland() -> bool:
+    """Return whether packaged Linux builds may keep Qt's default platform selection."""
+
+    raw_value = os.environ.get("IPHOTO_ALLOW_PACKAGED_LINUX_WAYLAND", "").strip().lower()
+    return raw_value in _TRUE_ENV_VALUES
 
 
 def _prepare_qt_runtime_for_maps() -> None:
@@ -30,11 +44,14 @@ def _prepare_qt_runtime_for_maps() -> None:
     if os.environ.get("IPHOTO_DISABLE_OPENGL", "").strip().lower() in {"1", "true", "yes", "on"}:
         return
 
-    from maps.map_sources import has_usable_osmand_native_widget
+    if _is_packaged_runtime() and not _allow_packaged_linux_wayland():
+        os.environ["QT_QPA_PLATFORM"] = "xcb"
+    else:
+        from maps.map_sources import has_usable_osmand_native_widget
 
-    maps_package_root = Path(__file__).resolve().parents[2] / "maps"
-    if not has_usable_osmand_native_widget(maps_package_root):
-        return
+        maps_package_root = Path(__file__).resolve().parents[2] / "maps"
+        if not has_usable_osmand_native_widget(maps_package_root):
+            return
 
     if not os.environ.get("QT_QPA_PLATFORM"):
         os.environ["QT_QPA_PLATFORM"] = "xcb"

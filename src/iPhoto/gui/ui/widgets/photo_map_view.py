@@ -31,7 +31,7 @@ from maps.map_sources import (
 from maps.map_widget._map_widget_base import MapWidgetBase
 from maps.map_widget.map_gl_widget import MapGLWidget
 from maps.map_widget.map_widget import MapWidget
-from maps.map_widget.native_osmand_widget import NativeOsmAndWidget
+from maps.map_widget.native_osmand_widget import NativeOsmAndWidget, probe_native_widget_runtime
 from maps.map_widget.qt_location_map_widget import QtLocationMapWidget
 from maps.map_widget.map_renderer import CityAnnotation
 
@@ -45,10 +45,26 @@ logger = getLogger(__name__)
 _MAPS_PACKAGE_ROOT = Path(__file__).resolve().parents[4] / "maps"
 
 
+def _opengl_explicitly_disabled() -> bool:
+    return os.environ.get("IPHOTO_DISABLE_OPENGL", "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _native_widget_runtime_is_usable() -> bool:
+    """Return ``True`` when the native widget files exist and load cleanly."""
+
+    if not has_usable_osmand_native_widget(_MAPS_PACKAGE_ROOT):
+        return False
+
+    is_available, reason = probe_native_widget_runtime(_MAPS_PACKAGE_ROOT)
+    if not is_available and reason:
+        logger.warning("Native OsmAnd widget runtime probe failed: %s", reason)
+    return is_available
+
+
 def check_opengl_support() -> bool:
     """Return ``True`` when the system can create a basic OpenGL context."""
 
-    if os.environ.get("IPHOTO_DISABLE_OPENGL", "").strip().lower() in {"1", "true", "yes", "on"}:
+    if _opengl_explicitly_disabled():
         return False
 
     try:
@@ -108,12 +124,16 @@ def choose_map_widget_backend(
     """Return the preferred widget class and source for the photo map view."""
 
     python_widget_cls = _preferred_python_widget_class(use_opengl=use_opengl)
-    native_widget_allowed = use_opengl and prefer_osmand_native_widget()
+    native_widget_usable = (
+        not _opengl_explicitly_disabled()
+        and prefer_osmand_native_widget()
+        and _native_widget_runtime_is_usable()
+    )
 
     if map_source is not None:
         resolved_map_source = _resolve_map_source(map_source)
         if resolved_map_source.kind == "osmand_obf":
-            if native_widget_allowed and has_usable_osmand_native_widget(_MAPS_PACKAGE_ROOT):
+            if native_widget_usable:
                 return NativeOsmAndWidget, resolved_map_source, "osmand_native"
             return python_widget_cls, resolved_map_source, "osmand_python"
 
@@ -121,7 +141,7 @@ def choose_map_widget_backend(
 
     default_osmand_source = MapSourceSpec.osmand_default(_MAPS_PACKAGE_ROOT).resolved(_MAPS_PACKAGE_ROOT)
     if _has_resolved_osmand_assets(default_osmand_source):
-        if native_widget_allowed and has_usable_osmand_native_widget(_MAPS_PACKAGE_ROOT):
+        if native_widget_usable:
             return NativeOsmAndWidget, default_osmand_source, "osmand_native"
         if has_usable_osmand_default(_MAPS_PACKAGE_ROOT):
             return python_widget_cls, default_osmand_source, "osmand_python"

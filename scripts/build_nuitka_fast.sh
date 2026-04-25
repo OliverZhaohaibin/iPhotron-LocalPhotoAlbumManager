@@ -9,6 +9,8 @@ python -m nuitka \
   --python-flag=no_site \
   --lto=yes \
   --clang \
+  --enable-plugin=pyside6 \
+  --include-qt-plugins=qml,multimedia \
   --follow-imports \
   --nofollow-import-to=numba \
   --nofollow-import-to=llvmlite \
@@ -21,6 +23,8 @@ python -m nuitka \
   --nofollow-import-to=iPhoto.tests \
   --include-package=iPhoto \
   --include-package=maps \
+  --include-package=OpenGL \
+  --include-package=OpenGL_accelerate \
   --include-package=insightface \
   --include-package=onnxruntime \
   --include-data-dir=src/extension/models=extension/models \

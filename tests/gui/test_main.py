@@ -58,6 +58,7 @@ def test_configure_qt_opengl_defaults_still_routes_shader_cache_when_opengl_is_d
 
 def test_prepare_qt_runtime_for_maps_sets_xcb_glx_on_linux_when_native_widget_exists(monkeypatch) -> None:
     monkeypatch.setattr("iPhoto.gui.main.sys.platform", "linux")
+    monkeypatch.setattr("iPhoto.gui.main._is_packaged_runtime", lambda: False)
     monkeypatch.setattr("maps.map_sources.has_usable_osmand_native_widget", lambda root: True)
     monkeypatch.delenv("IPHOTO_DISABLE_OPENGL", raising=False)
     monkeypatch.delenv("QT_QPA_PLATFORM", raising=False)
@@ -73,6 +74,40 @@ def test_prepare_qt_runtime_for_maps_sets_xcb_glx_on_linux_when_native_widget_ex
 
 def test_prepare_qt_runtime_for_maps_skips_when_native_widget_is_unavailable(monkeypatch) -> None:
     monkeypatch.setattr("iPhoto.gui.main.sys.platform", "linux")
+    monkeypatch.setattr("iPhoto.gui.main._is_packaged_runtime", lambda: False)
+    monkeypatch.setattr("maps.map_sources.has_usable_osmand_native_widget", lambda root: False)
+    monkeypatch.delenv("IPHOTO_DISABLE_OPENGL", raising=False)
+    monkeypatch.delenv("QT_QPA_PLATFORM", raising=False)
+    monkeypatch.delenv("QT_OPENGL", raising=False)
+    monkeypatch.delenv("QT_XCB_GL_INTEGRATION", raising=False)
+
+    _prepare_qt_runtime_for_maps()
+
+    assert "QT_QPA_PLATFORM" not in os.environ
+    assert "QT_OPENGL" not in os.environ
+    assert "QT_XCB_GL_INTEGRATION" not in os.environ
+
+
+def test_prepare_qt_runtime_for_maps_forces_xcb_glx_in_packaged_linux_builds(monkeypatch) -> None:
+    monkeypatch.setattr("iPhoto.gui.main.sys.platform", "linux")
+    monkeypatch.setattr("iPhoto.gui.main._is_packaged_runtime", lambda: True)
+    monkeypatch.delenv("IPHOTO_ALLOW_PACKAGED_LINUX_WAYLAND", raising=False)
+    monkeypatch.delenv("IPHOTO_DISABLE_OPENGL", raising=False)
+    monkeypatch.delenv("QT_QPA_PLATFORM", raising=False)
+    monkeypatch.delenv("QT_OPENGL", raising=False)
+    monkeypatch.delenv("QT_XCB_GL_INTEGRATION", raising=False)
+
+    _prepare_qt_runtime_for_maps()
+
+    assert os.environ["QT_QPA_PLATFORM"] == "xcb"
+    assert os.environ["QT_OPENGL"] == "desktop"
+    assert os.environ["QT_XCB_GL_INTEGRATION"] == "xcb_glx"
+
+
+def test_prepare_qt_runtime_for_maps_allows_packaged_linux_wayland_opt_out(monkeypatch) -> None:
+    monkeypatch.setattr("iPhoto.gui.main.sys.platform", "linux")
+    monkeypatch.setattr("iPhoto.gui.main._is_packaged_runtime", lambda: True)
+    monkeypatch.setenv("IPHOTO_ALLOW_PACKAGED_LINUX_WAYLAND", "1")
     monkeypatch.setattr("maps.map_sources.has_usable_osmand_native_widget", lambda root: False)
     monkeypatch.delenv("IPHOTO_DISABLE_OPENGL", raising=False)
     monkeypatch.delenv("QT_QPA_PLATFORM", raising=False)

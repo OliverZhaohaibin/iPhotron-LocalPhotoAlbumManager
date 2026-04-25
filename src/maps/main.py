@@ -37,6 +37,7 @@ from maps.tile_backend import OsmAndRasterBackend
 from maps.tile_parser import TileLoadingError
 
 _PYTHON_OBF_RUNTIME_PROBE: dict[Path, tuple[bool, str | None]] = {}
+_TRUE_ENV_VALUES = {"1", "true", "yes", "on"}
 
 
 @dataclass(frozen=True)
@@ -55,10 +56,27 @@ def _configure_qt_shader_disk_cache() -> None:
     configure_shader_cache_environment()
 
 
+def _is_packaged_runtime() -> bool:
+    """Return ``True`` when the preview is running from a compiled bundle."""
+
+    return "__compiled__" in globals() or getattr(sys, "frozen", False)
+
+
+def _allow_packaged_linux_wayland() -> bool:
+    """Return whether packaged Linux preview builds may keep Qt's default platform selection."""
+
+    raw_value = os.environ.get("IPHOTO_ALLOW_PACKAGED_LINUX_WAYLAND", "").strip().lower()
+    return raw_value in _TRUE_ENV_VALUES
+
+
+def _opengl_explicitly_disabled() -> bool:
+    return os.environ.get("IPHOTO_DISABLE_OPENGL", "").strip().lower() in {"1", "true", "yes", "on"}
+
+
 def check_opengl_support() -> bool:
     """Return ``True`` when the system can create a basic OpenGL context."""
 
-    if os.environ.get("IPHOTO_DISABLE_OPENGL", "").strip().lower() in {"1", "true", "yes", "on"}:
+    if _opengl_explicitly_disabled():
         return False
 
     try:
@@ -112,8 +130,8 @@ def choose_native_widget_class(
     use_opengl: bool,
     prefer_native_widget: bool = True,
 ) -> tuple[type[MapWidgetBase] | None, str]:
-    if not use_opengl:
-        return None, "OpenGL support unavailable. Falling back to CPU rendering."
+    if _opengl_explicitly_disabled():
+        return None, "OpenGL support disabled by configuration. Falling back to CPU rendering."
 
     if not prefer_native_widget:
         return None, "OpenGL support detected. Using the same GPU accelerated Python renderer as the Location section."
@@ -128,6 +146,9 @@ def choose_native_widget_class(
     if is_available:
         return NativeOsmAndWidget, "OpenGL support detected. Using the native OsmAnd widget when OBF data is selected."
 
+    if not use_opengl:
+        return None, "OpenGL support unavailable. Falling back to CPU rendering."
+
     detail = f" Native widget disabled: {reason}." if reason else ""
     return None, f"OpenGL support detected.{detail} Using GPU accelerated Python rendering."
 
@@ -138,6 +159,11 @@ def prepare_qt_runtime_for_backend(backend: str) -> None:
     normalized_backend = backend.strip().lower()
     if sys.platform != "linux" or normalized_backend == "python":
         return
+
+    if _is_packaged_runtime():
+        if _allow_packaged_linux_wayland():
+            return
+        os.environ["QT_QPA_PLATFORM"] = "xcb"
 
     if not os.environ.get("QT_QPA_PLATFORM"):
         os.environ["QT_QPA_PLATFORM"] = "xcb"

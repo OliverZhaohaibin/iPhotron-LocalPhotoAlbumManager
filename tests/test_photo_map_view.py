@@ -243,10 +243,29 @@ def test_choose_map_widget_backend_prefers_native_when_runtime_files_are_availab
     monkeypatch.setattr(photo_map_view_module, "has_usable_osmand_native_widget", lambda root: True)
     monkeypatch.setattr(photo_map_view_module, "has_usable_osmand_default", lambda root: False)
     monkeypatch.setattr(photo_map_view_module, "_has_resolved_osmand_assets", lambda source: True)
+    monkeypatch.setattr(photo_map_view_module, "probe_native_widget_runtime", lambda root: (True, None))
 
     widget_cls, resolved_source, backend_kind = photo_map_view_module.choose_map_widget_backend(
         None,
         use_opengl=True,
+    )
+
+    assert widget_cls is NativeOsmAndWidget
+    assert backend_kind == "osmand_native"
+    assert resolved_source is not None
+    assert resolved_source.kind == "osmand_obf"
+
+
+def test_choose_map_widget_backend_still_prefers_native_when_generic_opengl_probe_failed(monkeypatch) -> None:
+    monkeypatch.setattr(photo_map_view_module, "has_usable_osmand_native_widget", lambda root: True)
+    monkeypatch.setattr(photo_map_view_module, "has_usable_osmand_default", lambda root: False)
+    monkeypatch.setattr(photo_map_view_module, "_has_resolved_osmand_assets", lambda source: True)
+    monkeypatch.setattr(photo_map_view_module, "probe_native_widget_runtime", lambda root: (True, None))
+    monkeypatch.delenv("IPHOTO_DISABLE_OPENGL", raising=False)
+
+    widget_cls, resolved_source, backend_kind = photo_map_view_module.choose_map_widget_backend(
+        None,
+        use_opengl=False,
     )
 
     assert widget_cls is NativeOsmAndWidget
@@ -290,6 +309,27 @@ def test_choose_map_widget_backend_uses_python_obf_when_native_widget_files_are_
     monkeypatch.setattr(photo_map_view_module, "has_usable_osmand_native_widget", lambda root: False)
     monkeypatch.setattr(photo_map_view_module, "has_usable_osmand_default", lambda root: True)
     monkeypatch.setattr(photo_map_view_module, "_has_resolved_osmand_assets", lambda source: True)
+
+    widget_cls, resolved_source, backend_kind = photo_map_view_module.choose_map_widget_backend(
+        None,
+        use_opengl=True,
+    )
+
+    assert widget_cls is MapGLWidget
+    assert backend_kind == "osmand_python"
+    assert resolved_source is not None
+    assert resolved_source.kind == "osmand_obf"
+
+
+def test_choose_map_widget_backend_uses_python_obf_when_native_runtime_probe_fails(monkeypatch) -> None:
+    monkeypatch.setattr(photo_map_view_module, "has_usable_osmand_native_widget", lambda root: True)
+    monkeypatch.setattr(photo_map_view_module, "has_usable_osmand_default", lambda root: True)
+    monkeypatch.setattr(photo_map_view_module, "_has_resolved_osmand_assets", lambda source: True)
+    monkeypatch.setattr(
+        photo_map_view_module,
+        "probe_native_widget_runtime",
+        lambda root: (False, "OSError: runtime mismatch"),
+    )
 
     widget_cls, resolved_source, backend_kind = photo_map_view_module.choose_map_widget_backend(
         None,

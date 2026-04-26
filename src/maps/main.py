@@ -158,10 +158,9 @@ def choose_native_widget_class(
 def prepare_qt_runtime_for_backend(backend: str, package_root: Path | None = None) -> None:
     """Apply Linux Qt startup flags needed by the native OsmAnd widget.
 
-    The XCB/GLX flags are only applied when the native OsmAnd widget is actually
-    going to be used.  Unconditionally forcing ``QT_QPA_PLATFORM=xcb`` for every
-    non-Python backend would break Wayland-only environments or systems without
-    XCB even when no native widget is selected.
+    The Python and legacy renderers keep Qt's default platform selection. Native
+    and auto mode prefer XCB/GLX so the native OsmAnd widget has a stable OpenGL
+    runtime when it is selected later during backend negotiation.
     """
 
     normalized_backend = backend.strip().lower()
@@ -178,15 +177,6 @@ def prepare_qt_runtime_for_backend(backend: str, package_root: Path | None = Non
             return
         os.environ["QT_QPA_PLATFORM"] = "xcb"
 
-    if normalized_backend == "auto":
-        # For "auto" mode, only set XCB flags if the native widget is both
-        # configured and present.  This avoids forcing XCB on Wayland-only
-        # systems when the native widget is not actually available.
-        root = (package_root or Path(__file__).resolve().parent).resolve()
-        if not _is_packaged_runtime() and (
-            not prefer_osmand_native_widget() or not has_usable_osmand_native_widget(root)
-        ):
-            return
     if not os.environ.get("QT_QPA_PLATFORM"):
         os.environ["QT_QPA_PLATFORM"] = "xcb"
     if os.environ.get("QT_QPA_PLATFORM") == "xcb":

@@ -15,7 +15,6 @@ import numpy as np
 @dataclass
 class FaceRecord:
     face_id: str
-    face_key: str
     asset_rel: str
     box_x: int
     box_y: int
@@ -29,17 +28,18 @@ class FaceRecord:
     detected_at: str
     image_width: int
     image_height: int
+    face_key: str = ""
 
 
 @dataclass
 class PersonRecord:
     person_id: str
-    name: str | None
     key_face_id: str
     face_count: int
     center_embedding: np.ndarray
     created_at: str
     updated_at: str
+    name: str | None = None
 
 
 @dataclass(frozen=True)
@@ -154,7 +154,7 @@ class FaceClusterRepository:
                 [
                     (
                         face.face_id,
-                        face.face_key,
+                        face.face_key or face.face_id,
                         face.asset_rel,
                         face.box_x,
                         face.box_y,

@@ -8,6 +8,7 @@ from pathlib import Path
 
 from PySide6.QtCore import QCoreApplication, QProcess, QThreadPool, Qt
 from PySide6.QtWidgets import (
+    QApplication,
     QCheckBox,
     QDialog,
     QHBoxLayout,
@@ -101,6 +102,7 @@ class MapExtensionDownloadController:
         self._progress_dialog: _MapExtensionProgressDialog | None = None
         self._download_inflight = False
         self._latest_result: MapExtensionDownloadResult | None = None
+        self._temporarily_hidden_windows: list[QWidget] = []
 
     def maybe_prompt_on_startup(self) -> None:
         if not supports_map_extension_download():
@@ -150,6 +152,7 @@ class MapExtensionDownloadController:
 
         self._download_inflight = True
         self._latest_result = None
+        self._hide_blocking_top_level_windows()
         self._progress_dialog = _MapExtensionProgressDialog(self._parent)
         self._progress_dialog.show()
         self._progress_dialog.raise_()
@@ -188,6 +191,8 @@ class MapExtensionDownloadController:
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.Yes,
         )
+        if restart_now != QMessageBox.StandardButton.Yes:
+            self._restore_temporarily_hidden_windows()
         if restart_now == QMessageBox.StandardButton.Yes:
             self._restart_application()
 
@@ -197,6 +202,7 @@ class MapExtensionDownloadController:
             self._progress_dialog.close()
             self._progress_dialog.deleteLater()
             self._progress_dialog = None
+        self._restore_temporarily_hidden_windows()
         QMessageBox.critical(
             self._parent,
             "Map Extension",
@@ -232,6 +238,33 @@ class MapExtensionDownloadController:
             arguments = list(sys.argv[1:])
             return program, arguments
         return sys.executable, list(sys.argv)
+
+    def _hide_blocking_top_level_windows(self) -> None:
+        self._temporarily_hidden_windows.clear()
+        owner = self._parent.window()
+        if owner is None:
+            return
+
+        for widget in QApplication.topLevelWidgets():
+            if widget is owner or widget is self._progress_dialog:
+                continue
+            if widget.parentWidget() is not owner:
+                continue
+            if not widget.isVisible():
+                continue
+            if not bool(widget.windowFlags() & Qt.WindowType.WindowStaysOnTopHint):
+                continue
+            self._temporarily_hidden_windows.append(widget)
+            widget.hide()
+
+    def _restore_temporarily_hidden_windows(self) -> None:
+        while self._temporarily_hidden_windows:
+            widget = self._temporarily_hidden_windows.pop()
+            try:
+                widget.show()
+                widget.raise_()
+            except RuntimeError:
+                continue
 
 
 __all__ = ["MapExtensionDownloadController"]

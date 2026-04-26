@@ -33,6 +33,9 @@ from iPhoto.gui.ui.controllers.context_menu_controller import ContextMenuControl
 from iPhoto.gui.ui.controllers.dialog_controller import DialogController
 from iPhoto.gui.ui.controllers.export_controller import ExportController
 from iPhoto.gui.ui.controllers.header_controller import HeaderController
+from iPhoto.gui.ui.controllers.map_extension_download_controller import (
+    MapExtensionDownloadController,
+)
 from iPhoto.gui.ui.controllers.preview_controller import PreviewController
 from iPhoto.gui.ui.controllers.selection_controller import SelectionController
 from iPhoto.gui.ui.controllers.share_controller import ShareController
@@ -47,6 +50,7 @@ from iPhoto.gui.viewmodels.gallery_list_model_adapter import GalleryListModelAda
 from iPhoto.gui.viewmodels.gallery_viewmodel import GalleryViewModel
 from iPhoto.gui.services.pinned_items_service import PinnedItemsService
 from iPhoto.people.service import PeopleService
+from maps.map_sources import supports_map_extension_download
 
 if TYPE_CHECKING:
     from iPhoto.gui.ui.main_window import MainWindow
@@ -72,6 +76,13 @@ class MainCoordinator(QObject):
         self._facade = context.facade
         self._logger = logging.getLogger(__name__)
         self._media_failure_cleanup_paths: set[str] = set()
+        self._map_extension_download = MapExtensionDownloadController(
+            window,
+            context,
+            package_root=Path(__file__).resolve().parents[3] / "maps",
+        )
+        if hasattr(window.ui, "download_map_extension_action"):
+            window.ui.download_map_extension_action.setEnabled(supports_map_extension_download())
 
         # Resolve Services
         if self._container:
@@ -197,6 +208,9 @@ class MainCoordinator(QObject):
         # Manually attach info panel if available
         if hasattr(window.ui, "info_panel"):
             self._playback.set_info_panel(window.ui.info_panel)
+            window.ui.info_panel.downloadMapExtensionRequested.connect(
+                lambda: self._map_extension_download.start_download(source="info_panel")
+            )
 
         # 4. Theme Controller
         self._theme_controller = WindowThemeController(window.ui, window, context.theme)
@@ -321,6 +335,7 @@ class MainCoordinator(QObject):
         """Start the coordinator."""
         self._logger.info("MainCoordinator started")
         self._view_router.show_gallery()
+        self._map_extension_download.maybe_prompt_on_startup()
 
     # ------------------------------------------------------------------
     # Window manager integration (legacy interface)
@@ -435,6 +450,9 @@ class MainCoordinator(QObject):
         ui.open_album_action.triggered.connect(self._handle_open_album_dialog)
         ui.rescan_action.triggered.connect(self._status_bar.begin_scan)
         ui.rescan_action.triggered.connect(self._gallery_vm.rescan_current)
+        ui.download_map_extension_action.triggered.connect(
+            lambda: self._map_extension_download.start_download(source="settings")
+        )
         ui.edit_button.clicked.connect(self._detail_vm.request_edit)
         # ui.edit_rotate_left_button is handled by EditCoordinator in Edit Mode
         ui.rotate_left_button.clicked.connect(self._playback.rotate_current_asset)

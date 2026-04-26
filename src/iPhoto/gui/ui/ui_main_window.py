@@ -122,6 +122,7 @@ class Ui_MainWindow(object):
         self.rescan_action = self.main_header.rescan_action
         self.rebuild_links_action = self.main_header.rebuild_links_action
         self.bind_library_action = self.main_header.bind_library_action
+        self.download_map_extension_action = self.main_header.download_map_extension_action
         self.toggle_filmstrip_action = self.main_header.toggle_filmstrip_action
         self.toggle_face_names_action = self.main_header.toggle_face_names_action
         self.toggle_hidden_people_action = self.main_header.toggle_hidden_people_action
@@ -326,6 +327,9 @@ class Ui_MainWindow(object):
         )
         self.bind_library_action.setText(
             QCoreApplication.translate("MainWindow", "Set Basic Library…", None)
+        )
+        self.download_map_extension_action.setText(
+            QCoreApplication.translate("MainWindow", "Download Map Extension…", None)
         )
         self.toggle_filmstrip_action.setText(
             QCoreApplication.translate("MainWindow", "Show Filmstrip", None)

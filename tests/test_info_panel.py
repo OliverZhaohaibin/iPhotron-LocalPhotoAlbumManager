@@ -908,6 +908,38 @@ def test_info_panel_location_map_stays_square(
     panel.close()
 
 
+def test_info_panel_shows_download_button_when_location_extension_is_unavailable(
+    qapp: QApplication,
+) -> None:
+    del qapp
+    panel = InfoPanel()
+    panel.set_location_capability(
+        enabled=False,
+        fallback_text="Install the map extension to use Assign a Location.",
+    )
+    panel.set_asset_metadata({"rel": "img.jpg", "name": "img.jpg"})
+
+    assert not panel._location_fallback_label.isHidden()
+    assert not panel._location_download_button.isHidden()
+    assert panel._location_editor_row.isHidden()
+    panel.close()
+
+
+def test_info_panel_emits_download_request_from_fallback_button(qapp: QApplication) -> None:
+    panel = InfoPanel()
+    panel.set_location_capability(enabled=False)
+    panel.set_asset_metadata({"rel": "img.jpg", "name": "img.jpg"})
+    panel.show()
+    qapp.processEvents()
+
+    calls: list[str] = []
+    panel.downloadMapExtensionRequested.connect(lambda: calls.append("clicked"))
+    panel._location_download_button.click()
+
+    assert calls == ["clicked"]
+    panel.close()
+
+
 def test_info_panel_location_map_overlay_tracks_actual_embedded_map_size(
     qapp: QApplication,
     monkeypatch: pytest.MonkeyPatch,

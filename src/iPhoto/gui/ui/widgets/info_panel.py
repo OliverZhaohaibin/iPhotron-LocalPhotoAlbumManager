@@ -559,7 +559,6 @@ class InfoPanel(QWidget):
         self._location_layout.addWidget(self._location_map)
         content_layout.addWidget(self._location_container)
 
-        content_layout.addStretch(1)
         layout.addWidget(content, 1)
 
     # ------------------------------------------------------------------

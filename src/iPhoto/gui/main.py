@@ -35,31 +35,6 @@ def _allow_packaged_linux_wayland() -> bool:
     return raw_value in _TRUE_ENV_VALUES
 
 
-def _prepare_qt_runtime_for_maps() -> None:
-    """Apply Linux Qt platform flags required by the native OsmAnd widget."""
-
-    if sys.platform != "linux":
-        return
-
-    if os.environ.get("IPHOTO_DISABLE_OPENGL", "").strip().lower() in {"1", "true", "yes", "on"}:
-        return
-
-    if _is_packaged_runtime() and not _allow_packaged_linux_wayland():
-        os.environ["QT_QPA_PLATFORM"] = "xcb"
-    else:
-        from maps.map_sources import has_usable_osmand_native_widget
-
-        maps_package_root = Path(__file__).resolve().parents[2] / "maps"
-        if not has_usable_osmand_native_widget(maps_package_root):
-            return
-
-    if not os.environ.get("QT_QPA_PLATFORM"):
-        os.environ["QT_QPA_PLATFORM"] = "xcb"
-    if os.environ.get("QT_QPA_PLATFORM") == "xcb":
-        os.environ.setdefault("QT_OPENGL", "desktop")
-        os.environ.setdefault("QT_XCB_GL_INTEGRATION", "xcb_glx")
-
-
 def _prefer_local_source_tree() -> None:
     """Ensure direct script runs import the workspace package first.
 
@@ -78,6 +53,43 @@ def _prefer_local_source_tree() -> None:
     except ValueError:
         pass
     sys.path.insert(0, src_root_str)
+
+
+def _prepare_qt_runtime_for_maps() -> None:
+    """Apply Linux Qt platform flags required by the native OsmAnd widget.
+
+    ``PhotoMapView`` prefers the native OsmAnd widget when its runtime is
+    available. That widget expects Qt to use the XCB/GLX desktop OpenGL path on
+    Linux; without these flags the application can start successfully and only
+    fail later when the map view is opened with GLEW reporting missing GLX
+    support.
+    """
+
+    if sys.platform != "linux":
+        return
+
+    if os.environ.get("IPHOTO_DISABLE_OPENGL", "").strip().lower() in {"1", "true", "yes", "on"}:
+        return
+
+    if _is_packaged_runtime():
+        if _allow_packaged_linux_wayland():
+            return
+        os.environ["QT_QPA_PLATFORM"] = "xcb"
+    else:
+        try:
+            from maps.map_sources import has_usable_osmand_native_widget, prefer_osmand_native_widget
+        except Exception:
+            return
+
+        maps_package_root = Path(__file__).resolve().parents[2] / "maps"
+        if not prefer_osmand_native_widget() or not has_usable_osmand_native_widget(maps_package_root):
+            return
+
+    if not os.environ.get("QT_QPA_PLATFORM"):
+        os.environ["QT_QPA_PLATFORM"] = "xcb"
+    if os.environ.get("QT_QPA_PLATFORM") == "xcb":
+        os.environ.setdefault("QT_OPENGL", "desktop")
+        os.environ.setdefault("QT_XCB_GL_INTEGRATION", "xcb_glx")
 
 
 def _configure_qt_opengl_defaults() -> None:

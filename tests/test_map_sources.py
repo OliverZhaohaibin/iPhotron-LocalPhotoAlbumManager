@@ -7,6 +7,7 @@ from maps.map_sources import (
     ENV_OSMAND_EXTENSION_ROOT,
     MapSourceSpec,
     apply_pending_osmand_extension_install,
+    _sdk_roots,
     default_osmand_extension_root,
     default_osmand_download_url,
     default_osmand_search_database,
@@ -288,3 +289,46 @@ def test_apply_pending_osmand_extension_install_promotes_to_external_runtime_for
     ).resolve()
     assert (default_osmand_extension_root(package_root) / "marker.txt").read_text(encoding="utf-8") == "external"
     assert (bundled_root / "marker.txt").read_text(encoding="utf-8") == "bundled"
+
+
+def test_sdk_roots_discovers_inner_checkout(tmp_path) -> None:
+    repo_root = tmp_path / "repo"
+    inner_sdk = repo_root / "PySide6-OsmAnd-SDK"
+    inner_sdk.mkdir(parents=True)
+
+    roots = _sdk_roots(repo_root)
+
+    assert inner_sdk in roots
+
+
+def test_sdk_roots_discovers_sibling_checkout(tmp_path) -> None:
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir(parents=True)
+    sibling_sdk = tmp_path / "PySide6-OsmAnd-SDK"
+    sibling_sdk.mkdir()
+
+    roots = _sdk_roots(repo_root)
+
+    assert sibling_sdk in roots
+
+
+def test_sdk_roots_discovers_both_when_both_exist(tmp_path) -> None:
+    repo_root = tmp_path / "repo"
+    inner_sdk = repo_root / "PySide6-OsmAnd-SDK"
+    inner_sdk.mkdir(parents=True)
+    sibling_sdk = tmp_path / "PySide6-OsmAnd-SDK"
+    sibling_sdk.mkdir()
+
+    roots = _sdk_roots(repo_root)
+
+    assert inner_sdk in roots
+    assert sibling_sdk in roots
+
+
+def test_sdk_roots_returns_empty_when_neither_exists(tmp_path) -> None:
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+
+    roots = _sdk_roots(repo_root)
+
+    assert roots == ()

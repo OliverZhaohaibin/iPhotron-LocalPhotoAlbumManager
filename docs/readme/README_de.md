@@ -19,7 +19,7 @@
 
 ## 📥 Download & Installation
 
-[![Für Windows herunterladen](https://img.shields.io/badge/⬇️%20Download-Windows%20(.exe)-blue?style=for-the-badge&logo=windows)](https://github.com/OliverZhaohaibin/iPhotron-LocalPhotoAlbumManager/releases/download/v5.0.0/v5.00-alpha-x86-setup.exe)
+[![Für Windows herunterladen](https://img.shields.io/badge/⬇️%20Download-Windows%20(.exe)-blue?style=for-the-badge&logo=windows)](https://github.com/OliverZhaohaibin/iPhotron-LocalPhotoAlbumManager/releases/download/v5.0.0/v5.00-x86-setup.exe)
 [![Für Linux herunterladen](https://img.shields.io/badge/⬇️%20Download-Linux%20(.deb)-orange?style=for-the-badge&logo=linux&logoColor=white)](https://github.com/OliverZhaohaibin/iPhotron-LocalPhotoAlbumManager/releases/download/v5.0.0/iPhotron_5.00_amd64.deb)
 [![Download for Linux (.AppImage)](https://img.shields.io/badge/⬇️%20Download-Linux%20(.AppImage)-brightgreen?style=for-the-badge&logo=linux&logoColor=white)](https://github.com/OliverZhaohaibin/iPhotron-LocalPhotoAlbumManager/releases/download/v5.0.0/iPhotron-5.00-x86_64.AppImage)
 
@@ -31,6 +31,13 @@
 
 ```bash
 sudo apt install ./iPhotron_5.00_amd64.deb
+```
+
+- **Linux (AppImage):** Datei ausführbar machen und direkt starten:
+
+```bash
+chmod +x iPhotron-5.00-x86_64.AppImage
+./iPhotron-5.00-x86_64.AppImage
 ```
 
 **Für Entwickler:**
@@ -100,18 +107,22 @@ Wichtige Highlights:
 Die Offline-OBF-Kartenlaufzeit von iPhotron wird als selbstenthaltene
 **maps extension** unter `src/maps/tiles/extension/` bereitgestellt. Genau
 dieses Verzeichnislayout wird von der lokalen Entwicklung, von Paket-Builds
-und vom Windows-Installer verwendet.
+und von plattformspezifischen Installationsartefakten verwendet.
 
 Die Extension enthält derzeit:
 - Offline-Kartendaten in `World_basemap_2.obf`
 - OsmAnd-Ressourcen unter `misc/`, `poi/`, `rendering_styles/` und `routing/`
-- native Binärdateien unter `bin/`, darunter `osmand_render_helper.exe`,
-  `osmand_native_widget.dll`, `OsmAndCore_shared.dll` und die benötigten Qt-DLLs
+- plattformspezifische native Binärdateien unter `bin/`
+  - Windows: `osmand_render_helper.exe`, `osmand_native_widget.dll`,
+    `OsmAndCore_shared.dll`, `OsmAndCoreTools_shared.dll` und die benötigten Qt-DLLs
+  - Linux: `osmand_render_helper`, `osmand_native_widget.so`,
+    `libOsmAndCore_shared.so` und `libOsmAndCoreTools_shared.so`
 
-> **Derzeit nur Windows:** Die unten gezeigte vollständige native
-> maps-extension-Laufzeit ist aktuell nur unter Windows verfügbar. Unter Linux
-> und macOS verwendet iPhotron weiterhin den bestehenden Python-/Legacy-
-> Kartenpfad.
+Hinweise zur Linux-Kartenlaufzeit:
+- Unter Linux kann iPhotron sowohl den helper-basierten OBF-Renderer als auch das native OsmAnd-Widget verwenden, sobald die Shared Libraries vorhanden sind.
+- Wenn neben diesem Repository ein `PySide6-OsmAnd-SDK/`-Checkout existiert, wird in der Linux-Entwicklung bevorzugt dessen Widget-Build aus `tools/osmand_render_helper_native/dist-linux/` verwendet.
+- Das native Linux-Widget erwartet derzeit den XCB- + Desktop-OpenGL-Pfad von Qt. Bei Auswahl dieses Backends setzt iPhotron automatisch `QT_QPA_PLATFORM=xcb`, `QT_OPENGL=desktop` und `QT_XCB_GL_INTEGRATION=xcb_glx`.
+- macOS fällt weiterhin auf den bestehenden Python-/Legacy-Kartenpfad zurück, solange die native Laufzeit dort noch in Arbeit ist.
 
 | Ohne Maps Extension | Mit Maps Extension |
 | --- | --- |
@@ -119,9 +130,9 @@ Die Extension enthält derzeit:
 
 Die Extension wird im Upstream-Teilprojekt
 [PySide6-OsmAnd-SDK](https://github.com/OliverZhaohaibin/PySide6-OsmAnd-SDK)
-gebaut. Dieses Repository enthält die vendorten OsmAnd-Quellen, Windows-
-Buildskripte, die native Qt-Widget-Bridge und die Preview-App, aus denen die
-hier verwendete Laufzeit erzeugt wird.
+gebaut. Dieses Repository enthält die vendorten OsmAnd-Quellen, Windows- und
+Linux-Buildskripte, die native Qt-Widget-Bridge und die Preview-App, aus denen
+die hier verwendete Laufzeit erzeugt wird.
 
 Den vollständigen Workflow "maps extension aus dem Side-Project in dieses
 Repository übernehmen" findest du in [Development](../development.md). Hinweise
@@ -197,8 +208,8 @@ Detaillierte technische Dokumentation (auf Englisch):
 | Dokument | Beschreibung |
 |----------|-------------|
 | [Architecture](../architecture.md) | Gesamtarchitektur, Modulgrenzen, Datenfluss, wichtige Designentscheidungen |
-| [Development](../development.md) | Entwicklungsumgebung, Abhängigkeiten, Debugging und der vollständige maps-extension-Workflow über das Side-Project |
-| [Executable Build](../misc/BUILD_EXE.md) | Nuitka-Paketierung, AOT, maps-extension-Synchronisierung und Hinweise zum Windows-Installer |
+| [Development](../development.md) | Entwicklungsumgebung, Abhängigkeiten, Debugging und der vollständige maps-extension-Workflow für Windows und Linux |
+| [Executable Build](../misc/BUILD_EXE.md) | Nuitka-Paketierung, AOT, maps-extension-Synchronisierung und Hinweise zur Windows-/Linux-Laufzeit |
 | [Security](../security.md) | Berechtigungen, Verschlüsselung, Datenspeicherorte, Bedrohungsmodell |
 | [Changelog](../CHANGELOG.md) | Alle Versionshinweise und Änderungen |
 

@@ -320,6 +320,25 @@ def test_prepare_qt_runtime_for_backend_allows_packaged_linux_wayland_opt_out(mo
     assert attributes == []
 
 
+def test_prepare_qt_runtime_for_backend_allows_packaged_linux_wayland_opt_out_for_native_backend(monkeypatch) -> None:
+    attributes: list[tuple[object, bool]] = []
+
+    monkeypatch.setattr("maps.main.sys.platform", "linux")
+    monkeypatch.setattr("maps.main._is_packaged_runtime", lambda: True)
+    monkeypatch.setattr("maps.main.QApplication.setAttribute", lambda attr, enabled=True: attributes.append((attr, enabled)))
+    monkeypatch.setenv("IPHOTO_ALLOW_PACKAGED_LINUX_WAYLAND", "1")
+    monkeypatch.delenv("QT_QPA_PLATFORM", raising=False)
+    monkeypatch.delenv("QT_OPENGL", raising=False)
+    monkeypatch.delenv("QT_XCB_GL_INTEGRATION", raising=False)
+
+    prepare_qt_runtime_for_backend("native")
+
+    assert "QT_QPA_PLATFORM" not in os.environ
+    assert "QT_OPENGL" not in os.environ
+    assert "QT_XCB_GL_INTEGRATION" not in os.environ
+    assert attributes == []
+
+
 def test_choose_launch_configuration_can_force_native_backend(tmp_path, monkeypatch) -> None:
     package_root = tmp_path / "maps"
     monkeypatch.setattr("maps.main.has_usable_osmand_native_widget", lambda root: root == package_root)
@@ -475,7 +494,7 @@ def test_format_map_runtime_diagnostics_reports_native_gl(monkeypatch) -> None:
     assert "confirmed_gl=true" in diagnostics
     assert "event_target=NativeOsmAndMapWidget" in diagnostics
     assert "tile_kind=raster" in diagnostics
-    assert r"native_dll=D:\native\osmand_native_widget.dll" in diagnostics
+    assert r"native_library=D:\native\osmand_native_widget.dll" in diagnostics
 
 
 def test_describe_active_backend_distinguishes_helper_and_fallback() -> None:

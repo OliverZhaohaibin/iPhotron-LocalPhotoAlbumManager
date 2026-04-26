@@ -20,7 +20,7 @@
 
 ## 📥 Download & Install
 
-[![Download for Windows](https://img.shields.io/badge/⬇️%20Download-Windows%20(.exe)-blue?style=for-the-badge&logo=windows)](https://github.com/OliverZhaohaibin/iPhotron-LocalPhotoAlbumManager/releases/download/v5.0.0/v5.00-alpha-x86-setup.exe)
+[![Download for Windows](https://img.shields.io/badge/⬇️%20Download-Windows%20(.exe)-blue?style=for-the-badge&logo=windows)](https://github.com/OliverZhaohaibin/iPhotron-LocalPhotoAlbumManager/releases/download/v5.0.0/v5.00-x86-setup.exe)
 [![Download for Linux (.deb)](https://img.shields.io/badge/⬇️%20Download-Linux%20(.deb)-orange?style=for-the-badge&logo=linux&logoColor=white)](https://github.com/OliverZhaohaibin/iPhotron-LocalPhotoAlbumManager/releases/download/v5.0.0/iPhotron_5.00_amd64.deb)
 [![Download for Linux (.AppImage)](https://img.shields.io/badge/⬇️%20Download-Linux%20(.AppImage)-brightgreen?style=for-the-badge&logo=linux&logoColor=white)](https://github.com/OliverZhaohaibin/iPhotron-LocalPhotoAlbumManager/releases/download/v5.0.0/iPhotron-5.00-x86_64.AppImage)
 
@@ -36,8 +36,8 @@ sudo apt install ./iPhotron_5.00_amd64.deb
 - **Linux (.AppImage):** Make the file executable and run it:
 
 ```bash
-chmod +x iPhotron-x86_64.AppImage
-./iPhotron-x86_64.AppImage
+chmod +x iPhotron-5.00-x86_64.AppImage
+./iPhotron-5.00-x86_64.AppImage
 ```
 
 **For developers** — install from source:
@@ -105,17 +105,22 @@ Key highlights:
 
 iPhotron's offline OBF map runtime ships as a self-contained **maps extension**
 rooted at `src/maps/tiles/extension/`. That directory is the contract consumed
-by local development, packaged builds, and the Windows installer.
+by local development, packaged builds, and platform-specific installers.
 
 The extension currently contains:
 - `World_basemap_2.obf` offline map data
 - OsmAnd resources under `misc/`, `poi/`, `rendering_styles/`, and `routing/`
-- native binaries under `bin/`, including `osmand_render_helper.exe`,
-  `osmand_native_widget.dll`, `OsmAndCore_shared.dll`, and the required Qt DLLs
+- platform-specific native binaries under `bin/`
+  - Windows: `osmand_render_helper.exe`, `osmand_native_widget.dll`,
+    `OsmAndCore_shared.dll`, `OsmAndCoreTools_shared.dll`, and the required Qt DLLs
+  - Linux: `osmand_render_helper`, `osmand_native_widget.so`,
+    `libOsmAndCore_shared.so`, and `libOsmAndCoreTools_shared.so`
 
-> **Windows only:** The full native maps extension runtime shown below is
-> currently available on Windows only. On Linux and macOS, iPhotron continues
-> to use the existing Python/legacy map path.
+Linux maps notes:
+- iPhotron can use both the helper-backed OBF renderer and the native OsmAnd widget on Linux when the shared libraries are available.
+- If a sibling `PySide6-OsmAnd-SDK/` checkout exists, Linux development prefers its `tools/osmand_render_helper_native/dist-linux/` widget build.
+- The native Linux widget currently expects Qt's XCB desktop OpenGL path. When that backend is selected, iPhotron auto-sets `QT_QPA_PLATFORM=xcb`, `QT_OPENGL=desktop`, and `QT_XCB_GL_INTEGRATION=xcb_glx`.
+- macOS still falls back to the existing Python / legacy map path while the native runtime there remains in progress.
 
 | Without maps extension | With maps extension |
 | --- | --- |
@@ -123,14 +128,14 @@ The extension currently contains:
 
 The extension is built upstream from the standalone
 [PySide6-OsmAnd-SDK](https://github.com/OliverZhaohaibin/PySide6-OsmAnd-SDK)
-sub-project. That repository carries the vendored OsmAnd sources, Windows build
-scripts, native Qt widget bridge, and preview app used to produce the runtime
-consumed here.
+sub-project. That repository carries the vendored OsmAnd sources, Windows/Linux
+build scripts, native Qt widget bridge, and preview app used to produce the
+runtime consumed here.
 
 See [Development](docs/development.md) for the full "build the maps extension
 from the side project" workflow, and
 [Executable Build](docs/misc/BUILD_EXE.md) for how the extension is synchronized
-into Nuitka and Windows installer builds.
+into Nuitka and platform-specific release builds.
 
 ## ✨ Features
 
@@ -196,8 +201,8 @@ For deeper technical details, see the following docs:
 | Document | Description |
 |----------|-------------|
 | [Architecture](docs/architecture.md) | Overall architecture, module boundaries, data flow, key design decisions |
-| [Development](docs/development.md) | Dev environment, dependencies, debugging, and the full side-project-based maps extension workflow |
-| [Executable Build](docs/misc/BUILD_EXE.md) | Nuitka packaging, AOT filters, maps extension sync, and Windows installer/runtime notes |
+| [Development](docs/development.md) | Dev environment, dependencies, debugging, and the full side-project-based maps extension workflow for Windows and Linux |
+| [Executable Build](docs/misc/BUILD_EXE.md) | Nuitka packaging, AOT filters, maps extension sync, and Windows/Linux runtime notes |
 | [Security](docs/security.md) | Permissions, encryption, data storage locations, threat model |
 | [Changelog](docs/CHANGELOG.md) | All version release notes and changes |
 

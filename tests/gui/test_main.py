@@ -109,7 +109,6 @@ def test_prepare_qt_runtime_for_maps_allows_packaged_linux_wayland_opt_out(monke
     monkeypatch.setattr("iPhoto.gui.main.sys.platform", "linux")
     monkeypatch.setattr("iPhoto.gui.main._is_packaged_runtime", lambda: True)
     monkeypatch.setenv("IPHOTO_ALLOW_PACKAGED_LINUX_WAYLAND", "1")
-    monkeypatch.setattr("maps.map_sources.has_usable_osmand_native_widget", lambda root: False)
     monkeypatch.delenv("IPHOTO_DISABLE_OPENGL", raising=False)
     monkeypatch.delenv("QT_QPA_PLATFORM", raising=False)
     monkeypatch.delenv("QT_OPENGL", raising=False)

@@ -6,7 +6,7 @@ import logging
 from pathlib import Path
 
 from PySide6.QtCore import QCoreApplication, QEvent, QPointF, QRect, QRectF, QSize, Qt, QTimer
-from PySide6.QtGui import QPainter, QPixmap, QResizeEvent
+from PySide6.QtGui import QPainter, QPainterPath, QPixmap, QRegion, QResizeEvent
 from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import QLabel, QSizePolicy, QVBoxLayout, QWidget
 
@@ -85,6 +85,7 @@ class InfoLocationMapView(QWidget):
 
     DEFAULT_ZOOM = 8.0
     _MINIMUM_SIDE = 156
+    _CORNER_RADIUS = 12.0
     _SETTLE_SYNC_DELAY_MS = 24
     _VIEWPORT_MATCH_EPSILON = 1e-6
     _PIN_SYNC_EVENT = QEvent.Type(QEvent.registerEventType())
@@ -209,6 +210,7 @@ class InfoLocationMapView(QWidget):
     def resizeEvent(self, event: QResizeEvent) -> None:  # type: ignore[override]
         super().resizeEvent(event)
         self._sync_square_height()
+        self._sync_corner_masks()
         self._sync_overlay_geometry()
 
     def showEvent(self, event) -> None:  # type: ignore[override]
@@ -230,9 +232,35 @@ class InfoLocationMapView(QWidget):
 
     def eventFilter(self, watched: object, event: QEvent) -> bool:
         if watched is self._map_widget and event.type() == QEvent.Type.Resize:
+            self._sync_corner_masks()
             self._sync_overlay_geometry()
             self._queue_viewport_sync()
         return super().eventFilter(watched, event)
+
+    def _rounded_region(self, width: int, height: int) -> QRegion:
+        radius = min(self._CORNER_RADIUS, width / 2.0, height / 2.0)
+        if width <= 0 or height <= 0 or radius <= 0:
+            return QRegion(0, 0, max(0, width), max(0, height))
+
+        path = QPainterPath()
+        path.moveTo(radius, 0.0)
+        path.lineTo(float(width) - radius, 0.0)
+        path.quadTo(float(width), 0.0, float(width), radius)
+        path.lineTo(float(width), float(height) - radius)
+        path.quadTo(float(width), float(height), float(width) - radius, float(height))
+        path.lineTo(radius, float(height))
+        path.quadTo(0.0, float(height), 0.0, float(height) - radius)
+        path.lineTo(0.0, radius)
+        path.quadTo(0.0, 0.0, radius, 0.0)
+        path.closeSubpath()
+        return QRegion(path.toFillPolygon().toPolygon())
+
+    def _sync_corner_masks(self) -> None:
+        host_region = self._rounded_region(self._map_host.width(), self._map_host.height())
+        self._map_host.setMask(host_region)
+        if isinstance(self._map_widget, QWidget):
+            widget_region = self._rounded_region(self._map_widget.width(), self._map_widget.height())
+            self._map_widget.setMask(widget_region)
 
     def _sync_overlay_geometry(self) -> None:
         target_rect = self._visible_map_rect()
@@ -461,6 +489,7 @@ class InfoLocationMapView(QWidget):
         self._map_host_layout.addWidget(self._map_widget, 1)
         self._connect_map_signals()
         self._sync_square_height()
+        self._sync_corner_masks()
         self._sync_overlay_geometry()
         QTimer.singleShot(0, self._sync_overlay_geometry)
 

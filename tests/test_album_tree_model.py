@@ -10,6 +10,7 @@ pytest.importorskip("PySide6.QtWidgets", reason="Qt widgets not available", exc_
 from PySide6.QtCore import QModelIndex
 from PySide6.QtWidgets import QApplication
 
+import iPhoto.gui.ui.models.album_tree_model as album_tree_model_module
 from iPhoto.gui.services.pinned_items_service import PinnedItemsService
 from iPhoto.gui.ui.models.album_tree_model import AlbumTreeModel, AlbumTreeRole, NodeType
 from iPhoto.library.manager import LibraryManager
@@ -149,3 +150,44 @@ def test_model_omits_pinned_section_when_empty(tmp_path: Path, qapp: QApplicatio
 
     pinned_index = _find_child(model, QModelIndex(), "Pinned")
     assert pinned_index is None
+
+
+def test_model_keeps_missing_pinned_entities_visible_until_clicked(
+    tmp_path: Path,
+    qapp: QApplication,
+    monkeypatch,
+) -> None:
+    root = tmp_path / "Library"
+    root.mkdir()
+    manager = LibraryManager()
+    manager.bind_path(root)
+    qapp.processEvents()
+
+    settings = SettingsManager(path=tmp_path / "settings.json")
+    settings.load()
+    pinned_service = PinnedItemsService(settings)
+    pinned_service.pin_album(root / "Missing Album", "Missing Album", library_root=root)
+    pinned_service.pin_person("missing-person", "Ghost", library_root=root)
+    pinned_service.pin_group("missing-group", "Group 1", library_root=root)
+
+    class _StubPeopleService:
+        def __init__(self, library_root: Path) -> None:
+            self.library_root = library_root
+
+        def list_clusters(self, *, include_hidden: bool = False):
+            return []
+
+        def list_groups(self, *, repository=None, summaries=None):
+            return []
+
+    monkeypatch.setattr(album_tree_model_module, "PeopleService", _StubPeopleService)
+
+    model = AlbumTreeModel(manager)
+    model.set_pinned_service(pinned_service)
+    qapp.processEvents()
+
+    pinned_index = _find_child(model, QModelIndex(), "Pinned")
+    assert pinned_index is not None
+    assert _find_child(model, pinned_index, "Missing Album") is not None
+    assert _find_child(model, pinned_index, "Ghost") is not None
+    assert _find_child(model, pinned_index, "Group 1") is not None

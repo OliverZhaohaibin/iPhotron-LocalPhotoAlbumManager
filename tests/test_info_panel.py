@@ -280,6 +280,46 @@ def test_info_panel_close_event_shuts_down_location_map(qapp: QApplication, monk
     assert shutdown_calls == [True]
 
 
+def test_info_panel_location_map_recreates_after_close_shutdown(
+    qapp: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(info_location_map_module, "check_opengl_support", lambda: False)
+    monkeypatch.setattr(
+        info_location_map_module,
+        "choose_map_widget_backend",
+        _fake_choose_map_widget_backend,
+    )
+
+    panel = InfoPanel()
+    panel.set_location_capability(enabled=True)
+    panel.set_asset_metadata(
+        {
+            "rel": "map.jpg",
+            "name": "map.jpg",
+            "gps": {"lat": 37.7749, "lon": -122.4194},
+            "location": "San Francisco",
+        }
+    )
+    assert isinstance(panel._location_map._map_widget, _FakeMiniMapWidget)
+
+    panel.close()
+    qapp.processEvents()
+    assert panel._location_map._map_widget is None
+
+    panel.set_asset_metadata(
+        {
+            "rel": "map.jpg",
+            "name": "map.jpg",
+            "gps": {"lat": 37.7749, "lon": -122.4194},
+            "location": "San Francisco",
+        }
+    )
+
+    assert isinstance(panel._location_map._map_widget, _FakeMiniMapWidget)
+    panel.shutdown()
+
+
 def test_info_panel_close_button_matches_main_window(qapp: QApplication) -> None:
     """The close button dimensions should match the main window's controls."""
 
@@ -406,7 +446,7 @@ def test_info_panel_face_avatar_context_menu_labels_and_submenu(qapp: QApplicati
     delete_label, not_this_label, submenu_labels = avatar._menu_action_labels()
     assert delete_label == "Delete"
     assert not_this_label == "Not Alice"
-    assert submenu_labels == ("Choose Someone Else…", "Rename Person…")
+    assert submenu_labels == ("Choose Someone Else…", "New Person…")
     panel.close()
 
 

@@ -141,8 +141,6 @@ class InfoLocationMapView(QWidget):
         self._overlay = _PinOverlay(self, self._map_host)
         self._overlay.hide()
 
-        self._create_map_widget()
-
     def map_widget(self) -> MapWidgetBase | None:
         return self._map_widget
 
@@ -155,6 +153,8 @@ class InfoLocationMapView(QWidget):
         self._requested_zoom = float(zoom if zoom is not None else self.DEFAULT_ZOOM)
         self._pending_viewport_sync = True
         self._screen_point = None
+        if self._map_widget is None:
+            self._create_map_widget()
         if self._map_widget is None:
             self._message_label.setText("Map preview unavailable")
             self._message_label.show()
@@ -186,14 +186,27 @@ class InfoLocationMapView(QWidget):
         self._overlay.hide()
 
     def shutdown(self) -> None:
+        self._pin_sync_timer.stop()
+        self._pin_settle_timer.stop()
         self._viewport_sync_timer.stop()
         self._viewport_settle_timer.stop()
         if self._map_widget is not None:
+            map_widget = self._map_widget
+            self._map_widget = None
             try:
-                self._map_widget.shutdown()
+                map_widget.shutdown()
             except Exception:
                 LOGGER.debug("Mini-map shutdown failed", exc_info=True)
-            self._map_widget = None
+            if isinstance(map_widget, QWidget):
+                self._map_host_layout.removeWidget(map_widget)
+                map_widget.hide()
+                map_widget.setParent(None)
+                map_widget.deleteLater()
+        self._screen_point = None
+        self._pending_viewport_sync = False
+        self._overlay.set_screen_point(None)
+        self._overlay.hide()
+        self._map_host.hide()
 
     def hasHeightForWidth(self) -> bool:  # type: ignore[override]
         return True
@@ -445,6 +458,8 @@ class InfoLocationMapView(QWidget):
         self._queue_pin_sync()
 
     def _create_map_widget(self) -> None:
+        if self._map_widget is not None:
+            return
         map_source = MapSourceSpec.osmand_default(_MAPS_PACKAGE_ROOT)
         use_opengl = check_opengl_support()
         widget_cls, resolved_map_source, backend_kind = choose_map_widget_backend(

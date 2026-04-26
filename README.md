@@ -234,8 +234,11 @@ For deeper technical details, see the following docs:
 |------|----------|
 | **ExifTool** | Reads EXIF, GPS, QuickTime, and Live Photo metadata. |
 | **FFmpeg / FFprobe** | Generates video thumbnails & parses video info. |
+| **InsightFace / ONNXRuntime + `buffalo_s` models** | Optional People face scanning: face detection (`det_500m.onnx`) and face embeddings (`w600k_mbf.onnx`) from `src/extension/models/buffalo_s/`. |
 
-> Ensure both are available in your system `PATH`.
+> Ensure ExifTool and FFmpeg/FFprobe are available in your system `PATH`.
+> The AI face runtime is optional; install it with `pip install -e ".[ai-demo]"`
+> for source builds, and keep `extension/models` bundled for offline packaged builds.
 
 Python dependencies (e.g., `Pillow`, `reverse-geocoder`) are auto-installed via `pyproject.toml`.
 

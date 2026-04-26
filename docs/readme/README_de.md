@@ -238,6 +238,24 @@ Detaillierte technische Dokumentation (auf Englisch):
 
 ---
 
+## 🧩 Externe Werkzeuge
+
+| Werkzeug | Zweck |
+|----------|-------|
+| **ExifTool** | Liest EXIF-, GPS-, QuickTime- und Live-Photo-Metadaten. |
+| **FFmpeg / FFprobe** | Erzeugt Video-Miniaturansichten und analysiert Videoinformationen. |
+| **InsightFace / ONNXRuntime + `buffalo_s`-Modelle** | Optionales People Face Scanning: Gesichtserkennung (`det_500m.onnx`) und Face Embeddings (`w600k_mbf.onnx`) aus `src/extension/models/buffalo_s/`. |
+
+> ExifTool und FFmpeg/FFprobe müssen im System-`PATH` verfügbar sein.
+> Die AI-Gesichtslaufzeit ist optional; für Source-Builds kann sie mit
+> `pip install -e ".[ai-demo]"` installiert werden. Offline-Pakete sollten
+> `extension/models` mitliefern.
+
+Python-Abhängigkeiten wie `Pillow` und `reverse-geocoder` werden über
+`pyproject.toml` automatisch installiert.
+
+---
+
 ## 📄 Lizenz
 
 **MIT-Lizenz © 2025**  

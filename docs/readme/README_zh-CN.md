@@ -224,6 +224,22 @@ Nuitka 打包、runtime 同步与安装器说明请参阅
 
 ---
 
+## 🧩 外部工具
+
+| 工具 | 用途 |
+|------|------|
+| **ExifTool** | 读取 EXIF、GPS、QuickTime 和实况照片元数据。 |
+| **FFmpeg / FFprobe** | 生成视频缩略图并解析视频信息。 |
+| **InsightFace / ONNXRuntime + `buffalo_s` 模型** | 可选的 People 人脸扫描：使用 `src/extension/models/buffalo_s/` 中的 `det_500m.onnx` 进行人脸检测，使用 `w600k_mbf.onnx` 生成人脸 embedding。 |
+
+> 请确保 ExifTool 和 FFmpeg/FFprobe 已加入系统 `PATH`。
+> AI 人脸运行时是可选功能；源码安装可使用 `pip install -e ".[ai-demo]"`，
+> 离线打包版本需要保留 `extension/models`。
+
+Python 依赖（例如 `Pillow`、`reverse-geocoder`）会通过 `pyproject.toml` 自动安装。
+
+---
+
 ## 📄 许可证
 
 **MIT 许可证 © 2025**  

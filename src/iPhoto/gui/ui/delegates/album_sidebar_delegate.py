@@ -225,7 +225,7 @@ class AlbumSidebarDelegate(QStyledItemDelegate):
                 # Use the palette's link colour so the glyph tint tracks the active theme.
                 icon_color = palette.color(QPalette.ColorRole.Link)
                 colour_name = icon_color.name(QColor.NameFormat.HexArgb)
-                if icon_base in {"video", "suit.heart"}:
+                if icon_base in {"video", "suit.heart", "person.crop.square"}:
                     # The sidebar mirrors macOS behaviour where select states swap
                     # the regular outline icon for a filled version. We perform the
                     # decision here because the delegate has access to the selection
@@ -242,6 +242,19 @@ class AlbumSidebarDelegate(QStyledItemDelegate):
                         color=colour_name,
                         stroke_width=SIDEBAR_ICON_STROKE_WIDTH,
                     )
+            if state.node_type in {NodeType.PINNED_PERSON, NodeType.PINNED_GROUP}:
+                palette = self._palette_for_state(state)
+                icon_color = palette.color(QPalette.ColorRole.Text)
+                colour_name = icon_color.name(QColor.NameFormat.HexArgb)
+                if state.node_type == NodeType.PINNED_PERSON:
+                    icon_name = "person.fill.svg" if state.is_selected else "person.svg"
+                else:
+                    icon_name = "person.2.fill.svg" if state.is_selected else "person.2.svg"
+                return load_icon(
+                    icon_name,
+                    color=colour_name,
+                    stroke_width=SIDEBAR_ICON_STROKE_WIDTH,
+                )
 
         return icon
 

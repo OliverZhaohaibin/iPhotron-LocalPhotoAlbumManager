@@ -51,11 +51,13 @@ $mainScript = Join-Path $srcRoot 'iPhoto\gui\main.py'
 $nativeBuildScript = Join-Path $repoRoot 'tools\osmand_render_helper_native\build_native_widget_msvc.ps1'
 $nativeDistDir = Join-Path $repoRoot 'tools\osmand_render_helper_native\dist-msvc'
 $extensionBinDir = Join-Path $srcRoot 'maps\tiles\extension\bin'
+$faceModelDir = Join-Path $srcRoot 'extension\models'
 
 Assert-Exists $repoRoot
 Assert-Exists $srcRoot
 Assert-Exists $mainScript
 Assert-Exists $nativeBuildScript
+Assert-Exists $faceModelDir
 
 if (-not $PythonExe) {
     $venvPython = Join-Path $repoRoot '.venv\Scripts\python.exe'
@@ -101,6 +103,11 @@ $arguments = @(
     '--assume-yes-for-downloads',
     '--nofollow-import-to=numba',
     '--nofollow-import-to=llvmlite',
+    '--nofollow-import-to=albumentations',
+    '--nofollow-import-to=albucore',
+    '--nofollow-import-to=pydantic',
+    '--nofollow-import-to=pydantic_core',
+    '--nofollow-import-to=typing_inspection',
     '--nofollow-import-to=iPhoto.tests',
     '--nofollow-import-to=pytest',
     '--include-package=iPhoto',
@@ -109,7 +116,10 @@ $arguments = @(
     '--include-package=OpenGL_accelerate',
     '--include-package=cv2',
     '--include-package=reverse_geocoder',
+    '--include-package=insightface',
+    '--include-package=onnxruntime',
     "--output-dir=$OutputDir",
+    "--include-data-dir=$faceModelDir=extension/models",
     "--include-data-dir=$(Join-Path $srcRoot 'iPhoto\schemas')=iPhoto/schemas",
     "--include-data-dir=$(Join-Path $srcRoot 'iPhoto\gui\ui\icon')=iPhoto/gui/ui/icon",
     "--include-data-dir=$(Join-Path $srcRoot 'iPhoto\gui\ui\qml')=iPhoto/gui/ui/qml",

@@ -118,3 +118,78 @@ def test_geotagged_assets_reuse_cached_rows_until_library_changes(
 
     assert repo.calls == 1
     assert first == second
+
+
+def test_scan_chunk_invalidates_geotagged_cache(tmp_path: Path) -> None:
+    root = tmp_path / "Library"
+    album = root / "Album"
+    album.mkdir(parents=True, exist_ok=True)
+    _write_album_manifest(album)
+
+    row = {
+        "rel": "Album/photo.jpg",
+        "gps": {"lat": 10.0, "lon": 20.0},
+        "mime": "image/jpeg",
+        "id": "asset-1",
+        "parent_album_path": "Album",
+    }
+
+    class _Repo:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def read_geotagged(self):
+            self.calls += 1
+            return [row]
+
+    repo = _Repo()
+    manager = LibraryManager()
+    manager.bind_path(root)
+
+    with (
+        patch("iPhoto.library.geo_aggregator.get_global_repository", return_value=repo),
+        patch("iPhoto.library.geo_aggregator.resolve_location_name", return_value=None),
+    ):
+        manager.get_geotagged_assets()
+        manager._on_scan_chunk(root, [{"rel": "Album/new.jpg", "id": "asset-2"}])
+        manager.get_geotagged_assets()
+
+    assert repo.calls == 2
+
+
+def test_scan_finished_invalidates_geotagged_cache(tmp_path: Path) -> None:
+    root = tmp_path / "Library"
+    album = root / "Album"
+    album.mkdir(parents=True, exist_ok=True)
+    _write_album_manifest(album)
+
+    row = {
+        "rel": "Album/photo.jpg",
+        "gps": {"lat": 10.0, "lon": 20.0},
+        "mime": "image/jpeg",
+        "id": "asset-1",
+        "parent_album_path": "Album",
+    }
+
+    class _Repo:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def read_geotagged(self):
+            self.calls += 1
+            return [row]
+
+    repo = _Repo()
+    manager = LibraryManager()
+    manager.bind_path(root)
+
+    with (
+        patch("iPhoto.library.geo_aggregator.get_global_repository", return_value=repo),
+        patch("iPhoto.library.geo_aggregator.resolve_location_name", return_value=None),
+        patch("iPhoto.library.scan_coordinator.LOGGER.warning"),
+    ):
+        manager.get_geotagged_assets()
+        manager._on_scan_finished(root, [row])
+        manager.get_geotagged_assets()
+
+    assert repo.calls == 2

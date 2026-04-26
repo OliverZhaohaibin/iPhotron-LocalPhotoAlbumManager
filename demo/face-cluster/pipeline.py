@@ -1,10 +1,15 @@
 from __future__ import annotations
 
+import os
+import sys
+import builtins
+import typing
 from collections import Counter, defaultdict, deque
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 import hashlib
 from pathlib import Path
+from types import ModuleType
 import uuid
 
 import numpy as np
@@ -35,6 +40,7 @@ SUPPORTED_IMAGE_SUFFIXES = {
     ".heic",
     ".heif",
 }
+_REQUIRED_FACE_MODULES = ("detection", "recognition")
 
 
 @dataclass(frozen=True)
@@ -57,11 +63,17 @@ class FaceClusterPipeline:
     def __init__(
         self,
         *,
+        model_root: Path | None = None,
         model_pack: str = "buffalo_s",
         distance_threshold: float = 0.6,
         min_samples: int = 2,
         min_face_size: int = 40,
     ) -> None:
+        self._model_root = (
+            Path(model_root)
+            if model_root is not None
+            else Path(__file__).resolve().parents[2] / "src" / "extension" / "models"
+        )
         self._model_pack = model_pack
         self._distance_threshold = float(distance_threshold)
         self._min_samples = int(min_samples)
@@ -186,17 +198,34 @@ class FaceClusterPipeline:
             return self._analysis_app
 
         try:
-            from insightface.app import FaceAnalysis
+            _install_runtime_typing_compat()
+            _install_insightface_mask_renderer_stubs()
+            from insightface.app.face_analysis import FaceAnalysis
         except ImportError as exc:
             raise RuntimeError(
                 "缺少 insightface 依赖。请先安装 demo 需要的 AI 依赖后再运行。"
             ) from exc
 
+        self._model_root.mkdir(parents=True, exist_ok=True)
+        insightface_root = self._model_root.parent.resolve()
+        os.environ["INSIGHTFACE_HOME"] = str(insightface_root)
         _patch_insightface_alignment_estimate()
         providers = _resolve_execution_providers()
         ctx_id = 0 if "CUDAExecutionProvider" in providers else -1
-        app = FaceAnalysis(name=self._model_pack, providers=providers)
-        app.prepare(ctx_id=ctx_id, det_size=(640, 640))
+        try:
+            app = FaceAnalysis(
+                name=self._model_pack,
+                root=str(insightface_root),
+                allowed_modules=list(_REQUIRED_FACE_MODULES),
+                providers=providers,
+            )
+            app.prepare(ctx_id=ctx_id, det_size=(640, 640))
+        except Exception as exc:
+            raise _build_face_analysis_init_error(
+                model_pack=self._model_pack,
+                model_dir=self._model_root.resolve(),
+                exc=exc,
+            ) from exc
         self._analysis_app = app
         return app
 
@@ -495,6 +524,26 @@ def _quantize_value(value: float, step: int) -> int:
     return int(round(float(value) / float(step)) * step)
 
 
+def _build_face_analysis_init_error(
+    *,
+    model_pack: str,
+    model_dir: Path,
+    exc: Exception,
+) -> RuntimeError:
+    reason = str(exc).strip() or exc.__class__.__name__
+    model_pack_dir = model_dir / model_pack
+    if not model_pack_dir.exists():
+        return RuntimeError(
+            f"人脸聚类不可用：InsightFace 模型 '{model_pack}' 尚未缓存到 '{model_pack_dir}'，"
+            f"初始化/下载失败（{reason}）。请先让环境联网下载一次，或把已有的 "
+            f"'{model_pack}' 模型目录复制到这里后重试。"
+        )
+    return RuntimeError(
+        f"人脸聚类不可用：无法从 '{model_pack_dir}' 初始化 InsightFace 模型 "
+        f"'{model_pack}'（{reason}）。"
+    )
+
+
 def _resolve_execution_providers() -> list[str]:
     try:
         import onnxruntime as ort
@@ -543,6 +592,72 @@ def _patch_insightface_alignment_estimate() -> None:
 
     face_align.estimate_norm = estimate_norm
     face_align._iphoto_from_estimate_patch = True
+
+
+def _install_insightface_mask_renderer_stubs() -> None:
+    """Avoid importing albumentations for InsightFace mask rendering we do not use."""
+    if "albumentations" in sys.modules:
+        return
+
+    albumentations_module = ModuleType("albumentations")
+    core_module = ModuleType("albumentations.core")
+    transforms_module = ModuleType("albumentations.core.transforms_interface")
+
+    class ImageOnlyTransform:
+        def __init__(self, *args, **kwargs) -> None:
+            del args, kwargs
+
+    transforms_module.ImageOnlyTransform = ImageOnlyTransform
+    core_module.transforms_interface = transforms_module
+    albumentations_module.core = core_module
+
+    sys.modules["albumentations"] = albumentations_module
+    sys.modules["albumentations.core"] = core_module
+    sys.modules["albumentations.core.transforms_interface"] = transforms_module
+
+
+def _install_runtime_typing_compat() -> None:
+    """Provide typing names some third-party annotations expect at runtime."""
+    import numpy.typing as npt
+
+    compat_names = {
+        "Any": typing.Any,
+        "Callable": typing.Callable,
+        "ClassVar": typing.ClassVar,
+        "Concatenate": typing.Concatenate,
+        "Dict": typing.Dict,
+        "Final": typing.Final,
+        "Generic": typing.Generic,
+        "Iterable": typing.Iterable,
+        "List": typing.List,
+        "Literal": typing.Literal,
+        "LiteralString": typing.LiteralString,
+        "Mapping": typing.Mapping,
+        "MutableMapping": typing.MutableMapping,
+        "Never": typing.Never,
+        "NoReturn": typing.NoReturn,
+        "NotRequired": typing.NotRequired,
+        "Optional": typing.Optional,
+        "ParamSpec": typing.ParamSpec,
+        "Protocol": typing.Protocol,
+        "Required": typing.Required,
+        "Self": typing.Self,
+        "Sequence": typing.Sequence,
+        "Set": typing.Set,
+        "TypedDict": typing.TypedDict,
+        "Tuple": typing.Tuple,
+        "TypeAlias": typing.TypeAlias,
+        "TypeGuard": typing.TypeGuard,
+        "TypeVar": typing.TypeVar,
+        "Union": typing.Union,
+        "ArrayLike": npt.ArrayLike,
+        "DTypeLike": npt.DTypeLike,
+        "NDArray": npt.NDArray,
+        "ndarray": np.ndarray,
+    }
+    for name, value in compat_names.items():
+        if not hasattr(builtins, name):
+            setattr(builtins, name, value)
 
 
 def _utc_now_iso() -> str:

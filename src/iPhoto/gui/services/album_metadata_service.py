@@ -39,7 +39,11 @@ class AlbumMetadataService(QObject):
     # ------------------------------------------------------------------
     # Public API used by :class:`~iPhoto.gui.facade.AppFacade`
     # ------------------------------------------------------------------
-    def set_album_cover(self, album: Album, rel: str) -> bool:
+    def set_album_cover(
+        self,
+        album: Album,
+        rel: str,
+    ) -> bool:
         """Set *rel* as cover for *album* and persist the change."""
 
         if not rel:

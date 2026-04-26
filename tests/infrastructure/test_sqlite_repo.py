@@ -36,7 +36,8 @@ def sample_asset():
         content_identifier="cid_1",
         live_photo_group_id=None,
         is_favorite=False,
-        parent_album_path="album_1"
+        parent_album_path="album_1",
+        face_status="pending",
     )
 
 def test_repo_initialization(repo, db_path):
@@ -57,6 +58,7 @@ def test_save_and_get_asset(repo, sample_asset):
     for key, value in sample_asset.metadata.items():
         assert retrieved.metadata[key] == value
     assert retrieved.parent_album_path == "album_1"
+    assert retrieved.face_status == "pending"
 
 def test_update_asset(repo, sample_asset):
     repo.save(sample_asset)
@@ -67,6 +69,28 @@ def test_update_asset(repo, sample_asset):
 
     retrieved = repo.get(sample_asset.id)
     assert retrieved.is_favorite is True
+
+
+def test_save_preserves_existing_face_status_when_unspecified(repo, sample_asset):
+    repo.save(sample_asset)
+
+    updated = Asset(
+        id=sample_asset.id,
+        album_id=sample_asset.album_id,
+        path=sample_asset.path,
+        media_type=sample_asset.media_type,
+        size_bytes=sample_asset.size_bytes,
+        created_at=sample_asset.created_at,
+        is_favorite=True,
+        parent_album_path=sample_asset.parent_album_path,
+        face_status=None,
+    )
+    repo.save(updated)
+
+    retrieved = repo.get(sample_asset.id)
+    assert retrieved is not None
+    assert retrieved.is_favorite is True
+    assert retrieved.face_status == "pending"
 
 
 def test_get_by_absolute_path_prefers_longest_matching_relative_suffix(repo, tmp_path):
@@ -257,6 +281,7 @@ def test_repo_migrates_legacy_app_schema(tmp_path):
     assert legacy.media_type == MediaType.IMAGE
     assert legacy.content_identifier == "cid-legacy"
     assert legacy.metadata["iso"] == 200
+    assert legacy.face_status == "pending"
 
     # -- video row --
     legacy_vid = repo.get("legacy-vid")
@@ -270,6 +295,7 @@ def test_repo_migrates_legacy_app_schema(tmp_path):
     assert legacy_vid.media_type == MediaType.VIDEO
     assert legacy_vid.content_identifier == "cid-vid"
     assert legacy_vid.metadata["codec"] == "h264"
+    assert legacy_vid.face_status == "skipped"
 
     # -- media-type filtering works after migration --
     photo_results = repo.find_by_query(AssetQuery(media_types=[MediaType.IMAGE]))
@@ -299,6 +325,7 @@ def test_repo_migrates_legacy_app_schema(tmp_path):
     assert saved.path == Path("legacy/new.jpg")
     assert saved.parent_album_path == "legacy"
     assert saved.metadata["flag"] is True
+    assert saved.face_status is None
 
     # -- VIDEO asset saved post-migration also round-trips correctly --
     repo.save(
@@ -317,3 +344,27 @@ def test_repo_migrates_legacy_app_schema(tmp_path):
     assert new_vid is not None
     assert new_vid.media_type == MediaType.VIDEO
     assert new_vid.duration == pytest.approx(10.0)
+
+
+def test_find_by_query_asset_ids(repo):
+    asset_one = Asset(
+        id="asset-1",
+        album_id="album_1",
+        path=Path("album_1/one.jpg"),
+        media_type=MediaType.IMAGE,
+        size_bytes=1,
+        created_at=datetime(2024, 1, 1, 10, 0, 0),
+    )
+    asset_two = Asset(
+        id="asset-2",
+        album_id="album_1",
+        path=Path("album_1/two.jpg"),
+        media_type=MediaType.IMAGE,
+        size_bytes=1,
+        created_at=datetime(2024, 1, 1, 11, 0, 0),
+    )
+    repo.save_batch([asset_one, asset_two])
+
+    results = repo.find_by_query(AssetQuery(asset_ids=["asset-2"]))
+
+    assert [asset.id for asset in results] == ["asset-2"]

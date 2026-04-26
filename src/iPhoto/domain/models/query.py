@@ -15,6 +15,7 @@ class SortOrder(Enum):
 class AssetQuery:
     """Asset query object - Fluent API for building query conditions"""
 
+    asset_ids: List[str] = field(default_factory=list)
     album_id: Optional[str] = None
     album_path: Optional[str] = None
     include_subalbums: bool = False

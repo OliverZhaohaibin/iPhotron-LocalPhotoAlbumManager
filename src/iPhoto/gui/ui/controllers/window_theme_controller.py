@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 from typing import TYPE_CHECKING
 
 from PySide6.QtCore import QObject
@@ -275,9 +276,41 @@ class WindowThemeController(QObject):
             f"QPushButton:pressed {{ background-color: {edit_btn_pressed}; }}"
             f"QPushButton:disabled {{ color: {disabled_fg}; border-color: {edit_btn_border.name(QColor.NameFormat.HexArgb)}; }}"
         )
+        self._apply_zoom_slider_style(colors)
 
         # 4. Refresh Menus
         self._refresh_menu_styles()
+
+    def _apply_zoom_slider_style(self, colors: ThemeColors) -> None:
+        """Stabilise the header zoom-slider handle on Linux while leaving other platforms native."""
+
+        zoom_slider = getattr(self._ui, "zoom_slider", None)
+        if zoom_slider is None:
+            return
+        if not sys.platform.startswith("linux"):
+            zoom_slider.setStyleSheet("")
+            return
+
+        if colors.is_dark:
+            groove_bg = "rgba(255, 255, 255, 70)"
+            add_page_bg = "rgba(255, 255, 255, 24)"
+            sub_page_bg = "#d7d8da"
+            handle_bg = "#f5f6f8"
+            handle_border = "rgba(0, 0, 0, 90)"
+        else:
+            groove_bg = "rgba(17, 17, 17, 64)"
+            add_page_bg = "rgba(17, 17, 17, 20)"
+            sub_page_bg = "rgba(17, 17, 17, 210)"
+            handle_bg = "#f5f6f8"
+            handle_border = "rgba(17, 17, 17, 88)"
+
+        zoom_slider.setStyleSheet(
+            "QSlider { background: transparent; min-height: 18px; }\n"
+            f"QSlider::groove:horizontal {{ height: 3px; margin: 0; background: {groove_bg}; border-radius: 1px; }}\n"
+            f"QSlider::sub-page:horizontal {{ background: {sub_page_bg}; border-radius: 1px; }}\n"
+            f"QSlider::add-page:horizontal {{ background: {add_page_bg}; border-radius: 1px; }}\n"
+            f"QSlider::handle:horizontal {{ background: {handle_bg}; width: 12px; margin: -5px 0; border-radius: 6px; border: 1px solid {handle_border}; }}"
+        )
 
     def _update_icon_tints(self, colors: ThemeColors) -> None:
         """Update icon colors for buttons that need it."""

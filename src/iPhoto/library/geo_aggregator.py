@@ -52,6 +52,105 @@ class GeotaggedAsset:
     """Library-relative path of the paired motion file when known."""
 
 
+def geotagged_asset_from_row(root: Path, row: object) -> Optional[GeotaggedAsset]:
+    """Return a ``GeotaggedAsset`` converted from one index-store row."""
+
+    if not isinstance(row, dict):
+        return None
+    gps = row.get("gps")
+    if not isinstance(gps, dict):
+        return None
+    lat = gps.get("lat")
+    lon = gps.get("lon")
+    if not isinstance(lat, (int, float)) or not isinstance(lon, (int, float)):
+        return None
+
+    rel = row.get("rel")
+    if not isinstance(rel, str) or not rel:
+        return None
+
+    live_role_raw = row.get("live_role")
+    live_role = int(live_role_raw) if isinstance(live_role_raw, (int, float)) else 0
+    # Keep only visible rows to mirror regular gallery queries.
+    # Hidden motion components (live_role != 0) must not be shown as
+    # standalone assets in the location cluster gallery.
+    if live_role != 0:
+        return None
+
+    abs_path = (root / rel).resolve()
+    location_raw = row.get("location")
+    if not isinstance(location_raw, str) or not location_raw.strip():
+        metadata = row.get("metadata")
+        if isinstance(metadata, dict):
+            location_raw = metadata.get("location") or metadata.get("location_name")
+    location_name = (
+        str(location_raw).strip()
+        if isinstance(location_raw, str) and location_raw.strip()
+        else resolve_location_name(gps)
+    )
+
+    parent_album_path = row.get("parent_album_path")
+    if parent_album_path:
+        album_path = root / parent_album_path
+        prefix = parent_album_path + "/"
+        if rel.startswith(prefix):
+            album_relative_str = rel[len(prefix):]
+        elif rel == parent_album_path:
+            album_relative_str = ""
+        else:
+            album_relative_str = Path(rel).name
+    else:
+        album_path = root
+        album_relative_str = rel
+
+    asset_id = str(row.get("id") or rel)
+    classified_image, classified_video = classify_media(row)
+    is_image = classified_image or bool(row.get("is_image"))
+    is_video = classified_video or bool(row.get("is_video"))
+
+    still_image_time = row.get("still_image_time")
+    if isinstance(still_image_time, (int, float)):
+        still_image_value: Optional[float] = float(still_image_time)
+    else:
+        still_image_value = None
+
+    duration = row.get("dur")
+    if isinstance(duration, (int, float)):
+        duration_value: Optional[float] = float(duration)
+    else:
+        duration_value = None
+
+    live_group_raw = row.get("live_photo_group_id")
+    live_group_id = (
+        str(live_group_raw).strip()
+        if isinstance(live_group_raw, str) and live_group_raw.strip()
+        else None
+    )
+    partner_raw = row.get("live_partner_rel")
+    live_partner_rel = (
+        str(partner_raw).strip()
+        if isinstance(partner_raw, str) and partner_raw.strip()
+        else None
+    )
+
+    return GeotaggedAsset(
+        library_relative=rel,
+        album_relative=album_relative_str,
+        absolute_path=abs_path,
+        album_path=album_path,
+        asset_id=asset_id,
+        latitude=float(lat),
+        longitude=float(lon),
+        is_image=is_image,
+        is_video=is_video,
+        still_image_time=still_image_value,
+        duration=duration_value,
+        location_name=location_name,
+        live_photo_group_id=live_group_id,
+        live_partner_rel=live_partner_rel,
+    )
+
+
 class GeoAggregatorMixin:
     """Mixin providing geotagged asset collection for LibraryManager."""
 
@@ -82,99 +181,13 @@ class GeoAggregatorMixin:
             return assets
 
         for row in rows:
-            if not isinstance(row, dict):
+            asset = geotagged_asset_from_row(root, row)
+            if asset is None:
                 continue
-            gps = row.get("gps")
-            if not isinstance(gps, dict):
+            if asset.absolute_path in seen:
                 continue
-            lat = gps.get("lat")
-            lon = gps.get("lon")
-            if not isinstance(lat, (int, float)) or not isinstance(lon, (int, float)):
-                continue
-            # ``resolve_location_name`` maps the GPS coordinate to a human-readable
-            # label (typically the city) so that low zoom levels can show a
-            # meaningful aggregate marker instead of individual thumbnails.
-            location_name = resolve_location_name(gps)
-            rel = row.get("rel")
-            if not isinstance(rel, str) or not rel:
-                continue
-            abs_path = (root / rel).resolve()
-            if abs_path in seen:
-                continue
-            seen.add(abs_path)
-            library_relative_str = rel
-            # Compute album_path from the parent directory of the asset
-            parent_album_path = row.get("parent_album_path")
-            if parent_album_path:
-                album_path = root / parent_album_path
-                # Compute album-relative path by stripping the parent prefix
-                # Use string operations for robustness with paths at album root
-                prefix = parent_album_path + "/"
-                if rel.startswith(prefix):
-                    album_relative_str = rel[len(prefix):]
-                elif rel == parent_album_path:
-                    # File at the album root with same name as album (edge case)
-                    album_relative_str = ""
-                else:
-                    album_relative_str = Path(rel).name
-            else:
-                album_path = root
-                album_relative_str = rel
-            asset_id = str(row.get("id") or rel)
-            classified_image, classified_video = classify_media(row)
-            # Combine classifier results with any persisted flags to remain
-            # compatible with older index rows that stored boolean values.
-            is_image = classified_image or bool(row.get("is_image"))
-            is_video = classified_video or bool(row.get("is_video"))
-            still_image_time = row.get("still_image_time")
-            if isinstance(still_image_time, (int, float)):
-                still_image_value: Optional[float] = float(still_image_time)
-            else:
-                still_image_value = None
-            duration = row.get("dur")
-            if isinstance(duration, (int, float)):
-                duration_value: Optional[float] = float(duration)
-            else:
-                duration_value = None
-            live_role_raw = row.get("live_role")
-            live_role = int(live_role_raw) if isinstance(live_role_raw, (int, float)) else 0
-            # Keep only visible rows to mirror regular gallery queries.
-            # Hidden motion components (live_role != 0) must not be shown as
-            # standalone assets in the location cluster gallery.
-            if live_role != 0:
-                continue
-
-            live_group_raw = row.get("live_photo_group_id")
-            live_group_id = (
-                str(live_group_raw).strip()
-                if isinstance(live_group_raw, str) and live_group_raw.strip()
-                else None
-            )
-            partner_raw = row.get("live_partner_rel")
-            live_partner_rel = (
-                str(partner_raw).strip()
-                if isinstance(partner_raw, str) and partner_raw.strip()
-                else None
-            )
-
-            assets.append(
-                GeotaggedAsset(
-                    library_relative=library_relative_str,
-                    album_relative=album_relative_str,
-                    absolute_path=abs_path,
-                    album_path=album_path,
-                    asset_id=asset_id,
-                    latitude=float(lat),
-                    longitude=float(lon),
-                    is_image=is_image,
-                    is_video=is_video,
-                    still_image_time=still_image_value,
-                    duration=duration_value,
-                    location_name=location_name,
-                    live_photo_group_id=live_group_id,
-                    live_partner_rel=live_partner_rel,
-                )
-            )
+            seen.add(asset.absolute_path)
+            assets.append(asset)
 
         assets.sort(key=lambda item: item.library_relative)
         setattr(self, "_geotagged_assets_cache_root", root)

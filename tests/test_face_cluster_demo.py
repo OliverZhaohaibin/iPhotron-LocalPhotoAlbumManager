@@ -264,6 +264,32 @@ def test_embedding_match_falls_back_to_existing_profile(tmp_path: Path) -> None:
     assert canonical_persons[0].name == "已命名人物"
 
 
+def test_sync_scan_results_does_not_call_nested_person_order_query(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace = _workspace(tmp_path, "library-a")
+    state_repository = db.FaceClusterStateRepository(workspace.state_db_path)
+    embedding = _vector(1.0, 0.0, 0.0)
+    person = _person(person_id="profile-a", face_id="seed-face", embedding=embedding)
+    face = _face(face_id="seed-face", face_key="seed-key", person_id="profile-a", embedding=embedding)
+
+    def _forbidden_nested_query(_person_ids):
+        raise AssertionError("sync_scan_results should not call get_person_order_map")
+
+    monkeypatch.setattr(
+        state_repository,
+        "get_person_order_map",
+        _forbidden_nested_query,
+        raising=False,
+    )
+    state_repository.sync_scan_results([person], [face])
+
+    verify_repository = db.FaceClusterStateRepository(workspace.state_db_path)
+    assert {profile.person_id for profile in verify_repository.get_profiles()} == {"profile-a"}
+    if hasattr(verify_repository, "get_person_order_map"):
+        assert verify_repository.get_person_order_map(["profile-a"]) == {"profile-a": 0}
+
+
 def test_editable_name_label_emits_trimmed_text(qapp: QApplication) -> None:
     widget = ui.EditableNameLabel("人物1")
     widget.show()

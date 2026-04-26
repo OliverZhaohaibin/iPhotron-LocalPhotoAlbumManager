@@ -90,10 +90,19 @@ class MainHeaderWidget(QWidget):
         self.rescan_action = QAction("Rescan", main_window)
         self.rebuild_links_action = QAction("Rebuild Live Links", main_window)
         self.bind_library_action = QAction("Set Basic Library…", main_window)
+        self.download_map_extension_action = QAction("Download Map Extension…", main_window)
         self.toggle_filmstrip_action = QAction(
             "Show Filmstrip", main_window, checkable=True
         )
         self.toggle_filmstrip_action.setChecked(True)
+        self.toggle_face_names_action = QAction(
+            "Show face names", main_window, checkable=True
+        )
+        self.toggle_face_names_action.setChecked(False)
+        self.toggle_hidden_people_action = QAction(
+            "Show Hidden People", main_window, checkable=True
+        )
+        self.toggle_hidden_people_action.setChecked(False)
 
         self.share_action_group = QActionGroup(main_window)
         self.share_action_copy_file = QAction("Copy File", main_window, checkable=True)
@@ -162,10 +171,15 @@ class MainHeaderWidget(QWidget):
 
         self.rescan_button.setDefaultAction(self.rescan_action)
 
+        view_menu = self.menu_bar.addMenu("&View")
+        view_menu.addAction(self.toggle_face_names_action)
+        view_menu.addAction(self.toggle_hidden_people_action)
+        view_menu.addSeparator()
+        view_menu.addAction(self.toggle_filmstrip_action)
+
         settings_menu = self.menu_bar.addMenu("&Settings")
         settings_menu.addAction(self.bind_library_action)
-        settings_menu.addSeparator()
-        settings_menu.addAction(self.toggle_filmstrip_action)
+        settings_menu.addAction(self.download_map_extension_action)
         settings_menu.addSeparator()
 
         appearance_menu = settings_menu.addMenu("Appearance")

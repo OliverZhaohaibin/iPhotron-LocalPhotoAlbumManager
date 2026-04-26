@@ -23,17 +23,25 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, Iterator, List, Optional, Tuple
 
 from ...config import WORK_DIR_NAME
+from ...people.status import normalize_face_status
 from ...utils.logging import get_logger
 from .engine import DatabaseManager
 from .migrations import SchemaMigrator
 from .queries import QueryBuilder
 from .recovery import RecoveryService
 from .row_mapper import db_row_to_dict, insert_rows, row_to_db_params
+from .scan_merge import merge_scan_rows as merge_scan_rows_payload
 
 logger = get_logger()
 
 # Database filename for the global index
 GLOBAL_INDEX_DB_NAME = "global_index.db"
+
+# SQLite supports at most SQLITE_MAX_VARIABLE_NUMBER bound parameters per query
+# (compile-time default 999, raised to 32766 in SQLite ≥3.32).  Use a
+# conservative chunk size so large scans never hit the limit regardless of
+# the SQLite version in use.
+_SQLITE_PARAM_CHUNK_SIZE = 900
 
 # Global singleton instance and lock for thread-safe access
 _global_instance: Optional["AssetRepository"] = None
@@ -132,7 +140,7 @@ class AssetRepository:
             )
             recovery.recover()
 
-    def transaction(self):
+    def transaction(self, *, begin_mode: str | None = None):
         """Context manager for batching multiple operations.
         
         Example:
@@ -140,7 +148,7 @@ class AssetRepository:
             ...     repo.upsert_row("a.jpg", {...})
             ...     repo.upsert_row("b.jpg", {...})
         """
-        return self._db_manager.transaction()
+        return self._db_manager.transaction(begin_mode=begin_mode)
 
     def close(self) -> None:
         """Close any active database connections.
@@ -168,6 +176,53 @@ class AssetRepository:
         """Merge *rows* into the index, replacing duplicates by ``rel`` key."""
         with self.transaction() as conn:
             self._insert_rows(conn, rows)
+
+    def merge_scan_rows(self, rows: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Merge scanned rows while preserving persisted library-managed state.
+
+        The SELECT for existing rows and the subsequent INSERT are performed
+        within the same transaction so the read/write is atomic and cannot
+        lose concurrent updates to ``face_status`` or other library-managed
+        fields.
+
+        Existing rows are fetched in chunks of at most
+        ``_SQLITE_PARAM_CHUNK_SIZE`` to avoid hitting SQLite's bound-parameter
+        limit when a large snapshot is passed (e.g. from
+        ``index_sync_service.update_index_snapshot``).
+        """
+
+        materialized_rows = [dict(row) for row in rows]
+        if not materialized_rows:
+            return []
+
+        # De-duplicate while preserving insertion order so each rel is queried
+        # at most once.
+        unique_rels: List[str] = list(
+            dict.fromkeys(str(row["rel"]) for row in materialized_rows if row.get("rel"))
+        )
+
+        with self.transaction(begin_mode="IMMEDIATE") as conn:
+            existing_rows_by_rel: Dict[str, Dict[str, Any]] = {}
+            if unique_rels:
+                conn.row_factory = sqlite3.Row
+                for offset in range(0, len(unique_rels), _SQLITE_PARAM_CHUNK_SIZE):
+                    chunk = unique_rels[offset : offset + _SQLITE_PARAM_CHUNK_SIZE]
+                    placeholders = ", ".join(["?"] * len(chunk))
+                    cursor = conn.execute(
+                        f"SELECT * FROM assets WHERE rel IN ({placeholders})",
+                        chunk,
+                    )
+                    for db_row in cursor:
+                        d = self._db_row_to_dict(db_row)
+                        rel_value = d.get("rel")
+                        if rel_value is not None:
+                            existing_rows_by_rel[str(rel_value)] = d
+                conn.row_factory = None
+
+            merged_rows = merge_scan_rows_payload(materialized_rows, existing_rows_by_rel)
+            self._insert_rows(conn, merged_rows)
+
+        return merged_rows
 
     def upsert_row(self, rel: str, row: Dict[str, Any]) -> None:
         """Insert or update a single row identified by *rel*."""
@@ -213,6 +268,112 @@ class AssetRepository:
                 if rel_value is not None:
                     result[str(rel_value)] = d
             return result
+        finally:
+            if should_close:
+                conn.close()
+
+    def get_rows_by_ids(self, asset_ids: Iterable[str]) -> Dict[str, Dict[str, Any]]:
+        """Return a mapping of ``asset.id`` to asset rows."""
+
+        ids_list = [str(asset_id) for asset_id in asset_ids if asset_id]
+        if not ids_list:
+            return {}
+
+        conn = self._db_manager.get_connection()
+        should_close = conn != self._db_manager._conn
+
+        try:
+            conn.row_factory = sqlite3.Row
+            placeholders = ", ".join(["?"] * len(ids_list))
+            query = f"SELECT * FROM assets WHERE id IN ({placeholders})"
+            cursor = conn.cursor()
+            cursor.execute(query, ids_list)
+            rows: Dict[str, Dict[str, Any]] = {}
+            for row in cursor:
+                data = self._db_row_to_dict(row)
+                asset_id = data.get("id")
+                if isinstance(asset_id, str) and asset_id and asset_id not in rows:
+                    rows[asset_id] = data
+            return rows
+        finally:
+            if should_close:
+                conn.close()
+
+    def read_rows_by_face_status(
+        self,
+        statuses: Iterable[str],
+        *,
+        limit: int | None = None,
+    ) -> Iterator[Dict[str, Any]]:
+        """Yield rows whose ``face_status`` matches one of *statuses*."""
+
+        normalized_statuses = [
+            status
+            for status in (normalize_face_status(value) for value in statuses)
+            if status is not None
+        ]
+        if not normalized_statuses:
+            return
+
+        conn = self._db_manager.get_connection()
+        should_close = conn != self._db_manager._conn
+
+        try:
+            conn.row_factory = sqlite3.Row
+            placeholders = ", ".join(["?"] * len(normalized_statuses))
+            query = f"SELECT * FROM assets WHERE face_status IN ({placeholders}) ORDER BY dt DESC, id DESC"
+            params: list[Any] = list(normalized_statuses)
+            if limit is not None:
+                query += " LIMIT ?"
+                params.append(int(limit))
+            cursor = conn.cursor()
+            cursor.execute(query, params)
+            for row in cursor:
+                yield self._db_row_to_dict(row)
+        finally:
+            if should_close:
+                conn.close()
+
+    def update_face_status(self, asset_id: str, status: str) -> None:
+        """Update the ``face_status`` for a single asset row."""
+
+        normalized = normalize_face_status(status)
+        if normalized is None or not asset_id:
+            return
+        self._db_manager.execute_in_transaction(
+            "UPDATE assets SET face_status = ? WHERE id = ?",
+            (normalized, asset_id),
+        )
+
+    def update_face_statuses(self, asset_ids: Iterable[str], status: str) -> None:
+        """Update the ``face_status`` for multiple assets."""
+
+        normalized = normalize_face_status(status)
+        ids_list = [str(asset_id) for asset_id in asset_ids if asset_id]
+        if normalized is None or not ids_list:
+            return
+
+        placeholders = ", ".join(["?"] * len(ids_list))
+        query = f"UPDATE assets SET face_status = ? WHERE id IN ({placeholders})"
+        self._db_manager.execute_in_transaction(query, [normalized, *ids_list])
+
+    def count_by_face_status(self) -> Dict[str, int]:
+        """Return a status-to-count mapping for ``assets.face_status``."""
+
+        conn = self._db_manager.get_connection()
+        should_close = conn != self._db_manager._conn
+
+        try:
+            cursor = conn.execute(
+                "SELECT face_status, COUNT(*) AS asset_count FROM assets GROUP BY face_status"
+            )
+            counts: Dict[str, int] = {}
+            for status, asset_count in cursor.fetchall():
+                normalized = normalize_face_status(status)
+                if normalized is None:
+                    continue
+                counts[normalized] = int(asset_count or 0)
+            return counts
         finally:
             if should_close:
                 conn.close()
@@ -346,6 +507,7 @@ class AssetRepository:
             "dur", "year", "month", "dt", "ts", "content_id", "bytes",
             "mime", "w", "h", "original_rel_path", "original_album_id",
             "original_album_subpath", "is_favorite", "location", "gps",
+            "face_status",
             "micro_thumbnail"
         ]
 
@@ -528,6 +690,59 @@ class AssetRepository:
             "UPDATE assets SET location = ? WHERE rel = ?",
             (location, rel),
         )
+
+    def update_asset_geodata(
+        self,
+        rel: str,
+        *,
+        gps: Dict[str, float] | None,
+        location: str | None,
+        metadata_updates: Dict[str, Any] | None = None,
+    ) -> None:
+        """Atomically update GPS/location columns and JSON metadata for one asset."""
+
+        gps_payload = json.dumps(gps) if gps is not None else None
+        with self.transaction() as conn:
+            update_parts = ["gps = ?", "location = ?"]
+            params: list[Any] = [gps_payload, location]
+
+            columns = {
+                str(row[1])
+                for row in conn.execute("PRAGMA table_info(assets)")
+            }
+            if "metadata" in columns:
+                existing_metadata: Dict[str, Any] = {}
+                row = conn.execute(
+                    "SELECT metadata FROM assets WHERE rel = ?",
+                    (rel,),
+                ).fetchone()
+                if row is not None and row[0]:
+                    try:
+                        decoded = json.loads(row[0])
+                    except (json.JSONDecodeError, TypeError):
+                        decoded = {}
+                    if isinstance(decoded, dict):
+                        existing_metadata = decoded
+                if metadata_updates:
+                    existing_metadata.update(
+                        {key: value for key, value in metadata_updates.items() if value is not None}
+                    )
+                if gps is not None:
+                    existing_metadata["gps"] = dict(gps)
+                else:
+                    existing_metadata.pop("gps", None)
+                if isinstance(location, str) and location.strip():
+                    existing_metadata["location"] = location.strip()
+                else:
+                    existing_metadata.pop("location", None)
+                update_parts.append("metadata = ?")
+                params.append(json.dumps(existing_metadata, ensure_ascii=False))
+
+            params.append(rel)
+            conn.execute(
+                f"UPDATE assets SET {', '.join(update_parts)} WHERE rel = ?",
+                params,
+            )
 
     def apply_live_role_updates(
         self,

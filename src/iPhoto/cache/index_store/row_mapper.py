@@ -31,7 +31,7 @@ def insert_rows(
         "content_id", "frame_rate", "codec", "still_image_time", "dur",
         "original_rel_path", "original_album_id", "original_album_subpath",
         "live_role", "live_partner_rel", "aspect_ratio", "year", "month",
-        "media_type", "is_favorite", "location", "micro_thumbnail"
+        "media_type", "is_favorite", "location", "micro_thumbnail", "face_status"
     ]
     placeholders = ", ".join(["?"] * len(columns))
     query = (
@@ -91,13 +91,14 @@ def row_to_db_params(row: Dict[str, Any]) -> List[Any]:
         row.get("is_favorite", 0),
         row.get("location"),
         row.get("micro_thumbnail"),
+        row.get("face_status"),
     ]
 
 
 def db_row_to_dict(db_row: sqlite3.Row) -> Dict[str, Any]:
     """Map a DB row back to a dictionary."""
     d = dict(db_row)
-    if d["gps"] is not None:
+    if d.get("gps") is not None:
         try:
             d["gps"] = json.loads(d["gps"])
         except json.JSONDecodeError:

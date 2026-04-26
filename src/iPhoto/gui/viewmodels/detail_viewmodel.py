@@ -33,6 +33,7 @@ class MediaSelectionPort(Protocol):
 @dataclass(frozen=True)
 class DetailPresentation:
     row: int
+    asset_id: str
     path: Path
     is_video: bool
     is_live: bool
@@ -191,6 +192,9 @@ class DetailViewModel(BaseViewModel):
         path = self.current_path.value
         return path if isinstance(path, Path) else None
 
+    def refresh_current(self) -> None:
+        self._refresh_presentation()
+
     def _refresh_presentation(self) -> None:
         row = self.current_row.value
         if row is None or row < 0:
@@ -245,6 +249,8 @@ class DetailViewModel(BaseViewModel):
             }
         )
         location = self._resolve_location(dto)
+        if isinstance(location, str) and location.strip():
+            info["location"] = location.strip()
         live_motion_rel, live_motion_abs = self._resolve_live_motion(dto)
         video_adjustments: dict[str, Any] | None = None
         video_trim_range_ms: tuple[int, int] | None = None
@@ -289,6 +295,7 @@ class DetailViewModel(BaseViewModel):
                 }
         return DetailPresentation(
             row=row,
+            asset_id=dto.id,
             path=dto.abs_path,
             is_video=dto.is_video,
             is_live=dto.is_live,

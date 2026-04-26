@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 import shlex
 import sys
 from dataclasses import dataclass
@@ -14,13 +15,26 @@ DEFAULT_OSMAND_OBF_FILENAME = "World_basemap_2.obf"
 DEFAULT_OSMAND_STYLE_FILENAME = "snowmobile.render.xml"
 DEFAULT_OSMAND_RESOURCES_ROOT = DEFAULT_OSMAND_EXTENSION_RELATIVE_ROOT
 DEFAULT_OSMAND_STYLE_PATH = DEFAULT_OSMAND_RESOURCES_ROOT / "rendering_styles" / DEFAULT_OSMAND_STYLE_FILENAME
+DEFAULT_OSMAND_SEARCH_RELATIVE_PATH = DEFAULT_OSMAND_EXTENSION_RELATIVE_ROOT / "search" / "geonames.sqlite3"
+DEFAULT_OSMAND_PENDING_EXTENSION_SUFFIX = ".pending"
+LINUX_MAP_EXTENSION_DOWNLOAD_URL = (
+    "https://github.com/OliverZhaohaibin/iPhotron-LocalPhotoAlbumManager/"
+    "releases/download/v5.0.0/extension.tar.xz"
+)
+WINDOWS_MAP_EXTENSION_DOWNLOAD_URL = (
+    "https://github.com/OliverZhaohaibin/iPhotron-LocalPhotoAlbumManager/"
+    "releases/download/v5.0.0/extension.zip"
+)
 ENV_OSMAND_HELPER = "IPHOTO_OSMAND_RENDER_HELPER"
 ENV_OSMAND_NATIVE_WIDGET_LIBRARY = "IPHOTO_OSMAND_NATIVE_WIDGET_LIBRARY"
+ENV_OSMAND_EXTENSION_ROOT = "IPHOTO_OSMAND_EXTENSION_ROOT"
 ENV_PREFER_OSMAND_NATIVE_WIDGET = "IPHOTO_PREFER_OSMAND_NATIVE_WIDGET"
-
 if sys.platform == "win32":
     DEFAULT_HELPER_RELATIVE_PATH = DEFAULT_OSMAND_EXTENSION_RELATIVE_ROOT / "bin" / "osmand_render_helper.exe"
-    DEFAULT_HELPER_RELATIVE_PATHS = (DEFAULT_HELPER_RELATIVE_PATH,)
+    DEFAULT_HELPER_RELATIVE_PATHS = (
+        DEFAULT_HELPER_RELATIVE_PATH,
+        DEFAULT_OSMAND_EXTENSION_RELATIVE_ROOT / "bin" / "osmand_render_helper_sdk.exe",
+    )
     DEFAULT_NATIVE_WIDGET_RELATIVE_PATH_MSVC = (
         DEFAULT_OSMAND_EXTENSION_RELATIVE_ROOT / "bin" / "osmand_native_widget.dll"
     )
@@ -79,7 +93,6 @@ else:
         Path("tools") / "osmand_render_helper_native" / "dist-linux" / "osmand_native_widget.so",
         Path("tools") / "osmand_render_helper_native" / "dist-linux" / "libosmand_native_widget.so",
     )
-
 _TRUE_ENV_VALUES = {"1", "true", "yes", "on"}
 _FALSE_ENV_VALUES = {"0", "false", "no", "off"}
 
@@ -219,6 +232,142 @@ def has_usable_osmand_native_widget(package_root: Path | None = None) -> bool:
     return _has_osmand_data_assets(root) and resolve_osmand_native_widget_library(root) is not None
 
 
+def default_osmand_search_database(package_root: Path | None = None) -> Path:
+    """Return the bundled GeoNames database used by offline place search."""
+
+    root = package_root or _package_root()
+    return (default_osmand_extension_root(root) / "search" / "geonames.sqlite3").resolve()
+
+
+def default_osmand_tiles_root(package_root: Path | None = None) -> Path:
+    """Return the tiles root that hosts both legacy and extension map assets."""
+
+    root = package_root or _package_root()
+    return _managed_osmand_extension_root(root).parent.resolve()
+
+
+def has_usable_osmand_search_extension(package_root: Path | None = None) -> bool:
+    """Return ``True`` when both the map assets and search DB are bundled."""
+
+    root = package_root or _package_root()
+    return _has_osmand_data_assets(root) and default_osmand_search_database(root).is_file()
+
+
+def default_pending_osmand_extension_root(package_root: Path | None = None) -> Path:
+    """Return the staging directory consumed on the next application launch."""
+
+    root = package_root or _package_root()
+    extension_root = _managed_osmand_extension_root(root)
+    return extension_root.with_name(extension_root.name + DEFAULT_OSMAND_PENDING_EXTENSION_SUFFIX)
+
+
+def default_osmand_download_url(platform: str | None = None) -> str | None:
+    """Return the published extension archive URL for *platform*."""
+
+    resolved_platform = sys.platform if platform is None else platform
+    if resolved_platform == "win32":
+        return WINDOWS_MAP_EXTENSION_DOWNLOAD_URL
+    if resolved_platform.startswith("linux"):
+        return LINUX_MAP_EXTENSION_DOWNLOAD_URL
+    return None
+
+
+def supports_map_extension_download(platform: str | None = None) -> bool:
+    """Return whether the current platform offers a published extension archive."""
+
+    return default_osmand_download_url(platform) is not None
+
+
+def has_pending_osmand_extension_install(package_root: Path | None = None) -> bool:
+    """Return ``True`` when a staged extension is waiting for restart."""
+
+    pending_root = default_pending_osmand_extension_root(package_root)
+    return pending_root.is_dir()
+
+
+def has_installed_osmand_extension(package_root: Path | None = None) -> bool:
+    """Return ``True`` when the packaged extension layout is complete."""
+
+    root = package_root or _package_root()
+    extension_root = default_osmand_extension_root(root)
+
+    return validate_osmand_extension_root(extension_root, platform=sys.platform)
+
+
+def validate_osmand_extension_root(extension_root: Path, *, platform: str | None = None) -> bool:
+    """Return ``True`` when *extension_root* contains a complete runtime."""
+
+    resolved_platform = sys.platform if platform is None else platform
+    required_paths = (
+        extension_root / DEFAULT_OSMAND_OBF_FILENAME,
+        extension_root / "rendering_styles" / DEFAULT_OSMAND_STYLE_FILENAME,
+        extension_root / "search" / "geonames.sqlite3",
+    )
+    if not extension_root.is_dir() or not all(candidate.exists() for candidate in required_paths):
+        return False
+
+    if resolved_platform == "win32":
+        helper_candidates = (
+            extension_root / "bin" / "osmand_render_helper.exe",
+            extension_root / "bin" / "osmand_render_helper_sdk.exe",
+        )
+    else:
+        helper_candidates = (
+            extension_root / "bin" / "osmand_render_helper",
+            extension_root / "bin" / "osmand_render_helper_sdk",
+        )
+    return any(candidate.is_file() for candidate in helper_candidates)
+
+
+def verify_osmand_extension_install(package_root: Path | None = None, *, platform: str | None = None) -> bool:
+    """Return ``True`` when the active extension is complete and no pending dir remains."""
+
+    root = package_root or _package_root()
+    managed_extension_root = _managed_osmand_extension_root(root)
+    return (
+        not has_pending_osmand_extension_install(root)
+        and validate_osmand_extension_root(
+            managed_extension_root,
+            platform=platform,
+        )
+    )
+
+
+def apply_pending_osmand_extension_install(package_root: Path | None = None) -> bool:
+    """Promote a staged extension into place.
+
+    Returns ``True`` when a pending install existed and was promoted.
+    """
+
+    root = package_root or _package_root()
+    pending_root = default_pending_osmand_extension_root(root)
+    if not pending_root.exists():
+        return False
+
+    extension_root = _managed_osmand_extension_root(root)
+    backup_root = extension_root.with_name(extension_root.name + ".backup")
+
+    if backup_root.exists():
+        if backup_root.is_dir():
+            shutil.rmtree(backup_root)
+        else:
+            backup_root.unlink()
+
+    if extension_root.exists():
+        extension_root.replace(backup_root)
+
+    try:
+        pending_root.replace(extension_root)
+    except Exception:
+        if backup_root.exists() and not extension_root.exists():
+            backup_root.replace(extension_root)
+        raise
+    else:
+        if backup_root.exists():
+            shutil.rmtree(backup_root)
+    return True
+
+
 def _has_osmand_data_assets(package_root: Path) -> bool:
     source = MapSourceSpec.osmand_default(package_root).resolved(package_root)
     return (
@@ -254,7 +403,27 @@ def default_osmand_extension_root(package_root: Path | None = None) -> Path:
     """Return the self-contained extension directory used for OBF resources."""
 
     root = package_root or _package_root()
-    return (Path(root) / DEFAULT_OSMAND_EXTENSION_RELATIVE_ROOT).resolve()
+    bundled_root = _bundled_osmand_extension_root(root)
+    managed_root = _managed_osmand_extension_root(root)
+    if managed_root == bundled_root:
+        return bundled_root
+    if managed_root.exists() or not bundled_root.exists():
+        return managed_root
+    return bundled_root
+
+
+def _bundled_osmand_extension_root(package_root: Path) -> Path:
+    return (Path(package_root) / DEFAULT_OSMAND_EXTENSION_RELATIVE_ROOT).resolve()
+
+
+def _managed_osmand_extension_root(package_root: Path) -> Path:
+    root = Path(package_root).resolve()
+    override_root = os.environ.get(ENV_OSMAND_EXTENSION_ROOT, "").strip()
+    if override_root:
+        return Path(override_root).expanduser().resolve()
+    if _should_use_external_osmand_extension_root(root):
+        return _default_external_osmand_extension_root()
+    return _bundled_osmand_extension_root(root)
 
 
 def _sdk_roots(repo_root: Path) -> tuple[Path, ...]:
@@ -275,22 +444,76 @@ def _default_helper_candidates(package_root: Path) -> tuple[Path, ...]:
     repo_root = _repo_root(normalized_root)
     sdk_roots = _sdk_roots(repo_root)
     sdk_candidates = _collect_candidate_paths(sdk_roots, SDK_HELPER_RELATIVE_PATHS) if sdk_roots else ()
-    local_candidates = _collect_candidate_paths((normalized_root,), DEFAULT_HELPER_RELATIVE_PATHS)
+    local_candidates = _collect_candidate_paths(
+        _default_osmand_search_roots(normalized_root),
+        DEFAULT_HELPER_RELATIVE_PATHS,
+    )
     return _dedupe_candidates(sdk_candidates + local_candidates)
 
 
 def _default_native_widget_candidates(package_root: Path) -> tuple[Path, ...]:
-    repo_root = _repo_root(package_root)
-    sdk_roots = _sdk_roots(repo_root)
-
-    # Prefer the side project's newer Linux/macOS widget builds. The main
-    # project's bundled shared libraries are intentionally skipped there because
-    # they may lag behind the side project artifacts.
-    if sys.platform != "win32" and sdk_roots:
-        return _collect_candidate_paths(sdk_roots, SDK_NATIVE_WIDGET_RELATIVE_PATHS)
-
     normalized_root = Path(package_root).resolve()
-    return _collect_candidate_paths((normalized_root,), DEFAULT_NATIVE_WIDGET_RELATIVE_PATHS)
+    repo_root = _repo_root(normalized_root)
+    sdk_roots = _sdk_roots(repo_root)
+    sdk_candidates: tuple[Path, ...] = ()
+    if sys.platform != "win32" and sdk_roots:
+        sdk_candidates = _collect_candidate_paths(sdk_roots, SDK_NATIVE_WIDGET_RELATIVE_PATHS)
+    local_candidates = _collect_candidate_paths(
+        _default_osmand_search_roots(normalized_root),
+        DEFAULT_NATIVE_WIDGET_RELATIVE_PATHS,
+    )
+    return _dedupe_candidates(sdk_candidates + local_candidates)
+
+
+def _default_external_osmand_extension_root() -> Path:
+    data_home = os.environ.get("XDG_DATA_HOME", "").strip()
+    if os.name == "nt":
+        base = os.environ.get("APPDATA", "").strip()
+        if base:
+            return (Path(base) / "iPhoto" / "maps" / "tiles" / "extension").resolve()
+        return (Path.home() / "AppData" / "Roaming" / "iPhoto" / "maps" / "tiles" / "extension").resolve()
+    if sys.platform == "darwin":
+        return (Path.home() / "Library" / "Application Support" / "iPhoto" / "maps" / "tiles" / "extension").resolve()
+    if data_home:
+        return (Path(data_home) / "iPhoto" / "maps" / "tiles" / "extension").resolve()
+    return (Path.home() / ".local" / "share" / "iPhoto" / "maps" / "tiles" / "extension").resolve()
+
+
+def _should_use_external_osmand_extension_root(package_root: Path) -> bool:
+    if os.environ.get("APPIMAGE"):
+        return True
+
+    resolved_root = Path(package_root).resolve()
+    writable_probe_root = resolved_root / "tiles"
+    probe_target = writable_probe_root if writable_probe_root.exists() else resolved_root
+    if not probe_target.exists():
+        return False
+    return not os.access(probe_target, os.W_OK)
+
+
+def _default_osmand_search_roots(package_root: Path) -> tuple[Path, ...]:
+    normalized_root = Path(package_root).resolve()
+    bundled_root = normalized_root
+    override_root = os.environ.get(ENV_OSMAND_EXTENSION_ROOT, "").strip()
+    if override_root:
+        external_root = Path(override_root).expanduser().resolve().parents[1]
+    else:
+        external_root = _default_external_osmand_extension_root().parents[1]
+    if _should_use_external_osmand_extension_root(normalized_root):
+        return _dedupe_paths((external_root, bundled_root))
+    return _dedupe_paths((bundled_root, external_root))
+
+
+def _dedupe_paths(paths: tuple[Path, ...]) -> tuple[Path, ...]:
+    seen: set[Path] = set()
+    ordered: list[Path] = []
+    for path in paths:
+        resolved = path.resolve()
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        ordered.append(resolved)
+    return tuple(ordered)
 
 
 def _collect_candidate_paths(
@@ -325,20 +548,35 @@ def _dedupe_candidates(candidates: tuple[Path, ...]) -> tuple[Path, ...]:
 __all__ = [
     "DEFAULT_HELPER_RELATIVE_PATH",
     "DEFAULT_HELPER_RELATIVE_PATHS",
+    "DEFAULT_OSMAND_PENDING_EXTENSION_SUFFIX",
+    "DEFAULT_OSMAND_SEARCH_RELATIVE_PATH",
     "DEFAULT_OSMAND_EXTENSION_RELATIVE_ROOT",
     "DEFAULT_NATIVE_WIDGET_RELATIVE_PATH_MSVC",
     "DEFAULT_NATIVE_WIDGET_RELATIVE_PATH",
+    "DEFAULT_NATIVE_WIDGET_RELATIVE_PATHS",
     "DEFAULT_OSMAND_RESOURCES_ROOT",
     "DEFAULT_OSMAND_STYLE_PATH",
+    "LINUX_MAP_EXTENSION_DOWNLOAD_URL",
+    "WINDOWS_MAP_EXTENSION_DOWNLOAD_URL",
     "ENV_OSMAND_HELPER",
     "ENV_OSMAND_NATIVE_WIDGET_LIBRARY",
+    "ENV_OSMAND_EXTENSION_ROOT",
     "ENV_PREFER_OSMAND_NATIVE_WIDGET",
     "MapBackendMetadata",
     "MapSourceSpec",
+    "apply_pending_osmand_extension_install",
     "default_osmand_extension_root",
+    "default_osmand_tiles_root",
+    "default_osmand_download_url",
+    "default_pending_osmand_extension_root",
+    "default_osmand_search_database",
+    "has_installed_osmand_extension",
+    "has_pending_osmand_extension_install",
     "has_usable_osmand_default",
     "has_usable_osmand_native_widget",
+    "has_usable_osmand_search_extension",
     "prefer_osmand_native_widget",
     "resolve_osmand_helper_command",
     "resolve_osmand_native_widget_library",
+    "supports_map_extension_download",
 ]

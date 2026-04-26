@@ -11,7 +11,7 @@ pytest.importorskip("PySide6.QtMultimedia", reason="QtMultimedia is required")
 
 from pathlib import Path
 
-from PySide6.QtCore import QRectF, QSize, QSizeF, Qt
+from PySide6.QtCore import QPointF, QRectF, QSize, QSizeF, Qt
 from PySide6.QtGui import QColor, QImage, QKeyEvent, QRhiCommandBuffer, QShowEvent
 from PySide6.QtMultimedia import QMediaPlayer, QVideoFrame, QVideoFrameFormat
 from PySide6.QtWidgets import QApplication, QRhiWidget
@@ -1508,6 +1508,29 @@ def test_view_transform_controller_prefers_render_target_device_size(mocker):
 
     assert controller.get_view_dimensions_device_px() == (640.0, 360.0)
     assert controller.get_effective_scale() == pytest.approx(1.6)
+
+
+def test_view_transform_controller_emits_transform_callback_on_pan_zoom_and_reset(mocker):
+    viewer = mocker.Mock()
+    viewer.width.return_value = 200
+    viewer.height.return_value = 100
+    viewer.devicePixelRatioF.return_value = 1.0
+    viewer.update = mocker.Mock()
+
+    transform_events: list[str] = []
+    controller = ViewTransformController(
+        viewer,
+        texture_size_provider=lambda: (400, 200),
+        display_texture_size_provider=lambda: (400, 200),
+        on_zoom_changed=lambda _zoom: None,
+        on_view_transform_changed=lambda: transform_events.append("changed"),
+    )
+
+    controller.set_pan_pixels(QPointF(5.0, 6.0))
+    controller.set_zoom_factor_direct(1.5)
+    controller.reset_zoom()
+
+    assert len(transform_events) == 3
 
 
 def test_gl_image_viewer_centers_crop_when_framing_disabled(qapp, mocker):

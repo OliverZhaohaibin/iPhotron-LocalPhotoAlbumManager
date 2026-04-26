@@ -203,3 +203,95 @@ def test_handle_scan_chunk_refreshes_when_new_row_sorts_into_visible_window(tmp_
     )
 
     assert refreshed
+
+
+def test_handle_scan_finished_refreshes_count_outside_top_visible_window(tmp_path: Path) -> None:
+    root = tmp_path / "Library"
+    root.mkdir()
+    base_dt = datetime(2024, 1, 1, 12, 0, 0)
+    assets = [
+        Asset(
+            id=f"{1000 - i}",
+            album_id="a",
+            path=Path(f"asset_{i}.jpg"),
+            media_type=MediaType.IMAGE,
+            size_bytes=1,
+            created_at=base_dt - timedelta(minutes=i),
+        )
+        for i in range(240)
+    ]
+    repo = _FakeRepo(assets)
+    store = GalleryCollectionStore(repo, library_root=root)
+    store._path_cache.exists_cached = lambda path: True  # type: ignore[method-assign]
+    store.set_active_root(root)
+    store.load_selection(root, query=AssetQuery())
+    store.prioritize_rows(120, 140)
+
+    observed_counts: list[tuple[int, int]] = []
+    store.count_changed.connect(lambda old, new: observed_counts.append((old, new)))
+
+    repo.assets.insert(
+        0,
+        Asset(
+            id="scan-new",
+            album_id="a",
+            path=Path("new_asset.jpg"),
+            media_type=MediaType.IMAGE,
+            size_bytes=1,
+            created_at=base_dt + timedelta(minutes=5),
+        ),
+    )
+
+    store.handle_scan_finished(root, True)
+
+    assert store.count() == 241
+    assert observed_counts == [(240, 241)]
+
+
+def test_mid_scroll_rescan_updates_gallery_after_single_scan_finished(tmp_path: Path) -> None:
+    root = tmp_path / "Library"
+    root.mkdir()
+    base_dt = datetime(2024, 1, 1, 12, 0, 0)
+    assets = [
+        Asset(
+            id=f"{1000 - i}",
+            album_id="a",
+            path=Path(f"asset_{i}.jpg"),
+            media_type=MediaType.IMAGE,
+            size_bytes=1,
+            created_at=base_dt - timedelta(minutes=i),
+        )
+        for i in range(240)
+    ]
+    repo = _FakeRepo(assets)
+    store = GalleryCollectionStore(repo, library_root=root)
+    store._path_cache.exists_cached = lambda path: True  # type: ignore[method-assign]
+    store.set_active_root(root)
+    store.load_selection(root, query=AssetQuery())
+    store.prioritize_rows(120, 140)
+
+    repo.assets.insert(
+        0,
+        Asset(
+            id="scan-new",
+            album_id="a",
+            path=Path("new_asset.jpg"),
+            media_type=MediaType.IMAGE,
+            size_bytes=1,
+            created_at=base_dt + timedelta(minutes=5),
+        ),
+    )
+
+    store.handle_scan_chunk(
+        root,
+        [{"rel": "new_asset.jpg", "id": "scan-new", "dt": (base_dt + timedelta(minutes=5)).isoformat()}],
+    )
+
+    assert store.count() == 240
+
+    store.handle_scan_finished(root, True)
+
+    assert store.count() == 241
+    top_dto = store.asset_at(0)
+    assert top_dto is not None
+    assert top_dto.rel_path == Path("new_asset.jpg")

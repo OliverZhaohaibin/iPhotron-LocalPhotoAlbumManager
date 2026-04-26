@@ -261,6 +261,27 @@ class GalleryCollectionStore:
         dto.is_favorite = is_favorite
         self.row_changed.emit(row)
 
+    def update_asset_metadata(self, row: int, metadata: Dict[str, object]) -> None:
+        dto = self._row_cache.get(row)
+        if dto is None and row >= 0:
+            dto = self.asset_at(row)
+        if dto is None:
+            return
+        dto.metadata = dict(metadata)
+        width = metadata.get("w")
+        height = metadata.get("h")
+        duration = metadata.get("dur")
+        size_bytes = metadata.get("bytes")
+        if isinstance(width, int) and width > 0:
+            dto.width = width
+        if isinstance(height, int) and height > 0:
+            dto.height = height
+        if isinstance(duration, (int, float)) and float(duration) >= 0.0:
+            dto.duration = float(duration)
+        if isinstance(size_bytes, int) and size_bytes >= 0:
+            dto.size_bytes = size_bytes
+        self.row_changed.emit(row)
+
     def remove_rows(self, rows: List[int], *, emit: bool = True) -> None:
         if not rows:
             return
@@ -424,8 +445,9 @@ class GalleryCollectionStore:
         if not self._scan_root_matches_active_root(root):
             return
         self._pending_scan_refresh = True
-        if self._visible_range is not None and self._visible_range[0] == 0:
-            self._flush_pending_scan_refresh()
+        if self._visible_range is not None:
+            first, last = self._visible_range
+            self._reload_window_for_visible_range(first, last, emit_signals=True)
 
     def _flush_pending_scan_refresh(self) -> None:
         if not self._pending_scan_refresh or self._current_query is None:

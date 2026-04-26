@@ -198,7 +198,17 @@ Eine umfassende Bearbeitungssuite mit **Anpassen**- und **Zuschneiden**-Modi:
 Alle Bearbeitungen werden in `.ipo`-Sidecar-Dateien gespeichert und bewahren die Originalfotos unberührt.
 
 ### ℹ️ Schwebendes Info-Panel
-Schalten Sie ein schwebendes Metadaten-Panel um, das EXIF, Kamera-/Objektivinformationen, Belichtung, Blende, Brennweite, Dateigröße und mehr anzeigt.
+Schalten Sie ein schwebendes Metadaten-Panel um, das EXIF,
+Kamera-/Objektivinformationen, Belichtung, Blende, Brennweite, Abmessungen,
+Dateigröße und Aufnahmezeit anzeigt. Für Assets mit People-Daten zeigt das
+Panel erkannte Gesicht-Avatare und erlaubt es, ein Gesicht zu entfernen, einer
+anderen Person zuzuweisen oder eine neue Personenannotation zu erstellen.
+
+Auch Standortwerkzeuge sind integriert: Assets mit GPS-Daten können eine
+eingebettete Karte anzeigen, und Assets ohne Standort können über den
+"Assign a Location"-Suchfluss einen Ort auswählen und bestätigen. Wenn die
+maps extension fehlt, bietet das Panel den Downloadpfad an, statt still zu
+scheitern.
 ![Info interface](../picture/info1.png)
 
 ### 💬 Umfangreiche Interaktionen

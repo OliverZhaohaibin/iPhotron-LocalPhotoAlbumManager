@@ -191,7 +191,15 @@ A comprehensive editing suite with **Adjust** and **Crop** modes:
 All edits are stored in `.ipo` sidecar files, preserving original photos untouched.
 
 ### ℹ️ Floating Info Panel
-Toggle a floating metadata panel showing EXIF, camera/lens info, exposure, aperture, focal length, file size, and more.
+Toggle a floating metadata panel with EXIF, camera/lens details, exposure,
+aperture, focal length, dimensions, file size, and capture time. For assets
+with People data, the panel shows detected face avatars and lets you remove a
+face, move it to another person, or create a new person annotation.
+
+Location tools are built in as well: geotagged assets can show an inline map,
+and assets without a location can use the "Assign a Location" search flow to
+pick and confirm a place. If the maps extension is missing, the panel offers the
+download path instead of failing silently.
 ![Info interface](docs/picture/info1.png)
 ### 💬 Rich Interactions
 - Drag & drop files from Explorer/Finder directly into albums.

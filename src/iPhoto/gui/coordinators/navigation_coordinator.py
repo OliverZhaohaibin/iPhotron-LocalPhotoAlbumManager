@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import threading
 import time
 from pathlib import Path
@@ -29,6 +30,7 @@ class NavigationCoordinator(QObject):
     bindLibraryRequested = Signal()
 
     _TRASH_CLEANUP_THROTTLE_SEC = 300.0
+    _logger = logging.getLogger(__name__)
 
     def __init__(
         self,
@@ -105,10 +107,11 @@ class NavigationCoordinator(QObject):
                 query = people_service.build_cluster_query(pinned_item.item_id)
                 entity_exists = people_service.has_cluster(pinned_item.item_id)
             except Exception:
-                self._handle_missing_pinned_item(
-                    pinned_item,
-                    library_root=library_root,
-                    message=f"Pinned person '{pinned_item.label}' is no longer available and will be removed from the sidebar.",
+                self._logger.warning(
+                    "Failed to open pinned person '%s' (%s)",
+                    pinned_item.label,
+                    pinned_item.item_id,
+                    exc_info=True,
                 )
                 return
             if not query.asset_ids and not entity_exists:
@@ -130,10 +133,11 @@ class NavigationCoordinator(QObject):
                 query = people_service.build_group_query(pinned_item.item_id)
                 entity_exists = people_service.has_group(pinned_item.item_id)
             except Exception:
-                self._handle_missing_pinned_item(
-                    pinned_item,
-                    library_root=library_root,
-                    message=f"Pinned group '{pinned_item.label}' is no longer available and will be removed from the sidebar.",
+                self._logger.warning(
+                    "Failed to open pinned group '%s' (%s)",
+                    pinned_item.label,
+                    pinned_item.item_id,
+                    exc_info=True,
                 )
                 return
             if not query.asset_ids and not entity_exists:

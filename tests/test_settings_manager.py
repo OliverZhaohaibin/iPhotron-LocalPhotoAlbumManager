@@ -220,3 +220,46 @@ def test_prune_missing_people_entities_removes_only_stale_items(
     assert ("person", "person-ok") in items
     assert ("group", "group-ok") in items
     assert spy.count() == 5
+
+
+def test_prune_missing_people_entities_remaps_redirected_pins(
+    tmp_path: Path,
+    qapp: QApplication,
+    monkeypatch,
+) -> None:
+    settings_path = tmp_path / "settings.json"
+    manager = SettingsManager(path=settings_path)
+    manager.load()
+    service = PinnedItemsService(manager)
+
+    library_root = tmp_path / "Library"
+    library_root.mkdir()
+    service.pin_person("person-old", "Alice", library_root=library_root)
+    service.pin_group("group-old", "Group 1", library_root=library_root)
+    qapp.processEvents()
+
+    class _StubPeopleService:
+        def __init__(self, library_root: Path) -> None:
+            self.library_root = library_root
+
+        def has_cluster(self, person_id: str) -> bool:
+            return person_id == "person-new"
+
+        def has_group(self, group_id: str) -> bool:
+            return False
+
+    monkeypatch.setattr(pinned_items_service_module, "PeopleService", _StubPeopleService)
+
+    assert service.prune_missing_people_entities(
+        library_root,
+        person_ids=("person-old",),
+        group_ids=("group-old",),
+        person_redirects={"person-old": "person-new"},
+        group_redirects={"group-old": None},
+    )
+    qapp.processEvents()
+
+    items = {(item.kind, item.item_id) for item in service.items_for_library(library_root)}
+    assert ("person", "person-old") not in items
+    assert ("person", "person-new") in items
+    assert ("group", "group-old") not in items

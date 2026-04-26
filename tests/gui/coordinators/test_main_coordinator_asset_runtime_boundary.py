@@ -161,6 +161,8 @@ def test_handle_people_snapshot_sidebar_refresh_prunes_people_pins_before_refres
         library_root=root,
         changed_person_ids=("person-a",),
         changed_group_ids=("group-a",),
+        person_redirects={"person-a": "person-b"},
+        group_redirects={"group-a": "group-b"},
     )
 
     coordinator._handle_people_snapshot_sidebar_refresh(event)
@@ -169,5 +171,7 @@ def test_handle_people_snapshot_sidebar_refresh_prunes_people_pins_before_refres
         root,
         person_ids=("person-a",),
         group_ids=("group-a",),
+        person_redirects={"person-a": "person-b"},
+        group_redirects={"group-a": "group-b"},
     )
     coordinator._window.ui.sidebar.refresh_tree_model.assert_called_once_with()

@@ -214,6 +214,66 @@ def test_open_pinned_missing_group_warns_and_prunes(tmp_path: Path, monkeypatch)
     ]
 
 
+def test_open_pinned_person_does_not_prune_on_people_service_error(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    pinned_items_service = MagicMock()
+    coord = _make_coordinator(pinned_items_service=pinned_items_service)
+    coord._context.library.root.return_value = tmp_path
+    warnings: list[str] = []
+
+    class _StubPeopleService:
+        def __init__(self, library_root: Path) -> None:
+            self.library_root = library_root
+
+        def build_cluster_query(self, person_id: str) -> AssetQuery:
+            raise RuntimeError("face index unavailable")
+
+    monkeypatch.setattr(navigation_coordinator_module, "PeopleService", _StubPeopleService)
+    monkeypatch.setattr(
+        navigation_coordinator_module.dialogs,
+        "show_warning",
+        lambda _parent, message, title="iPhoto": warnings.append(message),
+    )
+
+    coord.open_pinned_item(PinnedSidebarItem(kind="person", item_id="person-a", label="Alice"))
+
+    coord._gallery_vm.open_pinned_people_query.assert_not_called()
+    pinned_items_service.prune_missing_entity.assert_not_called()
+    assert warnings == []
+
+
+def test_open_pinned_group_does_not_prune_on_people_service_error(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    pinned_items_service = MagicMock()
+    coord = _make_coordinator(pinned_items_service=pinned_items_service)
+    coord._context.library.root.return_value = tmp_path
+    warnings: list[str] = []
+
+    class _StubPeopleService:
+        def __init__(self, library_root: Path) -> None:
+            self.library_root = library_root
+
+        def build_group_query(self, group_id: str) -> AssetQuery:
+            raise RuntimeError("face index unavailable")
+
+    monkeypatch.setattr(navigation_coordinator_module, "PeopleService", _StubPeopleService)
+    monkeypatch.setattr(
+        navigation_coordinator_module.dialogs,
+        "show_warning",
+        lambda _parent, message, title="iPhoto": warnings.append(message),
+    )
+
+    coord.open_pinned_item(PinnedSidebarItem(kind="group", item_id="group-a", label="Group 1"))
+
+    coord._gallery_vm.open_pinned_people_query.assert_not_called()
+    pinned_items_service.prune_missing_entity.assert_not_called()
+    assert warnings == []
+
+
 def test_route_requested_updates_router() -> None:
     coord = _make_coordinator()
 

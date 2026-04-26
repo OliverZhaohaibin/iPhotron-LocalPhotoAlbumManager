@@ -578,6 +578,8 @@ class MainCoordinator(QObject):
                 library_root,
                 person_ids=tuple(getattr(event, "changed_person_ids", ()) or ()),
                 group_ids=tuple(getattr(event, "changed_group_ids", ()) or ()),
+                person_redirects=dict(getattr(event, "person_redirects", {}) or {}),
+                group_redirects=dict(getattr(event, "group_redirects", {}) or {}),
             )
         self._window.ui.sidebar.refresh_tree_model()
 

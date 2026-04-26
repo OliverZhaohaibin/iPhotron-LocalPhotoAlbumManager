@@ -281,17 +281,72 @@ class PinnedItemsService(QObject):
         *,
         person_ids: tuple[str, ...] = (),
         group_ids: tuple[str, ...] = (),
+        person_redirects: dict[str, str] | None = None,
+        group_redirects: dict[str, str | None] | None = None,
     ) -> bool:
         library_key = self._library_key(library_root)
         if library_key is None:
             return False
 
+        person_redirect_map = {
+            str(source).strip(): str(target).strip()
+            for source, target in (person_redirects or {}).items()
+            if str(source).strip() and str(target).strip()
+        }
+        group_redirect_map = {
+            str(source).strip(): (str(target).strip() if target is not None else None)
+            for source, target in (group_redirects or {}).items()
+            if str(source).strip()
+        }
         target_person_ids = tuple(dict.fromkeys(person_id for person_id in person_ids if person_id))
         target_group_ids = tuple(dict.fromkeys(group_id for group_id in group_ids if group_id))
-        if not target_person_ids and not target_group_ids:
+        if (
+            not target_person_ids
+            and not target_group_ids
+            and not person_redirect_map
+            and not group_redirect_map
+        ):
             return False
 
-        pinned_items = self.items_for_library(library_root)
+        payload = self._payload()
+        entries = payload.get(library_key, [])
+        rewritten: list[dict[str, object]] = []
+        updated = False
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            entry_kind = str(entry.get("kind") or "").strip()
+            entry_item_id = str(entry.get("item_id") or "").strip()
+            next_entry = dict(entry)
+            if entry_kind == "person" and entry_item_id in person_redirect_map:
+                next_entry["item_id"] = person_redirect_map[entry_item_id]
+                updated = True
+            elif entry_kind == "group" and entry_item_id in group_redirect_map:
+                redirect_target = group_redirect_map[entry_item_id]
+                if redirect_target is None:
+                    updated = True
+                    continue
+                next_entry["item_id"] = redirect_target
+                updated = True
+            rewritten.append(next_entry)
+
+        if updated:
+            entries = self._dedupe_entries(rewritten)
+            payload[library_key] = entries
+
+        pinned_items = [
+            PinnedSidebarItem(
+                kind=str(entry.get("kind") or "").strip(),
+                item_id=str(entry.get("item_id") or "").strip(),
+                label=str(entry.get("label") or "").strip(),
+                custom_label=bool(entry.get("custom_label", False)),
+            )
+            for entry in entries
+            if isinstance(entry, dict)
+            and str(entry.get("kind") or "").strip() in {"person", "group"}
+            and str(entry.get("item_id") or "").strip()
+            and str(entry.get("label") or "").strip()
+        ]
         pinned_person_ids = {
             item.item_id
             for item in pinned_items
@@ -303,6 +358,9 @@ class PinnedItemsService(QObject):
             if item.kind == "group" and item.item_id in target_group_ids
         }
         if not pinned_person_ids and not pinned_group_ids:
+            if updated:
+                self._persist(payload)
+                return True
             return False
 
         people_service = PeopleService(Path(library_key))
@@ -315,8 +373,6 @@ class PinnedItemsService(QObject):
         if not stale_person_ids and not stale_group_ids:
             return False
 
-        payload = self._payload()
-        entries = payload.get(library_key, [])
         filtered = [
             entry
             for entry in entries
@@ -335,6 +391,9 @@ class PinnedItemsService(QObject):
             )
         ]
         if len(filtered) == len(entries):
+            if updated:
+                self._persist(payload)
+                return True
             return False
         payload[library_key] = filtered
         self._persist(payload)

@@ -8,6 +8,7 @@ from pathlib import Path
 
 from PySide6.QtCore import QObject, Signal
 
+from iPhoto.people.service import PeopleService
 from iPhoto.settings.manager import SettingsManager
 
 _GROUP_LABEL_RE = re.compile(r"^Group (\d+)$")
@@ -273,6 +274,130 @@ class PinnedItemsService(QObject):
 
     def prune_missing_entity(self, *, kind: str, item_id: str, library_root: Path | None) -> None:
         self.unpin(kind=kind, item_id=item_id, library_root=library_root)
+
+    def prune_missing_people_entities(
+        self,
+        library_root: Path | None,
+        *,
+        person_ids: tuple[str, ...] = (),
+        group_ids: tuple[str, ...] = (),
+        person_redirects: dict[str, str] | None = None,
+        group_redirects: dict[str, str | None] | None = None,
+    ) -> bool:
+        library_key = self._library_key(library_root)
+        if library_key is None:
+            return False
+
+        person_redirect_map = {
+            str(source).strip(): str(target).strip()
+            for source, target in (person_redirects or {}).items()
+            if str(source).strip() and str(target).strip()
+        }
+        group_redirect_map = {
+            str(source).strip(): (str(target).strip() if target is not None else None)
+            for source, target in (group_redirects or {}).items()
+            if str(source).strip()
+        }
+        target_person_ids = tuple(dict.fromkeys(person_id for person_id in person_ids if person_id))
+        target_group_ids = tuple(dict.fromkeys(group_id for group_id in group_ids if group_id))
+        if (
+            not target_person_ids
+            and not target_group_ids
+            and not person_redirect_map
+            and not group_redirect_map
+        ):
+            return False
+
+        payload = self._payload()
+        entries = payload.get(library_key, [])
+        rewritten: list[dict[str, object]] = []
+        updated = False
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            entry_kind = str(entry.get("kind") or "").strip()
+            entry_item_id = str(entry.get("item_id") or "").strip()
+            next_entry = dict(entry)
+            if entry_kind == "person" and entry_item_id in person_redirect_map:
+                next_entry["item_id"] = person_redirect_map[entry_item_id]
+                updated = True
+            elif entry_kind == "group" and entry_item_id in group_redirect_map:
+                redirect_target = group_redirect_map[entry_item_id]
+                if redirect_target is None:
+                    updated = True
+                    continue
+                next_entry["item_id"] = redirect_target
+                updated = True
+            rewritten.append(next_entry)
+
+        if updated:
+            entries = self._dedupe_entries(rewritten)
+            payload[library_key] = entries
+
+        pinned_items = [
+            PinnedSidebarItem(
+                kind=str(entry.get("kind") or "").strip(),
+                item_id=str(entry.get("item_id") or "").strip(),
+                label=str(entry.get("label") or "").strip(),
+                custom_label=bool(entry.get("custom_label", False)),
+            )
+            for entry in entries
+            if isinstance(entry, dict)
+            and str(entry.get("kind") or "").strip() in {"person", "group"}
+            and str(entry.get("item_id") or "").strip()
+            and str(entry.get("label") or "").strip()
+        ]
+        pinned_person_ids = {
+            item.item_id
+            for item in pinned_items
+            if item.kind == "person" and item.item_id in target_person_ids
+        }
+        pinned_group_ids = {
+            item.item_id
+            for item in pinned_items
+            if item.kind == "group" and item.item_id in target_group_ids
+        }
+        if not pinned_person_ids and not pinned_group_ids:
+            if updated:
+                self._persist(payload)
+                return True
+            return False
+
+        people_service = PeopleService(Path(library_key))
+        stale_person_ids = [
+            person_id for person_id in pinned_person_ids if not people_service.has_cluster(person_id)
+        ]
+        stale_group_ids = [
+            group_id for group_id in pinned_group_ids if not people_service.has_group(group_id)
+        ]
+        if not stale_person_ids and not stale_group_ids:
+            return False
+
+        filtered = [
+            entry
+            for entry in entries
+            if not (
+                isinstance(entry, dict)
+                and (
+                    (
+                        str(entry.get("kind") or "").strip() == "person"
+                        and str(entry.get("item_id") or "").strip() in stale_person_ids
+                    )
+                    or (
+                        str(entry.get("kind") or "").strip() == "group"
+                        and str(entry.get("item_id") or "").strip() in stale_group_ids
+                    )
+                )
+            )
+        ]
+        if len(filtered) == len(entries):
+            if updated:
+                self._persist(payload)
+                return True
+            return False
+        payload[library_key] = filtered
+        self._persist(payload)
+        return True
 
     def _write_item(self, item: PinnedSidebarItem, *, library_root: Path | None) -> None:
         if not item.label:

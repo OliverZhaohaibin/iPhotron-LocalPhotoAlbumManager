@@ -147,3 +147,31 @@ def test_handle_media_load_failed_prunes_row_and_refreshes_collection(tmp_path: 
     repository.delete.assert_called_once_with("asset-1")
     pair_mock.assert_called_once_with(failed_path.parent, library_root=library_root)
     coordinator._gallery_store.reload_current_selection.assert_called_once_with()
+
+
+def test_handle_people_snapshot_sidebar_refresh_prunes_people_pins_before_refresh() -> None:
+    coordinator = MainCoordinator.__new__(MainCoordinator)
+    root = Path("/library")
+    coordinator._context = MagicMock()
+    coordinator._context.library.root.return_value = root
+    coordinator._pinned_items_service = MagicMock()
+    coordinator._window = MagicMock(ui=MagicMock(sidebar=MagicMock()))
+
+    event = SimpleNamespace(
+        library_root=root,
+        changed_person_ids=("person-a",),
+        changed_group_ids=("group-a",),
+        person_redirects={"person-a": "person-b"},
+        group_redirects={"group-a": "group-b"},
+    )
+
+    coordinator._handle_people_snapshot_sidebar_refresh(event)
+
+    coordinator._pinned_items_service.prune_missing_people_entities.assert_called_once_with(
+        root,
+        person_ids=("person-a",),
+        group_ids=("group-a",),
+        person_redirects={"person-a": "person-b"},
+        group_redirects={"group-a": "group-b"},
+    )
+    coordinator._window.ui.sidebar.refresh_tree_model.assert_called_once_with()

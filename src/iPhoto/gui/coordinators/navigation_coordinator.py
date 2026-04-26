@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import threading
 import time
 from pathlib import Path
@@ -14,6 +15,7 @@ from iPhoto.config import ALL_PHOTOS_TITLE
 from iPhoto.gui.services.pinned_items_service import PinnedItemsService, PinnedSidebarItem
 from iPhoto.gui.coordinators.view_router import ViewRouter
 from iPhoto.gui.facade import AppFacade
+from iPhoto.gui.ui.widgets import dialogs
 from iPhoto.gui.ui.widgets.album_sidebar import AlbumSidebar
 from iPhoto.gui.viewmodels.gallery_viewmodel import GalleryViewModel
 from iPhoto.people.service import PeopleService
@@ -28,6 +30,7 @@ class NavigationCoordinator(QObject):
     bindLibraryRequested = Signal()
 
     _TRASH_CLEANUP_THROTTLE_SEC = 300.0
+    _logger = logging.getLogger(__name__)
 
     def __init__(
         self,
@@ -85,11 +88,11 @@ class NavigationCoordinator(QObject):
         if pinned_item.kind == "album":
             target = Path(pinned_item.item_id)
             if not target.exists():
-                if self._pinned_items_service is not None:
-                    self._pinned_items_service.prune_missing_album(
-                        target,
-                        library_root=library_root,
-                    )
+                self._handle_missing_pinned_item(
+                    pinned_item,
+                    library_root=library_root,
+                    message=f"Pinned album '{pinned_item.label or target.name}' is no longer available and will be removed from the sidebar.",
+                )
                 return
             self._gallery_vm.open_pinned_album(target)
             return
@@ -100,16 +103,24 @@ class NavigationCoordinator(QObject):
 
         people_service = PeopleService(library_root)
         if pinned_item.kind == "person":
-            query = people_service.build_cluster_query(pinned_item.item_id)
-            if not query.asset_ids:
-                if not people_service.has_cluster(pinned_item.item_id):
-                    if self._pinned_items_service is not None:
-                        self._pinned_items_service.prune_missing_entity(
-                            kind="person",
-                            item_id=pinned_item.item_id,
-                            library_root=library_root,
-                        )
-                    return
+            try:
+                query = people_service.build_cluster_query(pinned_item.item_id)
+                entity_exists = people_service.has_cluster(pinned_item.item_id)
+            except Exception:
+                self._logger.warning(
+                    "Failed to open pinned person '%s' (%s)",
+                    pinned_item.label,
+                    pinned_item.item_id,
+                    exc_info=True,
+                )
+                return
+            if not query.asset_ids and not entity_exists:
+                self._handle_missing_pinned_item(
+                    pinned_item,
+                    library_root=library_root,
+                    message=f"Pinned person '{pinned_item.label}' is no longer available and will be removed from the sidebar.",
+                )
+                return
             self._gallery_vm.open_pinned_people_query(
                 query,
                 kind="person",
@@ -118,21 +129,51 @@ class NavigationCoordinator(QObject):
             return
 
         if pinned_item.kind == "group":
-            query = people_service.build_group_query(pinned_item.item_id)
-            if not query.asset_ids:
-                if not people_service.has_group(pinned_item.item_id):
-                    if self._pinned_items_service is not None:
-                        self._pinned_items_service.prune_missing_entity(
-                            kind="group",
-                            item_id=pinned_item.item_id,
-                            library_root=library_root,
-                        )
-                    return
+            try:
+                query = people_service.build_group_query(pinned_item.item_id)
+                entity_exists = people_service.has_group(pinned_item.item_id)
+            except Exception:
+                self._logger.warning(
+                    "Failed to open pinned group '%s' (%s)",
+                    pinned_item.label,
+                    pinned_item.item_id,
+                    exc_info=True,
+                )
+                return
+            if not query.asset_ids and not entity_exists:
+                self._handle_missing_pinned_item(
+                    pinned_item,
+                    library_root=library_root,
+                    message=f"Pinned group '{pinned_item.label}' is no longer available and will be removed from the sidebar.",
+                )
+                return
             self._gallery_vm.open_pinned_people_query(
                 query,
                 kind="group",
                 entity_id=pinned_item.item_id,
             )
+
+    def _handle_missing_pinned_item(
+        self,
+        pinned_item: PinnedSidebarItem,
+        *,
+        library_root: Path | None,
+        message: str,
+    ) -> None:
+        dialogs.show_warning(self._sidebar, message)
+        if self._pinned_items_service is None:
+            return
+        if pinned_item.kind == "album":
+            self._pinned_items_service.prune_missing_album(
+                Path(pinned_item.item_id),
+                library_root=library_root,
+            )
+            return
+        self._pinned_items_service.prune_missing_entity(
+            kind=pinned_item.kind,
+            item_id=pinned_item.item_id,
+            library_root=library_root,
+        )
 
     def open_all_photos(self) -> None:
         self._reset_playback()

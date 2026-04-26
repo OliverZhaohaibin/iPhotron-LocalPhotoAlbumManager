@@ -203,7 +203,7 @@ class MainCoordinator(QObject):
         self._playback.set_navigation_coordinator(self._navigation)
         self._navigation.set_playback_coordinator(self._playback)
         context.library.peopleSnapshotCommitted.connect(
-            lambda _event: window.ui.sidebar.refresh_tree_model()
+            self._handle_people_snapshot_sidebar_refresh
         )
         # Manually attach info panel if available
         if hasattr(window.ui, "info_panel"):
@@ -567,6 +567,19 @@ class MainCoordinator(QObject):
         )
         self._thumbnail_service.remap_album_paths(old_path, new_path)
         self._gallery_vm.handle_album_renamed(old_path, new_path)
+
+    def _handle_people_snapshot_sidebar_refresh(self, event: object) -> None:
+        library_root = self._context.library.root()
+        if (
+            library_root is not None
+            and getattr(event, "library_root", None) == library_root
+        ):
+            self._pinned_items_service.prune_missing_people_entities(
+                library_root,
+                person_ids=tuple(getattr(event, "changed_person_ids", ()) or ()),
+                group_ids=tuple(getattr(event, "changed_group_ids", ()) or ()),
+            )
+        self._window.ui.sidebar.refresh_tree_model()
 
     def _handle_media_load_failed(self, path: Path, message: str) -> None:
         path_key = str(path)

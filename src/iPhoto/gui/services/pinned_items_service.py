@@ -8,6 +8,7 @@ from pathlib import Path
 
 from PySide6.QtCore import QObject, Signal
 
+from iPhoto.people.service import PeopleService
 from iPhoto.settings.manager import SettingsManager
 
 _GROUP_LABEL_RE = re.compile(r"^Group (\d+)$")
@@ -273,6 +274,71 @@ class PinnedItemsService(QObject):
 
     def prune_missing_entity(self, *, kind: str, item_id: str, library_root: Path | None) -> None:
         self.unpin(kind=kind, item_id=item_id, library_root=library_root)
+
+    def prune_missing_people_entities(
+        self,
+        library_root: Path | None,
+        *,
+        person_ids: tuple[str, ...] = (),
+        group_ids: tuple[str, ...] = (),
+    ) -> bool:
+        library_key = self._library_key(library_root)
+        if library_key is None:
+            return False
+
+        target_person_ids = tuple(dict.fromkeys(person_id for person_id in person_ids if person_id))
+        target_group_ids = tuple(dict.fromkeys(group_id for group_id in group_ids if group_id))
+        if not target_person_ids and not target_group_ids:
+            return False
+
+        pinned_items = self.items_for_library(library_root)
+        pinned_person_ids = {
+            item.item_id
+            for item in pinned_items
+            if item.kind == "person" and item.item_id in target_person_ids
+        }
+        pinned_group_ids = {
+            item.item_id
+            for item in pinned_items
+            if item.kind == "group" and item.item_id in target_group_ids
+        }
+        if not pinned_person_ids and not pinned_group_ids:
+            return False
+
+        people_service = PeopleService(Path(library_key))
+        stale_person_ids = [
+            person_id for person_id in pinned_person_ids if not people_service.has_cluster(person_id)
+        ]
+        stale_group_ids = [
+            group_id for group_id in pinned_group_ids if not people_service.has_group(group_id)
+        ]
+        if not stale_person_ids and not stale_group_ids:
+            return False
+
+        payload = self._payload()
+        entries = payload.get(library_key, [])
+        filtered = [
+            entry
+            for entry in entries
+            if not (
+                isinstance(entry, dict)
+                and (
+                    (
+                        str(entry.get("kind") or "").strip() == "person"
+                        and str(entry.get("item_id") or "").strip() in stale_person_ids
+                    )
+                    or (
+                        str(entry.get("kind") or "").strip() == "group"
+                        and str(entry.get("item_id") or "").strip() in stale_group_ids
+                    )
+                )
+            )
+        ]
+        if len(filtered) == len(entries):
+            return False
+        payload[library_key] = filtered
+        self._persist(payload)
+        return True
 
     def _write_item(self, item: PinnedSidebarItem, *, library_root: Path | None) -> None:
         if not item.label:

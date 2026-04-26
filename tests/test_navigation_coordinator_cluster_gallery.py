@@ -92,6 +92,29 @@ def test_open_pinned_album_delegates_to_gallery_vm(tmp_path: Path) -> None:
     coord._gallery_vm.open_pinned_album.assert_called_once_with(target)
 
 
+def test_open_pinned_missing_album_warns_and_prunes(tmp_path: Path, monkeypatch) -> None:
+    pinned_items_service = MagicMock()
+    coord = _make_coordinator(pinned_items_service=pinned_items_service)
+    coord._context.library.root.return_value = tmp_path
+    warnings: list[str] = []
+    monkeypatch.setattr(
+        navigation_coordinator_module.dialogs,
+        "show_warning",
+        lambda _parent, message, title="iPhoto": warnings.append(message),
+    )
+
+    coord.open_pinned_item(PinnedSidebarItem(kind="album", item_id=str(tmp_path / "Missing"), label="Trips"))
+
+    coord._gallery_vm.open_pinned_album.assert_not_called()
+    pinned_items_service.prune_missing_album.assert_called_once_with(
+        tmp_path / "Missing",
+        library_root=tmp_path,
+    )
+    assert warnings == [
+        "Pinned album 'Trips' is no longer available and will be removed from the sidebar."
+    ]
+
+
 def test_open_pinned_person_keeps_valid_empty_pin(tmp_path: Path, monkeypatch) -> None:
     pinned_items_service = MagicMock()
     coord = _make_coordinator(pinned_items_service=pinned_items_service)
@@ -123,6 +146,7 @@ def test_open_pinned_missing_person_prunes_invalid_pin(tmp_path: Path, monkeypat
     pinned_items_service = MagicMock()
     coord = _make_coordinator(pinned_items_service=pinned_items_service)
     coord._context.library.root.return_value = tmp_path
+    warnings: list[str] = []
 
     class _StubPeopleService:
         def __init__(self, library_root: Path) -> None:
@@ -135,6 +159,11 @@ def test_open_pinned_missing_person_prunes_invalid_pin(tmp_path: Path, monkeypat
             return False
 
     monkeypatch.setattr(navigation_coordinator_module, "PeopleService", _StubPeopleService)
+    monkeypatch.setattr(
+        navigation_coordinator_module.dialogs,
+        "show_warning",
+        lambda _parent, message, title="iPhoto": warnings.append(message),
+    )
 
     coord.open_pinned_item(PinnedSidebarItem(kind="person", item_id="missing-person", label="Ghost"))
 
@@ -144,6 +173,45 @@ def test_open_pinned_missing_person_prunes_invalid_pin(tmp_path: Path, monkeypat
         item_id="missing-person",
         library_root=tmp_path,
     )
+    assert warnings == [
+        "Pinned person 'Ghost' is no longer available and will be removed from the sidebar."
+    ]
+
+
+def test_open_pinned_missing_group_warns_and_prunes(tmp_path: Path, monkeypatch) -> None:
+    pinned_items_service = MagicMock()
+    coord = _make_coordinator(pinned_items_service=pinned_items_service)
+    coord._context.library.root.return_value = tmp_path
+    warnings: list[str] = []
+
+    class _StubPeopleService:
+        def __init__(self, library_root: Path) -> None:
+            self.library_root = library_root
+
+        def build_group_query(self, group_id: str) -> AssetQuery:
+            return AssetQuery(asset_ids=[])
+
+        def has_group(self, group_id: str) -> bool:
+            return False
+
+    monkeypatch.setattr(navigation_coordinator_module, "PeopleService", _StubPeopleService)
+    monkeypatch.setattr(
+        navigation_coordinator_module.dialogs,
+        "show_warning",
+        lambda _parent, message, title="iPhoto": warnings.append(message),
+    )
+
+    coord.open_pinned_item(PinnedSidebarItem(kind="group", item_id="missing-group", label="Group 1"))
+
+    coord._gallery_vm.open_pinned_people_query.assert_not_called()
+    pinned_items_service.prune_missing_entity.assert_called_once_with(
+        kind="group",
+        item_id="missing-group",
+        library_root=tmp_path,
+    )
+    assert warnings == [
+        "Pinned group 'Group 1' is no longer available and will be removed from the sidebar."
+    ]
 
 
 def test_route_requested_updates_router() -> None:

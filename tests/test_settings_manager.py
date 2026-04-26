@@ -13,6 +13,7 @@ pytest.importorskip("PySide6.QtTest", reason="Qt test helpers not available", ex
 from PySide6.QtTest import QSignalSpy
 from PySide6.QtWidgets import QApplication
 
+import iPhoto.gui.services.pinned_items_service as pinned_items_service_module
 from iPhoto.gui.services.pinned_items_service import PinnedItemsService
 from iPhoto.settings.manager import SettingsManager
 
@@ -173,3 +174,49 @@ def test_pinned_child_album_path_remaps_when_parent_is_renamed(tmp_path: Path) -
     assert items[0].item_id == str(new_child.resolve())
     assert items[0].label == "Paris"
     assert items[0].custom_label is False
+
+
+def test_prune_missing_people_entities_removes_only_stale_items(
+    tmp_path: Path,
+    qapp: QApplication,
+    monkeypatch,
+) -> None:
+    settings_path = tmp_path / "settings.json"
+    manager = SettingsManager(path=settings_path)
+    manager.load()
+    service = PinnedItemsService(manager)
+    spy = QSignalSpy(service.changed)
+
+    library_root = tmp_path / "Library"
+    library_root.mkdir()
+    service.pin_person("person-stale", "Ghost", library_root=library_root)
+    service.pin_person("person-ok", "Alice", library_root=library_root)
+    service.pin_group("group-stale", "Old Group", library_root=library_root)
+    service.pin_group("group-ok", "New Group", library_root=library_root)
+    qapp.processEvents()
+
+    class _StubPeopleService:
+        def __init__(self, library_root: Path) -> None:
+            self.library_root = library_root
+
+        def has_cluster(self, person_id: str) -> bool:
+            return person_id != "person-stale"
+
+        def has_group(self, group_id: str) -> bool:
+            return group_id != "group-stale"
+
+    monkeypatch.setattr(pinned_items_service_module, "PeopleService", _StubPeopleService)
+
+    assert service.prune_missing_people_entities(
+        library_root,
+        person_ids=("person-stale", "person-ok"),
+        group_ids=("group-stale", "group-ok"),
+    )
+    qapp.processEvents()
+
+    items = {(item.kind, item.item_id) for item in service.items_for_library(library_root)}
+    assert ("person", "person-stale") not in items
+    assert ("group", "group-stale") not in items
+    assert ("person", "person-ok") in items
+    assert ("group", "group-ok") in items
+    assert spy.count() == 5

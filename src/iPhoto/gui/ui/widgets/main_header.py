@@ -90,6 +90,7 @@ class MainHeaderWidget(QWidget):
         self.rescan_action = QAction("Rescan", main_window)
         self.rebuild_links_action = QAction("Rebuild Live Links", main_window)
         self.bind_library_action = QAction("Set Basic Library…", main_window)
+        self.download_map_extension_action = QAction("Download Map Extension…", main_window)
         self.toggle_filmstrip_action = QAction(
             "Show Filmstrip", main_window, checkable=True
         )
@@ -178,6 +179,7 @@ class MainHeaderWidget(QWidget):
 
         settings_menu = self.menu_bar.addMenu("&Settings")
         settings_menu.addAction(self.bind_library_action)
+        settings_menu.addAction(self.download_map_extension_action)
         settings_menu.addSeparator()
 
         appearance_menu = settings_menu.addMenu("Appearance")

@@ -108,6 +108,13 @@ def main(argv: list[str] | None = None) -> int:
     """Launch the Qt application and return the exit code."""
 
     _prefer_local_source_tree()
+    maps_package_root = Path(__file__).resolve().parents[2] / "maps"
+    try:
+        from maps.map_sources import apply_pending_osmand_extension_install
+
+        apply_pending_osmand_extension_install(maps_package_root)
+    except Exception:
+        _logger.warning("Failed to apply pending map extension install", exc_info=True)
 
     # Ensure the ``iPhoto`` root logger is configured before any component
     # creates a child logger.  ``get_logger()`` lazily attaches a StreamHandler

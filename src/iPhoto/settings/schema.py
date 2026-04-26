@@ -64,6 +64,7 @@ SETTINGS_SCHEMA: dict[str, Any] = {
                 "show_filmstrip": {"type": "boolean"},
                 "show_face_names_in_detail": {"type": "boolean"},
                 "show_hidden_people": {"type": "boolean"},
+                "show_map_extension_startup_prompt": {"type": "boolean"},
                 "wheel_action": {
                     "type": "string",
                     "enum": ["navigate", "zoom"],
@@ -94,6 +95,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         "show_filmstrip": True,
         "show_face_names_in_detail": False,
         "show_hidden_people": False,
+        "show_map_extension_startup_prompt": True,
         "wheel_action": "navigate",
     },
     "last_open_albums": [],

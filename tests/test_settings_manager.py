@@ -49,6 +49,7 @@ def test_settings_manager_nested_updates_preserve_defaults(tmp_path: Path) -> No
     manager.set("ui.sidebar_width", 320)
     assert manager.get("ui.sidebar_width") == 320
     assert manager.get("ui.theme") == "system"
+    assert manager.get("ui.show_map_extension_startup_prompt") is True
 
 
 def test_pinned_items_roundtrip_is_scoped_by_library(tmp_path: Path, qapp: QApplication) -> None:

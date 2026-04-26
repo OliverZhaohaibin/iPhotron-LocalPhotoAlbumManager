@@ -362,6 +362,7 @@ class InfoPanel(QWidget):
     locationQueryChanged = Signal(str)
     locationSuggestionActivated = Signal(object)
     locationConfirmRequested = Signal(str, object)
+    downloadMapExtensionRequested = Signal()
     _DRAG_EVENT_TYPES = frozenset(
         (
             QEvent.Type.MouseButtonPress,
@@ -513,6 +514,14 @@ class InfoPanel(QWidget):
         self._location_fallback_label.hide()
         self._location_layout.addWidget(self._location_fallback_label)
 
+        self._location_download_button = QPushButton("Download Map Extension", self._location_container)
+        self._location_download_button.setAutoDefault(False)
+        self._location_download_button.setDefault(False)
+        self._location_download_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._location_download_button.clicked.connect(self.downloadMapExtensionRequested.emit)
+        self._location_download_button.hide()
+        self._location_layout.addWidget(self._location_download_button, 0, Qt.AlignmentFlag.AlignLeft)
+
         self._location_editor_row = QWidget(self._location_container)
         self._location_editor_layout = QHBoxLayout(self._location_editor_row)
         self._location_editor_layout.setContentsMargins(0, 0, 0, 0)
@@ -622,6 +631,7 @@ class InfoPanel(QWidget):
         self._location_map.clear_location()
         self._location_map.hide()
         self._location_fallback_label.hide()
+        self._location_download_button.hide()
         self._location_editor_row.setVisible(self._location_capability_enabled)
         self._location_editor.clear()
         self._location_editor.setPlaceholderText("Assign a Location")
@@ -782,9 +792,11 @@ class InfoPanel(QWidget):
             self._location_map.hide()
             self._location_fallback_label.setText(self._location_fallback_text)
             self._location_fallback_label.show()
+            self._location_download_button.show()
             return
 
         self._location_fallback_label.hide()
+        self._location_download_button.hide()
         self._location_editor_row.show()
         gps = metadata.get("gps")
         location_text = metadata.get("location") or metadata.get("place")

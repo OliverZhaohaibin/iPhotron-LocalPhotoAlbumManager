@@ -215,10 +215,12 @@ class MapExtensionDownloadController:
     def _restart_application(self) -> None:
         app = QCoreApplication.instance()
         if app is None:
+            self._restore_temporarily_hidden_windows()
             return
 
         program, arguments = self._restart_command(app)
         if not QProcess.startDetached(program, arguments):
+            self._restore_temporarily_hidden_windows()
             QMessageBox.critical(
                 self._parent,
                 "Restart Failed",

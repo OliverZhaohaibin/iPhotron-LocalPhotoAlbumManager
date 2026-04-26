@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import socket
 import shutil
 import tarfile
 import tempfile
@@ -22,6 +23,7 @@ from maps.map_sources import (
 
 _LOGGER = logging.getLogger(__name__)
 _CHUNK_SIZE = 1024 * 256
+_DOWNLOAD_TIMEOUT_SECONDS = 30
 
 
 @dataclass(frozen=True)
@@ -94,25 +96,36 @@ class MapExtensionDownloadWorker(QRunnable):
 
     def _download_archive(self, download_url: str, archive_path: Path) -> None:
         self.signals.progress.emit(0, 0, "Downloading map extension...")
-        with request.urlopen(download_url) as response, archive_path.open("wb") as handle:
-            total_header = response.headers.get("Content-Length", "").strip()
-            try:
-                total = int(total_header)
-            except ValueError:
-                total = 0
+        try:
+            with request.urlopen(download_url, timeout=_DOWNLOAD_TIMEOUT_SECONDS) as response, archive_path.open(
+                "wb"
+            ) as handle:
+                total_header = response.headers.get("Content-Length", "").strip()
+                try:
+                    total = int(total_header)
+                except ValueError:
+                    total = 0
 
-            received = 0
-            while True:
-                chunk = response.read(_CHUNK_SIZE)
-                if not chunk:
-                    break
-                handle.write(chunk)
-                received += len(chunk)
-                self.signals.progress.emit(
-                    received,
-                    total,
-                    "Downloading map extension...",
-                )
+                received = 0
+                while True:
+                    chunk = response.read(_CHUNK_SIZE)
+                    if not chunk:
+                        break
+                    handle.write(chunk)
+                    received += len(chunk)
+                    self.signals.progress.emit(
+                        received,
+                        total,
+                        "Downloading map extension...",
+                    )
+        except TimeoutError as exc:
+            raise RuntimeError(
+                "Map extension download timed out. Please check your connection and try again."
+            ) from exc
+        except socket.timeout as exc:
+            raise RuntimeError(
+                "Map extension download timed out. Please check your connection and try again."
+            ) from exc
 
     def _extract_archive(self, archive_path: Path, extracted_root: Path) -> None:
         self.signals.progress.emit(95, 100, "Extracting map extension...")

@@ -15,10 +15,13 @@ from urllib import request
 from PySide6.QtCore import QObject, QRunnable, Signal
 
 from maps.map_sources import (
+    apply_pending_osmand_extension_install,
     default_osmand_download_url,
+    default_osmand_extension_root,
     default_pending_osmand_extension_root,
     default_osmand_tiles_root,
     supports_map_extension_download,
+    verify_osmand_extension_install,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -35,6 +38,7 @@ class MapExtensionDownloadRequest:
 @dataclass(frozen=True)
 class MapExtensionDownloadResult:
     pending_root: Path
+    extension_root: Path
 
 
 class MapExtensionDownloadSignals(QObject):
@@ -77,6 +81,7 @@ class MapExtensionDownloadWorker(QRunnable):
         tiles_root = default_osmand_tiles_root(self._request.package_root)
         tiles_root.mkdir(parents=True, exist_ok=True)
         pending_root = default_pending_osmand_extension_root(self._request.package_root)
+        extension_root = default_osmand_extension_root(self._request.package_root)
 
         with tempfile.TemporaryDirectory(prefix="iphoto-map-extension-") as tmp_dir_str:
             tmp_dir = Path(tmp_dir_str)
@@ -87,12 +92,17 @@ class MapExtensionDownloadWorker(QRunnable):
 
             self._download_archive(download_url, archive_path)
             self._extract_archive(archive_path, extracted_root)
-            extension_root = extracted_root / "extension"
-            self._validate_extension_root(extension_root)
-            self._publish_pending_install(extension_root, pending_root)
+            staged_extension_root = extracted_root / "extension"
+            self.signals.progress.emit(96, 100, "Validating map extension...")
+            self._validate_extension_root(staged_extension_root)
+            self._publish_pending_install(staged_extension_root, pending_root)
+            self._install_and_verify_pending_root()
 
-        self.signals.progress.emit(100, 100, "Download complete")
-        return MapExtensionDownloadResult(pending_root=pending_root)
+        self.signals.progress.emit(100, 100, "Map extension installed.")
+        return MapExtensionDownloadResult(
+            pending_root=pending_root,
+            extension_root=extension_root,
+        )
 
     def _download_archive(self, download_url: str, archive_path: Path) -> None:
         self.signals.progress.emit(0, 0, "Downloading map extension...")
@@ -164,10 +174,28 @@ class MapExtensionDownloadWorker(QRunnable):
             raise RuntimeError("Downloaded map extension is incomplete: helper binary is missing.")
 
     def _publish_pending_install(self, extension_root: Path, pending_root: Path) -> None:
-        self.signals.progress.emit(99, 100, "Preparing restart...")
+        self.signals.progress.emit(97, 100, "Staging map extension...")
         if pending_root.exists():
             shutil.rmtree(pending_root)
         shutil.move(str(extension_root), str(pending_root))
+
+    def _install_and_verify_pending_root(self) -> None:
+        self.signals.progress.emit(98, 100, "Installing map extension...")
+        try:
+            apply_pending_osmand_extension_install(self._request.package_root)
+        except Exception as exc:
+            raise RuntimeError(
+                "Map extension files were downloaded, but the install folder could not be activated."
+            ) from exc
+
+        self.signals.progress.emit(99, 100, "Verifying installed files...")
+        if not verify_osmand_extension_install(
+            self._request.package_root,
+            platform=self._request.platform,
+        ):
+            raise RuntimeError(
+                "Map extension files were downloaded, but the install folder is still incomplete or stuck as '.pending'."
+            )
 
 
 __all__ = [

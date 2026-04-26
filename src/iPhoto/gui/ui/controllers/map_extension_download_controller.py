@@ -29,6 +29,7 @@ from maps.map_sources import (
     has_installed_osmand_extension,
     has_pending_osmand_extension_install,
     supports_map_extension_download,
+    verify_osmand_extension_install,
 )
 
 LOGGER = logging.getLogger(__name__)
@@ -177,8 +178,14 @@ class MapExtensionDownloadController:
     def _handle_ready(self, result: object) -> None:
         if isinstance(result, MapExtensionDownloadResult):
             self._latest_result = result
+        install_verified = verify_osmand_extension_install(self._package_root, platform=sys.platform)
+        if not install_verified:
+            self._handle_error(
+                "Map extension download finished, but the install folder was not renamed successfully."
+            )
+            return
         if self._progress_dialog is not None:
-            self._progress_dialog.update_progress(100, 100, "Map extension is ready. Restart required.")
+            self._progress_dialog.update_progress(100, 100, "Map extension is installed. Restart required.")
             self._progress_dialog.allow_close()
             self._progress_dialog.close()
             self._progress_dialog.deleteLater()

@@ -256,17 +256,46 @@ def has_installed_osmand_extension(package_root: Path | None = None) -> bool:
 
     root = package_root or _package_root()
     extension_root = default_osmand_extension_root(root)
-    if not (
-        _has_osmand_data_assets(root)
-        and default_osmand_search_database(root).is_file()
-        and extension_root.is_dir()
-    ):
+
+    return validate_osmand_extension_root(extension_root, platform=sys.platform)
+
+
+def validate_osmand_extension_root(extension_root: Path, *, platform: str | None = None) -> bool:
+    """Return ``True`` when *extension_root* contains a complete runtime."""
+
+    resolved_platform = sys.platform if platform is None else platform
+    required_paths = (
+        extension_root / DEFAULT_OSMAND_OBF_FILENAME,
+        extension_root / "rendering_styles" / DEFAULT_OSMAND_STYLE_FILENAME,
+        extension_root / "search" / "geonames.sqlite3",
+    )
+    if not extension_root.is_dir() or not all(candidate.exists() for candidate in required_paths):
         return False
 
-    if not any(candidate.is_file() for candidate in _default_helper_candidates(root)):
-        return False
+    if resolved_platform == "win32":
+        helper_candidates = (
+            extension_root / "bin" / "osmand_render_helper.exe",
+            extension_root / "bin" / "osmand_render_helper_sdk.exe",
+        )
+    else:
+        helper_candidates = (
+            extension_root / "bin" / "osmand_render_helper",
+            extension_root / "bin" / "osmand_render_helper_sdk",
+        )
+    return any(candidate.is_file() for candidate in helper_candidates)
 
-    return True
+
+def verify_osmand_extension_install(package_root: Path | None = None, *, platform: str | None = None) -> bool:
+    """Return ``True`` when the active extension is complete and no pending dir remains."""
+
+    root = package_root or _package_root()
+    return (
+        not has_pending_osmand_extension_install(root)
+        and validate_osmand_extension_root(
+            default_osmand_extension_root(root),
+            platform=platform,
+        )
+    )
 
 
 def apply_pending_osmand_extension_install(package_root: Path | None = None) -> bool:

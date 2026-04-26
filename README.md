@@ -97,6 +97,8 @@ Key highlights:
 - 🧠 Smart incremental scanning with persistent SQLite index.
 - 🎥 Full **Live Photo** pairing and playback support.
 - 🗺 Map view that visualizes GPS metadata across all photos & videos.
+- 👥 Optional People scanning with face clusters, names, covers, hidden people,
+  and multi-person groups.
 ![Main interface](docs/picture/mainview.png)
 ![Preview interface](docs/picture/preview.png)
 ---
@@ -150,6 +152,16 @@ A "LIVE" badge appears on still photos — click to play the motion video inline
 ### 🧩 Smart Albums
 The sidebar provides an auto-generated **Basic Library**, grouping photos into:
 `All Photos`, `Videos`, `Live Photos`, `Favorites`, and `Recently Deleted`.
+
+### 👥 People, Face Clusters & Groups
+The optional People pipeline detects faces, builds face clusters, and presents
+them as People cards. You can name people, merge duplicate clusters, hide or
+show hidden people, and keep chosen covers persistent across rescans.
+
+Drag people into groups to collect shared photos for multiple people. Group
+cards can use a selected cover, be reordered, and be disbanded when they are not
+pinned. Face scanning uses the optional `ai-demo` dependencies; the core photo
+manager remains usable without installing the AI runtime.
 
 ### 🖼 Immersive Detail View
 An elegant viewer with a filmstrip navigator and floating playback bar for videos.

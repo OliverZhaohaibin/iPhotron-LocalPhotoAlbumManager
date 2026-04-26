@@ -83,6 +83,11 @@ Do not add InsightFace's unused mask-rendering dependency chain to the runtime
 unless the product starts using it directly. The app does not need
 `albumentations` or `pydantic` for People clustering.
 
+The editable source install remains valid without this extra. In that mode the
+desktop app should still open libraries and use albums, maps, Live Photos, and
+editing; only the background People face scan is unavailable until `ai-demo` is
+installed.
+
 ### Dev Dependencies
 
 ```bash
@@ -531,6 +536,24 @@ Important rules:
 This prevents a broken image or transient packaged-runtime issue from
 deadlocking People scanning until the user deletes the database manually.
 
+### Stable People state
+
+Keep the People runtime snapshot and user decisions separate:
+
+- `.iPhoto/faces/face_index.db` is the rebuildable runtime snapshot containing
+  detected/manual faces and clustered person records.
+- `.iPhoto/faces/face_state.db` stores human decisions: names, canonical
+  identities, selected covers, hidden flags, person order, groups, group order,
+  pinned state, group covers, and group asset caches.
+- A scan commit may recluster all faces and rewrite the runtime snapshot, but it
+  must preserve the stable state and repair it through repository/coordinator
+  APIs instead of dropping it.
+- Group asset caches must be refreshed when scan commits, merges, manual face
+  edits, person deletion, or group membership changes can affect common-photo
+  results.
+- People in different hidden states must not be merged. Keep this enforced in
+  both UI and repository/service layers.
+
 ### Debugging packaged face scan failures
 
 The app writes rotating logs to:
@@ -565,6 +588,13 @@ After changing People scanning, run the focused tests:
 
 ```powershell
 pytest tests\test_people_pipeline.py tests\test_people_service.py tests\cache\test_global_repository.py tests\test_face_cluster_pipeline.py
+```
+
+When changing People UI, groups, covers, hidden-state filtering, merges, or
+popup/menu behavior, also run:
+
+```powershell
+pytest tests\gui\widgets\test_people_dashboard_widget.py tests\test_people_repository.py tests\test_people_service.py tests\test_information_popup.py tests\ui\controllers\test_context_menu_cover.py
 ```
 
 For a local smoke test against a real image:

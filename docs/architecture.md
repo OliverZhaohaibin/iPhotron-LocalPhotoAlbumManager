@@ -290,6 +290,36 @@ People indexing is a second pipeline layered on top of the asset scan rather tha
 6. Commit and publish
    `FaceRepository.replace_all()` rewrites the runtime People snapshot in `.iPhoto/faces/face_index.db`. `FaceStateRepository.sync_scan_results()` persists stable identity/user state in `.iPhoto/faces/face_state.db`. After commit, the global asset index is updated from `pending/retry` to `done`, and `PeopleSnapshotEvent` is emitted back to the GUI.
 
+### People Repository Responsibilities
+
+The People subsystem deliberately separates rebuildable scan output from
+user-authored state:
+
+| Component | Responsibility |
+|-----------|----------------|
+| `FaceScanWorker` | Background queue owner. It receives scan chunks, tops up pending/retry backlog from `global_index.db`, runs detection, and reports retry/failure status without blocking the asset scan. |
+| `PeopleIndexCoordinator` | Serialized mutation boundary for scan commits and UI mutations such as cover changes, manual face edits, merges, groups, and group deletion. |
+| `FaceRepository` | Runtime People view over faces/persons plus service methods for cluster queries, merges, covers, and group asset refreshes. |
+| `FaceStateRepository` | Stable People state database for names, canonical identities, covers, hidden flags, person/group order, group metadata, and group asset caches. |
+
+`face_index.db` is a runtime snapshot that can be rebuilt from detections and
+stable state. `face_state.db` is not disposable cache: it stores human decisions
+and must survive rescans, reclustering, and application restarts.
+
+### People Groups And Stable UI State
+
+Groups are user-created containers over existing People cards. A group stores
+member person ids, display metadata, order, pinned state, and optional cover
+asset in `face_state.db`. The repository also maintains a group asset cache:
+the cached asset ids are the photos where all current members appear together.
+
+Group state is refreshed when scan commits, merges, manual face edits, person
+deletions, or group mutations change the underlying memberships. Merging people
+repairs affected groups and emits group redirects so the UI can update cards
+without losing the user's visible organization. Hidden state is also stable
+People state; people with different hidden states must not be merged, and group
+cards stay synchronized with the dashboard's hidden-person filter.
+
 ### Face Status State Machine
 
 `face_status` lives on the main asset row in `global_index.db` and acts as the contract between the asset scan and the People scan.
@@ -315,8 +345,8 @@ The scan subsystem writes to multiple persistence artifacts under the library ro
 |------|---------|
 | `.iPhoto/global_index.db` | Main asset index, scan facts, favorites, live-role state, `face_status` |
 | `.iPhoto/links.json` | Materialized Live Photo pairing payload for the current album |
-| `.iPhoto/faces/face_index.db` | Runtime People snapshot: faces, persons, group membership inputs |
-| `.iPhoto/faces/face_state.db` | Stable People state: canonical identities, names, covers, order, group metadata |
+| `.iPhoto/faces/face_index.db` | Runtime People snapshot: detected/manual faces, clustered persons, and group membership inputs |
+| `.iPhoto/faces/face_state.db` | Stable People state: canonical identities, names, covers, hidden flags, person/group order, group metadata, pinned state, and group asset caches |
 | `.iPhoto/faces/thumbnails/` | Cropped face thumbnails used by the People UI |
 
 ### Important Scan Semantics
@@ -325,6 +355,9 @@ The scan subsystem writes to multiple persistence artifacts under the library ro
 - Deletion is handled by separate lifecycle flows, not by rescans.
 - Live Photo pairing is a post-scan step, not part of metadata extraction.
 - People clustering is a full snapshot rebuild on each committed batch, while user-facing identity state is preserved separately in `face_state.db`.
+- Names, chosen covers, hidden people, person order, groups, group order, pinned
+  groups, and selected group covers are human decisions. Do not discard them
+  when repairing or rebuilding the runtime face snapshot.
 - InsightFace model files are cached under the shared extension model directory (`src/extension/models`) rather than inside each library.
 
 ---

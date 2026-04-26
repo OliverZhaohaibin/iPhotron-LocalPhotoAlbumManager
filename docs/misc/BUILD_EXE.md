@@ -372,6 +372,8 @@ After building, confirm that:
    ```
 
 7. The People page can scan a small image folder and create face clusters.
+   Name a person, set a cover, create a group with at least two people, and
+   restart the packaged app to confirm the stable People state persists.
    During a diagnostic run, check the app log at
    `%LOCALAPPDATA%\iPhoto\iPhoto.log` for messages such as `Face detection
    failed for ...` or `Face scan failed for asset ...`.

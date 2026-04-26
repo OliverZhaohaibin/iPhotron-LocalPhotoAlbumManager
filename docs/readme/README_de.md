@@ -98,6 +98,7 @@ Wichtige Highlights:
 - 🧠 Intelligentes inkrementelles Scannen mit persistentem SQLite-Index.
 - 🎥 Vollständige **Live Photo**-Paarungs- und Wiedergabeunterstützung.
 - 🗺 Kartenansicht, die GPS-Metadaten über alle Fotos und Videos visualisiert.
+- 👥 Optionales People-Scanning mit Face Clusters, Namen, Covern, versteckten Personen und Mehrpersonen-Gruppen.
 ![Main interface](../picture/mainview.png)
 ![Preview interface](../picture/preview.png)
 ---
@@ -154,6 +155,18 @@ Ein "LIVE"-Badge erscheint auf Standbildern — klicken Sie, um das Bewegungsvid
 ### 🧩 Intelligente Alben
 Die Seitenleiste bietet eine automatisch generierte **Grundbibliothek**, die Fotos in Gruppen einteilt:
 `Alle Fotos`, `Videos`, `Live Photos`, `Favoriten` und `Kürzlich gelöscht`.
+
+### 👥 People, Face Clusters & Gruppen
+Die optionale People-Pipeline erkennt Gesichter, erstellt Face Clusters und
+zeigt sie als People-Karten an. Personen können benannt, doppelte Cluster
+zusammengeführt, versteckt oder wieder eingeblendet werden; ausgewählte Cover
+bleiben über erneute Scans hinweg erhalten.
+
+Mehrere Personen lassen sich zu Gruppen zusammenfassen, um gemeinsame Fotos
+anzuzeigen. Gruppenkarten unterstützen ein ausgewähltes Cover, Drag-and-drop-
+Sortierung und können aufgelöst werden, solange sie nicht angepinnt sind. Das
+Face Scanning nutzt die optionalen `ai-demo`-Abhängigkeiten; die zentrale
+Fotoverwaltung bleibt auch ohne AI-Laufzeit nutzbar.
 
 ### 🖼 Immersive Detailansicht
 Ein eleganter Foto-/Videobetrachter mit Filmstreifen-Navigator und schwebendem Wiedergabebalken.

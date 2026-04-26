@@ -97,6 +97,7 @@ iphoto-gui /photos/LondonTrip
 - 🧠 智能增量扫描，使用持久化 SQLite 索引。
 - 🎥 完整的**实况照片**配对和播放支持。
 - 🗺 地图视图，可视化所有照片和视频的 GPS 元数据。
+- 👥 可选的 People 人脸扫描，支持 face cluster、人物命名、封面、隐藏人物与多人 group。
 ![Main interface](../picture/mainview.png)
 ![Preview interface](../picture/preview.png)
 ---
@@ -151,6 +152,13 @@ Nuitka 打包、runtime 同步与安装器说明请参阅
 ### 🧩 智能相册
 侧边栏提供自动生成的**基础图库**，将照片分组为：
 `所有照片`、`视频`、`实况照片`、`收藏`和`最近删除`。
+
+### 👥 People、Face Cluster 与 Group
+可选的 People 管线会检测照片中的人脸，生成 face cluster，并在 People 页面以人物卡片展示。
+您可以为人物命名、合并重复 cluster、隐藏或重新显示隐藏人物，并让选定封面在重新扫描后继续保留。
+
+将多个人物组成 group 后，可以查看这些人物共同出现的照片。Group 卡片支持设置封面、拖拽排序，
+未置顶的 group 可以解散。人脸扫描依赖可选的 `ai-demo` 依赖；即使不安装 AI 运行时，核心照片管理功能仍可使用。
 
 ### 🖼 沉浸式详细视图
 优雅的照片/视频查看器，带有胶片条导航器和浮动播放栏。

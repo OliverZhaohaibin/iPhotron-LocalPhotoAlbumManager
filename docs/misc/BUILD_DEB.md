@@ -13,6 +13,12 @@ and the offline maps extension together. The Location view's native Linux maps
 runtime depends on the helper binary plus the shared libraries under
 `maps/tiles/extension/bin/`.
 
+Builds that ship the People page with face scanning enabled must also preserve
+the packaged AI runtime from the standalone bundle: `insightface`,
+`onnxruntime`, and the shared `extension/models` model cache. These are added at
+the Nuitka stage described in [`BUILD_EXE.md`](BUILD_EXE.md); the `.deb` stage
+must not strip them from `/opt/iPhotron/`.
+
 ## Prerequisites
 
 - A Debian-based Linux distribution (Ubuntu, Debian, Mint, …)
@@ -109,6 +115,14 @@ Description: Folder-native local photo album manager
    - `maps/tiles/extension/bin/libOsmAndCore_shared.so`
    - `maps/tiles/extension/bin/libOsmAndCoreTools_shared.so`
 
+   If this release includes offline-ready People scanning, also verify the face
+   runtime payload from the Nuitka bundle:
+
+   ```bash
+   find "$APP_ROOT" -path '*insightface*' -o -path '*onnxruntime*'
+   find "$APP_ROOT/extension/models" -name 'det_500m.onnx' -o -name 'w600k_mbf.onnx'
+   ```
+
 2. **Create the `control` file** — save the content from the section above to `"$PKG_ROOT/DEBIAN/control"` and ensure it is not world-writable:
 
    ```bash
@@ -129,7 +143,14 @@ Description: Folder-native local photo album manager
    dpkg-deb --info "${PKG_ROOT}.deb"
    dpkg-deb --contents "${PKG_ROOT}.deb"
    dpkg-deb --contents "${PKG_ROOT}.deb" | grep 'maps/tiles/extension'
+   # If this build ships offline-ready People scanning:
+   dpkg-deb --contents "${PKG_ROOT}.deb" | grep 'extension/models'
    ```
+
+   After installing on a clean test machine, open a small image library and
+   verify that the People page can create face clusters. For a fuller smoke
+   test, name a person, set a cover, create a group, restart iPhotron, and
+   confirm those user decisions persist.
 
 ## Installation
 
@@ -164,3 +185,5 @@ sudo apt remove iPhotron
 | Binary not found after install | Wrong install path in staging tree, or launcher points to the wrong standalone executable | Ensure the launcher under `usr/local/bin/` points to the executable copied into `/opt/iPhotron/` |
 | Location view falls back unexpectedly after install | `maps/tiles/extension/` was not included in the package | Re-stage the standalone bundle and verify the `.deb` contents include `World_basemap_2.obf`, resources, and Linux map binaries |
 | Native maps fail with GLX/XCB startup errors | The runtime was installed correctly, but the desktop session lacks XWayland/XCB GL integration | Install/enable XWayland and rerun, or set `IPHOTO_PREFER_OSMAND_NATIVE_WIDGET=0` to force the helper-backed Python OBF path |
+| People scan is unavailable in the installed app | The standalone build was produced without the optional face runtime | Rebuild the standalone app with `insightface`, `onnxruntime`, and `src/extension/models` included before staging the `.deb` |
+| People scan starts but never creates clusters | The model cache or an InsightFace submodel/dependency is missing from `/opt/iPhotron/` | Verify `extension/models`, exclude unused `albumentations`/`pydantic` packages at the Nuitka stage, and keep InsightFace limited to detection and recognition |

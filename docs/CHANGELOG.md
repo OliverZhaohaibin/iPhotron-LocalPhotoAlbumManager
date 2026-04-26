@@ -4,6 +4,81 @@ All notable changes to **iPhotron** are documented in this file.
 
 ---
 
+## 🚀 v6.0.0 — People, Face Clusters, Groups & Linux Maps Runtime
+
+👥 *A major People release with automatic face clustering, persistent People
+state, multi-person groups, richer location metadata, and broader Windows/Linux
+runtime packaging.*
+
+### Key Updates
+
+#### 👥 People Face Clusters
+- Added the optional **People face-scanning pipeline** powered by InsightFace
+  and ONNXRuntime through the `ai-demo` extra.
+- Detects faces in image assets, writes cropped face thumbnails, builds face
+  embeddings, and clusters them into persistent People cards.
+- Added background face-scan scheduling alongside the normal asset scan, with
+  `pending`, `done`, `skipped`, `retry`, and `failed` status tracking in the
+  global asset index.
+- Rebuilt the People persistence model around a rebuildable runtime snapshot
+  plus stable People state so names, covers, ordering, hidden flags, and group
+  decisions survive rescans and reclustering.
+
+#### 👨‍👩‍👧 People Groups & Dashboard Workflow
+- Added **People groups** for collecting photos where multiple selected people
+  appear together.
+- Group cards support shared-photo queries, cover selection, drag ordering,
+  pinned state, and safe disbanding without deleting the underlying people or
+  photos.
+- Added People card actions for naming, merging, hiding/unhiding, cover
+  management, and dashboard filtering for hidden people.
+- Hardened merge safety so hidden and visible people cannot be merged by
+  accident.
+- Split the People dashboard into focused board, card, dialog, shared, and
+  widget modules for easier testing and future iteration.
+
+#### 🗺️ Location & Info Panel Improvements
+- Added an embedded location map to the floating info panel so geotagged assets
+  can show map context directly in metadata view.
+- Added location assignment plumbing and background tasks for updating selected
+  asset coordinates.
+- Improved map source handling, OsmAnd search support, and map widget runtime
+  behavior.
+- Extended Linux maps support with helper-backed OBF rendering and the native
+  OsmAnd widget runtime when the required shared libraries are present.
+
+#### 🧩 Albums, Menus & Pinned Items
+- Added persistent pinned-item services for albums, people, and groups.
+- Expanded sidebar and gallery context-menu plumbing with shared menu styling
+  and consistent action handling.
+- Improved album dashboard/sidebar behavior, cover actions, rename/delete
+  workflows, and album tree model coverage.
+- Added project popup guardrails so routine warnings and confirmations use the
+  app-themed popup system instead of native `QMessageBox` surfaces.
+
+#### ⚙️ Scanning, Indexing & Packaging
+- Improved the scan pipeline with chunked persistence, scan-merge behavior, and
+  global repository tests for move/delete and status preservation scenarios.
+- Added People cover caching and thumbnail cache services for faster dashboard
+  rendering.
+- Updated Nuitka and Debian packaging guidance for bundled `insightface`,
+  `onnxruntime`, `extension/models`, Linux maps runtime files, and People-page
+  release smoke tests.
+- Added troubleshooting guidance for packaged face-scan failures, runtime typing
+  compatibility issues, model-cache problems, and Linux XCB/GLX map startup.
+
+#### 🧪 Tests & Reliability
+- Added focused coverage for People pipeline clustering, People repositories,
+  People service behavior, People dashboard widgets, group workflows, hidden
+  state, merge guards, and cover persistence.
+- Added tests for info panel maps, map extension download tasks, gallery and
+  playback coordinators, album sidebar/model behavior, scan/index sync, and
+  Linux map source handling.
+- Improved packaged-runtime diagnostics so asset-level face failures are logged
+  and retried without deadlocking the full People scan.
+
+---
+
 ## 🚀 v5.0.0 — Video Editing, Trim System & Platform Stability
 
 🎬 *Full non-destructive video editing, a visual trim timeline, centralized keyboard shortcuts, and a sweeping round of Linux/GL stability fixes.*

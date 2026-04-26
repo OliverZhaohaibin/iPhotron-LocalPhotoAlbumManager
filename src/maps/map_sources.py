@@ -27,6 +27,7 @@ WINDOWS_MAP_EXTENSION_DOWNLOAD_URL = (
 )
 ENV_OSMAND_HELPER = "IPHOTO_OSMAND_RENDER_HELPER"
 ENV_OSMAND_NATIVE_WIDGET_LIBRARY = "IPHOTO_OSMAND_NATIVE_WIDGET_LIBRARY"
+ENV_OSMAND_EXTENSION_ROOT = "IPHOTO_OSMAND_EXTENSION_ROOT"
 ENV_PREFER_OSMAND_NATIVE_WIDGET = "IPHOTO_PREFER_OSMAND_NATIVE_WIDGET"
 if sys.platform == "win32":
     DEFAULT_HELPER_RELATIVE_PATHS = (
@@ -203,14 +204,13 @@ def default_osmand_search_database(package_root: Path | None = None) -> Path:
     """Return the bundled GeoNames database used by offline place search."""
 
     root = package_root or _package_root()
-    return (Path(root) / DEFAULT_OSMAND_SEARCH_RELATIVE_PATH).resolve()
+    return (default_osmand_extension_root(root) / "search" / "geonames.sqlite3").resolve()
 
 
 def default_osmand_tiles_root(package_root: Path | None = None) -> Path:
     """Return the tiles root that hosts both legacy and extension map assets."""
 
-    root = package_root or _package_root()
-    return (Path(root) / "tiles").resolve()
+    return default_osmand_extension_root(package_root).parent.resolve()
 
 
 def has_usable_osmand_search_extension(package_root: Path | None = None) -> bool:
@@ -363,17 +363,80 @@ def default_osmand_extension_root(package_root: Path | None = None) -> Path:
     """Return the self-contained extension directory used for OBF resources."""
 
     root = package_root or _package_root()
-    return (Path(root) / DEFAULT_OSMAND_EXTENSION_RELATIVE_ROOT).resolve()
+    bundled_root = (Path(root) / DEFAULT_OSMAND_EXTENSION_RELATIVE_ROOT).resolve()
+
+    override_root = os.environ.get(ENV_OSMAND_EXTENSION_ROOT, "").strip()
+    if override_root:
+        return Path(override_root).expanduser().resolve()
+
+    if _should_use_external_osmand_extension_root(root):
+        external_root = _default_external_osmand_extension_root()
+        if external_root.exists() or not bundled_root.exists():
+            return external_root
+
+    return bundled_root
 
 
 def _default_helper_candidates(package_root: Path) -> tuple[Path, ...]:
-    normalized_root = Path(package_root).resolve()
-    return _collect_candidate_paths((normalized_root,), DEFAULT_HELPER_RELATIVE_PATHS)
+    return _collect_candidate_paths(_default_osmand_search_roots(package_root), DEFAULT_HELPER_RELATIVE_PATHS)
 
 
 def _default_native_widget_candidates(package_root: Path) -> tuple[Path, ...]:
+    return _collect_candidate_paths(
+        _default_osmand_search_roots(package_root),
+        DEFAULT_NATIVE_WIDGET_RELATIVE_PATHS,
+    )
+
+
+def _default_external_osmand_extension_root() -> Path:
+    data_home = os.environ.get("XDG_DATA_HOME", "").strip()
+    if os.name == "nt":
+        base = os.environ.get("APPDATA", "").strip()
+        if base:
+            return (Path(base) / "iPhoto" / "maps" / "tiles" / "extension").resolve()
+        return (Path.home() / "AppData" / "Roaming" / "iPhoto" / "maps" / "tiles" / "extension").resolve()
+    if sys.platform == "darwin":
+        return (Path.home() / "Library" / "Application Support" / "iPhoto" / "maps" / "tiles" / "extension").resolve()
+    if data_home:
+        return (Path(data_home) / "iPhoto" / "maps" / "tiles" / "extension").resolve()
+    return (Path.home() / ".local" / "share" / "iPhoto" / "maps" / "tiles" / "extension").resolve()
+
+
+def _should_use_external_osmand_extension_root(package_root: Path) -> bool:
+    if os.environ.get("APPIMAGE"):
+        return True
+
+    resolved_root = Path(package_root).resolve()
+    writable_probe_root = resolved_root / "tiles"
+    probe_target = writable_probe_root if writable_probe_root.exists() else resolved_root
+    if not probe_target.exists():
+        return False
+    return not os.access(probe_target, os.W_OK)
+
+
+def _default_osmand_search_roots(package_root: Path) -> tuple[Path, ...]:
     normalized_root = Path(package_root).resolve()
-    return _collect_candidate_paths((normalized_root,), DEFAULT_NATIVE_WIDGET_RELATIVE_PATHS)
+    bundled_root = normalized_root
+    override_root = os.environ.get(ENV_OSMAND_EXTENSION_ROOT, "").strip()
+    if override_root:
+        external_root = Path(override_root).expanduser().resolve().parents[1]
+    else:
+        external_root = _default_external_osmand_extension_root().parents[1]
+    if _should_use_external_osmand_extension_root(normalized_root):
+        return _dedupe_paths((external_root, bundled_root))
+    return _dedupe_paths((bundled_root, external_root))
+
+
+def _dedupe_paths(paths: tuple[Path, ...]) -> tuple[Path, ...]:
+    seen: set[Path] = set()
+    ordered: list[Path] = []
+    for path in paths:
+        resolved = path.resolve()
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        ordered.append(resolved)
+    return tuple(ordered)
 
 
 def _collect_candidate_paths(
@@ -409,6 +472,7 @@ __all__ = [
     "WINDOWS_MAP_EXTENSION_DOWNLOAD_URL",
     "ENV_OSMAND_HELPER",
     "ENV_OSMAND_NATIVE_WIDGET_LIBRARY",
+    "ENV_OSMAND_EXTENSION_ROOT",
     "ENV_PREFER_OSMAND_NATIVE_WIDGET",
     "MapBackendMetadata",
     "MapSourceSpec",

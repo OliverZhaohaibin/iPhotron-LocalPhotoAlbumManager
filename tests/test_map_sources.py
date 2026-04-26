@@ -4,10 +4,13 @@ from maps import map_sources
 from maps.map_sources import (
     DEFAULT_HELPER_RELATIVE_PATHS,
     DEFAULT_NATIVE_WIDGET_RELATIVE_PATHS,
+    ENV_OSMAND_EXTENSION_ROOT,
     MapSourceSpec,
     apply_pending_osmand_extension_install,
     default_osmand_extension_root,
     default_osmand_download_url,
+    default_osmand_search_database,
+    default_osmand_tiles_root,
     default_pending_osmand_extension_root,
     has_usable_osmand_default,
     has_installed_osmand_extension,
@@ -94,6 +97,34 @@ def test_resolve_osmand_helper_command_discovers_extension_helper(tmp_path, monk
     assert command == (str(helper_path.resolve()),)
 
 
+def test_resolve_osmand_helper_command_prefers_external_runtime_root_for_appimage(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    package_root = tmp_path / "AppDir" / "opt" / "iPhotron" / "maps"
+    package_root.mkdir(parents=True)
+    external_data_home = tmp_path / "xdg-data"
+    helper_path = (
+        external_data_home
+        / "iPhoto"
+        / "maps"
+        / "tiles"
+        / "extension"
+        / "bin"
+        / DEFAULT_HELPER_RELATIVE_PATHS[0].name
+    )
+    helper_path.parent.mkdir(parents=True, exist_ok=True)
+    helper_path.write_bytes(b"exe")
+    monkeypatch.setenv("APPIMAGE", str(tmp_path / "iPhotron.AppImage"))
+    monkeypatch.setenv("XDG_DATA_HOME", str(external_data_home))
+    monkeypatch.delenv(map_sources.ENV_OSMAND_HELPER, raising=False)
+    monkeypatch.delenv(ENV_OSMAND_EXTENSION_ROOT, raising=False)
+
+    command = resolve_osmand_helper_command(package_root)
+
+    assert command == (str(helper_path.resolve()),)
+
+
 def test_resolve_osmand_native_widget_library_prefers_extension_bin_output(tmp_path, monkeypatch) -> None:
     package_root = tmp_path / "src" / "maps"
     package_root.mkdir(parents=True)
@@ -146,6 +177,34 @@ def test_has_installed_osmand_extension_requires_search_database_and_helper(tmp_
     search_db = default_osmand_extension_root(package_root) / "search" / "geonames.sqlite3"
     search_db.unlink()
     assert has_installed_osmand_extension(package_root) is False
+
+
+def test_default_osmand_extension_root_uses_external_runtime_path_for_appimage(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    package_root = tmp_path / "AppDir" / "opt" / "iPhotron" / "maps"
+    package_root.mkdir(parents=True)
+    external_data_home = tmp_path / "xdg-data"
+    monkeypatch.setenv("APPIMAGE", str(tmp_path / "iPhotron.AppImage"))
+    monkeypatch.setenv("XDG_DATA_HOME", str(external_data_home))
+    monkeypatch.delenv(ENV_OSMAND_EXTENSION_ROOT, raising=False)
+
+    extension_root = default_osmand_extension_root(package_root)
+
+    assert extension_root == (
+        external_data_home / "iPhoto" / "maps" / "tiles" / "extension"
+    ).resolve()
+    assert default_osmand_tiles_root(package_root) == extension_root.parent
+    assert default_osmand_search_database(package_root) == extension_root / "search" / "geonames.sqlite3"
+
+
+def test_default_osmand_extension_root_prefers_override_env(tmp_path, monkeypatch) -> None:
+    package_root = tmp_path / "maps"
+    override_root = tmp_path / "runtime" / "extension"
+    monkeypatch.setenv(ENV_OSMAND_EXTENSION_ROOT, str(override_root))
+
+    assert default_osmand_extension_root(package_root) == override_root.resolve()
 
 
 def test_apply_pending_osmand_extension_install_promotes_staged_directory(tmp_path) -> None:

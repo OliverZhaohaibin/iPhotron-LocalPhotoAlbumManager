@@ -210,7 +210,8 @@ def default_osmand_search_database(package_root: Path | None = None) -> Path:
 def default_osmand_tiles_root(package_root: Path | None = None) -> Path:
     """Return the tiles root that hosts both legacy and extension map assets."""
 
-    return default_osmand_extension_root(package_root).parent.resolve()
+    root = package_root or _package_root()
+    return _managed_osmand_extension_root(root).parent.resolve()
 
 
 def has_usable_osmand_search_extension(package_root: Path | None = None) -> bool:
@@ -223,7 +224,8 @@ def has_usable_osmand_search_extension(package_root: Path | None = None) -> bool
 def default_pending_osmand_extension_root(package_root: Path | None = None) -> Path:
     """Return the staging directory consumed on the next application launch."""
 
-    extension_root = default_osmand_extension_root(package_root)
+    root = package_root or _package_root()
+    extension_root = _managed_osmand_extension_root(root)
     return extension_root.with_name(extension_root.name + DEFAULT_OSMAND_PENDING_EXTENSION_SUFFIX)
 
 
@@ -289,10 +291,11 @@ def verify_osmand_extension_install(package_root: Path | None = None, *, platfor
     """Return ``True`` when the active extension is complete and no pending dir remains."""
 
     root = package_root or _package_root()
+    managed_extension_root = _managed_osmand_extension_root(root)
     return (
         not has_pending_osmand_extension_install(root)
         and validate_osmand_extension_root(
-            default_osmand_extension_root(root),
+            managed_extension_root,
             platform=platform,
         )
     )
@@ -309,7 +312,7 @@ def apply_pending_osmand_extension_install(package_root: Path | None = None) -> 
     if not pending_root.exists():
         return False
 
-    extension_root = default_osmand_extension_root(root)
+    extension_root = _managed_osmand_extension_root(root)
     backup_root = extension_root.with_name(extension_root.name + ".backup")
 
     if backup_root.exists():
@@ -363,18 +366,27 @@ def default_osmand_extension_root(package_root: Path | None = None) -> Path:
     """Return the self-contained extension directory used for OBF resources."""
 
     root = package_root or _package_root()
-    bundled_root = (Path(root) / DEFAULT_OSMAND_EXTENSION_RELATIVE_ROOT).resolve()
+    bundled_root = _bundled_osmand_extension_root(root)
+    managed_root = _managed_osmand_extension_root(root)
+    if managed_root == bundled_root:
+        return bundled_root
+    if managed_root.exists() or not bundled_root.exists():
+        return managed_root
+    return bundled_root
 
+
+def _bundled_osmand_extension_root(package_root: Path) -> Path:
+    return (Path(package_root) / DEFAULT_OSMAND_EXTENSION_RELATIVE_ROOT).resolve()
+
+
+def _managed_osmand_extension_root(package_root: Path) -> Path:
+    root = Path(package_root).resolve()
     override_root = os.environ.get(ENV_OSMAND_EXTENSION_ROOT, "").strip()
     if override_root:
         return Path(override_root).expanduser().resolve()
-
     if _should_use_external_osmand_extension_root(root):
-        external_root = _default_external_osmand_extension_root()
-        if external_root.exists() or not bundled_root.exists():
-            return external_root
-
-    return bundled_root
+        return _default_external_osmand_extension_root()
+    return _bundled_osmand_extension_root(root)
 
 
 def _default_helper_candidates(package_root: Path) -> tuple[Path, ...]:

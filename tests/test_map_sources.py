@@ -146,6 +146,8 @@ def test_has_usable_osmand_default_requires_helper(tmp_path, monkeypatch) -> Non
     helper_path = extension_root / DEFAULT_HELPER_RELATIVE_PATHS[0].relative_to(Path("tiles") / "extension")
     helper_path.unlink()
     monkeypatch.delenv(map_sources.ENV_OSMAND_HELPER, raising=False)
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "empty-data-home"))
+    monkeypatch.delenv(ENV_OSMAND_EXTENSION_ROOT, raising=False)
 
     assert has_usable_osmand_default(package_root) is False
 
@@ -207,6 +209,27 @@ def test_default_osmand_extension_root_prefers_override_env(tmp_path, monkeypatc
     assert default_osmand_extension_root(package_root) == override_root.resolve()
 
 
+def test_default_pending_osmand_extension_root_uses_external_runtime_path_for_appimage_when_bundled_exists(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    package_root = tmp_path / "AppDir" / "opt" / "iPhotron" / "maps"
+    bundled_root = package_root / "tiles" / "extension"
+    bundled_root.mkdir(parents=True, exist_ok=True)
+    external_data_home = tmp_path / "xdg-data"
+    monkeypatch.setenv("APPIMAGE", str(tmp_path / "iPhotron.AppImage"))
+    monkeypatch.setenv("XDG_DATA_HOME", str(external_data_home))
+    monkeypatch.delenv(ENV_OSMAND_EXTENSION_ROOT, raising=False)
+
+    pending_root = default_pending_osmand_extension_root(package_root)
+
+    assert pending_root == (
+        external_data_home / "iPhoto" / "maps" / "tiles" / "extension.pending"
+    ).resolve()
+    assert default_osmand_tiles_root(package_root) == pending_root.parent
+    assert default_osmand_extension_root(package_root) == bundled_root.resolve()
+
+
 def test_apply_pending_osmand_extension_install_promotes_staged_directory(tmp_path) -> None:
     package_root = tmp_path / "maps"
     extension_root = _create_extension_assets(package_root)
@@ -230,3 +253,38 @@ def test_apply_pending_osmand_extension_install_promotes_staged_directory(tmp_pa
     assert apply_pending_osmand_extension_install(package_root) is True
     assert pending_root.exists() is False
     assert (default_osmand_extension_root(package_root) / "marker.txt").read_text(encoding="utf-8") == "new"
+
+
+def test_apply_pending_osmand_extension_install_promotes_to_external_runtime_for_appimage(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    package_root = tmp_path / "AppDir" / "opt" / "iPhotron" / "maps"
+    bundled_root = _create_extension_assets(package_root)
+    (bundled_root / "marker.txt").write_text("bundled", encoding="utf-8")
+    external_data_home = tmp_path / "xdg-data"
+    monkeypatch.setenv("APPIMAGE", str(tmp_path / "iPhotron.AppImage"))
+    monkeypatch.setenv("XDG_DATA_HOME", str(external_data_home))
+    monkeypatch.delenv(ENV_OSMAND_EXTENSION_ROOT, raising=False)
+
+    pending_root = default_pending_osmand_extension_root(package_root)
+    pending_root.mkdir(parents=True, exist_ok=True)
+    (pending_root / "World_basemap_2.obf").write_bytes(b"new-obf")
+    (pending_root / "rendering_styles").mkdir()
+    (pending_root / "rendering_styles" / "snowmobile.render.xml").write_text(
+        "<renderingStyle />",
+        encoding="utf-8",
+    )
+    (pending_root / "search").mkdir()
+    (pending_root / "search" / "geonames.sqlite3").write_bytes(b"sqlite")
+    (pending_root / "bin").mkdir()
+    (pending_root / "bin" / DEFAULT_HELPER_RELATIVE_PATHS[0].name).write_bytes(b"helper")
+    (pending_root / "marker.txt").write_text("external", encoding="utf-8")
+
+    assert apply_pending_osmand_extension_install(package_root) is True
+    assert pending_root.exists() is False
+    assert default_osmand_extension_root(package_root) == (
+        external_data_home / "iPhoto" / "maps" / "tiles" / "extension"
+    ).resolve()
+    assert (default_osmand_extension_root(package_root) / "marker.txt").read_text(encoding="utf-8") == "external"
+    assert (bundled_root / "marker.txt").read_text(encoding="utf-8") == "bundled"

@@ -1148,6 +1148,7 @@ class InfoPanel(QWidget):
     def closeEvent(self, event) -> None:  # type: ignore[override]
         """Emit a dismissal signal so the detail state stays in sync."""
 
+        self.shutdown()
         self.dismissed.emit()
         super().closeEvent(event)
 

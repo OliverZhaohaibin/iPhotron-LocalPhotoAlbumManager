@@ -268,6 +268,18 @@ def test_info_panel_frameless_window_flags(qapp: QApplication) -> None:
     panel.close()
 
 
+def test_info_panel_close_event_shuts_down_location_map(qapp: QApplication, monkeypatch) -> None:
+    panel = InfoPanel()
+    shutdown_calls: list[bool] = []
+
+    monkeypatch.setattr(panel, "shutdown", lambda: shutdown_calls.append(True))
+
+    panel.close()
+    qapp.processEvents()
+
+    assert shutdown_calls == [True]
+
+
 def test_info_panel_close_button_matches_main_window(qapp: QApplication) -> None:
     """The close button dimensions should match the main window's controls."""
 

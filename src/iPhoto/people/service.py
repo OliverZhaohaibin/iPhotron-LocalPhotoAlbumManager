@@ -112,6 +112,19 @@ class PeopleService:
         summaries_by_id = {summary.person_id: summary for summary in summary_list}
         return self._build_group_summaries(repository, repository.list_groups(), summaries_by_id)
 
+    def get_group_summary(self, group_id: str) -> PeopleGroupSummary | None:
+        if self._library_root is None or not group_id:
+            return None
+        repository = self.repository()
+        if repository is None:
+            return None
+        group = repository.get_group(group_id)
+        if group is None:
+            return None
+        summaries = repository.get_person_summaries()
+        summaries_by_id = {summary.person_id: summary for summary in summaries}
+        return self._build_group_summary(repository, group, summaries_by_id)
+
     def load_dashboard(
         self,
         *,

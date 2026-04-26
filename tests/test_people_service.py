@@ -313,6 +313,9 @@ def test_people_service_creates_groups_and_queries_common_assets(tmp_path: Path)
 
     query = service.build_group_query(group.group_id)
     assert query.asset_ids == ["asset-shared"]
+    assert service.has_group(group.group_id) is True
+    assert service.get_group_summary(group.group_id) is not None
+    assert service.has_group("missing-group") is False
 
 
 def test_people_service_uses_persisted_group_cover(tmp_path: Path) -> None:

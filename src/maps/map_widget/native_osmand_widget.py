@@ -15,7 +15,7 @@ from typing import Any, Sequence
 import PySide6
 import shiboken6
 from PySide6.QtCore import QEvent, QObject, QPointF, Qt, QTimer, Signal
-from PySide6.QtGui import QCloseEvent, QHideEvent, QShowEvent
+from PySide6.QtGui import QColor, QCloseEvent, QHideEvent, QPalette, QShowEvent
 from PySide6.QtWidgets import QSizePolicy, QVBoxLayout, QWidget
 
 from maps.map_sources import (
@@ -31,11 +31,30 @@ _NATIVE_DLL_DIR_HANDLES: list[Any] = []
 _PRELOADED_QT_LIBRARIES: list[ctypes.CDLL] = []
 _NATIVE_WIDGET_RUNTIME_PROBE: dict[Path, tuple[bool, str | None]] = {}
 _LOGGER = logging.getLogger(__name__)
+_MAP_OPAQUE_BACKGROUND = "#88a8c2"
 
 
 @dataclass(frozen=True)
 class _BridgeAPI:
     library: ctypes.CDLL
+
+
+def _configure_opaque_widget_background(widget: QWidget) -> None:
+    """Give native map hosts a stable opaque backing colour."""
+
+    if not widget.objectName():
+        widget.setObjectName(type(widget).__name__)
+    widget.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+    widget.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, False)
+    widget.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, False)
+    widget.setAttribute(Qt.WidgetAttribute.WA_AlwaysStackOnTop, False)
+    widget.setAutoFillBackground(True)
+    palette = QPalette(widget.palette())
+    palette.setColor(QPalette.ColorRole.Window, QColor(_MAP_OPAQUE_BACKGROUND))
+    widget.setPalette(palette)
+    widget.setStyleSheet(
+        f"QWidget#{widget.objectName()} {{ background-color: {_MAP_OPAQUE_BACKGROUND}; border: none; }}"
+    )
 
 
 def _startup_profile_enabled() -> bool:
@@ -209,6 +228,7 @@ class NativeOsmAndWidget(QWidget):
     ) -> None:
         super().__init__(parent)
         del tile_root, style_path
+        _configure_opaque_widget_background(self)
 
         if map_source is None or map_source.kind != "osmand_obf":
             raise TileLoadingError("The native OsmAnd widget requires an OBF map source")
@@ -236,7 +256,6 @@ class NativeOsmAndWidget(QWidget):
         )
         if not native_pointer:
             message = error_buffer.value or "Failed to create the native OsmAnd widget"
-            import sys
             print(f"[NativeOsmAndWidget] osmand_create_map_widget failed: {message}", file=sys.stderr)
             raise TileLoadingError(message)
         _log_startup_profile(
@@ -248,6 +267,11 @@ class NativeOsmAndWidget(QWidget):
         self._native_pointer = ctypes.c_void_p(native_pointer)
         self._native_widget = shiboken6.wrapInstance(int(native_pointer), QWidget)
         self._native_widget.setObjectName("NativeOsmAndMapWidget")
+        self._native_widget.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent, True)
+        self._native_widget.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, False)
+        self._native_widget.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, False)
+        self._native_widget.setAttribute(Qt.WidgetAttribute.WA_AlwaysStackOnTop, False)
+        self._native_widget.setAutoFillBackground(False)
         self._native_widget.setMinimumSize(0, 0)
         self._native_widget.setSizePolicy(
             QSizePolicy.Policy.Ignored,

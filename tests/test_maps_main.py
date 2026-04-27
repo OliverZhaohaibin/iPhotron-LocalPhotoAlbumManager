@@ -252,6 +252,7 @@ def test_configure_qt_opengl_defaults_prefers_desktop_opengl(monkeypatch) -> Non
     monkeypatch.setattr("maps.main.configure_shader_cache_environment", lambda: helper_calls.append(True))
     monkeypatch.setattr("maps.main.QApplication.setAttribute", lambda attr, enabled=True: attributes.append((attr, enabled)))
     monkeypatch.setattr("maps.main.QSurfaceFormat.setDefaultFormat", lambda fmt: default_formats.append(fmt))
+    monkeypatch.setattr("maps.main.sys.platform", "linux")
     monkeypatch.delenv("IPHOTO_DISABLE_OPENGL", raising=False)
 
     configure_qt_opengl_defaults()
@@ -260,6 +261,28 @@ def test_configure_qt_opengl_defaults_prefers_desktop_opengl(monkeypatch) -> Non
     assert len(attributes) == 2
     assert all(enabled is True for _, enabled in attributes)
     assert len(default_formats) == 1
+    assert default_formats[0].depthBufferSize() == 24
+    assert default_formats[0].stencilBufferSize() == 8
+    assert default_formats[0].alphaBufferSize() == 0
+    assert default_formats[0].samples() == 0
+
+
+def test_configure_qt_opengl_defaults_requests_alpha_on_macos(monkeypatch) -> None:
+    default_formats: list[object] = []
+
+    monkeypatch.setattr("maps.main.configure_shader_cache_environment", lambda: None)
+    monkeypatch.setattr("maps.main.QApplication.setAttribute", lambda _attr, enabled=True: None)
+    monkeypatch.setattr("maps.main.QSurfaceFormat.setDefaultFormat", lambda fmt: default_formats.append(fmt))
+    monkeypatch.setattr("maps.main.sys.platform", "darwin")
+    monkeypatch.delenv("IPHOTO_DISABLE_OPENGL", raising=False)
+
+    configure_qt_opengl_defaults()
+
+    assert len(default_formats) == 1
+    assert default_formats[0].depthBufferSize() == 24
+    assert default_formats[0].stencilBufferSize() == 8
+    assert default_formats[0].alphaBufferSize() == 8
+    assert default_formats[0].samples() == 0
 
 
 def test_configure_qt_opengl_defaults_still_routes_shader_cache_when_opengl_is_disabled(monkeypatch) -> None:

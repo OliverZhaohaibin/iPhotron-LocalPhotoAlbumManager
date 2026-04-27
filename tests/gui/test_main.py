@@ -3,6 +3,8 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+from PySide6.QtCore import Qt
+
 from iPhoto.gui.main import _configure_qt_opengl_defaults, _prepare_qt_runtime_for_maps
 
 
@@ -24,6 +26,7 @@ def test_configure_qt_opengl_defaults_routes_shader_cache_and_prefers_desktop_op
         lambda fmt: default_formats.append(fmt),
     )
     monkeypatch.setattr("iPhoto.gui.render_backend.sys.platform", "linux")
+    monkeypatch.setattr("iPhoto.gui.main.sys.platform", "linux")
     monkeypatch.delenv("IPHOTO_DISABLE_OPENGL", raising=False)
     monkeypatch.delenv("IPHOTO_RHI_BACKEND", raising=False)
 
@@ -32,10 +35,16 @@ def test_configure_qt_opengl_defaults_routes_shader_cache_and_prefers_desktop_op
     assert helper_calls == [True]
     assert len(attributes) == 2
     assert all(enabled is True for _, enabled in attributes)
+    assert (Qt.ApplicationAttribute.AA_ShareOpenGLContexts, True) in attributes
+    assert (Qt.ApplicationAttribute.AA_UseDesktopOpenGL, True) in attributes
     assert len(default_formats) == 1
+    assert default_formats[0].depthBufferSize() == 24
+    assert default_formats[0].stencilBufferSize() == 8
+    assert default_formats[0].alphaBufferSize() == 0
+    assert default_formats[0].samples() == 0
 
 
-def test_configure_qt_opengl_defaults_skips_global_desktop_opengl_on_macos_auto(monkeypatch) -> None:
+def test_configure_qt_opengl_defaults_keeps_map_gl_contexts_on_macos_auto(monkeypatch) -> None:
     helper_calls: list[bool] = []
     attributes: list[tuple[object, bool]] = []
     default_formats: list[object] = []
@@ -53,14 +62,19 @@ def test_configure_qt_opengl_defaults_skips_global_desktop_opengl_on_macos_auto(
         lambda fmt: default_formats.append(fmt),
     )
     monkeypatch.setattr("iPhoto.gui.render_backend.sys.platform", "darwin")
+    monkeypatch.setattr("iPhoto.gui.main.sys.platform", "darwin")
     monkeypatch.delenv("IPHOTO_DISABLE_OPENGL", raising=False)
     monkeypatch.delenv("IPHOTO_RHI_BACKEND", raising=False)
 
     _configure_qt_opengl_defaults()
 
     assert helper_calls == [True]
-    assert attributes == []
-    assert default_formats == []
+    assert attributes == [(Qt.ApplicationAttribute.AA_ShareOpenGLContexts, True)]
+    assert len(default_formats) == 1
+    assert default_formats[0].depthBufferSize() == 24
+    assert default_formats[0].stencilBufferSize() == 8
+    assert default_formats[0].alphaBufferSize() == 8
+    assert default_formats[0].samples() == 0
 
 
 def test_configure_qt_opengl_defaults_still_routes_shader_cache_when_opengl_is_disabled(monkeypatch) -> None:

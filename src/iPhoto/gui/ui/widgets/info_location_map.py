@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import sys
 from pathlib import Path
 
 from PySide6.QtCore import QCoreApplication, QEvent, QPointF, QRect, QRectF, QSize, Qt, QTimer
@@ -12,10 +13,14 @@ from PySide6.QtWidgets import QLabel, QSizePolicy, QVBoxLayout, QWidget
 
 from maps.map_sources import MapSourceSpec
 from maps.map_widget._map_widget_base import MapWidgetBase
-from maps.map_widget.map_gl_widget import MapGLWidget
+from maps.map_widget.map_gl_widget import MapGLWidget, MapGLWindowWidget
 from maps.map_widget.map_widget import MapWidget
 
-from .photo_map_view import check_opengl_support, choose_map_widget_backend
+from .photo_map_view import (
+    _configure_opaque_map_container,
+    check_opengl_support,
+    choose_map_widget_backend,
+)
 
 LOGGER = logging.getLogger(__name__)
 
@@ -93,6 +98,7 @@ class InfoLocationMapView(QWidget):
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
+        _configure_opaque_map_container(self)
         self._map_widget: MapWidgetBase | None = None
         self._backend_kind = "unavailable"
         self._latitude: float | None = None
@@ -127,6 +133,7 @@ class InfoLocationMapView(QWidget):
 
         self._map_host = QWidget(self)
         self._map_host.setObjectName("infoLocationMapHost")
+        _configure_opaque_map_container(self._map_host)
         self._map_host_layout = QVBoxLayout(self._map_host)
         self._map_host_layout.setContentsMargins(0, 0, 0, 0)
         self._map_host_layout.setSpacing(0)
@@ -476,10 +483,16 @@ class InfoLocationMapView(QWidget):
                     "Native OsmAnd widget unavailable for info-panel mini-map, falling back: %s",
                     exc,
                 )
-                fallback_cls = MapGLWidget if use_opengl else MapWidget
+                fallback_cls = (
+                    MapGLWindowWidget
+                    if use_opengl and sys.platform == "darwin"
+                    else MapGLWidget
+                    if use_opengl
+                    else MapWidget
+                )
                 self._map_widget = fallback_cls(self._map_host, map_source=resolved_map_source)
                 self._backend_kind = "osmand_python"
-            elif widget_cls is MapGLWidget:
+            elif widget_cls in {MapGLWidget, MapGLWindowWidget}:
                 LOGGER.warning(
                     "OpenGL mini-map unavailable, falling back to CPU renderer: %s",
                     exc,

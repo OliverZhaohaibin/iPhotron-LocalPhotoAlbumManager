@@ -74,8 +74,26 @@ if HAS_PYSIDE6:
     # Force-mock QtOpenGLWidgets and QtOpenGL to avoid segmentation faults in headless environment.
     if HAS_QTWIDGETS:
         class MockQOpenGLWidget(QWidget):
+            class UpdateBehavior:
+                NoPartialUpdate = object()
+                PartialUpdate = object()
+
             def __init__(self, *args, **kwargs):
                 super().__init__(*args, **kwargs)
+                self._format = None
+                self._update_behavior = self.UpdateBehavior.PartialUpdate
+
+            def setFormat(self, surface_format):
+                self._format = surface_format
+
+            def format(self):
+                return self._format
+
+            def setUpdateBehavior(self, behavior):
+                self._update_behavior = behavior
+
+            def updateBehavior(self):
+                return self._update_behavior
 
             def makeCurrent(self): pass
             def doneCurrent(self): pass

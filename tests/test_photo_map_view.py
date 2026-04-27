@@ -12,14 +12,16 @@ pytest.importorskip("PySide6.QtCore", reason="QtCore is required for photo map t
 pytest.importorskip("PySide6.QtGui", reason="QtGui is required for photo map tests", exc_type=ImportError)
 pytest.importorskip("PySide6.QtWidgets", reason="QtWidgets is required for photo map tests", exc_type=ImportError)
 
-from PySide6.QtCore import QEvent, QObject, QPoint, QPointF, Qt, Signal
-from PySide6.QtGui import QMouseEvent, QPixmap, QWheelEvent
+from PySide6.QtCore import QEvent, QObject, QPoint, QPointF, QSize, Qt, Signal
+from PySide6.QtGui import QHideEvent, QMouseEvent, QPixmap, QResizeEvent, QShowEvent, QWheelEvent
 from PySide6.QtTest import QSignalSpy
 from PySide6.QtWidgets import QApplication, QWidget
 
 from iPhoto.gui.ui.widgets import photo_map_view as photo_map_view_module
 from maps.map_sources import MapBackendMetadata, MapSourceSpec
-from maps.map_widget.map_gl_widget import MapGLWidget
+from maps.map_widget import map_gl_widget as map_gl_widget_module
+from maps.map_widget import map_widget as map_widget_module
+from maps.map_widget.map_gl_widget import MapGLWidget, MapGLWindowWidget
 from maps.map_widget.native_osmand_widget import NativeOsmAndWidget
 
 
@@ -239,6 +241,188 @@ class _FallbackMapWidget(QWidget):
         return self
 
 
+def test_map_gl_surface_format_requests_alpha_on_macos() -> None:
+    surface_format = map_gl_widget_module._map_gl_surface_format(platform="darwin")
+
+    assert surface_format.depthBufferSize() == 24
+    assert surface_format.stencilBufferSize() == 8
+    assert surface_format.alphaBufferSize() == 8
+    assert surface_format.samples() == 0
+
+
+def test_map_gl_surface_format_is_opaque_and_unsampled_on_non_macos() -> None:
+    surface_format = map_gl_widget_module._map_gl_surface_format(platform="linux")
+
+    assert surface_format.depthBufferSize() == 24
+    assert surface_format.stencilBufferSize() == 8
+    assert surface_format.alphaBufferSize() == 0
+    assert surface_format.samples() == 0
+
+
+def test_map_gl_prefers_no_partial_update_on_macos_and_linux() -> None:
+    assert map_gl_widget_module._map_gl_uses_no_partial_update(platform="darwin", environ={})
+    assert map_gl_widget_module._map_gl_uses_no_partial_update(platform="linux", environ={})
+    assert not map_gl_widget_module._map_gl_uses_no_partial_update(platform="win32", environ={})
+    assert not map_gl_widget_module._map_gl_uses_no_partial_update(
+        platform="darwin",
+        environ={"IPHOTO_OSMAND_GL_PARTIAL_UPDATE": "1"},
+    )
+
+
+def test_map_gl_uses_stack_on_top_only_on_macos() -> None:
+    assert map_gl_widget_module._map_gl_uses_window_container(platform="darwin")
+    assert not map_gl_widget_module._map_gl_uses_window_container(platform="linux")
+    assert not map_gl_widget_module._map_gl_uses_window_container(platform="win32")
+
+
+def test_map_gl_debug_switch_is_opt_in() -> None:
+    assert map_gl_widget_module._map_gl_debug_enabled({"IPHOTO_MAP_GL_DEBUG": "1"})
+    assert not map_gl_widget_module._map_gl_debug_enabled({})
+
+
+def test_map_gl_widget_uses_opaque_attrs_and_full_updates_on_macos(
+    qapp: QApplication,
+    monkeypatch,
+) -> None:
+    del qapp
+
+    class _Controller:
+        def __init__(self, *args, **kwargs) -> None:
+            del args, kwargs
+
+        def add_view_listener(self, *_args) -> None:
+            return None
+
+        def add_pan_listener(self, *_args) -> None:
+            return None
+
+        def add_pan_finished_listener(self, *_args) -> None:
+            return None
+
+        def view_state(self) -> tuple[float, float, float]:
+            return (0.5, 0.5, 2.0)
+
+        def shutdown(self) -> None:
+            return None
+
+    scheduled_callbacks: list[tuple[int, object]] = []
+    monkeypatch.setattr(map_gl_widget_module, "MapWidgetController", _Controller)
+    monkeypatch.setattr(map_gl_widget_module.sys, "platform", "darwin")
+    monkeypatch.setattr(
+        map_gl_widget_module.QTimer,
+        "singleShot",
+        lambda delay, callback: scheduled_callbacks.append((delay, callback)),
+    )
+    monkeypatch.delenv("IPHOTO_OSMAND_GL_PARTIAL_UPDATE", raising=False)
+
+    widget = map_gl_widget_module.MapGLWidget()
+    try:
+        assert widget.testAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent)
+        assert not widget.testAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        assert not widget.testAttribute(Qt.WidgetAttribute.WA_NoSystemBackground)
+        assert not widget.testAttribute(Qt.WidgetAttribute.WA_AlwaysStackOnTop)
+        assert (
+            widget.updateBehavior()
+            == map_gl_widget_module.QOpenGLWidget.UpdateBehavior.NoPartialUpdate
+        )
+        assert widget.format().alphaBufferSize() == 8
+        widget.showEvent(QShowEvent())
+        widget.resizeEvent(QResizeEvent(QSize(100, 80), QSize(90, 70)))
+        assert scheduled_callbacks == [
+            (0, widget.request_full_update),
+            (0, widget.request_full_update),
+        ]
+        widget.setUpdatesEnabled(True)
+        widget.hideEvent(QHideEvent())
+        assert widget.updatesEnabled()
+    finally:
+        widget.close()
+
+
+def test_legacy_map_widget_uses_opaque_attrs(qapp: QApplication, monkeypatch) -> None:
+    del qapp
+
+    class _Controller:
+        def __init__(self, *args, **kwargs) -> None:
+            del args, kwargs
+
+        def add_view_listener(self, *_args) -> None:
+            return None
+
+        def add_pan_listener(self, *_args) -> None:
+            return None
+
+        def add_pan_finished_listener(self, *_args) -> None:
+            return None
+
+        def shutdown(self) -> None:
+            return None
+
+    monkeypatch.setattr(map_widget_module, "MapWidgetController", _Controller)
+
+    widget = map_widget_module.MapWidget()
+    try:
+        assert widget.testAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent)
+        assert not widget.testAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        assert not widget.testAttribute(Qt.WidgetAttribute.WA_NoSystemBackground)
+        assert widget.autoFillBackground()
+        assert widget.palette().color(widget.backgroundRole()).alpha() == 255
+    finally:
+        widget.close()
+
+
+def test_photo_map_view_renders_markers_inside_gl_widget(
+    qapp: QApplication,
+    monkeypatch,
+    tmp_path,
+) -> None:
+    del qapp
+
+    source = MapSourceSpec(
+        kind="legacy_pbf",
+        data_path=tmp_path / "tiles",
+        style_path=tmp_path / "style.json",
+    )
+
+    class _FakeGLMapWidget(_FallbackMapWidget):
+        def __init__(self, *args, **kwargs) -> None:
+            super().__init__(*args, **kwargs)
+            self.post_render_painters = []
+            self.update_requests = 0
+
+        def add_post_render_painter(self, callback) -> None:
+            self.post_render_painters.append(callback)
+
+        def remove_post_render_painter(self, callback) -> None:
+            self.post_render_painters = [
+                existing for existing in self.post_render_painters if existing != callback
+            ]
+
+        def request_full_update(self) -> None:
+            self.update_requests += 1
+
+    monkeypatch.setattr(photo_map_view_module, "MapGLWidget", _FakeGLMapWidget)
+    monkeypatch.setattr(
+        photo_map_view_module,
+        "choose_map_widget_backend",
+        lambda map_source, use_opengl: (photo_map_view_module.MapGLWidget, source, "legacy_python"),
+    )
+    monkeypatch.setattr(photo_map_view_module, "check_opengl_support", lambda: True)
+    monkeypatch.setattr(photo_map_view_module, "ThumbnailLoader", _DummyThumbnailLoader)
+    monkeypatch.setattr(photo_map_view_module, "MarkerController", _DummyMarkerController)
+
+    view = photo_map_view_module.PhotoMapView(map_source=source)
+    try:
+        map_widget = view.map_widget()
+        assert isinstance(map_widget, _FakeGLMapWidget)
+        assert len(map_widget.post_render_painters) == 1
+        assert view._overlay.parent() is None
+        view._overlay.set_clusters([])
+        assert map_widget.update_requests == 1
+    finally:
+        view.close()
+
+
 def test_choose_map_widget_backend_prefers_native_when_runtime_files_are_available(monkeypatch) -> None:
     monkeypatch.setattr(photo_map_view_module, "has_usable_osmand_native_widget", lambda root: True)
     monkeypatch.setattr(photo_map_view_module, "has_usable_osmand_default", lambda root: False)
@@ -337,6 +521,7 @@ def test_photo_map_check_opengl_support_requires_make_current_on_macos(monkeypat
 
 
 def test_choose_map_widget_backend_uses_python_obf_when_native_widget_files_are_unavailable(monkeypatch) -> None:
+    monkeypatch.setattr(photo_map_view_module.sys, "platform", "linux")
     monkeypatch.setattr(photo_map_view_module, "has_usable_osmand_native_widget", lambda root: False)
     monkeypatch.setattr(photo_map_view_module, "has_usable_osmand_default", lambda root: True)
     monkeypatch.setattr(photo_map_view_module, "_has_resolved_osmand_assets", lambda source: True)
@@ -353,6 +538,7 @@ def test_choose_map_widget_backend_uses_python_obf_when_native_widget_files_are_
 
 
 def test_choose_map_widget_backend_uses_python_obf_when_native_runtime_probe_fails(monkeypatch) -> None:
+    monkeypatch.setattr(photo_map_view_module.sys, "platform", "linux")
     monkeypatch.setattr(photo_map_view_module, "has_usable_osmand_native_widget", lambda root: True)
     monkeypatch.setattr(photo_map_view_module, "has_usable_osmand_default", lambda root: True)
     monkeypatch.setattr(photo_map_view_module, "_has_resolved_osmand_assets", lambda source: True)
@@ -374,6 +560,7 @@ def test_choose_map_widget_backend_uses_python_obf_when_native_runtime_probe_fai
 
 
 def test_choose_map_widget_backend_prefers_python_obf_when_native_is_disabled(monkeypatch) -> None:
+    monkeypatch.setattr(photo_map_view_module.sys, "platform", "linux")
     monkeypatch.setattr(photo_map_view_module, "prefer_osmand_native_widget", lambda: False)
     monkeypatch.setattr(photo_map_view_module, "has_usable_osmand_native_widget", lambda root: True)
     monkeypatch.setattr(photo_map_view_module, "has_usable_osmand_default", lambda root: True)
@@ -391,6 +578,7 @@ def test_choose_map_widget_backend_prefers_python_obf_when_native_is_disabled(mo
 
 
 def test_choose_map_widget_backend_falls_back_to_legacy_when_obf_is_unavailable(monkeypatch) -> None:
+    monkeypatch.setattr(photo_map_view_module.sys, "platform", "linux")
     monkeypatch.setattr(photo_map_view_module, "has_usable_osmand_native_widget", lambda root: False)
     monkeypatch.setattr(photo_map_view_module, "has_usable_osmand_default", lambda root: False)
     monkeypatch.setattr(photo_map_view_module, "_has_resolved_osmand_assets", lambda source: False)
@@ -404,6 +592,25 @@ def test_choose_map_widget_backend_falls_back_to_legacy_when_obf_is_unavailable(
     assert resolved_source is not None
     assert resolved_source.kind == "legacy_pbf"
     assert Path(resolved_source.data_path) == photo_map_view_module._MAPS_PACKAGE_ROOT / "tiles"
+    assert backend_kind == "legacy_python"
+
+
+def test_choose_map_widget_backend_keeps_legacy_gl_on_macos(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(photo_map_view_module.sys, "platform", "darwin")
+    source = MapSourceSpec(
+        kind="legacy_pbf",
+        data_path=tmp_path / "tiles",
+        style_path=tmp_path / "style.json",
+    )
+
+    widget_cls, resolved_source, backend_kind = photo_map_view_module.choose_map_widget_backend(
+        source,
+        use_opengl=True,
+    )
+
+    assert widget_cls is MapGLWindowWidget
+    assert resolved_source is not None
+    assert resolved_source.kind == "legacy_pbf"
     assert backend_kind == "legacy_python"
 
 
@@ -547,6 +754,7 @@ def test_photo_map_view_falls_back_to_python_widget_when_native_init_fails(
     )
     monkeypatch.setattr(photo_map_view_module, "check_opengl_support", lambda: True)
     monkeypatch.setattr(photo_map_view_module, "MapGLWidget", _FallbackMapWidget)
+    monkeypatch.setattr(photo_map_view_module, "MapGLWindowWidget", _FallbackMapWidget)
     monkeypatch.setattr(photo_map_view_module, "ThumbnailLoader", _DummyThumbnailLoader)
     monkeypatch.setattr(photo_map_view_module, "MarkerController", _DummyMarkerController)
 

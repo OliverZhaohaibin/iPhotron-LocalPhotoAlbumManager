@@ -23,6 +23,25 @@ def _configure_qt_shader_disk_cache() -> None:
     configure_shader_cache_environment()
 
 
+def _opengl_explicitly_disabled() -> bool:
+    """Return whether all OpenGL-backed UI surfaces should be disabled."""
+
+    return os.environ.get("IPHOTO_DISABLE_OPENGL", "").strip().lower() in _TRUE_ENV_VALUES
+
+
+def _map_gl_surface_format(platform: str | None = None) -> QSurfaceFormat:
+    """Return the conservative OpenGL surface format used by map widgets."""
+
+    platform = sys.platform if platform is None else platform
+    surface_format = QSurfaceFormat()
+    surface_format.setRenderableType(QSurfaceFormat.RenderableType.OpenGL)
+    surface_format.setDepthBufferSize(24)
+    surface_format.setStencilBufferSize(8)
+    surface_format.setAlphaBufferSize(8 if platform == "darwin" else 0)
+    surface_format.setSamples(0)
+    return surface_format
+
+
 def _is_packaged_runtime() -> bool:
     """Return ``True`` when the app is running from a compiled/frozen bundle."""
 
@@ -69,7 +88,7 @@ def _prepare_qt_runtime_for_maps() -> None:
     if sys.platform != "linux":
         return
 
-    if os.environ.get("IPHOTO_DISABLE_OPENGL", "").strip().lower() in {"1", "true", "yes", "on"}:
+    if _opengl_explicitly_disabled():
         return
 
     if _is_packaged_runtime():
@@ -94,25 +113,26 @@ def _prepare_qt_runtime_for_maps() -> None:
 
 
 def _configure_qt_opengl_defaults() -> None:
-    """Apply the same desktop OpenGL defaults used by the standalone map tool."""
+    """Apply OpenGL context defaults required by the map widgets."""
 
     _configure_qt_shader_disk_cache()
 
-    if not should_configure_global_desktop_opengl():
+    if _opengl_explicitly_disabled():
         return
 
     try:
-        QApplication.setAttribute(Qt.ApplicationAttribute.AA_UseDesktopOpenGL, True)
         QApplication.setAttribute(Qt.ApplicationAttribute.AA_ShareOpenGLContexts, True)
     except Exception:
-        return
+        pass
+
+    if should_configure_global_desktop_opengl():
+        try:
+            QApplication.setAttribute(Qt.ApplicationAttribute.AA_UseDesktopOpenGL, True)
+        except Exception:
+            pass
 
     try:
-        surface_format = QSurfaceFormat()
-        surface_format.setRenderableType(QSurfaceFormat.RenderableType.OpenGL)
-        surface_format.setDepthBufferSize(24)
-        surface_format.setStencilBufferSize(8)
-        QSurfaceFormat.setDefaultFormat(surface_format)
+        QSurfaceFormat.setDefaultFormat(_map_gl_surface_format())
     except Exception:
         return
 

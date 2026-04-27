@@ -8,7 +8,7 @@ frame data as GPU textures and renders via custom shaders that handle:
 * Limited-range vs full-range normalisation
 * HDR→SDR tone mapping for PQ (ST.2084) and HLG (STD-B67) content
 * Letterbox rendering with a configurable background colour
-* Always-opaque output (alpha = 1.0)
+* Optional shader-rounded transparent clipping for preview popups
 
 The widget replaces ``QGraphicsVideoItem`` / ``QVideoWidget`` to give the
 application full control over the rendering pipeline, independent of any
@@ -75,8 +75,9 @@ _FRAG_QSB = _SHADER_DIR / "video_renderer.frag.qsb"
 #   int u_mirror;          // offset 52
 #   int _pad0;             // offset 56
 #   int _pad1;             // offset 60
-#                          // total = 64 bytes
-_UBO_SIZE = 64
+#   vec4 u_clip;           // offset 64  (view_w, view_h, radius, unused)
+#                          // total = 80 bytes
+_UBO_SIZE = 80
 
 
 def _load_shader(path: Path) -> QShader:
@@ -284,6 +285,8 @@ class VideoRendererWidget(QRhiWidget):
         self._has_frame = False
         self._viewport_fill_enabled = False
         self._zoom_factor = 1.0
+        self._transparent_rounded_clip_enabled = False
+        self._rounded_clip_radius = 0.0
 
         # --- RHI resources (created in initialize()) ---
         self._pipeline: Optional[QRhiGraphicsPipeline] = None
@@ -365,6 +368,26 @@ class VideoRendererWidget(QRhiWidget):
         if self._viewport_fill_enabled == target:
             return
         self._viewport_fill_enabled = target
+        self.update()
+
+    def set_transparent_rounded_clip(self, radius: float | None) -> None:
+        """Enable transparent output clipped to a rounded rectangle."""
+
+        numeric_radius = max(0.0, float(radius or 0.0))
+        target = numeric_radius > 0.0
+        if (
+            self._transparent_rounded_clip_enabled == target
+            and self._rounded_clip_radius == numeric_radius
+        ):
+            return
+
+        self._transparent_rounded_clip_enabled = target
+        self._rounded_clip_radius = numeric_radius
+        self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent, not target)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, target)
+        self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, target)
+        self.setAttribute(Qt.WidgetAttribute.WA_AlwaysStackOnTop, target)
+        self.setAutoFillBackground(not target)
         self.update()
 
     def set_user_rotate90_steps(self, rotate_steps: int) -> None:
@@ -613,7 +636,8 @@ class VideoRendererWidget(QRhiWidget):
             QRhiShaderStage(QRhiShaderStage.Type.Fragment, frag_shader),
         ])
 
-        # Disable alpha blending — the video surface is always fully opaque.
+        # Keep blending disabled. The shader writes final RGBA directly into
+        # the QRhiWidget render target, including alpha for preview clipping.
         target_blend = QRhiGraphicsPipeline.TargetBlend()
         target_blend.enable = False
 
@@ -648,11 +672,10 @@ class VideoRendererWidget(QRhiWidget):
         """Render the current video frame (or letterbox if no frame is present)."""
         if not self._initialized:
             # GPU pipeline not yet ready but we MUST still clear the render
-            # target with an opaque colour so the surface is never transparent.
-            lc = self._letterbox_color
+            # target. Normal playback stays opaque; preview popups stay clear.
             cb.beginPass(
                 self.renderTarget(),
-                QColor.fromRgbF(lc.redF(), lc.greenF(), lc.blueF(), 1.0),
+                self._pass_clear_color(self._letterbox_color),
                 QRhiDepthStencilClearValue(),
             )
             cb.endPass()
@@ -672,10 +695,9 @@ class VideoRendererWidget(QRhiWidget):
         # stale texture data from a previously played video from flashing on
         # screen during media transitions (video→video or video→image).
         if not self._has_frame:
-            lc = self._letterbox_color
             cb.beginPass(
                 self.renderTarget(),
-                QColor.fromRgbF(lc.redF(), lc.greenF(), lc.blueF(), 1.0),
+                self._pass_clear_color(self._letterbox_color),
                 QRhiDepthStencilClearValue(),
             )
             cb.endPass()
@@ -702,7 +724,11 @@ class VideoRendererWidget(QRhiWidget):
         cb.resourceUpdate(ru)
 
         # Draw
-        cb.beginPass(self.renderTarget(), QColor(0, 0, 0, 255), QRhiDepthStencilClearValue())
+        cb.beginPass(
+            self.renderTarget(),
+            self._pass_clear_color(QColor(0, 0, 0, 255)),
+            QRhiDepthStencilClearValue(),
+        )
         cb.setGraphicsPipeline(self._pipeline)
         cb.setShaderResources(self._srb)
         cb.setViewport(QRhiViewport(0, 0, output_size.width(), output_size.height()))
@@ -717,6 +743,15 @@ class VideoRendererWidget(QRhiWidget):
         if not self._first_render_done:
             self._first_render_done = True
             self.firstFrameReady.emit()
+
+    def _pass_clear_color(self, fallback: QColor) -> QColor:
+        """Return the render-pass clear colour for the current opacity mode."""
+
+        if self._transparent_rounded_clip_enabled:
+            return QColor(0, 0, 0, 0)
+        color = QColor(fallback)
+        color.setAlpha(255)
+        return color
 
     def releaseResources(self) -> None:  # type: ignore[override]
         """Clean up GPU resources."""
@@ -971,10 +1006,13 @@ class VideoRendererWidget(QRhiWidget):
         lg = lc.greenF()
         lb = lc.blueF()
         la = 1.0
+        clip_radius = 0.0
+        if self._transparent_rounded_clip_enabled:
+            clip_radius = self._rounded_clip_radius * self.devicePixelRatioF()
 
         # Pack uniform data (std140)
         ubo_data = struct.pack(
-            "iiii4f4fiiii",
+            "iiii4f4fiiii4f",
             self._fmt_enum,
             self._cs_enum,
             self._tf_enum,
@@ -985,6 +1023,7 @@ class VideoRendererWidget(QRhiWidget):
             self._mirror,          # u_mirror
             0,                     # _pad0
             0,                     # _pad1
+            ow, oh, clip_radius, 0.0,  # u_clip
         )
 
         ru.updateDynamicBuffer(self._ubuf, 0, len(ubo_data), ubo_data)

@@ -27,6 +27,8 @@ layout(std140, binding = 0) uniform buf {
     int u_mirror;
     int _pad0;
     int _pad1;
+    // Transparent rounded preview clip: (view_w_px, view_h_px, radius_px, unused)
+    vec4 u_clip;
 };
 
 // ---------------------------------------------------------------
@@ -119,8 +121,32 @@ vec3 linear_to_srgb(vec3 linear_rgb) {
     return result;
 }
 
+float rounded_rect_alpha(vec2 fragPx) {
+    float corner_radius = u_clip.z;
+    if (corner_radius <= 0.0) {
+        return 1.0;
+    }
+
+    vec2 view_size = u_clip.xy;
+    vec2 half_size = max(view_size * 0.5 - vec2(0.5), vec2(0.0));
+    float radius = min(corner_radius, min(half_size.x, half_size.y));
+    vec2 centered = fragPx - half_size;
+    vec2 q = abs(centered) - (half_size - vec2(radius));
+    float signed_distance = length(max(q, vec2(0.0))) + min(max(q.x, q.y), 0.0) - radius;
+    if (signed_distance >= 0.0) {
+        return 0.0;
+    }
+    return 1.0 - smoothstep(-1.0, 0.0, signed_distance);
+}
+
 void main()
 {
+    vec2 frag_px = vec2(gl_FragCoord.x - 0.5, gl_FragCoord.y - 0.5);
+    float alpha = rounded_rect_alpha(frag_px);
+    if (alpha <= 0.0) {
+        discard;
+    }
+
     // Determine if pixel falls inside video rect or in letterbox
     vec2 uv = v_texcoord;
 
@@ -130,7 +156,7 @@ void main()
     // If outside video rect, draw letterbox color
     if (video_uv.x < 0.0 || video_uv.x > 1.0 ||
         video_uv.y < 0.0 || video_uv.y > 1.0) {
-        fragColor = vec4(u_letterbox_color.rgb, 1.0);
+        fragColor = vec4(u_letterbox_color.rgb * alpha, alpha);
         return;
     }
 
@@ -224,5 +250,6 @@ void main()
     }
     // else: SDR — rgb is already in display gamma space
 
-    fragColor = vec4(clamp(rgb, vec3(0.0), vec3(1.0)), 1.0);
+    vec3 final_rgb = clamp(rgb, vec3(0.0), vec3(1.0));
+    fragColor = vec4(final_rgb * alpha, alpha);
 }

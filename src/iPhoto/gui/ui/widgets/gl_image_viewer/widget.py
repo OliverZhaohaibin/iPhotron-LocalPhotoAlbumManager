@@ -861,6 +861,7 @@ class GLImageViewer(QRhiWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent, not enabled)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, enabled)
         self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, enabled)
+        self.setAttribute(Qt.WidgetAttribute.WA_AlwaysStackOnTop, enabled)
         self.setAutoFillBackground(not enabled)
         self.update()
 

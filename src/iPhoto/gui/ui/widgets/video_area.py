@@ -525,11 +525,13 @@ class VideoArea(QWidget):
         self.setAutoFillBackground(not target)
         self._surface_stack.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, target)
         self._surface_stack.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, target)
+        self._surface_stack.setAttribute(Qt.WidgetAttribute.WA_AlwaysStackOnTop, target)
         self._surface_stack.setAutoFillBackground(not target)
         if target:
             self._surface_stack.setStyleSheet("background: transparent; border: none;")
         else:
             self._surface_stack.setStyleSheet("")
+        self._renderer.set_transparent_rounded_clip(corner_radius if target else 0.0)
         self._edit_viewer.set_transparent_rounded_clip(corner_radius if target else 0.0)
         self._apply_surface(self._default_surface_color)
 

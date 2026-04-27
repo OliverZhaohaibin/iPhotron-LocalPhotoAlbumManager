@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import struct
 from unittest.mock import Mock, call, patch
 
 import pytest
@@ -30,6 +31,7 @@ from iPhoto.gui.ui.widgets.video_renderer_widget import (
     _TF_HLG,
     _TF_PQ,
     _TF_SDR,
+    _UBO_SIZE,
     VideoRendererWidget,
     _classify_frame_format,
     _resolve_frame_rotation_cw,
@@ -388,6 +390,47 @@ class TestVideoRendererWidget:
         assert w._tex_y_fmt is None
         assert w._tex_uv_fmt is None
 
+    def test_transparent_rounded_clip_toggles_widget_attributes(self, qapp):
+        """Preview clipping should switch the renderer into transparent output mode."""
+        w = VideoRendererWidget()
+
+        w.set_transparent_rounded_clip(14.5)
+
+        assert w._transparent_rounded_clip_enabled is True
+        assert w._rounded_clip_radius == pytest.approx(14.5)
+        assert w.testAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        assert not w.testAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent)
+        assert w.testAttribute(Qt.WidgetAttribute.WA_NoSystemBackground)
+        assert w.testAttribute(Qt.WidgetAttribute.WA_AlwaysStackOnTop)
+
+        w.set_transparent_rounded_clip(0.0)
+
+        assert w._transparent_rounded_clip_enabled is False
+        assert w._rounded_clip_radius == pytest.approx(0.0)
+        assert not w.testAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        assert w.testAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent)
+        assert not w.testAttribute(Qt.WidgetAttribute.WA_NoSystemBackground)
+        assert not w.testAttribute(Qt.WidgetAttribute.WA_AlwaysStackOnTop)
+
+    def test_uniform_buffer_includes_transparent_clip_values(self, qapp):
+        """Rounded preview clip uniforms should be packed after existing renderer data."""
+        w = VideoRendererWidget()
+        w.set_transparent_rounded_clip(12.0)
+        ru = Mock()
+
+        w._update_uniforms(ru, QSize(320, 180))
+
+        _, offset, size, data = ru.updateDynamicBuffer.call_args.args
+        assert offset == 0
+        assert size == _UBO_SIZE
+        assert len(data) == _UBO_SIZE
+
+        unpacked = struct.unpack("iiii4f4fiiii4f", data)
+        assert unpacked[-4] == pytest.approx(320.0)
+        assert unpacked[-3] == pytest.approx(180.0)
+        assert unpacked[-2] == pytest.approx(12.0 * w.devicePixelRatioF())
+        assert unpacked[-1] == pytest.approx(0.0)
+
 
 # ------------------------------------------------------------------
 # VideoArea – construction & public API
@@ -425,6 +468,30 @@ class TestVideoArea:
         assert va.testAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent)
         assert not va._renderer.testAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         assert va._renderer.testAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent)
+
+    def test_transparent_preview_configures_both_video_surfaces(self, qapp, mocker):
+        """Long-press transparent rounding must apply to adjusted and plain video paths."""
+        va = VideoArea()
+        renderer_clip = mocker.patch.object(va._renderer, "set_transparent_rounded_clip")
+        edit_clip = mocker.patch.object(va._edit_viewer, "set_transparent_rounded_clip")
+
+        va.set_transparent_preview_enabled(True, corner_radius=18.0)
+
+        assert va.testAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        assert not va.testAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent)
+        assert va._surface_stack.testAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        assert va._surface_stack.testAttribute(Qt.WidgetAttribute.WA_AlwaysStackOnTop)
+        renderer_clip.assert_called_once_with(18.0)
+        edit_clip.assert_called_once_with(18.0)
+
+        va.set_transparent_preview_enabled(False, corner_radius=18.0)
+
+        assert not va.testAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        assert va.testAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent)
+        assert not va._surface_stack.testAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        assert not va._surface_stack.testAttribute(Qt.WidgetAttribute.WA_AlwaysStackOnTop)
+        assert renderer_clip.call_args_list == [call(18.0), call(0.0)]
+        assert edit_clip.call_args_list == [call(18.0), call(0.0)]
 
     def test_surface_color_updates_letterbox(self, qapp):
         """set_surface_color should update the renderer's letterbox color."""

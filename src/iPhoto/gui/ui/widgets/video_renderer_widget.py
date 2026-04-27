@@ -55,6 +55,8 @@ except (ModuleNotFoundError, ImportError):  # pragma: no cover
     QVideoFrameFormat = None  # type: ignore[assignment, misc]
     QVideoSink = None  # type: ignore[assignment, misc]
 
+from .render_backend import qrhi_api_name, select_qrhi_widget_api
+
 _log = logging.getLogger(__name__)
 
 # Shader .qsb files live next to this module.
@@ -259,12 +261,12 @@ class VideoRendererWidget(QRhiWidget):
         super().__init__(parent)
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
 
-        # Force the OpenGL backend so both QRhiWidget-based renderers
-        # (image viewer and video renderer) share the same rendering
-        # infrastructure inside the QStackedWidget.
+        # Keep media widgets on the platform-selected QRhi backend. macOS uses
+        # Metal by default; Windows/Linux keep the existing OpenGL path.
         # Must be called in the constructor — Qt docs state that calling
         # setApi() after the widget is shown may have no effect.
-        self.setApi(QRhiWidget.Api.OpenGL)
+        self._rhi_api = select_qrhi_widget_api()
+        self.setApi(self._rhi_api)
 
         # Declare that this widget always produces fully opaque output so
         # the compositor never expects transparency from the first paint.
@@ -314,6 +316,11 @@ class VideoRendererWidget(QRhiWidget):
         self._container_raw_w: int = 0
         self._container_raw_h: int = 0
         self._container_linux_180_hint: bool = False
+
+    def render_backend_name(self) -> str:
+        """Return the active QRhi backend name for diagnostics/tests."""
+
+        return qrhi_api_name(self._rhi_api)
 
     # ------------------------------------------------------------------
     # Public API

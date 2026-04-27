@@ -23,6 +23,7 @@ class PanStrategy(InteractionStrategy):
         get_effective_scale: Callable[[], float],
         get_dpr: Callable[[], float],
         on_crop_changed: Callable[[], None],
+        get_viewport_device_scale: Callable[[], tuple[float, float]] | None = None,
     ) -> None:
         """Initialize pan strategy.
 
@@ -43,6 +44,7 @@ class PanStrategy(InteractionStrategy):
         self._texture_size_provider = texture_size_provider
         self._get_effective_scale = get_effective_scale
         self._get_dpr = get_dpr
+        self._get_viewport_device_scale = get_viewport_device_scale
         self._on_crop_changed = on_crop_changed
 
     def on_drag(self, delta_view: QPointF) -> None:
@@ -55,9 +57,12 @@ class PanStrategy(InteractionStrategy):
         if view_scale <= 1e-6:
             return
 
-        dpr = self._get_dpr()
-        delta_device_x = float(delta_view.x()) * dpr
-        delta_device_y = float(delta_view.y()) * dpr
+        if self._get_viewport_device_scale is not None:
+            scale_x, scale_y = self._get_viewport_device_scale()
+        else:
+            scale_x = scale_y = self._get_dpr()
+        delta_device_x = float(delta_view.x()) * scale_x
+        delta_device_y = float(delta_view.y()) * scale_y
         delta_image = QPointF(delta_device_x / view_scale, delta_device_y / view_scale)
 
         snapshot = self._model.create_snapshot()

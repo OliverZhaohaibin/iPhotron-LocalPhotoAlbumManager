@@ -12,6 +12,7 @@ from PySide6.QtGui import QColor, QPalette, QSurfaceFormat
 from PySide6.QtWidgets import QApplication
 
 from iPhoto.bootstrap.qt_shader_cache import configure_shader_cache_environment
+from iPhoto.gui.render_backend import should_configure_global_desktop_opengl
 
 _logger = logging.getLogger(__name__)
 _TRUE_ENV_VALUES = {"1", "true", "yes", "on"}
@@ -97,7 +98,7 @@ def _configure_qt_opengl_defaults() -> None:
 
     _configure_qt_shader_disk_cache()
 
-    if os.environ.get("IPHOTO_DISABLE_OPENGL", "").strip().lower() in {"1", "true", "yes", "on"}:
+    if not should_configure_global_desktop_opengl():
         return
 
     try:

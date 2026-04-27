@@ -315,12 +315,13 @@ class CropInteractionController:
         bottom_right = self._transform_controller.convert_image_to_viewport(
             rect["right"], rect["bottom"]
         )
-        dpr = self._transform_controller._get_dpr()
+        top_left_device = self._transform_controller.viewport_logical_to_device(top_left)
+        bottom_right_device = self._transform_controller.viewport_logical_to_device(bottom_right)
         return {
-            "left": top_left.x() * dpr,
-            "top": top_left.y() * dpr,
-            "right": bottom_right.x() * dpr,
-            "bottom": bottom_right.y() * dpr,
+            "left": top_left_device.x(),
+            "top": top_left_device.y(),
+            "right": bottom_right_device.x(),
+            "bottom": bottom_right_device.y(),
         }
 
     def set_active(self, enabled: bool, values: Mapping[str, float] | None = None) -> None:
@@ -385,6 +386,7 @@ class CropInteractionController:
                 texture_size_provider=self._texture_size_provider,
                 get_effective_scale=self._transform_controller.get_effective_scale,
                 get_dpr=self._transform_controller._get_dpr,
+                get_viewport_device_scale=self._transform_controller.get_viewport_device_scale,
                 on_crop_changed=self._emit_crop_changed,
             )
             self._on_cursor_change(Qt.CursorShape.ClosedHandCursor)
@@ -395,6 +397,7 @@ class CropInteractionController:
                 texture_size_provider=self._texture_size_provider,
                 get_effective_scale=self._transform_controller.get_effective_scale,
                 get_dpr=self._transform_controller._get_dpr,
+                get_viewport_device_scale=self._transform_controller.get_viewport_device_scale,
                 on_crop_changed=self._emit_crop_changed,
                 apply_edge_push_zoom=self._apply_edge_push_auto_zoom,
                 locked_aspect=self._locked_aspect,
@@ -650,7 +653,7 @@ class CropInteractionController:
         if view_scale <= 1e-6:
             return
 
-        delta_device = QPointF(float(delta_view.x()) * dpr, float(delta_view.y()) * dpr)
+        delta_device = self._transform_controller.viewport_delta_logical_to_device(delta_view)
         if abs(delta_device.x()) < 1e-6 and abs(delta_device.y()) < 1e-6:
             return
 

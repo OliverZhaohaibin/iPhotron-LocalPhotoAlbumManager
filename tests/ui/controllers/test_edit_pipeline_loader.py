@@ -96,6 +96,27 @@ def test_prepare_sidebar_preview_starts_worker(MockWorker, pipeline_loader):
     assert kwargs['target_height'] == -1
 
 
+@patch("iPhoto.gui.ui.controllers.edit_pipeline_loader.QThreadPool.globalInstance")
+def test_prepare_sidebar_preview_inline_emits_without_threadpool(
+    mock_global_pool,
+    pipeline_loader,
+):
+    """Verify inline sidebar preview preparation avoids the thread pool."""
+    image = QImage(320, 240, QImage.Format.Format_ARGB32)
+    image.fill(0xFF336699)
+    mock_slot = Mock()
+    pipeline_loader.sidebarPreviewReady.connect(mock_slot)
+
+    pipeline_loader.prepare_sidebar_preview_inline(image, 80)
+
+    mock_global_pool.assert_not_called()
+    mock_slot.assert_called_once()
+    result = mock_slot.call_args.args[0]
+    assert result.image.height() == 80
+    assert result.image.format() == QImage.Format.Format_ARGB32
+    assert hasattr(result.stats, "white_balance_gain")
+
+
 def test_cancel_pending_operations(pipeline_loader):
     """Verify cancellation invalidates workers."""
     pipeline_loader._active_image_worker = Mock()

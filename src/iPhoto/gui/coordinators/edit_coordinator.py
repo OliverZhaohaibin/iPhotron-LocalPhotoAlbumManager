@@ -112,6 +112,8 @@ class EditCoordinator(QObject):
         self._video_thumbnail_generation = 0
         self._video_sidebar_generation = 0
         self._video_trim_worker: VideoTrimThumbnailWorker | None = None
+        self._video_sidebar_worker: VideoSidebarPreviewWorker | None = None
+        self._video_sidebar_workers: list[VideoSidebarPreviewWorker] = []
         self._video_trim_diag: dict[int, dict[str, object]] = {}
         self._pending_video_duration_sec: float | None = None
         self._video_frame_step_ms = _DEFAULT_VIDEO_FRAME_STEP_MS
@@ -542,6 +544,7 @@ class EditCoordinator(QObject):
         self._video_thumbnail_generation += 1
         self._video_sidebar_generation += 1
         self._video_trim_worker = None
+        self._video_sidebar_worker = None
         self._video_trim_diag.clear()
         self._video_frame_step_ms = _DEFAULT_VIDEO_FRAME_STEP_MS
 
@@ -779,7 +782,7 @@ class EditCoordinator(QObject):
                 return
             self._video_color_stats = result.stats
             self._session.set_color_stats(result.stats)
-            self._pipeline_loader.prepare_sidebar_preview(
+            self._pipeline_loader.prepare_sidebar_preview_inline(
                 result.image,
                 target_height=target_height,
                 full_res_image_for_fallback=result.image,
@@ -795,8 +798,22 @@ class EditCoordinator(QObject):
                 message,
             )
 
-        worker.signals.ready.connect(_handle_ready)
-        worker.signals.error.connect(_handle_error)
+        def _handle_finished(worker_generation: int) -> None:
+            del worker_generation
+            try:
+                self._video_sidebar_workers.remove(worker)
+            except ValueError:
+                pass
+            if worker is self._video_sidebar_worker:
+                self._video_sidebar_worker = None
+
+        self._video_sidebar_worker = worker
+        if not hasattr(self, "_video_sidebar_workers"):
+            self._video_sidebar_workers = []
+        self._video_sidebar_workers.append(worker)
+        worker.signals.ready.connect(_handle_ready, Qt.ConnectionType.QueuedConnection)
+        worker.signals.error.connect(_handle_error, Qt.ConnectionType.QueuedConnection)
+        worker.signals.finished.connect(_handle_finished, Qt.ConnectionType.QueuedConnection)
         QThreadPool.globalInstance().start(worker, -1)
 
     def _flush_video_trim_thumbnail_request(self) -> None:

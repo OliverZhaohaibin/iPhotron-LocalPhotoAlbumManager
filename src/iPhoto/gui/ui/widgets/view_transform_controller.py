@@ -158,11 +158,44 @@ class ViewTransformController:
     
     def _get_dpr(self) -> float:
         """Get device pixel ratio."""
-        return self._viewer.devicePixelRatioF()
+        dpr = float(self._viewer.devicePixelRatioF())
+        return dpr if math.isfinite(dpr) and dpr > 0.0 else 1.0
 
     def _get_view_dimensions_logical(self) -> tuple[float, float]:
         """Get viewport dimensions in logical pixels."""
         return float(self._viewer.width()), float(self._viewer.height())
+
+    def get_viewport_device_scale(self) -> tuple[float, float]:
+        """Return the per-axis scale from Qt viewport pixels to device pixels."""
+
+        logical_width, logical_height = self._get_view_dimensions_logical()
+        device_width, device_height = self._get_view_dimensions_device_px()
+        fallback = self._get_dpr()
+        scale_x = device_width / logical_width if logical_width > 0.0 else fallback
+        scale_y = device_height / logical_height if logical_height > 0.0 else fallback
+        if not math.isfinite(scale_x) or scale_x <= 0.0:
+            scale_x = fallback
+        if not math.isfinite(scale_y) or scale_y <= 0.0:
+            scale_y = fallback
+        return scale_x, scale_y
+
+    def viewport_logical_to_device(self, point: QPointF) -> QPointF:
+        """Convert a Qt viewport coordinate to render-target device pixels."""
+
+        scale_x, scale_y = self.get_viewport_device_scale()
+        return QPointF(float(point.x()) * scale_x, float(point.y()) * scale_y)
+
+    def viewport_delta_logical_to_device(self, delta: QPointF) -> QPointF:
+        """Convert a Qt viewport delta to render-target device pixels."""
+
+        scale_x, scale_y = self.get_viewport_device_scale()
+        return QPointF(float(delta.x()) * scale_x, float(delta.y()) * scale_y)
+
+    def viewport_device_to_logical(self, point: QPointF) -> QPointF:
+        """Convert render-target device pixels back to Qt viewport coordinates."""
+
+        scale_x, scale_y = self.get_viewport_device_scale()
+        return QPointF(float(point.x()) / scale_x, float(point.y()) / scale_y)
 
     def _get_fit_texture_size(self) -> tuple[float, float]:
         """Return the texture dimensions that should drive fit-to-view math."""
@@ -258,7 +291,7 @@ class ViewTransformController:
         if abs(clamped - self._zoom_factor) < 1e-6:
             return False
 
-        anchor_point = anchor or QPointF(self._viewer.width() / 2, self._viewer.height() / 2)
+        anchor_point = anchor or QPointF(self._viewer.width() / 2.0, self._viewer.height() / 2.0)
         tex_w, tex_h = self._texture_size_provider()
         if (
             anchor_point is not None
@@ -267,16 +300,15 @@ class ViewTransformController:
             and self._viewer.width() > 0
             and self._viewer.height() > 0
         ):
-            dpr = self._viewer.devicePixelRatioF()
-            view_width = float(self._viewer.width()) * dpr
-            view_height = float(self._viewer.height()) * dpr
+            view_width, view_height = self._get_view_dimensions_device_px()
             fit_w, fit_h = self._get_fit_texture_size()
             base_scale = compute_fit_to_view_scale((fit_w, fit_h), view_width, view_height)
             cover_scale = self._image_cover_scale
             old_scale = base_scale * cover_scale * self._zoom_factor
             new_scale = base_scale * cover_scale * clamped
             if old_scale > 1e-6 and new_scale > 0.0:
-                anchor_bottom_left = QPointF(anchor_point.x() * dpr, view_height - anchor_point.y() * dpr)
+                anchor_device = self.viewport_logical_to_device(anchor_point)
+                anchor_bottom_left = QPointF(anchor_device.x(), view_height - anchor_device.y())
                 view_centre = QPointF(view_width / 2.0, view_height / 2.0)
                 anchor_vector = anchor_bottom_left - view_centre
                 tex_coord_x = (anchor_vector.x() - self._pan_px.x()) / old_scale
@@ -318,8 +350,8 @@ class ViewTransformController:
             return
         delta = event.position() - self._pan_start_pos
         self._pan_start_pos = event.position()
-        dpr = self._viewer.devicePixelRatioF()
-        self.set_pan_pixels(self._pan_px + QPointF(delta.x() * dpr, -delta.y() * dpr))
+        delta_device = self.viewport_delta_logical_to_device(delta)
+        self.set_pan_pixels(self._pan_px + QPointF(delta_device.x(), -delta_device.y()))
 
     def handle_mouse_release(self, event: QMouseEvent) -> None:
         if event.button() == Qt.MouseButton.LeftButton:
@@ -566,28 +598,38 @@ class ViewTransformController:
     
     def convert_screen_to_world(self, screen_pt: QPointF) -> QPointF:
         """Map a Qt screen coordinate to GL view's centre-origin space."""
-        view_width, view_height = self._get_view_dimensions_logical()
-        dpr = self._get_dpr()
-        return self.screen_to_world(screen_pt, view_width, view_height, dpr)
+        view_width, view_height = self._get_view_dimensions_device_px()
+        point = self.viewport_logical_to_device(screen_pt)
+        return QPointF(point.x() - view_width * 0.5, view_height * 0.5 - point.y())
     
     def convert_world_to_screen(self, world_vec: QPointF) -> QPointF:
         """Convert a GL centre-origin vector into a Qt screen coordinate."""
-        view_width, view_height = self._get_view_dimensions_logical()
-        dpr = self._get_dpr()
-        return self.world_to_screen(world_vec, view_width, view_height, dpr)
+        view_width, view_height = self._get_view_dimensions_device_px()
+        point = QPointF(
+            float(world_vec.x()) + view_width * 0.5,
+            view_height * 0.5 - float(world_vec.y()),
+        )
+        return self.viewport_device_to_logical(point)
     
     def convert_image_to_viewport(self, x: float, y: float) -> QPointF:
         """Convert image pixel coordinates to viewport coordinates."""
         texture_size = self._texture_size_provider()
         scale = self.get_effective_scale()
-        view_width, view_height = self._get_view_dimensions_logical()
-        dpr = self._get_dpr()
-        return self.image_to_viewport(x, y, texture_size, scale, view_width, view_height, dpr)
+        tex_w, tex_h = texture_size
+        tex_vector_x = float(x) - (tex_w / 2.0)
+        tex_vector_y = float(y) - (tex_h / 2.0)
+        world_vector = QPointF(
+            tex_vector_x * scale + self._pan_px.x(),
+            -(tex_vector_y * scale) + self._pan_px.y(),
+        )
+        return self.convert_world_to_screen(world_vector)
     
     def convert_viewport_to_image(self, point: QPointF) -> QPointF:
         """Convert viewport coordinates to image pixel coordinates."""
         texture_size = self._texture_size_provider()
         scale = self.get_effective_scale()
-        view_width, view_height = self._get_view_dimensions_logical()
-        dpr = self._get_dpr()
-        return self.viewport_to_image(point, texture_size, scale, view_width, view_height, dpr)
+        world_vec = self.convert_screen_to_world(point)
+        tex_vector_x = (world_vec.x() - self._pan_px.x()) / scale
+        tex_vector_y = (world_vec.y() - self._pan_px.y()) / scale
+        tex_w, tex_h = texture_size
+        return QPointF(tex_w / 2.0 + tex_vector_x, tex_h / 2.0 - tex_vector_y)

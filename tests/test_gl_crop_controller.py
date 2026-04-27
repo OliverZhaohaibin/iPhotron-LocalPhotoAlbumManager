@@ -97,3 +97,22 @@ def test_animation_frame_ignores_invalid_transform_geometry():
     controller._on_animation_frame(1.0, QPointF(10, 10))
 
     controller._on_request_update.assert_not_called()
+
+
+def test_current_crop_rect_pixels_maps_viewport_logical_to_device_pixels():
+    controller = create_controller()
+    transform = controller._transform_controller
+    transform.convert_image_to_viewport.side_effect = lambda x, y: QPointF(x / 3.0, y / 2.0)
+    transform.viewport_logical_to_device.side_effect = lambda point: QPointF(
+        point.x() * 3.0,
+        point.y() * 2.0,
+    )
+
+    controller.set_active(True, {"Crop_CX": 0.5, "Crop_CY": 0.5, "Crop_W": 1.0, "Crop_H": 1.0})
+
+    assert controller.current_crop_rect_pixels() == {
+        "left": 0.0,
+        "top": 0.0,
+        "right": 300.0,
+        "bottom": 200.0,
+    }

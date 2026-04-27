@@ -300,9 +300,40 @@ def test_photo_map_check_opengl_support_accepts_valid_context_when_offscreen_mak
 
     monkeypatch.setattr(photo_map_view_module, "QOffscreenSurface", lambda: FakeSurface())
     monkeypatch.setattr(photo_map_view_module, "QOpenGLContext", lambda: FakeContext())
+    monkeypatch.setattr(photo_map_view_module.sys, "platform", "linux")
     monkeypatch.delenv("IPHOTO_DISABLE_OPENGL", raising=False)
 
     assert photo_map_view_module.check_opengl_support() is True
+
+
+def test_photo_map_check_opengl_support_requires_make_current_on_macos(monkeypatch) -> None:
+    class FakeSurface:
+        def create(self) -> None:
+            return None
+
+        def isValid(self) -> bool:
+            return True
+
+    class FakeContext:
+        def create(self) -> bool:
+            return True
+
+        def isValid(self) -> bool:
+            return True
+
+        def makeCurrent(self, surface) -> bool:
+            del surface
+            return False
+
+        def doneCurrent(self) -> None:
+            return None
+
+    monkeypatch.setattr(photo_map_view_module, "QOffscreenSurface", lambda: FakeSurface())
+    monkeypatch.setattr(photo_map_view_module, "QOpenGLContext", lambda: FakeContext())
+    monkeypatch.setattr(photo_map_view_module.sys, "platform", "darwin")
+    monkeypatch.delenv("IPHOTO_DISABLE_OPENGL", raising=False)
+
+    assert photo_map_view_module.check_opengl_support() is False
 
 
 def test_choose_map_widget_backend_uses_python_obf_when_native_widget_files_are_unavailable(monkeypatch) -> None:

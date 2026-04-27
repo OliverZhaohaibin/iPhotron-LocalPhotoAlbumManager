@@ -19,6 +19,7 @@ from PySide6.QtWidgets import QApplication, QRhiWidget
 from iPhoto.config import VIDEO_COMPLETE_HOLD_BACKSTEP_MS
 from iPhoto.gui.ui.widgets.gl_image_viewer import GLImageViewer
 from iPhoto.gui.ui.widgets.gl_texture_manager import TextureManager
+from iPhoto.gui.render_backend import selected_rhi_backend_name
 from iPhoto.gui.ui.widgets.video_area import VideoArea
 from iPhoto.gui.ui.widgets.video_renderer_widget import (
     _CS_BT601,
@@ -412,10 +413,10 @@ class TestVideoArea:
         va = VideoArea()
         assert va._video_sink is not None
 
-    def test_renderer_uses_opengl_api(self, qapp):
-        """VideoRendererWidget must use the OpenGL backend (same as GLImageViewer)."""
+    def test_renderer_uses_platform_qrhi_api(self, qapp):
+        """VideoRendererWidget must use the same selected QRhi backend as GLImageViewer."""
         va = VideoArea()
-        assert va._renderer.api() == QRhiWidget.Api.OpenGL
+        assert va._renderer.render_backend_name() == selected_rhi_backend_name()
 
     def test_opaque_widget_attributes(self, qapp):
         """VideoArea and renderer must block WA_TranslucentBackground cascade."""
@@ -1045,6 +1046,7 @@ def test_gl_image_viewer_resets_after_first_video_upload(qapp, mocker):
 def test_gl_image_viewer_initialize_uses_context_extra_functions(qapp, mocker):
     """QRhi-backed viewer init should resolve GL calls from the current context."""
 
+    mocker.patch.dict("os.environ", {"IPHOTO_RHI_BACKEND": "opengl"})
     viewer = GLImageViewer()
     rhi = mocker.Mock()
     gl_funcs = mocker.Mock()
@@ -1075,6 +1077,7 @@ def test_gl_image_viewer_render_declares_external_content_pass(qapp, mocker):
     """Raw GL rendering must declare ExternalContent before beginExternal()."""
 
     viewer = GLImageViewer()
+    viewer._uses_raw_gl = True
     viewer._gl_initialized = True
     viewer._gl_funcs = mocker.Mock()
     viewer._renderer = mocker.Mock()

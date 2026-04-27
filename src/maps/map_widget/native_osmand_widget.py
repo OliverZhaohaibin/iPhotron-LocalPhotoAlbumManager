@@ -15,6 +15,7 @@ from typing import Any, Sequence
 import PySide6
 import shiboken6
 from PySide6.QtCore import QEvent, QObject, QPointF, Qt, QTimer, Signal
+from PySide6.QtGui import QCloseEvent, QHideEvent, QShowEvent
 from PySide6.QtWidgets import QSizePolicy, QVBoxLayout, QWidget
 
 from maps.map_sources import (
@@ -137,6 +138,10 @@ def _load_bridge(library_path: Path) -> _BridgeAPI:
     library.osmand_widget_set_zoom.restype = None
     library.osmand_widget_reset_view.argtypes = [ctypes.c_void_p]
     library.osmand_widget_reset_view.restype = None
+    cleanup = getattr(library, "osmand_widget_cleanup", None)
+    if cleanup is not None:
+        cleanup.argtypes = [ctypes.c_void_p]
+        cleanup.restype = None
     library.osmand_widget_pan_by_pixels.argtypes = [ctypes.c_void_p, ctypes.c_double, ctypes.c_double]
     library.osmand_widget_pan_by_pixels.restype = None
     library.osmand_widget_set_center_lonlat.argtypes = [ctypes.c_void_p, ctypes.c_double, ctypes.c_double]
@@ -214,6 +219,7 @@ class NativeOsmAndWidget(QWidget):
         if library_path is None:
             raise TileLoadingError("The native OsmAnd widget library is not available")
         self._library_path = library_path.resolve()
+        self._shutdown = False
 
         create_started = time.perf_counter()
         self._bridge = _load_bridge(library_path)
@@ -284,22 +290,32 @@ class NativeOsmAndWidget(QWidget):
 
     @property
     def zoom(self) -> float:
+        if self._is_shutdown():
+            return float(self._metadata.min_zoom) if hasattr(self, "_metadata") else 0.0
         return float(self._bridge.library.osmand_widget_get_zoom(self._native_pointer))
 
     def set_zoom(self, zoom: float) -> None:
+        if self._is_shutdown():
+            return
         self._bridge.library.osmand_widget_set_zoom(self._native_pointer, float(zoom))
         self._emit_view_change()
 
     def reset_view(self) -> None:
+        if self._is_shutdown():
+            return
         self._bridge.library.osmand_widget_reset_view(self._native_pointer)
         self._emit_view_change()
 
     def pan_by_pixels(self, delta_x: float, delta_y: float) -> None:
+        if self._is_shutdown():
+            return
         self._bridge.library.osmand_widget_pan_by_pixels(self._native_pointer, float(delta_x), float(delta_y))
         self.panned.emit(QPointF(float(delta_x), float(delta_y)))
         self._emit_view_change()
 
     def center_lonlat(self) -> tuple[float, float]:
+        if self._is_shutdown():
+            return (0.0, 0.0)
         longitude = ctypes.c_double(0.0)
         latitude = ctypes.c_double(0.0)
         self._bridge.library.osmand_widget_get_center_lonlat(
@@ -310,6 +326,8 @@ class NativeOsmAndWidget(QWidget):
         return float(longitude.value), float(latitude.value)
 
     def center_on(self, lon: float, lat: float) -> None:
+        if self._is_shutdown():
+            return
         self._bridge.library.osmand_widget_set_center_lonlat(self._native_pointer, float(lon), float(lat))
         self._emit_view_change()
 
@@ -319,10 +337,27 @@ class NativeOsmAndWidget(QWidget):
             self.set_zoom(self.zoom + float(zoom_delta))
 
     def shutdown(self) -> None:
+        if self._shutdown:
+            return
+        self._shutdown = True
         if self._state_timer.isActive():
             self._state_timer.stop()
         if self._deferred_view_sync_timer.isActive():
             self._deferred_view_sync_timer.stop()
+        self._bridge_dragging = False
+        if hasattr(self, "_native_widget") and self._native_widget is not None:
+            try:
+                self._native_widget.removeEventFilter(self)
+            except RuntimeError:
+                pass
+            self._native_widget.setUpdatesEnabled(False)
+        self.setUpdatesEnabled(False)
+        cleanup = getattr(self._bridge.library, "osmand_widget_cleanup", None)
+        if cleanup is not None and bool(self._native_pointer):
+            try:
+                cleanup(self._native_pointer)
+            except Exception:
+                _LOGGER.warning("Native OsmAnd renderer cleanup failed", exc_info=True)
 
     def map_backend_metadata(self) -> MapBackendMetadata:
         return self._metadata
@@ -345,6 +380,8 @@ class NativeOsmAndWidget(QWidget):
         return True
 
     def project_lonlat(self, lon: float, lat: float) -> QPointF | None:
+        if self._is_shutdown():
+            return None
         screen_x = ctypes.c_double(0.0)
         screen_y = ctypes.c_double(0.0)
         projected = self._bridge.library.osmand_widget_project_lonlat(
@@ -381,6 +418,8 @@ class NativeOsmAndWidget(QWidget):
         return QPointF(world_x - top_left_x, world_y - top_left_y)
 
     def eventFilter(self, watched: QObject, event: QEvent) -> bool:  # type: ignore[override]
+        if self._is_shutdown():
+            return super().eventFilter(watched, event)
         if watched is self._native_widget:
             event_type = event.type()
             if event_type == QEvent.Type.MouseButtonPress:
@@ -411,20 +450,45 @@ class NativeOsmAndWidget(QWidget):
 
     def resizeEvent(self, event) -> None:  # type: ignore[override]
         super().resizeEvent(event)
+        if self._is_shutdown():
+            return
         self._sync_native_widget_geometry()
         self._schedule_deferred_view_sync()
 
-    def showEvent(self, event) -> None:  # type: ignore[override]
+    def showEvent(self, event: QShowEvent) -> None:  # type: ignore[override]
         super().showEvent(event)
+        if self._is_shutdown():
+            return
+        self.setUpdatesEnabled(True)
+        self._native_widget.setUpdatesEnabled(True)
+        if not self._state_timer.isActive():
+            self._state_timer.start()
         self._sync_native_widget_geometry()
         self._schedule_deferred_view_sync()
+
+    def hideEvent(self, event: QHideEvent) -> None:  # type: ignore[override]
+        if not self._is_shutdown():
+            if self._state_timer.isActive():
+                self._state_timer.stop()
+            if self._deferred_view_sync_timer.isActive():
+                self._deferred_view_sync_timer.stop()
+            self._native_widget.setUpdatesEnabled(False)
+        super().hideEvent(event)
+
+    def closeEvent(self, event: QCloseEvent) -> None:  # type: ignore[override]
+        self.shutdown()
+        super().closeEvent(event)
 
     def _emit_view_change(self) -> None:
+        if self._is_shutdown():
+            return
         center_x, center_y, zoom = self._read_view_state()
         self._last_view_state = (center_x, center_y, zoom)
         self.viewChanged.emit(center_x, center_y, zoom)
 
     def _poll_view_state(self) -> None:
+        if self._is_shutdown():
+            return
         current_state = self._read_view_state()
         if self._last_view_state is None:
             self._last_view_state = current_state
@@ -434,10 +498,14 @@ class NativeOsmAndWidget(QWidget):
             self.viewChanged.emit(*current_state)
 
     def _schedule_deferred_view_sync(self) -> None:
+        if self._is_shutdown():
+            return
         if not self._deferred_view_sync_timer.isActive():
             self._deferred_view_sync_timer.start()
 
     def _sync_native_widget_geometry(self) -> None:
+        if self._is_shutdown():
+            return
         target_rect = self.contentsRect()
         if target_rect.isEmpty():
             return
@@ -447,9 +515,14 @@ class NativeOsmAndWidget(QWidget):
             self._native_widget.setGeometry(target_rect)
 
     def _read_view_state(self) -> tuple[float, float, float]:
+        if self._is_shutdown():
+            return (0.5, 0.5, self.zoom)
         longitude, latitude = self.center_lonlat()
         center_x, center_y = _lonlat_to_normalized(longitude, latitude)
         return float(center_x), float(center_y), self.zoom
+
+    def _is_shutdown(self) -> bool:
+        return bool(getattr(self, "_shutdown", False)) or not bool(getattr(self, "_native_pointer", None))
 
 
 __all__ = ["NativeOsmAndWidget", "probe_native_widget_runtime"]

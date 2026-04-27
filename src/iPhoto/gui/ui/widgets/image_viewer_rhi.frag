@@ -1,74 +1,70 @@
-#version 330 core
-in vec2 vUV;
-out vec4 FragColor;
+#version 440
 
-uniform sampler2D uTex;
-uniform int   uSourceKind;      // 0 = RGBA image texture, 1 = YUV video planes
-uniform sampler2D uVideoYTex;
-uniform sampler2D uVideoUVTex;
-uniform int   uVideoFormat;     // 0 = none/RGBA fallback, 1 = NV12, 2 = P010
-uniform int   uVideoColorSpace; // 0 = BT.601, 1 = BT.709, 2 = BT.2020
-uniform int   uVideoTransfer;   // 0 = SDR, 1 = PQ, 2 = HLG
-uniform int   uVideoRange;      // 0 = limited, 1 = full
+layout(location = 0) in vec2 vUV;
+layout(location = 0) out vec4 fragColor;
 
-uniform float uBrilliance;
-uniform float uExposure;
-uniform float uHighlights;
-uniform float uShadows;
-uniform float uBrightness;
-uniform float uContrast;
-uniform float uBlackPoint;
-uniform float uSaturation;
-uniform float uVibrance;
-uniform float uColorCast;
-uniform vec3  uGain;
-uniform vec4  uBWParams;
-uniform bool  uBWEnabled;
-uniform sampler2D uCurveLUT;  // 256x1 RGB LUT texture for curve adjustment
-uniform bool  uCurveEnabled;
-uniform sampler2D uLevelsLUT; // 256x1 RGB LUT texture for levels adjustment
-uniform bool  uLevelsEnabled;
-uniform float uWBWarmth;      // [-1,1]
-uniform float uWBTemperature; // [-1,1]
-uniform float uWBTint;        // [-1,1]
-uniform bool  uWBEnabled;
-uniform float uTime;
+layout(binding = 1) uniform sampler2D uTex;
+layout(binding = 2) uniform sampler2D uVideoYTex;
+layout(binding = 3) uniform sampler2D uVideoUVTex;
+layout(binding = 4) uniform sampler2D uCurveLUT;
+layout(binding = 5) uniform sampler2D uLevelsLUT;
 
-// Selective Color uniforms
-// uSCRange0[i] = (centerHue, widthHue, hueShift, satAdj)
-// uSCRange1[i] = (lumAdj, satGateLo, satGateHi, enabled)
-uniform vec4  uSCRange0[6];
-uniform vec4  uSCRange1[6];
-uniform bool  uSCEnabled;
+layout(std140, binding = 0) uniform ImageViewBuf {
+    int uSourceKind;
+    int uVideoFormat;
+    int uVideoColorSpace;
+    int uVideoTransfer;
+    int uVideoRange;
+    int uRotate90;
+    int uBWEnabled;
+    int uCurveEnabled;
+    int uLevelsEnabled;
+    int uWBEnabled;
+    int uSCEnabled;
 
-uniform float uDefinition;   // [0.0, 0.2] definition / clarity strength
+    float uBrilliance;
+    float uExposure;
+    float uHighlights;
+    float uShadows;
+    float uBrightness;
+    float uContrast;
+    float uBlackPoint;
+    float uSaturation;
+    float uVibrance;
+    float uColorCast;
+    float uWBWarmth;
+    float uWBTemperature;
+    float uWBTint;
+    float uTime;
+    float uDefinition;
+    float uDenoiseAmount;
+    float uSharpenIntensity;
+    float uSharpenEdges;
+    float uSharpenFalloff;
+    float uVignetteStrength;
+    float uVignetteRadius;
+    float uVignetteSoftness;
+    float uScale;
+    float uImgScale;
+    float uCornerRadius;
+    float uCropCX;
+    float uCropCY;
+    float uCropW;
+    float uCropH;
 
-uniform float uDenoiseAmount;  // bilateral filter strength (0 = off)
-
-uniform float uSharpenIntensity;  // [0, 1] sharpening amount
-uniform float uSharpenEdges;      // [0, 1] edge detection threshold
-uniform float uSharpenFalloff;    // [0, 1] transition smoothness
-
-uniform float uVignetteStrength;  // [0, 1] edge-darkening intensity
-uniform float uVignetteRadius;    // [0, 1] inner radius
-uniform float uVignetteSoftness;  // [0.1, 1.0] falloff width
-
-uniform vec2  uViewSize;
-uniform vec2  uTexSize;
-uniform float uScale;
-uniform vec2  uPan;
-uniform float uImgScale;
-uniform vec2  uImgOffset;
-uniform float uCornerRadius;
-uniform float uCropCX;
-uniform float uCropCY;
-uniform float uCropW;
-uniform float uCropH;
-uniform vec3  uPerspectiveRow0;
-uniform vec3  uPerspectiveRow1;
-uniform vec3  uPerspectiveRow2;
-uniform int   uRotate90;  // 0, 1, 2, 3 for 0°, 90°, 180°, 270° CCW rotation
-uniform int   uTextureOriginTopLeft; // 0 = OpenGL/raw GL bottom-left frag coords, 1 = QRhi/Metal top-left frag coords
+    vec3 uGain;
+    vec4 uBWParams;
+    vec2 uViewSize;
+    vec2 uTexSize;
+    vec2 uPan;
+    vec2 uImgOffset;
+    vec3 uPerspectiveRow0;
+    vec3 uPerspectiveRow1;
+    vec3 uPerspectiveRow2;
+    vec4 uSCRange0[6];
+    vec4 uSCRange1[6];
+    int uTextureOriginTopLeft;
+};
 
 const int VIDEO_FMT_NONE = 0;
 const int VIDEO_FMT_NV12 = 1;
@@ -729,7 +725,7 @@ void main() {
         uv_perspective.y < 0.0 || uv_perspective.y > 1.0) {
         discard;
     }
-    
+
     // Apply rotation to get final texture sampling coordinates
     vec2 uv_tex = apply_rotation_90(uv_perspective, uRotate90);
 
@@ -751,22 +747,22 @@ void main() {
     c = apply_color_transform(c, uSaturation, uVibrance, uColorCast, uGain);
 
     // Apply white balance adjustment after color but before curve
-    if (uWBEnabled) {
+    if (uWBEnabled != 0) {
         c = apply_wb(c, uWBWarmth, uWBTemperature, uWBTint);
     }
 
     // Apply curve adjustment after color but before B&W
-    if (uCurveEnabled) {
+    if (uCurveEnabled != 0) {
         c = apply_curve(c);
     }
 
     // Apply levels adjustment after curve but before B&W
-    if (uLevelsEnabled) {
+    if (uLevelsEnabled != 0) {
         c = apply_levels(c);
     }
 
     // Apply selective color after levels, before B&W
-    if (uSCEnabled) {
+    if (uSCEnabled != 0) {
         c = apply_selective_color(c);
     }
 
@@ -790,7 +786,7 @@ void main() {
         c = apply_vignette(c, uv_tex);
     }
 
-    if (uBWEnabled) {
+    if (uBWEnabled != 0) {
         c = apply_bw(c, uv_tex);
     }
     float alpha = rounded_rect_alpha(fragPx);
@@ -798,5 +794,5 @@ void main() {
         discard;
     }
     vec3 rgb = clamp(c, 0.0, 1.0) * alpha;
-    FragColor = vec4(rgb, alpha);
+    fragColor = vec4(rgb, alpha);
 }

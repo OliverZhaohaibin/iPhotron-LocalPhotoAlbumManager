@@ -139,3 +139,38 @@ def test_live_preview_uses_motion_video_but_loads_adjustments_from_still_asset()
     assert args[0] == motion_path
     assert kwargs["adjustments"] == {"Exposure": 0.25}
     assert kwargs["adjusted_preview"] is True
+
+
+def test_macos_request_preview_routes_rotate_only_edits_through_adjusted_popup() -> None:
+    preview_window = Mock()
+    controller = PreviewController(preview_window)
+    preview_path = Path("/fake/video.mov")
+    view = _make_view(QRect(0, 0, 80, 60))
+    index = _make_index(
+        {
+            Roles.IS_VIDEO: True,
+            Roles.IS_LIVE: False,
+            Roles.ABS: str(preview_path),
+            Roles.INFO: {"dur": 5.0, "w": 1080, "h": 1920},
+        }
+    )
+
+    with patch(
+        "iPhoto.gui.ui.controllers.preview_controller.sys.platform",
+        "darwin",
+    ), patch(
+        "iPhoto.gui.ui.controllers.preview_controller.sidecar.load_adjustments",
+        return_value={"Crop_Rotate90": 3.0},
+    ), patch(
+        "iPhoto.gui.ui.controllers.preview_controller.sidecar.resolve_render_adjustments",
+        return_value={"Crop_Rotate90": 3.0},
+    ), patch(
+        "iPhoto.gui.ui.controllers.preview_controller.sidecar.trim_is_non_default",
+        return_value=False,
+    ):
+        controller._handle_request_preview(view, index)
+
+    preview_window.show_preview.assert_called_once()
+    _, kwargs = preview_window.show_preview.call_args
+    assert kwargs["adjustments"] == {"Crop_Rotate90": 3.0}
+    assert kwargs["adjusted_preview"] is True

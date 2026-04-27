@@ -208,9 +208,40 @@ def test_check_opengl_support_accepts_valid_context_when_offscreen_make_current_
 
     monkeypatch.setattr("maps.main.QOffscreenSurface", lambda: FakeSurface())
     monkeypatch.setattr("maps.main.QOpenGLContext", lambda: FakeContext())
+    monkeypatch.setattr("maps.main.sys.platform", "linux")
     monkeypatch.delenv("IPHOTO_DISABLE_OPENGL", raising=False)
 
     assert check_opengl_support() is True
+
+
+def test_check_opengl_support_requires_make_current_on_macos(monkeypatch) -> None:
+    class FakeSurface:
+        def create(self) -> None:
+            return None
+
+        def isValid(self) -> bool:
+            return True
+
+    class FakeContext:
+        def create(self) -> bool:
+            return True
+
+        def isValid(self) -> bool:
+            return True
+
+        def makeCurrent(self, surface) -> bool:
+            del surface
+            return False
+
+        def doneCurrent(self) -> None:
+            return None
+
+    monkeypatch.setattr("maps.main.QOffscreenSurface", lambda: FakeSurface())
+    monkeypatch.setattr("maps.main.QOpenGLContext", lambda: FakeContext())
+    monkeypatch.setattr("maps.main.sys.platform", "darwin")
+    monkeypatch.delenv("IPHOTO_DISABLE_OPENGL", raising=False)
+
+    assert check_opengl_support() is False
 
 
 def test_configure_qt_opengl_defaults_prefers_desktop_opengl(monkeypatch) -> None:

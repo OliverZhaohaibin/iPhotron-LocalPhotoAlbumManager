@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import sys
 from logging import getLogger
 from pathlib import Path
 from typing import Dict, Iterable, Optional, cast
@@ -67,6 +68,7 @@ def check_opengl_support() -> bool:
     if _opengl_explicitly_disabled():
         return False
 
+    strict_probe = sys.platform == "darwin"
     try:
         # ``QOffscreenSurface`` keeps the detection lightweight by avoiding any
         # visible windows while still exercising the platform specific OpenGL
@@ -81,11 +83,21 @@ def check_opengl_support() -> bool:
         if hasattr(context, "isValid") and not context.isValid():
             return False
 
-        # Some drivers refuse offscreen ``makeCurrent()`` even though a
-        # ``QOpenGLWidget`` can still render successfully. A valid context is
-        # enough to attempt the accelerated path; binding it offscreen remains a
-        # best-effort warm-up instead of a hard requirement.
-        if surface.isValid() and context.makeCurrent(surface):
+        if not surface.isValid():
+            return not strict_probe
+        if not context.makeCurrent(surface):
+            return not strict_probe
+        try:
+            if strict_probe:
+                functions = context.functions()
+                if functions is None:
+                    return False
+                # GL_VERSION = 0x1F02. A successful query proves the context is
+                # current and usable before the map widget attempts rendering.
+                version = functions.glGetString(0x1F02)
+                if not version:
+                    return False
+        finally:
             context.doneCurrent()
         return True
     except Exception:  # noqa: BLE001 - fall back gracefully on any Qt failure

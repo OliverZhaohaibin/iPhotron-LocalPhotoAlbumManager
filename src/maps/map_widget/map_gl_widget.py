@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Sequence
 
 from PySide6.QtCore import QPointF, Signal, Qt
-from PySide6.QtGui import QCloseEvent, QPainter, QResizeEvent, QShowEvent
+from PySide6.QtGui import QCloseEvent, QHideEvent, QPainter, QResizeEvent, QShowEvent, QSurfaceFormat
 from PySide6.QtOpenGLWidgets import QOpenGLWidget
 from PySide6.QtWidgets import QWidget
 
@@ -42,6 +42,12 @@ class MapGLWidget(QOpenGLWidget):
         style_path: Path | str = "style.json",
     ) -> None:
         super().__init__(parent)
+
+        surface_format = QSurfaceFormat()
+        surface_format.setRenderableType(QSurfaceFormat.RenderableType.OpenGL)
+        surface_format.setDepthBufferSize(24)
+        surface_format.setStencilBufferSize(8)
+        self.setFormat(surface_format)
 
         if sys.platform == "linux" and os.environ.get("IPHOTO_OSMAND_GL_PARTIAL_UPDATE", "0") != "1":
             self.setUpdateBehavior(QOpenGLWidget.UpdateBehavior.NoPartialUpdate)
@@ -206,7 +212,15 @@ class MapGLWidget(QOpenGLWidget):
         """Request a full repaint when the widget becomes visible."""
 
         super().showEvent(event)
+        self.setUpdatesEnabled(True)
         self.request_full_update()
+
+    # ------------------------------------------------------------------
+    def hideEvent(self, event: QHideEvent) -> None:  # type: ignore[override]
+        """Pause repaint requests while the GL map surface is hidden."""
+
+        self.setUpdatesEnabled(False)
+        super().hideEvent(event)
 
     # ------------------------------------------------------------------
     def request_full_update(self) -> None:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import sys
 
 from PySide6.QtCore import QCoreApplication, QMetaObject, QSize, Qt
 from PySide6.QtGui import QColor, QPalette
@@ -45,6 +46,7 @@ def _configure_main_view_stack(view_stack: QStackedWidget, map_view: object) -> 
         isinstance(stack_layout, QStackedLayout)
         and hasattr(map_view, "uses_native_osmand_widget")
         and map_view.uses_native_osmand_widget()
+        and sys.platform != "darwin"
         and os.environ.get("IPHOTO_KEEP_NATIVE_MAP_PAGE_ALIVE", "").strip().lower()
         in {"1", "true", "yes", "on"}
     ):

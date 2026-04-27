@@ -8,6 +8,9 @@ import pytest
 
 pytest.importorskip("PySide6", reason="PySide6 is required for QRhi renderer tests")
 
+from PySide6.QtCore import QPointF, QSize
+from PySide6.QtGui import QColor
+
 from iPhoto.gui.ui.widgets.rhi_image_renderer import RhiImageRenderer
 
 
@@ -33,6 +36,59 @@ class _FakeRhi:
     def newBuffer(self, *args):  # noqa: N802 - mirrors QRhi API
         self.new_buffer_calls += 1
         return self.buffer
+
+
+class _FakeResourceUpdateBatch:
+    def __init__(self) -> None:
+        self.dynamic_updates: list[tuple[object, int, int, bytes]] = []
+
+    def updateDynamicBuffer(self, buffer, offset, size, data):  # noqa: N802
+        self.dynamic_updates.append((buffer, offset, size, data))
+
+
+class _FakeRenderRhi:
+    def __init__(self) -> None:
+        self.batch = _FakeResourceUpdateBatch()
+
+    def nextResourceUpdateBatch(self):  # noqa: N802 - mirrors QRhi API
+        return self.batch
+
+
+class _FakeRenderTarget:
+    def __init__(self, width: int = 400, height: int = 300) -> None:
+        self._size = QSize(width, height)
+
+    def pixelSize(self):  # noqa: N802 - mirrors QRhi API
+        return self._size
+
+
+class _FakeCommandBuffer:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, object | tuple[object, ...]]] = []
+
+    def resourceUpdate(self, batch):  # noqa: N802 - mirrors QRhi API
+        self.calls.append(("resourceUpdate", batch))
+
+    def beginPass(self, render_target, clear_color, depth_stencil):  # noqa: N802
+        self.calls.append(("beginPass", (render_target, clear_color, depth_stencil)))
+
+    def setGraphicsPipeline(self, pipeline):  # noqa: N802
+        self.calls.append(("pipeline", pipeline))
+
+    def setShaderResources(self, bindings):  # noqa: N802
+        self.calls.append(("shaderResources", bindings))
+
+    def setViewport(self, viewport):  # noqa: N802
+        self.calls.append(("viewport", viewport))
+
+    def setVertexInput(self, start_binding, bindings):  # noqa: N802
+        self.calls.append(("vertexInput", (start_binding, bindings)))
+
+    def draw(self, vertex_count):  # noqa: N802
+        self.calls.append(("draw", vertex_count))
+
+    def endPass(self):  # noqa: N802
+        self.calls.append(("endPass", ()))
 
 
 def test_overlay_buffer_creation_failure_leaves_no_stale_buffer() -> None:
@@ -96,3 +152,80 @@ def test_overlay_vertices_accept_swapped_rect_edges() -> None:
 
     assert vertices
     assert all(math.isfinite(value) for value in vertices)
+
+
+def test_overlay_vertices_active_draws_border_corners_and_edge_handles() -> None:
+    vertices = RhiImageRenderer._build_overlay_vertices(
+        view_width=400.0,
+        view_height=300.0,
+        crop_rect={"left": 100.0, "top": 75.0, "right": 300.0, "bottom": 225.0},
+        faded=False,
+    )
+
+    # 4 mask quads + 4 border quads + 4 corner handles + 4 edge handles.
+    assert len(vertices) // 6 == 16 * 6
+    colours = [tuple(vertices[index + 2:index + 6]) for index in range(0, len(vertices), 6)]
+    assert colours.count((0.0, 0.0, 0.0, 0.55)) == 4 * 6
+    assert colours.count((1.0, 0.85, 0.2, 1.0)) == 12 * 6
+
+
+def test_overlay_vertices_faded_hides_yellow_handles() -> None:
+    vertices = RhiImageRenderer._build_overlay_vertices(
+        view_width=400.0,
+        view_height=300.0,
+        crop_rect={"left": 100.0, "top": 75.0, "right": 300.0, "bottom": 225.0},
+        faded=True,
+    )
+
+    assert len(vertices) // 6 == 4 * 6
+    colours = [tuple(vertices[index + 2:index + 6]) for index in range(0, len(vertices), 6)]
+    assert set(colours) == {(0.0, 0.0, 0.0, 1.0)}
+
+
+def test_render_rebinds_overlay_shader_resources(monkeypatch) -> None:
+    renderer = RhiImageRenderer()
+    main_pipeline = object()
+    overlay_pipeline = object()
+    main_bindings = object()
+    overlay_bindings = object()
+    main_vbuf = object()
+    overlay_vbuf = object()
+    fake_rhi = _FakeRenderRhi()
+    fake_cb = _FakeCommandBuffer()
+
+    renderer._rhi = fake_rhi  # type: ignore[assignment]
+    renderer._pipeline = main_pipeline  # type: ignore[assignment]
+    renderer._overlay_pipeline = overlay_pipeline  # type: ignore[assignment]
+    renderer._srb = main_bindings  # type: ignore[assignment]
+    renderer._overlay_srb = overlay_bindings  # type: ignore[assignment]
+    renderer._vbuf = main_vbuf  # type: ignore[assignment]
+    renderer._overlay_vbuf = overlay_vbuf  # type: ignore[assignment]
+    renderer._overlay_vbuf_capacity = 4096
+    monkeypatch.setattr(renderer, "_flush_pending_texture_uploads", lambda batch: None)
+    monkeypatch.setattr(renderer, "_update_uniforms", lambda batch, **kwargs: None)
+
+    renderer.render(
+        cb=fake_cb,
+        render_target=_FakeRenderTarget(),
+        clear_color=QColor(0, 0, 0),
+        view_width=400.0,
+        view_height=300.0,
+        scale=1.0,
+        pan=QPointF(0.0, 0.0),
+        adjustments={},
+        crop_rect={"left": 100.0, "top": 75.0, "right": 300.0, "bottom": 225.0},
+    )
+
+    pipeline_calls = [value for name, value in fake_cb.calls if name == "pipeline"]
+    bindings_calls = [value for name, value in fake_cb.calls if name == "shaderResources"]
+    draw_calls = [value for name, value in fake_cb.calls if name == "draw"]
+
+    assert pipeline_calls == [main_pipeline, overlay_pipeline]
+    assert bindings_calls == [main_bindings, overlay_bindings]
+    assert draw_calls == [6, 16 * 6]
+    assert len(fake_rhi.batch.dynamic_updates) == 1
+
+    overlay_pipeline_index = fake_cb.calls.index(("pipeline", overlay_pipeline))
+    overlay_bindings_index = fake_cb.calls.index(("shaderResources", overlay_bindings))
+    overlay_draw_index = fake_cb.calls.index(("draw", 16 * 6))
+    assert overlay_pipeline_index < overlay_bindings_index < overlay_draw_index

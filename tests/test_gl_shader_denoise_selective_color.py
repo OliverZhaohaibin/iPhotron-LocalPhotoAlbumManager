@@ -49,13 +49,17 @@ def test_denoise_uses_adjusted_color_as_base() -> None:
 
 
 def test_texture_origin_y_flip_is_backend_controlled() -> None:
-    """Raw GL and QRhi/Metal use different fragment-coordinate origins."""
+    """Raw GL and QRhi/Metal normalize fragment coordinates before crop math."""
 
     for shader in (_shader_source(), _rhi_shader_source()):
         normalised = _normalise(shader)
 
         assert "uTextureOriginTopLeft" in shader
         assert (
-            "if (uTextureOriginTopLeft == 0) { uv.y = 1.0 - uv.y; }"
+            "if (uTextureOriginTopLeft == 0) { fragPx.y = uViewSize.y - 1.0 - fragPx.y; }"
             in normalised
-        ), "Y flip must be controlled by the backend texture-origin uniform"
+        ), "Fragment coordinates must be normalized to top-left viewport space"
+        assert (
+            "vec2 worldVector = vec2(fragPx.x - viewCentre.x, viewCentre.y - fragPx.y);"
+            in normalised
+        ), "Crop math must use the same world-up convention as ViewTransformController"

@@ -138,6 +138,8 @@ class RhiImageRenderer:
         self._ubuf: QRhiBuffer | None = None
         self._sampler: QRhiSampler | None = None
         self._srb: QRhiShaderResourceBindings | None = None
+        self._overlay_srb: QRhiShaderResourceBindings | None = None
+        self._overlay_resource_gap_logged = False
 
         self._tex_rgba: QRhiTexture | None = None
         self._tex_y: QRhiTexture | None = None
@@ -242,6 +244,18 @@ class RhiImageRenderer:
             raise RuntimeError("Failed to create QRhi image pipeline")
 
         self._overlay_pipeline = rhi.newGraphicsPipeline()
+        self._overlay_srb = rhi.newShaderResourceBindings()
+        self._overlay_srb.setBindings([])
+        if self._overlay_srb.create() is False:
+            _LOGGER.warning(
+                "Failed to create QRhi crop overlay shader bindings; crop overlay disabled"
+            )
+            try:
+                self._overlay_srb.destroy()
+            except RuntimeError:
+                pass
+            self._overlay_srb = None
+
         self._overlay_pipeline.setShaderStages([
             QRhiShaderStage(QRhiShaderStage.Type.Vertex, overlay_vert_shader),
             QRhiShaderStage(QRhiShaderStage.Type.Fragment, overlay_frag_shader),
@@ -258,8 +272,10 @@ class RhiImageRenderer:
         self._overlay_pipeline.setTargetBlends([overlay_blend])
         self._overlay_pipeline.setRenderPassDescriptor(render_pass_descriptor)
         self._overlay_pipeline.setVertexInputLayout(self._overlay_vertex_layout())
-        if self._overlay_pipeline.create() is False:
-            _LOGGER.warning("Failed to create QRhi crop overlay pipeline; crop overlay disabled")
+        if self._overlay_srb is not None:
+            self._overlay_pipeline.setShaderResourceBindings(self._overlay_srb)
+        if self._overlay_srb is None or self._overlay_pipeline.create() is False:
+            _LOGGER.warning("QRhi crop overlay pipeline creation failed; crop overlay disabled")
             try:
                 self._overlay_pipeline.destroy()
             except RuntimeError:
@@ -280,6 +296,7 @@ class RhiImageRenderer:
             self._pipeline,
             self._overlay_pipeline,
             self._srb,
+            self._overlay_srb,
             self._sampler,
             self._tex_rgba,
             self._tex_y,
@@ -505,11 +522,25 @@ class RhiImageRenderer:
         cb.setVertexInput(0, [(self._vbuf, 0)])
         cb.draw(6)
 
-        if overlay_vertex_count and self._overlay_pipeline is not None and self._overlay_vbuf is not None:
-            cb.setGraphicsPipeline(self._overlay_pipeline)
-            cb.setViewport(QRhiViewport(0, 0, output_size.width(), output_size.height()))
-            cb.setVertexInput(0, [(self._overlay_vbuf, 0)])
-            cb.draw(overlay_vertex_count)
+        if overlay_vertex_count:
+            overlay_pipeline = self._overlay_pipeline
+            overlay_vbuf = self._overlay_vbuf
+            overlay_srb = self._overlay_srb
+            if overlay_pipeline is not None and overlay_vbuf is not None and overlay_srb is not None:
+                cb.setGraphicsPipeline(overlay_pipeline)
+                cb.setShaderResources(overlay_srb)
+                cb.setViewport(QRhiViewport(0, 0, output_size.width(), output_size.height()))
+                cb.setVertexInput(0, [(overlay_vbuf, 0)])
+                cb.draw(overlay_vertex_count)
+            elif not self._overlay_resource_gap_logged:
+                _LOGGER.warning(
+                    "QRhi crop overlay draw skipped; pipeline=%s vertex_buffer=%s "
+                    "shader_bindings=%s",
+                    overlay_pipeline is not None,
+                    overlay_vbuf is not None,
+                    overlay_srb is not None,
+                )
+                self._overlay_resource_gap_logged = True
 
         cb.endPass()
 
@@ -1018,6 +1049,29 @@ class RhiImageRenderer:
                         cy - handle_size,
                         cx + handle_size,
                         cy + handle_size,
+                    ),
+                    border_colour,
+                )
+
+            edge_half_length = 16.0
+            edge_half_thickness = 3.0
+            for cx, cy in (((left + right) * 0.5, top), ((left + right) * 0.5, bottom)):
+                add_rect(
+                    (
+                        cx - edge_half_length,
+                        cy - edge_half_thickness,
+                        cx + edge_half_length,
+                        cy + edge_half_thickness,
+                    ),
+                    border_colour,
+                )
+            for cx, cy in ((left, (top + bottom) * 0.5), (right, (top + bottom) * 0.5)):
+                add_rect(
+                    (
+                        cx - edge_half_thickness,
+                        cy - edge_half_length,
+                        cx + edge_half_thickness,
+                        cy + edge_half_length,
                     ),
                     border_colour,
                 )

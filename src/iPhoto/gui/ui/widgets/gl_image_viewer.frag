@@ -691,10 +691,13 @@ void main() {
     float safeImgScale = max(uImgScale, 1e-6);
 
     vec2 fragPx = vec2(gl_FragCoord.x - 0.5, gl_FragCoord.y - 0.5);
+    if (uTextureOriginTopLeft == 0) {
+        fragPx.y = uViewSize.y - 1.0 - fragPx.y;
+    }
     vec2 viewCentre = uViewSize * 0.5;
-    vec2 viewVector = fragPx - viewCentre;
-    vec2 screenVector = viewVector - uPan;
-    vec2 texVector = (screenVector / uScale - uImgOffset) / safeImgScale;
+    vec2 worldVector = vec2(fragPx.x - viewCentre.x, viewCentre.y - fragPx.y);
+    vec2 screenVector = worldVector - uPan;
+    vec2 texVector = (vec2(screenVector.x, -screenVector.y) / uScale - uImgOffset) / safeImgScale;
     vec2 texPx = texVector + (uTexSize * 0.5);
     vec2 uv = texPx / uTexSize;
 
@@ -702,9 +705,6 @@ void main() {
         discard;
     }
 
-    if (uTextureOriginTopLeft == 0) {
-        uv.y = 1.0 - uv.y;
-    }
     vec2 uv_corrected = uv;
 
     // Perform crop test in Logical/Screen space.

@@ -289,9 +289,18 @@ def has_installed_osmand_extension(package_root: Path | None = None) -> bool:
     """Return ``True`` when the packaged extension layout is complete."""
 
     root = package_root or _package_root()
-    extension_root = default_osmand_extension_root(root)
+    candidate_roots = (
+        default_osmand_extension_root(root),
+        *(
+            search_root / DEFAULT_OSMAND_EXTENSION_RELATIVE_ROOT
+            for search_root in _default_osmand_search_roots(Path(root).resolve())
+        ),
+    )
 
-    return validate_osmand_extension_root(extension_root, platform=sys.platform)
+    return any(
+        validate_osmand_extension_root(candidate_root, platform=sys.platform)
+        for candidate_root in _dedupe_paths(tuple(candidate_roots))
+    )
 
 
 def validate_osmand_extension_root(extension_root: Path, *, platform: str | None = None) -> bool:

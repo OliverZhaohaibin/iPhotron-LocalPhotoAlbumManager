@@ -22,6 +22,11 @@ from maps.map_sources import (
 
 def _create_extension_assets(package_root: Path) -> Path:
     extension_root = default_osmand_extension_root(package_root)
+    _create_extension_assets_at(extension_root)
+    return extension_root
+
+
+def _create_extension_assets_at(extension_root: Path) -> Path:
     (extension_root / "rendering_styles").mkdir(parents=True, exist_ok=True)
     (extension_root / "search").mkdir(parents=True, exist_ok=True)
     (extension_root / "poi").mkdir(parents=True, exist_ok=True)
@@ -180,6 +185,32 @@ def test_has_installed_osmand_extension_requires_search_database_and_helper(tmp_
     search_db = default_osmand_extension_root(package_root) / "search" / "geonames.sqlite3"
     search_db.unlink()
     assert has_installed_osmand_extension(package_root) is False
+
+
+def test_has_installed_osmand_extension_detects_external_runtime_when_bundled_exists(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    package_root = tmp_path / "maps"
+    bundled_root = package_root / "tiles" / "extension"
+    (bundled_root / "rendering_styles").mkdir(parents=True, exist_ok=True)
+    (bundled_root / "rendering_styles" / "snowmobile.render.xml").write_text(
+        "<renderingStyle />",
+        encoding="utf-8",
+    )
+    external_data_home = tmp_path / "xdg-data"
+    if map_sources.os.name == "nt":
+        monkeypatch.setenv("APPDATA", str(external_data_home))
+        external_root = external_data_home / "iPhoto" / "maps" / "tiles" / "extension"
+    else:
+        monkeypatch.setenv("XDG_DATA_HOME", str(external_data_home))
+        external_root = external_data_home / "iPhoto" / "maps" / "tiles" / "extension"
+    _create_extension_assets_at(external_root)
+    monkeypatch.delenv("APPIMAGE", raising=False)
+    monkeypatch.delenv(ENV_OSMAND_EXTENSION_ROOT, raising=False)
+
+    assert default_osmand_extension_root(package_root) == bundled_root.resolve()
+    assert has_installed_osmand_extension(package_root) is True
 
 
 def test_default_osmand_extension_root_uses_external_runtime_path_for_appimage(

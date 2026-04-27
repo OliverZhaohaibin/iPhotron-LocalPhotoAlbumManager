@@ -13,7 +13,16 @@ pytest.importorskip("PySide6.QtGui", reason="QtGui is required for photo map tes
 pytest.importorskip("PySide6.QtWidgets", reason="QtWidgets is required for photo map tests", exc_type=ImportError)
 
 from PySide6.QtCore import QEvent, QObject, QPoint, QPointF, QSize, Qt, Signal
-from PySide6.QtGui import QHideEvent, QMouseEvent, QPixmap, QResizeEvent, QShowEvent, QWheelEvent
+from PySide6.QtGui import (
+    QHideEvent,
+    QImage,
+    QMouseEvent,
+    QPixmap,
+    QResizeEvent,
+    QShowEvent,
+    QWheelEvent,
+    QWindow,
+)
 from PySide6.QtTest import QSignalSpy
 from PySide6.QtWidgets import QApplication, QWidget
 
@@ -22,7 +31,7 @@ from maps.map_sources import MapBackendMetadata, MapSourceSpec
 from maps.map_widget import map_gl_widget as map_gl_widget_module
 from maps.map_widget import map_widget as map_widget_module
 from maps.map_widget.map_gl_widget import MapGLWidget, MapGLWindowWidget
-from maps.map_widget.native_osmand_widget import NativeOsmAndWidget
+from maps.map_widget.native_osmand_widget import NativeOsmAndWidget, _render_marker_buffer
 
 
 @pytest.fixture
@@ -423,6 +432,124 @@ def test_photo_map_view_renders_markers_inside_gl_widget(
         view.close()
 
 
+def test_marker_callout_background_is_opaque(qapp: QApplication, tmp_path) -> None:
+    del qapp
+
+    asset = photo_map_view_module.GeotaggedAsset(
+        library_relative="album/photo.jpg",
+        album_relative="photo.jpg",
+        absolute_path=tmp_path / "album" / "photo.jpg",
+        album_path=tmp_path / "album",
+        asset_id="asset-1",
+        latitude=10.0,
+        longitude=20.0,
+        is_image=True,
+        is_video=False,
+        still_image_time=None,
+        duration=None,
+        location_name=None,
+        live_photo_group_id=None,
+        live_partner_rel=None,
+    )
+    cluster = photo_map_view_module._MarkerCluster(
+        representative=asset,
+        screen_pos=QPointF(100.0, 100.0),
+    )
+    layer = photo_map_view_module._MarkerLayer()
+    image = QImage(200, 200, QImage.Format.Format_ARGB32_Premultiplied)
+    image.fill(Qt.GlobalColor.black)
+
+    painter = photo_map_view_module.QPainter(image)
+    try:
+        layer.set_clusters([cluster])
+        layer.paint_markers(painter)
+    finally:
+        painter.end()
+
+    sample = image.pixelColor(100, 24)
+    assert sample.alpha() == 255
+    assert sample.red() == 255
+    assert sample.green() == 255
+    assert sample.blue() == 255
+
+
+def test_native_marker_overlay_precomposes_opaque_marker_buffer(
+    qapp: QApplication,
+    tmp_path,
+) -> None:
+    del qapp
+
+    asset = photo_map_view_module.GeotaggedAsset(
+        library_relative="album/photo.jpg",
+        album_relative="photo.jpg",
+        absolute_path=tmp_path / "album" / "photo.jpg",
+        album_path=tmp_path / "album",
+        asset_id="asset-1",
+        latitude=10.0,
+        longitude=20.0,
+        is_image=True,
+        is_video=False,
+        still_image_time=None,
+        duration=None,
+        location_name=None,
+        live_photo_group_id=None,
+        live_partner_rel=None,
+    )
+    cluster = photo_map_view_module._MarkerCluster(
+        representative=asset,
+        screen_pos=QPointF(100.0, 100.0),
+    )
+    layer = photo_map_view_module._MarkerLayer()
+    layer.set_clusters([cluster])
+
+    image = _render_marker_buffer(QSize(200, 200), 1.0, [layer.paint_markers])
+    sample = image.pixelColor(100, 24)
+
+    assert not image.isNull()
+    assert sample.alpha() == 255
+    assert sample.red() == 255
+    assert sample.green() == 255
+    assert sample.blue() == 255
+
+
+def test_photo_map_view_uses_widget_overlay_when_post_render_is_unsupported(
+    qapp: QApplication,
+    monkeypatch,
+    tmp_path,
+) -> None:
+    del qapp
+
+    source = MapSourceSpec(
+        kind="osmand_obf",
+        data_path=tmp_path / "world.obf",
+        resources_root=tmp_path,
+        style_path=tmp_path / "style.xml",
+    )
+
+    class _FakeNativeWithoutPostRender(_FallbackMapWidget):
+        def supports_post_render_painter(self) -> bool:
+            return False
+
+        def add_post_render_painter(self, _callback) -> None:
+            raise AssertionError("post-render painter should not be registered")
+
+    monkeypatch.setattr(
+        photo_map_view_module,
+        "choose_map_widget_backend",
+        lambda map_source, use_opengl: (_FakeNativeWithoutPostRender, source, "osmand_native"),
+    )
+    monkeypatch.setattr(photo_map_view_module, "check_opengl_support", lambda: True)
+    monkeypatch.setattr(photo_map_view_module, "ThumbnailLoader", _DummyThumbnailLoader)
+    monkeypatch.setattr(photo_map_view_module, "MarkerController", _DummyMarkerController)
+
+    view = photo_map_view_module.PhotoMapView(map_source=source)
+    try:
+        assert isinstance(view.map_widget(), _FakeNativeWithoutPostRender)
+        assert view._overlay.parent() is view
+    finally:
+        view.close()
+
+
 def test_choose_map_widget_backend_prefers_native_when_runtime_files_are_available(monkeypatch) -> None:
     monkeypatch.setattr(photo_map_view_module, "has_usable_osmand_native_widget", lambda root: True)
     monkeypatch.setattr(photo_map_view_module, "has_usable_osmand_default", lambda root: False)
@@ -723,6 +850,84 @@ def test_native_osmand_widget_bridges_drag_release_and_wheel_events(qapp: QAppli
         assert "confirmed_gl=true" in diagnostics
         assert "widget=NativeOsmAndWidget" in diagnostics
         assert f"native_dll={dummy_dll.resolve()}" in diagnostics
+    finally:
+        widget.shutdown()
+        widget.close()
+
+
+def test_native_osmand_widget_uses_exported_event_target(qapp: QApplication, monkeypatch, tmp_path) -> None:
+    class _FakeNativeLibraryWithEventTarget(_FakeNativeLibrary):
+        def osmand_widget_get_event_target(self, _pointer) -> int:
+            return 2
+
+    fake_library = _FakeNativeLibraryWithEventTarget()
+    fake_host = QWidget()
+    fake_event_target = QWindow()
+    dummy_dll = tmp_path / "osmand_native_widget.dll"
+    dummy_dll.write_bytes(b"dll")
+    monkeypatch.setenv("QT_QPA_PLATFORM", "cocoa")
+
+    monkeypatch.setattr(
+        "maps.map_widget.native_osmand_widget.resolve_osmand_native_widget_library",
+        lambda root: dummy_dll,
+    )
+    monkeypatch.setattr(
+        "maps.map_widget.native_osmand_widget._load_bridge",
+        lambda path: type("Bridge", (), {"library": fake_library})(),
+    )
+    monkeypatch.setattr("maps.map_widget.native_osmand_widget.shiboken6.getCppPointer", lambda widget: (1,))
+    monkeypatch.setattr(
+        "maps.map_widget.native_osmand_widget.shiboken6.wrapInstance",
+        lambda pointer, cls: fake_event_target if int(pointer) == 2 else fake_host,
+    )
+
+    source = MapSourceSpec(
+        kind="osmand_obf",
+        data_path=tmp_path / "world.obf",
+        resources_root=tmp_path,
+        style_path=tmp_path / "style.xml",
+    )
+    Path(source.data_path).write_bytes(b"obf")
+    Path(source.style_path).write_text("<renderingStyle />", encoding="utf-8")
+
+    widget = NativeOsmAndWidget(map_source=source)
+    panned_spy = QSignalSpy(widget.panned)
+    pan_finished_spy = QSignalSpy(widget.panFinished)
+
+    try:
+        assert widget.event_target() is fake_event_target
+        assert widget.supports_post_render_painter()
+
+        press_event = QMouseEvent(
+            QEvent.Type.MouseButtonPress,
+            QPointF(20.0, 20.0),
+            Qt.MouseButton.LeftButton,
+            Qt.MouseButton.LeftButton,
+            Qt.KeyboardModifier.NoModifier,
+        )
+        QApplication.sendEvent(fake_event_target, press_event)
+
+        move_event = QMouseEvent(
+            QEvent.Type.MouseMove,
+            QPointF(32.0, 25.0),
+            Qt.MouseButton.NoButton,
+            Qt.MouseButton.LeftButton,
+            Qt.KeyboardModifier.NoModifier,
+        )
+        QApplication.sendEvent(fake_event_target, move_event)
+
+        release_event = QMouseEvent(
+            QEvent.Type.MouseButtonRelease,
+            QPointF(32.0, 25.0),
+            Qt.MouseButton.LeftButton,
+            Qt.MouseButton.NoButton,
+            Qt.KeyboardModifier.NoModifier,
+        )
+        QApplication.sendEvent(fake_event_target, release_event)
+        qapp.processEvents()
+
+        assert panned_spy.count() >= 1
+        assert pan_finished_spy.count() == 1
     finally:
         widget.shutdown()
         widget.close()

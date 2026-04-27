@@ -336,7 +336,7 @@ class _MarkerLayer(QWidget):
 
         painter.save()
         painter.setPen(QPen(QColor(0, 0, 0, 80), 2))
-        painter.setBrush(QColor(255, 255, 255, 230))
+        painter.setBrush(QColor(255, 255, 255, 255))
         painter.drawPath(path)
         painter.restore()
 
@@ -508,7 +508,12 @@ class PhotoMapView(QWidget):
 
         self._marker_paint_callback = None
         add_post_render_painter = getattr(self._map_widget, "add_post_render_painter", None)
-        if callable(add_post_render_painter):
+        supports_post_render_painter = getattr(
+            self._map_widget,
+            "supports_post_render_painter",
+            lambda: True,
+        )
+        if callable(add_post_render_painter) and supports_post_render_painter():
             self._overlay = _GLMarkerLayer(self._map_widget)
             self._marker_paint_callback = self._overlay.paint_markers
             add_post_render_painter(self._marker_paint_callback)

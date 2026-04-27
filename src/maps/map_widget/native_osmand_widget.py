@@ -10,12 +10,24 @@ import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, Callable, Sequence
 
 import PySide6
 import shiboken6
-from PySide6.QtCore import QEvent, QObject, QPointF, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QCloseEvent, QHideEvent, QPalette, QShowEvent
+from PySide6.QtCore import QEvent, QObject, QPointF, QSize, Qt, QTimer, Signal
+from PySide6.QtGui import (
+    QColor,
+    QCloseEvent,
+    QHideEvent,
+    QImage,
+    QOpenGLContext,
+    QPainter,
+    QPalette,
+    QShowEvent,
+    QSurfaceFormat,
+    QWindow,
+)
+from PySide6.QtOpenGL import QOpenGLWindow
 from PySide6.QtWidgets import QSizePolicy, QVBoxLayout, QWidget
 
 from maps.map_sources import (
@@ -32,11 +44,127 @@ _PRELOADED_QT_LIBRARIES: list[ctypes.CDLL] = []
 _NATIVE_WIDGET_RUNTIME_PROBE: dict[Path, tuple[bool, str | None]] = {}
 _LOGGER = logging.getLogger(__name__)
 _MAP_OPAQUE_BACKGROUND = "#88a8c2"
+_GL_COLOR_BUFFER_BIT = 0x00004000
+_GL_DEPTH_BUFFER_BIT = 0x00000100
+_GL_SCISSOR_TEST = 0x0C11
 
 
 @dataclass(frozen=True)
 class _BridgeAPI:
     library: ctypes.CDLL
+
+
+def _render_marker_buffer(
+    size: QSize,
+    device_pixel_ratio: float,
+    painters: Sequence[Callable[[QPainter], None]],
+) -> QImage:
+    device_pixel_ratio = max(float(device_pixel_ratio), 1.0)
+    width = max(1, math.ceil(float(size.width()) * device_pixel_ratio))
+    height = max(1, math.ceil(float(size.height()) * device_pixel_ratio))
+    image = QImage(width, height, QImage.Format.Format_ARGB32_Premultiplied)
+    image.setDevicePixelRatio(device_pixel_ratio)
+    image.fill(Qt.GlobalColor.transparent)
+
+    painter = QPainter()
+    if not painter.begin(image):
+        return QImage()
+    try:
+        for callback in list(painters):
+            try:
+                callback(painter)
+            except Exception:
+                _LOGGER.warning("Native OsmAnd marker overlay painter failed", exc_info=True)
+    finally:
+        painter.end()
+    return image
+
+
+class _NativeMarkerOverlayWindow(QOpenGLWindow):
+    """Transparent native GL window used to paint markers above a native map window."""
+
+    def __init__(self) -> None:
+        super().__init__(QOpenGLWindow.UpdateBehavior.NoPartialUpdate)
+        surface_format = QSurfaceFormat()
+        surface_format.setRenderableType(QSurfaceFormat.RenderableType.OpenGL)
+        surface_format.setAlphaBufferSize(8)
+        surface_format.setDepthBufferSize(0)
+        surface_format.setStencilBufferSize(0)
+        surface_format.setSamples(0)
+        self.setFormat(surface_format)
+        self.setTitle("NativeOsmAndMarkerOverlayWindow")
+        self.setObjectName("NativeOsmAndMarkerOverlayWindow")
+        self.setMinimumSize(QSize(1, 1))
+        try:
+            self.setFlag(Qt.WindowType.WindowTransparentForInput, True)
+        except Exception:
+            pass
+        self._painters: list[Callable[[QPainter], None]] = []
+
+    def add_painter(self, callback: Callable[[QPainter], None]) -> None:
+        if callback not in self._painters:
+            self._painters.append(callback)
+            self.update()
+
+    def remove_painter(self, callback: Callable[[QPainter], None]) -> None:
+        self._painters = [existing for existing in self._painters if existing != callback]
+        self.update()
+
+    def paintGL(self) -> None:  # type: ignore[override]
+        self._clear_transparent_backbuffer()
+        if not self._painters:
+            return
+
+        marker_buffer = self._render_marker_buffer()
+        if marker_buffer.isNull():
+            return
+
+        painter = QPainter()
+        if not painter.begin(self):
+            return
+        try:
+            painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Source)
+            painter.drawImage(QPointF(0.0, 0.0), marker_buffer)
+        finally:
+            painter.end()
+
+    def exposeEvent(self, event) -> None:  # type: ignore[override]
+        super().exposeEvent(event)
+        if self.isExposed():
+            self.update()
+
+    def _clear_transparent_backbuffer(self) -> None:
+        context = QOpenGLContext.currentContext()
+        if context is None:
+            return
+        try:
+            functions = context.functions()
+        except Exception:
+            return
+        if functions is None:
+            return
+
+        had_scissor = False
+        try:
+            if hasattr(functions, "glIsEnabled"):
+                had_scissor = bool(functions.glIsEnabled(_GL_SCISSOR_TEST))
+            if had_scissor and hasattr(functions, "glDisable"):
+                functions.glDisable(_GL_SCISSOR_TEST)
+            if hasattr(functions, "glColorMask"):
+                functions.glColorMask(True, True, True, True)
+            functions.glClearColor(0.0, 0.0, 0.0, 0.0)
+            functions.glClear(_GL_COLOR_BUFFER_BIT | _GL_DEPTH_BUFFER_BIT)
+        except Exception:
+            return
+        finally:
+            if had_scissor and hasattr(functions, "glEnable"):
+                try:
+                    functions.glEnable(_GL_SCISSOR_TEST)
+                except Exception:
+                    pass
+
+    def _render_marker_buffer(self) -> QImage:
+        return _render_marker_buffer(self.size(), float(self.devicePixelRatio()), self._painters)
 
 
 def _configure_opaque_widget_background(widget: QWidget) -> None:
@@ -146,6 +274,10 @@ def _load_bridge(library_path: Path) -> _BridgeAPI:
         ctypes.c_int,
     ]
     library.osmand_create_map_widget.restype = ctypes.c_void_p
+    get_event_target = getattr(library, "osmand_widget_get_event_target", None)
+    if get_event_target is not None:
+        get_event_target.argtypes = [ctypes.c_void_p]
+        get_event_target.restype = ctypes.c_void_p
 
     library.osmand_widget_get_zoom.argtypes = [ctypes.c_void_p]
     library.osmand_widget_get_zoom.restype = ctypes.c_double
@@ -267,6 +399,14 @@ class NativeOsmAndWidget(QWidget):
         self._native_pointer = ctypes.c_void_p(native_pointer)
         self._native_widget = shiboken6.wrapInstance(int(native_pointer), QWidget)
         self._native_widget.setObjectName("NativeOsmAndMapWidget")
+        self._native_event_target = self._native_widget
+        get_event_target = getattr(self._bridge.library, "osmand_widget_get_event_target", None)
+        if get_event_target is not None:
+            event_target_pointer = get_event_target(self._native_pointer)
+            if event_target_pointer and int(event_target_pointer) != int(native_pointer):
+                self._native_event_target = shiboken6.wrapInstance(int(event_target_pointer), QWindow)
+                if not self._native_event_target.objectName():
+                    self._native_event_target.setObjectName("NativeOsmAndMapEventTarget")
         self._native_widget.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent, True)
         self._native_widget.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, False)
         self._native_widget.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, False)
@@ -285,9 +425,11 @@ class NativeOsmAndWidget(QWidget):
         self.setFocusProxy(self._native_widget)
         self.setMouseTracking(True)
         self.setMinimumSize(640, 480)
-        self._native_widget.installEventFilter(self)
+        self._native_event_target.installEventFilter(self)
         self._bridge_dragging = False
         self._bridge_last_mouse_pos = QPointF()
+        self._overlay_window: _NativeMarkerOverlayWindow | None = None
+        self._overlay_container: QWidget | None = None
 
         min_zoom = float(self._bridge.library.osmand_widget_get_min_zoom(self._native_pointer)) or 2.0
         max_zoom = float(self._bridge.library.osmand_widget_get_max_zoom(self._native_pointer)) or 19.0
@@ -371,7 +513,7 @@ class NativeOsmAndWidget(QWidget):
         self._bridge_dragging = False
         if hasattr(self, "_native_widget") and self._native_widget is not None:
             try:
-                self._native_widget.removeEventFilter(self)
+                self._native_event_target.removeEventFilter(self)
             except RuntimeError:
                 pass
             self._native_widget.setUpdatesEnabled(False)
@@ -398,7 +540,27 @@ class NativeOsmAndWidget(QWidget):
         return None
 
     def event_target(self) -> QObject:
-        return self._native_widget
+        return self._native_event_target
+
+    def supports_post_render_painter(self) -> bool:
+        if os.environ.get("QT_QPA_PLATFORM", "").strip().lower() == "offscreen":
+            return False
+        return isinstance(self._native_event_target, QWindow)
+
+    def add_post_render_painter(self, callback: Callable[[QPainter], None]) -> None:
+        if not self.supports_post_render_painter():
+            return
+        overlay = self._ensure_marker_overlay()
+        overlay.add_painter(callback)
+
+    def remove_post_render_painter(self, callback: Callable[[QPainter], None]) -> None:
+        if self._overlay_window is not None:
+            self._overlay_window.remove_painter(callback)
+
+    def request_full_update(self) -> None:
+        if self._overlay_window is not None:
+            self._overlay_window.update()
+        self._native_widget.update()
 
     def prefers_exact_screen_projection(self) -> bool:
         return True
@@ -444,7 +606,7 @@ class NativeOsmAndWidget(QWidget):
     def eventFilter(self, watched: QObject, event: QEvent) -> bool:  # type: ignore[override]
         if self._is_shutdown():
             return super().eventFilter(watched, event)
-        if watched is self._native_widget:
+        if watched is self._native_event_target or watched is self._native_widget:
             event_type = event.type()
             if event_type == QEvent.Type.MouseButtonPress:
                 mouse_event = event
@@ -477,6 +639,7 @@ class NativeOsmAndWidget(QWidget):
         if self._is_shutdown():
             return
         self._sync_native_widget_geometry()
+        self._sync_marker_overlay_geometry()
         self._schedule_deferred_view_sync()
 
     def showEvent(self, event: QShowEvent) -> None:  # type: ignore[override]
@@ -488,6 +651,7 @@ class NativeOsmAndWidget(QWidget):
         if not self._state_timer.isActive():
             self._state_timer.start()
         self._sync_native_widget_geometry()
+        self._sync_marker_overlay_geometry()
         self._schedule_deferred_view_sync()
 
     def hideEvent(self, event: QHideEvent) -> None:  # type: ignore[override]
@@ -497,6 +661,8 @@ class NativeOsmAndWidget(QWidget):
             if self._deferred_view_sync_timer.isActive():
                 self._deferred_view_sync_timer.stop()
             self._native_widget.setUpdatesEnabled(False)
+            if self._overlay_container is not None:
+                self._overlay_container.hide()
         super().hideEvent(event)
 
     def closeEvent(self, event: QCloseEvent) -> None:  # type: ignore[override]
@@ -537,6 +703,32 @@ class NativeOsmAndWidget(QWidget):
             self._native_widget.setMinimumSize(0, 0)
         if self._native_widget.geometry() != target_rect:
             self._native_widget.setGeometry(target_rect)
+
+    def _ensure_marker_overlay(self) -> _NativeMarkerOverlayWindow:
+        if self._overlay_window is None:
+            self._overlay_window = _NativeMarkerOverlayWindow()
+            self._overlay_container = QWidget.createWindowContainer(self._overlay_window, self)
+            self._overlay_container.setObjectName("NativeOsmAndMarkerOverlayContainer")
+            self._overlay_container.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+            self._overlay_container.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+            self._overlay_container.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, True)
+            self._overlay_container.setAutoFillBackground(False)
+            self._overlay_container.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            self._sync_marker_overlay_geometry()
+        return self._overlay_window
+
+    def _sync_marker_overlay_geometry(self) -> None:
+        if self._overlay_container is None:
+            return
+        target_rect = self.contentsRect()
+        if target_rect.isEmpty():
+            return
+        if self._overlay_container.geometry() != target_rect:
+            self._overlay_container.setGeometry(target_rect)
+        self._overlay_container.show()
+        self._overlay_container.raise_()
+        if self._overlay_window is not None:
+            self._overlay_window.update()
 
     def _read_view_state(self) -> tuple[float, float, float]:
         if self._is_shutdown():

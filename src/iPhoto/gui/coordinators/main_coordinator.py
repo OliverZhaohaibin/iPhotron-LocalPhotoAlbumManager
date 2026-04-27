@@ -23,6 +23,7 @@ from PySide6.QtGui import QAction
 from iPhoto import app as backend
 from iPhoto.application.contracts.runtime_entry_contract import RuntimeEntryContract
 from iPhoto.application.services.asset_service import AssetService
+from iPhoto.config import RECENTLY_DELETED_DIR_NAME
 from iPhoto.di.container import DependencyContainer
 from iPhoto.events.bus import EventBus
 from iPhoto.gui.coordinators.edit_coordinator import EditCoordinator
@@ -519,6 +520,7 @@ class MainCoordinator(QObject):
         move_service.moveStarted.connect(self._status_bar.handle_move_started)
         move_service.moveProgress.connect(self._status_bar.handle_move_progress)
         move_service.moveFinished.connect(self._status_bar.handle_move_finished)
+        move_service.moveFinished.connect(self._handle_move_finished_toast)
 
         # Error Reporting
         self._facade.errorRaised.connect(self._dialog.show_error)
@@ -582,6 +584,48 @@ class MainCoordinator(QObject):
                 group_redirects=dict(getattr(event, "group_redirects", {}) or {}),
             )
         self._window.ui.sidebar.refresh_tree_model()
+
+    def _handle_move_finished_toast(
+        self,
+        source: Path,
+        destination: Path,
+        success: bool,
+        message: str,
+    ) -> None:
+        """Show the lightweight completion toast for successful ordinary moves."""
+
+        del message
+        if not success or self._is_recently_deleted_move(source, destination):
+            return
+
+        self._window.ui.notification_toast.show_toast("Moved")
+
+    def _is_recently_deleted_move(self, source: Path, destination: Path) -> bool:
+        """Return whether a move completion belongs to delete or restore flows."""
+
+        trash_root = self._context.library.deleted_directory()
+        if trash_root is not None:
+            return self._paths_equal(source, trash_root) or self._paths_equal(
+                destination,
+                trash_root,
+            )
+        return (
+            source.name == RECENTLY_DELETED_DIR_NAME
+            or destination.name == RECENTLY_DELETED_DIR_NAME
+        )
+
+    def _paths_equal(self, first: Path, second: Path) -> bool:
+        """Return ``True`` when *first* and *second* refer to the same location."""
+
+        try:
+            first_resolved = first.resolve()
+        except OSError:
+            first_resolved = first
+        try:
+            second_resolved = second.resolve()
+        except OSError:
+            second_resolved = second
+        return first_resolved == second_resolved
 
     def _handle_media_load_failed(self, path: Path, message: str) -> None:
         path_key = str(path)

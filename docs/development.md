@@ -144,7 +144,8 @@ following layout:
 | `src/maps/tiles/extension/poi/` | OsmAnd POI resources |
 | `src/maps/tiles/extension/rendering_styles/` | OsmAnd style XML files; the default is `snowmobile.render.xml` |
 | `src/maps/tiles/extension/routing/` | OsmAnd routing resources |
-| `src/maps/tiles/extension/bin/` | Platform-specific helper/native widget binaries and dependent shared libraries (`.exe`/`.dll` on Windows, ELF binaries/`.so` on Linux) |
+| `src/maps/tiles/extension/search/geonames.sqlite3` | Offline place search database used by Assign Location |
+| `src/maps/tiles/extension/bin/` | Platform-specific helper/native widget binaries and dependent libraries (`.exe`/`.dll` on Windows, ELF binaries/`.so` on Linux, Mach-O binaries/`.dylib`/frameworks on macOS) |
 
 This directory is the contract used by:
 
@@ -154,7 +155,7 @@ This directory is the contract used by:
 - `scripts/build_nuitka_fast.sh` and Linux standalone packaging
 - the Windows installer's optional map-extension package
 
-### Linux runtime notes
+### Platform runtime notes
 
 On Linux, iPhotron can use both the helper-backed OBF renderer and the native
 OsmAnd widget. The native widget currently expects Qt's XCB desktop OpenGL path,
@@ -169,6 +170,18 @@ That means native maps on Linux currently run best on X11 or XWayland. If a
 sibling directory next to it, iPhotron prefers its
 `tools/osmand_render_helper_native/dist-linux/` widget build during development.
 
+On macOS, the legacy Python/OpenGL map path deliberately uses
+`QOpenGLWindow + QWidget.createWindowContainer()` instead of `QOpenGLWidget`.
+That keeps map tiles opaque inside the app's transparent, frameless main
+window. The native OsmAnd widget can also be discovered from the extension
+`bin/` directory or from a sibling SDK checkout when a `dist-macosx` runtime is
+available.
+
+Media preview widgets use QRhi backend selection rather than a fixed raw-GL
+path. `IPHOTO_RHI_BACKEND=auto` selects Metal on macOS when Qt exposes it, and
+OpenGL elsewhere. Use `IPHOTO_RHI_BACKEND=opengl` to force the legacy OpenGL
+path for diagnostics.
+
 ### Upstream sub-project: `PySide6-OsmAnd-SDK`
 
 The source of truth for building the map extension is the standalone upstream
@@ -180,7 +193,8 @@ That repository exists specifically to build and validate the OsmAnd runtime
 outside of the main iPhotron application. It contains:
 
 - vendored `OsmAnd-core`, `OsmAnd-core-legacy`, and `OsmAnd-resources`
-- Windows and Linux build scripts/output directories for helper and native widget runtimes
+- Windows, Linux, and macOS build scripts/output directories for helper and
+  native widget runtimes
 - the PySide6/OsmAnd preview app used to validate the runtime independently
 - a stable place to iterate on Qt6/PySide6 integration without touching the
   entire iPhotron application
@@ -193,7 +207,7 @@ In practice:
 
 ### Recommended build strategy
 
-For Windows and Linux packaging, the recommended path is:
+For Windows, Linux, and macOS packaging, the recommended path is:
 
 1. build the runtime in `PySide6-OsmAnd-SDK`
 2. copy the resulting map data, OsmAnd resources, and native binaries into
@@ -234,6 +248,13 @@ For Linux, build the native helper/widget runtime into `dist-linux`:
 bash tools/osmand_render_helper_native/build_linux.sh
 ```
 
+For macOS, build the helper/widget runtime into `dist-macosx` from the SDK
+checkout:
+
+```bash
+QT_ROOT=/opt/homebrew/opt/qt bash tools/osmand_render_helper_native/build_macos.sh
+```
+
 Useful alternatives inside `PySide6-OsmAnd-SDK`:
 
 - `build_helper.ps1`
@@ -245,6 +266,8 @@ Useful alternatives inside `PySide6-OsmAnd-SDK`:
   DLL and the `dist-msvc` runtime consumed most directly by the packaging flow.
 - `build_linux.sh`
   Produces the Linux helper and `.so` widget runtime under `dist-linux`.
+- `build_macos.sh`
+  Produces the macOS helper and `.dylib` widget runtime under `dist-macosx`.
 
 The main outputs you need are:
 
@@ -259,6 +282,9 @@ The main outputs you need are:
 | `tools/osmand_render_helper_native/dist-linux/osmand_native_widget.so` | Linux native Qt/OpenGL OsmAnd widget |
 | `tools/osmand_render_helper_native/dist-linux/libOsmAndCore_shared.so` | Linux native OsmAnd core runtime |
 | `tools/osmand_render_helper_native/dist-linux/libOsmAndCoreTools_shared.so` | Linux native OsmAnd tools runtime |
+| `tools/osmand_render_helper_native/dist-macosx/osmand_render_helper` | macOS helper-backed Python OBF rendering |
+| `tools/osmand_render_helper_native/dist-macosx/osmand_native_widget.dylib` | macOS native Qt/OpenGL OsmAnd widget |
+| `plugin/data/geonames.sqlite3` | Offline search database for Assign Location |
 | `vendor\osmand\resources\...` | Rendering styles and supporting OsmAnd resources |
 | `src\maps\tiles\World_basemap_2.obf` | Default demo OBF dataset used by the extension |
 
@@ -271,14 +297,17 @@ Example PowerShell sync:
 
 ```powershell
 $sdkRoot = "D:\python_code\iPhoto\PySide6-OsmAnd-SDK"
-$repoRoot = "D:\python_code\iPhoto\iPhotos"
+$repoRoot = "D:\python_code\iPhoto\iPhotron-LocalPhotoAlbumManager"
 $extensionRoot = Join-Path $repoRoot "src\maps\tiles\extension"
 $binRoot = Join-Path $extensionRoot "bin"
+$searchRoot = Join-Path $extensionRoot "search"
 
-New-Item -ItemType Directory -Force -Path $extensionRoot, $binRoot | Out-Null
+New-Item -ItemType Directory -Force -Path $extensionRoot, $binRoot, $searchRoot | Out-Null
 
 Copy-Item -LiteralPath (Join-Path $sdkRoot "src\maps\tiles\World_basemap_2.obf") `
   -Destination $extensionRoot -Force
+Copy-Item -LiteralPath (Join-Path $sdkRoot "plugin\data\geonames.sqlite3") `
+  -Destination $searchRoot -Force
 
 foreach ($resourceDir in "misc", "poi", "rendering_styles", "routing") {
   Copy-Item -LiteralPath (Join-Path $sdkRoot "vendor\osmand\resources\$resourceDir") `
@@ -296,9 +325,11 @@ sdk_root="$HOME/python-code/PySide6-OsmAnd-SDK"
 repo_root="$HOME/python-code/iPhotron-LocalPhotoAlbumManager"
 extension_root="$repo_root/src/maps/tiles/extension"
 bin_root="$extension_root/bin"
+search_root="$extension_root/search"
 
-mkdir -p "$extension_root" "$bin_root"
+mkdir -p "$extension_root" "$bin_root" "$search_root"
 cp -f "$sdk_root/src/maps/tiles/World_basemap_2.obf" "$extension_root/"
+cp -f "$sdk_root/plugin/data/geonames.sqlite3" "$search_root/"
 for resource_dir in misc poi rendering_styles routing; do
   rm -rf "$extension_root/$resource_dir"
   cp -a "$sdk_root/vendor/osmand/resources/$resource_dir" "$extension_root/"
@@ -306,14 +337,28 @@ done
 cp -a "$sdk_root/tools/osmand_render_helper_native/dist-linux/." "$bin_root/"
 ```
 
+Recommended macOS sync:
+
+```bash
+python scripts/sync_macos_map_extension.py \
+  --sdk-root "$HOME/python-code/PySide6-OsmAnd-SDK"
+```
+
+The macOS sync script copies `World_basemap_2.obf`, `search/geonames.sqlite3`,
+the OsmAnd resource directories, `osmand_render_helper`,
+`osmand_native_widget.dylib`, recursively resolved non-system Mach-O
+dependencies, then patches `install_name`/rpaths and ad-hoc signs copied
+binaries.
+
 If you are intentionally using the MinGW path instead of MSVC, replace
 `dist-msvc` with `dist`. The helper-backed Python renderer only requires the
 helper executable plus its dependent DLLs, but the native widget path also
 requires a usable widget DLL in the same `bin/` directory.
 
-On Linux and macOS, native widget discovery prefers the sibling
-`PySide6-OsmAnd-SDK` build when it exists, so keep that checkout in sync with
-the runtime you actually want to exercise.
+On Linux, native widget discovery prefers the sibling `PySide6-OsmAnd-SDK`
+build when it exists. On macOS, the local extension is checked first and the
+SDK `dist-macosx` output is also searched for development convenience. Keep the
+checkout in sync with the runtime you actually want to exercise.
 
 ### Step 4: Verify the runtime from the iPhotron checkout
 
@@ -321,11 +366,12 @@ After syncing the extension, return to the iPhotron repository and verify the
 runtime before packaging:
 
 ```powershell
-cd D:\python_code\iPhoto\iPhotos
+cd D:\python_code\iPhoto\iPhotron-LocalPhotoAlbumManager
 python -m pip install -e ".[dev]"
 python src\maps\main.py --backend auto
 python src\maps\main.py --backend python
 python src\maps\main.py --backend native
+python src\maps\main.py --backend legacy
 ```
 
 Recommended additional checks:
@@ -340,29 +386,33 @@ What to look for:
 - `--backend auto` chooses the native widget when it is healthy
 - `--backend python` succeeds with the helper-backed OBF renderer
 - `--backend native` loads the native widget library without missing runtime errors
+- `--backend legacy` still renders the bundled legacy vector tiles
 - the GUI Location view starts without falling back unexpectedly
 - on Linux, the native path starts under X11/XWayland rather than failing with missing GLX/XCB support
+- on macOS, the legacy GL map reports a `MapGLWindowWidget`/`MapGLWindow`
+  diagnostic and does not show transparent tile areas
 
 ### Development-time overrides
 
-For experimentation you can point iPhotron directly at a side-project checkout
-without copying files first:
+For experimentation you can override the managed extension root or individual
+runtime binaries:
 
 | Environment variable | Purpose |
 |----------------------|---------|
-| `IPHOTO_OSMAND_OBF_PATH` | Override the `.obf` file |
-| `IPHOTO_OSMAND_RESOURCES_ROOT` | Override the OsmAnd resources root |
-| `IPHOTO_OSMAND_STYLE_PATH` | Override the active style XML |
+| `IPHOTO_OSMAND_EXTENSION_ROOT` | Override the managed extension root. The directory must already use the `tiles/extension` layout described above |
 | `IPHOTO_OSMAND_RENDER_HELPER` | Override the helper executable/command |
 | `IPHOTO_OSMAND_NATIVE_WIDGET_LIBRARY` | Override the native widget library path |
 | `IPHOTO_PREFER_OSMAND_NATIVE_WIDGET` | Set to `0` to force the Python OBF path in auto mode |
+| `IPHOTO_DISABLE_OPENGL` | Set to `1` to force CPU/fallback rendering where supported |
+| `IPHOTO_MAP_GL_DEBUG` | Set to `1` to print one-shot map GL surface diagnostics |
+| `IPHOTO_OSMAND_GL_PARTIAL_UPDATE` | Set to `1` to allow partial updates on platforms that default to full GL repaint |
+| `IPHOTO_RHI_BACKEND` | `auto`, `metal`, or `opengl` for media preview QRhi backend selection |
+| `IPHOTO_ALLOW_PACKAGED_LINUX_WAYLAND` | Set to `1` only when deliberately testing packaged Linux maps outside the default XCB/GLX path |
 
 Example:
 
 ```powershell
-$env:IPHOTO_OSMAND_OBF_PATH = "D:\python_code\iPhoto\PySide6-OsmAnd-SDK\src\maps\tiles\World_basemap_2.obf"
-$env:IPHOTO_OSMAND_RESOURCES_ROOT = "D:\python_code\iPhoto\PySide6-OsmAnd-SDK\vendor\osmand\resources"
-$env:IPHOTO_OSMAND_STYLE_PATH = "D:\python_code\iPhoto\PySide6-OsmAnd-SDK\vendor\osmand\resources\rendering_styles\default.render.xml"
+$env:IPHOTO_OSMAND_EXTENSION_ROOT = "D:\tmp\iphoto-extension\extension"
 $env:IPHOTO_OSMAND_RENDER_HELPER = "D:\python_code\iPhoto\PySide6-OsmAnd-SDK\tools\osmand_render_helper_native\dist-msvc\osmand_render_helper.exe"
 $env:IPHOTO_OSMAND_NATIVE_WIDGET_LIBRARY = "D:\python_code\iPhoto\PySide6-OsmAnd-SDK\tools\osmand_render_helper_native\dist-msvc\osmand_native_widget.dll"
 iphoto-gui
@@ -371,11 +421,18 @@ iphoto-gui
 Linux example:
 
 ```bash
-export IPHOTO_OSMAND_OBF_PATH="$HOME/python-code/PySide6-OsmAnd-SDK/src/maps/tiles/World_basemap_2.obf"
-export IPHOTO_OSMAND_RESOURCES_ROOT="$HOME/python-code/PySide6-OsmAnd-SDK/vendor/osmand/resources"
-export IPHOTO_OSMAND_STYLE_PATH="$HOME/python-code/PySide6-OsmAnd-SDK/vendor/osmand/resources/rendering_styles/default.render.xml"
+export IPHOTO_OSMAND_EXTENSION_ROOT="$HOME/tmp/iphoto-extension/extension"
 export IPHOTO_OSMAND_RENDER_HELPER="$HOME/python-code/PySide6-OsmAnd-SDK/tools/osmand_render_helper_native/dist-linux/osmand_render_helper"
 export IPHOTO_OSMAND_NATIVE_WIDGET_LIBRARY="$HOME/python-code/PySide6-OsmAnd-SDK/tools/osmand_render_helper_native/dist-linux/osmand_native_widget.so"
+iphoto-gui
+```
+
+macOS example:
+
+```bash
+export IPHOTO_OSMAND_EXTENSION_ROOT="$HOME/tmp/iphoto-extension/extension"
+export IPHOTO_OSMAND_RENDER_HELPER="$HOME/python-code/PySide6-OsmAnd-SDK/tools/osmand_render_helper_native/dist-macosx/osmand_render_helper"
+export IPHOTO_OSMAND_NATIVE_WIDGET_LIBRARY="$HOME/python-code/PySide6-OsmAnd-SDK/tools/osmand_render_helper_native/dist-macosx/osmand_native_widget.dylib"
 iphoto-gui
 ```
 
@@ -646,6 +703,11 @@ It also includes `src/maps/tiles`, so Linux standalone builds keep the bundled
 OBF/resources layout intact as long as `src/maps/tiles/extension/` is staged
 correctly before packaging.
 
+Any manual Nuitka profile must include the QRhi shader assets next to the media
+widgets. The current Windows script includes `image_viewer_rhi.*`,
+`image_viewer_overlay.*`, and `video_renderer.*` source/QSB files explicitly so
+macOS/Metal and OpenGL QRhi previews share the same packaged shader set.
+
 For Windows release work that includes the native maps extension, prefer:
 
 ```powershell
@@ -655,6 +717,17 @@ powershell -ExecutionPolicy Bypass -File scripts\build_nuitka_windows.ps1 -Outpu
 That script stages `src/maps/tiles/extension/bin` from the native runtime before
 invoking Nuitka, so it is the recommended packaging entry point whenever the
 OsmAnd helper/native widget runtime is part of the build.
+
+For macOS packaging, run the SDK build and sync script first:
+
+```bash
+QT_ROOT=/opt/homebrew/opt/qt bash ../PySide6-OsmAnd-SDK/tools/osmand_render_helper_native/build_macos.sh
+python scripts/sync_macos_map_extension.py --sdk-root ../PySide6-OsmAnd-SDK
+```
+
+Then use the same AOT/Nuitka discipline: bundle `src/maps/tiles`, include the
+QRhi `.qsb` files, and verify the packaged app opens both media previews and
+the Location view from the frozen runtime.
 
 See [docs/misc/BUILD_EXE.md](misc/BUILD_EXE.md) for detailed troubleshooting and manual flags.
 
@@ -700,6 +773,8 @@ iphoto-gui
 | `FFmpeg not found` | Ensure `ffmpeg` and `ffprobe` are in your `PATH` |
 | OpenGL errors | Update GPU drivers; ensure OpenGL 3.3+ support |
 | `_jit_compiled` module not found | Run AOT compilation step (see Build section) |
+| macOS map tile area is transparent | Verify the active backend is `MapGLWindowWidget`/`MapGLWindow`, keep `IPHOTO_MAP_GL_DEBUG=1` diagnostics, and avoid forcing the legacy `QOpenGLWidget` map path |
+| Packaged media preview cannot load QRhi shaders | Ensure `image_viewer_rhi.*`, `image_viewer_overlay.*`, and `video_renderer.*` `.qsb` files are included in the Nuitka data files |
 
 ---
 

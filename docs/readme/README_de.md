@@ -1,11 +1,11 @@
 # 📸 iPhotron
-> Bringen Sie die *Fotos*-Erfahrung von macOS auf Windows — ordnerbasierte, nicht-destruktive Fotoverwaltung mit Live Photo, Karten und intelligenten Alben.
+> Ein von macOS *Fotos* inspirierter, ordnerbasierter Foto-Manager für Windows, macOS und Linux mit Live Photo, Karten und intelligenten Alben.
 
 ![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey)
-![Language](https://img.shields.io/badge/language-Python%203.10%2B-blue)
+![Language](https://img.shields.io/badge/language-Python%203.12%2B-blue)
 ![Framework](https://img.shields.io/badge/framework-PySide6%20(Qt6)-orange)
 ![License](https://img.shields.io/badge/license-MIT-green)
-[![GitHub Repo](https://img.shields.io/badge/github-iPhotos-181717?logo=github)](https://github.com/OliverZhaohaibin/iPhotos-LocalPhotoAlbumManager)
+[![GitHub Repo](https://img.shields.io/badge/github-iPhotron-181717?logo=github)](https://github.com/OliverZhaohaibin/iPhotron-LocalPhotoAlbumManager)
 
 **Sprachen / Languages:**  
 [![English](https://img.shields.io/badge/English-Click-blue?style=flat)](../../README.md) | [![中文简体](https://img.shields.io/badge/中文简体-点击-red?style=flat)](README_zh-CN.md) | [![Deutsch](https://img.shields.io/badge/Deutsch-Klick-yellow?style=flat)](README_de.md)
@@ -89,7 +89,8 @@ iphoto-gui /fotos/LondonReise
 
 **iPhotron** ist ein **ordnerbasierter Foto-Manager**, inspiriert von macOS *Fotos*.  
 Es organisiert Ihre Medien mit leichtgewichtigen JSON-Manifesten und Cache-Dateien —  
-bietet umfangreiche Album-Funktionalität und **hält alle Originaldateien intakt**.
+bietet umfangreiche Album-Funktionalität und hält Bearbeitungen von den
+Original-Mediendateien getrennt.
 
 Wichtige Highlights:
 - 🗂 Ordnerbasiertes Design — jeder Ordner *ist* ein Album, kein Import erforderlich.
@@ -112,18 +113,22 @@ und von plattformspezifischen Installationsartefakten verwendet.
 
 Die Extension enthält derzeit:
 - Offline-Kartendaten in `World_basemap_2.obf`
-- OsmAnd-Ressourcen unter `misc/`, `poi/`, `rendering_styles/` und `routing/`
+- OsmAnd-Ressourcen unter `misc/`, `poi/`, `rendering_styles/`, `routing/`
+  und weiteren Laufzeit-Ressourcenverzeichnissen
+- Offline-Suchdaten unter `search/geonames.sqlite3`
 - plattformspezifische native Binärdateien unter `bin/`
   - Windows: `osmand_render_helper.exe`, `osmand_native_widget.dll`,
     `OsmAndCore_shared.dll`, `OsmAndCoreTools_shared.dll` und die benötigten Qt-DLLs
   - Linux: `osmand_render_helper`, `osmand_native_widget.so`,
     `libOsmAndCore_shared.so` und `libOsmAndCoreTools_shared.so`
+  - macOS: `osmand_render_helper`, `osmand_native_widget.dylib` und kopierte
+    nicht-systemeigene Mach-O-Abhängigkeiten
 
-Hinweise zur Linux-Kartenlaufzeit:
-- Unter Linux kann iPhotron sowohl den helper-basierten OBF-Renderer als auch das native OsmAnd-Widget verwenden, sobald die Shared Libraries vorhanden sind.
-- Wenn neben diesem Repository ein `PySide6-OsmAnd-SDK/`-Checkout existiert, wird in der Linux-Entwicklung bevorzugt dessen Widget-Build aus `tools/osmand_render_helper_native/dist-linux/` verwendet.
+Hinweise zur Kartenlaufzeit:
+- iPhotron kann den helper-basierten OBF-Renderer und das native OsmAnd-Widget verwenden, sobald die jeweilige Plattformlaufzeit vorhanden ist.
+- Wenn neben diesem Repository ein `PySide6-OsmAnd-SDK/`-Checkout existiert, können Linux und macOS dessen Widget-Builds aus `tools/osmand_render_helper_native/dist-*` bevorzugen.
 - Das native Linux-Widget erwartet derzeit den XCB- + Desktop-OpenGL-Pfad von Qt. Bei Auswahl dieses Backends setzt iPhotron automatisch `QT_QPA_PLATFORM=xcb`, `QT_OPENGL=desktop` und `QT_XCB_GL_INTEGRATION=xcb_glx`.
-- macOS fällt weiterhin auf den bestehenden Python-/Legacy-Kartenpfad zurück, solange die native Laufzeit dort noch in Arbeit ist.
+- Unter macOS verwendet die Legacy-OpenGL-Karte `QOpenGLWindow + createWindowContainer()`, um Kompositionsprobleme von `QOpenGLWidget` in transparenten Hauptfenstern zu vermeiden. Medienvorschauen nutzen standardmäßig den Metal-fähigen QRhi-Pfad, außer `IPHOTO_RHI_BACKEND=opengl` ist gesetzt.
 
 | Ohne Maps Extension | Mit Maps Extension |
 | --- | --- |
@@ -131,9 +136,9 @@ Hinweise zur Linux-Kartenlaufzeit:
 
 Die Extension wird im Upstream-Teilprojekt
 [PySide6-OsmAnd-SDK](https://github.com/OliverZhaohaibin/PySide6-OsmAnd-SDK)
-gebaut. Dieses Repository enthält die vendorten OsmAnd-Quellen, Windows- und
-Linux-Buildskripte, die native Qt-Widget-Bridge und die Preview-App, aus denen
-die hier verwendete Laufzeit erzeugt wird.
+gebaut. Dieses Repository enthält die vendorten OsmAnd-Quellen, Buildskripte
+für Windows, Linux und macOS, die native Qt-Widget-Bridge und die Preview-App,
+aus denen die hier verwendete Laufzeit erzeugt wird.
 
 Den vollständigen Workflow "maps extension aus dem Side-Project in dieses
 Repository übernehmen" findest du in [Development](../development.md). Hinweise
@@ -169,7 +174,9 @@ Face Scanning nutzt die optionalen `ai-demo`-Abhängigkeiten; die zentrale
 Fotoverwaltung bleibt auch ohne AI-Laufzeit nutzbar.
 
 ### 🖼 Immersive Detailansicht
-Ein eleganter Foto-/Videobetrachter mit Filmstreifen-Navigator und schwebendem Wiedergabebalken.
+Ein eleganter Foto-/Videobetrachter mit Filmstreifen-Navigator, schwebendem
+Wiedergabebalken und plattformgewähltem GPU-Pfad: QRhi/Metal unter macOS,
+OpenGL-backed QRhi unter Windows und Linux.
 
 ### 🎨 Nicht-destruktive Fotobearbeitung
 Eine umfassende Bearbeitungssuite mit **Anpassen**- und **Zuschneiden**-Modi:
@@ -206,8 +213,11 @@ anderen Person zuzuweisen oder eine neue Personenannotation zu erstellen.
 
 Auch Standortwerkzeuge sind integriert: Assets mit GPS-Daten können eine
 eingebettete Karte anzeigen, und Assets ohne Standort können über den
-"Assign a Location"-Suchfluss einen Ort auswählen und bestätigen. Wenn die
-maps extension fehlt, bietet das Panel den Downloadpfad an, statt still zu
+"Assign a Location"-Suchfluss einen Ort auswählen und bestätigen. Die Auswahl
+wird immer in der lokalen Bibliotheksdatenbank gespeichert. Wenn ExifTool
+verfügbar ist, schreibt iPhotron die GPS-Daten zusätzlich best-effort in die
+Originaldatei zurück und warnt, wenn dieser Schreibvorgang fehlschlägt. Wenn
+die maps extension fehlt, bietet das Panel den Downloadpfad an, statt still zu
 scheitern.
 ![Info interface](../picture/info1.png)
 
@@ -231,8 +241,8 @@ Detaillierte technische Dokumentation (auf Englisch):
 | Dokument | Beschreibung |
 |----------|-------------|
 | [Architecture](../architecture.md) | Gesamtarchitektur, Modulgrenzen, Datenfluss, wichtige Designentscheidungen |
-| [Development](../development.md) | Entwicklungsumgebung, Abhängigkeiten, Debugging und der vollständige maps-extension-Workflow für Windows und Linux |
-| [Executable Build](../misc/BUILD_EXE.md) | Nuitka-Paketierung, AOT, maps-extension-Synchronisierung und Hinweise zur Windows-/Linux-Laufzeit |
+| [Development](../development.md) | Entwicklungsumgebung, Abhängigkeiten, Debugging und der maps-extension-Workflow für Windows, Linux und macOS |
+| [Executable Build](../misc/BUILD_EXE.md) | Nuitka-Paketierung, AOT, QRhi-Shader-Assets, maps-extension-Synchronisierung und Plattformlaufzeit-Hinweise |
 | [Security](../security.md) | Berechtigungen, Verschlüsselung, Datenspeicherorte, Bedrohungsmodell |
 | [Changelog](../CHANGELOG.md) | Alle Versionshinweise und Änderungen |
 
@@ -242,11 +252,13 @@ Detaillierte technische Dokumentation (auf Englisch):
 
 | Werkzeug | Zweck |
 |----------|-------|
-| **ExifTool** | Liest EXIF-, GPS-, QuickTime- und Live-Photo-Metadaten. |
+| **ExifTool** | Liest EXIF-, GPS-, QuickTime- und Live-Photo-Metadaten und schreibt GPS-Daten bei expliziten Assign-Location-Aktionen. |
 | **FFmpeg / FFprobe** | Erzeugt Video-Miniaturansichten und analysiert Videoinformationen. |
 | **InsightFace / ONNXRuntime + `buffalo_s`-Modelle** | Optionales People Face Scanning: Gesichtserkennung (`det_500m.onnx`) und Face Embeddings (`w600k_mbf.onnx`) aus `src/extension/models/buffalo_s/`. |
 
-> ExifTool und FFmpeg/FFprobe müssen im System-`PATH` verfügbar sein.
+> FFmpeg/FFprobe müssen im System-`PATH` verfügbar sein. Installieren Sie
+> ExifTool zusätzlich, wenn zugewiesene GPS-Koordinaten in Originaldateien
+> zurückgeschrieben werden sollen.
 > Die AI-Gesichtslaufzeit ist optional; für Source-Builds kann sie mit
 > `pip install -e ".[ai-demo]"` installiert werden. Offline-Pakete sollten
 > `extension/models` mitliefern.
@@ -262,4 +274,4 @@ Python-Abhängigkeiten wie `Pillow` und `reverse-geocoder` werden über
 Erstellt von **Haibin Zhao (OliverZhaohaibin)**  
 
 > *iPhotron — Ein ordnerbasiertes, menschenlesbares und vollständig wiederaufbaubares Fotosystem.*  
-> *Keine Importe. Keine Datenbank. Nur Ihre Fotos, elegant organisiert.*
+> *Keine erzwungenen Importe. Kein proprietärer Lock-in. Nur Ihre Fotos, elegant organisiert.*

@@ -1,11 +1,11 @@
 # 📸 iPhotron
-> Bring the macOS *Photos* experience to Windows — folder-native, non-destructive photo management with Live Photo, maps, and smart albums.
+> A macOS *Photos*-inspired, folder-native photo manager for Windows, macOS, and Linux with Live Photo, maps, and smart albums.
 
 ![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey)
-![Language](https://img.shields.io/badge/language-Python%203.10%2B-blue)
+![Language](https://img.shields.io/badge/language-Python%203.12%2B-blue)
 ![Framework](https://img.shields.io/badge/framework-PySide6%20(Qt6)-orange)
 ![License](https://img.shields.io/badge/license-MIT-green)
-[![GitHub Repo](https://img.shields.io/badge/github-iPhotos-181717?logo=github)](https://github.com/OliverZhaohaibin/iPhotos-LocalPhotoAlbumManager)
+[![GitHub Repo](https://img.shields.io/badge/github-iPhotron-181717?logo=github)](https://github.com/OliverZhaohaibin/iPhotron-LocalPhotoAlbumManager)
 
 **Languages / 语言 / Sprachen:**  
 [![English](https://img.shields.io/badge/English-Click-blue?style=flat)](README.md) | [![中文简体](https://img.shields.io/badge/中文简体-点击-red?style=flat)](docs/readme/README_zh-CN.md) | [![Deutsch](https://img.shields.io/badge/Deutsch-Klick-yellow?style=flat)](docs/readme/README_de.md)
@@ -88,7 +88,8 @@ iphoto-gui /photos/LondonTrip
 
 **iPhotron** is a **folder-native photo manager** inspired by macOS *Photos*.  
 It organizes your media using lightweight JSON manifests and cache files —  
-offering rich album functionality while **keeping all original files intact**.
+offering rich album functionality while keeping destructive edits out of your
+original media files.
 
 Key highlights:
 - 🗂 Folder-native design — every folder *is* an album, no import needed.
@@ -111,18 +112,22 @@ by local development, packaged builds, and platform-specific installers.
 
 The extension currently contains:
 - `World_basemap_2.obf` offline map data
-- OsmAnd resources under `misc/`, `poi/`, `rendering_styles/`, and `routing/`
+- OsmAnd resources under `misc/`, `poi/`, `rendering_styles/`, `routing/`,
+  and related runtime resource directories
+- offline search data under `search/geonames.sqlite3`
 - platform-specific native binaries under `bin/`
   - Windows: `osmand_render_helper.exe`, `osmand_native_widget.dll`,
     `OsmAndCore_shared.dll`, `OsmAndCoreTools_shared.dll`, and the required Qt DLLs
   - Linux: `osmand_render_helper`, `osmand_native_widget.so`,
     `libOsmAndCore_shared.so`, and `libOsmAndCoreTools_shared.so`
+  - macOS: `osmand_render_helper`, `osmand_native_widget.dylib`, and copied
+    non-system Mach-O dependencies
 
-Linux maps notes:
-- iPhotron can use both the helper-backed OBF renderer and the native OsmAnd widget on Linux when the shared libraries are available.
-- If a sibling `PySide6-OsmAnd-SDK/` checkout exists, Linux development prefers its `tools/osmand_render_helper_native/dist-linux/` widget build.
+Platform maps notes:
+- iPhotron can use both the helper-backed OBF renderer and the native OsmAnd widget when the platform runtime is available.
+- If a sibling `PySide6-OsmAnd-SDK/` checkout exists, Linux and macOS development can prefer its `tools/osmand_render_helper_native/dist-*` widget builds.
 - The native Linux widget currently expects Qt's XCB desktop OpenGL path. When that backend is selected, iPhotron auto-sets `QT_QPA_PLATFORM=xcb`, `QT_OPENGL=desktop`, and `QT_XCB_GL_INTEGRATION=xcb_glx`.
-- macOS still falls back to the existing Python / legacy map path while the native runtime there remains in progress.
+- On macOS, the legacy OpenGL map uses `QOpenGLWindow + createWindowContainer()` to avoid transparent-window `QOpenGLWidget` composition issues; media previews default to the Metal-capable QRhi path unless `IPHOTO_RHI_BACKEND=opengl` is set.
 
 | Without maps extension | With maps extension |
 | --- | --- |
@@ -130,9 +135,9 @@ Linux maps notes:
 
 The extension is built upstream from the standalone
 [PySide6-OsmAnd-SDK](https://github.com/OliverZhaohaibin/PySide6-OsmAnd-SDK)
-sub-project. That repository carries the vendored OsmAnd sources, Windows/Linux
-build scripts, native Qt widget bridge, and preview app used to produce the
-runtime consumed here.
+sub-project. That repository carries the vendored OsmAnd sources, build scripts
+for Windows, Linux, and macOS, the native Qt widget bridge, and the preview app
+used to produce the runtime consumed here.
 
 See [Development](docs/development.md) for the full "build the maps extension
 from the side project" workflow, and
@@ -164,7 +169,9 @@ pinned. Face scanning uses the optional `ai-demo` dependencies; the core photo
 manager remains usable without installing the AI runtime.
 
 ### 🖼 Immersive Detail View
-An elegant viewer with a filmstrip navigator and floating playback bar for videos.
+An elegant viewer with a filmstrip navigator, floating playback bar for videos,
+and a platform-selected GPU path: QRhi/Metal on macOS, OpenGL-backed QRhi on
+Windows and Linux.
 
 ### 🎨 Non-Destructive Photo Editing
 A comprehensive editing suite with **Adjust** and **Crop** modes:
@@ -198,8 +205,11 @@ face, move it to another person, or create a new person annotation.
 
 Location tools are built in as well: geotagged assets can show an inline map,
 and assets without a location can use the "Assign a Location" search flow to
-pick and confirm a place. If the maps extension is missing, the panel offers the
-download path instead of failing silently.
+pick and confirm a place. The assignment is always saved in the local library
+database; if ExifTool is available, iPhotron also best-effort writes GPS
+metadata back to the original file and warns when that write-back fails. If the
+maps extension is missing, the panel offers the download path instead of failing
+silently.
 ![Info interface](docs/picture/info1.png)
 ### 💬 Rich Interactions
 - Drag & drop files from Explorer/Finder directly into albums.
@@ -221,8 +231,8 @@ For deeper technical details, see the following docs:
 | Document | Description |
 |----------|-------------|
 | [Architecture](docs/architecture.md) | Overall architecture, module boundaries, data flow, key design decisions |
-| [Development](docs/development.md) | Dev environment, dependencies, debugging, and the full side-project-based maps extension workflow for Windows and Linux |
-| [Executable Build](docs/misc/BUILD_EXE.md) | Nuitka packaging, AOT filters, maps extension sync, and Windows/Linux runtime notes |
+| [Development](docs/development.md) | Dev environment, dependencies, debugging, and the side-project-based maps extension workflow for Windows, Linux, and macOS |
+| [Executable Build](docs/misc/BUILD_EXE.md) | Nuitka packaging, AOT filters, QRhi shader assets, maps extension sync, and platform runtime notes |
 | [Security](docs/security.md) | Permissions, encryption, data storage locations, threat model |
 | [Changelog](docs/CHANGELOG.md) | All version release notes and changes |
 
@@ -232,11 +242,12 @@ For deeper technical details, see the following docs:
 
 | Tool | Purpose |
 |------|----------|
-| **ExifTool** | Reads EXIF, GPS, QuickTime, and Live Photo metadata. |
+| **ExifTool** | Reads EXIF, GPS, QuickTime, and Live Photo metadata; writes GPS metadata for explicit Assign Location actions. |
 | **FFmpeg / FFprobe** | Generates video thumbnails & parses video info. |
 | **InsightFace / ONNXRuntime + `buffalo_s` models** | Optional People face scanning: face detection (`det_500m.onnx`) and face embeddings (`w600k_mbf.onnx`) from `src/extension/models/buffalo_s/`. |
 
-> Ensure ExifTool and FFmpeg/FFprobe are available in your system `PATH`.
+> Ensure FFmpeg/FFprobe are available in your system `PATH`; install ExifTool if
+> you want assigned GPS coordinates written back into original media files.
 > The AI face runtime is optional; install it with `pip install -e ".[ai-demo]"`
 > for source builds, and keep `extension/models` bundled for offline packaged builds.
 
@@ -250,4 +261,4 @@ Python dependencies (e.g., `Pillow`, `reverse-geocoder`) are auto-installed via 
 Created by **Haibin Zhao (OliverZhaohaibin)**  
 
 > *iPhotron — A folder-native, human-readable, and fully rebuildable photo system.*  
-> *No imports. No database. Just your photos, organized elegantly.*
+> *No forced imports. No proprietary lock-in. Just your photos, organized elegantly.*

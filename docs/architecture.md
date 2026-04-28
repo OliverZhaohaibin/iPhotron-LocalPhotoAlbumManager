@@ -84,6 +84,7 @@ graph TB
         Facade["facade.py — AppFacade"]
         Coord["coordinators/"]
         VM["viewmodels/"]
+        RenderBackend["render_backend.py — QRhi backend selection"]
         UI["ui/ — windows, controllers, models, widgets"]
         Tasks["ui/tasks/ — QRunnable workers"]
     end
@@ -144,6 +145,7 @@ src/
 │       ├── main.py          # GUI entry point (iphoto-gui)
 │       ├── appctx.py        # AppContext — shared global state
 │       ├── facade.py        # AppFacade (QObject) — GUI ↔ Backend bridge
+│       ├── render_backend.py # QRhi backend selection (Metal/OpenGL)
 │       ├── coordinators/    # MVVM Coordinators
 │       ├── viewmodels/      # ViewModels for data binding
 │       ├── services/        # Background operation services
@@ -194,16 +196,83 @@ sequenceDiagram
     participant User
     participant EditView as Edit View
     participant Resolver as Resolvers (light, color, bw, curves, levels)
-    participant GLRenderer as OpenGL Renderer
+    participant Renderer as GPU Preview Renderer
     participant IPO as .ipo Sidecar File
 
     User->>EditView: Adjust slider
     EditView->>Resolver: Compute parameters
-    Resolver-->>GLRenderer: Shader uniforms
-    GLRenderer-->>EditView: Real-time preview
+    Resolver-->>Renderer: Shader uniforms / QRhi buffers
+    Renderer-->>EditView: Real-time preview
     User->>EditView: Click "Done"
     EditView->>IPO: Save adjustments to .ipo
 ```
+
+The viewer keeps the public `GLImageViewer` API for existing controllers, but
+the implementation now selects the rendering backend at construction time.
+Windows and Linux keep the raw OpenGL path inside `QRhiWidget`. macOS defaults
+to a Metal-capable QRhi renderer implemented by
+`gui/ui/widgets/rhi_image_renderer.py`, with `IPHOTO_RHI_BACKEND=opengl`
+available for diagnostics.
+
+The video renderer follows the same QRhi backend selection. Packaged builds
+must ship the image, overlay, and video `.qsb` shader files or the first media
+preview frame can fail before user-visible rendering starts.
+
+### Map Backend Selection Flow
+
+```mermaid
+sequenceDiagram
+    participant View as PhotoMapView
+    participant Source as MapSourceSpec
+    participant Probe as Runtime Probes
+    participant Native as NativeOsmAndWidget
+    participant PyGL as Python GL Map
+    participant CPU as QWidget CPU Map
+
+    View->>Source: resolve default OBF extension
+    Source-->>View: OBF assets or legacy tiles
+    View->>Probe: check OpenGL and native widget runtime
+    alt native OsmAnd runtime loads
+        View->>Native: use osmand_native_widget
+    else helper OBF runtime exists
+        View->>PyGL: use helper-backed Python OBF renderer
+    else legacy fallback
+        View->>CPU: use legacy vector map source
+    end
+```
+
+On macOS, the Python GL map uses `MapGLWindowWidget`, a
+`QOpenGLWindow + createWindowContainer()` wrapper, instead of `QOpenGLWidget`.
+This avoids transparent-window FBO composition problems while preserving the
+legacy map renderer as a known-good fallback.
+
+### Location Assignment Flow
+
+```mermaid
+sequenceDiagram
+    participant User
+    participant Info as Info Panel
+    participant Service as AssignLocationService
+    participant Exif as ExifTool
+    participant DB as global_index.db
+
+    User->>Info: Pick and confirm location
+    Info->>Service: assign(asset, lon, lat, name)
+    Service->>Exif: best-effort write GPS metadata
+    alt file metadata write succeeds
+        Exif-->>Service: refreshed metadata
+    else ExifTool missing or write fails
+        Exif-->>Service: error reason
+    end
+    Service->>DB: persist GPS, location, sanitized metadata
+    Service-->>Info: result plus optional file_write_error
+    Info-->>User: warning only when original write-back failed
+```
+
+Assign Location is intentionally resilient: the user decision is stored in
+`global_index.db` even if ExifTool is missing or the original file cannot be
+updated. Metadata written into SQLite is sanitized to JSON-compatible values so
+failed third-party payloads do not corrupt the index row.
 
 ### Scanning & Indexing Flow
 
@@ -376,6 +445,12 @@ The scan subsystem writes to multiple persistence artifacts under the library ro
 
 **Rationale:** Original files remain 100% untouched. Edits can be reverted, modified, or removed at any time. The sidecar approach avoids database lock-in.
 
+Location assignment is the explicit exception to the "edits never touch
+originals" rule. When the user confirms a location, iPhotron persists the
+location in the local index and best-effort writes GPS metadata back to the
+original media through ExifTool. If that write-back fails, the local assignment
+still remains available and the UI shows a warning.
+
 ### ADR-3: Global SQLite Database (v3.00+)
 
 **Decision:** All asset metadata is stored in a single SQLite database (`global_index.db`) at the library root, replacing per-album JSON index files.
@@ -390,9 +465,12 @@ The scan subsystem writes to multiple persistence artifacts under the library ro
 
 ### ADR-5: GPU-Accelerated Preview Rendering
 
-**Decision:** Use OpenGL 3.3 for real-time edit preview with perspective transforms and color grading in shaders.
+**Decision:** Use GPU preview rendering for real-time edit and video display.
+Windows and Linux use the established OpenGL shader path inside `QRhiWidget`;
+macOS uses a QRhi renderer that can run on Metal while sharing the same
+canonical adjustment shader logic through QSB assets.
 
-**Rationale:** CPU-based rendering was too slow for interactive editing. The GPU pipeline delivers instant visual feedback during adjustments.
+**Rationale:** CPU-based rendering was too slow for interactive editing. The GPU pipeline delivers instant visual feedback during adjustments, while the QRhi/Metal path avoids raw OpenGL interop problems on modern macOS.
 
 ### ADR-6: Three Coordinate Systems for Crop & Perspective
 
@@ -414,5 +492,10 @@ The crop tool uses three distinct coordinate systems:
 |------|---------|
 | **ExifTool** | Reads EXIF, GPS, QuickTime, and Live Photo metadata |
 | **FFmpeg / FFprobe** | Generates video thumbnails & parses video info |
+| **InsightFace / ONNXRuntime** | Optional People face detection and embeddings |
 
-Both must be available in the system `PATH`. Python dependencies (e.g., `Pillow`, `reverse-geocoder`, `numba`) are managed via `pyproject.toml`.
+FFmpeg/FFprobe should be available in the system `PATH`. ExifTool is required
+for metadata extraction and for writing assigned GPS coordinates back to
+original files; when that write-back is unavailable, Assign Location still
+persists to `global_index.db`. Python dependencies are managed via
+`pyproject.toml`.

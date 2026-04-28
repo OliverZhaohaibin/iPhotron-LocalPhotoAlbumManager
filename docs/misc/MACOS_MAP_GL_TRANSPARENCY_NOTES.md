@@ -138,9 +138,9 @@ marker overlay 在排查中是一个很好的探针：
 
 也就是说，marker 是否画进 GL 不是根治透明的手段，而是要配合最终 surface 类型。
 
-## 后续做 OsmAnd GL 后端的建议
+## 维护 OsmAnd GL 后端的建议
 
-如果后续接入 native OsmAnd GL 后端，macOS 上应优先验证 native window/container 模型，
+native OsmAnd GL 后端在 macOS 上也应优先验证 native window/container 模型，
 不要默认照搬 `QOpenGLWidget`。
 
 建议顺序：

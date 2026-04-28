@@ -34,14 +34,16 @@ class FakeStack:
 
 def test_view_router_emits_when_switching_views(qtbot):
     gallery_page = object()
-    detail_page = object()
+    people_page = object()
     map_page = object()
+    detail_page = object()
     dashboard_page = object()
 
-    stack = FakeStack([gallery_page, map_page, detail_page, dashboard_page])
+    stack = FakeStack([gallery_page, people_page, map_page, detail_page, dashboard_page])
     ui = SimpleNamespace(
         view_stack=stack,
         gallery_page=gallery_page,
+        people_page=people_page,
         detail_page=detail_page,
         map_page=map_page,
         albums_dashboard_page=dashboard_page,
@@ -54,6 +56,29 @@ def test_view_router_emits_when_switching_views(qtbot):
     router.show_detail()
 
     assert stack.currentIndex() == stack.indexOf(detail_page)
+    assert spy.count() == 1
+
+
+def test_view_router_show_people_switches_to_people_page(qtbot):
+    gallery_page = object()
+    people_page = object()
+    detail_page = object()
+
+    stack = FakeStack([gallery_page, people_page, detail_page])
+    ui = SimpleNamespace(
+        view_stack=stack,
+        gallery_page=gallery_page,
+        people_page=people_page,
+        detail_page=detail_page,
+    )
+
+    router = ViewRouter(ui)
+    spy = QSignalSpy(router.peopleViewShown)
+
+    stack.setCurrentIndex(0)
+    router.show_people()
+
+    assert stack.currentIndex() == stack.indexOf(people_page)
     assert spy.count() == 1
 
 

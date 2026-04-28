@@ -53,6 +53,7 @@ def test_show_row_builds_presentation_and_requests_detail_route():
     assert vm.current_row.value == 0
     assert vm.current_path.value == dto.abs_path
     assert requested == ["detail"]
+    assert received[0].asset_id == dto.id
     assert received[0].path == dto.abs_path
     assert received[0].is_favorite is True
 

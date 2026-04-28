@@ -212,7 +212,7 @@ __marimo__/
 
 # Test artifacts
 /tmp/
-[\\]tmp[\\]**
+
 .idea/
 /tools/osmand_render_helper_native/qt6-msvc-importlibs/
 /tools/osmand_render_helper_native/dist-msvc/
@@ -222,7 +222,13 @@ __marimo__/
 /CMakeFiles/
 /debug/
 /.codex_staging/
+/.codex
+/PySide6-OsmAnd-SDK/
 /src/maps/tiles/World_basemap_2.obf
 /src/maps/tiles/extension/
+/src/extension/models/
 /demo/face-cluster/runtime/
 /demo/face-cluster/state/
+/.codex
+/src/extension/
+/src/iPhoto/extension/

@@ -14,11 +14,25 @@ from PySide6.QtWidgets import QApplication
 from iPhoto.bootstrap.qt_shader_cache import configure_shader_cache_environment
 
 _logger = logging.getLogger(__name__)
+_TRUE_ENV_VALUES = {"1", "true", "yes", "on"}
 
 
 def _configure_qt_shader_disk_cache() -> None:
     """Route shader/program caches into a managed ``.iPhoto`` work directory."""
     configure_shader_cache_environment()
+
+
+def _is_packaged_runtime() -> bool:
+    """Return ``True`` when the app is running from a compiled/frozen bundle."""
+
+    return "__compiled__" in globals() or getattr(sys, "frozen", False)
+
+
+def _allow_packaged_linux_wayland() -> bool:
+    """Return whether packaged Linux builds may keep Qt's default platform selection."""
+
+    raw_value = os.environ.get("IPHOTO_ALLOW_PACKAGED_LINUX_WAYLAND", "").strip().lower()
+    return raw_value in _TRUE_ENV_VALUES
 
 
 def _prefer_local_source_tree() -> None:
@@ -39,6 +53,43 @@ def _prefer_local_source_tree() -> None:
     except ValueError:
         pass
     sys.path.insert(0, src_root_str)
+
+
+def _prepare_qt_runtime_for_maps() -> None:
+    """Apply Linux Qt platform flags required by the native OsmAnd widget.
+
+    ``PhotoMapView`` prefers the native OsmAnd widget when its runtime is
+    available. That widget expects Qt to use the XCB/GLX desktop OpenGL path on
+    Linux; without these flags the application can start successfully and only
+    fail later when the map view is opened with GLEW reporting missing GLX
+    support.
+    """
+
+    if sys.platform != "linux":
+        return
+
+    if os.environ.get("IPHOTO_DISABLE_OPENGL", "").strip().lower() in {"1", "true", "yes", "on"}:
+        return
+
+    if _is_packaged_runtime():
+        if _allow_packaged_linux_wayland():
+            return
+        os.environ["QT_QPA_PLATFORM"] = "xcb"
+    else:
+        try:
+            from maps.map_sources import has_usable_osmand_native_widget, prefer_osmand_native_widget
+        except Exception:
+            return
+
+        maps_package_root = Path(__file__).resolve().parents[2] / "maps"
+        if not prefer_osmand_native_widget() or not has_usable_osmand_native_widget(maps_package_root):
+            return
+
+    if not os.environ.get("QT_QPA_PLATFORM"):
+        os.environ["QT_QPA_PLATFORM"] = "xcb"
+    if os.environ.get("QT_QPA_PLATFORM") == "xcb":
+        os.environ.setdefault("QT_OPENGL", "desktop")
+        os.environ.setdefault("QT_XCB_GL_INTEGRATION", "xcb_glx")
 
 
 def _configure_qt_opengl_defaults() -> None:
@@ -69,6 +120,13 @@ def main(argv: list[str] | None = None) -> int:
     """Launch the Qt application and return the exit code."""
 
     _prefer_local_source_tree()
+    maps_package_root = Path(__file__).resolve().parents[2] / "maps"
+    try:
+        from maps.map_sources import apply_pending_osmand_extension_install
+
+        apply_pending_osmand_extension_install(maps_package_root)
+    except Exception:
+        _logger.warning("Failed to apply pending map extension install", exc_info=True)
 
     # Ensure the ``iPhoto`` root logger is configured before any component
     # creates a child logger.  ``get_logger()`` lazily attaches a StreamHandler
@@ -78,6 +136,7 @@ def main(argv: list[str] | None = None) -> int:
     _init_logging()
 
     arguments = list(sys.argv if argv is None else argv)
+    _prepare_qt_runtime_for_maps()
     _configure_qt_opengl_defaults()
     app = QApplication(arguments)
 

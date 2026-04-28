@@ -4,22 +4,26 @@ from __future__ import annotations
 
 import subprocess
 import sys
-from functools import partial
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable, Optional, TYPE_CHECKING
+from typing import TYPE_CHECKING
 
 from PySide6.QtCore import (
     QAbstractItemModel,
-    QCoreApplication,
     QMimeData,
+    QItemSelectionModel,
+    QModelIndex,
     QObject,
     QPoint,
     QUrl,
-    Qt,
-    QItemSelectionModel,
 )
-from PySide6.QtGui import QGuiApplication, QPalette
+from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import QMenu
+
+from iPhoto.gui.ui.menus.core import MenuContext, populate_menu
+from iPhoto.gui.ui.menus.gallery_menu import GalleryMenuHandlers, gallery_action_specs
+from iPhoto.gui.ui.menus.style import apply_menu_style
+from iPhoto.people.service import PeopleService
 
 from ...facade import AppFacade
 from ..widgets.asset_grid import AssetGrid
@@ -29,6 +33,7 @@ from .status_bar_controller import StatusBarController
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from ...coordinators.navigation_coordinator import NavigationCoordinator
+    from ...viewmodels.gallery_viewmodel import GalleryViewModel
 
 
 class ContextMenuController(QObject):
@@ -44,10 +49,11 @@ class ContextMenuController(QObject):
         status_bar: StatusBarController,
         notification_toast: NotificationToast,
         selection_controller: SelectionController | None,
-        navigation: "NavigationCoordinator" | None,
+        navigation: NavigationCoordinator | None,
         export_callback: Callable[[], None],
         prepare_paths_for_mutation: Callable[[list[Path]], None] | None = None,
-        parent: Optional[QObject] = None,
+        gallery_viewmodel: GalleryViewModel | None = None,
+        parent: QObject | None = None,
     ) -> None:
         super().__init__(parent)
         self._grid_view = grid_view
@@ -60,6 +66,7 @@ class ContextMenuController(QObject):
         self._navigation = navigation
         self._export_callback = export_callback
         self._prepare_paths_for_mutation = prepare_paths_for_mutation
+        self._gallery_viewmodel = gallery_viewmodel
 
         self._grid_view.customContextMenuRequested.connect(self._handle_context_menu)
 
@@ -71,40 +78,7 @@ class ContextMenuController(QObject):
 
         index = self._grid_view.indexAt(point)
         menu = QMenu(self._grid_view)
-        # Menus inherit ``WA_TranslucentBackground`` from the frameless window shell.  The flag is
-        # essential for rendering rounded corners, so we keep it enabled and rely on the palette-
-        # driven stylesheet to paint an opaque surface that prevents any wallpaper bleed-through.
-        menu.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
-        menu.setAutoFillBackground(True)
-        menu.setWindowFlags(
-            menu.windowFlags()
-            | Qt.WindowType.FramelessWindowHint
-            | Qt.WindowType.Popup
-        )
-
-        main_window = self._grid_view.window()
-        if main_window is not None:
-            # Copy the main window palette verbatim so the popup colours stay consistent across
-            # multiple monitors and theme transitions.  The ``Base`` role keeps the surface opaque
-            # so the rounded outline never reveals the desktop wallpaper beneath the menu.
-            menu.setPalette(main_window.palette())
-            menu.setBackgroundRole(QPalette.ColorRole.Base)
-
-            stylesheet_accessor = getattr(main_window, "get_qmenu_stylesheet", None)
-            stylesheet: Optional[str]
-            if callable(stylesheet_accessor):
-                stylesheet = stylesheet_accessor()
-            else:
-                fallback_accessor = getattr(main_window, "menu_stylesheet", None)
-                stylesheet = fallback_accessor() if callable(fallback_accessor) else None
-
-            if isinstance(stylesheet, str) and stylesheet:
-                menu.setStyleSheet(stylesheet)
-
-        # Clear any residual graphics effect in case another component previously attached one.
-        # Removing stale ``QGraphicsEffect`` instances keeps the rounded outline crisp and avoids
-        # blending artefacts that might otherwise leak in from other widgets.
-        menu.setGraphicsEffect(None)
+        apply_menu_style(menu, self._grid_view)
 
         selection_model = self._grid_view.selectionModel()
 
@@ -114,68 +88,28 @@ class ContextMenuController(QObject):
                 QItemSelectionModel.ClearAndSelect | QItemSelectionModel.Rows,
             )
 
-        # When the cursor is above an already selected item we expose actions that operate on
-        # the selection (copy, reveal, move). This mirrors native file explorer conventions and
-        # ensures that selection mode is not a prerequisite for quick actions.
-        if index.isValid() and selection_model and selection_model.isSelected(index):
-            copy_action = menu.addAction(
-                QCoreApplication.translate("MainWindow", "Copy")
-            )
-            reveal_action = menu.addAction(
-                QCoreApplication.translate(
-                    "MainWindow", "Reveal in File Manager"
-                )
-            )
-            export_action = menu.addAction(
-                QCoreApplication.translate("MainWindow", "Export")
-            )
-            move_menu = menu.addMenu(
-                QCoreApplication.translate("MainWindow", "Move to")
-            )
-            delete_action = menu.addAction(
-                QCoreApplication.translate("MainWindow", "Delete")
-            )
-
-            destinations = self._collect_move_targets()
-            if destinations:
-                for label, path in destinations:
-                    action = move_menu.addAction(label)
-                    action.triggered.connect(
-                        partial(self._execute_move_to_album, path)
-                    )
-            else:
-                move_menu.setEnabled(False)
-
-            copy_action.triggered.connect(self._copy_selection_to_clipboard)
-            reveal_action.triggered.connect(self._reveal_selection_in_file_manager)
-            export_action.triggered.connect(self._export_callback)
-            is_recently_deleted = (
-                self._navigation.is_recently_deleted_view()
-                if self._navigation is not None
-                else False
-            )
-            if is_recently_deleted:
-                delete_action.setVisible(False)
-                move_menu.menuAction().setVisible(False)
-                restore_action = menu.addAction(
-                    QCoreApplication.translate("MainWindow", "Restore")
-                )
-                restore_action.triggered.connect(self._execute_restore)
-            else:
-                delete_action.triggered.connect(self.delete_selection)
-
-        # When the user invokes the context menu over an empty area we show album level actions
-        # so that the gallery still offers meaningful commands while nothing is selected.
-        else:
-            paste_action = menu.addAction(
-                QCoreApplication.translate("MainWindow", "Paste")
-            )
-            open_folder_action = menu.addAction(
-                QCoreApplication.translate("MainWindow", "Open Folder Location")
-            )
-
-            paste_action.triggered.connect(self._paste_from_clipboard)
-            open_folder_action.triggered.connect(self._open_current_folder)
+        context = self._menu_context(index=index)
+        handlers = GalleryMenuHandlers(
+            copy_selection=lambda _ctx: self._copy_selection_to_clipboard(),
+            reveal_selection=lambda _ctx: self._reveal_selection_in_file_manager(),
+            export_selection=lambda _ctx: self._export_callback(),
+            delete_selection=lambda _ctx: self.delete_selection(),
+            restore_selection=lambda _ctx: self._execute_restore(),
+            paste_into_album=lambda _ctx: self._paste_from_clipboard(),
+            open_current_folder=lambda _ctx: self._open_current_folder(),
+            set_as_cover=self._set_as_cover,
+            set_as_cover_visible=self._set_as_cover_visible,
+            move_targets=lambda _ctx: self._collect_move_targets(),
+            move_to_album=self._execute_move_to_album,
+        )
+        action_count = populate_menu(
+            menu,
+            context=context,
+            action_specs=gallery_action_specs(context, handlers),
+            anchor=self._grid_view,
+        )
+        if action_count <= 0:
+            return
 
         global_pos = self._grid_view.viewport().mapToGlobal(point)
         menu.exec(global_pos)
@@ -365,19 +299,80 @@ class ContextMenuController(QObject):
     def _selected_asset_paths(self) -> list[Path]:
         """Return absolute paths for all selected assets without duplicates."""
 
+        return self._selected_paths_provider(self._selected_rows())
+
+    def _selected_rows(self) -> list[int]:
         selection_model = self._grid_view.selectionModel()
         if selection_model is None:
             return []
-        rows = sorted({index.row() for index in selection_model.selectedIndexes() if index.isValid()})
-        return self._selected_paths_provider(rows)
+        return sorted(
+            {
+                index.row()
+                for index in selection_model.selectedIndexes()
+                if index.isValid()
+            }
+        )
+
+    def _selected_assets(self, rows: list[int]) -> list:
+        if self._gallery_viewmodel is None:
+            return []
+        items_for_rows = getattr(self._gallery_viewmodel, "items_for_rows", None)
+        if not callable(items_for_rows):
+            return []
+        return list(items_for_rows(rows))
+
+    def _menu_context(self, *, index: QModelIndex | None = None) -> MenuContext:
+        base_context = self._base_menu_context()
+        if index is not None and not index.isValid():
+            return base_context.with_selection(
+                selection_kind="empty",
+                selected_assets=[],
+            )
+
+        rows = self._selected_rows()
+        selection_kind = "assets" if rows else "empty"
+        return base_context.with_selection(
+            selection_kind=selection_kind,
+            selected_assets=self._selected_assets(rows) if rows else [],
+        )
+
+    def _base_menu_context(self) -> MenuContext:
+        if self._gallery_viewmodel is not None:
+            state_getter = getattr(self._gallery_viewmodel, "context_menu_state", None)
+            if callable(state_getter):
+                state = state_getter()
+                if isinstance(state, MenuContext):
+                    return state
+
+        is_recently_deleted = (
+            self._navigation.is_recently_deleted_view()
+            if self._navigation is not None
+            else False
+        )
+        return MenuContext(
+            surface="gallery",
+            selection_kind="empty",
+            gallery_section="recently_deleted" if is_recently_deleted else None,
+            active_root=getattr(getattr(self._facade, "current_album", None), "root", None),
+            is_recently_deleted=is_recently_deleted,
+        )
 
     def _collect_move_targets(self) -> list[tuple[str, Path]]:
         """Build a list of (label, path) destinations excluding the currently open album."""
 
         if self._navigation is None:
             return []
-        model = self._navigation.sidebar_model()
-        entries = model.iter_album_entries()
+        sidebar_model = getattr(self._navigation, "sidebar_model", None)
+        if not callable(sidebar_model):
+            return []
+        model = sidebar_model()
+        iter_album_entries = getattr(model, "iter_album_entries", None)
+        if not callable(iter_album_entries):
+            return []
+        try:
+            entries = list(iter_album_entries())
+        except TypeError:
+            return []
         current_album = self._facade.current_album
         current_root: Path | None = None
         if current_album is not None:
@@ -396,6 +391,70 @@ class ContextMenuController(QObject):
                 continue
             destinations.append((label, path))
         return destinations
+
+    def _set_as_cover_visible(self, context: MenuContext) -> bool:
+        asset = context.selected_asset
+        if asset is None or context.is_recently_deleted:
+            return False
+        if context.entity_kind == "album":
+            return context.gallery_section in {"album", "pinned_album"}
+        if context.entity_kind == "person" and context.entity_id:
+            return (
+                self._people_service_for_context(context).resolve_cluster_cover_face(
+                    context.entity_id,
+                    asset.id,
+                )
+                is not None
+            )
+        if context.entity_kind == "group" and context.entity_id:
+            return (
+                self._people_service_for_context(context).resolve_group_cover_asset(
+                    context.entity_id,
+                    asset.id,
+                )
+                is not None
+            )
+        return False
+
+    def _set_as_cover(self, context: MenuContext) -> None:
+        asset = context.selected_asset
+        if asset is None:
+            return
+
+        success = False
+        if context.entity_kind == "album":
+            success = self._facade.set_cover(self._album_cover_rel_path(context, asset))
+        elif context.entity_kind == "person" and context.entity_id:
+            service = self._people_service_for_context(context)
+            face_id = service.resolve_cluster_cover_face(context.entity_id, asset.id)
+            success = bool(face_id) and service.set_cluster_cover(context.entity_id, face_id)
+        elif context.entity_kind == "group" and context.entity_id:
+            service = self._people_service_for_context(context)
+            group_asset_id = service.resolve_group_cover_asset(context.entity_id, asset.id)
+            success = bool(group_asset_id) and service.set_group_cover(
+                context.entity_id,
+                group_asset_id,
+            )
+
+        if success:
+            self._toast.show_toast("Cover Updated")
+            return
+        self._status_bar.show_message(
+            "Unable to set cover for the selected item.",
+            3000,
+        )
+
+    def _album_cover_rel_path(self, context: MenuContext, asset) -> str:
+        album_root = context.active_root
+        if album_root is not None:
+            try:
+                return asset.abs_path.relative_to(album_root).as_posix()
+            except (OSError, ValueError):
+                pass
+        return asset.rel_path.as_posix()
+
+    def _people_service_for_context(self, context: MenuContext) -> PeopleService:
+        return PeopleService(context.active_root)
 
     def _remove_selection_rows(self, selected_indexes: list) -> None:
         if not selected_indexes:

@@ -13,7 +13,7 @@ Please note that this project is released with a [Code of Conduct](CODE_OF_CONDU
 ## 2. Development Setup
 
 ### Prerequisites
-*   **Python**: Version 3.10 or higher.
+*   **Python**: Version 3.12 or higher.
 *   **External Tools**: You must have the following tools installed and available in your system `PATH`:
     *   `ExifTool`: For reading/writing metadata.
     *   `FFmpeg` (and `ffprobe`): For video processing and thumbnail generation.
@@ -40,7 +40,8 @@ Our design philosophy is strict to ensure user trust and data safety:
 *   **Folder-Native Principle**: "Folder = Album". We do not import photos into a database. The filesystem is the source of truth.
 *   **Immutability of Originals**: We **never** modify source files (HEIC, JPG, MOV, etc.) directly. All edits must be non-destructive.
 *   **Manifest Files**: All user decisions (e.g., setting a cover, starring, reordering, cropping) are stored in sidecar files like `.iphoto.album.json` or `.ipo` XML files.
-*   **Disposable Cache**: The system must be robust enough to rebuild `global_index.db` (SQLite database), `links.json`, and `thumbnails` folders at any time. Do not treat cache as persistent storage. Since v3.00, we use a global SQLite database instead of distributed `index.jsonl` files for better performance.
+*   **Disposable Cache With Stable User State**: The system must be robust enough to rebuild `global_index.db` (SQLite database), `links.json`, thumbnails, and the runtime People face snapshot when needed. Do not treat cache as persistent storage. People names, selected covers, hidden flags, groups, group order, pinned state, and group covers are user decisions stored in stable People state and must not be discarded during cache repair or rescans.
+*   **Optional People AI Runtime**: Face clustering uses the optional `ai-demo` dependencies (`insightface` and `onnxruntime`). Core photo management must remain usable when those dependencies are not installed.
 
 ## 4. Project Architecture
 
@@ -62,6 +63,7 @@ The project follows a layered architecture to separate core logic from the GUI.
 *   `io/`: Filesystem scanning, metadata reading, and sidecar writing.
 *   `core/`: Algorithms for pairing Live Photos, sorting, filtering, and image adjustment resolvers (light, color, B&W, curves, selective color, levels).
 *   `cache/`: Management of global SQLite database (`global_index.db`), migrations, recovery, and file-level locking.
+*   `people/`: Face detection/clustering pipeline, rebuildable People snapshot, stable People state, names, covers, hidden people, and groups.
 *   `utils/`: General utilities and wrappers for `ExifTool` and `FFmpeg`.
 *   `gui/coordinators/`: MVVM coordinators managing view navigation and business flow.
 *   `gui/viewmodels/`: View models for data binding and presentation logic.
@@ -132,6 +134,7 @@ pytest
 ### Robustness
 *   Tests must simulate missing or corrupt files to ensure the application handles them gracefully without crashing.
 *   **Rebuildability**: Verify that deleting `global_index.db` or `links.json` results in them being correctly rebuilt by the system through re-scanning.
+*   **People State Safety**: When changing face clustering, merges, covers, hidden people, or groups, verify both repository behavior and GUI behavior. Stable People state must survive rescans and runtime snapshot rebuilds.
 
 ## 9. Submitting Issues
 
@@ -180,6 +183,7 @@ All submissions will be reviewed by maintainers. We look for:
 We welcome contributions across the entire stack:
 
 *   **Core Backend**: Filesystem logic, pairing algorithms, and performance optimization (NumPy/Numba).
+*   **People & Groups**: Face clustering, People state persistence, group workflows, cover handling, hidden-person filtering, and merge safety.
 *   **GUI (PySide6)**: New widgets, view controllers, and interaction improvements.
 *   **OpenGL/Maps**: Shader development, map rendering, and high-performance image viewers.
 *   **Documentation & Tooling**: Improving guides, adding docstrings, and enhancing CI/CD scripts.
@@ -199,5 +203,6 @@ Before submitting a Pull Request, please ensure:
 - [ ] You have run `mypy .` to check for type errors.
 - [ ] You have added unit tests for your changes.
 - [ ] You have verified that `pytest` passes locally.
+- [ ] (If applicable) You have run focused People tests for face clusters, groups, covers, hidden state, and merge behavior.
 - [ ] (If applicable) You have verified OpenGL coordinate logic matches the spec.
 - [ ] (If applicable) You have benchmarked performance critical changes.

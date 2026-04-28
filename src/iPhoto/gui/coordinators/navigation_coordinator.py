@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import threading
 import time
 from pathlib import Path
@@ -11,10 +12,13 @@ from PySide6.QtCore import QObject, QTimer, Signal
 
 from iPhoto.application.contracts.runtime_entry_contract import RuntimeEntryContract
 from iPhoto.config import ALL_PHOTOS_TITLE
+from iPhoto.gui.services.pinned_items_service import PinnedItemsService, PinnedSidebarItem
 from iPhoto.gui.coordinators.view_router import ViewRouter
 from iPhoto.gui.facade import AppFacade
+from iPhoto.gui.ui.widgets import dialogs
 from iPhoto.gui.ui.widgets.album_sidebar import AlbumSidebar
 from iPhoto.gui.viewmodels.gallery_viewmodel import GalleryViewModel
+from iPhoto.people.service import PeopleService
 
 if TYPE_CHECKING:
     from iPhoto.gui.coordinators.playback_coordinator import PlaybackCoordinator
@@ -26,6 +30,7 @@ class NavigationCoordinator(QObject):
     bindLibraryRequested = Signal()
 
     _TRASH_CLEANUP_THROTTLE_SEC = 300.0
+    _logger = logging.getLogger(__name__)
 
     def __init__(
         self,
@@ -34,6 +39,7 @@ class NavigationCoordinator(QObject):
         gallery_vm: GalleryViewModel,
         context: RuntimeEntryContract,
         facade: AppFacade,
+        pinned_items_service: PinnedItemsService | None = None,
     ) -> None:
         super().__init__()
         self._sidebar = sidebar
@@ -41,6 +47,7 @@ class NavigationCoordinator(QObject):
         self._gallery_vm = gallery_vm
         self._context = context
         self._facade = facade
+        self._pinned_items_service = pinned_items_service
 
         self._playback_coordinator: Optional[PlaybackCoordinator] = None
 
@@ -57,6 +64,7 @@ class NavigationCoordinator(QObject):
 
     def _connect_signals(self) -> None:
         self._sidebar.albumSelected.connect(self.open_album)
+        self._sidebar.pinnedItemSelected.connect(self.open_pinned_item)
         self._sidebar.allPhotosSelected.connect(self.open_all_photos)
         self._sidebar.staticNodeSelected.connect(self._handle_static_node)
         self._sidebar.bindLibraryRequested.connect(self._handle_bind_library)
@@ -74,6 +82,99 @@ class NavigationCoordinator(QObject):
         self._reset_playback()
         self._gallery_vm.open_album(path)
 
+    def open_pinned_item(self, pinned_item: PinnedSidebarItem) -> None:
+        self._reset_playback()
+        library_root = self._context.library.root()
+        if pinned_item.kind == "album":
+            target = Path(pinned_item.item_id)
+            if not target.exists():
+                self._handle_missing_pinned_item(
+                    pinned_item,
+                    library_root=library_root,
+                    message=f"Pinned album '{pinned_item.label or target.name}' is no longer available and will be removed from the sidebar.",
+                )
+                return
+            self._gallery_vm.open_pinned_album(target)
+            return
+
+        if library_root is None:
+            self.bindLibraryRequested.emit()
+            return
+
+        people_service = PeopleService(library_root)
+        if pinned_item.kind == "person":
+            try:
+                query = people_service.build_cluster_query(pinned_item.item_id)
+                entity_exists = people_service.has_cluster(pinned_item.item_id)
+            except Exception:
+                self._logger.warning(
+                    "Failed to open pinned person '%s' (%s)",
+                    pinned_item.label,
+                    pinned_item.item_id,
+                    exc_info=True,
+                )
+                return
+            if not query.asset_ids and not entity_exists:
+                self._handle_missing_pinned_item(
+                    pinned_item,
+                    library_root=library_root,
+                    message=f"Pinned person '{pinned_item.label}' is no longer available and will be removed from the sidebar.",
+                )
+                return
+            self._gallery_vm.open_pinned_people_query(
+                query,
+                kind="person",
+                entity_id=pinned_item.item_id,
+            )
+            return
+
+        if pinned_item.kind == "group":
+            try:
+                query = people_service.build_group_query(pinned_item.item_id)
+                entity_exists = people_service.has_group(pinned_item.item_id)
+            except Exception:
+                self._logger.warning(
+                    "Failed to open pinned group '%s' (%s)",
+                    pinned_item.label,
+                    pinned_item.item_id,
+                    exc_info=True,
+                )
+                return
+            if not query.asset_ids and not entity_exists:
+                self._handle_missing_pinned_item(
+                    pinned_item,
+                    library_root=library_root,
+                    message=f"Pinned group '{pinned_item.label}' is no longer available and will be removed from the sidebar.",
+                )
+                return
+            self._gallery_vm.open_pinned_people_query(
+                query,
+                kind="group",
+                entity_id=pinned_item.item_id,
+            )
+
+    def _handle_missing_pinned_item(
+        self,
+        pinned_item: PinnedSidebarItem,
+        *,
+        library_root: Path | None,
+        message: str,
+    ) -> None:
+        dialogs.show_warning(self._sidebar, message)
+        if self._pinned_items_service is None:
+            return
+        if pinned_item.kind == "album":
+            self._pinned_items_service.prune_missing_album(
+                Path(pinned_item.item_id),
+                library_root=library_root,
+            )
+            return
+        self._pinned_items_service.prune_missing_entity(
+            kind=pinned_item.kind,
+            item_id=pinned_item.item_id,
+            library_root=library_root,
+        )
+
     def open_all_photos(self) -> None:
         self._reset_playback()
         self._gallery_vm.open_all_photos()
@@ -87,12 +188,23 @@ class NavigationCoordinator(QObject):
         self._reset_playback()
         self._gallery_vm.open_location_map()
 
+    def open_people_view(self) -> None:
+        self._reset_playback()
+        self._gallery_vm.open_people_dashboard()
+
     def open_cluster_gallery(self, assets: list) -> None:
         self._reset_playback()
         self._gallery_vm.open_cluster_gallery(assets)
 
+    def open_people_cluster_gallery(self, query) -> None:
+        self._reset_playback()
+        self._gallery_vm.open_people_cluster_gallery(query)
+
+    def return_from_cluster_gallery(self) -> None:
+        self._gallery_vm.return_from_cluster_gallery()
+
     def return_to_map_from_cluster_gallery(self) -> None:
-        self._gallery_vm.return_to_map_from_cluster_gallery()
+        self.return_from_cluster_gallery()
 
     def open_location_asset(self, rel: str) -> None:
         self._gallery_vm.open_location_asset(rel)
@@ -119,6 +231,8 @@ class NavigationCoordinator(QObject):
 
             self._reset_playback()
             self._gallery_vm.open_filtered_collection(name, media_types=[MediaType.LIVE_PHOTO])
+        elif normalized == "people":
+            self.open_people_view()
         elif normalized == "location":
             self.open_location_view()
 
@@ -127,6 +241,8 @@ class NavigationCoordinator(QObject):
             self._router.show_gallery()
         elif view == "map":
             self._router.show_map()
+        elif view == "people":
+            self._router.show_people()
         elif view == "albums_dashboard":
             self._router.show_albums_dashboard()
         elif view == "detail":
@@ -144,7 +260,10 @@ class NavigationCoordinator(QObject):
     def _handle_cluster_gallery_mode_changed(self, enabled: bool) -> None:
         gallery_page = self._router.gallery_page()
         if gallery_page is not None:
-            gallery_page.set_cluster_gallery_mode(bool(enabled))
+            gallery_page.set_cluster_gallery_mode(
+                bool(enabled),
+                back_tooltip=self._gallery_vm.cluster_gallery_back_tooltip(),
+            )
 
     def _handle_bind_library(self) -> None:
         self.bindLibraryRequested.emit()

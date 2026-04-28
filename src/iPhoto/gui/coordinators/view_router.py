@@ -24,6 +24,7 @@ class ViewRouter(QObject):
     detailViewShown = Signal()
     editViewShown = Signal()
     mapViewShown = Signal()
+    peopleViewShown = Signal()
     dashboardViewShown = Signal()  # Added signal for dashboard
 
     def __init__(self, ui: Ui_MainWindow):
@@ -40,6 +41,10 @@ class ViewRouter(QObject):
         self._map_idx = -1
         if hasattr(ui, "map_page"):
             self._map_idx = self._stack.indexOf(ui.map_page)
+
+        self._people_idx = -1
+        if hasattr(ui, "people_page"):
+            self._people_idx = self._stack.indexOf(ui.people_page)
 
         # Dashboard View
         self._dashboard_idx = -1
@@ -83,6 +88,12 @@ class ViewRouter(QObject):
         if self._map_idx != -1 and self._stack.currentIndex() != self._map_idx:
             self._stack.setCurrentIndex(self._map_idx)
             self.mapViewShown.emit()
+
+    def show_people(self):
+        """Switch to the People dashboard."""
+        if self._people_idx != -1 and self._stack.currentIndex() != self._people_idx:
+            self._stack.setCurrentIndex(self._people_idx)
+            self.peopleViewShown.emit()
 
     def map_view(self) -> Optional["PhotoMapView"]:
         """Return the map widget when available."""

@@ -33,6 +33,13 @@
 sudo apt install ./iPhotron_5.00_amd64.deb
 ```
 
+- **Linux (AppImage):** Datei ausführbar machen und direkt starten:
+
+```bash
+chmod +x iPhotron-5.00-x86_64.AppImage
+./iPhotron-5.00-x86_64.AppImage
+```
+
 **Für Entwickler:**
 
 ```bash
@@ -91,6 +98,7 @@ Wichtige Highlights:
 - 🧠 Intelligentes inkrementelles Scannen mit persistentem SQLite-Index.
 - 🎥 Vollständige **Live Photo**-Paarungs- und Wiedergabeunterstützung.
 - 🗺 Kartenansicht, die GPS-Metadaten über alle Fotos und Videos visualisiert.
+- 👥 Optionales People-Scanning mit Face Clusters, Namen, Covern, versteckten Personen und Mehrpersonen-Gruppen.
 ![Main interface](../picture/mainview.png)
 ![Preview interface](../picture/preview.png)
 ---
@@ -100,18 +108,22 @@ Wichtige Highlights:
 Die Offline-OBF-Kartenlaufzeit von iPhotron wird als selbstenthaltene
 **maps extension** unter `src/maps/tiles/extension/` bereitgestellt. Genau
 dieses Verzeichnislayout wird von der lokalen Entwicklung, von Paket-Builds
-und vom Windows-Installer verwendet.
+und von plattformspezifischen Installationsartefakten verwendet.
 
 Die Extension enthält derzeit:
 - Offline-Kartendaten in `World_basemap_2.obf`
 - OsmAnd-Ressourcen unter `misc/`, `poi/`, `rendering_styles/` und `routing/`
-- native Binärdateien unter `bin/`, darunter `osmand_render_helper.exe`,
-  `osmand_native_widget.dll`, `OsmAndCore_shared.dll` und die benötigten Qt-DLLs
+- plattformspezifische native Binärdateien unter `bin/`
+  - Windows: `osmand_render_helper.exe`, `osmand_native_widget.dll`,
+    `OsmAndCore_shared.dll`, `OsmAndCoreTools_shared.dll` und die benötigten Qt-DLLs
+  - Linux: `osmand_render_helper`, `osmand_native_widget.so`,
+    `libOsmAndCore_shared.so` und `libOsmAndCoreTools_shared.so`
 
-> **Derzeit nur Windows:** Die unten gezeigte vollständige native
-> maps-extension-Laufzeit ist aktuell nur unter Windows verfügbar. Unter Linux
-> und macOS verwendet iPhotron weiterhin den bestehenden Python-/Legacy-
-> Kartenpfad.
+Hinweise zur Linux-Kartenlaufzeit:
+- Unter Linux kann iPhotron sowohl den helper-basierten OBF-Renderer als auch das native OsmAnd-Widget verwenden, sobald die Shared Libraries vorhanden sind.
+- Wenn neben diesem Repository ein `PySide6-OsmAnd-SDK/`-Checkout existiert, wird in der Linux-Entwicklung bevorzugt dessen Widget-Build aus `tools/osmand_render_helper_native/dist-linux/` verwendet.
+- Das native Linux-Widget erwartet derzeit den XCB- + Desktop-OpenGL-Pfad von Qt. Bei Auswahl dieses Backends setzt iPhotron automatisch `QT_QPA_PLATFORM=xcb`, `QT_OPENGL=desktop` und `QT_XCB_GL_INTEGRATION=xcb_glx`.
+- macOS fällt weiterhin auf den bestehenden Python-/Legacy-Kartenpfad zurück, solange die native Laufzeit dort noch in Arbeit ist.
 
 | Ohne Maps Extension | Mit Maps Extension |
 | --- | --- |
@@ -119,9 +131,9 @@ Die Extension enthält derzeit:
 
 Die Extension wird im Upstream-Teilprojekt
 [PySide6-OsmAnd-SDK](https://github.com/OliverZhaohaibin/PySide6-OsmAnd-SDK)
-gebaut. Dieses Repository enthält die vendorten OsmAnd-Quellen, Windows-
-Buildskripte, die native Qt-Widget-Bridge und die Preview-App, aus denen die
-hier verwendete Laufzeit erzeugt wird.
+gebaut. Dieses Repository enthält die vendorten OsmAnd-Quellen, Windows- und
+Linux-Buildskripte, die native Qt-Widget-Bridge und die Preview-App, aus denen
+die hier verwendete Laufzeit erzeugt wird.
 
 Den vollständigen Workflow "maps extension aus dem Side-Project in dieses
 Repository übernehmen" findest du in [Development](../development.md). Hinweise
@@ -143,6 +155,18 @@ Ein "LIVE"-Badge erscheint auf Standbildern — klicken Sie, um das Bewegungsvid
 ### 🧩 Intelligente Alben
 Die Seitenleiste bietet eine automatisch generierte **Grundbibliothek**, die Fotos in Gruppen einteilt:
 `Alle Fotos`, `Videos`, `Live Photos`, `Favoriten` und `Kürzlich gelöscht`.
+
+### 👥 People, Face Clusters & Gruppen
+Die optionale People-Pipeline erkennt Gesichter, erstellt Face Clusters und
+zeigt sie als People-Karten an. Personen können benannt, doppelte Cluster
+zusammengeführt, versteckt oder wieder eingeblendet werden; ausgewählte Cover
+bleiben über erneute Scans hinweg erhalten.
+
+Mehrere Personen lassen sich zu Gruppen zusammenfassen, um gemeinsame Fotos
+anzuzeigen. Gruppenkarten unterstützen ein ausgewähltes Cover, Drag-and-drop-
+Sortierung und können aufgelöst werden, solange sie nicht angepinnt sind. Das
+Face Scanning nutzt die optionalen `ai-demo`-Abhängigkeiten; die zentrale
+Fotoverwaltung bleibt auch ohne AI-Laufzeit nutzbar.
 
 ### 🖼 Immersive Detailansicht
 Ein eleganter Foto-/Videobetrachter mit Filmstreifen-Navigator und schwebendem Wiedergabebalken.
@@ -174,7 +198,17 @@ Eine umfassende Bearbeitungssuite mit **Anpassen**- und **Zuschneiden**-Modi:
 Alle Bearbeitungen werden in `.ipo`-Sidecar-Dateien gespeichert und bewahren die Originalfotos unberührt.
 
 ### ℹ️ Schwebendes Info-Panel
-Schalten Sie ein schwebendes Metadaten-Panel um, das EXIF, Kamera-/Objektivinformationen, Belichtung, Blende, Brennweite, Dateigröße und mehr anzeigt.
+Schalten Sie ein schwebendes Metadaten-Panel um, das EXIF,
+Kamera-/Objektivinformationen, Belichtung, Blende, Brennweite, Abmessungen,
+Dateigröße und Aufnahmezeit anzeigt. Für Assets mit People-Daten zeigt das
+Panel erkannte Gesicht-Avatare und erlaubt es, ein Gesicht zu entfernen, einer
+anderen Person zuzuweisen oder eine neue Personenannotation zu erstellen.
+
+Auch Standortwerkzeuge sind integriert: Assets mit GPS-Daten können eine
+eingebettete Karte anzeigen, und Assets ohne Standort können über den
+"Assign a Location"-Suchfluss einen Ort auswählen und bestätigen. Wenn die
+maps extension fehlt, bietet das Panel den Downloadpfad an, statt still zu
+scheitern.
 ![Info interface](../picture/info1.png)
 
 ### 💬 Umfangreiche Interaktionen
@@ -197,10 +231,28 @@ Detaillierte technische Dokumentation (auf Englisch):
 | Dokument | Beschreibung |
 |----------|-------------|
 | [Architecture](../architecture.md) | Gesamtarchitektur, Modulgrenzen, Datenfluss, wichtige Designentscheidungen |
-| [Development](../development.md) | Entwicklungsumgebung, Abhängigkeiten, Debugging und der vollständige maps-extension-Workflow über das Side-Project |
-| [Executable Build](../misc/BUILD_EXE.md) | Nuitka-Paketierung, AOT, maps-extension-Synchronisierung und Hinweise zum Windows-Installer |
+| [Development](../development.md) | Entwicklungsumgebung, Abhängigkeiten, Debugging und der vollständige maps-extension-Workflow für Windows und Linux |
+| [Executable Build](../misc/BUILD_EXE.md) | Nuitka-Paketierung, AOT, maps-extension-Synchronisierung und Hinweise zur Windows-/Linux-Laufzeit |
 | [Security](../security.md) | Berechtigungen, Verschlüsselung, Datenspeicherorte, Bedrohungsmodell |
 | [Changelog](../CHANGELOG.md) | Alle Versionshinweise und Änderungen |
+
+---
+
+## 🧩 Externe Werkzeuge
+
+| Werkzeug | Zweck |
+|----------|-------|
+| **ExifTool** | Liest EXIF-, GPS-, QuickTime- und Live-Photo-Metadaten. |
+| **FFmpeg / FFprobe** | Erzeugt Video-Miniaturansichten und analysiert Videoinformationen. |
+| **InsightFace / ONNXRuntime + `buffalo_s`-Modelle** | Optionales People Face Scanning: Gesichtserkennung (`det_500m.onnx`) und Face Embeddings (`w600k_mbf.onnx`) aus `src/extension/models/buffalo_s/`. |
+
+> ExifTool und FFmpeg/FFprobe müssen im System-`PATH` verfügbar sein.
+> Die AI-Gesichtslaufzeit ist optional; für Source-Builds kann sie mit
+> `pip install -e ".[ai-demo]"` installiert werden. Offline-Pakete sollten
+> `extension/models` mitliefern.
+
+Python-Abhängigkeiten wie `Pillow` und `reverse-geocoder` werden über
+`pyproject.toml` automatisch installiert.
 
 ---
 

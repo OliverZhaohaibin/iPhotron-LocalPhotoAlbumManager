@@ -136,3 +136,69 @@ def test_show_information_uses_information_popup(qapp: QApplication) -> None:
     assert captured[0]["title"] == "Test Title"
     assert captured[0]["message"] == "Test message"
     parent.close()
+
+
+def test_show_warning_uses_information_popup(qapp: QApplication) -> None:
+    """``dialogs.show_warning`` should use the project-styled ``InformationPopup``."""
+
+    from PySide6.QtCore import QTimer
+    from PySide6.QtWidgets import QWidget
+
+    from iPhoto.gui.ui.widgets import dialogs
+
+    parent = QWidget()
+    captured: list[dict[str, str]] = []
+
+    def _check_and_close() -> None:
+        children = parent.findChildren(InformationPopup)
+        for child in children:
+            captured.append({"title": child.title(), "message": child.message()})
+            child.close()
+
+    QTimer.singleShot(50, _check_and_close)
+    dialogs.show_warning(parent, "Warning message", title="Warning Title")
+
+    assert len(captured) == 1
+    assert captured[0]["title"] == "Warning Title"
+    assert captured[0]["message"] == "Warning message"
+    parent.close()
+
+
+def test_show_information_centers_popup_on_main_window(qapp: QApplication) -> None:
+    """The themed popup should be centered on the top-level window, not a child widget."""
+
+    from PySide6.QtCore import QTimer
+    from PySide6.QtWidgets import QWidget
+
+    from iPhoto.gui.ui.widgets import dialogs
+
+    window = QWidget()
+    window.resize(520, 360)
+    window.move(180, 140)
+
+    child = QWidget(window)
+    child.setGeometry(48, 72, 160, 120)
+
+    captured: list[tuple[tuple[int, int], tuple[int, int]]] = []
+
+    def _check_and_close() -> None:
+        children = child.findChildren(InformationPopup)
+        for popup in children:
+            popup_center = popup.frameGeometry().center()
+            window_center = window.frameGeometry().center()
+            captured.append(
+                (
+                    (popup_center.x(), popup_center.y()),
+                    (window_center.x(), window_center.y()),
+                )
+            )
+            popup.close()
+
+    window.show()
+    qapp.processEvents()
+    QTimer.singleShot(50, _check_and_close)
+    dialogs.show_information(child, "Centered message", title="Centered Title")
+
+    assert len(captured) == 1
+    assert captured[0][0] == captured[0][1]
+    window.close()

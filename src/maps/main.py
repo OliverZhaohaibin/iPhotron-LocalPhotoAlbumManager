@@ -7,8 +7,10 @@ if __package__ in {None, ""}:  # pragma: no cover - direct script bootstrap
     from pathlib import Path
 
     _SRC_ROOT = Path(__file__).resolve().parents[1]
-    if str(_SRC_ROOT) not in sys.path:
-        sys.path.insert(0, str(_SRC_ROOT))
+    _src_root_str = str(_SRC_ROOT)
+    if _src_root_str in sys.path:
+        sys.path.remove(_src_root_str)
+    sys.path.insert(0, _src_root_str)
 
 import argparse
 import os
@@ -37,6 +39,7 @@ from maps.tile_backend import OsmAndRasterBackend
 from maps.tile_parser import TileLoadingError
 
 _PYTHON_OBF_RUNTIME_PROBE: dict[Path, tuple[bool, str | None]] = {}
+_TRUE_ENV_VALUES = {"1", "true", "yes", "on"}
 
 
 @dataclass(frozen=True)
@@ -55,10 +58,27 @@ def _configure_qt_shader_disk_cache() -> None:
     configure_shader_cache_environment()
 
 
+def _is_packaged_runtime() -> bool:
+    """Return ``True`` when the preview is running from a compiled bundle."""
+
+    return "__compiled__" in globals() or getattr(sys, "frozen", False)
+
+
+def _allow_packaged_linux_wayland() -> bool:
+    """Return whether packaged Linux preview builds may keep Qt's default platform selection."""
+
+    raw_value = os.environ.get("IPHOTO_ALLOW_PACKAGED_LINUX_WAYLAND", "").strip().lower()
+    return raw_value in _TRUE_ENV_VALUES
+
+
+def _opengl_explicitly_disabled() -> bool:
+    return os.environ.get("IPHOTO_DISABLE_OPENGL", "").strip().lower() in {"1", "true", "yes", "on"}
+
+
 def check_opengl_support() -> bool:
     """Return ``True`` when the system can create a basic OpenGL context."""
 
-    if os.environ.get("IPHOTO_DISABLE_OPENGL", "").strip().lower() in {"1", "true", "yes", "on"}:
+    if _opengl_explicitly_disabled():
         return False
 
     try:
@@ -112,8 +132,8 @@ def choose_native_widget_class(
     use_opengl: bool,
     prefer_native_widget: bool = True,
 ) -> tuple[type[MapWidgetBase] | None, str]:
-    if not use_opengl:
-        return None, "OpenGL support unavailable. Falling back to CPU rendering."
+    if _opengl_explicitly_disabled():
+        return None, "OpenGL support disabled by configuration. Falling back to CPU rendering."
 
     if not prefer_native_widget:
         return None, "OpenGL support detected. Using the same GPU accelerated Python renderer as the Location section."
@@ -128,8 +148,44 @@ def choose_native_widget_class(
     if is_available:
         return NativeOsmAndWidget, "OpenGL support detected. Using the native OsmAnd widget when OBF data is selected."
 
+    if not use_opengl:
+        return None, "OpenGL support unavailable. Falling back to CPU rendering."
+
     detail = f" Native widget disabled: {reason}." if reason else ""
     return None, f"OpenGL support detected.{detail} Using GPU accelerated Python rendering."
+
+
+def prepare_qt_runtime_for_backend(backend: str, package_root: Path | None = None) -> None:
+    """Apply Linux Qt startup flags needed by the native OsmAnd widget.
+
+    The Python and legacy renderers keep Qt's default platform selection. Native
+    and auto mode prefer XCB/GLX so the native OsmAnd widget has a stable OpenGL
+    runtime when it is selected later during backend negotiation.
+    """
+
+    normalized_backend = backend.strip().lower()
+    if sys.platform != "linux":
+        return
+
+    # The "python" and "legacy" backends never use the native OsmAnd widget, so
+    # no XCB/GLX flags are required.
+    if normalized_backend in {"python", "legacy"}:
+        return
+
+    if _is_packaged_runtime():
+        if _allow_packaged_linux_wayland():
+            return
+        os.environ["QT_QPA_PLATFORM"] = "xcb"
+
+    if not os.environ.get("QT_QPA_PLATFORM"):
+        os.environ["QT_QPA_PLATFORM"] = "xcb"
+    if os.environ.get("QT_QPA_PLATFORM") == "xcb":
+        os.environ.setdefault("QT_OPENGL", "desktop")
+        os.environ.setdefault("QT_XCB_GL_INTEGRATION", "xcb_glx")
+        try:
+            QApplication.setAttribute(Qt.ApplicationAttribute.AA_UseDesktopOpenGL, True)
+        except Exception:
+            return
 
 
 def probe_python_obf_runtime(package_root: Path | None = None) -> tuple[bool, str | None]:
@@ -268,7 +324,7 @@ def choose_launch_configuration(
         if not use_opengl:
             raise TileLoadingError("OpenGL support is unavailable, so the native OsmAnd widget can not be forced")
         if not has_usable_osmand_native_widget(package_root):
-            raise TileLoadingError("The native OsmAnd widget DLL is not available")
+            raise TileLoadingError("The native OsmAnd widget library is not available")
         is_available, reason = probe_native_widget_runtime(package_root)
         if not is_available:
             detail = f": {reason}" if reason else ""
@@ -347,7 +403,7 @@ def format_map_runtime_diagnostics(
     native_library_path = getattr(map_widget, "loaded_library_path", lambda: None)()
     native_library_suffix = ""
     if native_library_path:
-        native_library_suffix = f" native_dll={native_library_path}"
+        native_library_suffix = f" native_library={native_library_path}"
 
     return (
         "[maps.main] "
@@ -732,6 +788,10 @@ def _schedule_screenshot_capture(
     delay_ms = max(0, int(capture_delay_ms))
 
     def _capture_and_exit() -> None:
+        map_widget = window._map_widget
+        if hasattr(map_widget, "shutdown"):
+            map_widget.shutdown()
+
         if window.capture_screenshot(screenshot_path):
             print(f"[maps.main] screenshot={screenshot_path.resolve()}", flush=True)
             app.exit(0)
@@ -750,10 +810,11 @@ def _schedule_screenshot_capture(
 def main(argv: Sequence[str] | None = None) -> int:
     arguments = list(argv if argv is not None else sys.argv[1:])
     parsed_args = build_argument_parser().parse_args(arguments)
+    package_root = Path(__file__).resolve().parent
+    prepare_qt_runtime_for_backend(parsed_args.backend, package_root)
     configure_qt_opengl_defaults()
     app = QApplication([Path(__file__).name, *arguments])
 
-    package_root = Path(__file__).resolve().parent
     use_opengl = check_opengl_support()
     launch_config = choose_launch_configuration(
         package_root,

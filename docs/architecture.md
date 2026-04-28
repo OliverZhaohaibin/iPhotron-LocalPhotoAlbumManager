@@ -68,12 +68,14 @@ graph TB
 
     subgraph CoreBackend["4. Core Backend"]
         App["app.py — Facade"]
-        IO["io/ — scanner, metadata"]
+        IO["io/ — scanner_adapter, metadata"]
         Core["core/ — pairing, resolvers, filters"]
-        Cache["cache/ — SQLite index_store"]
+        Cache["cache/index_store/ — global asset index"]
         DI["di/ — Dependency Injection"]
         Events["events/ — Event Bus"]
         Errors["errors/ — Error Handling"]
+        People["people/ — face detection, clustering, state"]
+        Library["library/ — scan coordinator, workers"]
     end
 
     subgraph GUILayer["5. GUI Layer"]
@@ -121,7 +123,7 @@ src/
 │   │   └── services/        # Metadata extraction, thumbnails
 │   ├── app.py               # Backend Facade
 │   ├── models/              # Legacy data structures (Album, LiveGroup)
-│   ├── io/                  # File scanning (scanner.py), metadata reading
+│   ├── io/                  # scanner_adapter.py, metadata reading
 │   ├── core/                # Algorithms: pairing, resolvers, filters
 │   │   ├── light_resolver.py
 │   │   ├── color_resolver.py
@@ -130,7 +132,9 @@ src/
 │   │   ├── selective_color_resolver.py
 │   │   ├── levels_resolver.py
 │   │   └── filters/         # NumPy → Numba JIT → QColor fallback
-│   ├── cache/               # Global SQLite database (index_store/)
+│   ├── cache/               # Global SQLite index_store/
+│   ├── people/              # Face scan pipeline, People repositories/state
+│   ├── library/             # LibraryManager, scan coordinator, workers
 │   ├── utils/               # Wrappers: exiftool.py, ffmpeg.py
 │   ├── schemas/             # JSON Schema (album.schema.json)
 │   ├── di/                  # Dependency Injection container
@@ -207,18 +211,154 @@ sequenceDiagram
 sequenceDiagram
     participant User
     participant GUI as GUI
-    participant Scanner as io/scanner.py
-    participant Meta as io/metadata.py
-    participant DB as SQLite (global_index.db)
+    participant LM as LibraryManager
+    participant SW as ScannerWorker
+    participant SA as io/scanner_adapter.py
+    participant Meta as ExifToolMetadataProvider
+    participant DB as .iPhoto/global_index.db
+    participant Pair as backend.pair()
+    participant FW as FaceScanWorker
+    participant PI as PeopleIndexCoordinator
+    participant FaceDB as .iPhoto/faces/*.db
 
     User->>GUI: Trigger scan
-    GUI->>Scanner: scan(path)
-    Scanner->>Scanner: Walk directory tree
-    Scanner->>Meta: Extract metadata (ExifTool)
-    Meta-->>Scanner: EXIF, GPS, timestamps
-    Scanner->>DB: Upsert assets (idempotent)
-    DB-->>GUI: Scan complete
+    GUI->>LM: start_scanning(root)
+    LM->>SW: start ScannerWorker
+    LM->>FW: start FaceScanWorker
+    SW->>SA: scan_album(root, include, exclude, existing_index)
+    SA->>SA: FileDiscoveryThread walks filesystem
+    SA->>Meta: batch metadata extraction
+    Meta-->>SA: normalized rows
+    SA-->>SW: scanned rows
+    SW->>DB: merge_scan_rows(chunk)
+    SW-->>LM: chunkReady(chunk)
+    LM->>FW: enqueue_rows(chunk)
+    SW-->>LM: finished(rows)
+    LM->>Pair: rebuild Live Photo links
+    FW->>PI: submit_detected_batch(detected faces)
+    PI->>FaceDB: replace face/person snapshot
+    PI->>DB: update face_status(done/retry)
+    PI-->>GUI: snapshotCommitted / peopleIndexUpdated
 ```
+
+### Current Scan Entry Points
+
+The repository currently contains more than one scan implementation, but the active desktop runtime path is the worker-based pipeline:
+
+1. `src/iPhoto/gui/facade.py::rescan_current_async()`
+   Uses `LibraryManager.start_scanning()` when the app is bound to a library. This is the main GUI path.
+2. `src/iPhoto/library/scan_coordinator.py`
+   Starts `ScannerWorker` and `FaceScanWorker` together so file indexing and People updates can progress concurrently.
+3. `src/iPhoto/app.py::rescan()`
+   Blocking backend API used by CLI/fallback workflows and by some background services.
+4. `src/iPhoto/app.py::open_album()`
+   Can trigger a lightweight autoscan when the index is empty.
+
+`src/iPhoto/application/use_cases/scan_album.py` and `src/iPhoto/application/services/parallel_scanner.py` still exist and are covered by tests/DI wiring, but they are not the primary GUI scan path today.
+
+### Current Filesystem Scan Pipeline
+
+The current asset scan is split into discovery, metadata extraction, merge, and post-processing stages:
+
+1. Discovery
+   `io.scanner_adapter.scan_album()` reuses `FileDiscoveryThread` from `application/use_cases/scan_album.py` to walk the directory tree. It applies album include/exclude filters and prunes internal folders such as `.iPhoto`.
+2. Incremental cache check
+   Before re-reading metadata, the adapter compares each file against the existing index using relative path, file size, and mtime with a 1-second tolerance. Cache hits are yielded directly.
+3. Metadata normalization
+   Cache misses are batched through `ExifToolMetadataProvider.get_metadata_batch()` and normalized by `normalize_metadata()`. This stage fills canonical row fields such as `id`, `rel`, `dt`, `ts`, `mime`, `media_type`, dimensions, duration, and `face_status`.
+4. Thumbnail enrichment
+   Images get a micro-thumbnail through `PillowThumbnailGenerator`. If metadata extraction fails, the adapter falls back to a minimal row so the file is still indexed.
+5. Chunked persistence
+   `ScannerWorker` persists each chunk with `AssetRepository.merge_scan_rows()`. The repository performs atomic read-merge-write inside one transaction so scan facts and library-managed state are not racing each other.
+6. Post-scan Live Photo pairing
+   When the scan finishes, `ScanCoordinatorMixin._on_scan_finished()` calls `backend.pair()` to rebuild `links.json` and synchronize Live Photo roles back into the global index.
+
+### Face Scan / People Pipeline
+
+People indexing is a second pipeline layered on top of the asset scan rather than part of metadata extraction itself.
+
+1. Candidate selection
+   New or retried rows are forwarded from `ScannerWorker.chunkReady` to `FaceScanWorker.enqueue_rows()`. Only image-like assets are eligible. Videos and hidden Live Photo motion parts are skipped by `people.status.is_face_scan_candidate()`.
+2. Global backlog top-up
+   `FaceScanWorker` does not rely only on the latest scan chunk. It also refills its queue from `global_index.db` by reading rows whose `face_status` is `pending` or `retry`.
+3. Detection and embedding
+   `FaceClusterPipeline.detect_faces_for_rows()` loads each asset, runs `insightface.app.FaceAnalysis`, drops small faces, extracts normalized embeddings, and writes cropped face thumbnails to `.iPhoto/faces/thumbnails/`.
+4. Session staging
+   `PeopleIndexCoordinator.submit_detected_batch()` creates a `FaceScanSession`, separates `done` and `retry` assets, and keeps scan-time mutations serialized under a lock.
+5. Snapshot rebuild
+   `FaceScanSession.build_runtime_snapshot()` merges staged detections with all previously persisted faces, reclusters all faces with DBSCAN, then canonicalizes identities against persisted People state.
+6. Commit and publish
+   `FaceRepository.replace_all()` rewrites the runtime People snapshot in `.iPhoto/faces/face_index.db`. `FaceStateRepository.sync_scan_results()` persists stable identity/user state in `.iPhoto/faces/face_state.db`. After commit, the global asset index is updated from `pending/retry` to `done`, and `PeopleSnapshotEvent` is emitted back to the GUI.
+
+### People Repository Responsibilities
+
+The People subsystem deliberately separates rebuildable scan output from
+user-authored state:
+
+| Component | Responsibility |
+|-----------|----------------|
+| `FaceScanWorker` | Background queue owner. It receives scan chunks, tops up pending/retry backlog from `global_index.db`, runs detection, and reports retry/failure status without blocking the asset scan. |
+| `PeopleIndexCoordinator` | Serialized mutation boundary for scan commits and UI mutations such as cover changes, manual face edits, merges, groups, and group deletion. |
+| `FaceRepository` | Runtime People view over faces/persons plus service methods for cluster queries, merges, covers, and group asset refreshes. |
+| `FaceStateRepository` | Stable People state database for names, canonical identities, covers, hidden flags, person/group order, group metadata, and group asset caches. |
+
+`face_index.db` is a runtime snapshot that can be rebuilt from detections and
+stable state. `face_state.db` is not disposable cache: it stores human decisions
+and must survive rescans, reclustering, and application restarts.
+
+### People Groups And Stable UI State
+
+Groups are user-created containers over existing People cards. A group stores
+member person ids, display metadata, order, pinned state, and optional cover
+asset in `face_state.db`. The repository also maintains a group asset cache:
+the cached asset ids are the photos where all current members appear together.
+
+Group state is refreshed when scan commits, merges, manual face edits, person
+deletions, or group mutations change the underlying memberships. Merging people
+repairs affected groups and emits group redirects so the UI can update cards
+without losing the user's visible organization. Hidden state is also stable
+People state; people with different hidden states must not be merged, and group
+cards stay synchronized with the dashboard's hidden-person filter.
+
+### Face Status State Machine
+
+`face_status` lives on the main asset row in `global_index.db` and acts as the contract between the asset scan and the People scan.
+
+| Status | Meaning | Typical producer |
+|-------|---------|------------------|
+| `pending` | Asset is eligible for face scan and has not been processed yet | Initial asset scan |
+| `skipped` | Asset should not be face scanned | Initial asset scan for videos / hidden motion items |
+| `retry` | Detection or commit should be retried later | `FaceScanWorker` / `PeopleIndexCoordinator` |
+| `done` | Face processing completed successfully | `PeopleIndexCoordinator` |
+| `failed` | Fatal runtime failure stopped scanning | `FaceScanWorker` fatal path |
+
+Two rules matter here:
+
+- Asset scan owns initialization of `face_status`, not People scan.
+- `cache/index_store/scan_merge.py` preserves the previous `face_status` when asset identity is unchanged, but recomputes it when the asset id changes.
+
+### Persistence Layout For Scanning
+
+The scan subsystem writes to multiple persistence artifacts under the library root:
+
+| Path | Purpose |
+|------|---------|
+| `.iPhoto/global_index.db` | Main asset index, scan facts, favorites, live-role state, `face_status` |
+| `.iPhoto/links.json` | Materialized Live Photo pairing payload for the current album |
+| `.iPhoto/faces/face_index.db` | Runtime People snapshot: detected/manual faces, clustered persons, and group membership inputs |
+| `.iPhoto/faces/face_state.db` | Stable People state: canonical identities, names, covers, hidden flags, person/group order, group metadata, pinned state, and group asset caches |
+| `.iPhoto/faces/thumbnails/` | Cropped face thumbnails used by the People UI |
+
+### Important Scan Semantics
+
+- Asset scan is additive-only. `index_sync_service.update_index_snapshot()` merges or upserts facts but does not treat "not seen in this scan" as deletion.
+- Deletion is handled by separate lifecycle flows, not by rescans.
+- Live Photo pairing is a post-scan step, not part of metadata extraction.
+- People clustering is a full snapshot rebuild on each committed batch, while user-facing identity state is preserved separately in `face_state.db`.
+- Names, chosen covers, hidden people, person order, groups, group order, pinned
+  groups, and selected group covers are human decisions. Do not discard them
+  when repairing or rebuilding the runtime face snapshot.
+- InsightFace model files are cached under the shared extension model directory (`src/extension/models`) rather than inside each library.
 
 ---
 

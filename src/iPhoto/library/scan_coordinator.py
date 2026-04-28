@@ -5,16 +5,38 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING, Dict, Iterable, List, Optional
 
-from PySide6.QtCore import QMutexLocker
+from PySide6.QtCore import QMutexLocker, QRunnable
 
 from ..cache.index_store import get_global_repository
 from ..utils.logging import get_logger
+from .workers.face_scan_worker import FaceScanWorker
 from .workers.scanner_worker import ScannerSignals, ScannerWorker
 
 if TYPE_CHECKING:
     pass
 
 LOGGER = get_logger()
+
+
+class _PairingWorker(QRunnable):
+    """Run live-photo pairing off the main thread after a scan completes."""
+
+    def __init__(self, scan_root: Path, library_root: Optional[Path]) -> None:
+        super().__init__()
+        self._scan_root = scan_root
+        self._library_root = library_root
+
+    def run(self) -> None:
+        try:
+            from .. import app as backend  # noqa: PLC0415
+            backend.pair(self._scan_root, library_root=self._library_root)
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.warning(
+                "Failed to persist live photo pairings after scan of %s "
+                "(re-scanning the library will retry pairing): %s",
+                self._scan_root,
+                exc,
+            )
 
 
 class ScanCoordinatorMixin:
@@ -42,6 +64,9 @@ class ScanCoordinatorMixin:
             self._current_scanner_worker.cancel()
             self._current_scanner_worker = None
             self._live_scan_root = None
+        if self._current_face_scanner is not None:
+            self._current_face_scanner.cancel()
+            self._current_face_scanner = None
 
         self._live_scan_root = root
         self._live_scan_buffer.clear()
@@ -49,9 +74,17 @@ class ScanCoordinatorMixin:
         # Pass library root to scanner so all assets go to global database
         worker = ScannerWorker(root, include, exclude, signals, library_root=self._root)
         self._current_scanner_worker = worker
+        self._face_scan_status_message = None
+        self.faceScanStatusChanged.emit("")
+        face_library_root = self._root if self._root is not None else root
+        face_worker = FaceScanWorker(face_library_root, self)
+        face_worker.statusChanged.connect(self._on_face_scan_status_changed)
+        face_worker.finished.connect(self._on_face_scan_finished)
+        self._current_face_scanner = face_worker
         # Release lock before starting the worker
         del locker
 
+        face_worker.start()
         self._scan_thread_pool.start(worker)
 
     def stop_scanning(self) -> None:
@@ -63,6 +96,9 @@ class ScanCoordinatorMixin:
             # We don't clear the buffer immediately on stop, as the UI might still need it
             # until a new scan starts or the app closes. Setting root to None invalidates it contextually.
             self._live_scan_root = None
+        if self._current_face_scanner is not None:
+            self._current_face_scanner.cancel()
+            self._current_face_scanner = None
 
     def is_scanning_path(self, path: Path) -> bool:
         """Return True if the given path is covered by the active scan."""
@@ -251,26 +287,62 @@ class ScanCoordinatorMixin:
         if not chunk:
             return
 
+        self._geotagged_assets_cache = None
+        self._geotagged_assets_cache_root = None
+        if self._current_face_scanner is not None:
+            self._current_face_scanner.enqueue_rows(chunk)
         self.scanChunkReady.emit(root, chunk)
 
     def _on_scan_finished(self, root: Path, rows: List[dict]) -> None:
-        # Emit scanFinished for downstream handling (e.g., updating links or finalizing scan).
-        self.scanFinished.emit(root, True)
-        # Clear worker reference after emitting signal to prevent race conditions
+        self._geotagged_assets_cache = None
+        self._geotagged_assets_cache_root = None
+
+        # Clear worker reference before downstream listeners react so a completed
+        # scan does not still appear in-flight while final post-processing runs.
         locker = QMutexLocker(self._scan_buffer_lock)
+        worker = self._current_scanner_worker
         self._current_scanner_worker = None
+        face_scanner = self._current_face_scanner
+        del locker
+
+        if worker is None:
+            if self._live_scan_root is None:
+                self.scanFinished.emit(root, True)
+            return
+        if face_scanner is not None:
+            face_scanner.finish_input()
+
+        if worker.cancelled:
+            self.scanFinished.emit(root, True)
+            return
+        if worker.failed:
+            self.scanFinished.emit(root, False)
+            return
 
         # Persist Live Photo pairings once a scan completes so the database and
         # links.json reflect the latest scan results.
         try:
             from .. import app as backend
+            backend._prune_index_scope(root, rows, library_root=self._root)
             backend.pair(root, library_root=self._root)
         except Exception as exc:
             LOGGER.warning("Failed to persist live photo pairings after scan: %s", exc)
 
+        # Emit immediately so the UI (status bar, map refresh) can react without
+        # waiting for the potentially slow live-photo pairing step.
+        self.scanFinished.emit(root, True)
+
+        # Persist live-photo pairings in the background to avoid blocking the
+        # main thread while downstream listeners start refreshing.
+        self._scan_thread_pool.start(_PairingWorker(root, self._root))
+
     def _on_scan_error(self, root: Path, message: str) -> None:
         locker = QMutexLocker(self._scan_buffer_lock)
         self._current_scanner_worker = None
+        face_scanner = self._current_face_scanner
+        del locker
+        if face_scanner is not None:
+            face_scanner.finish_input()
         self.errorRaised.emit(message)
         self.scanFinished.emit(root, False)
 
@@ -283,3 +355,10 @@ class ScanCoordinatorMixin:
             return p1.resolve() == p2.resolve()
         except OSError:
             return p1 == p2
+
+    def _on_face_scan_status_changed(self, message: str) -> None:
+        self._face_scan_status_message = message or None
+        self.faceScanStatusChanged.emit(message)
+
+    def _on_face_scan_finished(self) -> None:
+        self._current_face_scanner = None

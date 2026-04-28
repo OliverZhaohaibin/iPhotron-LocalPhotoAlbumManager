@@ -5,6 +5,7 @@ from .asset_import_service import AssetImportService
 from .asset_move_service import AssetMoveService
 from .deletion_service import DeletionService
 from .library_update_service import LibraryUpdateService, MoveOperationResult
+from .pinned_items_service import PinnedItemsService, PinnedSidebarItem
 from .restoration_service import RestorationService
 
 __all__ = [
@@ -14,5 +15,7 @@ __all__ = [
     "DeletionService",
     "LibraryUpdateService",
     "MoveOperationResult",
+    "PinnedItemsService",
+    "PinnedSidebarItem",
     "RestorationService",
 ]

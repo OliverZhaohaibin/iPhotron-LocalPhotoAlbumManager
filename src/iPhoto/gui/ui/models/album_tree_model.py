@@ -12,6 +12,8 @@ from PySide6.QtGui import QIcon
 
 from ....library.manager import LibraryManager
 from ....library.tree import AlbumNode
+from ....people.service import PeopleService
+from ...services.pinned_items_service import PinnedItemsService, PinnedSidebarItem
 from ..icon import load_icon
 from ..palette import SIDEBAR_ICON_COLOR_HEX
 
@@ -22,6 +24,7 @@ class AlbumTreeRole(int, Enum):
     NODE_TYPE = Qt.ItemDataRole.UserRole + 1
     FILE_PATH = Qt.ItemDataRole.UserRole + 2
     ALBUM_NODE = Qt.ItemDataRole.UserRole + 3
+    PINNED_ITEM = Qt.ItemDataRole.UserRole + 4
 
 
 class NodeType(Enum):
@@ -34,6 +37,9 @@ class NodeType(Enum):
     ACTION = auto()
     ALBUM = auto()
     SUBALBUM = auto()
+    PINNED_ALBUM = auto()
+    PINNED_PERSON = auto()
+    PINNED_GROUP = auto()
     SEPARATOR = auto()
 
 
@@ -52,6 +58,7 @@ class AlbumTreeItem:
     node_type: NodeType
     icon_name: Optional[str] = None
     album: Optional[AlbumNode] = None
+    pinned_item: Optional[PinnedSidebarItem] = None
     parent: Optional["AlbumTreeItem"] = None
     children: List["AlbumTreeItem"] = field(default_factory=list)
 
@@ -81,6 +88,7 @@ class AlbumTreeModel(QAbstractItemModel):
         "Videos",
         "Live Photos",
         "Favorites",
+        "People",
         "Location",
     )
 
@@ -94,6 +102,7 @@ class AlbumTreeModel(QAbstractItemModel):
         "videos": "video",
         "live photos": "livephoto",
         "favorites": "suit.heart",
+        "people": "person.crop.square",
         "location": "mappin.and.ellipse",
         "recently deleted": "trash",
     }
@@ -101,8 +110,10 @@ class AlbumTreeModel(QAbstractItemModel):
     def __init__(self, library: LibraryManager, parent: QObject | None = None) -> None:
         super().__init__(parent)
         self._library = library
+        self._pinned_service: PinnedItemsService | None = None
         self._root_item = AlbumTreeItem("root", NodeType.ROOT)
         self._path_map: Dict[Path, AlbumTreeItem] = {}
+        self._pinned_map: Dict[tuple[str, str], AlbumTreeItem] = {}
         self._library.treeUpdated.connect(self.refresh)
         self.refresh()
 
@@ -147,6 +158,8 @@ class AlbumTreeModel(QAbstractItemModel):
             return item.album
         if role == AlbumTreeRole.FILE_PATH and item.album is not None:
             return item.album.path
+        if role == AlbumTreeRole.PINNED_ITEM:
+            return item.pinned_item
         if role == Qt.ItemDataRole.DecorationRole:
             return self._icon_for_item(item)
         return None
@@ -158,6 +171,8 @@ class AlbumTreeModel(QAbstractItemModel):
         if item.node_type in {NodeType.SECTION, NodeType.SEPARATOR}:
             return Qt.ItemFlag.ItemIsEnabled
         if item.node_type == NodeType.HEADER:
+            if item.title == "Pinned":
+                return Qt.ItemFlag.ItemIsEnabled
             return Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable
         if item.node_type == NodeType.ACTION:
             return Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable
@@ -166,12 +181,28 @@ class AlbumTreeModel(QAbstractItemModel):
     # ------------------------------------------------------------------
     # Public helpers
     # ------------------------------------------------------------------
+    def set_pinned_service(self, service: PinnedItemsService | None) -> None:
+        """Attach a pinned-items service and keep the tree in sync with it."""
+
+        if self._pinned_service is service:
+            return
+        if self._pinned_service is not None:
+            try:
+                self._pinned_service.changed.disconnect(self.refresh)
+            except (RuntimeError, TypeError):
+                pass
+        self._pinned_service = service
+        if service is not None:
+            service.changed.connect(self.refresh)
+        self.refresh()
+
     def refresh(self) -> None:
         """Rebuild the model from the current state of the library."""
 
         self.beginResetModel()
         self._root_item = AlbumTreeItem("root", NodeType.ROOT)
         self._path_map.clear()
+        self._pinned_map.clear()
         library_root = self._library.root()
         if library_root is None:
             placeholder = AlbumTreeItem("Bind Basic Library…", NodeType.ACTION)
@@ -197,6 +228,12 @@ class AlbumTreeModel(QAbstractItemModel):
         # it lived before the hierarchy change. Rendering it at this level keeps
         # the visual grouping intact regardless of how many custom albums exist.
         self._root_item.add_child(AlbumTreeItem("──────────", NodeType.SEPARATOR))
+
+        pinned_header = AlbumTreeItem("Pinned", NodeType.HEADER)
+        self._add_pinned_nodes(pinned_header, library_root)
+        if pinned_header.children:
+            self._root_item.add_child(pinned_header)
+            self._root_item.add_child(AlbumTreeItem("──────────", NodeType.SEPARATOR))
 
         # Promote the Albums section to a header-level entry so that it shares the
         # same visual hierarchy, font weight, and font size as the "Basic Library"
@@ -226,6 +263,14 @@ class AlbumTreeModel(QAbstractItemModel):
         """Return the model index associated with *path*, if any."""
 
         item = self._path_map.get(path) or self._path_map.get(path.resolve())
+        if item is None:
+            return QModelIndex()
+        return self.createIndex(item.row(), 0, item)
+
+    def index_for_pinned_item(self, pinned_item: PinnedSidebarItem) -> QModelIndex:
+        """Return the index associated with *pinned_item*, if any."""
+
+        item = self._pinned_map.get((pinned_item.kind, pinned_item.item_id))
         if item is None:
             return QModelIndex()
         return self.createIndex(item.row(), 0, item)
@@ -292,6 +337,108 @@ class AlbumTreeModel(QAbstractItemModel):
         self._path_map[album.path.resolve()] = item
         return item
 
+    def _add_pinned_nodes(self, header: AlbumTreeItem, library_root: Path) -> None:
+        """Populate the pinned section from persisted settings."""
+
+        if self._pinned_service is None:
+            return
+
+        pinned_items = list(self._pinned_service.items_for_library(library_root))
+        if not pinned_items:
+            return
+
+        album_lookup = self._album_lookup()
+        person_lookup: dict[str, object] = {}
+        group_lookup: dict[str, object] = {}
+
+        needs_people = any(pinned_item.kind == "person" for pinned_item in pinned_items)
+        needs_groups = any(pinned_item.kind == "group" for pinned_item in pinned_items)
+        if needs_people or needs_groups:
+            people_service = PeopleService(library_root)
+            cluster_summaries = people_service.list_clusters()
+            if needs_people:
+                person_lookup = {summary.person_id: summary for summary in cluster_summaries}
+            if needs_groups:
+                group_lookup = {
+                    summary.group_id: summary
+                    for summary in people_service.list_groups(summaries=cluster_summaries)
+                }
+
+        for pinned_item in pinned_items:
+            item = self._create_pinned_item(
+                pinned_item,
+                album_lookup=album_lookup,
+                person_lookup=person_lookup,
+                group_lookup=group_lookup,
+            )
+            if item is None:
+                continue
+            header.add_child(item)
+            self._pinned_map[(pinned_item.kind, pinned_item.item_id)] = item
+
+    def _create_pinned_item(
+        self,
+        pinned_item: PinnedSidebarItem,
+        *,
+        album_lookup: dict[Path, AlbumNode],
+        person_lookup: dict[str, object],
+        group_lookup: dict[str, object],
+    ) -> AlbumTreeItem | None:
+        if pinned_item.kind == "album":
+            try:
+                album_path = Path(pinned_item.item_id)
+            except (TypeError, ValueError):
+                return None
+            album = album_lookup.get(album_path)
+            title = (
+                pinned_item.label
+                if pinned_item.custom_label
+                else (album.title if album is not None else pinned_item.label)
+            )
+            return AlbumTreeItem(
+                title,
+                NodeType.PINNED_ALBUM,
+                album=album,
+                pinned_item=pinned_item,
+            )
+        if pinned_item.kind == "person":
+            summary = person_lookup.get(pinned_item.item_id)
+            title = pinned_item.label if pinned_item.custom_label else (
+                str(getattr(summary, "name", "") or "").strip() or pinned_item.label
+            )
+            return AlbumTreeItem(
+                title,
+                NodeType.PINNED_PERSON,
+                pinned_item=pinned_item,
+            )
+        if pinned_item.kind == "group":
+            summary = group_lookup.get(pinned_item.item_id)
+            title = pinned_item.label if pinned_item.custom_label else (
+                str(getattr(summary, "name", "") or "").strip() or pinned_item.label
+            )
+            return AlbumTreeItem(
+                title,
+                NodeType.PINNED_GROUP,
+                pinned_item=pinned_item,
+            )
+        return None
+
+    def _album_lookup(self) -> dict[Path, AlbumNode]:
+        lookup: dict[Path, AlbumNode] = {}
+        for album in self._library.list_albums():
+            lookup[album.path] = album
+            try:
+                lookup[album.path.resolve()] = album
+            except OSError:
+                pass
+            for child in self._library.list_children(album):
+                lookup[child.path] = child
+                try:
+                    lookup[child.path.resolve()] = child
+                except OSError:
+                    pass
+        return lookup
+
     def _icon_for_item(
         self,
         item: AlbumTreeItem,
@@ -322,7 +469,15 @@ class AlbumTreeModel(QAbstractItemModel):
                 )
         if item.node_type in {NodeType.ALBUM, NodeType.SUBALBUM}:
             return load_icon("rectangle.stack", stroke_width=stroke_width, color=color)
+        if item.node_type == NodeType.PINNED_ALBUM:
+            return load_icon("rectangle.stack", stroke_width=stroke_width, color=color)
+        if item.node_type == NodeType.PINNED_PERSON:
+            return load_icon("person.svg", stroke_width=stroke_width, color=color)
+        if item.node_type == NodeType.PINNED_GROUP:
+            return load_icon("person.2.svg", stroke_width=stroke_width, color=color)
         if item.node_type == NodeType.HEADER:
+            if item.title == "Pinned":
+                return QIcon()
             return load_icon(
                 "photo.on.rectangle",
                 stroke_width=stroke_width,

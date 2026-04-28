@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -13,7 +14,7 @@ pytest.importorskip("PySide6.QtTest", reason="Qt test helpers not available", ex
 from PySide6.QtTest import QSignalSpy
 from PySide6.QtWidgets import QApplication
 
-from iPhoto.errors import AlbumDepthError, LibraryUnavailableError
+from iPhoto.errors import AlbumDepthError, AlbumOperationError, LibraryUnavailableError
 from iPhoto.library.manager import LibraryManager
 
 
@@ -70,8 +71,12 @@ def test_create_and_rename_album(tmp_path: Path, qapp: QApplication) -> None:
     assert sub.level == 2
     with pytest.raises(AlbumDepthError):
         manager.create_subalbum(sub, "TooDeep")
+    rename_spy = QSignalSpy(manager.albumRenamed)
+    old_sub_path = sub.path
     manager.rename_album(sub, "Arrival")
     qapp.processEvents()
+    assert rename_spy.count() == 1
+    assert rename_spy.at(0) == [old_sub_path, created.path / "Arrival"]
     refreshed_parent = next(
         node for node in manager.list_albums() if node.path == created.path
     )
@@ -86,6 +91,36 @@ def test_create_and_rename_album(tmp_path: Path, qapp: QApplication) -> None:
     assert data["title"] == "Arrival"
 
 
+@pytest.mark.parametrize("reserved_name", [".iPhoto", ".Trash", "exported"])
+def test_reserved_album_names_are_rejected_for_create_and_rename(
+    tmp_path: Path, qapp: QApplication, reserved_name: str
+) -> None:
+    root = tmp_path / "Library"
+    root.mkdir()
+    manager = LibraryManager()
+    manager.bind_path(root)
+
+    created = manager.create_album("Trips")
+    child = manager.create_subalbum(created, "Day1")
+
+    with pytest.raises(AlbumOperationError, match="reserved for internal use"):
+        manager.create_album(reserved_name)
+    with pytest.raises(AlbumOperationError, match="reserved for internal use"):
+        manager.create_subalbum(created, reserved_name)
+    with pytest.raises(AlbumOperationError, match="reserved for internal use"):
+        manager.rename_album(created, reserved_name)
+    with pytest.raises(AlbumOperationError, match="reserved for internal use"):
+        manager.rename_album(child, reserved_name)
+
+    qapp.processEvents()
+
+    albums = manager.list_albums()
+    assert any(node.path == created.path and node.title == "Trips" for node in albums)
+    refreshed_parent = next(node for node in albums if node.path == created.path)
+    refreshed_children = manager.list_children(refreshed_parent)
+    assert any(kid.path == child.path and kid.title == "Day1" for kid in refreshed_children)
+
+
 def test_ensure_manifest_generates_defaults(tmp_path: Path) -> None:
     root = tmp_path / "Library"
     album_dir = root / "NoManifest"
@@ -97,3 +132,29 @@ def test_ensure_manifest_generates_defaults(tmp_path: Path) -> None:
     data = json.loads(manifest_path.read_text(encoding="utf-8"))
     assert data["title"] == "NoManifest"
     assert data["schema"] == "iPhoto/album@1"
+
+
+def test_scan_finished_skips_prune_when_worker_failed(tmp_path: Path, qapp: QApplication) -> None:
+    root = tmp_path / "Library"
+    root.mkdir()
+    manager = LibraryManager()
+    manager.bind_path(root)
+
+    class _Worker:
+        cancelled = False
+        failed = True
+
+    spy = QSignalSpy(manager.scanFinished)
+    manager._current_scanner_worker = _Worker()
+
+    with (
+        patch("iPhoto.app._prune_index_scope") as prune_mock,
+        patch("iPhoto.app.pair") as pair_mock,
+    ):
+        manager._on_scan_finished(root, [])
+        qapp.processEvents()
+
+    prune_mock.assert_not_called()
+    pair_mock.assert_not_called()
+    assert spy.count() == 1
+    assert spy.at(0)[1] is False

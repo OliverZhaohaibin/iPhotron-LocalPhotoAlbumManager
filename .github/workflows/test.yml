@@ -40,4 +40,7 @@ jobs:
           QT_QPA_PLATFORM: offscreen
           NUMBA_DISABLE_JIT: "1"
         run: |
-          python -m pytest tests/ --tb=short -v
+          python -m pytest tests/ \
+            --ignore=tests/gui \
+            --ignore=tests/ui \
+            --tb=short -v

@@ -72,6 +72,7 @@ class SQLiteAssetRepository(IAssetRepository):
                     is_favorite INTEGER DEFAULT 0,
                     location TEXT,
                     micro_thumbnail BLOB,
+                    face_status TEXT,
                     album_id TEXT,
                     live_photo_group_id TEXT,
                     metadata TEXT
@@ -90,6 +91,7 @@ class SQLiteAssetRepository(IAssetRepository):
                 "dt": "TEXT",
                 "ts": "INTEGER",
                 "bytes": "INTEGER",
+                "mime": "TEXT",
                 "w": "INTEGER",
                 "h": "INTEGER",
                 "dur": "REAL",
@@ -104,6 +106,7 @@ class SQLiteAssetRepository(IAssetRepository):
                 "live_role": "INTEGER DEFAULT 0",
                 "live_partner_rel": "TEXT",
                 "micro_thumbnail": "BLOB",
+                "face_status": "TEXT",
             }
 
             for col, dtype in missing_cols.items():
@@ -156,6 +159,17 @@ class SQLiteAssetRepository(IAssetRepository):
                 "ELSE 0 END "
                 "WHERE typeof(media_type) = 'text'"
             )
+            conn.execute(
+                """
+                UPDATE assets SET face_status = CASE
+                    WHEN CAST(media_type AS TEXT) = '1' THEN 'skipped'
+                    WHEN live_role IS NOT NULL AND CAST(live_role AS INTEGER) != 0 THEN 'skipped'
+                    WHEN mime LIKE 'video/%' THEN 'skipped'
+                    ELSE 'pending'
+                END
+                WHERE face_status IS NULL OR face_status = ''
+                """
+            )
 
     def _ensure_indices(self):
         """Create indices after table and columns exist."""
@@ -175,6 +189,8 @@ class SQLiteAssetRepository(IAssetRepository):
                     "CREATE INDEX IF NOT EXISTS idx_assets_parent_album_path_dt_id_desc "
                     "ON assets(parent_album_path, dt DESC, id DESC)"
                 )
+            if "face_status" in columns:
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_assets_face_status ON assets(face_status)")
 
     def get(self, id: str) -> Optional[Asset]:
         # Note: legacy schema doesn't force ID uniqueness globally, but practically it's our Entity ID.
@@ -274,6 +290,7 @@ class SQLiteAssetRepository(IAssetRepository):
                 1 if asset.is_favorite else 0,
                 asset.parent_album_path,
                 micro_thumbnail,
+                asset.face_status,
             ))
 
         # Use UPSERT to preserve columns not managed by this repository
@@ -283,8 +300,8 @@ class SQLiteAssetRepository(IAssetRepository):
             conn.executemany("""
                 INSERT INTO assets
                 (rel, id, album_id, media_type, bytes, dt, w, h, dur, metadata,
-                 content_identifier, live_photo_group_id, is_favorite, parent_album_path, micro_thumbnail)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 content_identifier, live_photo_group_id, is_favorite, parent_album_path, micro_thumbnail, face_status)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(rel) DO UPDATE SET
                     id = excluded.id,
                     album_id = excluded.album_id,
@@ -299,7 +316,8 @@ class SQLiteAssetRepository(IAssetRepository):
                     live_photo_group_id = excluded.live_photo_group_id,
                     is_favorite = excluded.is_favorite,
                     parent_album_path = excluded.parent_album_path,
-                    micro_thumbnail = excluded.micro_thumbnail
+                    micro_thumbnail = excluded.micro_thumbnail,
+                    face_status = COALESCE(excluded.face_status, assets.face_status)
             """, data)
 
     def _sanitize_metadata(self, metadata: Optional[dict]) -> dict:
@@ -347,6 +365,11 @@ class SQLiteAssetRepository(IAssetRepository):
         if query.album_id:
             sql += " AND album_id = ?"
             params.append(query.album_id)
+
+        if query.asset_ids:
+            placeholders = ", ".join(["?"] * len(query.asset_ids))
+            sql += f" AND id IN ({placeholders})"
+            params.extend(query.asset_ids)
 
         if query.album_path:
             if query.include_subalbums:
@@ -503,5 +526,6 @@ class SQLiteAssetRepository(IAssetRepository):
             content_identifier=content_id,
             live_photo_group_id=live_group,
             is_favorite=is_favorite,
-            parent_album_path=self._first_non_null(row, "parent_album_path")
+            parent_album_path=self._first_non_null(row, "parent_album_path"),
+            face_status=self._first_non_null(row, "face_status"),
         )

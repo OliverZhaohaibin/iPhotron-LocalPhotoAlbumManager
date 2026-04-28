@@ -5,8 +5,9 @@
 * **Album = Folder**: Any folder can be an album; no database dependency for structure.
 * **Original Files Are Immutable**: **Never modify photos/videos directly** (rename, crop, write EXIF, etc.) unless user explicitly enables "organize/repair" mode.
 * **Human Decisions in Manifest**: Cover photos, featured items, sorting, tags, etc. are written to `manifest.json` and other sidecar files.
-* **Cache Is Disposable**: Thumbnails, index (`index.jsonl`), pairing results (`links.json`) can be deleted anytime; software must auto-rebuild.
+* **Cache Is Disposable, User State Is Not**: Thumbnails, runtime scan facts (`global_index.db`), pairing results (`links.json`), and the runtime People face snapshot must be repairable or rebuildable. People names, covers, hidden flags, groups, group order, pinned state, and group covers are human decisions and must not be discarded as cache.
 * **Live Photo Pairing**: Strong pairing based on `content.identifier` first, weak pairing (same name/time proximity) second; results written to `links.json`.
+* **Optional People AI Runtime**: Face clustering depends on the optional `ai-demo` dependencies. The app must still manage albums, maps, Live Photos, and edits when InsightFace/ONNXRuntime are unavailable.
 
 ---
 
@@ -26,6 +27,10 @@
     links.json         # Live Photo pairing and logical groups
     featured.json      # Featured UI cards
     thumbs/            # Thumbnail cache
+    faces/
+      face_index.db    # Rebuildable runtime People snapshot
+      face_state.db    # Stable People decisions: names, covers, hidden flags, groups
+      thumbnails/      # Cropped face thumbnail cache
     manifest.bak/      # Historical backups
     locks/             # Concurrency locks
   ```
@@ -45,6 +50,8 @@
 * **Global Index (`global_index.db`)**: Global SQLite database storing all asset metadata; can be rebuilt if deleted, but requires re-scanning.
 * **Links (`links.json`)**: Live Photo pairing cache; can be rebuilt if deleted.
 * **Featured (`featured.json`)**: Featured photo UI layout (crop box, titles, etc.), optional.
+* **People Runtime Snapshot (`faces/face_index.db`)**: Rebuildable face/person snapshot produced by scanning and clustering.
+* **People Stable State (`faces/face_state.db`)**: Persistent user decisions for People: names, canonical identities, covers, hidden flags, person/group order, group metadata, pinned state, group covers, and group asset caches.
 
 **v3.00 Architecture Changes:**
 - Migrated from distributed `index.jsonl` files to a single global SQLite database
@@ -56,7 +63,7 @@
 
 ## 4. Coding Rules
 
-* **Fixed Directory Structure** (see `src/iPhoto/…`, modules divided into `domain/`, `application/`, `infrastructure/`, `models/`, `io/`, `core/`, `cache/`, `utils/`).
+* **Fixed Directory Structure** (see `src/iPhoto/…`, modules divided into `domain/`, `application/`, `infrastructure/`, `models/`, `io/`, `core/`, `cache/`, `people/`, `utils/`).
 * **Data Classes**: Uniformly defined with `dataclass` (see `models/types.py`).
 * **Error Handling**: Must throw custom errors (see `errors.py`), no bare `Exception`.
 * **File Writing**: Must use atomic operations (`*.tmp` → `replace()`), manifest must be backed up to `.iPhoto/manifest.bak/` before writing.
@@ -83,6 +90,12 @@
   * Incremental scanning: Only processes new/modified files
   * Database automatically handles deduplication and updates
   * Thumbnails and pairing information also support incremental updates
+  * People scan commits may rebuild `face_index.db`, but must preserve and repair `face_state.db`
+* **People / Groups Safety**:
+  * Route face scan commits and UI mutations through `PeopleIndexCoordinator` / repository APIs
+  * Preserve names, covers, hidden flags, person order, groups, group order, pinned state, and group covers across rescans
+  * Refresh group asset caches after scan commits, merges, manual face edits, person deletion, or group membership changes
+  * Do not merge people with different hidden states; enforce this in both UI and service/repository layers
 
 ---
 
@@ -154,6 +167,7 @@ This project adopts **MVVM + DDD (Domain-Driven Design)** layered architecture:
   * `index_store/queries.py`: Parameterized SQL query construction
   * `index_store/repository.py`: High-level CRUD API
   * `lock.py`: File-level lock implementation
+* **people/**: Face detection, clustering, snapshot/state repositories, manual face annotations, People service API, and group membership/cache logic.
 * **utils/**: General utilities (hash, json, logging, external tool wrappers).
 * **schemas/**: JSON Schema definitions.
 * **cli.py**: Typer command-line entry point.
@@ -176,6 +190,8 @@ This project adopts **MVVM + DDD (Domain-Driven Design)** layered architecture:
 * All modules must have `pytest` unit tests.
 * Must handle missing/corrupted input files with errors, not crashes.
 * `global_index.db`, `links.json` must auto-rebuild if missing.
+* `faces/face_index.db` may be rebuilt, but `faces/face_state.db` must preserve People user decisions.
+* People/group changes must cover cluster queries, group common-photo caches, covers, hidden-state filtering, merge guards, and dashboard/context-menu behavior.
 * Multi-endpoint sync conflicts handled per manifest's `conflict.strategy`.
 
 ---
@@ -433,6 +449,7 @@ See Section 12.4 for detailed coordinate system definitions used in crop and per
 
 Managed via `pyproject.toml`:
 * **Core**: PySide6, Pillow, numpy
+* **Optional People AI**: `insightface` and `onnxruntime` through the `ai-demo` extra
 * **Database**: Built-in sqlite3
 * **Processing**: numba (optional JIT acceleration)
 * **Utilities**: reverse-geocoder, jsonschema

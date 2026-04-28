@@ -282,12 +282,15 @@ class WindowThemeController(QObject):
         self._refresh_menu_styles()
 
     def _apply_zoom_slider_style(self, colors: ThemeColors) -> None:
-        """Stabilise the header zoom-slider handle on Linux while leaving other platforms native."""
+        """Stabilise the header zoom-slider handle on composited platforms."""
 
         zoom_slider = getattr(self._ui, "zoom_slider", None)
         if zoom_slider is None:
             return
-        if not sys.platform.startswith("linux"):
+        needs_explicit_slider_style = (
+            sys.platform == "darwin" or sys.platform.startswith("linux")
+        )
+        if not needs_explicit_slider_style:
             zoom_slider.setStyleSheet("")
             return
 
@@ -296,13 +299,13 @@ class WindowThemeController(QObject):
             add_page_bg = "rgba(255, 255, 255, 24)"
             sub_page_bg = "#d7d8da"
             handle_bg = "#f5f6f8"
-            handle_border = "rgba(0, 0, 0, 90)"
+            handle_border = "#747477" if sys.platform == "darwin" else "rgba(0, 0, 0, 90)"
         else:
             groove_bg = "rgba(17, 17, 17, 64)"
             add_page_bg = "rgba(17, 17, 17, 20)"
             sub_page_bg = "rgba(17, 17, 17, 210)"
             handle_bg = "#f5f6f8"
-            handle_border = "rgba(17, 17, 17, 88)"
+            handle_border = "#b8b8b8" if sys.platform == "darwin" else "rgba(17, 17, 17, 88)"
 
         zoom_slider.setStyleSheet(
             "QSlider { background: transparent; min-height: 18px; }\n"

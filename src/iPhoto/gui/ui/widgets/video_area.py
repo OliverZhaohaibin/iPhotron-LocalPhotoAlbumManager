@@ -636,6 +636,12 @@ class VideoArea(QWidget):
             },
         )
         prev_source = self._current_source
+        prev_duration_ms = self._current_duration_ms
+        if sys.platform == "darwin" and prev_source is not None:
+            # AVFoundation can keep the previous audio session alive unless
+            # the source is cleared before loading another clip.
+            self._player.stop()
+            self._player.setSource(QUrl())
         self._profile_load_started_at = load_started
         self._profile_load_source = path
         self._profile_first_frame_logged = False
@@ -656,9 +662,6 @@ class VideoArea(QWidget):
         if not self._adjusted_preview_enabled and not video_requires_adjusted_preview(self._current_adjustments):
             native_rotate90_steps = int(float(self._current_adjustments.get("Crop_Rotate90", 0.0))) % 4
         self._renderer.set_user_rotate90_steps(native_rotate90_steps)
-        # Save previous duration before resetting so it can be used as a
-        # fallback if the media backend reports 0 after setSource (see below).
-        prev_duration_ms = self._current_duration_ms
         self._trim_in_ms = 0
         self._trim_out_ms = 0
         self._current_duration_ms = 0

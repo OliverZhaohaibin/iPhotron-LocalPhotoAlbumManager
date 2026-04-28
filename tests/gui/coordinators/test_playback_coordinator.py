@@ -317,6 +317,46 @@ def test_render_presentation_uses_viewmodel_video_state() -> None:
     assert coordinator._trim_out_ms == 3000
 
 
+def test_render_presentation_stops_video_area_before_showing_still() -> None:
+    coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
+    video_area = Mock(has_video=Mock(return_value=True), stop=Mock())
+    image_viewer = Mock(reset_zoom=Mock())
+    player_view = Mock(
+        show_image_surface=Mock(),
+        display_image=Mock(),
+        hide_live_badge=Mock(),
+        set_live_replay_enabled=Mock(),
+        video_area=video_area,
+        image_viewer=image_viewer,
+    )
+    parent = Mock()
+    parent.attach_mock(video_area.stop, "stop")
+    parent.attach_mock(player_view.show_image_surface, "show_image_surface")
+
+    coordinator._player_view = player_view
+    coordinator._favorite_button = Mock(setEnabled=Mock())
+    coordinator._info_button = Mock(setEnabled=Mock())
+    coordinator._share_button = Mock(setEnabled=Mock())
+    coordinator._edit_button = Mock(setEnabled=Mock())
+    coordinator._rotate_button = Mock(setEnabled=Mock())
+    coordinator._update_favorite_icon = Mock()
+    coordinator._zoom_slider = Mock(blockSignals=Mock(), setValue=Mock())
+    coordinator._player_bar = Mock(setEnabled=Mock(), set_playback_state=Mock(), set_position=Mock())
+    coordinator._zoom_handler = Mock(set_viewer=Mock())
+    coordinator._zoom_widget = Mock(show=Mock())
+    coordinator._info_panel = None
+    coordinator._clear_play_profile = Mock()
+    coordinator._refresh_face_name_overlay_for_presentation = Mock()
+
+    presentation = _make_presentation(path="/fake/photo.heic", is_video=False)
+
+    PlaybackCoordinator._render_presentation(coordinator, presentation)
+
+    assert parent.mock_calls[:2] == [call.stop(), call.show_image_surface()]
+    player_view.display_image.assert_called_once_with(Path("/fake/photo.heic"))
+    coordinator._player_bar.setEnabled.assert_called_once_with(False)
+
+
 def test_reset_for_gallery_closes_info_panel_and_clears_viewmodel_state() -> None:
     coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
     coordinator._player_view = Mock(

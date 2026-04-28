@@ -782,7 +782,7 @@ class TestVideoArea:
 
     def _setup_load_video_mocks(self, va, mocker, player_duration: int = 0):
         """Helper: patch common load_video dependencies."""
-        mocker.patch.object(va._player, "setSource")
+        mock_set_source = mocker.patch.object(va._player, "setSource")
         mocker.patch.object(va._player, "setPosition")
         mocker.patch.object(va._renderer, "clear_frame")
         mocker.patch.object(va._renderer, "set_container_rotation")
@@ -795,6 +795,7 @@ class TestVideoArea:
             return_value=False,
         )
         mocker.patch.object(va._player, "duration", return_value=player_duration)
+        return mock_set_source
 
     def test_load_video_same_source_reload_uses_prev_duration_when_player_reports_zero(
         self, qapp, mocker
@@ -845,6 +846,39 @@ class TestVideoArea:
 
         # No fallback for a different source.
         mock_on_dur.assert_not_called()
+
+    def test_load_video_on_macos_clears_previous_source_before_loading_next(
+        self, qapp, mocker
+    ):
+        """macOS AVFoundation should release the old source before a new one loads."""
+        va = VideoArea()
+        va._current_source = Path("/fake/old.mov")
+        mock_set_source = self._setup_load_video_mocks(va, mocker, player_duration=0)
+        mock_stop = mocker.patch.object(va._player, "stop")
+        mocker.patch("iPhoto.gui.ui.widgets.video_area.sys.platform", "darwin")
+
+        va.load_video(Path("/fake/new.mov"))
+
+        mock_stop.assert_called_once_with()
+        assert mock_set_source.call_count == 2
+        assert mock_set_source.call_args_list[0].args[0].isEmpty()
+        assert mock_set_source.call_args_list[1].args[0].toLocalFile() == "/fake/new.mov"
+
+    def test_load_video_off_macos_does_not_clear_previous_source_first(
+        self, qapp, mocker
+    ):
+        """Other platforms keep the existing load path unchanged."""
+        va = VideoArea()
+        va._current_source = Path("/fake/old.mp4")
+        mock_set_source = self._setup_load_video_mocks(va, mocker, player_duration=0)
+        mock_stop = mocker.patch.object(va._player, "stop")
+        mocker.patch("iPhoto.gui.ui.widgets.video_area.sys.platform", "linux")
+
+        va.load_video(Path("/fake/new.mp4"))
+
+        mock_stop.assert_not_called()
+        mock_set_source.assert_called_once()
+        assert mock_set_source.call_args.args[0].toLocalFile() == "/fake/new.mp4"
 
     def test_stop_clears_frame_and_source(self, qapp, mocker):
         """stop() should clear the renderer frame and release the media source."""

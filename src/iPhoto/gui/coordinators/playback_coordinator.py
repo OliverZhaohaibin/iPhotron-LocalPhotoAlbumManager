@@ -521,6 +521,8 @@ class PlaybackCoordinator(QObject):
             self._player_view.video_area.reset_zoom()
             self._zoom_widget.show()
         else:
+            if self._player_view.video_area.has_video():
+                self._player_view.video_area.stop()
             self._player_view.show_image_surface()
             display_started = time.perf_counter()
             self._player_view.display_image(source)

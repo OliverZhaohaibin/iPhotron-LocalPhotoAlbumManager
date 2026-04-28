@@ -27,6 +27,7 @@ from iPhoto.gui.ui.tasks.info_panel_metadata_worker import (
     InfoPanelMetadataWorker,
 )
 from iPhoto.gui.ui.tasks.manual_face_add_worker import ManualFaceAddWorker
+from iPhoto.gui.ui.widgets import dialogs
 from iPhoto.gui.ui.widgets.info_panel import InfoPanel
 from iPhoto.gui.viewmodels.detail_viewmodel import DetailPresentation, DetailViewModel
 from iPhoto.io import sidecar
@@ -54,6 +55,17 @@ _INFO_PANEL_METADATA_CACHE_MAX = 200
 _LOCATION_SEARCH_RESULT_LIMIT = 5
 _LOCATION_SEARCH_DEBOUNCE_MS = 80
 _LOCATION_EXTENSION_PROMPT = "如需Assign a Location功能请下载map extension"
+_LOCATION_EXIFTOOL_LIMITED_TITLE = "功能受限"
+_LOCATION_EXIFTOOL_LIMITED_MESSAGE = (
+    "地点已保存到本机图库数据库。\n\n"
+    "由于本机未安装 ExifTool，暂时无法把 GPS 信息写入原始照片/视频文件。"
+    "安装 ExifTool 后可完整写入原文件。"
+)
+_LOCATION_FILE_WRITE_LIMITED_TITLE = "原文件写入失败"
+_LOCATION_FILE_WRITE_LIMITED_MESSAGE_TEMPLATE = (
+    "地点已保存到本机图库数据库。\n\n"
+    "GPS 信息未能写入原始照片/视频文件：{reason}"
+)
 
 
 class PlaybackCoordinator(QObject):
@@ -1173,6 +1185,18 @@ class PlaybackCoordinator(QObject):
         if not isinstance(asset_path, Path) or not isinstance(metadata, dict):
             return
 
+        file_write_error = getattr(result, "file_write_error", None)
+        if isinstance(file_write_error, str) and file_write_error.strip():
+            LOGGER.warning(
+                "Location saved in the library, but GPS metadata was not written to %s: %s",
+                asset_path,
+                file_write_error,
+            )
+            if self._is_missing_exiftool_error(file_write_error):
+                self._queue_location_exiftool_missing_warning()
+            else:
+                self._queue_location_file_write_warning(file_write_error)
+
         row = self._asset_model.row_for_path(asset_path)
         if row is not None:
             self._asset_model.store.update_asset_metadata(row, dict(metadata))
@@ -1204,6 +1228,45 @@ class PlaybackCoordinator(QObject):
                 invalidate_location_session()
             except Exception:  # noqa: BLE001
                 LOGGER.warning("Failed to invalidate cached location-session data", exc_info=True)
+
+    def _is_missing_exiftool_error(self, message: str) -> bool:
+        normalized = message.casefold()
+        return "exiftool" in normalized and (
+            "not found" in normalized or "filenotfounderror" in normalized
+        )
+
+    def _queue_location_exiftool_missing_warning(self) -> None:
+        QTimer.singleShot(0, self._show_location_exiftool_missing_warning)
+
+    def _queue_location_file_write_warning(self, message: str) -> None:
+        QTimer.singleShot(0, lambda: self._show_location_file_write_warning(message))
+
+    def _location_warning_parent(self) -> QWidget | None:
+        info_panel = getattr(self, "_info_panel", None)
+        if info_panel is None:
+            return None
+        parent_widget = info_panel.parentWidget()
+        return parent_widget if parent_widget is not None else info_panel
+
+    def _show_location_exiftool_missing_warning(self) -> None:
+        popup_parent = self._location_warning_parent()
+        if popup_parent is None:
+            return
+        dialogs.show_warning(
+            popup_parent,
+            _LOCATION_EXIFTOOL_LIMITED_MESSAGE,
+            title=_LOCATION_EXIFTOOL_LIMITED_TITLE,
+        )
+
+    def _show_location_file_write_warning(self, message: str) -> None:
+        popup_parent = self._location_warning_parent()
+        if popup_parent is None:
+            return
+        dialogs.show_warning(
+            popup_parent,
+            _LOCATION_FILE_WRITE_LIMITED_MESSAGE_TEMPLATE.format(reason=message.strip()),
+            title=_LOCATION_FILE_WRITE_LIMITED_TITLE,
+        )
 
     @Slot(str)
     def _handle_location_assignment_error(self, message: str) -> None:

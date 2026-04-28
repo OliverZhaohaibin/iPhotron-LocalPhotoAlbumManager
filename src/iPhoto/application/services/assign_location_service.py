@@ -19,10 +19,11 @@ class AssignedLocationResult:
     display_name: str
     gps: dict[str, float]
     metadata: dict[str, Any]
+    file_write_error: str | None = None
 
 
 class AssignLocationService:
-    """Write GPS metadata to the original file and persist it in the library DB."""
+    """Persist assigned locations and best-effort embed GPS metadata in files."""
 
     def __init__(self, library_root: Path) -> None:
         self._library_root = Path(library_root)
@@ -40,18 +41,24 @@ class AssignLocationService:
     ) -> AssignedLocationResult:
         normalized_name = display_name.strip()
         gps = {"lat": float(latitude), "lon": float(longitude)}
+        file_write_error: str | None = None
 
-        write_gps_metadata(
-            asset_path,
-            latitude=gps["lat"],
-            longitude=gps["lon"],
-            is_video=is_video,
-        )
-        refreshed_metadata = self._read_back_metadata(
-            asset_path,
-            is_video=is_video,
-            existing_metadata=existing_metadata,
-        )
+        try:
+            write_gps_metadata(
+                asset_path,
+                latitude=gps["lat"],
+                longitude=gps["lon"],
+                is_video=is_video,
+            )
+        except (ExternalToolError, OSError) as exc:
+            file_write_error = str(exc)
+            refreshed_metadata = dict(existing_metadata or {})
+        else:
+            refreshed_metadata = self._read_back_metadata(
+                asset_path,
+                is_video=is_video,
+                existing_metadata=existing_metadata,
+            )
         refreshed_metadata["gps"] = dict(gps)
         refreshed_metadata["location"] = normalized_name
         refreshed_metadata["location_name"] = normalized_name
@@ -69,6 +76,7 @@ class AssignLocationService:
             display_name=normalized_name,
             gps=gps,
             metadata=refreshed_metadata,
+            file_write_error=file_write_error,
         )
 
     def _read_back_metadata(
@@ -89,9 +97,21 @@ class AssignLocationService:
         else:
             metadata = read_image_meta_with_exiftool(asset_path, exif_payload)
 
-        if not metadata and existing_metadata:
-            metadata = dict(existing_metadata)
-        return dict(metadata)
+        return self._merge_metadata(existing_metadata, metadata)
+
+    def _merge_metadata(
+        self,
+        existing_metadata: dict[str, Any] | None,
+        refreshed_metadata: dict[str, Any],
+    ) -> dict[str, Any]:
+        merged = dict(existing_metadata or {})
+        for key, value in refreshed_metadata.items():
+            if value is None:
+                continue
+            if isinstance(value, str) and not value.strip():
+                continue
+            merged[key] = value
+        return merged
 
 
 __all__ = ["AssignLocationService", "AssignedLocationResult"]

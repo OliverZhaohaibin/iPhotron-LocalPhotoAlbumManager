@@ -20,6 +20,7 @@ pytest.importorskip(
 
 from PySide6.QtWidgets import QApplication
 
+import iPhoto.bootstrap.library_asset_lifecycle_service as lifecycle_module
 from iPhoto.cache.index_store import IndexStore
 from iPhoto.config import RECENTLY_DELETED_DIR_NAME
 from iPhoto.gui.services.asset_move_service import AssetMoveService
@@ -146,6 +147,41 @@ def test_move_assets_submits_worker_and_emits_completion(
     assert is_restore is False
 
 
+def test_move_assets_passes_session_lifecycle_service(
+    mocker,
+    tmp_path: Path,
+    qapp: QApplication,
+) -> None:
+    """Move workers should receive the active session lifecycle command surface."""
+
+    library_root = tmp_path / "Library"
+    source_root = library_root / "Source"
+    destination_root = library_root / "Destination"
+    source_root.mkdir(parents=True)
+    destination_root.mkdir()
+    asset = source_root / "photo.jpg"
+    asset.write_bytes(b"data")
+    lifecycle_service = object()
+
+    task_manager = mocker.MagicMock()
+    album = mocker.MagicMock()
+    album.root = source_root
+    library_manager = mocker.MagicMock()
+    library_manager.root.return_value = library_root
+    library_manager.asset_lifecycle_service = lifecycle_service
+
+    service = _create_service(
+        task_manager=task_manager,
+        current_album=lambda: album,
+        library_manager=library_manager,
+    )
+
+    service.move_assets([asset], destination_root)
+
+    worker = task_manager.submit_task.call_args.kwargs["worker"]
+    assert worker.asset_lifecycle_service is lifecycle_service
+
+
 def test_restore_repopulates_library_index(
     tmp_path: Path, qapp: QApplication, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -175,8 +211,8 @@ def test_restore_repopulates_library_index(
             rows.append({"rel": candidate.resolve().relative_to(root).as_posix()})
         return rows
 
-    monkeypatch.setattr(move_worker_module, "process_media_paths", _fake_process_media_paths)
-    monkeypatch.setattr(move_worker_module.backend, "pair", lambda *_, **__: None)
+    monkeypatch.setattr(lifecycle_module, "process_media_paths", _fake_process_media_paths)
+    monkeypatch.setattr(lifecycle_module.LibraryScanService, "pair_album", lambda *_: [])
 
     restore_signals = MoveSignals()
     worker = MoveWorker(
@@ -225,8 +261,8 @@ def test_delete_records_original_path_for_restore(
             rows.append({"rel": candidate.resolve().relative_to(root).as_posix()})
         return rows
 
-    monkeypatch.setattr(move_worker_module, "process_media_paths", _fake_process_media_paths)
-    monkeypatch.setattr(move_worker_module.backend, "pair", lambda *_, **__: None)
+    monkeypatch.setattr(lifecycle_module, "process_media_paths", _fake_process_media_paths)
+    monkeypatch.setattr(lifecycle_module.LibraryScanService, "pair_album", lambda *_: [])
 
     delete_signals = MoveSignals()
     worker = MoveWorker(
@@ -268,8 +304,8 @@ def test_move_from_library_root_updates_source_album_index(
             rows.append({"rel": rel})
         return rows
 
-    monkeypatch.setattr(move_worker_module, "process_media_paths", _fake_process_media_paths)
-    monkeypatch.setattr(move_worker_module.backend, "pair", lambda *_, **__: None)
+    monkeypatch.setattr(lifecycle_module, "process_media_paths", _fake_process_media_paths)
+    monkeypatch.setattr(lifecycle_module.LibraryScanService, "pair_album", lambda *_: [])
 
     # Pre-populate the global library-root DB (MoveWorker only uses this DB).
     IndexStore(library_root).write_rows(
@@ -324,8 +360,8 @@ def test_delete_collision_assigns_unique_trash_paths(
             rows.append({"rel": rel, "ts": 1})
         return rows
 
-    monkeypatch.setattr(move_worker_module, "process_media_paths", _fake_process_media_paths)
-    monkeypatch.setattr(move_worker_module.backend, "pair", lambda *_, **__: None)
+    monkeypatch.setattr(lifecycle_module, "process_media_paths", _fake_process_media_paths)
+    monkeypatch.setattr(lifecycle_module.LibraryScanService, "pair_album", lambda *_: [])
 
     # First delete
     signals = MoveSignals()

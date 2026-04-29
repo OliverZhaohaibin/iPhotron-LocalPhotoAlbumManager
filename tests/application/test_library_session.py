@@ -24,6 +24,8 @@ def test_library_session_binds_runtime_and_exposes_ports(tmp_path: Path) -> None
     assert session.state is state
     assert session.scans is not None
     assert session.scans.library_root == tmp_path
+    assert session.asset_lifecycle is not None
+    assert session.asset_lifecycle.library_root == tmp_path
 
 
 def test_library_session_shutdown_delegates_to_asset_runtime(tmp_path: Path) -> None:

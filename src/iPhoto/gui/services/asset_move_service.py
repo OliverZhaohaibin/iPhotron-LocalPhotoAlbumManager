@@ -219,6 +219,11 @@ class AssetMoveService(QObject):
             library_root=library_root,
             trash_root=trash_root,
             is_restore=is_restore_operation,
+            asset_lifecycle_service=(
+                getattr(library_manager, "asset_lifecycle_service", None)
+                if library_manager is not None
+                else None
+            ),
         )
         unique_task_id = (
             f"move:{operation_normalized}:{source_root}->{destination_root}:{uuid.uuid4().hex}"

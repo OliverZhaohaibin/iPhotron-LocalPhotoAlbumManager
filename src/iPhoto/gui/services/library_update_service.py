@@ -9,7 +9,7 @@ from typing import Callable, Dict, Iterable, List, Optional, Sequence, Set, Tupl
 
 from PySide6.QtCore import QObject, QTimer, Signal, Slot
 
-from ...cache.index_store import get_global_repository
+from ...bootstrap.library_asset_lifecycle_service import LibraryAssetLifecycleService
 from ...bootstrap.library_scan_service import LibraryScanService
 from ...config import DEFAULT_EXCLUDE, DEFAULT_INCLUDE, RECENTLY_DELETED_DIR_NAME
 from ...errors import IPhotoError
@@ -415,64 +415,16 @@ class LibraryUpdateService(QObject):
         materialised_rows = list(rows)
 
         if root.name == RECENTLY_DELETED_DIR_NAME:
-            # When the Recently Deleted album is rescanned we must not lose the
-            # restore metadata that was captured at deletion time.  The
-            # ``original_rel_path`` value powers quick restores, while the
-            # album UUID and subpath pair allows the application to recover from
-            # album renames or deletions.  Merge any of those fields back into
-            # the freshly scanned rows so the trash index remains authoritative.
-            preserved_rows: Dict[str, dict] = {}
-            preserved_fields = (
-                "original_rel_path",
-                "original_album_id",
-                "original_album_subpath",
+            library = self._library_manager()
+            lifecycle_service = (
+                getattr(library, "asset_lifecycle_service", None)
+                if library is not None
+                else None
+            ) or LibraryAssetLifecycleService(library_root)
+            materialised_rows = lifecycle_service.preserve_trash_metadata(
+                root,
+                materialised_rows,
             )
-            try:
-                db_root = library_root if library_root else root
-                album_path: str | None = None
-                # Only allow read_all() when we are directly indexing the Recently
-                # Deleted root. If album_path resolution fails relative to a
-                # library_root, we must not fall back to a global read.
-                allow_read_all = not bool(library_root)
-                if library_root:
-                    try:
-                        album_path = root.resolve().relative_to(library_root.resolve()).as_posix()
-                    except (OSError, ValueError):
-                        # Resolution failed: do not attempt a global read_all().
-                        album_path = None
-                        allow_read_all = False
-                store = get_global_repository(db_root)
-                if album_path:
-                    row_iter = store.read_album_assets(album_path, include_subalbums=True)
-                elif allow_read_all:
-                    row_iter = store.read_all()
-                else:
-                    # No safe way to scope the read; skip merging preserved rows.
-                    row_iter = ()
-                for old_row in row_iter:
-                    rel_value = old_row.get("rel")
-                    if rel_value is None:
-                        continue
-                    if not any(field in old_row for field in preserved_fields):
-                        continue
-                    preserved_rows[str(rel_value)] = old_row
-            except IPhotoError:
-                # If the old index is unavailable (missing or corrupted) we have
-                # nothing to merge, therefore the rescan falls back to fresh
-                # metadata produced by the worker.
-                preserved_rows = {}
-
-            if preserved_rows:
-                for new_row in materialised_rows:
-                    rel_value = new_row.get("rel")
-                    if rel_value is None:
-                        continue
-                    cached_row = preserved_rows.get(str(rel_value))
-                    if cached_row is None:
-                        continue
-                    for field in preserved_fields:
-                        if field in cached_row:
-                            new_row[field] = cached_row[field]
 
         try:
             # Persist the freshly computed index snapshot immediately so future

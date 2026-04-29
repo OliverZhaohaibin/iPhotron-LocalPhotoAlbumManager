@@ -27,6 +27,15 @@ class AssetRepositoryPort(Protocol):
     ) -> list[dict[str, Any]]:
         """Merge scanned facts while preserving durable user state."""
 
+    def append_rows(self, rows: Iterable[dict[str, Any]]) -> None:
+        """Append or replace already-materialized asset rows."""
+
+    def remove_rows(self, rels: Iterable[str]) -> None:
+        """Remove rows identified by library-relative paths."""
+
+    def get_rows_by_rels(self, rels: Iterable[str]) -> dict[str, dict[str, Any]]:
+        """Return existing rows keyed by library-relative path."""
+
     def read_all(
         self,
         sort_by_date: bool = False,

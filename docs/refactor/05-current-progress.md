@@ -66,23 +66,46 @@ migration steps.
 - Added `docs/refactor/07-session-scan-followup.md` as the process handoff for
   this pass.
 
+## Completed In Move Lifecycle Migration
+
+- Added `LibraryAssetLifecycleService` as the session-owned command surface for
+  move/delete/restore index updates and post-move Live Photo pairing.
+- Exposed the lifecycle service from `LibrarySession` and bound it into
+  `LibraryManager` from `RuntimeContext.open_library()` / `close_library()`.
+- Extended `AssetRepositoryPort` with row append/remove/read-by-rel operations
+  needed by lifecycle commands.
+- Refactored `MoveWorker` so it only moves files and emits Qt progress; source
+  row removal, destination row merge, trash annotation, stale trash cleanup, and
+  pairing now run through the lifecycle service.
+- Refactored `RestorationService` restore metadata lookup and
+  `LibraryUpdateService` trash metadata preservation to use the lifecycle
+  service with compatibility fallback construction.
+- Added lifecycle and restoration tests covering move metadata reuse, delete
+  annotations, restore cleanup, stale trash cleanup, metadata preservation, and
+  session service routing.
+- Added `docs/refactor/08-move-lifecycle-migration.md` as the process handoff
+  for this pass.
+
 ## Current Phase Status
 
 - Phase 0 is partially complete: vNext docs are in place and architecture
   guardrails now cover application/concrete imports, lower-layer GUI imports,
   and new legacy model shim imports.
 - Phase 1 is partially complete: `LibrarySession` exists and is reachable from
-  runtime entry objects, but GUI/coordinators/viewmodels still need broader
+  runtime entry objects; scan and asset lifecycle session surfaces are bound
+  into `LibraryManager`, but GUI/coordinators/viewmodels still need broader
   session-surface migration.
 - Phase 2 is partially complete: repository/state ports exist and Assign
-  Location uses the state boundary, but asset persistence is not yet fully
-  collapsed to one public repository port.
+  Location uses the state boundary; lifecycle row operations are now on the
+  asset repository port, but asset persistence is not yet fully collapsed to
+  one public repository implementation.
 - Phase 3 is partially complete: `ScannerWorker`, LibraryManager scan
   coordinator paths, CLI scan/report, app compatibility scan calls,
   `AppFacade.open_album()`, import incremental scans, and restore rescans now
   enter through `LibrarySession` / `LibraryScanService` and
-  `ScanLibraryUseCase`; move/delete index updates and watcher lifecycle cleanup
-  still need migration.
+  `ScanLibraryUseCase`; move/delete/restore index updates now enter through
+  `LibraryAssetLifecycleService`, while watcher lifecycle cleanup still needs
+  migration.
 - Phase 4 is not complete: `gui.facade.py` and GUI services still carry legacy
   business orchestration and direct global repository access.
 - Phase 5 is partially complete: thumbnail and Assign Location boundaries were
@@ -100,9 +123,13 @@ migration steps.
 - `LibraryScanService` still uses the current index-store repository as the
   scan facts source of truth. This is intentional until the Phase 2 repository
   consolidation decision is completed.
-- Move/delete index updates, restore metadata lookup, favorite updates, map
-  aggregation, export reads, and several GUI asset-loading paths still access
-  the global repository directly or through compatibility paths.
+- `LibraryAssetLifecycleService` still uses the current index-store repository
+  as the move/delete/restore lifecycle source of truth. This is intentional
+  until repository consolidation is completed.
+- Favorite updates, map aggregation, export reads, People indexing, face scan
+  workers, trash cleanup helpers, watcher refresh paths, and several GUI
+  asset-loading paths still access the global repository directly or through
+  compatibility paths.
 - User state still physically lives in `global_index.db`; the new state port is
   an API boundary, not a separate `library_state.db` migration.
 - `global_index.db` compatibility schemas may not have a `metadata` column; the
@@ -130,6 +157,15 @@ Additional session scan follow-up verification:
 Results: all passed with the same existing pytest config and legacy shim
 warnings.
 
+Additional move lifecycle migration verification:
+
+- `.venv/bin/python tools/check_architecture.py`
+- `.venv/bin/python -m pytest tests/architecture -q`
+- `.venv/bin/python -m pytest tests/services/test_asset_move_service.py tests/services/test_library_update_service_global_db.py tests/cache/test_move_delete_optimizations.py tests/application/test_library_scan_service.py tests/application/test_library_asset_lifecycle_service.py tests/services/test_restoration_service.py tests/application/test_library_session.py tests/application/test_runtime_context.py -q`
+
+Results: all passed with the same existing pytest config and legacy shim
+warnings.
+
 The previous foundation pass also ran broader application/cache/scan suites and
 a broad non-GUI/UI run (`1237 passed, 7 skipped`), excluding
 `tests/test_aspect_ratio_constraint.py` because this environment lacks the
@@ -138,10 +174,10 @@ a broad non-GUI/UI run (`1237 passed, 7 skipped`), excluding
 ## Next Handoff Steps
 
 1. Replace direct `get_global_repository()` calls in GUI services/tasks with
-   session commands or application ports, starting with favorite, restore,
-   move/delete, and map aggregation paths.
-2. Move move/delete index mutations and Live Photo pairing calls out of
-   `MoveWorker` into a session/application lifecycle command.
+   session commands or application ports, starting with favorite, map
+   aggregation, export reads, asset loading, People, and face scan paths.
+2. Move watcher-triggered incremental refresh and remaining trash cleanup helper
+   paths behind session/application commands.
 3. Decide the final source of truth between `cache/index_store.AssetRepository`
    and `SQLiteAssetRepository`, then collapse callers to `AssetRepositoryPort`.
 4. Expand end-to-end temp-library tests for import/move/delete/restore and

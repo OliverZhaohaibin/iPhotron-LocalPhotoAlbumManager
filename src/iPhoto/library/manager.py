@@ -39,6 +39,7 @@ from .workers.scanner_worker import ScannerWorker
 LOGGER = get_logger()
 
 if TYPE_CHECKING:  # pragma: no cover
+    from ..bootstrap.library_asset_lifecycle_service import LibraryAssetLifecycleService
     from ..bootstrap.library_scan_service import LibraryScanService
 
 
@@ -96,6 +97,7 @@ class LibraryManager(
         self._face_scan_status_message: Optional[str] = None
         self._people_index_coordinator: PeopleIndexCoordinator | None = None
         self._scan_service: "LibraryScanService | None" = None
+        self._asset_lifecycle_service: "LibraryAssetLifecycleService | None" = None
 
     # ------------------------------------------------------------------
     # Basic properties
@@ -219,6 +221,18 @@ class LibraryManager(
     @property
     def scan_service(self) -> "LibraryScanService | None":
         return self._scan_service
+
+    def bind_asset_lifecycle_service(
+        self,
+        asset_lifecycle_service: "LibraryAssetLifecycleService | None",
+    ) -> None:
+        """Bind the current library session asset lifecycle command surface."""
+
+        self._asset_lifecycle_service = asset_lifecycle_service
+
+    @property
+    def asset_lifecycle_service(self) -> "LibraryAssetLifecycleService | None":
+        return self._asset_lifecycle_service
 
     def _bind_people_index_coordinator(self, root: Path) -> None:
         coordinator = get_people_index_coordinator(root)

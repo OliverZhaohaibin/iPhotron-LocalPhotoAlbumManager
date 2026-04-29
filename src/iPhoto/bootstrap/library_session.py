@@ -14,6 +14,7 @@ from ..infrastructure.services.location_metadata_service import (
     ExifToolLocationMetadataService,
 )
 from ..application.services.assign_location_service import AssignLocationService
+from .library_asset_lifecycle_service import LibraryAssetLifecycleService
 from .library_scan_service import LibraryScanService
 
 
@@ -25,6 +26,7 @@ class LibrarySession:
     asset_runtime: LibraryAssetRuntime = field(default_factory=LibraryAssetRuntime)
     state_repository: LibraryStateRepositoryPort | None = None
     scans: LibraryScanService | None = None
+    asset_lifecycle: LibraryAssetLifecycleService | None = None
     bind_asset_runtime: bool = True
 
     def __post_init__(self) -> None:
@@ -35,6 +37,11 @@ class LibrarySession:
             self.state_repository = IndexStoreLibraryStateRepository(self.library_root)
         if self.scans is None:
             self.scans = LibraryScanService(self.library_root)
+        if self.asset_lifecycle is None:
+            self.asset_lifecycle = LibraryAssetLifecycleService(
+                self.library_root,
+                scan_service=self.scans,
+            )
 
     @property
     def assets(self) -> AssetRepositoryPort:

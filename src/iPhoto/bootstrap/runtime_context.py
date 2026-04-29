@@ -161,10 +161,25 @@ class RuntimeContext:
         bind_scan_service = getattr(self.library, "bind_scan_service", None)
         if callable(bind_scan_service):
             bind_scan_service(self.library_session.scans)
+        bind_asset_lifecycle_service = getattr(
+            self.library,
+            "bind_asset_lifecycle_service",
+            None,
+        )
+        if callable(bind_asset_lifecycle_service):
+            bind_asset_lifecycle_service(self.library_session.asset_lifecycle)
         return self.library_session
 
     def close_library(self) -> None:
         """Close the active library-scoped session if one exists."""
+
+        bind_asset_lifecycle_service = getattr(
+            self.library,
+            "bind_asset_lifecycle_service",
+            None,
+        )
+        if callable(bind_asset_lifecycle_service):
+            bind_asset_lifecycle_service(None)
 
         bind_scan_service = getattr(self.library, "bind_scan_service", None)
         if callable(bind_scan_service):

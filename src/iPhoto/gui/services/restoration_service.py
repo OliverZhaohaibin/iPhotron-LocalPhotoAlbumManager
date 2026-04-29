@@ -8,7 +8,7 @@ from typing import Any, Callable, Dict, Iterable, List, Optional, Set, TYPE_CHEC
 
 from PySide6.QtCore import QObject, Signal
 
-from ...cache.index_store import get_global_repository
+from ...bootstrap.library_asset_lifecycle_service import LibraryAssetLifecycleService
 
 if TYPE_CHECKING:
     from ...library.manager import LibraryManager
@@ -105,23 +105,11 @@ class RestorationService(QObject):
                     continue
                 normalized.append(motion_path)
 
-        try:
-            trash_resolved = trash_root.resolve()
-        except OSError:
-            trash_resolved = trash_root
-        try:
-            library_resolved = library_root.resolve()
-        except OSError:
-            library_resolved = library_root
-        try:
-            album_path = trash_resolved.relative_to(library_resolved).as_posix()
-        except ValueError:
-            album_path = None
-        store = get_global_repository(library_root)
-        if album_path:
-            index_rows = list(store.read_album_assets(album_path, include_subalbums=True))
-        else:
-            index_rows = list(store.read_all())
+        lifecycle_service = (
+            getattr(library, "asset_lifecycle_service", None)
+            or LibraryAssetLifecycleService(library_root)
+        )
+        index_rows = lifecycle_service.read_restore_index_rows(trash_root)
         row_lookup: Dict[str, dict] = {}
         for row in index_rows:
             if not isinstance(row, dict):

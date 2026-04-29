@@ -8,7 +8,7 @@ frame data as GPU textures and renders via custom shaders that handle:
 * Limited-range vs full-range normalisation
 * HDR→SDR tone mapping for PQ (ST.2084) and HLG (STD-B67) content
 * Letterbox rendering with a configurable background colour
-* Always-opaque output (alpha = 1.0)
+* Optional shader-rounded transparent clipping for preview popups
 
 The widget replaces ``QGraphicsVideoItem`` / ``QVideoWidget`` to give the
 application full control over the rendering pipeline, independent of any
@@ -55,6 +55,8 @@ except (ModuleNotFoundError, ImportError):  # pragma: no cover
     QVideoFrameFormat = None  # type: ignore[assignment, misc]
     QVideoSink = None  # type: ignore[assignment, misc]
 
+from .render_backend import qrhi_api_name, select_qrhi_widget_api
+
 _log = logging.getLogger(__name__)
 
 # Shader .qsb files live next to this module.
@@ -73,8 +75,9 @@ _FRAG_QSB = _SHADER_DIR / "video_renderer.frag.qsb"
 #   int u_mirror;          // offset 52
 #   int _pad0;             // offset 56
 #   int _pad1;             // offset 60
-#                          // total = 64 bytes
-_UBO_SIZE = 64
+#   vec4 u_clip;           // offset 64  (view_w, view_h, radius, unused)
+#                          // total = 80 bytes
+_UBO_SIZE = 80
 
 
 def _load_shader(path: Path) -> QShader:
@@ -259,12 +262,12 @@ class VideoRendererWidget(QRhiWidget):
         super().__init__(parent)
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
 
-        # Force the OpenGL backend so both QRhiWidget-based renderers
-        # (image viewer and video renderer) share the same rendering
-        # infrastructure inside the QStackedWidget.
+        # Keep media widgets on the platform-selected QRhi backend. macOS uses
+        # Metal by default; Windows/Linux keep the existing OpenGL path.
         # Must be called in the constructor — Qt docs state that calling
         # setApi() after the widget is shown may have no effect.
-        self.setApi(QRhiWidget.Api.OpenGL)
+        self._rhi_api = select_qrhi_widget_api()
+        self.setApi(self._rhi_api)
 
         # Declare that this widget always produces fully opaque output so
         # the compositor never expects transparency from the first paint.
@@ -282,6 +285,8 @@ class VideoRendererWidget(QRhiWidget):
         self._has_frame = False
         self._viewport_fill_enabled = False
         self._zoom_factor = 1.0
+        self._transparent_rounded_clip_enabled = False
+        self._rounded_clip_radius = 0.0
 
         # --- RHI resources (created in initialize()) ---
         self._pipeline: Optional[QRhiGraphicsPipeline] = None
@@ -302,8 +307,11 @@ class VideoRendererWidget(QRhiWidget):
         self._tf_enum = _TF_SDR
         self._range_enum = _RANGE_LIMITED
         self._rotate90_steps = 0
+        self._base_rotate90_steps = 0
         self._user_rotate90_steps = 0
         self._mirror = 0
+        self._last_frame_width = 0
+        self._last_frame_height = 0
 
         # Container-level rotation obtained from ffprobe.  Used as the
         # primary rotation source on all platforms because Qt's
@@ -314,6 +322,11 @@ class VideoRendererWidget(QRhiWidget):
         self._container_raw_w: int = 0
         self._container_raw_h: int = 0
         self._container_linux_180_hint: bool = False
+
+    def render_backend_name(self) -> str:
+        """Return the active QRhi backend name for diagnostics/tests."""
+
+        return qrhi_api_name(self._rhi_api)
 
     # ------------------------------------------------------------------
     # Public API
@@ -360,6 +373,26 @@ class VideoRendererWidget(QRhiWidget):
         self._viewport_fill_enabled = target
         self.update()
 
+    def set_transparent_rounded_clip(self, radius: float | None) -> None:
+        """Enable transparent output clipped to a rounded rectangle."""
+
+        numeric_radius = max(0.0, float(radius or 0.0))
+        target = numeric_radius > 0.0
+        if (
+            self._transparent_rounded_clip_enabled == target
+            and self._rounded_clip_radius == numeric_radius
+        ):
+            return
+
+        self._transparent_rounded_clip_enabled = target
+        self._rounded_clip_radius = numeric_radius
+        self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent, not target)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, target)
+        self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, target)
+        self.setAttribute(Qt.WidgetAttribute.WA_AlwaysStackOnTop, target)
+        self.setAutoFillBackground(not target)
+        self.update()
+
     def set_user_rotate90_steps(self, rotate_steps: int) -> None:
         """Apply additional user-driven quarter turns on top of container rotation."""
 
@@ -392,6 +425,9 @@ class VideoRendererWidget(QRhiWidget):
         )
 
         self._rotate90_steps = ((rot_deg // 90) + self._user_rotate90_steps) % 4
+        self._base_rotate90_steps = (rot_deg // 90) % 4
+        self._last_frame_width = int(w)
+        self._last_frame_height = int(h)
         self._mirror = 1 if fmt.isMirrored() else 0
 
         # Compute the *display* native size: for 90°/270° rotations the
@@ -412,7 +448,10 @@ class VideoRendererWidget(QRhiWidget):
         self._frame_dirty = False
         self._native_size = QSizeF()
         self._rotate90_steps = 0
+        self._base_rotate90_steps = 0
         self._mirror = 0
+        self._last_frame_width = 0
+        self._last_frame_height = 0
         self._container_rotation_cw = 0
         self._container_raw_w = 0
         self._container_raw_h = 0
@@ -447,7 +486,10 @@ class VideoRendererWidget(QRhiWidget):
         """Re-apply user rotation to the currently loaded frame metadata."""
 
         if self._current_frame is None or not self._current_frame.isValid():
-            self._rotate90_steps = self._user_rotate90_steps % 4
+            self._rotate90_steps = (
+                self._base_rotate90_steps + self._user_rotate90_steps
+            ) % 4
+            self._update_display_native_size(self._last_frame_width, self._last_frame_height)
             return
         fmt = self._current_frame.surfaceFormat()
         base_rotation_cw = _resolve_frame_rotation_cw(
@@ -457,8 +499,11 @@ class VideoRendererWidget(QRhiWidget):
             container_raw_h=self._container_raw_h,
             linux_180_hint=self._container_linux_180_hint,
         )
+        self._base_rotate90_steps = (base_rotation_cw // 90) % 4
+        self._last_frame_width = int(fmt.frameWidth())
+        self._last_frame_height = int(fmt.frameHeight())
         self._rotate90_steps = ((base_rotation_cw // 90) + self._user_rotate90_steps) % 4
-        self._update_display_native_size(fmt.frameWidth(), fmt.frameHeight())
+        self._update_display_native_size(self._last_frame_width, self._last_frame_height)
 
     def set_letterbox_color(self, color: QColor) -> None:
         """Set the colour used for letterbox/pillarbox areas."""
@@ -606,7 +651,8 @@ class VideoRendererWidget(QRhiWidget):
             QRhiShaderStage(QRhiShaderStage.Type.Fragment, frag_shader),
         ])
 
-        # Disable alpha blending — the video surface is always fully opaque.
+        # Keep blending disabled. The shader writes final RGBA directly into
+        # the QRhiWidget render target, including alpha for preview clipping.
         target_blend = QRhiGraphicsPipeline.TargetBlend()
         target_blend.enable = False
 
@@ -641,11 +687,10 @@ class VideoRendererWidget(QRhiWidget):
         """Render the current video frame (or letterbox if no frame is present)."""
         if not self._initialized:
             # GPU pipeline not yet ready but we MUST still clear the render
-            # target with an opaque colour so the surface is never transparent.
-            lc = self._letterbox_color
+            # target. Normal playback stays opaque; preview popups stay clear.
             cb.beginPass(
                 self.renderTarget(),
-                QColor.fromRgbF(lc.redF(), lc.greenF(), lc.blueF(), 1.0),
+                self._pass_clear_color(self._letterbox_color),
                 QRhiDepthStencilClearValue(),
             )
             cb.endPass()
@@ -665,10 +710,9 @@ class VideoRendererWidget(QRhiWidget):
         # stale texture data from a previously played video from flashing on
         # screen during media transitions (video→video or video→image).
         if not self._has_frame:
-            lc = self._letterbox_color
             cb.beginPass(
                 self.renderTarget(),
-                QColor.fromRgbF(lc.redF(), lc.greenF(), lc.blueF(), 1.0),
+                self._pass_clear_color(self._letterbox_color),
                 QRhiDepthStencilClearValue(),
             )
             cb.endPass()
@@ -695,7 +739,11 @@ class VideoRendererWidget(QRhiWidget):
         cb.resourceUpdate(ru)
 
         # Draw
-        cb.beginPass(self.renderTarget(), QColor(0, 0, 0, 255), QRhiDepthStencilClearValue())
+        cb.beginPass(
+            self.renderTarget(),
+            self._pass_clear_color(QColor(0, 0, 0, 255)),
+            QRhiDepthStencilClearValue(),
+        )
         cb.setGraphicsPipeline(self._pipeline)
         cb.setShaderResources(self._srb)
         cb.setViewport(QRhiViewport(0, 0, output_size.width(), output_size.height()))
@@ -710,6 +758,15 @@ class VideoRendererWidget(QRhiWidget):
         if not self._first_render_done:
             self._first_render_done = True
             self.firstFrameReady.emit()
+
+    def _pass_clear_color(self, fallback: QColor) -> QColor:
+        """Return the render-pass clear colour for the current opacity mode."""
+
+        if self._transparent_rounded_clip_enabled:
+            return QColor(0, 0, 0, 0)
+        color = QColor(fallback)
+        color.setAlpha(255)
+        return color
 
     def releaseResources(self) -> None:  # type: ignore[override]
         """Clean up GPU resources."""
@@ -964,10 +1021,13 @@ class VideoRendererWidget(QRhiWidget):
         lg = lc.greenF()
         lb = lc.blueF()
         la = 1.0
+        clip_radius = 0.0
+        if self._transparent_rounded_clip_enabled:
+            clip_radius = self._rounded_clip_radius * self.devicePixelRatioF()
 
         # Pack uniform data (std140)
         ubo_data = struct.pack(
-            "iiii4f4fiiii",
+            "iiii4f4fiiii4f",
             self._fmt_enum,
             self._cs_enum,
             self._tf_enum,
@@ -978,6 +1038,7 @@ class VideoRendererWidget(QRhiWidget):
             self._mirror,          # u_mirror
             0,                     # _pad0
             0,                     # _pad1
+            ow, oh, clip_radius, 0.0,  # u_clip
         )
 
         ru.updateDynamicBuffer(self._ubuf, 0, len(ubo_data), ubo_data)

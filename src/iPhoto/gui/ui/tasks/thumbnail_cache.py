@@ -10,7 +10,7 @@ from pathlib import Path
 from PySide6.QtCore import QSize
 from PySide6.QtGui import QImage
 
-from ....config import WORK_DIR_NAME
+from ....utils.pathutils import ensure_work_dir
 
 
 LOGGER = logging.getLogger(__name__)
@@ -64,7 +64,7 @@ def generate_cache_path(library_root: Path, abs_path: Path, size: QSize, stamp: 
     path_str = str(abs_path.resolve())
     digest = hashlib.blake2b(path_str.encode("utf-8"), digest_size=20).hexdigest()
     filename = f"{digest}_{stamp}_{size.width()}x{size.height()}.png"
-    return library_root / WORK_DIR_NAME / "thumbs" / filename
+    return ensure_work_dir(library_root) / "thumbs" / filename
 
 
 def write_cache(canvas: QImage, path: Path) -> bool:  # pragma: no cover - worker helper

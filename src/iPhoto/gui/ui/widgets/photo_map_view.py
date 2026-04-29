@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import sys
 from logging import getLogger
 from pathlib import Path
 from typing import Dict, Iterable, Optional, cast
@@ -19,6 +20,7 @@ from PySide6.QtGui import (
     QPainterPath,
     QPen,
     QPixmap,
+    QPalette,
 )
 from PySide6.QtWidgets import QApplication, QVBoxLayout, QWidget
 
@@ -29,7 +31,7 @@ from maps.map_sources import (
     prefer_osmand_native_widget,
 )
 from maps.map_widget._map_widget_base import MapWidgetBase
-from maps.map_widget.map_gl_widget import MapGLWidget
+from maps.map_widget.map_gl_widget import MapGLWidget, MapGLWindowWidget
 from maps.map_widget.map_widget import MapWidget
 from maps.map_widget.native_osmand_widget import NativeOsmAndWidget, probe_native_widget_runtime
 from maps.map_widget.qt_location_map_widget import QtLocationMapWidget
@@ -43,6 +45,28 @@ from .custom_tooltip import FloatingToolTip, ToolTipEventFilter
 
 logger = getLogger(__name__)
 _MAPS_PACKAGE_ROOT = Path(__file__).resolve().parents[4] / "maps"
+_MAP_OPAQUE_BACKGROUND = "#88a8c2"
+
+
+def _configure_opaque_map_container(
+    widget: QWidget,
+    *,
+    background: str = _MAP_OPAQUE_BACKGROUND,
+) -> None:
+    """Give map hosts an opaque fallback while their GL child rebuilds."""
+
+    if not widget.objectName():
+        widget.setObjectName(type(widget).__name__)
+    widget.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+    widget.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, False)
+    widget.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, False)
+    widget.setAutoFillBackground(True)
+    palette = QPalette(widget.palette())
+    palette.setColor(QPalette.ColorRole.Window, QColor(background))
+    widget.setPalette(palette)
+    widget.setStyleSheet(
+        f"QWidget#{widget.objectName()} {{ background-color: {background}; border: none; }}"
+    )
 
 
 def _opengl_explicitly_disabled() -> bool:
@@ -67,6 +91,7 @@ def check_opengl_support() -> bool:
     if _opengl_explicitly_disabled():
         return False
 
+    strict_probe = sys.platform == "darwin"
     try:
         # ``QOffscreenSurface`` keeps the detection lightweight by avoiding any
         # visible windows while still exercising the platform specific OpenGL
@@ -81,11 +106,21 @@ def check_opengl_support() -> bool:
         if hasattr(context, "isValid") and not context.isValid():
             return False
 
-        # Some drivers refuse offscreen ``makeCurrent()`` even though a
-        # ``QOpenGLWidget`` can still render successfully. A valid context is
-        # enough to attempt the accelerated path; binding it offscreen remains a
-        # best-effort warm-up instead of a hard requirement.
-        if surface.isValid() and context.makeCurrent(surface):
+        if not surface.isValid():
+            return not strict_probe
+        if not context.makeCurrent(surface):
+            return not strict_probe
+        try:
+            if strict_probe:
+                functions = context.functions()
+                if functions is None:
+                    return False
+                # GL_VERSION = 0x1F02. A successful query proves the context is
+                # current and usable before the map widget attempts rendering.
+                version = functions.glGetString(0x1F02)
+                if not version:
+                    return False
+        finally:
             context.doneCurrent()
         return True
     except Exception:  # noqa: BLE001 - fall back gracefully on any Qt failure
@@ -113,7 +148,11 @@ def _has_resolved_osmand_assets(map_source: MapSourceSpec) -> bool:
 def _preferred_python_widget_class(*, use_opengl: bool) -> type[MapWidgetBase]:
     """Return the standard Python-backed widget class for the current runtime."""
 
-    return MapGLWidget if use_opengl else MapWidget
+    if not use_opengl:
+        return MapWidget
+    if sys.platform == "darwin":
+        return MapGLWindowWidget
+    return MapGLWidget
 
 
 def choose_map_widget_backend(
@@ -159,7 +198,7 @@ def _confirmed_gl_state(
 
     if backend_kind == "osmand_native":
         return "true"
-    if isinstance(map_widget, MapGLWidget):
+    if isinstance(map_widget, (MapGLWidget, MapGLWindowWidget)):
         return "true"
     if isinstance(map_widget, MapWidget):
         return "false"
@@ -263,12 +302,17 @@ class _MarkerLayer(QWidget):
         self._pixmaps.clear()
         self.update()
 
-    def paintEvent(self, event: QPaintEvent) -> None:  # type: ignore[override]
-        painter = QPainter(self)
+    def paint_markers(self, painter: QPainter) -> None:
+        """Paint all marker clusters into an already active painter."""
+
         painter.setRenderHint(QPainter.Antialiasing, True)
         painter.setRenderHint(QPainter.SmoothPixmapTransform, True)
         for cluster in self._clusters:
             self._paint_cluster(painter, cluster)
+
+    def paintEvent(self, event: QPaintEvent) -> None:  # type: ignore[override]
+        painter = QPainter(self)
+        self.paint_markers(painter)
         painter.end()
 
     def _paint_cluster(self, painter: QPainter, cluster: _MarkerCluster) -> None:
@@ -292,7 +336,7 @@ class _MarkerLayer(QWidget):
 
         painter.save()
         painter.setPen(QPen(QColor(0, 0, 0, 80), 2))
-        painter.setBrush(QColor(255, 255, 255, 230))
+        painter.setBrush(QColor(255, 255, 255, 255))
         painter.drawPath(path)
         painter.restore()
 
@@ -368,6 +412,18 @@ class _MarkerLayer(QWidget):
         return pixmap
 
 
+class _GLMarkerLayer(_MarkerLayer):
+    """Marker painter that renders inside the active GL map pass."""
+
+    def __init__(self, target) -> None:
+        super().__init__(None)
+        self._target = target
+
+    def update(self, *args, **kwargs) -> None:  # type: ignore[override]
+        del args, kwargs
+        self._target.request_full_update()
+
+
 class PhotoMapView(QWidget):
     """Embed the map widget and manage geotagged photo markers."""
 
@@ -389,6 +445,7 @@ class PhotoMapView(QWidget):
         map_source: MapSourceSpec | None = None,
     ) -> None:
         super().__init__(parent)
+        _configure_opaque_map_container(self)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
@@ -410,9 +467,18 @@ class PhotoMapView(QWidget):
                     exc,
                 )
                 fallback_cls = _preferred_python_widget_class(use_opengl=use_opengl)
-                self._map_widget = fallback_cls(self, map_source=resolved_map_source)
+                try:
+                    self._map_widget = fallback_cls(self, map_source=resolved_map_source)
+                except Exception as fallback_exc:
+                    if not use_opengl:
+                        raise
+                    logger.warning(
+                        "OpenGL OBF fallback unavailable, falling back to the CPU renderer: %s",
+                        fallback_exc,
+                    )
+                    self._map_widget = MapWidget(self, map_source=resolved_map_source)
                 backend_kind = "osmand_python"
-            elif widget_cls is MapGLWidget:
+            elif widget_cls in {MapGLWidget, MapGLWindowWidget}:
                 logger.warning(
                     "OpenGL photo map unavailable, falling back to the CPU renderer: %s",
                     exc,
@@ -440,9 +506,21 @@ class PhotoMapView(QWidget):
             logger.info("Photo map using CPU rendering because OpenGL is unavailable.")
         layout.addWidget(self._map_widget)
 
-        self._overlay = _MarkerLayer(self)
-        self._overlay.setGeometry(self._map_widget.geometry())
-        self._overlay.raise_()
+        self._marker_paint_callback = None
+        add_post_render_painter = getattr(self._map_widget, "add_post_render_painter", None)
+        supports_post_render_painter = getattr(
+            self._map_widget,
+            "supports_post_render_painter",
+            lambda: True,
+        )
+        if callable(add_post_render_painter) and supports_post_render_painter():
+            self._overlay = _GLMarkerLayer(self._map_widget)
+            self._marker_paint_callback = self._overlay.paint_markers
+            add_post_render_painter(self._marker_paint_callback)
+        else:
+            self._overlay = _MarkerLayer(self)
+            self._overlay.setGeometry(self._map_widget.geometry())
+            self._overlay.raise_()
 
         self._map_event_target = cast(QWidget, self._map_widget.event_target())
         self._map_event_target.installEventFilter(self)
@@ -537,7 +615,10 @@ class PhotoMapView(QWidget):
 
     def resizeEvent(self, event) -> None:  # type: ignore[override]
         super().resizeEvent(event)
-        self._overlay.setGeometry(self._map_widget.geometry())
+        if self._overlay.parent() is self:
+            self._overlay.setGeometry(self._map_widget.geometry())
+        else:
+            self._overlay.update()
         self._marker_controller.handle_resize()
 
     def hideEvent(self, event) -> None:  # type: ignore[override]
@@ -607,6 +688,9 @@ class PhotoMapView(QWidget):
         self._tooltip.deleteLater()
         if self._map_event_target is not None:
             self._map_event_target.removeEventFilter(self)
+        remove_post_render_painter = getattr(self._map_widget, "remove_post_render_painter", None)
+        if self._marker_paint_callback is not None and callable(remove_post_render_painter):
+            remove_post_render_painter(self._marker_paint_callback)
         # ``MarkerController`` maintains a worker thread that aggregates marker clusters.
         # Explicitly shutting it down prevents the Qt event loop from waiting indefinitely.
         self._marker_controller.shutdown()

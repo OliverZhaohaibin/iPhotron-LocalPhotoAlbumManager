@@ -31,7 +31,7 @@ from maps.map_sources import (
     has_usable_osmand_native_widget,
     prefer_osmand_native_widget,
 )
-from maps.map_widget import MapGLWidget, MapWidget, NativeOsmAndWidget
+from maps.map_widget import MapGLWidget, MapGLWindowWidget, MapWidget, NativeOsmAndWidget
 from maps.map_widget.native_osmand_widget import probe_native_widget_runtime
 from maps.map_widget._map_widget_base import MapWidgetBase
 from maps.style_resolver import StyleLoadError
@@ -81,6 +81,7 @@ def check_opengl_support() -> bool:
     if _opengl_explicitly_disabled():
         return False
 
+    strict_probe = sys.platform == "darwin"
     try:
         surface = QOffscreenSurface()
         surface.create()
@@ -92,11 +93,19 @@ def check_opengl_support() -> bool:
         if hasattr(context, "isValid") and not context.isValid():
             return False
 
-        # ``QOffscreenSurface.makeCurrent()`` is a useful warm-up when it works,
-        # but some drivers reject offscreen binding even though ``QOpenGLWidget``
-        # itself renders correctly. Treat a valid context as sufficient and use
-        # ``makeCurrent`` only as an optional best-effort probe.
-        if surface.isValid() and context.makeCurrent(surface):
+        if not surface.isValid():
+            return not strict_probe
+        if not context.makeCurrent(surface):
+            return not strict_probe
+        try:
+            if strict_probe:
+                functions = context.functions()
+                if functions is None:
+                    return False
+                version = functions.glGetString(0x1F02)
+                if not version:
+                    return False
+        finally:
             context.doneCurrent()
         return True
     except Exception:
@@ -266,6 +275,10 @@ def configure_qt_opengl_defaults() -> None:
     try:
         surface_format = QSurfaceFormat()
         surface_format.setRenderableType(QSurfaceFormat.RenderableType.OpenGL)
+        surface_format.setDepthBufferSize(24)
+        surface_format.setStencilBufferSize(8)
+        surface_format.setAlphaBufferSize(8 if sys.platform == "darwin" else 0)
+        surface_format.setSamples(0)
         QSurfaceFormat.setDefaultFormat(surface_format)
     except Exception:
         return
@@ -279,7 +292,10 @@ def choose_launch_configuration(
 ) -> PreviewLaunchConfig:
     """Resolve the startup backend requested on the command line."""
 
-    widget_cls: type[MapWidgetBase] = MapGLWidget if use_opengl else MapWidget
+    if use_opengl and sys.platform == "darwin":
+        widget_cls: type[MapWidgetBase] = MapGLWindowWidget
+    else:
+        widget_cls = MapGLWidget if use_opengl else MapWidget
     normalized_backend = backend.strip().lower()
     renderer_label = "GPU accelerated" if use_opengl else "CPU"
 
@@ -380,7 +396,7 @@ def _confirmed_gl_state(
 ) -> str:
     if backend_kind == "osmand_native":
         return "true"
-    if isinstance(map_widget, MapGLWidget):
+    if isinstance(map_widget, (MapGLWidget, MapGLWindowWidget)):
         return "true"
     if isinstance(map_widget, MapWidget):
         return "false"
@@ -475,7 +491,8 @@ class MainWindow(QMainWindow):
         self._runtime_diagnostics = ""
         chosen_source = map_source or choose_default_map_source(
             self._package_root,
-            use_opengl=self._native_widget_cls is not None or self._widget_cls is MapGLWidget,
+            use_opengl=self._native_widget_cls is not None
+            or self._widget_cls in {MapGLWidget, MapGLWindowWidget},
             native_widget_runtime_available=True if self._native_widget_cls is not None else None,
         )
         self._map_source = chosen_source.resolved(self._package_root)

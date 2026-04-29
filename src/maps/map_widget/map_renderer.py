@@ -24,6 +24,8 @@ from .viewport import ViewState, compute_view_state
 # The ``CityAnnotation`` import above already makes the name available in
 # this module's namespace; the comment is kept for clarity.
 
+MAP_BACKGROUND_COLOR = QColor("#88a8c2")
+
 
 class MapRenderer:
     """Render MapLibre vector tiles using the provided tile manager."""
@@ -80,9 +82,7 @@ class MapRenderer:
     ) -> None:
         """Draw the current map scene into ``painter``."""
 
-        # ``fillRect`` clears the previous frame and establishes the water-colored
-        # background used across the application.
-        painter.fillRect(0, 0, width, height, QColor("#88a8c2"))
+        self._fill_opaque_background(painter, width, height)
 
         fetch_max_zoom = self._tile_manager.metadata.fetch_max_zoom
         if fetch_max_zoom is None:
@@ -116,6 +116,16 @@ class MapRenderer:
         """Remove cached geometry derived from ``tile_key``."""
 
         self._clear_tile_paths(tile_key)
+
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _fill_opaque_background(painter: QPainter, width: int, height: int) -> None:
+        """Force the map frame to start with an opaque backing fill."""
+
+        painter.save()
+        painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Source)
+        painter.fillRect(0, 0, width, height, MAP_BACKGROUND_COLOR)
+        painter.restore()
 
     # ------------------------------------------------------------------
     def city_at(self, position: QPointF) -> Optional[str]:

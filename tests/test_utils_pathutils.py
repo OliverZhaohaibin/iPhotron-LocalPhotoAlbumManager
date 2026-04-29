@@ -4,10 +4,12 @@ import pytest
 from pathlib import Path
 from iPhoto.utils.pathutils import (
     _expand,
+    ensure_work_dir,
     is_excluded,
     normalise_for_compare,
     is_descendant_path,
     normalise_rel_value,
+    resolve_work_dir,
 )
 
 def test_expand_single_brace():
@@ -43,6 +45,50 @@ def test_is_excluded_with_braces(tmp_path):
     # _expand("file_{1}.txt") -> "file_{1}.txt"
     # fnmatch("file_{1}.txt", "file_{1}.txt") -> True
     assert is_excluded(path, ["file_{1}.txt"], root=root) is True
+
+
+def test_ensure_work_dir_creates_canonical_iPhoto(tmp_path):
+    work_dir = ensure_work_dir(tmp_path)
+
+    assert work_dir == tmp_path / ".iPhoto"
+    assert work_dir.is_dir()
+    assert resolve_work_dir(tmp_path) == work_dir
+
+
+def test_ensure_work_dir_uses_existing_legacy_lowercase(tmp_path):
+    legacy = tmp_path / ".iphoto"
+    legacy.mkdir()
+
+    work_dir = ensure_work_dir(tmp_path)
+
+    assert work_dir == legacy
+    assert not any(entry.name == ".iPhoto" for entry in tmp_path.iterdir())
+    assert resolve_work_dir(tmp_path) == legacy
+
+
+def test_ensure_work_dir_prefers_canonical_when_both_exist(tmp_path, caplog):
+    canonical = tmp_path / ".iPhoto"
+    legacy = tmp_path / ".iphoto"
+    canonical.mkdir()
+    if legacy.exists():
+        pytest.skip("case-insensitive filesystem cannot create both work dirs")
+    legacy.mkdir()
+
+    work_dir = ensure_work_dir(tmp_path)
+
+    assert work_dir == canonical
+    assert legacy.is_dir()
+    assert resolve_work_dir(tmp_path) == canonical
+    assert "Both canonical .iPhoto and legacy work directories exist" in caplog.text
+
+
+def test_work_dir_helpers_do_not_accept_plain_files(tmp_path):
+    canonical = tmp_path / ".iPhoto"
+    canonical.write_text("not a directory", encoding="utf-8")
+
+    assert resolve_work_dir(tmp_path) is None
+    with pytest.raises(FileExistsError):
+        ensure_work_dir(tmp_path)
 
 def test_normalise_for_compare(tmp_path):
     """Verify normalise_for_compare handles case sensitivity and resolution."""

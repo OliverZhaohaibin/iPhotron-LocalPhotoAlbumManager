@@ -66,6 +66,29 @@ def test_extract_frame_with_pyav_no_seek(mock_av, tmp_path):
     assert result == mock_image
     assert not mock_container.seek.called
 
+
+@patch("iPhoto.utils.ffmpeg.av")
+def test_extract_frame_with_pyav_success_does_not_load_cv2(mock_av, monkeypatch, tmp_path):
+    """A successful PyAV decode should not touch the OpenCV fallback."""
+    video_path = tmp_path / "video.mp4"
+    mock_container = MagicMock()
+    mock_av.open.return_value.__enter__.return_value = mock_container
+    mock_container.streams.video = [MagicMock()]
+    mock_frame = MagicMock()
+    mock_frame.pts = 0
+    mock_image = Image.new("RGB", (100, 100))
+    mock_frame.to_image.return_value = mock_image
+    mock_container.decode.return_value = [mock_frame]
+    monkeypatch.setattr(
+        ffmpeg,
+        "_load_cv2",
+        lambda: pytest.fail("OpenCV should not load when PyAV succeeds"),
+    )
+
+    result = ffmpeg.extract_frame_with_pyav(video_path)
+
+    assert result == mock_image
+
 @patch("iPhoto.utils.ffmpeg.av")
 def test_extract_frame_with_pyav_handles_scaling(mock_av, tmp_path):
     """Test scaling logic."""

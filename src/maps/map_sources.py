@@ -457,6 +457,8 @@ def _default_helper_candidates(package_root: Path) -> tuple[Path, ...]:
         _default_osmand_search_roots(normalized_root),
         DEFAULT_HELPER_RELATIVE_PATHS,
     )
+    if sys.platform == "darwin":
+        return _dedupe_candidates(local_candidates + sdk_candidates)
     return _dedupe_candidates(sdk_candidates + local_candidates)
 
 
@@ -471,6 +473,8 @@ def _default_native_widget_candidates(package_root: Path) -> tuple[Path, ...]:
         _default_osmand_search_roots(normalized_root),
         DEFAULT_NATIVE_WIDGET_RELATIVE_PATHS,
     )
+    if sys.platform == "darwin":
+        return _dedupe_candidates(local_candidates + sdk_candidates)
     return _dedupe_candidates(sdk_candidates + local_candidates)
 
 

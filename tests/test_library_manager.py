@@ -91,7 +91,7 @@ def test_create_and_rename_album(tmp_path: Path, qapp: QApplication) -> None:
     assert data["title"] == "Arrival"
 
 
-@pytest.mark.parametrize("reserved_name", [".iPhoto", ".Trash", "exported"])
+@pytest.mark.parametrize("reserved_name", [".iPhoto", ".iphoto", ".IPHOTO", ".Trash", "exported"])
 def test_reserved_album_names_are_rejected_for_create_and_rename(
     tmp_path: Path, qapp: QApplication, reserved_name: str
 ) -> None:
@@ -119,6 +119,27 @@ def test_reserved_album_names_are_rejected_for_create_and_rename(
     refreshed_parent = next(node for node in albums if node.path == created.path)
     refreshed_children = manager.list_children(refreshed_parent)
     assert any(kid.path == child.path and kid.title == "Day1" for kid in refreshed_children)
+
+
+@pytest.mark.parametrize("internal_name", [".iPhoto", ".iphoto", ".IPHOTO"])
+def test_work_dir_case_variants_are_hidden_from_album_tree(
+    tmp_path: Path, qapp: QApplication, internal_name: str
+) -> None:
+    root = tmp_path / "Library"
+    root.mkdir()
+    visible = root / "Trips"
+    visible.mkdir()
+    _write_manifest(visible, "Trips")
+    internal = root / internal_name
+    internal.mkdir()
+    _write_manifest(internal, f"Internal {internal_name}")
+
+    manager = LibraryManager()
+    manager.bind_path(root)
+    qapp.processEvents()
+
+    albums = manager.list_albums()
+    assert [node.title for node in albums] == ["Trips"]
 
 
 def test_ensure_manifest_generates_defaults(tmp_path: Path) -> None:

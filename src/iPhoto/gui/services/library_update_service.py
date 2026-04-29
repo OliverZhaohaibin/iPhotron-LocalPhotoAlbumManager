@@ -11,8 +11,9 @@ from PySide6.QtCore import QObject, QTimer, Signal, Slot
 
 from ... import app as backend
 from ...cache.index_store import get_global_repository
-from ...config import RECENTLY_DELETED_DIR_NAME, WORK_DIR_NAME
+from ...config import RECENTLY_DELETED_DIR_NAME
 from ...errors import IPhotoError
+from ...utils.pathutils import resolve_work_dir
 from ..background_task_manager import BackgroundTaskManager
 # Updated imports to new location
 from ...library.workers.rescan_worker import RescanSignals, RescanWorker
@@ -582,8 +583,7 @@ class LibraryUpdateService(QObject):
         current = candidate
         while True:
             visited.append(current)
-            work_dir = current / WORK_DIR_NAME
-            if work_dir.exists():
+            if resolve_work_dir(current) is not None:
                 album_root = current
                 break
             if self._paths_equal(current, library_root) or current.parent == current:

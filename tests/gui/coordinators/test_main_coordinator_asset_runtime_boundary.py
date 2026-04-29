@@ -120,6 +120,72 @@ def test_connect_signals_wires_location_scan_updates_from_library() -> None:
     coordinator._context.library.scanFinished.connect.assert_any_call(
         coordinator._gallery_vm.handle_location_scan_finished
     )
+    coordinator._facade.move_service.moveFinished.connect.assert_any_call(
+        coordinator._status_bar.handle_move_finished
+    )
+    coordinator._facade.move_service.moveFinished.connect.assert_any_call(
+        coordinator._handle_move_finished_toast
+    )
+
+
+def _make_move_toast_coordinator(tmp_path: Path) -> tuple[MainCoordinator, Path, MagicMock]:
+    coordinator = MainCoordinator.__new__(MainCoordinator)
+    toast = MagicMock()
+    coordinator._window = MagicMock(ui=MagicMock(notification_toast=toast))
+    coordinator._context = MagicMock()
+    trash_root = tmp_path / "Recently Deleted"
+    coordinator._context.library.deleted_directory.return_value = trash_root
+    return coordinator, trash_root, toast
+
+
+def test_handle_move_finished_toast_shows_for_successful_plain_move(
+    tmp_path: Path,
+) -> None:
+    coordinator, _trash_root, toast = _make_move_toast_coordinator(tmp_path)
+
+    coordinator._handle_move_finished_toast(
+        tmp_path / "Album A",
+        tmp_path / "Album B",
+        True,
+        "Moved 1 item.",
+    )
+
+    toast.show_toast.assert_called_once_with("Moved")
+
+
+def test_handle_move_finished_toast_skips_failed_move(tmp_path: Path) -> None:
+    coordinator, _trash_root, toast = _make_move_toast_coordinator(tmp_path)
+
+    coordinator._handle_move_finished_toast(
+        tmp_path / "Album A",
+        tmp_path / "Album B",
+        False,
+        "No files were moved.",
+    )
+
+    toast.show_toast.assert_not_called()
+
+
+def test_handle_move_finished_toast_skips_delete_and_restore(
+    tmp_path: Path,
+) -> None:
+    coordinator, trash_root, toast = _make_move_toast_coordinator(tmp_path)
+    album_root = tmp_path / "Album A"
+
+    coordinator._handle_move_finished_toast(
+        album_root,
+        trash_root,
+        True,
+        "Deleted 1 item.",
+    )
+    coordinator._handle_move_finished_toast(
+        trash_root,
+        album_root,
+        True,
+        "Restored 1 item.",
+    )
+
+    toast.show_toast.assert_not_called()
 
 
 def test_handle_media_load_failed_prunes_row_and_refreshes_collection(tmp_path: Path) -> None:

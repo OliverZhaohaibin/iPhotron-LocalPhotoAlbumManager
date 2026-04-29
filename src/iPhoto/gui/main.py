@@ -12,14 +12,72 @@ from PySide6.QtGui import QColor, QPalette, QSurfaceFormat
 from PySide6.QtWidgets import QApplication
 
 from iPhoto.bootstrap.qt_shader_cache import configure_shader_cache_environment
+from iPhoto.gui.render_backend import should_configure_global_desktop_opengl
 
 _logger = logging.getLogger(__name__)
 _TRUE_ENV_VALUES = {"1", "true", "yes", "on"}
+_MACOS_EXTERNAL_TOOL_PATHS = (
+    Path("/opt/homebrew/bin"),
+    Path("/opt/homebrew/sbin"),
+    Path("/usr/local/bin"),
+    Path("/usr/local/sbin"),
+    Path("/opt/local/bin"),
+    Path("/opt/local/sbin"),
+)
+
+
+def _bootstrap_macos_external_tool_path() -> None:
+    """Expose common Homebrew/MacPorts tool paths to GUI-launched app bundles."""
+
+    if sys.platform != "darwin":
+        return
+
+    existing_tool_paths: list[str] = []
+    for candidate in _MACOS_EXTERNAL_TOOL_PATHS:
+        try:
+            if candidate.is_dir():
+                existing_tool_paths.append(str(candidate))
+        except OSError:
+            continue
+
+    current_paths = [
+        entry
+        for entry in os.environ.get("PATH", "").split(os.pathsep)
+        if entry
+    ]
+    merged_paths: list[str] = []
+    seen: set[str] = set()
+    for entry in [*existing_tool_paths, *current_paths]:
+        if entry in seen:
+            continue
+        seen.add(entry)
+        merged_paths.append(entry)
+    if merged_paths:
+        os.environ["PATH"] = os.pathsep.join(merged_paths)
 
 
 def _configure_qt_shader_disk_cache() -> None:
     """Route shader/program caches into a managed ``.iPhoto`` work directory."""
     configure_shader_cache_environment()
+
+
+def _opengl_explicitly_disabled() -> bool:
+    """Return whether all OpenGL-backed UI surfaces should be disabled."""
+
+    return os.environ.get("IPHOTO_DISABLE_OPENGL", "").strip().lower() in _TRUE_ENV_VALUES
+
+
+def _map_gl_surface_format(platform: str | None = None) -> QSurfaceFormat:
+    """Return the conservative OpenGL surface format used by map widgets."""
+
+    platform = sys.platform if platform is None else platform
+    surface_format = QSurfaceFormat()
+    surface_format.setRenderableType(QSurfaceFormat.RenderableType.OpenGL)
+    surface_format.setDepthBufferSize(24)
+    surface_format.setStencilBufferSize(8)
+    surface_format.setAlphaBufferSize(8 if platform == "darwin" else 0)
+    surface_format.setSamples(0)
+    return surface_format
 
 
 def _is_packaged_runtime() -> bool:
@@ -68,7 +126,7 @@ def _prepare_qt_runtime_for_maps() -> None:
     if sys.platform != "linux":
         return
 
-    if os.environ.get("IPHOTO_DISABLE_OPENGL", "").strip().lower() in {"1", "true", "yes", "on"}:
+    if _opengl_explicitly_disabled():
         return
 
     if _is_packaged_runtime():
@@ -93,25 +151,26 @@ def _prepare_qt_runtime_for_maps() -> None:
 
 
 def _configure_qt_opengl_defaults() -> None:
-    """Apply the same desktop OpenGL defaults used by the standalone map tool."""
+    """Apply OpenGL context defaults required by the map widgets."""
 
     _configure_qt_shader_disk_cache()
 
-    if os.environ.get("IPHOTO_DISABLE_OPENGL", "").strip().lower() in {"1", "true", "yes", "on"}:
+    if _opengl_explicitly_disabled():
         return
 
     try:
-        QApplication.setAttribute(Qt.ApplicationAttribute.AA_UseDesktopOpenGL, True)
         QApplication.setAttribute(Qt.ApplicationAttribute.AA_ShareOpenGLContexts, True)
     except Exception:
-        return
+        pass
+
+    if should_configure_global_desktop_opengl():
+        try:
+            QApplication.setAttribute(Qt.ApplicationAttribute.AA_UseDesktopOpenGL, True)
+        except Exception:
+            pass
 
     try:
-        surface_format = QSurfaceFormat()
-        surface_format.setRenderableType(QSurfaceFormat.RenderableType.OpenGL)
-        surface_format.setDepthBufferSize(24)
-        surface_format.setStencilBufferSize(8)
-        QSurfaceFormat.setDefaultFormat(surface_format)
+        QSurfaceFormat.setDefaultFormat(_map_gl_surface_format())
     except Exception:
         return
 
@@ -120,6 +179,7 @@ def main(argv: list[str] | None = None) -> int:
     """Launch the Qt application and return the exit code."""
 
     _prefer_local_source_tree()
+    _bootstrap_macos_external_tool_path()
     maps_package_root = Path(__file__).resolve().parents[2] / "maps"
     try:
         from maps.map_sources import apply_pending_osmand_extension_install

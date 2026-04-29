@@ -14,6 +14,7 @@ from PySide6.QtWidgets import QFrame, QWidget
 from iPhoto.config import WORK_DIR_NAME
 from iPhoto.infrastructure.services.people_cover_cache_service import PeopleCoverCacheService
 from iPhoto.people.image_utils import create_cover_thumbnail, load_image_rgb
+from iPhoto.utils.pathutils import ensure_work_dir
 
 CARD_WIDTH = 156
 CARD_HEIGHT = 212
@@ -89,7 +90,7 @@ def configure_people_cover_cache(library_root: Path | None) -> None:
     if library_root is None:
         cache_root = Path.home() / WORK_DIR_NAME / "cache" / "people-covers"
     else:
-        cache_root = library_root / WORK_DIR_NAME / "cache" / "people-covers"
+        cache_root = ensure_work_dir(library_root) / "cache" / "people-covers"
     _PEOPLE_COVER_CACHE.set_disk_cache_path(cache_root)
 
 

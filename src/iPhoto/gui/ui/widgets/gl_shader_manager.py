@@ -140,6 +140,7 @@ _UNIFORM_NAMES = (
     "uPerspectiveRow1",
     "uPerspectiveRow2",
     "uRotate90",
+    "uTextureOriginTopLeft",
     *_SELECTIVE_COLOR_UNIFORM_NAMES,
     "uSCEnabled",
     "uDefinition",

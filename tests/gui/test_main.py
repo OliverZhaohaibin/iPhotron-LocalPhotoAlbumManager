@@ -3,7 +3,55 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from iPhoto.gui.main import _configure_qt_opengl_defaults, _prepare_qt_runtime_for_maps
+from PySide6.QtCore import Qt
+
+from iPhoto.gui.main import (
+    _bootstrap_macos_external_tool_path,
+    _configure_qt_opengl_defaults,
+    _prepare_qt_runtime_for_maps,
+)
+
+
+def test_bootstrap_macos_external_tool_path_prepends_existing_paths_once(monkeypatch) -> None:
+    existing_paths = {"/opt/homebrew/bin", "/usr/local/bin"}
+
+    def fake_is_dir(path: Path) -> bool:
+        return str(path) in existing_paths
+
+    monkeypatch.setattr("iPhoto.gui.main.sys.platform", "darwin")
+    monkeypatch.setattr("iPhoto.gui.main.Path.is_dir", fake_is_dir)
+    monkeypatch.setenv("PATH", "/usr/bin:/opt/homebrew/bin:/bin")
+
+    _bootstrap_macos_external_tool_path()
+
+    assert os.environ["PATH"].split(os.pathsep) == [
+        "/opt/homebrew/bin",
+        "/usr/local/bin",
+        "/usr/bin",
+        "/bin",
+    ]
+
+    _bootstrap_macos_external_tool_path()
+
+    assert os.environ["PATH"].split(os.pathsep) == [
+        "/opt/homebrew/bin",
+        "/usr/local/bin",
+        "/usr/bin",
+        "/bin",
+    ]
+
+
+def test_bootstrap_macos_external_tool_path_skips_non_macos(monkeypatch) -> None:
+    def fail_if_called(_path: Path) -> bool:
+        raise AssertionError("Path.is_dir should not be called off macOS")
+
+    monkeypatch.setattr("iPhoto.gui.main.sys.platform", "linux")
+    monkeypatch.setattr("iPhoto.gui.main.Path.is_dir", fail_if_called)
+    monkeypatch.setenv("PATH", "/usr/bin:/bin")
+
+    _bootstrap_macos_external_tool_path()
+
+    assert os.environ["PATH"] == "/usr/bin:/bin"
 
 
 def test_configure_qt_opengl_defaults_routes_shader_cache_and_prefers_desktop_opengl(monkeypatch) -> None:
@@ -23,14 +71,56 @@ def test_configure_qt_opengl_defaults_routes_shader_cache_and_prefers_desktop_op
         "iPhoto.gui.main.QSurfaceFormat.setDefaultFormat",
         lambda fmt: default_formats.append(fmt),
     )
+    monkeypatch.setattr("iPhoto.gui.render_backend.sys.platform", "linux")
+    monkeypatch.setattr("iPhoto.gui.main.sys.platform", "linux")
     monkeypatch.delenv("IPHOTO_DISABLE_OPENGL", raising=False)
+    monkeypatch.delenv("IPHOTO_RHI_BACKEND", raising=False)
 
     _configure_qt_opengl_defaults()
 
     assert helper_calls == [True]
     assert len(attributes) == 2
     assert all(enabled is True for _, enabled in attributes)
+    assert (Qt.ApplicationAttribute.AA_ShareOpenGLContexts, True) in attributes
+    assert (Qt.ApplicationAttribute.AA_UseDesktopOpenGL, True) in attributes
     assert len(default_formats) == 1
+    assert default_formats[0].depthBufferSize() == 24
+    assert default_formats[0].stencilBufferSize() == 8
+    assert default_formats[0].alphaBufferSize() == 0
+    assert default_formats[0].samples() == 0
+
+
+def test_configure_qt_opengl_defaults_keeps_map_gl_contexts_on_macos_auto(monkeypatch) -> None:
+    helper_calls: list[bool] = []
+    attributes: list[tuple[object, bool]] = []
+    default_formats: list[object] = []
+
+    monkeypatch.setattr(
+        "iPhoto.gui.main.configure_shader_cache_environment",
+        lambda: helper_calls.append(True),
+    )
+    monkeypatch.setattr(
+        "iPhoto.gui.main.QApplication.setAttribute",
+        lambda attr, enabled=True: attributes.append((attr, enabled)),
+    )
+    monkeypatch.setattr(
+        "iPhoto.gui.main.QSurfaceFormat.setDefaultFormat",
+        lambda fmt: default_formats.append(fmt),
+    )
+    monkeypatch.setattr("iPhoto.gui.render_backend.sys.platform", "darwin")
+    monkeypatch.setattr("iPhoto.gui.main.sys.platform", "darwin")
+    monkeypatch.delenv("IPHOTO_DISABLE_OPENGL", raising=False)
+    monkeypatch.delenv("IPHOTO_RHI_BACKEND", raising=False)
+
+    _configure_qt_opengl_defaults()
+
+    assert helper_calls == [True]
+    assert attributes == [(Qt.ApplicationAttribute.AA_ShareOpenGLContexts, True)]
+    assert len(default_formats) == 1
+    assert default_formats[0].depthBufferSize() == 24
+    assert default_formats[0].stencilBufferSize() == 8
+    assert default_formats[0].alphaBufferSize() == 8
+    assert default_formats[0].samples() == 0
 
 
 def test_configure_qt_opengl_defaults_still_routes_shader_cache_when_opengl_is_disabled(monkeypatch) -> None:

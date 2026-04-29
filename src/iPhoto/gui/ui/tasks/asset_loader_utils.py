@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Callable, Dict, Iterable, List, Optional, Set, Tuple, TYPE_CHECKING
 
 from ....cache.index_store import get_global_repository
-from ....config import RECENTLY_DELETED_DIR_NAME, WORK_DIR_NAME
+from ....config import RECENTLY_DELETED_DIR_NAME
 from ....media_classifier import classify_media
 from ....utils.geocoding import resolve_location_name
 from ....utils.pathutils import ensure_work_dir
@@ -55,7 +55,7 @@ def compute_album_path(
         return root, None
 
     # Ensure work dir exists at library root
-    ensure_work_dir(library_root, WORK_DIR_NAME)
+    ensure_work_dir(library_root)
 
     # Prefer robust, case-tolerant relative computation to avoid dropping
     # album filters (which would leak All Photos into physical album views).
@@ -420,7 +420,7 @@ def compute_asset_rows(
     count : int
         The number of entries returned.
     """
-    ensure_work_dir(root, WORK_DIR_NAME)
+    ensure_work_dir(root)
 
     params = copy.deepcopy(filter_params) if filter_params else {}
     featured_set = normalize_featured(featured)

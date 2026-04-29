@@ -6,6 +6,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -15,15 +16,48 @@ from ..errors import ExternalToolError
 
 LOGGER = logging.getLogger(__name__)
 
+_EXIFTOOL_ENV_VAR = "IPHOTO_EXIFTOOL_PATH"
+_MACOS_EXIFTOOL_CANDIDATES = (
+    Path("/opt/homebrew/bin/exiftool"),
+    Path("/usr/local/bin/exiftool"),
+    Path("/opt/local/bin/exiftool"),
+)
+
+
+def _is_executable_file(path: Path) -> bool:
+    try:
+        return path.is_file() and os.access(path, os.X_OK)
+    except OSError:
+        return False
+
 
 def _resolve_exiftool_executable() -> str:
-    executable = shutil.which("exiftool")
-    if executable is None:
+    configured = os.environ.get(_EXIFTOOL_ENV_VAR, "").strip()
+    if configured:
+        candidate = Path(configured).expanduser()
+        if _is_executable_file(candidate):
+            return str(candidate)
         raise ExternalToolError(
-            "exiftool executable not found. Install it from https://exiftool.org/ "
-            "and ensure it is available on PATH."
+            f"Configured exiftool executable is not available or executable: {candidate}. "
+            f"Set {_EXIFTOOL_ENV_VAR} to a valid executable path."
         )
-    return executable
+
+    executable = shutil.which("exiftool")
+    if executable:
+        return executable
+
+    searched = ["PATH"]
+    if sys.platform == "darwin":
+        for candidate in _MACOS_EXIFTOOL_CANDIDATES:
+            searched.append(str(candidate))
+            if _is_executable_file(candidate):
+                return str(candidate)
+
+    raise ExternalToolError(
+        "exiftool executable not found. Install it from https://exiftool.org/ "
+        f"and ensure it is available on PATH, or set {_EXIFTOOL_ENV_VAR}. "
+        f"Searched: {', '.join(searched)}."
+    )
 
 
 def _startup_options() -> tuple[subprocess.STARTUPINFO | None, int]:

@@ -12,7 +12,7 @@ pytest.importorskip("PySide6", reason="PySide6 is required for GUI tests", exc_t
 pytest.importorskip("PySide6.QtWidgets", reason="Qt widgets not available", exc_type=ImportError)
 
 from PySide6.QtCore import QEvent, QPointF, QSize, Qt, QTimer, Signal
-from PySide6.QtGui import QMouseEvent
+from PySide6.QtGui import QMouseEvent, QPainter, QPixmap
 from PySide6.QtWidgets import QApplication, QWidget
 
 from iPhoto.gui.ui.widgets.info_panel import (
@@ -124,6 +124,27 @@ class _DeferredCenterMiniMapWidget(_FakeMiniMapWidget):
         return QPointF(screen_x, screen_y)
 
 
+class _PostRenderMiniMapWidget(_FakeMiniMapWidget):
+    def __init__(self, parent: QWidget | None = None, *, map_source: MapSourceSpec | None = None) -> None:
+        super().__init__(parent, map_source=map_source)
+        self.post_render_painters: list[object] = []
+        self.removed_post_render_painters: list[object] = []
+        self.full_update_count = 0
+
+    def add_post_render_painter(self, callback) -> None:
+        if callback not in self.post_render_painters:
+            self.post_render_painters.append(callback)
+
+    def remove_post_render_painter(self, callback) -> None:
+        self.removed_post_render_painters.append(callback)
+        self.post_render_painters = [
+            existing for existing in self.post_render_painters if existing != callback
+        ]
+
+    def request_full_update(self) -> None:
+        self.full_update_count += 1
+
+
 def _fake_choose_map_widget_backend(
     _map_source: MapSourceSpec | None,
     *,
@@ -158,6 +179,19 @@ def _fake_choose_deferred_center_map_widget_backend(
     del use_opengl
     return (
         _DeferredCenterMiniMapWidget,
+        MapSourceSpec.legacy_default(Path.cwd()).resolved(Path.cwd()),
+        "legacy_python",
+    )
+
+
+def _fake_choose_post_render_map_widget_backend(
+    _map_source: MapSourceSpec | None,
+    *,
+    use_opengl: bool,
+) -> tuple[type[_PostRenderMiniMapWidget], MapSourceSpec, str]:
+    del use_opengl
+    return (
+        _PostRenderMiniMapWidget,
         MapSourceSpec.legacy_default(Path.cwd()).resolved(Path.cwd()),
         "legacy_python",
     )
@@ -1036,6 +1070,59 @@ def test_info_panel_location_map_overlay_tracks_actual_embedded_map_size(
     )
     assert abs(pin_tip_x - screen_point.x()) <= 1.0
     assert abs(pin_tip_y - screen_point.y()) <= 1.0
+    panel.close()
+
+
+def test_info_panel_location_map_uses_post_render_pin_when_available(
+    qapp: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(info_location_map_module, "check_opengl_support", lambda: True)
+    monkeypatch.setattr(
+        info_location_map_module,
+        "choose_map_widget_backend",
+        _fake_choose_post_render_map_widget_backend,
+    )
+
+    panel = InfoPanel()
+    panel.set_location_capability(enabled=True)
+    panel.set_asset_metadata(
+        {
+            "rel": "map.jpg",
+            "name": "map.jpg",
+            "gps": {"lat": 48.137154, "lon": 11.576124},
+            "location": "Munich",
+        }
+    )
+    panel.show()
+    qapp.processEvents()
+
+    map_view = panel._location_map
+    map_widget = map_view._map_widget
+    assert isinstance(map_widget, _PostRenderMiniMapWidget)
+    assert len(map_widget.post_render_painters) == 1
+    callback = map_widget.post_render_painters[0]
+    assert callback is map_view._pin_paint_callback
+    assert map_view._overlay.isHidden()
+
+    screen_point = map_view._screen_point
+    assert screen_point is not None
+    assert abs(screen_point.x() - map_widget.width() / 2.0) <= 1.0
+    assert abs(screen_point.y() - map_widget.height() / 2.0) <= 1.0
+
+    pixmap = QPixmap(map_widget.size())
+    pixmap.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(pixmap)
+    callback(painter)
+    painter.end()
+    image = pixmap.toImage()
+    sample_x = int(round(screen_point.x()))
+    sample_y = int(round(screen_point.y())) - 12
+    sample_y = max(0, min(image.height() - 1, sample_y))
+    assert image.pixelColor(sample_x, sample_y).alpha() > 0
+
+    map_view.shutdown()
+    assert map_widget.removed_post_render_painters == [callback]
     panel.close()
 
 

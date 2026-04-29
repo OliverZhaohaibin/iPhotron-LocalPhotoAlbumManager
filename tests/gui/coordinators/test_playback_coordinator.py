@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, call, patch
@@ -8,6 +9,8 @@ import pytest
 
 pytest.importorskip("PySide6", reason="PySide6 is required for playback coordinator tests", exc_type=ImportError)
 
+from iPhoto.application.services.assign_location_service import AssignedLocationResult
+from iPhoto.gui.coordinators import playback_coordinator as playback_coordinator_module
 from iPhoto.gui.coordinators.playback_coordinator import PlaybackCoordinator
 from iPhoto.gui.ui.tasks.info_panel_metadata_worker import InfoPanelMetadataResult
 from iPhoto.gui.viewmodels.detail_viewmodel import DetailPresentation
@@ -312,6 +315,46 @@ def test_render_presentation_uses_viewmodel_video_state() -> None:
     )
     assert coordinator._trim_in_ms == 1000
     assert coordinator._trim_out_ms == 3000
+
+
+def test_render_presentation_stops_video_area_before_showing_still() -> None:
+    coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
+    video_area = Mock(has_video=Mock(return_value=True), stop=Mock())
+    image_viewer = Mock(reset_zoom=Mock())
+    player_view = Mock(
+        show_image_surface=Mock(),
+        display_image=Mock(),
+        hide_live_badge=Mock(),
+        set_live_replay_enabled=Mock(),
+        video_area=video_area,
+        image_viewer=image_viewer,
+    )
+    parent = Mock()
+    parent.attach_mock(video_area.stop, "stop")
+    parent.attach_mock(player_view.show_image_surface, "show_image_surface")
+
+    coordinator._player_view = player_view
+    coordinator._favorite_button = Mock(setEnabled=Mock())
+    coordinator._info_button = Mock(setEnabled=Mock())
+    coordinator._share_button = Mock(setEnabled=Mock())
+    coordinator._edit_button = Mock(setEnabled=Mock())
+    coordinator._rotate_button = Mock(setEnabled=Mock())
+    coordinator._update_favorite_icon = Mock()
+    coordinator._zoom_slider = Mock(blockSignals=Mock(), setValue=Mock())
+    coordinator._player_bar = Mock(setEnabled=Mock(), set_playback_state=Mock(), set_position=Mock())
+    coordinator._zoom_handler = Mock(set_viewer=Mock())
+    coordinator._zoom_widget = Mock(show=Mock())
+    coordinator._info_panel = None
+    coordinator._clear_play_profile = Mock()
+    coordinator._refresh_face_name_overlay_for_presentation = Mock()
+
+    presentation = _make_presentation(path="/fake/photo.heic", is_video=False)
+
+    PlaybackCoordinator._render_presentation(coordinator, presentation)
+
+    assert parent.mock_calls[:2] == [call.stop(), call.show_image_surface()]
+    player_view.display_image.assert_called_once_with(Path("/fake/photo.heic"))
+    coordinator._player_bar.setEnabled.assert_called_once_with(False)
 
 
 def test_reset_for_gallery_closes_info_panel_and_clears_viewmodel_state() -> None:
@@ -679,6 +722,122 @@ def test_ready_enrichment_is_cached_without_touching_other_asset_panel() -> None
 
     coordinator._info_panel.set_asset_metadata.assert_not_called()
     assert coordinator._info_panel_metadata_cache[str(Path("/fake/video.mp4"))]["frame_rate"] == 59.94
+
+
+def test_location_assignment_ready_with_file_write_error_still_updates_library_state(
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
+    asset_path = Path("/fake/photo.jpg")
+    metadata = {
+        "gps": {"lat": 48.8566, "lon": 2.3522},
+        "location": "Paris",
+        "location_name": "Paris",
+    }
+    store = Mock()
+    coordinator._asset_model = Mock(row_for_path=Mock(return_value=4), store=store)
+    coordinator._info_panel_metadata_cache = {}
+    coordinator._info_panel_metadata_attempted = set()
+    coordinator._info_panel_metadata_inflight = {str(asset_path)}
+    coordinator._location_preview_path = asset_path
+    coordinator._location_preview_metadata = dict(metadata)
+    coordinator._detail_vm = Mock(refresh_current=Mock())
+    coordinator._library_manager = None
+    coordinator._location_session_invalidator = None
+    popup_parent = Mock()
+    coordinator._info_panel = Mock(parentWidget=Mock(return_value=popup_parent))
+    show_warning = Mock()
+    monkeypatch.setattr(playback_coordinator_module.dialogs, "show_warning", show_warning)
+    coordinator._queue_location_exiftool_missing_warning = Mock(
+        side_effect=lambda: PlaybackCoordinator._show_location_exiftool_missing_warning(
+            coordinator
+        )
+    )
+
+    result = AssignedLocationResult(
+        asset_path=asset_path,
+        asset_rel="photo.jpg",
+        display_name="Paris",
+        gps={"lat": 48.8566, "lon": 2.3522},
+        metadata=metadata,
+        file_write_error="exiftool executable not found",
+    )
+
+    with caplog.at_level(logging.WARNING, logger="iPhoto.gui.coordinators.playback_coordinator"):
+        PlaybackCoordinator._handle_location_assignment_ready(coordinator, result)
+
+    store.update_asset_metadata.assert_called_once_with(4, metadata)
+    assert coordinator._info_panel_metadata_cache[str(asset_path)] == metadata
+    assert coordinator._info_panel_metadata_attempted == {str(asset_path)}
+    assert coordinator._info_panel_metadata_inflight == set()
+    assert coordinator._location_preview_path is None
+    assert coordinator._location_preview_metadata is None
+    coordinator._detail_vm.refresh_current.assert_called_once_with()
+    assert "GPS metadata was not written" in caplog.text
+    coordinator._queue_location_exiftool_missing_warning.assert_called_once_with()
+    show_warning.assert_called_once_with(
+        popup_parent,
+        playback_coordinator_module._LOCATION_EXIFTOOL_LIMITED_MESSAGE,
+        title=playback_coordinator_module._LOCATION_EXIFTOOL_LIMITED_TITLE,
+    )
+
+
+def test_location_assignment_ready_with_non_missing_file_write_error_warns(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
+    asset_path = Path("/fake/photo.jpg")
+    metadata = {
+        "gps": {"lat": 48.8566, "lon": 2.3522},
+        "location": "Paris",
+        "location_name": "Paris",
+    }
+    store = Mock()
+    coordinator._asset_model = Mock(row_for_path=Mock(return_value=4), store=store)
+    coordinator._info_panel_metadata_cache = {}
+    coordinator._info_panel_metadata_attempted = set()
+    coordinator._info_panel_metadata_inflight = {str(asset_path)}
+    coordinator._location_preview_path = asset_path
+    coordinator._location_preview_metadata = dict(metadata)
+    coordinator._detail_vm = Mock(refresh_current=Mock())
+    coordinator._library_manager = None
+    coordinator._location_session_invalidator = None
+    popup_parent = Mock()
+    coordinator._info_panel = Mock(parentWidget=Mock(return_value=popup_parent))
+    show_warning = Mock()
+    monkeypatch.setattr(playback_coordinator_module.dialogs, "show_warning", show_warning)
+    coordinator._queue_location_exiftool_missing_warning = Mock()
+    coordinator._queue_location_file_write_warning = Mock(
+        side_effect=lambda message: PlaybackCoordinator._show_location_file_write_warning(
+            coordinator,
+            message,
+        )
+    )
+
+    result = AssignedLocationResult(
+        asset_path=asset_path,
+        asset_rel="photo.jpg",
+        display_name="Paris",
+        gps={"lat": 48.8566, "lon": 2.3522},
+        metadata=metadata,
+        file_write_error="ExifTool failed with an error: permission denied",
+    )
+
+    PlaybackCoordinator._handle_location_assignment_ready(coordinator, result)
+
+    store.update_asset_metadata.assert_called_once_with(4, metadata)
+    coordinator._queue_location_exiftool_missing_warning.assert_not_called()
+    coordinator._queue_location_file_write_warning.assert_called_once_with(
+        "ExifTool failed with an error: permission denied"
+    )
+    show_warning.assert_called_once_with(
+        popup_parent,
+        playback_coordinator_module._LOCATION_FILE_WRITE_LIMITED_MESSAGE_TEMPLATE.format(
+            reason="ExifTool failed with an error: permission denied"
+        ),
+        title=playback_coordinator_module._LOCATION_FILE_WRITE_LIMITED_TITLE,
+    )
 
 
 def test_handle_manual_face_submitted_queues_background_worker() -> None:

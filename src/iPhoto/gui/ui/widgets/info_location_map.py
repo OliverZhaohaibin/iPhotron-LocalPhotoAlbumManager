@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import logging
+import sys
 from pathlib import Path
+from typing import Callable
 
 from PySide6.QtCore import QCoreApplication, QEvent, QPointF, QRect, QRectF, QSize, Qt, QTimer
 from PySide6.QtGui import QPainter, QPainterPath, QPixmap, QRegion, QResizeEvent
@@ -12,10 +14,14 @@ from PySide6.QtWidgets import QLabel, QSizePolicy, QVBoxLayout, QWidget
 
 from maps.map_sources import MapSourceSpec
 from maps.map_widget._map_widget_base import MapWidgetBase
-from maps.map_widget.map_gl_widget import MapGLWidget
+from maps.map_widget.map_gl_widget import MapGLWidget, MapGLWindowWidget
 from maps.map_widget.map_widget import MapWidget
 
-from .photo_map_view import check_opengl_support, choose_map_widget_backend
+from .photo_map_view import (
+    _configure_opaque_map_container,
+    check_opengl_support,
+    choose_map_widget_backend,
+)
 
 LOGGER = logging.getLogger(__name__)
 
@@ -52,6 +58,12 @@ def _build_pin_pixmap(width: int, height: int) -> QPixmap:
     return pixmap
 
 
+def _pin_top_left(point: QPointF, pin: QPixmap) -> QPointF:
+    anchor_x = pin.width() * _PIN_ANCHOR_X_RATIO
+    anchor_y = pin.height() * _PIN_ANCHOR_Y_RATIO
+    return QPointF(point.x() - anchor_x, point.y() - anchor_y)
+
+
 class _PinOverlay(QWidget):
     """Transparent overlay that repositions a lightweight pin label."""
 
@@ -71,13 +83,15 @@ class _PinOverlay(QWidget):
             self._pin_label.hide()
             return
 
-        anchor_x = self._pin.width() * _PIN_ANCHOR_X_RATIO
-        anchor_y = self._pin.height() * _PIN_ANCHOR_Y_RATIO
-        x = int(round(point.x() - anchor_x))
-        y = int(round(point.y() - anchor_y))
+        top_left = _pin_top_left(point, self._pin)
+        x = int(round(top_left.x()))
+        y = int(round(top_left.y()))
         self._pin_label.move(x, y)
         self._pin_label.show()
         self._pin_label.raise_()
+
+    def pin_pixmap(self) -> QPixmap:
+        return self._pin
 
 
 class InfoLocationMapView(QWidget):
@@ -93,6 +107,7 @@ class InfoLocationMapView(QWidget):
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
+        _configure_opaque_map_container(self)
         self._map_widget: MapWidgetBase | None = None
         self._backend_kind = "unavailable"
         self._latitude: float | None = None
@@ -102,6 +117,8 @@ class InfoLocationMapView(QWidget):
         self._pending_viewport_sync = False
         self._pending_pin_sync_queue = False
         self._pending_viewport_sync_queue = False
+        self._pin_paint_callback: Callable[[QPainter], None] | None = None
+        self._uses_post_render_pin = False
         self._pin_sync_timer = QTimer(self)
         self._pin_sync_timer.setSingleShot(True)
         self._pin_sync_timer.setInterval(0)
@@ -127,6 +144,7 @@ class InfoLocationMapView(QWidget):
 
         self._map_host = QWidget(self)
         self._map_host.setObjectName("infoLocationMapHost")
+        _configure_opaque_map_container(self._map_host)
         self._map_host_layout = QVBoxLayout(self._map_host)
         self._map_host_layout.setContentsMargins(0, 0, 0, 0)
         self._map_host_layout.setSpacing(0)
@@ -184,6 +202,7 @@ class InfoLocationMapView(QWidget):
         self._viewport_settle_timer.stop()
         self._overlay.set_screen_point(None)
         self._overlay.hide()
+        self._request_pin_repaint()
 
     def shutdown(self) -> None:
         self._pin_sync_timer.stop()
@@ -192,6 +211,7 @@ class InfoLocationMapView(QWidget):
         self._viewport_settle_timer.stop()
         if self._map_widget is not None:
             map_widget = self._map_widget
+            self._remove_pin_painter(map_widget)
             self._map_widget = None
             try:
                 map_widget.shutdown()
@@ -280,7 +300,11 @@ class InfoLocationMapView(QWidget):
         if target_rect is None:
             return
         self._overlay.setGeometry(target_rect)
-        self._overlay.raise_()
+        if self._uses_post_render_pin:
+            self._overlay.hide()
+            self._request_pin_repaint()
+        else:
+            self._overlay.raise_()
         if self._latitude is not None and self._longitude is not None:
             if self._map_widget_ready_for_sync():
                 self._sync_pin_position_now()
@@ -410,6 +434,12 @@ class InfoLocationMapView(QWidget):
     def _sync_pin_position(self, *, center_fallback: bool) -> None:
         point = self._project_current_location(center_fallback=center_fallback)
         self._screen_point = QPointF(point) if point is not None else None
+        if self._uses_post_render_pin:
+            self._overlay.set_screen_point(None)
+            self._overlay.hide()
+            self._request_pin_repaint()
+            return
+
         self._overlay.set_screen_point(self._screen_point)
         if point is None:
             self._overlay.hide()
@@ -451,7 +481,10 @@ class InfoLocationMapView(QWidget):
             self._screen_point.x() + float(delta.x()),
             self._screen_point.y() + float(delta.y()),
         )
-        self._overlay.set_screen_point(self._screen_point)
+        if self._uses_post_render_pin:
+            self._request_pin_repaint()
+        else:
+            self._overlay.set_screen_point(self._screen_point)
         self._pin_settle_timer.start()
 
     def _handle_map_pan_finished(self) -> None:
@@ -476,10 +509,16 @@ class InfoLocationMapView(QWidget):
                     "Native OsmAnd widget unavailable for info-panel mini-map, falling back: %s",
                     exc,
                 )
-                fallback_cls = MapGLWidget if use_opengl else MapWidget
+                fallback_cls = (
+                    MapGLWindowWidget
+                    if use_opengl and sys.platform == "darwin"
+                    else MapGLWidget
+                    if use_opengl
+                    else MapWidget
+                )
                 self._map_widget = fallback_cls(self._map_host, map_source=resolved_map_source)
                 self._backend_kind = "osmand_python"
-            elif widget_cls is MapGLWidget:
+            elif widget_cls in {MapGLWidget, MapGLWindowWidget}:
                 LOGGER.warning(
                     "OpenGL mini-map unavailable, falling back to CPU renderer: %s",
                     exc,
@@ -502,11 +541,63 @@ class InfoLocationMapView(QWidget):
             self._map_widget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
             self._map_widget.installEventFilter(self)
         self._map_host_layout.addWidget(self._map_widget, 1)
+        self._install_pin_painter_if_supported()
         self._connect_map_signals()
         self._sync_square_height()
         self._sync_corner_masks()
         self._sync_overlay_geometry()
         QTimer.singleShot(0, self._sync_overlay_geometry)
+
+    def _install_pin_painter_if_supported(self) -> None:
+        if self._map_widget is None:
+            return
+        add_post_render_painter = getattr(self._map_widget, "add_post_render_painter", None)
+        supports_post_render_painter = getattr(
+            self._map_widget,
+            "supports_post_render_painter",
+            lambda: True,
+        )
+        if not callable(add_post_render_painter) or not supports_post_render_painter():
+            self._uses_post_render_pin = False
+            self._pin_paint_callback = None
+            return
+
+        self._pin_paint_callback = self._paint_pin
+        self._uses_post_render_pin = True
+        add_post_render_painter(self._pin_paint_callback)
+        self._overlay.set_screen_point(None)
+        self._overlay.hide()
+
+    def _remove_pin_painter(self, map_widget: MapWidgetBase) -> None:
+        callback = self._pin_paint_callback
+        if callback is None:
+            return
+        remove_post_render_painter = getattr(map_widget, "remove_post_render_painter", None)
+        if callable(remove_post_render_painter):
+            try:
+                remove_post_render_painter(callback)
+            except Exception:
+                LOGGER.debug("Failed to remove info-panel mini-map pin painter", exc_info=True)
+        self._pin_paint_callback = None
+        self._uses_post_render_pin = False
+
+    def _paint_pin(self, painter: QPainter) -> None:
+        if self._screen_point is None:
+            return
+        pin = self._overlay.pin_pixmap()
+        if pin.isNull():
+            return
+        top_left = _pin_top_left(self._screen_point, pin)
+        painter.drawPixmap(int(round(top_left.x())), int(round(top_left.y())), pin)
+
+    def _request_pin_repaint(self) -> None:
+        if self._map_widget is None:
+            return
+        request_full_update = getattr(self._map_widget, "request_full_update", None)
+        if callable(request_full_update):
+            request_full_update()
+        elif isinstance(self._map_widget, QWidget):
+            self._map_widget.update()
 
 
 __all__ = ["InfoLocationMapView"]

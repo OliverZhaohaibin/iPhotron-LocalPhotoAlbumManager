@@ -10,6 +10,9 @@ from typing import Final
 # the library root so assets removed from any album end up in a single
 # collection, mirroring the behaviour users expect from other photo managers.
 RECENTLY_DELETED_DIR_NAME: Final[str] = ".Trash"
+WORK_DIR_NAME: Final[str] = ".iPhoto"
+LEGACY_WORK_DIR_NAMES: Final[tuple[str, ...]] = (".iphoto",)
+ALL_WORK_DIR_NAMES: Final[tuple[str, ...]] = (WORK_DIR_NAME, *LEGACY_WORK_DIR_NAMES)
 
 DEFAULT_INCLUDE: Final[list[str]] = [
     (
@@ -21,7 +24,7 @@ DEFAULT_INCLUDE: Final[list[str]] = [
     )
 ]
 DEFAULT_EXCLUDE: Final[list[str]] = [
-    "**/.iPhoto/**",
+    *(f"**/{name}/**" for name in ALL_WORK_DIR_NAMES),
     "**/.DS_Store",
     "**/._*",
     f"**/{RECENTLY_DELETED_DIR_NAME}/**",
@@ -35,7 +38,6 @@ THUMBNAIL_SEEK_GUARD_SEC: Final[float] = 0.35
 
 SCHEMA_DIR: Final[Path] = Path(__file__).resolve().parent / "schemas"
 ALBUM_MANIFEST_NAMES: Final[list[str]] = [".iphoto.album.json", ".iPhoto/manifest.json"]
-WORK_DIR_NAME: Final[str] = ".iPhoto"
 EXPORT_DIR_NAME: Final[str] = "exported"
 ALL_PHOTOS_TITLE: Final[str] = "All Photos"
 

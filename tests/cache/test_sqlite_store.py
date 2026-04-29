@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 from pathlib import Path
 import pytest
@@ -61,6 +62,48 @@ def test_gps_serialization(store: IndexStore) -> None:
     read_rows = list(store.read_all())
     assert len(read_rows) == 1
     assert read_rows[0]["gps"] == gps_data
+
+def test_update_asset_geodata_sanitizes_metadata_updates_for_json(
+    store: IndexStore,
+) -> None:
+    with sqlite3.connect(store.path) as conn:
+        conn.execute("ALTER TABLE assets ADD COLUMN metadata TEXT")
+
+    store.write_rows([
+        {"rel": "livePhoto_1758142438.jpeg", "id": "live-asset", "location": "Old"}
+    ])
+
+    store.update_asset_geodata(
+        "livePhoto_1758142438.jpeg",
+        gps={"lat": 48.137154, "lon": 11.576124},
+        location="Munich",
+        metadata_updates={
+            "make": "FUJIFILM",
+            "micro_thumbnail": b"jpeg-preview-bytes",
+            "sidecar_path": Path("Live Photos/live.mov"),
+            "nested": {"keep": "value", "blob": memoryview(b"preview")},
+            "items": ["visible", bytearray(b"hidden")],
+        },
+    )
+
+    row = next(r for r in store.read_all() if r["rel"] == "livePhoto_1758142438.jpeg")
+    assert row["gps"] == {"lat": 48.137154, "lon": 11.576124}
+    assert row["location"] == "Munich"
+
+    with sqlite3.connect(store.path) as conn:
+        payload = conn.execute(
+            "SELECT metadata FROM assets WHERE rel = ?",
+            ("livePhoto_1758142438.jpeg",),
+        ).fetchone()[0]
+
+    metadata = json.loads(payload)
+    assert metadata["gps"] == {"lat": 48.137154, "lon": 11.576124}
+    assert metadata["location"] == "Munich"
+    assert metadata["make"] == "FUJIFILM"
+    assert metadata["sidecar_path"] == "Live Photos/live.mov"
+    assert metadata["nested"] == {"keep": "value"}
+    assert metadata["items"] == ["visible"]
+    assert "micro_thumbnail" not in metadata
 
 def test_read_geotagged(store: IndexStore) -> None:
     gps_data = {"lat": 51.5, "lon": -0.1}

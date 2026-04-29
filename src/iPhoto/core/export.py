@@ -8,6 +8,7 @@ import shutil
 import subprocess
 from fractions import Fraction
 from pathlib import Path
+from typing import Any
 
 from PySide6.QtGui import QImage, QTransform
 
@@ -21,12 +22,26 @@ from .filters.facade import apply_adjustments
 from .geometry import apply_geometry_and_crop
 from .raw_processor import RAW_EXTENSIONS
 
-try:  # pragma: no cover - optional dependency
-    import av  # type: ignore
-except (ImportError, ModuleNotFoundError):  # pragma: no cover - optional dependency
-    av = None  # type: ignore[assignment]
-
 _LOGGER = logging.getLogger(__name__)
+_OPTIONAL_MODULE_UNSET = object()
+av: Any = _OPTIONAL_MODULE_UNSET
+
+
+def _load_av() -> Any | None:
+    """Import PyAV only when edited video export needs frame decoding."""
+
+    global av
+    if av is None:
+        return None
+    if av is not _OPTIONAL_MODULE_UNSET:
+        return av
+    try:  # pragma: no cover - optional dependency
+        import av as imported_av  # type: ignore
+    except Exception:  # pragma: no cover - optional dependency unavailable/broken
+        av = None
+        return None
+    av = imported_av
+    return imported_av
 
 # Mapping of user-facing export format names to the Qt format string and file
 # suffix used when saving rendered images.  This is the single source of truth
@@ -104,7 +119,8 @@ def render_image(path: Path) -> QImage | None:
 def render_video(path: Path, destination: Path) -> bool:
     """Render *path* to *destination* as MP4 with trim and adjustments applied."""
 
-    if av is None:
+    av_module = _load_av()
+    if av_module is None:
         _LOGGER.error("Video export requires PyAV for frame decoding")
         return False
 
@@ -120,7 +136,7 @@ def render_video(path: Path, destination: Path) -> bool:
     rotation_cw, _, _ = probe_video_rotation(path)
 
     try:
-        with av.open(str(path)) as container:
+        with av_module.open(str(path)) as container:
             if not container.streams.video:
                 return False
             stream = container.streams.video[0]

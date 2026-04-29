@@ -47,6 +47,7 @@ public:
     void setCenterLonLat(double longitude, double latitude);
     QPointF centerLonLat() const;
     bool projectLonLat(double longitude, double latitude, QPointF& outScreenPoint) const;
+    void cleanupRenderer();
 
 protected:
     void initializeGL() override;
@@ -68,7 +69,6 @@ private:
     void beginInteractiveRendering();
     void scheduleInteractiveRenderingFinish();
     void finishInteractiveRendering();
-    void cleanupRenderer();
     void wrapCenter();
     double worldSize() const;
 

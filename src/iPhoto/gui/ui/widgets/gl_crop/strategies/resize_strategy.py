@@ -27,6 +27,7 @@ class ResizeStrategy(InteractionStrategy):
         on_crop_changed: Callable[[], None],
         apply_edge_push_zoom: Callable[[QPointF], None],
         locked_aspect: float = 0.0,
+        get_viewport_device_scale: Callable[[], tuple[float, float]] | None = None,
     ) -> None:
         """Initialize resize strategy.
 
@@ -54,6 +55,7 @@ class ResizeStrategy(InteractionStrategy):
         self._texture_size_provider = texture_size_provider
         self._get_effective_scale = get_effective_scale
         self._get_dpr = get_dpr
+        self._get_viewport_device_scale = get_viewport_device_scale
         self._on_crop_changed = on_crop_changed
         self._apply_edge_push_zoom = apply_edge_push_zoom
         self._locked_aspect = float(locked_aspect)
@@ -69,10 +71,13 @@ class ResizeStrategy(InteractionStrategy):
             return
 
         snapshot = self._model.create_snapshot()
-        dpr = self._get_dpr()
+        if self._get_viewport_device_scale is not None:
+            scale_x, scale_y = self._get_viewport_device_scale()
+        else:
+            scale_x = scale_y = self._get_dpr()
         delta_world = QPointF(
-            float(delta_view.x()) * dpr / view_scale,
-            -float(delta_view.y()) * dpr / view_scale,
+            float(delta_view.x()) * scale_x / view_scale,
+            -float(delta_view.y()) * scale_y / view_scale,
         )
 
         # Crop box definition must be constrained by the original

@@ -10,7 +10,7 @@ from typing import Dict, Iterable, List, Optional, Set
 from PySide6.QtCore import QObject, QRunnable, Signal, QThread
 
 from ....cache.index_store import get_global_repository
-from ....config import RECENTLY_DELETED_DIR_NAME, WORK_DIR_NAME
+from ....config import RECENTLY_DELETED_DIR_NAME
 from ....core.pairing import pair_live
 from ....utils.pathutils import ensure_work_dir
 
@@ -113,7 +113,7 @@ class AssetLoaderWorker(QRunnable):
 
     # ------------------------------------------------------------------
     def _build_payload_chunks(self) -> Iterable[List[Dict[str, object]]]:
-        ensure_work_dir(self._root, WORK_DIR_NAME)
+        ensure_work_dir(self._root)
 
         # Determine the effective index root and album path using helper
         effective_index_root, album_path = compute_album_path(self._root, self._library_root)

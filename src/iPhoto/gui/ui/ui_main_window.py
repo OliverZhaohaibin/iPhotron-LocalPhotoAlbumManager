@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import sys
 
 from PySide6.QtCore import QCoreApplication, QMetaObject, QSize, Qt
 from PySide6.QtGui import QColor, QPalette
@@ -37,6 +38,24 @@ from .widgets.albums_dashboard import AlbumsDashboard
 from .widgets.gl_image_viewer import GLImageViewer
 
 
+def _configure_opaque_widget_background(widget: QWidget, background: str | None = None) -> None:
+    """Ensure container widgets provide an opaque backing fill."""
+
+    if not widget.objectName():
+        widget.setObjectName(type(widget).__name__)
+    widget.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+    widget.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, False)
+    widget.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, False)
+    widget.setAutoFillBackground(True)
+    if background is not None:
+        palette = QPalette(widget.palette())
+        palette.setColor(QPalette.ColorRole.Window, QColor(background))
+        widget.setPalette(palette)
+        widget.setStyleSheet(
+            f"QWidget#{widget.objectName()} {{ background-color: {background}; border: none; }}"
+        )
+
+
 def _configure_main_view_stack(view_stack: QStackedWidget, map_view: object) -> None:
     """Keep the native map page alive across view switches when possible."""
 
@@ -45,6 +64,7 @@ def _configure_main_view_stack(view_stack: QStackedWidget, map_view: object) -> 
         isinstance(stack_layout, QStackedLayout)
         and hasattr(map_view, "uses_native_osmand_widget")
         and map_view.uses_native_osmand_widget()
+        and sys.platform != "darwin"
         and os.environ.get("IPHOTO_KEEP_NATIVE_MAP_PAGE_ALIVE", "").strip().lower()
         in {"1", "true", "yes", "on"}
     ):
@@ -208,13 +228,17 @@ class Ui_MainWindow(object):
         self.edit_right_controls_layout = self.detail_page.edit_right_controls_layout
 
         right_panel = QWidget()
-        right_panel.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
-        right_panel.setAutoFillBackground(True)
+        right_panel.setObjectName("rightPanel")
+        _configure_opaque_widget_background(right_panel)
         right_layout = QVBoxLayout(right_panel)
         right_layout.setContentsMargins(8, 8, 8, 8)
 
         self.view_stack = QStackedWidget()
+        self.view_stack.setObjectName("mainViewStack")
+        _configure_opaque_widget_background(self.view_stack)
         map_page = QWidget()
+        map_page.setObjectName("locationMapPage")
+        _configure_opaque_widget_background(map_page, "#88a8c2")
         map_layout = QVBoxLayout(map_page)
         map_layout.setContentsMargins(0, 0, 0, 0)
         map_layout.setSpacing(0)

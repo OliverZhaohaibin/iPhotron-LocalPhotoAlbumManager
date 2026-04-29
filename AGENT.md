@@ -3,7 +3,7 @@
 ## 1. Core Philosophy
 
 * **Album = Folder**: Any folder can be an album; no database dependency for structure.
-* **Original Files Are Immutable**: **Never modify photos/videos directly** (rename, crop, write EXIF, etc.) unless user explicitly enables "organize/repair" mode.
+* **Edits Are Non-Destructive**: Never bake crop/color/video edits into originals. The explicit exception is the user-confirmed Assign Location flow, which saves GPS to the local index and best-effort writes GPS metadata back to the original file through ExifTool.
 * **Human Decisions in Manifest**: Cover photos, featured items, sorting, tags, etc. are written to `manifest.json` and other sidecar files.
 * **Cache Is Disposable, User State Is Not**: Thumbnails, runtime scan facts (`global_index.db`), pairing results (`links.json`), and the runtime People face snapshot must be repairable or rebuildable. People names, covers, hidden flags, groups, group order, pinned state, and group covers are human decisions and must not be discarded as cache.
 * **Live Photo Pairing**: Strong pairing based on `content.identifier` first, weak pairing (same name/time proximity) second; results written to `links.json`.
@@ -21,7 +21,7 @@
 * **Hidden Work Directory** (deletable):
 
   ```
-  /<LibraryRoot>/.iphoto/
+  /<LibraryRoot>/.iPhoto/
     global_index.db    # Global SQLite database (metadata for entire library)
     manifest.json      # Optional manifest location
     links.json         # Live Photo pairing and logical groups
@@ -36,6 +36,25 @@
   ```
 
   **Note:** Since v3.00, `index.jsonl` has been replaced by `global_index.db`. The global SQLite database stores all album asset metadata.
+
+* **Maps Extension Runtime** (packaged/local runtime):
+
+  ```
+  src/maps/tiles/extension/
+    World_basemap_2.obf
+    rendering_styles/
+    misc/
+    poi/
+    routing/
+    search/geonames.sqlite3
+    bin/
+      osmand_render_helper(.exe)
+      osmand_native_widget.(dll|so|dylib)
+  ```
+
+  Windows uses `dist-msvc`, Linux uses `dist-linux`, and macOS uses
+  `dist-macosx` plus `scripts/sync_macos_map_extension.py` to copy and patch
+  Mach-O dependencies.
 
 * **Original Photos/Videos**
 
@@ -55,7 +74,7 @@
 
 **v3.00 Architecture Changes:**
 - Migrated from distributed `index.jsonl` files to a single global SQLite database
-- Database located at library root `.iphoto/global_index.db`
+- Database located at library root `.iPhoto/global_index.db`
 - Supports cross-album queries and high-performance indexing
 - WAL mode ensures concurrent safety and crash recovery
 
@@ -80,11 +99,11 @@
 
 * **No Hardcoded Paths**: Always use `Path` composition.
 * **No Hardcoded JSON**: Must use `jsonschema` validation; provide defaults when necessary.
-* **No Implicit Original Modification**: Writing EXIF/QuickTime metadata only in `repair.py`, must be controlled by `write_policy.touch_originals=true`.
+* **No Implicit Original Modification**: Original media write-back must happen only through an explicit user action or an explicit repair/organize mode. Assign Location may write GPS metadata through `AssignLocationService`; if ExifTool is missing or write-back fails, the app must preserve the local database assignment and warn the user.
 * **Output Must Be Runnable**: Complete functions/classes, not fragments.
 * **Clear Comments**: Document inputs, outputs, boundary conditions.
 * **Cross-Platform**: Works on Windows/macOS/Linux.
-* **External Dependencies**: Only call dependencies declared in `pyproject.toml`. For ffmpeg/exiftool, must use wrappers (`utils/ffmpeg.py`, `utils/exiftool.py`).
+* **External Dependencies**: Only call dependencies declared in `pyproject.toml`. For ffmpeg/exiftool, must use wrappers (`utils/ffmpeg.py`, `utils/exiftool.py`) and handle missing tools without corrupting local state.
 * **Caching Strategy**:
   * Global database uses idempotent upsert operations (INSERT OR REPLACE)
   * Incremental scanning: Only processes new/modified files
@@ -200,12 +219,13 @@ This project adopts **MVVM + DDD (Domain-Driven Design)** layered architecture:
 
 * Default:
 
-  * Don't modify originals
+  * Don't bake edits into originals
   * Don't organize directories
-  * Don't write EXIF
+  * Don't write EXIF/QuickTime metadata implicitly
 * When user explicitly allows:
 
   * Use `exiftool`/`ffmpeg` in `repair.py` to write back
+  * Use `AssignLocationService` to persist location in the DB and best-effort write GPS metadata
   * Must generate `.backup` first
 
 ---
@@ -330,17 +350,22 @@ Files currently involved with direct OpenGL calls or GL context management:
 * **Map Component (GL-accelerated)**
 
   * `src/maps/map_widget/map_gl_widget.py` (GL-based map tile rendering)
+    * `MapGLWidget` remains the `QOpenGLWidget` path for non-macOS GL maps
+    * `MapGLWindowWidget` wraps `QOpenGLWindow + createWindowContainer()` for macOS legacy maps
+  * `src/maps/map_widget/native_osmand_widget.py` hosts the native OsmAnd widget when the extension runtime is available
 
 * **Edit Preview Renderer**
 
   * `src/iPhoto/gui/ui/widgets/gl_renderer.py` (Core OpenGL renderer for edit preview)
   * Handles texture upload, shader uniforms, and real-time adjustment preview
+  * `src/iPhoto/gui/ui/widgets/rhi_image_renderer.py` is the QRhi renderer used by macOS/Metal media previews
 
 ### 2. OpenGL Version & Profile
 
-* **Target**: OpenGL 3.3 Core Profile
-* **Shading Language**: GLSL 3.30
-* **Rationale**: Maximum compatibility across Windows/macOS/Linux while supporting modern features
+* **OpenGL target**: OpenGL 3.3 Core Profile where the raw GL path is active
+* **QRhi target**: macOS should default to Metal through `IPHOTO_RHI_BACKEND=auto`; use `IPHOTO_RHI_BACKEND=opengl` only for diagnostics or compatibility
+* **Shading Language**: GLSL 3.30 plus packaged QSB shader assets for QRhi paths
+* **Rationale**: Preserve compatibility across Windows and Linux OpenGL while avoiding raw GL interop problems on modern macOS
 
 ### 3. Resource Management
 
@@ -368,6 +393,8 @@ See Section 12.4 for detailed coordinate system definitions used in crop and per
 * **GL Error Checking**: Use `glGetError()` in debug builds
 * **Shader Compilation**: Check compilation status and log errors
 * **Context Loss**: Handle context loss gracefully with resource recreation
+* **Packaged Shader Assets**: Keep `image_viewer_rhi.*`, `image_viewer_overlay.*`, and `video_renderer.*` QSB files bundled with Nuitka builds
+* **macOS Map Surface**: Do not replace `MapGLWindowWidget` with `QOpenGLWidget` for the legacy map unless transparent-window composition has been revalidated
 
 ---
 

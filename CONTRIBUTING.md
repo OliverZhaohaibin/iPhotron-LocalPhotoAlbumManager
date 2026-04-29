@@ -5,7 +5,10 @@ Thank you for your interest in contributing to iPhoto! We are building a folder-
 ## 1. Introduction
 
 ### Welcome & Purpose
-iPhoto aims to bring the polished experience of macOS *Photos* to Windows and Linux, adhering to a strict "Folder = Album" philosophy. We prioritize data integrity, performance, and a seamless user experience without locking you into a proprietary database.
+iPhoto aims to bring a polished macOS *Photos*-inspired experience to Windows,
+macOS, and Linux while preserving a strict "Folder = Album" philosophy. We
+prioritize data integrity, performance, and a seamless user experience without
+locking you into a proprietary database.
 
 ### Code of Conduct
 Please note that this project is released with a [Code of Conduct](CODE_OF_CONDUCT.md). By participating in this project you agree to abide by its terms.
@@ -22,8 +25,8 @@ Please note that this project is released with a [Code of Conduct](CODE_OF_CONDU
 
 1.  **Clone the repository**:
     ```bash
-    git clone https://github.com/OliverZhaohaibin/iPhotos.git
-    cd iPhotos
+    git clone https://github.com/OliverZhaohaibin/iPhotron-LocalPhotoAlbumManager.git
+    cd iPhotron-LocalPhotoAlbumManager
     ```
 
 2.  **Install dependencies**:
@@ -38,8 +41,8 @@ Please note that this project is released with a [Code of Conduct](CODE_OF_CONDU
 Our design philosophy is strict to ensure user trust and data safety:
 
 *   **Folder-Native Principle**: "Folder = Album". We do not import photos into a database. The filesystem is the source of truth.
-*   **Immutability of Originals**: We **never** modify source files (HEIC, JPG, MOV, etc.) directly. All edits must be non-destructive.
-*   **Manifest Files**: All user decisions (e.g., setting a cover, starring, reordering, cropping) are stored in sidecar files like `.iphoto.album.json` or `.ipo` XML files.
+*   **Non-Destructive Editing**: We never bake crop/color/video edits into source files (HEIC, JPG, MOV, etc.). The explicit exception is Assign Location, which saves the chosen place to the local index and best-effort writes GPS metadata through ExifTool after the user confirms the action.
+*   **Manifest Files**: User decisions such as covers, starring, ordering, and edits are stored in sidecar or state files like `.iphoto.album.json`, `.ipo`, and People state databases.
 *   **Disposable Cache With Stable User State**: The system must be robust enough to rebuild `global_index.db` (SQLite database), `links.json`, thumbnails, and the runtime People face snapshot when needed. Do not treat cache as persistent storage. People names, selected covers, hidden flags, groups, group order, pinned state, and group covers are user decisions stored in stable People state and must not be discarded during cache repair or rescans.
 *   **Optional People AI Runtime**: Face clustering uses the optional `ai-demo` dependencies (`insightface` and `onnxruntime`). Core photo management must remain usable when those dependencies are not installed.
 
@@ -53,6 +56,7 @@ The project follows a layered architecture to separate core logic from the GUI.
 *   **Infrastructure Layer** (`src/iPhoto/infrastructure/`): Concrete implementations (SQLite repositories, metadata providers).
 *   **Core Backend** (`src/iPhoto/`): Pure Python logic including models, I/O, core algorithms, and cache management. Has **no** dependencies on PySide6 or any GUI libraries.
 *   **GUI Layer** (`src/iPhoto/gui/`): The frontend implementation using PySide6 (Qt6) following MVVM pattern with coordinators and view models.
+*   **Maps Module** (`src/maps/`): Semi-independent offline map runtime with legacy vector tiles, helper-backed OBF rendering, and native OsmAnd widgets.
 *   **Facade Pattern**: `app.py` acts as the backend facade, while `gui/facade.py` bridges the backend to the frontend using Qt signals/slots.
 
 ### Module Responsibilities
@@ -64,6 +68,7 @@ The project follows a layered architecture to separate core logic from the GUI.
 *   `core/`: Algorithms for pairing Live Photos, sorting, filtering, and image adjustment resolvers (light, color, B&W, curves, selective color, levels).
 *   `cache/`: Management of global SQLite database (`global_index.db`), migrations, recovery, and file-level locking.
 *   `people/`: Face detection/clustering pipeline, rebuildable People snapshot, stable People state, names, covers, hidden people, and groups.
+*   `maps/`: Offline map sources, runtime discovery, map widgets, native OsmAnd bridge, and standalone map preview entry point.
 *   `utils/`: General utilities and wrappers for `ExifTool` and `FFmpeg`.
 *   `gui/coordinators/`: MVVM coordinators managing view navigation and business flow.
 *   `gui/viewmodels/`: View models for data binding and presentation logic.
@@ -103,9 +108,13 @@ Performance is critical for handling large photo libraries.
 ### Benchmarks
 *   Always measure performance before and after optimization to ensure your changes actually provide a benefit.
 
-## 7. OpenGL & Graphics Guidelines
+## 7. Graphics Guidelines
 
-The detail view and map components use OpenGL for high-performance rendering.
+The detail view, video preview, edit preview, and map components use
+platform-specific GPU rendering. Windows and Linux keep the established OpenGL
+paths; macOS media previews default to QRhi/Metal when available, and the
+legacy macOS map uses `QOpenGLWindow + createWindowContainer()` to avoid
+transparent-window `QOpenGLWidget` composition issues.
 
 ### Coordinate Systems
 We define four distinct coordinate spaces. **Do not mix them up.**
@@ -119,9 +128,11 @@ We define four distinct coordinate spaces. **Do not mix them up.**
 *   **Projected Space**: All crop validation (ensuring the crop box is inside the image) must happen in **Projected Space**.
 *   **Shader Pipeline**: The Fragment Shader handles geometric transformations in this order: Perspective -> Crop Test -> Rotation -> Texture Sampling.
 
-### GL Standards
-*   Use **OpenGL 3.3 Core Profile**.
-*   Use `QSurfaceFormat` to request the correct version.
+### GPU Standards
+*   Use **OpenGL 3.3 Core Profile** where the raw GL path is active.
+*   Use QRhi backend selection for media preview widgets; `IPHOTO_RHI_BACKEND=auto` should choose Metal on macOS and OpenGL elsewhere.
+*   Keep QRhi shader assets (`image_viewer_rhi.*`, `image_viewer_overlay.*`, `video_renderer.*`) included in packaged builds.
+*   Use `QSurfaceFormat` to request the correct map GL format. On macOS maps, keep alpha/depth/stencil settings aligned with `MapGLWindowWidget` unless a real GUI regression test proves a different surface model.
 
 ## 8. Testing Strategy
 
@@ -204,5 +215,6 @@ Before submitting a Pull Request, please ensure:
 - [ ] You have added unit tests for your changes.
 - [ ] You have verified that `pytest` passes locally.
 - [ ] (If applicable) You have run focused People tests for face clusters, groups, covers, hidden state, and merge behavior.
-- [ ] (If applicable) You have verified OpenGL coordinate logic matches the spec.
+- [ ] (If applicable) You have verified GPU coordinate logic matches the spec across logical and device-pixel viewports.
+- [ ] (If applicable) You have tested map runtime changes with `python src/maps/main.py --backend auto`, plus the forced backend that your change touches.
 - [ ] (If applicable) You have benchmarked performance critical changes.

@@ -251,11 +251,38 @@ QSurfaceFormat nativeWidgetSurfaceFormat()
 {
     auto format = QSurfaceFormat::defaultFormat();
     format.setRenderableType(QSurfaceFormat::OpenGL);
+#ifdef Q_OS_MACOS
+    format.setAlphaBufferSize(8);
+#else
+    format.setAlphaBufferSize(0);
+#endif
+    format.setSamples(0);
     if (format.depthBufferSize() < 24)
         format.setDepthBufferSize(24);
     if (format.stencilBufferSize() < 8)
         format.setStencilBufferSize(8);
     return format;
+}
+
+void clearOpaqueBackbuffer(QOpenGLContext* context)
+{
+    if (context == nullptr)
+        return;
+
+    auto* functions = context->functions();
+    if (functions == nullptr)
+        return;
+
+    const auto hadScissor = functions->glIsEnabled(GL_SCISSOR_TEST) == GL_TRUE;
+    if (hadScissor)
+        functions->glDisable(GL_SCISSOR_TEST);
+
+    functions->glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+    functions->glClearColor(0.53f, 0.65f, 0.76f, 1.0f);
+    functions->glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+    if (hadScissor)
+        functions->glEnable(GL_SCISSOR_TEST);
 }
 
 bool writeImageAsPng(const sk_sp<const SkImage>& image, const QString& outputPath)
@@ -353,6 +380,10 @@ OsmAndNativeMapWidget::OsmAndNativeMapWidget(const Configuration& configuration,
     connect(&_interactionTimer, &QTimer::timeout, this, &OsmAndNativeMapWidget::finishInteractiveRendering);
 
     setUpdateBehavior(QOpenGLWidget::NoPartialUpdate);
+    setAttribute(Qt::WA_OpaquePaintEvent, true);
+    setAttribute(Qt::WA_TranslucentBackground, false);
+    setAttribute(Qt::WA_NoSystemBackground, false);
+    setAutoFillBackground(false);
     setMouseTracking(true);
     setFocusPolicy(Qt::StrongFocus);
     setMinimumSize(640, 480);
@@ -483,15 +514,10 @@ void OsmAndNativeMapWidget::paintGL()
     if (_startupProfileEnabled)
         stageTimer.start();
 
+    clearOpaqueBackbuffer(context());
+
     if (!ensureRenderer())
-    {
-        if (auto* functions = context() ? context()->functions() : nullptr)
-        {
-            functions->glClearColor(0.53f, 0.65f, 0.76f, 1.0f);
-            functions->glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-        }
         return;
-    }
 
     syncRendererViewport(false);
     syncRendererCamera(false);

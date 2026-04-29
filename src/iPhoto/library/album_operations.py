@@ -6,10 +6,10 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Iterable, Optional
 
 from ..config import (
+    ALL_WORK_DIR_NAMES,
     ALBUM_MANIFEST_NAMES,
     EXPORT_DIR_NAME,
     RECENTLY_DELETED_DIR_NAME,
-    WORK_DIR_NAME,
 )
 from ..errors import (
     AlbumDepthError,
@@ -27,7 +27,7 @@ if TYPE_CHECKING:
 _RESERVED_LIBRARY_DIR_NAMES = frozenset(
     name.casefold()
     for name in (
-        WORK_DIR_NAME,
+        *ALL_WORK_DIR_NAMES,
         RECENTLY_DELETED_DIR_NAME,
         EXPORT_DIR_NAME,
     )

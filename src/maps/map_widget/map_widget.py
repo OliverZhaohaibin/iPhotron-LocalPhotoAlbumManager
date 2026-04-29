@@ -5,13 +5,16 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Sequence
 
-from PySide6.QtCore import QPointF, Signal
-from PySide6.QtGui import QCloseEvent, QPainter, QResizeEvent
+from PySide6.QtCore import QPointF, Signal, Qt
+from PySide6.QtGui import QColor, QCloseEvent, QPainter, QPalette, QResizeEvent
 from PySide6.QtWidgets import QWidget
 
 from ._map_widget_base import MapWidgetController
-from .map_renderer import CityAnnotation
+from .map_renderer import MAP_BACKGROUND_COLOR, CityAnnotation
 from maps.map_sources import MapBackendMetadata, MapSourceSpec
+
+
+_MAP_OPAQUE_BACKGROUND = "#88a8c2"
 
 
 class MapWidget(QWidget):
@@ -35,6 +38,18 @@ class MapWidget(QWidget):
         style_path: Path | str = "style.json",
     ) -> None:
         super().__init__(parent)
+        if not self.objectName():
+            self.setObjectName("LegacyMapWidget")
+        self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, False)
+        self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, False)
+        self.setAutoFillBackground(True)
+        palette = QPalette(self.palette())
+        palette.setColor(QPalette.ColorRole.Window, QColor(_MAP_OPAQUE_BACKGROUND))
+        self.setPalette(palette)
+        self.setStyleSheet(
+            f"QWidget#{self.objectName()} {{ background-color: {_MAP_OPAQUE_BACKGROUND}; border: none; }}"
+        )
 
         # ``MapWidgetController`` owns the heavy lifting (tile loading, rendering
         # setup, and gesture handling) so this subclass focuses solely on the
@@ -140,6 +155,10 @@ class MapWidget(QWidget):
 
         painter = QPainter(self)
         try:
+            painter.save()
+            painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Source)
+            painter.fillRect(self.rect(), MAP_BACKGROUND_COLOR)
+            painter.restore()
             self._controller.render(painter)
         finally:
             painter.end()

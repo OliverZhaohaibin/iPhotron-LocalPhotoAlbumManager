@@ -8,8 +8,8 @@ from pathlib import Path
 import uuid
 
 from iPhoto.cache.index_store import get_global_repository
-from iPhoto.config import WORK_DIR_NAME
 from iPhoto.domain.models.query import AssetQuery
+from iPhoto.utils.pathutils import ensure_work_dir
 
 from .index_coordinator import get_people_index_coordinator
 from .manual_faces import ManualFaceValidationError, build_manual_face_record
@@ -57,7 +57,7 @@ def shared_face_model_dir() -> Path:
 
 
 def face_library_paths(library_root: Path) -> FaceLibraryPaths:
-    root_dir = library_root / WORK_DIR_NAME / "faces"
+    root_dir = ensure_work_dir(library_root) / "faces"
     return FaceLibraryPaths(
         root_dir=root_dir,
         index_db_path=root_dir / "face_index.db",

@@ -13,9 +13,8 @@ from ..tasks.image_load_worker import ImageLoadWorker
 from ..tasks.edit_sidebar_preview_worker import (
     EditSidebarPreviewResult,
     EditSidebarPreviewWorker,
+    build_edit_sidebar_preview,
 )
-
-
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -75,14 +74,11 @@ class EditPipelineLoader(QObject):
 
         self._sidebar_preview_generation += 1
         generation = self._sidebar_preview_generation
-
-        # Determine whether the worker should perform an additional scaling pass.
-        if image.height() > int(target_height * 1.5):
-            worker_image = full_res_image_for_fallback if full_res_image_for_fallback else image
-            worker_target_height = target_height
-        else:
-            worker_image = image
-            worker_target_height = -1
+        worker_image, worker_target_height = self._sidebar_preview_input(
+            image,
+            target_height,
+            full_res_image_for_fallback,
+        )
 
         worker = EditSidebarPreviewWorker(
             worker_image,
@@ -95,6 +91,37 @@ class EditPipelineLoader(QObject):
         self._sidebar_preview_worker = worker
         self._sidebar_preview_worker_generation = generation
         QThreadPool.globalInstance().start(worker)
+
+    def prepare_sidebar_preview_inline(
+        self,
+        image: QImage,
+        target_height: int,
+        *,
+        full_res_image_for_fallback: QImage | None = None,
+    ) -> None:
+        """Prepare a sidebar preview immediately on the caller's thread."""
+
+        if image.isNull():
+            return
+
+        self._sidebar_preview_generation += 1
+        generation = self._sidebar_preview_generation
+        self._sidebar_preview_worker = None
+        self._sidebar_preview_worker_generation = None
+        worker_image, worker_target_height = self._sidebar_preview_input(
+            image,
+            target_height,
+            full_res_image_for_fallback,
+        )
+
+        try:
+            result = build_edit_sidebar_preview(worker_image, worker_target_height)
+        except Exception as exc:  # noqa: BLE001 - keep edit mode resilient to preview failures
+            _LOGGER.exception("Failed to prepare edit sidebar preview")
+            self._handle_sidebar_preview_error(generation, str(exc))
+            return
+
+        self._handle_sidebar_preview_ready(result, generation)
 
     def cancel_pending_operations(self) -> None:
         """Cancel any pending load or preview operations (where possible)."""
@@ -136,3 +163,16 @@ class EditPipelineLoader(QObject):
         if generation == self._sidebar_preview_worker_generation:
             self._sidebar_preview_worker = None
             self._sidebar_preview_worker_generation = None
+
+    def _sidebar_preview_input(
+        self,
+        image: QImage,
+        target_height: int,
+        full_res_image_for_fallback: QImage | None,
+    ) -> tuple[QImage, int]:
+        """Return the source image and target height for sidebar preview generation."""
+
+        if image.height() > int(target_height * 1.5):
+            worker_image = full_res_image_for_fallback if full_res_image_for_fallback else image
+            return worker_image, target_height
+        return image, -1

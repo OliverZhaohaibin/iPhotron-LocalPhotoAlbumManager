@@ -4,10 +4,11 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 
-from PySide6.QtCore import QObject, QRunnable, Qt, Signal
+from PySide6.QtCore import QObject, QRunnable, Signal
 from PySide6.QtGui import QImage
 
 from ....core.color_resolver import ColorStats, compute_color_statistics
+from .image_scaling import scale_qimage_to_height_for_worker
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -34,6 +35,25 @@ class EditSidebarPreviewSignals(QObject):
 
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
+
+
+def build_edit_sidebar_preview(source_image: QImage, target_height: int) -> EditSidebarPreviewResult:
+    """Build a sidebar preview synchronously from *source_image*."""
+
+    if source_image.isNull():
+        raise ValueError("Sidebar preview source image was empty")
+
+    requested_height = int(target_height)
+    normalized_target_height = -1 if requested_height < 0 else max(64, requested_height)
+    if normalized_target_height == -1:
+        preview = QImage(source_image)
+        if preview.format() != QImage.Format.Format_ARGB32:
+            preview = preview.convertToFormat(QImage.Format.Format_ARGB32)
+    else:
+        preview = scale_qimage_to_height_for_worker(source_image, normalized_target_height)
+
+    stats = compute_color_statistics(preview)
+    return EditSidebarPreviewResult(preview, stats)
 
 
 class EditSidebarPreviewWorker(QRunnable):
@@ -68,15 +88,7 @@ class EditSidebarPreviewWorker(QRunnable):
             return
 
         try:
-            if self._target_height == -1:
-                preview = self._source_image
-                if preview.format() != QImage.Format.Format_ARGB32:
-                    preview = preview.convertToFormat(QImage.Format.Format_ARGB32)
-            else:
-                preview = self._prepare_preview_image(self._source_image)
-
-            stats = self._compute_statistics(preview)
-            result = EditSidebarPreviewResult(preview, stats)
+            result = build_edit_sidebar_preview(self._source_image, self._target_height)
             self.signals.ready.emit(result, self._generation)
         except Exception as exc:  # pragma: no cover - defensive logging path
             _LOGGER.exception("Failed to prepare edit sidebar preview")
@@ -84,30 +96,9 @@ class EditSidebarPreviewWorker(QRunnable):
         finally:
             self.signals.finished.emit(self._generation)
 
-    # ------------------------------------------------------------------
-    def _prepare_preview_image(self, source: QImage) -> QImage:
-        """Return a scaled, format-normalised copy of *source* for thumbnails."""
-
-        scaled = source.scaledToHeight(
-            self._target_height,
-            Qt.TransformationMode.SmoothTransformation,
-        )
-        if scaled.isNull():
-            # ``scaledToHeight`` can return a null image when Qt fails to allocate the buffer.
-            # Fall back to the original frame so the sidebar still receives a valid preview.
-            scaled = QImage(source)
-        return scaled.convertToFormat(QImage.Format.Format_ARGB32)
-
-    def _compute_statistics(self, preview: QImage) -> ColorStats:
-        """Compute colour statistics from *preview* for use by the Color sliders."""
-
-        # The colour statistics are derived from the scaled preview.  Sampling the reduced frame
-        # keeps the worker fast enough to run during transitions while still capturing the global
-        # balance required by the colour adjustment heuristics.
-        return compute_color_statistics(preview)
-
 
 __all__ = [
+    "build_edit_sidebar_preview",
     "EditSidebarPreviewResult",
     "EditSidebarPreviewSignals",
     "EditSidebarPreviewWorker",

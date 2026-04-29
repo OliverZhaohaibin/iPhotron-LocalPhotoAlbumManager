@@ -8,13 +8,13 @@ from typing import Dict, Iterable, List, Optional, Tuple
 
 from .cache.index_store import get_global_repository
 from .cache.lock import FileLock
-from .config import WORK_DIR_NAME
 from .core.pairing import pair_live
 from .errors import IndexCorruptedError, ManifestInvalidError
 from .models.types import LiveGroup
 from .path_normalizer import compute_album_path, normalise_rel_key
 from .utils.jsonio import read_json, write_json
 from .utils.logging import get_logger
+from .utils.pathutils import ensure_work_dir
 
 LOGGER = get_logger()
 
@@ -121,7 +121,7 @@ def ensure_links(
     groups, payload = compute_links_payload(rows)
     sync_live_roles_to_db(root, groups, library_root=library_root)
 
-    work_dir = root / WORK_DIR_NAME
+    work_dir = ensure_work_dir(root)
     links_path = work_dir / "links.json"
     if links_path.exists():
         try:
@@ -150,7 +150,7 @@ def compute_links_payload(rows: List[dict]) -> tuple[List[LiveGroup], Dict[str, 
 
 
 def write_links(root: Path, payload: Dict[str, object]) -> None:
-    work_dir = root / WORK_DIR_NAME
+    work_dir = ensure_work_dir(root)
     with FileLock(root, "links"):
         write_json(work_dir / "links.json", payload, backup_dir=work_dir / "manifest.bak")
 

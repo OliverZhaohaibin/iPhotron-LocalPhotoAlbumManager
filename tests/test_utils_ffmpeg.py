@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import builtins
+import importlib
 from pathlib import Path
 import subprocess
+import sys
 
 import pytest
 
@@ -19,6 +22,37 @@ def _fake_completed_process(command: list[str], stdout: bytes = b"") -> subproce
 def _clear_rotation_probe_cache() -> None:
     ffmpeg._probe_video_rotation_info_cached.cache_clear()
     ffmpeg._LINUX_180_HINT_CACHE.clear()
+
+
+def test_module_import_does_not_import_av_or_cv2(monkeypatch: pytest.MonkeyPatch) -> None:
+    package = importlib.import_module("iPhoto.utils")
+    original_module = sys.modules.get("iPhoto.utils.ffmpeg")
+    original_attribute = getattr(package, "ffmpeg", None)
+    sys.modules.pop("iPhoto.utils.ffmpeg", None)
+    if hasattr(package, "ffmpeg"):
+        delattr(package, "ffmpeg")
+
+    imported_optional_modules: list[str] = []
+    real_import = builtins.__import__
+
+    def tracking_import(name, globals=None, locals=None, fromlist=(), level=0):  # noqa: A002
+        root_name = name.split(".", 1)[0]
+        if root_name in {"av", "cv2"}:
+            imported_optional_modules.append(root_name)
+            raise AssertionError(f"{root_name} should be lazy-loaded")
+        return real_import(name, globals, locals, fromlist, level)
+
+    monkeypatch.setattr(builtins, "__import__", tracking_import)
+    try:
+        importlib.import_module("iPhoto.utils.ffmpeg")
+    finally:
+        sys.modules.pop("iPhoto.utils.ffmpeg", None)
+        if original_module is not None:
+            sys.modules["iPhoto.utils.ffmpeg"] = original_module
+        if original_attribute is not None:
+            setattr(package, "ffmpeg", original_attribute)
+
+    assert imported_optional_modules == []
 
 
 # -----------------------------------------------------------------------
@@ -497,6 +531,62 @@ def test_extract_video_frame_propagates_error_when_no_fallback(monkeypatch: pyte
 
     with pytest.raises(ExternalToolError):
         ffmpeg.extract_video_frame(input_path, format="jpeg")
+
+
+def test_opencv_fallback_imports_cv2_on_demand(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    input_path = tmp_path / "clip.mov"
+    input_path.touch()
+    imported: list[str] = []
+
+    class FakeFrame:
+        shape = (4, 6, 3)
+
+    class FakeCapture:
+        def isOpened(self) -> bool:
+            return True
+
+        def read(self) -> tuple[bool, FakeFrame]:
+            return True, FakeFrame()
+
+        def release(self) -> None:
+            return None
+
+    class FakeCV2:
+        @staticmethod
+        def VideoCapture(path: str) -> FakeCapture:  # type: ignore[override]
+            assert path == str(input_path)
+            return FakeCapture()
+
+        @staticmethod
+        def imencode(ext: str, frame: FakeFrame, params: list[int]) -> tuple[bool, object]:
+            assert ext == ".jpg"
+            assert params == []
+
+            class _Buffer:
+                def __bytes__(self) -> bytes:
+                    return b"opencv"
+
+            return True, _Buffer()
+
+    real_import = builtins.__import__
+
+    def tracking_import(name, globals=None, locals=None, fromlist=(), level=0):  # noqa: A002
+        if name == "cv2":
+            imported.append(name)
+        return real_import(name, globals, locals, fromlist, level)
+
+    monkeypatch.setattr(ffmpeg, "cv2", ffmpeg._OPTIONAL_MODULE_UNSET)
+    monkeypatch.setitem(sys.modules, "cv2", FakeCV2)
+    monkeypatch.setattr(builtins, "__import__", tracking_import)
+    monkeypatch.setattr(ffmpeg, "probe_video_rotation_info", lambda src: (0, 0, 0, False))
+
+    data = ffmpeg._extract_with_opencv(input_path, at=None, scale=None, format="jpeg")
+
+    assert data == b"opencv"
+    assert imported == ["cv2"]
 
 
 def test_extract_with_opencv_scales_and_encodes(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

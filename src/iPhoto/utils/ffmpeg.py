@@ -14,18 +14,45 @@ from ..errors import ExternalToolError
 if TYPE_CHECKING:
     from PIL import Image
 
-try:  # pragma: no cover - optional dependency detection
-    import av  # type: ignore
-except Exception:  # pragma: no cover - PyAV not available or broken
-    av = None  # type: ignore[assignment]
-
-try:  # pragma: no cover - optional dependency detection
-    import cv2  # type: ignore
-except Exception:  # pragma: no cover - OpenCV not available or broken
-    cv2 = None  # type: ignore[assignment]
-
 _FFMPEG_LOG_LEVEL = "error"
 _LINUX_180_HINT_CACHE: dict[str, bool] = {}
+_OPTIONAL_MODULE_UNSET = object()
+av: Any = _OPTIONAL_MODULE_UNSET
+cv2: Any = _OPTIONAL_MODULE_UNSET
+
+
+def _load_av() -> Any | None:
+    """Import PyAV only when a PyAV-backed operation is actually requested."""
+
+    global av
+    if av is None:
+        return None
+    if av is not _OPTIONAL_MODULE_UNSET:
+        return av
+    try:  # pragma: no cover - optional dependency detection
+        import av as imported_av  # type: ignore
+    except Exception:  # pragma: no cover - PyAV not available or broken
+        av = None
+        return None
+    av = imported_av
+    return imported_av
+
+
+def _load_cv2() -> Any | None:
+    """Import OpenCV only when the ffmpeg subprocess fallback needs it."""
+
+    global cv2
+    if cv2 is None:
+        return None
+    if cv2 is not _OPTIONAL_MODULE_UNSET:
+        return cv2
+    try:  # pragma: no cover - optional dependency detection
+        import cv2 as imported_cv2  # type: ignore
+    except Exception:  # pragma: no cover - OpenCV not available or broken
+        cv2 = None
+        return None
+    cv2 = imported_cv2
+    return imported_cv2
 
 
 def _run_command(command: Sequence[str]) -> subprocess.CompletedProcess[bytes]:
@@ -74,11 +101,12 @@ def extract_frame_with_pyav(
         dimensions for the output image. The aspect ratio is preserved and
         the image is resized to fit within the given box if necessary.
     """
-    if av is None:
+    av_module = _load_av()
+    if av_module is None:
         return None
 
     try:
-        with av.open(str(source)) as container:
+        with av_module.open(str(source)) as container:
             if not container.streams.video:
                 return None
             stream = container.streams.video[0]
@@ -125,7 +153,7 @@ def extract_frame_with_pyav(
 
             return None
 
-    except (av.FFmpegError, ValueError, IndexError, Exception):
+    except Exception:
         # Fallback to other methods if PyAV fails for any reason
         return None
 
@@ -252,12 +280,13 @@ def _extract_with_opencv(
     scale: Optional[tuple[int, int]],
     format: str,
 ) -> Optional[bytes]:
-    if cv2 is None:
+    cv2_module = _load_cv2()
+    if cv2_module is None:
         return None
 
     try:
         # Security: Ensure absolute path to prevent argument injection if filename starts with '-'
-        capture = cv2.VideoCapture(str(source.absolute()))
+        capture = cv2_module.VideoCapture(str(source.absolute()))
     except Exception:
         return None
 
@@ -277,18 +306,21 @@ def _extract_with_opencv(
         if at is not None and at >= 0:
             seconds = max(at, 0.0)
             try:
-                positioned = capture.set(getattr(cv2, "CAP_PROP_POS_MSEC", 0), seconds * 1000.0)
+                positioned = capture.set(
+                    getattr(cv2_module, "CAP_PROP_POS_MSEC", 0),
+                    seconds * 1000.0,
+                )
             except Exception:
                 positioned = False
             if not positioned:
                 try:
-                    fps = capture.get(getattr(cv2, "CAP_PROP_FPS", 5.0))
+                    fps = capture.get(getattr(cv2_module, "CAP_PROP_FPS", 5.0))
                 except Exception:
                     fps = 0.0
                 if fps and fps > 0:
                     try:
                         capture.set(
-                            getattr(cv2, "CAP_PROP_POS_FRAMES", 1),
+                            getattr(cv2_module, "CAP_PROP_POS_FRAMES", 1),
                             max(int(round(fps * seconds)), 0),
                         )
                     except Exception:
@@ -327,21 +359,25 @@ def _extract_with_opencv(
                     new_width -= 1
                 if new_height % 2 == 1 and new_height > 1:
                     new_height -= 1
-            interpolation = getattr(cv2, "INTER_AREA", 3)
+            interpolation = getattr(cv2_module, "INTER_AREA", 3)
             try:
-                target_frame = cv2.resize(target_frame, (new_width, new_height), interpolation=interpolation)
+                target_frame = cv2_module.resize(
+                    target_frame,
+                    (new_width, new_height),
+                    interpolation=interpolation,
+                )
             except Exception:
                 return None
 
     extension = ".png" if format == "png" else ".jpg"
     params: list[int] = []
     if format == "jpeg":
-        jpeg_quality = getattr(cv2, "IMWRITE_JPEG_QUALITY", None)
+        jpeg_quality = getattr(cv2_module, "IMWRITE_JPEG_QUALITY", None)
         if jpeg_quality is not None:
             params = [int(jpeg_quality), 92]
 
     try:
-        success, buffer = cv2.imencode(extension, target_frame, params)
+        success, buffer = cv2_module.imencode(extension, target_frame, params)
     except Exception:
         return None
 
@@ -356,23 +392,24 @@ def _extract_with_opencv(
 
 def _orient_opencv_frame_from_metadata(source: Path, frame: Any) -> Any:
     """Rotate an OpenCV frame to match ffmpeg's display orientation."""
-    if cv2 is None:
+    cv2_module = _load_cv2()
+    if cv2_module is None:
         return frame
 
     cw_degrees, _, _, _ = probe_video_rotation_info(source)
     if cw_degrees == 90:
-        rotate_flag = getattr(cv2, "ROTATE_90_CLOCKWISE", None)
+        rotate_flag = getattr(cv2_module, "ROTATE_90_CLOCKWISE", None)
     elif cw_degrees == 180:
-        rotate_flag = getattr(cv2, "ROTATE_180", None)
+        rotate_flag = getattr(cv2_module, "ROTATE_180", None)
     elif cw_degrees == 270:
-        rotate_flag = getattr(cv2, "ROTATE_90_COUNTERCLOCKWISE", None)
+        rotate_flag = getattr(cv2_module, "ROTATE_90_COUNTERCLOCKWISE", None)
     else:
         rotate_flag = None
 
     if rotate_flag is None:
         return frame
     try:
-        return cv2.rotate(frame, rotate_flag)
+        return cv2_module.rotate(frame, rotate_flag)
     except Exception:
         return frame
 

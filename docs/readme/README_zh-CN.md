@@ -19,9 +19,10 @@
 
 ## 📥 下载与安装
 
-[![下载 Windows 版本](https://img.shields.io/badge/⬇️%20下载-Windows%20(.exe)-blue?style=for-the-badge&logo=windows)](https://github.com/OliverZhaohaibin/iPhotron-LocalPhotoAlbumManager/releases/download/v5.0.0/v5.00-x86-setup.exe)
-[![下载 Linux 版本](https://img.shields.io/badge/⬇️%20下载-Linux%20(.deb)-orange?style=for-the-badge&logo=linux&logoColor=white)](https://github.com/OliverZhaohaibin/iPhotron-LocalPhotoAlbumManager/releases/download/v5.0.0/iPhotron_5.00_amd64.deb)
-[![Download for Linux (.AppImage)](https://img.shields.io/badge/⬇️%20Download-Linux%20(.AppImage)-brightgreen?style=for-the-badge&logo=linux&logoColor=white)](https://github.com/OliverZhaohaibin/iPhotron-LocalPhotoAlbumManager/releases/download/v5.0.0/iPhotron-5.00-x86_64.AppImage)
+[![下载 Windows 版本](https://img.shields.io/badge/⬇️%20下载-Windows%20(.exe)-blue?style=for-the-badge&logo=windows)](https://github.com/OliverZhaohaibin/iPhotron-LocalPhotoAlbumManager/releases/download/v6.0.0/v6.00-x86-setup.exe)
+[![下载 Linux 版本（.deb）](https://img.shields.io/badge/⬇️%20下载-Linux%20(.deb)-orange?style=for-the-badge&logo=linux&logoColor=white)](https://github.com/OliverZhaohaibin/iPhotron-LocalPhotoAlbumManager/releases/download/v6.0.0/iphotron_6.00-alpha_amd64.deb)
+[![下载 Linux 版本（.AppImage）](https://img.shields.io/badge/⬇️%20下载-Linux%20(.AppImage)-brightgreen?style=for-the-badge&logo=linux&logoColor=white)](https://github.com/OliverZhaohaibin/iPhotron-LocalPhotoAlbumManager/releases/download/v6.0.0/iPhotron-6.00-alpha-x86_64.AppImage)
+[![下载 Linux 版本（.flatpak）](https://img.shields.io/badge/⬇️%20下载-Linux%20(.flatpak)-purple?style=for-the-badge&logo=flatpak&logoColor=white)](https://github.com/OliverZhaohaibin/iPhotron-LocalPhotoAlbumManager/releases/download/v6.0.0/com.github.OliverZhaohaibin.iPhotron-6.00-alpha-x86_64.flatpak)
 
 **💡 快速安装：** 点击上方按钮直接下载最新安装程序。
 
@@ -29,14 +30,20 @@
 - **Linux：** 安装命令为：
 
 ```bash
-sudo apt install ./iPhotron_5.00_amd64.deb
+sudo apt install ./iphotron_6.00-alpha_amd64.deb
 ```
 
 - **Linux（AppImage）：** 赋予执行权限后直接运行：
 
 ```bash
-chmod +x iPhotron-5.00-x86_64.AppImage
-./iPhotron-5.00-x86_64.AppImage
+chmod +x iPhotron-6.00-alpha-x86_64.AppImage
+./iPhotron-6.00-alpha-x86_64.AppImage
+```
+
+- **Linux（Flatpak）：** 使用 Flatpak 安装 bundle：
+
+```bash
+flatpak install --user ./com.github.OliverZhaohaibin.iPhotron-6.00-alpha-x86_64.flatpak
 ```
 
 **开发者安装：**

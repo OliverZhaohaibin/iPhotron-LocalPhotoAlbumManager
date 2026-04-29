@@ -19,9 +19,10 @@
 
 ## 📥 Download & Installation
 
-[![Für Windows herunterladen](https://img.shields.io/badge/⬇️%20Download-Windows%20(.exe)-blue?style=for-the-badge&logo=windows)](https://github.com/OliverZhaohaibin/iPhotron-LocalPhotoAlbumManager/releases/download/v5.0.0/v5.00-x86-setup.exe)
-[![Für Linux herunterladen](https://img.shields.io/badge/⬇️%20Download-Linux%20(.deb)-orange?style=for-the-badge&logo=linux&logoColor=white)](https://github.com/OliverZhaohaibin/iPhotron-LocalPhotoAlbumManager/releases/download/v5.0.0/iPhotron_5.00_amd64.deb)
-[![Download for Linux (.AppImage)](https://img.shields.io/badge/⬇️%20Download-Linux%20(.AppImage)-brightgreen?style=for-the-badge&logo=linux&logoColor=white)](https://github.com/OliverZhaohaibin/iPhotron-LocalPhotoAlbumManager/releases/download/v5.0.0/iPhotron-5.00-x86_64.AppImage)
+[![Für Windows herunterladen](https://img.shields.io/badge/⬇️%20Download-Windows%20(.exe)-blue?style=for-the-badge&logo=windows)](https://github.com/OliverZhaohaibin/iPhotron-LocalPhotoAlbumManager/releases/download/v6.0.0/v6.00-x86-setup.exe)
+[![Für Linux herunterladen (.deb)](https://img.shields.io/badge/⬇️%20Download-Linux%20(.deb)-orange?style=for-the-badge&logo=linux&logoColor=white)](https://github.com/OliverZhaohaibin/iPhotron-LocalPhotoAlbumManager/releases/download/v6.0.0/iphotron_6.00-alpha_amd64.deb)
+[![Für Linux herunterladen (.AppImage)](https://img.shields.io/badge/⬇️%20Download-Linux%20(.AppImage)-brightgreen?style=for-the-badge&logo=linux&logoColor=white)](https://github.com/OliverZhaohaibin/iPhotron-LocalPhotoAlbumManager/releases/download/v6.0.0/iPhotron-6.00-alpha-x86_64.AppImage)
+[![Für Linux herunterladen (.flatpak)](https://img.shields.io/badge/⬇️%20Download-Linux%20(.flatpak)-purple?style=for-the-badge&logo=flatpak&logoColor=white)](https://github.com/OliverZhaohaibin/iPhotron-LocalPhotoAlbumManager/releases/download/v6.0.0/com.github.OliverZhaohaibin.iPhotron-6.00-alpha-x86_64.flatpak)
 
 
 **💡 Schnellinstallation:** Klicken Sie auf die Schaltflächen oben, um das neueste Installationsprogramm direkt herunterzuladen.
@@ -30,14 +31,20 @@
 - **Linux:** Installationsbefehl:
 
 ```bash
-sudo apt install ./iPhotron_5.00_amd64.deb
+sudo apt install ./iphotron_6.00-alpha_amd64.deb
 ```
 
 - **Linux (AppImage):** Datei ausführbar machen und direkt starten:
 
 ```bash
-chmod +x iPhotron-5.00-x86_64.AppImage
-./iPhotron-5.00-x86_64.AppImage
+chmod +x iPhotron-6.00-alpha-x86_64.AppImage
+./iPhotron-6.00-alpha-x86_64.AppImage
+```
+
+- **Linux (Flatpak):** Bundle mit Flatpak installieren:
+
+```bash
+flatpak install --user ./com.github.OliverZhaohaibin.iPhotron-6.00-alpha-x86_64.flatpak
 ```
 
 **Für Entwickler:**

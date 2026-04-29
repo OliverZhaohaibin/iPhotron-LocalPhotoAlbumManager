@@ -222,6 +222,30 @@ class TestVideoRendererWidget:
         assert w._rotate90_steps == 0
         assert w.native_size() == QSizeF(1920.0, 1440.0)
 
+    def test_user_rotation_after_frame_release_keeps_container_rotation(self, qapp):
+        """User rotation should still compose after the decoded frame is released."""
+
+        w = VideoRendererWidget()
+        w.set_container_rotation(90, 1920, 1440)
+
+        from PySide6.QtCore import QSize
+        fmt = QVideoFrameFormat(
+            QSize(1920, 1440), QVideoFrameFormat.PixelFormat.Format_RGBA8888
+        )
+        frame = QVideoFrame(fmt)
+        w.update_frame(frame)
+
+        assert w._rotate90_steps == 1
+        assert w.native_size() == QSizeF(1440.0, 1920.0)
+
+        # render() releases _current_frame after uploading to GPU textures; the
+        # next rotate command must still use the cached frame metadata.
+        w._current_frame = None
+        w.set_user_rotate90_steps(3)
+
+        assert w._rotate90_steps == 0
+        assert w.native_size() == QSizeF(1920.0, 1440.0)
+
     def test_no_double_rotation_when_prerotated(self, qapp):
         """When GStreamer pre-rotates frames, do not apply container rotation again."""
         w = VideoRendererWidget()

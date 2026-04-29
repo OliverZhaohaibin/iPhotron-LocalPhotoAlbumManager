@@ -307,8 +307,11 @@ class VideoRendererWidget(QRhiWidget):
         self._tf_enum = _TF_SDR
         self._range_enum = _RANGE_LIMITED
         self._rotate90_steps = 0
+        self._base_rotate90_steps = 0
         self._user_rotate90_steps = 0
         self._mirror = 0
+        self._last_frame_width = 0
+        self._last_frame_height = 0
 
         # Container-level rotation obtained from ffprobe.  Used as the
         # primary rotation source on all platforms because Qt's
@@ -422,6 +425,9 @@ class VideoRendererWidget(QRhiWidget):
         )
 
         self._rotate90_steps = ((rot_deg // 90) + self._user_rotate90_steps) % 4
+        self._base_rotate90_steps = (rot_deg // 90) % 4
+        self._last_frame_width = int(w)
+        self._last_frame_height = int(h)
         self._mirror = 1 if fmt.isMirrored() else 0
 
         # Compute the *display* native size: for 90°/270° rotations the
@@ -442,7 +448,10 @@ class VideoRendererWidget(QRhiWidget):
         self._frame_dirty = False
         self._native_size = QSizeF()
         self._rotate90_steps = 0
+        self._base_rotate90_steps = 0
         self._mirror = 0
+        self._last_frame_width = 0
+        self._last_frame_height = 0
         self._container_rotation_cw = 0
         self._container_raw_w = 0
         self._container_raw_h = 0
@@ -477,7 +486,10 @@ class VideoRendererWidget(QRhiWidget):
         """Re-apply user rotation to the currently loaded frame metadata."""
 
         if self._current_frame is None or not self._current_frame.isValid():
-            self._rotate90_steps = self._user_rotate90_steps % 4
+            self._rotate90_steps = (
+                self._base_rotate90_steps + self._user_rotate90_steps
+            ) % 4
+            self._update_display_native_size(self._last_frame_width, self._last_frame_height)
             return
         fmt = self._current_frame.surfaceFormat()
         base_rotation_cw = _resolve_frame_rotation_cw(
@@ -487,8 +499,11 @@ class VideoRendererWidget(QRhiWidget):
             container_raw_h=self._container_raw_h,
             linux_180_hint=self._container_linux_180_hint,
         )
+        self._base_rotate90_steps = (base_rotation_cw // 90) % 4
+        self._last_frame_width = int(fmt.frameWidth())
+        self._last_frame_height = int(fmt.frameHeight())
         self._rotate90_steps = ((base_rotation_cw // 90) + self._user_rotate90_steps) % 4
-        self._update_display_native_size(fmt.frameWidth(), fmt.frameHeight())
+        self._update_display_native_size(self._last_frame_width, self._last_frame_height)
 
     def set_letterbox_color(self, color: QColor) -> None:
         """Set the colour used for letterbox/pillarbox areas."""

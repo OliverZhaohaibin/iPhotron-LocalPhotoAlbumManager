@@ -221,7 +221,7 @@ silently.
 
 | Info panel with map | Floating info panel in detail view |
 | --- | --- |
-| ![Info panel with map](docs/picture/info1.png) | ![Floating info panel in detail view](docs/picture/info2.png) |
+| ![Info panel with map](docs/picture/info.png) | ![Floating info panel in detail view](docs/picture/info2.png) |
 
 ### 💬 Rich Interactions
 - Drag & drop files from Explorer/Finder directly into albums.

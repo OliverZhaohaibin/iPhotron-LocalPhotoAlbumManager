@@ -230,7 +230,7 @@ scheitern.
 
 | Info-Panel mit Karte | Schwebendes Info-Panel in der Detailansicht |
 | --- | --- |
-| ![Info-Panel mit Karte](../picture/info1.png) | ![Schwebendes Info-Panel in der Detailansicht](../picture/info2.png) |
+| ![Info-Panel mit Karte](../picture/info.png) | ![Schwebendes Info-Panel in der Detailansicht](../picture/info2.png) |
 
 ### 💬 Umfangreiche Interaktionen
 - Ziehen und Ablegen von Dateien direkt aus dem Explorer/Finder in Alben.

@@ -58,8 +58,8 @@ _LOCATION_EXTENSION_PROMPT = "如需Assign a Location功能请下载map extensio
 _LOCATION_EXIFTOOL_LIMITED_TITLE = "功能受限"
 _LOCATION_EXIFTOOL_LIMITED_MESSAGE = (
     "地点已保存到本机图库数据库。\n\n"
-    "由于本机未安装 ExifTool，暂时无法把 GPS 信息写入原始照片/视频文件。"
-    "安装 ExifTool 后可完整写入原文件。"
+    "应用当前环境未找到或无法访问 ExifTool，暂时无法把 GPS 信息写入原始照片/视频文件。"
+    "请确认 ExifTool 已安装并可被应用访问。"
 )
 _LOCATION_FILE_WRITE_LIMITED_TITLE = "原文件写入失败"
 _LOCATION_FILE_WRITE_LIMITED_MESSAGE_TEMPLATE = (

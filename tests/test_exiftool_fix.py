@@ -1,10 +1,91 @@
-
 import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock, patch
+
 import pytest
 
+from iPhoto.errors import ExternalToolError
+from iPhoto.utils import exiftool
 from iPhoto.utils.exiftool import get_metadata_batch
+
+
+def _make_executable(path: Path) -> Path:
+    path.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    path.chmod(0o755)
+    return path
+
+
+def test_resolve_exiftool_prefers_explicit_env_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    configured = _make_executable(tmp_path / "custom-exiftool")
+    monkeypatch.setenv("IPHOTO_EXIFTOOL_PATH", str(configured))
+    monkeypatch.setattr(exiftool.shutil, "which", lambda _name: "/usr/bin/exiftool")
+
+    assert exiftool._resolve_exiftool_executable() == str(configured)
+
+
+def test_resolve_exiftool_prefers_path_before_macos_fallback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fallback = _make_executable(tmp_path / "fallback-exiftool")
+    monkeypatch.delenv("IPHOTO_EXIFTOOL_PATH", raising=False)
+    monkeypatch.setattr(exiftool.sys, "platform", "darwin")
+    monkeypatch.setattr(exiftool, "_MACOS_EXIFTOOL_CANDIDATES", (fallback,))
+    monkeypatch.setattr(exiftool.shutil, "which", lambda _name: "/custom/bin/exiftool")
+
+    assert exiftool._resolve_exiftool_executable() == "/custom/bin/exiftool"
+
+
+def test_resolve_exiftool_uses_macos_fallback_with_minimal_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fallback = _make_executable(tmp_path / "homebrew-exiftool")
+    monkeypatch.delenv("IPHOTO_EXIFTOOL_PATH", raising=False)
+    monkeypatch.setenv("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
+    monkeypatch.setattr(exiftool.sys, "platform", "darwin")
+    monkeypatch.setattr(exiftool, "_MACOS_EXIFTOOL_CANDIDATES", (fallback,))
+    monkeypatch.setattr(exiftool.shutil, "which", lambda _name: None)
+
+    assert exiftool._resolve_exiftool_executable() == str(fallback)
+
+
+def test_resolve_exiftool_error_includes_search_locations(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    missing = tmp_path / "missing-exiftool"
+    monkeypatch.delenv("IPHOTO_EXIFTOOL_PATH", raising=False)
+    monkeypatch.setattr(exiftool.sys, "platform", "darwin")
+    monkeypatch.setattr(exiftool, "_MACOS_EXIFTOOL_CANDIDATES", (missing,))
+    monkeypatch.setattr(exiftool.shutil, "which", lambda _name: None)
+
+    with pytest.raises(ExternalToolError) as exc_info:
+        exiftool._resolve_exiftool_executable()
+
+    message = str(exc_info.value)
+    assert "PATH" in message
+    assert str(missing) in message
+    assert "IPHOTO_EXIFTOOL_PATH" in message
+
+
+def test_resolve_exiftool_invalid_env_path_stops_search(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    invalid = tmp_path / "not-executable"
+    invalid.write_text("", encoding="utf-8")
+    monkeypatch.setenv("IPHOTO_EXIFTOOL_PATH", str(invalid))
+    monkeypatch.setattr(exiftool.shutil, "which", lambda _name: "/usr/bin/exiftool")
+
+    with pytest.raises(ExternalToolError) as exc_info:
+        exiftool._resolve_exiftool_executable()
+
+    assert str(invalid) in str(exc_info.value)
+
 
 def test_get_metadata_batch_uses_posix_paths():
     """Verify that paths are written to the argument file using POSIX style (forward slashes)."""
@@ -37,13 +118,14 @@ def test_get_metadata_batch_uses_posix_paths():
             raise AssertionError(f"Argument file content incorrect. Found:\n{content}")
 
         if "D:\\folder\\file.jpg" in content:
-             raise AssertionError(f"Argument file contains backslashes. Found:\n{content}")
+            raise AssertionError(f"Argument file contains backslashes. Found:\n{content}")
 
         return subprocess.CompletedProcess(args, 0, stdout=b"[]", stderr=b"")
 
-    with patch("shutil.which", return_value="/usr/bin/exiftool"), \
-         patch("subprocess.run", side_effect=check_arg_file) as mock_run:
-
+    with (
+        patch("shutil.which", return_value="/usr/bin/exiftool"),
+        patch("subprocess.run", side_effect=check_arg_file) as mock_run,
+    ):
         get_metadata_batch([mock_path])
 
         assert mock_run.called

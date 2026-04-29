@@ -16,6 +16,44 @@ from iPhoto.gui.render_backend import should_configure_global_desktop_opengl
 
 _logger = logging.getLogger(__name__)
 _TRUE_ENV_VALUES = {"1", "true", "yes", "on"}
+_MACOS_EXTERNAL_TOOL_PATHS = (
+    Path("/opt/homebrew/bin"),
+    Path("/opt/homebrew/sbin"),
+    Path("/usr/local/bin"),
+    Path("/usr/local/sbin"),
+    Path("/opt/local/bin"),
+    Path("/opt/local/sbin"),
+)
+
+
+def _bootstrap_macos_external_tool_path() -> None:
+    """Expose common Homebrew/MacPorts tool paths to GUI-launched app bundles."""
+
+    if sys.platform != "darwin":
+        return
+
+    existing_tool_paths: list[str] = []
+    for candidate in _MACOS_EXTERNAL_TOOL_PATHS:
+        try:
+            if candidate.is_dir():
+                existing_tool_paths.append(str(candidate))
+        except OSError:
+            continue
+
+    current_paths = [
+        entry
+        for entry in os.environ.get("PATH", "").split(os.pathsep)
+        if entry
+    ]
+    merged_paths: list[str] = []
+    seen: set[str] = set()
+    for entry in [*existing_tool_paths, *current_paths]:
+        if entry in seen:
+            continue
+        seen.add(entry)
+        merged_paths.append(entry)
+    if merged_paths:
+        os.environ["PATH"] = os.pathsep.join(merged_paths)
 
 
 def _configure_qt_shader_disk_cache() -> None:
@@ -141,6 +179,7 @@ def main(argv: list[str] | None = None) -> int:
     """Launch the Qt application and return the exit code."""
 
     _prefer_local_source_tree()
+    _bootstrap_macos_external_tool_path()
     maps_package_root = Path(__file__).resolve().parents[2] / "maps"
     try:
         from maps.map_sources import apply_pending_osmand_extension_install

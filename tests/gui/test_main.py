@@ -5,7 +5,53 @@ from pathlib import Path
 
 from PySide6.QtCore import Qt
 
-from iPhoto.gui.main import _configure_qt_opengl_defaults, _prepare_qt_runtime_for_maps
+from iPhoto.gui.main import (
+    _bootstrap_macos_external_tool_path,
+    _configure_qt_opengl_defaults,
+    _prepare_qt_runtime_for_maps,
+)
+
+
+def test_bootstrap_macos_external_tool_path_prepends_existing_paths_once(monkeypatch) -> None:
+    existing_paths = {"/opt/homebrew/bin", "/usr/local/bin"}
+
+    def fake_is_dir(path: Path) -> bool:
+        return str(path) in existing_paths
+
+    monkeypatch.setattr("iPhoto.gui.main.sys.platform", "darwin")
+    monkeypatch.setattr("iPhoto.gui.main.Path.is_dir", fake_is_dir)
+    monkeypatch.setenv("PATH", "/usr/bin:/opt/homebrew/bin:/bin")
+
+    _bootstrap_macos_external_tool_path()
+
+    assert os.environ["PATH"].split(os.pathsep) == [
+        "/opt/homebrew/bin",
+        "/usr/local/bin",
+        "/usr/bin",
+        "/bin",
+    ]
+
+    _bootstrap_macos_external_tool_path()
+
+    assert os.environ["PATH"].split(os.pathsep) == [
+        "/opt/homebrew/bin",
+        "/usr/local/bin",
+        "/usr/bin",
+        "/bin",
+    ]
+
+
+def test_bootstrap_macos_external_tool_path_skips_non_macos(monkeypatch) -> None:
+    def fail_if_called(_path: Path) -> bool:
+        raise AssertionError("Path.is_dir should not be called off macOS")
+
+    monkeypatch.setattr("iPhoto.gui.main.sys.platform", "linux")
+    monkeypatch.setattr("iPhoto.gui.main.Path.is_dir", fail_if_called)
+    monkeypatch.setenv("PATH", "/usr/bin:/bin")
+
+    _bootstrap_macos_external_tool_path()
+
+    assert os.environ["PATH"] == "/usr/bin:/bin"
 
 
 def test_configure_qt_opengl_defaults_routes_shader_cache_and_prefers_desktop_opengl(monkeypatch) -> None:

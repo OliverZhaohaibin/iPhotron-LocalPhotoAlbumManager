@@ -28,7 +28,7 @@ from PySide6.QtGui import (
     QWindow,
 )
 from PySide6.QtOpenGL import QOpenGLWindow
-from PySide6.QtWidgets import QSizePolicy, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QApplication, QSizePolicy, QVBoxLayout, QWidget
 
 from maps.map_sources import (
     MapBackendMetadata,
@@ -314,6 +314,13 @@ def _load_bridge(library_path: Path) -> _BridgeAPI:
     return _BridgeAPI(library=library)
 
 
+def _has_qapplication_instance() -> bool:
+    try:
+        return QApplication.instance() is not None
+    except Exception:
+        return False
+
+
 def probe_native_widget_runtime(package_root: Path | None = None) -> tuple[bool, str | None]:
     root = (package_root or Path(__file__).resolve().parent.parent).resolve()
     cached = _NATIVE_WIDGET_RUNTIME_PROBE.get(root)
@@ -323,6 +330,11 @@ def probe_native_widget_runtime(package_root: Path | None = None) -> tuple[bool,
     library_path = resolve_osmand_native_widget_library(root)
     if library_path is None:
         result = (False, "The native OsmAnd widget library is not available")
+    elif sys.platform == "darwin" and not _has_qapplication_instance():
+        return (
+            False,
+            "QApplication must be constructed before probing the native OsmAnd widget on macOS",
+        )
     else:
         try:
             _load_bridge(library_path)

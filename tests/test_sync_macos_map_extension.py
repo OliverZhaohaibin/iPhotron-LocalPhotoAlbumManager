@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -138,3 +139,173 @@ def test_resolve_dependency_source_prefers_pyside6_qt_rpath_for_qt_frameworks(tm
     )
 
     assert source == (pyside_qt / "QtCore").resolve()
+
+
+def test_collect_dependencies_resolves_copied_framework_transitive_deps_from_source_rpath(
+    tmp_path,
+) -> None:
+    bin_root = tmp_path / "extension" / "bin"
+    bin_root.mkdir(parents=True)
+    helper = bin_root / "osmand_render_helper"
+    helper.write_bytes(b"helper")
+
+    qt_lib = tmp_path / "qt" / "lib"
+    qt_gui = qt_lib / "QtGui.framework" / "Versions" / "A" / "QtGui"
+    qt_dbus = qt_lib / "QtDBus.framework" / "Versions" / "A" / "QtDBus"
+    qt_gui.parent.mkdir(parents=True)
+    qt_dbus.parent.mkdir(parents=True)
+    qt_gui.write_bytes(b"gui")
+    qt_dbus.write_bytes(b"dbus")
+
+    def runner(command):
+        binary = Path(command[-1])
+        if command[:2] == ("otool", "-L"):
+            if binary == helper:
+                stdout = f"""
+{helper}:
+\t@rpath/QtGui.framework/Versions/A/QtGui (compatibility version 6.0.0)
+"""
+            elif binary == qt_gui:
+                stdout = f"""
+{qt_gui}:
+\t{qt_gui} (compatibility version 6.0.0)
+\t@rpath/QtDBus.framework/Versions/A/QtDBus (compatibility version 6.0.0)
+"""
+            elif binary == qt_dbus:
+                stdout = f"""
+{qt_dbus}:
+\t{qt_dbus} (compatibility version 6.0.0)
+"""
+            else:
+                stdout = f"{binary}:\n"
+            return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr="")
+        if command[:2] == ("otool", "-l"):
+            if binary == helper:
+                stdout = f"""
+Load command 1
+          cmd LC_RPATH
+      cmdsize 64
+         path {qt_lib} (offset 12)
+"""
+            elif binary == qt_gui:
+                stdout = """
+Load command 1
+          cmd LC_RPATH
+      cmdsize 40
+         path @loader_path/../../../ (offset 12)
+"""
+            else:
+                stdout = ""
+            return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr="")
+        raise AssertionError(f"unexpected command: {command}")
+
+    result = sync_module.collect_and_copy_dependencies(
+        runtime_binaries=(helper,),
+        bin_root=bin_root,
+        runner=runner,
+    )
+
+    copied = {path.relative_to(bin_root).as_posix() for path in result.copied_binaries}
+    assert "QtGui.framework/Versions/A/QtGui" in copied
+    assert "QtDBus.framework/Versions/A/QtDBus" in copied
+    assert (bin_root / "QtDBus.framework" / "Versions" / "A" / "QtDBus").read_bytes() == b"dbus"
+
+
+def test_repair_app_bundle_native_widget_links_rewrites_qt_frameworks(tmp_path) -> None:
+    app_bundle = tmp_path / "main.app"
+    macos_root = app_bundle / "Contents" / "MacOS"
+    native_widget = (
+        macos_root / "maps" / "tiles" / "extension" / "bin" / "osmand_native_widget.dylib"
+    )
+    native_widget.parent.mkdir(parents=True)
+    native_widget.write_bytes(b"widget")
+    for qt_name in ("QtCore", "QtGui", "QtWidgets"):
+        (macos_root / qt_name).write_bytes(qt_name.encode("utf-8"))
+
+    commands: list[tuple[str, ...]] = []
+
+    def runner(command):
+        commands.append(tuple(command))
+        if command[:2] == ("otool", "-L"):
+            stdout = f"""
+{native_widget}:
+\t@rpath/QtCore.framework/Versions/A/QtCore (compatibility version 6.0.0)
+\t@rpath/libX11.6.dylib (compatibility version 11.0.0)
+\t@rpath/QtGui.framework/Versions/A/QtGui (compatibility version 6.0.0)
+\t@rpath/QtWidgets.framework/Versions/A/QtWidgets (compatibility version 6.0.0)
+"""
+            return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr="")
+        if command[0] in {"install_name_tool", "codesign"}:
+            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+        raise AssertionError(f"unexpected command: {command}")
+
+    result = sync_module.repair_app_bundle_native_widget_qt_links(
+        app_bundle,
+        runner=runner,
+    )
+
+    assert result.native_widget == native_widget.resolve()
+    assert result.rewritten_dependencies == (
+        ("@rpath/QtCore.framework/Versions/A/QtCore", "@executable_path/QtCore"),
+        ("@rpath/QtGui.framework/Versions/A/QtGui", "@executable_path/QtGui"),
+        ("@rpath/QtWidgets.framework/Versions/A/QtWidgets", "@executable_path/QtWidgets"),
+    )
+    install_name_commands = [command for command in commands if command[0] == "install_name_tool"]
+    assert install_name_commands == [
+        (
+            "install_name_tool",
+            "-change",
+            "@rpath/QtCore.framework/Versions/A/QtCore",
+            "@executable_path/QtCore",
+            str(native_widget.resolve()),
+        ),
+        (
+            "install_name_tool",
+            "-change",
+            "@rpath/QtGui.framework/Versions/A/QtGui",
+            "@executable_path/QtGui",
+            str(native_widget.resolve()),
+        ),
+        (
+            "install_name_tool",
+            "-change",
+            "@rpath/QtWidgets.framework/Versions/A/QtWidgets",
+            "@executable_path/QtWidgets",
+            str(native_widget.resolve()),
+        ),
+    ]
+    assert not any("@rpath/libX11.6.dylib" in command for command in install_name_commands)
+    assert any(command[0] == "codesign" for command in commands)
+
+
+def test_repair_app_bundle_native_widget_links_fails_for_missing_app_qt_target(
+    tmp_path,
+) -> None:
+    app_bundle = tmp_path / "main.app"
+    macos_root = app_bundle / "Contents" / "MacOS"
+    native_widget = (
+        macos_root / "maps" / "tiles" / "extension" / "bin" / "osmand_native_widget.dylib"
+    )
+    native_widget.parent.mkdir(parents=True)
+    native_widget.write_bytes(b"widget")
+
+    commands: list[tuple[str, ...]] = []
+
+    def runner(command):
+        commands.append(tuple(command))
+        if command[:2] == ("otool", "-L"):
+            stdout = f"""
+{native_widget}:
+\t@rpath/QtCore.framework/Versions/A/QtCore (compatibility version 6.0.0)
+"""
+            return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr="")
+        raise AssertionError(f"unexpected command: {command}")
+
+    try:
+        sync_module.repair_app_bundle_native_widget_qt_links(app_bundle, runner=runner)
+    except FileNotFoundError as exc:
+        assert "QtCore" in str(exc)
+    else:  # pragma: no cover - defensive assertion
+        raise AssertionError("missing QtCore should fail the app bundle repair")
+
+    assert [command[0] for command in commands] == ["otool"]

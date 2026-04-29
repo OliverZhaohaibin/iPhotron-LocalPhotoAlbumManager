@@ -9,7 +9,6 @@ from typing import TYPE_CHECKING, Optional
 
 from ..config import (
     RECENTLY_DELETED_DIR_NAME,
-    WORK_DIR_NAME,
 )
 from ..errors import (
     AlbumOperationError,
@@ -17,6 +16,7 @@ from ..errors import (
 )
 from ..cache.index_store import get_global_repository
 from ..utils.logging import get_logger
+from ..utils.pathutils import resolve_work_dir
 
 if TYPE_CHECKING:
     pass
@@ -162,7 +162,10 @@ class TrashManagerMixin:
         filename collisions.
         """
 
-        legacy = root / WORK_DIR_NAME / "deleted"
+        work_dir = resolve_work_dir(root)
+        if work_dir is None:
+            return
+        legacy = work_dir / "deleted"
         if not legacy.exists() or not legacy.is_dir():
             return
 
@@ -176,8 +179,8 @@ class TrashManagerMixin:
             ) from exc
 
         for entry in legacy.iterdir():
-            if entry.name == WORK_DIR_NAME:
-                destination_parent = target / WORK_DIR_NAME
+            if entry.name.casefold() in {".iphoto"}:
+                destination_parent = target / entry.name
                 destination_parent.mkdir(parents=True, exist_ok=True)
                 for child in entry.iterdir():
                     destination = self._unique_child_path(

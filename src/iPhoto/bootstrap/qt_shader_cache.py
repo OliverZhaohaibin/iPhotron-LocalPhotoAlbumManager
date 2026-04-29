@@ -38,7 +38,7 @@ def resolve_managed_work_root(
 
     library_root = load_saved_basic_library_path(settings_path)
     if library_root is not None:
-        return ensure_work_dir(library_root, WORK_DIR_NAME)
+        return ensure_work_dir(library_root)
 
     user_home = home_root or Path.home()
     work_root = user_home / WORK_DIR_NAME

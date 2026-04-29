@@ -9,7 +9,6 @@ from PySide6.QtCore import QObject, QRunnable, Signal
 
 from ...app import load_incremental_index_cache
 from ...cache.index_store import get_global_repository
-from ...config import WORK_DIR_NAME
 from ...io.scanner_adapter import scan_album
 from ...utils.pathutils import ensure_work_dir
 from ...utils.logging import get_logger
@@ -105,7 +104,7 @@ class ScannerWorker(QRunnable):
         store: Optional["AssetRepository"] = None
 
         try:
-            ensure_work_dir(self._root, WORK_DIR_NAME)
+            ensure_work_dir(self._root)
 
             # Emit an initial indeterminate update
             self._signals.progressUpdated.emit(self._root, 0, -1)

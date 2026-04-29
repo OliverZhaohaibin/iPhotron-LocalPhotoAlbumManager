@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 from ..cache.lock import FileLock
-from ..config import ALBUM_MANIFEST_NAMES, WORK_DIR_NAME
+from ..config import ALBUM_MANIFEST_NAMES
 from ..errors import AlbumNotFoundError, IPhotoError
 from ..schemas import validate_album
 from ..utils.jsonio import read_json, write_json
@@ -36,7 +36,7 @@ class Album:
         if not root.exists():
             raise AlbumNotFoundError(f"Album directory does not exist: {root}")
 
-        ensure_work_dir(root, WORK_DIR_NAME)
+        ensure_work_dir(root)
 
         manifest_path = cls._find_manifest(root)
         changed = False
@@ -103,7 +103,7 @@ class Album:
             validate_album(manifest)
 
         if changed:
-            backup_dir = root / WORK_DIR_NAME / "manifest.bak"
+            backup_dir = ensure_work_dir(root) / "manifest.bak"
             try:
                 with FileLock(root, "manifest"):
                     write_json(manifest_path, manifest, backup_dir=backup_dir)
@@ -126,7 +126,7 @@ class Album:
         """Persist the manifest to disk."""
 
         path = self._find_manifest(self.root) or (self.root / ALBUM_MANIFEST_NAMES[0])
-        work_dir = self.root / WORK_DIR_NAME / "manifest.bak"
+        work_dir = ensure_work_dir(self.root) / "manifest.bak"
         now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
         self.manifest.setdefault("created", now)
         self.manifest["modified"] = now

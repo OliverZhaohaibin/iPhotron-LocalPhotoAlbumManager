@@ -6,6 +6,7 @@ from pathlib import Path
 
 from ...config import WORK_DIR_NAME
 from ...domain.repositories import IAssetRepository
+from ...utils.pathutils import ensure_work_dir
 from ..db.pool import ConnectionPool
 from ..repositories.sqlite_asset_repository import SQLiteAssetRepository
 from .thumbnail_cache_service import ThumbnailCacheService
@@ -54,9 +55,9 @@ class LibraryAssetRuntime:
     def _database_path(self, library_root: Path | None) -> Path:
         if library_root is None:
             return Path.home() / ".iPhoto" / "global_index.db"
-        return library_root / WORK_DIR_NAME / "global_index.db"
+        return ensure_work_dir(library_root) / "global_index.db"
 
     def _cache_root(self, library_root: Path | None) -> Path:
         if library_root is None:
             return Path.home() / WORK_DIR_NAME / "cache" / "thumbs"
-        return library_root / WORK_DIR_NAME / "cache" / "thumbs"
+        return ensure_work_dir(library_root) / "cache" / "thumbs"

@@ -98,8 +98,9 @@ class RuntimeContext:
     def resume_startup_tasks(self) -> None:
         """Run deferred startup work such as binding the default library path."""
 
-        from ..config import DEFAULT_EXCLUDE, DEFAULT_INCLUDE, WORK_DIR_NAME
+        from ..config import DEFAULT_EXCLUDE, DEFAULT_INCLUDE
         from ..errors import LibraryError
+        from ..utils.pathutils import resolve_work_dir
 
         candidate = self._pending_basic_library_path
         self._pending_basic_library_path = None
@@ -117,11 +118,14 @@ class RuntimeContext:
                     "resume_startup_tasks: bind_path succeeded, root=%s",
                     self.library.root(),
                 )
+                existing_work_dir = resolve_work_dir(candidate)
+                had_existing_index = (
+                    existing_work_dir is not None
+                    and (existing_work_dir / "global_index.db").exists()
+                )
                 self.asset_runtime.bind_library_root(candidate)
-                work_dir = candidate / WORK_DIR_NAME
-                db_path = work_dir / "global_index.db"
                 if (
-                    not (work_dir.exists() and db_path.exists())
+                    not had_existing_index
                     and not self.library.is_scanning_path(candidate)
                 ):
                     self.library.start_scanning(

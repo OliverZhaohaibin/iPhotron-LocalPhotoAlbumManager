@@ -11,7 +11,8 @@ from PySide6.QtWidgets import QWidget
 from typing import TYPE_CHECKING
 from ....application.contracts.runtime_entry_contract import RuntimeEntryContract
 from ....errors import LibraryError
-from ....config import DEFAULT_EXCLUDE, DEFAULT_INCLUDE, WORK_DIR_NAME
+from ....config import DEFAULT_EXCLUDE, DEFAULT_INCLUDE
+from ....utils.pathutils import resolve_work_dir
 from ..widgets import dialogs
 
 if TYPE_CHECKING:
@@ -76,9 +77,9 @@ class DialogController:
         return bound_root
 
     def _start_initial_scan_if_needed(self, bound_root: Path) -> None:
-        work_dir = bound_root / WORK_DIR_NAME
-        db_path = work_dir / "global_index.db"
-        if work_dir.exists() and db_path.exists():
+        work_dir = resolve_work_dir(bound_root)
+        db_path = work_dir / "global_index.db" if work_dir is not None else None
+        if db_path is not None and db_path.exists():
             return
         if self._context.library.is_scanning_path(bound_root):
             return

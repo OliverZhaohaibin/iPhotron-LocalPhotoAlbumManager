@@ -100,10 +100,28 @@ Includes: `pytest`, `pytest-mock`, `pytest-qt`, `ruff`, `black`, `mypy`, `types-
 
 ## Album Naming Rules
 
+### Filesystem case stability
+
+`v5.0.0` already used `.iPhoto` as the runtime work directory on Windows and
+Linux (`WORK_DIR_NAME = ".iPhoto"`). That spelling is the canonical storage
+contract for new libraries.
+
+Linux filesystems are case-sensitive, so a directory rename that only changes
+letter case is a real path migration, not a harmless spelling cleanup. Treat
+lowercase `.iphoto` as a legacy-compatible alias only: code may read and exclude
+it when it already exists, but new libraries must create `.iPhoto`.
+
+Do not change managed library names such as `.iPhoto`, `.iphoto`,
+`.iphoto.album.json`, or `.iPhoto/manifest.json` by case alone unless the
+change includes an explicit migration plan, compatibility reads for existing
+libraries, and focused tests on a case-sensitive filesystem.
+
+### Reserved album directories
+
 Album creation and rename flows must reject directory names reserved for
 internal library infrastructure. Today the reserved names are:
 
-- `.iPhoto`
+- `.iPhoto` and legacy `.iphoto` case variants
 - `.Trash`
 - `exported`
 

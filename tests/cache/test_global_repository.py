@@ -32,6 +32,19 @@ class TestGlobalRepositorySingleton:
         assert repo.library_root.resolve() == tmp_path.resolve()
         assert repo.path == tmp_path / WORK_DIR_NAME / GLOBAL_INDEX_DB_NAME
 
+    def test_get_global_repository_uses_existing_legacy_work_dir(self, tmp_path: Path) -> None:
+        legacy_work_dir = tmp_path / ".iphoto"
+        legacy_work_dir.mkdir()
+
+        repo = get_global_repository(tmp_path)
+        repo.write_rows([{"rel": "legacy.jpg", "id": "asset-legacy", "bytes": 10}])
+
+        assert repo.path == legacy_work_dir / GLOBAL_INDEX_DB_NAME
+        assert repo.path.exists()
+        assert not any(entry.name == WORK_DIR_NAME for entry in tmp_path.iterdir())
+        rows = list(repo.read_all())
+        assert rows[0]["rel"] == "legacy.jpg"
+
     def test_get_global_repository_returns_singleton(self, tmp_path: Path) -> None:
         """Test that get_global_repository returns the same instance."""
         repo1 = get_global_repository(tmp_path)

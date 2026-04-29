@@ -8,15 +8,16 @@ import time
 from pathlib import Path
 from typing import Iterator
 
-from ..config import LOCK_EXPIRE_SEC, WORK_DIR_NAME
+from ..config import LOCK_EXPIRE_SEC
 from ..errors import LockTimeoutError
+from ..utils.pathutils import ensure_work_dir
 
 
 class FileLock:
     """A cooperative lock implemented using ``.lock`` files."""
 
     def __init__(self, album_root: Path, name: str):
-        self.lock_path = album_root / WORK_DIR_NAME / "locks" / f"{name}.lock"
+        self.lock_path = ensure_work_dir(album_root) / "locks" / f"{name}.lock"
         self.lock_path.parent.mkdir(parents=True, exist_ok=True)
 
     def acquire(self, *, timeout: float = LOCK_EXPIRE_SEC) -> None:

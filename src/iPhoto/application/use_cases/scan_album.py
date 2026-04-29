@@ -13,7 +13,7 @@ from iPhoto.domain.models import Album, Asset, MediaType
 from iPhoto.domain.repositories import IAlbumRepository, IAssetRepository
 from iPhoto.events.bus import EventBus, Event
 from iPhoto.application.interfaces import IMetadataProvider, IThumbnailGenerator
-from iPhoto.config import WORK_DIR_NAME, EXPORT_DIR_NAME, DEFAULT_INCLUDE, DEFAULT_EXCLUDE
+from iPhoto.config import ALL_WORK_DIR_NAMES, EXPORT_DIR_NAME, DEFAULT_INCLUDE, DEFAULT_EXCLUDE
 from iPhoto.utils.pathutils import should_include
 
 @dataclass(kw_only=True)
@@ -41,7 +41,13 @@ class FileDiscoveryThread(threading.Thread):
                     break
 
                 # Prune internal dirs
-                dirnames[:] = [d for d in dirnames if d != WORK_DIR_NAME and d != EXPORT_DIR_NAME]
+                reserved_names = {
+                    *[name.casefold() for name in ALL_WORK_DIR_NAMES],
+                    EXPORT_DIR_NAME.casefold(),
+                }
+                dirnames[:] = [
+                    d for d in dirnames if d.casefold() not in reserved_names
+                ]
 
                 for name in filenames:
                     if self._stop_event.is_set():

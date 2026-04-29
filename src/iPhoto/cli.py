@@ -14,7 +14,6 @@ if __package__ in (None, ""):
         sys.path.insert(0, str(package_root))
     from iPhoto import app as app_facade  # type: ignore  # pragma: no cover
     from iPhoto.cache.index_store import get_global_repository  # type: ignore  # pragma: no cover
-    from iPhoto.config import WORK_DIR_NAME  # type: ignore  # pragma: no cover
     from iPhoto.errors import (
         AlbumNotFoundError,
         IPhotoError,
@@ -22,12 +21,13 @@ if __package__ in (None, ""):
         ManifestInvalidError,
     )  # type: ignore  # pragma: no cover
     from iPhoto.models.album import Album  # type: ignore  # pragma: no cover
+    from iPhoto.utils.pathutils import resolve_work_dir  # type: ignore  # pragma: no cover
 else:
     from . import app as app_facade
     from .cache.index_store import get_global_repository
-    from .config import WORK_DIR_NAME
     from .errors import AlbumNotFoundError, IPhotoError, LockTimeoutError, ManifestInvalidError
     from .models.album import Album
+    from .utils.pathutils import resolve_work_dir
 
 app = typer.Typer(help="Folder-native photo manager with Live Photo support")
 cover_app = typer.Typer(help="Manage album covers")
@@ -119,9 +119,9 @@ def report(album_dir: Path = typer.Argument(Path.cwd(), exists=True)) -> None:
 
     album = app_facade.open_album(album_dir)
     rows = list(get_global_repository(album_dir).read_all())
-    work_dir = album_dir / WORK_DIR_NAME
-    links_path = work_dir / "links.json"
-    if links_path.exists():
+    work_dir = resolve_work_dir(album_dir)
+    links_path = work_dir / "links.json" if work_dir is not None else None
+    if links_path is not None and links_path.exists():
         import json
 
         with links_path.open("r", encoding="utf-8") as handle:

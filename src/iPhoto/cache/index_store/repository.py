@@ -22,9 +22,9 @@ import unicodedata
 from pathlib import Path
 from typing import Any, Dict, Iterable, Iterator, List, Optional, Tuple
 
-from ...config import WORK_DIR_NAME
 from ...people.status import normalize_face_status
 from ...utils.logging import get_logger
+from ...utils.pathutils import ensure_work_dir
 from .engine import DatabaseManager
 from .migrations import SchemaMigrator
 from .queries import QueryBuilder
@@ -154,8 +154,7 @@ class AssetRepository:
                 will be created at `<library_root>/.iPhoto/global_index.db`.
         """
         self.library_root = library_root
-        self.path = library_root / WORK_DIR_NAME / GLOBAL_INDEX_DB_NAME
-        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.path = ensure_work_dir(library_root) / GLOBAL_INDEX_DB_NAME
         
         self._db_manager = DatabaseManager(self.path)
         self._conn: Optional[sqlite3.Connection] = None

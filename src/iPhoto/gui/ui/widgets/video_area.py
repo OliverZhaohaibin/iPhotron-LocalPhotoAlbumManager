@@ -525,11 +525,13 @@ class VideoArea(QWidget):
         self.setAutoFillBackground(not target)
         self._surface_stack.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, target)
         self._surface_stack.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, target)
+        self._surface_stack.setAttribute(Qt.WidgetAttribute.WA_AlwaysStackOnTop, target)
         self._surface_stack.setAutoFillBackground(not target)
         if target:
             self._surface_stack.setStyleSheet("background: transparent; border: none;")
         else:
             self._surface_stack.setStyleSheet("")
+        self._renderer.set_transparent_rounded_clip(corner_radius if target else 0.0)
         self._edit_viewer.set_transparent_rounded_clip(corner_radius if target else 0.0)
         self._apply_surface(self._default_surface_color)
 
@@ -634,6 +636,12 @@ class VideoArea(QWidget):
             },
         )
         prev_source = self._current_source
+        prev_duration_ms = self._current_duration_ms
+        if sys.platform == "darwin" and prev_source is not None:
+            # AVFoundation can keep the previous audio session alive unless
+            # the source is cleared before loading another clip.
+            self._player.stop()
+            self._player.setSource(QUrl())
         self._profile_load_started_at = load_started
         self._profile_load_source = path
         self._profile_first_frame_logged = False
@@ -654,9 +662,6 @@ class VideoArea(QWidget):
         if not self._adjusted_preview_enabled and not video_requires_adjusted_preview(self._current_adjustments):
             native_rotate90_steps = int(float(self._current_adjustments.get("Crop_Rotate90", 0.0))) % 4
         self._renderer.set_user_rotate90_steps(native_rotate90_steps)
-        # Save previous duration before resetting so it can be used as a
-        # fallback if the media backend reports 0 after setSource (see below).
-        prev_duration_ms = self._current_duration_ms
         self._trim_in_ms = 0
         self._trim_out_ms = 0
         self._current_duration_ms = 0
@@ -814,23 +819,32 @@ class VideoArea(QWidget):
         """
         self._player.stop()
         self._player.setSource(QUrl())
+        self._resize_refit_timer.stop()
+        self._resize_refit_pending = False
         self._pending_video_frame = None
         self._last_presented_video_frame = None
         self._video_frame_dispatch_pending = False
         self._renderer.clear_frame()
+        self._renderer.set_user_rotate90_steps(0)
+        self._renderer.set_container_rotation(0, 0, 0)
+        self._renderer.set_linux_180_hint(False)
         self._edit_viewer.clear()
+        self._edit_viewer.set_adjustments({})
         self._edit_viewer.set_video_source_rotation(0)
+        self._current_adjustments = {}
         self._current_source = None
         self._current_duration_ms = 0
         self._container_rotation_cw = 0
         self._container_raw_w = 0
         self._container_raw_h = 0
         self._container_linux_180_hint = False
+        self._adjusted_first_frame_pending = False
         self._profile_load_started_at = None
         self._profile_load_source = None
         self._profile_first_frame_logged = False
         self._trim_in_ms = 0
         self._trim_out_ms = 0
+        self._suppress_trim_pause = False
         self._restart_from_trim_in_on_play = False
         self._end_hold_display_ms = None
 

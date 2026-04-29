@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from functools import partial
 from pathlib import Path
+import sys
 from typing import Any
 
 from PySide6.QtCore import QModelIndex, QObject, QRect
@@ -138,7 +139,15 @@ class PreviewController(QObject):
         except Exception:  # noqa: BLE001 - preview should gracefully fall back to raw playback
             raw_adjustments = {}
 
+        has_visible_adjustments = sidecar.has_non_default_adjustments(raw_adjustments)
         adjusted_preview = sidecar.video_requires_adjusted_preview(raw_adjustments)
+        if sys.platform == "darwin" and has_visible_adjustments:
+            # The non-adjusted long-press popup uses Qt's plain video item,
+            # not our VideoRendererWidget path. On macOS that means even
+            # "native-renderer-safe" edits such as rotate-only sidecars would
+            # be skipped unless we route the popup through the adjusted RHI
+            # preview surface.
+            adjusted_preview = True
         adjustments: dict[str, object] | None = None
         if adjusted_preview:
             try:

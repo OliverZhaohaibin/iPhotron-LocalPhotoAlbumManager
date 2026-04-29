@@ -6,7 +6,7 @@
 
 ## Overview
 
-iPhotron is a **local-first, offline photo manager**. It does not upload data to any cloud service, does not require an internet connection for core functionality, and does not collect user telemetry. All data remains on the user's local filesystem.
+iPhotron is a **local-first photo manager**. It does not upload data to any cloud service, does not require an internet connection for core functionality, and does not collect user telemetry. All library data remains on the user's local filesystem. The only network-facing flow is an optional user-triggered maps-extension download on platforms where a published extension archive exists.
 
 ---
 
@@ -18,26 +18,32 @@ iPhotron is a **local-first, offline photo manager**. It does not upload data to
 |--------|-------|---------|
 | **Read** | User-selected library folders | Scan photos/videos, read metadata (EXIF, GPS) |
 | **Write** | Library folders | Create `.iphoto.album.json` manifests, `.ipo` sidecar files |
-| **Write** | `.iphoto/` directory at library root | Global SQLite database (`global_index.db`), thumbnail cache |
+| **Write** | `.iPhoto/` directory at library root | Global SQLite database (`global_index.db`), thumbnail cache |
+| **Write** | Selected original media file | Best-effort GPS metadata write-back after an explicit Assign Location action |
 | **Read/Write** | Application settings directory | User preferences (theme, export destination) |
 
 ### External Tool Access
 
 | Tool | Access | Purpose |
 |------|--------|---------|
-| **ExifTool** | Read-only on media files | Extract EXIF, GPS, QuickTime metadata |
+| **ExifTool** | Read/write on media files when requested | Extract EXIF, GPS, QuickTime metadata; write GPS coordinates for explicit Assign Location actions |
 | **FFmpeg / FFprobe** | Read-only on media files | Generate video thumbnails, parse video info |
 
 ### Network Access
 
-iPhotron requires **no network access**. All features, including map rendering and reverse geocoding, work fully offline.
+iPhotron requires **no network access for normal library operation**. Map rendering,
+reverse geocoding, and Assign Location search work offline when the maps
+extension is installed.
 
 | Feature | Access | Purpose |
 |---------|--------|---------|
-| **Map rendering** | Offline (bundled vector tiles) | Render map tiles for the location view |
+| **Map rendering** | Offline (bundled OBF/vector map assets) | Render map tiles for the location view |
 | **Reverse geocoding** | Local database lookup | Convert GPS coordinates to place names (offline, via `reverse-geocoder` library) |
+| **Map extension download** | Optional HTTPS download | Fetch a published extension archive only when the user chooses the download path |
 
-> **Note:** iPhotron is a fully offline application. No network connection is required for any feature.
+> **Note:** No telemetry or cloud sync is performed. A network connection is only
+> needed if the user chooses to download a missing map extension from a release
+> archive.
 
 ---
 
@@ -51,14 +57,18 @@ iPhotron does **not** encrypt data at rest. The following files are stored in pl
 |------|--------|----------|
 | `.iphoto.album.json` | JSON | Album metadata: cover image, featured photos, sort order |
 | `*.ipo` | JSON | Edit parameters: light, color, B&W, crop, perspective adjustments |
-| `global_index.db` | SQLite | Asset metadata: file paths, timestamps, GPS coordinates, media types |
+| `global_index.db` | SQLite | Asset metadata: file paths, timestamps, GPS coordinates, media types, location assignment metadata |
+| `.iPhoto/faces/face_index.db` | SQLite | Rebuildable People runtime snapshot |
+| `.iPhoto/faces/face_state.db` | SQLite | Stable People decisions: names, covers, hidden flags, groups, ordering |
 | Thumbnail cache | Image files | Downscaled preview images |
 
 **Rationale:** The data managed by iPhotron (album organization, edit parameters, file metadata) is non-sensitive in most contexts. Users who require encryption should use full-disk encryption (e.g., BitLocker, FileVault, LUKS).
 
 ### In Transit
 
-- No network communication occurs. All data remains on the local filesystem.
+- No media, metadata, telemetry, or library state is transmitted by normal app
+  operation. The optional maps-extension download retrieves a release archive
+  only when the user chooses that path.
 
 ---
 
@@ -66,12 +76,16 @@ iPhotron does **not** encrypt data at rest. The following files are stored in pl
 
 ```
 LibraryRoot/                          # User-selected photo library folder
-├── .iphoto/
+├── .iPhoto/
 │   ├── global_index.db               # SQLite database (all asset metadata)
-│   └── thumbs/                       # Thumbnail cache
+│   ├── thumbs/                       # Thumbnail cache
+│   └── faces/
+│       ├── face_index.db             # Rebuildable People runtime snapshot
+│       ├── face_state.db             # Stable People user decisions
+│       └── thumbnails/               # Cropped face thumbnails
 ├── Album1/
 │   ├── .iphoto.album.json            # Album manifest
-│   ├── photo.jpg                     # Original photo (never modified)
+│   ├── photo.jpg                     # Original photo (edits are sidecar-only)
 │   └── photo.jpg.ipo                 # Edit sidecar (if edited)
 └── Album2/
     └── ...
@@ -95,8 +109,8 @@ User settings (theme preference, export destination) are stored via Qt's `QSetti
 
 | Asset | Sensitivity | Protection |
 |-------|-------------|------------|
-| Original photos/videos | Personal (potentially high) | Never modified by iPhotron; rely on OS-level access control |
-| GPS coordinates in metadata | Location data (medium) | Stored in SQLite index; same access level as original files |
+| Original photos/videos | Personal (potentially high) | Edits are non-destructive; explicit Assign Location may best-effort write GPS metadata |
+| GPS coordinates in metadata | Location data (medium) | Stored in SQLite index and, when ExifTool write-back succeeds, in the original file metadata |
 | Album organization | Low | Stored in JSON manifests alongside photos |
 | Edit parameters | Low | Stored in `.ipo` sidecar files |
 
@@ -128,13 +142,13 @@ User settings (theme preference, export destination) are stored via Qt's `QSetti
 | **Impact** | Potential code execution via Pillow, FFmpeg, or ExifTool |
 | **Mitigation** | Keep dependencies updated; use `pillow-heif` and `opencv-python-headless` (no GUI attack surface) |
 
-#### T4: Malicious Map Tile Data
+#### T4: Malicious Map Data
 
 | | |
 |---|---|
-| **Threat** | Crafted or corrupted bundled vector tile data |
+| **Threat** | Crafted or corrupted bundled map data, resources, or search database |
 | **Impact** | Incorrect map display; potential parsing vulnerability |
-| **Mitigation** | Tiles are rendered via OpenGL (not a web view); no script execution possible; tile data is bundled and not fetched from external sources |
+| **Mitigation** | Map assets are rendered through local native/helper renderers or Qt/OpenGL paths, not a web view; no script execution is performed; published extension archives should be validated before release |
 
 #### T5: Supply Chain Attack via Dependencies
 
@@ -150,9 +164,10 @@ User settings (theme preference, export destination) are stored via Qt's `QSetti
 
 1. **Use full-disk encryption** (BitLocker / FileVault / LUKS) if your photo library contains sensitive content.
 2. **Keep ExifTool and FFmpeg updated** to receive security patches.
-3. **Run `pip install --upgrade`** periodically to update Python dependencies.
-4. **Use OS-level file permissions** to restrict access to your library folder.
-5. **Back up your library** regularly — iPhotron's `.iphoto/` directory and `.ipo` files should be included in backups.
+3. **Install ExifTool only from a trusted source** if you plan to use GPS write-back through Assign Location.
+4. **Run `pip install --upgrade`** periodically to update Python dependencies.
+5. **Use OS-level file permissions** to restrict access to your library folder.
+6. **Back up your library** regularly — iPhotron's `.iPhoto/` directory and `.ipo` files should be included in backups.
 
 ---
 

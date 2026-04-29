@@ -30,7 +30,6 @@ from PySide6.QtCore import (
 )
 from PySide6.QtGui import QImage, QPixmap
 
-from ....config import WORK_DIR_NAME
 from ....utils.pathutils import ensure_work_dir
 
 # Re-exported names – keep every symbol that downstream code may import
@@ -118,7 +117,7 @@ class ThumbnailLoader(QObject):
         self._library_root = root
         if root:
             try:
-                work_dir = ensure_work_dir(root, WORK_DIR_NAME)
+                work_dir = ensure_work_dir(root)
                 (work_dir / "thumbs").mkdir(parents=True, exist_ok=True)
             except OSError:
                 # Ignore errors if the thumbnail directory cannot be created; not fatal.
@@ -140,7 +139,7 @@ class ThumbnailLoader(QObject):
         # Ensure the thumbnail directory exists in the library root (if set)
         if self._library_root:
             try:
-                work_dir = ensure_work_dir(self._library_root, WORK_DIR_NAME)
+                work_dir = ensure_work_dir(self._library_root)
                 (work_dir / "thumbs").mkdir(parents=True, exist_ok=True)
             except OSError:
                 # Ignore errors when creating the thumbnail directory; it may already exist or be inaccessible,
@@ -149,7 +148,7 @@ class ThumbnailLoader(QObject):
         else:
             # Fallback: create in local album root if library not configured
             try:
-                work_dir = ensure_work_dir(root, WORK_DIR_NAME)
+                work_dir = ensure_work_dir(root)
                 (work_dir / "thumbs").mkdir(parents=True, exist_ok=True)
             except OSError:
                 pass

@@ -10,6 +10,12 @@ def _shader_source() -> str:
     return shader_path.read_text(encoding="utf-8")
 
 
+def _rhi_shader_source() -> str:
+    root = Path(__file__).resolve().parents[1]
+    shader_path = root / "src" / "iPhoto" / "gui" / "ui" / "widgets" / "image_viewer_rhi.frag"
+    return shader_path.read_text(encoding="utf-8")
+
+
 def _normalise(text: str) -> str:
     """Collapse all whitespace runs to a single space for comparison."""
     return re.sub(r"\s+", " ", text)
@@ -40,3 +46,20 @@ def test_denoise_uses_adjusted_color_as_base() -> None:
         r"c\s*=\s*apply_denoise\s*\(\s*uv_tex\s*\)\s*;",
         normalised,
     ), "apply_denoise must not be called with only uv_tex (old single-arg form)"
+
+
+def test_texture_origin_y_flip_is_backend_controlled() -> None:
+    """Raw GL and QRhi/Metal normalize fragment coordinates before crop math."""
+
+    for shader in (_shader_source(), _rhi_shader_source()):
+        normalised = _normalise(shader)
+
+        assert "uTextureOriginTopLeft" in shader
+        assert (
+            "if (uTextureOriginTopLeft == 0) { fragPx.y = uViewSize.y - 1.0 - fragPx.y; }"
+            in normalised
+        ), "Fragment coordinates must be normalized to top-left viewport space"
+        assert (
+            "vec2 worldVector = vec2(fragPx.x - viewCentre.x, viewCentre.y - fragPx.y);"
+            in normalised
+        ), "Crop math must use the same world-up convention as ViewTransformController"

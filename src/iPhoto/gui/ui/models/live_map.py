@@ -5,14 +5,17 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Dict
 
-from ....config import WORK_DIR_NAME
 from ....utils.jsonio import read_json
+from ....utils.pathutils import resolve_work_dir
 
 
 def load_live_map(root: Path) -> Dict[str, Dict[str, object]]:
     """Return the Live Photo mapping indexed by relative path."""
 
-    path = root / WORK_DIR_NAME / "links.json"
+    work_dir = resolve_work_dir(root)
+    if work_dir is None:
+        return {}
+    path = work_dir / "links.json"
     if not path.exists():
         return {}
     try:

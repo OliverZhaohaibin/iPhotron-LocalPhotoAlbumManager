@@ -5,8 +5,10 @@ from __future__ import annotations
 import logging
 from typing import Callable, Sequence
 
-from PySide6.QtCore import QObject, QRunnable, Qt, Signal
+from PySide6.QtCore import QObject, QRunnable, Signal
 from PySide6.QtGui import QImage
+
+from .image_scaling import scale_qimage_to_height_for_worker
 
 
 LOGGER = logging.getLogger(__name__)
@@ -65,16 +67,9 @@ class ThumbnailGeneratorWorker(QRunnable):
             return
 
         try:
-            base = self._source_image.scaledToHeight(
-                self._target_height,
-                Qt.TransformationMode.SmoothTransformation,
-            )
-            if base.isNull():
-                base = QImage(self._source_image)
-
             # Convert once so the worker always feeds a predictable pixel format into the
             # preview generator, regardless of the source image's colour space.
-            base = base.convertToFormat(QImage.Format.Format_ARGB32)
+            base = scale_qimage_to_height_for_worker(self._source_image, self._target_height)
 
             for index, value in enumerate(self._values):
                 # Provide a detached copy so filter routines are free to mutate their input.

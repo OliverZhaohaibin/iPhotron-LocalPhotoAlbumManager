@@ -11,8 +11,8 @@ from typing import Iterable
 from PySide6.QtCore import QCoreApplication, QObject, Qt, Signal, Slot
 
 from iPhoto.cache.index_store import get_global_repository
-from iPhoto.config import WORK_DIR_NAME
 from iPhoto.utils.logging import get_logger
+from iPhoto.utils.pathutils import ensure_work_dir
 
 from .pipeline import DetectedAssetFaces
 from .repository import FaceRepository, ManualFaceRecord, PeopleGroupRecord
@@ -197,7 +197,7 @@ class PeopleIndexCoordinator(QObject):
                 state_repository.delete_manual_face(face.face_id)
                 repository.sync_runtime_state()
                 if face.thumbnail_path:
-                    faces_root = (self._library_root / WORK_DIR_NAME / "faces").resolve()
+                    faces_root = (ensure_work_dir(self._library_root) / "faces").resolve()
                     thumbnail_file = (faces_root / face.thumbnail_path).resolve()
                     try:
                         thumbnail_file.relative_to(faces_root)
@@ -387,7 +387,7 @@ class PeopleIndexCoordinator(QObject):
             return True
 
     def _repository(self) -> FaceRepository:
-        faces_root = self._library_root / WORK_DIR_NAME / "faces"
+        faces_root = ensure_work_dir(self._library_root) / "faces"
         return FaceRepository(
             faces_root / "face_index.db",
             faces_root / "face_state.db",

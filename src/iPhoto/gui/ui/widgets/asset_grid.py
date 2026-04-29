@@ -8,10 +8,11 @@ from typing import Callable, List, Optional
 
 from PySide6.QtCore import QModelIndex, QPoint, QTimer, Qt, Signal
 from PySide6.QtGui import QDragEnterEvent, QDragMoveEvent, QDropEvent, QMouseEvent
-from PySide6.QtWidgets import QListView
+from PySide6.QtWidgets import QApplication, QListView
 
 from ....config import LONG_PRESS_THRESHOLD_MS
 
+_IS_DARWIN = sys.platform == "darwin"
 _IS_LINUX = sys.platform == "linux"
 
 
@@ -37,6 +38,7 @@ class AssetGrid(QListView):
         self._pressed_index: Optional[QModelIndex] = None
         self._press_pos: Optional[QPoint] = None
         self._long_press_active = False
+        self._suppress_next_preview_leave = False
         self._update_timer = QTimer(self)
         self._update_timer.setSingleShot(True)
         self._update_timer.setInterval(100)
@@ -90,6 +92,10 @@ class AssetGrid(QListView):
 
     def leaveEvent(self, event) -> None:  # type: ignore[override]
         if self._long_press_active:
+            if self._should_suppress_preview_leave():
+                self._suppress_next_preview_leave = False
+                super().leaveEvent(event)
+                return
             self.previewCancelled.emit()
         self._cancel_pending_long_press()
         super().leaveEvent(event)
@@ -266,6 +272,7 @@ class AssetGrid(QListView):
         self._long_press_active = False
         self._pressed_index = None
         self._press_pos = None
+        self._suppress_next_preview_leave = False
 
     def _on_long_press_timeout(self) -> None:
         if not self._preview_enabled:
@@ -273,7 +280,14 @@ class AssetGrid(QListView):
             return
         if self._pressed_index is not None and self._pressed_index.isValid():
             self._long_press_active = True
+            self._suppress_next_preview_leave = _IS_DARWIN
             self.requestPreview.emit(self._pressed_index)
+
+    def _should_suppress_preview_leave(self) -> bool:
+        if not _IS_DARWIN or not self._suppress_next_preview_leave:
+            return False
+        buttons = QApplication.mouseButtons()
+        return bool(buttons & Qt.MouseButton.LeftButton)
 
     def _schedule_visible_rows_update(self) -> None:
         self._update_timer.start()

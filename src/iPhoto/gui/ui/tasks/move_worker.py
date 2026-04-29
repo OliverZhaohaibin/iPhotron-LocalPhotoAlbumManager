@@ -16,7 +16,8 @@ from ....errors import IPhotoError
 from ....cache.index_store import get_global_repository
 from ....io.scanner_adapter import process_media_paths
 from ....media_classifier import IMAGE_EXTENSIONS, VIDEO_EXTENSIONS
-from ....config import WORK_DIR_NAME, RECENTLY_DELETED_DIR_NAME
+from ....config import RECENTLY_DELETED_DIR_NAME
+from ....utils.pathutils import resolve_work_dir
 
 
 class MoveSignals(QObject):
@@ -513,8 +514,7 @@ class MoveWorker(QRunnable):
         visited: List[Path] = []
         while True:
             visited.append(current)
-            work_dir = current / WORK_DIR_NAME
-            if work_dir.exists():
+            if resolve_work_dir(current) is not None:
                 album_root: Optional[Path] = current
                 break
             parent = current.parent
@@ -522,7 +522,7 @@ class MoveWorker(QRunnable):
                 album_root = None
                 break
             if library_root_key is not None and self._normalised_string(parent) == library_root_key:
-                if (parent / WORK_DIR_NAME).exists():
+                if resolve_work_dir(parent) is not None:
                     album_root = parent
                 else:
                     album_root = None

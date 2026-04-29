@@ -4,10 +4,16 @@ from __future__ import annotations
 
 import fnmatch
 import functools
+import logging
 import os
 import re
 from pathlib import Path
 from typing import Iterable, Iterator, Optional, Tuple
+
+from ..config import ALL_WORK_DIR_NAMES, WORK_DIR_NAME
+
+LOGGER = logging.getLogger(__name__)
+_WARNED_WORK_DIR_CONFLICTS: set[Path] = set()
 
 
 def _expand(pattern: str) -> Iterator[str]:
@@ -63,8 +69,62 @@ def should_include(path: Path, include_globs: Iterable[str], exclude_globs: Iter
     return False
 
 
-def ensure_work_dir(root: Path, name: str = ".iPhoto") -> Path:
-    """Ensure that the album work directory exists and return it."""
+def _exact_work_dir_entries(root: Path) -> dict[str, Path]:
+    try:
+        return {
+            entry.name: entry
+            for entry in root.iterdir()
+            if entry.name in ALL_WORK_DIR_NAMES and entry.is_dir()
+        }
+    except OSError:
+        return {}
+
+
+def resolve_work_dir(root: Path) -> Path | None:
+    """Return the existing managed work directory for *root*, if any.
+
+    ``.iPhoto`` is canonical, while lowercase ``.iphoto`` remains readable for
+    legacy libraries on case-sensitive filesystems.
+    """
+
+    entries = _exact_work_dir_entries(root)
+    for name in ALL_WORK_DIR_NAMES:
+        candidate = entries.get(name)
+        if candidate is not None:
+            return candidate
+    return None
+
+
+def ensure_work_dir(root: Path, name: str = WORK_DIR_NAME) -> Path:
+    """Ensure that the album work directory exists and return it.
+
+    New libraries use canonical ``.iPhoto``. If a legacy lowercase work
+    directory already exists, continue using it instead of creating a case-only
+    sibling that would split state on Linux.
+    """
+
+    if name == WORK_DIR_NAME:
+        entries = _exact_work_dir_entries(root)
+        canonical = entries.get(WORK_DIR_NAME) or (root / WORK_DIR_NAME)
+        legacy_dirs = [
+            entries[legacy_name]
+            for legacy_name in ALL_WORK_DIR_NAMES[1:]
+            if legacy_name in entries
+        ]
+        if WORK_DIR_NAME in entries:
+            if legacy_dirs:
+                resolved_root = root.resolve()
+                if resolved_root not in _WARNED_WORK_DIR_CONFLICTS:
+                    _WARNED_WORK_DIR_CONFLICTS.add(resolved_root)
+                    LOGGER.warning(
+                        "Both canonical %s and legacy work directories exist under %s; using %s",
+                        WORK_DIR_NAME,
+                        root,
+                        canonical,
+                    )
+            return canonical
+        if legacy_dirs:
+            return legacy_dirs[0]
 
     work_dir = root / name
     work_dir.mkdir(parents=True, exist_ok=True)

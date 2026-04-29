@@ -1,0 +1,76 @@
+from __future__ import annotations
+
+from pathlib import Path
+
+from iPhoto.bootstrap.runtime_context import RuntimeContext
+
+
+class _FakeAssetRuntime:
+    def __init__(self) -> None:
+        self.bound_roots: list[Path] = []
+
+    def bind_library_root(self, root: Path) -> None:
+        self.bound_roots.append(root)
+        work_dir = root / ".iPhoto"
+        work_dir.mkdir(parents=True, exist_ok=True)
+        (work_dir / "global_index.db").touch()
+
+
+class _FakeLibrary:
+    def __init__(self) -> None:
+        self._root: Path | None = None
+        self.scan_requests: list[tuple[Path, list[str], list[str]]] = []
+
+    def bind_path(self, root: Path) -> None:
+        self._root = root
+
+    def root(self) -> Path | None:
+        return self._root
+
+    def is_scanning_path(self, _root: Path) -> bool:
+        return False
+
+    def start_scanning(
+        self,
+        root: Path,
+        include: list[str],
+        exclude: list[str],
+    ) -> None:
+        self.scan_requests.append((root, list(include), list(exclude)))
+
+
+def _runtime_context(root: Path) -> tuple[RuntimeContext, _FakeLibrary, _FakeAssetRuntime]:
+    context = RuntimeContext.__new__(RuntimeContext)
+    library = _FakeLibrary()
+    asset_runtime = _FakeAssetRuntime()
+    context.library = library
+    context.asset_runtime = asset_runtime
+    context._pending_basic_library_path = root
+    return context, library, asset_runtime
+
+
+def test_resume_startup_tasks_scans_when_work_dir_exists_without_index(
+    tmp_path: Path,
+) -> None:
+    library_root = tmp_path / "library"
+    (library_root / ".iPhoto" / "cache" / "shaders").mkdir(parents=True)
+    context, library, asset_runtime = _runtime_context(library_root)
+
+    context.resume_startup_tasks()
+
+    assert asset_runtime.bound_roots == [library_root]
+    assert (library_root / ".iPhoto" / "global_index.db").exists()
+    assert [request[0] for request in library.scan_requests] == [library_root]
+
+
+def test_resume_startup_tasks_skips_scan_when_index_preexists(tmp_path: Path) -> None:
+    library_root = tmp_path / "library"
+    work_dir = library_root / ".iPhoto"
+    work_dir.mkdir(parents=True)
+    (work_dir / "global_index.db").touch()
+    context, library, asset_runtime = _runtime_context(library_root)
+
+    context.resume_startup_tasks()
+
+    assert asset_runtime.bound_roots == [library_root]
+    assert library.scan_requests == []

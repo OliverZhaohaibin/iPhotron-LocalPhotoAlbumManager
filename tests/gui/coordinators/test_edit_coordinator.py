@@ -14,6 +14,7 @@ from PySide6.QtWidgets import QApplication, QSlider
 
 from iPhoto.core.adjustment_mapping import VIDEO_TRIM_IN_KEY, VIDEO_TRIM_OUT_KEY
 from iPhoto.gui.coordinators.edit_coordinator import EditCoordinator
+from iPhoto.gui.ui.tasks.video_sidebar_preview_worker import VideoSidebarPreviewResult
 from iPhoto.gui.ui.media import MediaRestoreRequest
 
 
@@ -259,6 +260,72 @@ def test_queue_video_trim_thumbnails_accepts_missing_duration() -> None:
     assert coordinator._video_trim_diag[1]["duration_sec"] is None
     trim_bar.clear.assert_called_once_with()
     pool.start.assert_called_once_with(worker_instance, -1)
+
+
+def test_refresh_video_sidebar_preview_uses_inline_sidebar_loader(qapp) -> None:
+    """Video sidebar frame delivery should not queue a second preview worker."""
+
+    coordinator = EditCoordinator.__new__(EditCoordinator)
+    coordinator._current_source = Path("/fake/video.mp4")
+    coordinator._session = SimpleNamespace(set_color_stats=Mock())
+    coordinator._video_sidebar_generation = 0
+    coordinator._video_sidebar_worker = None
+    coordinator._video_sidebar_workers = []
+    coordinator._video_duration_sec = Mock(return_value=10.0)
+    coordinator._normalised_video_trim = Mock(return_value=(2.0, 8.0))
+    coordinator._is_video_source = Mock(return_value=True)
+    coordinator._pipeline_loader = Mock()
+    coordinator._apply_session_adjustments_to_viewer = Mock()
+    coordinator._ui = SimpleNamespace(
+        edit_sidebar=Mock(preview_thumbnail_height=Mock(return_value=72)),
+    )
+
+    class _SignalStub:
+        def __init__(self) -> None:
+            self.callback = None
+
+        def connect(self, callback, *args, **kwargs) -> None:
+            self.callback = callback
+
+    ready_signal = _SignalStub()
+    finished_signal = _SignalStub()
+    worker_instance = SimpleNamespace(
+        signals=SimpleNamespace(
+            ready=ready_signal,
+            error=_SignalStub(),
+            finished=finished_signal,
+        )
+    )
+    pool = Mock()
+
+    with patch(
+        "iPhoto.gui.coordinators.edit_coordinator.VideoSidebarPreviewWorker",
+        return_value=worker_instance,
+    ), patch(
+        "iPhoto.gui.coordinators.edit_coordinator.QThreadPool.globalInstance",
+        return_value=pool,
+    ):
+        EditCoordinator._refresh_video_sidebar_preview(coordinator)
+
+    assert coordinator._video_sidebar_worker is worker_instance
+    assert coordinator._video_sidebar_workers == [worker_instance]
+    pool.start.assert_called_once_with(worker_instance, -1)
+
+    image = QImage(216, 144, QImage.Format.Format_ARGB32)
+    image.fill(0xFF336699)
+    ready_signal.callback(VideoSidebarPreviewResult(image=image, stats=None), 1)
+
+    coordinator._session.set_color_stats.assert_called_once_with(None)
+    coordinator._pipeline_loader.prepare_sidebar_preview_inline.assert_called_once_with(
+        image,
+        target_height=72,
+        full_res_image_for_fallback=image,
+    )
+    coordinator._apply_session_adjustments_to_viewer.assert_called_once_with()
+
+    finished_signal.callback(1)
+    assert coordinator._video_sidebar_worker is None
+    assert coordinator._video_sidebar_workers == []
 
 
 def test_estimate_video_trim_thumbnail_request_scales_for_portrait_video() -> None:

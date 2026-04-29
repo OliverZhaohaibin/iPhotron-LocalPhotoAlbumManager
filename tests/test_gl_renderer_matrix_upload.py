@@ -358,3 +358,55 @@ def test_draw_crop_overlay_unfaded_draws_border_and_handles(renderer):
     assert len(dark) == 4
     assert all(c[3] == pytest.approx(0.55) for c in dark)
     assert len(gold) >= 9
+
+
+def test_draw_crop_overlay_border_uses_filled_quads(renderer, mock_gl_funcs):
+    """Crop border should render as filled quads so QRhi/OpenGL does not clip GL lines."""
+
+    program = renderer._overlay_program
+    program.bind.return_value = True
+    mock_gl_funcs.glDrawArrays.reset_mock()
+    mock_gl_funcs.glBindBuffer.reset_mock()
+    mock_gl_funcs.glBufferData.reset_mock()
+
+    with patch.object(gl_renderer_mod.gl, "glBindBuffer"), patch.object(
+        gl_renderer_mod.gl, "glBufferData"
+    ):
+        renderer.draw_crop_overlay(
+            view_width=400.0,
+            view_height=300.0,
+            crop_rect={"left": 0.0, "top": 0.0, "right": 400.0, "bottom": 300.0},
+            faded=False,
+        )
+
+    draw_modes = [call.args[0] for call in mock_gl_funcs.glDrawArrays.call_args_list]
+    assert gl_renderer_mod.gl.GL_LINE_LOOP not in draw_modes
+    assert draw_modes.count(gl_renderer_mod.gl.GL_TRIANGLE_FAN) >= 12
+    assert mock_gl_funcs.glBindBuffer.called
+    assert mock_gl_funcs.glBufferData.called
+    mock_gl_funcs.glDisable.assert_any_call(gl_renderer_mod.gl.GL_SCISSOR_TEST)
+
+
+def test_draw_crop_overlay_uses_dummy_vao_when_overlay_vao_missing(
+    renderer,
+    mock_gl_funcs,
+):
+    """Raw GL crop overlay should keep drawing when the dedicated overlay VAO is unavailable."""
+
+    program = renderer._overlay_program
+    program.bind.return_value = True
+    renderer._shader_mgr.overlay_vao = None
+    mock_gl_funcs.glBindVertexArray.reset_mock()
+
+    with patch.object(gl_renderer_mod.gl, "glBindBuffer"), patch.object(
+        gl_renderer_mod.gl, "glBufferData"
+    ):
+        renderer.draw_crop_overlay(
+            view_width=400.0,
+            view_height=300.0,
+            crop_rect={"left": 100.0, "top": 75.0, "right": 300.0, "bottom": 225.0},
+            faded=False,
+        )
+
+    mock_gl_funcs.glBindVertexArray.assert_any_call(7)
+    mock_gl_funcs.glBindVertexArray.assert_any_call(0)

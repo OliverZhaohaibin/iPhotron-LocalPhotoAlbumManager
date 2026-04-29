@@ -5,6 +5,7 @@ from __future__ import annotations
 from concurrent.futures import Future, ThreadPoolExecutor
 import importlib.util
 from pathlib import Path
+import sys
 from typing import Callable, Mapping, Optional
 
 from PySide6.QtCore import QEvent, QObject, QPoint, QRect, QRectF, QSize, QSizeF, Qt, QTimer, Signal
@@ -33,6 +34,14 @@ if importlib.util.find_spec("PySide6.QtMultimediaWidgets") is not None:
     from PySide6.QtMultimediaWidgets import QGraphicsVideoItem
 else:  # pragma: no cover - requires optional Qt module
     QGraphicsVideoItem = None  # type: ignore[assignment]
+
+
+_PREVIEW_WINDOW_SHADOW_PADDING = 12
+_RHI_PREVIEW_SHADOW_BLUR_RADIUS = 48.0
+_RHI_PREVIEW_SHADOW_OFFSET_Y = 12
+_RHI_PREVIEW_SHADOW_PADDING = int(
+    _RHI_PREVIEW_SHADOW_BLUR_RADIUS + abs(_RHI_PREVIEW_SHADOW_OFFSET_Y)
+)
 
 
 class _PreviewWheelGuard(QObject):
@@ -200,13 +209,77 @@ class _PreviewFrame(QWidget):
         self.update()
 
 
-class _RhiPreviewPopup(VideoArea):
-    """Borderless popup that uses the RHI video surface as the window itself."""
+class _RhiShadowFrame(QWidget):
+    """Paints the rounded backing shape that receives the popup shadow."""
+
+    def __init__(self, corner_radius: int, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self._corner_radius = max(0, corner_radius)
+        self._background = QColor(18, 18, 22)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, True)
+        self.setAutoFillBackground(False)
+
+    def set_corner_radius(self, corner_radius: int) -> None:
+        radius = max(0, corner_radius)
+        if radius == self._corner_radius:
+            return
+        self._corner_radius = radius
+        self.update()
+
+    def paintEvent(self, event) -> None:  # type: ignore[override]
+        del event
+        if self.width() <= 0 or self.height() <= 0:
+            return
+
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        radius = max(
+            0.0,
+            min(float(self._corner_radius), min(rect.width(), rect.height()) / 2.0),
+        )
+
+        path = QPainterPath()
+        path.addRoundedRect(rect, radius, radius)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(self._background)
+        painter.drawPath(path)
+
+
+def _bottom_rounded_region(size: QSize, corner_radius: int) -> QRegion:
+    """Return a hard child clip that only protects the bottom popup corners."""
+
+    width = max(1, int(size.width()))
+    height = max(1, int(size.height()))
+    radius = max(0.0, min(float(corner_radius), width / 2.0, height / 2.0))
+    if radius <= 0.0:
+        return QRegion(0, 0, width, height)
+
+    path = QPainterPath()
+    path.moveTo(0.0, 0.0)
+    path.lineTo(float(width), 0.0)
+    path.lineTo(float(width), float(height) - radius)
+    path.quadTo(float(width), float(height), float(width) - radius, float(height))
+    path.lineTo(radius, float(height))
+    path.quadTo(0.0, float(height), 0.0, float(height) - radius)
+    path.closeSubpath()
+    return QRegion(path.toFillPolygon().toPolygon())
+
+
+class _RhiPreviewPopup(QWidget):
+    """Transparent popup wrapper hosting an RHI video area and shadow backplate."""
+
+    displaySizeChanged = Signal(QSizeF)
+    _PROFILE_RAW = "raw"
+    _PROFILE_EDITED = "edited"
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
         self._corner_radius = PREVIEW_WINDOW_CORNER_RADIUS
-        self._high_quality_rounding_enabled = False
+        self._shadow_padding = _RHI_PREVIEW_SHADOW_PADDING
+        default_height = max(1, int(PREVIEW_WINDOW_DEFAULT_WIDTH * 9 / 16))
+        self._content_size = QSize(PREVIEW_WINDOW_DEFAULT_WIDTH, default_height)
         flags = (
             Qt.WindowType.Tool
             | Qt.WindowType.FramelessWindowHint
@@ -215,29 +288,41 @@ class _RhiPreviewPopup(VideoArea):
             | Qt.WindowType.WindowDoesNotAcceptFocus
         )
         self.setWindowFlags(flags)
-        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, False)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, True)
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
-        self.setAutoFillBackground(True)
+        self.setAutoFillBackground(False)
         self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self.setStyleSheet("background-color: #121216; border: none;")
-        self.set_controls_enabled(False)
-        self.set_muted(PREVIEW_WINDOW_MUTED)
-        self.hide_controls(animate=False)
-        self.set_surface_color("#121216")
-        self.set_viewport_fill_enabled(True)
-        self.edit_viewer.set_crop_framing_enabled(True)
+
+        self._shadow_frame = _RhiShadowFrame(self._corner_radius, self)
+        shadow = QGraphicsDropShadowEffect(self)
+        shadow.setBlurRadius(_RHI_PREVIEW_SHADOW_BLUR_RADIUS)
+        shadow.setOffset(0, _RHI_PREVIEW_SHADOW_OFFSET_Y)
+        shadow.setColor(QColor(0, 0, 0, 120))
+        self._shadow_frame.setGraphicsEffect(shadow)
+
+        self._content_frame = _RhiShadowFrame(self._corner_radius, self)
+
         self._wheel_guard = _PreviewWheelGuard(self)
-        for target in (
-            self,
-            self._surface_stack,
-            self._renderer,
-            self._edit_viewer,
-        ):
+        for target in (self, self._shadow_frame, self._content_frame):
             target.installEventFilter(self._wheel_guard)
-        self._update_mask()
+        self._active_render_profile: str | None = None
+        self._video_area = self._create_video_area()
+        self._set_rounding_mode()
+        self.resize_preview(self._content_size)
+        self.hide()
 
     def resize_preview(self, size: QSize) -> None:
-        self.resize(size)
+        content_width = max(1, int(size.width()))
+        content_height = max(1, int(size.height()))
+        self._content_size = QSize(content_width, content_height)
+        total_size = QSize(
+            content_width + 2 * self._shadow_padding,
+            content_height + 2 * self._shadow_padding,
+        )
+        if self.size() != total_size:
+            self.resize(total_size)
+        self._layout_layers()
 
     def show_preview(
         self,
@@ -247,60 +332,127 @@ class _RhiPreviewPopup(VideoArea):
         trim_range_ms: tuple[int, int] | None,
         adjusted_preview: bool,
     ) -> None:
-        self.stop()
-        self._set_rounding_mode(adjusted_preview)
-        self.load_video(
-            source,
+        render_profile = self._render_profile(
             adjustments=adjustments,
             trim_range_ms=trim_range_ms,
             adjusted_preview=adjusted_preview,
         )
+        rebuilt = self._prepare_video_area_for_profile(render_profile)
+        if not rebuilt:
+            self._video_area.stop()
+        self._set_rounding_mode()
+        # macOS/Metal can fail when the same long-press popup alternates
+        # between two QRhiWidget-backed child surfaces. Keep every mac preview
+        # on the GL/adjusted surface; unedited videos still pass empty
+        # adjustments and no trim.
+        internal_adjusted_preview = bool(adjusted_preview or sys.platform == "darwin")
+        self._video_area.load_video(
+            source,
+            adjustments=adjustments,
+            trim_range_ms=trim_range_ms,
+            adjusted_preview=internal_adjusted_preview,
+        )
         self.show()
         self.raise_()
-        self.play()
+        self._video_area.play()
 
     def close_preview(self) -> None:
-        self.stop()
+        self._video_area.stop()
         self.hide()
 
     def resizeEvent(self, event: QResizeEvent) -> None:  # type: ignore[override]
         super().resizeEvent(event)
-        self._update_mask()
+        self._layout_layers()
 
-    def _update_mask(self) -> None:
-        if self._high_quality_rounding_enabled:
-            self.clearMask()
-            return
-        if self.width() <= 0 or self.height() <= 0:
-            return
-        radius = max(0.0, min(float(self._corner_radius), min(self.width(), self.height()) / 2.0))
-        if radius <= 0.0:
-            self.clearMask()
-            return
-        path = QPainterPath()
-        path.addRoundedRect(QRectF(self.rect()), radius, radius)
-        self.setMask(QRegion(path.toFillPolygon().toPolygon()))
+    def paintEvent(self, event) -> None:  # type: ignore[override]
+        del event
+        painter = QPainter(self)
+        painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Clear)
+        painter.fillRect(self.rect(), Qt.GlobalColor.transparent)
 
-    def _set_rounding_mode(self, adjusted_preview: bool) -> None:
-        self._high_quality_rounding_enabled = bool(adjusted_preview)
-        self.set_transparent_preview_enabled(
-            self._high_quality_rounding_enabled,
+    @classmethod
+    def _render_profile(
+        cls,
+        *,
+        adjustments: Mapping[str, object] | None,
+        trim_range_ms: tuple[int, int] | None,
+        adjusted_preview: bool,
+    ) -> str:
+        if adjusted_preview or trim_range_ms is not None or bool(adjustments):
+            return cls._PROFILE_EDITED
+        return cls._PROFILE_RAW
+
+    def _prepare_video_area_for_profile(self, profile: str) -> bool:
+        previous_profile = getattr(self, "_active_render_profile", None)
+        should_rebuild = (
+            sys.platform == "darwin"
+            and previous_profile is not None
+            and previous_profile != profile
+        )
+        if should_rebuild:
+            self._rebuild_video_area()
+        self._active_render_profile = profile
+        return should_rebuild
+
+    def _create_video_area(self) -> VideoArea:
+        video_area = VideoArea(self._content_frame)
+        video_area.set_controls_enabled(False)
+        video_area.set_muted(PREVIEW_WINDOW_MUTED)
+        video_area.hide_controls(animate=False)
+        video_area.set_surface_color("#121216")
+        video_area.set_viewport_fill_enabled(True)
+        video_area.edit_viewer.set_crop_framing_enabled(True)
+        video_area.displaySizeChanged.connect(self.displaySizeChanged.emit)
+        for target in (
+            video_area,
+            video_area._surface_stack,
+            video_area._renderer,
+            video_area._edit_viewer,
+        ):
+            target.installEventFilter(self._wheel_guard)
+        return video_area
+
+    def _rebuild_video_area(self) -> None:
+        old_video_area = self._video_area
+        try:
+            old_video_area.stop()
+        except Exception:
+            pass
+        try:
+            old_video_area.displaySizeChanged.disconnect(self.displaySizeChanged.emit)
+        except (RuntimeError, TypeError):
+            pass
+        old_video_area.hide()
+        old_video_area.setParent(None)
+        old_video_area.deleteLater()
+
+        self._video_area = self._create_video_area()
+        self._set_rounding_mode()
+        self._layout_layers()
+
+    def _layout_layers(self) -> None:
+        content_rect = QRect(
+            self._shadow_padding,
+            self._shadow_padding,
+            max(1, self.width() - 2 * self._shadow_padding),
+            max(1, self.height() - 2 * self._shadow_padding),
+        )
+        self._shadow_frame.setGeometry(content_rect)
+        self._content_frame.setGeometry(content_rect)
+        self._content_frame.setMask(
+            _bottom_rounded_region(content_rect.size(), self._corner_radius)
+        )
+        self._video_area.setGeometry(QRect(0, 0, content_rect.width(), content_rect.height()))
+        self._content_frame.raise_()
+        self._video_area.raise_()
+
+    def _set_rounding_mode(self) -> None:
+        self._shadow_frame.set_corner_radius(self._corner_radius)
+        self._content_frame.set_corner_radius(self._corner_radius)
+        self._video_area.set_transparent_preview_enabled(
+            True,
             corner_radius=float(self._corner_radius),
         )
-        self.setAttribute(
-            Qt.WidgetAttribute.WA_TranslucentBackground,
-            self._high_quality_rounding_enabled,
-        )
-        self.setAttribute(
-            Qt.WidgetAttribute.WA_NoSystemBackground,
-            self._high_quality_rounding_enabled,
-        )
-        self.setAutoFillBackground(not self._high_quality_rounding_enabled)
-        if self._high_quality_rounding_enabled:
-            self.setStyleSheet("background-color: transparent; border: none;")
-        else:
-            self.setStyleSheet("background-color: #121216; border: none;")
-        self._update_mask()
 
 
 class PreviewWindow(QWidget):
@@ -323,7 +475,7 @@ class PreviewWindow(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
         self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
 
-        self._shadow_padding = 12
+        self._shadow_padding = _PREVIEW_WINDOW_SHADOW_PADDING
         self._corner_radius = PREVIEW_WINDOW_CORNER_RADIUS
         default_height = max(1, int(PREVIEW_WINDOW_DEFAULT_WIDTH * 9 / 16))
         self._content_size = QSize(PREVIEW_WINDOW_DEFAULT_WIDTH, default_height)
@@ -398,7 +550,11 @@ class PreviewWindow(QWidget):
         path = Path(source)
         self._close_timer.stop()
         self._media.unload()
-        self._rhi_popup.close_preview()
+        next_uses_rhi_popup = bool(
+            sys.platform == "darwin"
+            or adjusted_preview
+            or trim_range_ms is not None
+        )
         self._current_native_size = QSizeF()
         self._native_size_seeded_from_probe = False
         self._native_size_seeded = False
@@ -414,7 +570,7 @@ class PreviewWindow(QWidget):
         self._anchor_rect = at if isinstance(at, QRect) else None
         self._anchor_point = at if isinstance(at, QPoint) else None
         self._prime_native_size_async(path, request_id=self._active_probe_request_id)
-        self._using_rhi_popup = bool(adjusted_preview or trim_range_ms is not None)
+        self._using_rhi_popup = next_uses_rhi_popup
         self._apply_layout_for_anchor()
         if self._using_rhi_popup:
             self._rhi_popup.show_preview(
@@ -425,6 +581,7 @@ class PreviewWindow(QWidget):
             )
             self.hide()
         else:
+            self._rhi_popup.close_preview()
             self._media.load(path)
 
         if not self._using_rhi_popup:
@@ -499,13 +656,19 @@ class PreviewWindow(QWidget):
                 center.x() - self._rhi_popup.width() // 2,
                 center.y() - self._rhi_popup.height() // 2,
             )
-            self._rhi_popup.move(self._clamp_to_screen(origin, size=content_size))
+            self._rhi_popup.move(self._clamp_to_screen(origin, size=self._rhi_popup.size()))
             return
 
         content_size = self._popup_size_for_aspect(PREVIEW_WINDOW_DEFAULT_WIDTH, aspect_ratio)
         self._rhi_popup.resize_preview(content_size)
         if self._anchor_point is not None:
-            self._rhi_popup.move(self._clamp_to_screen(self._anchor_point, size=content_size))
+            origin = self._anchor_point - QPoint(
+                self._rhi_popup._shadow_padding,
+                self._rhi_popup._shadow_padding,
+            )
+            self._rhi_popup.move(
+                self._clamp_to_screen(origin, size=self._rhi_popup.size())
+            )
 
     def _size_for_aspect(self, max_dimension: int, aspect_ratio: float) -> QSize:
         base = max(1, int(max_dimension))

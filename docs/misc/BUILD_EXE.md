@@ -45,7 +45,8 @@ Expected layout:
 | `src/maps/tiles/extension/poi/` | OsmAnd POI resources |
 | `src/maps/tiles/extension/rendering_styles/` | OsmAnd style XML files |
 | `src/maps/tiles/extension/routing/` | OsmAnd routing resources |
-| `src/maps/tiles/extension/bin/` | Platform-specific helper/native widget binaries plus dependent shared libraries (`.exe`/`.dll` on Windows, ELF binaries/`.so` on Linux) |
+| `src/maps/tiles/extension/search/geonames.sqlite3` | Offline place search database used by Assign Location |
+| `src/maps/tiles/extension/bin/` | Platform-specific helper/native widget binaries plus dependent libraries (`.exe`/`.dll` on Windows, ELF binaries/`.so` on Linux, Mach-O binaries/`.dylib`/frameworks on macOS) |
 
 The upstream source of truth for producing those files is the standalone
 [`PySide6-OsmAnd-SDK`](https://github.com/OliverZhaohaibin/PySide6-OsmAnd-SDK)
@@ -64,6 +65,12 @@ Recommended Linux command in `PySide6-OsmAnd-SDK`:
 bash tools/osmand_render_helper_native/build_linux.sh
 ```
 
+Recommended macOS command in `PySide6-OsmAnd-SDK`:
+
+```bash
+QT_ROOT=/opt/homebrew/opt/qt bash tools/osmand_render_helper_native/build_macos.sh
+```
+
 The relevant runtime outputs are mirrored under:
 
 - `tools\osmand_render_helper_native\dist-msvc\osmand_render_helper.exe`
@@ -75,6 +82,9 @@ The relevant runtime outputs are mirrored under:
 - `tools/osmand_render_helper_native/dist-linux/osmand_native_widget.so`
 - `tools/osmand_render_helper_native/dist-linux/libOsmAndCore_shared.so`
 - `tools/osmand_render_helper_native/dist-linux/libOsmAndCoreTools_shared.so`
+- `tools/osmand_render_helper_native/dist-macosx/osmand_render_helper`
+- `tools/osmand_render_helper_native/dist-macosx/osmand_native_widget.dylib`
+- non-system macOS Mach-O dependencies copied into `src/maps/tiles/extension/bin`
 
 You also need:
 
@@ -82,6 +92,7 @@ You also need:
 - `vendor\osmand\resources\poi`
 - `vendor\osmand\resources\rendering_styles`
 - `vendor\osmand\resources\routing`
+- `plugin\data\geonames.sqlite3`
 - `src\maps\tiles\World_basemap_2.obf`
 
 For the full end-to-end sync workflow, see [docs/development.md](../development.md).
@@ -202,6 +213,8 @@ Nuitka:
    `src/maps/tiles/extension/bin`
 3. it includes `src/maps/tiles` in the standalone bundle so the packaged app
    ships with the extension
+4. it includes the QRhi shader source/QSB files used by the image, overlay, and
+   video preview widgets
 
 The sync step currently requires these files to exist in
 `tools\osmand_render_helper_native\dist-msvc`:
@@ -246,6 +259,22 @@ That script already includes `src/maps/tiles`, so the offline OBF/resources
 layout is bundled automatically. The Linux maps runtime is picked up from
 `src/maps/tiles/extension/bin`, and the native widget expects Qt's XCB desktop
 OpenGL path when it is selected at runtime.
+
+### Recommended macOS runtime sync
+
+Before building a macOS package, build the SDK runtime and sync it into the
+iPhotron extension layout:
+
+```bash
+QT_ROOT=/opt/homebrew/opt/qt bash ../PySide6-OsmAnd-SDK/tools/osmand_render_helper_native/build_macos.sh
+python scripts/sync_macos_map_extension.py --sdk-root ../PySide6-OsmAnd-SDK
+```
+
+The sync script copies `World_basemap_2.obf`, `search/geonames.sqlite3`, OsmAnd
+resources, `osmand_render_helper`, `osmand_native_widget.dylib`, recursively
+resolved non-system Mach-O dependencies, then patches `install_name`/rpaths and
+ad-hoc signs the staged binaries. A manual macOS packaging command must include
+`src/maps/tiles` and the QRhi `.qsb` shader files just like the Windows script.
 
 Example Nuitka command (adjust paths for your platform):
 
@@ -321,6 +350,7 @@ Notes:
 | `--include-package=onnxruntime` | Bundles the ONNX runtime used by InsightFace models |
 | `--include-data-dir=src/extension/models=extension/models` | Bundles the shared face model cache |
 | `--nofollow-import-to=albumentations` and related pydantic packages | Avoids unused InsightFace mask-rendering dependencies that are not needed for People clustering |
+| QRhi `.qsb` data files | Required for macOS/Metal and OpenGL QRhi media previews; include `image_viewer_rhi.*`, `image_viewer_overlay.*`, and `video_renderer.*` |
 
 ## Step 3: Verify the Distribution
 
@@ -358,10 +388,20 @@ After building, confirm that:
    find dist/ -name "World_basemap_2.obf"
    find dist/ -name "osmand_render_helper"
    find dist/ -name "osmand_native_widget.so"
+   find dist/ -name "osmand_native_widget.dylib"
    ```
 
 5. The packaged application can launch the map preview and the main GUI without
    map-runtime errors.
+
+   Also verify the offline search database and QRhi shaders are present:
+
+   ```bash
+   find dist/ -path "*/maps/tiles/extension/search/geonames.sqlite3"
+   find dist/ -name "image_viewer_rhi.frag.qsb"
+   find dist/ -name "image_viewer_overlay.frag.qsb"
+   find dist/ -name "video_renderer.frag.qsb"
+   ```
 
 6. The packaged output includes the face model cache when it is intended to be
    shipped offline:
@@ -405,9 +445,11 @@ as `extension` so the install script lands the files in the correct location.
 | `ImportError` referencing `numba` at runtime | A code path still has an unconditional numba import | All numba imports must use `try/except ImportError` guards |
 | Image adjustments produce no visible effect | Kernel not loaded — check logs for error messages | Ensure the AOT module matches the current Python version and platform |
 | `Undesirable import of 'pytest'` warning from Nuitka | `iPhoto.tests` sub-package is being compiled into the build | Add `--nofollow-import-to=pytest` and `--nofollow-import-to=iPhoto.tests` to the Nuitka command |
-| `The native OsmAnd widget library is not available` | `src/maps/tiles/extension/bin` was not staged correctly, or the Linux `.so` runtime is missing | Rebuild the side-project runtime and resync `dist-msvc`/`dist-linux`, or restage `src/maps/tiles/extension/bin` before packaging |
+| `The native OsmAnd widget library is not available` | `src/maps/tiles/extension/bin` was not staged correctly, or the platform native runtime is missing | Rebuild the side-project runtime and resync `dist-msvc`/`dist-linux`/`dist-macosx`, or restage `src/maps/tiles/extension/bin` before packaging |
 | `OsmAnd helper command not configured` | `osmand_render_helper(.exe)` is missing from the extension `bin/` directory | Ensure the helper exists in the side-project output and is copied into `src/maps/tiles/extension/bin` |
 | Linux native maps fail with GLX/XCB startup errors | The session is Wayland-only or missing XWayland/XCB GL integration | Install/enable XWayland and rerun, or set `IPHOTO_PREFER_OSMAND_NATIVE_WIDGET=0` to force the helper-backed Python OBF path |
+| macOS Location map tiles are transparent | The legacy map is running through `QOpenGLWidget` inside a transparent top-level window, or the GL surface is not repainting fully | Keep the macOS legacy path on `MapGLWindowWidget`/`QOpenGLWindow`, set `IPHOTO_MAP_GL_DEBUG=1`, and verify full-update repaint behavior |
+| Packaged macOS media preview fails before first frame | QRhi shader `.qsb` files were not bundled, or `IPHOTO_RHI_BACKEND` forced an unavailable backend | Include the image/overlay/video `.qsb` files and test both default Metal and `IPHOTO_RHI_BACKEND=opengl` diagnostics |
 | Installer downloads the optional package but the map is still unavailable | The ZIP root does not contain `extension\...` or the expected OBF file is missing | Recreate the archive with the `extension` root and verify `extension\World_basemap_2.obf` exists before publishing |
 | `Face scanning paused: name 'Literal' is not defined` | A third-party annotation was evaluated at runtime inside the packaged app | Rebuild with the current People pipeline, which installs runtime typing compatibility before importing InsightFace |
 | `Face scanning paused: name 'NDArray' is not defined` | Same runtime annotation issue, usually from numpy typing annotations | Rebuild with the current People pipeline; do not remove the runtime typing compatibility helper |

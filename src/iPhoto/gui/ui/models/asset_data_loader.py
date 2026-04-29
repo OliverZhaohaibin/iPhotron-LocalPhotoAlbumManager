@@ -14,7 +14,6 @@ from ..tasks.asset_loader_worker import (
     compute_asset_rows,
 )
 from ....cache.index_store import get_global_repository
-from ....config import WORK_DIR_NAME
 
 
 class AssetDataLoader(QObject):

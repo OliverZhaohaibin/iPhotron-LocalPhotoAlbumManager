@@ -22,9 +22,9 @@ import unicodedata
 from pathlib import Path
 from typing import Any, Dict, Iterable, Iterator, List, Optional, Tuple
 
-from ...config import WORK_DIR_NAME
 from ...people.status import normalize_face_status
 from ...utils.logging import get_logger
+from ...utils.pathutils import ensure_work_dir
 from .engine import DatabaseManager
 from .migrations import SchemaMigrator
 from .queries import QueryBuilder
@@ -42,10 +42,47 @@ GLOBAL_INDEX_DB_NAME = "global_index.db"
 # conservative chunk size so large scans never hit the limit regardless of
 # the SQLite version in use.
 _SQLITE_PARAM_CHUNK_SIZE = 900
+_OMIT_METADATA_VALUE = object()
 
 # Global singleton instance and lock for thread-safe access
 _global_instance: Optional["AssetRepository"] = None
 _global_lock = threading.Lock()
+
+
+def _coerce_json_metadata_value(value: Any) -> Any:
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        return _OMIT_METADATA_VALUE
+    if isinstance(value, Path):
+        return value.as_posix()
+    if isinstance(value, dict):
+        sanitized: Dict[str, Any] = {}
+        for key, item in value.items():
+            sanitized_item = _coerce_json_metadata_value(item)
+            if sanitized_item is _OMIT_METADATA_VALUE:
+                continue
+            sanitized[str(key)] = sanitized_item
+        return sanitized
+    if isinstance(value, (list, tuple)):
+        sanitized_items = []
+        for item in value:
+            sanitized_item = _coerce_json_metadata_value(item)
+            if sanitized_item is _OMIT_METADATA_VALUE:
+                continue
+            sanitized_items.append(sanitized_item)
+        return sanitized_items
+
+    try:
+        json.dumps(value, ensure_ascii=False)
+    except (TypeError, ValueError):
+        return _OMIT_METADATA_VALUE
+    return value
+
+
+def _sanitize_metadata_for_json(metadata: Dict[str, Any]) -> Dict[str, Any]:
+    sanitized = _coerce_json_metadata_value(metadata)
+    if isinstance(sanitized, dict):
+        return sanitized
+    return {}
 
 
 def get_global_repository(library_root: Path) -> "AssetRepository":
@@ -117,8 +154,7 @@ class AssetRepository:
                 will be created at `<library_root>/.iPhoto/global_index.db`.
         """
         self.library_root = library_root
-        self.path = library_root / WORK_DIR_NAME / GLOBAL_INDEX_DB_NAME
-        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.path = ensure_work_dir(library_root) / GLOBAL_INDEX_DB_NAME
         
         self._db_manager = DatabaseManager(self.path)
         self._conn: Optional[sqlite3.Connection] = None
@@ -725,7 +761,13 @@ class AssetRepository:
                         existing_metadata = decoded
                 if metadata_updates:
                     existing_metadata.update(
-                        {key: value for key, value in metadata_updates.items() if value is not None}
+                        _sanitize_metadata_for_json(
+                            {
+                                key: value
+                                for key, value in metadata_updates.items()
+                                if value is not None
+                            }
+                        )
                     )
                 if gps is not None:
                     existing_metadata["gps"] = dict(gps)
@@ -736,7 +778,12 @@ class AssetRepository:
                 else:
                     existing_metadata.pop("location", None)
                 update_parts.append("metadata = ?")
-                params.append(json.dumps(existing_metadata, ensure_ascii=False))
+                params.append(
+                    json.dumps(
+                        _sanitize_metadata_for_json(existing_metadata),
+                        ensure_ascii=False,
+                    )
+                )
 
             params.append(rel)
             conn.execute(

@@ -1,3 +1,5 @@
+from unittest.mock import patch
+
 import pytest
 
 pytest.importorskip("PySide6", reason="PySide6 is required for GUI tests", exc_type=ImportError)
@@ -5,7 +7,7 @@ pytest.importorskip("PySide6.QtWidgets", reason="Qt widgets not available", exc_
 pytest.importorskip("PySide6.QtGui", reason="Qt GUI not available", exc_type=ImportError)
 pytest.importorskip("PySide6.QtTest", reason="Qt test utilities unavailable", exc_type=ImportError)
 
-from PySide6.QtCore import QPoint, Qt
+from PySide6.QtCore import QEvent, QPoint, Qt
 from PySide6.QtGui import QStandardItem, QStandardItemModel
 from PySide6.QtTest import QSignalSpy, QTest
 from PySide6.QtWidgets import QApplication
@@ -54,6 +56,45 @@ def test_asset_grid_long_press_emits_preview(qapp: QApplication) -> None:
         local_pos = target.mapFromGlobal(global_pos)
 
     QTest.mouseRelease(target, Qt.MouseButton.LeftButton, pos=local_pos)
+    if release_spy.count() == 0:
+        assert release_spy.wait(800)
+
+    assert release_spy.count() > 0
+
+
+def test_asset_grid_suppresses_first_macos_preview_leave(qapp: QApplication) -> None:
+    grid = AssetGrid()
+    model = QStandardItemModel()
+    model.appendRow(QStandardItem("item"))
+    grid.setModel(model)
+    grid.setIconSize(grid.iconSize())
+    grid.show()
+    qapp.processEvents()
+
+    index = model.index(0, 0)
+    pos = grid.visualRect(index).center()
+
+    preview_spy = QSignalSpy(grid.requestPreview)
+    release_spy = QSignalSpy(grid.previewReleased)
+    cancel_spy = QSignalSpy(grid.previewCancelled)
+
+    with (
+        patch("iPhoto.gui.ui.widgets.asset_grid._IS_DARWIN", True),
+        patch(
+            "iPhoto.gui.ui.widgets.asset_grid.QApplication.mouseButtons",
+            return_value=Qt.MouseButton.LeftButton,
+        ),
+    ):
+        QTest.mousePress(grid.viewport(), Qt.MouseButton.LeftButton, pos=pos)
+        assert preview_spy.wait(LONG_PRESS_THRESHOLD_MS + 800)
+
+        grid.leaveEvent(QEvent(QEvent.Type.Leave))
+        qapp.processEvents()
+
+        assert cancel_spy.count() == 0
+
+        QTest.mouseRelease(grid.viewport(), Qt.MouseButton.LeftButton, pos=pos)
+
     if release_spy.count() == 0:
         assert release_spy.wait(800)
 

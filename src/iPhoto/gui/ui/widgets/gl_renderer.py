@@ -507,6 +507,7 @@ class GLRenderer:
             self._set_uniform3f("uPerspectiveRow0", *perspective_matrix[0])
             self._set_uniform3f("uPerspectiveRow1", *perspective_matrix[1])
             self._set_uniform3f("uPerspectiveRow2", *perspective_matrix[2])
+            self._set_uniform1i("uTextureOriginTopLeft", 0)
 
             _drain_gl_errors("before glDrawArrays")
             gf.glDrawArrays(gl.GL_TRIANGLES, 0, 3)
@@ -530,13 +531,35 @@ class GLRenderer:
         if self._overlay_program is None or self._overlay_vbo == 0:
             return
 
-        vw = max(1.0, float(view_width))
-        vh = max(1.0, float(view_height))
+        try:
+            vw = float(view_width)
+            vh = float(view_height)
+        except (TypeError, ValueError):
+            return
+        if not math.isfinite(vw) or not math.isfinite(vh) or vw <= 0.0 or vh <= 0.0:
+            return
 
-        left = float(crop_rect.get("left", 0.0))
-        right = float(crop_rect.get("right", vw))
-        top = float(crop_rect.get("top", 0.0))
-        bottom = float(crop_rect.get("bottom", vh))
+        def _finite_rect_value(key: str, fallback: float) -> float | None:
+            try:
+                value = float(crop_rect.get(key, fallback))
+            except (TypeError, ValueError):
+                return None
+            return value if math.isfinite(value) else None
+
+        left = _finite_rect_value("left", 0.0)
+        right = _finite_rect_value("right", vw)
+        top = _finite_rect_value("top", 0.0)
+        bottom = _finite_rect_value("bottom", vh)
+        if left is None or right is None or top is None or bottom is None:
+            return
+        left, right = sorted((left, right))
+        top, bottom = sorted((top, bottom))
+        left = min(max(left, 0.0), vw)
+        right = min(max(right, 0.0), vw)
+        top = min(max(top, 0.0), vh)
+        bottom = min(max(bottom, 0.0), vh)
+        if right <= left or bottom <= top:
+            return
 
         program = self._overlay_program
         vao = self._overlay_vao
@@ -552,6 +575,12 @@ class GLRenderer:
             """Convert a viewport-space rectangle into interleaved clip coordinates."""
 
             left_px, top_px, right_px, bottom_px = rect
+            left_px = min(max(left_px, 0.0), vw)
+            right_px = min(max(right_px, 0.0), vw)
+            top_px = min(max(top_px, 0.0), vh)
+            bottom_px = min(max(bottom_px, 0.0), vh)
+            if right_px <= left_px or bottom_px <= top_px:
+                return np.empty(0, dtype=np.float32)
             points = [
                 (left_px, top_px),
                 (right_px, top_px),
@@ -570,15 +599,22 @@ class GLRenderer:
         ) -> None:
             """Upload *vertices* and issue a draw call with the provided colour."""
 
+            if vertices.size == 0:
+                return
             program.setUniformValue("uColor", *colour)
-            gl.glBindBuffer(gl.GL_ARRAY_BUFFER, int(self._overlay_vbo))
-            gl.glBufferData(gl.GL_ARRAY_BUFFER, vertices.nbytes, vertices, gl.GL_DYNAMIC_DRAW)
+            bind_buffer = getattr(gf, "glBindBuffer", gl.glBindBuffer)
+            buffer_data = getattr(gf, "glBufferData", gl.glBufferData)
+            bind_buffer(gl.GL_ARRAY_BUFFER, int(self._overlay_vbo))
+            buffer_data(gl.GL_ARRAY_BUFFER, vertices.nbytes, vertices, gl.GL_DYNAMIC_DRAW)
             gf.glEnableVertexAttribArray(0)
             gf.glVertexAttribPointer(0, 2, gl.GL_FLOAT, False, 0, VoidPtr(0))
             gf.glDrawArrays(mode, 0, int(vertices.size // 2))
             gf.glDisableVertexAttribArray(0)
-            gl.glBindBuffer(gl.GL_ARRAY_BUFFER, 0)
+            bind_buffer(gl.GL_ARRAY_BUFFER, 0)
 
+        gf.glDisable(gl.GL_DEPTH_TEST)
+        gf.glDisable(gl.GL_CULL_FACE)
+        gf.glDisable(gl.GL_SCISSOR_TEST)
         gf.glEnable(gl.GL_BLEND)
         gf.glBlendFunc(gl.GL_SRC_ALPHA, gl.GL_ONE_MINUS_SRC_ALPHA)
         gf.glColorMask(True, True, True, False)
@@ -588,36 +624,51 @@ class GLRenderer:
             gf.glDisable(gl.GL_BLEND)
             return
 
-        overlay_vao_bound = False
+        bound_vao = None
+
+        def _drain_errors() -> list[int]:
+            errors: list[int] = []
+            while True:
+                error = int(gf.glGetError())
+                if error == gl.GL_NO_ERROR:
+                    break
+                errors.append(error)
+            return errors
+
+        def _bind_vao(candidate, label: str) -> bool:
+            if candidate is None:
+                return False
+            if sys.platform.startswith("linux"):
+                _drain_errors()
+            try:
+                candidate.bind()
+            except Exception:
+                _LOGGER.warning("Failed to bind %s crop overlay VAO", label, exc_info=True)
+                return False
+            if sys.platform.startswith("linux"):
+                bind_errors = _drain_errors()
+                if bind_errors:
+                    joined = ", ".join(f"0x{value:04X}" for value in bind_errors)
+                    _LOGGER.warning("OpenGL error after %s crop overlay VAO bind: %s", label, joined)
+                    try:
+                        candidate.release()
+                    except Exception:
+                        pass
+                    return False
+            return True
+
         try:
             if vao is not None and not self._overlay_vao_disabled:
-                # Clear any pre-existing GL errors so we only evaluate errors
-                # caused by this VAO bind operation.
-                if sys.platform.startswith("linux"):
-                    while True:
-                        pre_error = int(gf.glGetError())
-                        if pre_error == gl.GL_NO_ERROR:
-                            break
-                vao.bind()
-                bind_errors: list[int] = []
-                if sys.platform.startswith("linux"):
-                    bind_errors = []
-                    while True:
-                        error = int(gf.glGetError())
-                        if error == gl.GL_NO_ERROR:
-                            break
-                        bind_errors.append(error)
-                    if bind_errors:
-                        joined = ", ".join(f"0x{value:04X}" for value in bind_errors)
-                        _LOGGER.warning("OpenGL error after overlay VAO bind: %s", joined)
-                        self._overlay_vao_disabled = True
-                        _LOGGER.warning(
-                            "Disabling overlay VAO after bind failure; continuing with default vertex-array state"
-                        )
-                    else:
-                        overlay_vao_bound = True
+                if _bind_vao(vao, "overlay"):
+                    bound_vao = vao
                 else:
-                    overlay_vao_bound = True
+                    self._overlay_vao_disabled = True
+                    _LOGGER.warning(
+                        "Disabling overlay VAO after bind failure; trying main VAO fallback"
+                    )
+            if bound_vao is None and self._dummy_vao is not None and self._dummy_vao is not vao:
+                if _bind_vao(self._dummy_vao, "fallback"):
+                    bound_vao = self._dummy_vao
 
             quads = [
                 (0.0, 0.0, vw, top),
@@ -630,8 +681,16 @@ class GLRenderer:
                 _draw(vertices, gl.GL_TRIANGLE_FAN, overlay_colour)
 
             if not faded:
-                border_vertices = _viewport_rect_to_clip((left, top, right, bottom))
-                _draw(border_vertices, gl.GL_LINE_LOOP, border_colour)
+                border = 2.0
+                border_rects = [
+                    (left, top, right, top + border),
+                    (left, bottom - border, right, bottom),
+                    (left, top, left + border, bottom),
+                    (right - border, top, right, bottom),
+                ]
+                for rect in border_rects:
+                    vertices = _viewport_rect_to_clip(rect)
+                    _draw(vertices, gl.GL_TRIANGLE_FAN, border_colour)
 
                 handle_size = 7.0
                 corner_positions = [
@@ -679,8 +738,8 @@ class GLRenderer:
                     vertices = _viewport_rect_to_clip(rect)
                     _draw(vertices, gl.GL_TRIANGLE_FAN, border_colour)
         finally:
-            if overlay_vao_bound:
-                vao.release()
+            if bound_vao is not None:
+                bound_vao.release()
             program.release()
             gf.glColorMask(True, True, True, True)
             gf.glDisable(gl.GL_BLEND)

@@ -43,6 +43,7 @@ def test_configure_main_view_stack_leaves_native_map_page_default_stack_mode(qap
 
 def test_configure_main_view_stack_can_opt_in_to_keep_native_map_page_alive(qapp: QApplication, monkeypatch) -> None:
     del qapp
+    monkeypatch.setattr("iPhoto.gui.ui.ui_main_window.sys.platform", "linux")
     monkeypatch.setenv("IPHOTO_KEEP_NATIVE_MAP_PAGE_ALIVE", "1")
     stack = QStackedWidget()
     stack.addWidget(QWidget())

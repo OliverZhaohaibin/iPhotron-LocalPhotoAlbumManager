@@ -1,11 +1,9 @@
 """
-GPU-accelerated image viewer (pure OpenGL texture upload; pixel-accurate zoom/pan).
-- Ensures magnification samples the ORIGINAL pixels (no Qt/FBO resampling).
-- Uses GL 3.3 Core, VAO/VBO, and a raw glTexImage2D + glTexSubImage2D upload path.
-- Rendered inside a QRhiWidget via beginExternal()/endExternal() so that both the
-  image viewer and the QRhiWidget-based video renderer share a unified rendering
-  backend, eliminating the intermittent GPU state corruption (花屏) that occurred
-  when mixing QOpenGLWidget and QRhiWidget in the same QStackedWidget.
+GPU-accelerated image viewer with platform-selected QRhi rendering.
+
+Windows/Linux keep the existing raw OpenGL texture path inside QRhiWidget.
+macOS uses a pure QRhi path so photo and adjusted-video previews render on
+Metal without ``beginExternal()`` raw GL interop.
 """
 
 from __future__ import annotations
@@ -16,7 +14,6 @@ import time
 from collections.abc import Mapping
 from typing import Any
 
-from OpenGL import GL as gl
 from PySide6.QtCore import QPointF, QRectF, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import (
     QColor,
@@ -37,7 +34,8 @@ except (ModuleNotFoundError, ImportError):  # pragma: no cover
     QVideoFrameFormat = None  # type: ignore[assignment, misc]
 
 from ..gl_crop_controller import CropInteractionController
-from ..gl_renderer import GLRenderer
+from ..render_backend import is_opengl_api, qrhi_api_name, select_qrhi_widget_api
+from ..rhi_image_renderer import RhiImageRenderer
 from ..view_transform_controller import ViewTransformController
 from . import crop_viewport, geometry
 from .adjustment_applicator import AdjustmentApplicator
@@ -50,6 +48,26 @@ from .utils import normalise_colour
 from .zoom_controller import ZoomController
 
 _LOGGER = logging.getLogger(__name__)
+gl: Any | None = None
+GLRenderer: Any | None = None
+
+
+def _load_gl_module():
+    global gl
+    if gl is None:
+        from OpenGL import GL as _gl
+
+        gl = _gl
+    return gl
+
+
+def _load_gl_renderer_class():
+    global GLRenderer
+    if GLRenderer is None:
+        from ..gl_renderer import GLRenderer as _GLRenderer
+
+        GLRenderer = _GLRenderer
+    return GLRenderer
 
 # 如果你的工程没有这个函数，可以改成固定背景色
 try:
@@ -62,12 +80,9 @@ except Exception:
 class GLImageViewer(QRhiWidget):
     """A QWidget that displays GPU-rendered images with pixel-accurate zoom.
 
-    Internally uses raw OpenGL 3.3 Core via ``beginExternal()`` /
-    ``endExternal()`` within the QRhi render pass.  This makes it a
-    QRhiWidget, the same base class as the video renderer, so that both
-    widgets share a single rendering backend inside the ``QStackedWidget``
-    and avoid the intermittent GPU state corruption that occurred when
-    mixing ``QOpenGLWidget`` and ``QRhiWidget``.
+    Internally selects either the legacy raw OpenGL path or the Metal-capable
+    QRhi path at construction time.  The class name and public API remain
+    stable for controllers that still refer to ``GLImageViewer``.
     """
 
     # Signals（保持与旧版一致）
@@ -89,11 +104,13 @@ class GLImageViewer(QRhiWidget):
         super().__init__(parent)
         self.setMouseTracking(True)
 
-        # Use the same OpenGL backend as the QRhiWidget-based video renderer
-        # so that both widgets share a single rendering infrastructure.
+        # Use the same platform-selected QRhi backend as the video renderer.
+        # macOS defaults to Metal; Windows/Linux keep the current OpenGL path.
         # Must be called in the constructor — Qt docs state that calling
         # setApi() after the widget is shown may have no effect.
-        self.setApi(QRhiWidget.Api.OpenGL)
+        self._rhi_api = select_qrhi_widget_api()
+        self._uses_raw_gl = is_opengl_api(self._rhi_api)
+        self.setApi(self._rhi_api)
 
         # Declare that this widget always produces fully opaque output so
         # the compositor never expects transparency from the first paint.
@@ -103,7 +120,7 @@ class GLImageViewer(QRhiWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, False)
 
         self._gl_funcs: Any | None = None
-        self._renderer: GLRenderer | None = None
+        self._renderer: Any | RhiImageRenderer | None = None
         self._gl_initialized = False
         self._first_render_done = False
         self._pending_post_load_view_transform = False
@@ -203,6 +220,11 @@ class GLImageViewer(QRhiWidget):
             on_cancel_auto_crop_lock=self._cancel_auto_crop_lock,
         )
 
+    def render_backend_name(self) -> str:
+        """Return the active QRhi backend name for diagnostics/tests."""
+
+        return qrhi_api_name(self._rhi_api)
+
     # ------------------------------------------------------------------
     # GL context helpers (replace QOpenGLWidget.makeCurrent/doneCurrent)
     # ------------------------------------------------------------------
@@ -214,7 +236,7 @@ class GLImageViewer(QRhiWidget):
         LUT upload, offscreen render).
         """
         rhi = self.rhi()
-        if rhi is not None:
+        if self._uses_raw_gl and rhi is not None:
             rhi.makeThreadLocalNativeContextCurrent()
 
     @staticmethod
@@ -839,6 +861,7 @@ class GLImageViewer(QRhiWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent, not enabled)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, enabled)
         self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, enabled)
+        self.setAttribute(Qt.WidgetAttribute.WA_AlwaysStackOnTop, enabled)
         self.setAutoFillBackground(not enabled)
         self.update()
 
@@ -968,6 +991,25 @@ class GLImageViewer(QRhiWidget):
         The width and height of the rendered image are clamped to at least one pixel
         to avoid driver errors. The returned image is always in Format_ARGB32 format.
         """
+        if not self._uses_raw_gl:
+            if target_size.isEmpty() or self._image is None or self._image.isNull():
+                return QImage()
+            try:
+                from .....core.image_filters import apply_adjustments
+            except Exception:
+                _LOGGER.warning("render_offscreen_image: CPU adjustment fallback unavailable", exc_info=True)
+                return QImage()
+            rendered = apply_adjustments(self._image, adjustments or self._adjustments)
+            if rendered.isNull():
+                return QImage()
+            if rendered.size() != target_size:
+                rendered = rendered.scaled(
+                    target_size,
+                    Qt.AspectRatioMode.IgnoreAspectRatio,
+                    Qt.TransformationMode.SmoothTransformation,
+                )
+            return rendered.convertToFormat(QImage.Format.Format_ARGB32)
+
         return OffscreenRenderer.render(
             renderer=self._renderer,
             context=self.rhi(),
@@ -982,19 +1024,33 @@ class GLImageViewer(QRhiWidget):
     # --------------------------- GL lifecycle ---------------------------
 
     def initialize(self, cb) -> None:  # type: ignore[override]
-        """QRhiWidget override: initialise raw GL resources once."""
+        """QRhiWidget override: initialise renderer resources once."""
         if self._gl_initialized:
             return
         rhi = self.rhi()
         if rhi is None:
-            _LOGGER.warning("QRhi not available — image rendering disabled")
+            _LOGGER.warning("QRhi not available - image rendering disabled")
             return
+        if not self._uses_raw_gl:
+            renderer = RhiImageRenderer()
+            try:
+                renderer.initialize_resources(rhi, self.renderTarget().renderPassDescriptor(), cb)
+            except Exception:
+                _LOGGER.exception("Failed to initialise QRhi image renderer")
+                return
+            self._renderer = renderer
+            self._adjustment_applicator.invalidate_cache()
+            self._adjustment_applicator.update_curve_lut_if_needed(self._adjustments)
+            self._adjustment_applicator.update_levels_lut_if_needed(self._adjustments)
+            self._gl_initialized = True
+            return
+
         # Make the underlying OpenGL context current so we can issue raw GL
         # calls (create shaders, VAO, VBO, textures, …).
         rhi.makeThreadLocalNativeContextCurrent()
         current_context = QOpenGLContext.currentContext()
         if current_context is None:
-            _LOGGER.warning("Current OpenGL context unavailable â€” image rendering disabled")
+            _LOGGER.warning("Current OpenGL context unavailable - image rendering disabled")
             return
         gf = current_context.extraFunctions()
         self._gl_funcs = gf
@@ -1002,7 +1058,8 @@ class GLImageViewer(QRhiWidget):
         if self._renderer is not None:
             self._renderer.destroy_resources()
 
-        self._renderer = GLRenderer(gf, parent=self)
+        renderer_cls = _load_gl_renderer_class()
+        self._renderer = renderer_cls(gf, parent=self)
         self._renderer.initialize_resources()
         self._adjustment_applicator.invalidate_cache()
         self._adjustment_applicator.update_curve_lut_if_needed(self._adjustments)
@@ -1013,18 +1070,22 @@ class GLImageViewer(QRhiWidget):
         self._gl_initialized = True
 
     def releaseResources(self) -> None:  # type: ignore[override]
-        """QRhiWidget override: release GL resources."""
+        """QRhiWidget override: release renderer resources."""
         self._gl_initialized = False
         if self._renderer is not None:
             rhi = self.rhi()
-            if rhi is not None:
+            if self._uses_raw_gl and rhi is not None:
                 # Ensure the underlying OpenGL context is current before
                 # issuing raw GL deletes in GLRenderer.destroy_resources().
                 rhi.makeThreadLocalNativeContextCurrent()
             self._renderer.destroy_resources()
 
     def render(self, cb) -> None:  # type: ignore[override]
-        """QRhiWidget override: render the current image via raw OpenGL."""
+        """QRhiWidget override: render the current image/video frame."""
+        if not self._uses_raw_gl:
+            self._render_rhi(cb)
+            return
+
         if not self._gl_initialized:
             # GL resources are not yet available but we MUST still clear the
             # render target with an opaque colour so the surface is never
@@ -1078,10 +1139,11 @@ class GLImageViewer(QRhiWidget):
         # --- All raw OpenGL calls happen between beginExternal/endExternal ---
         vw = max(1, output_size.width())
         vh = max(1, output_size.height())
+        gl_module = _load_gl_module()
         gf.glViewport(0, 0, vw, vh)
         clear_r, clear_g, clear_b, clear_a = self._gl_clear_rgba()
         gf.glClearColor(clear_r, clear_g, clear_b, clear_a)
-        gf.glClear(gl.GL_COLOR_BUFFER_BIT)
+        gf.glClear(gl_module.GL_COLOR_BUFFER_BIT)
 
         uploaded_new_still_texture = False
         if (
@@ -1229,6 +1291,110 @@ class GLImageViewer(QRhiWidget):
         if uploaded_new_still_texture:
             self._schedule_post_load_view_transform()
 
+    def _render_rhi(self, cb) -> None:
+        """Render the current image through QRhi without raw OpenGL."""
+
+        if not self._gl_initialized or self._renderer is None:
+            cb.beginPass(
+                self.renderTarget(),
+                self._pass_clear_color(),
+                QRhiDepthStencilClearValue(),
+            )
+            cb.endPass()
+            self._emit_first_frame_ready()
+            return
+
+        output_size = self.renderTarget().pixelSize()
+        if output_size.isEmpty():
+            return
+        self._last_render_target_size = QSize(output_size)
+
+        vw = max(1, output_size.width())
+        vh = max(1, output_size.height())
+
+        uploaded_new_still_texture = False
+        if (
+            self._using_video_frame_source
+            and self._video_frame_dirty
+            and (self._video_frame is not None or self._pending_video_image is not None)
+        ):
+            self._diag_video_render_count += 1
+            try:
+                self._upload_pending_video_source()
+            except Exception:
+                _LOGGER.exception("Failed to upload video frame into QRhi image viewer")
+        elif (
+            self._image is not None
+            and not self._image.isNull()
+            and self._texture_manager.needs_texture_upload()
+        ):
+            self._texture_manager.upload_texture_if_needed(self._image)
+            straighten, rotate_steps, _ = self._rotation_parameters()
+            self._update_cover_scale(straighten, rotate_steps)
+            uploaded_new_still_texture = True
+
+        if not self._renderer.has_texture():
+            cb.beginPass(
+                self.renderTarget(),
+                self._pass_clear_color(),
+                QRhiDepthStencilClearValue(),
+            )
+            cb.endPass()
+            self._emit_first_frame_ready()
+            return
+
+        effective_scale = self._transform_controller.get_effective_scale()
+        cover_scale = self._transform_controller.get_image_cover_scale()
+        time_value = time.monotonic() - self._time_base
+        view_pan = self._transform_controller.get_pan_pixels()
+
+        if self._crop_controller.is_active():
+            effective_adjustments = dict(self._display_adjustments())
+            effective_adjustments.update(
+                {
+                    "Crop_CX": 0.5,
+                    "Crop_CY": 0.5,
+                    "Crop_W": 1.0,
+                    "Crop_H": 1.0,
+                }
+            )
+        else:
+            effective_adjustments = dict(self._display_adjustments())
+            logical_crop = geometry.logical_crop_mapping_from_texture(effective_adjustments)
+            effective_adjustments.update(logical_crop)
+
+        logical_tex_w, logical_tex_h = self._display_texture_dimensions()
+        crop_rect = None
+        crop_faded = False
+        if self._crop_controller.is_active():
+            crop_rect = self._crop_controller.current_crop_rect_pixels()
+            crop_faded = self._crop_controller.is_faded_out()
+
+        self._renderer.render(
+            cb=cb,
+            render_target=self.renderTarget(),
+            clear_color=self._pass_clear_color(),
+            view_width=float(vw),
+            view_height=float(vh),
+            scale=effective_scale,
+            pan=view_pan,
+            adjustments=effective_adjustments,
+            time_value=time_value,
+            img_scale=cover_scale,
+            logical_tex_size=(float(logical_tex_w), float(logical_tex_h)),
+            corner_radius_px=(
+                self._rounded_clip_radius * self.devicePixelRatioF()
+                if self._transparent_rounded_clip_enabled
+                else 0.0
+            ),
+            crop_rect=crop_rect,
+            crop_faded=crop_faded,
+        )
+
+        self._emit_first_frame_ready()
+        if uploaded_new_still_texture:
+            self._schedule_post_load_view_transform()
+
     def _emit_first_frame_ready(self) -> None:
         """Notify listeners that the first opaque frame has been rendered."""
         if not self._first_render_done:
@@ -1246,6 +1412,7 @@ class GLImageViewer(QRhiWidget):
             self._transform_controller.reset_zoom()
         elif not enabled and was_active:
             self.reset_zoom()
+        self.update()
 
     def crop_values(self) -> dict[str, float]:
         logical_map = self._crop_controller.get_crop_values()

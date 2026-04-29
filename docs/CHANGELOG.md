@@ -4,6 +4,55 @@ All notable changes to **iPhotron** are documented in this file.
 
 ---
 
+## 🚧 Unreleased — macOS Rendering, Map Runtime & Location Resilience
+
+🖥️ *A platform-compatibility pass focused on macOS Metal/QRhi previews,
+transparent-window map rendering, safer location assignment, and packaged
+runtime coverage.*
+
+### Key Updates
+
+#### 🍎 macOS Media Rendering
+- Added platform QRhi backend selection via `IPHOTO_RHI_BACKEND`; macOS now
+  prefers Metal when Qt exposes it, while Windows and Linux keep the OpenGL path.
+- Added a QRhi-backed image/video adjustment renderer with QSB shader assets for
+  image preview, crop overlay, LUTs, and adjusted-video frames.
+- Routed macOS long-press video previews through the RHI popup path so adjusted,
+  rotate-only, and plain previews share the stable GPU surface.
+- Improved high-DPI crop and pan math by converting logical viewport
+  coordinates through the actual QRhi render-target scale.
+
+#### 🗺️ Maps Runtime & macOS GL Stability
+- Added macOS OsmAnd runtime discovery for `dist-macosx` helper/widget builds
+  and a `scripts/sync_macos_map_extension.py` workflow that copies resources,
+  search data, `.dylib` binaries, dependencies, rpaths, and ad-hoc signatures.
+- Switched the macOS legacy GL map to `QOpenGLWindow + createWindowContainer()`
+  to avoid transparent `QOpenGLWidget` FBO composition in the frameless main
+  window.
+- Hardened map surfaces with opaque backing colors, full-update repaint
+  behavior, optional `IPHOTO_MAP_GL_DEBUG` diagnostics, and GL marker rendering
+  inside supported map passes.
+- Extended standalone map preview backend selection with explicit
+  `auto/native/python/legacy` modes and runtime diagnostics.
+
+#### 📍 Assign Location Resilience
+- Assign Location now persists the selected place to `global_index.db` even when
+  ExifTool is missing or the original file metadata write fails.
+- Added user-facing warnings for missing ExifTool or failed GPS write-back while
+  keeping the local database assignment intact.
+- Sanitized metadata updates before JSON storage so non-serializable third-party
+  values cannot corrupt asset rows.
+
+#### 📦 Packaging & Tests
+- Updated the Windows Nuitka script to bundle QRhi image/overlay/video shader
+  assets and the `maps` package alongside the maps extension.
+- Added regression coverage for render backend selection, macOS map GL surface
+  formats, native map widget event targets, RHI overlay rendering, map runtime
+  sources, macOS extension sync, location assignment fallback, preview windows,
+  and worker-side image scaling.
+
+---
+
 ## 🚀 v6.0.0 — People, Face Clusters, Groups & Linux Maps Runtime
 
 👥 *A major People release with automatic face clustering, persistent People
@@ -291,7 +340,7 @@ runtime packaging.*
 - WAL mode for better concurrency and crash recovery.
 
 #### 💾 Unified Global Cache System
-- Single global database replaces scattered `.iphoto/index.jsonl` files.
+- Single global database replaces scattered `.iPhoto/index.jsonl` files.
 - Centralized management for easier backup and sync.
 
 ---

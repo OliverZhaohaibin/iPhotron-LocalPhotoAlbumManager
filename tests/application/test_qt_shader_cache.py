@@ -34,6 +34,29 @@ def test_configure_shader_cache_environment_prefers_library_work_dir(tmp_path) -
     assert env["QSG_RHI_PIPELINE_CACHE_LOAD"] == str(expected_root / "qt_rhi_pipeline.bin")
 
 
+def test_configure_shader_cache_environment_uses_existing_legacy_work_dir(tmp_path) -> None:
+    library_root = tmp_path / "library"
+    legacy_work_dir = library_root / ".iphoto"
+    legacy_work_dir.mkdir(parents=True)
+    settings_path = tmp_path / "settings.json"
+    settings_path.write_text(
+        json.dumps({"basic_library_path": str(library_root)}),
+        encoding="utf-8",
+    )
+    env: dict[str, str] = {}
+
+    cache_root = configure_shader_cache_environment(
+        settings_path,
+        home_root=tmp_path / "home",
+        environ=env,
+    )
+
+    expected_root = legacy_work_dir / "cache" / "shaders"
+    assert cache_root == expected_root
+    assert expected_root.is_dir()
+    assert not any(entry.name == ".iPhoto" for entry in library_root.iterdir())
+
+
 def test_configure_shader_cache_environment_falls_back_to_home_work_dir(tmp_path) -> None:
     home_root = tmp_path / "home"
     env: dict[str, str] = {}

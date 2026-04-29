@@ -41,7 +41,6 @@ from PySide6.QtWidgets import (
 
 from iPhoto.gui.services.pinned_items_service import PinnedItemsService
 from ....cache.index_store import get_global_repository
-from ....config import WORK_DIR_NAME
 from ....errors import LibraryError
 from ....media_classifier import get_media_type, MediaType
 from ....models.album import Album
@@ -439,7 +438,7 @@ class DashboardThumbnailLoader(QObject):
         effective_library_root = self._library_root if self._library_root else album_root
 
         try:
-            work_dir = ensure_work_dir(effective_library_root, WORK_DIR_NAME)
+            work_dir = ensure_work_dir(effective_library_root)
             thumbs_dir = work_dir / "thumbs"
             thumbs_dir.mkdir(parents=True, exist_ok=True)
         except OSError:

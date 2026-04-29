@@ -259,8 +259,10 @@ def test_ui_component_styling(window_theme_controller, mock_theme_manager):
     ui.video_area.set_surface_color.assert_called_with(bg)
 
 
-def test_zoom_slider_keeps_native_style_off_linux(mock_theme_manager, mock_window_shell, monkeypatch):
-    """Windows/macOS should keep the native header zoom-slider styling."""
+def test_zoom_slider_keeps_native_style_on_windows(
+    mock_theme_manager, mock_window_shell, monkeypatch
+):
+    """Windows should keep the native header zoom-slider styling."""
     monkeypatch.setattr(wtc_module.sys, "platform", "win32")
     ui = StubUi()
     ui.window_shell.parentWidget.return_value = mock_window_shell
@@ -268,6 +270,23 @@ def test_zoom_slider_keeps_native_style_off_linux(mock_theme_manager, mock_windo
     WindowThemeController(ui, None, mock_theme_manager)
 
     ui.zoom_slider.setStyleSheet.assert_called_with("")
+
+
+def test_zoom_slider_gets_macos_opaque_handle_fix(
+    mock_theme_manager, mock_window_shell, monkeypatch
+):
+    """macOS should receive an explicit opaque slider handle."""
+    monkeypatch.setattr(wtc_module.sys, "platform", "darwin")
+    ui = StubUi()
+    ui.window_shell.parentWidget.return_value = mock_window_shell
+
+    WindowThemeController(ui, None, mock_theme_manager)
+
+    style = ui.zoom_slider.setStyleSheet.call_args[0][0]
+    assert "QSlider::handle:horizontal" in style
+    assert "background: #f5f6f8" in style
+    assert "border: 1px solid #b8b8b8" in style
+    assert "rgba(17, 17, 17, 88)" not in style
 
 
 def test_zoom_slider_gets_linux_handle_fix(mock_theme_manager, mock_window_shell, monkeypatch):

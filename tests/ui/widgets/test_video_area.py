@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import struct
 from unittest.mock import Mock, call, patch
 
 import pytest
@@ -19,6 +20,7 @@ from PySide6.QtWidgets import QApplication, QRhiWidget
 from iPhoto.config import VIDEO_COMPLETE_HOLD_BACKSTEP_MS
 from iPhoto.gui.ui.widgets.gl_image_viewer import GLImageViewer
 from iPhoto.gui.ui.widgets.gl_texture_manager import TextureManager
+from iPhoto.gui.render_backend import selected_rhi_backend_name
 from iPhoto.gui.ui.widgets.video_area import VideoArea
 from iPhoto.gui.ui.widgets.video_renderer_widget import (
     _CS_BT601,
@@ -29,6 +31,7 @@ from iPhoto.gui.ui.widgets.video_renderer_widget import (
     _TF_HLG,
     _TF_PQ,
     _TF_SDR,
+    _UBO_SIZE,
     VideoRendererWidget,
     _classify_frame_format,
     _resolve_frame_rotation_cw,
@@ -219,6 +222,30 @@ class TestVideoRendererWidget:
         assert w._rotate90_steps == 0
         assert w.native_size() == QSizeF(1920.0, 1440.0)
 
+    def test_user_rotation_after_frame_release_keeps_container_rotation(self, qapp):
+        """User rotation should still compose after the decoded frame is released."""
+
+        w = VideoRendererWidget()
+        w.set_container_rotation(90, 1920, 1440)
+
+        from PySide6.QtCore import QSize
+        fmt = QVideoFrameFormat(
+            QSize(1920, 1440), QVideoFrameFormat.PixelFormat.Format_RGBA8888
+        )
+        frame = QVideoFrame(fmt)
+        w.update_frame(frame)
+
+        assert w._rotate90_steps == 1
+        assert w.native_size() == QSizeF(1440.0, 1920.0)
+
+        # render() releases _current_frame after uploading to GPU textures; the
+        # next rotate command must still use the cached frame metadata.
+        w._current_frame = None
+        w.set_user_rotate90_steps(3)
+
+        assert w._rotate90_steps == 0
+        assert w.native_size() == QSizeF(1920.0, 1440.0)
+
     def test_no_double_rotation_when_prerotated(self, qapp):
         """When GStreamer pre-rotates frames, do not apply container rotation again."""
         w = VideoRendererWidget()
@@ -387,6 +414,47 @@ class TestVideoRendererWidget:
         assert w._tex_y_fmt is None
         assert w._tex_uv_fmt is None
 
+    def test_transparent_rounded_clip_toggles_widget_attributes(self, qapp):
+        """Preview clipping should switch the renderer into transparent output mode."""
+        w = VideoRendererWidget()
+
+        w.set_transparent_rounded_clip(14.5)
+
+        assert w._transparent_rounded_clip_enabled is True
+        assert w._rounded_clip_radius == pytest.approx(14.5)
+        assert w.testAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        assert not w.testAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent)
+        assert w.testAttribute(Qt.WidgetAttribute.WA_NoSystemBackground)
+        assert w.testAttribute(Qt.WidgetAttribute.WA_AlwaysStackOnTop)
+
+        w.set_transparent_rounded_clip(0.0)
+
+        assert w._transparent_rounded_clip_enabled is False
+        assert w._rounded_clip_radius == pytest.approx(0.0)
+        assert not w.testAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        assert w.testAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent)
+        assert not w.testAttribute(Qt.WidgetAttribute.WA_NoSystemBackground)
+        assert not w.testAttribute(Qt.WidgetAttribute.WA_AlwaysStackOnTop)
+
+    def test_uniform_buffer_includes_transparent_clip_values(self, qapp):
+        """Rounded preview clip uniforms should be packed after existing renderer data."""
+        w = VideoRendererWidget()
+        w.set_transparent_rounded_clip(12.0)
+        ru = Mock()
+
+        w._update_uniforms(ru, QSize(320, 180))
+
+        _, offset, size, data = ru.updateDynamicBuffer.call_args.args
+        assert offset == 0
+        assert size == _UBO_SIZE
+        assert len(data) == _UBO_SIZE
+
+        unpacked = struct.unpack("iiii4f4fiiii4f", data)
+        assert unpacked[-4] == pytest.approx(320.0)
+        assert unpacked[-3] == pytest.approx(180.0)
+        assert unpacked[-2] == pytest.approx(12.0 * w.devicePixelRatioF())
+        assert unpacked[-1] == pytest.approx(0.0)
+
 
 # ------------------------------------------------------------------
 # VideoArea – construction & public API
@@ -412,10 +480,10 @@ class TestVideoArea:
         va = VideoArea()
         assert va._video_sink is not None
 
-    def test_renderer_uses_opengl_api(self, qapp):
-        """VideoRendererWidget must use the OpenGL backend (same as GLImageViewer)."""
+    def test_renderer_uses_platform_qrhi_api(self, qapp):
+        """VideoRendererWidget must use the same selected QRhi backend as GLImageViewer."""
         va = VideoArea()
-        assert va._renderer.api() == QRhiWidget.Api.OpenGL
+        assert va._renderer.render_backend_name() == selected_rhi_backend_name()
 
     def test_opaque_widget_attributes(self, qapp):
         """VideoArea and renderer must block WA_TranslucentBackground cascade."""
@@ -424,6 +492,30 @@ class TestVideoArea:
         assert va.testAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent)
         assert not va._renderer.testAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         assert va._renderer.testAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent)
+
+    def test_transparent_preview_configures_both_video_surfaces(self, qapp, mocker):
+        """Long-press transparent rounding must apply to adjusted and plain video paths."""
+        va = VideoArea()
+        renderer_clip = mocker.patch.object(va._renderer, "set_transparent_rounded_clip")
+        edit_clip = mocker.patch.object(va._edit_viewer, "set_transparent_rounded_clip")
+
+        va.set_transparent_preview_enabled(True, corner_radius=18.0)
+
+        assert va.testAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        assert not va.testAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent)
+        assert va._surface_stack.testAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        assert va._surface_stack.testAttribute(Qt.WidgetAttribute.WA_AlwaysStackOnTop)
+        renderer_clip.assert_called_once_with(18.0)
+        edit_clip.assert_called_once_with(18.0)
+
+        va.set_transparent_preview_enabled(False, corner_radius=18.0)
+
+        assert not va.testAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        assert va.testAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent)
+        assert not va._surface_stack.testAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        assert not va._surface_stack.testAttribute(Qt.WidgetAttribute.WA_AlwaysStackOnTop)
+        assert renderer_clip.call_args_list == [call(18.0), call(0.0)]
+        assert edit_clip.call_args_list == [call(18.0), call(0.0)]
 
     def test_surface_color_updates_letterbox(self, qapp):
         """set_surface_color should update the renderer's letterbox color."""
@@ -714,7 +806,7 @@ class TestVideoArea:
 
     def _setup_load_video_mocks(self, va, mocker, player_duration: int = 0):
         """Helper: patch common load_video dependencies."""
-        mocker.patch.object(va._player, "setSource")
+        mock_set_source = mocker.patch.object(va._player, "setSource")
         mocker.patch.object(va._player, "setPosition")
         mocker.patch.object(va._renderer, "clear_frame")
         mocker.patch.object(va._renderer, "set_container_rotation")
@@ -727,6 +819,7 @@ class TestVideoArea:
             return_value=False,
         )
         mocker.patch.object(va._player, "duration", return_value=player_duration)
+        return mock_set_source
 
     def test_load_video_same_source_reload_uses_prev_duration_when_player_reports_zero(
         self, qapp, mocker
@@ -777,6 +870,39 @@ class TestVideoArea:
 
         # No fallback for a different source.
         mock_on_dur.assert_not_called()
+
+    def test_load_video_on_macos_clears_previous_source_before_loading_next(
+        self, qapp, mocker
+    ):
+        """macOS AVFoundation should release the old source before a new one loads."""
+        va = VideoArea()
+        va._current_source = Path("/fake/old.mov")
+        mock_set_source = self._setup_load_video_mocks(va, mocker, player_duration=0)
+        mock_stop = mocker.patch.object(va._player, "stop")
+        mocker.patch("iPhoto.gui.ui.widgets.video_area.sys.platform", "darwin")
+
+        va.load_video(Path("/fake/new.mov"))
+
+        mock_stop.assert_called_once_with()
+        assert mock_set_source.call_count == 2
+        assert mock_set_source.call_args_list[0].args[0].isEmpty()
+        assert mock_set_source.call_args_list[1].args[0].toLocalFile() == "/fake/new.mov"
+
+    def test_load_video_off_macos_does_not_clear_previous_source_first(
+        self, qapp, mocker
+    ):
+        """Other platforms keep the existing load path unchanged."""
+        va = VideoArea()
+        va._current_source = Path("/fake/old.mp4")
+        mock_set_source = self._setup_load_video_mocks(va, mocker, player_duration=0)
+        mock_stop = mocker.patch.object(va._player, "stop")
+        mocker.patch("iPhoto.gui.ui.widgets.video_area.sys.platform", "linux")
+
+        va.load_video(Path("/fake/new.mp4"))
+
+        mock_stop.assert_not_called()
+        mock_set_source.assert_called_once()
+        assert mock_set_source.call_args.args[0].toLocalFile() == "/fake/new.mp4"
 
     def test_stop_clears_frame_and_source(self, qapp, mocker):
         """stop() should clear the renderer frame and release the media source."""
@@ -1045,6 +1171,7 @@ def test_gl_image_viewer_resets_after_first_video_upload(qapp, mocker):
 def test_gl_image_viewer_initialize_uses_context_extra_functions(qapp, mocker):
     """QRhi-backed viewer init should resolve GL calls from the current context."""
 
+    mocker.patch.dict("os.environ", {"IPHOTO_RHI_BACKEND": "opengl"})
     viewer = GLImageViewer()
     rhi = mocker.Mock()
     gl_funcs = mocker.Mock()
@@ -1075,6 +1202,7 @@ def test_gl_image_viewer_render_declares_external_content_pass(qapp, mocker):
     """Raw GL rendering must declare ExternalContent before beginExternal()."""
 
     viewer = GLImageViewer()
+    viewer._uses_raw_gl = True
     viewer._gl_initialized = True
     viewer._gl_funcs = mocker.Mock()
     viewer._renderer = mocker.Mock()

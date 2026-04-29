@@ -45,6 +45,8 @@ iPhotron_VERSION_amd64/
 │                   ├── poi/
 │                   ├── rendering_styles/
 │                   ├── routing/
+│                   ├── search/
+│                   │   └── geonames.sqlite3
 │                   └── bin/
 └── usr/
     └── local/
@@ -67,7 +69,7 @@ Maintainer: OliverZhao
 Description: Folder-native local photo album manager
  iPhotron is a folder-native photo manager inspired by macOS Photos.
  It organizes media using lightweight JSON manifests and provides rich
- album functionality while keeping all original files intact.
+ album functionality while keeping destructive edits out of original media.
 ```
 
 > **Fields explained**
@@ -114,6 +116,7 @@ Description: Folder-native local photo album manager
    - `maps/tiles/extension/bin/osmand_native_widget.so`
    - `maps/tiles/extension/bin/libOsmAndCore_shared.so`
    - `maps/tiles/extension/bin/libOsmAndCoreTools_shared.so`
+   - `maps/tiles/extension/search/geonames.sqlite3`
 
    If this release includes offline-ready People scanning, also verify the face
    runtime payload from the Nuitka bundle:

@@ -16,6 +16,7 @@ def test_appctx_proxies_runtime_context(monkeypatch) -> None:
         container=object(),
         theme=object(),
         asset_runtime=object(),
+        library_session=object(),
         recent_albums=[Path("A")],
         defer_startup_tasks=True,
     )
@@ -27,8 +28,17 @@ def test_appctx_proxies_runtime_context(monkeypatch) -> None:
     def _remember(root: Path) -> None:
         calls["remember"] = root
 
+    def _open_library(root: Path):
+        calls["open"] = root
+        return runtime.library_session
+
+    def _close_library() -> None:
+        calls["close"] = True
+
     runtime.resume_startup_tasks = _resume
     runtime.remember_album = _remember
+    runtime.open_library = _open_library
+    runtime.close_library = _close_library
 
     monkeypatch.setattr(
         "iPhoto.bootstrap.runtime_context.RuntimeContext.create",
@@ -43,10 +53,15 @@ def test_appctx_proxies_runtime_context(monkeypatch) -> None:
     assert context.container is runtime.container
     assert context.theme is runtime.theme
     assert context.asset_runtime is runtime.asset_runtime
+    assert context.library_session is runtime.library_session
     assert context.recent_albums is runtime.recent_albums
 
     context.resume_startup_tasks()
     context.remember_album(Path("B"))
+    assert context.open_library(Path("C")) is runtime.library_session
+    context.close_library()
 
     assert calls["resume"] is True
     assert calls["remember"] == Path("B")
+    assert calls["open"] == Path("C")
+    assert calls["close"] is True

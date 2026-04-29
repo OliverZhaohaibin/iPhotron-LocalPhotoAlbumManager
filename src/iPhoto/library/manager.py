@@ -13,7 +13,7 @@ sub-modules extracted during a refactoring pass:
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import TYPE_CHECKING, Dict, List, Optional
 
 from PySide6.QtCore import QFileSystemWatcher, QObject, Qt, QTimer, Signal, QThreadPool, QMutex
 
@@ -37,6 +37,9 @@ from .workers.face_scan_worker import FaceScanWorker
 from .workers.scanner_worker import ScannerWorker
 
 LOGGER = get_logger()
+
+if TYPE_CHECKING:  # pragma: no cover
+    from ..bootstrap.library_scan_service import LibraryScanService
 
 
 class LibraryManager(
@@ -92,6 +95,7 @@ class LibraryManager(
         self._geotagged_assets_cache_root: Optional[Path] = None
         self._face_scan_status_message: Optional[str] = None
         self._people_index_coordinator: PeopleIndexCoordinator | None = None
+        self._scan_service: "LibraryScanService | None" = None
 
     # ------------------------------------------------------------------
     # Basic properties
@@ -115,8 +119,7 @@ class LibraryManager(
         # Clear existing watches to ensure initialization operations (like creating
         # the deleted items folder) do not trigger "directoryChanged" signals
         # from an active watcher, which would cause a double-refresh.
-        if existing := self._watcher.directories():
-            self._watcher.removePaths(existing)
+        self._clear_watches_for_rebind()
 
         # Cancel any in-flight scan so we do not block UI interactions while
         # rebinding to a new library root.
@@ -155,6 +158,24 @@ class LibraryManager(
             LOGGER.info("bind_path: emitting treeUpdated for empty album tree")
             self.treeUpdated.emit()
 
+    def _clear_watches_for_rebind(self) -> None:
+        existing_dirs = self._watcher.directories()
+        existing_files = self._watcher.files()
+        if existing_dirs:
+            self._watcher.removePaths(existing_dirs)
+        if existing_files:
+            self._watcher.removePaths(existing_files)
+        if not self._watcher.directories() and not self._watcher.files():
+            return
+
+        try:
+            self._watcher.directoryChanged.disconnect(self._on_directory_changed)
+        except (RuntimeError, TypeError):
+            pass
+        self._watcher.deleteLater()
+        self._watcher = QFileSystemWatcher(self)
+        self._watcher.directoryChanged.connect(self._on_directory_changed)
+
     def list_albums(self) -> list[AlbumNode]:
         return list(self._albums)
 
@@ -189,6 +210,15 @@ class LibraryManager(
 
     def face_scan_status_message(self) -> str | None:
         return self._face_scan_status_message
+
+    def bind_scan_service(self, scan_service: "LibraryScanService | None") -> None:
+        """Bind the current library session scan command surface."""
+
+        self._scan_service = scan_service
+
+    @property
+    def scan_service(self) -> "LibraryScanService | None":
+        return self._scan_service
 
     def _bind_people_index_coordinator(self, root: Path) -> None:
         coordinator = get_people_index_coordinator(root)

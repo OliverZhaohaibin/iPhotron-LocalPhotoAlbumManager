@@ -8,7 +8,7 @@ import time
 
 from PySide6.QtCore import QObject, QRunnable, Signal
 
-from .... import app as backend
+from ....bootstrap.library_scan_service import LibraryScanService
 
 # Max updates per second for progress signal
 MAX_UPDATES_PER_SEC = 10
@@ -36,6 +36,7 @@ class ImportWorker(QRunnable):
         signals: ImportSignals,
         *,
         library_root: Path | None = None,
+        scan_service: LibraryScanService | None = None,
     ) -> None:
         super().__init__()
         self.setAutoDelete(False)
@@ -45,6 +46,7 @@ class ImportWorker(QRunnable):
         self._signals = signals
         self._is_cancelled = False
         self._library_root = library_root
+        self._scan_service = scan_service
         self._had_incremental_error = False
 
     @property
@@ -52,6 +54,14 @@ class ImportWorker(QRunnable):
         """Return the signal bundle associated with the worker."""
 
         return self._signals
+
+    @property
+    def scan_service(self) -> LibraryScanService:
+        """Return the session scan service, creating a compatibility fallback."""
+
+        if self._scan_service is None:
+            self._scan_service = LibraryScanService(self._library_root or self._destination)
+        return self._scan_service
 
     def cancel(self) -> None:
         """Request cancellation of the in-flight import operation."""
@@ -108,13 +118,13 @@ class ImportWorker(QRunnable):
         if imported and not self._is_cancelled:
             try:
                 if self._had_incremental_error:
-                    backend.rescan(self._destination, library_root=self._library_root)
+                    self._full_rescan()
                 else:
-                    backend.pair(self._destination, library_root=self._library_root)
+                    self.scan_service.pair_album(self._destination)
             except Exception as exc:  # pragma: no cover - defensive fallback
                 self._signals.error.emit(str(exc))
                 try:
-                    backend.rescan(self._destination, library_root=self._library_root)
+                    self._full_rescan()
                 except Exception as fallback_exc:  # pragma: no cover - defensive fallback
                     self._signals.error.emit(str(fallback_exc))
                 else:
@@ -129,10 +139,14 @@ class ImportWorker(QRunnable):
         if not batch or self._is_cancelled:
             return
         try:
-            backend.scan_specific_files(
-                self._destination, batch, library_root=self._library_root
-            )
+            self.scan_service.scan_specific_files(self._destination, batch)
         except Exception as exc:
             # Log error but don't fail the whole import; final rescan might fix it
             self._had_incremental_error = True
             self._signals.error.emit(f"Incremental scan failed: {exc}")
+
+    def _full_rescan(self) -> None:
+        """Rebuild the destination index scope through the session scan service."""
+
+        result = self.scan_service.scan_album(self._destination, persist_chunks=False)
+        self.scan_service.finalize_scan(self._destination, result.rows)

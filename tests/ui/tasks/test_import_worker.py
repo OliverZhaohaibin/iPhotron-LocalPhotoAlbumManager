@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from unittest.mock import patch
+from types import SimpleNamespace
 
 import pytest
 
@@ -22,6 +22,33 @@ pytest.importorskip(
 from PySide6.QtWidgets import QApplication
 
 from iPhoto.gui.ui.tasks.import_worker import ImportWorker, ImportSignals
+
+
+class FakeScanService:
+    def __init__(self, *, fail_incremental: bool = False, fail_pair: bool = False) -> None:
+        self.fail_incremental = fail_incremental
+        self.fail_pair = fail_pair
+        self.specific: list[tuple[Path, list[Path]]] = []
+        self.paired: list[Path] = []
+        self.scanned: list[tuple[Path, bool]] = []
+        self.finalized: list[tuple[Path, list[dict]]] = []
+
+    def scan_specific_files(self, root: Path, files: list[Path]) -> None:
+        self.specific.append((root, list(files)))
+        if self.fail_incremental:
+            raise RuntimeError("chunk failed")
+
+    def pair_album(self, root: Path) -> None:
+        self.paired.append(root)
+        if self.fail_pair:
+            raise RuntimeError("pair failed")
+
+    def scan_album(self, root: Path, *, persist_chunks: bool):
+        self.scanned.append((root, persist_chunks))
+        return SimpleNamespace(rows=[{"rel": "photo.jpg"}])
+
+    def finalize_scan(self, root: Path, rows: list[dict]) -> None:
+        self.finalized.append((root, rows))
 
 
 @pytest.fixture()
@@ -49,30 +76,56 @@ def test_import_worker_prefers_pair_over_rescan(qapp: QApplication, tmp_path: Pa
         lambda root, imported, success: finished.append((root, imported, success))
     )
 
-    with patch(
-        "iPhoto.gui.ui.tasks.import_worker.backend.scan_specific_files"
-    ) as scan_specific_files, patch(
-        "iPhoto.gui.ui.tasks.import_worker.backend.pair"
-    ) as pair, patch(
-        "iPhoto.gui.ui.tasks.import_worker.backend.rescan"
-    ) as rescan:
-        pair.return_value = None
-        rescan.return_value = None
+    scan_service = FakeScanService()
 
-        def copier(src: Path, dst: Path) -> Path:
-            target = dst / src.name
-            target.write_bytes(src.read_bytes())
-            return target
+    def copier(src: Path, dst: Path) -> Path:
+        target = dst / src.name
+        target.write_bytes(src.read_bytes())
+        return target
 
-        worker = ImportWorker([source], destination, copier, signals)
-        worker.run()
+    worker = ImportWorker([source], destination, copier, signals, scan_service=scan_service)
+    worker.run()
 
-        scan_specific_files.assert_called()
-        pair.assert_called_once_with(destination, library_root=None)
-        rescan.assert_not_called()
+    assert scan_service.specific == [(destination, [destination / source.name])]
+    assert scan_service.paired == [destination]
+    assert scan_service.scanned == []
 
     assert finished
     root, imported, success = finished[-1]
     assert root == destination
     assert imported == [destination / source.name]
     assert success is True
+
+
+def test_import_worker_falls_back_to_full_rescan_after_incremental_failure(
+    qapp: QApplication,
+    tmp_path: Path,
+) -> None:
+    destination = tmp_path / "Album"
+    destination.mkdir()
+    source = tmp_path / "photo.jpg"
+    source.write_bytes(b"data")
+
+    signals = ImportSignals()
+    errors: list[str] = []
+    finished: list[tuple[Path, list[Path], bool]] = []
+    signals.error.connect(errors.append)
+    signals.finished.connect(
+        lambda root, imported, success: finished.append((root, imported, success))
+    )
+
+    scan_service = FakeScanService(fail_incremental=True)
+
+    def copier(src: Path, dst: Path) -> Path:
+        target = dst / src.name
+        target.write_bytes(src.read_bytes())
+        return target
+
+    worker = ImportWorker([source], destination, copier, signals, scan_service=scan_service)
+    worker.run()
+
+    assert errors == ["Incremental scan failed: chunk failed"]
+    assert scan_service.paired == []
+    assert scan_service.scanned == [(destination, False)]
+    assert scan_service.finalized == [(destination, [{"rel": "photo.jpg"}])]
+    assert finished[-1] == (destination, [destination / source.name], True)

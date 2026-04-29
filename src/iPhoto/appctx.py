@@ -15,6 +15,7 @@ if TYPE_CHECKING:  # pragma: no cover
     from .di.container import DependencyContainer
     from .gui.facade import AppFacade
     from .gui.ui.theme_manager import ThemeManager
+    from .bootstrap.library_session import LibrarySession
     from .library.manager import LibraryManager
     from .settings.manager import SettingsManager
 
@@ -55,6 +56,10 @@ class AppContext:
         return self._runtime.asset_runtime
 
     @property
+    def library_session(self) -> "LibrarySession | None":
+        return self._runtime.library_session
+
+    @property
     def recent_albums(self) -> list[Path]:
         return self._runtime.recent_albums
 
@@ -63,3 +68,9 @@ class AppContext:
 
     def remember_album(self, root: Path) -> None:
         self._runtime.remember_album(root)
+
+    def open_library(self, root: Path) -> "LibrarySession":
+        return self._runtime.open_library(root)
+
+    def close_library(self) -> None:
+        self._runtime.close_library()

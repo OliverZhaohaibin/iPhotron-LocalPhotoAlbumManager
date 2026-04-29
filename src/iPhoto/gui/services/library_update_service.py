@@ -9,9 +9,9 @@ from typing import Callable, Dict, Iterable, List, Optional, Sequence, Set, Tupl
 
 from PySide6.QtCore import QObject, QTimer, Signal, Slot
 
-from ... import app as backend
 from ...cache.index_store import get_global_repository
-from ...config import RECENTLY_DELETED_DIR_NAME
+from ...bootstrap.library_scan_service import LibraryScanService
+from ...config import DEFAULT_EXCLUDE, DEFAULT_INCLUDE, RECENTLY_DELETED_DIR_NAME
 from ...errors import IPhotoError
 from ...utils.pathutils import resolve_work_dir
 from ..background_task_manager import BackgroundTaskManager
@@ -82,12 +82,24 @@ class LibraryUpdateService(QObject):
         """Synchronously rebuild the album index and emit cache updates."""
 
         library_root = None
+        scan_service = None
         lib_manager = self._library_manager_getter()
         if lib_manager:
             library_root = lib_manager.root()
+            scan_service = getattr(lib_manager, "scan_service", None)
 
         try:
-            rows = backend.rescan(album.root, library_root=library_root)
+            if scan_service is not None:
+                result = scan_service.scan_album(album.root, persist_chunks=False)
+                scan_service.finalize_scan(album.root, result.rows)
+                rows = result.rows
+            else:
+                fallback = LibraryScanService(library_root or album.root)
+                result = fallback.scan_album(album.root, persist_chunks=False)
+                fallback.finalize_scan(album.root, result.rows)
+                if library_root is None:
+                    fallback.sync_manifest_favorites(album.root)
+                rows = result.rows
         except IPhotoError as exc:
             self.errorRaised.emit(str(exc))
             return []
@@ -100,9 +112,11 @@ class LibraryUpdateService(QObject):
         """Start an asynchronous rescan for *album* using the background pool."""
 
         library_root = None
+        scan_service = None
         lib_manager = self._library_manager_getter()
         if lib_manager:
             library_root = lib_manager.root()
+            scan_service = getattr(lib_manager, "scan_service", None)
 
         if self._scanner_worker is not None:
             self._scanner_worker.cancel()
@@ -110,8 +124,8 @@ class LibraryUpdateService(QObject):
             return
 
         filters = album.manifest.get("filters", {}) if isinstance(album.manifest, dict) else {}
-        include: Iterable[str] = filters.get("include", backend.DEFAULT_INCLUDE)
-        exclude: Iterable[str] = filters.get("exclude", backend.DEFAULT_EXCLUDE)
+        include: Iterable[str] = filters.get("include", DEFAULT_INCLUDE)
+        exclude: Iterable[str] = filters.get("exclude", DEFAULT_EXCLUDE)
 
         signals = ScannerSignals()
         signals.progressUpdated.connect(self._relay_scan_progress)
@@ -123,6 +137,7 @@ class LibraryUpdateService(QObject):
             exclude,
             signals,
             library_root=library_root,
+            scan_service=scan_service,
         )
         self._scanner_worker = worker
         self._scan_pending = False
@@ -159,12 +174,17 @@ class LibraryUpdateService(QObject):
         
         # Get library root for global database access
         library_root = None
+        scan_service = None
         lib_manager = self._library_manager_getter()
         if lib_manager:
             library_root = lib_manager.root()
+            scan_service = getattr(lib_manager, "scan_service", None)
 
         try:
-            groups = backend.pair(album.root, library_root=library_root)
+            active_scan_service = scan_service or LibraryScanService(
+                library_root or album.root
+            )
+            groups = active_scan_service.pair_album(album.root)
         except IPhotoError as exc:
             self.errorRaised.emit(str(exc))
             return []
@@ -460,14 +480,7 @@ class LibraryUpdateService(QObject):
             # existed before the rescan.  The worker keeps the result in memory,
             # therefore we flush the global index and ``links.json`` here to
             # mirror the historical facade behaviour before notifying listeners.
-            backend._update_index_snapshot(root, materialised_rows, library_root=library_root)
-            backend._prune_index_scope(root, materialised_rows, library_root=library_root)
-            # Use backend.pair() so that library-relative rows produced by the
-            # worker are converted to album-relative before being passed to
-            # _ensure_links.  Calling _ensure_links directly with library-relative
-            # rows when library_root is set causes sync_live_roles_to_db to
-            # double-prefix the rel paths (e.g. "album/album/photo.heic").
-            backend.pair(root, library_root=library_root)
+            worker.scan_service.finalize_scan(root, materialised_rows)
         except IPhotoError as exc:
             self.errorRaised.emit(str(exc))
             self.scanFinished.emit(root, False)
@@ -602,7 +615,14 @@ class LibraryUpdateService(QObject):
             return
 
         signals = RescanSignals()
-        worker = RescanWorker(album_root, signals, library_root=library_root)
+        library = self._library_manager()
+        scan_service = getattr(library, "scan_service", None) if library is not None else None
+        worker = RescanWorker(
+            album_root,
+            signals,
+            library_root=library_root,
+            scan_service=scan_service,
+        )
         task_id = self._build_restore_rescan_task_id(album_root)
 
         def _on_finished(path: Path, succeeded: bool) -> None:

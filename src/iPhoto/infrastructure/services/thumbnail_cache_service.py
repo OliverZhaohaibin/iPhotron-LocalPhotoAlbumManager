@@ -8,8 +8,8 @@ from PySide6.QtGui import QImage, QPainter, QPixmap, QTransform
 
 from iPhoto.infrastructure.services.thumbnail_generator import PillowThumbnailGenerator
 from iPhoto.core.color_resolver import compute_color_statistics
+from iPhoto.core import geo_utils
 from iPhoto.core.image_filters import apply_adjustments
-from iPhoto.gui.ui.tasks import geo_utils
 from iPhoto.io import sidecar
 from iPhoto.utils import image_loader
 
@@ -74,6 +74,7 @@ class ThumbnailCacheService(QObject):
         self._pending_tasks.clear()
 
     def set_disk_cache_path(self, disk_cache_path: Path) -> None:
+        self._is_shutting_down = False
         if self._disk_cache_path == disk_cache_path:
             return
         self._disk_cache_path = disk_cache_path

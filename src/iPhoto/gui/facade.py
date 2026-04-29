@@ -7,8 +7,7 @@ from typing import Callable, Iterable, List, Optional, Set, TYPE_CHECKING, Any
 
 from PySide6.QtCore import QObject, Signal, Slot
 
-from .. import app as backend
-from ..cache.index_store import get_global_repository
+from ..bootstrap.library_scan_service import LibraryScanService
 from ..config import DEFAULT_INCLUDE, DEFAULT_EXCLUDE
 from ..errors import IPhotoError
 from ..models.album import Album
@@ -185,15 +184,22 @@ class AppFacade(QObject):
     def open_album(self, root: Path) -> Optional[Album]:
         """Open *root* and trigger background work as needed."""
 
-        # Get library root first for global database access
         library_root = self._library_manager.root() if self._library_manager else None
+        scan_service = (
+            getattr(self._library_manager, "scan_service", None)
+            if self._library_manager is not None
+            else None
+        )
+        if scan_service is None:
+            scan_service = LibraryScanService(library_root or root)
         
         try:
-            album = backend.open_album(
+            album = Album.open(root)
+            preparation = scan_service.prepare_album_open(
                 root,
                 autoscan=False,
-                library_root=library_root,
                 hydrate_index=False,
+                sync_manifest_favorites=library_root is None,
             )
         except IPhotoError as exc:
             self.errorRaised.emit(str(exc))
@@ -204,16 +210,9 @@ class AppFacade(QObject):
 
         self.albumOpened.emit(album_root)
 
-        # Check if the index is empty (likely because it's a new or cleaned album)
-        # and trigger a background scan if necessary.
-        index_root = library_root if library_root else album_root
-        has_assets = False
-        try:
-            store = get_global_repository(index_root)
-            next(store.read_all())
-            has_assets = True
-        except (StopIteration, IPhotoError):
-            pass
+        # Check if the scoped index is empty (likely because it's a new or
+        # cleaned album) and trigger a background scan if necessary.
+        has_assets = preparation.asset_count > 0
 
         is_already_scanning = False
         if self._library_manager and self._library_manager.is_scanning_path(album_root):

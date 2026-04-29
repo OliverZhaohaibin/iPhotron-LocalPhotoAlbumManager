@@ -16,6 +16,7 @@ if TYPE_CHECKING:  # pragma: no cover
     from ..infrastructure.services.library_asset_runtime import LibraryAssetRuntime
     from ..library.manager import LibraryManager
     from ..settings.manager import SettingsManager
+    from .library_session import LibrarySession
 
 _logger = logging.getLogger(__name__)
 
@@ -66,6 +67,7 @@ class RuntimeContext:
     recent_albums: list[Path] = field(default_factory=list)
     defer_startup_tasks: bool = False
     theme: "ThemeManager" = field(init=False)
+    library_session: "LibrarySession | None" = field(init=False, default=None)
     _pending_basic_library_path: Path | None = field(init=False, default=None, repr=False)
 
     def __post_init__(self) -> None:
@@ -113,17 +115,16 @@ class RuntimeContext:
         )
         if candidate.exists():
             try:
-                self.library.bind_path(candidate)
-                _logger.info(
-                    "resume_startup_tasks: bind_path succeeded, root=%s",
-                    self.library.root(),
-                )
                 existing_work_dir = resolve_work_dir(candidate)
                 had_existing_index = (
                     existing_work_dir is not None
                     and (existing_work_dir / "global_index.db").exists()
                 )
-                self.asset_runtime.bind_library_root(candidate)
+                self.open_library(candidate)
+                _logger.info(
+                    "resume_startup_tasks: bind_path succeeded, root=%s",
+                    self.library.root(),
+                )
                 if (
                     not had_existing_index
                     and not self.library.is_scanning_path(candidate)
@@ -144,6 +145,36 @@ class RuntimeContext:
             self.library.errorRaised.emit(
                 f"Basic Library path is unavailable: {candidate}"
             )
+
+    def open_library(self, root: Path) -> "LibrarySession":
+        """Bind *root* as the active library and rebuild library-scoped adapters."""
+
+        from .library_session import LibrarySession
+
+        normalized = Path(root).expanduser()
+        self.close_library()
+        self.library.bind_path(normalized)
+        self.library_session = LibrarySession(
+            normalized,
+            asset_runtime=self.asset_runtime,
+        )
+        bind_scan_service = getattr(self.library, "bind_scan_service", None)
+        if callable(bind_scan_service):
+            bind_scan_service(self.library_session.scans)
+        return self.library_session
+
+    def close_library(self) -> None:
+        """Close the active library-scoped session if one exists."""
+
+        bind_scan_service = getattr(self.library, "bind_scan_service", None)
+        if callable(bind_scan_service):
+            bind_scan_service(None)
+
+        session = getattr(self, "library_session", None)
+        if session is None:
+            return
+        session.shutdown()
+        self.library_session = None
 
     def remember_album(self, root: Path) -> None:
         """Track *root* in the recent albums list, keeping the most recent first."""

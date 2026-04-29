@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Dict, Iterable, List, Optional
 
 from PySide6.QtCore import QMutexLocker, QRunnable
 
+from ..bootstrap.library_scan_service import LibraryScanService
 from ..cache.index_store import get_global_repository
 from ..utils.logging import get_logger
 from .workers.face_scan_worker import FaceScanWorker
@@ -21,15 +22,23 @@ LOGGER = get_logger()
 class _PairingWorker(QRunnable):
     """Run live-photo pairing off the main thread after a scan completes."""
 
-    def __init__(self, scan_root: Path, library_root: Optional[Path]) -> None:
+    def __init__(
+        self,
+        scan_root: Path,
+        library_root: Optional[Path],
+        scan_service: LibraryScanService | None = None,
+    ) -> None:
         super().__init__()
         self._scan_root = scan_root
         self._library_root = library_root
+        self._scan_service = scan_service
 
     def run(self) -> None:
         try:
-            from .. import app as backend  # noqa: PLC0415
-            backend.pair(self._scan_root, library_root=self._library_root)
+            scan_service = self._scan_service or LibraryScanService(
+                self._library_root or self._scan_root
+            )
+            scan_service.pair_album(self._scan_root)
         except Exception as exc:  # noqa: BLE001
             LOGGER.warning(
                 "Failed to persist live photo pairings after scan of %s "
@@ -72,7 +81,14 @@ class ScanCoordinatorMixin:
         self._live_scan_buffer.clear()
 
         # Pass library root to scanner so all assets go to global database
-        worker = ScannerWorker(root, include, exclude, signals, library_root=self._root)
+        worker = ScannerWorker(
+            root,
+            include,
+            exclude,
+            signals,
+            library_root=self._root,
+            scan_service=getattr(self, "_scan_service", None),
+        )
         self._current_scanner_worker = worker
         self._face_scan_status_message = None
         self.faceScanStatusChanged.emit("")
@@ -321,10 +337,9 @@ class ScanCoordinatorMixin:
 
         # Persist Live Photo pairings once a scan completes so the database and
         # links.json reflect the latest scan results.
+        scan_service = worker.scan_service
         try:
-            from .. import app as backend
-            backend._prune_index_scope(root, rows, library_root=self._root)
-            backend.pair(root, library_root=self._root)
+            scan_service.finalize_scan(root, rows)
         except Exception as exc:
             LOGGER.warning("Failed to persist live photo pairings after scan: %s", exc)
 
@@ -334,7 +349,7 @@ class ScanCoordinatorMixin:
 
         # Persist live-photo pairings in the background to avoid blocking the
         # main thread while downstream listeners start refreshing.
-        self._scan_thread_pool.start(_PairingWorker(root, self._root))
+        self._scan_thread_pool.start(_PairingWorker(root, self._root, scan_service))
 
     def _on_scan_error(self, root: Path, message: str) -> None:
         locker = QMutexLocker(self._scan_buffer_lock)

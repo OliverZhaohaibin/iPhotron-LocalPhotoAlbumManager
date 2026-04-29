@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from functools import wraps
 from pathlib import Path
 import sys
 
@@ -12,8 +13,7 @@ if __package__ in (None, ""):
     package_root = Path(__file__).resolve().parent.parent
     if str(package_root) not in sys.path:
         sys.path.insert(0, str(package_root))
-    from iPhoto import app as app_facade  # type: ignore  # pragma: no cover
-    from iPhoto.cache.index_store import get_global_repository  # type: ignore  # pragma: no cover
+    from iPhoto.bootstrap.library_session import create_headless_library_session  # type: ignore  # pragma: no cover
     from iPhoto.errors import (
         AlbumNotFoundError,
         IPhotoError,
@@ -21,13 +21,10 @@ if __package__ in (None, ""):
         ManifestInvalidError,
     )  # type: ignore  # pragma: no cover
     from iPhoto.models.album import Album  # type: ignore  # pragma: no cover
-    from iPhoto.utils.pathutils import resolve_work_dir  # type: ignore  # pragma: no cover
 else:
-    from . import app as app_facade
-    from .cache.index_store import get_global_repository
+    from .bootstrap.library_session import create_headless_library_session
     from .errors import AlbumNotFoundError, IPhotoError, LockTimeoutError, ManifestInvalidError
     from .models.album import Album
-    from .utils.pathutils import resolve_work_dir
 
 app = typer.Typer(help="Folder-native photo manager with Live Photo support")
 cover_app = typer.Typer(help="Manage album covers")
@@ -37,6 +34,7 @@ app.add_typer(feature_app, name="feature")
 
 
 def _handle_errors(func):
+    @wraps(func)
     def wrapper(*args, **kwargs):
         try:
             return func(*args, **kwargs)
@@ -48,6 +46,13 @@ def _handle_errors(func):
             raise typer.Exit(1) from exc
 
     return wrapper
+
+
+def _require_scan_service(session):
+    scan_service = session.scans
+    if scan_service is None:
+        raise IPhotoError("Library scan service is unavailable.")
+    return scan_service
 
 
 @app.command()
@@ -66,8 +71,14 @@ def init(album_dir: Path = typer.Argument(Path.cwd(), exists=False)) -> None:
 def scan(album_dir: Path = typer.Argument(Path.cwd(), exists=True)) -> None:
     """Scan files and update the index cache."""
 
-    rows = app_facade.rescan(album_dir)
-    print(f"[green]Indexed {len(rows)} assets")
+    session = create_headless_library_session(album_dir)
+    try:
+        scan_service = _require_scan_service(session)
+        result = scan_service.scan_album(album_dir, persist_chunks=False)
+        scan_service.finalize_scan(album_dir, result.rows)
+    finally:
+        session.shutdown()
+    print(f"[green]Indexed {len(result.rows)} assets")
 
 
 @app.command()
@@ -75,7 +86,12 @@ def scan(album_dir: Path = typer.Argument(Path.cwd(), exists=True)) -> None:
 def pair(album_dir: Path = typer.Argument(Path.cwd(), exists=True)) -> None:
     """Rebuild Live Photo pairings."""
 
-    groups = app_facade.pair(album_dir)
+    session = create_headless_library_session(album_dir)
+    try:
+        scan_service = _require_scan_service(session)
+        groups = scan_service.pair_album(album_dir)
+    finally:
+        session.shutdown()
     print(f"[green]Paired {len(groups)} Live Photos")
 
 
@@ -84,7 +100,7 @@ def pair(album_dir: Path = typer.Argument(Path.cwd(), exists=True)) -> None:
 def cover_set(album_dir: Path, rel: str) -> None:
     """Set the album cover to the provided relative path."""
 
-    album = app_facade.open_album(album_dir)
+    album = Album.open(album_dir)
     album.set_cover(rel)
     album.save()
     print(f"[green]Set cover to {rel}")
@@ -95,7 +111,7 @@ def cover_set(album_dir: Path, rel: str) -> None:
 def feature_add(album_dir: Path, ref: str) -> None:
     """Add an item to the featured list."""
 
-    album = app_facade.open_album(album_dir)
+    album = Album.open(album_dir)
     album.add_featured(ref)
     album.save()
     print(f"[green]Added featured {ref}")
@@ -106,7 +122,7 @@ def feature_add(album_dir: Path, ref: str) -> None:
 def feature_rm(album_dir: Path, ref: str) -> None:
     """Remove an item from the featured list."""
 
-    album = app_facade.open_album(album_dir)
+    album = Album.open(album_dir)
     album.remove_featured(ref)
     album.save()
     print(f"[green]Removed featured {ref}")
@@ -117,21 +133,16 @@ def feature_rm(album_dir: Path, ref: str) -> None:
 def report(album_dir: Path = typer.Argument(Path.cwd(), exists=True)) -> None:
     """Print a simple album report."""
 
-    album = app_facade.open_album(album_dir)
-    rows = list(get_global_repository(album_dir).read_all())
-    work_dir = resolve_work_dir(album_dir)
-    links_path = work_dir / "links.json" if work_dir is not None else None
-    if links_path is not None and links_path.exists():
-        import json
-
-        with links_path.open("r", encoding="utf-8") as handle:
-            groups = json.load(handle).get("live_groups", [])
-    else:
-        groups = [group.__dict__ for group in app_facade.pair(album_dir)]
+    session = create_headless_library_session(album_dir)
+    try:
+        scan_service = _require_scan_service(session)
+        album_report = scan_service.report_album(album_dir)
+    finally:
+        session.shutdown()
     print(
-        f"Album: {album.manifest.get('title')}\n"
-        f"Assets: {len(rows)}\n"
-        f"Live pairs: {len(groups)}"
+        f"Album: {album_report.title or album_dir.name}\n"
+        f"Assets: {album_report.asset_count}\n"
+        f"Live pairs: {album_report.live_pair_count}"
     )
 
 

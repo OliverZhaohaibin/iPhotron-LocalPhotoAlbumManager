@@ -2,6 +2,7 @@
 
 import os
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import pytest
@@ -58,9 +59,12 @@ def _patch_scan_and_repo(fake_rows, repo_side_effect=None):
         yield from fake_rows
 
     return (
-        patch('iPhoto.library.workers.scanner_worker.scan_album', side_effect=fake_scan_album),
-        patch('iPhoto.library.workers.scanner_worker.get_global_repository', return_value=mock_store),
-        patch('iPhoto.library.workers.scanner_worker.load_incremental_index_cache', return_value={}),
+        patch(
+            'iPhoto.infrastructure.services.filesystem_media_scanner.scan_album',
+            side_effect=fake_scan_album,
+        ),
+        patch('iPhoto.bootstrap.library_scan_service.get_global_repository', return_value=mock_store),
+        patch('iPhoto.bootstrap.library_scan_service.load_incremental_index_cache', return_value={}),
         mock_store,
     )
 
@@ -86,6 +90,45 @@ def test_scanner_worker_batch_success(temp_album, qapp):
     assert finished_spy.count() == 1
     assert batch_failed_spy.count() == 0
     assert worker.failed_count == 0
+
+
+def test_scanner_worker_uses_injected_scan_service(temp_album, qapp):
+    """The worker should be a Qt transport around the session scan service."""
+
+    class FakeScanService:
+        def __init__(self) -> None:
+            self.calls = []
+
+        def scan_album(self, root: Path, **kwargs):
+            self.calls.append((root, kwargs))
+            kwargs["chunk_callback"]([{"rel": "test_0.jpg"}])
+            return SimpleNamespace(
+                rows=[{"rel": "test_0.jpg"}],
+                failed_count=0,
+            )
+
+    signals = ScannerSignals()
+    service = FakeScanService()
+    worker = ScannerWorker(
+        temp_album,
+        ["*.jpg"],
+        [],
+        signals,
+        scan_service=service,
+    )
+    chunk_ready_spy = QSignalSpy(signals.chunkReady)
+    finished_spy = QSignalSpy(signals.finished)
+
+    worker.run()
+    qapp.processEvents()
+
+    assert service.calls
+    root, kwargs = service.calls[0]
+    assert root == temp_album
+    assert kwargs["include"] == ["*.jpg"]
+    assert kwargs["persist_chunks"] is True
+    assert chunk_ready_spy.count() == 1
+    assert finished_spy.count() == 1
 
 
 def test_scanner_worker_batch_failure_handling(temp_album, qapp):
@@ -172,9 +215,9 @@ def test_scanner_worker_cleanup_on_error(temp_album, qapp):
     signals = ScannerSignals()
     worker = ScannerWorker(temp_album, ["*.jpg"], [], signals)
     
-    with patch('iPhoto.library.workers.scanner_worker.scan_album') as mock_scan, \
-         patch('iPhoto.library.workers.scanner_worker.load_incremental_index_cache', return_value={}), \
-         patch('iPhoto.library.workers.scanner_worker.get_global_repository'):
+    with patch('iPhoto.infrastructure.services.filesystem_media_scanner.scan_album') as mock_scan, \
+         patch('iPhoto.bootstrap.library_scan_service.load_incremental_index_cache', return_value={}), \
+         patch('iPhoto.bootstrap.library_scan_service.get_global_repository'):
         mock_generator = Mock()
         mock_generator.close = Mock()
         mock_scan.return_value = mock_generator

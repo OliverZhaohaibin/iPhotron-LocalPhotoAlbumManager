@@ -162,6 +162,7 @@ Nuitka 打包、runtime 同步与安装器说明请参阅
 
 将多个人物组成 group 后，可以查看这些人物共同出现的照片。Group 卡片支持设置封面、拖拽排序，
 未置顶的 group 可以解散。人脸扫描依赖可选的 `ai-demo` 依赖；即使不安装 AI 运行时，核心照片管理功能仍可使用。
+![People and groups interface](<../picture/People & Group.png>)
 
 ### 🖼 沉浸式详细视图
 优雅的照片/视频查看器，带有胶片条导航器和浮动播放栏；GPU 渲染路径会按平台选择：
@@ -200,7 +201,10 @@ macOS 默认 QRhi/Metal，Windows 与 Linux 使用 OpenGL-backed QRhi。
 “Assign a Location” 搜索、选择并确认地点。地点会始终保存到本机图库数据库；如果
 ExifTool 可用，iPhotron 还会尽力把 GPS 写回原始媒体文件，写回失败时会给出提示。
 如果 maps extension 缺失，面板会提供下载入口，而不是静默失效。
-![Info interface](../picture/info1.png)
+
+| 带地图的信息面板 | 详情页浮动信息面板 |
+| --- | --- |
+| ![带地图的信息面板](../picture/info1.png) | ![详情页浮动信息面板](../picture/info2.png) |
 
 ### 💬 丰富的交互
 - 从资源管理器/访达直接拖放文件到相册。

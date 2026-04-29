@@ -167,6 +167,7 @@ Drag people into groups to collect shared photos for multiple people. Group
 cards can use a selected cover, be reordered, and be disbanded when they are not
 pinned. Face scanning uses the optional `ai-demo` dependencies; the core photo
 manager remains usable without installing the AI runtime.
+![People and groups interface](<docs/picture/People & Group.png>)
 
 ### 🖼 Immersive Detail View
 An elegant viewer with a filmstrip navigator, floating playback bar for videos,
@@ -210,7 +211,11 @@ database; if ExifTool is available, iPhotron also best-effort writes GPS
 metadata back to the original file and warns when that write-back fails. If the
 maps extension is missing, the panel offers the download path instead of failing
 silently.
-![Info interface](docs/picture/info1.png)
+
+| Info panel with map | Floating info panel in detail view |
+| --- | --- |
+| ![Info panel with map](docs/picture/info1.png) | ![Floating info panel in detail view](docs/picture/info2.png) |
+
 ### 💬 Rich Interactions
 - Drag & drop files from Explorer/Finder directly into albums.
 - Multi-selection & context menus for Copy, Show in Folder, Move, Delete, Restore.

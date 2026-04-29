@@ -172,6 +172,7 @@ anzuzeigen. Gruppenkarten unterstützen ein ausgewähltes Cover, Drag-and-drop-
 Sortierung und können aufgelöst werden, solange sie nicht angepinnt sind. Das
 Face Scanning nutzt die optionalen `ai-demo`-Abhängigkeiten; die zentrale
 Fotoverwaltung bleibt auch ohne AI-Laufzeit nutzbar.
+![People and groups interface](<../picture/People & Group.png>)
 
 ### 🖼 Immersive Detailansicht
 Ein eleganter Foto-/Videobetrachter mit Filmstreifen-Navigator, schwebendem
@@ -219,7 +220,10 @@ verfügbar ist, schreibt iPhotron die GPS-Daten zusätzlich best-effort in die
 Originaldatei zurück und warnt, wenn dieser Schreibvorgang fehlschlägt. Wenn
 die maps extension fehlt, bietet das Panel den Downloadpfad an, statt still zu
 scheitern.
-![Info interface](../picture/info1.png)
+
+| Info-Panel mit Karte | Schwebendes Info-Panel in der Detailansicht |
+| --- | --- |
+| ![Info-Panel mit Karte](../picture/info1.png) | ![Schwebendes Info-Panel in der Detailansicht](../picture/info2.png) |
 
 ### 💬 Umfangreiche Interaktionen
 - Ziehen und Ablegen von Dateien direkt aus dem Explorer/Finder in Alben.

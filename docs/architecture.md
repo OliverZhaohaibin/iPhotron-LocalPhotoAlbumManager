@@ -1,501 +1,621 @@
-# 🏗️ Architecture
+# Architecture vNext
 
-> Overall architecture, module boundaries, data flow, and key design decisions for **iPhotron**.
+> Target architecture for **iPhotron**. This document is intentionally
+> prescriptive: it describes where the codebase should converge, not merely the
+> current file tree.
 
 ---
 
-## High-Level Architecture
+## Status
 
-iPhotron follows a **layered architecture** based on **MVVM + DDD (Domain-Driven Design)** principles. The codebase is split into a **pure-Python backend** (no GUI dependency) and a **PySide6 GUI layer** that communicates through a facade.
+The current architecture is not the final optimal target. It has the right
+direction, but it is still a transition state:
+
+- The desktop app already uses PySide6, MVVM-style coordinators/viewmodels,
+  `RuntimeContext`, folder-native libraries, global SQLite indexing, People,
+  Maps, and GPU-backed editing.
+- Several business paths still overlap: two asset repository APIs, more than
+  one scan pipeline, legacy model shims, direct cache access from application
+  services, and a few cross-layer imports.
+- Compatibility modules such as `app.py`, `appctx.py`, and `iPhoto.models.*`
+  may remain during migration, but they are not target architecture.
+
+The vNext target is a **library-scoped, modular desktop monolith**:
+`RuntimeContext` owns one active `LibrarySession`; GUI, CLI, and background
+workers call application-level contracts; SQLite, ExifTool, FFmpeg, thumbnail
+rendering, filesystem scanning, and Qt threading are infrastructure adapters.
+
+---
+
+## Product Principles
+
+iPhotron keeps these product-level decisions:
+
+- **Folder-native library.** The filesystem remains the user's source of album
+  organization. A folder is an album, and iPhotron must not require an import
+  step before browsing.
+- **Local library state.** Library runtime state lives under `.iPhoto/`, with
+  `.iPhoto/global_index.db` as the authoritative asset index for one library
+  root.
+- **Non-destructive editing.** Visual edits are stored in `.ipo` sidecars.
+  Original media is preserved. Location assignment is the explicit exception:
+  it persists locally and best-effort writes GPS metadata to original files
+  through ExifTool.
+- **Rebuildable scan facts, durable human choices.** Metadata, thumbnails,
+  Live Photo roles, and People runtime snapshots can be rebuilt. Names, covers,
+  favorites, hidden state, groups, order, and pinned items are human decisions
+  and must survive rescans.
+- **Offline maps extension.** Maps remain an optional self-contained runtime
+  rooted at `src/maps/tiles/extension/`, with graceful fallback when native OBF
+  support is unavailable.
+- **Cross-platform desktop first.** macOS, Windows, and Linux stay first-class.
+  Platform rendering differences are isolated behind adapter/runtime selection
+  layers.
+
+---
+
+## Target Shape
 
 ```mermaid
 graph TB
-    subgraph GUI["GUI Layer (PySide6)"]
-        direction TB
+    subgraph Runtime["Runtime"]
+        RuntimeContext["RuntimeContext"]
+        LibrarySession["LibrarySession"]
+        Ports["Application Ports"]
+    end
+
+    subgraph GUI["GUI (PySide6)"]
         Views["Views / Widgets"]
         ViewModels["ViewModels"]
         Coordinators["Coordinators"]
-        GuiFacade["AppFacade (QObject)"]
-        Services["Background Services"]
+        QtWorkers["Qt Worker Adapters"]
     end
 
-    subgraph Backend["Core Backend (Pure Python)"]
-        direction TB
-        AppFacade["app.py — Backend Facade"]
-        UseCases["Application Use Cases"]
-        DomainModels["Domain Models"]
-        Repos["Repository Interfaces"]
-        Infra["Infrastructure (SQLite, FS)"]
+    subgraph Application["Application"]
+        UseCases["Use Cases"]
+        AppServices["Application Services"]
+        DTOs["DTOs / Queries"]
+        Policies["Workflow Policies"]
     end
 
-    Views -->|data binding| ViewModels
+    subgraph Domain["Domain"]
+        Models["Models / Value Objects"]
+        RepoPorts["Repository Protocols"]
+        DomainServices["Pure Domain Services"]
+    end
+
+    subgraph Infrastructure["Infrastructure"]
+        SQLite["SQLite Repositories"]
+        Metadata["ExifTool / FFmpeg Adapters"]
+        Scanner["Filesystem Scanner Adapter"]
+        Thumbs["Thumbnail Adapter"]
+        PeopleInfra["People Persistence / AI Runtime"]
+        MapRuntime["Maps Extension Runtime"]
+    end
+
+    RuntimeContext --> LibrarySession
+    LibrarySession --> Ports
+
+    Views --> ViewModels
     Coordinators --> ViewModels
-    Coordinators --> GuiFacade
-    GuiFacade -->|signals/slots| AppFacade
-    Services --> AppFacade
+    ViewModels --> Ports
+    QtWorkers --> Ports
 
-    UseCases --> DomainModels
-    UseCases --> Repos
-    Infra -->|implements| Repos
-    AppFacade --> UseCases
+    Ports --> UseCases
+    AppServices --> UseCases
+    UseCases --> RepoPorts
+    UseCases --> DomainServices
+    UseCases --> DTOs
+    DomainServices --> Models
+    RepoPorts --> Models
+
+    SQLite -.implements.-> RepoPorts
+    Metadata -.implements.-> Ports
+    Scanner -.implements.-> Ports
+    Thumbs -.implements.-> Ports
+    PeopleInfra -.implements.-> Ports
+    MapRuntime -.adapter.-> GUI
 ```
+
+The dependency direction is one-way:
+
+```text
+gui -> runtime/application -> domain
+infrastructure -> application/domain ports
+bounded contexts -> application/domain ports
+```
+
+No lower layer imports GUI. No application service reaches around ports into
+SQLite singletons or concrete infrastructure modules.
 
 ---
 
-## Module Boundary Overview
+## Layer Boundaries
 
-```mermaid
-graph TB
-    subgraph DomainLayer["1. Domain Layer"]
-        Models["models/ — Album, Asset, MediaType, LiveGroup"]
-        RepoInterfaces["repositories.py — IAlbumRepository, IAssetRepository"]
-    end
+### `domain/`
 
-    subgraph ApplicationLayer["2. Application Layer"]
-        UC_Open["use_cases/open_album.py"]
-        UC_Scan["use_cases/scan_album.py"]
-        UC_Pair["use_cases/pair_live_photos.py"]
-        SvcAlbum["services/album_service.py"]
-        SvcAsset["services/asset_service.py"]
-        DTOs["dtos.py"]
-    end
+Owns pure business concepts:
 
-    subgraph InfraLayer["3. Infrastructure Layer"]
-        SQLiteAsset["sqlite_asset_repository.py"]
-        SQLiteAlbum["sqlite_album_repository.py"]
-        DBPool["db/pool.py"]
-    end
+- `Album`, `Asset`, `MediaType`, Live Photo grouping, scan state values,
+  People identity values, and query value objects.
+- Repository and service protocols that describe what the application needs.
+- Pure domain services that do not touch Qt, SQLite, the filesystem, ExifTool,
+  FFmpeg, or wall-clock side effects except through passed values.
 
-    subgraph CoreBackend["4. Core Backend"]
-        App["app.py — Facade"]
-        IO["io/ — scanner_adapter, metadata"]
-        Core["core/ — pairing, resolvers, filters"]
-        Cache["cache/index_store/ — global asset index"]
-        DI["di/ — Dependency Injection"]
-        Events["events/ — Event Bus"]
-        Errors["errors/ — Error Handling"]
-        People["people/ — face detection, clustering, state"]
-        Library["library/ — scan coordinator, workers"]
-    end
+Forbidden:
 
-    subgraph GUILayer["5. GUI Layer"]
-        Main["main.py"]
-        AppCtx["appctx.py — AppContext"]
-        Facade["facade.py — AppFacade"]
-        Coord["coordinators/"]
-        VM["viewmodels/"]
-        RenderBackend["render_backend.py — QRhi backend selection"]
-        UI["ui/ — windows, controllers, models, widgets"]
-        Tasks["ui/tasks/ — QRunnable workers"]
-    end
+- PySide6 / Qt imports.
+- SQLite or `cache/index_store` imports.
+- Filesystem writes, ExifTool, FFmpeg, model download, or thumbnail generation.
 
-    subgraph MapModule["6. Map Component"]
-        MapWidget["map_widget/"]
-        StyleResolver["style_resolver.py"]
-        TileParser["tile_parser.py"]
-    end
+### `application/`
 
-    ApplicationLayer --> DomainLayer
-    InfraLayer -->|implements| DomainLayer
-    CoreBackend --> ApplicationLayer
-    CoreBackend --> InfraLayer
-    GUILayer --> CoreBackend
-    MapModule --> GUILayer
-```
+Owns workflows:
 
----
+- Use cases such as opening a library/album, scanning media, pairing Live
+  Photos, assigning location, moving/deleting/restoring assets, exporting, and
+  People queries.
+- DTOs, query objects, progress events, and application-level policies.
+- Ports such as repositories, scanners, metadata readers/writers, thumbnail
+  renderers, and People index services.
 
-## Directory Structure
+Forbidden:
 
-```
-src/
-├── iPhoto/
-│   ├── domain/              # Pure business models & repository interfaces
-│   │   ├── models/          # Album, Asset, MediaType, LiveGroup, query.py
-│   │   └── repositories.py  # IAlbumRepository, IAssetRepository
-│   ├── application/         # Use Cases & Application Services
-│   │   ├── use_cases/       # open_album, scan_album, pair_live_photos
-│   │   ├── services/        # album_service, asset_service
-│   │   ├── interfaces.py    # IMetadataProvider, IThumbnailGenerator
-│   │   └── dtos.py          # Data Transfer Objects
-│   ├── infrastructure/      # Concrete implementations
-│   │   ├── repositories/    # SQLite implementations
-│   │   ├── db/              # Connection pool
-│   │   └── services/        # Metadata extraction, thumbnails
-│   ├── app.py               # Backend Facade
-│   ├── models/              # Legacy data structures (Album, LiveGroup)
-│   ├── io/                  # scanner_adapter.py, metadata reading
-│   ├── core/                # Algorithms: pairing, resolvers, filters
-│   │   ├── light_resolver.py
-│   │   ├── color_resolver.py
-│   │   ├── bw_resolver.py
-│   │   ├── curve_resolver.py
-│   │   ├── selective_color_resolver.py
-│   │   ├── levels_resolver.py
-│   │   └── filters/         # NumPy → Numba JIT → QColor fallback
-│   ├── cache/               # Global SQLite index_store/
-│   ├── people/              # Face scan pipeline, People repositories/state
-│   ├── library/             # LibraryManager, scan coordinator, workers
-│   ├── utils/               # Wrappers: exiftool.py, ffmpeg.py
-│   ├── schemas/             # JSON Schema (album.schema.json)
-│   ├── di/                  # Dependency Injection container
-│   ├── events/              # Event bus (publish-subscribe)
-│   ├── errors/              # Unified error handling
-│   └── gui/                 # PySide6 desktop application
-│       ├── main.py          # GUI entry point (iphoto-gui)
-│       ├── appctx.py        # AppContext — shared global state
-│       ├── facade.py        # AppFacade (QObject) — GUI ↔ Backend bridge
-│       ├── render_backend.py # QRhi backend selection (Metal/OpenGL)
-│       ├── coordinators/    # MVVM Coordinators
-│       ├── viewmodels/      # ViewModels for data binding
-│       ├── services/        # Background operation services
-│       ├── background_task_manager.py
-│       └── ui/              # Windows, controllers, models, widgets, tasks
-└── maps/                    # Semi-independent map rendering module
-    ├── map_widget/          # Core map widget & rendering
-    ├── style_resolver.py    # MapLibre style sheet parser
-    └── tile_parser.py       # .pbf vector tile parser
-```
+- Direct imports from `gui/`, `cache/`, or concrete `infrastructure/`
+  implementations.
+- Direct use of `get_global_repository()` or other process-wide persistence
+  singletons.
+- Qt signals, `QRunnable`, widgets, or thread-pool ownership.
+
+### `infrastructure/`
+
+Owns concrete adapters:
+
+- SQLite repository implementation for the global asset index.
+- ExifTool and FFmpeg metadata readers/writers.
+- Filesystem scanner implementation.
+- Thumbnail rendering and disk/memory cache adapters.
+- Runtime discovery for external binaries and packaged assets.
+
+Forbidden:
+
+- Imports from `gui/`.
+- Calling viewmodels, coordinators, widgets, or GUI task helpers.
+- Owning product workflow decisions that belong in `application/`.
+
+### `gui/`
+
+Owns presentation:
+
+- Views/widgets, viewmodels, coordinators, menus, controllers, shortcuts,
+  Qt workers, and signal adaptation.
+- UI state and ergonomic desktop behavior.
+- Threading adapters that forward progress/results from application use cases
+  back to Qt.
+
+Rules:
+
+- GUI code calls application contracts through `RuntimeContext` /
+  `LibrarySession`.
+- Coordinators orchestrate views and viewmodels; they do not directly own asset
+  persistence.
+- Qt workers are transport adapters only. They must not contain unique business
+  rules that bypass application use cases.
+
+### Bounded Contexts
+
+`people/`, `maps/`, and `core/` are bounded contexts:
+
+- `people/` owns face detection, clustering, People repositories/state, manual
+  faces, groups, and People queries. It exposes application-level ports to the
+  rest of the app.
+- `maps/` owns offline map runtime discovery, tile parsing, native OsmAnd
+  widget/helper integration, and map rendering internals.
+- `core/` owns pure editing/rendering math, Live Photo pairing rules, geometry,
+  raw loading helpers, export transformations, and filter algorithms.
+
+They may keep specialized internal structure, but they must follow the same
+dependency direction and avoid GUI-to-infrastructure shortcuts becoming public
+business APIs.
 
 ---
 
-## Data Flow
+## Runtime Contract
 
-### Album Opening Flow
+`RuntimeContext` is the desktop composition root. In vNext it owns exactly one
+active `LibrarySession`.
 
-```mermaid
-sequenceDiagram
-    participant User
-    participant GUI as GUI (View)
-    participant VM as ViewModel
-    participant Facade as AppFacade
-    participant Backend as app.py
-    participant UC as OpenAlbumUseCase
-    participant Repo as SQLiteRepository
-    participant FS as FileSystem
+```text
+RuntimeContext
+  settings
+  theme
+  library_session
+  recent_albums
+  resume_startup_tasks()
+  remember_album(root)
 
-    User->>GUI: Select album folder
-    GUI->>VM: Update selected album
-    VM->>Facade: openAlbum(path)
-    Facade->>Backend: open_album(path)
-    Backend->>UC: execute(path)
-    UC->>FS: Read .iphoto.album.json
-    UC->>Repo: Query assets for album
-    Repo->>Repo: SQLite indexed query
-    Repo-->>UC: Asset list
-    UC-->>Backend: AlbumDTO
-    Backend-->>Facade: Result
-    Facade-->>VM: Signal: albumOpened
-    VM-->>GUI: Update asset grid
+LibrarySession
+  library_root
+  assets
+  albums
+  scanner
+  people
+  thumbnails
+  maps
+  commands/use_cases
 ```
 
-### Photo Editing Flow
+The session is the single library-scoped surface used by:
+
+- GUI coordinators and viewmodels.
+- CLI commands.
+- Background workers.
+- Future automation or extension entry points.
+
+`app.py` may temporarily forward old calls into this session, but new runtime
+code should not treat `app.py` as the backend facade. `appctx.py` remains a
+compatibility proxy for old GUI construction paths only.
+
+---
+
+## Target Public Ports
+
+These ports define the application boundary. Names are target names; existing
+classes can be migrated incrementally.
+
+| Port | Responsibility |
+| --- | --- |
+| `AssetRepositoryPort` | Query, count, upsert, merge scan rows, update library-managed state, and expose transaction boundaries for one library database. |
+| `AlbumRepositoryPort` | Read/write folder manifests and album tree metadata through application semantics. |
+| `MediaScannerPort` | Discover media paths and produce normalized scan rows without deciding persistence lifecycle. |
+| `MetadataProviderPort` | Read image/video metadata in batches. |
+| `MetadataWriterPort` | Best-effort write GPS/location metadata to original files. |
+| `ThumbnailRendererPort` | Generate thumbnails and preview images without GUI ownership. |
+| `PeopleIndexPort` | Queue face scan candidates, commit People snapshots, and query People/group assets. |
+| `MapRuntimePort` | Report map extension availability and provide map/search runtime adapters. |
+
+Important target corrections:
+
+- `AssignLocationService` receives `AssetRepositoryPort` and
+  `MetadataWriterPort`; it must not call `get_global_repository()` directly.
+- Thumbnail rendering uses `core.geo_utils` for geometry helpers; infrastructure
+  must not import `gui.ui.tasks.geo_utils`.
+- Runtime code uses `domain.models` or manifest-specific models. `iPhoto.models.*`
+  is a compatibility shim only.
+
+---
+
+## Persistence Model
+
+Each library root owns one `.iPhoto/` workspace:
+
+| Path | Target ownership |
+| --- | --- |
+| `.iPhoto/global_index.db` | `AssetRepositoryPort` SQLite implementation. Authoritative asset index, scan facts, favorites, Live Photo role state, trash state, and face scan status. |
+| `.iPhoto/links.json` | Compatibility materialization of Live Photo pairing payload. Target code should treat DB-backed Live Photo state as authoritative. |
+| `.iPhoto/faces/face_index.db` | Rebuildable People runtime snapshot. |
+| `.iPhoto/faces/face_state.db` | Durable People user state: names, covers, hidden flags, order, groups, pinned state, and group asset caches. |
+| `.iPhoto/faces/thumbnails/` | Derived cropped face thumbnails. |
+| `.iPhoto/cache/thumbs/` | Derived UI thumbnail cache. |
+| `.ipo` sidecars | Durable non-destructive edit instructions next to source media. |
+
+SQLite access must converge on one repository implementation for assets. The
+current split between `cache/index_store.AssetRepository` and
+`SQLiteAssetRepository` is transitional and should be resolved by making one
+adapter implement `AssetRepositoryPort`.
+
+---
+
+## Core Flows
+
+### Library Startup
 
 ```mermaid
 sequenceDiagram
-    participant User
-    participant EditView as Edit View
-    participant Resolver as Resolvers (light, color, bw, curves, levels)
-    participant Renderer as GPU Preview Renderer
-    participant IPO as .ipo Sidecar File
+    participant Main as gui.main
+    participant Runtime as RuntimeContext
+    participant Session as LibrarySession
+    participant Ports as Application Ports
+    participant Infra as Infrastructure
 
-    User->>EditView: Adjust slider
-    EditView->>Resolver: Compute parameters
-    Resolver-->>Renderer: Shader uniforms / QRhi buffers
-    Renderer-->>EditView: Real-time preview
-    User->>EditView: Click "Done"
-    EditView->>IPO: Save adjustments to .ipo
+    Main->>Runtime: create(defer_startup=True)
+    Runtime->>Session: create inactive session
+    Main->>Runtime: resume_startup_tasks()
+    Runtime->>Session: bind_library(root)
+    Session->>Ports: initialize library use cases
+    Ports->>Infra: bind SQLite/cache/map/people adapters
+    Session-->>Main: library ready / scan required
 ```
 
-The viewer keeps the public `GLImageViewer` API for existing controllers, but
-the implementation now selects the rendering backend at construction time.
-Windows and Linux keep the raw OpenGL path inside `QRhiWidget`. macOS defaults
-to a Metal-capable QRhi renderer implemented by
-`gui/ui/widgets/rhi_image_renderer.py`, with `IPHOTO_RHI_BACKEND=opengl`
-available for diagnostics.
-
-The video renderer follows the same QRhi backend selection. Packaged builds
-must ship the image, overlay, and video `.qsb` shader files or the first media
-preview frame can fail before user-visible rendering starts.
-
-### Map Backend Selection Flow
+### Open Album / Collection
 
 ```mermaid
 sequenceDiagram
-    participant View as PhotoMapView
-    participant Source as MapSourceSpec
-    participant Probe as Runtime Probes
-    participant Native as NativeOsmAndWidget
-    participant PyGL as Python GL Map
-    participant CPU as QWidget CPU Map
+    participant UI as GUI View
+    participant VM as GalleryViewModel
+    participant Session as LibrarySession
+    participant UseCase as OpenCollectionUseCase
+    participant Repo as AssetRepositoryPort
 
-    View->>Source: resolve default OBF extension
-    Source-->>View: OBF assets or legacy tiles
-    View->>Probe: check OpenGL and native widget runtime
-    alt native OsmAnd runtime loads
-        View->>Native: use osmand_native_widget
-    else helper OBF runtime exists
-        View->>PyGL: use helper-backed Python OBF renderer
-    else legacy fallback
-        View->>CPU: use legacy vector map source
-    end
+    UI->>VM: select album or static collection
+    VM->>Session: open_collection(query)
+    Session->>UseCase: execute(query)
+    UseCase->>Repo: query/count/page assets
+    Repo-->>UseCase: assets
+    UseCase-->>VM: DTO page + total count
+    VM-->>UI: update model/window
 ```
 
-On macOS, the Python GL map uses `MapGLWindowWidget`, a
-`QOpenGLWindow + createWindowContainer()` wrapper, instead of `QOpenGLWidget`.
-This avoids transparent-window FBO composition problems while preserving the
-legacy map renderer as a known-good fallback.
+GUI viewmodels may keep paging and selection caches, but the repository remains
+the source of truth for persisted asset state.
 
-### Location Assignment Flow
+### Scan And Index
 
 ```mermaid
 sequenceDiagram
-    participant User
-    participant Info as Info Panel
+    participant Trigger as GUI/CLI/Watcher
+    participant Session as LibrarySession
+    participant UseCase as ScanLibraryUseCase
+    participant Scanner as MediaScannerPort
+    participant Repo as AssetRepositoryPort
+    participant People as PeopleIndexPort
+    participant Pairing as Live Photo Pairing
+
+    Trigger->>Session: scan(scope, filters)
+    Session->>UseCase: execute(scope)
+    UseCase->>Scanner: discover and normalize rows
+    Scanner-->>UseCase: scan chunks
+    UseCase->>Repo: merge_scan_rows(chunk)
+    Repo-->>UseCase: persisted rows
+    UseCase->>People: enqueue eligible rows
+    UseCase-->>Trigger: progress/chunk events
+    UseCase->>Pairing: rebuild roles after scan
+    Pairing->>Repo: persist live roles
+```
+
+There should be one scan use case. `LibraryManager -> ScannerWorker ->
+scanner_adapter`, `app.rescan()`, and `ScanAlbumUseCase` are current entry
+points that must converge. In the target architecture:
+
+- Qt workers only adapt threading and progress signals.
+- CLI uses the same use case without Qt.
+- Scans are additive by default. Deletion/trash lifecycle remains a separate
+  explicit flow.
+- Live Photo pairing remains post-scan and writes through repository ports.
+- People indexing remains asynchronous but consumes persisted scan rows.
+
+### Assign Location
+
+```mermaid
+sequenceDiagram
+    participant UI as Info Panel
     participant Service as AssignLocationService
-    participant Exif as ExifTool
-    participant DB as global_index.db
+    participant Writer as MetadataWriterPort
+    participant Reader as MetadataProviderPort
+    participant Repo as AssetRepositoryPort
 
-    User->>Info: Pick and confirm location
-    Info->>Service: assign(asset, lon, lat, name)
-    Service->>Exif: best-effort write GPS metadata
-    alt file metadata write succeeds
-        Exif-->>Service: refreshed metadata
-    else ExifTool missing or write fails
-        Exif-->>Service: error reason
+    UI->>Service: assign(asset, lat, lon, name)
+    Service->>Writer: best-effort write GPS
+    alt write succeeds
+        Service->>Reader: refresh metadata
+    else write fails
+        Writer-->>Service: recoverable error
     end
-    Service->>DB: persist GPS, location, sanitized metadata
-    Service-->>Info: result plus optional file_write_error
-    Info-->>User: warning only when original write-back failed
+    Service->>Repo: persist gps/location/metadata
+    Service-->>UI: result + optional warning
 ```
 
-Assign Location is intentionally resilient: the user decision is stored in
-`global_index.db` even if ExifTool is missing or the original file cannot be
-updated. Metadata written into SQLite is sanitized to JSON-compatible values so
-failed third-party payloads do not corrupt the index row.
+The local database update is authoritative for the app. File write failures are
+reported as warnings, not full operation failures.
 
-### Scanning & Indexing Flow
+### Thumbnail Rendering
 
 ```mermaid
 sequenceDiagram
-    participant User
-    participant GUI as GUI
-    participant LM as LibraryManager
-    participant SW as ScannerWorker
-    participant SA as io/scanner_adapter.py
-    participant Meta as ExifToolMetadataProvider
-    participant DB as .iPhoto/global_index.db
-    participant Pair as backend.pair()
-    participant FW as FaceScanWorker
-    participant PI as PeopleIndexCoordinator
-    participant FaceDB as .iPhoto/faces/*.db
+    participant VM as Gallery/List Adapter
+    participant Thumb as ThumbnailRendererPort
+    participant Cache as Thumbnail Cache
+    participant Core as core editing math
+    participant IO as Image/Video loaders
 
-    User->>GUI: Trigger scan
-    GUI->>LM: start_scanning(root)
-    LM->>SW: start ScannerWorker
-    LM->>FW: start FaceScanWorker
-    SW->>SA: scan_album(root, include, exclude, existing_index)
-    SA->>SA: FileDiscoveryThread walks filesystem
-    SA->>Meta: batch metadata extraction
-    Meta-->>SA: normalized rows
-    SA-->>SW: scanned rows
-    SW->>DB: merge_scan_rows(chunk)
-    SW-->>LM: chunkReady(chunk)
-    LM->>FW: enqueue_rows(chunk)
-    SW-->>LM: finished(rows)
-    LM->>Pair: rebuild Live Photo links
-    FW->>PI: submit_detected_batch(detected faces)
-    PI->>FaceDB: replace face/person snapshot
-    PI->>DB: update face_status(done/retry)
-    PI-->>GUI: snapshotCommitted / peopleIndexUpdated
+    VM->>Thumb: request(path, size)
+    Thumb->>Cache: lookup memory/disk
+    alt miss
+        Thumb->>IO: load frame/image
+        Thumb->>Core: apply sidecar geometry/adjustments
+        Thumb->>Cache: store derived thumbnail
+    end
+    Thumb-->>VM: image ready
 ```
 
-### Current Scan Entry Points
-
-The repository currently contains more than one scan implementation, but the active desktop runtime path is the worker-based pipeline:
-
-1. `src/iPhoto/gui/facade.py::rescan_current_async()`
-   Uses `LibraryManager.start_scanning()` when the app is bound to a library. This is the main GUI path.
-2. `src/iPhoto/library/scan_coordinator.py`
-   Starts `ScannerWorker` and `FaceScanWorker` together so file indexing and People updates can progress concurrently.
-3. `src/iPhoto/app.py::rescan()`
-   Blocking backend API used by CLI/fallback workflows and by some background services.
-4. `src/iPhoto/app.py::open_album()`
-   Can trigger a lightweight autoscan when the index is empty.
-
-`src/iPhoto/application/use_cases/scan_album.py` and `src/iPhoto/application/services/parallel_scanner.py` still exist and are covered by tests/DI wiring, but they are not the primary GUI scan path today.
-
-### Current Filesystem Scan Pipeline
-
-The current asset scan is split into discovery, metadata extraction, merge, and post-processing stages:
-
-1. Discovery
-   `io.scanner_adapter.scan_album()` reuses `FileDiscoveryThread` from `application/use_cases/scan_album.py` to walk the directory tree. It applies album include/exclude filters and prunes internal folders such as `.iPhoto`.
-2. Incremental cache check
-   Before re-reading metadata, the adapter compares each file against the existing index using relative path, file size, and mtime with a 1-second tolerance. Cache hits are yielded directly.
-3. Metadata normalization
-   Cache misses are batched through `ExifToolMetadataProvider.get_metadata_batch()` and normalized by `normalize_metadata()`. This stage fills canonical row fields such as `id`, `rel`, `dt`, `ts`, `mime`, `media_type`, dimensions, duration, and `face_status`.
-4. Thumbnail enrichment
-   Images get a micro-thumbnail through `PillowThumbnailGenerator`. If metadata extraction fails, the adapter falls back to a minimal row so the file is still indexed.
-5. Chunked persistence
-   `ScannerWorker` persists each chunk with `AssetRepository.merge_scan_rows()`. The repository performs atomic read-merge-write inside one transaction so scan facts and library-managed state are not racing each other.
-6. Post-scan Live Photo pairing
-   When the scan finishes, `ScanCoordinatorMixin._on_scan_finished()` calls `backend.pair()` to rebuild `links.json` and synchronize Live Photo roles back into the global index.
-
-### Face Scan / People Pipeline
-
-People indexing is a second pipeline layered on top of the asset scan rather than part of metadata extraction itself.
-
-1. Candidate selection
-   New or retried rows are forwarded from `ScannerWorker.chunkReady` to `FaceScanWorker.enqueue_rows()`. Only image-like assets are eligible. Videos and hidden Live Photo motion parts are skipped by `people.status.is_face_scan_candidate()`.
-2. Global backlog top-up
-   `FaceScanWorker` does not rely only on the latest scan chunk. It also refills its queue from `global_index.db` by reading rows whose `face_status` is `pending` or `retry`.
-3. Detection and embedding
-   `FaceClusterPipeline.detect_faces_for_rows()` loads each asset, runs `insightface.app.FaceAnalysis`, drops small faces, extracts normalized embeddings, and writes cropped face thumbnails to `.iPhoto/faces/thumbnails/`.
-4. Session staging
-   `PeopleIndexCoordinator.submit_detected_batch()` creates a `FaceScanSession`, separates `done` and `retry` assets, and keeps scan-time mutations serialized under a lock.
-5. Snapshot rebuild
-   `FaceScanSession.build_runtime_snapshot()` merges staged detections with all previously persisted faces, reclusters all faces with DBSCAN, then canonicalizes identities against persisted People state.
-6. Commit and publish
-   `FaceRepository.replace_all()` rewrites the runtime People snapshot in `.iPhoto/faces/face_index.db`. `FaceStateRepository.sync_scan_results()` persists stable identity/user state in `.iPhoto/faces/face_state.db`. After commit, the global asset index is updated from `pending/retry` to `done`, and `PeopleSnapshotEvent` is emitted back to the GUI.
-
-### People Repository Responsibilities
-
-The People subsystem deliberately separates rebuildable scan output from
-user-authored state:
-
-| Component | Responsibility |
-|-----------|----------------|
-| `FaceScanWorker` | Background queue owner. It receives scan chunks, tops up pending/retry backlog from `global_index.db`, runs detection, and reports retry/failure status without blocking the asset scan. |
-| `PeopleIndexCoordinator` | Serialized mutation boundary for scan commits and UI mutations such as cover changes, manual face edits, merges, groups, and group deletion. |
-| `FaceRepository` | Runtime People view over faces/persons plus service methods for cluster queries, merges, covers, and group asset refreshes. |
-| `FaceStateRepository` | Stable People state database for names, canonical identities, covers, hidden flags, person/group order, group metadata, and group asset caches. |
-
-`face_index.db` is a runtime snapshot that can be rebuilt from detections and
-stable state. `face_state.db` is not disposable cache: it stores human decisions
-and must survive rescans, reclustering, and application restarts.
-
-### People Groups And Stable UI State
-
-Groups are user-created containers over existing People cards. A group stores
-member person ids, display metadata, order, pinned state, and optional cover
-asset in `face_state.db`. The repository also maintains a group asset cache:
-the cached asset ids are the photos where all current members appear together.
-
-Group state is refreshed when scan commits, merges, manual face edits, person
-deletions, or group mutations change the underlying memberships. Merging people
-repairs affected groups and emits group redirects so the UI can update cards
-without losing the user's visible organization. Hidden state is also stable
-People state; people with different hidden states must not be merged, and group
-cards stay synchronized with the dashboard's hidden-person filter.
-
-### Face Status State Machine
-
-`face_status` lives on the main asset row in `global_index.db` and acts as the contract between the asset scan and the People scan.
-
-| Status | Meaning | Typical producer |
-|-------|---------|------------------|
-| `pending` | Asset is eligible for face scan and has not been processed yet | Initial asset scan |
-| `skipped` | Asset should not be face scanned | Initial asset scan for videos / hidden motion items |
-| `retry` | Detection or commit should be retried later | `FaceScanWorker` / `PeopleIndexCoordinator` |
-| `done` | Face processing completed successfully | `PeopleIndexCoordinator` |
-| `failed` | Fatal runtime failure stopped scanning | `FaceScanWorker` fatal path |
-
-Two rules matter here:
-
-- Asset scan owns initialization of `face_status`, not People scan.
-- `cache/index_store/scan_merge.py` preserves the previous `face_status` when asset identity is unchanged, but recomputes it when the asset id changes.
-
-### Persistence Layout For Scanning
-
-The scan subsystem writes to multiple persistence artifacts under the library root:
-
-| Path | Purpose |
-|------|---------|
-| `.iPhoto/global_index.db` | Main asset index, scan facts, favorites, live-role state, `face_status` |
-| `.iPhoto/links.json` | Materialized Live Photo pairing payload for the current album |
-| `.iPhoto/faces/face_index.db` | Runtime People snapshot: detected/manual faces, clustered persons, and group membership inputs |
-| `.iPhoto/faces/face_state.db` | Stable People state: canonical identities, names, covers, hidden flags, person/group order, group metadata, pinned state, and group asset caches |
-| `.iPhoto/faces/thumbnails/` | Cropped face thumbnails used by the People UI |
-
-### Important Scan Semantics
-
-- Asset scan is additive-only. `index_sync_service.update_index_snapshot()` merges or upserts facts but does not treat "not seen in this scan" as deletion.
-- Deletion is handled by separate lifecycle flows, not by rescans.
-- Live Photo pairing is a post-scan step, not part of metadata extraction.
-- People clustering is a full snapshot rebuild on each committed batch, while user-facing identity state is preserved separately in `face_state.db`.
-- Names, chosen covers, hidden people, person order, groups, group order, pinned
-  groups, and selected group covers are human decisions. Do not discard them
-  when repairing or rebuilding the runtime face snapshot.
-- InsightFace model files are cached under the shared extension model directory (`src/extension/models`) rather than inside each library.
+Thumbnail code belongs behind an infrastructure adapter, but pure adjustment and
+geometry calculations live in `core/`.
 
 ---
 
-## Key Design Decisions
+## Migration Targets
 
-### ADR-1: Folder-Native Album Design
+### Asset Repository
 
-**Decision:** Each filesystem folder is treated as an album. Album metadata is stored in `.iphoto.album.json` manifest files within each folder.
+Target:
 
-**Rationale:** No import step is required. Users keep their existing folder structure. The system is fully rebuildable from the filesystem.
+- One asset repository port.
+- One SQLite adapter for `.iPhoto/global_index.db`.
+- One transaction model for scan merges and user-authored state.
 
-### ADR-2: Non-Destructive Editing with `.ipo` Sidecar Files
+Migration:
 
-**Decision:** All photo edits are stored in `.ipo` (iPhoto Output) JSON sidecar files alongside originals.
+- Treat `cache/index_store.AssetRepository` as the current authoritative scan
+  storage implementation until the port is extracted.
+- Move query/count/update behavior needed by GUI into the same port.
+- Retire duplicate behavior in `SQLiteAssetRepository` or make it the single
+  adapter after parity is proven.
 
-**Rationale:** Original files remain 100% untouched. Edits can be reverted, modified, or removed at any time. The sidecar approach avoids database lock-in.
+### Scan Pipeline
 
-Location assignment is the explicit exception to the "edits never touch
-originals" rule. When the user confirms a location, iPhotron persists the
-location in the local index and best-effort writes GPS metadata back to the
-original media through ExifTool. If that write-back fails, the local assignment
-still remains available and the UI shows a warning.
+Target:
 
-### ADR-3: Global SQLite Database (v3.00+)
+- `ScanLibraryUseCase` owns scan orchestration.
+- `MediaScannerPort` owns filesystem discovery and metadata normalization.
+- Qt workers are thin wrappers over the use case.
 
-**Decision:** All asset metadata is stored in a single SQLite database (`global_index.db`) at the library root, replacing per-album JSON index files.
+Migration:
 
-**Rationale:** TB-level libraries caused freezing with JSON-based indexing. SQLite provides instant queries via multi-column indexes, WAL mode for crash safety, and automatic recovery.
+- Move scan semantics out of `app.py` and `LibraryManager` mixins.
+- Keep existing worker signals while delegating implementation to the use case.
+- Remove deletion semantics from generic rescan unless an explicit lifecycle
+  use case requests pruning/trash cleanup.
 
-### ADR-4: MVVM + DDD Layered Architecture (v4.00+)
+### Runtime Entry
 
-**Decision:** Adopt MVVM for the GUI layer and DDD for the backend, with a clear Facade boundary.
+Target:
 
-**Rationale:** Separates pure business logic (testable without GUI) from UI presentation. Coordinators manage navigation flow. ViewModels manage state and reduce unnecessary re-renders.
+- `RuntimeContext` and `LibrarySession` are the only composition/runtime entry.
+- `app.py` and `appctx.py` forward for compatibility only.
 
-### ADR-5: GPU-Accelerated Preview Rendering
+Migration:
 
-**Decision:** Use GPU preview rendering for real-time edit and video display.
-Windows and Linux use the established OpenGL shader path inside `QRhiWidget`;
-macOS uses a QRhi renderer that can run on Metal while sharing the same
-canonical adjustment shader logic through QSB assets.
+- Keep the existing runtime-entry architecture tests.
+- Convert GUI services and CLI commands to accept session/application ports.
+- Stop adding new business methods to `app.py`.
 
-**Rationale:** CPU-based rendering was too slow for interactive editing. The GPU pipeline delivers instant visual feedback during adjustments, while the QRhi/Metal path avoids raw OpenGL interop problems on modern macOS.
+### Legacy Models
 
-### ADR-6: Three Coordinate Systems for Crop & Perspective
+Target:
 
-The crop tool uses three distinct coordinate systems:
+- Runtime code imports `domain.models` or focused manifest models.
+- `iPhoto.models.album` and `iPhoto.models.types` become compatibility-only.
 
-| Space | Description | Purpose |
-|-------|-------------|---------|
-| **A. Original Texture Space** | Raw pixel space `[0, W_src] × [0, H_src]` | Input source for perspective transform |
-| **B. Projected Space** | After perspective matrix; original rect → convex quad `Q_valid` | **Core calculation space** — all black-border prevention logic happens here |
-| **C. Viewport/Screen Space** | Final pixel coordinates on the screen widget | User interaction only; inverse-transform to B before calculations |
+Migration:
 
-**Key Rule:** Always operate crop logic in **Projected Space (B)**. Screen coordinates are for input only; texture coordinates are for rendering only.
+- Replace runtime imports from `iPhoto.models.*`.
+- Keep deprecation warnings until downstream tests and CLI paths are migrated.
+- Add an architecture guard that blocks new runtime imports of legacy models.
+
+### Cross-Layer Imports
+
+Target:
+
+- `domain/`, `application/`, `infrastructure/`, `cache/`, `core/`, `io/`,
+  `library/`, and `people/` do not import `gui/`.
+- `application/` does not import concrete persistence or infrastructure
+  modules.
+
+Known examples to eliminate:
+
+- `infrastructure/services/thumbnail_cache_service.py` importing
+  `gui.ui.tasks.geo_utils`.
+- `application/services/assign_location_service.py` importing
+  `cache.index_store.repository.get_global_repository`.
 
 ---
 
-## External Dependencies
+## Architecture Guardrails
 
-| Tool | Purpose |
-|------|---------|
-| **ExifTool** | Reads EXIF, GPS, QuickTime, and Live Photo metadata |
-| **FFmpeg / FFprobe** | Generates video thumbnails & parses video info |
-| **InsightFace / ONNXRuntime** | Optional People face detection and embeddings |
+Existing guardrails should remain:
 
-FFmpeg/FFprobe should be available in the system `PATH`. ExifTool is required
-for metadata extraction and for writing assigned GPS coordinates back to
-original files; when that write-back is unavailable, Assign Location still
-persists to `global_index.db`. Python dependencies are managed via
-`pyproject.toml`.
+- Runtime `AppContext` imports stay confined to `appctx.py`.
+- Coordinators do not import collection-store implementation types directly.
+
+Add guardrails for vNext:
+
+- No `gui` imports from `domain`, `application`, `infrastructure`, `cache`,
+  `core`, `io`, `library`, or `people`.
+- No concrete `cache` or `infrastructure` imports from `application`; use
+  application ports instead.
+- No runtime imports from `iPhoto.models.*` outside compatibility shims and
+  tests explicitly covering compatibility.
+- Scan entry points must route through the target scan use case/session surface.
+- New repository code must target `AssetRepositoryPort`, not a process-wide
+  singleton.
+
+Recommended checks:
+
+```bash
+python3 tools/check_architecture.py
+.venv/bin/pytest tests/architecture \
+  tests/application/test_appctx_runtime_context.py \
+  tests/gui/coordinators/test_main_coordinator_asset_runtime_boundary.py -q
+```
+
+As more guards are added, include them in `tools/check_architecture.py` so CI
+can enforce the target boundaries.
+
+---
+
+## Current Compatibility Surface
+
+These modules are allowed during migration but should not be expanded:
+
+| Module | Target role |
+| --- | --- |
+| `iPhoto.app` | Compatibility facade forwarding to runtime/session use cases. |
+| `iPhoto.appctx` | Compatibility proxy around `RuntimeContext`. |
+| `iPhoto.models.album` | Manifest compatibility shim until a focused manifest model replaces it. |
+| `iPhoto.models.types` | Legacy dataclass shim for old Live Photo callers. |
+| `io.scanner_adapter` | Temporary scanner bridge until `MediaScannerPort` owns the scan adapter surface. |
+| `library.manager` scan mixins | GUI-era coordination shell until scan orchestration moves to application use cases. |
+
+Adding new features directly to these compatibility surfaces should be avoided
+unless the change is required to preserve behavior during a migration step.
+
+---
+
+## Decision Log
+
+### ADR-1: Folder-Native Albums
+
+Folders remain albums. Manifest files store folder-local album metadata, while
+global browsing/indexing state lives in the library database.
+
+### ADR-2: Library-Scoped Runtime
+
+One active library root owns one runtime session, one global asset database, one
+thumbnail cache root, one People state root, and one maps runtime context.
+
+### ADR-3: Application Ports Over Concrete Singletons
+
+Use cases depend on ports. Concrete SQLite, ExifTool, FFmpeg, thumbnail, People,
+and map runtimes are bound at the composition root. This makes GUI, CLI, tests,
+and future automation use the same behavior.
+
+### ADR-4: Single Asset Repository Contract
+
+The asset index must converge on one repository port and one SQLite
+implementation. Duplicate repository APIs are transitional and increase the
+risk of divergent scan, favorite, Live Photo, face status, and paging behavior.
+
+### ADR-5: Single Scan Use Case
+
+Scanning is a product workflow, not a GUI worker detail. GUI workers and CLI
+commands adapt the same use case so progress, cache checks, metadata fallback,
+People enqueueing, and Live Photo pairing stay consistent.
+
+### ADR-6: People State Split
+
+People runtime scan output is rebuildable. Human-authored People state is
+durable and survives rescans, reclustering, app restarts, and model changes.
+
+### ADR-7: Platform Rendering Behind Adapters
+
+OpenGL, QRhi/Metal, native OsmAnd widgets, helper-backed map renderers, and CPU
+fallbacks remain runtime-selected adapters. Product workflows must not depend
+on a specific rendering backend.
+
+---
+
+## Acceptance Criteria For vNext Migration
+
+The architecture can be considered converged when:
+
+- GUI, CLI, and workers use `RuntimeContext` / `LibrarySession` and application
+  use cases for library operations.
+- Asset persistence has one public repository port and one SQLite adapter.
+- Scanning has one application use case with Qt and non-Qt adapters.
+- `application/` has no direct concrete persistence or GUI imports.
+- `infrastructure/` has no GUI imports.
+- Runtime code no longer imports `iPhoto.models.*`.
+- Architecture guard tests enforce the above constraints.
+- Existing product behavior remains intact: folder browsing, global indexing,
+  Live Photos, People, maps, editing, location assignment, trash, import/move,
+  and export.

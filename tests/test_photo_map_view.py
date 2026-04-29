@@ -30,6 +30,7 @@ from iPhoto.gui.ui.widgets import photo_map_view as photo_map_view_module
 from maps.map_sources import MapBackendMetadata, MapSourceSpec
 from maps.map_widget import map_gl_widget as map_gl_widget_module
 from maps.map_widget import map_widget as map_widget_module
+from maps.map_widget import native_osmand_widget as native_osmand_widget_module
 from maps.map_widget.map_gl_widget import MapGLWidget, MapGLWindowWidget
 from maps.map_widget.native_osmand_widget import NativeOsmAndWidget, _render_marker_buffer
 
@@ -684,6 +685,63 @@ def test_choose_map_widget_backend_uses_python_obf_when_native_runtime_probe_fai
     assert backend_kind == "osmand_python"
     assert resolved_source is not None
     assert resolved_source.kind == "osmand_obf"
+
+
+def test_probe_native_widget_runtime_does_not_load_before_qapplication_on_macos(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    dummy_dylib = tmp_path / "osmand_native_widget.dylib"
+    dummy_dylib.write_bytes(b"dylib")
+    load_calls: list[Path] = []
+
+    monkeypatch.setattr(native_osmand_widget_module.sys, "platform", "darwin")
+    monkeypatch.setattr(
+        native_osmand_widget_module,
+        "resolve_osmand_native_widget_library",
+        lambda root: dummy_dylib,
+    )
+    monkeypatch.setattr(native_osmand_widget_module, "_has_qapplication_instance", lambda: False)
+    monkeypatch.setattr(
+        native_osmand_widget_module,
+        "_load_bridge",
+        lambda path: load_calls.append(path),
+    )
+
+    available, reason = native_osmand_widget_module.probe_native_widget_runtime(tmp_path)
+
+    assert available is False
+    assert reason is not None
+    assert "QApplication" in reason
+    assert load_calls == []
+
+
+def test_probe_native_widget_runtime_loads_after_qapplication_on_macos(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    dummy_dylib = tmp_path / "osmand_native_widget.dylib"
+    dummy_dylib.write_bytes(b"dylib")
+    load_calls: list[Path] = []
+
+    monkeypatch.setattr(native_osmand_widget_module.sys, "platform", "darwin")
+    monkeypatch.setattr(
+        native_osmand_widget_module,
+        "resolve_osmand_native_widget_library",
+        lambda root: dummy_dylib,
+    )
+    monkeypatch.setattr(native_osmand_widget_module, "_has_qapplication_instance", lambda: True)
+    monkeypatch.setattr(
+        native_osmand_widget_module,
+        "_load_bridge",
+        lambda path: load_calls.append(path) or object(),
+    )
+
+    available, reason = native_osmand_widget_module.probe_native_widget_runtime(tmp_path)
+
+    assert available is True
+    assert reason is None
+    assert load_calls == [dummy_dylib]
 
 
 def test_choose_map_widget_backend_prefers_python_obf_when_native_is_disabled(monkeypatch) -> None:

@@ -271,6 +271,8 @@ class _RhiPreviewPopup(QWidget):
     """Transparent popup wrapper hosting an RHI video area and shadow backplate."""
 
     displaySizeChanged = Signal(QSizeF)
+    _PROFILE_RAW = "raw"
+    _PROFILE_EDITED = "edited"
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
@@ -301,26 +303,11 @@ class _RhiPreviewPopup(QWidget):
 
         self._content_frame = _RhiShadowFrame(self._corner_radius, self)
 
-        self._video_area = VideoArea(self._content_frame)
-        self._video_area.set_controls_enabled(False)
-        self._video_area.set_muted(PREVIEW_WINDOW_MUTED)
-        self._video_area.hide_controls(animate=False)
-        self._video_area.set_surface_color("#121216")
-        self._video_area.set_viewport_fill_enabled(True)
-        self._video_area.edit_viewer.set_crop_framing_enabled(True)
-        self._video_area.displaySizeChanged.connect(self.displaySizeChanged.emit)
-
         self._wheel_guard = _PreviewWheelGuard(self)
-        for target in (
-            self,
-            self._shadow_frame,
-            self._content_frame,
-            self._video_area,
-            self._video_area._surface_stack,
-            self._video_area._renderer,
-            self._video_area._edit_viewer,
-        ):
+        for target in (self, self._shadow_frame, self._content_frame):
             target.installEventFilter(self._wheel_guard)
+        self._active_render_profile: str | None = None
+        self._video_area = self._create_video_area()
         self._set_rounding_mode()
         self.resize_preview(self._content_size)
         self.hide()
@@ -345,7 +332,14 @@ class _RhiPreviewPopup(QWidget):
         trim_range_ms: tuple[int, int] | None,
         adjusted_preview: bool,
     ) -> None:
-        self._video_area.stop()
+        render_profile = self._render_profile(
+            adjustments=adjustments,
+            trim_range_ms=trim_range_ms,
+            adjusted_preview=adjusted_preview,
+        )
+        rebuilt = self._prepare_video_area_for_profile(render_profile)
+        if not rebuilt:
+            self._video_area.stop()
         self._set_rounding_mode()
         # macOS/Metal can fail when the same long-press popup alternates
         # between two QRhiWidget-backed child surfaces. Keep every mac preview
@@ -375,6 +369,66 @@ class _RhiPreviewPopup(QWidget):
         painter = QPainter(self)
         painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Clear)
         painter.fillRect(self.rect(), Qt.GlobalColor.transparent)
+
+    @classmethod
+    def _render_profile(
+        cls,
+        *,
+        adjustments: Mapping[str, object] | None,
+        trim_range_ms: tuple[int, int] | None,
+        adjusted_preview: bool,
+    ) -> str:
+        if adjusted_preview or trim_range_ms is not None or bool(adjustments):
+            return cls._PROFILE_EDITED
+        return cls._PROFILE_RAW
+
+    def _prepare_video_area_for_profile(self, profile: str) -> bool:
+        previous_profile = getattr(self, "_active_render_profile", None)
+        should_rebuild = (
+            sys.platform == "darwin"
+            and previous_profile is not None
+            and previous_profile != profile
+        )
+        if should_rebuild:
+            self._rebuild_video_area()
+        self._active_render_profile = profile
+        return should_rebuild
+
+    def _create_video_area(self) -> VideoArea:
+        video_area = VideoArea(self._content_frame)
+        video_area.set_controls_enabled(False)
+        video_area.set_muted(PREVIEW_WINDOW_MUTED)
+        video_area.hide_controls(animate=False)
+        video_area.set_surface_color("#121216")
+        video_area.set_viewport_fill_enabled(True)
+        video_area.edit_viewer.set_crop_framing_enabled(True)
+        video_area.displaySizeChanged.connect(self.displaySizeChanged.emit)
+        for target in (
+            video_area,
+            video_area._surface_stack,
+            video_area._renderer,
+            video_area._edit_viewer,
+        ):
+            target.installEventFilter(self._wheel_guard)
+        return video_area
+
+    def _rebuild_video_area(self) -> None:
+        old_video_area = self._video_area
+        try:
+            old_video_area.stop()
+        except Exception:
+            pass
+        try:
+            old_video_area.displaySizeChanged.disconnect(self.displaySizeChanged.emit)
+        except (RuntimeError, TypeError):
+            pass
+        old_video_area.hide()
+        old_video_area.setParent(None)
+        old_video_area.deleteLater()
+
+        self._video_area = self._create_video_area()
+        self._set_rounding_mode()
+        self._layout_layers()
 
     def _layout_layers(self) -> None:
         content_rect = QRect(
@@ -496,7 +550,11 @@ class PreviewWindow(QWidget):
         path = Path(source)
         self._close_timer.stop()
         self._media.unload()
-        self._rhi_popup.close_preview()
+        next_uses_rhi_popup = bool(
+            sys.platform == "darwin"
+            or adjusted_preview
+            or trim_range_ms is not None
+        )
         self._current_native_size = QSizeF()
         self._native_size_seeded_from_probe = False
         self._native_size_seeded = False
@@ -512,11 +570,7 @@ class PreviewWindow(QWidget):
         self._anchor_rect = at if isinstance(at, QRect) else None
         self._anchor_point = at if isinstance(at, QPoint) else None
         self._prime_native_size_async(path, request_id=self._active_probe_request_id)
-        self._using_rhi_popup = bool(
-            sys.platform == "darwin"
-            or adjusted_preview
-            or trim_range_ms is not None
-        )
+        self._using_rhi_popup = next_uses_rhi_popup
         self._apply_layout_for_anchor()
         if self._using_rhi_popup:
             self._rhi_popup.show_preview(
@@ -527,6 +581,7 @@ class PreviewWindow(QWidget):
             )
             self.hide()
         else:
+            self._rhi_popup.close_preview()
             self._media.load(path)
 
         if not self._using_rhi_popup:

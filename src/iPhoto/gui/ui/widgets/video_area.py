@@ -819,23 +819,32 @@ class VideoArea(QWidget):
         """
         self._player.stop()
         self._player.setSource(QUrl())
+        self._resize_refit_timer.stop()
+        self._resize_refit_pending = False
         self._pending_video_frame = None
         self._last_presented_video_frame = None
         self._video_frame_dispatch_pending = False
         self._renderer.clear_frame()
+        self._renderer.set_user_rotate90_steps(0)
+        self._renderer.set_container_rotation(0, 0, 0)
+        self._renderer.set_linux_180_hint(False)
         self._edit_viewer.clear()
+        self._edit_viewer.set_adjustments({})
         self._edit_viewer.set_video_source_rotation(0)
+        self._current_adjustments = {}
         self._current_source = None
         self._current_duration_ms = 0
         self._container_rotation_cw = 0
         self._container_raw_w = 0
         self._container_raw_h = 0
         self._container_linux_180_hint = False
+        self._adjusted_first_frame_pending = False
         self._profile_load_started_at = None
         self._profile_load_source = None
         self._profile_first_frame_logged = False
         self._trim_in_ms = 0
         self._trim_out_ms = 0
+        self._suppress_trim_pause = False
         self._restart_from_trim_in_on_play = False
         self._end_hold_display_ms = None
 

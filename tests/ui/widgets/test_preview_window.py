@@ -77,7 +77,7 @@ def test_show_preview_uses_rhi_popup_for_unedited_video_on_macos() -> None:
     window._media.unload.assert_called_once_with()
     window._media.load.assert_not_called()
     window._media.play.assert_not_called()
-    window._rhi_popup.close_preview.assert_called_once_with()
+    window._rhi_popup.close_preview.assert_not_called()
     window._rhi_popup.show_preview.assert_called_once_with(
         source,
         adjustments=None,
@@ -131,6 +131,7 @@ def test_rhi_popup_resize_preview_includes_shadow_padding(qapp) -> None:
 def _make_rhi_popup_for_show() -> _RhiPreviewPopup:
     popup = _RhiPreviewPopup.__new__(_RhiPreviewPopup)
     popup._video_area = Mock()
+    popup._active_render_profile = None
     popup._set_rounding_mode = Mock()
     popup.show = Mock()
     popup.raise_ = Mock()
@@ -158,6 +159,84 @@ def test_rhi_popup_forces_single_adjusted_surface_on_macos() -> None:
         adjusted_preview=True,
     )
     popup._video_area.play.assert_called_once_with()
+
+
+def test_rhi_popup_rebuilds_from_edited_to_raw_profile_on_macos() -> None:
+    popup = _make_rhi_popup_for_show()
+    source = Path("/fake/raw.mov")
+    popup._active_render_profile = _RhiPreviewPopup._PROFILE_EDITED
+    popup._rebuild_video_area = Mock()
+
+    with patch("iPhoto.gui.ui.widgets.preview_window.sys.platform", "darwin"):
+        _RhiPreviewPopup.show_preview(
+            popup,
+            source,
+            adjustments=None,
+            trim_range_ms=None,
+            adjusted_preview=False,
+        )
+
+    popup._rebuild_video_area.assert_called_once_with()
+    assert popup._active_render_profile == _RhiPreviewPopup._PROFILE_RAW
+    popup._video_area.stop.assert_not_called()
+    popup._video_area.load_video.assert_called_once_with(
+        source,
+        adjustments=None,
+        trim_range_ms=None,
+        adjusted_preview=True,
+    )
+
+
+def test_rhi_popup_rebuilds_from_raw_to_edited_profile_on_macos() -> None:
+    popup = _make_rhi_popup_for_show()
+    source = Path("/fake/edited.mov")
+    popup._active_render_profile = _RhiPreviewPopup._PROFILE_RAW
+    popup._rebuild_video_area = Mock()
+    adjustments = {"Exposure": 0.25}
+
+    with patch("iPhoto.gui.ui.widgets.preview_window.sys.platform", "darwin"):
+        _RhiPreviewPopup.show_preview(
+            popup,
+            source,
+            adjustments=adjustments,
+            trim_range_ms=None,
+            adjusted_preview=True,
+        )
+
+    popup._rebuild_video_area.assert_called_once_with()
+    assert popup._active_render_profile == _RhiPreviewPopup._PROFILE_EDITED
+    popup._video_area.stop.assert_not_called()
+    popup._video_area.load_video.assert_called_once_with(
+        source,
+        adjustments=adjustments,
+        trim_range_ms=None,
+        adjusted_preview=True,
+    )
+
+
+def test_rhi_popup_reuses_same_profile_on_macos() -> None:
+    popup = _make_rhi_popup_for_show()
+    source = Path("/fake/another-raw.mov")
+    popup._active_render_profile = _RhiPreviewPopup._PROFILE_RAW
+    popup._rebuild_video_area = Mock()
+
+    with patch("iPhoto.gui.ui.widgets.preview_window.sys.platform", "darwin"):
+        _RhiPreviewPopup.show_preview(
+            popup,
+            source,
+            adjustments=None,
+            trim_range_ms=None,
+            adjusted_preview=False,
+        )
+
+    popup._rebuild_video_area.assert_not_called()
+    popup._video_area.stop.assert_called_once_with()
+    popup._video_area.load_video.assert_called_once_with(
+        source,
+        adjustments=None,
+        trim_range_ms=None,
+        adjusted_preview=True,
+    )
 
 
 def test_rhi_popup_keeps_plain_surface_off_macos_for_unedited_preview() -> None:

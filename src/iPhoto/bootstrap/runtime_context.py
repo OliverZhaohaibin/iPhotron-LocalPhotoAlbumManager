@@ -150,17 +150,19 @@ class RuntimeContext:
         """Bind *root* as the active library and rebuild library-scoped adapters."""
 
         from .library_session import LibrarySession
+        from ..errors import LibraryUnavailableError
 
-        normalized = Path(root).expanduser()
+        normalized = Path(root).expanduser().resolve()
         self.close_library()
-        self.library.bind_path(normalized)
+
+        if not normalized.exists() or not normalized.is_dir():
+            raise LibraryUnavailableError(f"Library path does not exist: {root}")
+
         self.library_session = LibrarySession(
             normalized,
             asset_runtime=self.asset_runtime,
+            bind_asset_runtime=False,
         )
-        bind_scan_service = getattr(self.library, "bind_scan_service", None)
-        if callable(bind_scan_service):
-            bind_scan_service(self.library_session.scans)
         bind_asset_query_service = getattr(
             self.library,
             "bind_asset_query_service",
@@ -171,6 +173,18 @@ class RuntimeContext:
         bind_state_repository = getattr(self.library, "bind_state_repository", None)
         if callable(bind_state_repository):
             bind_state_repository(self.library_session.state)
+
+        try:
+            self.library.bind_path(normalized)
+        except Exception:
+            self.close_library()
+            raise
+
+        self.asset_runtime.bind_library_root(normalized)
+
+        bind_scan_service = getattr(self.library, "bind_scan_service", None)
+        if callable(bind_scan_service):
+            bind_scan_service(self.library_session.scans)
         bind_asset_lifecycle_service = getattr(
             self.library,
             "bind_asset_lifecycle_service",

@@ -9,11 +9,16 @@ from .media import (
     ThumbnailRendererPort,
 )
 from .people import PeopleAssetRepositoryPort, PeopleIndexPort
-from .repositories import AssetRepositoryPort, LibraryStateRepositoryPort
+from .repositories import (
+    AssetFavoriteQueryPort,
+    AssetRepositoryPort,
+    LibraryStateRepositoryPort,
+)
 from .runtime import MapRuntimePort, TaskSchedulerPort
 
 __all__ = [
     "AssetRepositoryPort",
+    "AssetFavoriteQueryPort",
     "EditSidecarPort",
     "LibraryStateRepositoryPort",
     "LocationMetadataPort",

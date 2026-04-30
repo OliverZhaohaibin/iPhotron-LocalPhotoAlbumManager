@@ -16,6 +16,7 @@ class _Repository:
         self.album_rows = [{"rel": "Trip/a.jpg", "id": "a"}]
         self.all_rows = [{"rel": "root.jpg", "id": "root"}]
         self.geotagged_rows = [{"rel": "Trip/a.jpg", "gps": {"lat": 1, "lon": 2}}]
+        self.rows_by_rel = {"Trip/a.jpg": {"rel": "Trip/a.jpg", "is_favorite": 1}}
 
     def count(self, **kwargs):
         self.count_calls.append(dict(kwargs))
@@ -39,6 +40,9 @@ class _Repository:
 
     def update_location(self, rel: str, location: str) -> None:
         self.location_updates.append((rel, location))
+
+    def get_rows_by_rels(self, rels):
+        return {rel: self.rows_by_rel[rel] for rel in rels if rel in self.rows_by_rel}
 
 
 def test_count_and_geometry_rows_are_scoped_to_album_path(tmp_path: Path) -> None:
@@ -103,3 +107,14 @@ def test_read_asset_and_geotagged_rows(tmp_path: Path) -> None:
     assert list(service.read_geotagged_rows()) == [
         {"rel": "Trip/a.jpg", "gps": {"lat": 1, "lon": 2}}
     ]
+
+
+def test_favorite_status_for_path_uses_library_relative_rel(tmp_path: Path) -> None:
+    library_root = tmp_path / "Library"
+    album_root = library_root / "Trip"
+    album_root.mkdir(parents=True)
+    repo = _Repository()
+    service = LibraryAssetQueryService(library_root, repository_factory=lambda _root: repo)
+
+    assert service.favorite_status_for_path(album_root / "a.jpg") is True
+    assert service.favorite_status_for_path(album_root / "missing.jpg") is None

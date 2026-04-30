@@ -106,6 +106,7 @@ class MainCoordinator(QObject):
         self._media_session = MediaSelectionSession()
         self._media_session.bind_collection(self._gallery_store)
         self._asset_service.set_repository(self._context.asset_runtime.repository)
+        self._bind_asset_service_library_surfaces(lib_root)
         self._thumbnail_service = self._context.asset_runtime.thumbnail_service
         bound_people_service = getattr(context.library, "people_service", None)
         if isinstance(bound_people_service, PeopleService):
@@ -559,6 +560,7 @@ class MainCoordinator(QObject):
         self._logger.debug("_on_library_tree_updated: root=%s", root)
         self._context.asset_runtime.bind_library_root(root)
         self._asset_service.set_repository(self._context.asset_runtime.repository)
+        self._bind_asset_service_library_surfaces(root)
         self._asset_list_vm.rebind_repository(self._context.asset_runtime.repository, root)
         self._gallery_vm.on_library_tree_updated()
         window = getattr(self, "_window", None)
@@ -579,6 +581,30 @@ class MainCoordinator(QObject):
                 playback.set_people_service(bound_people_service)
             else:
                 playback.set_people_library_root(root)
+
+    def _bind_asset_service_library_surfaces(self, root: Path | None) -> None:
+        """Bind session-owned asset/state surfaces into the asset app service."""
+
+        bind = getattr(self._asset_service, "bind_library_surfaces", None)
+        clear = getattr(self._asset_service, "clear_library_surfaces", None)
+        state_repository = getattr(self._context.library, "state_repository", None)
+        asset_query_service = getattr(self._context.library, "asset_query_service", None)
+
+        if (
+            root is not None
+            and state_repository is not None
+            and asset_query_service is not None
+            and callable(bind)
+        ):
+            bind(
+                library_root=root,
+                state_repository=state_repository,
+                favorite_query=asset_query_service,
+            )
+            return
+
+        if callable(clear):
+            clear()
 
     def _on_album_renamed(self, old_path: Path, new_path: Path) -> None:
         self._pinned_items_service.remap_album_path(

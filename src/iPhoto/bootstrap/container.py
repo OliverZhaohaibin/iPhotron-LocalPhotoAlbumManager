@@ -1,4 +1,9 @@
-"""Container assembly helpers for the iPhoto runtime."""
+"""Compatibility container for the legacy domain-repository use-case graph.
+
+The active desktop runtime is assembled through RuntimeContext/LibrarySession.
+Do not add new runtime bindings here unless they are explicitly compatibility
+bridges for old tests or isolated callers.
+"""
 
 from __future__ import annotations
 

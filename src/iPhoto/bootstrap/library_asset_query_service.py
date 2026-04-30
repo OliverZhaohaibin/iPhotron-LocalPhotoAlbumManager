@@ -154,6 +154,15 @@ class LibraryAssetQueryService:
             if isinstance(row, dict):
                 yield dict(row)
 
+    def favorite_status_for_path(self, path: Path) -> bool | None:
+        """Return favorite state for *path*, or None when no indexed row exists."""
+
+        rel = self._library_relative_path(path)
+        row = self._repository().get_rows_by_rels([rel]).get(rel)
+        if row is None:
+            return None
+        return bool(row.get("is_favorite"))
+
     def location_cache_writer(self, root: Path) -> _ScopedLocationCacheWriter:
         """Return an object compatible with legacy asset-entry location writes."""
 
@@ -189,6 +198,18 @@ class LibraryAssetQueryService:
         if rel_path == prefix or rel_path.startswith(prefix + "/"):
             return rel_path
         return f"{prefix}/{rel_path}"
+
+    def _library_relative_path(self, path: Path) -> str:
+        candidate = Path(path)
+        if not candidate.is_absolute():
+            return candidate.as_posix()
+        try:
+            return candidate.resolve().relative_to(self.library_root.resolve()).as_posix()
+        except (OSError, ValueError):
+            try:
+                return candidate.relative_to(self.library_root).as_posix()
+            except ValueError:
+                return candidate.name
 
     def _scoped_rows(
         self,

@@ -1,3 +1,9 @@
+"""Compatibility exports for legacy domain-repository use cases.
+
+New runtime flows should prefer session/application ports such as
+``ScanLibraryUseCase`` and library-scoped services instead of this package.
+"""
+
 from .base import UseCase, UseCaseRequest, UseCaseResponse
 from .open_album import OpenAlbumUseCase
 from .scan_album import ScanAlbumUseCase

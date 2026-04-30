@@ -196,21 +196,39 @@ migration steps.
 - Added `docs/refactor/13-repository-source-of-truth-migration.md` as the
   process handoff for this pass.
 
+## Completed In Legacy Domain Repository Retirement
+
+- Extended `AssetService` so active-library favorite writes can bind to
+  session-owned `LibraryStateRepositoryPort` and favorite query surfaces while
+  preserving the legacy `IAssetRepository` fallback for old tests and isolated
+  compatibility callers.
+- Refactored `MainCoordinator` startup and library-tree rebinding to bind the
+  active session state/query surfaces into `AssetService`; GUI favorite
+  toggles now write through `state_repository.set_favorite_status()` instead
+  of saving through the legacy domain adapter.
+- Marked the old `application.use_cases` export graph and
+  `bootstrap/container.py` as compatibility-only surfaces.
+- Extended architecture checks so runtime code cannot add new imports of the
+  legacy domain-repository use cases outside the compatibility allowlist.
+- Added tests for session-bound favorite writes and legacy fallback behavior.
+- Added `docs/refactor/14-legacy-domain-repository-retirement.md` as the
+  process handoff for this pass.
+
 ## Current Phase Status
 
 - Phase 0 is partially complete: vNext docs are in place and architecture
   guardrails now cover application/concrete imports, lower-layer GUI imports,
-  GUI concrete index-store imports, asset-runtime SQLite regressions, and new
-  legacy model shim imports.
+  GUI concrete index-store imports, asset-runtime SQLite regressions, new
+  legacy model shim imports, and new legacy domain-repository use case imports.
 - Phase 1 is partially complete: `LibrarySession` exists and is reachable from
   runtime entry objects; scan, asset lifecycle, asset query, asset repository,
   durable state, and People session surfaces are bound into `LibraryManager`,
   but GUI/coordinators/viewmodels still need broader session-surface migration.
 - Phase 2 is partially complete: repository/state ports exist and
   `global_index.db` is now the runtime asset source of truth; legacy
-  `IAssetRepository` callers can bridge through the index-store adapter, but
-  older domain use cases still need to migrate to `application/ports` or be
-  retired as compatibility paths.
+  `IAssetRepository` callers can bridge through the index-store adapter, active
+  GUI favorite writes now use the state boundary, and older domain use cases
+  are quarantined as compatibility paths.
 - Phase 3 is partially complete: `ScannerWorker`, LibraryManager scan
   coordinator paths, CLI scan/report, app compatibility scan calls,
   `AppFacade.open_album()`, import incremental scans, and restore rescans now
@@ -244,6 +262,12 @@ migration steps.
 - `SQLiteAssetRepository` remains in place for legacy/domain repository tests
   and old use cases, but it is no longer the library-scoped runtime asset
   repository.
+- Old domain-repository use cases under `application/use_cases` remain for
+  compatibility tests and legacy service facades. New runtime code should not
+  import them outside the architecture-check allowlist.
+- `io/scanner_adapter.py` remains an allowlisted scan-bridge exception because
+  it still reuses the legacy `FileDiscoveryThread` helper during the scan
+  migration.
 - People still uses `global_index.db` as its asset-row source of truth through
   the bootstrap/session adapter. `src/iPhoto/people/**` and the face-scan worker
   should not import `get_global_repository()` directly.
@@ -326,6 +350,16 @@ Additional repository source-of-truth migration verification:
 Results: all passed with the same existing pytest config warning and legacy shim
 deprecation warning where compatibility code imports old model shims.
 
+Additional legacy domain repository retirement verification:
+
+- `.venv/bin/python -m pytest tests/application/test_album_service_facade.py tests/application/test_library_asset_query_service.py tests/gui/viewmodels/test_gallery_viewmodel.py tests/gui/viewmodels/test_detail_viewmodel.py -q`
+- `.venv/bin/python -m pytest tests/gui/coordinators/test_main_coordinator_asset_runtime_boundary.py tests/infrastructure/test_index_store_asset_repository_adapter.py -q`
+- `.venv/bin/python -m pytest tests/test_phase4_integration.py -q`
+- `.venv/bin/python tools/check_architecture.py`
+
+Results: all passed with the same existing pytest config warning and legacy
+shim deprecation warnings where compatibility code imports old model shims.
+
 Additional session cleanup / live read migration verification:
 
 - `.venv/bin/python tools/check_architecture.py`
@@ -345,8 +379,8 @@ a broad non-GUI/UI run (`1237 passed, 7 skipped`), excluding
 
 ## Next Handoff Steps
 
-1. Migrate or retire old `domain.repositories.IAssetRepository` use cases so
-   new application flows use `AssetRepositoryPort` / session query surfaces.
+1. Continue migrating legacy GUI read paths such as gallery collection loading
+   from the `IAssetRepository` adapter to session query surfaces.
 2. Continue reducing `gui.facade.py`, `library.manager.py`, and GUI services to
    presentation/compatibility surfaces only.
 3. Expand end-to-end temp-library tests for import/move/delete/restore and

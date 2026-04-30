@@ -13,6 +13,8 @@ def test_on_library_tree_updated_rebinds_asset_list_vm_and_reloads_selection() -
 
     coordinator._context = MagicMock()
     coordinator._context.library.root.return_value = root
+    coordinator._context.library.state_repository = MagicMock()
+    coordinator._context.library.asset_query_service = MagicMock()
     coordinator._context.asset_runtime.repository = MagicMock()
     coordinator._context.asset_runtime.bind_library_root = MagicMock()
     coordinator._asset_service = MagicMock()
@@ -27,6 +29,11 @@ def test_on_library_tree_updated_rebinds_asset_list_vm_and_reloads_selection() -
     coordinator._context.asset_runtime.bind_library_root.assert_called_once_with(root)
     coordinator._asset_service.set_repository.assert_called_once_with(
         coordinator._context.asset_runtime.repository
+    )
+    coordinator._asset_service.bind_library_surfaces.assert_called_once_with(
+        library_root=root,
+        state_repository=coordinator._context.library.state_repository,
+        favorite_query=coordinator._context.library.asset_query_service,
     )
     coordinator._asset_list_vm.rebind_repository.assert_called_once_with(
         coordinator._context.asset_runtime.repository,

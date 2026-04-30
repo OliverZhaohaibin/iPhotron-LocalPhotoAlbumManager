@@ -47,6 +47,30 @@ ASSET_RUNTIME_SQLITE_FORBIDDEN_IMPORTS = {
     "iPhoto.infrastructure.repositories.sqlite_asset_repository",
 }
 
+LEGACY_DOMAIN_USE_CASE_MODULES = {
+    "iPhoto.application.use_cases.aggregate_geo_data",
+    "iPhoto.application.use_cases.apply_edit",
+    "iPhoto.application.use_cases.export_assets",
+    "iPhoto.application.use_cases.generate_thumbnail",
+    "iPhoto.application.use_cases.import_assets",
+    "iPhoto.application.use_cases.manage_trash",
+    "iPhoto.application.use_cases.move_assets",
+    "iPhoto.application.use_cases.open_album",
+    "iPhoto.application.use_cases.pair_live_photos",
+    "iPhoto.application.use_cases.scan_album",
+    "iPhoto.application.use_cases.update_metadata",
+}
+
+LEGACY_DOMAIN_USE_CASE_ALLOWED_IMPORTERS = {
+    "application/services/album_service.py",
+    "application/services/asset_service.py",
+    "application/use_cases/__init__.py",
+    "bootstrap/container.py",
+    "io/scanner_adapter.py",
+}
+
+LEGACY_DOMAIN_USE_CASE_PACKAGE = "iPhoto.application.use_cases"
+
 
 def _is_type_checking_guard(node: ast.If) -> bool:
     test = node.test
@@ -216,6 +240,17 @@ def check(src_root: Path) -> list[str]:
             ):
                 violations.append(
                     f"{py_file}:{lineno}: runtime imports legacy model shim {module}"
+                )
+
+            if rel not in LEGACY_DOMAIN_USE_CASE_ALLOWED_IMPORTERS and (
+                module == LEGACY_DOMAIN_USE_CASE_PACKAGE
+                or any(
+                    _is_or_under(module, legacy_module)
+                    for legacy_module in LEGACY_DOMAIN_USE_CASE_MODULES
+                )
+            ):
+                violations.append(
+                    f"{py_file}:{lineno}: runtime imports legacy domain-repository use case {module}"
                 )
 
     return violations

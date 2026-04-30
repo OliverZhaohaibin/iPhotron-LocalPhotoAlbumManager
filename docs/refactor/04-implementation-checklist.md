@@ -31,6 +31,7 @@
 - [x] 扩展架构检查：application 禁止 concrete cache/infrastructure import。
 - [x] 扩展架构检查：infrastructure/cache/core/io/library/people 禁止 GUI import。
 - [x] 扩展架构检查：禁止新增 runtime `iPhoto.models.*` import。
+- [x] 扩展架构检查：旧 domain-repository use case 只允许兼容入口导入。
 - [x] 将架构检查加入 CI 或 documented verification。
 
 完成条件：
@@ -93,9 +94,11 @@
 - [x] 定义 `LibraryStateRepositoryPort`。
 - [x] 明确现有两个 asset repository 的保留/合并策略：`cache/index_store.AssetRepository` / `global_index.db` 是运行时 source of truth，`SQLiteAssetRepository` 暂保留为 legacy/domain 测试适配器。
 - [x] scan merge API 保留用户状态。
-- [ ] favorite/hidden/trash/pinned/order 等用户状态走 state boundary。
+- [x] active GUI favorite 写入走 state boundary。
+- [ ] hidden/trash/pinned/order 等其他用户状态继续收敛到 state boundary。
 - [x] repository 支持 transaction boundary。
 - [x] 写 integration tests 验证 scan rebuild 不丢用户状态。
+- [x] 旧 domain-repository use case graph 标注为 compatibility-only，并由架构检查限制新导入。
 
 完成条件：
 

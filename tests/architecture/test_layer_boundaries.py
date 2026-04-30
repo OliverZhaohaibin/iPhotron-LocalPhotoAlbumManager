@@ -20,3 +20,21 @@ def test_vnext_layer_boundaries() -> None:
         "vNext layer boundary violations:\n"
         + "\n".join(f"  {item}" for item in violations)
     )
+
+
+def test_legacy_use_case_package_import_is_blocked(tmp_path: Path) -> None:
+    source = tmp_path / "iPhoto"
+    module = source / "gui" / "example.py"
+    module.parent.mkdir(parents=True)
+    module.write_text(
+        "from iPhoto.application.use_cases import ScanAlbumUseCase\n",
+        encoding="utf-8",
+    )
+
+    violations = check_layer_boundaries.check(source)
+
+    assert any(
+        "runtime imports legacy domain-repository use case "
+        "iPhoto.application.use_cases" in violation
+        for violation in violations
+    )

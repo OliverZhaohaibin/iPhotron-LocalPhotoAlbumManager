@@ -109,3 +109,10 @@ class LibraryStateRepositoryPort(Protocol):
         metadata_updates: dict[str, Any] | None = None,
     ) -> None:
         """Persist GPS, location, and metadata overlays for one asset."""
+
+
+class AssetFavoriteQueryPort(Protocol):
+    """Read favorite state through a session-owned query surface."""
+
+    def favorite_status_for_path(self, path: Path) -> bool | None:
+        """Return favorite state for *path*, or None when no indexed row exists."""

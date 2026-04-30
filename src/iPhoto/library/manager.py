@@ -40,7 +40,9 @@ LOGGER = get_logger()
 
 if TYPE_CHECKING:  # pragma: no cover
     from ..bootstrap.library_asset_lifecycle_service import LibraryAssetLifecycleService
+    from ..bootstrap.library_asset_query_service import LibraryAssetQueryService
     from ..bootstrap.library_scan_service import LibraryScanService
+    from ..application.ports import LibraryStateRepositoryPort
 
 
 class LibraryManager(
@@ -97,6 +99,8 @@ class LibraryManager(
         self._face_scan_status_message: Optional[str] = None
         self._people_index_coordinator: PeopleIndexCoordinator | None = None
         self._scan_service: "LibraryScanService | None" = None
+        self._asset_query_service: "LibraryAssetQueryService | None" = None
+        self._state_repository: "LibraryStateRepositoryPort | None" = None
         self._asset_lifecycle_service: "LibraryAssetLifecycleService | None" = None
 
     # ------------------------------------------------------------------
@@ -221,6 +225,30 @@ class LibraryManager(
     @property
     def scan_service(self) -> "LibraryScanService | None":
         return self._scan_service
+
+    def bind_asset_query_service(
+        self,
+        asset_query_service: "LibraryAssetQueryService | None",
+    ) -> None:
+        """Bind the current library session asset query surface."""
+
+        self._asset_query_service = asset_query_service
+
+    @property
+    def asset_query_service(self) -> "LibraryAssetQueryService | None":
+        return self._asset_query_service
+
+    def bind_state_repository(
+        self,
+        state_repository: "LibraryStateRepositoryPort | None",
+    ) -> None:
+        """Bind the current library session durable-state surface."""
+
+        self._state_repository = state_repository
+
+    @property
+    def state_repository(self) -> "LibraryStateRepositoryPort | None":
+        return self._state_repository
 
     def bind_asset_lifecycle_service(
         self,

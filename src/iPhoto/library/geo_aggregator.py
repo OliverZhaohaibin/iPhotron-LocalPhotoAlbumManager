@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, List, Optional
 
-from ..cache.index_store import get_global_repository
+from ..bootstrap.library_asset_query_service import LibraryAssetQueryService
 from ..media_classifier import classify_media
 from ..utils.geocoding import resolve_location_name
 from ..utils.logging import get_logger
@@ -174,9 +174,12 @@ class GeoAggregatorMixin:
         seen: set[Path] = set()
         assets: list[GeotaggedAsset] = []
 
+        query_service = getattr(self, "asset_query_service", None)
+        if query_service is None:
+            query_service = LibraryAssetQueryService(root)
+
         try:
-            # Use single global database at library root
-            rows = get_global_repository(root).read_geotagged()
+            rows = query_service.read_geotagged_rows()
         except Exception:
             return assets
 

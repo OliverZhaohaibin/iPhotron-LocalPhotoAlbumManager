@@ -15,6 +15,7 @@ from ..infrastructure.services.location_metadata_service import (
 )
 from ..application.services.assign_location_service import AssignLocationService
 from .library_asset_lifecycle_service import LibraryAssetLifecycleService
+from .library_asset_query_service import LibraryAssetQueryService
 from .library_scan_service import LibraryScanService
 
 
@@ -25,6 +26,7 @@ class LibrarySession:
     library_root: Path
     asset_runtime: LibraryAssetRuntime = field(default_factory=LibraryAssetRuntime)
     state_repository: LibraryStateRepositoryPort | None = None
+    asset_queries: LibraryAssetQueryService | None = None
     scans: LibraryScanService | None = None
     asset_lifecycle: LibraryAssetLifecycleService | None = None
     bind_asset_runtime: bool = True
@@ -35,6 +37,8 @@ class LibrarySession:
             self.asset_runtime.bind_library_root(self.library_root)
         if self.state_repository is None:
             self.state_repository = IndexStoreLibraryStateRepository(self.library_root)
+        if self.asset_queries is None:
+            self.asset_queries = LibraryAssetQueryService(self.library_root)
         if self.scans is None:
             self.scans = LibraryScanService(self.library_root)
         if self.asset_lifecycle is None:
@@ -69,4 +73,14 @@ def create_headless_library_session(root: Path) -> LibrarySession:
     return LibrarySession(Path(root))
 
 
-__all__ = ["LibrarySession", "create_headless_library_session"]
+def create_library_state_repository(root: Path) -> LibraryStateRepositoryPort:
+    """Create the current state adapter for compatibility entry points."""
+
+    return IndexStoreLibraryStateRepository(Path(root))
+
+
+__all__ = [
+    "LibrarySession",
+    "create_headless_library_session",
+    "create_library_state_repository",
+]

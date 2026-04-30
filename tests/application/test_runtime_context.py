@@ -21,6 +21,8 @@ class _FakeLibrary:
         self._root: Path | None = None
         self.scan_requests: list[tuple[Path, list[str], list[str]]] = []
         self.bound_scan_services: list[object | None] = []
+        self.bound_asset_query_services: list[object | None] = []
+        self.bound_state_repositories: list[object | None] = []
         self.bound_asset_lifecycle_services: list[object | None] = []
 
     def bind_path(self, root: Path) -> None:
@@ -42,6 +44,12 @@ class _FakeLibrary:
 
     def bind_scan_service(self, scan_service: object | None) -> None:
         self.bound_scan_services.append(scan_service)
+
+    def bind_asset_query_service(self, asset_query_service: object | None) -> None:
+        self.bound_asset_query_services.append(asset_query_service)
+
+    def bind_state_repository(self, state_repository: object | None) -> None:
+        self.bound_state_repositories.append(state_repository)
 
     def bind_asset_lifecycle_service(
         self,
@@ -72,6 +80,8 @@ def test_resume_startup_tasks_scans_when_work_dir_exists_without_index(
     assert asset_runtime.bound_roots == [library_root]
     assert (library_root / ".iPhoto" / "global_index.db").exists()
     assert library.bound_scan_services[-1] is not None
+    assert library.bound_asset_query_services[-1] is not None
+    assert library.bound_state_repositories[-1] is not None
     assert library.bound_asset_lifecycle_services[-1] is not None
     assert [request[0] for request in library.scan_requests] == [library_root]
 
@@ -87,5 +97,7 @@ def test_resume_startup_tasks_skips_scan_when_index_preexists(tmp_path: Path) ->
 
     assert asset_runtime.bound_roots == [library_root]
     assert library.bound_scan_services[-1] is not None
+    assert library.bound_asset_query_services[-1] is not None
+    assert library.bound_state_repositories[-1] is not None
     assert library.bound_asset_lifecycle_services[-1] is not None
     assert library.scan_requests == []

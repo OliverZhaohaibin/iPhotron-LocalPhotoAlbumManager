@@ -157,6 +157,14 @@ def check(src_root: Path) -> list[str]:
                     f"{py_file}:{lineno}: lower layer imports GUI module {module}"
                 )
 
+            if top_level == "gui" and (
+                module == "iPhoto.cache"
+                or _is_or_under(module, "iPhoto.cache.index_store")
+            ):
+                violations.append(
+                    f"{py_file}:{lineno}: GUI imports concrete index store {module}"
+                )
+
             if (
                 rel not in LEGACY_MODEL_IMPORT_EXCEPTIONS
                 and not rel.startswith("models/")

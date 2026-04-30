@@ -11,9 +11,9 @@ from PySide6.QtWidgets import QWidget, QFileDialog
 
 from ....core.export import export_asset, DEFAULT_EXPORT_FORMAT
 from ....config import EXPORT_DIR_NAME
+from ....bootstrap.library_asset_query_service import LibraryAssetQueryService
 from ....library.manager import LibraryManager
 from ....io import sidecar
-from ....cache.index_store import get_global_repository
 from ..widgets.notification_toast import NotificationToast
 from .status_bar_controller import StatusBarController
 from ...ui.widgets.dialogs import show_error
@@ -80,18 +80,13 @@ class LibraryExportWorker(QRunnable):
             self.signals.finished.emit(0, 0)
             return
 
-        # Collect all album paths (Root + Level 1 + Level 2)
-        album_paths = {root}
-        top_albums = self._library.list_albums()
-        for album in top_albums:
-            album_paths.add(album.path)
-            for child in self._library.list_children(album):
-                album_paths.add(child.path)
-
         to_export = []
-        # Use single global database at library root
+        query_service = getattr(self._library, "asset_query_service", None)
+        if query_service is None:
+            query_service = LibraryAssetQueryService(root)
+
         try:
-            rows = get_global_repository(root).read_all()
+            rows = query_service.read_asset_rows(root, filter_hidden=False)
             for row in rows:
                 if not isinstance(row, dict):
                     continue

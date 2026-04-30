@@ -44,6 +44,14 @@ def _write_album_manifest(album_path: Path) -> None:
     manifest_path.write_text(json.dumps(payload), encoding="utf-8")
 
 
+class _QueryService:
+    def __init__(self, repo) -> None:
+        self._repo = repo
+
+    def read_geotagged_rows(self):
+        return self._repo.read_geotagged()
+
+
 def test_geotagged_assets_use_classifier(tmp_path: Path, qapp: QApplication) -> None:
     """Ensure GPS-enabled assets are classified even if flags are missing."""
 
@@ -111,10 +119,10 @@ def test_geotagged_assets_reuse_cached_rows_until_library_changes(
     repo = _Repo()
     manager = LibraryManager()
     manager.bind_path(root)
+    manager.bind_asset_query_service(_QueryService(repo))
 
-    with patch("iPhoto.library.geo_aggregator.get_global_repository", return_value=repo):
-        first = manager.get_geotagged_assets()
-        second = manager.get_geotagged_assets()
+    first = manager.get_geotagged_assets()
+    second = manager.get_geotagged_assets()
 
     assert repo.calls == 1
     assert first == second
@@ -145,9 +153,9 @@ def test_scan_chunk_invalidates_geotagged_cache(tmp_path: Path) -> None:
     repo = _Repo()
     manager = LibraryManager()
     manager.bind_path(root)
+    manager.bind_asset_query_service(_QueryService(repo))
 
     with (
-        patch("iPhoto.library.geo_aggregator.get_global_repository", return_value=repo),
         patch("iPhoto.library.geo_aggregator.resolve_location_name", return_value=None),
     ):
         manager.get_geotagged_assets()
@@ -182,9 +190,9 @@ def test_scan_finished_invalidates_geotagged_cache(tmp_path: Path) -> None:
     repo = _Repo()
     manager = LibraryManager()
     manager.bind_path(root)
+    manager.bind_asset_query_service(_QueryService(repo))
 
     with (
-        patch("iPhoto.library.geo_aggregator.get_global_repository", return_value=repo),
         patch("iPhoto.library.geo_aggregator.resolve_location_name", return_value=None),
         patch("iPhoto.library.scan_coordinator.LOGGER.warning"),
     ):

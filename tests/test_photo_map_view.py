@@ -44,6 +44,16 @@ def qapp() -> QApplication:
     return app
 
 
+def _override_cursor_shape() -> Qt.CursorShape | None:
+    cursor = QApplication.overrideCursor()
+    return None if cursor is None else cursor.shape()
+
+
+def _clear_override_cursors() -> None:
+    while QApplication.overrideCursor() is not None:
+        QApplication.restoreOverrideCursor()
+
+
 class _FakeNativeLibrary:
     def __init__(self) -> None:
         self.zoom = 2.0
@@ -862,6 +872,8 @@ def test_native_osmand_widget_bridges_drag_release_and_wheel_events(qapp: QAppli
             Qt.KeyboardModifier.NoModifier,
         )
         QApplication.sendEvent(event_target, press_event)
+        assert event_target.cursor().shape() == Qt.CursorShape.ClosedHandCursor
+        assert _override_cursor_shape() == Qt.CursorShape.ClosedHandCursor
 
         move_event = QMouseEvent(
             QEvent.Type.MouseMove,
@@ -872,6 +884,8 @@ def test_native_osmand_widget_bridges_drag_release_and_wheel_events(qapp: QAppli
         )
         QApplication.sendEvent(event_target, move_event)
         qapp.processEvents()
+        assert event_target.cursor().shape() == Qt.CursorShape.ClosedHandCursor
+        assert _override_cursor_shape() == Qt.CursorShape.ClosedHandCursor
 
         release_event = QMouseEvent(
             QEvent.Type.MouseButtonRelease,
@@ -881,6 +895,8 @@ def test_native_osmand_widget_bridges_drag_release_and_wheel_events(qapp: QAppli
             Qt.KeyboardModifier.NoModifier,
         )
         QApplication.sendEvent(event_target, release_event)
+        assert event_target.cursor().shape() == Qt.CursorShape.ArrowCursor
+        assert _override_cursor_shape() is None
 
         wheel_event = QWheelEvent(
             QPointF(44.0, 28.0),
@@ -911,6 +927,7 @@ def test_native_osmand_widget_bridges_drag_release_and_wheel_events(qapp: QAppli
     finally:
         widget.shutdown()
         widget.close()
+        _clear_override_cursors()
 
 
 def test_native_osmand_widget_uses_exported_event_target(qapp: QApplication, monkeypatch, tmp_path) -> None:
@@ -964,6 +981,8 @@ def test_native_osmand_widget_uses_exported_event_target(qapp: QApplication, mon
             Qt.KeyboardModifier.NoModifier,
         )
         QApplication.sendEvent(fake_event_target, press_event)
+        assert fake_event_target.cursor().shape() == Qt.CursorShape.ClosedHandCursor
+        assert _override_cursor_shape() == Qt.CursorShape.ClosedHandCursor
 
         move_event = QMouseEvent(
             QEvent.Type.MouseMove,
@@ -973,6 +992,8 @@ def test_native_osmand_widget_uses_exported_event_target(qapp: QApplication, mon
             Qt.KeyboardModifier.NoModifier,
         )
         QApplication.sendEvent(fake_event_target, move_event)
+        assert fake_event_target.cursor().shape() == Qt.CursorShape.ClosedHandCursor
+        assert _override_cursor_shape() == Qt.CursorShape.ClosedHandCursor
 
         release_event = QMouseEvent(
             QEvent.Type.MouseButtonRelease,
@@ -982,6 +1003,8 @@ def test_native_osmand_widget_uses_exported_event_target(qapp: QApplication, mon
             Qt.KeyboardModifier.NoModifier,
         )
         QApplication.sendEvent(fake_event_target, release_event)
+        assert fake_event_target.cursor().shape() == Qt.CursorShape.ArrowCursor
+        assert _override_cursor_shape() is None
         qapp.processEvents()
 
         assert panned_spy.count() >= 1
@@ -989,6 +1012,7 @@ def test_native_osmand_widget_uses_exported_event_target(qapp: QApplication, mon
     finally:
         widget.shutdown()
         widget.close()
+        _clear_override_cursors()
 
 
 def test_photo_map_view_falls_back_to_python_widget_when_native_init_fails(

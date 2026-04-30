@@ -7,13 +7,13 @@ from typing import Dict, List, Optional, Tuple
 
 from PySide6.QtCore import QObject, QThreadPool, Signal, QTimer
 
+from ....bootstrap.library_asset_query_service import LibraryAssetQueryService
 from ..tasks.asset_loader_worker import (
     AssetLoaderSignals,
     AssetLoaderWorker,
     compute_album_path,
     compute_asset_rows,
 )
-from ....cache.index_store import get_global_repository
 
 
 class AssetDataLoader(QObject):
@@ -30,7 +30,12 @@ class AssetDataLoader(QObject):
     # 20,000 rows is roughly instantaneous on modern SSDs with SQLite.
     SYNC_LOAD_THRESHOLD: int = 20000
 
-    def __init__(self, parent: QObject | None = None, library_root: Optional[Path] = None) -> None:
+    def __init__(
+        self,
+        parent: QObject | None = None,
+        library_root: Optional[Path] = None,
+        asset_query_service: LibraryAssetQueryService | None = None,
+    ) -> None:
         """Initialise the loader wrapper."""
         super().__init__(parent)
         self._pool = QThreadPool.globalInstance()
@@ -38,10 +43,19 @@ class AssetDataLoader(QObject):
         self._signals: Optional[AssetLoaderSignals] = None
         self._request_id: int = 0
         self._library_root: Optional[Path] = library_root
+        self._asset_query_service = asset_query_service
 
     def set_library_root(self, root: Path) -> None:
         """Update the library root for global index access."""
         self._library_root = root
+
+    def set_asset_query_service(
+        self,
+        asset_query_service: LibraryAssetQueryService | None,
+    ) -> None:
+        """Update the session query service used for index access."""
+
+        self._asset_query_service = asset_query_service
 
     def is_running(self) -> bool:
         """Return ``True`` while a worker is active."""
@@ -89,16 +103,21 @@ class AssetDataLoader(QObject):
         """
 
         # Use helper to compute effective index root and album path
-        effective_index_root, album_path = compute_album_path(root, self._library_root)
+        query_library_root = self._library_root
+        if query_library_root is None and self._asset_query_service is not None:
+            query_library_root = self._asset_query_service.library_root
+        effective_index_root, _album_path = compute_album_path(root, query_library_root)
+        query_service = self._asset_query_service or LibraryAssetQueryService(
+            effective_index_root
+        )
 
         try:
             # We use row count from SQLite instead of file size.
             # Include album_path filtering to count only assets in the current album
-            count = get_global_repository(effective_index_root).count(
+            count = query_service.count_assets(
+                root,
                 filter_hidden=True,
                 filter_params=filter_params,
-                album_path=album_path,
-                include_subalbums=True,
             )
         except Exception:
             count = 0
@@ -193,6 +212,7 @@ class AssetDataLoader(QObject):
             root, featured, signals,
             filter_params=filter_params,
             library_root=self._library_root,
+            asset_query_service=self._asset_query_service,
         )
         self._worker = worker
         self._signals = signals
@@ -242,6 +262,7 @@ class AssetDataLoader(QObject):
             root, featured,
             filter_params=filter_params,
             library_root=self._library_root,
+            asset_query_service=self._asset_query_service,
         )
 
     def _handle_chunk_ready(

@@ -40,7 +40,7 @@ from PySide6.QtWidgets import (
 )
 
 from iPhoto.gui.services.pinned_items_service import PinnedItemsService
-from ....cache.index_store import get_global_repository
+from ....bootstrap.library_asset_query_service import LibraryAssetQueryService
 from ....errors import LibraryError
 from ....media_classifier import get_media_type, MediaType
 from ....models.album import Album
@@ -335,12 +335,14 @@ class AlbumDataWorker(QRunnable):
         signals: DashboardLoaderSignals,
         generation: int,
         library_root: Optional[Path] = None,
+        asset_query_service: LibraryAssetQueryService | None = None,
     ) -> None:
         super().__init__()
         self.node = node
         self.signals = signals
         self.generation = generation
         self._library_root = library_root
+        self._asset_query_service = asset_query_service
 
     def run(self) -> None:
         # 1. Get count and first asset for cover fallback
@@ -348,49 +350,19 @@ class AlbumDataWorker(QRunnable):
         first_rel: str | None = None
 
         try:
-            # Use library root for global database if available
             index_root = self._library_root if self._library_root else self.node.path
-            store = get_global_repository(index_root)
-            
-            # Compute album path for filtering
-            album_path: Optional[str] = None
-            if self._library_root:
-                try:
-                    node_resolved = self.node.path.resolve()
-                    lib_resolved = self._library_root.resolve()
-                    if node_resolved != lib_resolved:
-                        album_path = node_resolved.relative_to(lib_resolved).as_posix()
-                except (ValueError, OSError):
-                    # If we cannot resolve or relativize paths (e.g. outside library root or
-                    # due to filesystem issues), fall back to using the full index without
-                    # an album-specific filter.
-                    pass
+            query_service = self._asset_query_service or LibraryAssetQueryService(
+                index_root
+            )
 
-            # Count assets for this album using the count method with album filter
-            count = store.count_album_assets(album_path, include_subalbums=True) if album_path else store.count()
-            
-            # Get first asset for cover fallback
-            for row in (
-                store.read_album_assets(album_path, include_subalbums=True)
-                if album_path
-                else store.read_all()
-            ):
+            count = query_service.count_assets(self.node.path)
+
+            for row in query_service.read_asset_rows(self.node.path):
                 if isinstance(row, dict):
                     rel = row.get("rel", "")
                     if isinstance(rel, str) and rel:
-                        # If using album_path filter, rel is library-relative.
-                        # Ensure first_rel is always album-relative when joined with self.node.path.
-                        if album_path:
-                            prefix = album_path.rstrip("/") + "/"
-                            if rel.startswith(prefix):
-                                inner = rel[len(prefix):]
-                                if inner:
-                                    first_rel = inner
-                                    break
-                        else:
-                            # When there is no album_path (library root), rel is already correct.
-                            first_rel = rel
-                            break
+                        first_rel = rel
+                        break
         except Exception:
             pass
 
@@ -637,8 +609,18 @@ class AlbumsDashboard(QWidget):
             self._cards[album.path] = card
             self._album_nodes[album.path] = album
 
-            # Fetch data with current generation, using library root for global DB
-            worker = AlbumDataWorker(album, self._loader_signals, current_gen, library_root=library_root)
+            # Fetch data with the current session query surface when available.
+            worker = AlbumDataWorker(
+                album,
+                self._loader_signals,
+                current_gen,
+                library_root=library_root,
+                asset_query_service=getattr(
+                    self._library,
+                    "asset_query_service",
+                    None,
+                ),
+            )
             pool.start(worker)
 
     def _on_album_data_ready(

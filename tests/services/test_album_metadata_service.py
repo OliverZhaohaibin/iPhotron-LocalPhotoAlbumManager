@@ -109,15 +109,9 @@ def test_toggle_featured_updates_current_and_library_album(
         lambda _delay, callback: callback(),
     )
     
-    # Mock repository access to avoid DB operations in tests
-    index_store_mock = mocker.MagicMock()
-    monkeypatch.setattr(
-        "iPhoto.gui.services.album_metadata_service.get_global_repository",
-        lambda root: index_store_mock,
-    )
-
     manager = mocker.MagicMock()
     manager.root.return_value = library_root
+    manager.state_repository = mocker.MagicMock()
     refresh = mocker.MagicMock()
 
     service = _build_service(
@@ -221,15 +215,9 @@ def test_toggle_featured_from_library_root_updates_sub_album(
         lambda _delay, callback: callback(),
     )
     
-    # Mock repository access to avoid DB operations in tests
-    index_store_mock = mocker.MagicMock()
-    monkeypatch.setattr(
-        "iPhoto.gui.services.album_metadata_service.get_global_repository",
-        lambda root: index_store_mock,
-    )
-
     manager = mocker.MagicMock()
     manager.root.return_value = library_root
+    manager.state_repository = mocker.MagicMock()
     refresh = mocker.MagicMock()
 
     service = _build_service(
@@ -250,8 +238,8 @@ def test_toggle_featured_from_library_root_updates_sub_album(
     assert sub_album.manifest["featured"] == ["photo.jpg"]
     assert sub_album.saved == 1
     
-    # Repository should be called twice (once for root, once for sub-album)
-    assert index_store_mock.set_favorite_status.call_count == 2
+    # State boundary should be called twice (once for root, once for sub-album)
+    assert manager.state_repository.set_favorite_status.call_count == 2
     
     refresh.assert_not_called()
 
@@ -293,15 +281,9 @@ def test_toggle_featured_from_library_root_for_root_asset(
         lambda _delay, callback: callback(),
     )
     
-    # Mock repository access to avoid DB operations in tests
-    index_store_mock = mocker.MagicMock()
-    monkeypatch.setattr(
-        "iPhoto.gui.services.album_metadata_service.get_global_repository",
-        lambda root: index_store_mock,
-    )
-
     manager = mocker.MagicMock()
     manager.root.return_value = library_root
+    manager.state_repository = mocker.MagicMock()
     refresh = mocker.MagicMock()
 
     service = _build_service(
@@ -322,9 +304,61 @@ def test_toggle_featured_from_library_root_for_root_asset(
     # Album.open should not be called as we skip reopening the library root
     assert open_count == 0
     
-    # Repository should be called once (for root as primary)
-    assert index_store_mock.set_favorite_status.call_count == 1
+    # State boundary should be called once (for root as primary)
+    assert manager.state_repository.set_favorite_status.call_count == 1
     
+    refresh.assert_not_called()
+
+
+def test_toggle_featured_outside_bound_library_uses_album_repository(
+    monkeypatch: pytest.MonkeyPatch,
+    mocker,
+    tmp_path: Path,
+    qapp: QApplication,
+) -> None:
+    """Standalone albums should not write favorite state into a bound library."""
+
+    library_root = tmp_path / "Library"
+    album_root = tmp_path / "Standalone"
+    library_root.mkdir()
+    album_root.mkdir()
+    (album_root / "photo.jpg").touch()
+    dummy_album = DummyAlbum(album_root)
+
+    monkeypatch.setattr(
+        "iPhoto.gui.services.album_metadata_service.QTimer.singleShot",
+        lambda _delay, callback: callback(),
+    )
+    fallback_repo = mocker.MagicMock()
+    created_roots: list[Path] = []
+
+    def repository_factory(root: Path):
+        created_roots.append(Path(root))
+        return fallback_repo
+
+    monkeypatch.setattr(
+        "iPhoto.gui.services.album_metadata_service.create_library_state_repository",
+        repository_factory,
+    )
+
+    manager = mocker.MagicMock()
+    manager.root.return_value = library_root
+    manager.state_repository = mocker.MagicMock()
+    refresh = mocker.MagicMock()
+
+    service = _build_service(
+        current_album=lambda: dummy_album,
+        library_manager_getter=lambda: manager,
+        refresh=refresh,
+    )
+
+    result = service.toggle_featured(dummy_album, "photo.jpg")
+
+    assert result is True
+    assert dummy_album.manifest["featured"] == ["photo.jpg"]
+    assert created_roots == [album_root]
+    fallback_repo.set_favorite_status.assert_called_once_with("photo.jpg", True)
+    manager.state_repository.set_favorite_status.assert_not_called()
     refresh.assert_not_called()
 
 
@@ -436,14 +470,9 @@ def test_toggle_featured_identifies_correct_physical_root_nested(
         lambda _delay, callback: callback(),
     )
 
-    index_store_mock = mocker.MagicMock()
-    monkeypatch.setattr(
-        "iPhoto.gui.services.album_metadata_service.get_global_repository",
-        lambda root: index_store_mock,
-    )
-
     manager = mocker.MagicMock()
     manager.root.return_value = library_root
+    manager.state_repository = mocker.MagicMock()
     refresh = mocker.MagicMock()
 
     service = _build_service(

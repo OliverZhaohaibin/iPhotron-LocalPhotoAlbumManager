@@ -11,7 +11,7 @@ import pytest
 pytest.importorskip("PySide6", reason="PySide6 is required for GUI tests", exc_type=ImportError)
 pytest.importorskip("PySide6.QtWidgets", reason="Qt widgets not available", exc_type=ImportError)
 
-from PySide6.QtCore import QEvent, QPointF, QSize, Qt, QTimer, Signal
+from PySide6.QtCore import QCoreApplication, QEvent, QPointF, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QMouseEvent, QPainter, QPixmap
 from PySide6.QtWidgets import QApplication, QWidget
 
@@ -145,6 +145,27 @@ class _PostRenderMiniMapWidget(_FakeMiniMapWidget):
         self.full_update_count += 1
 
 
+class _EventTargetMiniMapWidget(_FakeMiniMapWidget):
+    def __init__(
+        self,
+        parent: QWidget | None = None,
+        *,
+        map_source: MapSourceSpec | None = None,
+    ) -> None:
+        super().__init__(parent, map_source=map_source)
+        self._event_target = QWidget(self)
+        self._event_target.setObjectName("fakeInfoLocationMapEventTarget")
+        self._event_target.setGeometry(self.rect())
+        self._event_target.show()
+
+    def event_target(self) -> QWidget:
+        return self._event_target
+
+    def resizeEvent(self, event) -> None:  # type: ignore[override]
+        super().resizeEvent(event)
+        self._event_target.setGeometry(self.rect())
+
+
 def _fake_choose_map_widget_backend(
     _map_source: MapSourceSpec | None,
     *,
@@ -195,6 +216,44 @@ def _fake_choose_post_render_map_widget_backend(
         MapSourceSpec.legacy_default(Path.cwd()).resolved(Path.cwd()),
         "legacy_python",
     )
+
+
+def _fake_choose_event_target_map_widget_backend(
+    _map_source: MapSourceSpec | None,
+    *,
+    use_opengl: bool,
+) -> tuple[type[_EventTargetMiniMapWidget], MapSourceSpec, str]:
+    del use_opengl
+    return (
+        _EventTargetMiniMapWidget,
+        MapSourceSpec.legacy_default(Path.cwd()).resolved(Path.cwd()),
+        "osmand_native",
+    )
+
+
+def _clear_override_cursors() -> None:
+    while QApplication.overrideCursor() is not None:
+        QApplication.restoreOverrideCursor()
+
+
+def _send_mouse_event(
+    target: QWidget,
+    event_type: QEvent.Type,
+    *,
+    button: Qt.MouseButton,
+    buttons: Qt.MouseButton,
+) -> None:
+    local_pos = QPointF(12.0, 12.0)
+    global_pos = QPointF(target.mapToGlobal(local_pos.toPoint()))
+    event = QMouseEvent(
+        event_type,
+        local_pos,
+        global_pos,
+        button,
+        buttons,
+        Qt.KeyboardModifier.NoModifier,
+    )
+    QCoreApplication.sendEvent(target, event)
 
 
 def test_info_panel_formats_video_metadata(qapp: QApplication) -> None:
@@ -1071,6 +1130,198 @@ def test_info_panel_location_map_overlay_tracks_actual_embedded_map_size(
     assert abs(pin_tip_x - screen_point.x()) <= 1.0
     assert abs(pin_tip_y - screen_point.y()) <= 1.0
     panel.close()
+
+
+def test_info_panel_location_map_drag_cursor_tracks_event_target(
+    qapp: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _clear_override_cursors()
+    monkeypatch.setattr(info_location_map_module, "check_opengl_support", lambda: True)
+    monkeypatch.setattr(
+        info_location_map_module,
+        "choose_map_widget_backend",
+        _fake_choose_event_target_map_widget_backend,
+    )
+
+    panel = InfoPanel()
+    try:
+        panel.set_location_capability(enabled=True)
+        panel.set_asset_metadata(
+            {
+                "rel": "map.jpg",
+                "name": "map.jpg",
+                "gps": {"lat": 48.137154, "lon": 11.576124},
+                "location": "Munich",
+            }
+        )
+        panel.show()
+        qapp.processEvents()
+
+        map_view = panel._location_map
+        map_widget = map_view._map_widget
+        assert isinstance(map_widget, _EventTargetMiniMapWidget)
+        event_target = map_widget.event_target()
+        assert event_target is not map_widget
+
+        _send_mouse_event(
+            event_target,
+            QEvent.Type.MouseButtonPress,
+            button=Qt.MouseButton.LeftButton,
+            buttons=Qt.MouseButton.LeftButton,
+        )
+
+        override_cursor = QApplication.overrideCursor()
+        assert event_target.cursor().shape() == Qt.CursorShape.ClosedHandCursor
+        assert map_widget.cursor().shape() == Qt.CursorShape.ClosedHandCursor
+        assert map_view.cursor().shape() == Qt.CursorShape.ClosedHandCursor
+        assert override_cursor is not None
+        assert override_cursor.shape() == Qt.CursorShape.ClosedHandCursor
+
+        _send_mouse_event(
+            event_target,
+            QEvent.Type.MouseMove,
+            button=Qt.MouseButton.NoButton,
+            buttons=Qt.MouseButton.LeftButton,
+        )
+
+        override_cursor = QApplication.overrideCursor()
+        assert event_target.cursor().shape() == Qt.CursorShape.ClosedHandCursor
+        assert override_cursor is not None
+        assert override_cursor.shape() == Qt.CursorShape.ClosedHandCursor
+
+        _send_mouse_event(
+            event_target,
+            QEvent.Type.MouseButtonRelease,
+            button=Qt.MouseButton.LeftButton,
+            buttons=Qt.MouseButton.NoButton,
+        )
+
+        assert QApplication.overrideCursor() is None
+        assert event_target.cursor().shape() == Qt.CursorShape.ArrowCursor
+    finally:
+        panel.shutdown()
+        panel.close()
+        _clear_override_cursors()
+
+
+def test_info_panel_location_map_drag_cursor_resets_on_hide_and_shutdown(
+    qapp: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _clear_override_cursors()
+    monkeypatch.setattr(info_location_map_module, "check_opengl_support", lambda: True)
+    monkeypatch.setattr(
+        info_location_map_module,
+        "choose_map_widget_backend",
+        _fake_choose_event_target_map_widget_backend,
+    )
+
+    panel = InfoPanel()
+    try:
+        panel.set_location_capability(enabled=True)
+        panel.set_asset_metadata(
+            {
+                "rel": "map.jpg",
+                "name": "map.jpg",
+                "gps": {"lat": 48.137154, "lon": 11.576124},
+                "location": "Munich",
+            }
+        )
+        panel.show()
+        qapp.processEvents()
+
+        map_view = panel._location_map
+        map_widget = map_view._map_widget
+        assert isinstance(map_widget, _EventTargetMiniMapWidget)
+        event_target = map_widget.event_target()
+
+        _send_mouse_event(
+            event_target,
+            QEvent.Type.MouseButtonPress,
+            button=Qt.MouseButton.LeftButton,
+            buttons=Qt.MouseButton.LeftButton,
+        )
+        assert QApplication.overrideCursor() is not None
+
+        map_view.hide()
+        qapp.processEvents()
+
+        assert QApplication.overrideCursor() is None
+        assert event_target.cursor().shape() == Qt.CursorShape.ArrowCursor
+
+        _send_mouse_event(
+            event_target,
+            QEvent.Type.MouseButtonPress,
+            button=Qt.MouseButton.LeftButton,
+            buttons=Qt.MouseButton.LeftButton,
+        )
+        assert QApplication.overrideCursor() is not None
+
+        map_view.shutdown()
+
+        assert QApplication.overrideCursor() is None
+        assert map_view._map_event_targets == []
+    finally:
+        panel.close()
+        _clear_override_cursors()
+
+
+def test_info_panel_location_map_drag_cursor_uses_global_map_host_filter(
+    qapp: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _clear_override_cursors()
+    monkeypatch.setattr(info_location_map_module, "check_opengl_support", lambda: True)
+    monkeypatch.setattr(
+        info_location_map_module,
+        "choose_map_widget_backend",
+        _fake_choose_event_target_map_widget_backend,
+    )
+
+    panel = InfoPanel()
+    try:
+        panel.set_location_capability(enabled=True)
+        panel.set_asset_metadata(
+            {
+                "rel": "map.jpg",
+                "name": "map.jpg",
+                "gps": {"lat": 48.137154, "lon": 11.576124},
+                "location": "Munich",
+            }
+        )
+        panel.show()
+        qapp.processEvents()
+
+        map_view = panel._location_map
+        fallback_receiver = QWidget(map_view._map_host)
+        fallback_receiver.setGeometry(0, 0, 24, 24)
+        fallback_receiver.show()
+
+        _send_mouse_event(
+            fallback_receiver,
+            QEvent.Type.MouseButtonPress,
+            button=Qt.MouseButton.LeftButton,
+            buttons=Qt.MouseButton.LeftButton,
+        )
+
+        override_cursor = QApplication.overrideCursor()
+        assert fallback_receiver not in map_view._map_event_targets
+        assert override_cursor is not None
+        assert override_cursor.shape() == Qt.CursorShape.ClosedHandCursor
+
+        _send_mouse_event(
+            fallback_receiver,
+            QEvent.Type.MouseButtonRelease,
+            button=Qt.MouseButton.LeftButton,
+            buttons=Qt.MouseButton.NoButton,
+        )
+
+        assert QApplication.overrideCursor() is None
+    finally:
+        panel.shutdown()
+        panel.close()
+        _clear_override_cursors()
 
 
 def test_info_panel_location_map_uses_post_render_pin_when_available(

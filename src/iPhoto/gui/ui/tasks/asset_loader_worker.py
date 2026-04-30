@@ -9,7 +9,7 @@ from typing import Dict, Iterable, List, Optional, Set
 
 from PySide6.QtCore import QObject, QRunnable, Signal, QThread
 
-from ....cache.index_store import get_global_repository
+from ....bootstrap.library_asset_query_service import LibraryAssetQueryService
 from ....config import RECENTLY_DELETED_DIR_NAME
 from ....core.pairing import pair_live
 from ....utils.pathutils import ensure_work_dir
@@ -21,7 +21,6 @@ from .asset_loader_utils import (
     THUMBNAIL_MAX_DIMENSION,
     THUMBNAIL_MAX_BYTES,
     compute_album_path,
-    adjust_rel_for_album,
     normalize_featured,
     build_asset_entry,
     compute_asset_rows,
@@ -61,6 +60,7 @@ class AssetLoaderWorker(QRunnable):
         signals: AssetLoaderSignals,
         filter_params: Optional[Dict[str, object]] = None,
         library_root: Optional[Path] = None,
+        asset_query_service: LibraryAssetQueryService | None = None,
     ) -> None:
         super().__init__()
         self.setAutoDelete(True)
@@ -70,6 +70,7 @@ class AssetLoaderWorker(QRunnable):
         self._is_cancelled = False
         self._filter_params = filter_params
         self._library_root = library_root
+        self._asset_query_service = asset_query_service
 
     @property
     def root(self) -> Path:
@@ -116,7 +117,10 @@ class AssetLoaderWorker(QRunnable):
         ensure_work_dir(self._root)
 
         # Determine the effective index root and album path using helper
-        effective_index_root, album_path = compute_album_path(self._root, self._library_root)
+        effective_index_root, album_path = compute_album_path(
+            self._root,
+            self._library_root,
+        )
         root_name = self._root.name
         library_root_name = self._library_root.name if self._library_root else None
         index_root_name = effective_index_root.name
@@ -130,7 +134,12 @@ class AssetLoaderWorker(QRunnable):
             self._filter_params,
         )
 
-        store = get_global_repository(effective_index_root)
+        query_service = self._asset_query_service
+        if query_service is None:
+            query_service = LibraryAssetQueryService(effective_index_root)
+        elif album_path is None and query_service.library_root != effective_index_root:
+            query_service = LibraryAssetQueryService(effective_index_root)
+        location_writer = query_service.location_cache_writer(self._root)
 
         # Emit indeterminate progress initially
         _safe_signal_emit(self._signals.progressUpdated.emit, self._root, 0, 0)
@@ -140,93 +149,103 @@ class AssetLoaderWorker(QRunnable):
         if album_path is None and self._library_root is not None:
             params.setdefault("exclude_path_prefix", RECENTLY_DELETED_DIR_NAME)
 
-        # 2. Stream rows using lightweight geometry-first query
-        # Use a transaction context to keep the connection open for both the read and count queries.
+        # 2. Stream rows using the session-backed lightweight geometry query.
         dir_cache: Dict[Path, Optional[Set[str]]] = {}
 
         def _path_exists(path: Path) -> bool:
             return _cached_path_exists(path, dir_cache)
 
-        with store.transaction():
-            generator = store.read_geometry_only(
-                filter_params=params,
-                sort_by_date=True,
-                album_path=album_path,
-                include_subalbums=True,
+        generator = query_service.read_geometry_rows(
+            self._root,
+            filter_params=params,
+            sort_by_date=True,
+        )
+
+        chunk: List[Dict[str, object]] = []
+        last_reported = 0
+
+        # Priority: Emit first 20 items quickly
+        first_chunk_size = 20
+        normal_chunk_size = 200
+
+        total = 0
+        total_calculated = False
+        first_batch_emitted = False
+        yielded_count = 0
+
+        for position, row in enumerate(generator, start=1):
+            # Yield CPU every 50 items to keep UI responsive
+            if position % 50 == 0:
+                QThread.msleep(10)
+
+            if self._is_cancelled:
+                return
+
+            entry = build_asset_entry(
+                self._root,
+                row,
+                self._featured,
+                location_writer,
+                path_exists=_path_exists,
             )
 
-            chunk: List[Dict[str, object]] = []
-            last_reported = 0
+            if entry is not None:
+                chunk.append(entry)
 
-            # Priority: Emit first 20 items quickly
-            first_chunk_size = 20
-            normal_chunk_size = 200
+            # Determine emission
+            should_flush = False
 
-            total = 0
-            total_calculated = False
-            first_batch_emitted = False
-            yielded_count = 0
-
-            for position, row in enumerate(generator, start=1):
-                # Yield CPU every 50 items to keep UI responsive
-                if position % 50 == 0:
-                    QThread.msleep(10)
-
-                if self._is_cancelled:
-                    return
-
-                # Adjust rel path to be relative to the album root
-                adjusted_row = adjust_rel_for_album(row, album_path)
-
-                entry = build_asset_entry(
-                    self._root,
-                    adjusted_row,
-                    self._featured,
-                    store,
-                    path_exists=_path_exists,
-                )
-
-                if entry is not None:
-                    chunk.append(entry)
-
-                # Determine emission
-                should_flush = False
-
-                if not first_batch_emitted:
-                    if len(chunk) >= first_chunk_size:
-                        should_flush = True
-                        first_batch_emitted = True
-                elif len(chunk) >= normal_chunk_size:
+            if not first_batch_emitted:
+                if len(chunk) >= first_chunk_size:
                     should_flush = True
+                    first_batch_emitted = True
+            elif len(chunk) >= normal_chunk_size:
+                should_flush = True
 
-                if should_flush:
-                    yielded_count += len(chunk)
-                    yield chunk
-                    chunk = []
-
-                    # Perform count after yielding first chunk
-                    if not total_calculated:
-                        try:
-                            total = store.count(filter_hidden=True, filter_params=params)
-                            total_calculated = True
-                        except Exception as exc:
-                            LOGGER.warning("Failed to count assets in database: %s", exc, exc_info=True)
-                            total = 0  # fallback
-
-                # Update progress periodically
-                # Use >= total to robustly handle concurrent additions where position might exceed original total
-                if total_calculated and (position >= total or position - last_reported >= 50):
-                    last_reported = position
-                    _safe_signal_emit(self._signals.progressUpdated.emit, self._root, position, total)
-
-            if chunk:
+            if should_flush:
                 yielded_count += len(chunk)
                 yield chunk
+                chunk = []
 
-            # Final progress update
-            if not total_calculated:  # If we never flushed (e.g. small album)
-                total = yielded_count
-            _safe_signal_emit(self._signals.progressUpdated.emit, self._root, total, total)
+                # Perform count after yielding first chunk
+                if not total_calculated:
+                    try:
+                        total = query_service.count_assets(
+                            self._root,
+                            filter_hidden=True,
+                            filter_params=params,
+                        )
+                        total_calculated = True
+                    except Exception as exc:
+                        LOGGER.warning(
+                            "Failed to count assets in database: %s",
+                            exc,
+                            exc_info=True,
+                        )
+                        total = 0  # fallback
+
+            # Update progress periodically
+            # Use >= total to robustly handle concurrent additions where position might exceed original total
+            if total_calculated and (
+                position >= total or position - last_reported >= 50
+            ):
+                last_reported = position
+                _safe_signal_emit(
+                    self._signals.progressUpdated.emit,
+                    self._root,
+                    position,
+                    total,
+                )
+
+        if chunk:
+            yielded_count += len(chunk)
+            yield chunk
+
+        # Final progress update
+        if not total_calculated:  # If we never flushed (e.g. small album)
+            total = yielded_count
+        _safe_signal_emit(self._signals.progressUpdated.emit, self._root, total, total)
+
 
 class LiveIngestWorker(QRunnable):
     """Process in-memory live scan results on a background thread."""

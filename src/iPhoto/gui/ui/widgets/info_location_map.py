@@ -7,13 +7,25 @@ import sys
 from pathlib import Path
 from typing import Callable
 
-from PySide6.QtCore import QCoreApplication, QEvent, QPointF, QRect, QRectF, QSize, Qt, QTimer
+from PySide6.QtCore import (
+    QCoreApplication,
+    QEvent,
+    QObject,
+    QPoint,
+    QPointF,
+    QRect,
+    QRectF,
+    QSize,
+    Qt,
+    QTimer,
+)
 from PySide6.QtGui import QPainter, QPainterPath, QPixmap, QRegion, QResizeEvent
 from PySide6.QtSvg import QSvgRenderer
-from PySide6.QtWidgets import QLabel, QSizePolicy, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QApplication, QLabel, QSizePolicy, QVBoxLayout, QWidget
 
 from maps.map_sources import MapSourceSpec
 from maps.map_widget._map_widget_base import MapWidgetBase
+from maps.map_widget.drag_cursor import DragCursorManager
 from maps.map_widget.map_gl_widget import MapGLWidget, MapGLWindowWidget
 from maps.map_widget.map_widget import MapWidget
 
@@ -109,6 +121,10 @@ class InfoLocationMapView(QWidget):
         super().__init__(parent)
         _configure_opaque_map_container(self)
         self._map_widget: MapWidgetBase | None = None
+        self._map_event_targets: list[QObject] = []
+        self._application_event_filter_installed = False
+        self._drag_cursor = DragCursorManager()
+        self._dragging = False
         self._backend_kind = "unavailable"
         self._latitude: float | None = None
         self._longitude: float | None = None
@@ -192,6 +208,7 @@ class InfoLocationMapView(QWidget):
             self._overlay.hide()
 
     def clear_location(self) -> None:
+        self._reset_drag_cursor()
         self._latitude = None
         self._longitude = None
         self._screen_point = None
@@ -209,6 +226,8 @@ class InfoLocationMapView(QWidget):
         self._pin_settle_timer.stop()
         self._viewport_sync_timer.stop()
         self._viewport_settle_timer.stop()
+        self._reset_drag_cursor()
+        self._remove_map_event_filters()
         if self._map_widget is not None:
             map_widget = self._map_widget
             self._remove_pin_painter(map_widget)
@@ -251,6 +270,10 @@ class InfoLocationMapView(QWidget):
         self._sync_overlay_geometry()
         self._queue_viewport_sync()
 
+    def hideEvent(self, event) -> None:  # type: ignore[override]
+        self._reset_drag_cursor()
+        super().hideEvent(event)
+
     def event(self, event: QEvent) -> bool:  # type: ignore[override]
         if event.type() == self._PIN_SYNC_EVENT:
             self._pending_pin_sync_queue = False
@@ -264,11 +287,71 @@ class InfoLocationMapView(QWidget):
         return super().event(event)
 
     def eventFilter(self, watched: object, event: QEvent) -> bool:
-        if watched is self._map_widget and event.type() == QEvent.Type.Resize:
+        is_map_target = self._is_map_event_target(watched)
+        if is_map_target or self._is_global_map_drag_event(event):
+            self._handle_drag_cursor_event(event)
+
+        if is_map_target and event.type() == QEvent.Type.Resize:
             self._sync_corner_masks()
             self._sync_overlay_geometry()
             self._queue_viewport_sync()
         return super().eventFilter(watched, event)
+
+    def _is_map_event_target(self, watched: object) -> bool:
+        return any(watched is target for target in self._map_event_targets)
+
+    def _is_global_map_drag_event(self, event: QEvent) -> bool:
+        event_type = event.type()
+        if event_type not in {
+            QEvent.Type.MouseButtonPress,
+            QEvent.Type.MouseMove,
+            QEvent.Type.MouseButtonRelease,
+            QEvent.Type.Leave,
+            QEvent.Type.Hide,
+        }:
+            return False
+        if self._dragging:
+            return True
+        if event_type != QEvent.Type.MouseButtonPress:
+            return False
+        button = getattr(event, "button", lambda: Qt.MouseButton.NoButton)()
+        return button == Qt.MouseButton.LeftButton and self._event_is_inside_map_host(event)
+
+    def _event_is_inside_map_host(self, event: QEvent) -> bool:
+        global_point: QPoint | None = None
+        global_position = getattr(event, "globalPosition", None)
+        if callable(global_position):
+            global_point = global_position().toPoint()
+        else:
+            global_pos = getattr(event, "globalPos", None)
+            if callable(global_pos):
+                global_point = global_pos()
+
+        if global_point is None:
+            return False
+
+        host_rect = QRect(self._map_host.mapToGlobal(QPoint(0, 0)), self._map_host.size())
+        return host_rect.contains(global_point)
+
+    def _handle_drag_cursor_event(self, event: QEvent) -> None:
+        event_type = event.type()
+        if event_type == QEvent.Type.MouseButtonPress:
+            button = getattr(event, "button", lambda: Qt.MouseButton.NoButton)()
+            if button == Qt.MouseButton.LeftButton:
+                self._dragging = True
+                self._set_drag_cursor()
+        elif event_type == QEvent.Type.MouseMove:
+            buttons = getattr(event, "buttons", lambda: Qt.MouseButton.NoButton)()
+            if self._dragging and buttons & Qt.MouseButton.LeftButton:
+                self._set_drag_cursor()
+            elif self._dragging and not (buttons & Qt.MouseButton.LeftButton):
+                self._reset_drag_cursor()
+        elif event_type == QEvent.Type.MouseButtonRelease:
+            button = getattr(event, "button", lambda: Qt.MouseButton.NoButton)()
+            if button == Qt.MouseButton.LeftButton:
+                self._reset_drag_cursor()
+        elif event_type in (QEvent.Type.Leave, QEvent.Type.Hide):
+            self._reset_drag_cursor()
 
     def _rounded_region(self, width: int, height: int) -> QRegion:
         radius = min(self._CORNER_RADIUS, width / 2.0, height / 2.0)
@@ -539,7 +622,7 @@ class InfoLocationMapView(QWidget):
         if isinstance(self._map_widget, QWidget):
             self._map_widget.setMinimumSize(0, 0)
             self._map_widget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-            self._map_widget.installEventFilter(self)
+        self._install_map_event_filters()
         self._map_host_layout.addWidget(self._map_widget, 1)
         self._install_pin_painter_if_supported()
         self._connect_map_signals()
@@ -547,6 +630,63 @@ class InfoLocationMapView(QWidget):
         self._sync_corner_masks()
         self._sync_overlay_geometry()
         QTimer.singleShot(0, self._sync_overlay_geometry)
+
+    def _install_map_event_filters(self) -> None:
+        self._remove_map_event_filters()
+        if self._map_widget is None:
+            return
+
+        targets: list[QObject] = []
+        if isinstance(self._map_widget, QObject):
+            targets.append(self._map_widget)
+
+        event_target_getter = getattr(self._map_widget, "event_target", None)
+        if callable(event_target_getter):
+            try:
+                event_target = event_target_getter()
+            except Exception:
+                LOGGER.debug("Failed to resolve info-panel mini-map event target", exc_info=True)
+            else:
+                if isinstance(event_target, QObject) and not any(
+                    event_target is target for target in targets
+                ):
+                    targets.append(event_target)
+
+        for target in targets:
+            target.installEventFilter(self)
+        self._map_event_targets = targets
+        app = QApplication.instance()
+        if app is not None and not self._application_event_filter_installed:
+            app.installEventFilter(self)
+            self._application_event_filter_installed = True
+
+    def _remove_map_event_filters(self) -> None:
+        for target in self._map_event_targets:
+            try:
+                target.removeEventFilter(self)
+            except RuntimeError:
+                continue
+        self._map_event_targets = []
+        app = QApplication.instance()
+        if app is not None and self._application_event_filter_installed:
+            app.removeEventFilter(self)
+        self._application_event_filter_installed = False
+
+    def _cursor_targets(self) -> tuple[object, ...]:
+        targets: list[object] = [self, self._map_host]
+        if self._map_widget is not None:
+            targets.append(self._map_widget)
+        for target in self._map_event_targets:
+            if not any(target is existing for existing in targets):
+                targets.append(target)
+        return tuple(targets)
+
+    def _set_drag_cursor(self) -> None:
+        self._drag_cursor.set_cursor(Qt.CursorShape.ClosedHandCursor, self._cursor_targets())
+
+    def _reset_drag_cursor(self) -> None:
+        self._dragging = False
+        self._drag_cursor.reset(self._cursor_targets())
 
     def _install_pin_painter_if_supported(self) -> None:
         if self._map_widget is None:

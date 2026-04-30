@@ -8,6 +8,7 @@ from typing import Dict, List, Optional
 
 from PySide6.QtCore import QObject, QRunnable, Signal
 
+from ....bootstrap.library_asset_query_service import LibraryAssetQueryService
 from .asset_loader_worker import compute_asset_rows
 
 LOGGER = logging.getLogger(__name__)
@@ -34,6 +35,7 @@ class IncrementalRefreshWorker(QRunnable):
         filter_params: Optional[Dict[str, object]] = None,
         descendant_root: Optional[Path] = None,
         library_root: Optional[Path] = None,
+        asset_query_service: LibraryAssetQueryService | None = None,
     ) -> None:
         super().__init__()
         self.setAutoDelete(True)
@@ -43,6 +45,7 @@ class IncrementalRefreshWorker(QRunnable):
         self._filter_params = filter_params
         self._descendant_root = descendant_root
         self._library_root = library_root
+        self._asset_query_service = asset_query_service
 
     def run(self) -> None:
         try:
@@ -50,6 +53,7 @@ class IncrementalRefreshWorker(QRunnable):
             fresh_rows, _ = compute_asset_rows(
                 self._root, self._featured, filter_params=self._filter_params,
                 library_root=self._library_root,
+                asset_query_service=self._asset_query_service,
             )
 
             # 2. If a descendant root is involved, merge its fresh data into the current set of rows
@@ -87,6 +91,7 @@ class IncrementalRefreshWorker(QRunnable):
             child_rows, _ = compute_asset_rows(
                 self._descendant_root, child_featured, filter_params=self._filter_params,
                 library_root=self._library_root,
+                asset_query_service=self._asset_query_service,
             )
 
             if child_rows:

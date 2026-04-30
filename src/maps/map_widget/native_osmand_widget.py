@@ -35,6 +35,7 @@ from maps.map_sources import (
     MapSourceSpec,
     resolve_osmand_native_widget_library,
 )
+from maps.map_widget.drag_cursor import DragCursorManager
 from maps.map_widget.map_renderer import CityAnnotation
 from maps.tile_parser import TileLoadingError
 
@@ -440,6 +441,7 @@ class NativeOsmAndWidget(QWidget):
         self._native_event_target.installEventFilter(self)
         self._bridge_dragging = False
         self._bridge_last_mouse_pos = QPointF()
+        self._drag_cursor = DragCursorManager()
         self._overlay_window: _NativeMarkerOverlayWindow | None = None
         self._overlay_container: QWidget | None = None
 
@@ -522,6 +524,7 @@ class NativeOsmAndWidget(QWidget):
             self._state_timer.stop()
         if self._deferred_view_sync_timer.isActive():
             self._deferred_view_sync_timer.stop()
+        self._reset_drag_cursor()
         self._bridge_dragging = False
         if hasattr(self, "_native_widget") and self._native_widget is not None:
             try:
@@ -625,10 +628,12 @@ class NativeOsmAndWidget(QWidget):
                 if mouse_event.button() == Qt.MouseButton.LeftButton:
                     self._bridge_dragging = True
                     self._bridge_last_mouse_pos = mouse_event.position()
+                    self._set_drag_cursor()
                     self._schedule_deferred_view_sync()
             elif event_type == QEvent.Type.MouseMove:
                 mouse_event = event
                 if self._bridge_dragging and mouse_event.buttons() & Qt.MouseButton.LeftButton:
+                    self._set_drag_cursor()
                     current_pos = mouse_event.position()
                     delta = current_pos - self._bridge_last_mouse_pos
                     self._bridge_last_mouse_pos = current_pos
@@ -639,6 +644,7 @@ class NativeOsmAndWidget(QWidget):
                 mouse_event = event
                 if self._bridge_dragging and mouse_event.button() == Qt.MouseButton.LeftButton:
                     self._bridge_dragging = False
+                    self._reset_drag_cursor()
                     self.panFinished.emit()
                     self._schedule_deferred_view_sync()
             elif event_type in {QEvent.Type.Wheel, QEvent.Type.Resize}:
@@ -672,6 +678,8 @@ class NativeOsmAndWidget(QWidget):
                 self._state_timer.stop()
             if self._deferred_view_sync_timer.isActive():
                 self._deferred_view_sync_timer.stop()
+            self._reset_drag_cursor()
+            self._bridge_dragging = False
             self._native_widget.setUpdatesEnabled(False)
             if self._overlay_container is not None:
                 self._overlay_container.hide()
@@ -704,6 +712,26 @@ class NativeOsmAndWidget(QWidget):
             return
         if not self._deferred_view_sync_timer.isActive():
             self._deferred_view_sync_timer.start()
+
+    def _cursor_targets(self) -> tuple[object, ...]:
+        targets: list[object] = [self]
+        for candidate in (
+            getattr(self, "_native_widget", None),
+            getattr(self, "_native_event_target", None),
+            getattr(self, "_overlay_container", None),
+            getattr(self, "_overlay_window", None),
+        ):
+            if candidate is None:
+                continue
+            if all(candidate is not target for target in targets):
+                targets.append(candidate)
+        return tuple(targets)
+
+    def _set_drag_cursor(self) -> None:
+        self._drag_cursor.set_cursor(Qt.CursorShape.ClosedHandCursor, self._cursor_targets())
+
+    def _reset_drag_cursor(self) -> None:
+        self._drag_cursor.reset(self._cursor_targets())
 
     def _sync_native_widget_geometry(self) -> None:
         if self._is_shutdown():

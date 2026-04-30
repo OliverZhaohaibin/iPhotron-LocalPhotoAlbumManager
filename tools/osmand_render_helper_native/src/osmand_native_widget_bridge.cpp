@@ -98,6 +98,17 @@ __declspec(dllexport) void osmand_widget_cleanup(void* widgetPointer)
         widget->cleanupRenderer();
 }
 
+__declspec(dllexport) void* osmand_widget_get_event_target(void* widgetPointer)
+{
+    if (auto* widget = widgetFromPointer(widgetPointer))
+    {
+        if (auto* window = widget->windowHandle())
+            return window;
+        return widget;
+    }
+    return nullptr;
+}
+
 __declspec(dllexport) void osmand_widget_pan_by_pixels(void* widgetPointer, double deltaX, double deltaY)
 {
     if (auto* widget = widgetFromPointer(widgetPointer))
@@ -153,4 +164,3 @@ __declspec(dllexport) int osmand_widget_project_lonlat(
     return 0;
 }
 }
-

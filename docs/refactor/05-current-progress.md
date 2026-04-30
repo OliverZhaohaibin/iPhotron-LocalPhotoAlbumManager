@@ -86,15 +86,30 @@ migration steps.
 - Added `docs/refactor/08-move-lifecycle-migration.md` as the process handoff
   for this pass.
 
+## Completed In GUI Session Query Migration
+
+- Added `LibraryAssetQueryService` as the session-owned query surface for
+  scoped counts, lightweight geometry rows, full asset rows, and geotagged rows.
+- Exposed the query surface from `LibrarySession` and bound it, along with the
+  durable state repository, into `LibraryManager` from
+  `RuntimeContext.open_library()` / `close_library()`.
+- Refactored GUI favorite writes, asset grid reads, export reads, Albums
+  dashboard metadata, and Location map aggregation to use session query/state
+  surfaces instead of direct `get_global_repository()` imports.
+- Extended architecture checks so GUI runtime imports of the concrete index
+  store fail.
+- Added `docs/refactor/09-gui-session-query-migration.md` as the process
+  handoff for this pass.
+
 ## Current Phase Status
 
 - Phase 0 is partially complete: vNext docs are in place and architecture
   guardrails now cover application/concrete imports, lower-layer GUI imports,
-  and new legacy model shim imports.
+  GUI concrete index-store imports, and new legacy model shim imports.
 - Phase 1 is partially complete: `LibrarySession` exists and is reachable from
-  runtime entry objects; scan and asset lifecycle session surfaces are bound
-  into `LibraryManager`, but GUI/coordinators/viewmodels still need broader
-  session-surface migration.
+  runtime entry objects; scan, asset lifecycle, asset query, and durable state
+  session surfaces are bound into `LibraryManager`, but GUI/coordinators/
+  viewmodels still need broader session-surface migration.
 - Phase 2 is partially complete: repository/state ports exist and Assign
   Location uses the state boundary; lifecycle row operations are now on the
   asset repository port, but asset persistence is not yet fully collapsed to
@@ -106,8 +121,10 @@ migration steps.
   `ScanLibraryUseCase`; move/delete/restore index updates now enter through
   `LibraryAssetLifecycleService`, while watcher lifecycle cleanup still needs
   migration.
-- Phase 4 is not complete: `gui.facade.py` and GUI services still carry legacy
-  business orchestration and direct global repository access.
+- Phase 4 is partially complete: GUI favorite writes, asset grid reads, export
+  reads, dashboard metadata, and Location map aggregation now use session
+  surfaces, but `gui.facade.py` and GUI services still carry legacy business
+  orchestration.
 - Phase 5 is partially complete: thumbnail and Assign Location boundaries were
   improved; People, Maps, Edit sidecar, and full thumbnail renderer ports still
   need deeper migration.
@@ -126,10 +143,9 @@ migration steps.
 - `LibraryAssetLifecycleService` still uses the current index-store repository
   as the move/delete/restore lifecycle source of truth. This is intentional
   until repository consolidation is completed.
-- Favorite updates, map aggregation, export reads, People indexing, face scan
-  workers, trash cleanup helpers, watcher refresh paths, and several GUI
-  asset-loading paths still access the global repository directly or through
-  compatibility paths.
+- People indexing, face scan workers, trash cleanup helpers, watcher refresh
+  paths, and non-GUI compatibility paths still access the global repository
+  directly or through compatibility adapters.
 - User state still physically lives in `global_index.db`; the new state port is
   an API boundary, not a separate `library_state.db` migration.
 - `global_index.db` compatibility schemas may not have a `metadata` column; the
@@ -166,6 +182,16 @@ Additional move lifecycle migration verification:
 Results: all passed with the same existing pytest config and legacy shim
 warnings.
 
+Additional GUI session query migration verification:
+
+- `.venv/bin/python tools/check_architecture.py`
+- `.venv/bin/python -m pytest tests/architecture -q`
+- `.venv/bin/python -m pytest tests/application/test_library_asset_query_service.py tests/application/test_library_session.py tests/application/test_runtime_context.py -q`
+- `.venv/bin/python -m pytest tests/services/test_album_metadata_service.py tests/ui/tasks/test_asset_loader_missing_files.py tests/test_library_geotagged_assets.py tests/ui/controllers/test_export_controller.py -q`
+
+Results: all passed with the same existing pytest config and legacy shim
+warnings.
+
 The previous foundation pass also ran broader application/cache/scan suites and
 a broad non-GUI/UI run (`1237 passed, 7 skipped`), excluding
 `tests/test_aspect_ratio_constraint.py` because this environment lacks the
@@ -173,9 +199,8 @@ a broad non-GUI/UI run (`1237 passed, 7 skipped`), excluding
 
 ## Next Handoff Steps
 
-1. Replace direct `get_global_repository()` calls in GUI services/tasks with
-   session commands or application ports, starting with favorite, map
-   aggregation, export reads, asset loading, People, and face scan paths.
+1. Move People and face-scan repository access behind bounded-context ports or
+   session/application commands.
 2. Move watcher-triggered incremental refresh and remaining trash cleanup helper
    paths behind session/application commands.
 3. Decide the final source of truth between `cache/index_store.AssetRepository`

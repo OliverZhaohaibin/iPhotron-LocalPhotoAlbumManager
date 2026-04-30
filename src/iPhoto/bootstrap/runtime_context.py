@@ -161,6 +161,16 @@ class RuntimeContext:
         bind_scan_service = getattr(self.library, "bind_scan_service", None)
         if callable(bind_scan_service):
             bind_scan_service(self.library_session.scans)
+        bind_asset_query_service = getattr(
+            self.library,
+            "bind_asset_query_service",
+            None,
+        )
+        if callable(bind_asset_query_service):
+            bind_asset_query_service(self.library_session.asset_queries)
+        bind_state_repository = getattr(self.library, "bind_state_repository", None)
+        if callable(bind_state_repository):
+            bind_state_repository(self.library_session.state)
         bind_asset_lifecycle_service = getattr(
             self.library,
             "bind_asset_lifecycle_service",
@@ -180,6 +190,18 @@ class RuntimeContext:
         )
         if callable(bind_asset_lifecycle_service):
             bind_asset_lifecycle_service(None)
+
+        bind_state_repository = getattr(self.library, "bind_state_repository", None)
+        if callable(bind_state_repository):
+            bind_state_repository(None)
+
+        bind_asset_query_service = getattr(
+            self.library,
+            "bind_asset_query_service",
+            None,
+        )
+        if callable(bind_asset_query_service):
+            bind_asset_query_service(None)
 
         bind_scan_service = getattr(self.library, "bind_scan_service", None)
         if callable(bind_scan_service):

@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 
 from PySide6.QtCore import QObject, QTimer, Signal
 
-from ...cache.index_store import get_global_repository
+from ...bootstrap.library_session import create_library_state_repository
 from ...config import ALBUM_MANIFEST_NAMES
 from ...errors import IPhotoError
 from ...models.album import Album
@@ -117,17 +117,24 @@ class AlbumMetadataService(QObject):
             # Persist changes
             if self._save_manifest(alb, reload_view=False):
                 # Success: Update DB immediately to minimize inconsistency window
-                # Use library root for global database
-                index_root = library_root if library_root else alb.root
                 # For global DB, we need the library-relative path
                 if library_root:
                     try:
                         lib_rel = absolute_asset.relative_to(library_root).as_posix()
-                        get_global_repository(index_root).set_favorite_status(lib_rel, desired_state)
+                        self._state_repository_for(library_root).set_favorite_status(
+                            lib_rel,
+                            desired_state,
+                        )
                     except (ValueError, OSError):
-                        get_global_repository(alb.root).set_favorite_status(r, desired_state)
+                        self._state_repository_for(alb.root).set_favorite_status(
+                            r,
+                            desired_state,
+                        )
                 else:
-                    get_global_repository(index_root).set_favorite_status(r, desired_state)
+                    self._state_repository_for(alb.root).set_favorite_status(
+                        r,
+                        desired_state,
+                    )
 
                 # Check if this was the primary album
                 if alb.root == album.root:
@@ -228,6 +235,30 @@ class AlbumMetadataService(QObject):
         except IPhotoError as exc:
             self.errorRaised.emit(str(exc))
             return None
+
+    def _state_repository_for(self, root: Path):
+        manager = self._library_manager_getter()
+        if manager is not None:
+            repository = getattr(manager, "state_repository", None)
+            manager_root_getter = getattr(manager, "root", None)
+            manager_root = (
+                manager_root_getter() if callable(manager_root_getter) else None
+            )
+            if (
+                repository is not None
+                and manager_root is not None
+                and hasattr(repository, "set_favorite_status")
+                and self._paths_equal(root, manager_root)
+            ):
+                return repository
+        return create_library_state_repository(root)
+
+    @staticmethod
+    def _paths_equal(left: Path, right: Path) -> bool:
+        try:
+            return Path(left).resolve() == Path(right).resolve()
+        except OSError:
+            return Path(left) == Path(right)
 
     def _save_manifest(self, album: Album, *, reload_view: bool = True) -> bool:
         """Persist *album* to disk, optionally requesting a UI refresh."""

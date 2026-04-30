@@ -9,6 +9,7 @@ from typing import Iterable, List, Optional, Tuple
 from PySide6.QtCore import QObject, QRunnable, Signal
 
 from ....bootstrap.library_asset_lifecycle_service import LibraryAssetLifecycleService
+from ....io import sidecar
 from ....utils.logging import get_logger
 
 LOGGER = get_logger()
@@ -126,7 +127,10 @@ class MoveWorker(QRunnable):
                     source_path = source
                 target = self._move_into_destination(source_path)
             except FileNotFoundError:
-                self._signals.error.emit(f"File not found: {source}")
+                if self._is_trash_destination and not self._is_restore:
+                    LOGGER.debug("Skipping already-missing delete source: %s", source)
+                else:
+                    self._signals.error.emit(f"File not found: {source}")
             except OSError as exc:
                 self._signals.error.emit(f"Could not move '{source}': {exc}")
             else:
@@ -158,30 +162,99 @@ class MoveWorker(QRunnable):
         )
 
     def _move_into_destination(self, source: Path) -> Path:
-        """Move *source* into the destination album avoiding name collisions."""
+        """Move *source* and its edit sidecar as one destination bundle."""
 
         if not source.exists():
             raise FileNotFoundError(source)
+        source_sidecar = self._sidecar_for_asset(source)
+        target, target_sidecar = self._destination_bundle_paths(
+            source,
+            include_sidecar=source_sidecar is not None,
+        )
+
+        moved_sidecar: Path | None = None
+        try:
+            if source_sidecar is not None:
+                moved_sidecar = self._move_single_path(source_sidecar, target_sidecar)
+            moved_path = self._move_single_path(source, target)
+        except OSError:
+            if moved_sidecar is not None and source_sidecar is not None:
+                self._rollback_sidecar_move(moved_sidecar, source_sidecar)
+            raise
+        return moved_path
+
+    def _sidecar_for_asset(self, source: Path) -> Path | None:
+        candidate = sidecar.sidecar_path_for_asset(source)
+        if candidate == source:
+            return None
+        try:
+            if candidate.exists() and candidate.is_file():
+                return candidate
+        except OSError:
+            return None
+        return None
+
+    def _destination_bundle_paths(
+        self,
+        source: Path,
+        *,
+        include_sidecar: bool,
+    ) -> tuple[Path, Path]:
         target_dir = self._destination_root
-        base_name = source.name
-        target = target_dir / base_name
+        target = target_dir / source.name
         stem = target.stem
         suffix = target.suffix
         counter = 1
-        while target.exists():
+        while self._destination_bundle_exists(target, include_sidecar=include_sidecar):
             target = target_dir / f"{stem} ({counter}){suffix}"
             counter += 1
+        return target, sidecar.sidecar_path_for_asset(target)
+
+    def _destination_bundle_exists(self, target: Path, *, include_sidecar: bool) -> bool:
+        if target.exists():
+            return True
+        if not include_sidecar:
+            return False
+        target_sidecar = sidecar.sidecar_path_for_asset(target)
+        if target_sidecar == target:
+            return False
+        return target_sidecar.exists()
+
+    def _move_single_path(self, source: Path, target: Path) -> Path:
         target.parent.mkdir(parents=True, exist_ok=True)
         try:
             moved_path = shutil.move(str(source), str(target))
         except OSError:
-            if source.exists() and target.exists():
-                try:
-                    target.unlink()
-                except OSError:
-                    LOGGER.warning("Failed to clean up partially moved target %s", target, exc_info=True)
+            self._cleanup_partial_target(source, target)
             raise
-        return Path(moved_path).resolve()
+        return self._resolve_path(Path(moved_path))
+
+    def _cleanup_partial_target(self, source: Path, target: Path) -> None:
+        if not source.exists() or not target.exists():
+            return
+        try:
+            target.unlink()
+        except OSError:
+            LOGGER.warning(
+                "Failed to clean up partially moved target %s",
+                target,
+                exc_info=True,
+            )
+
+    def _rollback_sidecar_move(self, moved_sidecar: Path, original_sidecar: Path) -> None:
+        if not moved_sidecar.exists():
+            return
+        if original_sidecar.exists():
+            self._signals.error.emit(
+                f"Could not roll back sidecar '{moved_sidecar}': original path already exists."
+            )
+            return
+        try:
+            shutil.move(str(moved_sidecar), str(original_sidecar))
+        except OSError as exc:
+            self._signals.error.emit(
+                f"Could not roll back sidecar '{moved_sidecar}': {exc}"
+            )
 
     @property
     def asset_lifecycle_service(self) -> LibraryAssetLifecycleService:
@@ -198,6 +271,12 @@ class MoveWorker(QRunnable):
 
         if path is None:
             return None
+        try:
+            return path.resolve()
+        except OSError:
+            return path
+
+    def _resolve_path(self, path: Path) -> Path:
         try:
             return path.resolve()
         except OSError:

@@ -31,6 +31,16 @@ def _write_index_rows(store: IndexStore, rels: list[str]) -> None:
     store.write_rows(rows)
 
 
+class _LifecycleRecorder:
+    def __init__(self, result: int = 7) -> None:
+        self.result = result
+        self.cleanup_roots: list[Path] = []
+
+    def cleanup_deleted_index(self, trash_root: Path) -> int:
+        self.cleanup_roots.append(Path(trash_root))
+        return self.result
+
+
 def test_cleanup_deleted_index_removes_missing_rows(tmp_path: Path, qapp: QApplication) -> None:
     library_root = tmp_path / "Library"
     library_root.mkdir()
@@ -57,3 +67,22 @@ def test_cleanup_deleted_index_removes_missing_rows(tmp_path: Path, qapp: QAppli
     removed_again = manager.cleanup_deleted_index()
     assert removed_again == 1
     assert list(store.read_all()) == []
+
+
+def test_cleanup_deleted_index_delegates_to_session_lifecycle(
+    tmp_path: Path,
+    qapp: QApplication,
+) -> None:
+    library_root = tmp_path / "Library"
+    library_root.mkdir()
+
+    manager = LibraryManager()
+    manager.bind_path(library_root)
+    trash_root = manager.ensure_deleted_directory()
+    lifecycle = _LifecycleRecorder(result=3)
+    manager.bind_asset_lifecycle_service(lifecycle)  # type: ignore[arg-type]
+
+    removed = manager.cleanup_deleted_index()
+
+    assert removed == 3
+    assert lifecycle.cleanup_roots == [trash_root]

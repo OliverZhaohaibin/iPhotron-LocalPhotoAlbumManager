@@ -50,7 +50,7 @@ class AssetMoveService(QObject):
         destination: Path,
         *,
         operation: str = "move",
-    ) -> None:
+    ) -> bool:
         """Validate *sources* and queue a worker for the requested *operation*.
 
         ``operation`` accepts ``"move"`` (default), ``"delete"`` when moving items
@@ -64,7 +64,7 @@ class AssetMoveService(QObject):
 
         if operation_normalized not in {"move", "delete", "restore"}:
             self.errorRaised.emit(f"Unsupported move operation: {operation}")
-            return
+            return False
 
         album = self._current_album_getter()
         library_manager = self._library_manager_getter()
@@ -74,7 +74,7 @@ class AssetMoveService(QObject):
         elif album is None:
             if library_root is None:
                 self.errorRaised.emit("No album is currently open.")
-                return
+                return False
             source_root = library_root
         else:
             source_root = album.root
@@ -83,13 +83,13 @@ class AssetMoveService(QObject):
             destination_root = Path(destination).resolve()
         except OSError as exc:
             self.errorRaised.emit(f"Invalid destination: {exc}")
-            return
+            return False
 
         if not destination_root.exists() or not destination_root.is_dir():
             self.errorRaised.emit(
                 f"Move destination is not a directory: {destination_root}"
             )
-            return
+            return False
 
         if destination_root == source_root:
             self.moveFinished.emit(
@@ -98,7 +98,7 @@ class AssetMoveService(QObject):
                 False,
                 "Files are already located in this album.",
             )
-            return
+            return False
 
         normalized: List[Path] = []
         seen: set[Path] = set()
@@ -113,6 +113,8 @@ class AssetMoveService(QObject):
                 continue
             seen.add(resolved)
             if not resolved.exists():
+                if operation_normalized == "delete":
+                    continue
                 self.errorRaised.emit(f"File not found: {resolved}")
                 continue
             if resolved.is_dir():
@@ -130,13 +132,18 @@ class AssetMoveService(QObject):
             normalized.append(resolved)
 
         if not normalized:
+            message = (
+                "No items were deleted."
+                if operation_normalized == "delete"
+                else "No valid files were selected for moving."
+            )
             self.moveFinished.emit(
                 source_root,
                 destination_root,
                 False,
-                "No valid files were selected for moving.",
+                message,
             )
-            return
+            return False
 
         rel_paths: List[str] = []
         for resolved in normalized:
@@ -171,18 +178,18 @@ class AssetMoveService(QObject):
             self.errorRaised.emit(
                 "Basic Library root is unavailable; cannot delete items safely."
             )
-            return
+            return False
 
         if is_delete_operation and trash_root is None:
             self.errorRaised.emit("Recently Deleted folder is unavailable.")
-            return
+            return False
 
         if is_restore_operation:
             if trash_root is None:
                 trash_root = library_manager.deleted_directory() if library_manager else None
             if trash_root is None:
                 self.errorRaised.emit("Recently Deleted folder is unavailable.")
-                return
+                return False
             try:
                 source_resolved = source_root.resolve()
             except OSError:
@@ -195,14 +202,14 @@ class AssetMoveService(QObject):
                 self.errorRaised.emit(
                     "Restore operations must be triggered from Recently Deleted."
                 )
-                return
+                return False
             try:
                 destination_resolved = destination_root.resolve()
             except OSError:
                 destination_resolved = destination_root
             if destination_resolved == trash_resolved:
                 self.errorRaised.emit("Cannot restore items back into Recently Deleted.")
-                return
+                return False
 
         is_source_main_view = False
         if library_root is not None:
@@ -250,6 +257,7 @@ class AssetMoveService(QObject):
             on_error=self._handle_worker_error,
             result_payload=lambda src, dest, moved, *_: moved,
         )
+        return True
 
     def _handle_move_finished(
         self,

@@ -126,6 +126,21 @@ class LibraryAssetLifecycleService:
             rows = ()
         return [dict(row) for row in rows if isinstance(row, dict)]
 
+    def read_index_rows_by_rels(
+        self,
+        rels: Iterable[str],
+    ) -> dict[str, dict[str, Any]]:
+        """Read indexed rows by library-relative paths."""
+
+        if self.library_root is None:
+            return {}
+        repository = self._repository(self.library_root)
+        return {
+            str(rel): dict(row)
+            for rel, row in repository.get_rows_by_rels(rels).items()
+            if isinstance(row, dict)
+        }
+
     def preserve_trash_metadata(
         self,
         trash_root: Path,
@@ -163,6 +178,44 @@ class LibraryAssetLifecycleService:
                 if cached_row.get(preserved_field) is not None:
                     row[preserved_field] = cached_row[preserved_field]
         return materialized
+
+    def cleanup_deleted_index(self, trash_root: Path) -> int:
+        """Drop stale Recently Deleted rows for this library session."""
+
+        try:
+            root = self._repository_root_for_read(Path(trash_root))
+            repository = self._repository(root)
+            album_path = self._album_path(Path(trash_root))
+            if album_path:
+                rows = repository.read_album_assets(
+                    album_path,
+                    include_subalbums=True,
+                    filter_hidden=False,
+                )
+                process_root = root
+            elif self.library_root is None:
+                rows = repository.read_all(filter_hidden=False)
+                process_root = Path(trash_root)
+            else:
+                return 0
+
+            try:
+                has_files = next(Path(trash_root).iterdir(), None) is not None
+            except OSError:
+                has_files = False
+
+            missing_rels = [
+                row_rel
+                for row_rel in (row.get("rel") for row in rows)
+                if isinstance(row_rel, str)
+                and (not has_files or not (process_root / row_rel).exists())
+            ]
+            if missing_rels:
+                repository.remove_rows(missing_rels)
+            return len(missing_rels)
+        except (IPhotoError, sqlite3.Error, OSError) as exc:
+            LOGGER.debug("Recently Deleted cleanup skipped: %s", exc)
+            return 0
 
     def _remove_source_rows(
         self,

@@ -238,3 +238,51 @@ def test_preserve_trash_metadata_merges_fields_into_fresh_rows(tmp_path: Path) -
             "original_album_subpath": "photo.jpg",
         }
     ]
+
+
+def test_cleanup_deleted_index_removes_missing_trash_rows(tmp_path: Path) -> None:
+    library_root = tmp_path / "Library"
+    trash_root = library_root / RECENTLY_DELETED_DIR_NAME
+    trash_root.mkdir(parents=True)
+    keep = trash_root / "keep.jpg"
+    keep.write_bytes(b"data")
+
+    present = f"{RECENTLY_DELETED_DIR_NAME}/keep.jpg"
+    missing = f"{RECENTLY_DELETED_DIR_NAME}/missing.jpg"
+    get_global_repository(library_root).write_rows(
+        [
+            {"rel": present, "id": "present"},
+            {"rel": missing, "id": "missing"},
+        ]
+    )
+    service = LibraryAssetLifecycleService(library_root)
+
+    removed = service.cleanup_deleted_index(trash_root)
+
+    assert removed == 1
+    rows = _rows(library_root)
+    assert list(rows) == [present]
+
+    keep.unlink()
+    removed_again = service.cleanup_deleted_index(trash_root)
+
+    assert removed_again == 1
+    assert _rows(library_root) == {}
+
+
+def test_read_index_rows_by_rels_returns_library_rows(tmp_path: Path) -> None:
+    library_root = tmp_path / "Library"
+    library_root.mkdir(parents=True)
+    get_global_repository(library_root).write_rows(
+        [
+            {"rel": "photo.jpg", "id": "photo"},
+            {"rel": "motion.mov", "id": "motion"},
+        ]
+    )
+    service = LibraryAssetLifecycleService(library_root)
+
+    rows = service.read_index_rows_by_rels(["photo.jpg", "missing.jpg"])
+
+    assert set(rows) == {"photo.jpg"}
+    assert rows["photo.jpg"]["rel"] == "photo.jpg"
+    assert rows["photo.jpg"]["id"] == "photo"

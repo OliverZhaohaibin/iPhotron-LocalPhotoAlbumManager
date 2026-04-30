@@ -32,19 +32,19 @@ class DeletionService(QObject):
         self._library_manager_getter = library_manager_getter
         self._model_provider_getter = model_provider_getter
 
-    def delete_assets(self, sources: Iterable[Path]) -> None:
+    def delete_assets(self, sources: Iterable[Path]) -> bool:
         """Move *sources* into the dedicated deleted-items folder."""
 
         library = self._library_manager_getter()
         if library is None:
             self.errorRaised.emit("Basic Library has not been configured.")
-            return
+            return False
 
         try:
             deleted_root = library.ensure_deleted_directory()
         except AlbumOperationError as exc:
             self.errorRaised.emit(str(exc))
-            return
+            return False
 
         def _normalize(path: Path) -> Path:
             try:
@@ -63,7 +63,7 @@ class DeletionService(QObject):
             normalized.append(candidate)
 
         if not normalized:
-            return
+            return False
 
         # Use model provider to get live motion
         model_provider = self._model_provider_getter()
@@ -85,7 +85,13 @@ class DeletionService(QObject):
                 seen.add(motion_key)
                 normalized.append(motion_path)
 
-        self._move_service.move_assets(normalized, deleted_root, operation="delete")
+        return bool(
+            self._move_service.move_assets(
+                normalized,
+                deleted_root,
+                operation="delete",
+            )
+        )
 
 
 __all__ = ["DeletionService"]

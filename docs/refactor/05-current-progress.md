@@ -127,6 +127,32 @@ migration steps.
 - Added `docs/refactor/10-people-session-migration.md` as the process handoff
   for this pass.
 
+## Completed In Session Cleanup / Live Read Migration
+
+- Added `LibraryAssetLifecycleService.cleanup_deleted_index()` as the
+  session-owned Recently Deleted cleanup command.
+- Refactored `TrashManagerMixin.cleanup_deleted_index()` so library code
+  delegates cleanup to the active lifecycle surface, with compatibility fallback
+  construction for isolated callers.
+- Added `LibraryAssetQueryService.read_library_relative_asset_rows()` for
+  scoped query reads that must preserve library-relative `rel` values.
+- Refactored `ScanCoordinatorMixin.get_live_scan_results()` so empty-buffer
+  database fallback reads go through the active query surface instead of a
+  direct global repository import.
+- Hardened delete operations so already-missing delete sources are treated as
+  benign no-ops instead of surfacing a modal `File not found` error.
+- Reordered right-click delete so the backend deletion worker is accepted before
+  optimistic UI mutation/toast feedback, preserving selected-row metadata and
+  preventing false successful deletes.
+- Hardened restore so files already in `.Trash` can recover from missing trash
+  index metadata by using stale original rows or the restore-to-root prompt; Live
+  Photo restore now also recovers same-stem motion files from `.Trash`.
+- Removed direct concrete index-store imports from
+  `src/iPhoto/library/trash_manager.py` and
+  `src/iPhoto/library/scan_coordinator.py`.
+- Added `docs/refactor/11-session-cleanup-live-read-migration.md` as the
+  process handoff for this pass.
+
 ## Current Phase Status
 
 - Phase 0 is partially complete: vNext docs are in place and architecture
@@ -144,9 +170,10 @@ migration steps.
   coordinator paths, CLI scan/report, app compatibility scan calls,
   `AppFacade.open_album()`, import incremental scans, and restore rescans now
   enter through `LibrarySession` / `LibraryScanService` and
-  `ScanLibraryUseCase`; move/delete/restore index updates now enter through
-  `LibraryAssetLifecycleService`, while watcher lifecycle cleanup still needs
-  migration.
+  `ScanLibraryUseCase`; move/delete/restore index updates and Recently Deleted
+  cleanup now enter through `LibraryAssetLifecycleService`, and live scan
+  fallback reads use the session query service. Remaining watcher-triggered
+  incremental scan/refresh orchestration still needs migration.
 - Phase 4 is partially complete: GUI favorite writes, asset grid reads, export
   reads, dashboard metadata, Location map aggregation, and key People dashboard/
   navigation/manual-face flows now use session surfaces, but `gui.facade.py` and
@@ -172,8 +199,8 @@ migration steps.
 - People still uses `global_index.db` as its asset-row source of truth through
   the bootstrap/session adapter. `src/iPhoto/people/**` and the face-scan worker
   should not import `get_global_repository()` directly.
-- Trash cleanup helpers, watcher refresh paths, and non-GUI compatibility paths
-  still access the global repository directly or through compatibility adapters.
+- Watcher refresh paths and non-GUI compatibility paths still access the
+  global repository directly or through compatibility adapters.
 - User state still physically lives in `global_index.db`; the new state port is
   an API boundary, not a separate `library_state.db` migration.
 - `global_index.db` compatibility schemas may not have a `metadata` column; the
@@ -231,6 +258,18 @@ Additional People session migration verification:
 Results: all passed with the same existing pytest config and legacy shim
 warnings.
 
+Additional session cleanup / live read migration verification:
+
+- `.venv/bin/python tools/check_architecture.py`
+- `.venv/bin/python -m pytest tests/architecture -q`
+- `.venv/bin/python -m pytest tests/application/test_library_asset_lifecycle_service.py tests/test_library_manager_cleanup.py tests/test_library_live_scan_results.py tests/application/test_library_asset_query_service.py -q`
+- `.venv/bin/python -m pytest tests/services/test_asset_move_service.py tests/ui/controllers/test_context_menu_operations.py -q`
+- `.venv/bin/python -m pytest tests/services/test_restoration_service.py tests/application/test_library_asset_lifecycle_service.py tests/services/test_asset_move_service.py -q`
+- `.venv/bin/python -m pytest tests/application/test_library_asset_lifecycle_service.py tests/test_library_manager_cleanup.py tests/test_library_live_scan_results.py tests/application/test_library_asset_query_service.py tests/application/test_library_session.py tests/application/test_runtime_context.py tests/services/test_asset_move_service.py tests/services/test_restoration_service.py tests/ui/controllers/test_context_menu_operations.py -q`
+
+Results: all passed with the same existing pytest config and legacy shim
+warnings.
+
 The previous foundation pass also ran broader application/cache/scan suites and
 a broad non-GUI/UI run (`1237 passed, 7 skipped`), excluding
 `tests/test_aspect_ratio_constraint.py` because this environment lacks the
@@ -238,8 +277,8 @@ a broad non-GUI/UI run (`1237 passed, 7 skipped`), excluding
 
 ## Next Handoff Steps
 
-1. Move watcher-triggered incremental refresh and remaining trash cleanup helper
-   paths behind session/application commands.
+1. Move the remaining watcher-triggered incremental scan/refresh orchestration
+   behind session/application commands.
 2. Decide the final source of truth between `cache/index_store.AssetRepository`
    and `SQLiteAssetRepository`, then collapse callers to `AssetRepositoryPort`.
 3. Expand end-to-end temp-library tests for import/move/delete/restore and

@@ -359,15 +359,15 @@ class AppFacade(QObject):
             mark_featured=mark_featured,
         )
 
-    def move_assets(self, sources: Iterable[Path], destination: Path) -> None:
+    def move_assets(self, sources: Iterable[Path], destination: Path) -> bool:
         """Move *sources* into *destination* and refresh the relevant albums."""
 
-        self._move_service.move_assets(sources, destination)
+        return self._move_service.move_assets(sources, destination)
 
-    def delete_assets(self, sources: Iterable[Path]) -> None:
+    def delete_assets(self, sources: Iterable[Path]) -> bool:
         """Move *sources* into the dedicated deleted-items folder."""
 
-        self._deletion_service.delete_assets(sources)
+        return self._deletion_service.delete_assets(sources)
 
     def restore_assets(self, sources: Iterable[Path]) -> bool:
         """Return ``True`` when at least one trashed asset restore is scheduled."""

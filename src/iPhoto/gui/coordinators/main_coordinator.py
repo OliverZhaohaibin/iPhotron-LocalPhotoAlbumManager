@@ -241,6 +241,7 @@ class MainCoordinator(QObject):
 
         # --- Legacy Controllers ---
         self._dialog = DialogController(window, context, window.ui.status_bar)
+        self._facade.register_restore_prompt(self._dialog.prompt_restore_to_root)
         self._status_bar = StatusBarController(
             window.ui.status_bar,
             window.ui.progress_bar,

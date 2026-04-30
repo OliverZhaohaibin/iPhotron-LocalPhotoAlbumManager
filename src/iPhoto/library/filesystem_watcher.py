@@ -53,9 +53,14 @@ class FileSystemWatcherMixin:
     def _on_watcher_debounce_timeout(self) -> None:
         """Refresh the tree and scan changed watcher scopes through the session."""
 
+        previous_album_paths = self._known_album_paths()
         pending_paths = set(self._pending_watch_paths)
         self._pending_watch_paths.clear()
         self._refresh_tree()
+        pending_paths = self._expand_new_album_watch_paths(
+            pending_paths,
+            previous_album_paths,
+        )
         self._start_watcher_scans(pending_paths)
 
     def _start_watcher_scans(self, paths: set[Path]) -> None:
@@ -118,6 +123,58 @@ class FileSystemWatcherMixin:
             return str(path.resolve())
         except OSError:
             return str(path)
+
+    def _known_album_paths(self) -> set[Path]:
+        """Return the currently discovered album directories."""
+
+        return {Path(node.path) for node in getattr(self, "_nodes", {}).values()}
+
+    def _expand_new_album_watch_paths(
+        self,
+        paths: set[Path],
+        previous_album_paths: set[Path],
+    ) -> set[Path]:
+        """Scan newly discovered albums instead of their parent watch path."""
+
+        if not paths:
+            return paths
+
+        previous_keys = {
+            self._watch_scan_key(path)
+            for path in previous_album_paths
+        }
+        new_album_paths = [
+            path
+            for path in sorted(self._known_album_paths(), key=lambda item: item.as_posix())
+            if self._watch_scan_key(path) not in previous_keys
+        ]
+        if not new_album_paths:
+            return paths
+
+        expanded = set(paths)
+        for pending_path in paths:
+            additions = [
+                album_path
+                for album_path in new_album_paths
+                if self._path_covers(pending_path, album_path)
+            ]
+            if not additions:
+                continue
+            expanded.discard(pending_path)
+            expanded.update(additions)
+        return expanded
+
+    @staticmethod
+    def _path_covers(root: Path, candidate: Path) -> bool:
+        try:
+            root_resolved = root.resolve()
+            candidate_resolved = candidate.resolve()
+        except OSError:
+            return False
+        return (
+            candidate_resolved == root_resolved
+            or root_resolved in candidate_resolved.parents
+        )
 
     def _dedupe_watch_scan_roots(self, paths: set[Path]) -> list[Path]:
         """Return minimal existing directory scopes for watcher-triggered scans."""

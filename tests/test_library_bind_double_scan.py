@@ -116,6 +116,48 @@ def test_watcher_debounce_scans_changed_scope_through_session_service(
     start_scanning.assert_called_once_with(album, ["*.jpg"], [])
 
 
+def test_root_watcher_event_for_new_album_uses_new_album_filters(
+    tmp_path,
+    qapp,
+):
+    root = tmp_path / "Library"
+    root.mkdir()
+
+    manager = LibraryManager()
+    manager.bind_path(root)
+
+    album = root / "NewAlbum"
+    album.mkdir()
+    (album / ".iphoto.album.json").write_text(
+        json.dumps(
+            {
+                "schema": "iPhoto/album@1",
+                "title": "NewAlbum",
+                "filters": {"include": ["*.heic"], "exclude": ["*.mov"]},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    class FakeScanService:
+        def __init__(self) -> None:
+            self.filter_roots = []
+
+        def scan_filters(self, path):
+            self.filter_roots.append(Path(path))
+            return ["*.heic"], ["*.mov"]
+
+    scan_service = FakeScanService()
+    manager.bind_scan_service(scan_service)
+
+    with patch.object(manager, "start_scanning") as start_scanning:
+        manager._on_directory_changed(str(root))
+        manager._on_watcher_debounce_timeout()
+
+    assert scan_service.filter_roots == [album]
+    start_scanning.assert_called_once_with(album, ["*.heic"], ["*.mov"])
+
+
 def test_watcher_scans_multiple_changed_scopes_with_each_album_filter(
     tmp_path,
     qapp,

@@ -36,6 +36,7 @@ def test_prune_index_scope_removes_only_rows_within_scan_prefix(tmp_path: Path) 
         album_a,
         [{"rel": "album-a/keep.jpg", "id": "keep"}],
         library_root=library_root,
+        repository=store,
     )
 
     assert removed == 2
@@ -80,7 +81,7 @@ def test_ensure_links_keeps_db_live_roles_when_derived_snapshot_write_fails(
         lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("disk full")),
     )
 
-    ensure_links(album_root, rows)
+    ensure_links(album_root, rows, repository=store)
 
     data = {row["rel"]: row for row in store.read_all(filter_hidden=False)}
     assert data["photo.heic"]["live_partner_rel"] == "motion.mov"

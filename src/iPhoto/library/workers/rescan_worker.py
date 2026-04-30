@@ -6,6 +6,7 @@ from pathlib import Path
 
 from PySide6.QtCore import QObject, QRunnable, Signal
 
+from ...bootstrap.library_asset_lifecycle_service import LibraryAssetLifecycleService
 from ...bootstrap.library_scan_service import LibraryScanService
 from ...errors import IPhotoError
 
@@ -28,6 +29,7 @@ class RescanWorker(QRunnable):
         *,
         library_root: Path | None = None,
         scan_service: LibraryScanService | None = None,
+        asset_lifecycle_service: LibraryAssetLifecycleService | None = None,
     ) -> None:
         super().__init__()
         self.setAutoDelete(False)
@@ -35,6 +37,7 @@ class RescanWorker(QRunnable):
         self._signals = signals
         self._library_root = library_root
         self._scan_service = scan_service
+        self._asset_lifecycle_service = asset_lifecycle_service
 
     @property
     def root(self) -> Path:
@@ -62,6 +65,17 @@ class RescanWorker(QRunnable):
             self._scan_service = LibraryScanService(self._library_root or self._root)
         return self._scan_service
 
+    @property
+    def asset_lifecycle_service(self) -> LibraryAssetLifecycleService:
+        """Return the lifecycle service used for explicit scan reconciliation."""
+
+        if self._asset_lifecycle_service is None:
+            self._asset_lifecycle_service = LibraryAssetLifecycleService(
+                self._library_root or self._root,
+                scan_service=self.scan_service,
+            )
+        return self._asset_lifecycle_service
+
     def run(self) -> None:  # pragma: no cover - executed on worker thread
         """Perform the rescan and emit the outcome back to the GUI thread."""
 
@@ -76,6 +90,10 @@ class RescanWorker(QRunnable):
                 persist_chunks=False,
             )
             self.scan_service.finalize_scan(self._root, result.rows)
+            self.asset_lifecycle_service.reconcile_missing_scan_rows(
+                self._root,
+                result.rows,
+            )
         except IPhotoError as exc:
             # Surface domain-specific failures with the album path attached so the
             # facade can relay meaningful diagnostics to the user.

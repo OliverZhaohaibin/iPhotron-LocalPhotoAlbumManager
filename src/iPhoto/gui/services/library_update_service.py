@@ -83,20 +83,36 @@ class LibraryUpdateService(QObject):
 
         library_root = None
         scan_service = None
+        lifecycle_service = None
         lib_manager = self._library_manager_getter()
         if lib_manager:
             library_root = lib_manager.root()
             scan_service = getattr(lib_manager, "scan_service", None)
+            lifecycle_service = getattr(lib_manager, "asset_lifecycle_service", None)
 
         try:
             if scan_service is not None:
                 result = scan_service.scan_album(album.root, persist_chunks=False)
                 scan_service.finalize_scan(album.root, result.rows)
+                self._reconcile_scan_scope(
+                    album.root,
+                    result.rows,
+                    library_root=library_root,
+                    scan_service=scan_service,
+                    lifecycle_service=lifecycle_service,
+                )
                 rows = result.rows
             else:
                 fallback = LibraryScanService(library_root or album.root)
                 result = fallback.scan_album(album.root, persist_chunks=False)
                 fallback.finalize_scan(album.root, result.rows)
+                self._reconcile_scan_scope(
+                    album.root,
+                    result.rows,
+                    library_root=library_root,
+                    scan_service=fallback,
+                    lifecycle_service=lifecycle_service,
+                )
                 if library_root is None:
                     fallback.sync_manifest_favorites(album.root)
                 rows = result.rows
@@ -433,6 +449,17 @@ class LibraryUpdateService(QObject):
             # therefore we flush the global index and ``links.json`` here to
             # mirror the historical facade behaviour before notifying listeners.
             worker.scan_service.finalize_scan(root, materialised_rows)
+            lifecycle_service = None
+            library = self._library_manager()
+            if library is not None:
+                lifecycle_service = getattr(library, "asset_lifecycle_service", None)
+            self._reconcile_scan_scope(
+                root,
+                materialised_rows,
+                library_root=library_root,
+                scan_service=worker.scan_service,
+                lifecycle_service=lifecycle_service,
+            )
         except IPhotoError as exc:
             self.errorRaised.emit(str(exc))
             self.scanFinished.emit(root, False)
@@ -474,6 +501,21 @@ class LibraryUpdateService(QObject):
     def _cleanup_scan_worker(self) -> None:
         self._scanner_worker = None
         self._scan_pending = False
+
+    def _reconcile_scan_scope(
+        self,
+        root: Path,
+        rows: Iterable[dict],
+        *,
+        library_root: Path | None,
+        scan_service: LibraryScanService | None,
+        lifecycle_service: LibraryAssetLifecycleService | None,
+    ) -> int:
+        active_lifecycle = lifecycle_service or LibraryAssetLifecycleService(
+            library_root or root,
+            scan_service=scan_service,
+        )
+        return active_lifecycle.reconcile_missing_scan_rows(root, rows)
 
     def _schedule_scan_retry(self) -> None:
         QTimer.singleShot(0, self._retry_scan_if_album_available)
@@ -569,11 +611,17 @@ class LibraryUpdateService(QObject):
         signals = RescanSignals()
         library = self._library_manager()
         scan_service = getattr(library, "scan_service", None) if library is not None else None
+        lifecycle_service = (
+            getattr(library, "asset_lifecycle_service", None)
+            if library is not None
+            else None
+        )
         worker = RescanWorker(
             album_root,
             signals,
             library_root=library_root,
             scan_service=scan_service,
+            asset_lifecycle_service=lifecycle_service,
         )
         task_id = self._build_restore_rescan_task_id(album_root)
 

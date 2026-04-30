@@ -8,6 +8,7 @@ import time
 
 from PySide6.QtCore import QObject, QRunnable, Signal
 
+from ....bootstrap.library_asset_lifecycle_service import LibraryAssetLifecycleService
 from ....bootstrap.library_scan_service import LibraryScanService
 
 # Max updates per second for progress signal
@@ -37,6 +38,7 @@ class ImportWorker(QRunnable):
         *,
         library_root: Path | None = None,
         scan_service: LibraryScanService | None = None,
+        asset_lifecycle_service: LibraryAssetLifecycleService | None = None,
     ) -> None:
         super().__init__()
         self.setAutoDelete(False)
@@ -47,6 +49,7 @@ class ImportWorker(QRunnable):
         self._is_cancelled = False
         self._library_root = library_root
         self._scan_service = scan_service
+        self._asset_lifecycle_service = asset_lifecycle_service
         self._had_incremental_error = False
 
     @property
@@ -62,6 +65,17 @@ class ImportWorker(QRunnable):
         if self._scan_service is None:
             self._scan_service = LibraryScanService(self._library_root or self._destination)
         return self._scan_service
+
+    @property
+    def asset_lifecycle_service(self) -> LibraryAssetLifecycleService:
+        """Return the lifecycle service used for explicit scan reconciliation."""
+
+        if self._asset_lifecycle_service is None:
+            self._asset_lifecycle_service = LibraryAssetLifecycleService(
+                self._library_root or self._destination,
+                scan_service=self.scan_service,
+            )
+        return self._asset_lifecycle_service
 
     def cancel(self) -> None:
         """Request cancellation of the in-flight import operation."""
@@ -150,3 +164,7 @@ class ImportWorker(QRunnable):
 
         result = self.scan_service.scan_album(self._destination, persist_chunks=False)
         self.scan_service.finalize_scan(self._destination, result.rows)
+        self.asset_lifecycle_service.reconcile_missing_scan_rows(
+            self._destination,
+            result.rows,
+        )

@@ -270,6 +270,32 @@ def test_cleanup_deleted_index_removes_missing_trash_rows(tmp_path: Path) -> Non
     assert _rows(library_root) == {}
 
 
+def test_reconcile_missing_scan_rows_prunes_scope_after_scan_finalize(
+    tmp_path: Path,
+) -> None:
+    library_root = tmp_path / "Library"
+    album_root = library_root / "AlbumA"
+    album_root.mkdir(parents=True)
+    get_global_repository(library_root).write_rows(
+        [
+            {"rel": "AlbumA/keep.jpg", "id": "keep", "is_favorite": True},
+            {"rel": "AlbumA/stale.jpg", "id": "stale"},
+            {"rel": "AlbumB/other.jpg", "id": "other"},
+        ]
+    )
+    service = LibraryAssetLifecycleService(library_root)
+
+    removed = service.reconcile_missing_scan_rows(
+        album_root,
+        [{"rel": "AlbumA/keep.jpg", "id": "keep"}],
+    )
+
+    rows = _rows(library_root)
+    assert removed == 1
+    assert set(rows) == {"AlbumA/keep.jpg", "AlbumB/other.jpg"}
+    assert bool(rows["AlbumA/keep.jpg"]["is_favorite"]) is True
+
+
 def test_read_index_rows_by_rels_returns_library_rows(tmp_path: Path) -> None:
     library_root = tmp_path / "Library"
     library_root.mkdir(parents=True)

@@ -228,6 +228,7 @@ __marimo__/
 /.codex
 /PySide6-OsmAnd-SDK/
 /src/maps/tiles/World_basemap_2.obf
+/src/maps/tiles/*.tar*
 /src/maps/tiles/extension/
 /src/extension/models/
 /demo/face-cluster/runtime/

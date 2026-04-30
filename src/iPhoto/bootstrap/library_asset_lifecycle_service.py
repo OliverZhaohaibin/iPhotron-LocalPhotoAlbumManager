@@ -15,6 +15,7 @@ from ..cache.index_store import get_global_repository
 from ..cache.lock import FileLock
 from ..config import ALBUM_MANIFEST_NAMES, RECENTLY_DELETED_DIR_NAME
 from ..errors import IPhotoError
+from ..index_sync_service import prune_index_scope
 from ..io.scanner_adapter import process_media_paths
 from ..media_classifier import IMAGE_EXTENSIONS, VIDEO_EXTENSIONS
 from ..schemas import validate_album
@@ -216,6 +217,23 @@ class LibraryAssetLifecycleService:
         except (IPhotoError, sqlite3.Error, OSError) as exc:
             LOGGER.debug("Recently Deleted cleanup skipped: %s", exc)
             return 0
+
+    def reconcile_missing_scan_rows(
+        self,
+        root: Path,
+        materialised_rows: Iterable[dict[str, Any]],
+    ) -> int:
+        """Explicitly prune stale scan rows for a completed scan scope."""
+
+        scan_root = Path(root)
+        repository_root = self._repository_root_for_read(scan_root)
+        repository = self._repository(repository_root)
+        return prune_index_scope(
+            scan_root,
+            materialised_rows,
+            library_root=self.library_root,
+            repository=repository,
+        )
 
     def _remove_source_rows(
         self,

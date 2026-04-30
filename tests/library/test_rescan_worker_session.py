@@ -29,11 +29,21 @@ class FakeScanService:
         self.finalized.append((root, rows))
 
 
+class FakeLifecycleService:
+    def __init__(self) -> None:
+        self.reconciled: list[tuple[Path, list[dict]]] = []
+
+    def reconcile_missing_scan_rows(self, root: Path, rows: list[dict]) -> int:
+        self.reconciled.append((root, rows))
+        return 0
+
+
 def test_rescan_worker_uses_session_scan_service(tmp_path: Path) -> None:
     album_root = tmp_path / "album"
     album_root.mkdir()
     scan_service = FakeScanService()
     signals = RescanSignals()
+    lifecycle_service = FakeLifecycleService()
     progress: list[tuple[Path, int, int]] = []
     finished: list[tuple[Path, bool]] = []
     signals.progressUpdated.connect(
@@ -41,10 +51,16 @@ def test_rescan_worker_uses_session_scan_service(tmp_path: Path) -> None:
     )
     signals.finished.connect(lambda root, success: finished.append((root, success)))
 
-    worker = RescanWorker(album_root, signals, scan_service=scan_service)
+    worker = RescanWorker(
+        album_root,
+        signals,
+        scan_service=scan_service,
+        asset_lifecycle_service=lifecycle_service,
+    )
     worker.run()
 
     assert scan_service.scanned == [(album_root, False)]
     assert scan_service.finalized == [(album_root, [{"rel": "a.jpg"}])]
+    assert lifecycle_service.reconciled == [(album_root, [{"rel": "a.jpg"}])]
     assert progress == [(album_root, 1, 2)]
     assert finished == [(album_root, True)]

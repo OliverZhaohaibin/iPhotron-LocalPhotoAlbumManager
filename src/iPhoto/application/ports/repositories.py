@@ -74,6 +74,19 @@ class AssetRepositoryPort(Protocol):
     ) -> list[dict[str, Any]]:
         """Return one paginated asset page."""
 
+    def apply_live_role_updates(
+        self,
+        updates: Iterable[tuple[str, int, str | None]],
+    ) -> None:
+        """Replace Live Photo role state using library-relative updates."""
+
+    def apply_live_role_updates_for_prefix(
+        self,
+        prefix: str,
+        updates: Iterable[tuple[str, int, str | None]],
+    ) -> None:
+        """Replace Live Photo role state only inside a library-relative prefix."""
+
 
 class LibraryStateRepositoryPort(Protocol):
     """Persist durable user choices for one library."""

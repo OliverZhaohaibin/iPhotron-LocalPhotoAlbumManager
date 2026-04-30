@@ -132,7 +132,8 @@
 - [x] CLI scan 改为调用同一 use case。
 - [x] `app.open_album()`、import 增量扫描、restore rescan 进入 session scan surface。
 - [x] Watcher/live-row 刷新读取改为调用 session query surface。
-- [ ] 删除普通 scan 中的隐式 delete/prune 决策。
+- [x] Watcher-triggered refresh 改为通过 session scan surface 触发扫描。
+- [x] 删除普通 scan 中的隐式 delete/prune 决策。
 
 完成条件：
 
@@ -140,6 +141,7 @@
 - [x] GUI、CLI、watcher 扫描结果一致。
 - [x] scan cancellation 不留下半写坏状态。
 - [x] scan progress 可被 GUI 和 CLI 消费。
+- [x] stale-row prune 通过 lifecycle reconciliation 显式执行。
 
 回归测试：
 
@@ -148,6 +150,7 @@
 - [x] 删除文件不隐式清空用户状态。
 - [x] 扫描后 People 候选状态正确。
 - [x] 扫描后 Live Photo pairing 可恢复。
+- [x] `LibraryScanService.finalize_scan()` 不再隐式删除 stale rows。
 
 ## Phase 4 - GUI Presentation Adapter
 

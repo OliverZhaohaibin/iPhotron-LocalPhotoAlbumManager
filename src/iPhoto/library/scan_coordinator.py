@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Dict, Iterable, List, Optional
 
 from PySide6.QtCore import QMutexLocker, QRunnable
 
+from ..bootstrap.library_asset_lifecycle_service import LibraryAssetLifecycleService
 from ..bootstrap.library_asset_query_service import LibraryAssetQueryService
 from ..bootstrap.library_scan_service import LibraryScanService
 from ..utils.logging import get_logger
@@ -337,8 +338,15 @@ class ScanCoordinatorMixin:
         scan_service = worker.scan_service
         try:
             scan_service.finalize_scan(root, rows)
+            lifecycle_service = getattr(self, "asset_lifecycle_service", None)
+            if lifecycle_service is None:
+                lifecycle_service = LibraryAssetLifecycleService(
+                    self._root or root,
+                    scan_service=scan_service,
+                )
+            lifecycle_service.reconcile_missing_scan_rows(root, rows)
         except Exception as exc:
-            LOGGER.warning("Failed to persist live photo pairings after scan: %s", exc)
+            LOGGER.warning("Failed to persist scan finalization for %s: %s", root, exc)
 
         # Emit immediately so the UI (status bar, map refresh) can react without
         # waiting for the potentially slow live-photo pairing step.

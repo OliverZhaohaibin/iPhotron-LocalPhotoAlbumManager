@@ -34,6 +34,10 @@ PEOPLE_INDEX_STORE_FORBIDDEN_FILES = {
     "library/workers/face_scan_worker.py",
 }
 
+INDEX_SYNC_FORBIDDEN_FILES = {
+    "index_sync_service.py",
+}
+
 
 def _is_type_checking_guard(node: ast.If) -> bool:
     test = node.test
@@ -178,6 +182,14 @@ def check(src_root: Path) -> list[str]:
             ):
                 violations.append(
                     f"{py_file}:{lineno}: People runtime imports concrete index store {module}"
+                )
+
+            if rel in INDEX_SYNC_FORBIDDEN_FILES and (
+                module == "iPhoto.cache"
+                or _is_or_under(module, "iPhoto.cache.index_store")
+            ):
+                violations.append(
+                    f"{py_file}:{lineno}: index sync imports concrete index store {module}"
                 )
 
             if (

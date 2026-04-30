@@ -12,9 +12,10 @@ class DummyAlbum:
 
 
 class DummyLibrary:
-    def __init__(self, root: Path, scan_service=None) -> None:
+    def __init__(self, root: Path, scan_service=None, lifecycle_service=None) -> None:
         self._root = Path(root)
         self.scan_service = scan_service
+        self.asset_lifecycle_service = lifecycle_service
 
     def root(self) -> Path:
         return self._root
@@ -31,6 +32,15 @@ class FakeScanService:
 
     def finalize_scan(self, root: Path, rows: list[dict]) -> None:
         self.finalized.append((root, rows))
+
+
+class FakeLifecycleService:
+    def __init__(self) -> None:
+        self.reconciled: list[tuple[Path, list[dict]]] = []
+
+    def reconcile_missing_scan_rows(self, root: Path, rows: list[dict]) -> int:
+        self.reconciled.append((root, rows))
+        return 0
 
 
 class FakeFallbackScanService(FakeScanService):
@@ -60,11 +70,16 @@ def test_rescan_album_uses_session_scan_service(tmp_path: Path) -> None:
     lib_root.mkdir()
     album_root.mkdir()
     scan_service = FakeScanService()
+    lifecycle_service = FakeLifecycleService()
 
     service = lus.LibraryUpdateService(
         task_manager=DummyTaskManager(),
         current_album_getter=lambda: None,
-        library_manager_getter=lambda: DummyLibrary(lib_root, scan_service=scan_service),
+        library_manager_getter=lambda: DummyLibrary(
+            lib_root,
+            scan_service=scan_service,
+            lifecycle_service=lifecycle_service,
+        ),
     )
 
     rows = service.rescan_album(DummyAlbum(album_root))
@@ -72,6 +87,7 @@ def test_rescan_album_uses_session_scan_service(tmp_path: Path) -> None:
     assert rows == [{"rel": "a.jpg"}]
     assert scan_service.scanned == [(album_root, False)]
     assert scan_service.finalized == [(album_root, [{"rel": "a.jpg"}])]
+    assert lifecycle_service.reconciled == [(album_root, [{"rel": "a.jpg"}])]
 
 
 def test_rescan_album_fallback_syncs_manifest_favorites(
@@ -150,10 +166,15 @@ def test_rescan_album_async_passes_library_root(monkeypatch, tmp_path: Path) -> 
 
     task_manager = DummyTaskManager()
     scan_service = FakeScanService()
+    lifecycle_service = FakeLifecycleService()
     service = lus.LibraryUpdateService(
         task_manager=task_manager,
         current_album_getter=lambda: None,
-        library_manager_getter=lambda: DummyLibrary(lib_root, scan_service=scan_service),
+        library_manager_getter=lambda: DummyLibrary(
+            lib_root,
+            scan_service=scan_service,
+            lifecycle_service=lifecycle_service,
+        ),
     )
 
     service.rescan_album_async(DummyAlbum(album_root))
@@ -173,12 +194,21 @@ def test_restore_rescan_worker_receives_session_scan_service(
     album_root = lib_root / "Album"
     album_root.mkdir(parents=True)
     scan_service = FakeScanService()
+    lifecycle_service = FakeLifecycleService()
 
     class StubRescanWorker:
-        def __init__(self, root, signals, library_root=None, scan_service=None) -> None:
+        def __init__(
+            self,
+            root,
+            signals,
+            library_root=None,
+            scan_service=None,
+            asset_lifecycle_service=None,
+        ) -> None:
             self.root = Path(root)
             self.library_root = library_root
             self.scan_service = scan_service
+            self._asset_lifecycle_service = asset_lifecycle_service
 
     monkeypatch.setattr(lus, "RescanWorker", StubRescanWorker)
 
@@ -186,7 +216,11 @@ def test_restore_rescan_worker_receives_session_scan_service(
     service = lus.LibraryUpdateService(
         task_manager=task_manager,
         current_album_getter=lambda: None,
-        library_manager_getter=lambda: DummyLibrary(lib_root, scan_service=scan_service),
+        library_manager_getter=lambda: DummyLibrary(
+            lib_root,
+            scan_service=scan_service,
+            lifecycle_service=lifecycle_service,
+        ),
     )
 
     service._refresh_restored_album(album_root, lib_root)
@@ -196,3 +230,4 @@ def test_restore_rescan_worker_receives_session_scan_service(
     assert isinstance(worker, StubRescanWorker)
     assert worker.library_root == lib_root
     assert worker.scan_service is scan_service
+    assert worker._asset_lifecycle_service is lifecycle_service

@@ -120,6 +120,33 @@ def test_subalbum_scan_prefixes_library_relative_rows(tmp_path: Path) -> None:
     ]
 
 
+def test_finalize_scan_does_not_prune_stale_rows(tmp_path: Path) -> None:
+    library_root = tmp_path / "library"
+    album_root = library_root / "album"
+    album_root.mkdir(parents=True)
+    store = get_global_repository(library_root)
+    store.write_rows(
+        [
+            {"rel": "album/keep.jpg", "id": "keep", "is_favorite": True},
+            {"rel": "album/stale.jpg", "id": "stale"},
+        ]
+    )
+    service = LibraryScanService(library_root)
+
+    service.finalize_scan(album_root, [{"rel": "album/keep.jpg", "id": "keep"}])
+
+    rows = {
+        row["rel"]: row
+        for row in store.read_album_assets(
+            "album",
+            include_subalbums=True,
+            filter_hidden=False,
+        )
+    }
+    assert set(rows) == {"album/keep.jpg", "album/stale.jpg"}
+    assert bool(rows["album/keep.jpg"]["is_favorite"]) is True
+
+
 def test_finalize_scan_preserves_subalbum_live_pairs_across_repeated_rescans(
     tmp_path: Path,
 ) -> None:
@@ -223,6 +250,36 @@ def test_prepare_album_open_autoscan_uses_shared_scan_and_finalize(tmp_path: Pat
     assert result.scanned is True
     assert result.rows == [{"rel": "a.jpg", "id": "asset-a"}]
     assert [row["rel"] for row in store.read_all(filter_hidden=False)] == ["a.jpg"]
+
+
+def test_prepare_album_open_autoscan_prunes_stale_hidden_rows(
+    tmp_path: Path,
+) -> None:
+    library_root = tmp_path / "library"
+    album_root = library_root / "album"
+    album_root.mkdir(parents=True)
+    store = get_global_repository(library_root)
+    store.write_rows(
+        [
+            {
+                "rel": "album/deleted.mov",
+                "id": "deleted-motion",
+                "live_role": 1,
+                "live_partner_rel": "album/deleted.heic",
+            },
+        ]
+    )
+    service = LibraryScanService(library_root, scanner=_Scanner([]))
+
+    result = service.prepare_album_open(
+        album_root,
+        autoscan=True,
+        hydrate_index=False,
+    )
+
+    assert result.scanned is True
+    assert result.rows == []
+    assert list(store.read_all(filter_hidden=False)) == []
 
 
 def test_sync_manifest_favorites_raises_recoverable_errors_by_default(

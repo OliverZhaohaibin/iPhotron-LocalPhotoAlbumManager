@@ -27,9 +27,19 @@ class _FakeScans:
         return AlbumReport(title="Library", asset_count=2, live_pair_count=1)
 
 
+class _FakeLifecycle:
+    def __init__(self) -> None:
+        self.reconciled: list[tuple[Path, list[dict]]] = []
+
+    def reconcile_missing_scan_rows(self, root: Path, rows: list[dict]) -> int:
+        self.reconciled.append((root, rows))
+        return 0
+
+
 class _FakeSession:
     def __init__(self) -> None:
         self.scans = _FakeScans()
+        self.asset_lifecycle = _FakeLifecycle()
         self.shutdown_called = False
 
     def shutdown(self) -> None:
@@ -50,6 +60,7 @@ def test_cli_scan_uses_headless_session(monkeypatch, tmp_path: Path) -> None:
     assert "Indexed 1 assets" in result.output
     assert session.scans.scanned == [(tmp_path, False)]
     assert session.scans.finalized == [(tmp_path, [{"rel": "a.jpg"}])]
+    assert session.asset_lifecycle.reconciled == [(tmp_path, [{"rel": "a.jpg"}])]
     assert session.shutdown_called is True
     assert not hasattr(cli, "app_facade")
     assert not hasattr(cli, "get_global_repository")

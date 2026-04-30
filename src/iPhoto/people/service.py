@@ -7,11 +7,11 @@ import os
 from pathlib import Path
 import uuid
 
-from iPhoto.cache.index_store import get_global_repository
+from iPhoto.application.ports import PeopleAssetRepositoryPort
 from iPhoto.domain.models.query import AssetQuery
 from iPhoto.utils.pathutils import ensure_work_dir
 
-from .index_coordinator import get_people_index_coordinator
+from .index_coordinator import PeopleIndexCoordinator, get_people_index_coordinator
 from .manual_faces import ManualFaceValidationError, build_manual_face_record
 from .repository import (
     AssetFaceAnnotation,
@@ -68,17 +68,45 @@ def face_library_paths(library_root: Path) -> FaceLibraryPaths:
 
 
 class PeopleService:
-    def __init__(self, library_root: Path | None = None) -> None:
+    def __init__(
+        self,
+        library_root: Path | None = None,
+        *,
+        asset_repository: PeopleAssetRepositoryPort | None = None,
+        coordinator: PeopleIndexCoordinator | None = None,
+    ) -> None:
         self._library_root = library_root
+        self._asset_repository = asset_repository
+        self._coordinator = coordinator
 
     def set_library_root(self, library_root: Path | None) -> None:
+        if self._library_root == library_root:
+            return
         self._library_root = library_root
+        self._asset_repository = None
+        self._coordinator = None
 
     def library_root(self) -> Path | None:
         return self._library_root
 
     def is_bound(self) -> bool:
         return self._library_root is not None
+
+    @property
+    def asset_repository(self) -> PeopleAssetRepositoryPort | None:
+        return self._asset_repository
+
+    @property
+    def coordinator(self) -> PeopleIndexCoordinator | None:
+        if self._coordinator is not None:
+            return self._coordinator
+        if self._library_root is None:
+            return None
+        self._coordinator = get_people_index_coordinator(
+            self._library_root,
+            asset_repository=self._asset_repository,
+        )
+        return self._coordinator
 
     def paths(self) -> FaceLibraryPaths | None:
         if self._library_root is None:
@@ -149,7 +177,10 @@ class PeopleService:
         valid_member_ids = _ordered_valid_person_ids(member_person_ids, summaries_by_id)
         if len(valid_member_ids) < 2:
             return None
-        group = get_people_index_coordinator(self._library_root).create_group(valid_member_ids)
+        coordinator = self.coordinator
+        if coordinator is None:
+            return None
+        group = coordinator.create_group(valid_member_ids)
         if group is None:
             return None
         return self._build_group_summary(repository, group, summaries_by_id)
@@ -157,7 +188,9 @@ class PeopleService:
     def rename_cluster(self, person_id: str, new_name: str | None) -> None:
         if self._library_root is None:
             return
-        get_people_index_coordinator(self._library_root).rename_person(person_id, new_name)
+        coordinator = self.coordinator
+        if coordinator is not None:
+            coordinator.rename_person(person_id, new_name)
 
     def pin_block_reason(self, person_id: str) -> str | None:
         """Return a human-readable reason why *person_id* cannot be pinned."""
@@ -183,12 +216,14 @@ class PeopleService:
     def set_cluster_cover(self, person_id: str, face_id: str) -> bool:
         if self._library_root is None:
             return False
-        return get_people_index_coordinator(self._library_root).set_person_cover(person_id, face_id)
+        coordinator = self.coordinator
+        return bool(coordinator and coordinator.set_person_cover(person_id, face_id))
 
     def set_group_cover(self, group_id: str, asset_id: str) -> bool:
         if self._library_root is None:
             return False
-        return get_people_index_coordinator(self._library_root).set_group_cover(group_id, asset_id)
+        coordinator = self.coordinator
+        return bool(coordinator and coordinator.set_group_cover(group_id, asset_id))
 
     def resolve_cluster_cover_face(self, person_id: str, asset_id: str) -> str | None:
         if not person_id or not asset_id:
@@ -206,7 +241,8 @@ class PeopleService:
     def delete_group(self, group_id: str) -> bool:
         if self._library_root is None:
             return False
-        return get_people_index_coordinator(self._library_root).delete_group(group_id)
+        coordinator = self.coordinator
+        return bool(coordinator and coordinator.delete_group(group_id))
 
     def set_cluster_order(
         self,
@@ -214,7 +250,9 @@ class PeopleService:
     ) -> None:
         if self._library_root is None:
             return
-        get_people_index_coordinator(self._library_root).set_person_order(person_ids)
+        coordinator = self.coordinator
+        if coordinator is not None:
+            coordinator.set_person_order(person_ids)
 
     def set_group_order(
         self,
@@ -222,7 +260,9 @@ class PeopleService:
     ) -> None:
         if self._library_root is None:
             return
-        get_people_index_coordinator(self._library_root).set_group_order(group_ids)
+        coordinator = self.coordinator
+        if coordinator is not None:
+            coordinator.set_group_order(group_ids)
 
     def set_cluster_hidden(self, person_id: str, hidden: bool) -> bool:
         repository = self.repository()
@@ -239,21 +279,28 @@ class PeopleService:
     def merge_clusters(self, source_person_id: str, target_person_id: str) -> bool:
         if self._library_root is None:
             return False
-        return get_people_index_coordinator(self._library_root).merge_persons(
+        coordinator = self.coordinator
+        return bool(coordinator and coordinator.merge_persons(
             source_person_id,
             target_person_id,
-        )
+        ))
 
     def delete_face(self, annotation_face_id: str) -> bool:
         if self._library_root is None or not annotation_face_id:
             return False
-        event = get_people_index_coordinator(self._library_root).delete_face(annotation_face_id)
+        coordinator = self.coordinator
+        if coordinator is None:
+            return False
+        event = coordinator.delete_face(annotation_face_id)
         return event is not None
 
     def move_face_to_person(self, annotation_face_id: str, target_person_id: str) -> bool:
         if self._library_root is None or not annotation_face_id or not target_person_id:
             return False
-        event = get_people_index_coordinator(self._library_root).move_face_to_person(
+        coordinator = self.coordinator
+        if coordinator is None:
+            return False
+        event = coordinator.move_face_to_person(
             annotation_face_id,
             target_person_id,
         )
@@ -264,7 +311,10 @@ class PeopleService:
         if self._library_root is None or not annotation_face_id or not normalized_name:
             return None
         new_person_id = uuid.uuid4().hex
-        event = get_people_index_coordinator(self._library_root).move_face_to_new_person(
+        coordinator = self.coordinator
+        if coordinator is None:
+            return None
+        event = coordinator.move_face_to_new_person(
             annotation_face_id,
             new_person_id,
             normalized_name,
@@ -304,8 +354,9 @@ class PeopleService:
         repository = self.repository()
         if repository is None or not asset_id:
             return []
-        if self._library_root is not None:
-            rows_by_id = get_global_repository(self._library_root).get_rows_by_ids([asset_id])
+        asset_repository = self.asset_repository
+        if asset_repository is not None:
+            rows_by_id = asset_repository.get_rows_by_ids([asset_id])
             if asset_id not in rows_by_id:
                 return []
         return repository.list_asset_face_annotations(asset_id)
@@ -328,10 +379,17 @@ class PeopleService:
         repository = self.repository()
         paths = self.paths()
         library_root = self._library_root
-        if repository is None or paths is None or library_root is None or not asset_id:
+        asset_repository = self.asset_repository
+        if (
+            repository is None
+            or asset_repository is None
+            or paths is None
+            or library_root is None
+            or not asset_id
+        ):
             raise ManualFaceValidationError("Manual face tagging is unavailable right now.")
 
-        row = get_global_repository(library_root).get_rows_by_ids([asset_id]).get(asset_id)
+        row = asset_repository.get_rows_by_ids([asset_id]).get(asset_id)
         if row is None:
             raise ManualFaceValidationError("The selected photo is no longer available.")
         asset_rel = str(row.get("rel") or row.get("path") or "").strip()
@@ -359,7 +417,10 @@ class PeopleService:
             thumbnail_dir=paths.thumbnail_dir,
             target_person_id=resolved_person_id,
         )
-        add_result = get_people_index_coordinator(library_root).add_manual_face(
+        coordinator = self.coordinator
+        if coordinator is None:
+            raise ManualFaceValidationError("Manual face tagging is unavailable right now.")
+        add_result = coordinator.add_manual_face(
             face,
             person_name=preferred_name,
         )
@@ -373,9 +434,9 @@ class PeopleService:
         )
 
     def face_status_counts(self) -> dict[str, int]:
-        if self._library_root is None:
+        if self._library_root is None or self.asset_repository is None:
             return {}
-        return get_global_repository(self._library_root).count_by_face_status()
+        return self.asset_repository.count_by_face_status()
 
     def mark_asset_retry(self, asset_id: str) -> bool:
         return self._mark_asset_status(asset_id, FACE_STATUS_RETRY)
@@ -384,12 +445,13 @@ class PeopleService:
         return self._mark_asset_status(asset_id, FACE_STATUS_SKIPPED)
 
     def _mark_asset_status(self, asset_id: str, status: str) -> bool:
-        if self._library_root is None or not asset_id:
+        asset_repository = self.asset_repository
+        if self._library_root is None or asset_repository is None or not asset_id:
             return False
         normalized = normalize_face_status(status)
         if normalized is None:
             return False
-        get_global_repository(self._library_root).update_face_status(asset_id, normalized)
+        asset_repository.update_face_status(asset_id, normalized)
         return True
 
     def _build_group_summary(
@@ -475,13 +537,19 @@ class PeopleService:
     def _valid_asset_ids(self, asset_ids: list[str]) -> list[str]:
         if self._library_root is None or not asset_ids:
             return []
-        rows_by_id = get_global_repository(self._library_root).get_rows_by_ids(asset_ids)
+        asset_repository = self.asset_repository
+        if asset_repository is None:
+            return list(asset_ids)
+        rows_by_id = asset_repository.get_rows_by_ids(asset_ids)
         return [asset_id for asset_id in asset_ids if asset_id in rows_by_id]
 
     def _cover_asset_paths(self, asset_ids: list[str]) -> dict[str, Path]:
         if self._library_root is None or not asset_ids:
             return {}
-        rows_by_id = get_global_repository(self._library_root).get_rows_by_ids(asset_ids)
+        asset_repository = self.asset_repository
+        if asset_repository is None:
+            return {}
+        rows_by_id = asset_repository.get_rows_by_ids(asset_ids)
         resolved: dict[str, Path] = {}
         for asset_id, row in rows_by_id.items():
             rel_value = row.get("rel") or row.get("path")

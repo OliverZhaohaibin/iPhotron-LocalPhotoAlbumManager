@@ -7,6 +7,7 @@ from pathlib import Path
 
 from PySide6.QtCore import QObject, QRunnable, Signal
 
+from iPhoto.bootstrap.library_people_service import create_people_service
 from iPhoto.people.manual_faces import ManualFaceValidationError
 from iPhoto.people.service import ManualFaceAddResult, PeopleService
 
@@ -35,6 +36,7 @@ class ManualFaceAddWorker(QRunnable):
         requested_box: tuple[int, int, int, int],
         name_or_none: str | None,
         person_id: str | None,
+        people_service: PeopleService | None = None,
     ) -> None:
         super().__init__()
         self.setAutoDelete(True)
@@ -43,11 +45,12 @@ class ManualFaceAddWorker(QRunnable):
         self._requested_box = tuple(int(value) for value in requested_box)
         self._name_or_none = name_or_none
         self._person_id = person_id
+        self._people_service = people_service
         self.signals = ManualFaceAddSignals()
 
     def run(self) -> None:  # pragma: no cover - exercised through coordinator/widget tests
         try:
-            service = PeopleService(self._library_root)
+            service = self._people_service or create_people_service(self._library_root)
             result = service.add_manual_face(
                 asset_id=self._asset_id,
                 requested_box=self._requested_box,

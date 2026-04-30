@@ -19,6 +19,7 @@ from PySide6.QtCore import QFileSystemWatcher, QObject, Qt, QTimer, Signal, QThr
 
 from ..errors import LibraryUnavailableError
 from ..people.index_coordinator import PeopleIndexCoordinator, get_people_index_coordinator
+from ..people.service import PeopleService
 from ..utils.logging import get_logger
 from .tree import AlbumNode
 
@@ -102,6 +103,7 @@ class LibraryManager(
         self._asset_query_service: "LibraryAssetQueryService | None" = None
         self._state_repository: "LibraryStateRepositoryPort | None" = None
         self._asset_lifecycle_service: "LibraryAssetLifecycleService | None" = None
+        self._people_service: PeopleService | None = None
 
     # ------------------------------------------------------------------
     # Basic properties
@@ -261,6 +263,26 @@ class LibraryManager(
     @property
     def asset_lifecycle_service(self) -> "LibraryAssetLifecycleService | None":
         return self._asset_lifecycle_service
+
+    def bind_people_service(self, people_service: PeopleService | None) -> None:
+        """Bind the current library session People surface."""
+
+        self._unbind_people_index_coordinator()
+        self._people_service = people_service
+        if people_service is None:
+            return
+        coordinator = people_service.coordinator
+        if coordinator is None:
+            return
+        coordinator.resume()
+        coordinator.snapshotCommitted.connect(
+            self._on_people_snapshot_committed, Qt.ConnectionType.QueuedConnection
+        )
+        self._people_index_coordinator = coordinator
+
+    @property
+    def people_service(self) -> PeopleService | None:
+        return self._people_service
 
     def _bind_people_index_coordinator(self, root: Path) -> None:
         coordinator = get_people_index_coordinator(root)

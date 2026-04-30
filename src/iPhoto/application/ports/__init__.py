@@ -8,7 +8,7 @@ from .media import (
     MetadataWriterPort,
     ThumbnailRendererPort,
 )
-from .people import PeopleIndexPort
+from .people import PeopleAssetRepositoryPort, PeopleIndexPort
 from .repositories import AssetRepositoryPort, LibraryStateRepositoryPort
 from .runtime import MapRuntimePort, TaskSchedulerPort
 
@@ -22,6 +22,7 @@ __all__ = [
     "MetadataReaderPort",
     "MetadataWriterPort",
     "PeopleIndexPort",
+    "PeopleAssetRepositoryPort",
     "TaskSchedulerPort",
     "ThumbnailRendererPort",
 ]

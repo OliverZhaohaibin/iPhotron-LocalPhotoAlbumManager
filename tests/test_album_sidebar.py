@@ -213,6 +213,80 @@ def test_sidebar_pinned_album_survives_album_rename(tmp_path: Path, qapp: QAppli
     assert sidebar.tree_model().data(refreshed_index) == "Renamed Trip"
 
 
+def test_sidebar_pinned_album_rename_updates_album_tree(
+    tmp_path: Path,
+    qapp: QApplication,
+) -> None:
+    root = tmp_path / "Library"
+    album_dir = root / "Trip"
+    album_dir.mkdir(parents=True)
+    _write_manifest(album_dir, "Trip")
+
+    manager = LibraryManager()
+    manager.bind_path(root)
+    qapp.processEvents()
+
+    settings = SettingsManager(path=tmp_path / "settings.json")
+    settings.load()
+    pinned_service = PinnedItemsService(settings)
+    pinned_service.pin_album(album_dir, "Trip", library_root=root)
+
+    sidebar = AlbumSidebar(manager)
+    sidebar.set_pinned_service(pinned_service)
+    manager.albumRenamed.connect(
+        lambda old, new: pinned_service.remap_album_path(
+            old,
+            new,
+            library_root=root,
+            fallback_label=new.name,
+        )
+    )
+    qapp.processEvents()
+
+    pinned_item = pinned_service.items_for_library(root)[0]
+    pinned_index = sidebar.tree_model().index_for_pinned_item(pinned_item)
+    item = sidebar.tree_model().item_from_index(pinned_index)
+    assert item is not None
+    assert item.node_type == NodeType.PINNED_ALBUM
+    assert item.album is not None
+
+    from unittest.mock import patch
+
+    with patch(
+        "iPhoto.gui.ui.menus.album_sidebar_menu._create_styled_input_dialog",
+        return_value=("Renamed Trip", True),
+    ):
+        menu = AlbumSidebarContextMenu(
+            sidebar,
+            sidebar._tree,
+            sidebar.tree_model(),
+            manager,
+            item,
+            sidebar._set_pending_selection,
+            sidebar.bindLibraryRequested.emit,
+        )
+        actions = [action for action in menu.actions() if not action.isSeparator()]
+        assert [action.text() for action in actions] == ["Rename Album…", "Unpin"]
+        actions[0].trigger()
+
+    qapp.processEvents()
+    qapp.processEvents()
+
+    new_album = root / "Renamed Trip"
+    assert not album_dir.exists()
+    assert new_album.exists()
+
+    renamed_pinned = pinned_service.items_for_library(root)[0]
+    assert renamed_pinned.item_id == str(new_album.resolve())
+
+    refreshed_pinned_index = sidebar.tree_model().index_for_pinned_item(renamed_pinned)
+    assert sidebar.tree_model().data(refreshed_pinned_index) == "Renamed Trip"
+
+    albums_index = sidebar.tree_model().index_for_path(new_album)
+    assert albums_index.isValid()
+    assert sidebar.tree_model().data(albums_index) == "Renamed Trip"
+
+
 def test_sidebar_pinned_item_context_menu_offers_unpin(tmp_path: Path, qapp: QApplication) -> None:
     root = tmp_path / "Library"
     root.mkdir()

@@ -14,8 +14,10 @@ from ..infrastructure.services.location_metadata_service import (
     ExifToolLocationMetadataService,
 )
 from ..application.services.assign_location_service import AssignLocationService
+from ..people.service import PeopleService
 from .library_asset_lifecycle_service import LibraryAssetLifecycleService
 from .library_asset_query_service import LibraryAssetQueryService
+from .library_people_service import create_people_service
 from .library_scan_service import LibraryScanService
 
 
@@ -29,6 +31,7 @@ class LibrarySession:
     asset_queries: LibraryAssetQueryService | None = None
     scans: LibraryScanService | None = None
     asset_lifecycle: LibraryAssetLifecycleService | None = None
+    people: PeopleService | None = None
     bind_asset_runtime: bool = True
 
     def __post_init__(self) -> None:
@@ -46,6 +49,8 @@ class LibrarySession:
                 self.library_root,
                 scan_service=self.scans,
             )
+        if self.people is None:
+            self.people = create_people_service(self.library_root)
 
     @property
     def assets(self) -> AssetRepositoryPort:

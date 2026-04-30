@@ -86,8 +86,8 @@ def test_people_cluster_gallery_menu_shows_set_as_cover(mock_qmenu_cls) -> None:
         selected_assets=[asset],
     )
 
-    with patch("iPhoto.gui.ui.controllers.context_menu_controller.PeopleService") as service_cls:
-        service_cls.return_value.resolve_cluster_cover_face.return_value = "face-a"
+    with patch("iPhoto.gui.ui.controllers.context_menu_controller.create_people_service") as service_factory:
+        service_factory.return_value.resolve_cluster_cover_face.return_value = "face-a"
         controller._handle_context_menu(QPoint(10, 10))
 
     actions_added = [args[0] for args, _ in mock_qmenu_cls.return_value.addAction.call_args_list]
@@ -110,8 +110,8 @@ def test_group_cluster_gallery_menu_shows_set_as_cover(mock_qmenu_cls) -> None:
         selected_assets=[asset],
     )
 
-    with patch("iPhoto.gui.ui.controllers.context_menu_controller.PeopleService") as service_cls:
-        service_cls.return_value.resolve_group_cover_asset.return_value = "asset-1"
+    with patch("iPhoto.gui.ui.controllers.context_menu_controller.create_people_service") as service_factory:
+        service_factory.return_value.resolve_group_cover_asset.return_value = "asset-1"
         controller._handle_context_menu(QPoint(10, 10))
 
     actions_added = [args[0] for args, _ in mock_qmenu_cls.return_value.addAction.call_args_list]

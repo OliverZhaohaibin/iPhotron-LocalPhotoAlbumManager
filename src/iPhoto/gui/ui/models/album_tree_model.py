@@ -10,6 +10,7 @@ from typing import Dict, List, Optional
 from PySide6.QtCore import QAbstractItemModel, QModelIndex, QObject, Qt
 from PySide6.QtGui import QIcon
 
+from ....bootstrap.library_people_service import create_people_service
 from ....library.manager import LibraryManager
 from ....library.tree import AlbumNode
 from ....people.service import PeopleService
@@ -354,7 +355,12 @@ class AlbumTreeModel(QAbstractItemModel):
         needs_people = any(pinned_item.kind == "person" for pinned_item in pinned_items)
         needs_groups = any(pinned_item.kind == "group" for pinned_item in pinned_items)
         if needs_people or needs_groups:
-            people_service = PeopleService(library_root)
+            bound_people_service = getattr(self._library, "people_service", None)
+            people_service = (
+                bound_people_service
+                if isinstance(bound_people_service, PeopleService)
+                else create_people_service(library_root)
+            )
             cluster_summaries = people_service.list_clusters()
             if needs_people:
                 person_lookup = {summary.person_id: summary for summary in cluster_summaries}
@@ -390,11 +396,7 @@ class AlbumTreeModel(QAbstractItemModel):
             except (TypeError, ValueError):
                 return None
             album = album_lookup.get(album_path)
-            title = (
-                pinned_item.label
-                if pinned_item.custom_label
-                else (album.title if album is not None else pinned_item.label)
-            )
+            title = album.title if album is not None else pinned_item.label
             return AlbumTreeItem(
                 title,
                 NodeType.PINNED_ALBUM,

@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Any, Callable, Optional
 from PySide6.QtCore import QItemSelectionModel, QModelIndex, QObject, QLocale, QThreadPool, QTimer, Signal, Slot
 from PySide6.QtGui import QAction, QColor, QPalette
 
+from iPhoto.bootstrap.library_people_service import create_people_service
 from iPhoto.config import PLAY_ASSET_DEBOUNCE_MS
 from iPhoto.gui.ui.tasks.assign_location_worker import (
     AssignLocationRequest,
@@ -174,6 +175,10 @@ class PlaybackCoordinator(QObject):
     def set_navigation_coordinator(self, nav: NavigationCoordinator) -> None:
         self._navigation = nav
 
+    def set_people_service(self, service: PeopleService | None) -> None:
+        self._people_service = service or PeopleService()
+        self._refresh_face_name_overlay_for_current_presentation()
+
     def set_info_panel(self, panel: InfoPanel) -> None:
         self._info_panel = panel
         panel.dismissed.connect(self._handle_info_panel_dismissed)
@@ -188,9 +193,16 @@ class PlaybackCoordinator(QObject):
 
     def set_people_library_root(self, library_root: Path | None) -> None:
         people_service = getattr(self, "_people_service", None)
-        if people_service is None:
-            return
-        people_service.set_library_root(library_root)
+        service_matches_root = (
+            isinstance(people_service, PeopleService)
+            and people_service.library_root() == library_root
+            and (library_root is None or people_service.asset_repository is not None)
+        )
+        if not service_matches_root:
+            if library_root is None:
+                self._people_service = PeopleService()
+            else:
+                self._people_service = create_people_service(library_root)
         self._refresh_face_name_overlay_for_current_presentation()
 
     def set_face_name_display_enabled(self, enabled: bool) -> None:
@@ -1519,6 +1531,7 @@ class PlaybackCoordinator(QObject):
             requested_box=requested_box,
             name_or_none=payload.get("name") if isinstance(payload.get("name"), str) else None,
             person_id=payload.get("person_id") if isinstance(payload.get("person_id"), str) else None,
+            people_service=self._people_service,
         )
         worker.signals.ready.connect(self._handle_manual_face_ready)
         worker.signals.error.connect(self._handle_manual_face_error)

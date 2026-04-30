@@ -8,7 +8,7 @@ from pathlib import Path
 
 from PySide6.QtCore import QObject, Signal
 
-from iPhoto.people.service import PeopleService
+from iPhoto.bootstrap.library_people_service import create_people_service
 from iPhoto.settings.manager import SettingsManager
 
 _GROUP_LABEL_RE = re.compile(r"^Group (\d+)$")
@@ -363,7 +363,7 @@ class PinnedItemsService(QObject):
                 return True
             return False
 
-        people_service = PeopleService(Path(library_key))
+        people_service = create_people_service(Path(library_key))
         stale_person_ids = [
             person_id for person_id in pinned_person_ids if not people_service.has_cluster(person_id)
         ]

@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Literal, Optional
 from PySide6.QtCore import QObject, QTimer, Signal
 
 from iPhoto.application.contracts.runtime_entry_contract import RuntimeEntryContract
+from iPhoto.bootstrap.library_people_service import create_people_service
 from iPhoto.config import ALL_PHOTOS_TITLE
 from iPhoto.gui.services.pinned_items_service import PinnedItemsService, PinnedSidebarItem
 from iPhoto.gui.coordinators.view_router import ViewRouter
@@ -101,7 +102,12 @@ class NavigationCoordinator(QObject):
             self.bindLibraryRequested.emit()
             return
 
-        people_service = PeopleService(library_root)
+        bound_people_service = getattr(self._context.library, "people_service", None)
+        people_service = (
+            bound_people_service
+            if isinstance(bound_people_service, PeopleService)
+            else create_people_service(library_root)
+        )
         if pinned_item.kind == "person":
             try:
                 query = people_service.build_cluster_query(pinned_item.item_id)

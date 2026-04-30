@@ -30,6 +30,10 @@ LEGACY_MODEL_IMPORT_EXCEPTIONS = {
     "library/album_operations.py",
 }
 
+PEOPLE_INDEX_STORE_FORBIDDEN_FILES = {
+    "library/workers/face_scan_worker.py",
+}
+
 
 def _is_type_checking_guard(node: ast.If) -> bool:
     test = node.test
@@ -163,6 +167,17 @@ def check(src_root: Path) -> list[str]:
             ):
                 violations.append(
                     f"{py_file}:{lineno}: GUI imports concrete index store {module}"
+                )
+
+            if (
+                (top_level == "people" or rel in PEOPLE_INDEX_STORE_FORBIDDEN_FILES)
+                and (
+                    module == "iPhoto.cache"
+                    or _is_or_under(module, "iPhoto.cache.index_store")
+                )
+            ):
+                violations.append(
+                    f"{py_file}:{lineno}: People runtime imports concrete index store {module}"
                 )
 
             if (

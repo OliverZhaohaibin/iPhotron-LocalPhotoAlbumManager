@@ -137,6 +137,43 @@ def test_model_inserts_pinned_section_between_library_and_albums(tmp_path: Path,
     assert model.data(trips_index, AlbumTreeRole.NODE_TYPE) == NodeType.PINNED_ALBUM
 
 
+def test_model_pinned_album_uses_current_album_title_over_custom_label(
+    tmp_path: Path,
+    qapp: QApplication,
+) -> None:
+    root = tmp_path / "Library"
+    root.mkdir()
+    album_dir = _create_album(root, "Trips")
+    manager = LibraryManager()
+    manager.bind_path(root)
+    qapp.processEvents()
+
+    settings = SettingsManager(path=tmp_path / "settings.json")
+    settings.load()
+    pinned_service = PinnedItemsService(settings)
+    pinned_service.pin_album(album_dir, "Trips", library_root=root)
+    assert pinned_service.rename_item(
+        kind="album",
+        item_id=album_dir,
+        label="Best Trips",
+        library_root=root,
+    )
+
+    model = AlbumTreeModel(manager)
+    model.set_pinned_service(pinned_service)
+    qapp.processEvents()
+
+    pinned_item = pinned_service.items_for_library(root)[0]
+    pinned_index = model.index_for_pinned_item(pinned_item)
+    pinned_tree_item = model.item_from_index(pinned_index)
+
+    assert pinned_index.isValid()
+    assert pinned_tree_item is not None
+    assert pinned_tree_item.album is not None
+    assert pinned_tree_item.album.path == album_dir
+    assert model.data(pinned_index) == "Trips"
+
+
 def test_model_omits_pinned_section_when_empty(tmp_path: Path, qapp: QApplication) -> None:
     root = tmp_path / "Library"
     root.mkdir()

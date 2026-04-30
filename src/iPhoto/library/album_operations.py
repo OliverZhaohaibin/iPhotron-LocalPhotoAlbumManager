@@ -65,6 +65,9 @@ class AlbumOperationsMixin:
         parent = node.path.parent
         target = self._validate_new_name(parent, new_name)
         original_path = node.path
+        stop_scanning = getattr(self, "stop_scanning", None)
+        if callable(stop_scanning):
+            stop_scanning()
         try:
             original_path.rename(target)
         except FileExistsError as exc:

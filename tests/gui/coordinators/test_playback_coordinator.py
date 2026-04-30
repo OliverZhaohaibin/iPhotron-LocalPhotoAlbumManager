@@ -886,6 +886,7 @@ def test_handle_manual_face_submitted_queues_background_worker() -> None:
         requested_box=(10, 20, 30, 40),
         name_or_none="Alice",
         person_id="person-a",
+        people_service=coordinator._people_service,
     )
     fake_pool.start.assert_called_once_with(fake_worker, -1)
 

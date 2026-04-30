@@ -205,7 +205,11 @@ def test_prune_missing_people_entities_removes_only_stale_items(
         def has_group(self, group_id: str) -> bool:
             return group_id != "group-stale"
 
-    monkeypatch.setattr(pinned_items_service_module, "PeopleService", _StubPeopleService)
+    monkeypatch.setattr(
+        pinned_items_service_module,
+        "create_people_service",
+        lambda library_root: _StubPeopleService(library_root),
+    )
 
     assert service.prune_missing_people_entities(
         library_root,
@@ -248,7 +252,11 @@ def test_prune_missing_people_entities_remaps_redirected_pins(
         def has_group(self, group_id: str) -> bool:
             return False
 
-    monkeypatch.setattr(pinned_items_service_module, "PeopleService", _StubPeopleService)
+    monkeypatch.setattr(
+        pinned_items_service_module,
+        "create_people_service",
+        lambda library_root: _StubPeopleService(library_root),
+    )
 
     assert service.prune_missing_people_entities(
         library_root,

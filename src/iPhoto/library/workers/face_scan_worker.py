@@ -8,14 +8,12 @@ from typing import Iterable
 
 from PySide6.QtCore import QThread, Signal
 
-from ...cache.index_store import get_global_repository
 from ...people.index_coordinator import (
     PeopleIndexCoordinator,
     PeopleSnapshotCommittedError,
-    get_people_index_coordinator,
 )
 from ...people.pipeline import FaceClusterPipeline
-from ...people.service import face_library_paths
+from ...people.service import PeopleService, face_library_paths
 from ...people.status import (
     FACE_STATUS_FAILED,
     FACE_STATUS_PENDING,
@@ -29,7 +27,7 @@ LOGGER = get_logger()
 
 
 class FaceScanWorker(QThread):
-    """Consume pending assets from the global index and build People clusters."""
+    """Consume pending People assets from the session service."""
 
     peopleIndexUpdated = Signal()
     statusChanged = Signal(str)
@@ -37,9 +35,20 @@ class FaceScanWorker(QThread):
     BATCH_SIZE = 4
     QUEUE_TARGET_SIZE = 16
 
-    def __init__(self, library_root: Path, parent=None) -> None:
+    def __init__(
+        self,
+        library_root: Path,
+        parent=None,
+        *,
+        people_service: PeopleService | None = None,
+    ) -> None:
         super().__init__(parent)
         self._library_root = Path(library_root)
+        if people_service is None:
+            from ...bootstrap.library_people_service import create_people_service
+
+            people_service = create_people_service(self._library_root)
+        self._people_service = people_service
         self._queue: queue.Queue[dict] = queue.Queue()
         self._queued_ids: set[str] = set()
         self._input_closed = False
@@ -72,7 +81,10 @@ class FaceScanWorker(QThread):
 
         paths = face_library_paths(self._library_root)
         pipeline = FaceClusterPipeline(model_root=paths.model_dir)
-        coordinator = get_people_index_coordinator(self._library_root)
+        coordinator = self._people_service.coordinator
+        if coordinator is None:
+            self.statusChanged.emit("Face scanning is unavailable for this library.")
+            return
 
         while not self._cancelled:
             self._top_up_pending_rows()
@@ -121,7 +133,9 @@ class FaceScanWorker(QThread):
         self._top_up_pending_rows()
 
     def _top_up_pending_rows(self) -> None:
-        store = get_global_repository(self._library_root)
+        store = self._people_service.asset_repository
+        if store is None:
+            return
         attempts = 0
         while self._queue.qsize() < self.QUEUE_TARGET_SIZE and attempts < 3 and not self._cancelled:
             queue_size_before = self._queue.qsize()
@@ -166,6 +180,7 @@ class FaceScanWorker(QThread):
                 batch,
                 library_root=self._library_root,
                 thumbnail_dir=thumbnail_dir,
+                is_cancelled=lambda: self._cancelled,
             )
         )
 
@@ -194,7 +209,7 @@ class FaceScanWorker(QThread):
         if first_retry_ids:
             self.statusChanged.emit("Some assets need a face-scan retry.")
         if failed_ids:
-            get_global_repository(self._library_root).update_face_statuses(
+            self._update_face_statuses(
                 failed_ids,
                 FACE_STATUS_FAILED,
             )
@@ -216,26 +231,41 @@ class FaceScanWorker(QThread):
 
     def _mark_rows_retry(self, rows: Iterable[dict]) -> None:
         ids = [str(row.get("id") or "") for row in rows if row.get("id")]
-        get_global_repository(self._library_root).update_face_statuses(ids, FACE_STATUS_RETRY)
+        self._update_face_statuses(ids, FACE_STATUS_RETRY)
         for asset_id in ids:
             self._queued_ids.discard(asset_id)
 
     def _mark_remaining_retry(self, initial_rows: Iterable[dict]) -> None:
         self._mark_rows_retry(initial_rows)
-        remaining = list(get_global_repository(self._library_root).read_rows_by_face_status(["pending", "retry"]))
+        remaining = list(
+            self._read_rows_by_face_status([FACE_STATUS_PENDING, FACE_STATUS_RETRY])
+        )
         self._mark_rows_retry(remaining)
 
     def _mark_rows_failed(self, rows: Iterable[dict]) -> None:
         ids = [str(row.get("id") or "") for row in rows if row.get("id")]
-        get_global_repository(self._library_root).update_face_statuses(ids, FACE_STATUS_FAILED)
+        self._update_face_statuses(ids, FACE_STATUS_FAILED)
         for asset_id in ids:
             self._queued_ids.discard(asset_id)
 
     def _mark_remaining_failed(self, initial_rows: Iterable[dict]) -> None:
         self._mark_rows_failed(initial_rows)
-        remaining = list(
-            get_global_repository(self._library_root).read_rows_by_face_status(
-                [FACE_STATUS_PENDING, FACE_STATUS_RETRY]
-            )
-        )
+        remaining = list(self._read_rows_by_face_status([FACE_STATUS_PENDING, FACE_STATUS_RETRY]))
         self._mark_rows_failed(remaining)
+
+    def _read_rows_by_face_status(
+        self,
+        statuses: Iterable[str],
+        *,
+        limit: int | None = None,
+    ) -> Iterable[dict]:
+        store = self._people_service.asset_repository
+        if store is None:
+            return ()
+        return store.read_rows_by_face_status(statuses, limit=limit)
+
+    def _update_face_statuses(self, asset_ids: Iterable[str], status: str) -> None:
+        store = self._people_service.asset_repository
+        if store is None:
+            return
+        store.update_face_statuses(asset_ids, status)

@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 import hashlib
 from pathlib import Path
 from types import ModuleType
-from typing import Sequence
+from typing import Callable, Sequence
 
 import numpy as np
 
@@ -72,13 +72,17 @@ class FaceClusterPipeline:
         *,
         library_root: Path,
         thumbnail_dir: Path,
+        is_cancelled: Callable[[], bool] | None = None,
     ) -> list[DetectedAssetFaces]:
         if not rows:
             return []
 
         face_app = self._ensure_face_analysis()
+        cancellation_requested = is_cancelled or (lambda: False)
         results: list[DetectedAssetFaces] = []
         for row in rows:
+            if cancellation_requested():
+                break
             asset_id = str(row.get("id") or "")
             asset_rel = Path(str(row.get("rel") or "")).as_posix()
             image_path = (library_root / asset_rel).resolve()
@@ -87,6 +91,8 @@ class FaceClusterPipeline:
                 image_bgr = pil_image_to_bgr(image)
                 detected_faces = face_app.get(image_bgr)
             except Exception as exc:
+                if cancellation_requested():
+                    break
                 _LOGGER.exception("Face detection failed for %s", image_path)
                 results.append(
                     DetectedAssetFaces(
@@ -97,6 +103,9 @@ class FaceClusterPipeline:
                     )
                 )
                 continue
+
+            if cancellation_requested():
+                break
 
             image_width, image_height = image.size
             faces: list[FaceRecord] = []

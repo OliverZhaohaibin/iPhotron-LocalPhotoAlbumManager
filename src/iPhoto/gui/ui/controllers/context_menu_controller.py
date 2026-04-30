@@ -20,6 +20,7 @@ from PySide6.QtCore import (
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import QMenu
 
+from iPhoto.bootstrap.library_people_service import create_people_service
 from iPhoto.gui.ui.menus.core import MenuContext, populate_menu
 from iPhoto.gui.ui.menus.gallery_menu import GalleryMenuHandlers, gallery_action_specs
 from iPhoto.gui.ui.menus.style import apply_menu_style
@@ -454,7 +455,9 @@ class ContextMenuController(QObject):
         return asset.rel_path.as_posix()
 
     def _people_service_for_context(self, context: MenuContext) -> PeopleService:
-        return PeopleService(context.active_root)
+        if context.active_root is None:
+            return PeopleService()
+        return create_people_service(context.active_root)
 
     def _remove_selection_rows(self, selected_indexes: list) -> None:
         if not selected_indexes:

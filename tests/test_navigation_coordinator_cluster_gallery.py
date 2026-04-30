@@ -130,7 +130,11 @@ def test_open_pinned_person_keeps_valid_empty_pin(tmp_path: Path, monkeypatch) -
         def has_cluster(self, person_id: str) -> bool:
             return True
 
-    monkeypatch.setattr(navigation_coordinator_module, "PeopleService", _StubPeopleService)
+    monkeypatch.setattr(
+        navigation_coordinator_module,
+        "create_people_service",
+        lambda library_root: _StubPeopleService(library_root),
+    )
 
     coord.open_pinned_item(PinnedSidebarItem(kind="person", item_id="person-a", label="Alice"))
 
@@ -158,7 +162,11 @@ def test_open_pinned_missing_person_prunes_invalid_pin(tmp_path: Path, monkeypat
         def has_cluster(self, person_id: str) -> bool:
             return False
 
-    monkeypatch.setattr(navigation_coordinator_module, "PeopleService", _StubPeopleService)
+    monkeypatch.setattr(
+        navigation_coordinator_module,
+        "create_people_service",
+        lambda library_root: _StubPeopleService(library_root),
+    )
     monkeypatch.setattr(
         navigation_coordinator_module.dialogs,
         "show_warning",
@@ -194,7 +202,11 @@ def test_open_pinned_missing_group_warns_and_prunes(tmp_path: Path, monkeypatch)
         def has_group(self, group_id: str) -> bool:
             return False
 
-    monkeypatch.setattr(navigation_coordinator_module, "PeopleService", _StubPeopleService)
+    monkeypatch.setattr(
+        navigation_coordinator_module,
+        "create_people_service",
+        lambda library_root: _StubPeopleService(library_root),
+    )
     monkeypatch.setattr(
         navigation_coordinator_module.dialogs,
         "show_warning",
@@ -230,7 +242,11 @@ def test_open_pinned_person_does_not_prune_on_people_service_error(
         def build_cluster_query(self, person_id: str) -> AssetQuery:
             raise RuntimeError("face index unavailable")
 
-    monkeypatch.setattr(navigation_coordinator_module, "PeopleService", _StubPeopleService)
+    monkeypatch.setattr(
+        navigation_coordinator_module,
+        "create_people_service",
+        lambda library_root: _StubPeopleService(library_root),
+    )
     monkeypatch.setattr(
         navigation_coordinator_module.dialogs,
         "show_warning",
@@ -260,7 +276,11 @@ def test_open_pinned_group_does_not_prune_on_people_service_error(
         def build_group_query(self, group_id: str) -> AssetQuery:
             raise RuntimeError("face index unavailable")
 
-    monkeypatch.setattr(navigation_coordinator_module, "PeopleService", _StubPeopleService)
+    monkeypatch.setattr(
+        navigation_coordinator_module,
+        "create_people_service",
+        lambda library_root: _StubPeopleService(library_root),
+    )
     monkeypatch.setattr(
         navigation_coordinator_module.dialogs,
         "show_warning",

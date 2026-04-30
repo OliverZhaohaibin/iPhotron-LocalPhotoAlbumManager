@@ -191,11 +191,12 @@
 
 ### People
 
-- [ ] 定义 `PeopleIndexPort`。
-- [ ] People scan enqueue 通过 port。
-- [ ] People stable mutation 通过 application service。
-- [ ] 防止 scan commit 清空 stable state。
-- [ ] group asset cache 刷新有测试。
+- [x] 定义 `PeopleIndexPort`。
+- [x] 定义 People asset row / `face_status` port。
+- [x] People scan enqueue 通过 port。
+- [x] People stable mutation 通过 application service。
+- [x] 防止 scan commit 清空 stable state。
+- [x] group asset cache 刷新有测试。
 
 ### Maps
 

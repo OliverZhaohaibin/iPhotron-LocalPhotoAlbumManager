@@ -1,6 +1,6 @@
 # 05 - Current Progress
 
-> Last updated: 2026-04-29
+> Last updated: 2026-04-30
 
 ## Summary
 
@@ -101,14 +101,40 @@ migration steps.
 - Added `docs/refactor/09-gui-session-query-migration.md` as the process
   handoff for this pass.
 
+## Completed In People Session Migration
+
+- Added `PeopleAssetRepositoryPort` for People-owned asset-row reads,
+  pending/retry face-scan reads, single/batch `face_status` updates, and
+  face-status counts.
+- Added `bootstrap/library_people_service.py` as the People session assembly
+  point and the only People adapter that imports the current global index-store
+  singleton.
+- Exposed `LibrarySession.people` and bound/unbound the active People service
+  through `RuntimeContext.open_library()` / `close_library()` and
+  `LibraryManager`.
+- Refactored `PeopleService`, `PeopleIndexCoordinator`, and `FaceScanWorker` so
+  asset row validation, group cover resolution, pending/retry reads, and
+  post-commit `face_status` bookkeeping use injected ports/session services.
+- Refactored key GUI People callers to prefer the session-bound People service,
+  including dashboard loading, navigation, playback manual-face flow, context
+  menu covers, gallery cluster refresh, pinned items, and album tree entries.
+- Fixed the rootless startup path so `MainCoordinator` no longer calls
+  `create_people_service(None)`, and fixed People dashboard root rebinding so
+  groups can resolve shared-photo covers instead of permanently falling back to
+  collage art.
+- Extended architecture checks so People runtime code and the face-scan worker
+  cannot import the concrete index store directly.
+- Added `docs/refactor/10-people-session-migration.md` as the process handoff
+  for this pass.
+
 ## Current Phase Status
 
 - Phase 0 is partially complete: vNext docs are in place and architecture
   guardrails now cover application/concrete imports, lower-layer GUI imports,
   GUI concrete index-store imports, and new legacy model shim imports.
 - Phase 1 is partially complete: `LibrarySession` exists and is reachable from
-  runtime entry objects; scan, asset lifecycle, asset query, and durable state
-  session surfaces are bound into `LibraryManager`, but GUI/coordinators/
+  runtime entry objects; scan, asset lifecycle, asset query, durable state, and
+  People session surfaces are bound into `LibraryManager`, but GUI/coordinators/
   viewmodels still need broader session-surface migration.
 - Phase 2 is partially complete: repository/state ports exist and Assign
   Location uses the state boundary; lifecycle row operations are now on the
@@ -122,12 +148,12 @@ migration steps.
   `LibraryAssetLifecycleService`, while watcher lifecycle cleanup still needs
   migration.
 - Phase 4 is partially complete: GUI favorite writes, asset grid reads, export
-  reads, dashboard metadata, and Location map aggregation now use session
-  surfaces, but `gui.facade.py` and GUI services still carry legacy business
-  orchestration.
-- Phase 5 is partially complete: thumbnail and Assign Location boundaries were
-  improved; People, Maps, Edit sidecar, and full thumbnail renderer ports still
-  need deeper migration.
+  reads, dashboard metadata, Location map aggregation, and key People dashboard/
+  navigation/manual-face flows now use session surfaces, but `gui.facade.py` and
+  GUI services still carry legacy business orchestration.
+- Phase 5 is partially complete: thumbnail, Assign Location, and People
+  boundaries were improved; Maps, Edit sidecar, and full thumbnail renderer
+  ports still need deeper migration.
 - Phase 6 is partially complete: new tests and CI architecture check were added,
   but broad end-to-end and performance baselines remain open.
 
@@ -143,9 +169,11 @@ migration steps.
 - `LibraryAssetLifecycleService` still uses the current index-store repository
   as the move/delete/restore lifecycle source of truth. This is intentional
   until repository consolidation is completed.
-- People indexing, face scan workers, trash cleanup helpers, watcher refresh
-  paths, and non-GUI compatibility paths still access the global repository
-  directly or through compatibility adapters.
+- People still uses `global_index.db` as its asset-row source of truth through
+  the bootstrap/session adapter. `src/iPhoto/people/**` and the face-scan worker
+  should not import `get_global_repository()` directly.
+- Trash cleanup helpers, watcher refresh paths, and non-GUI compatibility paths
+  still access the global repository directly or through compatibility adapters.
 - User state still physically lives in `global_index.db`; the new state port is
   an API boundary, not a separate `library_state.db` migration.
 - `global_index.db` compatibility schemas may not have a `metadata` column; the
@@ -192,6 +220,17 @@ Additional GUI session query migration verification:
 Results: all passed with the same existing pytest config and legacy shim
 warnings.
 
+Additional People session migration verification:
+
+- `.venv/bin/python tools/check_architecture.py`
+- `.venv/bin/python -m pytest tests/architecture -q`
+- `.venv/bin/python -m pytest tests/test_people_service.py tests/application/test_library_people_service.py tests/application/test_library_session.py tests/application/test_runtime_context.py -q`
+- `.venv/bin/python -m pytest tests/gui/widgets/test_people_dashboard_widget.py tests/gui/coordinators/test_playback_coordinator.py -q`
+- `.venv/bin/python -m pytest tests/test_navigation_coordinator_cluster_gallery.py tests/gui/viewmodels/test_gallery_viewmodel.py tests/ui/controllers/test_context_menu_cover.py -q`
+
+Results: all passed with the same existing pytest config and legacy shim
+warnings.
+
 The previous foundation pass also ran broader application/cache/scan suites and
 a broad non-GUI/UI run (`1237 passed, 7 skipped`), excluding
 `tests/test_aspect_ratio_constraint.py` because this environment lacks the
@@ -199,11 +238,9 @@ a broad non-GUI/UI run (`1237 passed, 7 skipped`), excluding
 
 ## Next Handoff Steps
 
-1. Move People and face-scan repository access behind bounded-context ports or
-   session/application commands.
-2. Move watcher-triggered incremental refresh and remaining trash cleanup helper
+1. Move watcher-triggered incremental refresh and remaining trash cleanup helper
    paths behind session/application commands.
-3. Decide the final source of truth between `cache/index_store.AssetRepository`
+2. Decide the final source of truth between `cache/index_store.AssetRepository`
    and `SQLiteAssetRepository`, then collapse callers to `AssetRepositoryPort`.
-4. Expand end-to-end temp-library tests for import/move/delete/restore and
+3. Expand end-to-end temp-library tests for import/move/delete/restore and
    user-state preservation across rescans.

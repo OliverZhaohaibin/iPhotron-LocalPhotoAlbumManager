@@ -150,8 +150,17 @@ class AlbumSidebarContextMenu(QMenu):
                 "Show in File Manager",
                 lambda: self._reveal_path(self._item.album),
             )
+        if self._item.node_type == NodeType.PINNED_ALBUM:
+            if self._item.album is not None:
+                self.addAction(
+                    "Rename Album…",
+                    lambda: self._prompt_rename_album(self._item),
+                )
+            else:
+                self.addAction("Rename…", self._prompt_rename_pinned_item)
+            self.addSeparator()
+            self.addAction("Unpin", self._unpin_sidebar_item)
         if self._item.node_type in {
-            NodeType.PINNED_ALBUM,
             NodeType.PINNED_PERSON,
             NodeType.PINNED_GROUP,
         }:

@@ -59,6 +59,26 @@ def test_bind_and_scan_tree(tmp_path: Path, qapp: QApplication) -> None:
     assert children[0].title == "Day1"
 
 
+def test_bind_path_relays_people_snapshot_events(tmp_path: Path, qapp: QApplication) -> None:
+    root = tmp_path / "Library"
+    root.mkdir()
+    manager = LibraryManager()
+    manager.bind_path(root)
+
+    snapshot_spy = QSignalSpy(manager.peopleSnapshotCommitted)
+    index_spy = QSignalSpy(manager.peopleIndexUpdated)
+    coordinator = manager._people_index_coordinator
+    assert coordinator is not None
+
+    event = object()
+    coordinator.snapshotCommitted.emit(event)
+    qapp.processEvents()
+
+    assert snapshot_spy.count() == 1
+    assert snapshot_spy.at(0)[0] is event
+    assert index_spy.count() == 1
+
+
 def test_create_and_rename_album(tmp_path: Path, qapp: QApplication) -> None:
     root = tmp_path / "Library"
     root.mkdir()
@@ -73,8 +93,10 @@ def test_create_and_rename_album(tmp_path: Path, qapp: QApplication) -> None:
         manager.create_subalbum(sub, "TooDeep")
     rename_spy = QSignalSpy(manager.albumRenamed)
     old_sub_path = sub.path
-    manager.rename_album(sub, "Arrival")
+    with patch.object(manager, "stop_scanning", wraps=manager.stop_scanning) as stop_scanning:
+        manager.rename_album(sub, "Arrival")
     qapp.processEvents()
+    stop_scanning.assert_called_once_with()
     assert rename_spy.count() == 1
     assert rename_spy.at(0) == [old_sub_path, created.path / "Arrival"]
     refreshed_parent = next(

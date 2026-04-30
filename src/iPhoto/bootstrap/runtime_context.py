@@ -178,6 +178,9 @@ class RuntimeContext:
         )
         if callable(bind_asset_lifecycle_service):
             bind_asset_lifecycle_service(self.library_session.asset_lifecycle)
+        bind_people_service = getattr(self.library, "bind_people_service", None)
+        if callable(bind_people_service):
+            bind_people_service(self.library_session.people)
         return self.library_session
 
     def close_library(self) -> None:
@@ -190,6 +193,10 @@ class RuntimeContext:
         )
         if callable(bind_asset_lifecycle_service):
             bind_asset_lifecycle_service(None)
+
+        bind_people_service = getattr(self.library, "bind_people_service", None)
+        if callable(bind_people_service):
+            bind_people_service(None)
 
         bind_state_repository = getattr(self.library, "bind_state_repository", None)
         if callable(bind_state_repository):

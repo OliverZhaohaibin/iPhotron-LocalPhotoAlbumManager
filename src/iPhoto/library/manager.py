@@ -81,6 +81,7 @@ class LibraryManager(
         self._debounce.setSingleShot(True)
         self._debounce.setInterval(500)
         self._pending_watch_paths: set[Path] = set()
+        self._watch_scan_queue: list[Path] = []
         # ``_watch_suspend_depth`` tracks how many in-flight operations asked us to
         # ignore file-system notifications. We use a counter instead of a boolean
         # to correctly handle nested operations that may overlap (e.g., multiple
@@ -88,6 +89,7 @@ class LibraryManager(
         self._watch_suspend_depth = 0
         self._watcher.directoryChanged.connect(self._on_directory_changed)
         self._debounce.timeout.connect(self._on_watcher_debounce_timeout)
+        self.scanFinished.connect(self._on_watcher_scan_finished)
 
         # Scanner State
         self._current_scanner_worker: Optional[ScannerWorker] = None
@@ -133,6 +135,8 @@ class LibraryManager(
         # Cancel any in-flight scan so we do not block UI interactions while
         # rebinding to a new library root.
         self.stop_scanning()
+        self._pending_watch_paths.clear()
+        self._watch_scan_queue.clear()
         self._face_scan_status_message = None
         self._unbind_people_index_coordinator()
 
@@ -205,6 +209,7 @@ class LibraryManager(
         self._live_scan_buffer.clear()
         self._live_scan_root = None
         self._pending_watch_paths.clear()
+        self._watch_scan_queue.clear()
         self._geotagged_assets_cache = None
         self._geotagged_assets_cache_root = None
         if self._current_face_scanner is not None:

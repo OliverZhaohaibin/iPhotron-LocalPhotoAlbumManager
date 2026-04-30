@@ -23,8 +23,10 @@ class FileSystemWatcherMixin:
         # to ensure that an earlier notification does not race with the write we
         # are about to perform.
         self._watch_suspend_depth += 1
-        if self._watch_suspend_depth == 1 and self._debounce.isActive():
-            self._debounce.stop()
+        if self._watch_suspend_depth == 1:
+            if self._debounce.isActive():
+                self._debounce.stop()
+            self._pending_watch_paths.clear()
 
     def resume_watcher(self) -> None:
         """Re-enable change notifications once protected writes have finished."""
@@ -60,15 +62,44 @@ class FileSystemWatcherMixin:
         if self._root is None or not paths:
             return
 
+        scan_roots = self._dedupe_watch_scan_roots(paths)
+        self._queue_watcher_scan_roots(scan_roots)
+
+    def _queue_watcher_scan_roots(self, scan_roots: list[Path]) -> None:
+        """Queue watcher-triggered scan scopes without collapsing album filters."""
+
+        if not scan_roots:
+            return
+
+        queued = {
+            self._watch_scan_key(scan_root)
+            for scan_root in self._watch_scan_queue
+        }
+        active_root = getattr(self, "_live_scan_root", None)
+        for scan_root in scan_roots:
+            key = self._watch_scan_key(scan_root)
+            if key in queued:
+                continue
+            if active_root is not None and self._paths_equal(active_root, scan_root):
+                continue
+            self._watch_scan_queue.append(scan_root)
+            queued.add(key)
+
+        self._start_next_watcher_scan()
+
+    def _start_next_watcher_scan(self) -> None:
+        if self._root is None:
+            self._watch_scan_queue.clear()
+            return
+        if getattr(self, "_current_scanner_worker", None) is not None:
+            return
+
         scan_service = getattr(self, "scan_service", None)
         if scan_service is None:
             scan_service = LibraryScanService(self._root)
 
-        scan_roots = self._dedupe_watch_scan_roots(paths)
-        if len(scan_roots) > 1:
-            scan_roots = [self._root]
-
-        for scan_root in scan_roots:
+        while self._watch_scan_queue:
+            scan_root = self._watch_scan_queue.pop(0)
             if not scan_root.exists() or not scan_root.is_dir():
                 continue
             try:
@@ -76,6 +107,17 @@ class FileSystemWatcherMixin:
             except Exception:
                 include, exclude = list(DEFAULT_INCLUDE), list(DEFAULT_EXCLUDE)
             self.start_scanning(scan_root, include, exclude)
+            return
+
+    def _on_watcher_scan_finished(self, _root: Path, _success: bool) -> None:
+        self._start_next_watcher_scan()
+
+    @staticmethod
+    def _watch_scan_key(path: Path) -> str:
+        try:
+            return str(path.resolve())
+        except OSError:
+            return str(path)
 
     def _dedupe_watch_scan_roots(self, paths: set[Path]) -> list[Path]:
         """Return minimal existing directory scopes for watcher-triggered scans."""
@@ -99,6 +141,9 @@ class FileSystemWatcherMixin:
             except ValueError:
                 continue
             candidates.append(path)
+
+        if len(candidates) > 1:
+            candidates = [candidate for candidate in candidates if candidate != root_resolved]
 
         deduped: list[Path] = []
         for candidate in candidates:

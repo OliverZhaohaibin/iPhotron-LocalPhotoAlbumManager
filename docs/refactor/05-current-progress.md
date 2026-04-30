@@ -176,19 +176,41 @@ migration steps.
 - Added `docs/refactor/12-watcher-scan-prune-migration.md` as the process
   handoff for this pass.
 
+## Completed In Repository Source-of-Truth Migration
+
+- Chose `cache/index_store.AssetRepository` / `global_index.db` as the current
+  runtime asset source of truth.
+- Added `IndexStoreAssetRepositoryAdapter` so legacy `IAssetRepository`
+  consumers can continue to query, save favorites, and delete rows while using
+  the global index store underneath.
+- Refactored `LibraryAssetRuntime` so it no longer creates
+  `ConnectionPool + SQLiteAssetRepository`; it now binds the session asset port
+  and the legacy domain adapter to the same index-store repository.
+- Refactored `LibrarySession.assets` to expose the true session
+  `AssetRepositoryPort` surface instead of the legacy domain adapter.
+- Extended architecture checks so `LibraryAssetRuntime` cannot regress to the
+  retired SQLite runtime binding.
+- Added adapter/runtime tests covering id/path reads, paginated domain queries,
+  favorite persistence, delete-by-id-to-rel pruning, and Live Photo hidden-row
+  filtering.
+- Added `docs/refactor/13-repository-source-of-truth-migration.md` as the
+  process handoff for this pass.
+
 ## Current Phase Status
 
 - Phase 0 is partially complete: vNext docs are in place and architecture
   guardrails now cover application/concrete imports, lower-layer GUI imports,
-  GUI concrete index-store imports, and new legacy model shim imports.
+  GUI concrete index-store imports, asset-runtime SQLite regressions, and new
+  legacy model shim imports.
 - Phase 1 is partially complete: `LibrarySession` exists and is reachable from
-  runtime entry objects; scan, asset lifecycle, asset query, durable state, and
-  People session surfaces are bound into `LibraryManager`, but GUI/coordinators/
-  viewmodels still need broader session-surface migration.
-- Phase 2 is partially complete: repository/state ports exist and Assign
-  Location uses the state boundary; lifecycle row operations are now on the
-  asset repository port, but asset persistence is not yet fully collapsed to
-  one public repository implementation.
+  runtime entry objects; scan, asset lifecycle, asset query, asset repository,
+  durable state, and People session surfaces are bound into `LibraryManager`,
+  but GUI/coordinators/viewmodels still need broader session-surface migration.
+- Phase 2 is partially complete: repository/state ports exist and
+  `global_index.db` is now the runtime asset source of truth; legacy
+  `IAssetRepository` callers can bridge through the index-store adapter, but
+  older domain use cases still need to migrate to `application/ports` or be
+  retired as compatibility paths.
 - Phase 3 is partially complete: `ScannerWorker`, LibraryManager scan
   coordinator paths, CLI scan/report, app compatibility scan calls,
   `AppFacade.open_album()`, import incremental scans, and restore rescans now
@@ -215,12 +237,13 @@ migration steps.
   checker. Do not add new `iPhoto.models.*` runtime imports outside that list.
 - `app.py`, `gui.facade.py`, `library.manager.py`, and several GUI services are
   still compatibility surfaces, not finished vNext entry points.
-- `LibraryScanService` still uses the current index-store repository as the
-  scan facts source of truth. This is intentional until the Phase 2 repository
-  consolidation decision is completed.
+- `LibraryScanService` uses the current index-store repository as the scan
+  facts source of truth.
 - `LibraryAssetLifecycleService` still uses the current index-store repository
-  as the move/delete/restore lifecycle source of truth. This is intentional
-  until repository consolidation is completed.
+  as the move/delete/restore lifecycle source of truth.
+- `SQLiteAssetRepository` remains in place for legacy/domain repository tests
+  and old use cases, but it is no longer the library-scoped runtime asset
+  repository.
 - People still uses `global_index.db` as its asset-row source of truth through
   the bootstrap/session adapter. `src/iPhoto/people/**` and the face-scan worker
   should not import `get_global_repository()` directly.
@@ -293,6 +316,16 @@ Additional watcher scan / prune migration verification:
 Results: all passed in this environment with the same existing pytest config
 and legacy shim warnings.
 
+Additional repository source-of-truth migration verification:
+
+- `.venv/bin/python -m pytest tests/infrastructure/test_index_store_asset_repository_adapter.py -q`
+- `.venv/bin/python -m pytest tests/infrastructure/test_library_asset_runtime.py tests/application/test_library_session.py tests/application/test_runtime_context.py -q`
+- `.venv/bin/python -m pytest tests/gui/coordinators/test_main_coordinator_asset_runtime_boundary.py tests/gui/viewmodels/test_gallery_viewmodel.py -q`
+- `.venv/bin/python tools/check_architecture.py`
+
+Results: all passed with the same existing pytest config warning and legacy shim
+deprecation warning where compatibility code imports old model shims.
+
 Additional session cleanup / live read migration verification:
 
 - `.venv/bin/python tools/check_architecture.py`
@@ -312,8 +345,8 @@ a broad non-GUI/UI run (`1237 passed, 7 skipped`), excluding
 
 ## Next Handoff Steps
 
-1. Decide the final source of truth between `cache/index_store.AssetRepository`
-   and `SQLiteAssetRepository`, then collapse callers to `AssetRepositoryPort`.
+1. Migrate or retire old `domain.repositories.IAssetRepository` use cases so
+   new application flows use `AssetRepositoryPort` / session query surfaces.
 2. Continue reducing `gui.facade.py`, `library.manager.py`, and GUI services to
    presentation/compatibility surfaces only.
 3. Expand end-to-end temp-library tests for import/move/delete/restore and

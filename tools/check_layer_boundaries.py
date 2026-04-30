@@ -38,6 +38,15 @@ INDEX_SYNC_FORBIDDEN_FILES = {
     "index_sync_service.py",
 }
 
+ASSET_RUNTIME_SQLITE_FORBIDDEN_FILES = {
+    "infrastructure/services/library_asset_runtime.py",
+}
+
+ASSET_RUNTIME_SQLITE_FORBIDDEN_IMPORTS = {
+    "iPhoto.infrastructure.db.pool",
+    "iPhoto.infrastructure.repositories.sqlite_asset_repository",
+}
+
 
 def _is_type_checking_guard(node: ast.If) -> bool:
     test = node.test
@@ -190,6 +199,14 @@ def check(src_root: Path) -> list[str]:
             ):
                 violations.append(
                     f"{py_file}:{lineno}: index sync imports concrete index store {module}"
+                )
+
+            if rel in ASSET_RUNTIME_SQLITE_FORBIDDEN_FILES and any(
+                _is_or_under(module, forbidden)
+                for forbidden in ASSET_RUNTIME_SQLITE_FORBIDDEN_IMPORTS
+            ):
+                violations.append(
+                    f"{py_file}:{lineno}: asset runtime imports retired SQLite repository path {module}"
                 )
 
             if (

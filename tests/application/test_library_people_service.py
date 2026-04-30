@@ -51,6 +51,7 @@ class FakePeopleAssetRepository:
 
 def test_library_session_exposes_people_surface(tmp_path: Path) -> None:
     runtime = Mock()
+    runtime.assets = object()
     runtime.repository = object()
     runtime.thumbnail_service = object()
     session = LibrarySession(tmp_path, asset_runtime=runtime)

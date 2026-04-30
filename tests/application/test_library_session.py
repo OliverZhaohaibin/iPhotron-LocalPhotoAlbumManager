@@ -8,6 +8,7 @@ from iPhoto.bootstrap.library_session import LibrarySession
 
 def test_library_session_binds_runtime_and_exposes_ports(tmp_path: Path) -> None:
     runtime = Mock()
+    runtime.assets = object()
     runtime.repository = object()
     runtime.thumbnail_service = object()
     state = Mock()
@@ -19,7 +20,7 @@ def test_library_session_binds_runtime_and_exposes_ports(tmp_path: Path) -> None
     )
 
     runtime.bind_library_root.assert_called_once_with(tmp_path)
-    assert session.assets is runtime.repository
+    assert session.assets is runtime.assets
     assert session.thumbnails is runtime.thumbnail_service
     assert session.state is state
     assert session.asset_queries is not None
@@ -34,6 +35,7 @@ def test_library_session_binds_runtime_and_exposes_ports(tmp_path: Path) -> None
 
 def test_library_session_shutdown_delegates_to_asset_runtime(tmp_path: Path) -> None:
     runtime = Mock()
+    runtime.assets = object()
     runtime.repository = object()
     runtime.thumbnail_service = object()
     session = LibrarySession(tmp_path, asset_runtime=runtime, state_repository=Mock())

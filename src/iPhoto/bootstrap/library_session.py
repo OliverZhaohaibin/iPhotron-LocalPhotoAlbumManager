@@ -54,7 +54,7 @@ class LibrarySession:
 
     @property
     def assets(self) -> AssetRepositoryPort:
-        return self.asset_runtime.repository
+        return self.asset_runtime.assets
 
     @property
     def thumbnails(self):

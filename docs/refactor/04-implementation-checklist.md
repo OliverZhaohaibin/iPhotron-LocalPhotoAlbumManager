@@ -59,7 +59,7 @@
 - [x] 新增 `LibrarySession`。
 - [x] `RuntimeContext` 持有单个 active `LibrarySession`。
 - [x] library open/bind/shutdown 生命周期进入 session。
-- [ ] repository、thumbnail、people、maps runtime 挂到 session。
+- [x] repository、thumbnail、people runtime 挂到 session；Maps runtime 仍待独立 session surface。
 - [ ] GUI startup 使用 session surface。
 - [x] `appctx.py` 标注并限制为 compatibility proxy。
 - [x] 增加 runtime entry tests。
@@ -91,7 +91,7 @@
 
 - [x] 定义 `AssetRepositoryPort`。
 - [x] 定义 `LibraryStateRepositoryPort`。
-- [ ] 明确现有两个 asset repository 的保留/合并策略。
+- [x] 明确现有两个 asset repository 的保留/合并策略：`cache/index_store.AssetRepository` / `global_index.db` 是运行时 source of truth，`SQLiteAssetRepository` 暂保留为 legacy/domain 测试适配器。
 - [x] scan merge API 保留用户状态。
 - [ ] favorite/hidden/trash/pinned/order 等用户状态走 state boundary。
 - [x] repository 支持 transaction boundary。

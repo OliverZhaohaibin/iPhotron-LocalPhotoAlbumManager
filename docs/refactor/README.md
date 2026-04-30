@@ -23,7 +23,7 @@
 2. `02-detailed-requirements.md`：功能、非功能、边界和验收需求。
 3. `03-development-roadmap.md`：阶段规划和迁移策略。
 4. `04-implementation-checklist.md`：逐阶段执行清单、完成条件和回归测试。
-5. `05-current-progress.md` 及后续编号文档：当前状态和过程性交接记录。
+5. `05-current-progress.md` 及 `06` 之后的编号文档：当前状态和过程性交接记录。
 
 ## 当前判断
 

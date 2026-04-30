@@ -94,6 +94,9 @@ def test_read_asset_and_geotagged_rows(tmp_path: Path) -> None:
     service = LibraryAssetQueryService(library_root, repository_factory=lambda _root: repo)
 
     assert list(service.read_asset_rows(album_root)) == [{"rel": "a.jpg", "id": "a"}]
+    assert list(service.read_library_relative_asset_rows(album_root)) == [
+        {"rel": "Trip/a.jpg", "id": "a"}
+    ]
     assert list(service.read_asset_rows(library_root)) == [
         {"rel": "root.jpg", "id": "root"}
     ]

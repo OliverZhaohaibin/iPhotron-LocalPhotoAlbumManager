@@ -110,6 +110,33 @@ class LibraryAssetQueryService:
             rows = repository.read_all(filter_hidden=filter_hidden)
         yield from self._scoped_rows(rows, album_path)
 
+    def read_library_relative_asset_rows(
+        self,
+        root: Path,
+        *,
+        filter_hidden: bool = True,
+        sort_by_date: bool = True,
+    ) -> Iterator[dict[str, Any]]:
+        """Yield full index rows for *root* with library-relative paths."""
+
+        album_path = self.album_path_for(root)
+        repository = self._repository()
+        if album_path:
+            rows = repository.read_album_assets(
+                album_path,
+                include_subalbums=True,
+                sort_by_date=sort_by_date,
+                filter_hidden=filter_hidden,
+            )
+        else:
+            rows = repository.read_all(
+                sort_by_date=sort_by_date,
+                filter_hidden=filter_hidden,
+            )
+        for row in rows:
+            if isinstance(row, dict):
+                yield dict(row)
+
     def read_geotagged_rows(self) -> Iterator[dict[str, Any]]:
         """Yield library-relative rows that contain GPS metadata."""
 

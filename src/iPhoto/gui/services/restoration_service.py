@@ -9,6 +9,7 @@ from typing import Any, Callable, Dict, Iterable, List, Optional, Set, TYPE_CHEC
 from PySide6.QtCore import QObject, Signal
 
 from ...bootstrap.library_asset_lifecycle_service import LibraryAssetLifecycleService
+from ...media_classifier import IMAGE_EXTENSIONS, VIDEO_EXTENSIONS
 
 if TYPE_CHECKING:
     from ...library.manager import LibraryManager
@@ -90,20 +91,26 @@ class RestorationService(QObject):
             if model and hasattr(model, "metadata_for_path"):
                 metadata = model.metadata_for_path(still_path)
 
-            if not metadata or not metadata.get("is_live"):
-                continue
-            motion_raw = metadata.get("live_motion_abs")
-            if not motion_raw:
-                continue
-            motion_path = _normalize(Path(str(motion_raw)))
-            motion_key = str(motion_path)
-            if motion_key not in seen and motion_path.exists():
-                seen.add(motion_key)
-                try:
-                    motion_path.relative_to(trash_root)
-                except ValueError:
-                    continue
-                normalized.append(motion_path)
+            if metadata and metadata.get("is_live"):
+                motion_raw = metadata.get("live_motion_abs")
+                if motion_raw:
+                    motion_path = _normalize(Path(str(motion_raw)))
+                    motion_key = str(motion_path)
+                    if motion_key not in seen and motion_path.exists():
+                        try:
+                            motion_path.relative_to(trash_root)
+                        except ValueError:
+                            pass
+                        else:
+                            seen.add(motion_key)
+                            normalized.append(motion_path)
+            if metadata is None or "is_live" not in metadata:
+                self._append_live_motion_fallback(
+                    still_path=still_path,
+                    trash_root=trash_root,
+                    normalized=normalized,
+                    seen=seen,
+                )
 
         lifecycle_service = (
             getattr(library, "asset_lifecycle_service", None)
@@ -121,13 +128,25 @@ class RestorationService(QObject):
             key = str(_normalize(candidate_path))
             row_lookup[key] = row
 
+        fallback_rows = self._read_fallback_restore_rows(
+            normalized,
+            trash_root=trash_root,
+            lifecycle_service=lifecycle_service,
+            row_lookup=row_lookup,
+            library=library,
+            library_root=library_root,
+        )
+
         grouped: Dict[Path, List[Path]] = defaultdict(list)
         for path in normalized:
             try:
                 key = str(_normalize(path))
                 row = row_lookup.get(key)
                 if not row:
-                    raise LookupError("metadata unavailable")
+                    row = self._fallback_row_for_path(
+                        path,
+                        fallback_rows=fallback_rows,
+                    )
                 destination_root = self._determine_restore_destination(
                     row=row,
                     library=library,
@@ -154,14 +173,191 @@ class RestorationService(QObject):
 
         scheduled_restore = False
         for destination_root, paths in grouped.items():
-            self._move_service.move_assets(
+            if self._move_service.move_assets(
                 paths,
                 destination_root,
                 operation="restore",
-            )
-            scheduled_restore = True
+            ):
+                scheduled_restore = True
 
         return scheduled_restore
+
+    def _append_live_motion_fallback(
+        self,
+        *,
+        still_path: Path,
+        trash_root: Path,
+        normalized: List[Path],
+        seen: Set[str],
+    ) -> None:
+        """Add a same-stem motion file when model metadata is unavailable."""
+
+        if still_path.suffix.lower() not in IMAGE_EXTENSIONS:
+            return
+        for suffix in VIDEO_EXTENSIONS:
+            motion_path = trash_root / f"{still_path.stem}{suffix.upper()}"
+            if not motion_path.exists():
+                motion_path = trash_root / f"{still_path.stem}{suffix.lower()}"
+            if not motion_path.exists():
+                continue
+            motion_key = str(self._normalize_path(motion_path))
+            if motion_key in seen:
+                return
+            seen.add(motion_key)
+            normalized.append(self._normalize_path(motion_path))
+            return
+
+    def _read_fallback_restore_rows(
+        self,
+        paths: Iterable[Path],
+        *,
+        trash_root: Path,
+        lifecycle_service: LibraryAssetLifecycleService,
+        row_lookup: dict[str, dict],
+        library: "LibraryManager",
+        library_root: Path,
+    ) -> dict[str, dict]:
+        """Read stale pre-delete rows that can recover missing trash metadata."""
+
+        rels_by_path: dict[str, list[str]] = {}
+        rels: list[str] = []
+        seen: set[str] = set()
+        for path in paths:
+            path_key = str(self._normalize_path(path))
+            row = row_lookup.get(path_key)
+            candidates = self._fallback_original_rels(
+                path,
+                trash_root=trash_root,
+                row=row,
+                library=library,
+                library_root=library_root,
+            )
+            rels_by_path[path_key] = candidates
+            for rel in candidates:
+                if rel in seen:
+                    continue
+                seen.add(rel)
+                rels.append(rel)
+        read_rows = getattr(lifecycle_service, "read_index_rows_by_rels", None)
+        if not callable(read_rows):
+            return {}
+        rows_by_rel = {
+            str(rel): dict(row)
+            for rel, row in read_rows(rels).items()
+            if isinstance(row, dict)
+        }
+        fallback_rows: dict[str, dict] = {}
+        for path_key, candidate_rels in rels_by_path.items():
+            for rel in candidate_rels:
+                row = rows_by_rel.get(rel)
+                if row is None:
+                    continue
+                fallback = dict(row)
+                if not fallback.get("original_rel_path"):
+                    fallback["original_rel_path"] = rel
+                fallback_rows[path_key] = fallback
+                break
+        return fallback_rows
+
+    def _fallback_row_for_path(
+        self,
+        path: Path,
+        *,
+        fallback_rows: dict[str, dict],
+    ) -> dict:
+        """Return restore metadata for broken trash rows, prompting as needed."""
+
+        return dict(fallback_rows.get(str(self._normalize_path(path)), {}))
+
+    def _fallback_original_rels(
+        self,
+        path: Path,
+        *,
+        trash_root: Path,
+        row: Optional[dict],
+        library: "LibraryManager",
+        library_root: Path,
+    ) -> list[str]:
+        """Return candidate library-relative rels for recovering stale rows."""
+
+        rels: list[str] = []
+        seen: set[str] = set()
+
+        def _append(rel: Optional[str]) -> None:
+            if not rel or rel in seen:
+                return
+            seen.add(rel)
+            rels.append(rel)
+
+        if row:
+            original_rel = row.get("original_rel_path")
+            if isinstance(original_rel, str) and self._is_safe_relative_path(original_rel):
+                _append(Path(original_rel).as_posix())
+            _append(
+                self._original_rel_from_album_metadata(
+                    row,
+                    library=library,
+                    library_root=library_root,
+                )
+            )
+
+        _append(self._fallback_original_rel(path, trash_root))
+        return rels
+
+    def _fallback_original_rel(self, path: Path, trash_root: Path) -> Optional[str]:
+        """Infer the original rel for trash rows created before metadata existed."""
+
+        try:
+            relative = path.relative_to(trash_root)
+        except ValueError:
+            return None
+        if relative.is_absolute() or any(part == ".." for part in relative.parts):
+            return None
+        return relative.as_posix()
+
+    def _original_rel_from_album_metadata(
+        self,
+        row: dict,
+        *,
+        library: "LibraryManager",
+        library_root: Path,
+    ) -> Optional[str]:
+        """Rebuild a library-relative rel from preserved album metadata."""
+
+        album_id = row.get("original_album_id")
+        subpath = row.get("original_album_subpath")
+        if not isinstance(album_id, str) or not album_id:
+            return None
+        if not isinstance(subpath, str) or not subpath:
+            return None
+
+        node = library.find_album_by_uuid(album_id)
+        if node is None:
+            return None
+
+        subpath_obj = Path(subpath)
+        if not self._is_safe_relative_parts(subpath_obj):
+            return None
+
+        try:
+            relative = (node.path / subpath_obj).relative_to(library_root)
+        except ValueError:
+            return None
+        return relative.as_posix()
+
+    @staticmethod
+    def _is_safe_relative_path(value: str) -> bool:
+        return RestorationService._is_safe_relative_parts(Path(value))
+
+    @staticmethod
+    def _is_safe_relative_parts(path: Path) -> bool:
+        return not path.is_absolute() and all(part != ".." for part in path.parts)
+
+    def _normalize_path(self, path: Path) -> Path:
+        try:
+            return path.resolve()
+        except OSError:
+            return path
 
     def _determine_restore_destination(
         self,

@@ -7,8 +7,8 @@ from typing import TYPE_CHECKING, Dict, Iterable, List, Optional
 
 from PySide6.QtCore import QMutexLocker, QRunnable
 
+from ..bootstrap.library_asset_query_service import LibraryAssetQueryService
 from ..bootstrap.library_scan_service import LibraryScanService
-from ..cache.index_store import get_global_repository
 from ..utils.logging import get_logger
 from .workers.face_scan_worker import FaceScanWorker
 from .workers.scanner_worker import ScannerSignals, ScannerWorker
@@ -171,7 +171,7 @@ class ScanCoordinatorMixin:
         if query_root is None:
             return []
 
-        db_rows = self._read_live_rows_from_store(query_root, library_root)
+        db_rows = self._read_live_rows_from_query_service(query_root, library_root)
         if not db_rows:
             return []
         return self._rewrite_rows_relative_to(db_rows, query_root, base_root)
@@ -197,33 +197,26 @@ class ScanCoordinatorMixin:
             return relative_to
         return None
 
-    def _read_live_rows_from_store(
+    def _read_live_rows_from_query_service(
         self,
         query_root: Path,
         library_root: Path,
     ) -> List[Dict]:
         try:
-            store = get_global_repository(library_root)
-            try:
-                album_path = query_root.resolve().relative_to(library_root.resolve()).as_posix()
-            except (OSError, ValueError):
-                try:
-                    album_path = query_root.relative_to(library_root).as_posix()
-                except ValueError:
-                    album_path = None
-
-            if album_path in (None, "", "."):
-                rows = store.read_all(sort_by_date=True, filter_hidden=True)
-            else:
-                rows = store.read_album_assets(
-                    album_path,
-                    include_subalbums=True,
-                    sort_by_date=True,
-                    filter_hidden=True,
-                )
+            query_service = getattr(self, "asset_query_service", None)
+            if (
+                query_service is None
+                or getattr(query_service, "library_root", library_root) != library_root
+            ):
+                query_service = LibraryAssetQueryService(library_root)
+            rows = query_service.read_library_relative_asset_rows(
+                query_root,
+                sort_by_date=True,
+                filter_hidden=True,
+            )
             return [dict(row) for row in rows]
         except Exception:
-            LOGGER.debug("Failed to read live scan rows from store", exc_info=True)
+            LOGGER.debug("Failed to read live scan rows from query service", exc_info=True)
             return []
 
     def _rewrite_rows_relative_to(

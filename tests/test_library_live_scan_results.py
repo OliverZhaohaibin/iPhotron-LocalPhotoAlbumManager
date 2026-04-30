@@ -1,6 +1,20 @@
 
 from iPhoto.library.manager import LibraryManager
 
+
+class _QueryService:
+    def __init__(self, library_root, rows):
+        self.library_root = library_root
+        self.rows = rows
+        self.query_roots = []
+
+    def read_library_relative_asset_rows(self, root, *, sort_by_date=True, filter_hidden=True):
+        self.query_roots.append(root)
+        assert sort_by_date is True
+        assert filter_hidden is True
+        return iter(self.rows)
+
+
 def test_get_live_scan_results_scanning_child_viewing_parent(tmp_path):
     """
     Scenario: Scanning a child album (e.g. /Photos/Vacation)
@@ -112,3 +126,21 @@ def test_scan_chunk_does_not_accumulate_live_buffer(tmp_path):
     manager._on_scan_chunk(root, [{"rel": "new.jpg", "id": "2"}])
 
     assert manager._live_scan_buffer == [{"rel": "existing.jpg", "id": "1"}]
+
+
+def test_get_live_scan_results_reads_database_snapshot_through_query_service(tmp_path):
+    root = tmp_path / "Library"
+    child = root / "Vacation"
+    child.mkdir(parents=True)
+
+    manager = LibraryManager()
+    manager._root = root
+    manager._live_scan_root = child
+    manager._live_scan_buffer = []
+    query_service = _QueryService(root, [{"rel": "Vacation/photo.jpg", "id": "1"}])
+    manager.bind_asset_query_service(query_service)
+
+    results = manager.get_live_scan_results(relative_to=root)
+
+    assert query_service.query_roots == [child]
+    assert results == [{"rel": "Vacation/photo.jpg", "id": "1"}]

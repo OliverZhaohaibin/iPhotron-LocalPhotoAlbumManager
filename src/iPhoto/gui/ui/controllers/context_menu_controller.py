@@ -134,12 +134,13 @@ class ContextMenuController(QObject):
             self._status_bar.show_message("Select items to delete first.", 3000)
             return False
 
-        if not self._apply_optimistic_move(paths, is_delete=True):
-            self._remove_selection_rows(selected_indexes)
-
         try:
             self._prepare_file_mutation(paths)
-            self._facade.delete_assets(paths)
+            queued_delete = self._facade.delete_assets(paths)
+            if not queued_delete:
+                return False
+            if not self._apply_optimistic_move(paths, is_delete=True):
+                self._remove_selection_rows(selected_indexes)
         except Exception:
             # Rescanning the album restores the rows we removed optimistically.
             self._facade.rescan_current()
@@ -275,16 +276,24 @@ class ContextMenuController(QObject):
     def _execute_move_to_album(self, target: Path) -> None:
         """Move the currently selected assets to ``target`` while updating the view."""
 
+        selection_model = self._grid_view.selectionModel()
+        selected_indexes = (
+            list(selection_model.selectedIndexes()) if selection_model else []
+        )
         paths = self._selected_asset_paths()
         if not paths:
             self._status_bar.show_message("Select items to move first.", 3000)
             return
 
-        self._apply_optimistic_move(paths, destination_root=target)
-
         try:
             self._prepare_file_mutation(paths)
-            self._facade.move_assets(paths, target)
+            queued_move = self._facade.move_assets(paths, target)
+            if not queued_move:
+                return
+            if selected_indexes and not self._apply_optimistic_move(
+                paths, destination_root=target
+            ):
+                self._remove_selection_rows(selected_indexes)
         except Exception:
             rollback = getattr(self._asset_model, "rollback_pending_moves", None)
             if callable(rollback):

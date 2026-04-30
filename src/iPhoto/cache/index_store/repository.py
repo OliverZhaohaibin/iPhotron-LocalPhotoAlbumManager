@@ -475,6 +475,7 @@ class AssetRepository:
         include_subalbums: bool = False,
         filter_hidden: bool = True,
         filter_params: Optional[Dict[str, Any]] = None,
+        offset: int = 0,
     ) -> List[Dict[str, Any]]:
         """Fetch a page of assets using cursor-based pagination.
         
@@ -489,6 +490,7 @@ class AssetRepository:
             include_subalbums: If True, include assets from sub-albums.
             filter_hidden: If True, exclude hidden assets.
             filter_params: Additional filter parameters.
+            offset: Number of sorted rows to skip.
         
         Returns:
             A list of asset dictionaries for the requested page.
@@ -501,6 +503,7 @@ class AssetRepository:
             cursor_dt=cursor_dt,
             cursor_id=cursor_id,
             limit=limit,
+            offset=offset,
         )
 
         conn = self._db_manager.get_connection()

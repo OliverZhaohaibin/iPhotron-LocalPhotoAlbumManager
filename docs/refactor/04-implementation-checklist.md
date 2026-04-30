@@ -173,6 +173,7 @@
 - [x] 删除流程迁移到 application use case。
 - [x] 恢复流程迁移到 application use case。
 - [x] 配对/刷新流程迁移到 application use case。
+- [x] Gallery collection/windowed reads 迁移到 session query surface。
 - [ ] GUI services 只保留 presentation coordination。
 - [ ] Background task manager 只保留 Qt transport。
 

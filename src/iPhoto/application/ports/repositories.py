@@ -71,6 +71,7 @@ class AssetRepositoryPort(Protocol):
         include_subalbums: bool = False,
         filter_hidden: bool = True,
         filter_params: dict[str, Any] | None = None,
+        offset: int = 0,
     ) -> list[dict[str, Any]]:
         """Return one paginated asset page."""
 

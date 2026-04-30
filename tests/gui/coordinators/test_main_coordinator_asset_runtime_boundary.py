@@ -35,8 +35,8 @@ def test_on_library_tree_updated_rebinds_asset_list_vm_and_reloads_selection() -
         state_repository=coordinator._context.library.state_repository,
         favorite_query=coordinator._context.library.asset_query_service,
     )
-    coordinator._asset_list_vm.rebind_repository.assert_called_once_with(
-        coordinator._context.asset_runtime.repository,
+    coordinator._asset_list_vm.rebind_asset_query_service.assert_called_once_with(
+        coordinator._context.library.asset_query_service,
         root,
     )
     coordinator._gallery_vm.on_library_tree_updated.assert_called_once_with()
@@ -60,8 +60,8 @@ def test_on_library_tree_updated_skips_selection_reload_in_location_context() ->
 
     coordinator._on_library_tree_updated()
 
-    coordinator._asset_list_vm.rebind_repository.assert_called_once_with(
-        coordinator._context.asset_runtime.repository,
+    coordinator._asset_list_vm.rebind_asset_query_service.assert_called_once_with(
+        coordinator._context.library.asset_query_service,
         root,
     )
     coordinator._gallery_vm.on_library_tree_updated.assert_called_once_with()

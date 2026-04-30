@@ -321,6 +321,9 @@ def test_get_assets_page_basic(store: IndexStore) -> None:
     assert page2[0]["rel"] == "b.jpg"
     assert page2[1]["rel"] == "a.jpg"
 
+    offset_page = store.get_assets_page(limit=1, offset=2)
+    assert [row["rel"] for row in offset_page] == ["b.jpg"]
+
 
 def test_get_assets_page_with_album_filter(store: IndexStore) -> None:
     """Test pagination with album path filtering."""

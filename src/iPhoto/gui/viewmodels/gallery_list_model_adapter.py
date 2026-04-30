@@ -48,12 +48,12 @@ class GalleryListModelAdapter(QAbstractListModel):
     def create(
         cls,
         *,
-        repository,
+        asset_query_service,
         thumbnail_service: ThumbnailCacheService,
         library_root: Optional[Path] = None,
         parent=None,
     ) -> "GalleryListModelAdapter":
-        store = GalleryCollectionStore(repository, library_root)
+        store = GalleryCollectionStore(asset_query_service, library_root)
         return cls(store, thumbnail_service, parent=parent)
 
     @property
@@ -181,10 +181,14 @@ class GalleryListModelAdapter(QAbstractListModel):
     def pin_row(self, row: int) -> None:
         self._store.pin_row(row)
 
-    def rebind_repository(self, repo, library_root: Optional[Path]) -> None:
+    def rebind_asset_query_service(
+        self,
+        asset_query_service,
+        library_root: Optional[Path],
+    ) -> None:
         self._last_snapshot = None
         self._duration_cache.clear()
-        self._store.rebind_repository(repo, library_root)
+        self._store.rebind_asset_query_service(asset_query_service, library_root)
 
     def invalidate_thumbnail(self, path_str: str) -> None:
         path = Path(path_str)

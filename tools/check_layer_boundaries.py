@@ -47,6 +47,11 @@ ASSET_RUNTIME_SQLITE_FORBIDDEN_IMPORTS = {
     "iPhoto.infrastructure.repositories.sqlite_asset_repository",
 }
 
+GUI_DOMAIN_REPOSITORY_FORBIDDEN_PREFIXES = (
+    "gui/viewmodels/",
+    "gui/ui/models/",
+)
+
 LEGACY_DOMAIN_USE_CASE_MODULES = {
     "iPhoto.application.use_cases.aggregate_geo_data",
     "iPhoto.application.use_cases.apply_edit",
@@ -240,6 +245,14 @@ def check(src_root: Path) -> list[str]:
             ):
                 violations.append(
                     f"{py_file}:{lineno}: runtime imports legacy model shim {module}"
+                )
+
+            if rel.startswith(GUI_DOMAIN_REPOSITORY_FORBIDDEN_PREFIXES) and _is_or_under(
+                module,
+                "iPhoto.domain.repositories",
+            ):
+                violations.append(
+                    f"{py_file}:{lineno}: GUI collection/viewmodel imports legacy domain repository {module}"
                 )
 
             if rel not in LEGACY_DOMAIN_USE_CASE_ALLOWED_IMPORTERS and (

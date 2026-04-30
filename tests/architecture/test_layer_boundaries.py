@@ -38,3 +38,21 @@ def test_legacy_use_case_package_import_is_blocked(tmp_path: Path) -> None:
         "iPhoto.application.use_cases" in violation
         for violation in violations
     )
+
+
+def test_gui_viewmodel_domain_repository_import_is_blocked(tmp_path: Path) -> None:
+    source = tmp_path / "iPhoto"
+    module = source / "gui" / "viewmodels" / "example.py"
+    module.parent.mkdir(parents=True)
+    module.write_text(
+        "from iPhoto.domain.repositories import IAssetRepository\n",
+        encoding="utf-8",
+    )
+
+    violations = check_layer_boundaries.check(source)
+
+    assert any(
+        "GUI collection/viewmodel imports legacy domain repository "
+        "iPhoto.domain.repositories" in violation
+        for violation in violations
+    )

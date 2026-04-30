@@ -97,7 +97,7 @@ class MainCoordinator(QObject):
         lib_root = context.library.root()
         self._context.asset_runtime.bind_library_root(lib_root)
         self._asset_list_vm = GalleryListModelAdapter.create(
-            repository=self._context.asset_runtime.repository,
+            asset_query_service=getattr(context.library, "asset_query_service", None),
             thumbnail_service=self._context.asset_runtime.thumbnail_service,
             library_root=lib_root,
             parent=window.ui.grid_view,
@@ -561,7 +561,10 @@ class MainCoordinator(QObject):
         self._context.asset_runtime.bind_library_root(root)
         self._asset_service.set_repository(self._context.asset_runtime.repository)
         self._bind_asset_service_library_surfaces(root)
-        self._asset_list_vm.rebind_repository(self._context.asset_runtime.repository, root)
+        self._asset_list_vm.rebind_asset_query_service(
+            getattr(self._context.library, "asset_query_service", None),
+            root,
+        )
         self._gallery_vm.on_library_tree_updated()
         window = getattr(self, "_window", None)
         ui = getattr(window, "ui", None)

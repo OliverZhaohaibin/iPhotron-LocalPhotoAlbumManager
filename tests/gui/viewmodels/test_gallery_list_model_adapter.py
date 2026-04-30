@@ -95,13 +95,13 @@ def test_prioritize_rows_delegates_to_store(adapter, mock_store):
     mock_store.prioritize_rows.assert_called_once_with(10, 25)
 
 
-def test_rebind_repository_updates_store(adapter, mock_store):
-    repo = MagicMock()
+def test_rebind_asset_query_service_updates_store(adapter, mock_store):
+    query_service = MagicMock()
     root = Path("/library")
 
-    adapter.rebind_repository(repo, root)
+    adapter.rebind_asset_query_service(query_service, root)
 
-    mock_store.rebind_repository.assert_called_once_with(repo, root)
+    mock_store.rebind_asset_query_service.assert_called_once_with(query_service, root)
 
 
 def test_invalidate_thumbnail_clears_duration_cache_and_emits_size_role(adapter, mock_store):

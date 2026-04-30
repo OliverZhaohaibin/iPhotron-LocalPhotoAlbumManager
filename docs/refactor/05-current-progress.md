@@ -214,12 +214,30 @@ migration steps.
 - Added `docs/refactor/14-legacy-domain-repository-retirement.md` as the
   process handoff for this pass.
 
+## Completed In Gallery Query Read Migration
+
+- Extended `LibraryAssetQueryService` with AssetQuery-aware count/read
+  operations for gallery collection paging, including album, all-photos,
+  favorite/video/live, and People asset-id queries.
+- Refactored `GalleryCollectionStore` and `GalleryListModelAdapter` so
+  windowed gallery reads use the session-owned query surface instead of the
+  legacy `domain.repositories.IAssetRepository` adapter.
+- Refactored `MainCoordinator` startup and library-tree rebinding to pass
+  `context.library.asset_query_service` into the gallery model path.
+- Added an architecture guard that blocks GUI viewmodel/model imports of the
+  legacy domain repository interface.
+- Added tests for session-query paging, lazy row fetch, rebind reloads, People
+  asset-id queries, coordinator rebinding, and the new guardrail.
+- Added `docs/refactor/15-gallery-query-read-migration.md` as the process
+  handoff for this pass.
+
 ## Current Phase Status
 
 - Phase 0 is partially complete: vNext docs are in place and architecture
   guardrails now cover application/concrete imports, lower-layer GUI imports,
   GUI concrete index-store imports, asset-runtime SQLite regressions, new
-  legacy model shim imports, and new legacy domain-repository use case imports.
+  legacy model shim imports, new legacy domain-repository use case imports, and
+  GUI collection/viewmodel imports of legacy domain repositories.
 - Phase 1 is partially complete: `LibrarySession` exists and is reachable from
   runtime entry objects; scan, asset lifecycle, asset query, asset repository,
   durable state, and People session surfaces are bound into `LibraryManager`,
@@ -227,8 +245,9 @@ migration steps.
 - Phase 2 is partially complete: repository/state ports exist and
   `global_index.db` is now the runtime asset source of truth; legacy
   `IAssetRepository` callers can bridge through the index-store adapter, active
-  GUI favorite writes now use the state boundary, and older domain use cases
-  are quarantined as compatibility paths.
+  GUI favorite writes now use the state boundary, gallery collection reads now
+  use the session query surface, and older domain use cases are quarantined as
+  compatibility paths.
 - Phase 3 is partially complete: `ScannerWorker`, LibraryManager scan
   coordinator paths, CLI scan/report, app compatibility scan calls,
   `AppFacade.open_album()`, import incremental scans, and restore rescans now
@@ -239,10 +258,11 @@ migration steps.
   session scan surface, and stale-row pruning is an explicit lifecycle
   reconciliation step. Remaining legacy scan-like application services still
   need review before Phase 3 can be marked fully complete.
-- Phase 4 is partially complete: GUI favorite writes, asset grid reads, export
-  reads, dashboard metadata, Location map aggregation, and key People dashboard/
-  navigation/manual-face flows now use session surfaces, but `gui.facade.py` and
-  GUI services still carry legacy business orchestration.
+- Phase 4 is partially complete: GUI favorite writes, gallery collection/
+  windowed reads, asset grid reads, export reads, dashboard metadata, Location
+  map aggregation, and key People dashboard/navigation/manual-face flows now use
+  session surfaces, but `gui.facade.py` and GUI services still carry legacy
+  business orchestration.
 - Phase 5 is partially complete: thumbnail, Assign Location, and People
   boundaries were improved; Maps, Edit sidecar, and full thumbnail renderer
   ports still need deeper migration.
@@ -360,6 +380,18 @@ Additional legacy domain repository retirement verification:
 Results: all passed with the same existing pytest config warning and legacy
 shim deprecation warnings where compatibility code imports old model shims.
 
+Additional gallery query read migration verification:
+
+- `.venv/bin/python -m pytest tests/application/test_library_asset_query_service.py tests/gui/viewmodels/test_gallery_collection_store.py tests/gui/viewmodels/test_gallery_list_model_adapter.py tests/gui/viewmodels/test_gallery_viewmodel.py -q`
+- `.venv/bin/python -m pytest tests/gui/coordinators/test_main_coordinator_asset_runtime_boundary.py tests/test_phase4_integration.py -q`
+- `.venv/bin/python -m pytest tests/cache/test_sqlite_store.py -q`
+- `.venv/bin/python -m pytest tests/architecture -q`
+- `.venv/bin/python -m pytest tests/ui/tasks/test_asset_loader_missing_files.py -q`
+- `.venv/bin/python tools/check_architecture.py`
+
+Results: all passed with the same existing pytest config warning and legacy
+shim deprecation warnings where compatibility code imports old model shims.
+
 Additional session cleanup / live read migration verification:
 
 - `.venv/bin/python tools/check_architecture.py`
@@ -379,9 +411,9 @@ a broad non-GUI/UI run (`1237 passed, 7 skipped`), excluding
 
 ## Next Handoff Steps
 
-1. Continue migrating legacy GUI read paths such as gallery collection loading
-   from the `IAssetRepository` adapter to session query surfaces.
-2. Continue reducing `gui.facade.py`, `library.manager.py`, and GUI services to
+1. Continue reducing `gui.facade.py`, `library.manager.py`, and GUI services to
    presentation/compatibility surfaces only.
+2. Review remaining legacy scan-like application services before marking Phase
+   3 fully complete.
 3. Expand end-to-end temp-library tests for import/move/delete/restore and
    user-state preservation across rescans.

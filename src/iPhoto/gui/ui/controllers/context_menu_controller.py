@@ -276,6 +276,10 @@ class ContextMenuController(QObject):
     def _execute_move_to_album(self, target: Path) -> None:
         """Move the currently selected assets to ``target`` while updating the view."""
 
+        selection_model = self._grid_view.selectionModel()
+        selected_indexes = (
+            list(selection_model.selectedIndexes()) if selection_model else []
+        )
         paths = self._selected_asset_paths()
         if not paths:
             self._status_bar.show_message("Select items to move first.", 3000)
@@ -283,8 +287,13 @@ class ContextMenuController(QObject):
 
         try:
             self._prepare_file_mutation(paths)
-            self._apply_optimistic_move(paths, destination_root=target)
-            self._facade.move_assets(paths, target)
+            queued_move = self._facade.move_assets(paths, target)
+            if not queued_move:
+                return
+            if selected_indexes and not self._apply_optimistic_move(
+                paths, destination_root=target
+            ):
+                self._remove_selection_rows(selected_indexes)
         except Exception:
             rollback = getattr(self._asset_model, "rollback_pending_moves", None)
             if callable(rollback):

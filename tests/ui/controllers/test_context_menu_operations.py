@@ -86,8 +86,29 @@ def test_execute_move_to_album_prepares_paths_before_move() -> None:
     controller._apply_optimistic_move = MagicMock(  # type: ignore[method-assign]
         side_effect=lambda paths, destination_root: events.append("optimistic") or True
     )
-    facade.move_assets.side_effect = lambda paths, target: events.append(f"move:{target}")
+    facade.move_assets.side_effect = (
+        lambda paths, target: events.append(f"move:{target}") or True
+    )
 
     controller._execute_move_to_album(destination)
 
-    assert events == ["prepare", "optimistic", f"move:{destination}"]
+    assert events == ["prepare", f"move:{destination}", "optimistic"]
+
+
+def test_execute_move_to_album_waits_for_backend_acceptance() -> None:
+    asset_path = Path("D:/library/video.mp4")
+    destination = Path("D:/library/AlbumB")
+    events: list[str] = []
+
+    controller, facade = _make_controller(selected_paths=[asset_path])
+    controller._apply_optimistic_move = MagicMock(  # type: ignore[method-assign]
+        side_effect=lambda paths, destination_root: events.append("optimistic") or True
+    )
+    facade.move_assets.side_effect = (
+        lambda paths, target: events.append(f"move:{target}") or False
+    )
+
+    controller._execute_move_to_album(destination)
+
+    assert events == [f"move:{destination}"]
+    controller._apply_optimistic_move.assert_not_called()

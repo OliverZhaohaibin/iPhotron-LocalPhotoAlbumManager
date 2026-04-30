@@ -36,9 +36,16 @@ class _FakeLifecycleService:
 
 
 class _FakeLibrary:
-    def __init__(self, root: Path, lifecycle_service: _FakeLifecycleService) -> None:
+    def __init__(
+        self,
+        root: Path,
+        lifecycle_service: _FakeLifecycleService,
+        *,
+        albums_by_uuid: dict[str, object] | None = None,
+    ) -> None:
         self._root = Path(root)
         self.asset_lifecycle_service = lifecycle_service
+        self._albums_by_uuid = albums_by_uuid or {}
 
     def root(self) -> Path:
         return self._root
@@ -47,7 +54,12 @@ class _FakeLibrary:
         return self._root / RECENTLY_DELETED_DIR_NAME
 
     def find_album_by_uuid(self, _album_id: str):
-        return None
+        return self._albums_by_uuid.get(_album_id)
+
+
+class _FakeAlbumNode:
+    def __init__(self, path: Path) -> None:
+        self.path = Path(path)
 
 
 class _FakeMoveService:
@@ -63,6 +75,17 @@ class _FakeMoveService:
     ) -> bool:
         self.calls.append((list(paths), Path(destination_root), operation))
         return True
+
+
+class _FakeModel:
+    def __init__(self, metadata_by_path: dict[Path, dict]) -> None:
+        self._metadata_by_path = {
+            Path(path).resolve(): dict(metadata)
+            for path, metadata in metadata_by_path.items()
+        }
+
+    def metadata_for_path(self, path: Path):
+        return self._metadata_by_path.get(Path(path).resolve())
 
 
 def test_restore_uses_lifecycle_rows_to_resolve_destination(tmp_path: Path) -> None:
@@ -129,6 +152,52 @@ def test_restore_uses_stale_original_rows_when_trash_rows_are_missing(
     assert move_service.calls == [([trashed_asset], library_root, "restore")]
 
 
+def test_restore_uses_album_metadata_to_recover_stale_subalbum_rows(
+    tmp_path: Path,
+) -> None:
+    library_root = tmp_path / "Library"
+    album_root = library_root / "AlbumA"
+    trash_root = library_root / RECENTLY_DELETED_DIR_NAME
+    album_root.mkdir(parents=True)
+    trash_root.mkdir()
+    trashed_asset = trash_root / "photo.jpg"
+    trashed_asset.write_bytes(b"data")
+
+    lifecycle = _FakeLifecycleService(
+        [
+            {
+                "rel": f"{RECENTLY_DELETED_DIR_NAME}/photo.jpg",
+                "original_album_id": "album-a",
+                "original_album_subpath": "photo.jpg",
+            }
+        ]
+    )
+    lifecycle.rows_by_rel = {
+        "AlbumA/photo.jpg": {
+            "rel": "AlbumA/photo.jpg",
+            "original_rel_path": "AlbumA/photo.jpg",
+        }
+    }
+    library = _FakeLibrary(
+        library_root,
+        lifecycle,
+        albums_by_uuid={"album-a": _FakeAlbumNode(album_root)},
+    )
+    move_service = _FakeMoveService()
+    service = RestorationService(
+        move_service=move_service,  # type: ignore[arg-type]
+        library_manager_getter=lambda: library,  # type: ignore[return-value]
+        model_provider_getter=lambda: None,
+        restore_prompt_getter=lambda: None,
+    )
+
+    scheduled = service.restore_assets([trashed_asset])
+
+    assert scheduled is True
+    assert lifecycle.read_rels == [["AlbumA/photo.jpg", "photo.jpg"]]
+    assert move_service.calls == [([trashed_asset], album_root, "restore")]
+
+
 def test_restore_live_photo_adds_same_stem_motion_without_model_metadata(
     tmp_path: Path,
 ) -> None:
@@ -160,3 +229,44 @@ def test_restore_live_photo_adds_same_stem_motion_without_model_metadata(
     assert move_service.calls == [
         ([still.resolve(), motion.resolve()], library_root, "restore")
     ]
+
+
+def test_restore_non_live_photo_does_not_add_same_stem_motion(
+    tmp_path: Path,
+) -> None:
+    library_root = tmp_path / "Library"
+    album_root = library_root / "AlbumA"
+    trash_root = library_root / RECENTLY_DELETED_DIR_NAME
+    album_root.mkdir(parents=True)
+    trash_root.mkdir()
+    still = trash_root / "IMG_0001.JPG"
+    motion = trash_root / "IMG_0001.MOV"
+    still.write_bytes(b"still")
+    motion.write_bytes(b"motion")
+
+    lifecycle = _FakeLifecycleService(
+        [
+            {
+                "rel": f"{RECENTLY_DELETED_DIR_NAME}/IMG_0001.JPG",
+                "original_rel_path": "AlbumA/IMG_0001.JPG",
+            },
+            {
+                "rel": f"{RECENTLY_DELETED_DIR_NAME}/IMG_0001.MOV",
+                "original_rel_path": "AlbumA/IMG_0001.MOV",
+            },
+        ]
+    )
+    library = _FakeLibrary(library_root, lifecycle)
+    move_service = _FakeMoveService()
+    model = _FakeModel({still: {"is_live": False}})
+    service = RestorationService(
+        move_service=move_service,  # type: ignore[arg-type]
+        library_manager_getter=lambda: library,  # type: ignore[return-value]
+        model_provider_getter=lambda: lambda: model,
+        restore_prompt_getter=lambda: None,
+    )
+
+    scheduled = service.restore_assets([still])
+
+    assert scheduled is True
+    assert move_service.calls == [([still.resolve()], album_root, "restore")]

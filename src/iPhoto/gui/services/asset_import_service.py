@@ -81,11 +81,13 @@ class AssetImportService(QObject):
 
         library_root: Optional[Path] = None
         scan_service = None
+        lifecycle_service = None
         if self._library_manager_getter is not None:
             manager = self._library_manager_getter()
             if manager is not None:
                 library_root = manager.root()
                 scan_service = getattr(manager, "scan_service", None)
+                lifecycle_service = getattr(manager, "asset_lifecycle_service", None)
 
         worker = ImportWorker(
             normalized,
@@ -94,6 +96,7 @@ class AssetImportService(QObject):
             signals,
             library_root=library_root,
             scan_service=scan_service,
+            asset_lifecycle_service=lifecycle_service,
         )
         unique_task_id = f"import:{target_root}:{uuid.uuid4().hex}"
         # The BackgroundTaskManager refuses duplicate task identifiers so we append a

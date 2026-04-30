@@ -55,6 +55,13 @@ def _require_scan_service(session):
     return scan_service
 
 
+def _require_lifecycle_service(session):
+    lifecycle_service = session.asset_lifecycle
+    if lifecycle_service is None:
+        raise IPhotoError("Library asset lifecycle service is unavailable.")
+    return lifecycle_service
+
+
 @app.command()
 @_handle_errors
 def init(album_dir: Path = typer.Argument(Path.cwd(), exists=False)) -> None:
@@ -76,6 +83,10 @@ def scan(album_dir: Path = typer.Argument(Path.cwd(), exists=True)) -> None:
         scan_service = _require_scan_service(session)
         result = scan_service.scan_album(album_dir, persist_chunks=False)
         scan_service.finalize_scan(album_dir, result.rows)
+        _require_lifecycle_service(session).reconcile_missing_scan_rows(
+            album_dir,
+            result.rows,
+        )
     finally:
         session.shutdown()
     print(f"[green]Indexed {len(result.rows)} assets")

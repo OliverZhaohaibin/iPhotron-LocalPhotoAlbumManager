@@ -38,6 +38,15 @@ class FakeScanService:
         return ["pair"]
 
 
+class FakeLifecycleService:
+    def __init__(self) -> None:
+        self.reconciled: list[tuple[Path, list[dict]]] = []
+
+    def reconcile_missing_scan_rows(self, root: Path, rows: list[dict]) -> int:
+        self.reconciled.append((root, rows))
+        return 0
+
+
 def test_open_album_forwards_lazy_open_to_session_scan_service(monkeypatch, tmp_path):
     album_dir = tmp_path / "album"
     album_dir.mkdir()
@@ -78,9 +87,15 @@ def test_rescan_wrapper_uses_session_scan_and_finalize(monkeypatch, tmp_path):
     album_dir = tmp_path / "album"
     album_dir.mkdir()
     service = FakeScanService()
+    lifecycle = FakeLifecycleService()
     progress: list[tuple[int, int]] = []
 
     monkeypatch.setattr(app, "_scan_service", lambda root, library_root=None: service)
+    monkeypatch.setattr(
+        app,
+        "_lifecycle_service",
+        lambda root, library_root=None, scan_service=None: lifecycle,
+    )
 
     rows = app.rescan(
         album_dir,
@@ -90,6 +105,7 @@ def test_rescan_wrapper_uses_session_scan_and_finalize(monkeypatch, tmp_path):
     assert rows == [{"rel": "a.jpg"}]
     assert service.scanned == [(album_dir, False)]
     assert service.finalized == [(album_dir, [{"rel": "a.jpg"}])]
+    assert lifecycle.reconciled == [(album_dir, [{"rel": "a.jpg"}])]
     assert service.synced == [album_dir]
     assert progress == [(1, 1)]
 

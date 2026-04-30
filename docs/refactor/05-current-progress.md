@@ -153,6 +153,29 @@ migration steps.
 - Added `docs/refactor/11-session-cleanup-live-read-migration.md` as the
   process handoff for this pass.
 
+## Completed In Watcher Scan / Prune Migration
+
+- Split scan finalization from stale-row deletion: `LibraryScanService` now
+  performs additive scan fact merge and Live Photo link materialization only.
+- Added `LibraryAssetLifecycleService.reconcile_missing_scan_rows()` as the
+  explicit lifecycle command for scoped stale-row pruning after a completed
+  scan.
+- Routed GUI synchronous/asynchronous rescans, restore rescans, import fallback
+  rescans, CLI `scan`, legacy `app.rescan()`, and `LibraryManager` scan finish
+  through explicit lifecycle reconciliation.
+- Refactored filesystem watcher debounce handling so external directory changes
+  refresh the tree and trigger scans through the active session scan surface
+  instead of remaining a tree-only refresh path.
+- Removed concrete repository access from `index_sync_service.py`; it now
+  receives repository ports from session/lifecycle adapters.
+- Extended architecture checks so future concrete index-store imports in
+  `index_sync_service.py` fail.
+- Added tests for non-pruning scan finalization, lifecycle reconciliation,
+  watcher-triggered session scans, and caller propagation of lifecycle
+  reconciliation.
+- Added `docs/refactor/12-watcher-scan-prune-migration.md` as the process
+  handoff for this pass.
+
 ## Current Phase Status
 
 - Phase 0 is partially complete: vNext docs are in place and architecture
@@ -171,9 +194,11 @@ migration steps.
   `AppFacade.open_album()`, import incremental scans, and restore rescans now
   enter through `LibrarySession` / `LibraryScanService` and
   `ScanLibraryUseCase`; move/delete/restore index updates and Recently Deleted
-  cleanup now enter through `LibraryAssetLifecycleService`, and live scan
-  fallback reads use the session query service. Remaining watcher-triggered
-  incremental scan/refresh orchestration still needs migration.
+  cleanup now enter through `LibraryAssetLifecycleService`, live scan fallback
+  reads use the session query service, watcher-triggered refreshes enter the
+  session scan surface, and stale-row pruning is an explicit lifecycle
+  reconciliation step. Remaining legacy scan-like application services still
+  need review before Phase 3 can be marked fully complete.
 - Phase 4 is partially complete: GUI favorite writes, asset grid reads, export
   reads, dashboard metadata, Location map aggregation, and key People dashboard/
   navigation/manual-face flows now use session surfaces, but `gui.facade.py` and
@@ -199,8 +224,8 @@ migration steps.
 - People still uses `global_index.db` as its asset-row source of truth through
   the bootstrap/session adapter. `src/iPhoto/people/**` and the face-scan worker
   should not import `get_global_repository()` directly.
-- Watcher refresh paths and non-GUI compatibility paths still access the
-  global repository directly or through compatibility adapters.
+- Non-GUI compatibility paths still access the global repository through
+  compatibility adapters.
 - User state still physically lives in `global_index.db`; the new state port is
   an API boundary, not a separate `library_state.db` migration.
 - `global_index.db` compatibility schemas may not have a `metadata` column; the
@@ -258,6 +283,16 @@ Additional People session migration verification:
 Results: all passed with the same existing pytest config and legacy shim
 warnings.
 
+Additional watcher scan / prune migration verification:
+
+- `.venv/bin/python -m pytest tests/application/test_library_scan_service.py tests/application/test_library_asset_lifecycle_service.py tests/test_index_sync_service.py tests/test_app_live_sync.py -q`
+- `.venv/bin/python -m pytest tests/test_app_open_album_lazy.py tests/library/test_rescan_worker_session.py tests/ui/tasks/test_import_worker.py tests/services/test_library_update_service_global_db.py tests/application/test_cli_session_scan.py -q`
+- `.venv/bin/python -m pytest tests/test_library_bind_double_scan.py tests/test_library_manager.py -q`
+- `.venv/bin/python tools/check_architecture.py`
+
+Results: all passed in this environment with the same existing pytest config
+and legacy shim warnings.
+
 Additional session cleanup / live read migration verification:
 
 - `.venv/bin/python tools/check_architecture.py`
@@ -277,9 +312,9 @@ a broad non-GUI/UI run (`1237 passed, 7 skipped`), excluding
 
 ## Next Handoff Steps
 
-1. Move the remaining watcher-triggered incremental scan/refresh orchestration
-   behind session/application commands.
-2. Decide the final source of truth between `cache/index_store.AssetRepository`
+1. Decide the final source of truth between `cache/index_store.AssetRepository`
    and `SQLiteAssetRepository`, then collapse callers to `AssetRepositoryPort`.
+2. Continue reducing `gui.facade.py`, `library.manager.py`, and GUI services to
+   presentation/compatibility surfaces only.
 3. Expand end-to-end temp-library tests for import/move/delete/restore and
    user-state preservation across rescans.

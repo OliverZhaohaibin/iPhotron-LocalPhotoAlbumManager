@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from pathlib import Path
 
+from .bootstrap.library_asset_lifecycle_service import LibraryAssetLifecycleService
 from .bootstrap.library_scan_service import LibraryScanService
 from .cache.index_store import get_global_repository
 from .index_sync_service import sync_live_roles_to_db as _sync_live_roles_to_db_impl
@@ -22,7 +23,13 @@ def _sync_live_roles_to_db(
 ) -> None:
     """Backward-compatible wrapper around the index sync helper."""
 
-    _sync_live_roles_to_db_impl(root, groups, library_root=library_root)
+    repository_root = library_root if library_root is not None else root
+    _sync_live_roles_to_db_impl(
+        root,
+        groups,
+        library_root=library_root,
+        repository=get_global_repository(repository_root),
+    )
 
 
 def _scan_service(root: Path, library_root: Path | None = None) -> LibraryScanService:
@@ -30,6 +37,20 @@ def _scan_service(root: Path, library_root: Path | None = None) -> LibraryScanSe
 
     return LibraryScanService(
         library_root if library_root is not None else root,
+        repository_factory=get_global_repository,
+    )
+
+
+def _lifecycle_service(
+    root: Path,
+    library_root: Path | None = None,
+    scan_service: LibraryScanService | None = None,
+) -> LibraryAssetLifecycleService:
+    """Return the session-style lifecycle service used by legacy wrappers."""
+
+    return LibraryAssetLifecycleService(
+        library_root if library_root is not None else root,
+        scan_service=scan_service,
         repository_factory=get_global_repository,
     )
 
@@ -84,6 +105,10 @@ def rescan(
     )
     rows = result.rows
     service.finalize_scan(root, rows)
+    _lifecycle_service(root, library_root, service).reconcile_missing_scan_rows(
+        root,
+        rows,
+    )
     if library_root is None:
         service.sync_manifest_favorites(root)
     return rows

@@ -191,13 +191,13 @@ def test_scan_finished_skips_prune_when_worker_failed(tmp_path: Path, qapp: QApp
     manager._current_scanner_worker = _Worker()
 
     with (
-        patch("iPhoto.app._prune_index_scope") as prune_mock,
-        patch("iPhoto.app.pair") as pair_mock,
+        patch("iPhoto.library.scan_coordinator.LibraryAssetLifecycleService") as lifecycle_mock,
+        patch.object(manager._scan_thread_pool, "start") as start_mock,
     ):
         manager._on_scan_finished(root, [])
         qapp.processEvents()
 
-    prune_mock.assert_not_called()
-    pair_mock.assert_not_called()
+    lifecycle_mock.assert_not_called()
+    start_mock.assert_not_called()
     assert spy.count() == 1
     assert spy.at(0)[1] is False

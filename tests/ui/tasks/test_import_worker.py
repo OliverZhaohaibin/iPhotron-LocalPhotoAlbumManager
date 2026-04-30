@@ -51,6 +51,15 @@ class FakeScanService:
         self.finalized.append((root, rows))
 
 
+class FakeLifecycleService:
+    def __init__(self) -> None:
+        self.reconciled: list[tuple[Path, list[dict]]] = []
+
+    def reconcile_missing_scan_rows(self, root: Path, rows: list[dict]) -> int:
+        self.reconciled.append((root, rows))
+        return 0
+
+
 @pytest.fixture()
 def qapp() -> QApplication:
     """Ensure a QApplication exists for QObject-based signals."""
@@ -77,18 +86,27 @@ def test_import_worker_prefers_pair_over_rescan(qapp: QApplication, tmp_path: Pa
     )
 
     scan_service = FakeScanService()
+    lifecycle_service = FakeLifecycleService()
 
     def copier(src: Path, dst: Path) -> Path:
         target = dst / src.name
         target.write_bytes(src.read_bytes())
         return target
 
-    worker = ImportWorker([source], destination, copier, signals, scan_service=scan_service)
+    worker = ImportWorker(
+        [source],
+        destination,
+        copier,
+        signals,
+        scan_service=scan_service,
+        asset_lifecycle_service=lifecycle_service,
+    )
     worker.run()
 
     assert scan_service.specific == [(destination, [destination / source.name])]
     assert scan_service.paired == [destination]
     assert scan_service.scanned == []
+    assert lifecycle_service.reconciled == []
 
     assert finished
     root, imported, success = finished[-1]
@@ -115,17 +133,26 @@ def test_import_worker_falls_back_to_full_rescan_after_incremental_failure(
     )
 
     scan_service = FakeScanService(fail_incremental=True)
+    lifecycle_service = FakeLifecycleService()
 
     def copier(src: Path, dst: Path) -> Path:
         target = dst / src.name
         target.write_bytes(src.read_bytes())
         return target
 
-    worker = ImportWorker([source], destination, copier, signals, scan_service=scan_service)
+    worker = ImportWorker(
+        [source],
+        destination,
+        copier,
+        signals,
+        scan_service=scan_service,
+        asset_lifecycle_service=lifecycle_service,
+    )
     worker.run()
 
     assert errors == ["Incremental scan failed: chunk failed"]
     assert scan_service.paired == []
     assert scan_service.scanned == [(destination, False)]
     assert scan_service.finalized == [(destination, [{"rel": "photo.jpg"}])]
+    assert lifecycle_service.reconciled == [(destination, [{"rel": "photo.jpg"}])]
     assert finished[-1] == (destination, [destination / source.name], True)

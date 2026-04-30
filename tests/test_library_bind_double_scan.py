@@ -1,5 +1,6 @@
 
 import os
+import json
 from pathlib import Path
 from unittest.mock import patch
 
@@ -80,3 +81,51 @@ def test_bind_path_emits_tree_updated_for_empty_library(tmp_path, qapp):
     spy = QSignalSpy(manager.treeUpdated)
     manager.bind_path(root)
     assert spy.count() >= 1, "treeUpdated must be emitted when binding an empty library"
+
+
+def test_watcher_debounce_scans_changed_scope_through_session_service(
+    tmp_path,
+    qapp,
+):
+    root = tmp_path / "Library"
+    album = root / "Album"
+    album.mkdir(parents=True)
+    (album / ".iphoto.album.json").write_text(
+        json.dumps({"schema": "iPhoto/album@1", "title": "Album", "filters": {}}),
+        encoding="utf-8",
+    )
+
+    class FakeScanService:
+        def __init__(self) -> None:
+            self.filter_roots = []
+
+        def scan_filters(self, path):
+            self.filter_roots.append(Path(path))
+            return ["*.jpg"], []
+
+    manager = LibraryManager()
+    manager.bind_path(root)
+    scan_service = FakeScanService()
+    manager.bind_scan_service(scan_service)
+
+    with patch.object(manager, "start_scanning") as start_scanning:
+        manager._on_directory_changed(str(album))
+        manager._on_watcher_debounce_timeout()
+
+    assert scan_service.filter_roots == [album]
+    start_scanning.assert_called_once_with(album, ["*.jpg"], [])
+
+
+def test_watcher_pause_suppresses_session_scan(tmp_path, qapp):
+    root = tmp_path / "Library"
+    root.mkdir()
+    manager = LibraryManager()
+    manager.bind_path(root)
+
+    with patch.object(manager, "start_scanning") as start_scanning:
+        manager.pause_watcher()
+        manager._on_directory_changed(str(root))
+        manager.resume_watcher()
+        manager._on_watcher_debounce_timeout()
+
+    start_scanning.assert_not_called()

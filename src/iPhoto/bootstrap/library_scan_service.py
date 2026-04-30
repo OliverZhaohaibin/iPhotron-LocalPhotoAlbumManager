@@ -158,6 +158,7 @@ class LibraryScanService:
             if asset_count == 0 and autoscan:
                 result = self.scan_album(scan_root, persist_chunks=False)
                 self.finalize_scan(scan_root, result.rows)
+                self.reconcile_missing_scan_rows(scan_root, result.rows)
                 rows = result.rows
                 asset_count = len(rows)
                 scanned = True
@@ -199,14 +200,16 @@ class LibraryScanService:
             include=include,
             exclude=exclude,
         )
+        repository = self._repository()
         existing_index = load_incremental_index_cache(
             scan_root,
             library_root=self.library_root,
+            repository=repository,
         )
 
         use_case = ScanLibraryUseCase(
             scanner=self._scanner,
-            asset_repository=self._repository(),
+            asset_repository=repository,
         )
         return use_case.execute(
             ScanLibraryRequest(
@@ -225,21 +228,35 @@ class LibraryScanService:
         )
 
     def finalize_scan(self, root: Path, rows: Iterable[dict[str, Any]]) -> None:
-        """Persist final scan side effects after a successful scan."""
+        """Persist additive scan side effects after a successful scan."""
 
         scan_root = Path(root)
         materialized_rows = [dict(row) for row in rows]
+        repository = self._repository()
         update_index_snapshot(
             scan_root,
             materialized_rows,
             library_root=self.library_root,
+            repository=repository,
         )
-        prune_index_scope(
+        self.ensure_links_for_rows(scan_root, materialized_rows, repository=repository)
+
+    def reconcile_missing_scan_rows(
+        self,
+        root: Path,
+        rows: Iterable[dict[str, Any]],
+    ) -> int:
+        """Prune stale rows for a completed full scan scope."""
+
+        scan_root = Path(root)
+        materialized_rows = [dict(row) for row in rows]
+        repository = self._repository()
+        return prune_index_scope(
             scan_root,
             materialized_rows,
             library_root=self.library_root,
+            repository=repository,
         )
-        self.ensure_links_for_rows(scan_root, materialized_rows)
 
     def scan_specific_files(
         self,
@@ -286,7 +303,12 @@ class LibraryScanService:
             rows = self._album_relative_rows(rows, album_path)
         else:
             rows = list(repository.read_all(filter_hidden=False))
-        return ensure_links(scan_root, rows, library_root=self.library_root)
+        return ensure_links(
+            scan_root,
+            rows,
+            library_root=self.library_root,
+            repository=repository,
+        )
 
     def report_album(self, root: Path) -> AlbumReport:
         """Return the asset and Live Photo counts for *root*."""
@@ -354,15 +376,23 @@ class LibraryScanService:
         self,
         root: Path,
         rows: Iterable[dict[str, Any]],
+        *,
+        repository: AssetRepositoryPort | None = None,
     ) -> "list[LiveGroup]":
         """Rebuild links using already materialized rows for *root*."""
 
         scan_root = Path(root)
         materialized = [dict(row) for row in rows]
+        active_repository = repository or self._repository()
         album_path = self._album_path(scan_root)
         if album_path:
             materialized = self._album_relative_rows(materialized, album_path)
-        return ensure_links(scan_root, materialized, library_root=self.library_root)
+        return ensure_links(
+            scan_root,
+            materialized,
+            library_root=self.library_root,
+            repository=active_repository,
+        )
 
     def sync_manifest_favorites(
         self,

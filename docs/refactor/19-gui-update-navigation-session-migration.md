@@ -1,81 +1,83 @@
-# 19 GUI Update + Navigation Session Migration
+# 19 - GUI Update + Navigation Session Migration
 
-## Goal
+> **版本:** 1.0 | **日期:** 2026-05-01  
+> **状态:** 已完成  
+> **范围:** Phase 4 GUI residual orchestration cleanup（LibraryUpdate + Location/Trash）
 
-Continue the GUI residual-orchestration cleanup without cutting across Maps or Edit in a broad way.
+---
 
-This slice targets two remaining seams:
+## 1. 背景与目标
 
-- `LibraryUpdateService` still owning scan/pair/finalize/restore-refresh orchestration details.
-- Location / Recently Deleted flows still reaching through GUI code into library/runtime behavior instead of consuming a narrow adapter surface.
+继续清理 GUI 残留编排，不对 Maps / Edit 做大范围切入。本轮关注两个剩余缝隙：
 
-The goal of this round is to leave GUI code with presentation coordination, Qt transport, and routing responsibilities only, while reusing the repository's current runtime/library boundary (`LibraryManager` plus bootstrap services and mixins) instead of forcing a parallel session abstraction.
+- `LibraryUpdateService` 仍持有 scan / pair / finalize / restore-refresh 编排细节。
+- Location / Recently Deleted 仍从 GUI 直接触达库/运行时行为。
 
-## What Changed
+目标是让 GUI 只保留 presentation coordination、Qt transport 与路由职责，继续复用当前 runtime/library 边界（`LibraryManager` + bootstrap services/mixins），不强推新的 session 抽象。
 
-### LibraryUpdate
+## 2. 变更摘要
 
-- Added higher-level runtime scan entry points on `LibraryScanService`:
-  - synchronous rescan
-  - scan finalize hook
-  - restore-refresh rescan entry
-- The runtime finalize hook now centralizes:
-  - Recently Deleted preserved-field merge
-  - snapshot persistence
-  - link rebuild
-  - stale-row reconciliation
-  - optional Live Photo pairing follow-up
-- `RescanWorker` now refreshes restored albums through the runtime scan surface instead of directly composing lifecycle persistence rules.
-- `LibraryUpdateService` no longer imports `ScannerWorker` / `RescanWorker` directly.
-- Worker ownership moved into a dedicated GUI task runner so `LibraryUpdateService` remains a presentation adapter that:
-  - starts or cancels tasks
-  - relays progress and chunk signals
-  - emits `indexUpdated`, `linksUpdated`, and `assetReloadRequested`
-  - keeps facade-facing behavior stable
+### 2.1 LibraryUpdate
 
-### Location / Trash
+- 在 `LibraryScanService` 上补充更高层 scan 入口：同步 rescan、scan finalize hook、restore-refresh rescan 入口。
+- finalize hook 统一处理：Recently Deleted 保留字段、snapshot persistence、link rebuild、stale-row reconciliation、可选 Live Photo pairing follow-up。
+- `RescanWorker` 改为通过 runtime scan surface 刷新恢复相册。
+- `LibraryUpdateService` 不再直接 import `ScannerWorker` / `RescanWorker`。
+- worker ownership 移入专用 GUI task runner；`LibraryUpdateService` 保持 presentation adapter，负责：
+  - 启动/取消任务
+  - 转发 progress/chunk 信号
+  - 发出 `indexUpdated`、`linksUpdated`、`assetReloadRequested`
+  - 维持 facade-facing API 兼容
 
-- Added a narrow GUI `LocationTrashNavigationService` for:
-  - Recently Deleted directory preparation
-  - trash cleanup throttling and background dispatch
-  - background geotagged-asset loading
-  - request-serial management for Location reloads
-- `NavigationCoordinator` dropped its trash cleanup thread logic and remains a thin routing binder.
-- `GalleryViewModel` no longer calls `ensure_deleted_directory()` or `get_geotagged_assets()` directly.
-- `GalleryViewModel` now consumes adapter results and keeps only UI state:
-  - static selection
-  - route changes
-  - cluster gallery state
-  - cached location snapshot state
+### 2.2 Location / Trash
 
-### Guardrails
+- 新增 `LocationTrashNavigationService`，负责：
+  - Recently Deleted 目录准备
+  - trash cleanup 节流与后台调度
+  - geotagged assets 后台加载
+  - Location reload 的 request-serial 管理
+- `NavigationCoordinator` 去除 trash cleanup 线程逻辑，保持路由绑定。
+- `GalleryViewModel` 不再直接调用 `ensure_deleted_directory()` 或 `get_geotagged_assets()`。
+- `GalleryViewModel` 只保留 UI 状态：静态选择、路由切换、cluster gallery、location snapshot cache。
 
-- Extended architecture checking so `gui/services/library_update_service.py` cannot import `library.workers.*`.
-- Updated targeted GUI regressions to assert the new boundary shape rather than old worker-construction details.
+### 2.3 Guardrails
 
-## Behavioral Notes
+- 架构检查扩展：`gui/services/library_update_service.py` 禁止 import `library.workers.*`。
+- 相关 GUI regressions 调整为验证新的 boundary 形态。
 
-- `AppFacade` public API shape stays the same; the refactor only changes internal forwarding.
-- The current branch still uses `LibraryManager` and bootstrap runtime services as the effective boundary. This round does not claim a new full `LibrarySession` / `RuntimeContext` rollout where the code does not already use one.
-- Maps runtime extraction is still incomplete. The new Location/Trash adapter is a cleanup seam for future work, not the final Phase 5 port.
-- People residual fallback behavior remains for a later slice.
+## 3. 行为说明
 
-## Verification
+- `AppFacade` 公共 API 形态保持不变，变化仅在内部转发路径。
+- 当前边界仍以 `LibraryManager` + bootstrap runtime services 为主，本轮不强制新的 `LibrarySession` / `RuntimeContext` 术语层。
+- Maps runtime extraction 仍未完成；Location/Trash adapter 是后续 Maps 工作的临时 GUI seam。
+- People residual fallback 仍留待后续切片。
 
-Targeted regressions updated for:
+## 4. 审查结论
 
-- `LibraryUpdateService` runtime forwarding and task-runner delegation
-- `GalleryViewModel` Recently Deleted and Location flows through the new adapter
-- `NavigationCoordinator` remaining free of direct trash cleanup calls
-- `AppFacade` preserving its public async-rescan forwarding shape
-- architecture boundary checks for `LibraryUpdateService` worker imports
+核对现有实现后，变更描述与代码一致：
 
-Environment note:
+- `LibraryUpdateService` 通过 `LibraryUpdateTaskRunner` 持有 worker 生命周期，服务本体无直接 `library.workers` import；对应 guardrail 已在 `tools/check_layer_boundaries.py` 与 `tests/architecture/test_layer_boundaries.py` 覆盖。
+- `LibraryScanService.finalize_scan_result()` 已包含 Recently Deleted 保留字段合并、snapshot/links 持久化、stale-row reconciliation 与可选 Live Photo pairing。
+- `LocationTrashNavigationService` 负责 trash cleanup 节流与 geotagged assets 后台加载，`GalleryViewModel` 使用 adapter 获取数据。
 
-- Final command-based verification was partially blocked by the local Codex escalation limit during this round, so any remaining test execution should be rerun once command access is available again.
+结论：第 19 步文档描述与当前代码一致，无需更正。
 
-## Next Handoff
+## 5. 验证
 
-- Continue with the remaining People fallback/coordinator residuals as the next Phase 4 GUI cleanup slice.
-- When returning to Maps work, build on the new `LocationTrashNavigationService` seam instead of reintroducing direct `LibraryManager` reads into coordinator/viewmodel code.
-- Keep Edit sidecar, full Maps fallback cleanup, and temp-library end-to-end validation out of this slice unless a later round explicitly re-scopes them.
+目标回归覆盖：
+
+- `LibraryUpdateService` runtime forwarding 与 task-runner delegation
+- `GalleryViewModel` Recently Deleted / Location 流程通过新的 adapter
+- `NavigationCoordinator` 保持无 direct trash cleanup 调用
+- `AppFacade` 维持 async rescan forwarding 形态
+- `LibraryUpdateService` worker import 的架构边界检查
+
+环境说明：
+
+- 本轮命令式验证曾因本地 Codex 权限限制部分阻断；如需完整结果请在具备命令权限时重跑。
+
+## 6. 下一步交接
+
+- 继续清理 People fallback/coordinator residuals（Phase 4）。
+- Maps 侧回归时，以 `LocationTrashNavigationService` 作为临时 GUI seam，避免直接回引 `LibraryManager`。
+- Edit sidecar、完整 Maps fallback、temp-library E2E 仍保持 out of scope。

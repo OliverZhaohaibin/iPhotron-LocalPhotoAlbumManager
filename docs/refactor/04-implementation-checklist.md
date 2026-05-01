@@ -1,8 +1,16 @@
-# 04 - Implementation Checklist
+# 04 - 重构实施清单
 
-> 执行清单用于跟踪 vNext 重构。勾选前必须满足对应完成条件和回归测试。
+> **版本:** 1.0 | **日期:** 2026-05-01  
+> **状态:** 进行中  
+> **范围:** vNext 重构执行清单与回归要求
 
-## 全局规则
+---
+
+## 1. 文档定位
+
+执行清单用于跟踪 vNext 重构。勾选前必须满足对应完成条件和回归测试。
+
+## 2. 全局规则
 
 - [ ] 不新增业务逻辑到 `src/iPhoto/app.py`。
 - [ ] 不新增业务逻辑到 `src/iPhoto/appctx.py`。
@@ -13,7 +21,7 @@
 - [ ] 不绕过 use case 直接从 GUI 写 persistence。
 - [ ] 每个阶段结束运行 `python3 tools/check_architecture.py`。
 
-## Phase 0 - 文档与 Guardrail
+## 3. Phase 0 - 文档与 Guardrail
 
 主要文件：
 
@@ -46,7 +54,7 @@
 - [x] `python3 tools/check_architecture.py`
 - [x] `pytest tests/architecture -q`，如果 architecture tests 已存在。
 
-## Phase 1 - RuntimeContext / LibrarySession
+## 4. Phase 1 - RuntimeContext / LibrarySession
 
 主要文件：
 
@@ -79,7 +87,7 @@
 - [ ] GUI startup smoke test，如已有。
 - [ ] 手动打开一个已有 library，确认资产能加载。
 
-## Phase 2 - Repository 与用户状态拆分
+## 5. Phase 2 - Repository 与用户状态拆分
 
 主要文件：
 
@@ -115,7 +123,7 @@
 - [x] trash/restore 在 rescan 后保持。
 - [x] Live Photo role 在 pairing 后可查询。
 
-## Phase 3 - 扫描管线统一
+## 6. Phase 3 - 扫描管线统一
 
 主要文件：
 
@@ -157,7 +165,7 @@
 - [x] 扫描后 Live Photo pairing 可恢复。
 - [x] `LibraryScanService.finalize_scan()` 不再隐式删除 stale rows。
 
-## Phase 4 - GUI Presentation Adapter
+## 7. Phase 4 - GUI Presentation Adapter
 
 主要文件：
 
@@ -200,7 +208,7 @@
 - [x] Favorite/hidden 状态刷新正确。
 - [x] album cover / featured manifest 同步与 favorite state mirror 正确。
 
-## Phase 5 - Bounded Context Ports
+## 8. Phase 5 - Bounded Context Ports
 
 ### People
 
@@ -245,7 +253,7 @@
 - [x] Thumbnail 生成不阻塞 UI。
 - [ ] Edit sidecar 保存后重启仍可恢复。
 
-## Phase 6 - 测试、性能、CI
+## 9. Phase 6 - 测试、性能、CI
 
 主要文件：
 
@@ -282,7 +290,7 @@
 - [x] `pytest tests/architecture -q`
 - [ ] 性能测试按项目约定运行。
 
-## Definition of Done
+## 10. Definition of Done
 
 - [ ] 代码边界符合 `01-target-architecture-vnext.md`。
 - [ ] 行为需求符合 `02-detailed-requirements.md`。
@@ -291,18 +299,21 @@
 - [ ] 没有新增兼容层业务债务。
 - [ ] 没有丢失用户状态的迁移风险。
 - [ ] 文档、测试和架构检查同步更新。
-## Round 19 Update: GUI Update + Location/Trash
 
-Phase 4 status adjustments:
+## 11. 第19轮更新：GUI Update + Location/Trash
 
-- [x] `LibraryUpdateService` no longer imports `iPhoto.app`, `cache.index_store`, or `library.workers.*`; worker ownership moved behind a GUI task runner and durable scan finalization moved to runtime/library surfaces.
-- [x] GUI scan update flows now use a runtime scan finalize hook for snapshot persistence, Recently Deleted preserved fields, stale-row reconciliation, and Live Photo pairing follow-up.
-- [x] Recently Deleted preparation and cleanup throttling no longer live in `NavigationCoordinator`; they now flow through a dedicated Location/Trash GUI transport adapter that calls existing library/runtime surfaces.
-- [x] Location geotagged-asset loading no longer reads directly from `GalleryViewModel`; background transport and request-token handling now flow through the dedicated Location/Trash adapter.
-- [ ] People fallback still has residual coordinator/viewmodel touchpoints and remains the next GUI residual slice.
+本轮用于收口 GUI Update 与 Location/Trash 的残留编排职责。
 
-Phase 5 status adjustments:
+### Phase 4 状态调整
 
-- Maps runtime porting is still not complete in this round.
-- This slice only cleaned the GUI-side Location entry point so later Maps runtime extraction has a narrower boundary to target.
-- Do not mark `MapRuntimePort` complete from this round alone.
+- [x] `LibraryUpdateService` 不再导入 `iPhoto.app`、`cache.index_store` 或 `library.workers.*`；worker ownership 迁入 GUI 任务运行器，durable scan finalize 迁到 runtime/library surface。
+- [x] GUI scan update flows 通过 runtime scan finalize hook 处理 snapshot 持久化、Recently Deleted 保留字段、stale-row reconciliation 与 Live Photo pairing follow-up。
+- [x] Recently Deleted 的 prepare/cleanup throttle 不再由 `NavigationCoordinator` 负责，而是经由 Location/Trash GUI transport adapter。
+- [x] Location 的地理资产加载不再从 `GalleryViewModel` 直接读取，后台加载与 request token 管理走 Location/Trash adapter。
+- [ ] People fallback 仍残留 coordinator/viewmodel touchpoints，作为下一块 GUI residual。
+
+### Phase 5 状态调整
+
+- Maps runtime porting 本轮仍未完成。
+- 本轮仅清理 GUI 侧 Location 入口，为后续 Maps runtime 提取收窄边界。
+- 不应仅凭本轮将 `MapRuntimePort` 标记为完成。

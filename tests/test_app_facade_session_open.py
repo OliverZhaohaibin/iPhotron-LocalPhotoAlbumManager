@@ -12,6 +12,7 @@ pytest.importorskip(
 )
 
 from iPhoto.gui.facade import AppFacade
+from iPhoto.config import DEFAULT_EXCLUDE, DEFAULT_INCLUDE
 
 
 class FakeScanService:
@@ -21,16 +22,16 @@ class FakeScanService:
 
     def prepare_album_open(self, root: Path, **kwargs):
         self.prepared.append({"root": root, **kwargs})
-        return SimpleNamespace(asset_count=self.asset_count)
+        return SimpleNamespace(asset_count=self.asset_count, scanned=False)
 
 
 class DummyLibrary:
-    def __init__(self, root: Path, scan_service: FakeScanService) -> None:
+    def __init__(self, root: Path | None, scan_service: FakeScanService) -> None:
         self._root = root
         self.scan_service = scan_service
         self.started: list[tuple[Path, list[str], list[str]]] = []
 
-    def root(self) -> Path:
+    def root(self) -> Path | None:
         return self._root
 
     def is_scanning_path(self, _path: Path) -> bool:
@@ -62,3 +63,43 @@ def test_facade_open_album_uses_session_scan_service(tmp_path: Path) -> None:
         }
     ]
     assert library.started == []
+
+
+def test_facade_open_album_triggers_async_rescan_for_empty_scope(tmp_path: Path) -> None:
+    library_root = tmp_path / "library"
+    album_root = library_root / "album"
+    album_root.mkdir(parents=True)
+    scan_service = FakeScanService(asset_count=0)
+    library = DummyLibrary(library_root, scan_service)
+    facade = AppFacade()
+    facade._library_manager = library
+
+    album = facade.open_album(album_root)
+
+    assert album is not None
+    assert library.started == [
+        (album_root, list(DEFAULT_INCLUDE), list(DEFAULT_EXCLUDE))
+    ]
+
+
+def test_facade_open_album_syncs_manifest_favorites_when_library_root_is_unbound(
+    tmp_path: Path,
+) -> None:
+    album_root = tmp_path / "album"
+    album_root.mkdir(parents=True)
+    scan_service = FakeScanService(asset_count=3)
+    library = DummyLibrary(None, scan_service)
+    facade = AppFacade()
+    facade._library_manager = library
+
+    album = facade.open_album(album_root)
+
+    assert album is not None
+    assert scan_service.prepared == [
+        {
+            "root": album_root,
+            "autoscan": False,
+            "hydrate_index": False,
+            "sync_manifest_favorites": True,
+        }
+    ]

@@ -20,7 +20,6 @@ from PySide6.QtCore import (
 )
 from PySide6.QtGui import QAction
 
-from iPhoto import app as backend
 from iPhoto.application.contracts.runtime_entry_contract import RuntimeEntryContract
 from iPhoto.application.services.asset_service import AssetService
 from iPhoto.config import RECENTLY_DELETED_DIR_NAME
@@ -684,34 +683,14 @@ class MainCoordinator(QObject):
         self._media_failure_cleanup_paths.add(path_key)
         try:
             self._dialog.show_error(f"File not found or unreadable: {path.name}\n\n{message}")
-
-            repository = self._context.asset_runtime.repository
-            asset = repository.get_by_path(path)
-            if asset is None:
+            facade = getattr(self, "_facade", None)
+            updates = getattr(facade, "library_updates", None)
+            if updates is None:
                 return
 
-            repository.delete(asset.id)
-
-            library_root = self._context.library.root()
-            pair_root: Path | None = None
-            if library_root is not None:
-                try:
-                    path.resolve().relative_to(library_root.resolve())
-                except (OSError, ValueError):
-                    pair_root = None
-                else:
-                    pair_root = path.parent if path.parent != library_root else library_root
-            if pair_root is not None and library_root is not None:
-                try:
-                    backend.pair(pair_root, library_root=library_root)
-                except Exception:  # noqa: BLE001 - best-effort derived snapshot refresh
-                    self._logger.warning(
-                        "Failed to refresh live pairing after removing %s",
-                        path,
-                        exc_info=True,
-                    )
-
-            self._gallery_store.reload_current_selection()
+            refresh_root = updates.handle_media_load_failure(path)
+            if refresh_root is not None:
+                self._gallery_store.reload_current_selection()
         finally:
             self._media_failure_cleanup_paths.discard(path_key)
 

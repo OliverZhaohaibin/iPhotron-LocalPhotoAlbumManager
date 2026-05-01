@@ -32,6 +32,7 @@
 - [x] 扩展架构检查：infrastructure/cache/core/io/library/people 禁止 GUI import。
 - [x] 扩展架构检查：禁止新增 runtime `iPhoto.models.*` import。
 - [x] 扩展架构检查：旧 domain-repository use case 只允许兼容入口导入。
+- [x] 扩展架构检查：GUI runtime 禁止导入 `iPhoto.app`。
 - [x] 将架构检查加入 CI 或 documented verification。
 
 完成条件：
@@ -134,13 +135,14 @@
 - [x] `app.rescan()` 改为 compatibility forwarder。
 - [x] CLI scan 改为调用同一 use case。
 - [x] `app.open_album()`、import 增量扫描、restore rescan 进入 session scan surface。
+- [x] GUI `open/rescan/pair` 路由收口到 session scan/update surface。
 - [x] Watcher/live-row 刷新读取改为调用 session query surface。
 - [x] Watcher-triggered refresh 改为通过 session scan surface 触发扫描。
 - [x] 删除普通 scan 中的隐式 delete/prune 决策。
 
 完成条件：
 
-- [ ] 全项目只有一个 scan orchestration。
+- [x] 全项目只有一个 scan orchestration。
 - [x] GUI、CLI、watcher 扫描结果一致。
 - [x] scan cancellation 不留下半写坏状态。
 - [x] scan progress 可被 GUI 和 CLI 消费。
@@ -167,12 +169,13 @@
 
 任务：
 
-- [ ] 为 facade 方法建立目标 command/use case mapping。
+- [x] 为 facade 方法建立目标 command/use case mapping。
 - [x] 导入流程迁移到 application use case。
 - [x] 移动流程迁移到 application use case。
 - [x] 删除流程迁移到 application use case。
 - [x] 恢复流程迁移到 application use case。
 - [x] 配对/刷新流程迁移到 application use case。
+- [x] album open / rescan / media-load-failure 路由迁移到 session update / lifecycle surface。
 - [x] Gallery collection/windowed reads 迁移到 session query surface。
 - [x] Move/delete/restore planning 迁移到 session asset operation surface。
 - [ ] GUI services 只保留 presentation coordination。
@@ -180,7 +183,7 @@
 
 完成条件：
 
-- [ ] `gui.facade.py` 不直接调用 `iPhoto.app` 业务函数。
+- [x] `gui.facade.py` 不直接调用 `iPhoto.app` 业务函数。
 - [x] GUI 不直接调用 concrete repository singleton。
 - [ ] ViewModels 通过 session commands/queries 访问业务。
 - [ ] Coordinators 不拥有 persistence 规则。

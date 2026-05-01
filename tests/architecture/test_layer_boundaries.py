@@ -82,3 +82,20 @@ def test_gui_file_operation_service_planning_import_is_blocked(
         "iPhoto.media_classifier" in violation
         for violation in violations
     )
+
+
+def test_gui_runtime_backend_import_is_blocked(tmp_path: Path) -> None:
+    source = tmp_path / "iPhoto"
+    module = source / "gui" / "coordinators" / "example.py"
+    module.parent.mkdir(parents=True)
+    module.write_text(
+        "from iPhoto import app as backend\n",
+        encoding="utf-8",
+    )
+
+    violations = check_layer_boundaries.check(source)
+
+    assert any(
+        "GUI runtime imports compatibility backend iPhoto.app" in violation
+        for violation in violations
+    )

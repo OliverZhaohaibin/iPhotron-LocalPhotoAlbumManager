@@ -7,8 +7,6 @@ from typing import Callable, Iterable, List, Optional, Set, TYPE_CHECKING, Any
 
 from PySide6.QtCore import QObject, Signal, Slot
 
-from ..bootstrap.library_scan_service import LibraryScanService
-from ..config import DEFAULT_INCLUDE, DEFAULT_EXCLUDE
 from ..errors import IPhotoError
 from ..models.album import Album
 from ..utils.logging import get_logger
@@ -184,18 +182,13 @@ class AppFacade(QObject):
     def open_album(self, root: Path) -> Optional[Album]:
         """Open *root* and trigger background work as needed."""
 
-        library_root = self._library_manager.root() if self._library_manager else None
-        scan_service = (
-            getattr(self._library_manager, "scan_service", None)
-            if self._library_manager is not None
-            else None
-        )
-        if scan_service is None:
-            scan_service = LibraryScanService(library_root or root)
-        
         try:
             album = Album.open(root)
-            preparation = scan_service.prepare_album_open(
+            library_manager = self._library_manager
+            library_root = (
+                library_manager.root() if library_manager is not None else None
+            )
+            open_routing = self._library_update_service.prepare_album_open(
                 root,
                 autoscan=False,
                 hydrate_index=False,
@@ -210,16 +203,8 @@ class AppFacade(QObject):
 
         self.albumOpened.emit(album_root)
 
-        # Check if the scoped index is empty (likely because it's a new or
-        # cleaned album) and trigger a background scan if necessary.
-        has_assets = preparation.asset_count > 0
-
-        is_already_scanning = False
-        if self._library_manager and self._library_manager.is_scanning_path(album_root):
-            is_already_scanning = True
-
-        if not has_assets and not is_already_scanning:
-            self.rescan_current_async()
+        if open_routing.should_rescan_async:
+            self._library_update_service.rescan_album_async(album)
 
         # Legacy reload signals - might be needed for status bar
         self.loadStarted.emit(album_root)
@@ -242,14 +227,7 @@ class AppFacade(QObject):
         if album is None:
             return
 
-        if self._library_manager:
-            filters = album.manifest.get("filters", {}) if isinstance(album.manifest, dict) else {}
-            include = filters.get("include", DEFAULT_INCLUDE)
-            exclude = filters.get("exclude", DEFAULT_EXCLUDE)
-
-            self._library_manager.start_scanning(album.root, include, exclude)
-        else:
-            self._library_update_service.rescan_album_async(album)
+        self._library_update_service.rescan_album_async(album)
 
     def _inject_scan_dependencies_for_tests(
         self,

@@ -62,6 +62,10 @@ GUI_FILE_OPERATION_SERVICE_FORBIDDEN_IMPORTS = {
     "iPhoto.media_classifier",
 }
 
+GUI_RUNTIME_BACKEND_FORBIDDEN = {
+    "iPhoto.app",
+}
+
 LEGACY_DOMAIN_USE_CASE_MODULES = {
     "iPhoto.application.use_cases.aggregate_geo_data",
     "iPhoto.application.use_cases.apply_edit",
@@ -219,6 +223,14 @@ def check(src_root: Path) -> list[str]:
             ):
                 violations.append(
                     f"{py_file}:{lineno}: GUI imports concrete index store {module}"
+                )
+
+            if top_level == "gui" and any(
+                _is_or_under(module, forbidden)
+                for forbidden in GUI_RUNTIME_BACKEND_FORBIDDEN
+            ):
+                violations.append(
+                    f"{py_file}:{lineno}: GUI runtime imports compatibility backend {module}"
                 )
 
             if (

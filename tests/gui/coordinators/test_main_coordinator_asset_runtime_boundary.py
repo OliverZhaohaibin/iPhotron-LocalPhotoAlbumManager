@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 from iPhoto.gui.coordinators.main_coordinator import MainCoordinator
 
@@ -197,28 +197,21 @@ def test_handle_move_finished_toast_skips_delete_and_restore(
 
 def test_handle_media_load_failed_prunes_row_and_refreshes_collection(tmp_path: Path) -> None:
     coordinator = MainCoordinator.__new__(MainCoordinator)
-    library_root = tmp_path / "library"
-    library_root.mkdir()
-    failed_path = library_root / "Album" / "motion.mov"
+    failed_path = tmp_path / "library" / "Album" / "motion.mov"
     failed_path.parent.mkdir(parents=True)
-
-    repository = MagicMock()
-    repository.get_by_path.return_value = SimpleNamespace(id="asset-1")
+    updates = MagicMock()
+    updates.handle_media_load_failure.return_value = failed_path.parent
 
     coordinator._media_failure_cleanup_paths = set()
     coordinator._dialog = MagicMock()
     coordinator._gallery_store = MagicMock()
     coordinator._logger = MagicMock()
-    coordinator._context = MagicMock()
-    coordinator._context.asset_runtime.repository = repository
-    coordinator._context.library.root.return_value = library_root
+    coordinator._facade = MagicMock(library_updates=updates)
 
-    with patch("iPhoto.gui.coordinators.main_coordinator.backend.pair") as pair_mock:
-        coordinator._handle_media_load_failed(failed_path, "decoder failed")
+    coordinator._handle_media_load_failed(failed_path, "decoder failed")
 
     coordinator._dialog.show_error.assert_called_once()
-    repository.delete.assert_called_once_with("asset-1")
-    pair_mock.assert_called_once_with(failed_path.parent, library_root=library_root)
+    updates.handle_media_load_failure.assert_called_once_with(failed_path)
     coordinator._gallery_store.reload_current_selection.assert_called_once_with()
 
 

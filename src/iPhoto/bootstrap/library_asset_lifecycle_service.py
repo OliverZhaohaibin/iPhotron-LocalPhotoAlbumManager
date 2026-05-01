@@ -218,6 +218,54 @@ class LibraryAssetLifecycleService:
             LOGGER.debug("Recently Deleted cleanup skipped: %s", exc)
             return 0
 
+    def repair_missing_asset(self, path: Path) -> Path | None:
+        """Best-effort index/link repair after a missing asset load failure."""
+
+        target = Path(path)
+        rel = self._relative_for_index(target, base=target.parent)
+        if rel is None:
+            return None
+
+        repository_root = self._repository_root_for_read(target.parent)
+        repository = self._repository(repository_root)
+        try:
+            existing_row = repository.get_rows_by_rels([rel]).get(rel)
+        except (IPhotoError, sqlite3.Error, OSError):
+            LOGGER.warning(
+                "Failed to inspect index state for missing asset %s",
+                target,
+                exc_info=True,
+            )
+            return None
+
+        if not isinstance(existing_row, dict):
+            return None
+
+        try:
+            repository.remove_rows([rel])
+        except (IPhotoError, sqlite3.Error, OSError):
+            LOGGER.warning(
+                "Failed to remove missing asset row for %s",
+                target,
+                exc_info=True,
+            )
+            return None
+
+        pair_root = self._pair_root_for_missing_asset(target)
+        refresh_root = pair_root or target.parent
+        if pair_root is not None:
+            try:
+                self._active_scan_service(self.library_root or pair_root).pair_album(
+                    pair_root
+                )
+            except Exception:  # noqa: BLE001 - best-effort recovery after decoder failure
+                LOGGER.warning(
+                    "Failed to repair live pairing after removing missing asset %s",
+                    target,
+                    exc_info=True,
+                )
+        return refresh_root
+
     def reconcile_missing_scan_rows(
         self,
         root: Path,
@@ -404,6 +452,18 @@ class LibraryAssetLifecycleService:
     def _pair_after_move(self, source_root: Path) -> None:
         pair_root = self.library_root or source_root
         self._active_scan_service(pair_root).pair_album(pair_root)
+
+    def _pair_root_for_missing_asset(self, path: Path) -> Path | None:
+        target = Path(path)
+        if self.library_root is None:
+            return target.parent
+        try:
+            target.resolve().relative_to(self.library_root.resolve())
+        except (OSError, ValueError):
+            return None
+        if self._paths_equal(target.parent, self.library_root):
+            return self.library_root
+        return target.parent
 
     def _active_scan_service(self, root: Path) -> LibraryScanService:
         if self._scan_service is None:

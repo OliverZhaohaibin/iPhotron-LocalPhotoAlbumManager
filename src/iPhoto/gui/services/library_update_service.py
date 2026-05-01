@@ -43,6 +43,14 @@ class MoveOperationResult:
     destination_ok: bool = True
 
 
+@dataclass(frozen=True)
+class AlbumOpenRouting:
+    """Session-backed album-open preparation result for GUI callers."""
+
+    asset_count: int
+    should_rescan_async: bool = False
+
+
 class LibraryUpdateService(QObject):
     """Coordinate rescans, Live Photo pairing, and move aftermath bookkeeping."""
 
@@ -78,44 +86,63 @@ class LibraryUpdateService(QObject):
     # ------------------------------------------------------------------
     # Public API used by :class:`~iPhoto.gui.facade.AppFacade`
     # ------------------------------------------------------------------
+    def prepare_album_open(
+        self,
+        root: Path,
+        *,
+        autoscan: bool = False,
+        hydrate_index: bool = False,
+        sync_manifest_favorites: bool = False,
+    ) -> AlbumOpenRouting:
+        """Prepare one album open through the active session scan surface."""
+
+        scan_root = Path(root)
+        library_root, scan_service, _lifecycle_service = self._scan_dependencies(scan_root)
+        active_scan_service = scan_service or LibraryScanService(library_root or scan_root)
+        preparation = active_scan_service.prepare_album_open(
+            scan_root,
+            autoscan=autoscan,
+            hydrate_index=hydrate_index,
+            sync_manifest_favorites=sync_manifest_favorites,
+        )
+
+        library = self._library_manager()
+        is_already_scanning = bool(
+            library is not None and library.is_scanning_path(scan_root)
+        )
+        should_rescan_async = (
+            preparation.asset_count == 0
+            and not preparation.scanned
+            and not is_already_scanning
+        )
+        return AlbumOpenRouting(
+            asset_count=preparation.asset_count,
+            should_rescan_async=should_rescan_async,
+        )
+
     def rescan_album(self, album: "Album") -> List[dict]:
         """Synchronously rebuild the album index and emit cache updates."""
 
-        library_root = None
-        scan_service = None
-        lifecycle_service = None
-        lib_manager = self._library_manager_getter()
-        if lib_manager:
-            library_root = lib_manager.root()
-            scan_service = getattr(lib_manager, "scan_service", None)
-            lifecycle_service = getattr(lib_manager, "asset_lifecycle_service", None)
+        library_root, scan_service, lifecycle_service = self._scan_dependencies(
+            album.root
+        )
+        active_scan_service = scan_service or LibraryScanService(
+            library_root or album.root
+        )
 
         try:
-            if scan_service is not None:
-                result = scan_service.scan_album(album.root, persist_chunks=False)
-                scan_service.finalize_scan(album.root, result.rows)
-                self._reconcile_scan_scope(
-                    album.root,
-                    result.rows,
-                    library_root=library_root,
-                    scan_service=scan_service,
-                    lifecycle_service=lifecycle_service,
-                )
-                rows = result.rows
-            else:
-                fallback = LibraryScanService(library_root or album.root)
-                result = fallback.scan_album(album.root, persist_chunks=False)
-                fallback.finalize_scan(album.root, result.rows)
-                self._reconcile_scan_scope(
-                    album.root,
-                    result.rows,
-                    library_root=library_root,
-                    scan_service=fallback,
-                    lifecycle_service=lifecycle_service,
-                )
-                if library_root is None:
-                    fallback.sync_manifest_favorites(album.root)
-                rows = result.rows
+            result = active_scan_service.scan_album(album.root, persist_chunks=False)
+            active_scan_service.finalize_scan(album.root, result.rows)
+            self._reconcile_scan_scope(
+                album.root,
+                result.rows,
+                library_root=library_root,
+                scan_service=active_scan_service,
+                lifecycle_service=lifecycle_service,
+            )
+            if scan_service is None and library_root is None:
+                active_scan_service.sync_manifest_favorites(album.root)
+            rows = result.rows
         except IPhotoError as exc:
             self.errorRaised.emit(str(exc))
             return []
@@ -127,21 +154,20 @@ class LibraryUpdateService(QObject):
     def rescan_album_async(self, album: "Album") -> None:
         """Start an asynchronous rescan for *album* using the background pool."""
 
-        library_root = None
-        scan_service = None
-        lib_manager = self._library_manager_getter()
-        if lib_manager:
-            library_root = lib_manager.root()
-            scan_service = getattr(lib_manager, "scan_service", None)
+        include, exclude = self._scan_filters(album)
+        lib_manager = self._library_manager()
+        if lib_manager is not None:
+            lib_manager.start_scanning(album.root, include, exclude)
+            return
+
+        library_root, scan_service, _lifecycle_service = self._scan_dependencies(
+            album.root
+        )
 
         if self._scanner_worker is not None:
             self._scanner_worker.cancel()
             self._scan_pending = True
             return
-
-        filters = album.manifest.get("filters", {}) if isinstance(album.manifest, dict) else {}
-        include: Iterable[str] = filters.get("include", DEFAULT_INCLUDE)
-        exclude: Iterable[str] = filters.get("exclude", DEFAULT_EXCLUDE)
 
         signals = ScannerSignals()
         signals.progressUpdated.connect(self._relay_scan_progress)
@@ -187,14 +213,10 @@ class LibraryUpdateService(QObject):
 
     def pair_live(self, album: "Album") -> List[dict]:
         """Rebuild Live Photo pairings for *album* and refresh related views."""
-        
-        # Get library root for global database access
-        library_root = None
-        scan_service = None
-        lib_manager = self._library_manager_getter()
-        if lib_manager:
-            library_root = lib_manager.root()
-            scan_service = getattr(lib_manager, "scan_service", None)
+
+        library_root, scan_service, _lifecycle_service = self._scan_dependencies(
+            album.root
+        )
 
         try:
             active_scan_service = scan_service or LibraryScanService(
@@ -208,6 +230,39 @@ class LibraryUpdateService(QObject):
         self.linksUpdated.emit(album.root)
         self.assetReloadRequested.emit(album.root, False, False)
         return [group.__dict__ for group in groups]
+
+    def handle_media_load_failure(self, path: Path) -> Path | None:
+        """Repair index/link state after an asset can no longer be decoded."""
+
+        target = Path(path)
+        library = self._library_manager()
+        library_root = library.root() if library is not None else None
+        scan_service = getattr(library, "scan_service", None) if library is not None else None
+        repair_root = library_root or self._standalone_missing_asset_root(target)
+        lifecycle_service = (
+            getattr(library, "asset_lifecycle_service", None)
+            if library is not None
+            else None
+        )
+        lifecycle_root = getattr(lifecycle_service, "library_root", None)
+        if lifecycle_service is None or (
+            library_root is None
+            and (
+                lifecycle_root is None
+                or not self._paths_equal(Path(lifecycle_root), repair_root)
+            )
+        ):
+            lifecycle_service = LibraryAssetLifecycleService(
+                repair_root,
+                scan_service=scan_service,
+            )
+        refresh_root = lifecycle_service.repair_missing_asset(target)
+        if refresh_root is not None and library_root is None:
+            refresh_root = repair_root
+        if refresh_root is not None:
+            self.indexUpdated.emit(refresh_root)
+            self.linksUpdated.emit(refresh_root)
+        return refresh_root
 
     def announce_album_refresh(
         self,
@@ -502,6 +557,32 @@ class LibraryUpdateService(QObject):
         self._scanner_worker = None
         self._scan_pending = False
 
+    def _scan_dependencies(
+        self,
+        root: Path,
+    ) -> tuple[
+        Path | None,
+        LibraryScanService | None,
+        LibraryAssetLifecycleService | None,
+    ]:
+        library_root: Path | None = None
+        scan_service: LibraryScanService | None = None
+        lifecycle_service: LibraryAssetLifecycleService | None = None
+        library = self._library_manager()
+        if library is not None:
+            library_root = library.root()
+            scan_service = getattr(library, "scan_service", None)
+            lifecycle_service = getattr(library, "asset_lifecycle_service", None)
+        if library_root is None:
+            root = Path(root)
+        return library_root, scan_service, lifecycle_service
+
+    def _scan_filters(self, album: "Album") -> tuple[Iterable[str], Iterable[str]]:
+        filters = album.manifest.get("filters", {}) if isinstance(album.manifest, dict) else {}
+        include: Iterable[str] = filters.get("include", DEFAULT_INCLUDE)
+        exclude: Iterable[str] = filters.get("exclude", DEFAULT_EXCLUDE)
+        return include, exclude
+
     def _reconcile_scan_scope(
         self,
         root: Path,
@@ -532,6 +613,19 @@ class LibraryUpdateService(QObject):
     def _current_album_root(self) -> Optional[Path]:
         album = self._current_album_getter()
         return album.root if album is not None else None
+
+    def _standalone_missing_asset_root(self, target: Path) -> Path:
+        current_root = self._current_album_root()
+        if current_root is not None and self._path_is_descendant(target, current_root):
+            return current_root
+
+        current = Path(target).parent
+        while True:
+            if resolve_work_dir(current) is not None:
+                return current
+            if current.parent == current:
+                return Path(target).parent
+            current = current.parent
 
     def _library_manager(self) -> Optional["LibraryManager"]:
         return self._library_manager_getter()

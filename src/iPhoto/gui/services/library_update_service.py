@@ -93,7 +93,7 @@ class LibraryUpdateService(QObject):
         """Prepare one album open through the active session scan surface."""
 
         scan_root = Path(root)
-        library_root, scan_service, _lifecycle_service = self._scan_dependencies(scan_root)
+        library_root, scan_service = self._scan_dependencies(scan_root)
         active_scan_service = scan_service or LibraryScanService(library_root or scan_root)
         preparation = active_scan_service.prepare_album_open(
             scan_root,

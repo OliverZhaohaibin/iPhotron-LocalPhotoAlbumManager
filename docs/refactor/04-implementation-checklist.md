@@ -190,6 +190,13 @@
 - [ ] GUI services 只保留 presentation coordination。
 - [ ] Background task manager 只保留 Qt transport。
 
+- 本轮补充（第19步）：
+  - [x] `LibraryUpdateService` 不再导入 `iPhoto.app`、`cache.index_store` 或 `library.workers.*`；worker ownership 迁入 GUI 任务运行器，durable scan finalize 迁到 runtime/library surface。
+  - [x] GUI scan update flows 通过 runtime scan finalize hook 处理 snapshot 持久化、Recently Deleted 保留字段、stale-row reconciliation 与 Live Photo pairing follow-up。
+  - [x] Recently Deleted 的 prepare/cleanup throttle 不再由 `NavigationCoordinator` 负责，而是经由 Location/Trash GUI transport adapter。
+  - [x] Location 的地理资产加载不再从 `GalleryViewModel` 直接读取，后台加载与 request token 管理走 Location/Trash adapter。
+  - [ ] People fallback 仍残留 coordinator/viewmodel touchpoints，作为下一块 GUI residual。
+
 完成条件：
 
 - [x] `gui.facade.py` 不直接调用 `iPhoto.app` 业务函数。
@@ -299,21 +306,3 @@
 - [ ] 没有新增兼容层业务债务。
 - [ ] 没有丢失用户状态的迁移风险。
 - [ ] 文档、测试和架构检查同步更新。
-
-## 11. 第19轮更新：GUI Update + Location/Trash
-
-本轮用于收口 GUI Update 与 Location/Trash 的残留编排职责。
-
-### Phase 4 状态调整
-
-- [x] `LibraryUpdateService` 不再导入 `iPhoto.app`、`cache.index_store` 或 `library.workers.*`；worker ownership 迁入 GUI 任务运行器，durable scan finalize 迁到 runtime/library surface。
-- [x] GUI scan update flows 通过 runtime scan finalize hook 处理 snapshot 持久化、Recently Deleted 保留字段、stale-row reconciliation 与 Live Photo pairing follow-up。
-- [x] Recently Deleted 的 prepare/cleanup throttle 不再由 `NavigationCoordinator` 负责，而是经由 Location/Trash GUI transport adapter。
-- [x] Location 的地理资产加载不再从 `GalleryViewModel` 直接读取，后台加载与 request token 管理走 Location/Trash adapter。
-- [ ] People fallback 仍残留 coordinator/viewmodel touchpoints，作为下一块 GUI residual。
-
-### Phase 5 状态调整
-
-- Maps runtime porting 本轮仍未完成。
-- 本轮仅清理 GUI 侧 Location 入口，为后续 Maps runtime 提取收窄边界。
-- 不应仅凭本轮将 `MapRuntimePort` 标记为完成。

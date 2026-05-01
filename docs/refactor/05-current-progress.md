@@ -91,9 +91,14 @@ adapter 职责。
   gallery query reads、media-load-failure 修复、album metadata durable
   mutation 都已迁到 session service；但 `gui/services/*` 和
   `BackgroundTaskManager` 仍未完全瘦身成纯 presentation transport。
+  本轮已将 `LibraryUpdateService` 定位为 presentation adapter，
+  `NavigationCoordinator` 与 `GalleryViewModel` 的 Location/Trash 流程
+  通过新的 GUI transport adapter 收口，并继续沿用 `LibraryManager`
+  + bootstrap runtime surfaces 作为事实边界。
 - Phase 5：部分完成。
   People、Thumbnail、Assign Location 边界已有明显收口；Maps runtime
-  availability/fallback 与 Edit sidecar port 仍待深入迁移。
+  availability/fallback 与 Edit sidecar port 仍待深入迁移。本轮仅通过
+  清理 GUI 侧 Location 入口为后续 Maps runtime 提取收窄边界。
 - Phase 6：部分完成。
   architecture tests、targeted application/infrastructure tests 已存在；
   temp-library end-to-end 与性能 baseline 仍未完成。
@@ -114,6 +119,7 @@ adapter 职责。
 - `global_index.db` 兼容 schema 可能缺失 `metadata` 列；state adapter 保持
   best-effort 行为。
 - Maps 与 Edit sidecar 仍缺少完整的 session/runtime boundary 收口。
+- People fallback 仍有 coordinator/viewmodel 残留。
 
 ## 6. 最新验证
 
@@ -129,45 +135,20 @@ adapter 职责。
 - `tools/check_architecture.py` 通过。
 - 仍有既有的 pytest `Unknown config option: env` warning。
 - 仍有既有的 legacy model shim / pairing deprecation warnings。
+- 本轮新增验证意图：`LibraryUpdateService` worker import guardrail，
+  以及 `LibraryUpdateService` / `NavigationCoordinator` / `GalleryViewModel`
+  / `AppFacade` 的 GUI regressions。
 
 之前各个切片的针对性验证命令和结果，继续以 `06` 到 `16` 交接文档为准；
 本文件只保留当前整体验证结论和最新增量验证。
 
 ## 7. 下一步交接
 
-1. 继续瘦身 `gui/services/*` 与 `BackgroundTaskManager`，优先收口仍在
-   coordinator/viewmodel 里的 location/trash-cleanup/People fallback 之类
-   非 Qt durable orchestration。
+1. 继续瘦身 `gui/services/*` 与 `BackgroundTaskManager`，优先收口
+   coordinator/viewmodel 里的 People fallback 与 location/trash-cleanup
+   之类非 Qt durable orchestration。
 2. 补 `temp library` 端到端回归：import / move / delete / restore，以及
    rescan 后用户状态保护。
 3. 推进 Phase 5 的 Maps / Edit：地图可用性查询、native fallback、`.ipo`
-   sidecar 读写与 save/reset/export use case。
-
-## 8. 第19轮复盘：GUI Update + Location/Trash
-
-本轮完成 `LibraryUpdate` 与 `Location/Trash` 的 GUI residual 编排清理。
-
-### Phase 4 状态说明
-
-- `LibraryUpdateService` 现在是 presentation-facing adapter；scan worker ownership 迁入 GUI task runner，durable scan completion 行为迁到当前 runtime/library surface。
-- `NavigationCoordinator` 不再负责 Recently Deleted 清理节流或后台线程调度；`GalleryViewModel` 不再直接准备 deleted roots 或从 `LibraryManager` 读取 geotagged assets，这些流程改走 Location/Trash GUI transport adapter。
-- 当前仓库仍以 `LibraryManager` + bootstrap/mixin runtime surfaces 作为事实边界，本轮未强制引入新的 `LibrarySession` / `RuntimeContext` 术语层。
-
-### Phase 5 状态说明
-
-- Maps runtime extraction 仍是部分完成；本轮仅通过清理 GUI 侧 Location 编排收窄边界。
-
-### 已知例外
-
-- People fallback 仍有 coordinator/viewmodel 残留。
-- Edit sidecar、完整 Maps fallback 清理、temp-library 端到端工作继续保持 out of scope。
-
-### 本轮验证意图
-
-- 架构 guardrail 增强：`gui/services/library_update_service.py` 不得 import `library.workers.*`
-- 针对 `LibraryUpdateService`、`NavigationCoordinator`、`GalleryViewModel`、`AppFacade` 的 GUI regressions 已更新
-
-### 下一步交接
-
-- 优先继续处理剩余 People residuals，除非 Maps runtime 提取更紧急。
-- 恢复 Maps 工作时，继续以 Location/Trash transport adapter 作为临时 GUI seam，而不是 Phase 5 的最终 runtime boundary。
+   sidecar 读写与 save/reset/export use case；恢复 Maps 工作时继续沿用
+   Location/Trash transport adapter 作为临时 GUI seam。
